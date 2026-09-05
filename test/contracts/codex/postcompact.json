@@ -1,0 +1,268 @@
+{
+  "agent": "codex",
+  "agent_version": "codex-cli 0.153.0",
+  "captured_at": "2026-09-03T15:49:46.482Z",
+  "summary_field": null,
+  "summary_length": 0,
+  "pass_a": false,
+  "pass_b": true,
+  "headless": {
+    "pre": [
+      {
+        "session_id": "01a067f5-979f-7061-b677-e5c5a0d2d0ee",
+        "turn_id": "01a067f5-97b2-7de0-aead-d215ec52b90c",
+        "transcript_path": "<run>/codex-postcompact-payload/c/codex-home/sessions/2026/09/04/rollout-2026-09-04T00-49-03-01a067f5-979f-7061-b677-e5c5a0d2d0ee.jsonl",
+        "cwd": "<repo>",
+        "hook_event_name": "PreCompact",
+        "model": "gpt-5.6-sol",
+        "trigger": "auto"
+      }
+    ],
+    "post": [
+      {
+        "session_id": "01a067f5-979f-7061-b677-e5c5a0d2d0ee",
+        "turn_id": "01a067f5-97b2-7de0-aead-d215ec52b90c",
+        "transcript_path": "<run>/codex-postcompact-payload/c/codex-home/sessions/2026/09/04/rollout-2026-09-04T00-49-03-01a067f5-979f-7061-b677-e5c5a0d2d0ee.jsonl",
+        "cwd": "<repo>",
+        "hook_event_name": "PostCompact",
+        "model": "gpt-5.6-sol",
+        "trigger": "auto"
+      }
+    ],
+    "timeline": [
+      {
+        "event": "SessionStart",
+        "at": "2026-09-03T15:49:08.093Z",
+        "source": "startup",
+        "trigger": null,
+        "turn_id": null,
+        "session_id": "01a067f5-979f-7061-b677-e5c5a0d2d0ee",
+        "keys": [
+          "session_id",
+          "transcript_path",
+          "cwd",
+          "hook_event_name",
+          "model",
+          "permission_mode",
+          "source"
+        ]
+      },
+      {
+        "event": "UserPromptSubmit",
+        "at": "2026-09-03T15:49:08.117Z",
+        "source": null,
+        "trigger": null,
+        "turn_id": "01a067f5-97b2-7de0-aead-d215ec52b90c",
+        "session_id": "01a067f5-979f-7061-b677-e5c5a0d2d0ee",
+        "keys": [
+          "session_id",
+          "turn_id",
+          "transcript_path",
+          "cwd",
+          "hook_event_name",
+          "model",
+          "permission_mode",
+          "prompt"
+        ]
+      },
+      {
+        "event": "PreCompact",
+        "at": "2026-09-03T15:49:11.967Z",
+        "source": null,
+        "trigger": "auto",
+        "turn_id": "01a067f5-97b2-7de0-aead-d215ec52b90c",
+        "session_id": "01a067f5-979f-7061-b677-e5c5a0d2d0ee",
+        "keys": [
+          "session_id",
+          "turn_id",
+          "transcript_path",
+          "cwd",
+          "hook_event_name",
+          "model",
+          "trigger"
+        ]
+      },
+      {
+        "event": "PostCompact",
+        "at": "2026-09-03T15:49:15.095Z",
+        "source": null,
+        "trigger": "auto",
+        "turn_id": "01a067f5-97b2-7de0-aead-d215ec52b90c",
+        "session_id": "01a067f5-979f-7061-b677-e5c5a0d2d0ee",
+        "keys": [
+          "session_id",
+          "turn_id",
+          "transcript_path",
+          "cwd",
+          "hook_event_name",
+          "model",
+          "trigger"
+        ]
+      },
+      {
+        "event": "SessionStart",
+        "at": "2026-09-03T15:49:15.120Z",
+        "source": "compact",
+        "trigger": null,
+        "turn_id": null,
+        "session_id": "01a067f5-979f-7061-b677-e5c5a0d2d0ee",
+        "keys": [
+          "session_id",
+          "transcript_path",
+          "cwd",
+          "hook_event_name",
+          "model",
+          "permission_mode",
+          "source"
+        ]
+      }
+    ]
+  },
+  "tui": {
+    "pre": [
+      {
+        "session_id": "01a067f6-0a44-7420-a2bf-723e331af25d",
+        "turn_id": "01a067f6-173f-76a2-b977-5a6905216098",
+        "transcript_path": "<run>/codex-postcompact-payload/d/codex-home/sessions/2026/09/04/rollout-2026-09-04T00-49-32-01a067f6-0a44-7420-a2bf-723e331af25d.jsonl",
+        "cwd": "<repo>",
+        "hook_event_name": "PreCompact",
+        "model": "gpt-5.6-sol",
+        "trigger": "manual"
+      },
+      {
+        "session_id": "01a067f6-0a44-7420-a2bf-723e331af25d",
+        "turn_id": "01a067f6-2acb-7493-bf0c-123b22e6c883",
+        "transcript_path": "<run>/codex-postcompact-payload/d/codex-home/sessions/2026/09/04/rollout-2026-09-04T00-49-32-01a067f6-0a44-7420-a2bf-723e331af25d.jsonl",
+        "cwd": "<repo>",
+        "hook_event_name": "PreCompact",
+        "model": "gpt-5.6-sol",
+        "trigger": "manual"
+      }
+    ],
+    "post": [
+      {
+        "session_id": "01a067f6-0a44-7420-a2bf-723e331af25d",
+        "turn_id": "01a067f6-173f-76a2-b977-5a6905216098",
+        "transcript_path": "<run>/codex-postcompact-payload/d/codex-home/sessions/2026/09/04/rollout-2026-09-04T00-49-32-01a067f6-0a44-7420-a2bf-723e331af25d.jsonl",
+        "cwd": "<repo>",
+        "hook_event_name": "PostCompact",
+        "model": "gpt-5.6-sol",
+        "trigger": "manual"
+      },
+      {
+        "session_id": "01a067f6-0a44-7420-a2bf-723e331af25d",
+        "turn_id": "01a067f6-2acb-7493-bf0c-123b22e6c883",
+        "transcript_path": "<run>/codex-postcompact-payload/d/codex-home/sessions/2026/09/04/rollout-2026-09-04T00-49-32-01a067f6-0a44-7420-a2bf-723e331af25d.jsonl",
+        "cwd": "<repo>",
+        "hook_event_name": "PostCompact",
+        "model": "gpt-5.6-sol",
+        "trigger": "manual"
+      }
+    ],
+    "timeline": [
+      {
+        "event": "SessionStart",
+        "at": "2026-09-03T15:49:35.820Z",
+        "source": "startup",
+        "trigger": null,
+        "turn_id": null,
+        "session_id": "01a067f6-0a44-7420-a2bf-723e331af25d",
+        "keys": [
+          "session_id",
+          "transcript_path",
+          "cwd",
+          "hook_event_name",
+          "model",
+          "permission_mode",
+          "source"
+        ]
+      },
+      {
+        "event": "UserPromptSubmit",
+        "at": "2026-09-03T15:49:35.845Z",
+        "source": null,
+        "trigger": null,
+        "turn_id": "01a067f6-0aef-7891-9dbf-28d693a67002",
+        "session_id": "01a067f6-0a44-7420-a2bf-723e331af25d",
+        "keys": [
+          "session_id",
+          "turn_id",
+          "transcript_path",
+          "cwd",
+          "hook_event_name",
+          "model",
+          "permission_mode",
+          "prompt"
+        ]
+      },
+      {
+        "event": "PreCompact",
+        "at": "2026-09-03T15:49:36.399Z",
+        "source": null,
+        "trigger": "manual",
+        "turn_id": "01a067f6-173f-76a2-b977-5a6905216098",
+        "session_id": "01a067f6-0a44-7420-a2bf-723e331af25d",
+        "keys": [
+          "session_id",
+          "turn_id",
+          "transcript_path",
+          "cwd",
+          "hook_event_name",
+          "model",
+          "trigger"
+        ]
+      },
+      {
+        "event": "PostCompact",
+        "at": "2026-09-03T15:49:40.654Z",
+        "source": null,
+        "trigger": "manual",
+        "turn_id": "01a067f6-173f-76a2-b977-5a6905216098",
+        "session_id": "01a067f6-0a44-7420-a2bf-723e331af25d",
+        "keys": [
+          "session_id",
+          "turn_id",
+          "transcript_path",
+          "cwd",
+          "hook_event_name",
+          "model",
+          "trigger"
+        ]
+      },
+      {
+        "event": "PreCompact",
+        "at": "2026-09-03T15:49:41.239Z",
+        "source": null,
+        "trigger": "manual",
+        "turn_id": "01a067f6-2acb-7493-bf0c-123b22e6c883",
+        "session_id": "01a067f6-0a44-7420-a2bf-723e331af25d",
+        "keys": [
+          "session_id",
+          "turn_id",
+          "transcript_path",
+          "cwd",
+          "hook_event_name",
+          "model",
+          "trigger"
+        ]
+      },
+      {
+        "event": "PostCompact",
+        "at": "2026-09-03T15:49:45.022Z",
+        "source": null,
+        "trigger": "manual",
+        "turn_id": "01a067f6-2acb-7493-bf0c-123b22e6c883",
+        "session_id": "01a067f6-0a44-7420-a2bf-723e331af25d",
+        "keys": [
+          "session_id",
+          "turn_id",
+          "transcript_path",
+          "cwd",
+          "hook_event_name",
+          "model",
+          "trigger"
+        ]
+      }
+    ]
+  }
+}

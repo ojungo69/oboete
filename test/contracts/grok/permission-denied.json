@@ -1,0 +1,31 @@
+{
+  "agent": "grok",
+  "noApproveHookDeny": null,
+  "alwaysApproveHookDeny": null,
+  "permissionRule": {
+    "hookEventName": "permission_denied",
+    "sessionId": "01a067fe-b5f8-7350-a29e-0ac8d2fdcedc",
+    "cwd": "<repo>",
+    "workspaceRoot": "<repo>/",
+    "timestamp": "2026-09-03T15:59:46.364676664+00:00",
+    "transcriptPath": "<run>/grok-permission-denied/rule-deny/grok-home/sessions/<run>%2Fgrok-permission-denied%2Frule-deny%2Frepo/01a067fe-b5f8-7350-a29e-0ac8d2fdcedc/updates.jsonl",
+    "permissionMode": "bypassPermissions",
+    "toolName": "run_terminal_command",
+    "toolUseId": "call-9d5d3845-1f03-4fdf-b43f-d8229046335d-0",
+    "toolInput": {
+      "command": "echo perm-probe",
+      "description": "Run permission probe echo command"
+    },
+    "toolInputTruncated": false,
+    "hook_event_name": "PermissionDenied",
+    "session_id": "01a067fe-b5f8-7350-a29e-0ac8d2fdcedc",
+    "transcript_path": "<run>/grok-permission-denied/rule-deny/grok-home/sessions/<run>%2Fgrok-permission-denied%2Frule-deny%2Frepo/01a067fe-b5f8-7350-a29e-0ac8d2fdcedc/updates.jsonl",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "run_terminal_command",
+    "tool_input": {
+      "command": "echo perm-probe",
+      "description": "Run permission probe echo command"
+    },
+    "tool_use_id": "call-9d5d3845-1f03-4fdf-b43f-d8229046335d-0"
+  }
+}

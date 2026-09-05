@@ -1,4 +1,20 @@
-# legacy/ is frozen evidence; CodeRabbit counts its files-per-review limit after this filter.
+# CodeRabbit reviews at most 100 files per pull request and counts them after this filter.
+# legacy/ is frozen evidence; specs/, docs/ and the Phase 1 probe harness with its recorded
+# contract fixtures are reviewed by their own gates, so the count is spent on src/.
 reviews:
+  # This pull request stays a draft until M1 is complete, and CodeRabbit skips drafts by default.
+  auto_review:
+    enabled: true
+    drafts: true
+  # The count is taken after these filters, and 113 files still exceeded the limit on 2026-09-05,
+  # so the unit tests come out as well: src/ is what a second reviewer adds most to, and the tests
+  # are read by the review rounds that run against the diff itself.
   path_filters:
     - "!legacy/**"
+    - "!specs/**"
+    - "!docs/**"
+    - "!scripts/e2e/**"
+    - "!test/contracts/**"
+    - "!test/fixtures/**"
+    - "!test/corpus/**"
+    - "!test/unit/**"

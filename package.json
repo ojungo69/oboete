@@ -1,0 +1,51 @@
+{
+  "name": "oboete",
+  "version": "0.1.0-alpha.0",
+  "description": "Automatic shared memory for Claude Code, Codex, Grok Build, and Pi.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "private": false,
+  "bin": {
+    "oboete": "dist/oboete.mjs"
+  },
+  "engines": {
+    "node": ">=22.16"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "npm run build && node --test --enable-source-maps 'build/test/unit/**/*.test.mjs' 'build/test/migrations/**/*.test.mjs' 'scripts/e2e/**/*.test.mjs' && node --test --enable-source-maps --test-concurrency=1 'build/test/e2e-*.test.mjs' 'build/test/fault-*.test.mjs'",
+    "test:coverage": "npm run build && node --test --enable-source-maps --experimental-test-coverage 'build/test/**/*.test.mjs'"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "3.0.43",
+    "@ai-sdk/provider": "4.0.10",
+    "@hono/node-server": "2.1.1",
+    "ai": "7.0.91",
+    "hono": "4.13.5",
+    "workers-ai-provider": "4.0.0",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@preact/preset-vite": "2.10.6",
+    "@secretlint/core": "13.0.5",
+    "@secretlint/secretlint-rule-preset-recommend": "13.0.5",
+    "@secretlint/types": "13.0.5",
+    "@types/node": "22.20.1",
+    "esbuild": "0.28.2",
+    "eslint": "10.9.1",
+    "preact": "10.29.8",
+    "smol-toml": "1.8.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.69.0",
+    "vite": "8.2.2"
+  }
+}

@@ -29,8 +29,27 @@ jobs:
           mkdir -p coverage
           node --test --experimental-test-coverage \
             --test-reporter=spec --test-reporter-destination=stdout \
-            --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
+            --test-reporter=lcov --test-reporter-destination=coverage/dco-lcov.info \
             scripts/dco-check.test.mjs
+      - name: Install dependencies
+        run: npm ci
+      - name: Engine coverage
+        # package.json test:coverage enables --experimental-test-coverage but has no lcov reporter.
+        # The scripts/e2e harness tests belong in this step: sonar.sources is scripts/, and Sonar
+        # charges lines_to_cover for every source file whether or not the lcov report names it
+        # (measured 2026-09-04: probe-lib/agents.mjs at 0% / 404 uncovered with no lcov entry at
+        # all), so running them uninstrumented would report 0%, not exclude them.
+        run: |
+          npm run build
+          mkdir -p coverage
+          node --test --enable-source-maps --experimental-test-coverage \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
+            'build/test/unit/**/*.test.mjs' 'build/test/migrations/**/*.test.mjs' 'scripts/e2e/**/*.test.mjs'
+      - name: End-to-end bundle tests
+        # The hook tests time the real bundle against its 300 ms deadline, so they run alone and
+        # without coverage instrumentation, the way `npm test` runs them.
+        run: node --test --enable-source-maps --test-concurrency=1 'build/test/e2e-*.test.mjs'
       - name: Analyze with SonarQube Cloud
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
@@ -38,6 +57,34 @@ jobs:
           args: -Dsonar.qualitygate.wait=true
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  engine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.16.0", "24.x"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Build
+        run: npm run build
+      - name: Test
+        run: npm test
 
   secrets:
     runs-on: ubuntu-24.04

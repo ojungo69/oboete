@@ -1,0 +1,43 @@
+{
+  "agent": "grok",
+  "A": {
+    "hookEventName": "session_start",
+    "sessionId": "01a06803-26f6-70d2-a364-8c6f78544a20",
+    "cwd": "<repo>",
+    "workspaceRoot": "<repo>/",
+    "timestamp": "2026-09-03T16:03:52.228160391+00:00",
+    "permissionMode": "bypassPermissions",
+    "source": "new",
+    "hook_event_name": "SessionStart",
+    "session_id": "01a06803-26f6-70d2-a364-8c6f78544a20",
+    "permission_mode": "bypassPermissions"
+  },
+  "B": {
+    "hookEventName": "session_start",
+    "sessionId": "01a06803-26f6-70d2-a364-8c6f78544a20",
+    "cwd": "<repo>",
+    "workspaceRoot": "<repo>/",
+    "timestamp": "2026-09-03T16:04:06.027433023+00:00",
+    "transcriptPath": "<run>/grok-resume/B/grok-home/sessions/<run>%2Fgrok-resume%2FA%2Frepo/01a06803-26f6-70d2-a364-8c6f78544a20/updates.jsonl",
+    "permissionMode": "bypassPermissions",
+    "source": "load",
+    "hook_event_name": "SessionStart",
+    "session_id": "01a06803-26f6-70d2-a364-8c6f78544a20",
+    "transcript_path": "<run>/grok-resume/B/grok-home/sessions/<run>%2Fgrok-resume%2FA%2Frepo/01a06803-26f6-70d2-a364-8c6f78544a20/updates.jsonl",
+    "permission_mode": "bypassPermissions"
+  },
+  "C": {
+    "hookEventName": "session_start",
+    "sessionId": "01a06803-e0d6-7043-a9af-3fa28e2794b4",
+    "cwd": "<repo>",
+    "workspaceRoot": "<repo>/",
+    "timestamp": "2026-09-03T16:04:39.833127234+00:00",
+    "transcriptPath": "<run>/grok-resume/C/grok-home/sessions/<run>%2Fgrok-resume%2FA%2Frepo/01a06803-e0d6-7043-a9af-3fa28e2794b4/updates.jsonl",
+    "permissionMode": "bypassPermissions",
+    "source": "load",
+    "hook_event_name": "SessionStart",
+    "session_id": "01a06803-e0d6-7043-a9af-3fa28e2794b4",
+    "transcript_path": "<run>/grok-resume/C/grok-home/sessions/<run>%2Fgrok-resume%2FA%2Frepo/01a06803-e0d6-7043-a9af-3fa28e2794b4/updates.jsonl",
+    "permission_mode": "bypassPermissions"
+  }
+}

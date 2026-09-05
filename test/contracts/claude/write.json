@@ -1,0 +1,53 @@
+{
+  "agent": "claude",
+  "agent_version": "2.1.259 (Claude Code)",
+  "captured_at": "2026-09-03T15:43:49.670Z",
+  "native_tool": "Write",
+  "normalized_tool": "write",
+  "events": {
+    "PreToolUse": {
+      "session_id": "31654ffb-33da-460d-9fd7-2a0f3b21873b",
+      "transcript_path": "~/.claude/projects/<run>-claude-payload-shapes-repo/31654ffb-33da-460d-9fd7-2a0f3b21873b.jsonl",
+      "cwd": "<repo>",
+      "prompt_id": "a32a184c-2a67-4f46-a46f-927833ae6c4f",
+      "permission_mode": "bypassPermissions",
+      "effort": {
+        "level": "high"
+      },
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Write",
+      "tool_input": {
+        "file_path": "<repo>/notes.txt",
+        "content": "alpha\n"
+      },
+      "tool_use_id": "toolu_01348yTtNtxs9Ctiq8nFGjG6"
+    },
+    "PostToolUse": {
+      "session_id": "31654ffb-33da-460d-9fd7-2a0f3b21873b",
+      "transcript_path": "~/.claude/projects/<run>-claude-payload-shapes-repo/31654ffb-33da-460d-9fd7-2a0f3b21873b.jsonl",
+      "cwd": "<repo>",
+      "prompt_id": "a32a184c-2a67-4f46-a46f-927833ae6c4f",
+      "permission_mode": "bypassPermissions",
+      "effort": {
+        "level": "high"
+      },
+      "hook_event_name": "PostToolUse",
+      "tool_name": "Write",
+      "tool_input": {
+        "file_path": "<repo>/notes.txt",
+        "content": "alpha\n"
+      },
+      "tool_response": {
+        "type": "create",
+        "filePath": "<repo>/notes.txt",
+        "content": "alpha\n",
+        "structuredPatch": [],
+        "originalFile": null,
+        "userModified": false
+      },
+      "tool_use_id": "toolu_01348yTtNtxs9Ctiq8nFGjG6",
+      "duration_ms": 10
+    }
+  },
+  "notes": "tool_input.file_path ; tool_response.filePath"
+}

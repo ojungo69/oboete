@@ -1,0 +1,47 @@
+{
+  "agent": "claude",
+  "agent_version": "2.1.259 (Claude Code)",
+  "captured_at": "2026-09-03T15:44:43.851Z",
+  "native_tool": "Bash",
+  "normalized_tool": "bash",
+  "events": {
+    "PreToolUse": {
+      "session_id": "f65937f4-f116-4da1-b263-a55fba0ddb90",
+      "transcript_path": "~/.claude/projects/<run>-claude-tool-failure-repo/f65937f4-f116-4da1-b263-a55fba0ddb90.jsonl",
+      "cwd": "<repo>",
+      "prompt_id": "2ac7769c-0c79-48db-a827-9b8f6916d950",
+      "permission_mode": "bypassPermissions",
+      "effort": {
+        "level": "high"
+      },
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "echo fail-stderr >&2; exit 3",
+        "description": "Run probe command that exits 3"
+      },
+      "tool_use_id": "toolu_01VnvVfSJTXKdzPwJq7tNVAT"
+    },
+    "PostToolUseFailure": {
+      "session_id": "f65937f4-f116-4da1-b263-a55fba0ddb90",
+      "transcript_path": "~/.claude/projects/<run>-claude-tool-failure-repo/f65937f4-f116-4da1-b263-a55fba0ddb90.jsonl",
+      "cwd": "<repo>",
+      "prompt_id": "2ac7769c-0c79-48db-a827-9b8f6916d950",
+      "permission_mode": "bypassPermissions",
+      "effort": {
+        "level": "high"
+      },
+      "hook_event_name": "PostToolUseFailure",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "echo fail-stderr >&2; exit 3",
+        "description": "Run probe command that exits 3"
+      },
+      "tool_use_id": "toolu_01VnvVfSJTXKdzPwJq7tNVAT",
+      "error": "Exit code 3\nfail-stderr",
+      "is_interrupt": false,
+      "duration_ms": 38
+    }
+  },
+  "notes": "PostToolUse also fires for this failed call: false; error is string (string)"
+}
