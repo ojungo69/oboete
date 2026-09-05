@@ -1,0 +1,33 @@
+scripts/fixtures/smoke-first-sessions.mjs
+  s_0ec4092f1f4270::t_566c8455c91ffc 1-181
+scripts/fixtures/NOTES-T067.md
+  s_0ec4092f1f4270::t_1c4c1a0a0fa34d 1-21
+scripts/fixtures/generate-1000-events.mjs
+  s_0ec4092f1f4270::t_c04191980d95c0 1-1581
+test/fixtures/events-1000.jsonl
+  s_ae2d2d34276f4a::t_6cb0239e04e25a 1-1050
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "937cfa898801dcf5ca41a17b969201334a4f347e",
+  "prompts": {},
+  "sessions": {
+    "s_0ec4092f1f4270": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0728a-e9ac-79d1-aa4e-0e3ee10a6268",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_ae2d2d34276f4a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b4e57edf-22c5-4daa-9502-9e0a647eb665",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
