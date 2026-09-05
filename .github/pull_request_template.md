@@ -4,19 +4,19 @@ Describe what changed and why. Keep the scope narrow enough to review and revert
 
 ## Validation
 
-List the commands, fixtures, or manual checks used to validate this change. Run the product checks from the `vendor/codemem` workspace.
+List the commands, fixtures, or manual checks used to validate this change.
 
-- [ ] `cd vendor/codemem && corepack pnpm run build`
-- [ ] `cd vendor/codemem && corepack pnpm run tsc`
-- [ ] `cd vendor/codemem && corepack pnpm run lint`
-- [ ] `cd vendor/codemem && CI=true corepack pnpm run test:coverage`
+- [ ] `node --test scripts/dco-check.test.mjs` (and `npm ci && npm run build && npm test` once `package.json` exists)
 - [ ] Other validation is documented below, or a reason is given for skipped checks.
 
-## Safety and compatibility
+## Constitution compliance
 
+- [ ] This change complies with Principles I-VI of `CONSTITUTION.md`, or the exception is
+      named and approved below.
 - [ ] No real credentials, private memory content, database files, or private local paths are included.
-- [ ] Sole-writer, authentication, redaction, spool/replay, backup, and fail-open invariants remain intact or their changes are explicitly documented.
-- [ ] Breaking RPC, schema, configuration, migration, or adapter changes are identified.
+- [ ] Fail-open capture, fail-closed classification, secret redaction, and the egress table remain
+      intact, or their changes are explicitly documented.
+- [ ] Breaking schema, CLI, configuration, migration, or hook-contract changes are identified.
 - [ ] New or changed third-party material has clear provenance and its notices are updated when required.
 - [ ] Documentation and tests were updated where behavior changed.
 

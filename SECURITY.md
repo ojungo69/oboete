@@ -1,10 +1,10 @@
 # Security Policy
 
-free-mem has no supported release yet. Security reports against the current default
+oboete has no supported release yet. Security reports against the current default
 branch are welcome.
 
 Use GitHub's
-[private vulnerability reporting](https://github.com/ojungo69/free-mem/security/advisories/new).
+[private vulnerability reporting](https://github.com/ojungo69/oboete/security/advisories/new).
 Do not open a public issue for a suspected vulnerability.
 
 Include the affected commit, impact, and minimal reproduction steps. Use synthetic

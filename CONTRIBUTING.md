@@ -1,17 +1,17 @@
-# Contributing to free-mem
+# Contributing to oboete
 
 Thanks for taking the time to look at this project. Please read this page before opening a pull
 request — a few of the rules here are unusual, and they exist because of how this repository is built.
 
 ## License of your contribution
 
-free-mem is licensed under the Apache License 2.0 (see [`LICENSE`](LICENSE)). Contributions are
+oboete is licensed under the Apache License 2.0 (see [`LICENSE`](LICENSE)). Contributions are
 accepted under the same license — **inbound = outbound**. You keep the copyright in what you write;
 we do not ask you to assign it, and there is no CLA.
 
 The rationale for the license choice, the dependency license scan behind it, and the
 material-by-material breakdown are recorded in
-[`evidence/adr-004-licensing.md`](evidence/adr-004-licensing.md).
+[`legacy/evidence/adr-004-licensing.md`](legacy/evidence/adr-004-licensing.md).
 
 ## Sign your commits (DCO)
 
@@ -42,7 +42,7 @@ When Claude Code or Codex CLI creates a commit, include `git commit -s` in its i
 commits are checked in the same way.
 
 The check runs from the target branch, not from the pull request: both the workflow
-(`.github/workflows/dco.yml`) and the checker (`harness/dco-check.mjs`) are read from `main`, and the
+(`.github/workflows/dco.yml`) and the checker (`scripts/dco-check.mjs`) are read from `main`, and the
 pull request head is only read as git history. A pull request that edits either file is still checked
 by the version already on `main`, so it cannot weaken the checker that gates it.
 
@@ -65,33 +65,30 @@ Do not paste code from another project into this repository without recording wh
 If your change vendors, copies, or adapts third-party material:
 
 1. Record the upstream URL, the exact commit, and the license in the same pull request.
-2. Add or update the entry in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
-3. Keep the upstream license file intact. Do not add free-mem headers to vendored files.
+2. Add or update the entry in `THIRD_PARTY_NOTICES.md` (create it with the first entry).
+3. Keep the upstream license file intact. Do not add oboete headers to vendored files.
 
-`vendor/codemem/` is a pinned MIT snapshot of an upstream project and stays under its own license.
-Changes there follow [`vendor/codemem/VENDOR.md`](vendor/codemem/VENDOR.md).
+`legacy/vendor/codemem/` is a pinned MIT snapshot of an upstream project from the free-mem era. It is
+not built, tested, or changed; see [`legacy/README.md`](legacy/README.md).
 
 ## Never put real data in fixtures
 
 Test fixtures, capability captures, benchmark inputs, and issue reports must not contain real
 credentials, private memory content, or local filesystem paths from your machine. Use synthetic
-repositories and isolated HOME/config directories — the capture rigs under `harness/rig/` are set up
-for exactly this. A fixture that encodes a machine-specific layout will be rejected even if the test
-passes.
+repositories and isolated HOME/config directories. A fixture that encodes a machine-specific layout
+will be rejected even if the test passes.
 
 ## Before you open a pull request
 
-- Run the checks that cover what you touched. For `vendor/codemem/`:
-  `cd vendor/codemem && corepack pnpm run tsc && corepack pnpm run lint && corepack pnpm test`.
-  For the harness: `node --experimental-strip-types harness/assemble.ts --self-test` and
-  `node --experimental-strip-types --test harness/continuity/*.test.ts`.
-- Never edit generated files by hand. `harness/matrix/*.json` is produced by `harness/assemble.ts`
-  from the fixtures; change the fixture and regenerate.
-- If you change observable behavior of the Phase 1 daemon, update the matching frozen contract in
-  `specs/001-agent-memory-core/contracts/*-v1.md` in the same pull request. Those documents describe
-  what the implementation actually does, and a silent drift between them is treated as a defect.
+- Run `node --test scripts/dco-check.test.mjs`, plus any check that covers what you touched. The `npm ci && npm run build && npm test` step arrives together with `package.json` in the first M1 implementation pull request.
+- Never edit generated files by hand; change the source and regenerate.
+- If you change the SQLite schema, the CLI contract, or a hook payload, update the matching
+  specification under `specs/` in the same pull request. Those documents describe what the
+  implementation actually does, and a silent drift between them is treated as a defect.
 - Do not weaken a CI gate to make a check pass. If a gate is wrong, say so in the pull request and
   fix the gate deliberately, in its own change.
+- State whether the change complies with Principles I-VI of [`CONSTITUTION.md`](CONSTITUTION.md),
+  and name any approved exception.
 
 ## Security issues
 

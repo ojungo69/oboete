@@ -1,9 +1,11 @@
-free-mem
-Copyright 2026 The free-mem Authors
+oboete
+Copyright 2026 The oboete Authors
 
-This product includes software developed by third parties.
-Their copyright notices and license terms are listed in THIRD_PARTY_NOTICES.md.
+This product includes software developed by third parties. Their copyright notices and
+license terms are listed in THIRD_PARTY_NOTICES.md once the package bundles third-party
+material.
 
-The vendored snapshot under vendor/codemem/ is derived from kunickiaj/codemem
-and remains licensed under the MIT License. Its license text is retained at
-vendor/codemem/LICENSE and is not superseded by the license of this repository.
+The historical snapshot under legacy/vendor/codemem/ is derived from kunickiaj/codemem and
+remains licensed under the MIT License. Its license text is retained at
+legacy/vendor/codemem/LICENSE and is not superseded by the license of this repository. It is
+not part of the oboete package; its notice file is kept at legacy/THIRD_PARTY_NOTICES.md.

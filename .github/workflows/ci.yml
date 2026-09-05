@@ -12,9 +12,6 @@ jobs:
   check:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: vendor/codemem
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -25,246 +22,22 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.16.0
-      - name: Enable and verify pnpm
+      - name: DCO gate self-test
+        # ゲート本体（dco.yml）は base branch 側の checker を走らせるので、PR 側の変更は
+        # そこには載らない。checker を直す PR の正しさはこの job で担保する。
         run: |
-          corepack enable pnpm
-          test "$(pnpm --version)" = "11.8.0"
-      - name: Install dependencies
-        run: corepack pnpm install --frozen-lockfile
-      - name: Build
-        run: corepack pnpm run build
-      - name: Committed hook-runtime copies match the build
-        # `plugins/{claude,codex}/scripts/` の bundle と notice は build 出力を git に commit した
-        # 複製。build すれば runner 上では正しい内容に直るので、HEAD 側が古い・欠けていても
-        # 他のゲートは全て通る。誤りが残るのは GitHub の source archive だけ——つまり、
-        # bundle した第三者コードの許諾文が実際の配布物から欠ける形になる。
-        # build 直後の作業ツリーが綺麗であることを、その唯一の検査にする。
-        working-directory: .
-        run: |
-          git status --porcelain --untracked-files=all -- \
-            vendor/codemem/plugins/claude/scripts/hook-runtime.mjs \
-            vendor/codemem/plugins/codex/scripts/hook-runtime.mjs \
-            vendor/codemem/plugins/claude/scripts/THIRD_PARTY_NOTICES.hook-runtime.md \
-            vendor/codemem/plugins/codex/scripts/THIRD_PARTY_NOTICES.hook-runtime.md \
-            > "${RUNNER_TEMP}/hook-runtime-drift.txt"
-          if [ -s "${RUNNER_TEMP}/hook-runtime-drift.txt" ]; then
-            cat "${RUNNER_TEMP}/hook-runtime-drift.txt"
-            echo "::error::commit 済みの hook-runtime 複製が build 出力と一致しない。build して差分を commit すること"
-            exit 1
-          fi
-      - name: Typecheck and lint
-        run: corepack pnpm run tsc && corepack pnpm run lint
-      - name: Typecheck harness
-        # harness は --experimental-strip-types で走る＝型は剥がされるだけで検査されない。
-        # vendor の依存が入っているこの job でだけ tsc をかけられる
-        working-directory: .
-        run: vendor/codemem/node_modules/.bin/tsc -p harness/tsconfig.json
-      - name: Product Reset contract regression checks
-        working-directory: .
-        run: node --experimental-strip-types specs/005-product-reset/contracts/validate-alpha-result.test.mjs
-      - name: Test with coverage
-        run: CI=true corepack pnpm run test:coverage
+          mkdir -p coverage
+          node --test --experimental-test-coverage \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
+            scripts/dco-check.test.mjs
       - name: Analyze with SonarQube Cloud
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
         with:
-          projectBaseDir: vendor/codemem
           args: -Dsonar.qualitygate.wait=true
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-  harness:
-    runs-on: ubuntu-24.04
-    # 変異ゲートは変異 1 件ごとに test 一式を回すので、この job だけ「変異の件数 × test 一式の
-    # 実行時間」で伸びる。79 件で 7m25s（2026-08-18 実測）。102 件では 20 分枠に当たって
-    # 打ち切られた（2026-08-19 実測、run 32206958988。件数だけでなく、rig を実 process として
-    # 起動する test が増えたぶん 1 周も重くなっている）。枠を広げたあとは 109 件で 24m14s
-    # （2026-08-19 実測、run 32211920109）。123 件では 37m25s（2026-08-19 実測、
-    # run 32239966727 = 1 変異あたり 18.25s）で、45 分枠の 84% まで来ていた。上限に当たると
-    # 検査の verdict が出ないまま赤になるので、枠を広げて「走り切って落ちる」側に寄せる。
-    # 変異 1 件 = 約 18s なので、枠の残りから逆算して 200 件を超えたら分割（変異を shard に
-    # 割って並列 job で回す）へ切り替える
-    timeout-minutes: 75
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          # 旧形 parity の baseline を分岐点の commit から再生成するので、その commit まで
-          # 履歴が要る（既定の depth 1 では `git show <sha>:...` が引けない）
-          fetch-depth: 0
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24.16.0
-      - name: Published manifest versions are immutable
-        # §13「Adding or removing a required scenario requires a manifest version bump
-        # recorded in the evidence file」。test 側は manifest・hash・evidence の 3 つを
-        # 突き合わせるが、その 3 つは同じ変更の中で一緒に書き換えられるため、版を据え置いた
-        # まま集合を変える経路を塞げない。origin/main に既に載っている版のファイルを
-        # 不変の基準として扱い、変更を拒否する（新しい版は新しいファイルで足す）。
-        #
-        # 列挙は **基準側**（origin/main）から行う。作業ツリー側を列挙すると、公開済みの版を
-        # 削除・rename したときに旧 path が一度も比較されず素通りする。
-        #
-        # 比較は作業ツリーではなく HEAD に対して行う。同じ job の前段が manifest を基準の
-        # 内容へ書き戻すと、merge 対象の commit が変更済みでも作業ツリー比較では空になる。
-        #
-        # main-protection ruleset は required_status_checks だけで PR を必須にしていない
-        # （green な commit を直接 main へ進められる。#34）ため、pull_request に限定すると
-        # branch への push で検査が飛び、その commit が green のまま main に入る。
-        # イベントを問わず走らせる。main への push では origin/main == HEAD で空振りになるが、
-        # その commit は branch 側の実行で既に検査されている。
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          PUSH_BEFORE: ${{ github.event.before }}
-        run: |
-          # 送信先 ref を明示する。`git fetch origin main` だけだと remote の refspec 次第で
-          # origin/main が作られず、後続が黙って空振りする
-          git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
-          git rev-parse --verify origin/main >/dev/null
-          base=origin/main
-          # main への直 push では origin/main も HEAD も push 後の commit を指すので、
-          # 同じものどうしを比べて必ず成功する。ruleset は直 push を禁じていない（#34）ため、
-          # この場合だけ push 前の commit を基準にする
-          if [ "$EVENT_NAME" = "push" ] && [ "$REF_NAME" = "main" ]; then
-            case "$PUSH_BEFORE" in
-              "" | 0000000000000000000000000000000000000000)
-                echo "::error::main への push だが push 前の commit が取れない。基準が無いので検査できない"
-                exit 1
-                ;;
-            esac
-            git fetch --depth=1 origin "$PUSH_BEFORE"
-            base="$PUSH_BEFORE"
-          fi
-          # 列挙の失敗を握り潰さない。`|| true` を付けると「基準に 1 件も無い」と
-          # 区別が付かず、検査ゼロで成功する
-          git ls-tree -r --name-only "$base" -- harness/schema > /tmp/baseline-schema.txt
-          status=0
-          while read -r f; do
-            [ -n "$f" ] || continue
-            git diff --exit-code "$base" HEAD -- "$f" >/dev/null || {
-              echo "::error file=$f::公開済みの版を変更・削除している。scenario 集合を変えるなら新しい版のファイルを追加し、evidence に節を足すこと（§13）"
-              status=1
-            }
-          done < <(grep -E 'capability-scenarios\.v[0-9]+\.json$' /tmp/baseline-schema.txt || true)
-          exit $status
-
-
-      - name: Contract hashes are regenerated
-        # plan Task 4「Emit schema/fixture SHA-256 values for TypeScript/Rust parity」。
-        # Rust 側が同じ契約を読んでいることを確かめる手段が版番号しかないと、drift した複製を
-        # 読んでいても気付けない。生バイトの hash なので整形の違いも検出する。
-        #
-        # 凍結・生成物の検査は repo のコードを走らせる前に置く。後段の test や assemble が
-        # 作業ツリーを書き換えると、この比較は「書き換え後どうし」を見ることになる
-        run: |
-          node harness/contract-hashes.mjs > /tmp/contract-hashes.json
-          diff harness/contract-hashes.json /tmp/contract-hashes.json
-
-
-      - name: Old-shape parity baseline is regenerated from the pinned commit
-        # SC-003 の門は「変更前の実装の出力」を committed fixture として持つ。fixture 自体は
-        # ただの JSON なので、手で書き換えて contract hash を作り直せば test は緑のまま通る
-        # （基準 sha の自己申告と件数しか見ていない）。基準の commit から生成し直して
-        # committed fixture と突き合わせ、**生成物であることを CI 側で確かめる**。
-        #
-        # 出力先を `--output` で作業ツリーの外へ逃がす。committed fixture を上書きしてから
-        # 比較すると、書き換わっていても常に一致する
-        run: |
-          node --experimental-strip-types harness/continuity/old-shape-baseline.mjs \
-            --output "${RUNNER_TEMP}/old-shape-parity.json"
-          diff harness/fixtures/continuity/old-shape-parity.json "${RUNNER_TEMP}/old-shape-parity.json"
-
-
-      - name: Capability matrix self-test
-        # PASS 行を必須にする: entry point の起動条件が変わって黙って no-op しても exit 0 になるため
-        run: node --experimental-strip-types harness/assemble.ts --self-test | tee /dev/stderr | grep -qx PASS
-      - name: Continuity contract tests
-        run: node --experimental-strip-types --test harness/continuity/*.test.ts
-      - name: Evidence verification tests
-        # rig-manifest.test.mjs は .mjs なので glob に入らない。別に並べる
-        # （glob だけにすると、rig の manifest 生成が誰にも検査されないまま緑になる）
-        run: node --experimental-strip-types --test harness/evidence/*.test.ts harness/evidence/rig-manifest.test.mjs
-      - name: Evidence mutation gates
-        # 変異表（specs/003-evidence-hash-normalization/tasks.md）との突き合わせもこの中で走る。
-        # 表に書いた test が実在するかまで見るので、名前だけ書いて test を書かない形を塞ぐ
-        run: bash harness/evidence/mutate.sh
-      - name: Continuity mutation gates
-        # test が「ゲートを壊しても落ちない」状態に腐るのを防ぐ。人が手で叩いたときしか
-        # 走らないと、アンカー外れ（実装を直すと変異が黙って飛ばされる）も、変異が module を
-        # 壊して test を 1 件も走らせない形も、次のラウンドまで見つからない。
-        # スクリプト自身が「実行件数 == 期待件数」「生存 0」「変異が baseline と同じ件数の
-        # test を走らせた」を検査して非ゼロで終了する
-        run: bash harness/continuity/mutate.sh
-      - name: DCO gate self-test
-        # ゲート本体（dco.yml）は base branch 側の checker を走らせるので、PR 側の変更は
-        # そこには載らない。checker を直す PR の正しさはこの job で担保する。純関数だけの test は
-        # CLI 経路が `Refs #59` + sign-off を落としていても全件通った（実測）。実物を子プロセスと
-        # して起動する test を含めてここで回す。
-        run: node --test harness/dco-check.test.mjs
-      - name: Matrices are regenerated, not hand-edited
-        # plan の「Regenerate matrices; never manually edit generated JSON」を CI で強制する。
-        # 判定は test 側に置いてある。`diff <(jq …) <(jq …)` でやっていた頃は 2 つ素通しした:
-        # jq が object の重複キーを後勝ちで潰すので潰れる側は比較に出ず、process substitution の
-        # 中で jq が落ちても終了状態は diff のものしか返らない
-        run: node --experimental-strip-types --test harness/evidence/matrix-drift.test.ts
-
-  license:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24.16.0
-      - name: License and notice inclusion
-        run: node harness/license-inclusion-check.mjs
-
-  notices:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24.16.0
-      - name: Enable and verify pnpm
-        # packageManager 欄は vendor/codemem/package.json にあるので、そこを cwd にしないと
-        # corepack が最新版を落としてきてこの検証が落ちる（ゲート本体は cwd を自分で指定する）。
-        working-directory: vendor/codemem
-        run: |
-          corepack enable pnpm
-          test "$(pnpm --version)" = "11.8.0"
-      - name: Build, pack, and verify third-party notices
-        # ゲートは build 前に生成先を空にする（`emptyOutDir: false` の成果物に前回のファイルが
-        # 残ると、新しい notice に載らない古い bundle が tarball へ入る）。その掃除を消しても
-        # clean checkout の CI では症状が出ないので、古い成果物をここで置いてから走らせ、
-        # 消えていることを確かめる。notice 以外のファイルはゲート本体の検査対象ではないため、
-        # この後始末の確認が唯一の firing test になる。
-        run: |
-          mkdir -p vendor/codemem/packages/viewer-server/static
-          echo "// stale bundle from an earlier build" \
-            > vendor/codemem/packages/viewer-server/static/stale-bundle.js
-          node harness/notice-inclusion-check.mjs
-          if [ -e vendor/codemem/packages/viewer-server/static/stale-bundle.js ]; then
-            echo "::error::build 前の掃除が効いていない。notice に載らない古い成果物が tarball に残る"
-            exit 1
-          fi
-      - name: Test the third-party notice gate
-        run: node --test harness/notice-inclusion-check.test.mjs
-      - name: Test the notice generator
-        # rollup を実際に回すので vendor の node_modules が要る。上のゲートが install 済みにする
-        run: node --test harness/license-notice-plugin.test.mjs
 
   secrets:
     runs-on: ubuntu-24.04
@@ -277,22 +50,19 @@ jobs:
           persist-credentials: false
       - name: Scan every commit for secrets
         # gitleaks-action は `pulls/:n/commits` を pagination なしで呼び、返ってきた 1 ページ
-        # （既定 30 件）の先頭と末尾を走査範囲にする。commit が 30 を超える PR では**新しい側**が
-        # 丸ごと範囲外になる。この PR (#92) は 35 commit で、required check が実際に見た範囲は
-        # `05f8e93^..d4b251e` の 30 件だった（job log で確認）。
-        # 範囲の選び方を持ち込まず、clone にある commit を全部走査する。この repo なら 3 秒で終わる
+        # （既定 30 件）の先頭と末尾を走査範囲にする。commit が 30 を超える PR では新しい側が
+        # 丸ごと範囲外になる。範囲の選び方を持ち込まず、HEAD から届く commit を全部走査する。
+        # gitleaks 既定の `--all` は他 branch の ref まで走査し、そこの allowlist 済み合成 corpus で
+        # 無関係な PR が落ちる（PR #149）ので HEAD の履歴に限る
         env:
           GITLEAKS_VERSION: "8.30.1"
           # gitleaks_8.30.1_checksums.txt の linux_x64 の値
           GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
         run: |
-          # --retry は接続失敗・timeout・一部の一時 HTTP 応答を再試行する。--max-time は
-          # 試行ごとの上限。--retry-max-time は新しい再試行を始める期限で、開始済みの試行は
-          # 自身の --max-time まで続けられる。job の 10 分枠を最終的な外側の上限にする
           curl -fsSL --retry 3 --max-time 60 --retry-max-time 180 -o "${RUNNER_TEMP}/gitleaks.tar.gz" \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           echo "${GITLEAKS_SHA256}  ${RUNNER_TEMP}/gitleaks.tar.gz" | sha256sum -c -
           tar -xzf "${RUNNER_TEMP}/gitleaks.tar.gz" -C "${RUNNER_TEMP}" gitleaks
           "${RUNNER_TEMP}/gitleaks" version
           "${RUNNER_TEMP}/gitleaks" detect --no-banner --redact --exit-code 1 \
-            --source . --config .gitleaks.toml
+            --source . --config .gitleaks.toml --log-opts="--full-history"

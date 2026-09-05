@@ -1,4 +1,4 @@
-title = "free-mem secret scanning"
+title = "oboete secret scanning"
 
 [extend]
 useDefault = true
@@ -7,10 +7,10 @@ useDefault = true
 description = "Synthetic credential shapes required by redaction tests."
 targetRules = ["generic-api-key", "gcp-api-key", "jwt"]
 paths = [
-  '''^harness/phase1-no-agent-blockage\.mjs$''',
-  '''^vendor/codemem/packages/cli/src/commands/hook-thin-client\.test\.ts$''',
-  '''^vendor/codemem/packages/core/src/secret-scanner\.test\.ts$''',
-  '''^vendor/codemem/packages/core/src/sync-replication\.test\.ts$''',
+  '''^(legacy/)?harness/phase1-no-agent-blockage\.mjs$''',
+  '''^(legacy/)?vendor/codemem/packages/cli/src/commands/hook-thin-client\.test\.ts$''',
+  '''^(legacy/)?vendor/codemem/packages/core/src/secret-scanner\.test\.ts$''',
+  '''^(legacy/)?vendor/codemem/packages/core/src/sync-replication\.test\.ts$''',
 ]
 
 # 除外は「ファイル」ではなく「その 1 件」に当てる。path だけで 3 ルールを外すと、
@@ -21,5 +21,5 @@ paths = [
 description = "One synthetic 20-char literal left in this branch history."
 condition = "AND"
 targetRules = ["generic-api-key"]
-paths = ['''^harness/evidence/secrets\.test\.ts$''']
+paths = ['''^(legacy/)?harness/evidence/secrets\.test\.ts$''']
 regexes = ['''^0123456789abcdefghij$''']

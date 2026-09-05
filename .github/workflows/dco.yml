@@ -3,7 +3,7 @@
 # 取得するだけで checkout も実行もしない（`pull_request_target` の危険はそこにある）。
 # `dco` という check 名の生産者はここ 1 つに保つ。required status check は同じ名前の check run を
 # 全件見るので、生産者が増えると、そちらが失敗・取り消しになるだけで merge が止まる。どの run が
-# 判定したのかも辿れなくなる。理由と背景は CONTRIBUTING.md と evidence/adr-004-licensing.md に。
+# 判定したのかも辿れなくなる。理由と背景は CONTRIBUTING.md と legacy/evidence/adr-004-licensing.md に。
 name: DCO
 
 on:
@@ -28,7 +28,7 @@ jobs:
     steps:
       - name: Check out base branch
         # pull_request_target なので checkout されるのは base branch 側の tree。
-        # ここで取れる harness/dco-check.mjs が検査の正本になる。
+        # ここで取れる scripts/dco-check.mjs が検査の正本になる。
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -53,4 +53,4 @@ jobs:
         env:
           BASE_REF: origin/${{ github.base_ref }}
           HEAD_REF: ${{ github.event.pull_request.head.sha }}
-        run: node harness/dco-check.mjs "$BASE_REF" "$HEAD_REF"
+        run: node scripts/dco-check.mjs "$BASE_REF" "$HEAD_REF"

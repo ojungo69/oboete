@@ -1,0 +1,4 @@
+# legacy/ is frozen evidence; CodeRabbit counts its files-per-review limit after this filter.
+reviews:
+  path_filters:
+    - "!legacy/**"

@@ -1,127 +1,170 @@
 <!--
 Sync Impact Report
-- Version change: 1.0.0 -> 2.0.0 (product purpose and delivery model redefined)
+- Version change: 2.0.0 -> 3.0.0 (product renamed to oboete; foundation, agent set,
+  and delivery model redefined)
 - Modified principles:
-  - Local-First -> Automatic Memory UX First
-  - Zero Incremental Cost -> Local-First and Explicit Egress
-  - Privacy Boundary -> Local-First and Explicit Egress
-  - Safety Boundary -> Durable Capture and Honest Degradation
-  - Deterministic Gates -> Bounded and Predictable Resources
-  - Local-Only Development -> Product Slices Before Speculative Platforms
-- Added sections: Product and Technical Constraints; Development Workflow and Gates
+  - Automatic Memory UX First -> I. Automatic, Agent-Neutral Memory
+  - Durable Capture and Honest Degradation -> II. One File, No Daemon
+  - Local-First and Explicit Egress -> III. Local-First, Fail-Closed Classification
+  - Bounded and Predictable Resources -> IV. Honest Degradation and Bounded Resources
+  - Product Slices Before Speculative Platforms -> V. Parity Target and Milestones
+- Added sections:
+  - VI. Portable and Minimal
+  - Legacy disposition (Product and Technical Constraints)
+  - Isolated dogfood environment (Development Workflow and Gates)
 - Removed requirements:
-  - checkpoint claim, revision fence, and Verified Continuity Engine scope
-  - v6.1 as the canonical product specification and fixed Phase 0A-11 order
-  - blanket prohibition on push, pull requests, and public repository operations
-  - a mandatory zero-cost generation profile
+  - daemon-owned sole writer, RPC, bounded spool as the mutation path
+  - versioned capability manifest compiled by setup
+  - pinned Codemem safety kernel as the implementation base
+  - Technical Alpha boundary limited to Linux/WSL and Claude Code + Codex
 - Follow-up work:
-  - create the Product Reset feature specification and implementation plan
-  - route or close legacy continuity issues after the new specification is authoritative
+  - write the M1 (self-use Alpha) feature specification with /speckit-specify
+  - record verified hook and API contracts in docs/research/ before the M1 plan
+  - (done in the same change) move vendor/, specs/, evidence/, harness/ and root spec files under legacy/
+  - route or close Product Reset issues (#136-#139, #148, #150-#153) after M1 is
+    authoritative
 -->
 
-# free-mem Constitution
+# oboete Constitution
 
 ## Core Principles
 
-### I. Automatic Memory UX First
+### I. Automatic, Agent-Neutral Memory
 
-free-mem MUST let Claude Code and Codex users work normally while relevant activity is
-captured, summarized, stored, retrieved, and injected without manual handoff bookkeeping.
-The first supported product path MUST work in both Claude-to-Codex and Codex-to-Claude
-directions. Background memory failures MUST NOT block either coding Agent. Features that do
-not improve this end-to-end experience MUST NOT delay the Technical Alpha.
+oboete MUST capture, summarize, store, retrieve, and inject memory for Claude Code, Codex,
+Grok Build, and Pi without manual handoff bookkeeping. All four agents MUST share one memory
+store. Destination boundaries MUST be defined by sensitivity and repository only; an agent
+identifier MUST NOT silo memory. The `agent` column on a session records provenance and MUST
+NOT affect eligibility. Memory failures of any kind MUST NOT block, slow beyond budget, or
+corrupt the coding agent's turn. Observation granularity and memory types follow claude-mem:
+prompts and tool inputs and outputs are given to the observer; only summaries are stored.
 
-### II. Local-First and Explicit Egress
+### II. One File, No Daemon
 
-Memory, indexes, configuration, and operational state MUST be stored locally by default.
-Cloud sync and hosted services MUST remain explicit opt-in extensions. Summary and embedding
-providers MAY be local or remote, but setup MUST show the effective provider, endpoint host,
-credential source, expected cost class, and data-egress behavior before activation. Remote
-requests MUST use the redaction and sensitivity boundary; secrets and items marked local-only
-or sensitive MUST NOT leave the device. Credentials MUST NOT be discovered from unrelated
-Agent sessions or subscription stores without explicit user selection and a supported contract.
+The product is the SQLite file `~/.oboete/memory.db`. There MUST be no resident daemon, RPC
+server, or listening port. Hooks run as short-lived processes that write directly to the
+database in WAL mode. Background work (`oboete observe`) MUST be a detached process that is
+single per machine through a heartbeat `worker_lease` row in the database. The SQLite schema
+plus the CLI contract is the language-neutral seam: any component MAY later be rewritten in
+another language only behind that seam. The engine is TypeScript on Node.js >= 22.16 using
+`node:sqlite` with FTS5, bundled into a single file.
 
-### III. Bounded and Predictable Resources
+### III. Local-First, Fail-Closed Classification
 
-Every shipped profile MUST have measured limits for resident processes, queues, retries,
-concurrency, storage growth, and injected tokens. Unbounded buffers, retry loops, duplicate
-index writes, and orphan subprocesses are prohibited. Technical Alpha MUST NOT use a
-Chroma/Python sidecar. Necessary memory use is acceptable when it preserves user experience
-and retrieval quality, but usage MUST reach a stable, observable plateau for a fixed workload.
-The product MUST NOT delete durable memories or silently disable semantic retrieval solely to
-meet an arbitrary RSS target.
+Memory, indexes, configuration, and operational state live locally by default. Sensitivity is
+decided at capture and written as `local_only`; a row MAY be promoted to `eligible` only after
+the background worker has passed it through secret detection and entropy checks. Secrets MUST
+be redacted before storage, including inside generated summaries. Egress is governed by one
+table of rules: remote observer <- eligible; local observer <- same-repository eligible,
+local_only, and private; sync <- everything except secret, encrypted end to end; injection <-
+same repository. Availability fails open; classification fails closed; both directions MUST
+have tests. Injected text MUST be marked and never re-observed. Before any remote provider or
+sync target is enabled, setup MUST show destination host, credential source, cost class, and
+data egress. oboete MUST NOT read credentials from other agents' sessions or subscription
+stores without explicit user selection.
 
-### IV. Durable Capture and Honest Degradation
+### IV. Honest Degradation and Bounded Resources
 
-The canonical store MUST have one daemon-owned writer. Hooks, adapters, MCP, and CLI clients
-MUST submit mutations through the daemon or a bounded atomic spool. Accepted events MUST be
-idempotent and recoverable after daemon or provider failure. When summarization or embeddings
-are unavailable, free-mem MUST preserve pending work, serve the strongest available lexical
-fallback, and expose the degraded reason through doctor and injection metadata. Empty or stale
-results MUST NOT be reported as a healthy semantic result.
+With zero credentials, capture and lexical search MUST work. When no LLM is reachable or the
+daily allowance is exhausted, a rule-based observer MUST produce summaries in the same schema,
+and every injection pack and `oboete doctor` MUST expose the degraded reason. Empty or stale
+results MUST NOT be reported as healthy. Budgets are explicit: hook process 300 ms (overflow
+appends to a spool file and exits 0), background worker RSS 150 MB, observer input 12,000
+characters, and a self-counted daily Workers AI Neuron allowance that resets at UTC midnight.
+Raw events are deleted after 7 days; memories are permanent and removed only through
+tombstones and supersession. Injection volume is adaptive: a relevance threshold plus a cap
+proportional to the agent's context window, never a fixed token count. Resource evidence from
+a committed 1,000-event fixture (hook time, RSS, database growth) MUST exist before a
+milestone is called done.
 
-### V. Product Slices Before Speculative Platforms
+### V. Parity Target and Milestones
 
-Development MUST proceed through one user-visible vertical slice at a time. The Technical
-Alpha is limited to Linux/WSL, Claude Code and Codex, automatic memory, local retrieval,
-profile-based model configuration, doctor, and a minimal inspection/deletion surface. Rust,
-macOS, native Windows, additional Agents, cloud sync, teams, shared-memory governance, and
-advanced viewers MUST remain deferred until the Alpha flow is externally validated or a
-measured blocker proves the change necessary. Active product blockers MUST be capped at five,
-and only one product slice may be in progress.
+Done means functional parity with claude-mem plus cmem pro without a subscription, with
+higher configurability and fewer defects. Milestones are delivered one at a time: M1 self-use
+Alpha (four agents, web viewer, doctor, isolated dogfood for one to two weeks); M2 R2 sync and
+hybrid search (`sqlite-vec`, Workers AI `bge-m3` default embedding, optional local model); M3
+npm publication; M4 macOS and private MCP link; M5 Windows. Vector search, cloud sync, and
+non-Linux platforms MUST NOT delay M1, and M1 MUST NOT hardcode anything that prevents them.
+Only one milestone may be in progress.
+
+### VI. Portable and Minimal
+
+No Linux-only assumption may be written: no Unix sockets, `flock`, or bash-only hooks; paths
+follow XDG and AppData conventions. Dependencies are limited to those adopted by the design
+record (`node:sqlite`, the Vercel AI SDK with the OpenAI-compatible and Workers AI providers,
+`@secretlint/node`, `age-encryption`, `aws4fetch`, `zod`, Hono, Preact, Vite); any addition
+requires a written reason in the plan. oboete does NOT build a resident daemon, a manifest
+compiler, Verified Continuity, a Chroma or Python sidecar, Vectorize, a hosted viewer,
+team or RBAC features, a Rust rewrite ahead of measurement, or subscription OAuth reuse.
+Deletion is preferred over addition; every abstraction needs a second concrete user.
 
 ## Product and Technical Constraints
 
-- The implementation base is the existing pinned Codemem safety kernel: daemon sole writer,
-  bounded spool, redaction, SQLite/FTS, optional sqlite-vec, hooks, observer, backup, CLI/MCP,
-  and viewer assets. It is not an upstream-tracking fork.
-- claude-mem is the UX and characterization-test reference. Its context rendering, prompt and
-  parser behavior, health communication, and migration format MAY be selectively adapted with
-  required Apache-2.0 attribution. Its runtime is not the product foundation.
-- Technical Alpha uses TypeScript, Node.js, and SQLite. Rust is considered only after a
-  reproducible comparison shows that lifecycle and packaging changes cannot meet the frozen
-  resource envelope.
-- Setup MUST compile a small resource preset plus independent summary and embedding provider
-  choices into one versioned effective capability manifest. Runtime and doctor MUST consume
-  that same manifest; direct configuration bypasses are prohibited.
-- Retrieval MUST produce a bounded, versioned injection pack with stable selection behavior and
-  an explanation of included, omitted, and degraded candidates.
-- The Alpha support matrix is Linux and WSL on local Linux filesystems. macOS is the first
-  post-Alpha platform milestone; native Windows follows separately.
-- Pro features may later add encrypted cloud sync, multi-device backup, and a hosted viewer,
-  but MUST NOT become dependencies of the local core.
+- Data model: `repos` (id derived by the hook from the normalized git remote or toplevel
+  realpath hash, never self-reported), `sessions`, append-only `raw_events` as the acceptance
+  point, `memories` (`content_hash` UNIQUE, `deleted_at` tombstone, `superseded_by`,
+  bitemporal validity), `memories_fts` (FTS5 trigram plus a CJK bigram shadow column;
+  queries shorter than three characters use LIKE), optional `memory_vec`, an `injections`
+  ledger, and `sync_conflicts`. Migrations are numbered SQL files.
+- Agent integration: Claude Code and Grok Build use the same JSON hook command; the command
+  identifies its caller from the environment and never assumes Claude Code. Codex uses
+  `~/.codex/config.toml` hooks; injection happens only at session start and prompt submit.
+  Pi loads an in-process extension that imports the capture functions and MUST wrap every call
+  in try/catch with a timeout. Search is exposed through `oboete mcp` over stdio.
+- Observer: one OpenAI-compatible client with presets (Cloudflare Workers AI default, NVIDIA
+  NIM, OpenRouter, Gemini, Ollama, Anthropic). The prompt classifies against nearby existing
+  memories as ADD, UPDATE, DELETE, or NOOP. Free-model availability is resolved from the
+  provider catalog at run time, not hardcoded.
+- Retrieval and injection: session start injects the latest summary and pinned memories;
+  prompt submit runs FTS5 BM25 (plus vectors from M2), fused by RRF then MMR with character
+  n-gram similarity, with citation staleness checked against HEAD. The same session is never
+  re-injected with the same memory. `oboete why` explains any pack.
+- Sync (M2): `oboete sync push|pull` ships `VACUUM INTO` diffs encrypted with age to R2 over
+  the S3 API with SigV4; merge is `content_hash` union with tombstone propagation; divergence
+  lands in `sync_conflicts`; no CRDT.
+- Viewer: `oboete view` serves a Preact + Vite static SPA through Hono with SSE.
+- Distribution and configuration: npm package `oboete`, Apache-2.0, no telemetry.
+  `~/.oboete/` holds `config.toml`, `memory.db`, `spool/`, and `logs/`. Summary language
+  follows content.
+- Legacy disposition: the previous free-mem implementation (`vendor/codemem`), its
+  specifications, evidence, and harness are moved under `legacy/` as read-only evidence.
+  Only the boundary SQL, test fixtures, and mutation gate MAY be ported, and each ported
+  piece is deleted from `legacy/` once it lands.
 
 ## Development Workflow and Gates
 
-- Use the Spec Kit sequence `specify -> clarify -> plan -> tasks -> implement -> verify-tasks`
-  for this Product Reset and each subsequent non-trivial product slice.
-- Perform implementation in an isolated branch and worktree. Preserve unrelated worktrees and
-  never rewrite the shared checkout.
-- Start with one fixed Claude-to-Codex and Codex-to-Claude scenario. Before changing a
-  foundation or resource envelope, compare candidates with the same lifecycle milestones,
-  expected facts, and result schema.
-- New behavior requires the smallest regression test that fails without it. Release evidence
-  MUST include build, typecheck, lint, focused tests, full relevant tests, clean-install or
-  packed-artifact checks, real hook-to-injection E2E, provider-failure fallback, and a bounded
-  resource soak.
-- Correctness and security review MUST precede the over-engineering review. Valid findings are
-  fixed and re-reviewed; review tools are evidence sources, not authorities. Quality cleanup
-  unrelated to the active user-visible slice MUST NOT expand scope.
-- Public pull requests and issue updates are allowed when requested and MUST follow the
-  repository review, CI, and merge gates. Merge, release, and deployment remain separate
-  explicit delivery decisions.
+- Every milestone follows the Spec Kit sequence `specify -> clarify -> plan -> tasks ->
+  implement -> verify-tasks`. Bugs go through `bug-assess -> bug-fix -> bug-test`.
+- Implementation happens in an isolated branch and worktree; the shared checkout is never
+  rewritten. Correctness and security review precede the over-engineering review, and
+  findings are evidence, not authority. Security-related changes are not delegated to
+  external coding CLIs.
+- Third-party contracts (hook payloads, provider APIs, extension events) MUST be verified
+  against primary sources or a live probe and recorded under `docs/research/` before a plan
+  depends on them.
+- New behavior requires the smallest test that fails without it. Release evidence includes
+  build, typecheck, lint, tests, a packed-install check, real hook-to-injection E2E for each
+  agent, provider-failure fallback, and the resource fixture numbers.
+- Dogfood runs on this WSL host under a separate Linux user with an isolated home and its own
+  agent logins, driving `claude -p`, `codex exec`, `grok --print`, and `pi -p` with real
+  hooks. oboete MUST NOT be installed in the maintainer's own agent environment until the
+  isolated E2E has been green for at least one week and the maintainer approves it again at
+  that time. The OCI A1 host is excluded.
+- Pull requests follow the repository CI, DCO, and merge gates. Merge, publication, and
+  cloud enablement remain separate explicit decisions.
 
 ## Governance
 
-This constitution supersedes the v6 continuity specification, its phase order, and legacy
-continuity issues as active product authority. Those artifacts remain historical evidence only
+This constitution supersedes version 2.0.0, the Product Reset specifications
+(`legacy/specs/005-product-reset`, `legacy/specs/006-slice1-runtime`), and every earlier continuity
+specification as product authority. Those artifacts are historical evidence under `legacy/`
 until a new approved specification explicitly reactivates part of them. Amendments require an
-updated Sync Impact Report, user approval for changes to product purpose or privacy boundaries,
-and a migration or disposition plan for affected specifications and issues.
+updated Sync Impact Report, user approval for changes to product purpose, privacy boundaries,
+or milestone order, and a disposition plan for affected specifications and issues.
 
 Versioning follows semantic versioning: MAJOR for removed or redefined principles, MINOR for a
 new or materially expanded principle, and PATCH for non-semantic clarification. Every feature
-plan and pull request MUST state whether it complies with Principles I-V and identify any
+plan and pull request MUST state whether it complies with Principles I-VI and identify any
 approved exception. Unexplained violations block implementation or merge.
 
-**Version**: 2.0.0 | **Ratified**: 2026-08-12 | **Last Amended**: 2026-08-25
+**Version**: 3.0.0 | **Ratified**: 2026-08-12 | **Last Amended**: 2026-09-02

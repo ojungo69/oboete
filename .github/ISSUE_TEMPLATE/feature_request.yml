@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Describe the user problem and required behavior before proposing implementation details. free-mem is pre-release source and its safety invariants take priority over feature breadth.
+        Describe the user problem and required behavior before proposing implementation details. oboete is pre-release source and its safety invariants take priority over feature breadth.
   - type: textarea
     id: problem
     attributes:

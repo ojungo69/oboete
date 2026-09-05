@@ -1,11 +1,9 @@
 ---
 include_paths:
-  - "vendor/codemem/packages/*/src/**"
-  - "vendor/codemem/packages/opencode-plugin/index.js"
-  - "vendor/codemem/packages/opencode-plugin/.opencode/**"
+  - "src/**"
+  - "scripts/**"
 
 engines:
   lizard:
     exclude_paths:
-      - "harness/**"
-      - "vendor/codemem/packages/**"
+      - "legacy/**"

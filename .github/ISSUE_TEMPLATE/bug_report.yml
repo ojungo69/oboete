@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        free-mem is pre-release software. Use synthetic data only. Do not include credentials, private memory content, database files, or private local paths.
+        oboete is pre-release software. Use synthetic data only. Do not include credentials, private memory content, database files, or private local paths.
   - type: input
     id: commit
     attributes:
