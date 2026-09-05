@@ -47,3 +47,26 @@ export function strictest(first: Sensitivity, ...rest: Sensitivity[]): Sensitivi
   }
   return strictestValue;
 }
+
+export type ImportedDecision =
+  | { decision: 'retry' }
+  | { decision: 'unreviewed' | 'secret'; title: string; body: string };
+
+/**
+ * R12 "Export/import": an imported row is quarantined (`review_state = imported`) until the worker
+ * has run the detector on its title and body and the directive check on both. A clean, complete run
+ * without a directive releases it as `unreviewed`; a secret finding or a directive tombstones it as
+ * `secret`; a detector that did not finish decides nothing, and the row stays quarantined for the
+ * next run (fail closed, R4). The texts returned are the detector's, so what the detector removed
+ * (a `<private>` span, a redacted secret) is what gets stored (FR-018, FR-019).
+ */
+export function reclassifyImportedRow(
+  title: DetectorResult,
+  body: DetectorResult,
+  directive: boolean,
+): ImportedDecision {
+  if (!title.ok || !body.ok) return { decision: 'retry' };
+  const decision =
+    title.sensitivity === 'secret' || body.sensitivity === 'secret' || directive ? 'secret' : 'unreviewed';
+  return { decision, title: title.text, body: body.text };
+}

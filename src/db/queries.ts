@@ -410,7 +410,8 @@ export function nearbyCandidates(
   const limit = input.limit ?? 8;
   const found = searchCandidates(db, {
     text: input.text,
-    scope: { where: 'm.repo_id = ?', params: [input.repoId] },
+    // R12 quarantine: an imported row the worker has not classified is offered to no summarizer.
+    scope: { where: "m.repo_id = ? AND m.review_state <> 'imported'", params: [input.repoId] },
     limit,
   });
   const ranked = rrfFuse(normalizeBm25(normalizeBm25(found.rows, 'scoreTrigram'), 'scoreCjk'))

@@ -4,6 +4,8 @@ import { isAbsolute, relative, resolve } from 'node:path';
 import { lintSource } from '@secretlint/core';
 import { rules as recommendedRules } from '@secretlint/secretlint-rule-preset-recommend';
 import type { SecretLintCoreConfig } from '@secretlint/types';
+
+import { credentialValues } from '../log.js';
 import { testFault } from '../testing/faults.js';
 
 const FILTER_COMMENTS_RULE = '@secretlint/secretlint-rule-filter-comments';
@@ -40,6 +42,12 @@ export type DetectorInput = {
   paths: string[];
   repoRoot: string | null;
   secretPaths: string[];
+  /**
+   * The values of oboete's own credential variables (log.ts credentialValues), redacted whatever
+   * they look like: the environment, not the shape, is what makes them secrets (FR-016). Defaults
+   * to this process's environment; the worker passes the one it was started with.
+   */
+  credentialValues?: string[];
 };
 
 export type DetectorResult =
@@ -356,6 +364,21 @@ export async function redactSecrets(
   };
 }
 
+/** FR-016: a configured credential value is redacted wherever it appears, whatever it looks like. */
+function redactCredentials(
+  value: string,
+  credentials: readonly string[],
+): { text: string; hits: Redaction[] } {
+  let text = value;
+  let count = 0;
+  for (const credential of credentials) {
+    const parts = text.split(credential);
+    count += parts.length - 1;
+    text = parts.join('[REDACTED:oboete-credential]');
+  }
+  return { text, hits: count === 0 ? [] : [{ rule: 'oboete-credential', count }] };
+}
+
 /** One entry per rule with the counts of every text summed, ordered by rule name. */
 function mergeRedactions(hits: Redaction[]): Redaction[] {
   const counts = new Map<string, number>();
@@ -396,13 +419,21 @@ export async function detectSync(
       }
     }
 
-    // A caller that passes fields only (the hook does) must not pay for linting an empty string.
-    const redacted =
-      stripped.text === '' ? { text: '', hits: [] } : await redactSecrets(stripped.text, options);
+    const credentials = input.credentialValues ?? credentialValues(process.env);
+    // The configured credentials go first: a rule that redacted part of one would otherwise leave
+    // the rest unmatched. A caller that passes fields only (the hook does) must not pay for linting
+    // an empty string.
+    const redactAll = async (value: string): Promise<{ text: string; hits: Redaction[] }> => {
+      if (value === '') return { text: '', hits: [] };
+      const known = redactCredentials(value, credentials);
+      const found = await redactSecrets(known.text, options);
+      return { text: found.text, hits: [...known.hits, ...found.hits] };
+    };
+    const redacted = await redactAll(stripped.text);
     const hits = [...redacted.hits];
     const texts: string[] = [];
     for (const field of strippedFields) {
-      const redactedField = field.text === '' ? { text: '', hits: [] } : await redactSecrets(field.text, options);
+      const redactedField = await redactAll(field.text);
       texts.push(redactedField.text);
       hits.push(...redactedField.hits);
     }
@@ -434,9 +465,16 @@ export function detectInWorker(
   options: { cutoffMs: number; workerScript: string },
 ): Promise<DetectorResult> {
   return new Promise((settle) => {
+    // R6 reserves the hook's stderr for the count of unstored events. The worker thread prints its
+    // own warnings (Node 22.16 warns when node:sqlite loads) unless its streams are kept apart, so
+    // they are piped here and dropped.
     const worker = new Worker(options.workerScript, {
       workerData: { role: 'oboete-detector', input },
+      stdout: true,
+      stderr: true,
     });
+    worker.stdout.resume();
+    worker.stderr.resume();
 
     let done = false;
     const finish = (result: DetectorResult): void => {

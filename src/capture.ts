@@ -39,13 +39,14 @@ import {
   type NormalizedEvent,
   type SessionStartSource,
 } from './events.js';
-import { appendLogQuietly, errorCode } from './log.js';
+import { appendLogQuietly, credentialValues, errorCode } from './log.js';
 import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from './paths.js';
 import { detectInWorker, type DetectorInput, type DetectorResult } from './privacy/detect.js';
 import { resolveRepoIdentity, type GitSpawn, type RepoIdentity } from './repo-identity.js';
 import { writeSpoolEntry, type SpoolEntry } from './spool.js';
 import { isLeaseFree, transactionImmediate } from './worker/lease.js';
 import type { HookContext } from './injection/inject.js';
+import { stripRecognizedPacks } from './injection/recognize.js';
 import { testFault } from './testing/faults.js';
 
 /** The absolute budget of a capture hook, measured from process start (contracts/agents.md). */
@@ -115,16 +116,6 @@ const BATCH_TRIGGER_KINDS: ReadonlySet<EventKind> = new Set<EventKind>([
   'session_end',
   'last_assistant_message',
 ]);
-
-/**
- * FR-021: injected text must be recognized on capture so it is not summarized as new activity.
- * Recognition against `injections.pack_hash` is T065; until then nothing is recognized, which is
- * the safe direction: an unrecognized pack is stored as ordinary content, never dropped.
- */
-export function recognizeInjectedText(text: string): boolean {
-  void text;
-  return false;
-}
 
 export type StdinRead = { text: string; truncated: boolean };
 
@@ -521,6 +512,22 @@ function placeInTurn(db: DatabaseSync, session: SessionRow, row: RowDraft): stri
   return turnId;
 }
 
+/**
+ * FR-021: a pack this database issued is removed from the content before it is stored, and the row
+ * remembers which packs it carried. The spool path cannot look the hash up (no database); the
+ * worker does it when it recovers the entry (batches.ts recoverSpool).
+ */
+function recognizePacks(db: DatabaseSync, rows: RowDraft[]): void {
+  for (const row of rows) {
+    if (row.content === null) continue;
+    const recognized = stripRecognizedPacks(db, row.content);
+    if (recognized.hashes.length === 0) continue;
+    row.content = recognized.text;
+    row.contentHash = contentHash(recognized.text);
+    row.payload.recognized_packs = recognized.hashes;
+  }
+}
+
 function storeRows(
   db: DatabaseSync,
   identity: RepoIdentity,
@@ -808,9 +815,10 @@ async function write(
         // under the id of another turn (R7: the direct path keys by the ordinal it read).
         let stored: ReturnType<typeof storeRows>;
         try {
-          stored = transactionImmediate(opened.db, () =>
-            storeRows(opened.db, identity, rows, diagnostics, capturedAt),
-          );
+          stored = transactionImmediate(opened.db, () => {
+            recognizePacks(opened.db, rows);
+            return storeRows(opened.db, identity, rows, diagnostics, capturedAt);
+          });
         } catch {
           // R1: a storage failure before the transaction commits writes the sanitized event to the
           // spool. Injection then sees no database and records index_unavailable in the hook log.
@@ -1127,6 +1135,8 @@ async function runDetector(
         paths: input.paths,
         repoRoot: input.identity.root,
         secretPaths: input.secretPaths,
+        // FR-016: the hook's own credentials are secrets whatever they look like (log.ts).
+        credentialValues: credentialValues(process.env),
       },
       cutoff,
     );

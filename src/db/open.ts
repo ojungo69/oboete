@@ -1,11 +1,24 @@
 import { existsSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
+import { createRequire } from 'node:module';
+import type * as Sqlite from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
 
 import { sha256Hex } from '../hash.js';
 
 import sql0001 from './migrations/0001_core.sql';
 import sql0002 from './migrations/0002_memory_search.sql';
 import sql0003 from './migrations/0003_operations.sql';
+
+/**
+ * `node:sqlite` is loaded on the first open, not at import: on Node 22.16 loading it emits an
+ * ExperimentalWarning while the module graph is still linking, before cli.ts can install its warning
+ * filter, and R6 keeps the hook's stderr for the count of unstored events.
+ */
+let sqlite: typeof Sqlite | null = null;
+function loadSqlite(): typeof Sqlite {
+  sqlite ??= createRequire(import.meta.url)('node:sqlite') as typeof Sqlite;
+  return sqlite;
+}
 
 export const MIGRATIONS: {
   version: 1 | 2 | 3;
@@ -72,7 +85,7 @@ export function openDatabase(options: {
     throw new DatabaseMissingError(`Database file does not exist: ${options.path}`);
   }
 
-  const db = new DatabaseSync(options.path, { timeout: options.timeoutMs });
+  const db = new (loadSqlite().DatabaseSync)(options.path, { timeout: options.timeoutMs });
   try {
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('PRAGMA foreign_keys = ON');

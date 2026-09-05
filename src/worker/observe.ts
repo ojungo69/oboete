@@ -22,11 +22,12 @@ import {
   type AncestorCache,
   updateCitationState,
 } from '../injection/staleness.js';
-import { appendLog, appendLogQuietly, errorCode } from '../log.js';
+import { appendLog, appendLogQuietly, credentialValues, errorCode } from '../log.js';
 import { refreshWorkersAiCatalog } from '../observer/catalog.js';
 import {
   applyObservations,
   checkLanguage,
+  rejectsDirectives,
   sessionSummary,
   type ApplyResult,
   type DegradedReason,
@@ -37,6 +38,8 @@ import { resolveModel } from '../observer/providers.js';
 import { buildObserverRequest } from '../observer/request.js';
 import { recordExhausted, reserveAttempt } from '../observer/reservation.js';
 import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from '../paths.js';
+import { reclassifyImportedRow } from '../privacy/classify.js';
+import { cjkBigrams } from '../retrieval/fts.js';
 import { detectSync, type DetectorInput, type DetectorResult } from '../privacy/detect.js';
 import { loadDestinationRules } from '../privacy/egress.js';
 import {
@@ -65,6 +68,8 @@ import {
 const DEFAULT_HEARTBEAT_MS = 2_000;
 const DEFAULT_MAX_RUN_MS = 20 * 60 * 1_000;
 const BUSY_RETRY_MS = 200;
+/** Imported rows per fenced write: two detector runs each, so the lease's `now` stays fresh. */
+const RECLASSIFY_LIMIT = 50;
 
 export type ObserveDeps = {
   now: () => number;
@@ -81,6 +86,7 @@ export type ObserveDeps = {
 type Counts = {
   recovered: number;
   classified: number;
+  reclassified: number;
   batches: number;
   applied: number;
   fallback: number;
@@ -595,6 +601,70 @@ async function updateBatchCitations(
   });
 }
 
+/**
+ * R12 "Export/import": every quarantined row (`review_state = imported`) goes through the detector
+ * and the directive check; the decision table is privacy/classify.ts reclassifyImportedRow. The
+ * writes are one fenced transaction so a lost lease changes nothing. A tombstoned row keeps its
+ * hashes (FR-035) and loses the secret (FR-018).
+ */
+async function reclassifyImported(
+  db: DatabaseSync,
+  token: string,
+  now: () => number,
+  detect: (text: string) => Promise<DetectorResult>,
+): Promise<{ examined: number; leaseLost: boolean }> {
+  const select = db.prepare(
+    `SELECT id, title, body FROM memories
+     WHERE review_state = 'imported' AND deleted_at IS NULL AND id > ? ORDER BY id LIMIT ?`,
+  );
+  // The CJK index is a column of its own (0002_memory_search.sql), so it follows the text here.
+  const release = db.prepare(
+    `UPDATE memories SET review_state = 'unreviewed', title = ?, body = ?, cjk_bigrams = ?
+     WHERE id = ? AND review_state = 'imported'`,
+  );
+  const tombstone = db.prepare(
+    `UPDATE memories SET sensitivity = 'secret', deleted_at = ?, title = ?, body = ?, cjk_bigrams = ?
+     WHERE id = ? AND review_state = 'imported'`,
+  );
+  let examined = 0;
+  // Keyset pages: a row the detector could not finish stays quarantined and is passed over, so
+  // the pass ends even when the detector keeps failing on it (the next run tries it again).
+  let after = '';
+  for (;;) {
+    const rows = select
+      .all(after, RECLASSIFY_LIMIT)
+      .map((row) => ({ id: String(row.id), title: String(row.title ?? ''), body: String(row.body ?? '') }));
+    if (rows.length === 0) return { examined, leaseLost: false };
+    examined += rows.length;
+    after = rows[rows.length - 1]?.id ?? after;
+
+    const decided: { id: string; decision: 'unreviewed' | 'secret'; title: string; body: string }[] = [];
+    for (const row of rows) {
+      const directive = rejectsDirectives(row.title) !== null || rejectsDirectives(row.body) !== null;
+      const verdict = reclassifyImportedRow(await detect(row.title), await detect(row.body), directive);
+      if (verdict.decision === 'retry') continue;
+      decided.push({ id: row.id, ...verdict });
+    }
+
+    // The clock is read after the detector ran, so the lease heartbeat this write leaves is current.
+    const at = now();
+    const leaseLost = transactionImmediate(db, () => {
+      if (!assertLease(db, token, at)) {
+        db.exec('ROLLBACK');
+        return true;
+      }
+      for (const row of decided) {
+        const bigrams = cjkBigrams(`${row.title} ${row.body}`);
+        if (row.decision === 'unreviewed') release.run(row.title, row.body, bigrams, row.id);
+        else tombstone.run(at, row.title, row.body, bigrams, row.id);
+      }
+      return false;
+    });
+    if (leaseLost) return { examined, leaseLost: true };
+    if (rows.length < RECLASSIFY_LIMIT) return { examined, leaseLost: false };
+  }
+}
+
 function pendingSummaries(db: DatabaseSync): string[] {
   return db
     .prepare(
@@ -697,6 +767,7 @@ export async function runObserve(argv: string[], overrides: Partial<ObserveDeps>
   const result: Counts = {
     recovered: 0,
     classified: 0,
+    reclassified: 0,
     batches: 0,
     applied: 0,
     fallback: 0,
@@ -780,6 +851,7 @@ export async function runObserve(argv: string[], overrides: Partial<ObserveDeps>
         paths: [],
         repoRoot: null,
         secretPaths: config.privacy.secret_paths,
+        credentialValues: credentialValues(deps.env),
       });
 
     for (;;) {
@@ -796,6 +868,10 @@ export async function runObserve(argv: string[], overrides: Partial<ObserveDeps>
       const classified = await retryBusy(() => classifyPending(db, token, deps.now(), detect));
       result.classified += classified.examined;
       if (classified.leaseLost || leaseLost) break;
+
+      const reclassified = await retryBusy(() => reclassifyImported(db, token, deps.now, detect));
+      result.reclassified += reclassified.examined;
+      if (reclassified.leaseLost || leaseLost) break;
 
       const reclaimed = await retryBusy(() => reclaimStale(db, token, deps.now()));
       if (reclaimed.leaseLost || leaseLost) break;

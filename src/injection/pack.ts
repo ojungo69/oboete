@@ -1,7 +1,6 @@
 // The pack builder every agent shares (contracts/agents.md "Injection policy shared by all agents"
 // and "Pack format (all agents)", FR-021, FR-024, FR-025, FR-026, FR-028, FR-029, FR-044).
 // Hook path: no heavy import, no network, no file read beyond the staleness check.
-import { createHash } from 'node:crypto';
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
 
 import {
@@ -31,10 +30,9 @@ import {
   type ItemReason,
   type LedgerItem,
 } from './ledger.js';
+import { PACK_FOOTER as FOOTER, PACK_HEADER as HEADER, packHash } from './recognize.js';
 import { checkPaths, repositoryHead } from './staleness.js';
 
-const HEADER = 'oboete memory context';
-const FOOTER = 'end of oboete memory context';
 
 /** Amendment A2: session start waits at most one second for a pending summary, then degrades. */
 export const SUMMARY_WAIT_MS = 1_000;
@@ -473,7 +471,7 @@ async function assemble(
       channel: input.channel,
       state: input.state ?? 'built',
       epoch: input.epoch,
-      packHash: createHash('sha256').update(text, 'utf8').digest('hex'),
+      packHash: packHash(text),
       charBudget: assembly.budgetChars,
       charsUsed: text.length,
       degradedReason: degraded,

@@ -8,7 +8,8 @@ import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 
 import type { ProviderPreset } from '../config.js';
 import { isBusyError } from '../db/open.js';
-import { toolInputSchema, type ToolInput } from '../events.js';
+import { contentHash, toolInputSchema, type ToolInput } from '../events.js';
+import { stripRecognizedPacks } from '../injection/recognize.js';
 import type { OboetePaths } from '../paths.js';
 import { promoteSensitivity, strictest } from '../privacy/classify.js';
 import type { DetectorResult } from '../privacy/detect.js';
@@ -294,6 +295,17 @@ function placeRecoveredInTurn(db: DatabaseSync, sessionId: string, entry: SpoolE
   return turnId;
 }
 
+/** FR-021 on the spool path: the hook had no database to recognize the pack with, so the worker does it here. */
+function recognizePacksInEntry(db: DatabaseSync, entry: SpoolEntry): void {
+  const payload = payloadOf(entry.row);
+  if (entry.row.content === null || payload === null) return;
+  const recognized = stripRecognizedPacks(db, entry.row.content);
+  if (recognized.hashes.length === 0) return;
+  entry.row.content = recognized.text;
+  entry.row.content_hash = contentHash(recognized.text);
+  entry.row.payload_json = JSON.stringify({ ...payload, recognized_packs: recognized.hashes });
+}
+
 /**
  * Recovers every spool file in name order before the next summarization pass (FR-003). The
  * deterministic `raw_events.id` makes `INSERT OR IGNORE` the whole idempotency mechanism, so a
@@ -331,6 +343,7 @@ export function recoverSpool(
           return 'skipped';
         }
         const parents = ensureSessionRows(db, entry);
+        recognizePacksInEntry(db, entry);
         const changes = Number(
           db
             .prepare(

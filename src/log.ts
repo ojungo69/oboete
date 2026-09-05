@@ -20,16 +20,24 @@ export function childEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  * FR-016 and contracts/cli.md: logs and diagnostics never contain a credential value.
  */
 export function scrubCredentials(text: string, env: NodeJS.ProcessEnv = process.env): string {
-  const values = Object.entries(env)
+  let scrubbed = text;
+  for (const value of credentialValues(env)) scrubbed = scrubbed.split(value).join('[credential]');
+  return scrubbed;
+}
+
+/**
+ * No real credential is shorter than this; a placeholder such as `test` in a credential variable
+ * would otherwise redact every row and every log line that contains those letters.
+ */
+const MIN_CREDENTIAL_LENGTH = 8;
+
+/** The values of the credential variables, longest first so a value that contains another one is replaced whole. */
+export function credentialValues(env: NodeJS.ProcessEnv): string[] {
+  return Object.entries(env)
     .filter(([name]) => isCredentialVariable(name))
     .map(([, value]) => value?.trim() ?? '')
-    .filter((value) => value !== '')
-    // Longest first, so a value that contains another one is replaced whole.
+    .filter((value) => value.length >= MIN_CREDENTIAL_LENGTH)
     .sort((a, b) => b.length - a.length);
-
-  let scrubbed = text;
-  for (const value of values) scrubbed = scrubbed.split(value).join('[credential]');
-  return scrubbed;
 }
 
 function formatValue(value: string | number | boolean): string {

@@ -416,8 +416,10 @@ test('a credential is refused wherever it sits in the config file', async () => 
     writeFileSync(paths.config, '[[credentials]]\nvalue = "token-value"\n');
     assert.ok(caught(() => loadConfig(paths)) instanceof ConfigError);
   });
-  assert.equal(scrubCredentials('v', { OBOETE_API_KEY: 'v' }), '[credential]');
-  assert.equal(scrubCredentials('v', { OBOETE_GROK_API_TOKEN: 'v' }), '[credential]');
+  // Any OBOETE_*_API_KEY / _API_TOKEN name counts; a value shorter than a real credential does not.
+  assert.equal(scrubCredentials('value-01', { OBOETE_API_KEY: 'value-01' }), '[credential]');
+  assert.equal(scrubCredentials('value-01', { OBOETE_GROK_API_TOKEN: 'value-01' }), '[credential]');
+  assert.equal(scrubCredentials('v', { OBOETE_GROK_API_TOKEN: 'v' }), 'v');
 });
 
 // The literals below are transcribed from contracts/observer.md "Provider presets", the R13

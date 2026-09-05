@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { Worker } from 'node:worker_threads';
 
@@ -14,7 +15,10 @@ import {
   loadRepoRules,
 } from '../../src/config.js';
 import { openDatabase } from '../../src/db/open.js';
-import { promoteSensitivity, strictest } from '../../src/privacy/classify.js';
+import { PACK_FOOTER, PACK_HEADER, packHash, stripRecognizedPacks } from '../../src/injection/recognize.js';
+import { credentialValues } from '../../src/log.js';
+import { DIRECTIVE_PHRASES } from '../../src/observer/classify.js';
+import { promoteSensitivity, reclassifyImportedRow, strictest } from '../../src/privacy/classify.js';
 import {
   detectInWorker,
   detectSync,
@@ -27,6 +31,21 @@ import type { DetectorInput, DetectorResult } from '../../src/privacy/detect.js'
 import { filterEgress, isAllowed, loadDestinationRules } from '../../src/privacy/egress.js';
 import type { Destination, Sensitivity } from '../../src/privacy/egress.js';
 import { withTempHome } from '../helpers/home.js';
+import {
+  NOW,
+  captureEndedSession,
+  catalogResponse,
+  cleanEnv,
+  eventBase,
+  eventId,
+  providerOutput,
+  runObserveForFixture,
+  toggleDatabase,
+  withFixture,
+  workersResponse,
+  writeConfig,
+  type Fixture,
+} from '../helpers/observe.js';
 
 type CorpusLine = { id: string; kind: string; text: string; secret: string | null };
 
@@ -61,7 +80,8 @@ const CLEAN_TEXT = [
 ].join('\n');
 
 function detectorInput(text: string): DetectorInput {
-  return { text, paths: [], repoRoot: null, secretPaths: [] };
+  // No configured credentials: the detector must not read the developer's shell in these tests.
+  return { text, paths: [], repoRoot: null, secretPaths: [], credentialValues: [] };
 }
 
 /** Secret-shaped literals live in the corpus, never in this file, so the secret scanners stay useful. */
@@ -541,4 +561,593 @@ test('the detector wall time on large clean payloads is reported for the capture
       `detectSync on ${size} characters took ${elapsed.toFixed(1)} ms on Node ${process.versions.node}`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// US3 end to end (T064): the real hook, the real detector, the real worker and the real pack.
+// ---------------------------------------------------------------------------
+
+/** The repository the fixture captures into: whatever identity the hook derived for `process.cwd()`. */
+function repoIdOf(fixture: Fixture): string {
+  return fixture.withDb((db) => {
+    const row = db.prepare('SELECT id FROM repos').get();
+    if (row === undefined) assert.fail('no repository row was created by capture');
+    return String(row.id);
+  });
+}
+
+function ensureRepo(db: DatabaseSync, id: string): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
+     VALUES (?, 'remote', ?, '/tmp/other-repository', 1, 1)`,
+  ).run(id, `example.invalid/${id}.git`);
+}
+
+function seedMemory(
+  db: DatabaseSync,
+  memory: {
+    id: string;
+    repoId: string;
+    title: string;
+    body: string;
+    sensitivity?: Sensitivity;
+    pinned?: boolean;
+    reviewState?: 'unreviewed' | 'imported';
+  },
+): void {
+  db.prepare(
+    `INSERT INTO memories (id, repo_id, type, title, body, cjk_bigrams, material_hash, content_hash,
+       sensitivity, review_state, pinned_at, pin_order, created_at)
+     VALUES (?, ?, 'discovery', ?, ?, '', ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    memory.id,
+    memory.repoId,
+    memory.title,
+    memory.body,
+    `material_${memory.id}`,
+    `content_${memory.id}`,
+    memory.sensitivity ?? 'eligible',
+    memory.reviewState ?? 'unreviewed',
+    memory.pinned === true ? NOW - 1_000 : null,
+    memory.pinned === true ? 1 : null,
+    NOW - 2_000,
+  );
+}
+
+function storedEvents(fixture: Fixture, nativeSessionId: string, kind: string): { content: string | null; payload: Record<string, unknown>; id: string }[] {
+  return fixture.withDb((db) =>
+    db
+      .prepare(
+        `SELECT e.id, e.content, e.payload_json FROM raw_events e
+         JOIN sessions s ON s.id = e.session_id
+         WHERE s.native_session_id = ? AND e.kind = ? ORDER BY e.captured_at, e.id`,
+      )
+      .all(nativeSessionId, kind)
+      .map((row) => ({
+        id: String(row.id),
+        content: row.content === null ? null : String(row.content),
+        payload: JSON.parse(String(row.payload_json)) as Record<string, unknown>,
+      })),
+  );
+}
+
+/**
+ * The observer input travels as the user message of the provider's own request shape (llm.ts), so
+ * it is found by walking the request body and parsing the string that carries `repo_ref`.
+ */
+function observerInputOf(body: string): { repo_ref?: string; nearby?: { id: string }[] } {
+  const queue: unknown[] = [JSON.parse(body)];
+  while (queue.length > 0) {
+    const value = queue.shift();
+    if (typeof value === 'string') {
+      try {
+        queue.push(JSON.parse(value));
+      } catch {
+        // an ordinary string
+      }
+      continue;
+    }
+    if (value !== null && typeof value === 'object') {
+      if ('repo_ref' in value) return value as { repo_ref?: string; nearby?: { id: string }[] };
+      queue.push(...Object.values(value));
+    }
+  }
+  assert.fail('the provider body carries no observer input');
+}
+
+test('FR-021: a pack that comes back through capture is recognized by its hash and never summarized', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    await fixture.capture('SessionStart', { ...eventBase('seed'), source: 'startup' });
+    const repoId = repoIdOf(fixture);
+    fixture.withDb((db) =>
+      seedMemory(db, {
+        id: 'm_pinned',
+        repoId,
+        title: 'Uploader retry policy',
+        body: 'PINNEDBODY the uploader retries three times with backoff.',
+        pinned: true,
+      }),
+    );
+
+    const common = eventBase('s-recapture');
+    const start = await fixture.capture('SessionStart', { ...common, source: 'startup' });
+    const pack = start.stdout ?? '';
+    assert.ok(pack.startsWith(PACK_HEADER) && pack.includes('PINNEDBODY'), `the session-start pack was not built: ${pack}`);
+    const packHash = fixture.withDb((db) =>
+      String(db.prepare("SELECT pack_hash FROM injections WHERE pack_hash IS NOT NULL ORDER BY created_at DESC LIMIT 1").get()?.pack_hash),
+    );
+    assert.equal(packHash.length, 64);
+
+    // The whole message is the pack: nothing of it is new activity.
+    await fixture.capture('UserPromptSubmit', { ...common, prompt_id: 'p1', prompt: 'Repeat your notes.' });
+    await fixture.capture('Stop', { ...common, prompt_id: 'p1', last_assistant_message: pack });
+    // The pack embedded in real output: the output stays, the pack does not.
+    const before = 'The tests pass on the retry branch.';
+    const after = 'Nothing else changed.';
+    await fixture.capture('UserPromptSubmit', { ...common, prompt_id: 'p2', prompt: 'Summarize the branch.' });
+    await fixture.capture('Stop', {
+      ...common,
+      prompt_id: 'p2',
+      last_assistant_message: `${before}\n${pack}\n${after}`,
+    });
+    await fixture.capture('SessionEnd', { ...common, reason: 'prompt_input_exit' });
+
+    const messages = storedEvents(fixture, 's-recapture', 'last_assistant_message');
+    assert.equal(messages.length, 2);
+    assert.equal(messages[0]?.content, '');
+    assert.deepEqual(messages[0]?.payload.recognized_packs, [packHash]);
+    assert.equal(messages[1]?.content, `${before}\n\n${after}`);
+    assert.deepEqual(messages[1]?.payload.recognized_packs, [packHash]);
+
+    await runObserveForFixture(fixture);
+    fixture.withDb((db) => {
+      const session = db.prepare("SELECT id FROM sessions WHERE native_session_id = 's-recapture'").get();
+      const produced = db
+        .prepare('SELECT id, title, body FROM memories WHERE source_session_id = ?')
+        .all(String(session?.id))
+        .map((row) => ({ id: String(row.id), text: `${String(row.title)}\n${String(row.body)}` }));
+      assert.ok(produced.length > 0, 'the remainder of the session is still summarized');
+      for (const memory of produced) {
+        assert.equal(memory.text.includes(PACK_HEADER), false, memory.text);
+        assert.equal(memory.text.includes('PINNEDBODY'), false, memory.text);
+      }
+      // The pack-only message contributed nothing: no memory cites it as a source.
+      const cited = db
+        .prepare('SELECT COUNT(*) AS n FROM memory_sources WHERE raw_event_id = ?')
+        .get(messages[0]?.id ?? '')?.n;
+      assert.equal(cited, 0);
+    });
+  });
+});
+
+test('fail-open: a text that only looks like a pack is ordinary content', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    const common = eventBase('s-lookalike');
+    const lookalike = [PACK_HEADER, '> repository: example.invalid/other.git', '> a line nobody injected', 'end of oboete memory context'].join('\n');
+    await fixture.capture('SessionStart', { ...common, source: 'startup' });
+    await fixture.capture('UserPromptSubmit', { ...common, prompt_id: 'p1', prompt: 'What is this?' });
+    await fixture.capture('Stop', { ...common, prompt_id: 'p1', last_assistant_message: lookalike });
+
+    const [message] = storedEvents(fixture, 's-lookalike', 'last_assistant_message');
+    assert.equal(message?.content, lookalike);
+    assert.equal('recognized_packs' in (message?.payload ?? {}), false);
+  });
+});
+
+test('FR-020: a memory of another repository is refused at the injection destination, this repository is delivered', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    await fixture.capture('SessionStart', { ...eventBase('seed'), source: 'startup' });
+    const repoId = repoIdOf(fixture);
+    fixture.withDb((db) => {
+      ensureRepo(db, 'repo-other');
+      seedMemory(db, {
+        id: 'm_other',
+        repoId: 'repo-other',
+        title: 'Uploader retry policy of the other project',
+        body: 'OTHERREPO the uploader retries five times.',
+        pinned: true,
+      });
+      seedMemory(db, {
+        id: 'm_ours',
+        repoId,
+        title: 'Uploader retry policy',
+        body: 'OURREPO the uploader retries three times.',
+        pinned: true,
+      });
+    });
+
+    const common = eventBase('s-cross');
+    const start = await fixture.capture('SessionStart', { ...common, source: 'startup' });
+    assert.ok((start.stdout ?? '').includes('OURREPO'), 'fail open: the memory of this repository is delivered');
+    assert.equal((start.stdout ?? '').includes('OTHERREPO'), false);
+
+    const prompt = await fixture.capture('UserPromptSubmit', {
+      ...common,
+      prompt_id: 'p1',
+      prompt: 'How many times does the uploader retry in the other project?',
+    });
+    assert.equal((prompt.stdout ?? '').includes('OTHERREPO'), false);
+
+    fixture.withDb((db) => {
+      // Not omitted for a reason: never a candidate. The repository scope is applied before ranking.
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM injection_items WHERE memory_id = 'm_other'").get()?.n, 0);
+      assert.equal(
+        db.prepare("SELECT COUNT(*) AS n FROM injection_items WHERE memory_id = 'm_ours' AND decision = 'included'").get()?.n,
+        1,
+      );
+    });
+  });
+});
+
+test('SC-005/SC-006: the outbound body of a mixed session carries the eligible rows, an opaque repo_ref and nothing else', async () => {
+  await withFixture(async (fixture) => {
+    fixture.env = cleanEnv(fixture.home, {
+      OBOETE_CF_API_TOKEN: 'worker-test-token',
+      OBOETE_CF_ACCOUNT_ID: 'worker-test-account',
+    });
+    writeConfig(fixture, 'workers-ai', fixture.env);
+    appendFileSync(fixture.paths.config, '\n[privacy]\nsecret_paths = ["secrets/**"]\n');
+    const secret = corpusLine('github-classic-pat');
+    const eligiblePrompt = 'Add a retry to the uploader.';
+    const eligibleAnswer = 'The uploader now retries three times.';
+
+    const common = eventBase('s-mixed');
+    await fixture.capture('SessionStart', { ...common, source: 'startup' });
+    const repoId = repoIdOf(fixture);
+    fixture.withDb((db) => {
+      ensureRepo(db, 'repo-other');
+      seedMemory(db, { id: 'm_eligible', repoId, title: 'Uploader retry count', body: 'The uploader retry count was one.' });
+      seedMemory(db, {
+        id: 'm_local',
+        repoId,
+        title: 'Uploader retry notes',
+        body: 'LOCALONLYMEMORY the uploader retry notes stay on this machine.',
+        sensitivity: 'local_only',
+      });
+      seedMemory(db, {
+        id: 'm_other',
+        repoId: 'repo-other',
+        title: 'Uploader retry in the other project',
+        body: 'OTHERREPO the uploader retry of another repository.',
+      });
+    });
+    await fixture.capture('UserPromptSubmit', { ...common, prompt_id: 'p1', prompt: eligiblePrompt });
+    await fixture.capture('PreToolUse', {
+      ...common,
+      prompt_id: 'p1',
+      tool_name: 'Edit',
+      tool_use_id: 't1',
+      tool_input: { file_path: 'src/uploader.ts', old_string: 'retries = 1', new_string: 'retries = 3' },
+    });
+    await fixture.capture('PreToolUse', {
+      ...common,
+      prompt_id: 'p1',
+      tool_name: 'Edit',
+      tool_use_id: 't2',
+      tool_input: { file_path: 'src/SECRETPATH.ts', old_string: 'token = ""', new_string: secret.text },
+    });
+    await fixture.capture('UserPromptSubmit', {
+      ...common,
+      prompt_id: 'p2',
+      prompt: 'Keep <private>PRIVATEMARKER the customer list</private> out of it and continue.',
+    });
+    await fixture.capture('PreToolUse', {
+      ...common,
+      prompt_id: 'p2',
+      tool_name: 'Read',
+      tool_use_id: 't3',
+      tool_input: { file_path: 'secrets/aws.json' },
+    });
+    await fixture.capture('Stop', { ...common, prompt_id: 'p2', last_assistant_message: eligibleAnswer });
+    await fixture.capture('SessionEnd', { ...common, reason: 'prompt_input_exit' });
+
+    const sourceId = eventId(fixture, eligiblePrompt);
+    let providerBody = '';
+    let providerCalls = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if (String(input).includes('/models/search')) {
+        return catalogResponse(Number(new URL(String(input)).searchParams.get('page') ?? '1'));
+      }
+      providerCalls += 1;
+      providerBody = String(init?.body ?? '');
+      return workersResponse(providerOutput(sourceId));
+    };
+    await runObserveForFixture(fixture, { fetch: fetchImpl });
+    assert.equal(providerCalls, 1);
+
+    // Fail open (FR-023): the eligible rows travel.
+    assert.equal(providerBody.includes(eligiblePrompt), true);
+    assert.equal(providerBody.includes(eligibleAnswer), true);
+    assert.equal(providerBody.includes('src/uploader.ts'), true);
+    assert.equal(providerBody.includes('The uploader retry count was one.'), true);
+
+    // Fail closed (SC-005, SC-006, FR-020): the secret row, the private span, the path-rule row,
+    // the local-only memory and the other repository do not.
+    assertNoSecretRun(providerBody, secret.secret ?? '', secret.id);
+    assert.equal(providerBody.includes('SECRETPATH'), false, 'a secret row is dropped whole, not redacted');
+    assert.equal(providerBody.includes('PRIVATEMARKER'), false);
+    assert.equal(providerBody.includes('secrets/aws.json'), false);
+    assert.equal(providerBody.includes('LOCALONLYMEMORY'), false);
+    assert.equal(providerBody.includes('OTHERREPO'), false);
+
+    const body = observerInputOf(providerBody);
+    assert.equal(body.repo_ref, repoId);
+    assert.deepEqual((body.nearby ?? []).map((item) => item.id), ['m_eligible']);
+    // R10: the identity that would leak is the normalized remote (or path); neither travels.
+    const identity = fixture.withDb((db) => String(db.prepare('SELECT normalized_identity FROM repos WHERE id = ?').get(repoId)?.normalized_identity));
+    assert.notEqual(identity, '');
+    assert.equal(providerBody.includes(identity), false, 'the repository travels as an opaque id');
+    assert.equal(providerBody.includes(process.cwd()), false);
+    assert.equal(/\b(claude|codex|grok|pi)\b/i.test(providerBody), false, 'the producing agent is provenance only');
+  });
+});
+
+type ProducedUnderAgent = {
+  memories: Record<string, unknown>[];
+  pack: string;
+  decisions: Record<string, unknown>[];
+};
+
+/** The same session, produced by one agent, then injected into a fresh Claude session. */
+async function produceUnderAgent(agent: 'claude' | 'grok'): Promise<ProducedUnderAgent> {
+  let produced: ProducedUnderAgent | null = null;
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    await captureEndedSession(fixture, {
+      sessionId: 'swap',
+      prompts: ['Add a retry to the uploader.', 'Document the retry count in README.md.'],
+      tools: [{ id: 't1', path: 'src/uploader.ts', text: 'retries = 1' }],
+      assistant: 'The uploader now retries three times.',
+    });
+    if (agent === 'grok') {
+      // Only the producing agent changes; every byte of content stays.
+      fixture.withDb((db) => {
+        db.exec("UPDATE raw_events SET agent = 'grok'");
+        db.exec("UPDATE sessions SET agent = 'grok'");
+      });
+    }
+    await runObserveForFixture(fixture);
+    const start = await fixture.capture('SessionStart', { ...eventBase('s-after-swap'), source: 'startup' });
+    produced = fixture.withDb((db) => ({
+      memories: db
+        .prepare(
+          `SELECT type, title, body, material_hash, content_hash, sensitivity, review_state, degraded_reason
+           FROM memories ORDER BY content_hash`,
+        )
+        .all()
+        .map((row) => ({ ...row })),
+      pack: start.stdout ?? '',
+      decisions: db
+        .prepare(
+          `SELECT i.source_kind, i.decision, i.reason, m.content_hash
+           FROM injection_items i LEFT JOIN memories m ON m.id = i.memory_id
+           ORDER BY m.content_hash, i.decision`,
+        )
+        .all()
+        .map((row) => ({ ...row })),
+    }));
+  });
+  if (produced === null) assert.fail('the fixture did not run');
+  return produced;
+}
+
+test('SC-006: changing only the producing agent changes no memory hash, no body, no pack and no injection decision', async () => {
+  const byClaude = await produceUnderAgent('claude');
+  const byGrok = await produceUnderAgent('grok');
+  assert.ok(byClaude.memories.length > 0, 'the worker produced memories');
+  assert.ok(byClaude.pack.startsWith(PACK_HEADER), `a pack was injected: ${byClaude.pack}`);
+  assert.deepEqual(byGrok.memories, byClaude.memories);
+  // The pack dates its items against the real clock; the two runs may straddle a boundary of it.
+  const undated = (pack: string) => pack.replace(/\b(\d+ (minute|hour|day)s? ago|yesterday|just now)\b/g, 'AGO');
+  assert.equal(undated(byGrok.pack), undated(byClaude.pack));
+  assert.deepEqual(byGrok.decisions, byClaude.decisions);
+});
+
+test('FR-021: a pack captured while the database is unavailable is recognized when the spool is recovered', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    await fixture.capture('SessionStart', { ...eventBase('seed'), source: 'startup' });
+    const repoId = repoIdOf(fixture);
+    fixture.withDb((db) =>
+      seedMemory(db, {
+        id: 'm_pinned',
+        repoId,
+        title: 'Uploader retry policy',
+        body: 'PINNEDBODY the uploader retries three times with backoff.',
+        pinned: true,
+      }),
+    );
+    const common = eventBase('s-spooled');
+    const pack = (await fixture.capture('SessionStart', { ...common, source: 'startup' })).stdout ?? '';
+    assert.ok(pack.includes('PINNEDBODY'), `the session-start pack was not built: ${pack}`);
+    const packHash = fixture.withDb((db) =>
+      String(db.prepare("SELECT pack_hash FROM injections WHERE pack_hash IS NOT NULL ORDER BY created_at DESC LIMIT 1").get()?.pack_hash),
+    );
+    await fixture.capture('UserPromptSubmit', { ...common, prompt_id: 'p1', prompt: 'Repeat your notes.' });
+
+    // The database is gone for one hook: the message is spooled with the pack still inside it,
+    // because without the database the hook has no hash to recognize it by.
+    toggleDatabase(fixture, true);
+    try {
+      await fixture.capture('Stop', { ...common, prompt_id: 'p1', last_assistant_message: pack }, 'spooled');
+    } finally {
+      toggleDatabase(fixture, false);
+    }
+    // Stop yields the message and the turn end, so two entries; the message entry still holds the pack.
+    const spooled = readdirSync(fixture.paths.spool)
+      .filter((name) => name.endsWith('.json'))
+      .map((name) => readFileSync(join(fixture.paths.spool, name), 'utf8'));
+    assert.equal(spooled.length, 2);
+    assert.equal(spooled.some((entry) => entry.includes('PINNEDBODY')), true);
+    await fixture.capture('SessionEnd', { ...common, reason: 'prompt_input_exit' });
+
+    await runObserveForFixture(fixture);
+    const [message] = storedEvents(fixture, 's-spooled', 'last_assistant_message');
+    assert.equal(message?.content, '');
+    assert.deepEqual(message?.payload.recognized_packs, [packHash]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Imported rows (T066): quarantined until the worker's detector and directive check let them out.
+// ---------------------------------------------------------------------------
+
+test('quarantine: an imported row leaves quarantine only on a clean, complete detector run without a directive', () => {
+  const clean: DetectorResult = {
+    ok: true,
+    text: 'note',
+    texts: [],
+    redactions: [],
+    privateRemoved: 0,
+    sensitivity: 'local_only',
+    pathRule: null,
+  };
+  const hit: DetectorResult = { ...clean, redactions: [{ rule: 'github', count: 1 }], sensitivity: 'secret' };
+  const failed: DetectorResult = { ok: false, reason: 'detector_error' };
+
+  const stripped: DetectorResult = { ...clean, text: 'note ', privateRemoved: 1 };
+
+  assert.deepEqual(reclassifyImportedRow(clean, clean, false), { decision: 'unreviewed', title: 'note', body: 'note' });
+  // What the detector removed is what gets stored, on release as much as on a tombstone.
+  assert.deepEqual(reclassifyImportedRow(clean, stripped, false), { decision: 'unreviewed', title: 'note', body: 'note ' });
+  assert.equal(reclassifyImportedRow(hit, clean, false).decision, 'secret');
+  assert.equal(reclassifyImportedRow(clean, hit, false).decision, 'secret');
+  assert.equal(reclassifyImportedRow(clean, clean, true).decision, 'secret');
+  // A detector that did not finish decides nothing: the row stays quarantined for the next run.
+  assert.deepEqual(reclassifyImportedRow(failed, clean, false), { decision: 'retry' });
+  assert.deepEqual(reclassifyImportedRow(clean, failed, false), { decision: 'retry' });
+  assert.deepEqual(reclassifyImportedRow(failed, hit, true), { decision: 'retry' });
+});
+
+test('quarantine: imported memories reach no pack before the worker classifies them, and only the clean one after', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    await fixture.capture('SessionStart', { ...eventBase('seed'), source: 'startup' });
+    const repoId = repoIdOf(fixture);
+    const secret = corpusLine('github-classic-pat');
+    fixture.withDb((db) => {
+      seedMemory(db, { id: 'm_plain', repoId, title: 'Plain pinned note', body: 'PLAINPINNED the uploader retries.', pinned: true });
+      seedMemory(db, {
+        id: 'm_import_clean',
+        repoId,
+        title: 'Imported retry note',
+        body: 'IMPORTEDCLEAN the uploader retries three times.',
+        sensitivity: 'local_only',
+        reviewState: 'imported',
+        pinned: true,
+      });
+      seedMemory(db, {
+        id: 'm_import_secret',
+        repoId,
+        title: 'Imported token note',
+        body: `IMPORTEDSECRET ${secret.text}`,
+        sensitivity: 'local_only',
+        reviewState: 'imported',
+        pinned: true,
+      });
+      seedMemory(db, {
+        id: 'm_import_directive',
+        repoId,
+        title: 'Imported instruction',
+        body: `IMPORTEDDIRECTIVE ${DIRECTIVE_PHRASES[0]}`,
+        sensitivity: 'local_only',
+        reviewState: 'imported',
+        pinned: true,
+      });
+      seedMemory(db, {
+        id: 'm_import_private',
+        repoId,
+        title: 'Imported note with a private span',
+        body: 'IMPORTEDPRIVATE keep this <private>IMPORTEDPRIVATESPAN drop this</private> end.',
+        sensitivity: 'local_only',
+        reviewState: 'imported',
+        pinned: true,
+      });
+    });
+
+    const before = (await fixture.capture('SessionStart', { ...eventBase('s-before'), source: 'startup' })).stdout ?? '';
+    assert.equal(before.includes('PLAINPINNED'), true, `a pack was built: ${before}`);
+    assert.equal(before.includes('IMPORTED'), false, `quarantined rows reached a pack: ${before}`);
+
+    await runObserveForFixture(fixture);
+
+    fixture.withDb((db) => {
+      const rows = db
+        .prepare("SELECT id, review_state, sensitivity, deleted_at, body FROM memories WHERE id LIKE 'm_import_%' ORDER BY id")
+        .all()
+        .map((row) => ({ ...row }));
+      assert.deepEqual(
+        rows.map((row) => ({ id: row.id, review_state: row.review_state, sensitivity: row.sensitivity, deleted: row.deleted_at !== null })),
+        [
+          { id: 'm_import_clean', review_state: 'unreviewed', sensitivity: 'local_only', deleted: false },
+          { id: 'm_import_directive', review_state: 'imported', sensitivity: 'secret', deleted: true },
+          { id: 'm_import_private', review_state: 'unreviewed', sensitivity: 'local_only', deleted: false },
+          { id: 'm_import_secret', review_state: 'imported', sensitivity: 'secret', deleted: true },
+        ],
+      );
+      // FR-018: the secret does not stay in the tombstone either.
+      const tombstone = rows.find((row) => row.id === 'm_import_secret');
+      assertNoSecretRun(String(tombstone?.body), secret.secret ?? '', secret.id);
+      // FR-019: a released row stores what the detector left, not what was imported.
+      assert.equal(rows.find((row) => row.id === 'm_import_private')?.body, 'IMPORTEDPRIVATE keep this  end.');
+    });
+
+    const after = (await fixture.capture('SessionStart', { ...eventBase('s-after'), source: 'startup' })).stdout ?? '';
+    assert.equal(after.includes('IMPORTEDCLEAN'), true, `the classified row is injectable: ${after}`);
+    assert.equal(after.includes('IMPORTEDSECRET'), false);
+    assert.equal(after.includes('IMPORTEDDIRECTIVE'), false);
+    assert.equal(after.includes('IMPORTEDPRIVATESPAN'), false);
+  });
+});
+
+test('FR-021: recognition survives a pack line that quotes the footer, two packs in one text, and a header mid-line', async () => {
+  await withTempHome(async (home) => {
+    const opened = openDatabase({ path: join(home, 'memory.db'), timeoutMs: 2_000 });
+    try {
+      const quoting = [PACK_HEADER, '> repository: example.invalid/one.git', `> pinned: the marker line is ${PACK_FOOTER}`, PACK_FOOTER].join('\n');
+      const plain = [PACK_HEADER, '> repository: example.invalid/one.git', '> pinned: another note', PACK_FOOTER].join('\n');
+      const insert = opened.db.prepare(
+        "INSERT INTO injections (id, kind, state, pack_hash, created_at) VALUES (?, 'session_start', 'emitted', ?, 1)",
+      );
+      insert.run('i1', packHash(quoting));
+      insert.run('i2', packHash(plain));
+
+      assert.deepEqual(stripRecognizedPacks(opened.db, `before\n${quoting}\nmiddle\n${plain}\nafter`), {
+        text: 'before\n\nmiddle\n\nafter',
+        hashes: [packHash(quoting), packHash(plain)],
+      });
+      // The header inside a sentence is not a pack; the issued pack after it still is.
+      assert.deepEqual(stripRecognizedPacks(opened.db, `the ${PACK_HEADER} marker, then\n${plain}`), {
+        text: `the ${PACK_HEADER} marker, then\n`,
+        hashes: [packHash(plain)],
+      });
+      // An unterminated header is content.
+      const unterminated = `${PACK_HEADER}\n> repository: nothing closes this`;
+      assert.deepEqual(stripRecognizedPacks(opened.db, unterminated), { text: unterminated, hashes: [] });
+    } finally {
+      opened.db.close();
+    }
+  });
+});
+
+test('FR-016: a configured credential value is redacted whatever it looks like, and a short one is not a credential', async () => {
+  const value = 'plain-words-credential-000';
+  const text = `the key ${value} selects the preset; ${value.slice(0, 5)} alone is a word`;
+  const redacted = assertDetected(
+    await detectSync({ ...detectorInput(text), credentialValues: [value] }),
+    'configured credential',
+  );
+  assert.equal(redacted.text, 'the key [REDACTED:oboete-credential] selects the preset; plain alone is a word');
+  assert.equal(redacted.sensitivity, 'secret');
+  assert.deepEqual(redacted.redactions, [{ rule: 'oboete-credential', count: 1 }]);
+  // Fail open: the same text with no configured credential is byte-identical and local_only.
+  const untouched = assertDetected(await detectSync(detectorInput(text)), 'no credential');
+  assert.equal(untouched.text, text);
+  assert.equal(untouched.sensitivity, 'local_only');
+  // A placeholder shorter than a real credential never becomes one (log.ts credentialValues).
+  assert.deepEqual(credentialValues({ OBOETE_OPENAI_API_KEY: 'test', OBOETE_CF_ACCOUNT_ID: ' ' }), []);
+  assert.deepEqual(credentialValues({ OBOETE_OPENROUTER_API_KEY: value, OBOETE_CF_ACCOUNT_ID: 'acct-1234' }), [value, 'acct-1234']);
 });

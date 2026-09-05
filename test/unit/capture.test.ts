@@ -25,7 +25,6 @@ import {
   applyCompaction,
   captureEvent,
   readStdinBounded,
-  recognizeInjectedText,
   runCapture,
   runHook,
   type CaptureDeps,
@@ -1327,10 +1326,6 @@ test('a worker spawn that throws leaves the stored rows alone', async () => {
     const kinds = context.all('SELECT kind FROM raw_events ORDER BY kind').map((row) => row.kind);
     assert.deepEqual(kinds, ['last_assistant_message', 'turn_end']);
   });
-});
-
-test('recognizing injected text is the seam T065 fills (FR-021)', () => {
-  assert.equal(recognizeInjectedText('oboete memory context\n> repository: example\n'), false);
 });
 
 test('files written by capture stay owner-only', async () => {

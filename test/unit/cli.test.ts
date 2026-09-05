@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { oboetePaths } from '../../src/paths.js';
@@ -39,12 +39,30 @@ test('oboete doctor exits 2 because it is not implemented yet', () => {
   assert.equal(result.stderr, 'oboete doctor is not implemented yet\n');
 });
 
+/**
+ * Node 22.16's test runner reports through process.stdout.write itself: v8 frames (Buffers) under
+ * `node --test`, TAP lines when the file runs directly. Swallowing those breaks the run, so the
+ * stub lets them through and records only the command's own string writes.
+ */
+function recordCommandWrites(t: TestContext): string[] {
+  const written: string[] = [];
+  const original = process.stdout.write.bind(process.stdout);
+  t.mock.method(process.stdout, 'write', ((chunk: unknown, ...rest: unknown[]) => {
+    if (typeof chunk === 'string' && !/^(TAP version|# |ok |not ok |\s|1\.\.)/.test(chunk)) {
+      written.push(chunk);
+      return true;
+    }
+    return (original as (...args: unknown[]) => boolean)(chunk, ...rest);
+  }) as typeof process.stdout.write);
+  return written;
+}
+
 for (const command of ['hook', 'capture', 'inject', 'observe']) {
   test(`${command} contains an uncaught dispatch error with its contracted exit code`, async (t) => {
     await withTempHome(async (home) => {
       const previous = { argv: process.argv, env: process.env, exitCode: process.exitCode };
       const warnings = process.listeners('warning');
-      const stdout = t.mock.method(process.stdout, 'write', () => true);
+      const stdout = recordCommandWrites(t);
       const stderr = t.mock.method(process.stderr, 'write', () => true);
       process.argv = [process.execPath, bin, command, '--agent', 'pi'];
       if (command !== 'capture') {
@@ -57,7 +75,7 @@ for (const command of ['hook', 'capture', 'inject', 'observe']) {
         // Import the real entry point in-process; each command gets a fresh ESM evaluation.
         await import(`${pathToFileURL(bin).href}?uncaught=${command}`);
         assert.equal(process.exitCode, command === 'observe' ? 3 : 0);
-        assert.equal(stdout.mock.callCount(), 0);
+        assert.deepEqual(stdout, []);
         const log = oboetePaths(home).hookLog;
         if (command === 'observe') {
           assert.equal(stderr.mock.callCount(), 1);
