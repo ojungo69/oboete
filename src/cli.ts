@@ -39,6 +39,7 @@ const commands: Record<string, () => Promise<(argv: string[]) => Promise<number>
   pin: () => import('./memories-cli.js').then((module) => module.runPin),
   unpin: () => import('./memories-cli.js').then((module) => module.runUnpin),
   delete: () => import('./memories-cli.js').then((module) => module.runDelete),
+  fixture: () => import('./fixture/replay.js').then((module) => module.runFixture),
 };
 
 /**
