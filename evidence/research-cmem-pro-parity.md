@@ -59,7 +59,7 @@ Apache-2.0 側: Core memory engine / Claude-Mem Server / CLI / SDKs / REST API s
 | 2026-05-08 (`36b0929f`) | Apache-2.0 | LICENSE patch −630 (AGPL) / +202 (Apache)。コミット: "Server-beta: Postgres storage + independent runtime + BullMQ queue (Phases 1–3) (#2351)" |
 | 現在 | Apache-2.0 | `npm view claude-mem license` / `license.spdx_id` |
 
-有料化 (Server-beta) と同一コミットで AGPL→Apache へ**緩和**。`docs/license.md`: 制約は商標のみ ("Apache-2.0 licenses code. It does not grant rights to third-party trademarks or brand names")。**free-mem にとって OSS コアの参照・借用・fork に法的障壁はない** (2026-05 以前の AGPL 期より条件が良い)。
+有料化 (Server-beta) と同一コミットで AGPL→Apache へ**緩和**。`docs/license.md`: 制約は商標のみ ("Apache-2.0 licenses code. It does not grant rights to third-party trademarks or brand names")。**free-mem にとって OSS コアの参照・借用・fork にコピーレフトの障壁はない** (2026-05 以前の AGPL 期より条件が良い)。ただし Apache-2.0 の条件はそのまま残る: 借用・fork・再配布のときは LICENSE と NOTICE の同梱、改変の明示、出所 (repo・commit・license) の記録と `THIRD_PARTY_NOTICES.md` の更新 (`legacy/evidence/adr-004-licensing.md` の運用ルール)。「障壁なし」は義務なしの意味ではない。
 
 ## 2. Grok Build CLI と Pi のフック面
 
@@ -129,6 +129,6 @@ Workers Paid ($5/月): リクエスト無制限、CPU 30 秒 (最大 5 分)、su
 
 ## まとめ (設計に効く 3 点)
 
-1. **課金の本丸は LLM コストであって同期基盤ではない。** free-mem がユーザー自身の Claude Code / Codex / Grok サブスク枠で observer を回す設計なら、Pro の主要訴求は最初から無効化される。同期・MCP link・hybrid search は Cloudflare 無料枠でほぼ再現可能。
+1. **課金の本丸は LLM コストであって同期基盤ではない。** free-mem が observer を無料枠プロバイダ (Workers AI 等) と、同意ゲート付きの agent CLI レーンで回す設計なら、Pro の主要訴求は最初から無効化される。agent CLI レーンは M1 では Grok Build のみで、ユーザーが setup で明示的に選んだときだけ使う。Claude Code / Codex のサブスク資格情報を黙って流用することは仕様で禁止 (`legacy/specs/005-product-reset/spec.md` の Alpha 制約、`007-oboete-m1-alpha` の consent ゲート) であり、この結論はそれを前提にしない。同期・MCP link・hybrid search は Cloudflare 無料枠でほぼ再現可能。
 2. **ベクトル検索はローカルに残す。** Vectorize 5M dims 制限の最短回避で、claude-mem 無料版と同じ構え。
-3. **ライセンス障壁なし。** Apache-2.0 (AGPL から緩和済み)。制約は商標のみ — 名前に "claude-mem" / "cmem" を使わなければよい。
+3. **コピーレフト障壁なし。** Apache-2.0 (AGPL から緩和済み)。商標 (名前に "claude-mem" / "cmem" を使わない) と Apache-2.0 の同梱・記録義務を守れば借用・fork できる。
