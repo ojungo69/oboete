@@ -1,0 +1,227 @@
+.codacy.yml
+  s_ae2d2d34276f4a::t_bd5404fadeec65 3-4,9
+.coderabbit.yaml
+  s_ae2d2d34276f4a::t_2e524083ba1c6e 1-4
+.github/CODEOWNERS
+  s_ae2d2d34276f4a::t_78696bdf48e41e 1
+.github/ISSUE_TEMPLATE/bug_report.yml
+  s_ae2d2d34276f4a::t_252d7d23ff38fa 10
+.github/ISSUE_TEMPLATE/config.yml
+  s_ae2d2d34276f4a::t_5801f5b13f72e7 4
+.github/ISSUE_TEMPLATE/feature_request.yml
+  s_ae2d2d34276f4a::t_9e0bd6e1d19ad7 10
+.github/pull_request_template.md
+  s_ae2d2d34276f4a::t_d76739ee401fc5 7,9,12,14-15,17-19
+.github/workflows/ci.yml
+  s_ae2d2d34276f4a::t_c69b417338da05 25-27,29-33,53-56,68
+.github/workflows/codeql.yml
+  s_ae2d2d34276f4a::t_ff4b478a2d57eb 41-43
+.github/workflows/dco.yml
+  s_ae2d2d34276f4a::t_8d5ac981483575 6,31,56
+.gitignore
+  s_ae2d2d34276f4a::t_8af06071adcbaa 1
+.gitleaks.toml
+  s_ae2d2d34276f4a::t_36007c4a239722 1,10-13,24
+CONSTITUTION.md
+  s_ae2d2d34276f4a::t_0c305bc8c97fa7 3-4,6-14,16-19,21-25,28,32-99,103-132,136-154,158-160,162-163,167,170
+CONTRIBUTING.md
+  s_ae2d2d34276f4a::t_c56fc8090ad0dd 1,8,14,45,68-69,71-72,78-79,83-87,90-91
+NOTICE
+  s_ae2d2d34276f4a::t_bc93248cf03be8 1-2,4-6,8-11
+README.md
+  s_ae2d2d34276f4a::t_6011c536d2648c 1,3-5,7,9-12,14,16-24,26,28,30-36,38,40-44,46,48
+SECURITY.md
+  s_ae2d2d34276f4a::t_e4fdaa471b0618 3,7
+legacy/README-free-mem.md
+  s_ae2d2d34276f4a::t_a3a51b5986280e 1-165
+legacy/README.md
+  s_ae2d2d34276f4a::t_5586f879b971f0 1-21
+legacy/specs/006-slice1-runtime/contracts/processing-job-v1.md
+  s_ae2d2d34276f4a::t_73bda2bf0fd416 166-172,177-180
+legacy/specs/006-slice1-runtime/contracts/sensitivity-egress-v1.md
+  s_ae2d2d34276f4a::t_0b37fe32629160 111-119
+legacy/specs/006-slice1-runtime/data-model.md
+  s_ae2d2d34276f4a::t_783a202bfa9432 449-478,521-523,732-774,786-788
+legacy/specs/006-slice1-runtime/plan.md
+  s_ae2d2d34276f4a::t_5fd983fa766b60 57,282-291,318-321
+legacy/specs/006-slice1-runtime/quickstart.md
+  s_ae2d2d34276f4a::t_cf83d8d53559b9 194,201,211-213,241-251
+legacy/specs/006-slice1-runtime/research.md
+  s_ae2d2d34276f4a::t_45bbeefaa0b3ed 301-313
+legacy/specs/006-slice1-runtime/spec.md
+  s_ae2d2d34276f4a::t_7007003e8ff95e 12-19,321-336
+legacy/specs/006-slice1-runtime/tasks.md
+  s_ae2d2d34276f4a::t_0dcbc2459e9f4d 91-95,99-106,118,121-122
+legacy/vendor/codemem/README.md
+  s_ae2d2d34276f4a::t_30abfa2eb94e22 150
+legacy/vendor/codemem/docs/plugin-reference.md
+  s_ae2d2d34276f4a::t_c11f08c97a612b 224,227,229-230,238,243
+legacy/vendor/codemem/docs/user-guide.md
+  s_ae2d2d34276f4a::t_668dbcad6848b3 90-94
+legacy/vendor/codemem/packages/cli/src/commands/cli-rpc.test.ts
+  s_ae2d2d34276f4a::t_8062e9b4049c61 61-104,175-177,180-183
+legacy/vendor/codemem/packages/cli/src/commands/memory.test.ts
+  s_ae2d2d34276f4a::t_d33ee28bfe40f9 10-28
+legacy/vendor/codemem/packages/cli/src/commands/memory.ts
+  s_ae2d2d34276f4a::t_17008032b3dc5c 154
+legacy/vendor/codemem/packages/cli/src/commands/pack.test.ts
+  s_ae2d2d34276f4a::t_4d8675706db212 87-88,118-137
+legacy/vendor/codemem/packages/core/src/backup-restore-smoke.test.ts
+  s_ae2d2d34276f4a::t_498aab7102cc6f 14,24,326-518
+legacy/vendor/codemem/packages/core/src/capability-manifest.test.ts
+  s_ae2d2d34276f4a::t_9f69a38f025cd3 6-9,280,283,287-310,314-317,321,326-327,332-353,559-605
+legacy/vendor/codemem/packages/core/src/capability-manifest.ts
+  s_ae2d2d34276f4a::t_2b712ef2d248df 469-478,600-611,619,622-623,626
+legacy/vendor/codemem/packages/core/src/daemon-jobs.ts
+  s_ae2d2d34276f4a::t_34e6d28f844d5e 5-8,16,227,927,929
+legacy/vendor/codemem/packages/core/src/daemon-lifecycle.test.ts
+  s_ae2d2d34276f4a::t_256b1ba7747ffa 22,78-90,461-465,499-502,514-516,523-606
+legacy/vendor/codemem/packages/core/src/daemon-lifecycle.ts
+  s_ae2d2d34276f4a::t_7e843475efbb4b 10,17,23,25,332,347,361-362,402-439,566
+legacy/vendor/codemem/packages/core/src/daemon-operations.test.ts
+  s_ae2d2d34276f4a::t_deaac542d241a4 479,789-791,793
+legacy/vendor/codemem/packages/core/src/daemon-rpc-validation.test.ts
+  s_ae2d2d34276f4a::t_cd3d3ff0798a37 5,46,48,59
+legacy/vendor/codemem/packages/core/src/daemon-rpc.test.ts
+  s_ae2d2d34276f4a::t_c814b645158522 1,9,11,1389,1398,1416,1426-1566,1581-1583,1589,1620,1931-1935,1958-2089
+legacy/vendor/codemem/packages/core/src/daemon-rpc.ts
+  s_ae2d2d34276f4a::t_ff0ddbbb1e3dc5 22-27,41,70,177-179,392-402,861,885,1039-1046,1053-1058,1071-1074,1077,1085,1333,1357-1364,1371,1505,1557,1559-1566,1568,1570-1577,1580-1582,1585-1592,1596-1602,1626
+legacy/vendor/codemem/packages/core/src/db.test.ts
+  s_ae2d2d34276f4a::t_2f2eb36ce17b12 14,34,957-968,1016-1020
+legacy/vendor/codemem/packages/core/src/destination-boundary.test.ts
+  s_ae2d2d34276f4a::t_9a7e8cece77a36 1-224
+legacy/vendor/codemem/packages/core/src/destination-boundary.ts
+  s_ae2d2d34276f4a::t_3f70662f737ac9 1-219
+legacy/vendor/codemem/packages/core/src/export-import.test.ts
+  s_ae2d2d34276f4a::t_958fb47d7e789c 6-10,15-22,25,53-55,57-59,64,68,70,74,77,79,83-84,87-88,90,159,164,170-296,313,354,386,484-828
+legacy/vendor/codemem/packages/core/src/export-import.ts
+  s_ae2d2d34276f4a::t_173207ab164b2a 4-9,17,45,84-92,107-111,125,130-137,141-169,290,292-293,309-322,326-331,334,336,339,343-347,363-364,386-390,396,404,412,417,420-426,441,466,474-482,486-499,504-720,727,731-732,735,757-758,786,802-805,820,854-867,899-900,914-916,924,939,948-949,954,967-970,974-978,991,999-1004,1006,1022-1023,1037,1045-1118,1125,1137-1143,1155,1165-1168,1172-1177,1186,1194-1203,1215-1216
+legacy/vendor/codemem/packages/core/src/filters.ts
+  s_ae2d2d34276f4a::t_f1e658a8553694 8-11,43-44,239-249,268
+legacy/vendor/codemem/packages/core/src/index.test.ts
+  s_ae2d2d34276f4a::t_2e07c64bb2ea8b 37-53
+legacy/vendor/codemem/packages/core/src/ingest-pipeline.test.ts
+  s_ae2d2d34276f4a::t_c094363a426f49 11,13,39,1966,1971,2003,2012,2026-2111,2174-2339,2342,2378,2386-2387,2395,2397,2416,2424-2429,2438,2462,2478,2499,2515,2522,2542,2559,2562,2580,2583,2605,2608,2627,2630,2645,2650,2653,2687-2689,2697-2699,2706,2714-2717,2743,2746,2762,2768,2774,2777,2790-2796,2823,2860,2884,2922,2943,2980,3002,3015,3041,3081,3122,3156,3172,3210,3225,3258,3277,3302,3343,3369,3435,3443,3489,3612-3614,3619,3634,3649,3689,3702-3753,3764,3776,3782
+legacy/vendor/codemem/packages/core/src/ingest-pipeline.ts
+  s_ae2d2d34276f4a::t_f40fc97e735e52 142,156-162,176-179,194-195,218-248,315-316,332,335,337,364,411-446,473,493-498,500-501,503-505,507-510,512-514,516-522,524-531,533-535,537-539,541-544,546-566,568-573,575-587,589-597,599,601-611,613-646,649-651,653,655-657,659-664,666-667,669-672,675-677,680,682-700,703-713,715-716,718-719,723-728,730-738,740-777,779-795,797,799,801-829,831-834,836,838-883,887-955,960,962-1023
+legacy/vendor/codemem/packages/core/src/ingest-prompts.test.ts
+  s_ae2d2d34276f4a::t_1014363b0b57ff 135-172
+legacy/vendor/codemem/packages/core/src/ingest-prompts.ts
+  s_ae2d2d34276f4a::t_24d6146fcdc8ae 95-99,302-304,309-315
+legacy/vendor/codemem/packages/core/src/ingest-types.ts
+  s_ae2d2d34276f4a::t_a5b62ec74b247e 8-9,37,53,65
+legacy/vendor/codemem/packages/core/src/ingest-xml-parser.test.ts
+  s_ae2d2d34276f4a::t_dd519bd89a82ab 1-94
+legacy/vendor/codemem/packages/core/src/ingest-xml-parser.ts
+  s_ae2d2d34276f4a::t_62572c09865177 14,38,41-44,215-276,281-284,289-290,301,305-308,320-321,332,346-349,356,365,379,408,451-455,459,474,478-494,581-582,796-797
+legacy/vendor/codemem/packages/core/src/maintenance.test.ts
+  s_ae2d2d34276f4a::t_4c3718e4f9ac4b 7-10,503-539,558,617,646,680,707,789,1017,1054,1072,2068-2072,2088-2089,2145-2149,2191-2195,2239-2243,2289,2315-2319,2345-2349,2369-2370,2380-2384,2422,2458
+legacy/vendor/codemem/packages/core/src/maintenance/ai-structured.test.ts
+  s_ae2d2d34276f4a::t_943bdea57839f8 3-4,39-78,80-180
+legacy/vendor/codemem/packages/core/src/maintenance/ai-structured.ts
+  s_ae2d2d34276f4a::t_0edb1b7b587342 6-9,16,90,125,128,294-317,320-322,329,333,337,340-345,478-493
+legacy/vendor/codemem/packages/core/src/maintenance/memory-role-report.ts
+  s_ae2d2d34276f4a::t_21059a2d05dcd3 5-10,59,65-72,101,213,227-229
+legacy/vendor/codemem/packages/core/src/observer-client.test.ts
+  s_ae2d2d34276f4a::t_e927939ef98142 5-6,1613-1685
+legacy/vendor/codemem/packages/core/src/observer-client.ts
+  s_ae2d2d34276f4a::t_af5c51beffc8f9 20-23,132-145,156-176,539-540,615,669-690,909,960,964-965,990-993,1037,1260-1279,1281-1285,1714,1721-1724,1733-1734,1746-1751,1756-1757
+legacy/vendor/codemem/packages/core/src/pack.test.ts
+  s_ae2d2d34276f4a::t_fadefd20c1abb9 6-9,18-22,56-65,133-344
+legacy/vendor/codemem/packages/core/src/pack.ts
+  s_ae2d2d34276f4a::t_afa711461e51d7 17-18,27-34,46,54,88-100,918-919,922,929-930,933-935,981,984-987,1014-1018,1021,1047,1088,1193-1194,1201,1208-1214,1229,1236-1243,1250,1253-1256,1263-1265,1267,1271-1297,1335-1341,1354,1366-1375,1397-1398,1407-1408,1417,1425-1436,1461,1472,1476,1479-1485,1489,1513,1523-1529,1539-1545,1559,1563,1566-1572,1582,1599,1608-1614,1623,1628,1635,1641-1643,1659,1706-1707,1959-1963,2016-2028,2061-2062,2159-2160,2200,2202-2216,2227,2229-2243,2254,2256-2270,2293-2295,2306,2313-2327,2335-2337,2347,2354-2368,2376-2378,2388,2395-2409
+legacy/vendor/codemem/packages/core/src/project.test.ts
+  s_ae2d2d34276f4a::t_9f3df613f0079a 1-3,5,13,16-26,132-207
+legacy/vendor/codemem/packages/core/src/project.ts
+  s_ae2d2d34276f4a::t_7fdd15d186e6e2 1-3,6-99
+legacy/vendor/codemem/packages/core/src/prompt-pack-ledger.test.ts
+  s_ae2d2d34276f4a::t_60baae54666c66 6,17,21-22,41-50,59-129
+legacy/vendor/codemem/packages/core/src/prompt-pack-ledger.ts
+  s_ae2d2d34276f4a::t_87e0c6dace9a18 4-7,121-125,128-130,134-135,137,151-155,167,210,239,259,262,274,277-283
+legacy/vendor/codemem/packages/core/src/raw-event-flush.test.ts
+  s_ae2d2d34276f4a::t_71e83031f18b8d 5,43,52,81,95-113,116-120,122-138,189,254,274,341,381,410,447,653-788,790-847,883,888,943,1017,1037,1072,1085,1158,1172,1275,1285,1298
+legacy/vendor/codemem/packages/core/src/raw-event-flush.ts
+  s_ae2d2d34276f4a::t_8c0970cdd5cc59 12,46-48,237-238,255-259,265-266,270-272,284-291,295,315-319,337,392-393,395,404
+legacy/vendor/codemem/packages/core/src/raw-event-sweeper.test.ts
+  s_ae2d2d34276f4a::t_cf5a60453bf66f 5,17-28,30-36,68,180,186,207,237,243,266-355,362,389,508,538,568-569,571,583,777,782
+legacy/vendor/codemem/packages/core/src/raw-event-sweeper.ts
+  s_ae2d2d34276f4a::t_4c2617106513d3 29-38,48,106,110,147,159,170,192,226,270,273,302-303,391,394,420,423
+legacy/vendor/codemem/packages/core/src/ref-queries.test.ts
+  s_ae2d2d34276f4a::t_d1f50f42e84951 6-9,277-327
+legacy/vendor/codemem/packages/core/src/ref-queries.ts
+  s_ae2d2d34276f4a::t_1bfd7a560eb8b0 13-16,65,92-96,149,158-162
+legacy/vendor/codemem/packages/core/src/search.test.ts
+  s_ae2d2d34276f4a::t_b54cb7dec9b3c7 6-9,2072-2176
+legacy/vendor/codemem/packages/core/src/search.ts
+  s_ae2d2d34276f4a::t_2e8de07c0b36e9 13-16,41,43,63,67-72,78,96-99,108,731,737-740,910,913-972,980,1007,1028,1055,1082,1095-1098,1125-1134,1137-1147,1158-1161,1180,1185,1191,1205,1215,1227-1230,1406,1424,1538,1585,1600
+legacy/vendor/codemem/packages/core/src/spool.ts
+  s_ae2d2d34276f4a::t_5b5a9de302e6bf 73-83
+legacy/vendor/codemem/packages/core/src/store.test.ts
+  s_ae2d2d34276f4a::t_5a772b78370bb7 9,1230-1275,1851-1912,1971,1975-1976,1978,1986-1988,1993-1994,2087,2095-2102,2435,2445,2451-2468,2471,2497,2513-2523,2525,2563,2567-2568,2575,2580-2587,2675,2784,2872,2954,2957,2970,3021,3048-3051,3073,3119-3121,3125,3137,3146,3152-3153,3158,3162,3190,3201,3210-3217,3239,3266,3275-3282,3298-3299,3319,3336,3367,3388,3393-3879,4019,4041-4042,4053,4067,4422,4460-4462,4481
+legacy/vendor/codemem/packages/core/src/store.ts
+  s_ae2d2d34276f4a::t_0daafc4a1531cb 31-40,92,107-108,186-228,231-232,236-239,243,253-257,259,508-547,591-594,908,911,940,953-958,962-978,987-991,1047,1064-1070,1086,1173-1208,1218,1260-1263,1311,1357-1360,1362-1367,1395,1592-1597,1599-1602,1632,1639-1642,1673-1676,1687-1696,1707,1710,1719,1722,1737,1741-1744,1767-1811,1848,1947-1954,1958,2033-2039,2056,2058,2075,2077,2093,2095-2104,2112,2114-2123,2132,2142,2159,2161-2169,2178,2187,2197,2206,2673-2767,2774,2785-2787,2796-2805,2937,2951-2991,3070-3082,3086-3097,3099,3117-3123,3145-3163,3167-3176,3200-3201,3203-3204,3210,3252,3258-3259,3261,3303-3304,3313,3316-3324,3329-3332,3336-3350,3359-3381,3383-3384,3386-3391,3399,3402-3405,3415-3416,3418-3492,3501,3503-3546,3548-3553,3556-3562,3566-3568,3570,5059-5064,5068-5073
+legacy/vendor/codemem/packages/core/src/test-utils.ts
+  s_ae2d2d34276f4a::t_b23eef20835ab7 121-122
+legacy/vendor/codemem/packages/core/src/types.ts
+  s_ae2d2d34276f4a::t_f74635592c1d9f 136-142,160-161,267-280,283-302,691-692
+legacy/vendor/codemem/packages/core/src/vectors.test.ts
+  s_ae2d2d34276f4a::t_3f7bc185556283 7,319-323,326-349
+legacy/vendor/codemem/packages/core/src/vectors.ts
+  s_ae2d2d34276f4a::t_f7fc2a60890979 52,610
+legacy/vendor/codemem/packages/core/src/viewer-read.ts
+  s_ae2d2d34276f4a::t_26236db4480356 1-4,42-49,52,56,65
+legacy/vendor/codemem/packages/core/src/viewer-routes/memory.test.ts
+  s_ae2d2d34276f4a::t_41a67d849136d9 1-372
+legacy/vendor/codemem/packages/core/src/viewer-routes/memory.ts
+  s_ae2d2d34276f4a::t_5bb0aac520e854 5,9-14,49,73,77,83-85,107-112,115-120,131-151,165-170,185-194,197,205,216-225,227,234-239,241,257,269,298,312,327-333,341,349-352,358,366,406,437,470-473,475-478,495,514,517-523
+legacy/vendor/codemem/packages/core/src/viewer-routes/observer-status.test.ts
+  s_ae2d2d34276f4a::t_4ba821b2bd7018 1-3,5-6,66-203
+legacy/vendor/codemem/packages/core/src/viewer-routes/observer-status.ts
+  s_ae2d2d34276f4a::t_8a7958464bf951 10-15,19,28,67-112,130-138,146-148,163,165
+legacy/vendor/codemem/packages/core/src/viewer-routes/raw-events.test.ts
+  s_ae2d2d34276f4a::t_fd72dd749f0724 1-82
+legacy/vendor/codemem/packages/core/src/viewer-routes/raw-events.ts
+  s_ae2d2d34276f4a::t_ea60c0dec886de 2-7,11-37,39-46,48,53-67,74
+legacy/vendor/codemem/packages/core/src/viewer-routes/stats.test.ts
+  s_ae2d2d34276f4a::t_e67070bee81be1 1-189
+legacy/vendor/codemem/packages/core/src/viewer-routes/stats.ts
+  s_ae2d2d34276f4a::t_fbd5a5ab4bd0bb 8-13,87-91,93-96,113-117,119-122,145-149,161-162,345-349,351,358-361,363-368,411,427,438,441-443,459-464,474,478,484,488,492
+legacy/vendor/codemem/packages/mcp-server/src/rpc-client.test.ts
+  s_ae2d2d34276f4a::t_4ff9d7dc7ffa78 22,107-263,297,300,308
+legacy/vendor/codemem/packages/mcp-server/src/rpc-client.ts
+  s_ae2d2d34276f4a::t_b338b7b24e817e 55-63
+legacy/vendor/codemem/packages/mcp-server/src/server.test.ts
+  s_ae2d2d34276f4a::t_90ee192fd3e939 243-304
+legacy/vendor/codemem/packages/viewer-server/src/index.test.ts
+  s_ae2d2d34276f4a::t_5eb3bad51f17e1 78-79,467-469,520-522,524,703-714,875-879,917-920,1034-1035,1048-1049,1068-1069
+legacy/vendor/codemem/plugins/claude/scripts/hook-runtime.mjs
+  s_ae2d2d34276f4a::t_0742a5146e655c 2455-2456
+legacy/vendor/codemem/plugins/codex/scripts/hook-runtime.mjs
+  s_ae2d2d34276f4a::t_9242691f2e4e36 2455-2456
+legacy/vendor/codemem/scripts/eval/lib.ts
+  s_ae2d2d34276f4a::t_baaa0fa09758fe 4,13-19,103,117-119
+legacy/vendor/codemem/scripts/eval/pack-eval.ts
+  s_ae2d2d34276f4a::t_3a025bae1e5d45 20-21,77
+scripts/dco-check.mjs
+  s_ae2d2d34276f4a::t_f1e9ce4283683f 9-11,55-56,121-122
+scripts/dco-check.test.mjs
+  s_ae2d2d34276f4a::t_3af2f4598c8b3d 152-153,169-176
+sonar-project.properties
+  s_ae2d2d34276f4a::t_8e93789fff7def 1-10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "c37cd0a5376079d9aa70dd057d4375784dd5b44b",
+  "prompts": {},
+  "sessions": {
+    "s_ae2d2d34276f4a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b4e57edf-22c5-4daa-9502-9e0a647eb665",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
