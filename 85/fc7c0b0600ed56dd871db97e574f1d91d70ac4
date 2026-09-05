@@ -1,0 +1,19 @@
+test/fault-provider.test.ts
+  s_ae2d2d34276f4a::t_2719200a0627a1 809
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "85fc7c0b0600ed56dd871db97e574f1d91d70ac4",
+  "prompts": {},
+  "sessions": {
+    "s_ae2d2d34276f4a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b4e57edf-22c5-4daa-9502-9e0a647eb665",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
