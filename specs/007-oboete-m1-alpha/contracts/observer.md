@@ -88,6 +88,9 @@ shortened form appears only in bodies.
 **Session summary (deterministic, worker-side, no provider call)**: `type = session_summary`,
 `title` = the session's first prompt truncated to 120 characters, `body` = five labelled lines
 under the same 2,000-character budget: `request` = the first prompt (up to 1,000 characters);
+prompt lines that read as instructions (the directive corpus, matched with the A13
+normalization, on each line and on the kept lines joined) are removed from `title`, `request`
+and `next_steps` before truncation, so a summary is never omitted from a pack as `directive`;
 `investigated` = the distinct files read (up to 20 paths); `learned` = the titles of the
 observations applied for the session (up to 10); `completed` = the distinct files modified with
 tool counts (up to 20); `next_steps` = the last unfinished turn's prompt (200). Trim order: the

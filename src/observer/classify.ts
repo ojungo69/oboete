@@ -481,6 +481,22 @@ function summaryBody(parts: {
 }
 
 /**
+ * FR-021: a prompt line that reads as an instruction to the agent never enters a summary. The
+ * summary is the one writer to `memories` outside `applyObservations`, and the pack would otherwise
+ * omit the whole summary as `directive`. A20 keeps every other line verbatim.
+ */
+function withoutDirectiveLines(text: string): string {
+  const kept = text
+    .split('\n')
+    .filter((line) => rejectsDirectives(line) === null)
+    .join('\n')
+    .trim();
+  // A phrase wrapped across two lines passes the per-line pass but matches once the pack joins the
+  // lines (A13 folds the newline into a space), so the joined text is checked too: fail closed.
+  return rejectsDirectives(kept) === null ? kept : '';
+}
+
+/**
  * The session summary of contracts/observer.md: derived from the session's own rows and the
  * observations already applied, never from a provider call. Insert, `latest_summary_memory_id` and
  * `summary_state = done` commit together, so a crash cannot leave an ended session without one.
@@ -531,7 +547,7 @@ export function sessionSummary(
     }
 
     const prompts = rows.filter((row) => row.kind === 'prompt' && (row.content ?? '').trim() !== '');
-    const firstPrompt = (prompts[0]?.content ?? rows[0].content ?? '').trim();
+    const firstPrompt = withoutDirectiveLines(prompts[0]?.content ?? rows[0].content ?? '');
 
     const investigated: string[] = [];
     const modified = new Map<string, number>();
@@ -558,7 +574,7 @@ export function sessionSummary(
     const nextPrompt =
       openTurn === undefined
         ? ''
-        : (prompts.findLast((row) => row.turn_id === openTurn.id)?.content ?? '').trim();
+        : withoutDirectiveLines(prompts.findLast((row) => row.turn_id === openTurn.id)?.content ?? '');
 
     const title = firstPrompt.slice(0, MAX_TITLE);
     const body = summaryBody({
