@@ -1,0 +1,27 @@
+test/unit/classify.test.ts
+  s_ae2d2d34276f4a::t_4e1b1767986d96 732-733,735-736,741-752,754-764
+  s_ae2d2d34276f4a::t_14f17d9972dd76 753
+  s_ae2d2d34276f4a::t_7240db12c8ab46 694-731,734,737-740,765-767
+src/observer/classify.ts
+  s_ae2d2d34276f4a::t_4e1b1767986d96 489,494-496
+  s_ae2d2d34276f4a::t_055c52cced3763 484-488,490-493,497-498,550,577
+  s_ae2d2d34276f4a::t_794f5f1f0c5c92 483
+specs/007-oboete-m1-alpha/contracts/observer.md
+  s_ae2d2d34276f4a::t_4e1b1767986d96 91-93
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "0f41bb39707b0e8b36e5d88aeef205301ad0ced6",
+  "prompts": {},
+  "sessions": {
+    "s_ae2d2d34276f4a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b4e57edf-22c5-4daa-9502-9e0a647eb665",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
