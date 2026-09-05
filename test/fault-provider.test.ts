@@ -806,7 +806,7 @@ scenario('remote-no-duplicate', async (t: TestContext) => {
 
     holdLease(place);
     const common = { session_id: 's-dedup', cwd: place.repo };
-    hook(place, 'Stop', { ...common, prompt_id: 's-dedup-p2', last_assistant_message: EN_ASSISTANT }, env);
+    hook(place, 'Stop', { ...common, prompt_id: 's-dedup-again', last_assistant_message: EN_ASSISTANT }, env);
     // A second SessionEnd with the same reason is collapsed as a re-delivery (R7) and would leave
     // the reopened session active, so the worker idles with no batch trigger (T058/T063).
     run(place, "UPDATE sessions SET status = 'ended', ended_at = ? WHERE native_session_id = ?", [
