@@ -58,11 +58,12 @@ const REPO = join(HERE, '../..');
 const OUT = join(REPO, 'test/fixtures/events-1000.jsonl');
 
 const MODELS = {
-  claude: 'claude-opus-4-6',
   codex: 'gpt-5.6-sol',
   grok: undefined,
   pi: 'gpt-5.6-luna',
 };
+
+const PI_INPUT_SOURCES = ['interactive', 'rpc', 'extension'];
 
 const TOOLS = {
   claude: ['read', 'write', 'edit', 'bash'],
@@ -228,6 +229,7 @@ function createState() {
     rng,
     seq: 0,
     clock: BASE_MS,
+    grokStamp: 0,
     events: [],
     sessionN: { claude: 0, codex: 0, grok: 0, pi: 0 },
     uuid() {
@@ -296,7 +298,6 @@ function claudeBase(session, eventName) {
     cwd: ROOT_PH,
     permission_mode: 'bypassPermissions',
     hook_event_name: eventName,
-    model: session.model,
   };
   if (session.promptId !== null) payload.prompt_id = session.promptId;
   return payload;
@@ -317,12 +318,13 @@ function codexBase(session, eventName) {
 
 function grokBase(g, session, eventName) {
   const camel = grokEventName(eventName);
+  g.grokStamp += 1;
   return {
     hookEventName: camel,
     sessionId: session.nativeId,
     cwd: ROOT_PH,
     workspaceRoot: `${ROOT_PH}/`,
-    timestamp: grokTimestamp(g.clock + 1_000, g.seq + 1),
+    timestamp: grokTimestamp(BASE_MS + g.grokStamp * 1_000, g.grokStamp),
     transcriptPath: session.transcript,
     permissionMode: 'bypassPermissions',
     hook_event_name: eventName,
@@ -410,7 +412,11 @@ function emitPrompt(g, session, text, tags) {
     g,
     session,
     'input',
-    piEnvelope(session, 'input', { type: 'input', text, source: 'interactive' }),
+    piEnvelope(session, 'input', {
+      type: 'input',
+      text,
+      source: PI_INPUT_SOURCES[(session.turn - 1) % PI_INPUT_SOURCES.length],
+    }),
     tags,
   );
 }
@@ -929,9 +935,12 @@ function emitCompact(g, session) {
     return;
   }
   if (session.agent === 'grok') {
-    const payload = grokBase(g, session, 'PostCompact');
-    payload.source = 'auto';
-    push(g, session, 'PostCompact', payload, tags);
+    const first = grokBase(g, session, 'PostCompact');
+    first.source = 'auto';
+    push(g, session, 'PostCompact', first, tags);
+    const second = grokBase(g, session, 'PostCompact');
+    second.source = 'auto';
+    push(g, session, 'PostCompact', second);
     return;
   }
   const id = g.hex(8);
@@ -968,7 +977,9 @@ function emitWorkTurn(g, session, work, toolKind, extra = {}) {
     extra.directivePlace === 'output' ||
     extra.factPlace === 'output'
   ) {
-    if (kind === 'edit' || kind === 'patch-update') kind = 'read';
+    // Write/edit results are a path or a fixed success string. Adapter output is
+    // tool_response / output_for_prompt / Pi content, so force a tool that stores spec.body there.
+    if (kind !== 'bash' && kind !== 'bash-read' && kind !== 'read') kind = 'read';
   }
   const promptTags = {};
   const outputTags = {};
@@ -988,7 +999,7 @@ function emitWorkTurn(g, session, work, toolKind, extra = {}) {
     promptText = `${promptText}\n${directiveToken(extra.directive)}`;
   }
   if (extra.fact !== undefined && extra.factPlace === 'prompt') {
-    promptText = `${promptText}\n${extra.fact.statement}`;
+    promptText = `${promptText}\n${statementOf(extra.fact)}`;
   }
   emitPrompt(g, session, promptText, promptTags);
 
@@ -1073,7 +1084,7 @@ function emitWorkTurn(g, session, work, toolKind, extra = {}) {
     spec.body = `${spec.body}\n${directiveToken(extra.directive)}`;
   }
   if (extra.fact !== undefined && extra.factPlace === 'output') {
-    spec.body = `${spec.body}\n${extra.fact.statement}`;
+    spec.body = `${spec.body}\n${statementOf(extra.fact)}`;
   }
   emitTool(
     g,
@@ -1095,6 +1106,12 @@ function directiveToken(index) {
 
 function factTag(fact) {
   return { id: fact.id, lang: fact.lang, query: fact.query, expect: fact.expect };
+}
+
+function statementOf(tag) {
+  const row = FACTS.find((fact) => fact.id === tag.id);
+  if (row === undefined) throw new Error(`unknown fact ${tag.id}`);
+  return row.statement;
 }
 
 function defaultStartSource(agent) {
@@ -1240,7 +1257,6 @@ function emitLifecycleBundle(g, agent) {
   }
   if (agent === 'grok') {
     const forked = newSession(g, agent);
-    forked.transcript = resume.transcript;
     emitSessionStart(g, forked, 'load', { lifecycle: 'fork' });
     emitWorkTurn(g, forked, WORK[7], 'read');
     emitWorkTurn(g, forked, WORK[0], 'write');
@@ -1335,6 +1351,49 @@ function countBy(events, keyFn) {
   return out;
 }
 
+function promptTextOf(event) {
+  if (event.event === 'UserPromptSubmit') return event.payload.prompt ?? '';
+  if (event.event === 'input') return event.payload.payload?.text ?? '';
+  return '';
+}
+
+function adapterOutputText(event) {
+  const payload = event.payload;
+  if (event.agent === 'claude' && event.event === 'PostToolUse') {
+    const response = payload.tool_response;
+    const tool = payload.tool_name;
+    // Write/Edit adapter output is the path (`writtenPath`), not file content.
+    if (tool === 'Write' || tool === 'Edit') {
+      return typeof response?.filePath === 'string' ? response.filePath : '';
+    }
+    if (typeof response === 'string') return response;
+    if (response === null || typeof response !== 'object') return '';
+    if (typeof response.file?.content === 'string') return response.file.content;
+    const stdout = typeof response.stdout === 'string' ? response.stdout : '';
+    const stderr = typeof response.stderr === 'string' ? response.stderr : '';
+    if ('stdout' in response || 'stderr' in response) return `${stdout}\n${stderr}`;
+    return '';
+  }
+  if (event.agent === 'codex' && event.event === 'PostToolUse') {
+    return typeof payload.tool_response === 'string' ? payload.tool_response : '';
+  }
+  if (event.agent === 'grok' && event.event === 'PostToolUse') {
+    const result = payload.toolResult ?? {};
+    if (typeof result.FileContent?.content === 'string') return result.FileContent.content;
+    if (typeof result.EditsApplied?.tool_output_for_prompt === 'string') {
+      return result.EditsApplied.tool_output_for_prompt;
+    }
+    if (typeof result.output_for_prompt === 'string') return result.output_for_prompt;
+    return '';
+  }
+  if (event.agent === 'pi' && event.event === 'tool_result') {
+    const blocks = payload.payload?.content;
+    if (!Array.isArray(blocks)) return '';
+    return blocks.map((block) => (typeof block?.text === 'string' ? block.text : '')).join('\n');
+  }
+  return '';
+}
+
 function coverage(events, secrets, directives) {
   const byAgent = countBy(events, (event) => event.agent);
   const byEvent = countBy(events, (event) => `${event.agent}:${event.event}`);
@@ -1379,6 +1438,8 @@ function coverage(events, secrets, directives) {
   }
 
   const missingSecrets = [...secretIds].filter((id) => !seenSecrets.has(id));
+  const negativeIds = secrets.filter((row) => row.secret === null).map((row) => row.id);
+  const missingNegatives = negativeIds.filter((id) => !seenSecrets.has(id));
   const missingDir = [];
   for (let i = 0; i < directives.length; i += 1) {
     if (!dirPrompt.has(i) || !dirOutput.has(i)) missingDir.push(i);
@@ -1407,7 +1468,13 @@ function coverage(events, secrets, directives) {
     total: events.length,
     byAgent,
     byEvent,
-    secrets: { required: secretIds.size, seen: seenSecrets.size, missing: missingSecrets },
+    secrets: {
+      required: secretIds.size,
+      seen: seenSecrets.size,
+      missing: missingSecrets,
+      negatives: negativeIds.length,
+      missingNegatives,
+    },
     directives: {
       total: directives.length,
       prompt: dirPrompt.size,
@@ -1442,6 +1509,9 @@ function assertCoverage(events, secrets, directives, body) {
   if (report.secrets.missing.length > 0) {
     problems.push(`missing secrets ${report.secrets.missing.join(',')}`);
   }
+  if (report.secrets.missingNegatives.length > 0) {
+    problems.push(`missing negative secrets ${report.secrets.missingNegatives.join(',')}`);
+  }
   if (report.directives.missing.length > 0) {
     problems.push(`directives not in both prompt and output: ${report.directives.missing.join(',')}`);
   }
@@ -1466,14 +1536,113 @@ function assertCoverage(events, secrets, directives, body) {
   if (above.length < 2) problems.push(`above_bound count ${above.length}`);
   if (!above.some((row) => row.bytes === ABOVE_ONE)) problems.push('missing 1048577');
   if (!above.some((row) => row.bytes === ABOVE_TWO)) problems.push('missing 2097152');
+  for (const row of report.sizes) {
+    if (row.tag === 'at_bound' && row.bytes !== AT_BOUND) {
+      problems.push(`size seq ${row.seq} at_bound is ${row.bytes}`);
+    }
+    if (row.tag === 'above_bound' && row.bytes !== ABOVE_ONE && row.bytes !== ABOVE_TWO) {
+      problems.push(`size seq ${row.seq} above_bound is ${row.bytes}`);
+    }
+  }
   for (const row of secrets) {
     if (row.secret !== null && body.includes(row.secret)) problems.push(`secret value leaked for ${row.id}`);
   }
+  const factsById = new Map(FACTS.map((fact) => [fact.id, fact]));
+  const grokTimestamps = [];
+  const grokCompacts = {};
+  const piSources = new Set();
   let prev = 0;
   for (const event of events) {
     if (event.seq !== prev + 1) problems.push(`seq gap at ${event.seq}`);
     prev = event.seq;
     JSON.parse(JSON.stringify(event));
+    const tags = event.tags ?? {};
+    const blob = JSON.stringify(event.payload);
+    if (event.agent === 'claude' && Object.hasOwn(event.payload, 'model')) {
+      problems.push(`claude payload has model at seq ${event.seq}`);
+    }
+    if (tags.fact !== undefined) {
+      const expect = tags.fact.expect;
+      if (typeof expect !== 'string' || expect === '' || !blob.includes(expect)) {
+        problems.push(`fact ${tags.fact.id} expect missing from payload seq ${event.seq}`);
+      }
+      if (
+        (event.event === 'PostToolUse' || event.event === 'tool_result') &&
+        !adapterOutputText(event).includes(expect)
+      ) {
+        problems.push(`fact ${tags.fact.id} expect not in adapter output seq ${event.seq}`);
+      }
+    }
+    if (tags.secret !== undefined) {
+      const token = secretToken(tags.secret);
+      if (!blob.includes(token)) {
+        problems.push(`secret token missing from payload seq ${event.seq} id=${tags.secret}`);
+      }
+      if (event.event === 'PostToolUse' && !adapterOutputText(event).includes(token)) {
+        problems.push(`secret ${tags.secret} not in adapter output seq ${event.seq}`);
+      }
+      if (event.event === 'tool_result' && !adapterOutputText(event).includes(token)) {
+        const inputBlob = JSON.stringify(event.payload.payload?.input ?? {});
+        const toolName = event.payload.payload?.toolName;
+        if (!inputBlob.includes(token)) {
+          problems.push(`secret ${tags.secret} not in pi input or content seq ${event.seq}`);
+        } else if (toolName === 'write' || toolName === 'edit') {
+          problems.push(`secret ${tags.secret} in pi ${toolName} input seq ${event.seq}`);
+        }
+      }
+    }
+    if (tags.directive !== undefined) {
+      const token = directiveToken(tags.directive);
+      if (!blob.includes(token)) {
+        problems.push(`directive token missing from payload seq ${event.seq} index=${tags.directive}`);
+      }
+      if (event.event === 'PostToolUse' && !adapterOutputText(event).includes(token)) {
+        problems.push(`directive ${tags.directive} not in adapter output seq ${event.seq}`);
+      }
+      if (event.event === 'tool_result' && !adapterOutputText(event).includes(token)) {
+        const toolName = event.payload.payload?.toolName;
+        if (toolName === 'write' || toolName === 'edit') {
+          problems.push(`directive ${tags.directive} in pi ${toolName} input seq ${event.seq}`);
+        }
+      }
+    }
+    if (tags.recall !== undefined) {
+      const fact = factsById.get(tags.recall);
+      const prompt = promptTextOf(event);
+      if (fact === undefined || !prompt.includes(fact.query)) {
+        problems.push(`recall ${tags.recall} prompt missing query seq ${event.seq}`);
+      }
+    }
+    if (event.agent === 'grok') {
+      const ts = event.payload.timestamp;
+      if (typeof ts !== 'string' || ts === '') {
+        problems.push(`grok missing timestamp seq ${event.seq}`);
+      } else {
+        if (grokTimestamps.includes(ts)) problems.push(`duplicate grok timestamp ${ts} seq ${event.seq}`);
+        if (grokTimestamps.length > 0 && ts <= grokTimestamps[grokTimestamps.length - 1]) {
+          problems.push(`grok timestamp not increasing seq ${event.seq}`);
+        }
+        grokTimestamps.push(ts);
+      }
+      if (event.event === 'PostCompact') {
+        grokCompacts[event.session] = (grokCompacts[event.session] ?? 0) + 1;
+      }
+      if (tags.lifecycle === 'fork') {
+        const expected = `${ROOT_PH}/.oboete-replay/grok/${event.session}.jsonl`;
+        if (event.payload.transcriptPath !== expected) {
+          problems.push(`grok fork reuses transcript seq ${event.seq}`);
+        }
+      }
+    }
+    if (event.agent === 'pi' && event.event === 'input') {
+      piSources.add(event.payload.payload?.source);
+    }
+  }
+  if (!Object.values(grokCompacts).some((n) => n >= 2)) {
+    problems.push('no grok session compact twice');
+  }
+  for (const source of PI_INPUT_SOURCES) {
+    if (!piSources.has(source)) problems.push(`pi input source missing ${source}`);
   }
   const turnsBySession = {};
   for (const event of events) {
@@ -1505,10 +1674,14 @@ function generate() {
   }
 
   const secretRows = secrets.filter((row) => row.secret !== null);
+  const negativeRows = secrets.filter((row) => row.secret === null);
   const secretPlan = { claude: [], codex: [], grok: [], pi: [] };
   const places = ['prompt', 'input', 'output'];
   for (let i = 0; i < secretRows.length; i += 1) {
     secretPlan[AGENTS[i % 4]].push({ id: secretRows[i].id, place: places[i % 3] });
+  }
+  for (let i = 0; i < negativeRows.length; i += 1) {
+    secretPlan[AGENTS[i % 4]].push({ id: negativeRows[i].id, place: places[i % 3] });
   }
   const dirPromptPlan = { claude: [], codex: [], grok: [], pi: [] };
   const dirOutputPlan = { claude: [], codex: [], grok: [], pi: [] };
