@@ -51,7 +51,9 @@ jobs:
       - name: Scan every commit for secrets
         # gitleaks-action は `pulls/:n/commits` を pagination なしで呼び、返ってきた 1 ページ
         # （既定 30 件）の先頭と末尾を走査範囲にする。commit が 30 を超える PR では新しい側が
-        # 丸ごと範囲外になる。範囲の選び方を持ち込まず、clone にある commit を全部走査する
+        # 丸ごと範囲外になる。範囲の選び方を持ち込まず、HEAD から届く commit を全部走査する。
+        # gitleaks 既定の `--all` は他 branch の ref まで走査し、そこの allowlist 済み合成 corpus で
+        # 無関係な PR が落ちる（PR #149）ので HEAD の履歴に限る
         env:
           GITLEAKS_VERSION: "8.30.1"
           # gitleaks_8.30.1_checksums.txt の linux_x64 の値
@@ -63,4 +65,4 @@ jobs:
           tar -xzf "${RUNNER_TEMP}/gitleaks.tar.gz" -C "${RUNNER_TEMP}" gitleaks
           "${RUNNER_TEMP}/gitleaks" version
           "${RUNNER_TEMP}/gitleaks" detect --no-banner --redact --exit-code 1 \
-            --source . --config .gitleaks.toml
+            --source . --config .gitleaks.toml --log-opts="--full-history"
