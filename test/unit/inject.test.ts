@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { DatabaseSync } from 'node:sqlite';
@@ -721,5 +721,115 @@ test('a spooled injection hook prints nothing and logs index_unavailable', async
     assert.equal(output, '');
     assert.equal(existsSync(paths.db), false, 'the hook path never creates the missing index');
     assert.match(readFileSync(paths.hookLog, 'utf8'), /index_unavailable/);
+  });
+});
+
+test('an exhausted hook budget produces no pack or ledger entry', async () => {
+  await withFixture(async (fixture) => {
+    insertSession(fixture, { id: 'no-budget', agent: 'claude' });
+    insertMemory(fixture, { id: 'm-budget', title: 'SQLite busy timeout', body: 'A retained note.', pinned: true });
+    assert.equal(await injectForHook(context(fixture, {
+      agent: 'claude', eventName: 'SessionStart', sessionId: 'no-budget', remainingBudget: () => 0,
+    })), '');
+    assert.equal(fixture.db.prepare('SELECT count(*) AS n FROM injections').get()?.n, 0);
+    assert.equal(fixture.db.prepare('SELECT last_injected_at FROM memories WHERE id = ?').get('m-budget')?.last_injected_at, null);
+  });
+});
+
+test('a Grok stop with a turn id distinguishes an undelivered tool call from no tool call', async () => {
+  await withFixture(async (fixture) => {
+    insertSession(fixture, { id: 's-turn', agent: 'grok' });
+    fixture.db.prepare("INSERT INTO turns (id, session_id, ordinal, started_at) VALUES ('turn-current', 's-turn', 1, ?)").run(NOW);
+    insertMemory(fixture, { id: 'm-turn', title: 'SQLite busy timeout', body: 'The database has one writer.' });
+    const prompt = { ...context(fixture, { agent: 'grok', eventName: 'UserPromptSubmit', sessionId: 's-turn' }), turnId: 'turn-current' };
+    assert.equal(await injectForHook(prompt), '');
+    fixture.db.prepare(
+      `INSERT INTO raw_events (id, repo_id, session_id, turn_id, agent, kind, sensitivity, captured_at)
+       VALUES ('raw-tool', ?, 's-turn', 'turn-current', 'grok', 'tool_call', 'local_only', ?)`,
+    ).run(fixture.identity.id, NOW);
+    assert.equal(await injectForHook({
+      ...context(fixture, { agent: 'grok', eventName: 'Stop', sessionId: 's-turn' }), turnId: 'turn-current',
+    }), '');
+    assert.deepEqual(
+      { ...fixture.db.prepare('SELECT state, degraded_reason FROM injections').get() },
+      { state: 'omitted', degraded_reason: 'not_delivered' },
+    );
+    assert.deepEqual(
+      { ...fixture.db.prepare('SELECT decision, reason FROM injection_items').get() },
+      { decision: 'omitted', reason: 'not_delivered' },
+    );
+  });
+});
+
+test('a storage error in a Grok delivery hook is contained and logged without event text', async () => {
+  await withFixture(async (fixture) => {
+    fixture.db.exec('DROP TABLE injections');
+    const hook = context(fixture, { agent: 'grok', eventName: 'PreToolUse', sessionId: 'missing' });
+    assert.equal(await injectForHook(hook), '');
+    const log = readFileSync(fixture.paths.hookLog, 'utf8');
+    assert.match(log, /injection failed agent=grok event=PreToolUse reason=ERR_SQLITE_ERROR/);
+    assert.doesNotMatch(log, /SQLite busy timeout|no such table/);
+  });
+});
+
+test('paused Pi injection returns zero before reading stdin or creating storage', async () => {
+  await withTempHome(async (home) => {
+    const paths = oboetePaths(home);
+    writeFileSync(paths.paused, 'paused');
+    assert.equal(await stdoutOf(() => runInject(['--agent', 'pi', '--kind', 'prompt'], {
+      readStdin: () => assert.fail('paused injection must not read stdin'),
+    })), '');
+    assert.equal(existsSync(paths.db), false);
+    assert.equal(existsSync(paths.hookLog), false);
+  });
+});
+
+test('Pi injection with an expired deadline leaves storage unopened', async () => {
+  await withTempHome(async (home) => {
+    const paths = oboetePaths(home);
+    assert.equal(await stdoutOf(() => runInject(['--agent', 'pi', '--kind', 'prompt'], {
+      readStdin: () => JSON.stringify({ cwd: home, session_id: 'too-late', prompt: 'private input' }),
+      elapsedMs: () => 301,
+    })), '');
+    assert.equal(existsSync(paths.db), false);
+    const log = readFileSync(paths.hookLog, 'utf8');
+    assert.match(log, /inject failed agent=pi reason=Error/);
+    assert.doesNotMatch(log, /private input/);
+  });
+});
+
+test('Pi injection reports an older schema without migrating it', async () => {
+  await withFixture(async (fixture) => {
+    fixture.db.exec('PRAGMA user_version = 1');
+    assert.equal(await stdoutOf(() => runInject(['--agent', 'pi', '--kind', 'start'], {
+      readStdin: () => JSON.stringify({ cwd: fixture.repo, session_id: 'old-schema' }),
+      elapsedMs: () => 0,
+    })), '');
+    assert.equal(fixture.db.prepare('PRAGMA user_version').get()?.user_version, 1);
+    assert.equal(fixture.db.prepare('SELECT count(*) AS n FROM sessions').get()?.n, 0);
+    assert.match(readFileSync(fixture.paths.hookLog, 'utf8'), /agent=pi event=start degraded=index_unavailable/);
+  });
+});
+
+test('Pi fills a missing model and reuses the persisted conversation epoch and latest turn', async () => {
+  await withFixture(async (fixture) => {
+    insertSession(fixture, { id: 'pi-root', agent: 'pi', nativeId: 'native-root', epoch: 2 });
+    insertSession(fixture, { id: 'pi-resume', agent: 'pi', nativeId: 'native-resume', conversationId: 'pi-root' });
+    fixture.db.prepare("INSERT INTO turns (id, session_id, ordinal) VALUES ('pi-turn-1', 'pi-resume', 1), ('pi-turn-2', 'pi-resume', 2)").run();
+    insertMemory(fixture, { id: 'm-resumed', title: 'SQLite busy timeout', body: 'Reuse the existing session.' });
+    const output = await stdoutOf(() => runInject(['--agent', 'pi', '--kind', 'prompt'], {
+      readStdin: () => JSON.stringify({ cwd: fixture.repo, session_id: 'native-resume', prompt: 'SQLite busy timeout', model: 'gpt-5.6-luna' }),
+      now: () => NOW, elapsedMs: () => 0,
+    }));
+    assert.match(output, /SQLite busy timeout/);
+    assert.deepEqual(
+      { ...fixture.db.prepare("SELECT model, conversation_id FROM sessions WHERE id = 'pi-resume'").get() },
+      { model: 'gpt-5.6-luna', conversation_id: 'pi-root' },
+    );
+    assert.deepEqual(
+      { ...fixture.db.prepare('SELECT session_id, conversation_id, context_epoch, turn_id, state FROM injections').get() },
+      { session_id: 'pi-resume', conversation_id: 'pi-root', context_epoch: 2, turn_id: 'pi-turn-2', state: 'emitted' },
+    );
+    assert.equal(fixture.db.prepare("SELECT last_injected_at FROM memories WHERE id = 'm-resumed'").get()?.last_injected_at, NOW);
   });
 });

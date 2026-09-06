@@ -1313,3 +1313,65 @@ test('every text field writes its redacted value back where it came from', () =>
   assert.equal(event.input.command, '[REDACTED] echo one');
   assert.equal(event.input.text, '[REDACTED] two');
 });
+
+test('a mixed Codex patch is an edit and preserves all file paths and line counts', () => {
+  const payload = record(record(loadFixture('codex', 'apply_patch-add.json').events).PreToolUse);
+  const patch = '*** Begin Patch\n*** Add File: new.txt\n+new\n*** Update File: old.txt\n@@\n-old\n+new\n*** End Patch';
+  const output = adapt({
+    agent: 'codex', eventName: 'PreToolUse', capturedAt: CAPTURED_AT,
+    payload: { ...payload, tool_input: { command: patch } },
+  });
+  const call = eventOf(events(output), 'tool_call');
+  assert.equal(call.tool_name, 'edit');
+  assert.deepEqual(call.input, { paths: ['new.txt', 'old.txt'], text: patch, lines_added: 2, lines_removed: 1 });
+  assert.deepEqual(detector(output).paths, ['new.txt', 'old.txt']);
+});
+
+test('the Grok prompt replay preserves the prompt identity and user text', () => {
+  const fixture = readFileSync(join(repositoryRoot(), 'test/fixtures/events-1000.jsonl'), 'utf8')
+    .trimEnd().split('\n').map((line) => JSON.parse(line) as Json).find((row) => row.seq === 38)!;
+  assert.equal(fixture.event, 'UserPromptSubmit');
+  assert.deepEqual(events(adapt({
+    agent: 'grok', eventName: 'UserPromptSubmit', capturedAt: CAPTURED_AT, payload: fixture.payload,
+  })), [{
+    agent: 'grok', native_session_id: '10de8968-8a89-481d-b4b8-6739d724fdfe',
+    cwd: '__OBOETE_REPLAY_ROOT__', captured_at: CAPTURED_AT,
+    prompt_id: 'ab3acf78-e93a-4694-bf95-d464a3cc2fd7', kind: 'prompt', input_source: 'user',
+    text: 'Add a 50ms timeout to fetchJson in src/clients/http.ts and keep the existing retry.',
+  }]);
+});
+
+test('a Grok Stop without assistant text emits only the turn end', () => {
+  const payload = record(loadFixture('grok', 'stop-end-turn.json').end_turn);
+  delete payload.lastAssistantMessage;
+  assert.deepEqual(events(adapt({ agent: 'grok', eventName: 'Stop', payload, capturedAt: CAPTURED_AT })), [{
+    agent: 'grok', native_session_id: '01a06808-0809-7cd2-8dc4-ab7f48e55707',
+    cwd: '<repo>', captured_at: CAPTURED_AT, prompt_id: '4d1a3212-7382-4412-a097-e95435bee6d5',
+    kind: 'turn_end', turn_index: 0, reason: 'end_turn',
+  }]);
+});
+
+test('the Grok failure replay preserves the failed call identity and error', () => {
+  const fixture = readFileSync(join(repositoryRoot(), 'test/fixtures/events-1000.jsonl'), 'utf8')
+    .trimEnd().split('\n').map((line) => JSON.parse(line) as Json).find((row) => row.seq === 538)!;
+  assert.equal(fixture.event, 'PostToolUseFailure');
+  assert.deepEqual(events(adapt({
+    agent: 'grok', eventName: 'PostToolUseFailure', capturedAt: CAPTURED_AT, payload: fixture.payload,
+  })), [{
+    agent: 'grok', native_session_id: '41c499d7-7d44-4088-8944-c684dcdd5f40',
+    cwd: '__OBOETE_REPLAY_ROOT__', captured_at: CAPTURED_AT, kind: 'tool_failure',
+    tool_call_id: 'call-7ae44ad0-23fb-4d8f-91ae-3343c0761872-0', error: 'tool handler crashed',
+  }]);
+});
+
+for (const agent of ['codex', 'grok'] as const) {
+  test(`${agent} refuses inherited object keys as native tool mappings`, () => {
+    const payload = agent === 'codex'
+      ? { session_id: 'session', cwd: '/repo', tool_name: 'constructor', tool_use_id: 'call', tool_input: { file_path: '.env', text: 'private-content' } }
+      : { sessionId: 'session', cwd: '/repo', toolName: 'constructor', toolUseId: 'call', toolInput: { file_path: '.env', text: 'private-content' } };
+    assert.deepEqual(adapt({ agent, eventName: 'PreToolUse', payload, capturedAt: CAPTURED_AT }), {
+      kind: 'unmapped', reason: 'unmapped_payload',
+      metadata: { nativeSessionId: 'session', toolName: 'constructor', eventName: 'PreToolUse' },
+    });
+  });
+}

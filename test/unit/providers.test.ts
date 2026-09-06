@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { spawn } from 'node:child_process';
 import { test } from 'node:test';
 
@@ -281,4 +282,107 @@ test('runAgentCli inherits the login environment without forwarding oboete crede
     if (previous === undefined) delete process.env.OBOETE_NIM_API_KEY;
     else process.env.OBOETE_NIM_API_KEY = previous;
   }
+});
+
+test('model overrides are trimmed before they select the provider model', () => {
+  assert.deepEqual(resolveModel(configSchema.parse({ observer: { preset: 'nim', model: '  custom-model  ' } })), {
+    preset: 'nim', model: 'custom-model',
+  });
+});
+
+test('an empty model is refused before loading an HTTP provider', async () => {
+  await assert.rejects(createLanguageModel('ollama', '   ', credentialsFor('ollama')), {
+    name: 'ProviderConfigError', code: 'model_required',
+    message: 'The ollama preset requires an observer model in the configuration.',
+  });
+});
+
+test('agent-cli cannot be constructed as an HTTP language model', async () => {
+  await assert.rejects(createLanguageModel('agent-cli', 'model', credentialsFor('agent-cli')), {
+    name: 'ProviderConfigError', code: 'unsupported_preset',
+    message: 'The agent-cli preset uses a child process instead of an HTTP language model.',
+  });
+});
+
+test('Workers AI requires a token even when an account id is present', async () => {
+  await assert.rejects(createLanguageModel('workers-ai', '@cf/model', {
+    kind: 'cloudflare', present: true, source: 'test', values: { accountId: 'test-account', token: '' },
+  }, { fetch: async () => assert.fail('no request without a token') }), {
+    name: 'ProviderConfigError', code: 'credentials_required',
+    message: 'The selected observer preset does not have its required credentials.',
+  });
+});
+
+for (const [name, stdout] of [
+  ['malformed JSON', '{broken'],
+  ['a null envelope', 'null'],
+  ['a missing result field', '{"text":"wrong-field"}'],
+  ['a non-string result', '{"result":{"observations":[]}}'],
+] as const) {
+  test(`the Claude CLI rejects ${name}`, async () => {
+    assert.deepEqual(await runAgentCli('claude', 'prompt', {
+      timeoutMs: 1000, spawn: fakeSpawn(({ child }) => finish(child, stdout)),
+    }), { error: 'invalid_output' });
+  });
+}
+
+test('a nonzero CLI exit rejects otherwise valid stdout', async () => {
+  assert.deepEqual(await runAgentCli('grok', 'prompt', {
+    timeoutMs: 1000, spawn: fakeSpawn(({ child }) => finish(child, '{"text":"do not use"}', 1)),
+  }), { error: 'process_failed' });
+});
+
+test('a synchronous spawn error returns process_failed without exposing its message', async () => {
+  assert.deepEqual(await runAgentCli('claude', 'prompt', {
+    timeoutMs: 1000, spawn: () => { throw new Error('private command details'); },
+  }), { error: 'process_failed' });
+});
+
+test('a synchronous spawn timeout is classified as timeout', async () => {
+  assert.deepEqual(await runAgentCli('grok', 'prompt', {
+    timeoutMs: 1000, spawn: () => { throw Object.assign(new Error('expired'), { name: 'TimeoutError' }); },
+  }), { error: 'timeout' });
+});
+
+test('an asynchronous child error is classified without forwarding stderr', async () => {
+  assert.deepEqual(await runAgentCli('claude', 'prompt', {
+    timeoutMs: 1000, spawn: fakeSpawn(({ child }) => {
+      child.stderr.write('private diagnostics');
+      child.emit('error', new Error('process unavailable'));
+    }),
+  }), { error: 'process_failed' });
+});
+
+test('CLI JSON split across string and buffer chunks is reassembled', async () => {
+  assert.deepEqual(await runAgentCli('claude', 'prompt', {
+    timeoutMs: 1000, spawn: fakeSpawn(({ child }) => {
+      child.stdout.emit('data', '{"res');
+      finish(child, 'ult":"complete reply"}');
+    }),
+  }), { text: 'complete reply' });
+});
+
+test('Codex rejects a missing last-message file and removes its temporary directory', async () => {
+  let outputPath = '';
+  assert.deepEqual(await runAgentCli('codex', 'prompt', {
+    timeoutMs: 1000, spawn: fakeSpawn(({ args, child }) => {
+      outputPath = args[args.indexOf('--output-last-message') + 1];
+      finish(child, '{"result":"stdout is not the reply"}');
+    }),
+  }), { error: 'invalid_output' });
+  assert.notEqual(outputPath, '');
+  assert.equal(existsSync(dirname(outputPath)), false);
+});
+
+test('a failed Codex child removes its output directory', async () => {
+  let outputPath = '';
+  assert.deepEqual(await runAgentCli('codex', 'prompt', {
+    timeoutMs: 1000, spawn: fakeSpawn(({ args, child }) => {
+      outputPath = args[args.indexOf('--output-last-message') + 1];
+      writeFileSync(outputPath, 'reply from an unsuccessful command');
+      finish(child, '', 2);
+    }),
+  }), { error: 'process_failed' });
+  assert.notEqual(outputPath, '');
+  assert.equal(existsSync(dirname(outputPath)), false);
 });

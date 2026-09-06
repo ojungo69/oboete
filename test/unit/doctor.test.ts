@@ -7,6 +7,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
@@ -15,15 +16,18 @@ import { basename, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
-import { PRESET_CATALOG } from '../../src/config.js';
+import { PRESET_CATALOG, configSchema, consentHash, consentTuple } from '../../src/config.js';
 import { openDatabase } from '../../src/db/open.js';
 import { runDoctor, type DoctorDeps, type DoctorItem } from '../../src/doctor.js';
 import { probeReason } from '../../src/doctor/agents.js';
-import { oboetePaths } from '../../src/paths.js';
+import { allowanceItem, catalogItems, providerItem } from '../../src/doctor/provider.js';
+import { ftsItem, migrationItem, openStorage, spoolItem, workerItem } from '../../src/doctor/storage.js';
+import { ensureDirectories, oboetePaths, type OboetePaths } from '../../src/paths.js';
 import type { VersionSpawn } from '../../src/setup/detect.js';
 import { removeJsonHandlers } from '../../src/setup/managed-block.js';
 import { runSetup, type SetupDeps } from '../../src/setup/setup.js';
 import { utcDay } from '../../src/observer/reservation.js';
+import { runtimeStateSet } from '../../src/worker/purge.js';
 import { withTempHome } from '../helpers/home.js';
 
 const NODE = '/usr/bin/node';
@@ -745,3 +749,288 @@ test('an unknown option exits 2', async () => {
     assert.match(output, /unknown|nope/i);
   });
 });
+
+const ITEM_NOW = Date.UTC(2026, 8, 6, 12);
+const ITEM_RESET = Date.UTC(2026, 8, 7);
+const itemDeps: DoctorDeps = {
+  env: {},
+  versionSpawn: () => assert.fail('no version probe expected'),
+  spawn: () => assert.fail('no agent process expected'),
+  fetch: async () => assert.fail('no network request expected'),
+  write: () => assert.fail('an item returns its sentence without printing'),
+  now: () => ITEM_NOW,
+};
+const itemOptions = { probeProvider: true, noProbeAgents: true, json: true };
+
+async function withItemDatabase(run: (db: DatabaseSync, paths: OboetePaths) => void | Promise<void>): Promise<void> {
+  await withTempHome(async (home) => {
+    const paths = oboetePaths(home);
+    ensureDirectories(paths);
+    const { db } = openDatabase({ path: paths.db, timeoutMs: 100 });
+    try { await run(db, paths); } finally { db.close(); }
+  });
+}
+
+test('missing storage explains spooling without creating a database', async () => {
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    assert.deepEqual(openStorage(paths), {
+      item: {
+        item: 'storage', status: 'degraded', reason: `No database at ${paths.db}.`,
+        consequence: 'Hooks spool every event and nothing is summarized or injected.',
+        recovery: '`oboete setup`',
+      },
+      db: null, schemaVersion: null, schemaAhead: false, integrityFailed: false,
+    });
+    assert.equal(existsSync(paths.db), false);
+  });
+});
+
+test('a newer database schema is diagnosed without migrating it', async () => {
+  await withItemDatabase((db, paths) => {
+    db.exec('PRAGMA user_version = 4');
+    assert.deepEqual(openStorage(paths), {
+      item: {
+        item: 'storage', status: 'healthy',
+        reason: `\`${paths.db}\` opened; the schema is newer than this bundle knows.`,
+        consequence: '', recovery: '',
+      },
+      db: null, schemaVersion: 4, schemaAhead: true, integrityFailed: false,
+    });
+    assert.deepEqual(migrationItem(4, true, false), {
+      item: 'migration', status: 'degraded',
+      reason: 'The database schema is version 4, newer than this bundle knows; upgrade oboete.',
+      consequence: 'This version of oboete cannot migrate or write this database.',
+      recovery: 'Upgrade oboete to a version that knows schema version 4.',
+    });
+    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 4);
+  });
+});
+
+test('a missing full-text table explains why search and injection are unavailable', async () => {
+  await withItemDatabase((db) => {
+    db.exec('DROP TABLE memories_fts');
+    assert.deepEqual(ftsItem(db, false), {
+      item: 'fts', status: 'degraded', reason: 'no such table: memories_fts',
+      consequence: 'Search and injection return nothing until full-text search is back (packs say `index_unavailable`).',
+      recovery: 'Use a Node.js build whose bundled SQLite has FTS5 (22.16 and 24.x do), then run `oboete doctor` again.',
+    });
+  });
+});
+
+test('an unreadable lease table produces a worker recovery sentence', async () => {
+  await withItemDatabase((db) => {
+    db.exec('DROP TABLE worker_lease');
+    assert.deepEqual(workerItem(db, ITEM_NOW, false), {
+      item: 'worker', status: 'degraded', reason: 'no such table: worker_lease',
+      consequence: 'Queued events are not summarized until the lease is reclaimed.',
+      recovery: '`oboete observe` (it reclaims a stale lease and releases it when the queue is empty)',
+    });
+  });
+});
+
+test('a fresh worker heartbeat reports the process and elapsed seconds', async () => {
+  await withItemDatabase((db) => {
+    db.prepare("UPDATE worker_lease SET owner_token = 'live-owner', pid = 1234, heartbeat_at = ? WHERE id = 1").run(ITEM_NOW - 2000);
+    assert.deepEqual(workerItem(db, ITEM_NOW, false), {
+      item: 'worker', status: 'healthy', reason: 'The worker process 1234 is alive (heartbeat 2 seconds ago).',
+      consequence: '', recovery: '',
+    });
+  });
+});
+
+test('a spool backlog reports waiting events and removes its writable probe', async () => {
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    ensureDirectories(paths);
+    writeFileSync(join(paths.spool, 'waiting.json'), '{}');
+    assert.deepEqual(spoolItem(paths), {
+      item: 'spool', status: 'degraded', reason: '1 events are waiting in the spool.',
+      consequence: 'They are not summarized or searchable yet.', recovery: '`oboete observe`',
+    });
+    assert.deepEqual(readdirSync(paths.spool).sort(), ['failed', 'pi-ack', 'waiting.json']);
+  });
+});
+
+test('quarantined spool files are a warning and directories are not counted', async () => {
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    ensureDirectories(paths);
+    writeFileSync(join(paths.spoolFailed, 'rejected.json'), '{}');
+    mkdirSync(join(paths.spoolFailed, 'directory'));
+    assert.deepEqual(spoolItem(paths), {
+      item: 'spool', status: 'warning', reason: `1 quarantined files are under ${paths.spoolFailed}.`,
+      consequence: 'Those events were not recovered into storage.',
+      recovery: `Inspect and delete the files under ${paths.spoolFailed}.`,
+    });
+  });
+});
+
+test('a missing spool directory reports potential event loss', async () => {
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    assert.deepEqual(spoolItem(paths), {
+      item: 'spool', status: 'degraded', reason: `The spool directory ${paths.spool} is not writable.`,
+      consequence: 'When the database is also unavailable, events are lost (the hook reports the count on stderr).',
+      recovery: `\`chmod u+rwx ${paths.spool}\``,
+    });
+  });
+});
+
+test('an unconfigured provider explains fallback without probing', async () => {
+  await withItemDatabase(async (db, paths) => {
+    assert.deepEqual(await providerItem({
+      config: configSchema.parse({ observer: { preset: 'none' } }), paths, db,
+      integrityFailed: false, deps: itemDeps, options: itemOptions, now: ITEM_NOW,
+    }), {
+      item: 'provider', status: 'degraded', reason: 'No observer provider is configured.',
+      consequence: 'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
+      recovery: '`oboete setup --provider <preset>` (workers-ai is the free remote default; ollama stays local)',
+    });
+    assert.equal(db.prepare('SELECT count(*) AS n FROM provider_usage').get()?.n, 0);
+  });
+});
+
+test('missing provider credentials name the variable to export', async () => {
+  await withItemDatabase(async (db, paths) => {
+    assert.deepEqual(await providerItem({
+      config: configSchema.parse({ observer: { preset: 'openrouter' } }), paths, db,
+      integrityFailed: false, deps: itemDeps, options: itemOptions, now: ITEM_NOW,
+    }), {
+      item: 'provider', status: 'degraded',
+      reason: 'No credentials are set for the openrouter preset (env:OBOETE_OPENROUTER_API_KEY).',
+      consequence: 'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
+      recovery: 'Export that variable in the shell that runs the agents.',
+    });
+  });
+});
+
+test('a provider probe without storage remains unverified', async () => {
+  await withTempHome(async (home) => {
+    assert.deepEqual(await providerItem({
+      config: configSchema.parse({ observer: { preset: 'ollama', model: 'qwen3:8b' } }),
+      paths: oboetePaths(home), db: null, integrityFailed: false,
+      deps: itemDeps, options: itemOptions, now: ITEM_NOW,
+    }), {
+      item: 'provider', status: 'unverified', reason: 'The database is unavailable, so the provider could not be probed.',
+      consequence: 'Summaries cannot be checked until storage is open.',
+      recovery: '`oboete doctor --probe-provider` after storage is repaired.',
+    });
+  });
+});
+
+test('changed provider consent stops a doctor probe before reserving allowance', async () => {
+  await withItemDatabase(async (db, paths) => {
+    assert.deepEqual(await providerItem({
+      config: configSchema.parse({}), paths, db, integrityFailed: false,
+      deps: { ...itemDeps, env: { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' } },
+      options: itemOptions, now: ITEM_NOW,
+    }), {
+      item: 'provider', status: 'degraded', reason: 'Observer consent changed before reservation.',
+      consequence: 'Summaries fall back to rule-based until the provider answers.',
+      recovery: '`oboete setup --accept-egress`',
+    });
+    assert.equal(db.prepare('SELECT count(*) AS n FROM provider_usage').get()?.n, 0);
+  });
+});
+
+for (const [name, calls, exhaustedAt, reason] of [
+  ['provider exhaustion', 1, ITEM_NOW, 'provider_exhausted: The provider reported exhaustion today.'],
+  ['the daily cap', 150, null, 'daily_cap: The daily cap of 150 calls is used up.'],
+] as const) {
+  test(`${name} stops a doctor probe without consuming another call`, async () => {
+    await withItemDatabase(async (db, paths) => {
+      db.prepare('INSERT INTO provider_usage (utc_day, preset, calls, exhausted_at, reset_at) VALUES (?, ?, ?, ?, ?)')
+        .run('2026-09-06', 'workers-ai', calls, exhaustedAt, ITEM_RESET);
+      const config = configSchema.parse({});
+      assert.deepEqual(await providerItem({
+        config, paths, db, integrityFailed: false,
+        deps: { ...itemDeps, env: { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' } },
+        options: itemOptions, now: ITEM_NOW,
+      }), {
+        item: 'provider', status: 'degraded', reason,
+        consequence: 'Summaries fall back to rule-based until the provider answers.',
+        recovery: 'Wait for the reset at 2026-09-07T00:00:00.000Z or choose another preset with `oboete setup --provider`.',
+      });
+      assert.deepEqual(allowanceItem(config, db, false, ITEM_NOW), {
+        item: 'allowance', status: 'degraded',
+        reason: exhaustedAt === null ? 'The daily cap of 150 calls is used up.' : 'The provider reported exhaustion today.',
+        consequence: 'Summaries come from the fallback until the allowance resets; no call is retried.',
+        recovery: 'Wait for the reset at 2026-09-07T00:00:00.000Z or switch preset with `oboete setup --provider`.',
+      });
+      assert.deepEqual(
+        { ...db.prepare('SELECT calls, exhausted_at FROM provider_usage').get() },
+        { calls, exhausted_at: exhaustedAt },
+      );
+    });
+  });
+}
+
+test('a rejected provider credential consumes one probe and recommends checking credentials', async () => {
+  await withItemDatabase(async (db, paths) => {
+    const env = { OBOETE_OPENROUTER_API_KEY: 'test-key' };
+    const draft = configSchema.parse({ observer: { preset: 'openrouter' } });
+    const config = configSchema.parse({ ...draft, consent: { hash: consentHash(consentTuple(draft, env)), accepted_at: ITEM_NOW } });
+    let requests = 0;
+    const item = await providerItem({
+      config, paths, db, integrityFailed: false, options: itemOptions, now: ITEM_NOW,
+      deps: { ...itemDeps, env, fetch: async () => {
+        requests += 1;
+        return new Response(JSON.stringify({ error: { message: 'invalid credential' } }), {
+          status: 401, headers: { 'content-type': 'application/json' },
+        });
+      } },
+    });
+    assert.deepEqual(item, {
+      item: 'provider', status: 'degraded', reason: 'Provider request failed with HTTP 401.',
+      consequence: 'Summaries fall back to rule-based until the provider answers.',
+      recovery: 'Check the credentials for this preset and run `oboete doctor --probe-provider` again.',
+    });
+    assert.equal(requests, 1);
+    assert.deepEqual(
+      { ...db.prepare('SELECT utc_day, preset, calls, exhausted_at FROM provider_usage').get() },
+      { utc_day: '2026-09-06', preset: 'openrouter', calls: 1, exhausted_at: null },
+    );
+  });
+});
+
+for (const [name, fetchedAt] of [['an expired', ITEM_NOW - 86_400_000], ['a future-dated', ITEM_NOW + 1]] as const) {
+  test(`${name} catalog cannot verify the configured model`, async () => {
+    await withItemDatabase((db) => {
+      runtimeStateSet(db, 'workers_ai_catalog', JSON.stringify({
+        accountId: 'account', models: ['chosen-model'], defaultModelPresent: false,
+        hasPaidOnlyModels: false, fetchedAt,
+      }), ITEM_NOW);
+      assert.deepEqual(catalogItems(configSchema.parse({ observer: { model: 'chosen-model' } }), db, false,
+        { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' }, ITEM_NOW), [{
+        item: 'catalog', status: 'unverified', reason: 'The cached catalog is stale; the worker refreshes it on the next batch.',
+        consequence: 'The configured model has not been checked against the provider list this run.',
+        recovery: '`oboete observe` fetches the catalog on the first batch.',
+      }]);
+    });
+  });
+}
+
+for (const [name, models, paid, expected] of [
+  ['a missing model', ['another-model'], false, {
+    status: 'degraded', reason: 'The configured model is not in the catalog of 1 models fetched 2026-09-06T12:00:00.000Z.',
+    consequence: 'Summaries fall back to rule-based until `[observer] model` names a listed model.', recovery: 'Set `[observer] model` to a listed model.',
+  }],
+  ['paid models', ['chosen-model'], true, {
+    status: 'warning', reason: 'The catalog lists models that need a paid Workers plan; the configured model chosen-model is only used if it is free.',
+    consequence: 'A paid-only model will fail with provider_paid and fall back to rule-based summaries.', recovery: 'Keep `[observer] model` on a free model.',
+  }],
+  ['a listed model', ['chosen-model'], false, {
+    status: 'healthy', reason: 'The catalog of 1 models fetched 2026-09-06T12:00:00.000Z includes the configured model.', consequence: '', recovery: '',
+  }],
+] as const) {
+  test(`a fresh catalog reports ${name}`, async () => {
+    await withItemDatabase((db) => {
+      runtimeStateSet(db, 'workers_ai_catalog', JSON.stringify({
+        accountId: 'account', models, defaultModelPresent: false, hasPaidOnlyModels: paid, fetchedAt: ITEM_NOW,
+      }), ITEM_NOW);
+      assert.deepEqual(catalogItems(configSchema.parse({ observer: { model: 'chosen-model' } }), db, false,
+        { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' }, ITEM_NOW), [{ item: 'catalog', ...expected }]);
+    });
+  });
+}

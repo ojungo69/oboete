@@ -17,6 +17,7 @@ import { whyReport } from '../../src/injection/ledger.js';
 import { buildPromptPack, type PromptPackInput } from '../../src/injection/pack.js';
 import { oboetePaths } from '../../src/paths.js';
 import { cjkBigrams } from '../../src/retrieval/fts.js';
+import { runtimeStateGet, runtimeStateSet } from '../../src/worker/purge.js';
 import { withTempHome } from '../helpers/home.js';
 
 const NOW = 1_700_000_000_000;
@@ -616,4 +617,143 @@ test('a record whose stored pack was lost delivers only the items that were rend
       { id: 'm_2', title: 'Lease note two', body: 'The lease is fenced by its owner token.' },
     ],
   );
+});
+
+test('repeating PreToolUse and PostToolUse does not duplicate an attempt or delivery', async () => {
+  await withGrok(async (db) => {
+    const id = await pendingPack(db);
+    const hook = { conversationId: CONVERSATION, toolCallId: 'replayed-call', now: NOW + 1 };
+    assert.match(attachOnPreToolUse(db, hook)!, /Retrieval note one/);
+    assert.match(attachOnPreToolUse(db, { ...hook, now: NOW + 2 })!, /Retrieval note one/);
+    assert.deepEqual(JSON.parse(String(injectionRow(db, id).attempts_json)), [
+      { tool_call_id: 'replayed-call', execution: 'pending', delivery: 'pending', at: NOW + 1 },
+    ]);
+    assert.equal(injectionRow(db, id).attempted_at, NOW + 1);
+    assert.deepEqual(confirmOnPostToolUse(db, { ...hook, now: NOW + 3 }), { status: 'emitted', text: null });
+    assert.deepEqual(confirmOnPostToolUse(db, { ...hook, now: NOW + 4 }), { status: 'already', text: null });
+    assert.equal(injectionRow(db, id).delivery_count, 1);
+  });
+});
+
+test('hooks without a pending pack create no attempts or injection records', async () => {
+  await withGrok(async (db) => {
+    const hook = { conversationId: CONVERSATION, toolCallId: 'no-pack', now: NOW };
+    assert.equal(attachOnPreToolUse(db, hook), null);
+    assert.deepEqual(confirmOnPostToolUse(db, hook), { status: 'none', text: null });
+    assert.equal(markFailure(db, { ...hook, kind: 'PostToolUseFailure' }), 'none');
+    assert.equal(markFailure(db, { ...hook, kind: 'PermissionDenied' }), 'none');
+    assert.equal(closeOnStop(db, { conversationId: CONVERSATION, sawAnyToolHook: false, now: NOW }), 'none');
+    assert.equal(db.prepare('SELECT count(*) AS n FROM injections').get()?.n, 0);
+    assert.equal(db.prepare('SELECT count(*) AS n FROM runtime_state').get()?.n, 0);
+  });
+});
+
+test('a malformed stored pack emits no text and leaves its memories injectable', async () => {
+  await withGrok(async (db) => {
+    const id = await pendingPack(db);
+    runtimeStateSet(db, `injection_pending:${CONVERSATION}`, '{damaged', NOW);
+    const hook = { conversationId: CONVERSATION, toolCallId: 'lost-text', now: NOW + 1 };
+    assert.equal(attachOnPreToolUse(db, hook), null);
+    assert.deepEqual(confirmOnPostToolUse(db, hook), { status: 'emitted', text: null });
+    assert.deepEqual(
+      db.prepare('SELECT memory_id, decision, reason FROM injection_items WHERE injection_id = ?').all(id).map((row) => ({ ...row })),
+      [{ memory_id: 'm_1', decision: 'omitted', reason: 'not_delivered' }],
+    );
+    assert.equal(runtimeStateGet(db, `injection_pending:${CONVERSATION}`), undefined);
+    const next = await buildPromptPack(db, promptInput({ now: NOW + 2 }));
+    assert.match(next!.text, /Retrieval note one/);
+    assert.equal(next!.items.find((item) => item.memoryId === 'm_1')?.decision, 'planned');
+  });
+});
+
+test('a permission denial without PreToolUse is recorded and the next call can deliver', async () => {
+  await withGrok(async (db) => {
+    const id = await pendingPack(db);
+    assert.equal(markFailure(db, {
+      conversationId: CONVERSATION, toolCallId: 'denied-first', kind: 'PermissionDenied', now: NOW + 1,
+    }), 'attempted');
+    assert.deepEqual(JSON.parse(String(injectionRow(db, id).attempts_json)), [
+      { tool_call_id: 'denied-first', execution: 'denied', delivery: 'dropped', at: NOW + 1 },
+    ]);
+    assert.match(attachOnPreToolUse(db, {
+      conversationId: CONVERSATION, toolCallId: 'allowed-next', now: NOW + 2,
+    })!, /Retrieval note one/);
+    assert.deepEqual(confirmOnPostToolUse(db, {
+      conversationId: CONVERSATION, toolCallId: 'allowed-next', now: NOW + 3,
+    }), { status: 'emitted', text: null });
+    assert.equal(markFailure(db, {
+      conversationId: CONVERSATION, toolCallId: 'unrelated-deny', kind: 'PermissionDenied', now: NOW + 4,
+    }), 'none');
+    assert.equal(injectionRow(db, id).delivery_count, 1);
+    assert.deepEqual(JSON.parse(String(injectionRow(db, id).attempts_json)), [
+      { tool_call_id: 'denied-first', execution: 'denied', delivery: 'dropped', at: NOW + 1 },
+      { tool_call_id: 'allowed-next', execution: 'ran', delivery: 'delivered', at: NOW + 2 },
+    ]);
+  });
+});
+
+test('a control character in stored blocks closes the merged pack without delivery', async () => {
+  await withGrok(async (db) => {
+    const id = await pendingPack(db);
+    const key = `injection_pending:${CONVERSATION}`;
+    const stored = JSON.parse(runtimeStateGet(db, key)!) as { blocks: { lines: string[] }[] };
+    stored.blocks[0].lines.push('corrupt\u0000text');
+    runtimeStateSet(db, key, JSON.stringify(stored), NOW);
+    assert.equal(await pendingPack(db, { prompt: 'lease', now: NOW + 1 }), id);
+    assert.equal(attachOnPreToolUse(db, {
+      conversationId: CONVERSATION, toolCallId: 'cannot-deliver', now: NOW + 2,
+    }), null);
+    const row = injectionRow(db, id);
+    assert.equal(row.state, 'omitted');
+    assert.equal(row.degraded_reason, 'index_unavailable');
+    assert.equal(runtimeStateGet(db, key), undefined);
+    assert.deepEqual(
+      db.prepare('SELECT memory_id, decision, reason FROM injection_items ORDER BY memory_id').all().map((item) => ({ ...item })),
+      [
+        { memory_id: 'm_1', decision: 'omitted', reason: 'not_delivered' },
+        { memory_id: 'm_2', decision: 'omitted', reason: null },
+      ],
+    );
+  }, [
+    { id: 'm_1', title: 'Retrieval note one', body: 'The ranking is lexical.' },
+    { id: 'm_2', title: 'Lease note two', body: 'The owner token fences writes.' },
+  ]);
+});
+
+test('a concurrent merge invalidates validation and omits only the unvalidated incoming memory', async () => {
+  await withGrok(async (db) => {
+    const id = await pendingPack(db);
+    let entered!: () => void;
+    let resume!: () => void;
+    const validating = new Promise<void>((resolve) => { entered = resolve; });
+    const released = new Promise<void>((resolve) => { resume = resolve; });
+    const second = pendingPack(db, { prompt: 'lease', now: NOW + 1 }, {
+      detect: async () => { entered(); await released; return false; }, directives: [],
+    });
+    await validating;
+    try {
+      assert.equal(await pendingPack(db, { prompt: 'migration', now: NOW + 2 }), id);
+    } finally {
+      resume();
+    }
+    assert.equal(await second, id);
+    const text = attachOnPreToolUse(db, {
+      conversationId: CONVERSATION, toolCallId: 'merged-call', now: NOW + 3,
+    });
+    assert.match(text!, /Retrieval note one/);
+    assert.match(text!, /Migration note three/);
+    assert.doesNotMatch(text!, /Lease note two/);
+    assert.deepEqual(
+      db.prepare('SELECT memory_id, decision, reason FROM injection_items ORDER BY memory_id').all().map((item) => ({ ...item })),
+      [
+        { memory_id: 'm_1', decision: 'planned', reason: null },
+        { memory_id: 'm_2', decision: 'omitted', reason: 'not_delivered' },
+        { memory_id: 'm_3', decision: 'planned', reason: null },
+      ],
+    );
+  }, [
+    { id: 'm_1', title: 'Retrieval note one', body: 'The ranking is lexical.' },
+    { id: 'm_2', title: 'Lease note two', body: 'The owner token fences writes.' },
+    { id: 'm_3', title: 'Migration note three', body: 'Schema changes are transactional.' },
+  ]);
 });

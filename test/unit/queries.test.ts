@@ -9,10 +9,13 @@ import {
   latestSessionSummary,
   listMemories,
   markInjected,
+  memorySources,
   memoriesForSession,
   memoryScope,
+  nearbyCandidates,
   pinnedMemories,
   setPinned,
+  setReviewed,
   timeline,
   tombstone,
 } from '../../src/db/queries.js';
@@ -480,5 +483,104 @@ test('markInjected stamps only the given memories', async () => {
       .map((row) => String(row.id));
 
     assert.deepEqual(stamped, ['m_a_eligible_unreviewed_active', 'm_a_summary_done']);
+  });
+});
+
+test('reviewing a memory changes only a visible row and keeps imported rows quarantined', async () => {
+  await withSeededDatabase((db) => {
+    const scope = memoryScope(db, { repoId: REPO_A, destination: 'injection' });
+    assert.equal(setReviewed(db, { id: 'm_a_eligible_unreviewed_active', scope }), true);
+    assert.equal(
+      db.prepare('SELECT review_state FROM memories WHERE id = ?').get('m_a_eligible_unreviewed_active')?.review_state,
+      'reviewed',
+    );
+    for (const id of [
+      'm_a_eligible_imported_active',
+      'm_a_secret_unreviewed_active',
+      'm_a_eligible_unreviewed_deleted',
+      'm_a_eligible_unreviewed_superseded',
+      'm_b_eligible_unreviewed_active',
+      'missing',
+    ]) {
+      assert.equal(setReviewed(db, { id, scope }), false, id);
+    }
+    assert.deepEqual(
+      db.prepare("SELECT id, review_state FROM memories WHERE id IN ('m_a_eligible_imported_active', 'm_b_eligible_unreviewed_active') ORDER BY id")
+        .all().map((row) => ({ ...row })),
+      [
+        { id: 'm_a_eligible_imported_active', review_state: 'imported' },
+        { id: 'm_b_eligible_unreviewed_active', review_state: 'unreviewed' },
+      ],
+    );
+  });
+});
+
+test('unpinning clears both pin fields without deleting the memory', async () => {
+  await withSeededDatabase((db) => {
+    const scope = memoryScope(db, { repoId: REPO_A, destination: 'injection' });
+    const id = 'm_a_eligible_unreviewed_active';
+    assert.equal(setPinned(db, { id, scope, pinnedAt: null, pinOrder: null }), true);
+    assert.deepEqual(
+      { ...db.prepare('SELECT pinned_at, pin_order, deleted_at FROM memories WHERE id = ?').get(id) },
+      { pinned_at: null, pin_order: null, deleted_at: null },
+    );
+    assert.equal(getMemory(db, id, scope)?.title, 'Title of m_a_eligible_unreviewed_active');
+    assert.equal(pinnedMemories(db, scope).some((row) => row.id === id), false);
+  });
+});
+
+test('memory sources retain insertion order and citations without raw events', async () => {
+  await withSeededDatabase((db) => {
+    db.exec('PRAGMA reverse_unordered_selects = ON');
+    db.prepare(
+      `INSERT INTO memory_sources (memory_id, citation_kind, citation_value, source_agent)
+       VALUES ('m_a_summary_done', 'commit', 'abc123', 'codex')`,
+    ).run();
+    assert.deepEqual(memorySources(db, 'm_a_summary_done').map((row) => ({ ...row })), [
+      { raw_event_id: 'e_a_done_1', citation_kind: 'file_read', citation_value: 'src/db/queries.ts', source_agent: 'claude' },
+      { raw_event_id: null, citation_kind: 'commit', citation_value: 'abc123', source_agent: 'codex' },
+    ]);
+    assert.deepEqual(memorySources(db, 'missing'), []);
+  });
+});
+
+test('timeline keeps session-linked memories and citations after raw events expire', async () => {
+  await withSeededDatabase((db) => {
+    db.prepare("UPDATE memories SET source_session_id = 's_a_done' WHERE id = 'm_a_summary_done'").run();
+    db.prepare("DELETE FROM raw_events WHERE id = 'e_a_done_1'").run();
+    const [session] = timeline(db, REPO_A, { sessionId: 's_a_done', limit: 1 });
+    assert.deepEqual(session.memory_ids, ['m_a_summary_done']);
+    assert.deepEqual(session.turns.map((turn) => ({ id: turn.id, memory_ids: turn.memory_ids })), [
+      { id: 't_a_done_1', memory_ids: [] },
+      { id: 't_a_done_2', memory_ids: [] },
+    ]);
+    assert.deepEqual(session.memories[0], {
+      id: 'm_a_summary_done', type: 'session_summary', title: 'Title of m_a_summary_done',
+      body: 'Body of m_a_summary_done', sensitivity: 'eligible', review_state: 'unreviewed',
+      degraded_reason: null, source_session_id: 's_a_done', source_batch_id: null,
+      pinned_at: null, pin_order: null, created_at: 1730, turn_ids: [],
+      sources: [{ raw_event_id: 'e_a_done_1', citation_kind: 'file_read', citation_value: 'src/db/queries.ts', source_agent: 'claude' }],
+    });
+  });
+});
+
+test('nearby candidates apply quarantine before a deterministic result limit', async () => {
+  await withSeededDatabase((db) => {
+    for (const id of [
+      'm_a_eligible_unreviewed_active', 'm_a_eligible_reviewed_active',
+      'm_a_local_only_reviewed_active', 'm_a_eligible_imported_active',
+      'm_b_eligible_unreviewed_active',
+    ]) {
+      db.prepare("UPDATE memories SET title = 'Kiwi matching', body = 'Kiwi matching handles stored rows.' WHERE id = ?").run(id);
+    }
+    assert.deepEqual(
+      nearbyCandidates(db, { repoId: REPO_A, text: 'Kiwi matching' }).map((row) => row.id),
+      ['m_a_eligible_reviewed_active', 'm_a_eligible_unreviewed_active', 'm_a_local_only_reviewed_active'],
+    );
+    assert.deepEqual(
+      nearbyCandidates(db, { repoId: REPO_A, text: 'Kiwi matching', limit: 2 }).map((row) => row.id),
+      ['m_a_eligible_reviewed_active', 'm_a_eligible_unreviewed_active'],
+    );
+    assert.deepEqual(nearbyCandidates(db, { repoId: REPO_A, text: 'unfindable phrase' }), []);
   });
 });
