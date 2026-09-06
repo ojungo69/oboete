@@ -178,6 +178,13 @@ function findApiError(
 async function responseWithinLimit(response: Response): Promise<Response> {
   const declaredLength = Number(response.headers.get('content-length'));
   if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+    if (response.body !== null) {
+      try {
+        await response.body.cancel();
+      } catch {
+        // The size failure is authoritative.
+      }
+    }
     const error = new Error('provider response exceeded 1 MB');
     error.name = 'ResponseTooLargeError';
     throw error;

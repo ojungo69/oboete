@@ -416,6 +416,40 @@ test('an HTTP envelope above 1 MB is stopped before the SDK parses it', async ()
   assert.equal(harness.reservations(), 1);
 });
 
+test('a declared content-length above 1 MB cancels the live body', async () => {
+  let cancelled = false;
+  const scripted = scriptedFetch(
+    async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([120]));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            'content-type': 'application/json',
+            'content-length': '2097152',
+          },
+        },
+      ),
+  );
+  const harness = httpHarness(scripted.fetch);
+  const result = await summarizeWithProvider(INPUT, harness.ctx);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, 'unusable_output');
+    assert.equal(result.detail, 'provider response exceeded 1 MB');
+  }
+  assert.equal(result.attempts, 1);
+  assert.equal(harness.reservations(), 1);
+  assert.equal(cancelled, true);
+});
+
 test('a returned model id alias is rejected', async () => {
   const scripted = scriptedFetch(async () =>
     openAiResponse(JSON.stringify(output()), { model: `${MODEL}-2026-09-04` }),
