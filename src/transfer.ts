@@ -128,7 +128,7 @@ export function exportMemories(
         title: withoutText ? '' : row.title,
         body: withoutText ? '' : row.body,
         concepts: withoutText ? '[]' : row.concepts,
-        source_agent: sources[0]?.source_agent ?? null,
+        source_agent: withoutText ? null : (sources[0]?.source_agent ?? null),
         sources: withoutText ? [] : sources,
       }),
     );
@@ -428,9 +428,14 @@ export async function runImport(argv: string[], io: Io = { writeOut: (t) => proc
     io.writeError(`${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
   }
+  // A regular file has a size to check up front; a pipe (`-`, /dev/stdin, a process substitution)
+  // is read to a bounded string first, so a slow writer never holds the database's write lock.
+  let regular = false;
   if (file !== '-') {
     try {
-      if (statSync(file).size > MAX_FILE_BYTES) {
+      const stat = statSync(file);
+      regular = stat.isFile();
+      if (regular && stat.size > MAX_FILE_BYTES) {
         io.writeError(`${file} exceeds ${MAX_FILE_BYTES / (1024 * 1024)} MB; nothing was imported.\n`);
         return 2;
       }
@@ -439,10 +444,11 @@ export async function runImport(argv: string[], io: Io = { writeOut: (t) => proc
       return 2;
     }
   }
-  // Standard input is read before the database is opened: a slow pipe must not hold the write lock.
-  const source = file === '-' ? await readBounded(process.stdin, MAX_FILE_BYTES) : createReadStream(file, { encoding: 'utf8' });
+  const source = regular
+    ? createReadStream(file, { encoding: 'utf8' })
+    : await readBounded(file === '-' ? process.stdin : createReadStream(file), MAX_FILE_BYTES);
   if (source === null) {
-    io.writeError(`standard input exceeds ${MAX_FILE_BYTES / (1024 * 1024)} MB; nothing was imported.\n`);
+    io.writeError(`${file === '-' ? 'standard input' : file} exceeds ${MAX_FILE_BYTES / (1024 * 1024)} MB; nothing was imported.\n`);
     return 2;
   }
   return await withDatabase(async (db) => {

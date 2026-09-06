@@ -37,7 +37,11 @@ import { credentialGuidance } from '../setup/consent.js';
 import { describe } from '../setup/setup.js';
 import { transactionImmediate } from '../worker/lease.js';
 
-const PROVIDER_PROBE_TIMEOUT_MS = 10_000;
+/**
+ * The worker allows 60 s per call (observer/llm.ts REQUEST_TIMEOUT_MS); the default model answers
+ * the probe in several seconds, so 10 s reported a healthy provider as timed out (dogfood 2026-09-06).
+ */
+const PROVIDER_PROBE_TIMEOUT_MS = 30_000;
 
 const PROVIDER_PROBE_INPUT: ObserverInput = {
   repo_ref: 'doctor',
@@ -160,7 +164,7 @@ export async function providerItem(input: {
     }
     return degraded(
       'provider',
-      `${outcome.reason}: ${outcome.detail}`,
+      outcomeSentence(outcome),
       FALLBACK_CONSEQUENCE,
       providerRecovery(outcome.reason, config, paths, deps.env, estimate.resetAt),
     );
@@ -207,6 +211,15 @@ function lastProviderOutcome(db: DatabaseSync): string {
   } catch {
     return 'none yet';
   }
+}
+
+/** The worker's outcome as one sentence: the detail already names the failure, the code is dropped. */
+function outcomeSentence(outcome: Extract<CallOutcome, { ok: false }>): string {
+  const detail = outcome.detail.trim().replace(/\.$/u, '');
+  const text = detail === '' ? `The provider call failed (${outcome.reason})` : `${detail[0].toUpperCase()}${detail.slice(1)}`;
+  return outcome.reason === 'timeout'
+    ? `${text} after ${PROVIDER_PROBE_TIMEOUT_MS / 1000} seconds.`
+    : `${text}.`;
 }
 
 function providerRecovery(

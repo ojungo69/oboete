@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -138,6 +139,7 @@ test('export writes the header and one line per memory; tombstones and secret ro
     assert.equal(secret.title, '');
     assert.equal(secret.body, '');
     assert.equal(secret.concepts, '[]');
+    assert.equal(secret.source_agent, null);
     assert.deepEqual(secret.sources, []);
     assert.ok(!lines.join('\n').includes('sk-live-secret'));
     assert.ok(!lines.join('\n').includes('.env.production'));
@@ -361,6 +363,13 @@ test('oboete export and oboete import wire the module with the exit codes of con
       assert.notEqual(stderr, '');
       assert.equal(await runImport([file, '--map-repo', 'nonsense'], io), 2);
       assert.equal(await runImport([join(home, 'missing.jsonl')], io), 2);
+      // A pipe named as the file argument is read through the same bound as standard input.
+      const fifo = join(home, 'out', 'import.fifo');
+      execFileSync('mkfifo', [fifo]);
+      const writer = spawn('sh', ['-c', `cat "$1" > "$2"`, 'sh', file, fifo], { stdio: 'ignore' });
+      const written = new Promise<void>((resolve) => writer.on('exit', () => resolve()));
+      assert.equal(await runImport([fifo], io), 0);
+      await written;
     });
   });
 });

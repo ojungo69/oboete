@@ -376,8 +376,8 @@ test('an unreachable provider degrades provider and an answering fetch restores 
     const broken = await context.doctor(['--json', '--probe-provider']);
     assert.equal(broken, 1, context.output);
     const failed = context.item('provider');
-    assertBroken(failed, 'degraded', 'unreachable', 'rule-based', 'network|host');
-    assert.match(failed.reason, /^unreachable/);
+    assertBroken(failed, 'degraded', 'Provider request failed', 'rule-based', 'network|host');
+    assert.match(failed.reason, /^Provider request failed.*\.$/);
 
     context.fetch = answeringFetch();
     const restored = await context.doctor(['--json', '--probe-provider']);
