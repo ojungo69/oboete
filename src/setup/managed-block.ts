@@ -103,9 +103,25 @@ export function removeTomlBlock(file: string, blockText = ''): void {
   if (existsSync(target)) {
     const lines = readLines(target);
     const region = findRegion(lines, file);
-    const next = region
-      ? [...lines.slice(0, region.start), ...lines.slice(region.end + 1)]
-      : blockText === '' ? lines : stripTomlTables(lines, parseTomlOrThrow(joinLines(lines), file), parseTomlOrThrow(blockText, file));
+    let next = lines;
+    if (region) {
+      next = [...lines.slice(0, region.start), ...lines.slice(region.end + 1)];
+    } else {
+      // A marker-less file has to parse before oboete can tell whether its table is in there. One
+      // that does not is left whole, and so is its backup, which the developer can restore.
+      let current: unknown;
+      try {
+        current = parseToml(joinLines(lines));
+      } catch (error) {
+        throw new ManagedFileError(
+          `${file} would not parse as TOML (${reason(error)}), so any \`[mcp_servers.oboete]\` table oboete wrote ` +
+            `there was left for you to delete by hand (the ${BACKUP_SUFFIX} copy is kept)`,
+          'reparse_failed',
+          file,
+        );
+      }
+      if (blockText !== '') next = stripTomlTables(lines, current, parseTomlOrThrow(blockText, file));
+    }
     if (next !== lines) {
       writeManaged(target, file, joinLines(next), parseTomlOrThrow, {}, false);
     }

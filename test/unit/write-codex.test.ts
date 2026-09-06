@@ -259,6 +259,36 @@ test('removeCodex removes its handlers, leaves a malformed marker-less config.to
   });
 });
 
+test('removeCodex without its options still refuses a malformed marker-less config.toml and keeps its backup', async () => {
+  await withTempHome(async (home) => {
+    const configPath = join(home, 'config.toml');
+    writeFileSync(configPath, 'model = "gpt-5"\n');
+    writeCodex(home, { node: NODE, bundle: BUNDLE });
+    const malformed = readFileSync(configPath, 'utf8').replace(/^# oboete:(?:begin|end)\n/gm, '') + 'broken = [\n';
+    writeFileSync(configPath, malformed);
+
+    assert.throws(
+      () => removeCodex(home),
+      (error: unknown) => error instanceof ManagedFileError && error.code === 'reparse_failed',
+    );
+    assert.equal(readFileSync(configPath, 'utf8'), malformed);
+    assert.equal(readFileSync(configPath + BACKUP_SUFFIX, 'utf8'), 'model = "gpt-5"\n');
+  });
+});
+
+test('removeCodex cuts a marked region whose inside no longer parses and gives the rest of the file back', async () => {
+  await withTempHome(async (home) => {
+    const configPath = join(home, 'config.toml');
+    writeFileSync(configPath, 'model = "gpt-5"\n');
+    writeCodex(home, { node: NODE, bundle: BUNDLE });
+    writeFileSync(configPath, readFileSync(configPath, 'utf8').replace('# oboete:end', 'broken = [\n# oboete:end'));
+
+    removeCodex(home, { node: NODE, bundle: BUNDLE });
+    assert.equal(readFileSync(configPath, 'utf8'), 'model = "gpt-5"\n');
+    assert.equal(existsSync(configPath + BACKUP_SUFFIX), false);
+  });
+});
+
 test('Codex repairs and removes marker-less registration and trust rows while keeping developer tables', async () => {
   await withTempHome(async (home) => {
     const configPath = join(home, 'config.toml');

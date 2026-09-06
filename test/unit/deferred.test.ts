@@ -674,6 +674,27 @@ test('a malformed stored pack emits no text and leaves its memories injectable',
   });
 });
 
+test('a call without an attempt does not close the record while another call still carries the pack', async () => {
+  await withGrok(async (db) => {
+    const id = await pendingPack(db);
+    const carrier = { conversationId: CONVERSATION, toolCallId: 'carrier', now: NOW + 1 };
+    assert.match(attachOnPreToolUse(db, carrier)!, /Retrieval note one/);
+    // The stored pack is damaged after the carrier took its text to the model.
+    runtimeStateSet(db, `injection_pending:${CONVERSATION}`, '{damaged', NOW + 1);
+    const bystander = { conversationId: CONVERSATION, toolCallId: 'bystander', now: NOW + 2 };
+    assert.deepEqual(confirmOnPostToolUse(db, bystander), { status: 'none', text: null });
+    assert.equal(injectionRow(db, id).state, 'attempted');
+
+    assert.deepEqual(confirmOnPostToolUse(db, { ...carrier, now: NOW + 3 }), { status: 'emitted', text: null });
+    const row = injectionRow(db, id);
+    assert.equal(row.state, 'emitted');
+    assert.equal(row.delivery_count, 1);
+    assert.deepEqual(JSON.parse(String(row.attempts_json)), [
+      { tool_call_id: 'carrier', execution: 'ran', delivery: 'delivered', at: NOW + 1 },
+    ]);
+  });
+});
+
 test('a permission denial without PreToolUse is recorded and the next call can deliver', async () => {
   await withGrok(async (db) => {
     const id = await pendingPack(db);

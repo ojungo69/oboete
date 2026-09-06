@@ -131,6 +131,25 @@ test('marker-less recovery ignores header text inside strings and tables under o
   });
 });
 
+test('removeTomlBlock leaves a marker-less file that does not parse, and its backup, for the developer', async () => {
+  await withTempHome(async (home) => {
+    const file = agentFile(home, '.grok/config.toml', 'model = "grok-4"\n');
+    applyTomlBlock(file, MCP_BLOCK);
+    const malformed = readFileSync(file, 'utf8').replace(/^# oboete:(?:begin|end)\n/gm, '') + 'broken = [\n';
+    writeFileSync(file, malformed);
+
+    for (const blockText of [undefined, MCP_BLOCK]) {
+      assert.throws(
+        () => removeTomlBlock(file, blockText),
+        (error: unknown) =>
+          error instanceof ManagedFileError && error.code === 'reparse_failed' && /delete by hand/.test(error.message),
+      );
+      assert.equal(readFileSync(file, 'utf8'), malformed);
+      assert.equal(readFileSync(file + BACKUP_SUFFIX, 'utf8'), 'model = "grok-4"\n');
+    }
+  });
+});
+
 test('marker-less recovery refuses a foreign command even when it has oboete arguments', async () => {
   await withTempHome(async (home) => {
     const original = MCP_BLOCK.replace('/usr/bin/node', '/opt/foreign-command');

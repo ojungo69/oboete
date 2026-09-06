@@ -482,8 +482,11 @@ function deliver(
     // reaches PostToolUse with no attempt of its own: it carried nothing, so it delivers nothing.
     if (attempt === undefined && emitted) return { status: 'none', text: null };
     if (attempt === undefined && !emitted && pending === null) {
-      // Rule 3 would have this hook print the pack, but its stored text is gone: nothing reached
-      // the model, so the record closes undelivered and its memories stay injectable (FR-026).
+      // Rule 3 would have this hook print the pack, but its stored text is gone. A call that still
+      // carries it has not returned yet: this one delivers nothing and the record waits for that
+      // one. Otherwise nothing reached the model, so the record closes undelivered and its memories
+      // stay injectable (FR-026).
+      if (attempts.some((entry) => entry.delivery === 'pending')) return { status: 'none', text: null };
       attempts.push({
         tool_call_id: input.toolCallId,
         execution: input.execution,

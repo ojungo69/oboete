@@ -14,7 +14,6 @@ import {
   applyTomlBlock,
   BACKUP_SUFFIX,
   isPlainObject,
-  ManagedFileError,
   readOboeteMcp,
   removeJsonHandlers,
   removeTomlBlock,
@@ -104,16 +103,8 @@ export function removeCodex(home: string, options?: CodexSetupOptions): void {
   const identity = previous === null ? options : { node: previous.command, bundle: previous.args[0] };
   const block = identity === undefined ? undefined : blockText(hooksPath, identity, configPath);
   removeJsonHandlers(hooksPath);
-  if (block === '') {
-    // The handlers are gone, so Codex fires nothing; the MCP table and trust rows stay because the
-    // file cannot be rewritten safely, and so does its backup, which the developer can restore.
-    throw new ManagedFileError(
-      `${configPath} would not parse as TOML, so its \`[mcp_servers.oboete]\` table and \`[hooks.state]\` rows ` +
-        `were left for you to delete by hand (the hooks.json handlers are removed; the ${BACKUP_SUFFIX} copy is kept)`,
-      'reparse_failed',
-      configPath,
-    );
-  }
+  // The handlers are gone first, so Codex fires nothing even when the file below cannot be
+  // rewritten: removeTomlBlock then leaves it, and its backup, for the developer.
   removeTomlBlock(configPath, block);
   for (const file of oboetes) if (isEmptyShell(file)) rmSync(file);
 }
@@ -165,8 +156,8 @@ function blockText(hooksPath: string, options: CodexSetupOptions, recoverFrom?: 
     try {
       config = parseToml(readFileSync(recoverFrom, 'utf8'));
     } catch {
-      // Unreadable recovery config: the empty block tells removeCodex to stop after the hooks
-      // (a real block always carries the MCP table, so '' is never produced otherwise).
+      // Unreadable recovery config: with no block to strip, removeTomlBlock cuts a marked region and
+      // refuses a marker-less file, which is what such a file gets either way.
       return '';
     }
     const rows = isPlainObject(config.hooks) && isPlainObject(config.hooks.state) ? config.hooks.state : {};
