@@ -131,6 +131,7 @@ test('providerRequestOptions follows the preset structured-output policy', () =>
           type: 'json_schema',
           json_schema: { name: 'observer_output', schema: observerOutputJsonSchema },
         },
+        chat_template_kwargs: { enable_thinking: false },
       },
     },
   });
