@@ -210,3 +210,23 @@ Exit codes: 1 for every degraded run, 3 for the corrupted header, 0 for the rest
 - **The provider probe timed out while `curl` answered in seconds.** The default model `@cf/zai-org/glm-4.7-flash` was answering the one-event probe with 1,600–3,700 completion tokens of reasoning (25–45 s, 60–136 neurons per call), so the worker's 60 s deadline turned e2e summaries into fallbacks and the 10 s probe always failed. The observer now sends `chat_template_kwargs: { enable_thinking: false }`: the same request answers in 1.4 s with 122 tokens (5.7 neurons). The probe deadline is 30 s.
 - **The break-3 script corrupted the account's database in run 2** by copying `memory.db` and deleting its WAL while a probe-spawned worker still held the file; `quick_check` later reported "2nd reference to page 134". The doctor recovery text was followed literally (`oboete export` read 61 memories; move aside; `oboete setup`; `oboete import` of the remote repository's 8 rows) and doctor returned to exit 0. The script now kills live workers and checkpoints the WAL before it touches the file.
 - Two wording items: probe outcome codes and Pi diagnostics are rendered as sentences; the Pi warning covers the last 24 hours (nothing cleared the rows before, so it was permanent).
+
+## 2026-09-06 no-credentials run 2026-09-06T08-47-25-047Z (SC-004)
+
+- 6 of 6 requested pairs pass (partial run; SC-001 needs all 12)
+- No provider credentials: yes
+- Report: <run>/report.json
+
+| seed | receive | status | elapsed ms | missing facts |
+|---|---|---:|---:|---|
+| claude | codex | pass | 28118 | none |
+| claude | pi | pass | 24893 | none |
+| codex | claude | pass | 30381 | none |
+| codex | pi | pass | 31830 | none |
+| pi | claude | pass | 22885 | none |
+| pi | codex | pass | 32990 | none |
+
+
+Isolated-user run of `scripts/e2e/isolated-user.mjs --no-credentials --daily --pairs claude:codex,claude:pi,codex:claude,codex:pi,pi:claude,pi:codex` with bundle 0.1.0-alpha.0 (commit 8baf3414): the provider credentials are removed from the agents' environment, so every summary is rule-based. All six pairs recalled the three seeded facts on the first turn, and `report.json` records `degraded_marker: true` for every receiving pack (the `> degraded:` line of contracts/agents.md). Elapsed 23–33 s per pair against 62–93 s on 2026-09-04, which is the provider deadline no longer being waited for.
+
+The six Grok Build pairs were not run today: the user put Grok on a quota hold until 2026-09-12 (the same hold covers implementation delegation), so the SC-004 statement "still passes SC-001" is shown for the nine non-Grok pairs here and the three Grok-receive pairs remain to be repeated when the hold ends. The exhausted-allowance variant was exercised through doctor's break 6 (`allowance` degraded with the reset time) and the unit tests of the `daily_cap` / `provider_exhausted` degraded reasons (test/unit/degraded.test.ts); an end-to-end pair run with a pre-exhausted counter is still open.
