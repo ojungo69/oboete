@@ -17,6 +17,7 @@ import { test } from 'node:test';
 import { PRESET_CATALOG } from '../../src/config.js';
 import { openDatabase } from '../../src/db/open.js';
 import { runDoctor, type DoctorDeps, type DoctorItem } from '../../src/doctor.js';
+import { probeReason } from '../../src/doctor/agents.js';
 import { oboetePaths } from '../../src/paths.js';
 import type { VersionSpawn } from '../../src/setup/detect.js';
 import { removeJsonHandlers } from '../../src/setup/managed-block.js';
@@ -293,6 +294,71 @@ test('hook entry removed degrades agent:claude and setup restores it', async () 
   });
 });
 
+for (const [agent, label] of [['grok', 'Grok'], ['codex', 'Codex']]) {
+  test(`doctor reports the marker-less ${agent} table and setup repairs it`, async () => {
+    await harness(async (context) => {
+      const configPath = join(context.userHome, `.${agent}`, 'config.toml');
+      const unmarked = readFileSync(configPath, 'utf8').replace(/^# oboete:(?:begin|end)\n/gm, '');
+      writeFileSync(configPath, unmarked);
+
+      for (const argv of [['--json'], ['--json', '--no-probe-agents']]) {
+        assert.equal(await context.doctor(argv), 1, context.output);
+        const item = context.item(`agent:${agent}`);
+        assert.equal(item.status, 'degraded');
+        assert.equal(item.reason, `${label} rewrote its config.toml and dropped the oboete markers; the MCP table is still there.`);
+        assert.equal(item.recovery, `Run \`oboete setup --agents ${agent}\`.`);
+        assert.equal(readFileSync(configPath, 'utf8'), unmarked, 'doctor only reads the file');
+      }
+
+      assert.equal(await context.setup(['--agents', agent, '--yes']), 0);
+      assert.equal(await context.doctor(), 0, context.output);
+      assert.equal(context.item(`agent:${agent}`).status, 'healthy');
+    });
+  });
+
+  test(`doctor does not claim a foreign ${agent} table lost oboete markers`, async () => {
+    await harness(async (context) => {
+      const configPath = join(context.userHome, `.${agent}`, 'config.toml');
+      const unmarked = readFileSync(configPath, 'utf8')
+        .replace(/^# oboete:(?:begin|end)\n/gm, '')
+        .replace(`command = "${NODE}"`, 'command = "foreign-server"');
+      writeFileSync(configPath, unmarked);
+      await context.doctor(['--json', '--no-probe-agents']);
+      assert.doesNotMatch(context.item(`agent:${agent}`).reason, /dropped the oboete markers/);
+    });
+  });
+}
+
+test('every probe outcome has a sentence for every agent', () => {
+  const outcomes = {
+    agent_not_installed: 'Grok is not installed, so the probe could not run.',
+    spawn_failed: 'Grok could not be started for the probe.',
+    probe_event_stored: 'Grok ran and its capture event reached oboete.',
+    probe_lookup_failed: 'The capture event from Grok could not be checked in the oboete database.',
+    probe_event_missing: 'Grok ran but no capture event reached oboete.',
+    agent_exit_7: 'Grok exited with code 7 before the probe finished.',
+    agent_exit_signal: 'Grok was stopped by a signal before the probe finished.',
+    deadline_exceeded: 'Grok did not finish the probe within 90 seconds.',
+  };
+  for (const [code, sentence] of Object.entries(outcomes)) {
+    for (const label of ['Grok', 'Codex', 'Claude', 'Pi']) {
+      assert.equal(probeReason(label, code), sentence.replace('Grok', label));
+    }
+  }
+  assert.equal(probeReason('Grok', 'unknown_outcome'), 'The Grok probe could not be verified.');
+});
+
+test('doctor renders an agent exit as a sentence', async () => {
+  await harness(async (context) => {
+    context.spawn = ((command: string, args: readonly string[]) => {
+      if (basename(command) === 'grok') return closingChild(7);
+      return storingSpawn(context.paths.db)(command, [...args]);
+    }) as unknown as typeof spawn;
+    assert.equal(await context.doctor(), 1, context.output);
+    assert.equal(context.item('agent:grok').reason, 'Grok exited with code 7 before the probe finished.');
+  });
+});
+
 test('database chmod 0o444 degrades storage with exit 1 and chmod 0o600 restores it', async () => {
   await harness(async (context) => {
     chmodSync(context.paths.db, 0o444);
@@ -441,7 +507,7 @@ test('a stale Pi .started file degrades pi and deleting it restores health', asy
   });
 });
 
-test('a Pi spawn ENOENT degrades agent:pi with pi_spawn_failed', async () => {
+test('a Pi spawn failure degrades agent:pi with a sentence', async () => {
   await harness(async (context) => {
     context.spawn = ((command: string, args: readonly string[]) => {
       if (basename(command) === 'pi') {
@@ -460,8 +526,8 @@ test('a Pi spawn ENOENT degrades agent:pi with pi_spawn_failed', async () => {
     const broken = await context.doctor();
     assert.equal(broken, 1, context.output);
     const entry = context.item('agent:pi');
-    assertBroken(entry, 'degraded', 'pi_spawn_failed', 'Pi', 'setup');
-    assert.match(entry.reason, /pi_spawn_failed/);
+    assertBroken(entry, 'degraded', 'could not be started', 'Pi', 'setup');
+    assert.equal(entry.reason, 'Pi could not be started for the probe.');
 
     context.spawn = storingSpawn(context.paths.db);
     const restored = await context.doctor();

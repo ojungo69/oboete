@@ -5,7 +5,7 @@
 // file is touched, and Codex's own `memories` setting is read by nobody here (FR-032, FR-043).
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { stringify as stringifyToml } from 'smol-toml';
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 
 import { trustedHash, trustKey } from './codex-trust.js';
 import type { CodexHandler } from './codex-trust.js';
@@ -13,6 +13,8 @@ import {
   applyJsonHandlers,
   applyTomlBlock,
   BACKUP_SUFFIX,
+  isPlainObject,
+  readOboeteMcp,
   removeJsonHandlers,
   removeTomlBlock,
 } from './managed-block.js';
@@ -63,6 +65,8 @@ export function writeCodex(home: string, options: CodexSetupOptions): WriteResul
   const hooksExisted = existsSync(hooksPath);
   const hooksBackupExisted = existsSync(hooksPath + BACKUP_SUFFIX);
   const backupExisted = existsSync(configPath + BACKUP_SUFFIX);
+  const previous = readOboeteMcp(configPath, hooksPath, 'codex');
+  const previousBlockText = previous === null ? undefined : blockText(hooksPath, { node: previous.command, bundle: previous.args[0] }, configPath);
 
   const groups: Record<string, CodexGroup[]> = {};
   // One call: `handlers` is the whole of what oboete owns in the file, so wiring the events in
@@ -72,7 +76,7 @@ export function writeCodex(home: string, options: CodexSetupOptions): WriteResul
 
   try {
     // `config.toml` can hold an API key, so its backup is owner-only.
-    applyTomlBlock(configPath, blockText(hooksPath, options), { credentialBearing: true });
+    applyTomlBlock(configPath, blockText(hooksPath, options), { credentialBearing: true, previousBlockText });
   } catch (error) {
     // Codex skips a handler that has no matching trust row and says nothing, so handlers left
     // behind by a setup that could not write the rows would be wired and silently inert. A setup
@@ -89,14 +93,17 @@ export function writeCodex(home: string, options: CodexSetupOptions): WriteResul
   return { files: [hooksPath, configPath] };
 }
 
-export function removeCodex(home: string): void {
+export function removeCodex(home: string, options?: CodexSetupOptions): void {
   const hooksPath = resolve(home, 'hooks.json');
   const configPath = resolve(home, 'config.toml');
   // A backup exists for every file that was the developer's before setup, so a file without one is
   // oboete's own: what removal leaves of it is an empty shell rather than their configuration.
   const oboetes = [hooksPath, configPath].filter((file) => !existsSync(file + BACKUP_SUFFIX));
+  const previous = readOboeteMcp(configPath, hooksPath, 'codex');
+  const identity = previous === null ? options : { node: previous.command, bundle: previous.args[0] };
+  const block = identity === undefined ? undefined : blockText(hooksPath, identity, configPath);
   removeJsonHandlers(hooksPath);
-  removeTomlBlock(configPath);
+  removeTomlBlock(configPath, block);
   for (const file of oboetes) if (isEmptyShell(file)) rmSync(file);
 }
 
@@ -129,7 +136,7 @@ function group(wiring: Wiring, options: CodexSetupOptions): CodexGroup {
  * index, so the positions are read back from the file rather than assumed. Only oboete's own
  * handlers get a row; trusting the developer's hooks is not oboete's decision to make.
  */
-function blockText(hooksPath: string, options: CodexSetupOptions): string {
+function blockText(hooksPath: string, options: CodexSetupOptions, recoverFrom?: string): string {
   const merged = mergedGroups(hooksPath);
   const state: Record<string, { trusted_hash: string }> = {};
   for (const wiring of WIRING) {
@@ -142,6 +149,25 @@ function blockText(hooksPath: string, options: CodexSetupOptions): string {
       });
     });
   }
+  if (recoverFrom !== undefined && existsSync(recoverFrom)) {
+    const config = parseToml(readFileSync(recoverFrom, 'utf8'));
+    const rows = isPlainObject(config.hooks) && isPlainObject(config.hooks.state) ? config.hooks.state : {};
+    // BUG-ASSESSMENT.md: trust hashes retain bundle identity even when hook positions are lost.
+    for (const wiring of WIRING) {
+      const prefix = trustKey(hooksPath, wiring.event, 0, 0).slice(0, -3);
+      const expected = group(wiring, options);
+      const hashes = new Set([
+        trustedHash(wiring.event, expected.matcher, expected.hooks[0]),
+        ...Object.entries(state).filter(([key]) => key.startsWith(prefix)).map(([, row]) => row.trusted_hash),
+      ]);
+      for (const [key, row] of Object.entries(rows)) {
+        if (key.startsWith(prefix) && /^\d+:\d+$/.test(key.slice(prefix.length)) &&
+          isPlainObject(row) && typeof row.trusted_hash === 'string' && hashes.has(row.trusted_hash)) {
+          state[key] = { trusted_hash: row.trusted_hash };
+        }
+      }
+    }
+  }
   // `hooks` and `hooks.state` carry no key of their own, so smol-toml emits only the
   // `[hooks.state."<key>"]` rows and never a `[hooks]` header to collide with the developer's.
   return stringifyToml({
@@ -151,6 +177,7 @@ function blockText(hooksPath: string, options: CodexSetupOptions): string {
 }
 
 function mergedGroups(hooksPath: string): Record<string, CodexGroup[]> {
+  if (!existsSync(hooksPath)) return {};
   const file = JSON.parse(readFileSync(hooksPath, 'utf8')) as { hooks?: Record<string, CodexGroup[]> };
   return file.hooks ?? {};
 }

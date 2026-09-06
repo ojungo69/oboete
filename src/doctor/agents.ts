@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { stringify as stringifyToml } from 'smol-toml';
 
 import {
   asNumber,
@@ -22,7 +23,7 @@ import {
   type AgentDetection,
   type SetupAgent,
 } from '../setup/detect.js';
-import { isOboeteOwned, isPlainObject } from '../setup/managed-block.js';
+import { hasUnmarkedTomlBlock, isOboeteOwned, isPlainObject, readOboeteMcp } from '../setup/managed-block.js';
 import { probeEventStored, runProbes, type ProbeResult } from '../setup/probe.js';
 import { SETUP_RESULT_KEY } from '../setup/setup.js';
 import { PI_HANG_AFTER_MS, runtimeStateGet } from '../worker/purge.js';
@@ -44,9 +45,11 @@ export async function agentItems(
 ): Promise<DoctorItem[]> {
   try {
     const detected = detectAgents(deps.env, deps.versionSpawn);
+    const missingMarkers = new Set(detected.filter(configMarkersMissing).map(({ agent }) => agent));
     const targets = detected.filter(
       (agent) =>
         agent.installed &&
+        !missingMarkers.has(agent.agent) &&
         !hookMissing(agent) &&
         !options.noProbeAgents &&
         db !== null &&
@@ -67,7 +70,7 @@ export async function agentItems(
 
     const items: DoctorItem[] = [];
     for (const agent of detected) {
-      items.push(oneAgentItem(agent, db, integrityFailed, options, results));
+      items.push(oneAgentItem(agent, db, integrityFailed, options, results, missingMarkers.has(agent.agent)));
       if (agent.nativeMemory !== null) {
         items.push(
           warning(
@@ -91,6 +94,7 @@ function oneAgentItem(
   integrityFailed: boolean,
   options: DoctorOptions,
   results: ReadonlyMap<SetupAgent, ProbeResult>,
+  markersMissing: boolean,
 ): DoctorItem {
   const name = `agent:${agent.agent}`;
   const label = AGENT_LABEL[agent.agent];
@@ -98,6 +102,15 @@ function oneAgentItem(
   const setupRecovery = `\`oboete setup --agents ${agent.agent}\``;
 
   if (!agent.installed) return healthy(name, 'Not installed.');
+
+  if (markersMissing) {
+    return degraded(
+      name,
+      `${label} rewrote its config.toml and dropped the oboete markers; the MCP table is still there.`,
+      `${label} capture and injection have not been verified for this configuration.`,
+      `Run ${setupRecovery}.`,
+    );
+  }
 
   if (hookMissing(agent)) {
     const reason =
@@ -159,16 +172,48 @@ function oneAgentItem(
     );
   }
 
-  let reason = result.reason;
-  if (agent.agent === 'pi' && (result.reason === 'spawn_failed' || result.reason.includes('spawn'))) {
-    reason = `pi_spawn_failed (${result.reason})`;
-  }
   return degraded(
     name,
-    reason,
+    probeReason(label, result.reason),
     captureConsequence,
     `${setupRecovery}; if it still fails, run the agent once by hand and read its own error output.`,
   );
+}
+
+function configMarkersMissing(agent: AgentDetection): boolean {
+  if (agent.agent !== 'grok' && agent.agent !== 'codex') return false;
+  const home = agent.agent === 'grok' ? dirname(dirname(agent.configPath)) : dirname(agent.configPath);
+  const config = join(home, 'config.toml');
+  const mcp = readOboeteMcp(config, agent.configPath, agent.agent === 'grok' ? 'claude-or-grok' : 'codex');
+  return mcp !== null && hasUnmarkedTomlBlock(config, stringifyToml({ mcp_servers: { oboete: mcp } }));
+}
+
+export function probeReason(label: string, code: string): string {
+  switch (code) {
+    case 'agent_not_installed':
+      return `${label} is not installed, so the probe could not run.`;
+    case 'spawn_failed':
+      // The Pi diagnostic keeps its name (tasks.md T069: pi_spawn_failed) next to the sentence.
+      return label === 'Pi'
+        ? `${label} could not be started for the probe (pi_spawn_failed).`
+        : `${label} could not be started for the probe.`;
+    case 'probe_event_stored':
+      return `${label} ran and its capture event reached oboete.`;
+    case 'probe_lookup_failed':
+      return `The capture event from ${label} could not be checked in the oboete database.`;
+    case 'probe_event_missing':
+      return `${label} ran but no capture event reached oboete.`;
+    case 'agent_exit_signal':
+      return `${label} was stopped by a signal before the probe finished.`;
+    case 'deadline_exceeded':
+      return `${label} did not finish the probe within 90 seconds.`;
+    default: {
+      const exit = /^agent_exit_(-?\d+)$/.exec(code);
+      return exit
+        ? `${label} exited with code ${exit[1]} before the probe finished.`
+        : `The ${label} probe could not be verified.`;
+    }
+  }
 }
 
 function hookMissing(agent: AgentDetection): boolean {

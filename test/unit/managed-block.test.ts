@@ -12,6 +12,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { parse as parseToml } from 'smol-toml';
 
 import {
   applyJsonHandlers,
@@ -24,6 +25,7 @@ import {
 import { withTempHome } from '../helpers/home.js';
 
 const BLOCK = '[hooks.state."/opt/oboete.mjs:SessionStart:oboete:capture"]\ntrusted_hash = "sha256:beef"';
+const MCP_BLOCK = '[mcp_servers.oboete]\ncommand = "/usr/bin/node"\nargs = ["/opt/oboete/dist/oboete.mjs", "mcp"]\n';
 
 /**
  * A foreign agent file inside the temporary home; `mode` is what the developer's file carries.
@@ -90,6 +92,53 @@ test('applyTomlBlock replaces exactly the managed region and keeps the bytes aro
     assert.ok(!after.includes('stale'), 'the previous block is gone');
     assert.equal(after.match(/# oboete:begin/g)?.length, 1);
     assert.equal(after.match(/# oboete:end/g)?.length, 1);
+  });
+});
+
+test('marker-less tables are recovered by content, with quoted headers and array boundaries', async () => {
+  await withTempHome(async (home) => {
+    const head = '# Keep this comment.\nmodel = "gpt-5"\n';
+    const tail = '[[plugins]]\nname = "mine"\n[plugins.settings]\nenabled = true\n';
+    const original = head + MCP_BLOCK.replace('[mcp_servers.oboete]', '[ "mcp_servers" . \'oboete\' ] # rewritten') + 'enabled = false\n' + tail;
+    const file = agentFile(home, '.grok/config.toml', original);
+
+    applyTomlBlock(file, MCP_BLOCK, { credentialBearing: true });
+    const repaired = readFileSync(file, 'utf8');
+    assert.ok(repaired.startsWith(head + tail));
+    assert.equal(repaired.match(/^\[mcp_servers\.oboete\]$/gm)?.length, 1);
+    assert.equal(repaired.match(/^# oboete:begin$/gm)?.length, 1);
+    assert.doesNotThrow(() => parseToml(repaired));
+    assert.equal(readFileSync(file + BACKUP_SUFFIX, 'utf8'), original);
+    assert.equal(statSync(file + BACKUP_SUFFIX).mode & 0o777, 0o600);
+
+    writeFileSync(file, original);
+    removeTomlBlock(file, MCP_BLOCK);
+    assert.equal(readFileSync(file, 'utf8'), head + tail);
+    assert.doesNotThrow(() => parseToml(readFileSync(file, 'utf8')));
+  });
+});
+
+test('marker-less recovery ignores header text inside strings and tables under other parents', async () => {
+  await withTempHome(async (home) => {
+    const head = `description = '''\n${MCP_BLOCK}'''\n`;
+    const nested = MCP_BLOCK.replace('[mcp_servers.oboete]', '[profiles.work.mcp_servers.oboete]');
+    const file = agentFile(home, '.grok/config.toml', head + MCP_BLOCK + nested);
+
+    applyTomlBlock(file, MCP_BLOCK);
+    assert.ok(readFileSync(file, 'utf8').startsWith(head + nested));
+    removeTomlBlock(file);
+    assert.equal(readFileSync(file, 'utf8'), head + nested);
+  });
+});
+
+test('marker-less recovery refuses a foreign command even when it has oboete arguments', async () => {
+  await withTempHome(async (home) => {
+    const original = MCP_BLOCK.replace('/usr/bin/node', '/opt/foreign-command');
+    const file = agentFile(home, '.grok/config.toml', original);
+    assert.throws(() => applyTomlBlock(file, MCP_BLOCK), ManagedFileError);
+    assert.equal(readFileSync(file, 'utf8'), original);
+    removeTomlBlock(file, MCP_BLOCK);
+    assert.equal(readFileSync(file, 'utf8'), original);
   });
 });
 

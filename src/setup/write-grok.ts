@@ -15,6 +15,7 @@ import {
   BACKUP_SUFFIX,
   isOboeteOwned,
   isPlainObject,
+  readOboeteMcp,
   removeJsonHandlers,
   removeTomlBlock,
 } from './managed-block.js';
@@ -63,6 +64,7 @@ export function writeGrok(grokHome: string, options: GrokWriteOptions): GrokWrit
   const hooksExisted = existsSync(hooksFile);
   const hooksBackupExisted = existsSync(hooksFile + BACKUP_SUFFIX);
   const configBackupExisted = existsSync(configFile + BACKUP_SUFFIX);
+  const previous = readOboeteMcp(configFile, hooksFile, 'claude-or-grok');
 
   const handlers: Record<string, unknown[]> = {};
   for (const [event, timeout] of Object.entries(HOOK_TIMEOUTS)) {
@@ -82,12 +84,11 @@ export function writeGrok(grokHome: string, options: GrokWriteOptions): GrokWrit
   try {
     applyTomlBlock(
       configFile,
-      stringifyToml({
-        mcp_servers: {
-          oboete: { command: options.nodePath, args: [options.bundlePath, 'mcp'], enabled: true },
-        },
-      }),
-      { credentialBearing: true },
+      mcpBlock(options),
+      {
+        credentialBearing: true,
+        previousBlockText: previous === null ? undefined : mcpBlock({ nodePath: previous.command, bundlePath: previous.args[0] }),
+      },
     );
   } catch (error) {
     // The handlers go in before the block, so a failure here would otherwise leave Grok running
@@ -107,13 +108,24 @@ export function writeGrok(grokHome: string, options: GrokWriteOptions): GrokWrit
 }
 
 /** Undoes {@link writeGrok}: the handlers, the file when it held nothing else, and the MCP block. */
-export function removeGrok(grokHome: string): void {
+export function removeGrok(grokHome: string, options?: GrokWriteOptions): void {
   const hooksFile = join(grokHome, 'hooks', 'oboete.json');
+  const configFile = join(grokHome, 'config.toml');
+  const previous = readOboeteMcp(configFile, hooksFile, 'claude-or-grok');
+  const identity = previous === null ? options : { nodePath: previous.command, bundlePath: previous.args[0] };
   removeJsonHandlers(hooksFile);
   const remaining = readJson(hooksFile);
   // oboete created this file, so an empty one is oboete's leftover rather than the developer's.
   if (remaining !== null && Object.keys(remaining).length === 0) rmSync(hooksFile);
-  removeTomlBlock(join(grokHome, 'config.toml'));
+  removeTomlBlock(configFile, identity === undefined ? undefined : mcpBlock(identity));
+}
+
+function mcpBlock(options: GrokWriteOptions): string {
+  return stringifyToml({
+    mcp_servers: {
+      oboete: { command: options.nodePath, args: [options.bundlePath, 'mcp'], enabled: true },
+    },
+  });
 }
 
 /**

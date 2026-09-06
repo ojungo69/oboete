@@ -424,10 +424,10 @@ function unwire(
         break;
       }
       case 'codex':
-        removeCodex(home);
+        removeCodex(home, { node: deps.node, bundle: deps.bundle });
         break;
       case 'grok':
-        removeGrok(home);
+        removeGrok(home, { nodePath: deps.node, bundlePath: deps.bundle });
         break;
       case 'pi':
         removePi(home);
@@ -469,7 +469,7 @@ async function probeSelected(
 
 function failure(agent: SetupAgent, error: unknown): string[] {
   const lines = [`${agent}: ${describe(error)}`];
-  if (error instanceof ManagedFileError && error.code === 'reparse_failed') {
+  if (error instanceof ManagedFileError && error.foreignTable) {
     lines.push(
       `  Remove the \`[mcp_servers.oboete]\` table that is already in ${error.file} (\`grok mcp add\` and`,
       '  `codex mcp add` write one) and run setup again; oboete keeps its own copy in a managed block.',

@@ -24,7 +24,10 @@ import {
 } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { dirname } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { parse as parseToml } from 'smol-toml';
+
+import { shellQuote } from './shell-quote.js';
 
 export const BLOCK_BEGIN = '# oboete:begin';
 export const BLOCK_END = '# oboete:end';
@@ -43,12 +46,14 @@ export type ManagedFileErrorCode =
 export class ManagedFileError extends Error {
   readonly code: ManagedFileErrorCode;
   readonly file: string;
+  readonly foreignTable: boolean;
 
-  constructor(message: string, code: ManagedFileErrorCode, file: string) {
+  constructor(message: string, code: ManagedFileErrorCode, file: string, foreignTable = false) {
     super(message);
     this.name = 'ManagedFileError';
     this.code = code;
     this.file = file;
+    this.foreignTable = foreignTable;
   }
 }
 
@@ -58,6 +63,8 @@ export type ManagedWriteOptions = {
    * created 0600 instead of copying the original mode (research.md R8).
    */
   credentialBearing?: boolean;
+  /** BUG-ASSESSMENT.md: retain the old bundle identity before setup replaces its marked handlers. */
+  previousBlockText?: string;
 };
 
 /**
@@ -75,24 +82,122 @@ export function applyTomlBlock(
   const region = findRegion(lines, file);
   const inner = blockText.replace(/^\n+|\n+$/g, '');
   const block = inner === '' ? [BLOCK_BEGIN, BLOCK_END] : [BLOCK_BEGIN, ...inner.split('\n'), BLOCK_END];
+  const outside = region ? [...lines.slice(0, region.start), ...lines.slice(region.end + 1)] : lines;
+  const current = parseTomlOrThrow(joinLines(outside), file);
+  const expected = parseTomlOrThrow(inner, file);
+  const previous = parseTomlOrThrow(options.previousBlockText ?? '', file);
+  const path = ['mcp_servers', 'oboete'];
+  const existingMcp = tableAt(current, path);
+  const expectedMcp = tableAt(expected, path);
+  const foreignTable = existingMcp !== undefined && expectedMcp !== undefined &&
+    !sameMcpCommand(existingMcp, expectedMcp) && !sameMcpCommand(existingMcp, tableAt(previous, path));
   const next = region
     ? [...lines.slice(0, region.start), ...block, ...lines.slice(region.end + 1)]
-    : [...lines, ...block];
-  writeManaged(target, file, joinLines(next), parseTomlOrThrow, options, true);
+    : [...stripTomlTables(lines, current, expected, previous), ...block];
+  writeManaged(target, file, joinLines(next), (text, name) => parseTomlOrThrow(text, name, foreignTable), options, true);
 }
 
-/** Deletes the managed region with its delimiters, then the backup. A file without one is left alone. */
-export function removeTomlBlock(file: string): void {
+/** BUG-ASSESSMENT.md: removal must also find tables whose comment markers the agent dropped. */
+export function removeTomlBlock(file: string, blockText = ''): void {
   const target = resolveTarget(file);
   if (existsSync(target)) {
     const lines = readLines(target);
     const region = findRegion(lines, file);
-    if (region) {
-      const next = [...lines.slice(0, region.start), ...lines.slice(region.end + 1)];
+    const next = region
+      ? [...lines.slice(0, region.start), ...lines.slice(region.end + 1)]
+      : blockText === '' ? lines : stripTomlTables(lines, parseTomlOrThrow(joinLines(lines), file), parseTomlOrThrow(blockText, file));
+    if (next !== lines) {
       writeManaged(target, file, joinLines(next), parseTomlOrThrow, {}, false);
     }
   }
   rmSync(target + BACKUP_SUFFIX, { force: true });
+}
+
+type McpCommand = { command: string; args: [string, 'mcp'] };
+
+/** BUG-ASSESSMENT.md: a marked hook proves bundle ownership without guessing from a path fragment. */
+export function readOboeteMcp(file: string, hooksFile: string, agent: 'codex' | 'claude-or-grok'): McpCommand | null {
+  try {
+    const mcp = tableAt(parseToml(readFileSync(file, 'utf8')), ['mcp_servers', 'oboete']);
+    if (!isPlainObject(mcp) || typeof mcp.command !== 'string' || !Array.isArray(mcp.args) ||
+      mcp.args.length !== 2 || typeof mcp.args[0] !== 'string' || mcp.args[1] !== 'mcp') return null;
+    const root: unknown = JSON.parse(readFileSync(hooksFile, 'utf8'));
+    if (!isPlainObject(root) || !isPlainObject(root.hooks)) return null;
+    const prefix = `${shellQuote(mcp.command)} ${shellQuote(mcp.args[0])} hook --agent ${agent} --event `;
+    const owned = Object.entries(root.hooks).some(([event, groups]) =>
+      Array.isArray(groups) && groups.some((group) => isOboeteOwned(group) && isPlainObject(group) &&
+        Array.isArray(group.hooks) && group.hooks.some((hook) => isPlainObject(hook) &&
+          hook.type === 'command' && hook.command === prefix + event)),
+    );
+    return owned ? { command: mcp.command, args: [mcp.args[0], 'mcp'] } : null;
+  } catch {
+    return null;
+  }
+}
+
+export function hasUnmarkedTomlBlock(file: string, blockText: string): boolean {
+  try {
+    const lines = readLines(file);
+    return findRegion(lines, file) === null &&
+      stripTomlTables(lines, parseToml(joinLines(lines)), parseToml(blockText)) !== lines;
+  } catch {
+    return false;
+  }
+}
+
+function tableAt(root: unknown, path: readonly string[]): unknown {
+  let value = root;
+  for (const key of path) {
+    if (!isPlainObject(value) || !Object.hasOwn(value, key)) return undefined;
+    value = value[key];
+  }
+  return value;
+}
+
+function sameMcpCommand(value: unknown, expected: unknown): boolean {
+  return isPlainObject(value) && isPlainObject(expected) && typeof expected.command === 'string' &&
+    Array.isArray(expected.args) && expected.args.length === 2 && expected.args[1] === 'mcp' &&
+    value.command === expected.command && isDeepStrictEqual(value.args, expected.args);
+}
+
+function sameOwnedTable(value: unknown, expected: unknown): boolean {
+  if (!isPlainObject(value) || !isPlainObject(expected)) return false;
+  if (sameMcpCommand(value, expected)) {
+    return Object.keys(value).every((key) => ['command', 'args', 'enabled'].includes(key));
+  }
+  return Object.keys(expected).length === 1 && typeof expected.trusted_hash === 'string' &&
+    isDeepStrictEqual(value, expected);
+}
+
+function stripTomlTables(lines: string[], current: unknown, expected: unknown, previous?: unknown): string[] {
+  const headers: { start: number; path: string[] }[] = [];
+  for (const [start, line] of lines.entries()) {
+    if (!line.trimStart().startsWith('[')) continue;
+    try {
+      let header: unknown = parseToml(line);
+      // ponytail: prefix parsing is quadratic in table count; use parser source spans if configs grow large.
+      // BUG-ASSESSMENT.md: header text inside multiline values must not become a removal boundary.
+      parseToml(joinLines(lines.slice(0, start + 1)));
+      const path: string[] = [];
+      while (isPlainObject(header) && Object.keys(header).length === 1) {
+        const key = Object.keys(header)[0];
+        path.push(key);
+        header = header[key];
+      }
+      headers.push({ start, path: Array.isArray(header) ? [] : path });
+    } catch {
+      continue;
+    }
+  }
+  let next = lines;
+  for (let index = headers.length - 1; index >= 0; index -= 1) {
+    const { start, path } = headers[index];
+    if (path.length === 0) continue;
+    const value = tableAt(current, path);
+    if (!sameOwnedTable(value, tableAt(expected, path)) && !sameOwnedTable(value, tableAt(previous, path))) continue;
+    next = [...next.slice(0, start), ...next.slice(headers[index + 1]?.start ?? lines.length)];
+  }
+  return next;
 }
 
 /**
@@ -292,14 +397,15 @@ function findRegion(lines: string[], file: string): { start: number; end: number
   return { start, end };
 }
 
-function parseTomlOrThrow(text: string, file: string): void {
+function parseTomlOrThrow(text: string, file: string, foreignTable = false): unknown {
   try {
-    parseToml(text);
+    return parseToml(text);
   } catch (error) {
     throw new ManagedFileError(
       `${file} would not parse as TOML after the oboete block (${reason(error)})`,
       'reparse_failed',
       file,
+      foreignTable,
     );
   }
 }

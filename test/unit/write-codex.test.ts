@@ -234,6 +234,74 @@ test('removeCodex takes back the files oboete created', async () => {
   });
 });
 
+test('Codex repairs and removes marker-less registration and trust rows while keeping developer tables', async () => {
+  await withTempHome(async (home) => {
+    const configPath = join(home, 'config.toml');
+    const head = '# Developer settings.\n[features]\nhooks = true\n';
+    const tail = '[hooks.state."developer:session_start:0:0"]\ntrusted_hash = "sha256:mine"\n[[plugins]]\nname = "mine"\n';
+    writeFileSync(configPath, head);
+    writeCodex(home, { node: NODE, bundle: BUNDLE });
+    const unmarked = readFileSync(configPath, 'utf8').replace(/^# oboete:(?:begin|end)\n/gm, '') + tail;
+    writeFileSync(configPath, unmarked);
+
+    writeCodex(home, { node: NODE, bundle: BUNDLE });
+    const repaired = readFileSync(configPath, 'utf8');
+    assert.ok(repaired.startsWith(head + tail));
+    assert.equal(repaired.match(/^\[mcp_servers\.oboete\]$/gm)?.length, 1);
+    assert.equal(repaired.match(/^# oboete:begin$/gm)?.length, 1);
+    const parsed = parseToml(repaired) as { hooks: { state: Record<string, unknown> } };
+    assert.equal(Object.keys(parsed.hooks.state).length, EVENTS.length + 1);
+    assert.deepEqual(parsed.hooks.state['developer:session_start:0:0'], { trusted_hash: 'sha256:mine' });
+    writeCodex(home, { node: NODE, bundle: BUNDLE });
+    assert.equal(readFileSync(configPath, 'utf8'), repaired);
+
+    writeFileSync(configPath, unmarked);
+    removeCodex(home);
+    assert.equal(readFileSync(configPath, 'utf8'), head + tail);
+    assert.doesNotThrow(() => parseToml(readFileSync(configPath, 'utf8')));
+    assert.deepEqual(JSON.parse(readFileSync(join(home, 'hooks.json'), 'utf8')), {});
+  });
+});
+
+test('removeCodex keeps a marker-less registration that runs a foreign command', async () => {
+  await withTempHome(async (home) => {
+    const configPath = join(home, 'config.toml');
+    const original = `[mcp_servers.oboete]\ncommand = "foreign-server"\nargs = ["${BUNDLE}", "mcp"]\n`;
+    writeFileSync(configPath, original);
+    removeCodex(home);
+    assert.equal(readFileSync(configPath, 'utf8'), original);
+  });
+});
+
+test('Codex recovers trust rows after a developer hook shifts the group positions', async () => {
+  await withTempHome(async (home) => {
+    const codexHome = join(home, 'quoted.path]');
+    const hooksPath = join(codexHome, 'hooks.json');
+    const configPath = join(codexHome, 'config.toml');
+    writeCodex(codexHome, { node: NODE, bundle: BUNDLE });
+    const oldKey = trustKey(hooksPath, 'SessionStart', 0, 0);
+    const foreignKey = trustKey(hooksPath, 'SessionStart', 9, 0);
+    const foreign = `[hooks.state.${JSON.stringify(foreignKey)}]\ntrusted_hash = "sha256:mine"\n`;
+    writeFileSync(configPath, readFileSync(configPath, 'utf8').replace(/^# oboete:(?:begin|end)\n/gm, '') + foreign);
+    const hooks = hooksOf(hooksPath);
+    const userGroup = { hooks: [{ type: 'command', command: 'notify-send hi' }] };
+    hooks.SessionStart.unshift(userGroup);
+    writeFileSync(hooksPath, JSON.stringify({ hooks }));
+
+    writeCodex(codexHome, { node: NODE, bundle: BUNDLE });
+    const repaired = readFileSync(configPath, 'utf8');
+    const parsed = parseToml(repaired) as { hooks: { state: Record<string, unknown> } };
+    assert.equal(parsed.hooks.state[oldKey], undefined, 'the obsolete trust row is removed');
+    assert.deepEqual(parsed.hooks.state[trustKey(hooksPath, 'SessionStart', 1, 0)], { trusted_hash: OBOETE_HASHES.sessionStart });
+    assert.deepEqual(parsed.hooks.state[foreignKey], { trusted_hash: 'sha256:mine' });
+
+    writeFileSync(configPath, repaired.replace(/^# oboete:(?:begin|end)\n/gm, ''));
+    removeCodex(codexHome);
+    assert.equal(readFileSync(configPath, 'utf8'), foreign);
+    assert.deepEqual(hooksOf(hooksPath), { SessionStart: [userGroup] });
+  });
+});
+
 /** The developer registered oboete by hand; appending the block would define the table twice. */
 const HAND_WRITTEN_MCP = '[mcp_servers.oboete]\ncommand = "oboete"\nargs = ["mcp"]\n';
 

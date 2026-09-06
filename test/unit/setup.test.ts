@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import type { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { parse as parseToml } from 'smol-toml';
 
 import { consentMatches, loadConfig } from '../../src/config.js';
 import { openDatabase } from '../../src/db/open.js';
@@ -219,6 +220,52 @@ test('a probe that fails exits 1 and names the agent', async () => {
     assert.deepEqual(report.agents.map((agent) => [agent.agent, agent.probe]), [['claude', 'fail']]);
   });
 });
+
+for (const agent of ['grok', 'codex']) {
+  test(`setup gives hand-edit advice only for a foreign ${agent} registration`, async () => {
+    await harness(async (context) => {
+      const configPath = join(context.userHome, `.${agent}`, 'config.toml');
+      const original = `[mcp_servers.oboete]\ncommand = "foreign-server"\nargs = ["${BUNDLE}", "mcp"]\n`;
+      writeFileSync(configPath, original);
+      assert.equal(await context.run(['--agents', agent, '--provider', 'none']), 1);
+      assert.match(context.output, /Remove the `\[mcp_servers\.oboete\]` table/);
+      assert.equal(readFileSync(configPath, 'utf8'), original);
+
+      context.output = '';
+      writeFileSync(configPath, 'broken = = toml\n');
+      assert.equal(await context.run(['--agents', agent, '--provider', 'none']), 1);
+      assert.doesNotMatch(context.output, /Remove the `\[mcp_servers\.oboete\]` table/);
+      assert.equal(readFileSync(configPath, 'utf8'), 'broken = = toml\n');
+    });
+  });
+
+  test(`setup removes its marker-less ${agent} registration even when the hooks file is absent`, async () => {
+    await harness(async (context) => {
+      const configPath = join(context.userHome, `.${agent}`, 'config.toml');
+      const tail = '[history]\nenabled = true\n';
+      assert.equal(await context.run(['--agents', agent, '--provider', 'none']), 0);
+      writeFileSync(configPath, readFileSync(configPath, 'utf8').replace(/^# oboete:(?:begin|end)\n/gm, '') + tail);
+      unlinkSync(join(context.userHome, `.${agent}`, ...(agent === 'grok' ? ['hooks', 'oboete.json'] : ['hooks.json'])));
+      assert.equal(await context.run(['--agents', agent, '--remove']), 0, context.output);
+      assert.equal(readFileSync(configPath, 'utf8'), tail);
+    });
+  });
+
+  test(`setup repairs a marker-less ${agent} registration after the bundle moves`, async () => {
+    await harness(async (context) => {
+      const configPath = join(context.userHome, `.${agent}`, 'config.toml');
+      assert.equal(await context.run(['--agents', agent, '--provider', 'none']), 0);
+      writeFileSync(configPath, readFileSync(configPath, 'utf8').replace(/^# oboete:(?:begin|end)\n/gm, ''));
+      context.output = '';
+      assert.equal(await context.run(['--agents', agent, '--provider', 'none'], { bundle: '/new/oboete/dist/oboete.mjs' }), 0, context.output);
+      const repaired = readFileSync(configPath, 'utf8');
+      const parsed = parseToml(repaired) as { mcp_servers: { oboete: { args: string[] } } };
+      assert.deepEqual(parsed.mcp_servers.oboete.args, ['/new/oboete/dist/oboete.mjs', 'mcp']);
+      assert.equal(repaired.match(/^\[mcp_servers\.oboete\]$/gm)?.length, 1);
+      assert.doesNotMatch(context.output, /Remove the/);
+    });
+  });
+}
 
 test('--remove restores the foreign files and keeps the consent record', async () => {
   await harness(async (context) => {

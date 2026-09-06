@@ -137,6 +137,41 @@ test('removeGrok takes the hooks file and the MCP block away again', async () =>
   });
 });
 
+test('writeGrok repairs a marker-less registration and removeGrok removes it without changing other tables', async () => {
+  await withTempHome(async (home) => {
+    const head = '# Developer settings.\nmodel = "grok-4.6-build"\n';
+    const tail = '[marketplace]\nenabled = true\n[[plugins]]\nname = "mine"\n[ui]\ncolor = "blue"\n';
+    const original = `${head}[mcp_servers.oboete]\ncommand = "${NODE}"\nargs = ["${BUNDLE}", "mcp"]\nenabled = false\n${tail}`;
+    write(configFile(home), original);
+
+    writeGrok(grokHome(home), { nodePath: NODE, bundlePath: BUNDLE });
+    const repaired = readFileSync(configFile(home), 'utf8');
+    assert.ok(repaired.startsWith(head + tail));
+    assert.equal(repaired.match(/^\[mcp_servers\.oboete\]$/gm)?.length, 1);
+    assert.equal(repaired.match(/^# oboete:begin$/gm)?.length, 1);
+    assert.deepEqual(parseToml(repaired).mcp_servers, {
+      oboete: { command: NODE, args: [BUNDLE, 'mcp'], enabled: true },
+    });
+    writeGrok(grokHome(home), { nodePath: NODE, bundlePath: BUNDLE });
+    assert.equal(readFileSync(configFile(home), 'utf8'), repaired);
+
+    writeFileSync(configFile(home), original);
+    removeGrok(grokHome(home));
+    assert.equal(readFileSync(configFile(home), 'utf8'), head + tail);
+    assert.doesNotThrow(() => parseToml(readFileSync(configFile(home), 'utf8')));
+    assert.equal(existsSync(hooksFile(home)), false);
+  });
+});
+
+test('removeGrok keeps a marker-less registration that runs a foreign command', async () => {
+  await withTempHome(async (home) => {
+    const original = `[mcp_servers.oboete]\ncommand = "foreign-server"\nargs = ["${BUNDLE}", "mcp"]\n`;
+    write(configFile(home), original);
+    removeGrok(grokHome(home));
+    assert.equal(readFileSync(configFile(home), 'utf8'), original);
+  });
+});
+
 test('removeGrok keeps a hooks file that still holds a handler the developer added', async () => {
   await withTempHome(async (home) => {
     writeGrok(grokHome(home), { nodePath: NODE, bundlePath: BUNDLE });
