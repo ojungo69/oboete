@@ -1,0 +1,2482 @@
+[
+{
+"id": "AaB3XkchIqdfylE4c2nl",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/setup/write-codex.ts",
+"line": 141,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 18 to the 15 allowed."
+},
+{
+"id": "AaB3XkrWIqdfylE4c2sD",
+"rule": "javascript:S8786",
+"sev": "MAJOR",
+"file": "scripts/e2e/mcp-clients.mjs",
+"line": 294,
+"msg": "Simplify this regular expression to reduce its runtime, as it has super-linear performance due to backtracking."
+},
+{
+"id": "AaB3XkorIqdfylE4c2ql",
+"rule": "javascript:S3358",
+"sev": "MAJOR",
+"file": "scripts/e2e/probe-lib/trusthash.mjs",
+"line": 11,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkorIqdfylE4c2qm",
+"rule": "javascript:S3358",
+"sev": "MAJOR",
+"file": "scripts/e2e/probe-lib/trusthash.mjs",
+"line": 16,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkbGIqdfylE4c2nZ",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/doctor/agents.ts",
+"line": 293,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 18 to the 15 allowed."
+},
+{
+"id": "AaB3XkbGIqdfylE4c2na",
+"rule": "typescript:S4624",
+"sev": "MAJOR",
+"file": "src/doctor/agents.ts",
+"line": 364,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkkbIqdfylE4c2pP",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/transfer.ts",
+"line": 243,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 35 to the 15 allowed."
+},
+{
+"id": "AaB3XkcRIqdfylE4c2nk",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/setup/managed-block.ts",
+"line": 188,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 16 to the 15 allowed."
+},
+{
+"id": "AaB3XkkbIqdfylE4c2pS",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/transfer.ts",
+"line": 399,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 16 to the 15 allowed."
+},
+{
+"id": "AaB3XkmFIqdfylE4c2pt",
+"rule": "typescript:S7778",
+"sev": "MINOR",
+"file": "src/doctor.ts",
+"line": 133,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkmFIqdfylE4c2pu",
+"rule": "typescript:S7778",
+"sev": "MINOR",
+"file": "src/doctor.ts",
+"line": 138,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkmFIqdfylE4c2pv",
+"rule": "typescript:S7778",
+"sev": "MINOR",
+"file": "src/doctor.ts",
+"line": 139,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkmFIqdfylE4c2pw",
+"rule": "typescript:S7778",
+"sev": "MINOR",
+"file": "src/doctor.ts",
+"line": 140,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkmFIqdfylE4c2px",
+"rule": "typescript:S7778",
+"sev": "MINOR",
+"file": "src/doctor.ts",
+"line": 145,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkmFIqdfylE4c2py",
+"rule": "typescript:S7778",
+"sev": "MINOR",
+"file": "src/doctor.ts",
+"line": 146,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkmFIqdfylE4c2pz",
+"rule": "typescript:S7778",
+"sev": "MINOR",
+"file": "src/doctor.ts",
+"line": 149,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkmFIqdfylE4c2p0",
+"rule": "typescript:S7778",
+"sev": "MINOR",
+"file": "src/doctor.ts",
+"line": 152,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkmFIqdfylE4c2p1",
+"rule": "typescript:S7778",
+"sev": "MINOR",
+"file": "src/doctor.ts",
+"line": 153,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkmFIqdfylE4c2p2",
+"rule": "typescript:S3358",
+"sev": "MAJOR",
+"file": "src/doctor.ts",
+"line": 163,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkbGIqdfylE4c2nX",
+"rule": "typescript:S6551",
+"sev": "MINOR",
+"file": "src/doctor/agents.ts",
+"line": 245,
+"msg": "'row.probe ?? 'none'' will use Object's default stringification format ('[object Object]') when stringified."
+},
+{
+"id": "AaB3XkbGIqdfylE4c2nY",
+"rule": "typescript:S6551",
+"sev": "MINOR",
+"file": "src/doctor/agents.ts",
+"line": 245,
+"msg": "'row.trust ?? 'none'' will use Object's default stringification format ('[object Object]') when stringified."
+},
+{
+"id": "AaB3XkbGIqdfylE4c2nb",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/doctor/agents.ts",
+"line": 371,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 21 to the 15 allowed."
+},
+{
+"id": "AaB3XkbGIqdfylE4c2nc",
+"rule": "typescript:S7758",
+"sev": "MINOR",
+"file": "src/doctor/agents.ts",
+"line": 374,
+"msg": "Prefer `String#codePointAt()` over `String#charCodeAt()`."
+},
+{
+"id": "AaB3XkbGIqdfylE4c2nd",
+"rule": "typescript:S7758",
+"sev": "MINOR",
+"file": "src/doctor/agents.ts",
+"line": 380,
+"msg": "Prefer `String#codePointAt()` over `String#charCodeAt()`."
+},
+{
+"id": "AaB3XkX3IqdfylE4c2nW",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/doctor/provider.ts",
+"line": 63,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 16 to the 15 allowed."
+},
+{
+"id": "AaB3XkbZIqdfylE4c2ne",
+"rule": "typescript:S6582",
+"sev": "MINOR",
+"file": "src/doctor/storage.ts",
+"line": 300,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkbZIqdfylE4c2nf",
+"rule": "typescript:S4624",
+"sev": "MAJOR",
+"file": "src/doctor/storage.ts",
+"line": 356,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkkbIqdfylE4c2pO",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/transfer.ts",
+"line": 150,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 22 to the 15 allowed."
+},
+{
+"id": "AaB3XkrWIqdfylE4c2r-",
+"rule": "javascript:S7755",
+"sev": "MINOR",
+"file": "scripts/e2e/mcp-clients.mjs",
+"line": 25,
+"msg": "Prefer `.at(…)` over `[….length - index]`."
+},
+{
+"id": "AaB3XkrWIqdfylE4c2r_",
+"rule": "javascript:S7781",
+"sev": "MINOR",
+"file": "scripts/e2e/mcp-clients.mjs",
+"line": 218,
+"msg": "Prefer `String#replaceAll()` over `String#replace()`."
+},
+{
+"id": "AaB3XkrWIqdfylE4c2sA",
+"rule": "javascript:S7781",
+"sev": "MINOR",
+"file": "scripts/e2e/mcp-clients.mjs",
+"line": 218,
+"msg": "Prefer `String#replaceAll()` over `String#replace()`."
+},
+{
+"id": "AaB3XkrWIqdfylE4c2sB",
+"rule": "javascript:S7780",
+"sev": "MINOR",
+"file": "scripts/e2e/mcp-clients.mjs",
+"line": 218,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3XkrWIqdfylE4c2sC",
+"rule": "javascript:S7780",
+"sev": "MINOR",
+"file": "scripts/e2e/mcp-clients.mjs",
+"line": 254,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3XkrWIqdfylE4c2sF",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/mcp-clients.mjs",
+"line": 349,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 16 to the 15 allowed."
+},
+{
+"id": "AaB3XkrWIqdfylE4c2sG",
+"rule": "javascript:S6397",
+"sev": "MAJOR",
+"file": "scripts/e2e/mcp-clients.mjs",
+"line": 361,
+"msg": "Replace this character class by the character itself."
+},
+{
+"id": "AaB3XkrWIqdfylE4c2sH",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/mcp-clients.mjs",
+"line": 420,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 26 to the 15 allowed."
+},
+{
+"id": "AaB3XkrWIqdfylE4c2sI",
+"rule": "javascript:S4624",
+"sev": "MAJOR",
+"file": "scripts/e2e/mcp-clients.mjs",
+"line": 504,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkrWIqdfylE4c2sJ",
+"rule": "javascript:S4624",
+"sev": "MAJOR",
+"file": "scripts/e2e/mcp-clients.mjs",
+"line": 537,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkrWIqdfylE4c2sK",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/mcp-clients.mjs",
+"line": 658,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 26 to the 15 allowed."
+},
+{
+"id": "AaB3XkrWIqdfylE4c2sL",
+"rule": "javascript:S4624",
+"sev": "MAJOR",
+"file": "scripts/e2e/mcp-clients.mjs",
+"line": 694,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkrWIqdfylE4c2sM",
+"rule": "javascript:S4624",
+"sev": "MAJOR",
+"file": "scripts/e2e/mcp-clients.mjs",
+"line": 744,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkoXIqdfylE4c2qi",
+"rule": "javascript:S3358",
+"sev": "MAJOR",
+"file": "scripts/e2e/probe-lib/mcp-tee.mjs",
+"line": 69,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkkbIqdfylE4c2pQ",
+"rule": "typescript:S6582",
+"sev": "MINOR",
+"file": "src/transfer.ts",
+"line": 259,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkkbIqdfylE4c2pR",
+"rule": "typescript:S7737",
+"sev": "MINOR",
+"file": "src/transfer.ts",
+"line": 371,
+"msg": "Do not use an object literal as default for parameter `io`."
+},
+{
+"id": "AaB3XkkbIqdfylE4c2pT",
+"rule": "typescript:S7737",
+"sev": "MINOR",
+"file": "src/transfer.ts",
+"line": 399,
+"msg": "Do not use an object literal as default for parameter `io`."
+},
+{
+"id": "AaB3XkhpIqdfylE4c2oj",
+"rule": "typescript:S7744",
+"sev": "MINOR",
+"file": "src/viewer/app/api.ts",
+"line": 80,
+"msg": "The empty object is useless."
+},
+{
+"id": "AaB3XkhcIqdfylE4c2of",
+"rule": "typescript:S6479",
+"sev": "MAJOR",
+"file": "src/viewer/app/main.tsx",
+"line": 40,
+"msg": "Do not use Array index in keys"
+},
+{
+"id": "AaB3XkhcIqdfylE4c2og",
+"rule": "typescript:S6479",
+"sev": "MAJOR",
+"file": "src/viewer/app/main.tsx",
+"line": 149,
+"msg": "Do not use Array index in keys"
+},
+{
+"id": "AaB3XkhcIqdfylE4c2oh",
+"rule": "typescript:S3358",
+"sev": "MAJOR",
+"file": "src/viewer/app/main.tsx",
+"line": 260,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkhcIqdfylE4c2oi",
+"rule": "typescript:S6772",
+"sev": "MAJOR",
+"file": "src/viewer/app/main.tsx",
+"line": 271,
+"msg": "Ambiguous spacing before next element input"
+},
+{
+"id": "AaB3Xkh3IqdfylE4c2ol",
+"rule": "typescript:S7780",
+"sev": "MINOR",
+"file": "src/viewer/server.ts",
+"line": 139,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3Xkh3IqdfylE4c2ok",
+"rule": "typescript:S3358",
+"sev": "MAJOR",
+"file": "src/viewer/server.ts",
+"line": 85,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3Xkh3IqdfylE4c2om",
+"rule": "typescript:S4624",
+"sev": "MAJOR",
+"file": "src/viewer/server.ts",
+"line": 244,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkllIqdfylE4c2pm",
+"rule": "typescript:S7755",
+"sev": "MINOR",
+"file": "src/mcp.ts",
+"line": 24,
+"msg": "Prefer `.at(…)` over `[….length - index]`."
+},
+{
+"id": "AaB3Xke6IqdfylE4c2oF",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/observer/llm.ts",
+"line": 178,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 18 to the 15 allowed."
+},
+{
+"id": "AaB3Xkc9IqdfylE4c2nu",
+"rule": "typescript:S7750",
+"sev": "MINOR",
+"file": "src/fixture/replay.ts",
+"line": 651,
+"msg": "Prefer `.findLast(…)` over `.filter(…).pop()`."
+},
+{
+"id": "AaB3Xkc9IqdfylE4c2nv",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/fixture/replay.ts",
+"line": 696,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 177 to the 15 allowed."
+},
+{
+"id": "AaB3Xkc9IqdfylE4c2n0",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/fixture/replay.ts",
+"line": 1212,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 75 to the 15 allowed."
+},
+{
+"id": "AaB3Xkc9IqdfylE4c2nm",
+"rule": "typescript:S7786",
+"sev": "MINOR",
+"file": "src/fixture/replay.ts",
+"line": 199,
+"msg": "`new Error()` is too unspecific for a type check. Use `new TypeError()` instead."
+},
+{
+"id": "AaB3Xkc9IqdfylE4c2nn",
+"rule": "typescript:S6551",
+"sev": "MINOR",
+"file": "src/fixture/replay.ts",
+"line": 226,
+"msg": "'row.session_id ?? ''' will use Object's default stringification format ('[object Object]') when stringified."
+},
+{
+"id": "AaB3Xkc9IqdfylE4c2no",
+"rule": "typescript:S7781",
+"sev": "MINOR",
+"file": "src/fixture/replay.ts",
+"line": 278,
+"msg": "Prefer `String#replaceAll()` over `String#replace()`."
+},
+{
+"id": "AaB3Xkc9IqdfylE4c2ns",
+"rule": "typescript:S7781",
+"sev": "MINOR",
+"file": "src/fixture/replay.ts",
+"line": 570,
+"msg": "Prefer `String#replaceAll()` over `String#replace()`."
+},
+{
+"id": "AaB3Xkc9IqdfylE4c2nt",
+"rule": "typescript:S7780",
+"sev": "MINOR",
+"file": "src/fixture/replay.ts",
+"line": 570,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3Xkc9IqdfylE4c2nw",
+"rule": "typescript:S3358",
+"sev": "MAJOR",
+"file": "src/fixture/replay.ts",
+"line": 760,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3Xkc9IqdfylE4c2nx",
+"rule": "typescript:S3358",
+"sev": "MAJOR",
+"file": "src/fixture/replay.ts",
+"line": 761,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3Xkc9IqdfylE4c2ny",
+"rule": "typescript:S6582",
+"sev": "MINOR",
+"file": "src/fixture/replay.ts",
+"line": 866,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3Xkc9IqdfylE4c2nz",
+"rule": "typescript:S4624",
+"sev": "MAJOR",
+"file": "src/fixture/replay.ts",
+"line": 936,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3Xkc9IqdfylE4c2n1",
+"rule": "typescript:S3358",
+"sev": "MAJOR",
+"file": "src/fixture/replay.ts",
+"line": 1730,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XksHIqdfylE4c2sn",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/fixtures/generate-1000-events.mjs",
+"line": 972,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 32 to the 15 allowed."
+},
+{
+"id": "AaB3XksHIqdfylE4c2sr",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/fixtures/generate-1000-events.mjs",
+"line": 1360,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 35 to the 15 allowed."
+},
+{
+"id": "AaB3XksHIqdfylE4c2st",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/fixtures/generate-1000-events.mjs",
+"line": 1501,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 125 to the 15 allowed."
+},
+{
+"id": "AaB3XksHIqdfylE4c2sv",
+"rule": "javascript:S7755",
+"sev": "MINOR",
+"file": "scripts/fixtures/generate-1000-events.mjs",
+"line": 1622,
+"msg": "Prefer `.at(…)` over `[….length - index]`."
+},
+{
+"id": "AaB3XkjoIqdfylE4c2pG",
+"rule": "typescript:S3863",
+"sev": "MINOR",
+"file": "src/db/open.ts",
+"line": 3,
+"msg": "'node:sqlite' imported multiple times."
+},
+{
+"id": "AaB3XkjoIqdfylE4c2pH",
+"rule": "typescript:S3863",
+"sev": "MINOR",
+"file": "src/db/open.ts",
+"line": 4,
+"msg": "'node:sqlite' imported multiple times."
+},
+{
+"id": "AaB3XkiJIqdfylE4c2or",
+"rule": "typescript:S7755",
+"sev": "MINOR",
+"file": "src/worker/observe.ts",
+"line": 639,
+"msg": "Prefer `.at(…)` over `[….length - index]`."
+},
+{
+"id": "AaB3XkiJIqdfylE4c2os",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/worker/observe.ts",
+"line": 752,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 140 to the 15 allowed."
+},
+{
+"id": "AaB3XksHIqdfylE4c2sk",
+"rule": "javascript:S8786",
+"sev": "MAJOR",
+"file": "scripts/fixtures/generate-1000-events.mjs",
+"line": 710,
+"msg": "Simplify this regular expression to reduce its runtime, as it has super-linear performance due to backtracking."
+},
+{
+"id": "AaB3XksHIqdfylE4c2sl",
+"rule": "javascript:S7744",
+"sev": "MINOR",
+"file": "scripts/fixtures/generate-1000-events.mjs",
+"line": 780,
+"msg": "The empty object is useless."
+},
+{
+"id": "AaB3XksHIqdfylE4c2sm",
+"rule": "javascript:S7744",
+"sev": "MINOR",
+"file": "scripts/fixtures/generate-1000-events.mjs",
+"line": 780,
+"msg": "The empty object is useless."
+},
+{
+"id": "AaB3XksHIqdfylE4c2so",
+"rule": "javascript:S3358",
+"sev": "MAJOR",
+"file": "scripts/fixtures/generate-1000-events.mjs",
+"line": 1220,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XksHIqdfylE4c2sp",
+"rule": "javascript:S7744",
+"sev": "MINOR",
+"file": "scripts/fixtures/generate-1000-events.mjs",
+"line": 1278,
+"msg": "The empty object is useless."
+},
+{
+"id": "AaB3XksHIqdfylE4c2sq",
+"rule": "javascript:S7744",
+"sev": "MINOR",
+"file": "scripts/fixtures/generate-1000-events.mjs",
+"line": 1288,
+"msg": "The empty object is useless."
+},
+{
+"id": "AaB3XksHIqdfylE4c2ss",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/fixtures/generate-1000-events.mjs",
+"line": 1397,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 33 to the 15 allowed."
+},
+{
+"id": "AaB3XksHIqdfylE4c2su",
+"rule": "javascript:S7784",
+"sev": "MINOR",
+"file": "scripts/fixtures/generate-1000-events.mjs",
+"line": 1558,
+"msg": "Prefer `structuredClone(…)` over `JSON.parse(JSON.stringify(…))` to create a deep clone."
+},
+{
+"id": "AaB3Xke6IqdfylE4c2oG",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/observer/llm.ts",
+"line": 320,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 29 to the 15 allowed."
+},
+{
+"id": "AaB3Xke6IqdfylE4c2oH",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/observer/llm.ts",
+"line": 370,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 61 to the 15 allowed."
+},
+{
+"id": "AaB3XkdaIqdfylE4c2n5",
+"rule": "typescript:S6551",
+"sev": "MINOR",
+"file": "src/testing/faults.ts",
+"line": 51,
+"msg": "'input' may use Object's default stringification format ('[object Object]') when stringified."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2rt",
+"rule": "javascript:S7780",
+"sev": "MINOR",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 180,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2r1",
+"rule": "javascript:S7781",
+"sev": "MINOR",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 1838,
+"msg": "Prefer `String#replaceAll()` over `String#replace()`."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2r2",
+"rule": "javascript:S7781",
+"sev": "MINOR",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 1838,
+"msg": "Prefer `String#replaceAll()` over `String#replace()`."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2r3",
+"rule": "javascript:S7780",
+"sev": "MINOR",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 1838,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2rq",
+"rule": "javascript:S4624",
+"sev": "MAJOR",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 67,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2rv",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 462,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 54 to the 15 allowed."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2rw",
+"rule": "javascript:S107",
+"sev": "MAJOR",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 906,
+"msg": "Async function 'launchAgent' has too many parameters (9). Maximum allowed is 7."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2rx",
+"rule": "javascript:S7744",
+"sev": "MINOR",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 924,
+"msg": "The empty object is useless."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2ry",
+"rule": "javascript:S4624",
+"sev": "MAJOR",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 1141,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2rz",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 1755,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 34 to the 15 allowed."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2r0",
+"rule": "javascript:S4624",
+"sev": "MAJOR",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 1786,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2r4",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 1883,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 16 to the 15 allowed."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qW",
+"rule": "javascript:S3516",
+"sev": "BLOCKER",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 737,
+"msg": "Refactor this function to not always return the same value."
+},
+{
+"id": "AaB3XkmfIqdfylE4c2p7",
+"rule": "javascript:S8786",
+"sev": "MAJOR",
+"file": "scripts/e2e/probe-lib/tmux.mjs",
+"line": 94,
+"msg": "Simplify this regular expression to reduce its runtime, as it has super-linear performance due to backtracking."
+},
+{
+"id": "AaB3XkmfIqdfylE4c2p8",
+"rule": "javascript:S6397",
+"sev": "MAJOR",
+"file": "scripts/e2e/probe-lib/tmux.mjs",
+"line": 94,
+"msg": "Replace this character class by the character itself."
+},
+{
+"id": "AaB3XkmfIqdfylE4c2p_",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/tmux.mjs",
+"line": 165,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3Xkd4IqdfylE4c2n7",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/observer/catalog.ts",
+"line": 56,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 20 to the 15 allowed."
+},
+{
+"id": "AaB3XkqRIqdfylE4c2ri",
+"rule": "javascript:S7781",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-contracts.mjs",
+"line": 68,
+"msg": "Prefer `String#replaceAll()` over `String#replace()`."
+},
+{
+"id": "AaB3XkqRIqdfylE4c2rj",
+"rule": "javascript:S7781",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-contracts.mjs",
+"line": 69,
+"msg": "Prefer `String#replaceAll()` over `String#replace()`."
+},
+{
+"id": "AaB3XkqRIqdfylE4c2rk",
+"rule": "javascript:S7780",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-contracts.mjs",
+"line": 69,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3XkmfIqdfylE4c2p-",
+"rule": "javascript:S7744",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/tmux.mjs",
+"line": 135,
+"msg": "The empty object is useless."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qJ",
+"rule": "javascript:S3516",
+"sev": "BLOCKER",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 153,
+"msg": "Refactor this function to not always return the same value."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2rs",
+"rule": "javascript:S7786",
+"sev": "MINOR",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 154,
+"msg": "`new Error()` is too unspecific for a type check. Use `new TypeError()` instead."
+},
+{
+"id": "AaB3Xkb6IqdfylE4c2nh",
+"rule": "typescript:S7780",
+"sev": "MINOR",
+"file": "src/setup/shell-quote.ts",
+"line": 7,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3Xkb6IqdfylE4c2ni",
+"rule": "typescript:S4624",
+"sev": "MAJOR",
+"file": "src/setup/shell-quote.ts",
+"line": 7,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkjBIqdfylE4c2o1",
+"rule": "typescript:S3358",
+"sev": "MAJOR",
+"file": "src/memories-cli.ts",
+"line": 375,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkjBIqdfylE4c2o2",
+"rule": "typescript:S4624",
+"sev": "MAJOR",
+"file": "src/memories-cli.ts",
+"line": 375,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkbrIqdfylE4c2ng",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/setup/setup.ts",
+"line": 158,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 22 to the 15 allowed."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2rr",
+"rule": "javascript:S7765",
+"sev": "MINOR",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 115,
+"msg": "Use `.includes()` instead of `.some()` when checking value existence."
+},
+{
+"id": "AaB3XkqvIqdfylE4c2ru",
+"rule": "javascript:S8786",
+"sev": "MAJOR",
+"file": "scripts/e2e/isolated-user.mjs",
+"line": 197,
+"msg": "Simplify this regular expression to reduce its runtime, as it has super-linear performance due to backtracking."
+},
+{
+"id": "AaB3XklOIqdfylE4c2pj",
+"rule": "typescript:S6551",
+"sev": "MINOR",
+"file": "src/pi-extension.ts",
+"line": 262,
+"msg": "'input.query ?? ''' will use Object's default stringification format ('[object Object]') when stringified."
+},
+{
+"id": "AaB3XklOIqdfylE4c2pk",
+"rule": "typescript:S6551",
+"sev": "MINOR",
+"file": "src/pi-extension.ts",
+"line": 276,
+"msg": "'input.id ?? ''' will use Object's default stringification format ('[object Object]') when stringified."
+},
+{
+"id": "AaB3XkcRIqdfylE4c2nj",
+"rule": "typescript:S8786",
+"sev": "MAJOR",
+"file": "src/setup/managed-block.ts",
+"line": 83,
+"msg": "Simplify this regular expression to reduce its runtime, as it has super-linear performance due to backtracking."
+},
+{
+"id": "AaB3XkfdIqdfylE4c2oO",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/injection/pack.ts",
+"line": 355,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 39 to the 15 allowed."
+},
+{
+"id": "AaB3XklZIqdfylE4c2pl",
+"rule": "typescript:S4323",
+"sev": "MINOR",
+"file": "src/log.ts",
+"line": 43,
+"msg": "Replace this union type with a type alias."
+},
+{
+"id": "AaB3XkgRIqdfylE4c2oV",
+"rule": "typescript:S1940",
+"sev": "MINOR",
+"file": "src/injection/staleness.ts",
+"line": 43,
+"msg": "Use the opposite operator (<=) instead."
+},
+{
+"id": "AaB3XkgRIqdfylE4c2oW",
+"rule": "typescript:S6582",
+"sev": "MINOR",
+"file": "src/injection/staleness.ts",
+"line": 45,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XklBIqdfylE4c2pd",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/privacy/detect.ts",
+"line": 111,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 20 to the 15 allowed."
+},
+{
+"id": "AaB3XklBIqdfylE4c2pf",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/privacy/detect.ts",
+"line": 164,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 35 to the 15 allowed."
+},
+{
+"id": "AaB3Xkl3IqdfylE4c2pn",
+"rule": "typescript:S6582",
+"sev": "MINOR",
+"file": "src/capture.ts",
+"line": 246,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3Xkl3IqdfylE4c2pp",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/capture.ts",
+"line": 776,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 22 to the 15 allowed."
+},
+{
+"id": "AaB3Xkl3IqdfylE4c2pq",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/capture.ts",
+"line": 871,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 21 to the 15 allowed."
+},
+{
+"id": "AaB3XkioIqdfylE4c2oy",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/worker/batches.ts",
+"line": 567,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 24 to the 15 allowed."
+},
+{
+"id": "AaB3XkkOIqdfylE4c2pM",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/retrieval/fts.ts",
+"line": 100,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 28 to the 15 allowed."
+},
+{
+"id": "AaB3XkkOIqdfylE4c2pN",
+"rule": "typescript:S4043",
+"sev": "MAJOR",
+"file": "src/retrieval/fts.ts",
+"line": 149,
+"msg": "Move this array \"sort\" operation to a separate statement or replace it with \"toSorted\"."
+},
+{
+"id": "AaB3Xkl3IqdfylE4c2po",
+"rule": "typescript:S107",
+"sev": "MAJOR",
+"file": "src/capture.ts",
+"line": 776,
+"msg": "Async function 'write' has too many parameters (8). Maximum allowed is 7."
+},
+{
+"id": "AaB3Xkl3IqdfylE4c2pr",
+"rule": "typescript:S7755",
+"sev": "MINOR",
+"file": "src/capture.ts",
+"line": 982,
+"msg": "Prefer `.at(…)` over `[….length - index]`."
+},
+{
+"id": "AaB3XkfNIqdfylE4c2oL",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/injection/inject.ts",
+"line": 360,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 25 to the 15 allowed."
+},
+{
+"id": "AaB3XksZIqdfylE4c2sw",
+"rule": "javascript:S7784",
+"sev": "MINOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 162,
+"msg": "Prefer `structuredClone(…)` over `JSON.parse(JSON.stringify(…))` to create a deep clone."
+},
+{
+"id": "AaB3XksZIqdfylE4c2sx",
+"rule": "javascript:S6353",
+"sev": "MINOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 180,
+"msg": "Use concise character class syntax '\\d' instead of '[0-9]'."
+},
+{
+"id": "AaB3XksZIqdfylE4c2sy",
+"rule": "javascript:S6353",
+"sev": "MINOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 180,
+"msg": "Use concise character class syntax '\\d' instead of '[0-9]'."
+},
+{
+"id": "AaB3XksZIqdfylE4c2sz",
+"rule": "javascript:S3358",
+"sev": "MAJOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 236,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XksZIqdfylE4c2s0",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 298,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XksZIqdfylE4c2s1",
+"rule": "javascript:S4624",
+"sev": "MAJOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 299,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XksZIqdfylE4c2s2",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 301,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XksZIqdfylE4c2s3",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 302,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XksZIqdfylE4c2s4",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 303,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XksZIqdfylE4c2s5",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 304,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XksZIqdfylE4c2s6",
+"rule": "javascript:S4624",
+"sev": "MAJOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 305,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XksZIqdfylE4c2s7",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 307,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XksZIqdfylE4c2s8",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 308,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XksZIqdfylE4c2s9",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 309,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XksZIqdfylE4c2s-",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 310,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XksZIqdfylE4c2s_",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 311,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XksZIqdfylE4c2tA",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/measure-cold-start.mjs",
+"line": 312,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkiJIqdfylE4c2ou",
+"rule": "typescript:S3358",
+"sev": "MAJOR",
+"file": "src/worker/observe.ts",
+"line": 841,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkiJIqdfylE4c2on",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/worker/observe.ts",
+"line": 166,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 21 to the 15 allowed."
+},
+{
+"id": "AaB3XkiJIqdfylE4c2oo",
+"rule": "typescript:S107",
+"sev": "MAJOR",
+"file": "src/worker/observe.ts",
+"line": 311,
+"msg": "Async function 'providerCall' has too many parameters (9). Maximum allowed is 7."
+},
+{
+"id": "AaB3XkiJIqdfylE4c2op",
+"rule": "typescript:S107",
+"sev": "MAJOR",
+"file": "src/worker/observe.ts",
+"line": 395,
+"msg": "Async function 'processBatch' has too many parameters (10). Maximum allowed is 7."
+},
+{
+"id": "AaB3XkiJIqdfylE4c2oq",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/worker/observe.ts",
+"line": 395,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 21 to the 15 allowed."
+},
+{
+"id": "AaB3XkiJIqdfylE4c2ot",
+"rule": "typescript:S3735",
+"sev": "CRITICAL",
+"file": "src/worker/observe.ts",
+"line": 753,
+"msg": "Remove this use of the \"void\" operator."
+},
+{
+"id": "AaB3XkiJIqdfylE4c2ov",
+"rule": "typescript:S4165",
+"sev": "MAJOR",
+"file": "src/worker/observe.ts",
+"line": 1002,
+"msg": "Review this redundant assignment: \"endReason\" already holds the assigned value along all execution paths."
+},
+{
+"id": "AaB3XkfvIqdfylE4c2oS",
+"rule": "typescript:S6582",
+"sev": "MINOR",
+"file": "src/injection/deferred.ts",
+"line": 307,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkfdIqdfylE4c2oM",
+"rule": "typescript:S7781",
+"sev": "MINOR",
+"file": "src/injection/pack.ts",
+"line": 87,
+"msg": "Prefer `String#replaceAll()` over `String#replace()`."
+},
+{
+"id": "AaB3XkeZIqdfylE4c2n_",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/observer/classify.ts",
+"line": 510,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 21 to the 15 allowed."
+},
+{
+"id": "AaB3XkeJIqdfylE4c2n8",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/observer/fallback.ts",
+"line": 202,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 18 to the 15 allowed."
+},
+{
+"id": "AaB3Xke6IqdfylE4c2oD",
+"rule": "typescript:S4323",
+"sev": "MINOR",
+"file": "src/observer/llm.ts",
+"line": 75,
+"msg": "Replace this union type with a type alias."
+},
+{
+"id": "AaB3Xke6IqdfylE4c2oE",
+"rule": "typescript:S4624",
+"sev": "MAJOR",
+"file": "src/observer/llm.ts",
+"line": 139,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3Xke6IqdfylE4c2oI",
+"rule": "typescript:S3358",
+"sev": "MAJOR",
+"file": "src/observer/llm.ts",
+"line": 403,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3Xke6IqdfylE4c2oJ",
+"rule": "typescript:S1874",
+"sev": "MINOR",
+"file": "src/observer/llm.ts",
+"line": 451,
+"msg": "'response' is deprecated."
+},
+{
+"id": "AaB3Xke6IqdfylE4c2oK",
+"rule": "typescript:S1874",
+"sev": "MINOR",
+"file": "src/observer/llm.ts",
+"line": 482,
+"msg": "'response' is deprecated."
+},
+{
+"id": "AaB3XkfvIqdfylE4c2oT",
+"rule": "typescript:S6582",
+"sev": "MINOR",
+"file": "src/injection/deferred.ts",
+"line": 478,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkfdIqdfylE4c2oN",
+"rule": "typescript:S4043",
+"sev": "MAJOR",
+"file": "src/injection/pack.ts",
+"line": 277,
+"msg": "Move this array \"reverse\" operation to a separate statement or replace it with \"toReversed\"."
+},
+{
+"id": "AaB3XkfdIqdfylE4c2oP",
+"rule": "typescript:S3358",
+"sev": "MAJOR",
+"file": "src/injection/pack.ts",
+"line": 386,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkfdIqdfylE4c2oQ",
+"rule": "typescript:S3358",
+"sev": "MAJOR",
+"file": "src/injection/pack.ts",
+"line": 391,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkfdIqdfylE4c2oR",
+"rule": "typescript:S4624",
+"sev": "MAJOR",
+"file": "src/injection/pack.ts",
+"line": 391,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkgRIqdfylE4c2oX",
+"rule": "typescript:S6582",
+"sev": "MINOR",
+"file": "src/injection/staleness.ts",
+"line": 82,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkeZIqdfylE4c2n9",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/observer/classify.ts",
+"line": 276,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 47 to the 15 allowed."
+},
+{
+"id": "AaB3XkeZIqdfylE4c2n-",
+"rule": "typescript:S6582",
+"sev": "MINOR",
+"file": "src/observer/classify.ts",
+"line": 346,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkeZIqdfylE4c2oA",
+"rule": "typescript:S6582",
+"sev": "MINOR",
+"file": "src/observer/classify.ts",
+"line": 520,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkeZIqdfylE4c2oB",
+"rule": "typescript:S7776",
+"sev": "MINOR",
+"file": "src/observer/classify.ts",
+"line": 590,
+"msg": "`reasons` should be a `Set`, and use `reasons.has()` to check existence or non-existence."
+},
+{
+"id": "AaB3XkdqIqdfylE4c2n6",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/observer/request.ts",
+"line": 117,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 16 to the 15 allowed."
+},
+{
+"id": "AaB3XkioIqdfylE4c2ox",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/worker/batches.ts",
+"line": 410,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 24 to the 15 allowed."
+},
+{
+"id": "AaB3XkioIqdfylE4c2oz",
+"rule": "typescript:S7755",
+"sev": "MINOR",
+"file": "src/worker/batches.ts",
+"line": 598,
+"msg": "Prefer `.at(…)` over `[….length - index]`."
+},
+{
+"id": "AaB3XkgzIqdfylE4c2oa",
+"rule": "typescript:S7780",
+"sev": "MINOR",
+"file": "src/agents/index.ts",
+"line": 79,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3XkgzIqdfylE4c2ob",
+"rule": "typescript:S7780",
+"sev": "MINOR",
+"file": "src/agents/index.ts",
+"line": 81,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3XkgzIqdfylE4c2oc",
+"rule": "typescript:S7780",
+"sev": "MINOR",
+"file": "src/agents/index.ts",
+"line": 322,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3XkjNIqdfylE4c2o5",
+"rule": "plsql:CreateOrReplaceCheck",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0002_memory_search.sql",
+"line": 82,
+"msg": "\"CREATE OR REPLACE\" should be used instead of \"CREATE\"."
+},
+{
+"id": "AaB3XkjNIqdfylE4c2o8",
+"rule": "plsql:CreateOrReplaceCheck",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0002_memory_search.sql",
+"line": 97,
+"msg": "\"CREATE OR REPLACE\" should be used instead of \"CREATE\"."
+},
+{
+"id": "AaB3XkeqIqdfylE4c2oC",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/observer/contract.ts",
+"line": 396,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 21 to the 15 allowed."
+},
+{
+"id": "AaB3XkkoIqdfylE4c2pY",
+"rule": "typescript:S7750",
+"sev": "MINOR",
+"file": "src/repo-identity.ts",
+"line": 160,
+"msg": "Prefer `.find(…)` over `.filter(…)`."
+},
+{
+"id": "AaB3Xkl3IqdfylE4c2ps",
+"rule": "typescript:S3516",
+"sev": "BLOCKER",
+"file": "src/capture.ts",
+"line": 1226,
+"msg": "Refactor this function to not always return the same value."
+},
+{
+"id": "AaB3XkkCIqdfylE4c2pJ",
+"rule": "typescript:S7780",
+"sev": "MINOR",
+"file": "src/retrieval/query.ts",
+"line": 49,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3XkkCIqdfylE4c2pK",
+"rule": "typescript:S7780",
+"sev": "MINOR",
+"file": "src/retrieval/query.ts",
+"line": 49,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3XkkCIqdfylE4c2pL",
+"rule": "typescript:S7780",
+"sev": "MINOR",
+"file": "src/retrieval/query.ts",
+"line": 133,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3Xkj2IqdfylE4c2pI",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/retrieval/rank.ts",
+"line": 157,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 22 to the 15 allowed."
+},
+{
+"id": "AaB3Xki0IqdfylE4c2o0",
+"rule": "typescript:S3358",
+"sev": "MAJOR",
+"file": "src/worker/lease.ts",
+"line": 13,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkiYIqdfylE4c2ow",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/worker/purge.ts",
+"line": 109,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 26 to the 15 allowed."
+},
+{
+"id": "AaB3XklBIqdfylE4c2pc",
+"rule": "typescript:S8786",
+"sev": "MAJOR",
+"file": "src/privacy/detect.ts",
+"line": 72,
+"msg": "Simplify this regular expression to reduce its runtime, as it has super-linear performance due to backtracking."
+},
+{
+"id": "AaB3XklBIqdfylE4c2pe",
+"rule": "typescript:S2310",
+"sev": "MAJOR",
+"file": "src/privacy/detect.ts",
+"line": 142,
+"msg": "Remove this assignment of \"index\"."
+},
+{
+"id": "AaB3XklBIqdfylE4c2pg",
+"rule": "typescript:S7781",
+"sev": "MINOR",
+"file": "src/privacy/detect.ts",
+"line": 204,
+"msg": "Prefer `String#replaceAll()` over `String#replace()`."
+},
+{
+"id": "AaB3XklBIqdfylE4c2ph",
+"rule": "typescript:S5869",
+"sev": "MAJOR",
+"file": "src/privacy/detect.ts",
+"line": 259,
+"msg": "Remove duplicates in this character class."
+},
+{
+"id": "AaB3XklBIqdfylE4c2pi",
+"rule": "typescript:S7755",
+"sev": "MINOR",
+"file": "src/privacy/detect.ts",
+"line": 311,
+"msg": "Prefer `.at(…)` over `[….length - index]`."
+},
+{
+"id": "AaB3XkkzIqdfylE4c2pZ",
+"rule": "typescript:S7776",
+"sev": "MINOR",
+"file": "src/privacy/egress.ts",
+"line": 6,
+"msg": "`DESTINATIONS` should be a `Set`, and use `DESTINATIONS.has()` to check existence or non-existence."
+},
+{
+"id": "AaB3XkkzIqdfylE4c2pa",
+"rule": "typescript:S7776",
+"sev": "MINOR",
+"file": "src/privacy/egress.ts",
+"line": 7,
+"msg": "`SENSITIVITIES` should be a `Set`, and use `SENSITIVITIES.has()` to check existence or non-existence."
+},
+{
+"id": "AaB3XkkzIqdfylE4c2pb",
+"rule": "typescript:S6582",
+"sev": "MINOR",
+"file": "src/privacy/egress.ts",
+"line": 58,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkhBIqdfylE4c2od",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/agents/claude.ts",
+"line": 99,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 17 to the 15 allowed."
+},
+{
+"id": "AaB3XkhNIqdfylE4c2oe",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/agents/grok.ts",
+"line": 87,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 24 to the 15 allowed."
+},
+{
+"id": "AaB3XkgmIqdfylE4c2oZ",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "src/agents/pi.ts",
+"line": 106,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 16 to the 15 allowed."
+},
+{
+"id": "AaB3XkmSIqdfylE4c2p3",
+"rule": "typescript:S4624",
+"sev": "MAJOR",
+"file": "src/events.ts",
+"line": 174,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkmSIqdfylE4c2p4",
+"rule": "typescript:S8786",
+"sev": "MAJOR",
+"file": "src/events.ts",
+"line": 328,
+"msg": "Simplify this regular expression to reduce its runtime, as it has super-linear performance due to backtracking."
+},
+{
+"id": "AaB3XkmSIqdfylE4c2p5",
+"rule": "typescript:S8786",
+"sev": "MAJOR",
+"file": "src/events.ts",
+"line": 329,
+"msg": "Simplify this regular expression to reduce its runtime, as it has super-linear performance due to backtracking."
+},
+{
+"id": "AaB3XkmSIqdfylE4c2p6",
+"rule": "typescript:S8786",
+"sev": "MAJOR",
+"file": "src/events.ts",
+"line": 330,
+"msg": "Simplify this regular expression to reduce its runtime, as it has super-linear performance due to backtracking."
+},
+{
+"id": "AaB3XkkoIqdfylE4c2pU",
+"rule": "typescript:S7776",
+"sev": "MINOR",
+"file": "src/repo-identity.ts",
+"line": 40,
+"msg": "`REMOTE_SCHEMES` should be a `Set`, and use `REMOTE_SCHEMES.has()` to check existence or non-existence."
+},
+{
+"id": "AaB3XkkoIqdfylE4c2pV",
+"rule": "typescript:S8786",
+"sev": "MAJOR",
+"file": "src/repo-identity.ts",
+"line": 63,
+"msg": "Simplify this regular expression to reduce its runtime, as it has super-linear performance due to backtracking."
+},
+{
+"id": "AaB3XkkoIqdfylE4c2pW",
+"rule": "typescript:S8786",
+"sev": "MAJOR",
+"file": "src/repo-identity.ts",
+"line": 65,
+"msg": "Simplify this regular expression to reduce its runtime, as it has super-linear performance due to backtracking."
+},
+{
+"id": "AaB3XkkoIqdfylE4c2pX",
+"rule": "typescript:S4624",
+"sev": "MAJOR",
+"file": "src/repo-identity.ts",
+"line": 96,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkjcIqdfylE4c2pF",
+"rule": "plsql:S1192",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0001_core.sql",
+"line": 33,
+"msg": "Define a constant instead of duplicating this literal 3 times."
+},
+{
+"id": "AaB3XkjNIqdfylE4c2o-",
+"rule": "plsql:S1192",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0002_memory_search.sql",
+"line": 18,
+"msg": "Define a constant instead of duplicating this literal 6 times."
+},
+{
+"id": "AaB3XkjNIqdfylE4c2o9",
+"rule": "plsql:S1192",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0002_memory_search.sql",
+"line": 18,
+"msg": "Define a constant instead of duplicating this literal 5 times."
+},
+{
+"id": "AaB3XkjNIqdfylE4c2pC",
+"rule": "plsql:S1192",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0002_memory_search.sql",
+"line": 18,
+"msg": "Define a constant instead of duplicating this literal 6 times."
+},
+{
+"id": "AaB3XkjNIqdfylE4c2pE",
+"rule": "plsql:S1192",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0002_memory_search.sql",
+"line": 18,
+"msg": "Define a constant instead of duplicating this literal 6 times."
+},
+{
+"id": "AaB3XkjNIqdfylE4c2o3",
+"rule": "plsql:CreateOrReplaceCheck",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0002_memory_search.sql",
+"line": 72,
+"msg": "\"CREATE OR REPLACE\" should be used instead of \"CREATE\"."
+},
+{
+"id": "AaB3XkjNIqdfylE4c2o4",
+"rule": "plsql:CreateOrReplaceCheck",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0002_memory_search.sql",
+"line": 76,
+"msg": "\"CREATE OR REPLACE\" should be used instead of \"CREATE\"."
+},
+{
+"id": "AaB3XkjNIqdfylE4c2pA",
+"rule": "plsql:S1192",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0002_memory_search.sql",
+"line": 78,
+"msg": "Define a constant instead of duplicating this literal 4 times."
+},
+{
+"id": "AaB3XkjNIqdfylE4c2o6",
+"rule": "plsql:CreateOrReplaceCheck",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0002_memory_search.sql",
+"line": 88,
+"msg": "\"CREATE OR REPLACE\" should be used instead of \"CREATE\"."
+},
+{
+"id": "AaB3XkjNIqdfylE4c2o7",
+"rule": "plsql:CreateOrReplaceCheck",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0002_memory_search.sql",
+"line": 92,
+"msg": "\"CREATE OR REPLACE\" should be used instead of \"CREATE\"."
+},
+{
+"id": "AaB3XkjNIqdfylE4c2o_",
+"rule": "plsql:S1192",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0002_memory_search.sql",
+"line": 105,
+"msg": "Define a constant instead of duplicating this literal 5 times."
+},
+{
+"id": "AaB3XkjNIqdfylE4c2pB",
+"rule": "plsql:S1192",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0002_memory_search.sql",
+"line": 105,
+"msg": "Define a constant instead of duplicating this literal 5 times."
+},
+{
+"id": "AaB3XkjNIqdfylE4c2pD",
+"rule": "plsql:S1192",
+"sev": "CRITICAL",
+"file": "src/db/migrations/0002_memory_search.sql",
+"line": 105,
+"msg": "Define a constant instead of duplicating this literal 5 times."
+},
+{
+"id": "AaB3XkqRIqdfylE4c2rl",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/probe-contracts.mjs",
+"line": 146,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 42 to the 15 allowed."
+},
+{
+"id": "AaB3XkqRIqdfylE4c2rn",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-contracts.mjs",
+"line": 215,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkqRIqdfylE4c2ro",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-contracts.mjs",
+"line": 216,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qQ",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 417,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 39 to the 15 allowed."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qU",
+"rule": "javascript:S7744",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 678,
+"msg": "The empty object is useless."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qX",
+"rule": "javascript:S3358",
+"sev": "MAJOR",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 794,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2q0",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 404,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 38 to the 15 allowed."
+},
+{
+"id": "AaB3XkpxIqdfylE4c2rW",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/probes/grok.mjs",
+"line": 470,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 17 to the 15 allowed."
+},
+{
+"id": "AaB3XkqBIqdfylE4c2rg",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/probes/pi.mjs",
+"line": 411,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 30 to the 15 allowed."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2qr",
+"rule": "javascript:S1854",
+"sev": "MAJOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 196,
+"msg": "Remove this useless assignment to variable \"events\"."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2qs",
+"rule": "javascript:S1854",
+"sev": "MAJOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 201,
+"msg": "Remove this useless assignment to variable \"events\"."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2qt",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 214,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2qu",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 218,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2qv",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 270,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2qw",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 308,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2qx",
+"rule": "javascript:S6653",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 389,
+"msg": "Use 'Object.hasOwn()' instead of 'Object.prototype.hasOwnProperty.call()'."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2qy",
+"rule": "javascript:S6653",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 390,
+"msg": "Use 'Object.hasOwn()' instead of 'Object.prototype.hasOwnProperty.call()'."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2qz",
+"rule": "javascript:S6653",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 391,
+"msg": "Use 'Object.hasOwn()' instead of 'Object.prototype.hasOwnProperty.call()'."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2q1",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 431,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2q2",
+"rule": "javascript:S3358",
+"sev": "MAJOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 435,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2q3",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 443,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2q4",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 448,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2q5",
+"rule": "javascript:S3358",
+"sev": "MAJOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 454,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2q6",
+"rule": "javascript:S3358",
+"sev": "MAJOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 460,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2q7",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 468,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkpAIqdfylE4c2q8",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 469,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkphIqdfylE4c2rH",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/codex.mjs",
+"line": 140,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkphIqdfylE4c2rJ",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/codex.mjs",
+"line": 350,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkphIqdfylE4c2rK",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/codex.mjs",
+"line": 411,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkphIqdfylE4c2rL",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/codex.mjs",
+"line": 444,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkphIqdfylE4c2rM",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/codex.mjs",
+"line": 447,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkphIqdfylE4c2rN",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/codex.mjs",
+"line": 483,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkphIqdfylE4c2rO",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/codex.mjs",
+"line": 486,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkphIqdfylE4c2rP",
+"rule": "javascript:S7755",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/codex.mjs",
+"line": 490,
+"msg": "Prefer `.at(…)` over `[….length - index]`."
+},
+{
+"id": "AaB3XkphIqdfylE4c2rQ",
+"rule": "javascript:S1854",
+"sev": "MAJOR",
+"file": "scripts/e2e/probes/codex.mjs",
+"line": 494,
+"msg": "Remove this useless assignment to variable \"aDetail\"."
+},
+{
+"id": "AaB3XkphIqdfylE4c2rR",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/codex.mjs",
+"line": 507,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkpxIqdfylE4c2rS",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/grok.mjs",
+"line": 157,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkpxIqdfylE4c2rT",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/grok.mjs",
+"line": 258,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkpxIqdfylE4c2rU",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/grok.mjs",
+"line": 262,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkpxIqdfylE4c2rV",
+"rule": "javascript:S3358",
+"sev": "MAJOR",
+"file": "scripts/e2e/probes/grok.mjs",
+"line": 353,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkqBIqdfylE4c2rX",
+"rule": "javascript:S1994",
+"sev": "CRITICAL",
+"file": "scripts/e2e/probes/pi.mjs",
+"line": 46,
+"msg": "This loop's stop condition tests \"s.length, s\" but the incrementer updates \"i\"."
+},
+{
+"id": "AaB3XkqBIqdfylE4c2rY",
+"rule": "javascript:S7780",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/pi.mjs",
+"line": 54,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3XkqBIqdfylE4c2rZ",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/pi.mjs",
+"line": 180,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkqBIqdfylE4c2ra",
+"rule": "javascript:S4624",
+"sev": "MAJOR",
+"file": "scripts/e2e/probes/pi.mjs",
+"line": 304,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkqBIqdfylE4c2rb",
+"rule": "javascript:S4624",
+"sev": "MAJOR",
+"file": "scripts/e2e/probes/pi.mjs",
+"line": 305,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkqBIqdfylE4c2rc",
+"rule": "javascript:S4624",
+"sev": "MAJOR",
+"file": "scripts/e2e/probes/pi.mjs",
+"line": 306,
+"msg": "Refactor this code to not use nested template literals."
+},
+{
+"id": "AaB3XkqBIqdfylE4c2rd",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/pi.mjs",
+"line": 333,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkqBIqdfylE4c2re",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/pi.mjs",
+"line": 334,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkqBIqdfylE4c2rf",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/pi.mjs",
+"line": 338,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkqBIqdfylE4c2rh",
+"rule": "javascript:S3358",
+"sev": "MAJOR",
+"file": "scripts/e2e/probes/pi.mjs",
+"line": 483,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkrIIqdfylE4c2r7",
+"rule": "shelldre:S7688",
+"sev": "MAJOR",
+"file": "scripts/e2e/dogfood.sh",
+"line": 26,
+"msg": "Use '[[' instead of '[' for conditional tests. The '[[' construct is safer and more feature-rich."
+},
+{
+"id": "AaB3XkrIIqdfylE4c2r8",
+"rule": "shelldre:S1066",
+"sev": "MAJOR",
+"file": "scripts/e2e/dogfood.sh",
+"line": 31,
+"msg": "Merge this if statement with the enclosing one."
+},
+{
+"id": "AaB3XkrIIqdfylE4c2r9",
+"rule": "shelldre:S7688",
+"sev": "MAJOR",
+"file": "scripts/e2e/dogfood.sh",
+"line": 31,
+"msg": "Use '[[' instead of '[' for conditional tests. The '[[' construct is safer and more feature-rich."
+},
+{
+"id": "AaB3XkqRIqdfylE4c2rm",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-contracts.mjs",
+"line": 180,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkqRIqdfylE4c2rp",
+"rule": "javascript:S7785",
+"sev": "MAJOR",
+"file": "scripts/e2e/probe-contracts.mjs",
+"line": 243,
+"msg": "Prefer top-level await over using a promise chain."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qI",
+"rule": "javascript:S7780",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 17,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qM",
+"rule": "javascript:S7781",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 336,
+"msg": "Prefer `String#replaceAll()` over `String#replace()`."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qN",
+"rule": "javascript:S7780",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 336,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qO",
+"rule": "javascript:S3358",
+"sev": "MAJOR",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 356,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qP",
+"rule": "javascript:S3358",
+"sev": "MAJOR",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 377,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qR",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 474,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qS",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 479,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 36 to the 15 allowed."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qT",
+"rule": "javascript:S7744",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 644,
+"msg": "The empty object is useless."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qV",
+"rule": "javascript:S7744",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 711,
+"msg": "The empty object is useless."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qY",
+"rule": "javascript:S7780",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 799,
+"msg": "`String.raw` should be used to avoid escaping `\\`."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qZ",
+"rule": "javascript:S6594",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 834,
+"msg": "Use the \"RegExp.exec()\" method instead."
+},
+{
+"id": "AaB3XknlIqdfylE4c2qa",
+"rule": "javascript:S8786",
+"sev": "MAJOR",
+"file": "scripts/e2e/probe-lib/agents.mjs",
+"line": 834,
+"msg": "Simplify this regular expression to reduce its runtime, as it has super-linear performance due to backtracking."
+},
+{
+"id": "AaB3XkoDIqdfylE4c2qd",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/probe-lib/hook.mjs",
+"line": 40,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 16 to the 15 allowed."
+},
+{
+"id": "AaB3Xkm9IqdfylE4c2qB",
+"rule": "typescript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/probe-lib/pi-extension.ts",
+"line": 57,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 19 to the 15 allowed."
+},
+{
+"id": "AaB3Xkm9IqdfylE4c2qC",
+"rule": "typescript:S7741",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/pi-extension.ts",
+"line": 62,
+"msg": "Compare with `undefined` directly instead of using `typeof`."
+},
+{
+"id": "AaB3Xkm9IqdfylE4c2qD",
+"rule": "typescript:S6551",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/pi-extension.ts",
+"line": 80,
+"msg": "'v' will use Object's default stringification format ('[object Object]') when stringified."
+},
+{
+"id": "AaB3Xkm9IqdfylE4c2qE",
+"rule": "typescript:S7726",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/pi-extension.ts",
+"line": 94,
+"msg": "The arrow function should be named."
+},
+{
+"id": "AaB3XkphIqdfylE4c2rI",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/probes/codex.mjs",
+"line": 237,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 16 to the 15 allowed."
+},
+{
+"id": "AaB3XkpTIqdfylE4c2q9",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/providers.mjs",
+"line": 109,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkpTIqdfylE4c2q-",
+"rule": "javascript:S3358",
+"sev": "MAJOR",
+"file": "scripts/e2e/probes/providers.mjs",
+"line": 142,
+"msg": "Extract this nested ternary operation into an independent statement."
+},
+{
+"id": "AaB3XkpTIqdfylE4c2q_",
+"rule": "javascript:S8786",
+"sev": "MAJOR",
+"file": "scripts/e2e/probes/providers.mjs",
+"line": 148,
+"msg": "Simplify this regular expression to reduce its runtime, as it has super-linear performance due to backtracking."
+},
+{
+"id": "AaB3XkpTIqdfylE4c2rA",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/probes/providers.mjs",
+"line": 183,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 16 to the 15 allowed."
+},
+{
+"id": "AaB3XkpTIqdfylE4c2rB",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/providers.mjs",
+"line": 213,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkpTIqdfylE4c2rC",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/providers.mjs",
+"line": 214,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkpTIqdfylE4c2rD",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/providers.mjs",
+"line": 215,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkpTIqdfylE4c2rE",
+"rule": "javascript:S7778",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/providers.mjs",
+"line": 216,
+"msg": "Do not call `Array#push()` multiple times."
+},
+{
+"id": "AaB3XkpTIqdfylE4c2rF",
+"rule": "javascript:S6582",
+"sev": "MINOR",
+"file": "scripts/e2e/probes/providers.mjs",
+"line": 224,
+"msg": "Prefer using an optional chain expression instead, as it's more concise and easier to read."
+},
+{
+"id": "AaB3XkpTIqdfylE4c2rG",
+"rule": "javascript:S3776",
+"sev": "CRITICAL",
+"file": "scripts/e2e/probes/providers.mjs",
+"line": 234,
+"msg": "Refactor this function to reduce its Cognitive Complexity from 28 to the 15 allowed."
+}
+]

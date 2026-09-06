@@ -15,7 +15,7 @@ export default tseslint.config(
     ],
   },
   {
-    files: ['src/**/*.ts', 'test/**/*.ts', 'scripts/build.mjs', 'eslint.config.js'],
+    files: ['src/**/*.ts', 'test/**/*.ts', 'scripts/build.mjs', 'scripts/quality-debt-*.mjs', 'eslint.config.js'],
     extends: [eslint.configs.recommended, ...tseslint.configs.recommended],
     rules: {
       '@typescript-eslint/consistent-type-imports': 'error',
@@ -38,12 +38,15 @@ export default tseslint.config(
     },
   },
   {
-    files: ['scripts/build.mjs', 'eslint.config.js'],
+    files: ['scripts/build.mjs', 'scripts/quality-debt-*.mjs', 'eslint.config.js'],
     languageOptions: {
       sourceType: 'module',
       globals: {
         console: 'readonly',
         process: 'readonly',
+        fetch: 'readonly',
+        URL: 'readonly',
+        URLSearchParams: 'readonly',
       },
     },
   },

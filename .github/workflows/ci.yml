@@ -46,6 +46,11 @@ jobs:
           NODE_V8_COVERAGE="$PWD/coverage/v8" node --test --enable-source-maps \
             --test-reporter=spec --test-reporter-destination=stdout \
             'build/test/unit/**/*.test.mjs' 'build/test/migrations/**/*.test.mjs' 'scripts/e2e/**/*.test.mjs'
+          # The record tests spawn the script once per case; run alone so the spawns do not load
+          # the timed unit tests. Same coverage directory, so c8 merges them below.
+          NODE_V8_COVERAGE="$PWD/coverage/v8" node --test --test-concurrency=1 \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            'scripts/quality-debt-record*.test.mjs'
           npx c8 report --temp-directory coverage/v8 --reports-dir coverage --reporter=lcov \
             --exclude-after-remap --exclude 'test/**' --exclude 'build/**' --exclude 'dist/**' \
             --exclude 'node_modules/**' --exclude 'scripts/**/*.test.mjs'
