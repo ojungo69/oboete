@@ -1,0 +1,23 @@
+test/unit/mcp.test.ts
+  s_359fcac8e97f88::t_cf9762a735fef8 243,245,261,263-265
+src/mcp.ts
+  s_359fcac8e97f88::t_25602fcdfe13d5 66-68,70-72,243-247
+specs/007-oboete-m1-alpha/contracts/mcp.md
+  s_359fcac8e97f88::t_3e84804efff0c3 7-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "3a2b831f0828425e21ba176eeab9b1030316a0ed",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
