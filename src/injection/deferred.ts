@@ -389,7 +389,8 @@ export function attachOnPreToolUse(
 }
 
 export type DeferredDelivery = {
-  status: 'emitted' | 'already' | 'none';
+  /** `omitted`: the record closed without delivering, its stored text having been lost. */
+  status: 'emitted' | 'already' | 'none' | 'omitted';
   /** Set only when this hook has to print the pack itself (rule 3). */
   text: string | null;
 };
@@ -423,9 +424,10 @@ export function markFailure(
     kind: 'PostToolUseFailure' | 'PermissionDenied';
     now: number;
   },
-): 'emitted' | 'attempted' | 'none' {
+): 'emitted' | 'attempted' | 'omitted' | 'none' {
   if (input.kind === 'PostToolUseFailure') {
-    return deliver(db, { ...input, execution: 'failed' }).status === 'none' ? 'none' : 'emitted';
+    const { status } = deliver(db, { ...input, execution: 'failed' });
+    return status === 'none' || status === 'omitted' ? status : 'emitted';
   }
 
   return transactionImmediate(db, () => {
@@ -479,6 +481,21 @@ function deliver(
     // A15 counts the calls of the batch that carried the pack. A later call of the conversation
     // reaches PostToolUse with no attempt of its own: it carried nothing, so it delivers nothing.
     if (attempt === undefined && emitted) return { status: 'none', text: null };
+    if (attempt === undefined && !emitted && pending === null) {
+      // Rule 3 would have this hook print the pack, but its stored text is gone: nothing reached
+      // the model, so the record closes undelivered and its memories stay injectable (FR-026).
+      attempts.push({
+        tool_call_id: input.toolCallId,
+        execution: input.execution,
+        delivery: 'dropped',
+        at: input.now,
+      });
+      saveAttempts(db, injectionId, attempts);
+      omitPlanned(db, injectionId, 'not_delivered');
+      omitInjection(db, injectionId, (record.degraded_reason as DegradedReason | null) ?? 'not_delivered');
+      clearPending(db, input.conversationId);
+      return { status: 'omitted', text: null };
+    }
     if (attempt === undefined) {
       attempts.push({
         tool_call_id: input.toolCallId,

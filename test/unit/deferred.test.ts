@@ -654,11 +654,19 @@ test('a malformed stored pack emits no text and leaves its memories injectable',
     runtimeStateSet(db, `injection_pending:${CONVERSATION}`, '{damaged', NOW);
     const hook = { conversationId: CONVERSATION, toolCallId: 'lost-text', now: NOW + 1 };
     assert.equal(attachOnPreToolUse(db, hook), null);
-    assert.deepEqual(confirmOnPostToolUse(db, hook), { status: 'emitted', text: null });
+    assert.deepEqual(confirmOnPostToolUse(db, hook), { status: 'omitted', text: null });
     assert.deepEqual(
       db.prepare('SELECT memory_id, decision, reason FROM injection_items WHERE injection_id = ?').all(id).map((row) => ({ ...row })),
       [{ memory_id: 'm_1', decision: 'omitted', reason: 'not_delivered' }],
     );
+    // Nothing reached the model, so the record says so: no delivery, the call dropped.
+    const row = injectionRow(db, id);
+    assert.equal(row.state, 'omitted');
+    assert.equal(row.degraded_reason, 'not_delivered');
+    assert.equal(row.delivery_count ?? 0, 0);
+    assert.deepEqual(JSON.parse(String(row.attempts_json)), [
+      { tool_call_id: 'lost-text', execution: 'ran', delivery: 'dropped', at: NOW + 1 },
+    ]);
     assert.equal(runtimeStateGet(db, `injection_pending:${CONVERSATION}`), undefined);
     const next = await buildPromptPack(db, promptInput({ now: NOW + 2 }));
     assert.match(next!.text, /Retrieval note one/);

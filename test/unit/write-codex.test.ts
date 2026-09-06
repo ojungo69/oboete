@@ -234,7 +234,7 @@ test('removeCodex takes back the files oboete created', async () => {
   });
 });
 
-test('removeCodex removes its handlers and preserves a malformed marker-less config.toml', async () => {
+test('removeCodex removes its handlers, leaves a malformed marker-less config.toml and its backup, and says so', async () => {
   await withTempHome(async (home) => {
     const userGroup = { matcher: 'startup', hooks: [{ type: 'command', command: 'notify-send hi' }] };
     const settings = { hooks: { SessionStart: [userGroup] } };
@@ -246,11 +246,16 @@ test('removeCodex removes its handlers and preserves a malformed marker-less con
     const malformed = readFileSync(configPath, 'utf8').replace(/^# oboete:(?:begin|end)\n/gm, '') + 'broken = [\n';
     writeFileSync(configPath, malformed);
 
-    assert.doesNotThrow(() => removeCodex(home, { node: NODE, bundle: BUNDLE }));
+    assert.throws(
+      () => removeCodex(home, { node: NODE, bundle: BUNDLE }),
+      (error: unknown) =>
+        error instanceof ManagedFileError && error.code === 'reparse_failed' && /delete by hand/.test(error.message),
+    );
+    // Codex fires nothing any more, the unreadable file is untouched, and the pre-oboete copy stays.
     assert.deepEqual(JSON.parse(readFileSync(hooksPath, 'utf8')), settings);
     assert.equal(readFileSync(configPath, 'utf8'), malformed);
     assert.equal(existsSync(hooksPath + BACKUP_SUFFIX), false);
-    assert.equal(existsSync(configPath + BACKUP_SUFFIX), false);
+    assert.equal(readFileSync(configPath + BACKUP_SUFFIX, 'utf8'), 'model = "gpt-5"\n');
   });
 });
 
