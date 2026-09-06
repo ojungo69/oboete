@@ -1,0 +1,31 @@
+scripts/fixtures/NOTES-T067.md
+  s_0ec4092f1f4270::t_a117bb8dc12d9a 21
+specs/007-oboete-m1-alpha/contracts/agents.md
+  s_86c1dd8ef0f2c2::t_0a92322ba2f8cf 215-217
+src/fixture/replay.ts
+  s_86c1dd8ef0f2c2::t_82bca1e84d9634 18,21,34-37,44,67-68,86-99,176-178,213-214,276-290,309,312-313,332-352,355-357,362-367,370,383-458,472-477,559-564,633-634,709-715,747,763-766,770,783-787,791-802,813-863,879-880,910-924,928,930,938-943,947-948,951,966,974,985-990,994-1006,1021,1071-1078,1082-1092,1113-1115,1145-1162,1177-1179,1261,1263-1265,1268,1274-1376,1380-1382,1384-1391,1405-1417,1436-1437,1440-1451,1476-1490,1496,1501,1557-1578,1581-1592,1608,1621,1627,1637,1684-1686,1688-1696,1736-1737
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "f3bb8398a6eb547c86d64827ff1f4e53ab16941f",
+  "prompts": {},
+  "sessions": {
+    "s_0ec4092f1f4270": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0728a-e9ac-79d1-aa4e-0e3ee10a6268",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_86c1dd8ef0f2c2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7726dcc6-57f2-486b-9f09-5ebee0e48f95",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
