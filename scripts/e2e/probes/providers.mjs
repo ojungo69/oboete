@@ -145,7 +145,10 @@ function extractModelAndText(body) {
 function schemaHonoured(text) {
   if (!text) return false;
   try {
-    const obj = JSON.parse(String(text).trim().replace(/^```(?:json)?\s*|\s*```$/g, ""));
+    let body = String(text).trim();
+    if (body.startsWith("```")) body = body.slice(body.startsWith("```json") ? 7 : 3).trimStart();
+    if (body.endsWith("```")) body = body.slice(0, -3).trimEnd();
+    const obj = JSON.parse(body);
     return obj && typeof obj === "object" && typeof obj.ok === "boolean" && Object.keys(obj).length === 1;
   } catch {
     return false;

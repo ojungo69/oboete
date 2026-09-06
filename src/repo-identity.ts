@@ -59,10 +59,16 @@ function git(spawn: GitSpawn, cwd: string, args: string[], timeout: number): str
   return result.stdout.trim();
 }
 
+function withoutTrailingSlashes(path: string): string {
+  let end = path.length;
+  while (end > 0 && path[end - 1] === '/') end -= 1;
+  return path.slice(0, end);
+}
+
 function trimPath(path: string): string {
-  const withoutSlashes = path.replace(/\/+$/, '');
+  const withoutSlashes = withoutTrailingSlashes(path);
   return withoutSlashes.endsWith('.git')
-    ? withoutSlashes.slice(0, -'.git'.length).replace(/\/+$/, '')
+    ? withoutTrailingSlashes(withoutSlashes.slice(0, -'.git'.length))
     : withoutSlashes;
 }
 

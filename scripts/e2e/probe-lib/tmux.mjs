@@ -91,7 +91,7 @@ export async function tuiSubmit(name, tui, text, options = {}, dependencies = {}
       const pane = tui.capture();
       if (!pane) return text === "/quit";
       const lines = pane.split("\n");
-      const composer = lines.findLastIndex((line) => /^\s*[│]?\s*[›❯>]\s/u.test(line));
+      const composer = lines.findLastIndex((line) => /^\s*(?:│\s*)?[›❯>]\s/u.test(line));
       return composer < 0 || !lines[composer].includes(prefix) ||
         lines.slice(composer + 1).some((line) => /^\s*[•●]/u.test(line));
     }, 5_000, 200, dependencies);

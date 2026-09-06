@@ -18,6 +18,7 @@ import {
   normalizeToolName,
 } from '../../src/events.js';
 import type { AgentName, EventKind, NormalizedEvent, SessionStartSource } from '../../src/events.js';
+import { WALL_CLOCK_IS_MEASURED } from '../helpers/home.js';
 
 // The test hashes the documented key itself instead of calling the module, so a change of the key
 // shape cannot hide behind the module's own hashing.
@@ -432,6 +433,30 @@ test('normalizeToolName maps each agent native tool name from the fixtures', () 
   for (const [agent, native, normalized] of cases) {
     assert.equal(normalizeToolName(agent, native), normalized, `${agent} ${native}`);
   }
+});
+
+test('normalizeToolName splits an MCP name once, not once per underscore', () => {
+  // Native names arrive uncapped from agent payloads; the former lazy regex took 1.3 s on this.
+  const native = `mcp__${'_'.repeat(40_000)}`;
+  const started = performance.now();
+  const normalized = normalizeToolName('claude', native);
+  const elapsed = performance.now() - started;
+  assert.equal(normalized, `mcp:_/${'_'.repeat(40_000 - 3)}`);
+  if (WALL_CLOCK_IS_MEASURED) assert.ok(elapsed < 100, `took ${elapsed.toFixed(0)} ms`);
+  // The rejected shape (a line terminator at the end) was the one the regex re-scanned.
+  const startedRejected = performance.now();
+  assert.equal(normalizeToolName('claude', `${native}\n`), 'other');
+  const elapsedRejected = performance.now() - startedRejected;
+  if (WALL_CLOCK_IS_MEASURED) assert.ok(elapsedRejected < 100, `took ${elapsedRejected.toFixed(0)} ms`);
+  // The split keeps the regex's edges: a server or tool part must be non-empty, and a line
+  // terminator anywhere in the name disqualifies it.
+  assert.equal(normalizeToolName('claude', 'mcp__a___b'), 'mcp:a/_b');
+  assert.equal(normalizeToolName('claude', 'mcp____tool'), 'other');
+  assert.equal(normalizeToolName('claude', 'mcp__server__'), 'other');
+  assert.equal(normalizeToolName('claude', 'mcp__server'), 'other');
+  assert.equal(normalizeToolName('claude', 'mcp__server__tool\nx'), 'other');
+  assert.equal(normalizeToolName('grok', 'a__b'), 'mcp:a/b');
+  assert.equal(normalizeToolName('grok', '__b'), 'other');
 });
 
 test('a normalized tool name is always a value the schema accepts', () => {

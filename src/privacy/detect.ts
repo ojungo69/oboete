@@ -69,7 +69,11 @@ export type DetectorResult =
  * text. The removed text is never part of the result.
  */
 export function stripPrivate(text: string): { text: string; removed: number } {
-  const tag = /<\s*(\/?)\s*private\s*>/gi;
+  // The optional slash sits between two whitespace runs, so the earlier `\s*(\/?)\s*` form let the
+  // engine split a run of spaces every possible way before failing (1.4 s on 50,000 spaces, and the
+  // captured text can be 1 MiB). With the slash required before the second run, each character is
+  // examined once.
+  const tag = /<\s*(?:(\/)\s*)?private\s*>/gi;
   let depth = 0;
   let kept = '';
   let cursor = 0;
@@ -112,6 +116,9 @@ function tokenize(glob: string): GlobToken[] {
   const tokens: GlobToken[] = [];
   // A rule without a slash matches the file name at any depth, as it does in .gitignore.
   if (!glob.includes('/')) tokens.push({ kind: 'anyDirectories' });
+  // The next `]` at or after the cursor, or -1 once none remains: looked up again only after the
+  // cursor passes it, so a rule made of `[` with no `]` is read once instead of once per bracket.
+  let nextClose = 0;
   for (let index = 0; index < glob.length; index += 1) {
     const character = glob[index] as string;
     if (character === '*') {
@@ -134,12 +141,12 @@ function tokenize(glob: string): GlobToken[] {
       continue;
     }
     if (character === '[') {
-      const end = glob.indexOf(']', index + 1);
-      if (end !== -1) {
-        const body = glob.slice(index + 1, end).replace(/^[!^]/, '^');
+      if (nextClose !== -1 && nextClose <= index) nextClose = glob.indexOf(']', index + 1);
+      if (nextClose !== -1) {
+        const body = glob.slice(index + 1, nextClose).replace(/^[!^]/, '^');
         const expression = new RegExp(`^[${body}]$`);
         tokens.push({ kind: 'one', test: (candidate) => expression.test(candidate) });
-        index = end;
+        index = nextClose;
         continue;
       }
     }

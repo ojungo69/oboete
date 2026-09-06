@@ -24,11 +24,13 @@ case "${1:-}" in
     fi
     latest=$(sudo -u oboete-dogfood -H bash -lc 'ls -1d "$HOME/.cache/oboete-probes"/*/ 2>/dev/null | sort | tail -1' || true)
     if [ -n "${latest:-}" ]; then
+      # shellcheck disable=SC2024 # read as root, write as the invoking user: the unprivileged redirect is the point
       sudo cat "${latest}report.json" > "$dest/report.json"
       runId=$(basename "${latest%/}")
       doc="$ROOT/docs/research/oboete-contracts-probes.md"
       if sudo test -f "${latest}report.md"; then
         if [ ! -f "$doc" ] || ! grep -q "run ${runId}" "$doc"; then
+          # shellcheck disable=SC2024 # same: the report lands in the checkout owned by the invoking user
           sudo cat "${latest}report.md" >> "$doc"
         fi
       fi

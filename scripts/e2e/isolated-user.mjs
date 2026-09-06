@@ -194,7 +194,14 @@ export function assertAgentOutput(output, facts, { requireDegraded = false } = {
   const missingFacts = facts.filter((fact) => !normalizedOutput.includes(normalize(fact)));
   const degradedMarker = text
     .split(/\r?\n/u)
-    .some((line) => /^>\s*degraded:\s+.*\brule-based notes\.\s*$/iu.test(line.trim()));
+    .some((line) => {
+      // Two anchored tests instead of one `\s+.*` pattern, which re-split a run of spaces; the
+      // accepted lines are the same: any whitespace run after the colon, then a line without a
+      // line terminator that ends in the phrase.
+      const trimmed = line.trim();
+      const head = /^>\s*degraded:\s+/iu.exec(trimmed);
+      return head !== null && /^.*\brule-based notes\.$/iu.test(trimmed.slice(head[0].length));
+    });
   return {
     pass: missingFacts.length === 0 && (!requireDegraded || degradedMarker),
     missingFacts,
