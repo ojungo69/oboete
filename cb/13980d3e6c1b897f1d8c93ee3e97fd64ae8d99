@@ -1,0 +1,87 @@
+src/worker/batches.ts
+  s_a22f3d496187b3::t_43073b42e6de9e 598
+src/worker/observe.ts
+  s_a22f3d496187b3::t_43073b42e6de9e 639,837-844
+src/retrieval/query.ts
+  s_a22f3d496187b3::t_dc31b5aacb96eb 49-50
+  s_2d0d27ee225918::t_00e4dcf72b3b50 134
+src/worker/lease.ts
+  s_a22f3d496187b3::t_43073b42e6de9e 10-13
+src/doctor/agents.ts
+  s_a22f3d496187b3::t_74534f995d69ad 364-365,375,381
+src/setup/shell-quote.ts
+  s_a22f3d496187b3::t_43073b42e6de9e 7-8
+src/observer/llm.ts
+  s_a22f3d496187b3::t_74534f995d69ad 75-77,137,142,403,410,456,487
+  s_a22f3d496187b3::t_0b1ff3fce68ef1 404-409
+src/capture.ts
+  s_359fcac8e97f88::t_77e27bea10962b 246,982
+src/agents/index.ts
+  s_4ac45069234a82::t_75266febdf61e7 79,81,322
+src/db/open.ts
+  s_4ac45069234a82::t_4f459e8fd77121 11-12
+src/doctor.ts
+  s_4ac45069234a82::t_0e3139333f3502 133,137-138,142,145-146,157-160
+src/doctor/storage.ts
+  s_4ac45069234a82::t_8f9f87032d58f6 300,354,357
+src/events.ts
+  s_4ac45069234a82::t_7ca57ebde0b8bf 174-175
+src/log.ts
+  s_4ac45069234a82::t_c3e8ffb7835271 43-45
+src/memories-cli.ts
+  s_4ac45069234a82::t_07edf1d43e24ba 372-374,376
+src/observer/classify.ts
+  s_4ac45069234a82::t_74fcad46b6c8ac 346,520,590,596-597
+src/repo-identity.ts
+  s_4ac45069234a82::t_416ab4c780e645 40,95,102-103,166-167
+src/retrieval/fts.ts
+  s_10adc800e5f916::t_e5ede422d0c1c9 150
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "cb13980d3e6c1b897f1d8c93ee3e97fd64ae8d99",
+  "prompts": {},
+  "sessions": {
+    "s_10adc800e5f916": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a078c7-677c-7db2-b0eb-655b13247875",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_2d0d27ee225918": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a078c6-4483-7b22-9f25-f637169b5d4c",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_4ac45069234a82": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a078c6-3604-7490-9373-d9f7ac3941f3",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_a22f3d496187b3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a078c5-2eb6-7dc2-a99a-878fff75a289",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
