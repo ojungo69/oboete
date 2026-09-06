@@ -1,0 +1,24 @@
+test/unit/privacy.test.ts
+  s_a53c4f46cadef5::t_5ce924427f2622 33,333-335
+test/helpers/home.ts
+  s_a53c4f46cadef5::t_8d6d45024a6126 5-6
+  s_a53c4f46cadef5::t_5ce924427f2622 7-8
+test/unit/capture.test.ts
+  s_a53c4f46cadef5::t_5ce924427f2622 41,1101-1103
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "09f75fa48866b44c167dcf0b63de9cef037c65dc",
+  "prompts": {},
+  "sessions": {
+    "s_a53c4f46cadef5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0775d-6734-7c92-9035-edfcad883b62",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
