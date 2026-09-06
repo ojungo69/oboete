@@ -52,7 +52,22 @@ await build({
   external: EXTERNAL,
 });
 
-// Viewer assets (src/viewer/app, Vite) are embedded here from T079 on.
+// The viewer's page script (src/viewer/app, Preact) is built for the browser next to the engine
+// bundle; src/viewer/server.ts serves it from dist/viewer at request time, so the engine file
+// carries nothing of it (plan.md Complexity Tracking 10: esbuild compiles the TSX, no Vite).
+await build({
+  bundle: true,
+  platform: 'browser',
+  format: 'esm',
+  target: 'es2022',
+  jsx: 'automatic',
+  jsxImportSource: 'preact',
+  entryPoints: [join(root, 'src/viewer/app/main.tsx')],
+  outfile: join(root, 'dist/viewer/app.js'),
+  minify: true,
+  legalComments: 'none',
+  logLevel: 'warning',
+});
 
 const tests = [];
 const walk = (dir) => {

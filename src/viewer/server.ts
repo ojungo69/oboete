@@ -69,7 +69,8 @@ function pageHtml(): string {
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
-<main id="app"><p>Loading the memory viewer.</p></main>
+<main id="app"></main>
+<noscript><p>The memory viewer needs JavaScript enabled in this browser.</p></noscript>
 <script type="module" src="/assets/app.js"></script>
 </body>
 </html>
@@ -129,8 +130,18 @@ export async function startViewer(options: ViewerOptions): Promise<ViewerHandle>
   const app = new Hono();
   let origin = '';
 
-  // FR-038: the token gates every route, page and assets included; the query form exists for the
-  // page URL and for EventSource, which cannot send a header.
+  // FR-038: the token gates the page and every API route; the query form exists for the page URL
+  // and for EventSource, which cannot send a header. The page script and stylesheet carry no data
+  // and are fetched by the browser without a header, so they are served on the bind alone.
+  app.get('/assets/:name{app\\.(js|css)}', (c) => {
+    const name = c.req.param('name');
+    const file = join(assetsDir, name);
+    if (!existsSync(file)) return c.text('The viewer assets were not built.', 404);
+    return c.body(readFileSync(file), 200, {
+      'content-type': name.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8',
+    });
+  });
+  app.get('/favicon.ico', (c) => c.body(null, 204));
   app.use('*', async (c, next) => {
     const header = c.req.header('authorization');
     const bearer = header?.startsWith('Bearer ') ? header.slice('Bearer '.length) : undefined;
@@ -149,14 +160,6 @@ export async function startViewer(options: ViewerOptions): Promise<ViewerHandle>
   });
 
   app.get('/', (c) => c.html(pageHtml()));
-  app.get('/assets/:name{app\\.(js|css)}', (c) => {
-    const name = c.req.param('name');
-    const file = join(assetsDir, name);
-    if (!existsSync(file)) return c.text('The viewer assets were not built.', 404);
-    return c.body(readFileSync(file), 200, {
-      'content-type': name.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8',
-    });
-  });
 
   app.get('/api/memories', (c) =>
     withDatabase((db, scope) =>

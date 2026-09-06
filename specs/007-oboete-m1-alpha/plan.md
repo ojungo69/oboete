@@ -294,7 +294,7 @@ task, and a delegated result that touches one is returned to Claude Code.
 | 7 | `smol-toml` | The constitution mandates `config.toml`; Node has no TOML parser; setup writes values | JSON config contradicts the file name; other TOML packages are stale or parse-only |
 | 8 | `@ai-sdk/provider` | Required peer of `workers-ai-provider` | None |
 | 9 | `eslint` + `typescript-eslint` (dev) | The constitution's release evidence requires a lint gate | `tsc --noEmit` alone is not a linter |
-| 10 | `vite` + `@preact/preset-vite` (dev) | Listed Vite and Preact need the preset to compile TSX | Hand-rolled JSX transform |
+| 10 | ~~`vite` + `@preact/preset-vite` (dev)~~ superseded 2026-09-06: esbuild (already a devDependency) compiles the Preact TSX in scripts/build.mjs; the two packages were removed | The plan listed Vite to compile TSX; esbuild does the same with no extra package | Vite build pipeline for a one-file page script |
 | 11 | `typescript`, `@types/node` (dev) | Type gate | None |
 | 12 | Codex hooks written to `~/.codex/hooks.json` with the trust row in `config.toml` | Codex reads both files with one trust identity; a managed block appended to `config.toml` avoids re-serializing a user-maintained file | Writing the handler itself into `config.toml` requires a full TOML rewrite; amendment A5 |
 | 13 | `.oboete.toml` for repository path rules | Same parser as the user config; a committed file may only add rules | YAML would add a parser |

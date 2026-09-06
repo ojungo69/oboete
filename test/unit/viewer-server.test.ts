@@ -110,7 +110,7 @@ test('the viewer binds 127.0.0.1 with a per-launch token and refuses any other h
 
 test('a request without the token is refused on every route; the page and the API accept it', async () => {
   await withViewer(async ({ api, viewer }) => {
-    for (const path of ['/', '/api/memories', '/api/sessions', '/api/events', '/assets/app.js']) {
+    for (const path of ['/', '/api/memories', '/api/sessions', '/api/events', '/api/sessions/s1/why']) {
       const refused = await api(path, { token: null });
       assert.equal(refused.status, 401, path);
       const wrong = await api(path, { token: 'f'.repeat(32) });
@@ -122,9 +122,11 @@ test('a request without the token is refused on every route; the page and the AP
     const html = await page.text();
     assert.ok(html.includes('/assets/app.js'), html);
     assert.ok(!html.includes(viewer.token), 'the page never embeds the token');
-    const script = await api('/assets/app.js');
+    // The page script and stylesheet carry no data; the browser fetches them without a header.
+    const script = await api('/assets/app.js', { token: null });
     assert.equal(script.status, 200);
     assert.equal(await script.text(), 'console.log("viewer")');
+    assert.equal((await api('/assets/other.js', { token: null })).status, 401);
     const query = await fetch(`${viewer.origin}/api/memories?token=${viewer.token}`);
     assert.equal(query.status, 200);
   });

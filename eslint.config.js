@@ -22,6 +22,22 @@ export default tseslint.config(
     },
   },
   {
+    files: ['src/viewer/app/**/*.ts', 'src/viewer/app/**/*.tsx'],
+    extends: [eslint.configs.recommended, ...tseslint.configs.recommended],
+    languageOptions: {
+      globals: {
+        document: 'readonly',
+        fetch: 'readonly',
+        location: 'readonly',
+        EventSource: 'readonly',
+        HTMLElement: 'readonly',
+        HTMLInputElement: 'readonly',
+        RequestInit: 'readonly',
+        URLSearchParams: 'readonly',
+      },
+    },
+  },
+  {
     files: ['scripts/build.mjs', 'eslint.config.js'],
     languageOptions: {
       sourceType: 'module',
