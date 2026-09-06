@@ -1,0 +1,29 @@
+README.md
+  s_359fcac8e97f88::t_4d8d2a2240e8e1 3,5-10,12-20,24-26,31-35,49-389,394-395,397
+docs/agents/codex.md
+  s_359fcac8e97f88::t_b34b60e5d34137 1-109
+docs/agents/grok.md
+  s_359fcac8e97f88::t_6c40c5ce7ed3b3 1-124
+docs/agents/claude.md
+  s_359fcac8e97f88::t_8f48e016534441 1-92
+docs/agents/pi.md
+  s_359fcac8e97f88::t_13bfa80a6d8633 1-112
+specs/007-oboete-m1-alpha/tasks.md
+  s_359fcac8e97f88::t_bf457d13d85799 264
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "584d23873271250a2711434af977512dd775209b",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
