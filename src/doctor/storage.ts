@@ -87,7 +87,7 @@ export function openStorage(paths: OboetePaths): StorageOpen {
       return {
         item: degraded(
           'storage',
-          describe(error),
+          integritySentence(error),
           'Hooks spool every event; nothing is summarized, injected or searchable until storage is repaired.',
           CORRUPT_RECOVERY,
         ),
@@ -151,7 +151,7 @@ function finishStorageOpen(
       return {
         item: degraded(
           'storage',
-          describe(error),
+          integritySentence(error),
           'Hooks spool every event; nothing is summarized, injected or searchable until storage is repaired.',
           CORRUPT_RECOVERY,
         ),
@@ -361,6 +361,14 @@ export function spoolItem(paths: OboetePaths): DoctorItem {
 function countFiles(directory: string): number {
   if (!existsSync(directory)) return 0;
   return readdirSync(directory, { withFileTypes: true }).filter((entry) => entry.isFile()).length;
+}
+
+/** SQLite's own words ("file is not a database") as a sentence that names the file's state. */
+function integritySentence(error: unknown): string {
+  const text = describe(error).trim().replace(/\.$/u, '');
+  return /not a database/i.test(text)
+    ? 'The file is not a SQLite database (its header is not the SQLite format).'
+    : `The database is corrupt: ${text}.`;
 }
 
 function isIntegrityFailure(error: unknown): boolean {
