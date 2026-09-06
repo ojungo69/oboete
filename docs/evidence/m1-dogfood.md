@@ -174,3 +174,39 @@ Isolated account `oboete-dogfood`, bundle 0.1.0-alpha.0 (commit 8fedac9d), Node 
 | SC-010 duplicates | 0 duplicate included groups | 0 | pass |
 
 The SC-003 figures match the quiet-machine measurement within 9 % on memory and 1 % on growth. The injection row's two samples over 300 ms (of 418) appeared only under the concurrent load named above; the T068 row, taken on a quiet machine, holds. A quiet-machine repeat on the isolated account is the open item for this row.
+
+## 2026-09-06 setup timing and doctor break-one-at-a-time (SC-008) run 2026-09-06T08-42-39Z
+
+Isolated account `oboete-dogfood`, bundle 0.1.0-alpha.0 (commit 6f16a7c3 plus the wording commits after it), Node v24.20.0, provider `workers-ai` with the account's credentials in the shell. Script: `/tmp/oboete-doctor-run.sh` (kept in the run directory). Three runs were made today; the first two found product defects that were fixed before this run (see the end of this section).
+
+### Setup timing
+
+`oboete setup --agents claude,codex,grok,pi --provider workers-ai --yes --json` on the already-wired account: exit 0 in **11.9 s** (8.7 s and 9.6 s in the two earlier runs), all four agents `wired: yes`, `probe: pass` (Codex `trust: trusted`). Bound: under 2 minutes. **Pass.**
+
+### Baseline
+
+`oboete doctor --probe-provider`: every item healthy — config, storage, fts, migration, worker, spool, provider (`Provider workers-ai answered with model @cf/zai-org/glm-4.7-flash.`), allowance, agent:claude, agent:codex, agent:grok, agent:pi, pi. The catalog item warns that the catalog lists paid models and native-memory:claude warns that Claude's own memory feature is on; both are informational.
+
+### Break one at a time
+
+Each row: the deliberate break, what doctor said (reason / consequence / recovery, abridged), the recovery step taken, and doctor's item afterwards.
+
+| # | Break | Doctor item | Reason (abridged) | Recovery printed | Step taken | After |
+|---|---|---|---|---|---|---|
+| 1 | oboete's hook groups removed from `~/.claude/settings.json` | `agent:claude` degraded | `No oboete hook in /home/oboete-dogfood/.claude/settings.json.` | `oboete setup --agents claude` | ran it | healthy |
+| 2 | `chmod 0444 memory.db` | `storage` degraded | `The database at …/memory.db is not writable.` | `chmod u+rw …/memory.db` (and the `-wal`/`-shm` files) | `chmod 0600` | healthy |
+| 3 | first 100 bytes of `memory.db` overwritten | `storage` degraded, exit **3** | `file is not a database` (now: `The file is not a SQLite database …`) | back up; `oboete export` if readable; move aside; `oboete setup`; `oboete import` | restored the copy | healthy |
+| 4 | `worker_lease` row pointed at a dead process with a 60 s old heartbeat | `worker` degraded | `The worker process 424242 holds the lease but its last heartbeat was 60 seconds ago.` | `oboete observe` | started a worker | healthy |
+| 5 | HTTPS proxied to a closed port (`NODE_USE_ENV_PROXY=1 https_proxy=http://127.0.0.1:9`) | `provider` degraded | `Provider request failed.` | `Check the network and the host in …/config.toml.` | proxy removed | healthy |
+| 6 | `provider_usage.exhausted_at` set for today | `allowance` degraded | `The provider reported exhaustion today.` | `Wait for the reset at 2026-09-07T00:00:00.000Z or switch preset with oboete setup --provider.` | row cleared (reset simulated) | healthy |
+| 7 | a 120 s old `.started` file in `spool/pi-ack` | `pi` degraded | `1 Pi capture children never finished (oldest 120 seconds ago), which is pi_child_hang. …` | delete the `.started` files under `spool/pi-ack` and run `oboete observe` | file deleted | **warning** (the worker's `pi_child_hang` count stays visible for 24 h) |
+| 8 | node path in `~/.pi/agent/extensions/oboete.js` replaced by `/nonexistent/node` | `agent:pi` degraded | `Pi ran but no capture event reached oboete.` | `oboete setup --agents pi`; if it still fails, run the agent by hand | extension restored | healthy |
+
+Exit codes: 1 for every degraded run, 3 for the corrupted header, 0 for the restored runs. `FAILS=0`, script exit 0. **SC-008 pass**: every deliberately broken component is named with a reason, a consequence and a recovery, and the recovery turns it green (row 7 turns to the documented warning).
+
+### Defects the first two runs exposed (fixed the same day)
+
+- **Grok Build re-serializes `~/.grok/config.toml` and drops comments.** After Grok's 1.0.21 update the `# oboete:begin` / `# oboete:end` markers were gone and the bare `[mcp_servers.oboete]` table remained, so `oboete setup` refused with "would not parse as TOML after the oboete block" and asked for a hand edit. Fixed in the setup writers: a marker-less table that runs oboete's own bundle is recognized (through the marked handler in `hooks/oboete.json`) and replaced or removed; a foreign table is still refused; doctor reports the dropped markers. Assessment: `.specify/bugs/grok-config-rewrite-loses-managed-block/`.
+- **The provider probe timed out while `curl` answered in seconds.** The default model `@cf/zai-org/glm-4.7-flash` was answering the one-event probe with 1,600–3,700 completion tokens of reasoning (25–45 s, 60–136 neurons per call), so the worker's 60 s deadline turned e2e summaries into fallbacks and the 10 s probe always failed. The observer now sends `chat_template_kwargs: { enable_thinking: false }`: the same request answers in 1.4 s with 122 tokens (5.7 neurons). The probe deadline is 30 s.
+- **The break-3 script corrupted the account's database in run 2** by copying `memory.db` and deleting its WAL while a probe-spawned worker still held the file; `quick_check` later reported "2nd reference to page 134". The doctor recovery text was followed literally (`oboete export` read 61 memories; move aside; `oboete setup`; `oboete import` of the remote repository's 8 rows) and doctor returned to exit 0. The script now kills live workers and checkpoints the WAL before it touches the file.
+- Two wording items: probe outcome codes and Pi diagnostics are rendered as sentences; the Pi warning covers the last 24 hours (nothing cleared the rows before, so it was permanent).
