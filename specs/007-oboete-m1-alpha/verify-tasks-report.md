@@ -1,83 +1,17 @@
-# verify-tasks report — Phase 4 (User Story 2), T057–T063
+# Verify-tasks report — Phases 6-10 (T069-T087)
 
 - Date: 2026-09-06
-- Scope: `branch` (3fa73504 = start of Phase 4 → HEAD 41a8f86b on m1/p4-us2)
-- Tasks verified: 7 (filter: T057 T058 T059 T060 T061 T062 T063)
-- ⚠️ FRESH SESSION ADVISORY: this pass was run by the session that also drove the implementation (Claude Code as orchestrator; Grok Build wrote T058–T060, Codex wrote T063, Claude Code wrote T057/T061/T062 and the log-content fixes). Re-run in a separate session for an independent pass.
-- Evidence beyond the layers below: `npm test` on Node 24.16.0 and Node 22.23.1 — 665 + 44 tests, 0 failures (this session, after the T063 commit); the five fault files alone: 40 scenarios, 40 pass.
+- Scope: `all` (branch 007-oboete-m1-alpha at 584d2387, clean tree); tasks filtered to T069-T087 marked `[X]`; T085, T088, T089 open by design
+- Verifiers: five fresh `sonnet` agents (Workflow `wf_a512bc1b-17e`), one group of two to four tasks each; the implementing session only assembled this report
+- ⚠️ FRESH SESSION ADVISORY: the verification ran in independent agents, not in the implementing context
 
 ## Scorecard
 
-| Verdict | Count |
-|---|---|
-| ✅ VERIFIED | 6 |
-| 🔍 PARTIAL | 1 |
-| ⚠️ WEAK | 0 |
-| ❌ NOT_FOUND | 0 |
-| ⏭️ SKIPPED | 0 |
-
-## Flagged items
-
-### T057 — 🔍 PARTIAL
-
-Task text lists `src/db/open.ts` and `src/worker/lease.ts` among the files to wire the seam into; neither changed on the branch.
-
-| Layer | Result | Detail |
-|---|---|---|
-| 1 File existence | positive | src/testing/faults.ts, src/privacy/detect.ts, src/observer/llm.ts, src/capture.ts, src/db/open.ts, src/worker/lease.ts, test/unit/faults.test.ts, package.json all present |
-| 2 Git diff | negative | open.ts and lease.ts are not in the branch diff (faults.ts A; detect.ts, llm.ts, capture.ts, package.json M) |
-| 3 Content | positive | `testFault`, `faultFetch` exported; `testFault(` at detect.ts:460, llm.ts:329/434/470, capture.ts:1274; `faultFetch(` at llm.ts:377; package.json test glob carries `build/test/fault-*.test.mjs`; test/unit/faults.test.ts has the gate cases |
-| 4 Dead code | positive | testFault 5 callers, faultFetch 1 caller in src/ |
-| 5 Semantic | positive | ⚠️ Interpretive: the task note records the deviation on purpose — open/write failures are staged for real (missing, corrupt, chmod, held BEGIN IMMEDIATE) and land in the same catches, and every lease function takes `now` while `worker_lease` is one row a test can write; fault-storage (db-missing, busy, corrupt, readonly, enospc) and fault-worker (lease-steal, clock-jump, lease-lost-after-3036) exercise those paths without a seam. Not a phantom: the seam exists and is wired where a real fault cannot be staged. |
-
-## Verified items
-
-| Task | Verdict | Summary |
-|---|---|---|
-| T058 | ✅ VERIFIED | test/fault-storage.test.ts (A) with scenarios db-missing, busy, corrupt, readonly, enospc, oversized-payload, detector-never-returns; test/helpers/fault.ts (A) exports scenario/fixture/spawnEngine/runHook/rows/spoolFiles/claudePayload and is imported by all five fault files; 8/8 pass |
-| T059 | ✅ VERIFIED | test/fault-worker.test.ts (A) with worker-kill, worker-kill-after-response, lease-steal, lease-lost-after-3036, clock-jump, resume, fork, clear, compact, pause; 10/10 pass ×3 runs |
-| T060 | ✅ VERIFIED | test/fault-provider.test.ts (A) with provider-unreachable, provider-hang, provider-429-3036, provider-403-5035, provider-401, provider-length, provider-malformed (+ schema-invalid sibling), provider-wrong-language, cap-boundary (workers-ai and openrouter, cross-preset sum), consent-changed, remote-no-duplicate; 12/12 pass |
-| T061 | ✅ VERIFIED | test/fault-pi.test.ts (A) with pi-throw, pi-child-hang, pi-spawn-failure, prior-failure counters recorded; 4/4 pass |
-| T062 | ✅ VERIFIED | test/fault-grok.test.ts (A) with the six Grok cases and the ledger assertion after `purgeExpiredEvents`; 6/6 pass |
-| T063 | ✅ VERIFIED | src/cli.ts (M: exit 0 + one hook-log line for hook/capture/inject), src/log.ts (M: `errorCode`, 11 callers in src/), src/worker/observe.ts (M: `SAFE_UNUSABLE_DETAILS` + `loggableDetail`, `detail=` on the batch log line), src/capture.ts and src/injection/inject.ts (M: sibling catches on `errorCode`), test/fault-storage.test.ts (M: SessionEnd-driven recovery assertions), test/unit/cli.test.ts and test/unit/observe.test.ts (M: 4 + 3 new tests). ⚠️ Interpretive: "green on 22.16 and 24.x" was measured on Node 22.23.1 (the installed 22.x) and 24.16.0 |
-
-## Unassessable items
-
-None.
-
-## Verdict lines
-
-| T057 | 🔍 PARTIAL | seam wired into detect/llm/capture; open.ts and lease.ts deliberately left without a seam (documented in the task note) |
-| T058 | ✅ VERIFIED | storage matrix + shared harness present, changed, wired, green |
-| T059 | ✅ VERIFIED | worker matrix present, changed, green |
-| T060 | ✅ VERIFIED | provider matrix present, changed, green |
-| T061 | ✅ VERIFIED | Pi matrix present, changed, green |
-| T062 | ✅ VERIFIED | Grok matrix present, changed, green |
-| T063 | ✅ VERIFIED | engine fixes present, changed, wired, matrix and full suite green on both Node lines |
-
-## Walkthrough Log
-
-- T057 (🔍 PARTIAL): disposition **S — skipped, no fix needed**. Auto-disposition by the orchestrating session (the user was not present for the walkthrough): the Layer 2 negative is the documented design deviation in the task note, not missing work. An independent re-run in a fresh session may re-open it.
-
----
-
-# verify-tasks report — Phase 5 (User Story 3), T064–T068
-
-- Date: 2026-09-06
-- Scope: `all` (origin/main 96885197 → HEAD 6b72308a on 007-oboete-m1-alpha; working tree clean)
-- Tasks verified: 5 (filter: T064 T065 T066 T067 T068)
-- ⚠️ FRESH SESSION ADVISORY: the cascade was run by five fresh workflow agents (one per task, no implementation context; opus for T065/T068, sonnet for the rest), orchestrated by the session that also drove the implementation (Claude Code wrote T064–T066; Grok Build wrote T067 and the T068 first pass and fix round; Codex wrote the T068 round 2). Re-run in a separate session for a fully independent pass.
-- Evidence beyond the layers below: `npm test` on Node 24.16.0 and Node 22.23.1 — 678 + 44 tests, 0 failures (this session, after the T068 round-2 commit, from the lane worktree at the same tree); `oboete fixture replay` recorded run at load 0.38 in docs/evidence/m1-resource-envelope.md (every gate pass except SC-009 without provider credentials). Verifiers did not execute tests or the replay (read-only).
-
-## Scorecard
-
-| Verdict | Count |
-|---|---|
-| ✅ VERIFIED | 5 |
-| 🔍 PARTIAL | 0 |
-| ⚠️ WEAK | 0 |
-| ❌ NOT_FOUND | 0 |
-| ⏭️ SKIPPED | 0 |
+- ✅ VERIFIED: 18
+- 🔍 PARTIAL: 0
+- ⚠️ WEAK: 0
+- ❌ NOT_FOUND: 0
+- ⏭️ SKIPPED: 0
 
 ## Flagged items
 
@@ -85,28 +19,28 @@ None.
 
 ## Verified items
 
-| Task | L1 files | L2 diff | L3 symbols | L4 wired | L5 semantic | Summary |
+| Task | Verdict | L1 files | L3 symbols | L4 wiring | L5 semantic | Summary |
 |---|---|---|---|---|---|---|
-| T064 | positive | positive | positive | n/a (tests) | positive | test/unit/privacy.test.ts drives the real hook, detector, worker and pack through test/helpers/observe.ts: mixed-session outbound body (eligible rows travel, secret row, `<private>` span, path-rule row, local-only memory and other repository absent, `repo_ref` opaque), FR-020 cross-repository refusal via injection_items count, pack recognition on the spool path (`recognized_packs` = [packHash]), agent-swap invariance over memories, pack text and decisions. |
-| T065 | positive | positive | positive | positive | positive | src/injection/recognize.ts `stripRecognizedPacks` (sha256 of header→footer span against injections.pack_hash, every footer line tried, unissued span stays content) is called inside the capture write transaction (capture.ts:819) and in spool recovery (worker/batches.ts:346); contentHash is rewritten after stripping. test/unit/logs.test.ts is an end-to-end credential scan over rows, spool, log, pack, doctor output and the data directory; `credentialValues` (log.ts) is used by capture, observe and detect. |
-| T066 | positive | positive | positive | positive | positive | `reclassifyImportedRow` (privacy/classify.ts) decides from two detector results and the directive check (clean → unreviewed with detector texts; secret or directive → tombstoned `secret`; unfinished detector → retry); observe.ts runs it after classifyPending in keyset pages of 50 and nearbyCandidates excludes imported rows. Decision-table unit test plus fixture-level end-to-end test match the note's seeded ids and assertions. |
-| T067 | positive | positive | positive | n/a (fixture) | positive | scripts/fixtures/generate-1000-events.mjs and test/fixtures/events-1000.jsonl: 1,051 lines, 48 sessions, 40 bilingual facts recalled later, 37 corpus secret ids (32 + 5 negatives), 32 directives, 4 size events at the exact byte boundaries, fork/resume/compact/clear per agent — each count reproduced by the verifier by parsing the fixture; regeneration byte-identical. |
-| T068 | positive | positive | positive | positive | positive | src/fixture/replay.ts (1,816 lines, loaded lazily by cli.ts `fixture`) spawns the real hook per event and derives every measurement from live processes and SQL; eleven gates (SC-002, injection, session start, SC-003, SC-005, SC-009, SC-010, lifecycle, directives, hooks) all feed the exit code; docs/evidence/m1-resource-envelope.md carries the recorded run. |
+| T069 | ✅ VERIFIED | positive | positive | positive | positive | doctor.ts:86-167 wires all listed items, exit 3/1/0 logic at line 163; cli.ts:32 wires `doctor:`. pi_child_hang literal (agents.ts:329); pi_child_failed set in capture.ts:893, read via generic message_code (agents.ts:348-368); literal 'pi_spawn_failed' absent (closest: capture_spawn_failed) — paraphrase, not phantom. 26/26 tests pass in build/test/unit/doctor.test.mjs. |
+| T070 | ✅ VERIFIED | positive | positive | positive | positive | pause.ts implements runPause/runResume (marker mode 0o600, pause.ts:53), wired in cli.ts:44-45. isPaused (config.ts:397) checked in capture.ts:874 before db open, per comment 'R12: paused marker read before stdin and before the database'. 5/5 tests pass in build/test/unit/pause.test.mjs. |
+| T071 | ✅ VERIFIED | positive | positive | positive | positive | doctor.test.ts has one test per break: hook removed(281), chmod(362), corrupt header(383), stale worker lease(412), unreachable provider(439), exhausted allowance(465), stale Pi .started(492), Pi spawn failure(510), each asserting degraded then recovery turns green. Also --json(564), paused warning exit0(577), config 0o644(586), --no-probe-agents(539), unknown option exit2(709). 26/26 pass via node --test. |
+| T072 | ✅ VERIFIED | positive | not_applicable | not_applicable | positive | docs/evidence/m1-dogfood.md:178-212 section 'setup timing and doctor break-one-at-a-time (SC-008)' has measured setup time 11.9s vs 2min bound, baseline doctor run, 8-row break table with reason/recovery/after state matching T071 tests, exit codes 1/3/0 documented, 'FAILS=0, SC-008 pass' plus two real defects found/fixed same day — genuine evidence, not a stub. |
+| T073 | ✅ VERIFIED | positive | positive | positive | positive | test/unit/degraded.test.ts (8 tests) covers summary precedence (src/observer/classify.ts sessionSummary), pack `> degraded:` lines (src/injection/pack.ts), usageEstimate exhaustion (src/observer/reservation.ts). `node --test build/test/unit/degraded.test.mjs`: 8/8 pass, 0 fail. |
+| T074 | ✅ VERIFIED | positive | positive | positive | positive | src/why.ts:174 runWhy parses <session-id>/--turn/--json, findSession (:62) resolves native ids, calls whyReport, renders ItemReason/DEGRADED_SENTENCES/deferred attempts. Wired src/cli.ts:17,40. `node --test build/test/unit/why.test.mjs`: 7/7 pass. Matches contracts/cli.md:19. |
+| T075 | ✅ VERIFIED | positive | not_applicable | not_applicable | positive | docs/evidence/m1-dogfood.md:214-232 has concrete per-pair table (6 pairs, 22885-32990ms, all pass) and confirms degraded_marker:true; exhaustion gap honestly left open pending Grok hold, covered by doctor break 6 + degraded.test.ts. Minor prose slip ('nine' vs six pairs at line 232) doesn't indicate fabrication. |
+| T076 | ✅ VERIFIED | positive | positive | positive | positive | src/memories-cli.ts exports runSearch(:202)/runTimeline(:275)/runGet(:308)/runPin(:383)/runUnpin(:390)/runDelete(:397) on db/queries.ts; LEXICAL_NOTE(:24) emitted on empty results. Wired src/cli.ts:37-43. test/unit/cli-memories.test.ts:453 covers A13 tombstone non-recreation directly (:538-540). |
+| T077 | ✅ VERIFIED | positive | positive | positive | positive | src/mcp.ts implements legacy-era JSON-RPC: initialize echo (196-203), tools/list w/ inputSchema (29-61,213), tools/call content+structuredContent+isError (135-192), -32601 for server/discover (220), -32602 for repo arg (141-143), 1MiB frame -32600 (67,242-246). Wired src/cli.ts:48. test/unit/mcp.test.ts covers raw frames; build/test/unit/mcp.test.mjs: 10/10 pass. |
+| T078 | ✅ VERIFIED | positive | positive | positive | positive | src/viewer/server.ts: Hono on @hono/node-server (120-122), loopback-only bind (105-107), per-launch token via timingSafeEqual on every route (97-102,142-146), Origin check on mutating routes (148-154), SSE PRAGMA data_version poll every 500ms (34,238-259), sessions/turns/memories/review/pin/delete/search routes, --open browser launch. Wired src/cli.ts:49. build/test/unit/viewer-server.test.mjs: 6/6 pass incl. non-loopback refusal, token-less refusal, SC-011 SSE timing. |
+| T079 | ✅ VERIFIED | positive | positive | positive | positive | src/viewer/app/main.tsx: sessions/turns list, MemoryCard w/ sensitivity/provenance/review-state/degraded-reason/pin/delete-confirm (46-114), full-sentence copy (SENSITIVITY_LABEL/DEGRADED_LABEL 9-27), search (118-129), why-ledger, SSE live refresh via api.events (175). scripts/build.mjs (esbuild, no Vite per plan.md) compiles to dist/viewer/app.js/app.css, present and freshly built. Served by src/viewer/server.ts. Genuine implementation, no stubs. |
+| T080 | ✅ VERIFIED | positive | positive | positive | positive | scripts/e2e/mcp-clients.mjs drives tools/list and tools/call for claude/codex/grok (21-22, registration fns ~490-540) with raw frames via probe-lib/mcp-tee.mjs, plus Pi tool path via extension prompt/assertion (~727-756). scripts/e2e/mcp-clients.test.mjs: 14/14 pass. docs/evidence/m1-dogfood.md:111-124 records isolated-user run 2026-09-06T07-00-54-911Z, 4/4 agents pass with concrete per-agent protocolVersion/tool/frame data. |
+| T081 | ✅ VERIFIED | positive | positive | not_applicable | positive | docs/evidence/m1-dogfood.md:111 '## 2026-09-06 MCP clients run' has 4/4 client pass table (claude/codex/grok/pi); :132 '## 2026-09-06 viewer timing (SC-011)' has 5-row timing table, worst-case 6ms vs 2s bound, 500ms SSE poll. Concrete figures matching cli.md/plan requirements. Evidence task, no code to wire. |
+| T082 | ✅ VERIFIED | positive | positive | positive | positive | src/transfer.ts: EXPORT_FORMAT='oboete-export/1' (17), MAX_LINE_BYTES=64KB (18), MAX_FILE_BYTES=256MB (19), exportMemories (100), importMemories (243) w/ material_hash check (165-166), content_hash recompute (173), union lookup (176); runExport/runImport (370,398) wired in src/cli.ts:46-47. test/unit/transfer.test.ts covers tombstones, lattice, --map-repo, rejection. Ran build/test/unit/transfer.test.mjs: 7/7 pass. |
+| T083 | ✅ VERIFIED | positive | positive | positive | positive | runExport/runImport wired in src/cli.ts commands map (46-47), matching cli.md rows for export/import w/ --dry-run/--map-repo. Exit 2 on parseArgs failure, oversized/unreadable file, bad --map-repo, rejected lines; exit 0 on success. test/unit/transfer.test.ts:325 CLI test asserts these exact codes (344-373). build/test/unit/transfer.test.mjs: 7/7 pass incl. this test. |
+| T084 | ✅ VERIFIED | positive | not_applicable | not_applicable | positive | docs/evidence/m1-dogfood.md:149 '## export -> import round trip and fixture replay (SC-003)': round trip (31 exported, 8+2 mapped imported into B, idempotent, quarantine-until-observe, 'SC-003 export/import part pass' at :160) plus fixture replay section w/ RSS/per-1000-events figures vs m1-resource-envelope.md. Concrete measured data present, matches task description. |
+| T086 | ✅ VERIFIED | positive | positive | not_applicable | positive | README.md (402 lines) has substantive install/setup/doctor/privacy/support-matrix/degraded-mode sections (README.md:53 support matrix, tables at 132-149, 284-303). docs/agents/{claude,codex,grok,pi}.md all exist (92-124 lines each), cross-linked from README.md:319,326,332,337. Full-sentence prose, no stubs/TODOs found. |
+| T087 | ✅ VERIFIED | positive | positive | positive | positive | package.json:25 `pack-check: node scripts/pack-check.mjs`. scripts/pack-check.mjs really builds, npm packs, installs into empty --prefix, sumInstalledBytes() walks tree, exceedsSizeLimit() gates at 30MB (LIMIT_BYTES), exits 1 on breach. ci.yml:88-89 runs `npm run pack-check` in CI. README:65-67,375-381 cite matching measured 20.280 MB pass. |
 
-## Unassessable items
+## Notes
 
-None.
-
-## Verdict lines
-
-| T064 | ✅ VERIFIED | privacy tests drive the real pipeline; every done-note claim found in the test bodies |
-| T065 | ✅ VERIFIED | pack recognition wired into capture and spool recovery; credential scan end to end |
-| T066 | ✅ VERIFIED | imported-row reclassification implemented, wired and tested at unit and fixture level |
-| T067 | ✅ VERIFIED | fixture counts reproduced independently from the committed file |
-| T068 | ✅ VERIFIED | replay implemented, all printed gates reach the exit code, evidence recorded |
-
-## Gaps recorded by the verifiers (not defects)
-
-- Tests and the replay were not executed by the verifiers (read-only pass); execution evidence is the session's `npm test` and the recorded replay run above.
-- T065's done note says "batches.ts recoverSpool" without a directory; the code is src/worker/batches.ts. Doctor is still the T069 stub, so the credential scan's doctor leg only asserts the command ran and printed no credential (the note says so).
-- T068's evidence Setup names Commit `16303cac` and the lane worktree's bundle path: the evidence is generated from the tree one commit before the commit that records it (NOTES-T068.md states this). SC-009 is a recorded fail (17.5%) without provider credentials, so the command exits 1 until replayed with a provider. The replay is not wired into package.json scripts or CI (a 6-minute, timing-sensitive run); the Phase 5 checkpoint "SC-005 and SC-006 pass in CI" is met by the T064/T065 unit tests that run in `npm test` (mixed-session outbound body: no secret, no local-only or private row; credential scan), and "the replay evidence file exists" by T068. SC-006 is not a replay row; it is covered by those unit tests.
+- T069: the verifier found no literal `pi_spawn_failed` in the source (the agent:pi reason is the sentence `Pi could not be started for the probe.`); the task line's name is a paraphrase of that diagnostic, not a missing feature.
+- T075: the evidence prose said "nine non-Grok pairs" where six were run; corrected in docs/evidence/m1-dogfood.md after this report.

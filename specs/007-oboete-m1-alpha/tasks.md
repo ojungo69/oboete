@@ -264,7 +264,7 @@ classified, tombstone under --map-repo still suppresses.
 - [X] T086 [P] [EXT] Write README.md (install, setup, doctor, privacy model, support matrix 22.16 / 24.x, degraded modes) and docs/agents/*.md per-agent notes; user-facing copy in full sentences (done 2026-09-06: README.md plus docs/agents/{claude,codex,grok,pi}.md; alpha 0.1.0-alpha.0 self-use copy checked against setup, doctor, pack, and writer sources)
 - [X] T087 [P] [EXT] Add `npm run pack-check` (npm pack, install into an empty prefix, unpacked size ≤ 30 MB) to package.json and CI (done 2026-09-06: scripts/pack-check.mjs + engine Pack check step; installed size 20.280 MB file-size sum, limit 30 MB)
 - [ ] T088 Run the review gates on the implementation branch: `/code-review` then `ponytail-review`, plus `rules/security.md` tooling (semgrep, `/codex-review mode=security`, `/codex:adversarial-review`) for the security-owned modules, and record `~/.claude/review-status.json`
-- [ ] T089 Run `speckit-verify-tasks` against this file and resolve every phantom completion before opening the PR from `007-oboete-m1-alpha` to main
+- [X] T089 Run `speckit-verify-tasks` against this file and resolve every phantom completion before opening the PR from `007-oboete-m1-alpha` to main (done 2026-09-06 for Phases 6-10: 18 of 18 VERIFIED by five fresh verifier agents, report in verify-tasks-report.md; Phases 1-5 were verified on 2026-09-06 morning, commit f3353acf)
 
 ---
 
