@@ -1,0 +1,22 @@
+sonar-project.properties
+  s_79580a13bce7d5::t_c808cae81fee79 3-5,13-14
+.github/workflows/ci.yml
+  s_79580a13bce7d5::t_c808cae81fee79 39
+  s_79580a13bce7d5::t_b6923c297a727f 37-38,44-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "9a521c1e865dda6a9f88df273b2cbde082d8dd9c",
+  "prompts": {},
+  "sessions": {
+    "s_79580a13bce7d5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0762a-4f1a-7af1-b877-9115ba20753a",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
