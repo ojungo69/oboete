@@ -89,6 +89,12 @@ if (tests.length > 0) {
     packages: 'external',
     banner: { js: requireShim },
     sourcemap: 'inline',
+    // Coverage is measured on these bundles (CI merges the V8 data with c8). With tree shaking, a
+    // src/ function a bundle never imports is absent from that bundle, so v8-to-istanbul keeps its
+    // default "executed" mark for the original lines and the merge counts uncalled code as covered
+    // (measured 2026-09-06: capture.ts sleep() FNDA 0 yet DA 5). Keeping every function in the
+    // bundle lets V8 report the ones that never ran.
+    treeShaking: false,
   });
 }
 
