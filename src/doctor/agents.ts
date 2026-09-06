@@ -193,10 +193,7 @@ export function probeReason(label: string, code: string): string {
     case 'agent_not_installed':
       return `${label} is not installed, so the probe could not run.`;
     case 'spawn_failed':
-      // The Pi diagnostic keeps its name (tasks.md T069: pi_spawn_failed) next to the sentence.
-      return label === 'Pi'
-        ? `${label} could not be started for the probe (pi_spawn_failed).`
-        : `${label} could not be started for the probe.`;
+      return `${label} could not be started for the probe.`;
     case 'probe_event_stored':
       return `${label} ran and its capture event reached oboete.`;
     case 'probe_lookup_failed':
