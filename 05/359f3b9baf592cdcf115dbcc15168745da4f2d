@@ -1,0 +1,23 @@
+.github/workflows/ci.yml
+  s_359fcac8e97f88::t_61e47f582193be 37-42,45-46,49-51
+package.json
+  s_359fcac8e97f88::t_457037f8711815 43
+package-lock.json
+  s_359fcac8e97f88::t_e516ca7c03a6de 29,105-114,763-800,864-870,1190-1215,1246-1319,1360-1366,1409-1418,1686-1743,1757-1766,1776-1782,1833-1871,1939-1964,1981-1990,2075-2091,2144-2156,2180-2192,2206-2238,2249-2276,2384-2398,2449-2532
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "05359f3b9baf592cdcf115dbcc15168745da4f2d",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
