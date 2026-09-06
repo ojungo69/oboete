@@ -243,7 +243,7 @@ export function applyCompaction(
   const stored = state.lastCompactionKey;
   // The compaction the current epoch belongs to, whichever of Claude Code's two hooks opened it.
   const openedKey =
-    stored !== null && stored.startsWith(CLAUDE_COMPACT_POST_PREFIX)
+    stored?.startsWith(CLAUDE_COMPACT_POST_PREFIX)
       ? stored.slice(CLAUDE_COMPACT_POST_PREFIX.length)
       : stored;
 
@@ -979,7 +979,7 @@ export async function captureEvent(deps: CaptureDeps, input: CaptureInput): Prom
   }
   const injection: InjectionSeed = {
     eventName: input.eventName,
-    event: events[events.length - 1] as NormalizedEvent,
+    event: events.at(-1) as NormalizedEvent,
     config: settings.config,
     secretPaths: settings.secretPaths,
   };

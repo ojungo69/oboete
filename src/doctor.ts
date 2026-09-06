@@ -129,28 +129,22 @@ export async function runDoctor(argv: string[], overrides: Partial<DoctorDeps> =
     db = storage.db;
     integrityFailed = storage.integrityFailed;
 
-    items.push(guardItem('fts', () => ftsItem(db, integrityFailed)));
     items.push(
+      guardItem('fts', () => ftsItem(db, integrityFailed)),
       guardItem('migration', () =>
         migrationItem(storage.schemaVersion, storage.schemaAhead, integrityFailed),
       ),
-    );
-    items.push(guardItem('worker', () => workerItem(db, now, integrityFailed)));
-    items.push(guardItem('spool', () => spoolItem(paths)));
-    items.push(
+      guardItem('worker', () => workerItem(db, now, integrityFailed)),
+      guardItem('spool', () => spoolItem(paths)),
       await guardItemAsync('provider', () =>
         providerItem({ config, paths, db, integrityFailed, deps, options, now }),
       ),
-    );
-    items.push(guardItem('allowance', () => allowanceItem(config, db, integrityFailed, now)));
-    items.push(
+      guardItem('allowance', () => allowanceItem(config, db, integrityFailed, now)),
       ...guardList('catalog', () => catalogItems(config, db, integrityFailed, deps.env, now)),
-    );
-    items.push(
       ...(await guardListAsync('agent:claude', () => agentItems(db, integrityFailed, deps, options))),
+      guardItem('unrecognized-agents', () => unrecognizedItem(db, integrityFailed)),
+      guardItem('pi', () => piItem(paths, db, integrityFailed, now)),
     );
-    items.push(guardItem('unrecognized-agents', () => unrecognizedItem(db, integrityFailed)));
-    items.push(guardItem('pi', () => piItem(paths, db, integrityFailed, now)));
   } finally {
     try {
       db?.close();
@@ -160,7 +154,10 @@ export async function runDoctor(argv: string[], overrides: Partial<DoctorDeps> =
   }
 
   const degradedCount = items.filter((entry) => entry.status === 'degraded').length;
-  const exit = integrityFailed ? 3 : degradedCount > 0 ? 1 : 0;
+  let exit: number;
+  if (integrityFailed) exit = 3;
+  else if (degradedCount > 0) exit = 1;
+  else exit = 0;
   report(deps, options.json, items);
   appendLog(paths.hookLog, exit === 0 ? 'info' : 'warn', 'doctor', { exit, degraded: degradedCount });
   return exit;

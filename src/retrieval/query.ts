@@ -46,7 +46,8 @@ function bindParams(values: unknown[]): SQLInputValue[] {
 }
 
 function likePattern(term: string): string {
-  return `%${term.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_')}%`;
+  const escaped = term.replaceAll('\\', '\\\\').replaceAll('%', String.raw`\%`).replaceAll('_', String.raw`\_`);
+  return `%${escaped}%`;
 }
 
 function candidateFrom(
@@ -130,7 +131,7 @@ export function searchCandidates(db: DatabaseSync, input: SearchInput): SearchRe
     usedLike = true;
     const patterns = terms.like.map(likePattern);
     const likeClause = patterns
-      .map(() => `(m.title LIKE ? ESCAPE '\\' OR m.body LIKE ? ESCAPE '\\')`)
+      .map(() => String.raw`(m.title LIKE ? ESCAPE '\' OR m.body LIKE ? ESCAPE '\')`)
       .join(' AND ');
     const sql = `SELECT m.id, m.title, m.body, m.pinned_at, m.created_at
 FROM memories m

@@ -297,7 +297,7 @@ export function workerItem(
   }
   try {
     const row = db.prepare('SELECT owner_token, pid, heartbeat_at FROM worker_lease WHERE id = 1').get();
-    if (row === undefined || row.owner_token === null) {
+    if (row?.owner_token == null) {
       return healthy('worker', 'No worker is running; a hook starts one when work is queued.');
     }
     const processId = asNumber(row.pid) ?? 0;
@@ -351,9 +351,10 @@ export function spoolItem(paths: OboetePaths): DoctorItem {
   const quarantined = countFiles(paths.spoolFailed);
 
   if (!writable) {
+    const waiting = backlog > 0 ? ` (${backlog} events waiting)` : '';
     return degraded(
       'spool',
-      `The spool directory ${paths.spool} is not writable${backlog > 0 ? ` (${backlog} events waiting)` : ''}.`,
+      `The spool directory ${paths.spool} is not writable${waiting}.`,
       'When the database is also unavailable, events are lost (the hook reports the count on stderr).',
       `\`chmod u+rwx ${paths.spool}\``,
     );
