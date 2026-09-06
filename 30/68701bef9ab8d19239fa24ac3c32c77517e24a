@@ -1,0 +1,30 @@
+test/unit/mcp.test.ts
+  s_359fcac8e97f88::t_6e72c305a6acc1 158-160,178-179,198,200-205,208-210
+  s_359fcac8e97f88::t_a84085264d1610 1-157,161-177,180-197,199,206-207,211-286
+src/cli.ts
+  s_359fcac8e97f88::t_9483443de00cc1 44
+specs/007-oboete-m1-alpha/tasks.md
+  s_359fcac8e97f88::t_fceee1eada4190 231-232
+src/mcp.ts
+  s_359fcac8e97f88::t_6e72c305a6acc1 137-140
+  s_359fcac8e97f88::t_0345bec3c35f2a 1-136,141-287
+src/memories-cli.ts
+  s_359fcac8e97f88::t_15433e3fe89011 23-24,35,152,166-195,222
+  s_359fcac8e97f88::t_c294199c000681 13,241-274,302
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "3068701bef9ab8d19239fa24ac3c32c77517e24a",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
