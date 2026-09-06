@@ -1,0 +1,21 @@
+sonar-project.properties
+  s_359fcac8e97f88::t_67141e89926b09 12
+scripts/build.mjs
+  s_359fcac8e97f88::t_67141e89926b09 92-97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "add7c8961b007e10bab42e9f0a5204b587435460",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
