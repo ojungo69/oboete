@@ -1,0 +1,35 @@
+src/fixture/replay.ts
+  s_733feaa657825e::t_2d60e0193919b3 4,298,301-318,320-321,338,369,457,576-580,589-591,597-604,614,622,632,640-642,648,650,652,655-656,745,748,770,793-797,854,905-914,916-917,972,982,990,1009,1027,1115,1136,1163-1164,1182-1183,1231-1232
+  s_733feaa657825e::t_5d790a17ab04e2 300,319,915
+  s_733feaa657825e::t_be63fddf184d3e 1398-1399,1416,1435,1442-1454,1459-1464,1482,1493,1498-1499,1504-1505,1510,1532-1542,1563,1568,1571,1573,1586,1589-1591,1675,1688,1694,1704,1712-1713,1751,1778,1781-1788
+docs/evidence/m1-resource-envelope.md
+  s_86c1dd8ef0f2c2::t_12cdf4c0d230a4 142,146-147,149,151,160,164,168-191,195,199-209,215-218,222,226-227,229,233-236,246,300,329-332,336-337
+scripts/fixtures/NOTES-T068.md
+  s_86c1dd8ef0f2c2::t_a1488e0fb4cfc7 11-23,28-36
+specs/007-oboete-m1-alpha/tasks.md
+  s_86c1dd8ef0f2c2::t_50ac1a3cb01c41 179-180
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "6b72308a6e296c59d0aca1b8457c7dc2ef03d1a1",
+  "prompts": {},
+  "sessions": {
+    "s_733feaa657825e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0749a-6e69-76e2-b469-aad11b081dd0",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_86c1dd8ef0f2c2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7726dcc6-57f2-486b-9f09-5ebee0e48f95",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
