@@ -128,3 +128,20 @@ and the CodeQL fixes (1f11d087).
 - pi: pass (oboete_search memories=2)
 
 Isolated-user run of `scripts/e2e/mcp-clients.mjs --daily` from `~/oboete`. Each of Claude Code, Codex, and Grok Build listed and called `search` on a second `oboete_probe` registration (tee of `oboete mcp`, raw frames in the run dir); Pi called `oboete_search` and the tool result parsed as `oboete search --json`. Direct stdio rejected `repo` with `-32602` and `get m_missing` with `isError: true`. Probe registrations were removed; the setup `oboete` entries were left in place. Claude's search returned 0 memories because it ran first; Codex/Grok/Pi then saw 2, after that turn was captured.
+
+## 2026-09-06 viewer timing (SC-011) run 2026-09-06T08-16-57Z
+
+- Bundle: 0.1.0-alpha.0 (commit 8fedac9d), Node v24.20.0, isolated account `oboete-dogfood`, repository `github.com/ojungo69/oboete`, database `~/.oboete/memory.db` with 8 memories in scope.
+- Method: `/tmp/oboete-viewer-timing.sh` starts `oboete view --port 0`, reads the tokenized URL, opens `/api/events` with the token, drains the change events already queued, then five times inserts a memory row directly into the database and polls `/api/memories` every 25 ms until the row is listed. "Visible" is the time from the insert to the first listing that contains the row; the first `event: change` after the insert is recorded alongside. Each row is deleted before the next insert.
+
+| insert | visible in `/api/memories` | first SSE change |
+|---:|---:|---:|
+| 1 | 6 ms | 500 ms |
+| 2 | 5 ms | 3 ms |
+| 3 | 5 ms | 2 ms |
+| 4 | 6 ms | 2 ms |
+| 5 | 5 ms | 2 ms |
+
+- `oboete view` printed its URL 300 ms after launch; `GET /api/memories` took 34 ms and `GET /api/search?q=busy%20timeout` 7 ms.
+- Result: **SC-011 pass**, worst case 6 ms against the 2 s bound. The event stream polls `PRAGMA data_version` every 500 ms, so a change reaches an open browser within one poll interval (the 500 ms on the first insert).
+- Observation, not a failure: while a hook-spawned `oboete observe` worker is alive it commits a lease heartbeat about once a second, so the stream reported a change on nearly every poll (12 events in 6 idle seconds on this account, 1 on an idle installation). The browser refetches the list on each event; with a worker alive that is about two 35 ms requests per second for up to twenty minutes after a session. A follow-up may derive the stream's version from the memory tables instead of the connection's `data_version`.
