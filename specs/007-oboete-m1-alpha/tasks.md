@@ -262,7 +262,7 @@ classified, tombstone under --map-repo still suppresses.
 
 - [ ] T085 [EXT] Run scripts/e2e/isolated-user.mjs --daily on the isolated account for 7 consecutive days, appending doctor output, provider usage, spool backlog, duplicate count, and viewer latency to docs/evidence/m1-dogfood.md (SC-007)
 - [ ] T086 [P] [EXT] Write README.md (install, setup, doctor, privacy model, support matrix 22.16 / 24.x, degraded modes) and docs/agents/*.md per-agent notes; user-facing copy in full sentences
-- [ ] T087 [P] [EXT] Add `npm run pack-check` (npm pack, install into an empty prefix, unpacked size ≤ 30 MB) to package.json and CI
+- [X] T087 [P] [EXT] Add `npm run pack-check` (npm pack, install into an empty prefix, unpacked size ≤ 30 MB) to package.json and CI (done 2026-09-06: scripts/pack-check.mjs + engine Pack check step; installed size 20.280 MB file-size sum, limit 30 MB)
 - [ ] T088 Run the review gates on the implementation branch: `/code-review` then `ponytail-review`, plus `rules/security.md` tooling (semgrep, `/codex-review mode=security`, `/codex:adversarial-review`) for the security-owned modules, and record `~/.claude/review-status.json`
 - [ ] T089 Run `speckit-verify-tasks` against this file and resolve every phantom completion before opening the PR from `007-oboete-m1-alpha` to main
 

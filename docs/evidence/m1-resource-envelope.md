@@ -126,6 +126,23 @@ provider path needs it at runtime. Same commands as above, run online against th
 The margin is small (0.85 MB); a dependency bump of `ai`, `zod` or `hono` can cross the line,
 which is what the pack-check step of T087 is for.
 
+### Pack-check (T087, 2026-09-06)
+
+- Date: 2026-09-06T07:00:02Z
+- Node: `/home/jura/.nvm/versions/node/v24.16.0/bin/node` (`v24.16.0`)
+- Commit: `4d5f0221` (worktree `m1/p10-pack-check`; T087 still uncommitted)
+- Command: `npm run pack-check`
+- Method: `npm run build`, then `npm pack --json` into a temp dir, then `npm install -g --prefix <tmp> <tarball>` with an isolated `npm_config_cache` seeded from `~/.npm/_cacache` (same offline-cache trick as the commands at the top of this section). Size is the recursive sum of file `st_size` under `<prefix>/lib/node_modules/oboete`; symlinks are not followed. 1 MB = 1,048,576 bytes.
+- Printed output:
+  ```
+  installed size: 20.280 MB (limit 30 MB)
+  tarball: oboete-0.1.0-alpha.0.tgz
+  oboete --version: 0.1.0-alpha.0
+  ```
+- Result: **pass**, 9.720 MB under the 30 MB limit (31,457,280 bytes).
+
+The 20.280 MB figure is not a replacement for the 29.152 MB `du -k` row above. `du -k` counts allocated 1,024-byte blocks including directory inodes and slack; T087 sums file sizes only.
+
 ## R13 rows
 
 Load averages for the source tables: cold start `1.40 2.43 2.28 2/4249 14`; installed size `1.24 1.68 1.77 1/3752 16`.

@@ -21,7 +21,8 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit && tsc -p src/viewer/app --noEmit",
     "lint": "eslint .",
-    "test": "npm run build && node --test --enable-source-maps 'build/test/unit/**/*.test.mjs' 'build/test/migrations/**/*.test.mjs' 'scripts/e2e/**/*.test.mjs' && node --test --enable-source-maps --test-concurrency=1 'build/test/e2e-*.test.mjs' 'build/test/fault-*.test.mjs'",
+    "test": "npm run build && node --test --enable-source-maps 'build/test/unit/**/*.test.mjs' 'build/test/migrations/**/*.test.mjs' 'scripts/e2e/**/*.test.mjs' 'scripts/*.test.mjs' && node --test --enable-source-maps --test-concurrency=1 'build/test/e2e-*.test.mjs' 'build/test/fault-*.test.mjs'",
+    "pack-check": "node scripts/pack-check.mjs",
     "test:coverage": "npm run build && node --test --enable-source-maps --experimental-test-coverage 'build/test/**/*.test.mjs'"
   },
   "dependencies": {
