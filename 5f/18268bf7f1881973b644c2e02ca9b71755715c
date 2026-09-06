@@ -1,0 +1,25 @@
+scripts/measure-cold-start.mjs
+  s_359fcac8e97f88::t_8fc6e70cd06cd4 290-292
+scripts/e2e/probes/codex.mjs
+  s_359fcac8e97f88::t_8fc6e70cd06cd4 1,190
+scripts/e2e/mcp-clients.mjs
+  s_359fcac8e97f88::t_8fc6e70cd06cd4 282-289,293-296,300-301,626-627
+scripts/e2e/probe-lib/trusthash.mjs
+  s_359fcac8e97f88::t_8fc6e70cd06cd4 10-11,17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "5f18268bf7f1881973b644c2e02ca9b71755715c",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
