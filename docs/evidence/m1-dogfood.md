@@ -145,3 +145,32 @@ Isolated-user run of `scripts/e2e/mcp-clients.mjs --daily` from `~/oboete`. Each
 - `oboete view` printed its URL 300 ms after launch; `GET /api/memories` took 34 ms and `GET /api/search?q=busy%20timeout` 7 ms.
 - Result: **SC-011 pass**, worst case 6 ms against the 2 s bound. The event stream polls `PRAGMA data_version` every 500 ms, so a change reaches an open browser within one poll interval (the 500 ms on the first insert).
 - Observation, not a failure: while a hook-spawned `oboete observe` worker is alive it commits a lease heartbeat about once a second, so the stream reported a change on nearly every poll (12 events in 6 idle seconds on this account, 1 on an idle installation). The browser refetches the list on each event; with a worker alive that is about two 35 ms requests per second for up to twenty minutes after a session. A follow-up may derive the stream's version from the memory tables instead of the connection's `data_version`.
+
+## 2026-09-06 export → import round trip and fixture replay (SC-003) runs 2026-09-06T08-21-16Z and replay-2026-09-06T08-22-16Z
+
+Isolated account `oboete-dogfood`, bundle 0.1.0-alpha.0 (commit 8fedac9d), Node v24.20.0. Installation A is the account's `~/.oboete`; installation B is a fresh `OBOETE_HOME=~/.oboete-b` on the same account. Script: `/tmp/oboete-transfer-run.sh` (kept in the run directory).
+
+### Round trip
+
+- `oboete export` from A wrote 31 memories and 0 tombstones (32 lines, `oboete-export/1`). All 31 rows were `eligible`; no row carried secret text, concepts or sources.
+- A's memories belong to one remote repository (`github.com/ojungo69/oboete`, 8 rows) and 22 machine-local (`common_dir`) repositories left behind by finished probe and end-to-end runs. Importing the whole file into B rejected the 23 machine-local rows with `repository <id> is not known here; map it with --map-repo <id>=<local repository id>` and, because a file is applied as a whole, wrote nothing (exit 2). The run then imported the 8 remote-repository rows and, separately, one machine-local repository's 2 rows mapped onto the remote one with `--map-repo`.
+- `--dry-run` into B: `8 memories added, 0 raised in sensitivity, 0 tombstones applied, 0 unchanged would be written`, nothing on disk. Import: `8 memories added`. Second import of the same file: `0 memories added … 8 unchanged` (idempotent). Unmapped machine-local file: exit 2. Mapped: `2 memories added`.
+- Re-export from B and comparison with A's file by `content_hash`: 10 rows in B (8 + 2 mapped), 0 missing, 0 ids changed for the remote repository (the mapped rows get B's repository identity by design), 0 sensitivities lowered, every active row landed as `review_state = imported`.
+- Quarantine: `oboete search exactly --json` in B returned no memory before a worker ran. `OBOETE_HOME=~/.oboete-b oboete observe` reclassified the imported rows (exit 0); afterwards the same search returned the imported session summary and the database held 10 rows as `unreviewed` / `local_only`.
+- Result: **SC-003 export/import part pass**.
+
+### Fixture replay on the isolated account
+
+`oboete fixture replay test/fixtures/events-1000.jsonl` from the account's checkout with the installed bundle (`/home/oboete-dogfood/.npm-global/bin/oboete`, 1,552,351 bytes), a temporary `OBOETE_HOME`, no provider credentials, `NODE_ENV=test`. 245 s wall time. Load average at the start `1.85 2.32 1.81`: two Codex review sessions, one Grok Build job and this repository's unit tests were running on the same machine, unlike the quiet-machine T068 measurement.
+
+| Row | This run (isolated account, loaded machine) | docs/evidence/m1-resource-envelope.md T068 (quiet machine) | Bound |
+|---|---|---|---|
+| SC-003 worker peak RSS (`VmHWM`) | 123,756 kB = 120.9 MB | 113,864 kB = 111.2 MB | < 150 MB, pass |
+| SC-003 growth per 1,000 events | 3,558,257 bytes (`memory.db` + `-wal` 221,184 → 3,960,912 bytes) | 3,581,640 bytes | recorded |
+| observe runs | 43 spawned by replay, 42 hook-spawned | 43 / 42 | — |
+| SC-002 capture p99 | 250.8 ms; 99.9% ≤ 300 ms (n=717) | 181.2 ms; 100.0% (n=717) | p99 ≤ 300 ms and ≥ 99%, pass |
+| injection hooks | p99 228.6 ms; 99.8% ≤ 300 ms (n=418); two samples over the bound: `grok/Stop` max 309.4 ms, `claude/UserPromptSubmit` max 311.2 ms | p99 203.1 ms; 100.0% | every sample ≤ 300 ms, **fail on this loaded run** |
+| SC-005 secret scan | 0 secret ids in db, wal, spool, logs, packs | 0 | pass |
+| SC-010 duplicates | 0 duplicate included groups | 0 | pass |
+
+The SC-003 figures match the quiet-machine measurement within 9 % on memory and 1 % on growth. The injection row's two samples over 300 ms (of 418) appeared only under the concurrent load named above; the T068 row, taken on a quiet machine, holds. A quiet-machine repeat on the isolated account is the open item for this row.
