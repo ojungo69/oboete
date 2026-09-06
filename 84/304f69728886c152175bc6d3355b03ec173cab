@@ -1,0 +1,21 @@
+src/transfer.ts
+  s_359fcac8e97f88::t_9775a232e8b418 6,400-401,403,433-434,437,446
+test/unit/transfer.test.ts
+  s_359fcac8e97f88::t_9775a232e8b418 3,343,346
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "84304f69728886c152175bc6d3355b03ec173cab",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
