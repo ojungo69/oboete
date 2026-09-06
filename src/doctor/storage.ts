@@ -68,7 +68,26 @@ export function openStorage(paths: OboetePaths): StorageOpen {
   }
 
   try {
-    const opened = openDatabase({ path: paths.db, timeoutMs: DATABASE_TIMEOUT_MS });
+    // `hook: true` reads the schema version without migrating: a diagnosis must not rewrite the
+    // file it examines, and the migration item is the one that names a pending migration.
+    const opened = openDatabase({ path: paths.db, timeoutMs: DATABASE_TIMEOUT_MS, hook: true });
+    if (opened.schemaVersion > LATEST_SCHEMA_VERSION) {
+      closeQuietly(opened.db);
+      throw new SchemaAheadError(opened.schemaVersion);
+    }
+    if (opened.schemaBehind) {
+      closeQuietly(opened.db);
+      return {
+        item: healthy(
+          'storage',
+          `\`${paths.db}\` opened; a schema migration is pending, so the items that read it are unverified.`,
+        ),
+        db: null,
+        schemaVersion: opened.schemaVersion,
+        schemaAhead: false,
+        integrityFailed: false,
+      };
+    }
     return finishStorageOpen(paths, opened.db, opened.schemaVersion, false);
   } catch (error) {
     if (error instanceof SchemaAheadError) {

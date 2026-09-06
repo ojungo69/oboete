@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
 import { PRESET_CATALOG } from '../../src/config.js';
@@ -630,6 +631,24 @@ test('quick_check failure degrades storage with exit 3 and does not spawn agent 
       assert.match(context.item(name).reason, /integrity check/i);
     }
     assert.equal(spawned, 0, 'probe must not spawn against a corrupt database');
+  });
+});
+
+test('a database behind the schema is reported, not migrated, and the items that read it are unverified', async () => {
+  await harness(async (context) => {
+    const before = new DatabaseSync(context.paths.db);
+    before.exec('PRAGMA user_version = 1');
+    before.close();
+    const code = await context.doctor(['--json', '--no-probe-agents']);
+    assert.equal(code, 1, context.output);
+    assertBroken(context.item('migration'), 'degraded', 'behind', 'missing', 'oboete setup');
+    assert.equal(context.item('storage').status, 'healthy', context.item('storage').reason);
+    for (const name of ['fts', 'worker', 'allowance']) {
+      assert.equal(context.item(name).status, 'unverified', `${name}: ${context.item(name).reason}`);
+    }
+    const after = new DatabaseSync(context.paths.db, { readOnly: true });
+    assert.equal(after.prepare('PRAGMA user_version').get()?.user_version, 1, 'doctor must not migrate the file it diagnoses');
+    after.close();
   });
 });
 
