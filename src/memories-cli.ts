@@ -10,6 +10,7 @@ import {
   timeline,
   tombstone,
   type MemoryRow,
+  type TimelineSession,
 } from './db/queries.js';
 import { openDatabase } from './db/open.js';
 import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from './paths.js';
@@ -19,8 +20,8 @@ import { rankCandidates, type RankedCandidate } from './retrieval/rank.js';
 
 const SEARCH_DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
-const EMPTY_REASON = 'No memories matched this query in the current repository.';
-const LEXICAL_NOTE = 'M1 search is lexical (word match). Semantic search arrives in M2.';
+export const EMPTY_REASON = 'No memories matched this query in the current repository.';
+export const LEXICAL_NOTE = 'M1 search is lexical (word match). Semantic search arrives in M2.';
 
 export type MemoryCliRuntime = {
   cwd: string;
@@ -31,7 +32,7 @@ export type MemoryCliRuntime = {
 
 type CommandOptions = Record<string, { type: 'string' | 'boolean' }>;
 type ParsedCommand = ReturnType<typeof parseArgs>;
-type SearchRow = {
+export type SearchRow = {
   id: string;
   type: string;
   title: string;
@@ -148,7 +149,7 @@ function sourceText(sources: ReturnType<typeof memorySources>): string {
     .join(', ');
 }
 
-function renderSearch(rows: SearchRow[]): string {
+export function renderSearch(rows: SearchRow[]): string {
   const noun = rows.length === 1 ? 'memory' : 'memories';
   return `Found ${rows.length} ${noun}.\n${rows
     .map(
@@ -160,6 +161,36 @@ function renderSearch(rows: SearchRow[]): string {
         `  Its body is ${JSON.stringify(row.body)}.`,
     )
     .join('\n')}`;
+}
+
+/** The one search every surface uses (CLI, MCP, Pi tools): injection scope, lexical ranking. */
+export function searchMemories(
+  db: DatabaseSync,
+  input: { repoId: string; paths: OboetePaths; query: string; limit: number },
+): SearchRow[] {
+  const scope = memoryScope(db, { repoId: input.repoId, destination: 'injection' });
+  const found = searchCandidates(db, { text: input.query, scope });
+  const ranked = rankCandidates(found.rows, {
+    threshold: loadConfig(input.paths).injection.threshold,
+    lambda: 0.5,
+    limit: input.limit,
+  });
+  return ranked.included.flatMap((row): SearchRow[] => {
+    const memory = getMemory(db, row.id, scope);
+    if (memory === null) return [];
+    return [
+      {
+        id: row.id,
+        type: memory.type,
+        title: row.title,
+        body: row.body,
+        sensitivity: memory.sensitivity,
+        created_at: memory.created_at,
+        score: row.score_bm25,
+        reasons: searchReasons(row),
+      },
+    ];
+  });
 }
 
 function notFound(runtime: MemoryCliRuntime, id: string, json: boolean): 1 {
@@ -188,29 +219,7 @@ export async function runSearch(
   if (limit === null) return 2;
 
   return withDatabase(runtime, (db, repoId, paths) => {
-    const scope = memoryScope(db, { repoId, destination: 'injection' });
-    const found = searchCandidates(db, { text: query, scope });
-    const ranked = rankCandidates(found.rows, {
-      threshold: loadConfig(paths).injection.threshold,
-      lambda: 0.5,
-      limit,
-    });
-    const rows = ranked.included.flatMap((row): SearchRow[] => {
-      const memory = getMemory(db, row.id, scope);
-      if (memory === null) return [];
-      return [
-        {
-          id: row.id,
-          type: memory.type,
-          title: row.title,
-          body: row.body,
-          sensitivity: memory.sensitivity,
-          created_at: memory.created_at,
-          score: row.score_bm25,
-          reasons: searchReasons(row),
-        },
-      ];
-    });
+    const rows = searchMemories(db, { repoId, paths, query, limit });
 
     if (parsed.values.json === true) {
       runtime.writeOut(
@@ -227,6 +236,40 @@ export async function runSearch(
     }
     return 0;
   });
+}
+
+export function renderTimeline(sessions: readonly TimelineSession[]): string {
+  return sessions
+    .map((session) => {
+      const turns =
+        session.turns.length === 0
+          ? '  It has no recorded turns.'
+          : session.turns
+              .map(
+                (turn) =>
+                  `  Turn ${turn.ordinal} has ${
+                    turn.memory_ids.length === 0
+                      ? 'no memories'
+                      : `memory identifiers ${turn.memory_ids.join(', ')}`
+                  }.`,
+              )
+              .join('\n');
+      const memories =
+        session.memories.length === 0
+          ? '  It has no visible memories.'
+          : session.memories
+              .map(
+                (memory) =>
+                  `  Memory ${memory.id} is a ${memory.type} titled ${JSON.stringify(
+                    memory.title ?? '(untitled)',
+                  )}. Its sensitivity is ${memory.sensitivity}. Its body is ${JSON.stringify(
+                    memory.body ?? '',
+                  )}. Its sources are ${sourceText(memory.sources)}.`,
+              )
+              .join('\n');
+      return `Session ${session.id} was recorded by ${session.agent} and is ${session.status}.\n${turns}\n${memories}`;
+    })
+    .join('\n');
 }
 
 export async function runTimeline(
@@ -256,39 +299,7 @@ export async function runTimeline(
     } else if (sessions.length === 0) {
       runtime.writeOut('No sessions were found in the current repository.\n');
     } else {
-      runtime.writeOut(
-        `${sessions
-          .map((session) => {
-            const turns =
-              session.turns.length === 0
-                ? '  It has no recorded turns.'
-                : session.turns
-                    .map(
-                      (turn) =>
-                        `  Turn ${turn.ordinal} has ${
-                          turn.memory_ids.length === 0
-                            ? 'no memories'
-                            : `memory identifiers ${turn.memory_ids.join(', ')}`
-                        }.`,
-                    )
-                    .join('\n');
-            const memories =
-              session.memories.length === 0
-                ? '  It has no visible memories.'
-                : session.memories
-                    .map(
-                      (memory) =>
-                        `  Memory ${memory.id} is a ${memory.type} titled ${JSON.stringify(
-                          memory.title ?? '(untitled)',
-                        )}. Its sensitivity is ${memory.sensitivity}. Its body is ${JSON.stringify(
-                          memory.body ?? '',
-                        )}. Its sources are ${sourceText(memory.sources)}.`,
-                    )
-                    .join('\n');
-            return `Session ${session.id} was recorded by ${session.agent} and is ${session.status}.\n${turns}\n${memories}`;
-          })
-          .join('\n')}\n`,
-      );
+      runtime.writeOut(`${renderTimeline(sessions)}\n`);
     }
     return 0;
   });

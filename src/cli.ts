@@ -41,6 +41,7 @@ const commands: Record<string, () => Promise<(argv: string[]) => Promise<number>
   delete: () => import('./memories-cli.js').then((module) => module.runDelete),
   pause: () => import('./pause.js').then((module) => module.runPause),
   resume: () => import('./pause.js').then((module) => module.runResume),
+  mcp: () => import('./mcp.js').then((module) => module.runMcp),
   fixture: () => import('./fixture/replay.js').then((module) => module.runFixture),
 };
 
