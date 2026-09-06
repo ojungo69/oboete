@@ -58,3 +58,55 @@ None.
 ## Walkthrough Log
 
 - T057 (🔍 PARTIAL): disposition **S — skipped, no fix needed**. Auto-disposition by the orchestrating session (the user was not present for the walkthrough): the Layer 2 negative is the documented design deviation in the task note, not missing work. An independent re-run in a fresh session may re-open it.
+
+---
+
+# verify-tasks report — Phase 5 (User Story 3), T064–T068
+
+- Date: 2026-09-06
+- Scope: `all` (origin/main 96885197 → HEAD 6b72308a on 007-oboete-m1-alpha; working tree clean)
+- Tasks verified: 5 (filter: T064 T065 T066 T067 T068)
+- ⚠️ FRESH SESSION ADVISORY: the cascade was run by five fresh workflow agents (one per task, no implementation context; opus for T065/T068, sonnet for the rest), orchestrated by the session that also drove the implementation (Claude Code wrote T064–T066; Grok Build wrote T067 and the T068 first pass and fix round; Codex wrote the T068 round 2). Re-run in a separate session for a fully independent pass.
+- Evidence beyond the layers below: `npm test` on Node 24.16.0 and Node 22.23.1 — 678 + 44 tests, 0 failures (this session, after the T068 round-2 commit, from the lane worktree at the same tree); `oboete fixture replay` recorded run at load 0.38 in docs/evidence/m1-resource-envelope.md (every gate pass except SC-009 without provider credentials). Verifiers did not execute tests or the replay (read-only).
+
+## Scorecard
+
+| Verdict | Count |
+|---|---|
+| ✅ VERIFIED | 5 |
+| 🔍 PARTIAL | 0 |
+| ⚠️ WEAK | 0 |
+| ❌ NOT_FOUND | 0 |
+| ⏭️ SKIPPED | 0 |
+
+## Flagged items
+
+None.
+
+## Verified items
+
+| Task | L1 files | L2 diff | L3 symbols | L4 wired | L5 semantic | Summary |
+|---|---|---|---|---|---|---|
+| T064 | positive | positive | positive | n/a (tests) | positive | test/unit/privacy.test.ts drives the real hook, detector, worker and pack through test/helpers/observe.ts: mixed-session outbound body (eligible rows travel, secret row, `<private>` span, path-rule row, local-only memory and other repository absent, `repo_ref` opaque), FR-020 cross-repository refusal via injection_items count, pack recognition on the spool path (`recognized_packs` = [packHash]), agent-swap invariance over memories, pack text and decisions. |
+| T065 | positive | positive | positive | positive | positive | src/injection/recognize.ts `stripRecognizedPacks` (sha256 of header→footer span against injections.pack_hash, every footer line tried, unissued span stays content) is called inside the capture write transaction (capture.ts:819) and in spool recovery (worker/batches.ts:346); contentHash is rewritten after stripping. test/unit/logs.test.ts is an end-to-end credential scan over rows, spool, log, pack, doctor output and the data directory; `credentialValues` (log.ts) is used by capture, observe and detect. |
+| T066 | positive | positive | positive | positive | positive | `reclassifyImportedRow` (privacy/classify.ts) decides from two detector results and the directive check (clean → unreviewed with detector texts; secret or directive → tombstoned `secret`; unfinished detector → retry); observe.ts runs it after classifyPending in keyset pages of 50 and nearbyCandidates excludes imported rows. Decision-table unit test plus fixture-level end-to-end test match the note's seeded ids and assertions. |
+| T067 | positive | positive | positive | n/a (fixture) | positive | scripts/fixtures/generate-1000-events.mjs and test/fixtures/events-1000.jsonl: 1,051 lines, 48 sessions, 40 bilingual facts recalled later, 37 corpus secret ids (32 + 5 negatives), 32 directives, 4 size events at the exact byte boundaries, fork/resume/compact/clear per agent — each count reproduced by the verifier by parsing the fixture; regeneration byte-identical. |
+| T068 | positive | positive | positive | positive | positive | src/fixture/replay.ts (1,816 lines, loaded lazily by cli.ts `fixture`) spawns the real hook per event and derives every measurement from live processes and SQL; eleven gates (SC-002, injection, session start, SC-003, SC-005, SC-009, SC-010, lifecycle, directives, hooks) all feed the exit code; docs/evidence/m1-resource-envelope.md carries the recorded run. |
+
+## Unassessable items
+
+None.
+
+## Verdict lines
+
+| T064 | ✅ VERIFIED | privacy tests drive the real pipeline; every done-note claim found in the test bodies |
+| T065 | ✅ VERIFIED | pack recognition wired into capture and spool recovery; credential scan end to end |
+| T066 | ✅ VERIFIED | imported-row reclassification implemented, wired and tested at unit and fixture level |
+| T067 | ✅ VERIFIED | fixture counts reproduced independently from the committed file |
+| T068 | ✅ VERIFIED | replay implemented, all printed gates reach the exit code, evidence recorded |
+
+## Gaps recorded by the verifiers (not defects)
+
+- Tests and the replay were not executed by the verifiers (read-only pass); execution evidence is the session's `npm test` and the recorded replay run above.
+- T065's done note says "batches.ts recoverSpool" without a directory; the code is src/worker/batches.ts. Doctor is still the T069 stub, so the credential scan's doctor leg only asserts the command ran and printed no credential (the note says so).
+- T068's evidence Setup names Commit `16303cac` and the lane worktree's bundle path: the evidence is generated from the tree one commit before the commit that records it (NOTES-T068.md states this). SC-009 is a recorded fail (17.5%) without provider credentials, so the command exits 1 until replayed with a provider. The replay is not wired into package.json scripts or CI (a 6-minute, timing-sensitive run); the Phase 5 checkpoint "SC-005 and SC-006 pass in CI" is met by the T064/T065 unit tests that run in `npm test` (mixed-session outbound body: no secret, no local-only or private row; credential scan), and "the replay evidence file exists" by T068. SC-006 is not a replay row; it is covered by those unit tests.
