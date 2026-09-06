@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 
 import { AGENTS, EVENT_KINDS } from './events.js';
+import { compareCodeUnits } from './hash.js';
 import type { OboetePaths } from './paths.js';
 
 const identifier = z.string().min(1);
@@ -76,7 +77,7 @@ export function listSpool(paths: OboetePaths): string[] {
   if (!existsSync(paths.spool)) return [];
   return readdirSync(paths.spool)
     .filter((name) => name.endsWith('.json'))
-    .sort();
+    .sort(compareCodeUnits);
 }
 
 /** One entry, or null when it is gone or does not match the schema. */

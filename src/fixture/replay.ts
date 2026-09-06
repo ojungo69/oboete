@@ -20,6 +20,7 @@ import { parseArgs } from 'node:util';
 
 import { CAPTURE_DEADLINE_MS, INJECTION_DEADLINE_MS, hookDeadlineMs } from '../capture.js';
 import { openDatabase } from '../db/open.js';
+import { compareCodeUnits } from '../hash.js';
 import { DEGRADED_SENTENCES } from '../injection/pack.js';
 import { childEnvironment } from '../log.js';
 import { ensureDirectories, oboetePaths } from '../paths.js';
@@ -614,7 +615,7 @@ function timingRows(
       statusOf(passed),
     ];
   };
-  for (const [key, group] of [...groups.entries()].sort()) {
+  for (const [key, group] of [...groups.entries()].sort(([left], [right]) => compareCodeUnits(left, right))) {
     const [agent, event] = key.split('\t');
     rows.push(rowOf(agent ?? '', event ?? '', group));
   }

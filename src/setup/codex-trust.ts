@@ -7,6 +7,8 @@
 // docs/research/oboete-contracts-probes.md and scripts/e2e/probe-lib/trusthash.mjs).
 import { createHash } from 'node:crypto';
 
+import { compareCodeUnits } from '../hash.js';
+
 export type CodexHandler = {
   type: 'command';
   command: string;
@@ -87,7 +89,7 @@ function canonical(value: unknown): string {
   if (value !== null && typeof value === 'object') {
     const source = value as Record<string, unknown>;
     const pairs = Object.keys(source)
-      .sort()
+      .sort(compareCodeUnits)
       .map((key) => `${JSON.stringify(key)}:${canonical(source[key])}`);
     return `{${pairs.join(',')}}`;
   }
