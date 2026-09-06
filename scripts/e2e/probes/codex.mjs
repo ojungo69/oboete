@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -186,7 +187,7 @@ async function waitEvents(home, pred, ms) {
 }
 
 async function withTui(dir, { home, repo, extra = [], run }) {
-  const name = "obc-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6);
+  const name = "obc-" + Date.now().toString(36) + "-" + randomBytes(2).toString("hex");
   let tui;
   try {
     // Only pane overrides go into tmux's world-readable argv; HOME comes from the server.

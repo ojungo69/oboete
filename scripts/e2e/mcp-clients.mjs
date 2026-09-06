@@ -279,23 +279,26 @@ export function probeServerToml({ node, tee, bundle, log, startupTimeoutSec = 15
   ].join("\n");
 }
 
-function rewriteFile(file, transform) {
-  const stat = fs.statSync(file);
-  fs.writeFileSync(file, transform(fs.readFileSync(file, "utf8")));
-  fs.chmodSync(file, stat.mode);
+/** The file's text, or undefined when it does not exist (read, never check-then-read). */
+function readIfPresent(file) {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    throw error;
+  }
 }
 
 function appendProbeToml(file, block) {
-  if (!fs.existsSync(file)) {
-    fs.writeFileSync(file, `${block.trim()}\n`, { mode: 0o600 });
-    return;
-  }
-  rewriteFile(file, (text) => `${removeTomlServerTables(text, PROBE_NAME).replace(/\s+$/u, "")}\n${block.trim()}\n`);
+  const text = readIfPresent(file);
+  const kept = text === undefined ? "" : `${removeTomlServerTables(text, PROBE_NAME).replace(/\s+$/u, "")}\n`;
+  // mode applies only when the file is created; an existing file keeps its own mode.
+  fs.writeFileSync(file, `${kept}${block.trim()}\n`, { mode: 0o600 });
 }
 
 function stripProbeToml(file) {
-  if (!fs.existsSync(file)) return;
-  rewriteFile(file, (text) => removeTomlServerTables(text, PROBE_NAME));
+  const text = readIfPresent(file);
+  if (text !== undefined) fs.writeFileSync(file, removeTomlServerTables(text, PROBE_NAME));
 }
 
 function whichBin(name, env) {
@@ -620,8 +623,8 @@ async function runStdio({ repo, bundle, log, env }) {
   }
   const proc = {
     exitCode: child?.status == null ? 1 : child.status,
-    stdout: fs.existsSync(stdoutPath) ? fs.readFileSync(stdoutPath, "utf8") : "",
-    stderr: fs.existsSync(stderrPath) ? fs.readFileSync(stderrPath, "utf8") : "",
+    stdout: readIfPresent(stdoutPath) ?? "",
+    stderr: readIfPresent(stderrPath) ?? "",
     elapsedMs: Date.now() - start,
   };
   const outFrames = (proc.stdout || "")

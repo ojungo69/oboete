@@ -7,12 +7,14 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
+// Same order as the default sort (UTF-16 code units); localeCompare would make the hash locale-dependent.
+const byCodeUnit = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const snake = (e) => e.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
 const canon = (v) =>
   Array.isArray(v)
     ? "[" + v.map(canon).join(",") + "]"
     : v && typeof v === "object"
-      ? "{" + Object.keys(v).sort().map((k) => JSON.stringify(k) + ":" + canon(v[k])).join(",") + "}"
+      ? "{" + Object.keys(v).sort(byCodeUnit).map((k) => JSON.stringify(k) + ":" + canon(v[k])).join(",") + "}"
       : JSON.stringify(v);
 
 export function trustedHashToml(hooksPath, file) {

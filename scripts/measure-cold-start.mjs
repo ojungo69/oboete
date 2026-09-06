@@ -279,9 +279,6 @@ function measurementAttempt(index) {
       results: nodes.map((node) => measureNode(node, temporary, index)),
     };
   } finally {
-    if (!temporary.startsWith(join(tmpdir(), 'oboete-cold-start-'))) {
-      throw new Error(`refusing to remove unexpected path: ${temporary}`);
-    }
     rmSync(temporary, { recursive: true, force: true });
   }
 }
@@ -290,8 +287,9 @@ const measuredAt = new Date().toISOString();
 const nodeVersions = nodes.map((node) => ({ node, version: run(node, ['--version']).stdout.trim() }));
 const commit = run('git', ['-C', ROOT, 'rev-parse', '--short', 'HEAD']).stdout.trim();
 const attempts = Array.from({ length: ATTEMPTS }, (_, index) => measurementAttempt(index + 1));
-const kept = attempts.reduce((best, candidate) =>
-  candidate.load.oneMinute < best.load.oneMinute ? candidate : best,
+const kept = attempts.reduce(
+  (best, candidate) => (candidate.load.oneMinute < best.load.oneMinute ? candidate : best),
+  attempts[0],
 );
 
 const lines = [];
