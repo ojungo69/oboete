@@ -10,14 +10,7 @@ import { sha256Hex } from '../../src/hash.js';
 import { getMemory, memoryScope } from '../../src/db/queries.js';
 import { oboetePaths } from '../../src/paths.js';
 import { cjkBigrams } from '../../src/retrieval/fts.js';
-import {
-  EXPORT_FORMAT,
-  exportMemories,
-  importMemories,
-  runExport,
-  runImport,
-  type ImportResult,
-} from '../../src/transfer.js';
+import { EXPORT_FORMAT, MAX_REJECTED, exportMemories, importMemories, runExport, runImport, type ImportResult } from '../../src/transfer.js';
 import { withTempHome } from '../helpers/home.js';
 
 const NOW = 1_800_000_000_000;
@@ -110,7 +103,13 @@ test('export writes the header and one line per memory; tombstones and secret ro
       sources: [{ kind: 'file_read', value: 'src/db/open.ts', agent: 'codex' }],
     });
     const gone = insertMemory(db, { repoId: REMOTE.id, title: 'Old', body: 'Deleted content.', deletedAt: NOW - 5 });
-    insertMemory(db, { repoId: REMOTE.id, title: 'Token', body: 'sk-live-secret', sensitivity: 'secret' });
+    insertMemory(db, {
+      repoId: REMOTE.id,
+      title: 'Token',
+      body: 'sk-live-secret',
+      sensitivity: 'secret',
+      sources: [{ kind: 'file_read', value: '.env.production', agent: 'codex' }],
+    });
     const { lines, counts } = exportOf(db);
     db.close();
 
@@ -138,7 +137,10 @@ test('export writes the header and one line per memory; tombstones and secret ro
     const secret = rows.find((row) => row.sensitivity === 'secret')!;
     assert.equal(secret.title, '');
     assert.equal(secret.body, '');
+    assert.equal(secret.concepts, '[]');
+    assert.deepEqual(secret.sources, []);
     assert.ok(!lines.join('\n').includes('sk-live-secret'));
+    assert.ok(!lines.join('\n').includes('.env.production'));
     for (const line of lines) assert.ok(Buffer.byteLength(line) < 65_536);
   });
 });
@@ -242,6 +244,7 @@ test('a hash mismatch, an oversized line, a malformed line or a bad header rejec
         ['not JSON', [lines[0], '{not json']],
         ['header', ['{"format":"something-else/9","repos":[]}', lines[1]]],
         ['missing field', [lines[0], JSON.stringify({ id: 'm_1' })]],
+        ['secret with text', [lines[0], JSON.stringify({ ...JSON.parse(lines[1]), sensitivity: 'secret' })]],
       ];
       for (const [label, file] of cases) {
         const result = await importInto(target, file);
@@ -306,6 +309,12 @@ test('--dry-run reports the counts and writes nothing; the file limits are enfor
       assert.equal(targetDb.prepare('SELECT COUNT(*) AS n FROM memories').get()?.n, 0);
       const tooBig = await importMemories(targetDb, lines.join('\n') + '\n', { now: NOW, maxFileBytes: 10 });
       assert.match(tooBig.rejected[0]?.reason ?? '', /256 MB|file size/i);
+      // Blank lines count toward the limit too, and a flood of bad lines stops early.
+      const padded = await importMemories(targetDb, `${lines[0]}\n${' '.repeat(64)}\n`, { now: NOW, maxFileBytes: lines[0].length + 8 });
+      assert.match(padded.rejected[0]?.reason ?? '', /file size/i);
+      const flood = await importMemories(targetDb, `${lines[0]}\n${'x\n'.repeat(500)}`, { now: NOW });
+      assert.equal(flood.rejected.length, MAX_REJECTED + 1);
+      assert.match(flood.rejected.at(-1)?.reason ?? '', /stopped here/);
       targetDb.close();
     });
   });

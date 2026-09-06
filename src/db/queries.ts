@@ -43,7 +43,7 @@ export type MemorySourceRow = {
 };
 
 /** A `WHERE` fragment over the alias `m` plus its parameters, in that order. */
-export type MemoryScope = { where: string; params: SQLInputValue[] };
+export type MemoryScope = { repoId: string; where: string; params: SQLInputValue[] };
 
 export type TimelineTurn = {
   id: string;
@@ -128,7 +128,7 @@ export function memoryScope(
     allowed.length === 0 ? '0' : `m.sensitivity IN (${allowed.map(() => '?').join(', ')})`,
   ];
 
-  return { where: `(${conditions.join(' AND ')})`, params: [input.repoId, ...allowed] };
+  return { repoId: input.repoId, where: `(${conditions.join(' AND ')})`, params: [input.repoId, ...allowed] };
 }
 
 /** Null for a missing id and for one outside the scope alike (contracts/cli.md, contracts/mcp.md). */

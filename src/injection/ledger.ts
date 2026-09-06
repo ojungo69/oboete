@@ -4,6 +4,8 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 
+import type { MemoryScope } from '../db/queries.js';
+
 import { transactionImmediate } from '../worker/lease.js';
 
 export type InjectionKind = 'session_start' | 'prompt' | 'grok_deferred';
@@ -290,24 +292,36 @@ export function parseAttempts(value: unknown): WhyAttempt[] {
 }
 
 /** The ledger of one session, formatted by `oboete why` (contracts/cli.md; T074 renders it). */
-export function whyReport(db: DatabaseSync, sessionId: string, turn?: number): WhyInjection[] {
+/**
+ * The ledger of one session, read through the caller's scope: injections of another repository
+ * are not reported, and the title of a memory that has since left the scope (deleted, superseded,
+ * raised to secret, quarantined) is null (FR-020, FR-035).
+ */
+export function whyReport(
+  db: DatabaseSync,
+  sessionId: string,
+  scope: MemoryScope,
+  turn?: number,
+): WhyInjection[] {
   const filter =
     turn === undefined
       ? ''
       : 'AND turn_id = (SELECT id FROM turns WHERE session_id = ? AND ordinal = ?)';
   const params: SQLInputValue[] =
-    turn === undefined ? [sessionId] : [sessionId, sessionId, turn];
+    turn === undefined
+      ? [sessionId, scope.repoId]
+      : [sessionId, scope.repoId, sessionId, turn];
 
   const injections = db
     .prepare(
-      `SELECT * FROM injections WHERE session_id = ? ${filter} ORDER BY created_at, id`,
+      `SELECT * FROM injections WHERE session_id = ? AND repo_id = ? ${filter} ORDER BY created_at, id`,
     )
     .all(...params);
 
   const itemsOf = db.prepare(
     `SELECT i.source_kind, i.memory_id, i.raw_event_id, i.decision, i.reason, i.rank, i.stale,
             m.title AS title
-     FROM injection_items i LEFT JOIN memories m ON m.id = i.memory_id
+     FROM injection_items i LEFT JOIN memories m ON m.id = i.memory_id AND ${scope.where}
      WHERE i.injection_id = ? ORDER BY i.rank, i.id`,
   );
 
@@ -329,7 +343,7 @@ export function whyReport(db: DatabaseSync, sessionId: string, turn?: number): W
       String(row.channel ?? '').startsWith('grok:') ||
       parseAttempts(row.attempts_json).length > 0,
     attempts: parseAttempts(row.attempts_json),
-    items: itemsOf.all(String(row.id)).map((item) => ({
+    items: itemsOf.all(...scope.params, String(row.id)).map((item) => ({
       sourceKind: (item.source_kind as ItemSourceKind | null) ?? null,
       memoryId: item.memory_id === null ? null : String(item.memory_id),
       rawEventId: item.raw_event_id === null ? null : String(item.raw_event_id),

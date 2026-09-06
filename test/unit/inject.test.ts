@@ -13,6 +13,7 @@ import {
   runHook,
 } from '../../src/capture.js';
 import { openDatabase } from '../../src/db/open.js';
+import { memoryScope } from '../../src/db/queries.js';
 import type { AgentName, NormalizedEvent } from '../../src/events.js';
 import {
   injectForHook,
@@ -34,6 +35,9 @@ type Fixture = {
   repo: string;
   identity: RepoIdentity;
 };
+
+const scope = (fixture: Fixture) =>
+  memoryScope(fixture.db, { repoId: fixture.identity.id, destination: 'injection' });
 
 async function withFixture(run: (fixture: Fixture) => Promise<void>): Promise<void> {
   await withTempHome(async (home) => {
@@ -262,7 +266,7 @@ test('Claude injects plain session-start and prompt packs and confirms their ite
       }),
     );
     assert.ok(prompt.includes('SQLite busy timeout'));
-    assert.ok(whyReport(fixture.db, 's-claude').flatMap((row) => row.items).every((item) => item.decision === 'included'));
+    assert.ok(whyReport(fixture.db, 's-claude', scope(fixture)).flatMap((row) => row.items).every((item) => item.decision === 'included'));
     assert.equal(
       fixture.db.prepare('SELECT last_injected_at FROM memories WHERE id = ?').get('m-prompt')?.last_injected_at,
       NOW,
@@ -291,7 +295,7 @@ test('transcript replay sources never rebuild a Claude or Codex start pack', asy
         ),
         '',
       );
-      assert.deepEqual(whyReport(fixture.db, sessionId), []);
+      assert.deepEqual(whyReport(fixture.db, sessionId, scope(fixture)), []);
     }
   });
 });
@@ -435,7 +439,7 @@ test('Grok defers, attempts, confirms, and closes a no-tool turn', async () => {
       ),
       '',
     );
-    assert.equal(whyReport(fixture.db, 's-grok-fork')[0]?.state, 'pending');
+    assert.equal(whyReport(fixture.db, 's-grok-fork', scope(fixture))[0]?.state, 'pending');
 
     const startContext = context(fixture, {
       agent: 'grok',
@@ -443,8 +447,8 @@ test('Grok defers, attempts, confirms, and closes a no-tool turn', async () => {
       sessionId: 's-grok',
     });
     assert.equal(await injectForHook(startContext), '');
-    assert.equal(whyReport(fixture.db, 's-grok')[0]?.state, 'pending');
-    assert.equal(whyReport(fixture.db, 's-grok')[0]?.deferred, true);
+    assert.equal(whyReport(fixture.db, 's-grok', scope(fixture))[0]?.state, 'pending');
+    assert.equal(whyReport(fixture.db, 's-grok', scope(fixture))[0]?.deferred, true);
 
     const pre = envelope(
       await injectForHook(
@@ -458,7 +462,7 @@ test('Grok defers, attempts, confirms, and closes a no-tool turn', async () => {
     );
     assert.equal(pre.hookSpecificOutput.hookEventName, 'PreToolUse');
     assert.ok(pre.hookSpecificOutput.additionalContext.startsWith('oboete memory context'));
-    assert.equal(whyReport(fixture.db, 's-grok')[0]?.attempts.length, 1);
+    assert.equal(whyReport(fixture.db, 's-grok', scope(fixture))[0]?.attempts.length, 1);
 
     assert.equal(
       await injectForHook(
@@ -471,7 +475,7 @@ test('Grok defers, attempts, confirms, and closes a no-tool turn', async () => {
       ),
       '',
     );
-    assert.equal(whyReport(fixture.db, 's-grok')[0]?.state, 'emitted');
+    assert.equal(whyReport(fixture.db, 's-grok', scope(fixture))[0]?.state, 'emitted');
     assert.equal(
       fixture.db.prepare('SELECT last_injected_at FROM memories WHERE id = ?').get('m-summary')
         ?.last_injected_at,
@@ -512,8 +516,8 @@ test('Grok defers, attempts, confirms, and closes a no-tool turn', async () => {
     await injectForHook(
       context(fixture, { agent: 'grok', eventName: 'Stop', sessionId: 's-grok-empty' }),
     );
-    assert.equal(whyReport(fixture.db, 's-grok-empty')[0]?.degradedReason, 'no_tool_call');
-    assert.equal(whyReport(fixture.db, 's-grok-empty')[0]?.deferred, true);
+    assert.equal(whyReport(fixture.db, 's-grok-empty', scope(fixture))[0]?.degradedReason, 'no_tool_call');
+    assert.equal(whyReport(fixture.db, 's-grok-empty', scope(fixture))[0]?.deferred, true);
   });
 });
 
@@ -552,7 +556,7 @@ test('Grok retries a denied attempt and confirms a failed execution', async () =
     assert.notEqual(await injectForHook(hook('PreToolUse', 'call-failed')), '');
     assert.equal(await injectForHook(hook('PostToolUseFailure', 'call-failed')), '');
 
-    const report = whyReport(fixture.db, 's-grok-retry')[0];
+    const report = whyReport(fixture.db, 's-grok-retry', scope(fixture))[0];
     assert.equal(report?.state, 'emitted');
     assert.deepEqual(
       report?.attempts.map((attempt) => [attempt.execution, attempt.delivery]),

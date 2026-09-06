@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
-import { test } from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, test } from 'node:test';
 
 import { openDatabase } from '../../src/db/open.js';
 import {
@@ -14,11 +17,15 @@ import {
 import { DEGRADED_SENTENCES } from '../../src/injection/pack.js';
 import type { MemoryCliRuntime } from '../../src/memories-cli.js';
 import { oboetePaths } from '../../src/paths.js';
+import { resolveRepoIdentity } from '../../src/repo-identity.js';
 import { runWhy } from '../../src/why.js';
 import { withTempHome } from '../helpers/home.js';
 
 const NOW = 1_800_000_000_000;
-const REPO = 'r_why';
+// A plain directory is a repository of kind "path"; the why command derives the repository from cwd.
+const REPO_DIR = mkdtempSync(join(tmpdir(), 'oboete-why-repo-'));
+after(() => rmSync(REPO_DIR, { recursive: true, force: true }));
+const REPO = resolveRepoIdentity(REPO_DIR).id;
 const SESSION = 's_why';
 const NATIVE = 'native_why';
 const TURN = 't_why_1';
@@ -37,7 +44,7 @@ async function run(
   let stdout = '';
   let stderr = '';
   const status = await command(argv, {
-    cwd: process.cwd(),
+    cwd: REPO_DIR,
     now: () => NOW,
     writeOut: (text) => {
       stdout += text;
@@ -346,6 +353,14 @@ test('why resolves a native session id and rejects unknown or invalid input', as
       seedPromptPack(db);
       insertSession(db, { id: 's_shared_claude', agent: 'claude', native: 'shared-native' });
       insertSession(db, { id: 's_shared_grok', agent: 'grok', native: 'shared-native' });
+      db.prepare(
+        `INSERT INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
+         VALUES ('r_other', 'remote', 'example.test/other', '/tmp/other', 1, 1)`,
+      ).run();
+      db.prepare(
+        `INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, started_at, status, turn_count, context_epoch)
+         VALUES ('s_elsewhere', 'r_other', 'claude', 'n_elsewhere', 's_elsewhere', 1, 'active', 0, 0)`,
+      ).run();
     },
     async () => {
       const byId = await run(runWhy, [SESSION]);
@@ -358,6 +373,10 @@ test('why resolves a native session id and rejects unknown or invalid input', as
       assert.equal(unknown.status, 1);
       assert.equal(unknown.stdout, '');
       assert.equal(unknown.stderr, 'Session no-such-session was not found.\n');
+
+      const elsewhere = await run(runWhy, ['s_elsewhere']);
+      assert.equal(elsewhere.status, 1);
+      assert.equal(elsewhere.stderr, 'Session s_elsewhere was not found.\n');
 
       const badTurn = await run(runWhy, [SESSION, '--turn', 'x']);
       assert.equal(badTurn.status, 2);

@@ -6,6 +6,7 @@ import { test } from 'node:test';
 
 import { contentHash, materialHash, memoryIdFor } from '../../src/db/identity.js';
 import { openDatabase } from '../../src/db/open.js';
+import { createInjection, planItems, type LedgerItem, type NewInjection } from '../../src/injection/ledger.js';
 import { oboetePaths } from '../../src/paths.js';
 import { resolveRepoIdentity, type RepoIdentity } from '../../src/repo-identity.js';
 import { cjkBigrams } from '../../src/retrieval/fts.js';
@@ -129,6 +130,9 @@ test('a request without the token is refused on every route; the page and the AP
     assert.equal((await api('/assets/other.js', { token: null })).status, 401);
     const query = await fetch(`${viewer.origin}/api/memories?token=${viewer.token}`);
     assert.equal(query.status, 200);
+    // A multibyte string of the token's character length is a plain 401, not a comparison error.
+    const wide = await fetch(`${viewer.origin}/api/memories?token=${encodeURIComponent('é'.repeat(viewer.token.length))}`);
+    assert.equal(wide.status, 401);
   });
 });
 
@@ -159,8 +163,46 @@ test('memories, sessions, search and why are read through the injection scope of
 
     const why = (await (await api('/api/sessions/s1/why')).json()) as { injections: unknown[] };
     assert.deepEqual(why.injections, []);
+
+    // The ledger of another repository's session is not reported, and the title of a memory that
+    // has since been raised to secret is withheld even though it was injected once (FR-020).
+    db.prepare(
+      `INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, started_at, status, turn_count, context_epoch)
+       VALUES ('s2', ?, 'codex', 'n2', 'c2', 1, 'ended', 0, 0)`,
+    ).run(other.id);
+    const elsewhere = createInjection(db, injectionRow({ id: 'inj-other', repoId: other.id, sessionId: 's2', conversationId: 'c2' }));
+    planItems(db, { id: elsewhere, conversationId: 'c2', epoch: 0 }, [ledgerItem('m-other')]);
+    const here = createInjection(db, injectionRow({ id: 'inj-here', repoId: identity.id, sessionId: 's1', conversationId: 'c1' }));
+    planItems(db, { id: here, conversationId: 'c1', epoch: 0 }, [ledgerItem(visible)]);
+    const otherWhy = (await (await api('/api/sessions/s2/why')).json()) as { injections: unknown[] };
+    assert.deepEqual(otherWhy.injections, []);
+    const before = (await (await api('/api/sessions/s1/why')).json()) as { injections: { items: { title: string | null }[] }[] };
+    assert.equal(before.injections[0].items[0].title, 'Busy timeout');
+    db.prepare("UPDATE memories SET sensitivity = 'secret' WHERE id = ?").run(visible);
+    const after = (await (await api('/api/sessions/s1/why')).json()) as { injections: { items: { memory_id: string | null; title: string | null }[] }[] };
+    assert.equal(after.injections[0].items[0].title, null);
   });
 });
+
+function injectionRow(overrides: Partial<NewInjection> & { repoId: string; sessionId: string; conversationId: string }): NewInjection {
+  return {
+    turnId: null,
+    kind: 'session_start',
+    channel: 'codex:SessionStart',
+    state: 'emitted',
+    epoch: 0,
+    packHash: null,
+    charBudget: null,
+    charsUsed: null,
+    degradedReason: null,
+    createdAt: NOW,
+    ...overrides,
+  };
+}
+
+function ledgerItem(memoryId: string): LedgerItem {
+  return { sourceKind: 'memory', memoryId, rawEventId: null, decision: 'included', reason: null, rank: 1, stale: 0 };
+}
 
 test('review, pin, unpin and delete mutate through the scope and need a same-origin request', async () => {
   await withViewer(async ({ api, db, identity, viewer }) => {

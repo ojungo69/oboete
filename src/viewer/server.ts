@@ -97,8 +97,11 @@ function defaultAssetsDir(): string {
 }
 
 function sameToken(expected: string, given: string | undefined): boolean {
-  if (given === undefined || given.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(expected), Buffer.from(given));
+  if (given === undefined) return false;
+  const a = Buffer.from(expected);
+  const b = Buffer.from(given);
+  // Byte lengths, not character counts: a multibyte token of the same length would throw here.
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 export async function startViewer(options: ViewerOptions): Promise<ViewerHandle> {
@@ -191,7 +194,7 @@ export async function startViewer(options: ViewerOptions): Promise<ViewerHandle>
     ),
   );
   app.get('/api/sessions/:id/why', (c) =>
-    withDatabase((db) => c.json({ injections: whyReport(db, c.req.param('id')) })),
+    withDatabase((db, scope) => c.json({ injections: whyReport(db, c.req.param('id'), scope) })),
   );
 
   const mutate = (

@@ -6,6 +6,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { after, test } from 'node:test';
 
 import { openDatabase } from '../../src/db/open.js';
+import { memoryScope } from '../../src/db/queries.js';
 import { CHANNEL_CAPS } from '../../src/injection/budget.js';
 import {
   alreadyIncluded,
@@ -31,6 +32,7 @@ const NOW = 1_700_000_000_000;
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const REPO = 'r1';
+const scope = (db: DatabaseSync) => memoryScope(db, { repoId: REPO, destination: 'injection' });
 const IDENTITY = 'example.test/one';
 
 // The R11 fixture: the phrases a pack is checked against are the adversarial corpus itself.
@@ -336,7 +338,7 @@ test('a stale path and a stale commit are marked on the item and noted in the pa
     assert.match(pack!.text, /> related: Retrieval note deleted \[gone\.ts; .+\]/);
     assert.match(pack!.text, /> related: Retrieval note commit \[0{40}; .+\]/);
 
-    const items = whyReport(db, 's_now')[0].items;
+    const items = whyReport(db, 's_now', scope(db))[0].items;
     const byId = new Map(items.map((item) => [item.memoryId, item]));
     assert.equal(byId.get('m_fresh')?.stale, false);
     assert.equal(byId.get('m_stale_path')?.stale, true);
@@ -454,7 +456,7 @@ test('a pending summary waits once and then injects the latest raw activity', as
     assert.equal(pack!.text.includes('VERBATIM-TOOL-OUTPUT'), false);
     assert.equal(pack!.text.includes('A prompt of a failed classification.'), false);
 
-    const injection = whyReport(db, 's_now')[0];
+    const injection = whyReport(db, 's_now', scope(db))[0];
     assert.equal(injection.degradedReason, 'summary_pending');
     assert.ok(injection.items.every((item) => item.sourceKind === 'raw_activity'));
     assert.ok(injection.items.every((item) => item.rawEventId !== null));
@@ -466,7 +468,7 @@ test('a session with nothing to inject records the empty pack and prints nothing
     insertSession(db, { id: 's_now', conversationId: 'c1', status: 'active' });
     const pack = await buildSessionStartPack(db, packInput());
     assert.equal(pack, null);
-    const injection = whyReport(db, 's_now')[0];
+    const injection = whyReport(db, 's_now', scope(db))[0];
     assert.equal(injection.state, 'omitted');
     assert.equal(injection.degradedReason, 'empty');
   });
@@ -534,7 +536,7 @@ test('a memory already delivered in the epoch is omitted as a duplicate', async 
       packInput({ channel: 'claude:UserPromptSubmit', prompt: 'busy timeout' }),
     );
     assert.equal(second, null, 'nothing is left to print once every candidate is a duplicate');
-    const items = whyReport(db, 's_now').flatMap((injection) => injection.items);
+    const items = whyReport(db, 's_now', scope(db)).flatMap((injection) => injection.items);
     const duplicate = items.find((item) => item.decision === 'omitted');
     assert.equal(duplicate?.memoryId, 'm_en');
     assert.equal(duplicate?.reason, 'duplicate_in_conversation');
@@ -633,7 +635,7 @@ test('the budget cut is recorded on the memories that did not fit', async () => 
     );
     assert.notEqual(pack, null);
     assert.ok(pack!.text.length <= 400, `pack was ${pack!.text.length} characters`);
-    const items = whyReport(db, 's_now')[0].items;
+    const items = whyReport(db, 's_now', scope(db))[0].items;
     assert.ok(items.some((item) => item.decision === 'omitted' && item.reason === 'budget'));
     assert.ok(items.some((item) => item.decision === 'planned'));
   });
@@ -656,7 +658,7 @@ test('a memory that trips the secret detector never reaches the pack', async () 
     assert.notEqual(pack, null);
     assert.equal(pack!.text.includes('SECRET-MARKER'), false);
     assert.ok(pack!.text.includes('The ranking is lexical.'));
-    const items = whyReport(db, 's_now')[0].items;
+    const items = whyReport(db, 's_now', scope(db))[0].items;
     const dropped = items.find((item) => item.memoryId === 'm_secret');
     assert.equal(dropped?.decision, 'omitted');
     // `why` says which check dropped it, not the label the item carried before (FR-028).
@@ -680,7 +682,7 @@ test('a memory whose title reads as an instruction is dropped', async () => {
     );
     assert.notEqual(pack, null);
     assert.equal(pack!.text.toLowerCase().includes('ignore previous instructions'), false);
-    const items = whyReport(db, 's_now')[0].items;
+    const items = whyReport(db, 's_now', scope(db))[0].items;
     const dropped = items.find((item) => item.memoryId === 'm_directive');
     assert.equal(dropped?.decision, 'omitted');
     assert.equal(dropped?.reason, 'directive');
@@ -709,7 +711,7 @@ test('a memory that was last injected more than ninety days ago is retired', asy
     );
     assert.notEqual(pack, null);
     assert.equal(pack!.text.includes('Not used for a long time.'), false);
-    const items = whyReport(db, 's_now')[0].items;
+    const items = whyReport(db, 's_now', scope(db))[0].items;
     assert.equal(items.find((item) => item.memoryId === 'm_retired')?.reason, 'retired');
   });
 });
@@ -729,7 +731,7 @@ test('an unlisted model keeps the lane open and says so in plain language', asyn
     );
     assert.notEqual(pack, null);
     assert.ok(pack!.text.includes(`> degraded: ${DEGRADED_SENTENCES.window_unknown}`), pack!.text);
-    assert.equal(whyReport(db, 's_now')[0].degradedReason, 'window_unknown');
+    assert.equal(whyReport(db, 's_now', scope(db))[0].degradedReason, 'window_unknown');
   });
 });
 
@@ -778,15 +780,15 @@ test('why reports the injections of one turn when a turn is named', async () => 
     }
 
     assert.deepEqual(
-      whyReport(db, 's_now').map((injection) => injection.id),
+      whyReport(db, 's_now', scope(db)).map((injection) => injection.id),
       ['i1', 'i2'],
     );
     assert.deepEqual(
-      whyReport(db, 's_now', 2).map((injection) => injection.id),
+      whyReport(db, 's_now', scope(db), 2).map((injection) => injection.id),
       ['i2'],
     );
     // A turn that never ran has no injections, and asking for it is not an error (FR-028).
-    assert.deepEqual(whyReport(db, 's_now', 3), []);
+    assert.deepEqual(whyReport(db, 's_now', scope(db), 3), []);
   });
 });
 
@@ -855,7 +857,7 @@ test(
       assert.deepEqual(git.calls().length, 1, git.calls().join(' | '));
       assert.notEqual(pack, null);
 
-      const items = whyReport(db, 's_now')[0].items;
+      const items = whyReport(db, 's_now', scope(db))[0].items;
       const byId = new Map(items.map((item) => [item.memoryId, item]));
       assert.equal(byId.get('m_current')?.stale, false);
       assert.equal(byId.get('m_unchecked')?.stale, true);
@@ -893,7 +895,7 @@ test('a directive written in full-width or half-width characters is dropped too'
     assert.equal(pack!.text.includes('ﾌﾟﾛﾝﾌﾟﾄ'), false);
     assert.ok(pack!.text.includes('The ranking is lexical.'));
 
-    const items = whyReport(db, 's_now')[0].items;
+    const items = whyReport(db, 's_now', scope(db))[0].items;
     for (const id of ['m_wide', 'm_half']) {
       const dropped = items.find((item) => item.memoryId === id);
       assert.equal(dropped?.decision, 'omitted', id);
@@ -912,7 +914,7 @@ test('a session-start pack carries the batch reason of a fallback summary', asyn
     const pack = await buildSessionStartPack(db, packInput());
     assert.notEqual(pack, null);
     assert.ok(pack!.text.includes(`> degraded: ${DEGRADED_SENTENCES.daily_cap}`), pack!.text);
-    assert.equal(whyReport(db, 's_now')[0].degradedReason, 'daily_cap');
+    assert.equal(whyReport(db, 's_now', scope(db))[0].degradedReason, 'daily_cap');
   });
 });
 
@@ -932,6 +934,6 @@ test('a prompt pack carries the most severe batch reason among the included memo
     assert.equal(pack!.items.filter((item) => item.decision === 'planned').length, 2, pack!.text);
     assert.ok(pack!.text.includes(`> degraded: ${DEGRADED_SENTENCES.provider_exhausted}`), pack!.text);
     assert.ok(!pack!.text.includes(DEGRADED_SENTENCES.rule_based), pack!.text);
-    assert.equal(whyReport(db, 's_now')[0].degradedReason, 'provider_exhausted');
+    assert.equal(whyReport(db, 's_now', scope(db))[0].degradedReason, 'provider_exhausted');
   });
 });

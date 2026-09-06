@@ -3,6 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
 import { openDatabase } from '../../src/db/open.js';
+import { memoryScope } from '../../src/db/queries.js';
 import { CHANNEL_CAPS } from '../../src/injection/budget.js';
 import { whyReport } from '../../src/injection/ledger.js';
 import {
@@ -38,6 +39,7 @@ const NOW = 1_700_000_000_000;
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const REPO = 'r1';
+const scope = (db: DatabaseSync) => memoryScope(db, { repoId: REPO, destination: 'injection' });
 const IDENTITY = 'example.test/one';
 const SUMMARY_REPO = 'a1b2c3d4e5f60718';
 
@@ -298,7 +300,7 @@ test('a pending previous summary puts summary_pending on the session-start pack;
     );
     assert.notEqual(pack, null);
     assert.ok(pack!.text.includes(`> degraded: ${DEGRADED_SENTENCES.summary_pending}`), pack!.text);
-    assert.equal(whyReport(db, 's_now')[0].degradedReason, 'summary_pending');
+    assert.equal(whyReport(db, 's_now', scope(db))[0].degradedReason, 'summary_pending');
   });
 
   await withDb(async (db) => {
@@ -331,7 +333,7 @@ test('a pending previous summary puts summary_pending on the session-start pack;
     );
     assert.notEqual(pack, null);
     assert.equal(pack!.text.includes('> degraded:'), false, pack!.text);
-    assert.equal(whyReport(db, 's_now')[0].degradedReason, null);
+    assert.equal(whyReport(db, 's_now', scope(db))[0].degradedReason, null);
   });
 });
 
@@ -341,7 +343,7 @@ test('session-start and prompt packs carry the most severe batch reason; summary
     const pack = await buildSessionStartPack(db, packInput());
     assert.notEqual(pack, null);
     assert.ok(pack!.text.includes(`> degraded: ${DEGRADED_SENTENCES.daily_cap}`), pack!.text);
-    assert.equal(whyReport(db, 's_now')[0].degradedReason, 'daily_cap');
+    assert.equal(whyReport(db, 's_now', scope(db))[0].degradedReason, 'daily_cap');
   });
 
   await withDb(async (db) => {
@@ -369,7 +371,7 @@ test('session-start and prompt packs carry the most severe batch reason; summary
     assert.notEqual(pack, null);
     assert.ok(pack!.text.includes(`> degraded: ${DEGRADED_SENTENCES.summary_pending}`), pack!.text);
     assert.equal(pack!.text.includes(DEGRADED_SENTENCES.daily_cap), false, pack!.text);
-    assert.equal(whyReport(db, 's_now')[0].degradedReason, 'summary_pending');
+    assert.equal(whyReport(db, 's_now', scope(db))[0].degradedReason, 'summary_pending');
   });
 
   await withDb(async (db) => {
@@ -394,7 +396,7 @@ test('session-start and prompt packs carry the most severe batch reason; summary
     assert.notEqual(pack, null);
     assert.ok(pack!.text.includes(`> degraded: ${DEGRADED_SENTENCES.provider_exhausted}`), pack!.text);
     assert.equal(pack!.text.includes(DEGRADED_SENTENCES.rule_based), false, pack!.text);
-    assert.equal(whyReport(db, 's_now')[0].degradedReason, 'provider_exhausted');
+    assert.equal(whyReport(db, 's_now', scope(db))[0].degradedReason, 'provider_exhausted');
   });
 
   await withDb(async (db) => {
@@ -407,7 +409,7 @@ test('session-start and prompt packs carry the most severe batch reason; summary
     );
     assert.notEqual(pack, null);
     assert.equal(pack!.text.includes('> degraded:'), false, pack!.text);
-    assert.equal(whyReport(db, 's_now')[0].degradedReason, null);
+    assert.equal(whyReport(db, 's_now', scope(db))[0].degradedReason, null);
   });
 });
 
@@ -429,7 +431,7 @@ test('a prompt pack for an undocumented model says window_unknown; a batch reaso
       unknown!.text.includes(`> degraded: ${DEGRADED_SENTENCES.window_unknown}`),
       unknown!.text,
     );
-    assert.equal(whyReport(db, 's_now')[0].degradedReason, 'window_unknown');
+    assert.equal(whyReport(db, 's_now', scope(db))[0].degradedReason, 'window_unknown');
   });
 
   await withDb(async (db) => {
@@ -452,7 +454,7 @@ test('a prompt pack for an undocumented model says window_unknown; a batch reaso
     assert.notEqual(pack, null);
     assert.ok(pack!.text.includes(`> degraded: ${DEGRADED_SENTENCES.daily_cap}`), pack!.text);
     assert.equal(pack!.text.includes(DEGRADED_SENTENCES.window_unknown), false, pack!.text);
-    assert.equal(whyReport(db, 's_now')[0].degradedReason, 'daily_cap');
+    assert.equal(whyReport(db, 's_now', scope(db))[0].degradedReason, 'daily_cap');
   });
 });
 
@@ -467,7 +469,7 @@ test('a prompt that matches nothing returns null and records an omitted empty in
       }),
     );
     assert.equal(pack, null);
-    const report = whyReport(db, 's_now');
+    const report = whyReport(db, 's_now', scope(db));
     assert.equal(report.length, 1);
     assert.equal(report[0].state, 'omitted');
     assert.equal(report[0].degradedReason, 'empty');
@@ -488,7 +490,7 @@ test('a pack whose rendered text trips the detector returns null and records omi
       }),
     );
     assert.equal(pack, null);
-    const report = whyReport(db, 's_now');
+    const report = whyReport(db, 's_now', scope(db));
     assert.equal(report.length, 1);
     assert.equal(report[0].state, 'omitted');
     assert.equal(report[0].degradedReason, 'index_unavailable');

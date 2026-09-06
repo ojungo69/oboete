@@ -18,6 +18,8 @@ import { cjkBigrams } from './retrieval/fts.js';
 export const EXPORT_FORMAT = 'oboete-export/1';
 export const MAX_LINE_BYTES = 64 * 1024;
 export const MAX_FILE_BYTES = 256 * 1024 * 1024;
+/** Every rejection rolls the import back, so listing more than this many helps nobody. */
+export const MAX_REJECTED = 100;
 
 /** data-model "memories": the stricter class wins on every merge. */
 const SENSITIVITY_RANK = { eligible: 0, local_only: 1, private: 2, secret: 3 } as const;
@@ -125,8 +127,9 @@ export function exportMemories(
         ...row,
         title: withoutText ? '' : row.title,
         body: withoutText ? '' : row.body,
+        concepts: withoutText ? '[]' : row.concepts,
         source_agent: sources[0]?.source_agent ?? null,
-        sources,
+        sources: withoutText ? [] : sources,
       }),
     );
     if (row.deleted_at === null) counts.memories += 1;
@@ -162,6 +165,10 @@ function applyLine(
   const hasText = title !== '' || body !== '';
   if (hasText && materialHash(title, body) !== line.material_hash) {
     throw new Rejection('material_hash does not match the title and body');
+  }
+  // A secret row travels as its hashes only (FR-020): text under that label is not ours to store.
+  if (line.sensitivity === 'secret' && (hasText || line.sources.length > 0 || (line.concepts ?? '[]') !== '[]')) {
+    throw new Rejection('a secret row must carry no title, body, concepts or sources');
   }
   // Identity is recomputed here from the local repository and never taken from the file.
   const content = contentHash(repoId, line.material_hash);
@@ -282,15 +289,19 @@ export async function importMemories(
     let bytes = 0;
     let headerSeen = false;
     for await (const raw of linesOf(source)) {
+      const size = Buffer.byteLength(raw, 'utf8') + 1;
+      bytes += size;
+      if (bytes > maxFileBytes) {
+        reject(number + 1, `file size exceeds ${Math.floor(maxFileBytes / (1024 * 1024))} MB; the import stopped here`);
+        break;
+      }
+      if (result.rejected.length >= MAX_REJECTED) {
+        reject(number + 1, `more than ${MAX_REJECTED} lines were rejected; the import stopped here`);
+        break;
+      }
       const line = raw.replace(/\r$/u, '');
       if (line.trim() === '') continue;
       number += 1;
-      const size = Buffer.byteLength(line, 'utf8') + 1;
-      bytes += size;
-      if (bytes > maxFileBytes) {
-        reject(number, `file size exceeds ${Math.floor(maxFileBytes / (1024 * 1024))} MB; the import stopped here`);
-        break;
-      }
       if (size > MAX_LINE_BYTES + 1) {
         reject(number, `line exceeds ${MAX_LINE_BYTES / 1024} KB`);
         continue;
@@ -340,6 +351,19 @@ export async function importMemories(
 }
 
 type Io = { writeOut(text: string): void; writeError(text: string): void };
+
+/** The whole stream as one string, or null once it exceeds `limit` bytes (reading stops there). */
+async function readBounded(input: NodeJS.ReadableStream, limit: number): Promise<string | null> {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of input) {
+    const buffer = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+    bytes += buffer.length;
+    if (bytes > limit) return null;
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 function withDatabase<T>(fn: (db: DatabaseSync) => T | Promise<T>): Promise<T> {
   const paths = oboetePaths(resolveHome());
@@ -415,8 +439,13 @@ export async function runImport(argv: string[], io: Io = { writeOut: (t) => proc
       return 2;
     }
   }
+  // Standard input is read before the database is opened: a slow pipe must not hold the write lock.
+  const source = file === '-' ? await readBounded(process.stdin, MAX_FILE_BYTES) : createReadStream(file, { encoding: 'utf8' });
+  if (source === null) {
+    io.writeError(`standard input exceeds ${MAX_FILE_BYTES / (1024 * 1024)} MB; nothing was imported.\n`);
+    return 2;
+  }
   return await withDatabase(async (db) => {
-    const source = file === '-' ? process.stdin : createReadStream(file, { encoding: 'utf8' });
     const result = await importMemories(db, source, { now: Date.now(), dryRun, mapRepo });
     for (const item of result.rejected) io.writeError(`line ${item.line}: ${item.reason}\n`);
     const summary = `${plural(result.inserted, 'memory', 'memories')} added, ${result.updated} raised in sensitivity, ${plural(result.tombstones, 'tombstone')} applied, ${result.unchanged} unchanged`;

@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 
 import { openDatabase } from './db/open.js';
+import { memoryScope } from './db/queries.js';
 import {
   whyReport,
   type ItemReason,
@@ -16,6 +17,7 @@ import {
   type MemoryCliRuntime,
 } from './memories-cli.js';
 import { ensureDirectories, oboetePaths, resolveHome } from './paths.js';
+import { resolveRepoIdentity } from './repo-identity.js';
 
 const ITEM_SENTENCES: Record<ItemReason, string> = {
   below_threshold: 'Its relevance score was below the threshold.',
@@ -56,16 +58,17 @@ function asSession(row: Record<string, unknown>): SessionRef {
   };
 }
 
-function findSession(db: DatabaseSync, given: string): SessionRef[] {
+/** Sessions of the current repository only: another repository's ledger is "not found". */
+function findSession(db: DatabaseSync, repoId: string, given: string): SessionRef[] {
   const byId = db
-    .prepare('SELECT id, agent, native_session_id FROM sessions WHERE id = ?')
-    .get(given);
+    .prepare('SELECT id, agent, native_session_id FROM sessions WHERE id = ? AND repo_id = ?')
+    .get(given, repoId);
   if (byId !== undefined) return [asSession(byId)];
   return db
     .prepare(
-      'SELECT id, agent, native_session_id FROM sessions WHERE native_session_id = ? ORDER BY agent, id',
+      'SELECT id, agent, native_session_id FROM sessions WHERE native_session_id = ? AND repo_id = ? ORDER BY agent, id',
     )
-    .all(given)
+    .all(given, repoId)
     .map((row) => asSession(row));
 }
 
@@ -189,8 +192,10 @@ export async function runWhy(
     turn = parsedTurn;
   }
 
+  const repoId = resolveRepoIdentity(runtime.cwd).id;
   return withWhyDatabase((db) => {
-    const matches = findSession(db, givenId);
+    const scope = memoryScope(db, { repoId, destination: 'injection' });
+    const matches = findSession(db, repoId, givenId);
     if (matches.length === 0) {
       runtime.writeError(`Session ${givenId} was not found.\n`);
       return 1;
@@ -205,7 +210,9 @@ export async function runWhy(
 
     const session = matches[0];
     const injections =
-      turn === undefined ? whyReport(db, session.id) : whyReport(db, session.id, turn);
+      turn === undefined
+        ? whyReport(db, session.id, scope)
+        : whyReport(db, session.id, scope, turn);
     if (json) {
       runtime.writeOut(`${JSON.stringify({ session, injections })}\n`);
       return 0;

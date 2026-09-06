@@ -3,6 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
 import { openDatabase } from '../../src/db/open.js';
+import { memoryScope } from '../../src/db/queries.js';
 import { CHANNEL_CAPS } from '../../src/injection/budget.js';
 import {
   attachOnPreToolUse,
@@ -20,6 +21,7 @@ import { withTempHome } from '../helpers/home.js';
 
 const NOW = 1_700_000_000_000;
 const REPO = 'r1';
+const scope = (db: DatabaseSync) => memoryScope(db, { repoId: REPO, destination: 'injection' });
 const CONVERSATION = 'c1';
 
 function insertMemory(
@@ -137,7 +139,7 @@ test('the first tool call that runs receives the pack and confirms it', async ()
     const row = injectionRow(db, id);
     assert.equal(row.state, 'emitted');
     assert.equal(row.delivery_count, 1);
-    const items = whyReport(db, 's_now')[0].items;
+    const items = whyReport(db, 's_now', scope(db))[0].items;
     assert.ok(items.every((item) => item.decision === 'included'));
 
     // A later call of the same turn adds nothing: the pack is confirmed.
@@ -165,7 +167,7 @@ test('a call that runs and fails still delivered the pack', async () => {
     const row = injectionRow(db, id);
     assert.equal(row.state, 'emitted');
     assert.equal(row.delivery_count, 1);
-    const attempts = whyReport(db, 's_now')[0].attempts;
+    const attempts = whyReport(db, 's_now', scope(db))[0].attempts;
     assert.deepEqual(
       attempts.map((attempt) => [attempt.execution, attempt.delivery]),
       [['failed', 'delivered']],
@@ -201,7 +203,7 @@ test('a denied call delivers nothing and the next call carries the pack again', 
 
     const row = injectionRow(db, id);
     assert.equal(row.delivery_count, 1, 'only the call that ran delivered the pack');
-    const attempts = whyReport(db, 's_now')[0].attempts;
+    const attempts = whyReport(db, 's_now', scope(db))[0].attempts;
     assert.deepEqual(
       attempts.map((attempt) => [attempt.tool_call_id, attempt.execution, attempt.delivery]),
       [
@@ -227,7 +229,7 @@ test('a turn whose chain was stopped by another handler records not_delivered', 
     assert.equal(row.state, 'omitted');
     assert.equal(row.degraded_reason, 'not_delivered');
     assert.equal(row.delivery_count, 0);
-    const report = whyReport(db, 's_now')[0];
+    const report = whyReport(db, 's_now', scope(db))[0];
     assert.deepEqual(report.attempts.map((attempt) => attempt.delivery), ['dropped']);
     assert.ok(report.items.every((item) => item.decision === 'omitted' && item.reason === 'not_delivered'));
 
@@ -265,7 +267,7 @@ test('a parallel batch delivers the pack once per call and includes its items on
     assert.equal(row.delivery_count, 2);
     assert.equal(received.length, 2);
 
-    const report = whyReport(db, 's_now')[0];
+    const report = whyReport(db, 's_now', scope(db))[0];
     assert.deepEqual(report.attempts.map((attempt) => attempt.delivery), ['delivered', 'delivered']);
     const included = report.items.filter((item) => item.decision === 'included' && item.memoryId === 'm_1');
     assert.equal(included.length, 1, 'the memory is counted once for the conversation');
@@ -280,7 +282,7 @@ test('a turn with no tool call at all records no_tool_call', async () => {
     const row = injectionRow(db, id);
     assert.equal(row.state, 'omitted');
     assert.equal(row.degraded_reason, 'no_tool_call');
-    assert.deepEqual(whyReport(db, 's_now')[0].attempts, []);
+    assert.deepEqual(whyReport(db, 's_now', scope(db))[0].attempts, []);
   });
 });
 
@@ -314,7 +316,7 @@ test('the attempt record outlives the raw events it came from', async () => {
     ).run(REPO, NOW, NOW);
     db.prepare('DELETE FROM raw_events').run();
 
-    const report = whyReport(db, 's_now')[0];
+    const report = whyReport(db, 's_now', scope(db))[0];
     assert.equal(report.attempts.length, 1);
     assert.equal(report.attempts[0].delivery, 'delivered');
     assert.equal(report.deferred, true);
@@ -344,7 +346,7 @@ test('a second prompt before any tool call merges into the one pending record', 
       assert.equal(text!.split('Retrieval note one').length - 1, 1, 'and it is not repeated');
 
       confirmOnPostToolUse(db, { conversationId: CONVERSATION, toolCallId: 'call-1', now: NOW + 201 });
-      const included = whyReport(db, 's_now')
+      const included = whyReport(db, 's_now', scope(db))
         .flatMap((injection) => injection.items)
         .filter((item) => item.decision === 'included')
         .map((item) => item.memoryId)
@@ -372,7 +374,7 @@ test('a memory that both merged packs carry is delivered once and counted once',
     assert.ok(text!.includes('Retrieval note one'), 'the repeated memory is in the pack');
     confirmOnPostToolUse(db, { conversationId: CONVERSATION, toolCallId: 'call-1', now: NOW + 201 });
 
-    const items = whyReport(db, 's_now').flatMap((injection) => injection.items);
+    const items = whyReport(db, 's_now', scope(db)).flatMap((injection) => injection.items);
     assert.deepEqual(
       items.map((item) => `${item.memoryId}:${item.decision}:${item.reason ?? '-'}`).sort(),
       ['m_1:included:-', 'm_1:omitted:duplicate_in_conversation'],
@@ -409,7 +411,7 @@ test('a merged pack that trips the secret detector is never stored', async () =>
       assert.ok(text!.includes('alpha'), 'the validated pack is still deliverable');
       assert.ok(!text!.includes('beta'), 'the merged text was never stored');
 
-      const items = whyReport(db, 's_now').flatMap((injection) => injection.items);
+      const items = whyReport(db, 's_now', scope(db)).flatMap((injection) => injection.items);
       assert.deepEqual(
         items
           .filter((item) => item.memoryId === 'm_2')
@@ -442,7 +444,7 @@ test('a merged pack that trips the directive corpus is never stored', async () =
       });
       assert.ok(!text!.includes('Lease note two'), 'the merged text was never stored');
 
-      const items = whyReport(db, 's_now').flatMap((injection) => injection.items);
+      const items = whyReport(db, 's_now', scope(db)).flatMap((injection) => injection.items);
       assert.deepEqual(
         items
           .filter((item) => item.memoryId === 'm_2')
@@ -470,7 +472,7 @@ test('a merged item that no longer fits the budget is recorded as trimmed', asyn
         now: NOW + 200,
       });
       assert.ok(text!.length <= 200, `the merged pack keeps the budget: ${text!.length}`);
-      const items = whyReport(db, 's_now')[0].items;
+      const items = whyReport(db, 's_now', scope(db))[0].items;
       assert.ok(
         items.some((item) => item.memoryId === 'm_2' && item.decision === 'omitted' && item.reason === 'budget'),
         JSON.stringify(items),
@@ -508,7 +510,7 @@ test('a PostToolUse for a call that never carried the pack changes nothing', asy
     const row = injectionRow(db, id);
     assert.equal(row.delivery_count, 1, 'only the attached call counts as a delivery');
     assert.deepEqual(
-      whyReport(db, 's_now')[0].attempts.map((attempt) => attempt.tool_call_id),
+      whyReport(db, 's_now', scope(db))[0].attempts.map((attempt) => attempt.tool_call_id),
       ['call-1'],
     );
   });
@@ -539,7 +541,7 @@ test('a deny and a stop after the pack was delivered still record their attempts
 
     assert.equal(injectionRow(db, id).delivery_count, 1);
     assert.deepEqual(
-      whyReport(db, 's_now')[0].attempts.map((attempt) => [
+      whyReport(db, 's_now', scope(db))[0].attempts.map((attempt) => [
         attempt.tool_call_id,
         attempt.execution,
         attempt.delivery,
@@ -559,7 +561,7 @@ test('why marks a Grok pack deferred even when no tool call ever ran', async () 
     closeOnStop(db, { conversationId: CONVERSATION, sawAnyToolHook: false, now: NOW + 5 });
 
     // FR-045: the Grok lane is the deferred one, and a pack that reached no call is still its pack.
-    assert.equal(whyReport(db, 's_now')[0].deferred, true);
+    assert.equal(whyReport(db, 's_now', scope(db))[0].deferred, true);
   });
 });
 
@@ -573,7 +575,7 @@ test('the degraded reason the pack was built with survives the close at Stop', a
     const row = injectionRow(db, id);
     assert.equal(row.state, 'omitted');
     assert.equal(row.degraded_reason, 'window_unknown', 'the built reason is not overwritten');
-    const items = whyReport(db, 's_now')[0].items;
+    const items = whyReport(db, 's_now', scope(db))[0].items;
     assert.ok(items.every((item) => item.decision === 'omitted' && item.reason === 'not_delivered'));
   });
 });
@@ -601,7 +603,7 @@ test('a record whose stored pack was lost delivers only the items that were rend
       confirmOnPostToolUse(db, { conversationId: CONVERSATION, toolCallId: 'call-1', now: NOW + 201 });
 
       // FR-026: only a delivered memory is counted for the conversation, so m_1 stays injectable.
-      const items = whyReport(db, 's_now').flatMap((injection) => injection.items);
+      const items = whyReport(db, 's_now', scope(db)).flatMap((injection) => injection.items);
       assert.deepEqual(
         items.map((item) => `${item.memoryId}:${item.decision}:${item.reason ?? '-'}`).sort(),
         ['m_1:omitted:not_delivered', 'm_2:included:-'],
