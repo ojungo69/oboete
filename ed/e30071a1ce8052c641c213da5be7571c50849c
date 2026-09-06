@@ -1,0 +1,21 @@
+docs/evidence/m1-dogfood.md
+  s_359fcac8e97f88::t_01ee2523815226 177-212
+specs/007-oboete-m1-alpha/tasks.md
+  s_359fcac8e97f88::t_231b06cc4618ea 198
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "ede30071a1ce8052c641c213da5be7571c50849c",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
