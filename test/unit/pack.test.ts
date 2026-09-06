@@ -901,3 +901,37 @@ test('a directive written in full-width or half-width characters is dropped too'
     }
   });
 });
+
+// US5 scenario 2: while the provider is exhausted, memories come from the fallback, and every pack
+// built from them says so. The pack-level reasons (summary_pending) still come first.
+test('a session-start pack carries the batch reason of a fallback summary', async () => {
+  await withDb(async (db) => {
+    seedReadySession(db);
+    db.prepare("UPDATE memories SET degraded_reason = 'daily_cap' WHERE id = 'm_summary'").run();
+
+    const pack = await buildSessionStartPack(db, packInput());
+    assert.notEqual(pack, null);
+    assert.ok(pack!.text.includes(`> degraded: ${DEGRADED_SENTENCES.daily_cap}`), pack!.text);
+    assert.equal(whyReport(db, 's_now')[0].degradedReason, 'daily_cap');
+  });
+});
+
+test('a prompt pack carries the most severe batch reason among the included memories', async () => {
+  await withDb(async (db) => {
+    insertSession(db, { id: 's_now', conversationId: 'c1', status: 'active' });
+    insertMemory(db, { id: 'm_rules', title: 'Retrieval note', body: 'The ranking is lexical.' });
+    insertMemory(db, { id: 'm_cap', title: 'Retrieval order', body: 'Lexical ranking, then MMR.' });
+    db.prepare("UPDATE memories SET degraded_reason = 'rule_based' WHERE id = 'm_rules'").run();
+    db.prepare("UPDATE memories SET degraded_reason = 'provider_exhausted' WHERE id = 'm_cap'").run();
+
+    const pack = await buildPromptPack(
+      db,
+      packInput({ channel: 'claude:UserPromptSubmit', prompt: 'retrieval lexical ranking' }),
+    );
+    assert.notEqual(pack, null);
+    assert.equal(pack!.items.filter((item) => item.decision === 'planned').length, 2, pack!.text);
+    assert.ok(pack!.text.includes(`> degraded: ${DEGRADED_SENTENCES.provider_exhausted}`), pack!.text);
+    assert.ok(!pack!.text.includes(DEGRADED_SENTENCES.rule_based), pack!.text);
+    assert.equal(whyReport(db, 's_now')[0].degradedReason, 'provider_exhausted');
+  });
+});

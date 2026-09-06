@@ -12,7 +12,7 @@ import {
   type MemoryRow,
 } from '../db/queries.js';
 import type { AgentName } from '../events.js';
-import { rejectsDirectives } from '../observer/classify.js';
+import { DEGRADED_PRECEDENCE, rejectsDirectives } from '../observer/classify.js';
 import { isCjk } from '../retrieval/fts.js';
 import { searchCandidates } from '../retrieval/query.js';
 import { rankCandidates } from '../retrieval/rank.js';
@@ -327,6 +327,26 @@ function omittedItem(memoryId: string, reason: ItemReason): LedgerItem {
   };
 }
 
+/**
+ * US5: a memory written by the fallback carries the batch reason it was written under, and a pack
+ * built from such memories says so. The most severe reason among the given memories wins, in the
+ * order the summarizer uses for a session (contracts/observer.md); a pack-level reason such as
+ * `summary_pending` takes precedence and is decided by the caller.
+ */
+function batchReasonOf(db: DatabaseSync, memoryIds: readonly string[]): DegradedReason | null {
+  if (memoryIds.length === 0) return null;
+  const reasons = new Set(
+    db
+      .prepare(
+        `SELECT degraded_reason FROM memories
+         WHERE degraded_reason IS NOT NULL AND id IN (${memoryIds.map(() => '?').join(', ')})`,
+      )
+      .all(...memoryIds)
+      .map((row) => String(row.degraded_reason)),
+  );
+  return DEGRADED_PRECEDENCE.find((reason) => reasons.has(reason)) ?? null;
+}
+
 function blockCost(block: readonly string[]): number {
   return block.join('\n').length + 1;
 }
@@ -579,6 +599,7 @@ export async function buildSessionStartPack(
   });
   // FR-025 and the R13 gate: an agent with no verified context window ships no injection lane.
   if (budget.blocked) return null;
+  degraded ??= batchReasonOf(db, memories.map((memory) => memory.id));
   if (degraded === null && budget.windowUnknown) degraded = 'window_unknown';
 
   return assemble(db, input, {
@@ -650,7 +671,9 @@ export async function buildPromptPack(
     })),
     activity: [],
     omitted,
-    degraded: budget.windowUnknown ? 'window_unknown' : null,
+    degraded:
+      batchReasonOf(db, ranked.included.map((row) => row.id)) ??
+      (budget.windowUnknown ? 'window_unknown' : null),
     budgetChars: budget.chars,
     directives: input.directives,
   });
