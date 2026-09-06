@@ -193,7 +193,7 @@ minutes, doctor healthy, then break one item at a time and confirm doctor names 
 recovery step turns it green.
 
 - [ ] T069 [EXT] [US4] Implement src/doctor.ts and `oboete doctor [--probe-provider] [--no-probe-agents]`: items with { item, status, reason, consequence, recovery } for wiring probes (default on) and trust state, storage integrity and FTS5, migration level, worker liveness, spool backlog and writability, provider (live only with --probe-provider, else unverified), allowance estimate and exhaustion, catalog paid flag, unrecognized agents, native memory coexistence, config file mode, Pi diagnostics (pi_child_hang, pi_child_failed, pi_spawn_failed); corrupt-storage recovery steps
-- [ ] T070 [P] [EXT] [US4] Implement `oboete pause` / `oboete resume` (marker file checked before the database is opened) in src/cli.ts with tests test/unit/pause.test.ts (memories untouched)
+- [X] T070 [P] [EXT] [US4] Implement `oboete pause` / `oboete resume` (marker file checked before the database is opened) in src/cli.ts with tests test/unit/pause.test.ts (memories untouched) (done 2026-09-06: src/pause.ts; cli.ts loads pause/resume lazily; marker `~/.oboete/paused` 0o600; capture skipped until resume, memories untouched)
 - [ ] T071 [EXT] [US4] Write test/unit/doctor.test.ts: break-one-at-a-time (hook entry removed, database chmod, corrupted header, worker killed, unreachable provider, exhausted counter, stale Pi .started, Pi extension unable to spawn) asserting reason, consequence, recovery, and that recovery turns the item green
 - [ ] T072 [EXT] [US4] Run setup and doctor on the isolated account (quickstart.md), record timing and the break-one results in docs/evidence/m1-dogfood.md (SC-008)
 
