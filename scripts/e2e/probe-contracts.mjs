@@ -65,8 +65,8 @@ function pipe(s) {
   // The backslash goes first: escaping only the bar turns an evidence string that already holds
   // `\\|` into `\\\\|`, which renders as a literal backslash followed by a live column separator.
   return String(s || "")
-    .replace(/\\/g, "\\\\")
-    .replace(/\|/g, "\\|")
+    .replaceAll(/\\/g, "\\\\")
+    .replaceAll(/\|/g, String.raw`\|`)
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -177,7 +177,7 @@ async function main() {
     try {
       grokSeed = await agents.seedGrokHome(runRoot);
     } catch (e) {
-      grokSeedError = String(e && e.message ? e.message : e);
+      grokSeedError = String(e?.message ? e.message : e);
     }
   }
 
@@ -212,8 +212,8 @@ async function main() {
           result = { status: "fail", evidence: ["invalid result status"], data: result };
         }
       } catch (e) {
-        const evidence = [String(e && e.stack ? e.stack : e)];
-        if (/probe timeout /.test(String(e && e.message ? e.message : e))) {
+        const evidence = [String(e?.stack ? e.stack : e)];
+        if (/probe timeout /.test(String(e?.message ? e.message : e))) {
           tmux(["kill-server"]);
           evidence.push("tmux server oboete-probes killed");
         }
@@ -240,8 +240,10 @@ async function main() {
 }
 
 if (path.resolve(process.argv[1] || "") === fileURLToPath(import.meta.url)) {
-  main().catch((e) => {
+  try {
+    await main();
+  } catch (e) {
     console.error(e);
     process.exit(1);
-  });
+  }
 }

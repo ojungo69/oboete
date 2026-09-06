@@ -159,7 +159,7 @@ const secretContent =
   }).join('\n') + '\n';
 
 function payload(repo, content, sample) {
-  const value = JSON.parse(JSON.stringify(FIXTURE));
+  const value = structuredClone(FIXTURE);
   value.cwd = repo;
   value.transcript_path = join(repo, 'transcript.jsonl');
   value.tool_use_id = `toolu_oboete_measure_${String(sample).padStart(4, '0')}`;
@@ -177,7 +177,7 @@ function hookLogP50(home) {
     .split('\n')
     .slice(WARM_UPS)
     .map((entry) =>
-      /\b(?:wall_ms|elapsed_ms|duration_ms)=([0-9]+(?:\.[0-9]+)?)(?:\s|$)/.exec(entry),
+      /\b(?:wall_ms|elapsed_ms|duration_ms)=(\d+(?:\.\d+)?)(?:\s|$)/.exec(entry),
     )
     .filter((match) => match !== null)
     .map((match) => Number(match[1]));
@@ -231,9 +231,13 @@ function measureHook(node, parent, key, description, content, databasePresent) {
     if (index >= WARM_UPS) samples.push(elapsed);
   }
 
-  const landed = databasePresent
-    ? `raw_events=${rawEventCount(node, home)}`
-    : `spool files=${spoolCount(home)}; memory.db absent=${existsSync(join(home, 'memory.db')) ? 'no' : 'yes'}`;
+  let landed;
+  if (databasePresent) {
+    landed = `raw_events=${rawEventCount(node, home)}`;
+  } else {
+    const memoryDbAbsent = existsSync(join(home, 'memory.db')) ? 'no' : 'yes';
+    landed = `spool files=${spoolCount(home)}; memory.db absent=${memoryDbAbsent}`;
+  }
   return {
     scenario: description,
     stdinBytes: Buffer.byteLength(inputs[0]),
@@ -294,22 +298,26 @@ const kept = attempts.reduce(
 
 const lines = [];
 if (values.markdown) lines.push('<!-- measure:start -->');
-lines.push(`- Date: ${measuredAt}`);
+const nodeVersionsText = nodeVersions
+  .map(({ node, version }) => `\`${displayPath(node)}\` (${version})`)
+  .join('; ');
+const attemptsText = attempts
+  .map((attempt) => `run ${attempt.index} load \`${attempt.load.raw}\``)
+  .join('; ');
 lines.push(
-  `- Node versions: ${nodeVersions.map(({ node, version }) => `\`${displayPath(node)}\` (${version})`).join('; ')}`,
+  `- Date: ${measuredAt}`,
+  `- Node versions: ${nodeVersionsText}`,
+  `- Commit: \`${commit}\``,
+  `- Bundle: \`${displayPath(bundle)}\` (${statSync(bundle).size} bytes)`,
+  `- Samples: ${RUNS} measured runs after ${WARM_UPS} warm-up runs per scenario`,
+  `- Measurement attempts: ${attemptsText}; kept run ${kept.index} (lower 1-minute load average)`,
+  '- Percentiles: linear interpolation over the 30 measured runs; status is `max <= budget`',
+  '',
+  `Load average next to this table (kept run ${kept.index}, before the measurement set): \`${kept.load.raw}\``,
+  '',
+  '| Node | Scenario | stdin bytes | p50 ms | p95 ms | max ms | hook.log wall p50 | Landed | Budget | Status |',
+  '|---|---|---:|---:|---:|---:|---|---|---:|---|',
 );
-lines.push(`- Commit: \`${commit}\``);
-lines.push(`- Bundle: \`${displayPath(bundle)}\` (${statSync(bundle).size} bytes)`);
-lines.push(`- Samples: ${RUNS} measured runs after ${WARM_UPS} warm-up runs per scenario`);
-lines.push(
-  `- Measurement attempts: ${attempts.map((attempt) => `run ${attempt.index} load \`${attempt.load.raw}\``).join('; ')}; kept run ${kept.index} (lower 1-minute load average)`,
-);
-lines.push('- Percentiles: linear interpolation over the 30 measured runs; status is `max <= budget`');
-lines.push('');
-lines.push(`Load average next to this table (kept run ${kept.index}, before the measurement set): \`${kept.load.raw}\``);
-lines.push('');
-lines.push('| Node | Scenario | stdin bytes | p50 ms | p95 ms | max ms | hook.log wall p50 | Landed | Budget | Status |');
-lines.push('|---|---|---:|---:|---:|---:|---|---|---:|---|');
 for (const result of kept.results) {
   for (const scenario of result.scenarios) {
     lines.push(

@@ -22,7 +22,7 @@ import { readMcpFrames } from "./probe-lib/mcp-frames.mjs";
 export const AGENTS = ["claude", "codex", "grok", "pi"];
 export const MCP_AGENTS = ["claude", "codex", "grok"];
 export const SUPPORTED_PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
-export const LATEST_PROTOCOL = SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1];
+export const LATEST_PROTOCOL = SUPPORTED_PROTOCOL_VERSIONS.at(-1);
 export const EXPECTED_TOOLS = ["search", "timeline", "get"];
 
 const AGENT_SET = new Set(AGENTS);
@@ -215,7 +215,7 @@ export function exitCodeFor(rows, stdioStatus = "pass") {
 }
 
 function markdownCell(value) {
-  return String(value ?? "").replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+  return String(value ?? "").replaceAll(/\\/g, String.raw`\\`).replaceAll(/\|/g, "\\|").replace(/\r?\n/g, " ");
 }
 
 export function markdownSection(report) {
@@ -251,7 +251,7 @@ export function writeDaily(report, cwd) {
 }
 
 export function removeTomlServerTables(text, name) {
-  const header = new RegExp(`^\\[mcp_servers\\.${name}(?:\\.[^\\]]+)?\\]\\s*$`);
+  const header = new RegExp(String.raw`^\[mcp_servers\.${name}(?:\.[^\]]+)?\]\s*$`);
   const out = [];
   let skipping = false;
   for (const line of String(text).split("\n")) {
@@ -358,7 +358,7 @@ function collectToolNames(value, acc) {
   }
   if (!value || typeof value !== "object") return;
   for (const [key, item] of Object.entries(value)) {
-    if (/^(tool[_]?name|name)$/i.test(key) && typeof item === "string" && TOOL_NAME_EXACT.test(item)) acc.add(item);
+    if (/^(tool_?name|name)$/i.test(key) && typeof item === "string" && TOOL_NAME_EXACT.test(item)) acc.add(item);
     else collectToolNames(item, acc);
   }
 }
@@ -501,7 +501,8 @@ async function registerClaude({ node, tee, bundle, log, env, dir }) {
     { cwd: dir, env, dir: path.join(dir, "_reg"), timeoutMs: 30_000 },
   );
   if (add.exitCode !== 0) {
-    throw new Error(`claude mcp add oboete_probe exited ${add.exitCode}: ${firstLine(`${add.stderr}\n${add.stdout}`) || "no output"}`);
+    const combined = `${add.stderr}\n${add.stdout}`;
+    throw new Error(`claude mcp add oboete_probe exited ${add.exitCode}: ${firstLine(combined) || "no output"}`);
   }
 }
 
@@ -534,7 +535,8 @@ async function registerGrok({ node, tee, bundle, log, env, dir }) {
     { cwd: dir, env, dir: path.join(dir, "_reg"), timeoutMs: 30_000 },
   );
   if (add.exitCode !== 0) {
-    throw new Error(`grok mcp add oboete_probe exited ${add.exitCode}: ${firstLine(`${add.stderr}\n${add.stdout}`) || "no output"}`);
+    const combined = `${add.stderr}\n${add.stdout}`;
+    throw new Error(`grok mcp add oboete_probe exited ${add.exitCode}: ${firstLine(combined) || "no output"}`);
   }
 }
 
@@ -691,7 +693,8 @@ async function runMcpAgent(agent, context) {
       dbPayloads: recentDbToolNames(home, agent, started - 5_000),
     });
     if (isUnavailable(proc) && parsed.frames.length === 0) {
-      return blockedRow(agent, `${agent} exited ${proc.exitCode}: ${firstLine(`${proc.stderr}\n${proc.stdout}`) || "unavailable"}`);
+      const combined = `${proc.stderr}\n${proc.stdout}`;
+      return blockedRow(agent, `${agent} exited ${proc.exitCode}: ${firstLine(combined) || "unavailable"}`);
     }
     const asserted = assertAgentFrames(parsed.frames);
     const toolName = extracted.toolName;
@@ -741,7 +744,8 @@ async function runPi(context) {
       timeoutMs,
     });
     if (isUnavailable(proc)) {
-      return blockedRow("pi", `pi exited ${proc.exitCode}: ${firstLine(`${proc.stderr}\n${proc.stdout}`) || "unavailable"}`);
+      const combined = `${proc.stderr}\n${proc.stdout}`;
+      return blockedRow("pi", `pi exited ${proc.exitCode}: ${firstLine(combined) || "unavailable"}`);
     }
     const asserted = assertPiJson(proc.stdout);
     fs.writeFileSync(path.join(dir, "pi-assert.json"), `${JSON.stringify({ types: asserted.types, reason: asserted.reason }, null, 2)}\n`);

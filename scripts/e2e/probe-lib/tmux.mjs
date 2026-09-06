@@ -132,7 +132,7 @@ export function tmux(args, opts = {}) {
   return spawnSync("tmux", ["-L", TMUX_SOCKET, ...args], {
     encoding: "utf8",
     ...rest,
-    env: withoutCredentials({ ...process.env, ...(env ?? {}) }),
+    env: withoutCredentials({ ...process.env, ...env }),
   });
 }
 
@@ -160,9 +160,8 @@ export function tmuxSession({ name, command, cwd, env } = {}, { tmux: drive = tm
   for (const [k, v] of Object.entries(extraEnv)) {
     args.push("-e", `${k}=${v}`);
   }
-  args.push(command || "bash");
   // One command queue sets the policy before tmux handles even an immediate startup exit.
-  args.push(";", "set-option", "-t", name, "remain-on-exit", "on");
+  args.push(command || "bash", ";", "set-option", "-t", name, "remain-on-exit", "on");
   const r = drive(args, { env: extraEnv });
   if (r.status !== 0) throw new PreconditionError("tmux new-session: " + (r.stderr || r.stdout || "fail"));
   return {
