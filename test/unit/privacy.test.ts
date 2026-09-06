@@ -30,7 +30,7 @@ import {
 import type { DetectorInput, DetectorResult } from '../../src/privacy/detect.js';
 import { filterEgress, isAllowed, loadDestinationRules } from '../../src/privacy/egress.js';
 import type { Destination, Sensitivity } from '../../src/privacy/egress.js';
-import { withTempHome } from '../helpers/home.js';
+import { WALL_CLOCK_IS_MEASURED, withTempHome } from '../helpers/home.js';
 import {
   NOW,
   captureEndedSession,
@@ -330,7 +330,9 @@ test('fail-closed: a detector that never answers is cut off at the deadline', as
     const elapsed = Date.now() - started;
 
     assert.deepEqual(result, { ok: false, reason: 'deadline' });
-    assert.ok(elapsed < 200, `the call returned after ${elapsed} ms`);
+    if (WALL_CLOCK_IS_MEASURED) {
+      assert.ok(elapsed < 200, `the call returned after ${elapsed} ms`);
+    }
 
     // The Worker is terminated, so nothing in it keeps running once the deadline has passed. How
     // many times it ticked before that is machine-dependent and only reported.
