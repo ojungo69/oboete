@@ -1,0 +1,47 @@
+scripts/e2e/dogfood.sh
+  s_359fcac8e97f88::t_aa3dbdfb7e5df8 27,33
+scripts/e2e/isolated-user.mjs
+  s_359fcac8e97f88::t_7bfd3ff93ba812 197
+scripts/e2e/mcp-clients.mjs
+  s_359fcac8e97f88::t_e366770b337215 294
+scripts/e2e/probe-lib/agents.mjs
+  s_359fcac8e97f88::t_dfc3555e2ddb45 834-835
+scripts/e2e/probe-lib/tmux.mjs
+  s_359fcac8e97f88::t_6a21804c083288 94
+scripts/e2e/probes/providers.mjs
+  s_359fcac8e97f88::t_83ec34436c77e4 148-151
+scripts/fixtures/generate-1000-events.mjs
+  s_359fcac8e97f88::t_908a45f24d83e9 710
+src/cli.ts
+  s_359fcac8e97f88::t_1ba8640f2e2a95 94-96
+src/events.ts
+  s_359fcac8e97f88::t_da0401e3915fb7 325-331,334-351,358-361
+src/privacy/detect.ts
+  s_359fcac8e97f88::t_0e34dcfda3c937 72-76
+src/repo-identity.ts
+  s_359fcac8e97f88::t_007dc53bd7f911 62-67,69,71
+src/setup/managed-block.ts
+  s_359fcac8e97f88::t_61b42b5d52ba43 83,164-172
+test/unit/cli.test.ts
+  s_359fcac8e97f88::t_25e721a767cbe0 31-35
+test/unit/events.test.ts
+  s_359fcac8e97f88::t_dc3275fbea899e 21,438-456
+test/unit/privacy.test.ts
+  s_359fcac8e97f88::t_4b31b26aeaa8bb 165-179
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "b774271c3263d1e8189ec9515c3005daf03843f6",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
