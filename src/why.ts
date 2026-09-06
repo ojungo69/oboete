@@ -102,7 +102,7 @@ function omittedLabel(item: WhyItem): string {
 
 function itemLine(label: string, item: WhyItem, rank: boolean): string {
   const stale = item.stale ? STALE_NOTE : '';
-  const prefix = rank ? `${item.rank}. ` : '';
+  const prefix = rank && item.rank !== null ? `${item.rank}. ` : '';
   return `    ${prefix}${label} — ${reasonSentence(item.reason)}${stale}`;
 }
 

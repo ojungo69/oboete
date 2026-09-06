@@ -277,19 +277,20 @@ export function importMemories(db: DatabaseSync, source: string, options: Import
     let bytes = 0;
     let headerSeen = false;
     for (const raw of source.split('\n')) {
+      // The physical source line, so a rejection names the line the developer sees in the file.
+      number += 1;
       const size = Buffer.byteLength(raw, 'utf8') + 1;
       bytes += size;
       if (bytes > maxFileBytes) {
-        reject(number + 1, `file size exceeds ${Math.floor(maxFileBytes / (1024 * 1024))} MB; the import stopped here`);
+        reject(number, `file size exceeds ${Math.floor(maxFileBytes / (1024 * 1024))} MB; the import stopped here`);
         break;
       }
       if (result.rejected.length >= MAX_REJECTED) {
-        reject(number + 1, `more than ${MAX_REJECTED} lines were rejected; the import stopped here`);
+        reject(number, `more than ${MAX_REJECTED} lines were rejected; the import stopped here`);
         break;
       }
       const line = raw.replace(/\r$/u, '');
       if (line.trim() === '') continue;
-      number += 1;
       if (size > MAX_LINE_BYTES + 1) {
         reject(number, `line exceeds ${MAX_LINE_BYTES / 1024} KB`);
         continue;

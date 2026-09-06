@@ -257,8 +257,9 @@ test('a hash mismatch, an oversized line, a malformed line or a bad header rejec
         targetDb.close();
       }
       // A valid line next to a rejected one is not written either: the file is applied as a whole.
-      const mixed = await importInto(target, [lines[0], lines[1], '{not json']);
-      assert.equal(mixed.rejected.length, 1);
+      // The rejection names the physical line, so the blank line 3 counts.
+      const mixed = await importInto(target, [lines[0], lines[1], '', '{not json']);
+      assert.deepEqual(mixed.rejected, [{ line: 4, reason: 'not valid JSON' }]);
       assert.equal(mixed.inserted, 0);
       assert.equal(mixed.applied, false);
     });

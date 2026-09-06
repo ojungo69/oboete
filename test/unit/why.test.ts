@@ -141,6 +141,16 @@ function seedPromptPack(db: DatabaseSync, id = 'inj-prompt'): string {
       rank: 2,
       stale: 0,
     }),
+    // The session summary is included without a rank, the way pack.ts records it.
+    item({
+      sourceKind: 'session_summary',
+      memoryId: null,
+      rawEventId: null,
+      decision: 'included',
+      reason: 'summary',
+      rank: null,
+      stale: 0,
+    }),
     item({
       sourceKind: 'memory',
       memoryId: 'm_budget',
@@ -249,6 +259,8 @@ test('why lists included and omitted items with trim and stale notes', async () 
       assert.match(result.stdout, /included:/);
       assert.match(result.stdout, /1\. Pinned note — It is pinned, so it is always included\./);
       assert.match(result.stdout, /2\. Matched note — It matched the prompt\./);
+      assert.match(result.stdout, /^ {4}session summary — It is the summary of the previous session\.$/m);
+      assert.doesNotMatch(result.stdout, /null\./);
       assert.match(result.stdout, /omitted:/);
       assert.match(
         result.stdout,
@@ -411,7 +423,7 @@ test('why --json returns the ledger items and never prints a memory body', async
         native_session_id: NATIVE,
       });
       assert.equal(parsed.injections.length, 1);
-      assert.equal(parsed.injections[0].items.length, 4);
+      assert.equal(parsed.injections[0].items.length, 5);
       assertNoBodies(result.stdout + result.stderr);
     },
   );
