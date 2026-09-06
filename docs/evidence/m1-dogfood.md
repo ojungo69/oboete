@@ -229,7 +229,18 @@ Exit codes: 1 for every degraded run, 3 for the corrupted header, 0 for the rest
 
 Isolated-user run of `scripts/e2e/isolated-user.mjs --no-credentials --daily --pairs claude:codex,claude:pi,codex:claude,codex:pi,pi:claude,pi:codex` with bundle 0.1.0-alpha.0 (commit 8baf3414): the provider credentials are removed from the agents' environment, so every summary is rule-based. All six pairs recalled the three seeded facts on the first turn, and `report.json` records `degraded_marker: true` for every receiving pack (the `> degraded:` line of contracts/agents.md). Elapsed 23–33 s per pair against 62–93 s on 2026-09-04, which is the provider deadline no longer being waited for.
 
-The six Grok Build pairs were not run today: the user put Grok on a quota hold until 2026-09-12 (the same hold covers implementation delegation), so the SC-004 statement "still passes SC-001" is shown for the six non-Grok pairs here and the six pairs that seed or receive with Grok Build remain to be repeated when the hold ends. The exhausted-allowance variant was exercised through doctor's break 6 (`allowance` degraded with the reset time) and the unit tests of the `daily_cap` / `provider_exhausted` degraded reasons (test/unit/degraded.test.ts); an end-to-end pair run with a pre-exhausted counter is still open.
+The six Grok Build pairs ran later the same day (run 2026-09-06T11-19-17-715Z, grok 1.0.21 alpha), once the user released part of the Grok quota for verification:
+
+| seed | receive | status | elapsed ms | missing facts |
+|---|---|---:|---:|---|
+| claude | grok | pass | 34981 | none |
+| codex | grok | pass | 35347 | none |
+| grok | claude | pass | 25525 | none |
+| grok | codex | pass | 26386 | none |
+| grok | pi | pass | 24419 | none |
+| pi | grok | pass | 36827 | none |
+
+`report.json` records `degraded_marker: true` for all six receiving packs, so SC-004 holds for all twelve pairs without provider credentials: every fact is recalled and every pack says it is degraded. The exhausted-allowance variant was exercised through doctor's break 6 (`allowance` degraded with the reset time) and the unit tests of the `daily_cap` / `provider_exhausted` degraded reasons (test/unit/degraded.test.ts); an end-to-end pair run with a pre-exhausted counter is still open.
 
 ## 2026-09-06 daily run (SC-007, day 1)
 
