@@ -211,7 +211,7 @@ with `Degraded:` in every pack; the exhausted-counter fixture switches to the fa
 retrying and shows the switch in doctor and packs.
 
 - [X] T073 [EXT] [US5] Verify the degraded labelling end to end: summary degraded_reason precedence, `Degraded:` line in packs (summary_pending, index_unavailable, empty, window_unknown, batch reasons), doctor exhaustion flag; tests test/unit/degraded.test.ts (done 2026-09-06: Grok Build; test/unit/degraded.test.ts 8 tests — summary precedence, pack `degraded:` lines, omitted empty/index_unavailable, usageEstimate exhaustion, observe no-retry after recordExhausted)
-- [ ] T074 [EXT] [US5] Implement `oboete why <session-id> [--turn N]` in src/cli.ts reading injections, injection_items, attempts_json (deliveries per attempt), trims, staleness, deferred and degraded state; tests test/unit/why.test.ts
+- [X] T074 [EXT] [US5] Implement `oboete why <session-id> [--turn N]` in src/cli.ts reading injections, injection_items, attempts_json (deliveries per attempt), trims, staleness, deferred and degraded state; tests test/unit/why.test.ts (done 2026-09-06: src/why.ts; cli.ts loads why lazily; whyReport rendered with ItemReason sentences, DEGRADED_SENTENCES, deferred attempts; native session id resolution)
 - [ ] T075 [EXT] [US5] Run the no-credentials and exhausted-allowance runs on the isolated account and record SC-004 in docs/evidence/m1-dogfood.md
 
 **Checkpoint**: SC-004 recorded.

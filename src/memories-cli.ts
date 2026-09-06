@@ -43,7 +43,7 @@ export type SearchRow = {
   reasons: string[];
 };
 
-function runtimeWith(overrides: Partial<MemoryCliRuntime>): MemoryCliRuntime {
+export function runtimeWith(overrides: Partial<MemoryCliRuntime>): MemoryCliRuntime {
   return {
     cwd: process.cwd(),
     now: Date.now,
@@ -57,7 +57,7 @@ function runtimeWith(overrides: Partial<MemoryCliRuntime>): MemoryCliRuntime {
   };
 }
 
-function parseCommand(
+export function parseCommand(
   argv: string[],
   options: CommandOptions,
   runtime: MemoryCliRuntime,
@@ -70,12 +70,12 @@ function parseCommand(
   }
 }
 
-function invalid(runtime: MemoryCliRuntime, message: string): 2 {
+export function invalid(runtime: MemoryCliRuntime, message: string): 2 {
   runtime.writeError(`${message}\n`);
   return 2;
 }
 
-function oneArgument(
+export function oneArgument(
   positionals: string[],
   name: string,
   runtime: MemoryCliRuntime,

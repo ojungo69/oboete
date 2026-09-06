@@ -36,6 +36,7 @@ const commands: Record<string, () => Promise<(argv: string[]) => Promise<number>
   search: () => import('./memories-cli.js').then((module) => module.runSearch),
   timeline: () => import('./memories-cli.js').then((module) => module.runTimeline),
   get: () => import('./memories-cli.js').then((module) => module.runGet),
+  why: () => import('./why.js').then((module) => module.runWhy),
   pin: () => import('./memories-cli.js').then((module) => module.runPin),
   unpin: () => import('./memories-cli.js').then((module) => module.runUnpin),
   delete: () => import('./memories-cli.js').then((module) => module.runDelete),
