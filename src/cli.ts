@@ -42,6 +42,8 @@ const commands: Record<string, () => Promise<(argv: string[]) => Promise<number>
   delete: () => import('./memories-cli.js').then((module) => module.runDelete),
   pause: () => import('./pause.js').then((module) => module.runPause),
   resume: () => import('./pause.js').then((module) => module.runResume),
+  export: () => import('./transfer.js').then((module) => module.runExport),
+  import: () => import('./transfer.js').then((module) => module.runImport),
   mcp: () => import('./mcp.js').then((module) => module.runMcp),
   view: () => import('./viewer/server.js').then((module) => module.runView),
   fixture: () => import('./fixture/replay.js').then((module) => module.runFixture),

@@ -248,8 +248,8 @@ merges by content, keeps deletions, never lowers sensitivity, and quarantines im
 mismatch and oversized lines rejected with exit 2, imported rows absent from search and packs until
 classified, tombstone under --map-repo still suppresses.
 
-- [ ] T082 [CC] [US7] Implement src/transfer.ts export (`oboete-export/1` header + lines with material_hash, content_hash, provenance, sources) and import (64 KB per line, 256 MB per file, material_hash verified, content_hash recomputed for the local repo id incl. --map-repo, union on content_hash, sensitivity lattice, tombstones win, active rows land local_only / imported); tests test/unit/transfer.test.ts
-- [ ] T083 [EXT] [US7] Wire `oboete export [file|-]` and `oboete import [file|-] [--dry-run] [--map-repo]` in src/cli.ts with the exit codes of contracts/cli.md
+- [X] T082 [CC] [US7] Implement src/transfer.ts export (`oboete-export/1` header + lines with material_hash, content_hash, provenance, sources) and import (64 KB per line, 256 MB per file, material_hash verified, content_hash recomputed for the local repo id incl. --map-repo, union on content_hash, sensitivity lattice, tombstones win, active rows land local_only / imported); tests test/unit/transfer.test.ts (done 2026-09-06: src/transfer.ts exportMemories/importMemories; secret rows travel as hashes like tombstones; header repo ids are recomputed from the identity before they are trusted; the file is applied as one transaction; tests test/unit/transfer.test.ts)
+- [X] T083 [EXT] [US7] Wire `oboete export [file|-]` and `oboete import [file|-] [--dry-run] [--map-repo]` in src/cli.ts with the exit codes of contracts/cli.md (done 2026-09-06: runExport/runImport in src/transfer.ts wired in src/cli.ts; exit 2 on an invalid file, a bad --map-repo or an unreadable path; covered by the CLI test in transfer.test.ts)
 - [ ] T084 [EXT] [US7] Run the export → import round trip between two isolated installations and the 1,000-event replay comparison against docs/evidence/m1-resource-envelope.md; record in docs/evidence/m1-dogfood.md (SC-003)
 
 **Checkpoint**: SC-003 recorded.
