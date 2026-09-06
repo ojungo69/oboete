@@ -42,6 +42,7 @@ const commands: Record<string, () => Promise<(argv: string[]) => Promise<number>
   pause: () => import('./pause.js').then((module) => module.runPause),
   resume: () => import('./pause.js').then((module) => module.runResume),
   mcp: () => import('./mcp.js').then((module) => module.runMcp),
+  view: () => import('./viewer/server.js').then((module) => module.runView),
   fixture: () => import('./fixture/replay.js').then((module) => module.runFixture),
 };
 

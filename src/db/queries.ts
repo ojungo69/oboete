@@ -159,6 +159,14 @@ export function setPinned(
   return Number(result.changes) !== 0;
 }
 
+/** The viewer's review action (data-model "memories" review_state), scoped like every write. */
+export function setReviewed(db: DatabaseSync, input: { id: string; scope: MemoryScope }): boolean {
+  const result = db
+    .prepare(`UPDATE memories AS m SET review_state = 'reviewed' WHERE ${input.scope.where} AND m.id = ?`)
+    .run(...input.scope.params, input.id);
+  return Number(result.changes) !== 0;
+}
+
 /**
  * Leaves the hashes and content in place so identical content cannot be recreated (FR-035).
  * Scoped like the reads: an id outside the boundary is refused exactly like a missing one, so the
