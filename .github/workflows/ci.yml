@@ -34,15 +34,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Engine coverage
-        # package.json test:coverage enables --experimental-test-coverage but has no lcov reporter.
-        # The scripts/e2e harness tests belong in this step: sonar.sources is scripts/, and Sonar
-        # charges lines_to_cover for every source file whether or not the lcov report names it
-        # (measured 2026-09-04: probe-lib/agents.mjs at 0% / 404 uncovered with no lcov entry at
-        # all), so running them uninstrumented would report 0%, not exclude them.
+        # Include test bundles before source-map remapping, then report src/ TypeScript and scripts/.
+        # An explicit exclusion replaces Node 24's default, which skips the bundles themselves.
+        # The scripts/e2e harness stays instrumented; real bundle timing tests run below.
         run: |
           npm run build
           mkdir -p coverage
           node --test --enable-source-maps --experimental-test-coverage \
+            --test-coverage-include='build/test/**' \
+            --test-coverage-include='src/**/*.ts' --test-coverage-include='scripts/**' \
+            --test-coverage-exclude='scripts/**/*.test.mjs' \
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
             'build/test/unit/**/*.test.mjs' 'build/test/migrations/**/*.test.mjs' 'scripts/e2e/**/*.test.mjs'
