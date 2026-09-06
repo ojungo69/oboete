@@ -1,0 +1,27 @@
+docs/evidence/m1-resource-envelope.md
+  s_0ec4092f1f4270::t_405a76de362d9a 139-318
+scripts/fixtures/NOTES-T068.md
+  s_0ec4092f1f4270::t_bbd68cac77f678 1-28
+scripts/fixtures/replay.mjs
+  s_0ec4092f1f4270::t_b11d4cfe3e71e6 2,4,9-21
+src/cli.ts
+  s_0ec4092f1f4270::t_cc8102dd9dcee7 42
+src/fixture/replay.ts
+  s_0ec4092f1f4270::t_78eb889f5877ef 1-1314
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "3d696a84660dcbe6d841d24f9f88df1950e0811e",
+  "prompts": {},
+  "sessions": {
+    "s_0ec4092f1f4270": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0728a-e9ac-79d1-aa4e-0e3ee10a6268",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
