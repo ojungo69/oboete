@@ -1,0 +1,51 @@
+specs/007-oboete-m1-alpha/contracts/cli.md
+  s_359fcac8e97f88::t_16f55cb3ed6ab8 11
+specs/007-oboete-m1-alpha/tasks.md
+  s_359fcac8e97f88::t_0c5d4662c3bafc 195,197
+test/unit/cli.test.ts
+  s_359fcac8e97f88::t_69b9b3a66481ac 3,36-54
+test/unit/logs.test.ts
+  s_359fcac8e97f88::t_3687fc46d8093e 90-97
+src/cli.ts
+  s_359fcac8e97f88::t_a4f611848a0e2b 32
+src/db/open.ts
+  s_359fcac8e97f88::t_51dc786259f7dc 59,65,69-84,86-88
+src/doctor.ts
+  s_359fcac8e97f88::t_f294897ce7df4b 1-374
+src/doctor/agents.ts
+  s_359fcac8e97f88::t_5523fdd5f157c5 1-349
+src/doctor/provider.ts
+  s_359fcac8e97f88::t_8783feaf767326 1-381
+src/doctor/storage.ts
+  s_359fcac8e97f88::t_5d0d9a587684bf 1-380
+src/memories-cli.ts
+  s_359fcac8e97f88::t_01f00da4e66647 23
+src/observer/catalog.ts
+  s_359fcac8e97f88::t_5254238f052c00 6,12,18,30
+src/observer/reservation.ts
+  s_359fcac8e97f88::t_7589634927b9d1 87,105-128
+src/setup/setup.ts
+  s_359fcac8e97f88::t_b75074cb79bb26 47,492-502,504,508-514,517
+src/worker/lease.ts
+  s_359fcac8e97f88::t_066b601ba62cf4 9
+src/worker/purge.ts
+  s_359fcac8e97f88::t_a4dca77f249d80 9
+test/unit/doctor.test.ts
+  s_359fcac8e97f88::t_b411bd77fced2f 1-662
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "0b9dfc17b04fb582b848557cceb5b0c5d32fb050",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
