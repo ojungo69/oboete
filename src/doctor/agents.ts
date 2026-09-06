@@ -323,10 +323,10 @@ export function piItem(
   if (hangs.length > 0) {
     const oldest = Math.max(...hangs);
     const seconds = Math.max(0, Math.round(oldest / 1000));
-    const listing = diag.length > 0 ? ` ${diag.join(', ')}.` : '';
+    const listing = diag.length > 0 ? ` ${diag.join('. ')}.` : '';
     return degraded(
       'pi',
-      `${hangs.length} Pi capture children never finished (oldest ${seconds} seconds ago). pi_child_hang.${listing}`,
+      `${hangs.length} Pi capture children never finished (oldest ${seconds} seconds ago), which is pi_child_hang.${listing}`,
       'Those Pi turns were not captured.',
       `Delete the \`.started\` files under ${paths.piAck} and run \`oboete observe\`; if it recurs, run \`oboete setup --agents pi\`.`,
     );
@@ -334,7 +334,7 @@ export function piItem(
   if (diag.length > 0) {
     return warning(
       'pi',
-      diag.join(', '),
+      `${diag.join('. ')}; the files are gone, this is the history.`,
       'Those Pi turns were not captured.',
       `Delete the \`.started\` files under ${paths.piAck} and run \`oboete observe\`; if it recurs, run \`oboete setup --agents pi\`.`,
     );
@@ -357,9 +357,8 @@ function piDiagnostics(db: DatabaseSync): string[] {
       if (code === '') return [];
       const last = asNumber(row.last_seen_at);
       const count = countOf(row, 'count');
-      return [
-        `${code} ${count} times (last seen ${last === null ? 'unknown' : iso(last)})`,
-      ];
+      const when = last === null ? 'at an unknown time' : `last at ${iso(last)}`;
+      return [`The worker recorded ${code} ${count === 1 ? 'once' : `${count} times`}, ${when}`];
     });
   } catch {
     return [];
