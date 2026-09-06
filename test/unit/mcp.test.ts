@@ -240,8 +240,9 @@ test('a repo argument, an unknown tool and invalid arguments are -32602 protocol
       call(10, 'search', { query: 'x', limit: 0 }),
       call(11, 'search', {}),
       request(12, 'tools/call', { arguments: {} }),
+      call(16, 'search', { query: 'x'.repeat(4097) }),
     ]);
-    assert.equal(frames.length, 5);
+    assert.equal(frames.length, 6);
     for (const frame of frames) {
       const error = frame.error as { code: number; message: string; data?: unknown };
       assert.equal(error.code, -32602, JSON.stringify(frame));
@@ -257,8 +258,11 @@ test('server/discover and other unknown methods are -32601; a broken line is -32
       request(14, 'resources/list'),
       '{"jsonrpc":"2.0","id":15,"method":',
       JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: {} }),
+      JSON.stringify({ jsonrpc: '2.0', id: 17, method: 'ping', params: { pad: 'x'.repeat(1_048_576) } }),
     ]);
-    assert.equal(frames.length, 3);
+    assert.equal(frames.length, 4);
+    assert.equal((frames[3].error as { code: number }).code, -32600);
+    assert.equal(frames[3].id, null);
     assert.equal((frames[0].error as { code: number }).code, -32601);
     assert.equal(frames[0].id, 13);
     assert.equal((frames[1].error as { code: number }).code, -32601);

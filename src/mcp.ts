@@ -63,10 +63,13 @@ export const MCP_TOOLS = [
   },
 ] as const;
 
+const MAX_TEXT = 4096;
+const MAX_LINE_CHARS = 1_048_576;
+
 const toolArguments = {
-  search: z.looseObject({ query: z.string(), limit: limitSchema.default(DEFAULT_LIMIT) }),
-  timeline: z.looseObject({ session: z.string().optional(), limit: limitSchema.default(DEFAULT_LIMIT) }),
-  get: z.looseObject({ id: z.string() }),
+  search: z.looseObject({ query: z.string().max(MAX_TEXT), limit: limitSchema.default(DEFAULT_LIMIT) }),
+  timeline: z.looseObject({ session: z.string().max(MAX_TEXT).optional(), limit: limitSchema.default(DEFAULT_LIMIT) }),
+  get: z.looseObject({ id: z.string().max(MAX_TEXT) }),
 };
 
 const requestSchema = z.looseObject({
@@ -237,6 +240,11 @@ function respond(runtime: McpRuntime, id: JsonRpcId, body: { result: unknown } |
 }
 
 function serveLine(line: string, runtime: McpRuntime, context: { repoId: string; paths: OboetePaths }): void {
+  if (line.length > MAX_LINE_CHARS) {
+    // ponytail: readline still buffers the oversized line; the client spawns this server, so the cost is its own.
+    respond(runtime, null, { error: new RpcError(-32600, 'Invalid Request') });
+    return;
+  }
   let message: unknown;
   try {
     message = JSON.parse(line);

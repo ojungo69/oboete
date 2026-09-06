@@ -4,7 +4,9 @@ Transport: stdio, newline-delimited JSON-RPC 2.0; logging to stderr only. M1 imp
 legacy-era lifecycle only. `server/discover` and every other unknown method return `-32601` so
 clients that implement the 2026-07-28 revision fall back to `initialize`. Whether each agent's client
 completes the flows below is a verification-gate probe (research R13) that compares raw frames; a
-client that cannot blocks that agent's tool surface pending an owner amendment.
+client that cannot blocks that agent's tool surface pending an owner amendment. A frame longer than
+1 MiB is answered with `-32600` and dropped; string arguments (`query`, `session`, `id`) are limited to
+4096 characters and a longer one is `-32602`.
 
 Repository boundary: the server derives the repository identity from its own working directory with
 the same function as capture; any `repo` argument is rejected with `-32602`. Sensitivity boundary:
