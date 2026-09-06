@@ -1,0 +1,60 @@
+src/setup/write-grok.ts
+  s_cfc31af5438953::t_1806a308e8bc77 120
+  s_cfc31af5438953::t_0d7a374f83686c 18,67,87-91,111,113-115,121-128
+test/unit/managed-block.test.ts
+  s_cfc31af5438953::t_718b2d0ff4f007 15,28,98-143
+  s_cfc31af5438953::t_093434347fb298 144
+test/unit/doctor.test.ts
+  s_cfc31af5438953::t_9f82d6abc45f65 20,297-361,510,529-530
+src/setup/setup.ts
+  s_cfc31af5438953::t_0d7a374f83686c 427,430,472
+test/unit/write-codex.test.ts
+  s_cfc31af5438953::t_ed73c526d64598 276-304
+  s_cfc31af5438953::t_718b2d0ff4f007 237-261,263-275
+  s_cfc31af5438953::t_5a62b02d6ffc16 262
+src/setup/write-codex.ts
+  s_cfc31af5438953::t_1806a308e8bc77 106
+  s_cfc31af5438953::t_0d7a374f83686c 17,68,79,96,102-103,180
+  s_cfc31af5438953::t_391fbe64aa91c6 8,16,69,104,139,152-169
+  s_cfc31af5438953::t_c462342a009f60 170
+src/setup/managed-block.ts
+  s_cfc31af5438953::t_4042b676e896e0 66,100,118,179,189
+  s_cfc31af5438953::t_33672c4170f13d 27,30-31,49,51,56,67,85-93,96-97,101,106-107,109,116-117,119-178,180-188,190-194,196-202,400,402,408
+  s_cfc31af5438953::t_391fbe64aa91c6 195
+  s_cfc31af5438953::t_0d7a374f83686c 108
+src/doctor/agents.ts
+  s_cfc31af5438953::t_2401d13e492a3e 177,189-214
+  s_cfc31af5438953::t_6c2954058fa8be 2,4,26,48,52,73,97,106-114,183-188
+  s_cfc31af5438953::t_a49f8fbb284c66 215-217
+  s_359fcac8e97f88::t_f2978b1f588603 218
+test/unit/write-grok.test.ts
+  s_cfc31af5438953::t_718b2d0ff4f007 140-174
+test/unit/setup.test.ts
+  s_cfc31af5438953::t_ed73c526d64598 4,7,246-248,262-263
+  s_cfc31af5438953::t_718b2d0ff4f007 224-240,268-269
+  s_cfc31af5438953::t_a55492c3c1392f 241-245,249-261,264-267
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "9bf2c4231cc81a71e56dd54a18d207ff2ca65aa2",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_cfc31af5438953": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a075bb-653c-71e2-bc95-71d4fc4e7517",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
