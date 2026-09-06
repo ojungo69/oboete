@@ -1,7 +1,7 @@
 // `oboete fixture replay`: native payloads through the real hook, resource-envelope evidence.
 // Never on the hook path (cli.ts loads this command lazily). Sources: contracts/cli.md,
 // contracts/agents.md hook SLAs, spec SC-002/003/005/009/010, FR-040, quickstart "Fixture replay".
-import { spawn, spawnSync } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -295,26 +295,31 @@ function runChild(
   cwd: string,
   env: NodeJS.ProcessEnv,
   timeoutMs: number,
-): Spawned {
+): Promise<Spawned> {
   const started = performance.now();
-  const result = spawnSync(process.execPath, [bundle, ...args], {
-    input,
-    cwd,
-    encoding: 'utf8',
-    env,
-    timeout: timeoutMs,
-    maxBuffer: 16 * 1024 * 1024,
-    killSignal: 'SIGTERM',
+  // T068 / SC-003: keep the event loop free for RSS polls while hooks are executing.
+  return new Promise((resolvePromise) => {
+    const child = execFile(process.execPath, [bundle, ...args], {
+      cwd,
+      encoding: 'utf8',
+      env,
+      timeout: timeoutMs,
+      maxBuffer: 16 * 1024 * 1024,
+      killSignal: 'SIGTERM',
+    }, (error, stdout, stderr) => {
+      resolvePromise({
+        status: child.exitCode,
+        signal: child.signalCode,
+        timedOut: child.killed && error?.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+        stdout,
+        stderr,
+        elapsedMs: performance.now() - started,
+      });
+    });
+    // T068 / FR-002: a bounded-input hook can exit before consuming all of a size-tagged payload.
+    child.stdin?.on('error', () => {});
+    child.stdin?.end(input);
   });
-  const code = (result.error as { code?: string } | undefined)?.code;
-  return {
-    status: result.status,
-    signal: result.signal,
-    timedOut: code === 'ETIMEDOUT',
-    stdout: result.stdout ?? '',
-    stderr: result.stderr ?? '',
-    elapsedMs: performance.now() - started,
-  };
 }
 
 function readVmHwm(pid: number): number {
@@ -330,6 +335,7 @@ function readVmHwm(pid: number): number {
 }
 
 type ObserveProc = {
+  pid: number | undefined;
   rssKb: () => number;
   running: () => boolean;
   status: () => number | null;
@@ -360,6 +366,7 @@ function startObserve(bundle: string, cwd: string, env: NodeJS.ProcessEnv): Obse
     child.on('close', (code) => finish(code));
   });
   return {
+    pid: child.pid,
     rssKb: () => rssKb,
     running: () => running,
     status: () => status,
@@ -447,7 +454,7 @@ function startInjectionCount(dbPath: string, agent: Agent, nativeId: string): nu
           `SELECT COUNT(*) AS n FROM injections i
            JOIN sessions s ON s.id = i.session_id
            WHERE s.agent = ? AND s.native_session_id = ?
-             AND i.kind = 'session_start' AND i.state <> 'omitted'`,
+             AND i.kind IN ('session_start', 'grok_deferred') AND i.state <> 'omitted'`,
         )
         .get(agent, nativeId) as { n?: unknown } | undefined;
       return typeof row?.n === 'number' ? row.n : 0;
@@ -566,7 +573,11 @@ function groupKey(sample: Sample): string {
   return `${sample.agent}\t${sample.event}`;
 }
 
-function timingRows(samples: Sample[], boundFor: (sample: Sample) => number): string[][] {
+function timingRows(
+  samples: Sample[],
+  boundFor: (sample: Sample) => number,
+  requiredFraction = 0.99,
+): { rows: string[][]; pass: boolean; worstGroup: string } {
   const groups = new Map<string, Sample[]>();
   for (const sample of samples) {
     const key = groupKey(sample);
@@ -575,12 +586,22 @@ function timingRows(samples: Sample[], boundFor: (sample: Sample) => number): st
     groups.set(key, list);
   }
   const rows: string[][] = [];
+  let pass = samples.length > 0;
+  let worstP99 = -1;
+  let worstGroup = 'n/a';
   const rowOf = (labelAgent: string, labelEvent: string, group: Sample[]): string[] => {
     const values = group.map((sample) => sample.ms);
     const boundMs = Math.max(...group.map(boundFor));
     const p99 = percentile(values, 99);
     const under = group.filter((sample) => sample.ms <= boundFor(sample)).length;
-    const status = under / group.length >= 0.99 && p99 <= boundMs ? 'pass' : 'fail';
+    const passed = under / group.length >= requiredFraction && p99 <= boundMs;
+    if (labelAgent !== 'all') {
+      pass = pass && passed;
+      if (p99 > worstP99) {
+        worstP99 = p99;
+        worstGroup = `${labelAgent}/${labelEvent} p99 ${ms(p99)} ms`;
+      }
+    }
     return [
       labelAgent,
       labelEvent,
@@ -590,7 +611,7 @@ function timingRows(samples: Sample[], boundFor: (sample: Sample) => number): st
       ms(p99),
       ms(Math.max(...values)),
       `${boundMs} ms`,
-      status,
+      statusOf(passed),
     ];
   };
   for (const [key, group] of [...groups.entries()].sort()) {
@@ -598,7 +619,7 @@ function timingRows(samples: Sample[], boundFor: (sample: Sample) => number): st
     rows.push(rowOf(agent ?? '', event ?? '', group));
   }
   if (samples.length > 0) rows.push(rowOf('all', '*', samples));
-  return rows;
+  return { rows, pass, worstGroup };
 }
 
 function countQuery(db: ReturnType<typeof openDatabase>['db'], sql: string): number {
@@ -608,7 +629,7 @@ function countQuery(db: ReturnType<typeof openDatabase>['db'], sql: string): num
 
 function lastSessions(lines: Line[]): {
   lastStartSeq: Record<Agent, number>;
-  penultimateEndSeq: Record<Agent, number>;
+  holdFromSeq: Record<Agent, number>;
 } {
   const lastStartSeq = { claude: 0, codex: 0, grok: 0, pi: 0 };
   const ends: Record<Agent, number[]> = { claude: [], codex: [], grok: [], pi: [] };
@@ -616,22 +637,23 @@ function lastSessions(lines: Line[]): {
   for (const line of lines) {
     const key = `${line.agent}:${line.session}`;
     if (!seen.has(key)) {
+      if (!sessionStartEvent(line.agent, line.event)) {
+        throw new Error(`fixture seq=${line.seq} event=${line.event}: first line of ${key} must be a session start`);
+      }
       seen.add(key);
       lastStartSeq[line.agent] = line.seq;
     }
     if (SESSION_END.has(line.event)) ends[line.agent].push(line.seq);
   }
-  const penultimateEndSeq = { claude: 0, codex: 0, grok: 0, pi: 0 };
+  const holdFromSeq = { claude: 0, codex: 0, grok: 0, pi: 0 };
   for (const agent of AGENTS) {
-    const list = ends[agent];
-    const previous = list.length >= 2 ? list[list.length - 2] : list[0];
-    penultimateEndSeq[agent] = previous ?? 0;
+    holdFromSeq[agent] = ends[agent].filter((seq) => seq < lastStartSeq[agent]).pop() ?? 0;
   }
-  return { lastStartSeq, penultimateEndSeq };
+  return { lastStartSeq, holdFromSeq };
 }
 
-function skipObserve(line: Line, penultimateEndSeq: Record<Agent, number>): boolean {
-  return SESSION_END.has(line.event) && line.seq === penultimateEndSeq[line.agent];
+function skipObserve(line: Line, holdFromSeq: Record<Agent, number>): boolean {
+  return SESSION_END.has(line.event) && line.seq === holdFromSeq[line.agent];
 }
 
 function parseLines(file: string): Line[] {
@@ -720,8 +742,10 @@ export async function runFixture(argv: string[]): Promise<number> {
   }
 
   let lines: Line[];
+  let sessionWindows;
   try {
     lines = parseLines(fixturePath);
+    sessionWindows = lastSessions(lines);
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
@@ -743,7 +767,7 @@ export async function runFixture(argv: string[]): Promise<number> {
   const envBase = replayEnv(home);
   const startedAt = new Date().toISOString();
   const loadAtStart = loadAverage();
-  const { lastStartSeq, penultimateEndSeq } = lastSessions(lines);
+  const { lastStartSeq, holdFromSeq } = sessionWindows;
   const pendingHold = new Set<Agent>();
   const pendingSessions = new Set<string>();
   for (const agent of AGENTS) {
@@ -766,6 +790,11 @@ export async function runFixture(argv: string[]): Promise<number> {
   let hookCount = 0;
   let observeRssKb = 0;
   let observeRuns = 0;
+  let hookWorkerRssKb = 0;
+  const hookWorkerPids = new Set<number>();
+  const observePids = new Set<number>();
+  let workerPollDb: ReturnType<typeof openDatabase>['db'] | undefined;
+  let workerPoll: ReturnType<typeof setInterval> | undefined;
   let storageFailed = false;
   let leaseHeld = false;
 
@@ -822,6 +851,7 @@ export async function runFixture(argv: string[]): Promise<number> {
   const startWorker = (): void => {
     if (liveObserve?.running() === true) return;
     liveObserve = startObserve(bundle, repo, envBase);
+    if (liveObserve.pid !== undefined) observePids.add(liveObserve.pid);
     observeRuns += 1;
     void liveObserve.exited.then(() => harvestRss());
   };
@@ -872,6 +902,19 @@ export async function runFixture(argv: string[]): Promise<number> {
       return 3;
     }
     const dbBytesBefore = fileBytes(paths.db) + fileBytes(`${paths.db}-wal`);
+    workerPollDb = openDatabase({ path: paths.db, timeoutMs: 0, hook: true }).db;
+    const workerPid = workerPollDb.prepare('SELECT pid FROM worker_lease WHERE id = 1');
+    workerPoll = setInterval(() => {
+      try {
+        const pid = workerPid.get()?.pid;
+        if (typeof pid === 'number' && pid !== process.pid && !observePids.has(pid)) {
+          hookWorkerPids.add(pid);
+          hookWorkerRssKb = Math.max(hookWorkerRssKb, readVmHwm(pid));
+        }
+      } catch {
+        // T068 / R6: a busy lease read must not interrupt replay; the next poll retries it.
+      }
+    }, 50);
 
     for (const line of lines) {
       if (line.seq % 100 === 0) process.stderr.write(`replay ${line.seq}/${lines.length}\n`);
@@ -926,7 +969,7 @@ export async function runFixture(argv: string[]): Promise<number> {
       const { args, extra } = hookArgs({ ...line, payload });
       const env = replayEnv(home, extra);
       const timeoutMs = injection ? 15_000 : 10_000;
-      const hooked = runChild(bundle, args, input, repo, env, timeoutMs);
+      const hooked = await runChild(bundle, args, input, repo, env, timeoutMs);
       recordHook(line, hooked, line.event);
       const sample: Sample = {
         agent: line.agent,
@@ -936,7 +979,7 @@ export async function runFixture(argv: string[]): Promise<number> {
         ms: hooked.elapsedMs,
       };
       const holdActive = pendingHold.size > 0;
-      if (injection && !isPendingStart && !(sessionStartEvent(line.agent, line.event) && holdActive)) {
+      if (injection && !(sessionStartEvent(line.agent, line.event) && holdActive)) {
         injectionSamples.push(sample);
       } else if (!injection) {
         captureSamples.push(sample);
@@ -944,7 +987,7 @@ export async function runFixture(argv: string[]): Promise<number> {
       recordPack(line, hooked.stdout);
 
       if (sessionStartEvent(line.agent, line.event) && line.agent !== 'pi') {
-        if (isPendingStart) pendingSamples.push(sample);
+        if (isPendingStart && holdActive) pendingSamples.push(sample);
         else if (line.seq > 1 && !holdActive) readySamples.push(sample);
       }
 
@@ -963,7 +1006,7 @@ export async function runFixture(argv: string[]): Promise<number> {
           prompt: typeof envelope.payload?.text === 'string' ? envelope.payload.text : undefined,
           model: typeof envelope.model === 'string' ? envelope.model : undefined,
         });
-        injected = runChild(
+        injected = await runChild(
           bundle,
           ['inject', '--agent', 'pi', '--kind', kind],
           injectInput,
@@ -981,7 +1024,7 @@ export async function runFixture(argv: string[]): Promise<number> {
         };
         recordPack(line, injected.stdout);
         if (line.event === 'session_start') {
-          if (pendingSessions.has(key)) pendingSamples.push(injectSample);
+          if (isPendingStart && holdActive) pendingSamples.push(injectSample);
           else if (!holdActive) {
             injectionSamples.push(injectSample);
             if (line.seq > 1) readySamples.push(injectSample);
@@ -1069,7 +1112,7 @@ export async function runFixture(argv: string[]): Promise<number> {
       }
 
       if (SESSION_END.has(line.event)) {
-        if (skipObserve(line, penultimateEndSeq)) pendingHold.add(line.agent);
+        if (skipObserve(line, holdFromSeq)) pendingHold.add(line.agent);
         else if (pendingHold.size === 0) await observeNow();
       }
 
@@ -1090,6 +1133,7 @@ export async function runFixture(argv: string[]): Promise<number> {
       harvestRss();
       releaseHeldLease(paths.db);
     }
+    clearInterval(workerPoll);
 
     if (storageFailed) {
       process.stderr.write('observe reported unusable storage\n');
@@ -1116,6 +1160,8 @@ export async function runFixture(argv: string[]): Promise<number> {
         maps,
         observeRssKb,
         observeRuns,
+        hookWorkerRssKb,
+        hookWorkerRuns: hookWorkerPids.size,
         dbBytesBefore,
         home,
         fixturePath,
@@ -1133,6 +1179,8 @@ export async function runFixture(argv: string[]): Promise<number> {
 
     return measured.failed ? 1 : 0;
   } finally {
+    clearInterval(workerPoll);
+    workerPollDb?.close();
     if (!keep) {
       rmSync(repo, { recursive: true, force: true });
       if (createdHome) rmSync(home, { recursive: true, force: true });
@@ -1180,6 +1228,8 @@ function measure(
     maps: ReturnType<typeof corpus>;
     observeRssKb: number;
     observeRuns: number;
+    hookWorkerRssKb: number;
+    hookWorkerRuns: number;
     dbBytesBefore: number;
     home: string;
     fixturePath: string;
@@ -1345,8 +1395,8 @@ function measure(
             ).n;
       const count = typeof clean === 'number' ? clean : -1;
       compactRows.push({
-        session: `${line.agent}:${line.session}`,
-        pass: conv !== undefined && conv.epoch === count,
+        session: `${line.agent}:${line.session} epoch=${conv?.epoch ?? 'missing'} rows=${count}`,
+        pass: conv !== undefined && count >= 1 && conv.epoch === count,
       });
     }
   }
@@ -1363,6 +1413,7 @@ function measure(
     life('compact', compactRows),
     life('clear', clearRows),
   ];
+  const lifecyclePass = lifecycleRows.every((row) => row.pass);
 
   const compactionSummaries = db
     .prepare(
@@ -1381,20 +1432,36 @@ function measure(
       ? 1
       : captureValues.filter((value) => value <= CAPTURE_DEADLINE_MS).length / captureValues.length;
   const captureP99 = percentile(captureValues, 99);
-  const sc002 = captureValues.length > 0 && captureUnder >= 0.99 && captureP99 < CAPTURE_DEADLINE_MS;
+  const sc002 = captureValues.length > 0 && captureUnder >= 0.99 && captureP99 <= CAPTURE_DEADLINE_MS;
   const injectionValues = input.injectionSamples.map((sample) => sample.ms);
   const injectionUnder =
     injectionValues.length === 0
       ? 1
       : injectionValues.filter((value) => value <= READY_BOUND_MS).length / injectionValues.length;
   const injectionP99 = percentile(injectionValues, 99);
-  const injectionPass = injectionValues.length > 0 && injectionUnder >= 0.99 && injectionP99 <= READY_BOUND_MS;
+  const injectionTiming = timingRows(input.injectionSamples, () => READY_BOUND_MS, 1);
+  const injectionPass = injectionTiming.pass;
+  const pendingSentence = (samples: Sample[]): { hits: number; text: string } => {
+    const hits = samples.filter((sample) => {
+      const pack =
+        input.packs.find((entry) => entry.seq === sample.seq)?.text ??
+        input.sessionStartPack.get(`${sample.agent}:${sample.session}`) ??
+        '';
+      return pack.includes(SUMMARY_PENDING);
+    }).length;
+    return { hits, text: `${hits}/${samples.length} packs carry summary_pending` };
+  };
+  const pending = pendingSentence(input.pendingSamples);
   const readyMax = input.readySamples.length === 0 ? 0 : Math.max(...input.readySamples.map((sample) => sample.ms));
   const pendingMax = input.pendingSamples.length === 0 ? 0 : Math.max(...input.pendingSamples.map((sample) => sample.ms));
   const readyPass = input.readySamples.every((sample) => sample.ms <= READY_BOUND_MS);
   const pendingPass =
-    input.pendingSamples.length === 0 || input.pendingSamples.every((sample) => sample.ms <= PENDING_BOUND_MS);
-  const sc003 = input.observeRssKb < WORKER_RSS_BOUND_KB;
+    input.pendingSamples.length > 0 &&
+    pending.hits === input.pendingSamples.length &&
+    input.pendingSamples.every((sample) => sample.ms <= PENDING_BOUND_MS);
+  const workerRssKb = Math.max(input.observeRssKb, input.hookWorkerRssKb);
+  const workerRuns = `observe runs: ${input.observeRuns} spawned by replay, ${input.hookWorkerRuns} hook-spawned (polled via worker_lease.pid)`;
+  const sc003 = workerRssKb < WORKER_RSS_BOUND_KB;
   const sc005 = leakedSecrets.length === 0;
   const sc009 =
     recallRate(input.recallHits) >= RECALL_BOUND &&
@@ -1412,21 +1479,10 @@ function measure(
     sc005 &&
     sc009 &&
     sc010 &&
+    lifecyclePass &&
     directivesPass &&
     hooksPass
   );
-
-  const pendingSentence = (samples: Sample[]): string => {
-    if (samples.length === 0) return 'n/a';
-    const hits = samples.filter((sample) => {
-      const pack =
-        input.packs.find((entry) => entry.seq === sample.seq)?.text ??
-        input.sessionStartPack.get(`${sample.agent}:${sample.session}`) ??
-        '';
-      return pack.includes(SUMMARY_PENDING);
-    }).length;
-    return `${hits}/${samples.length} packs carry summary_pending`;
-  };
 
   const cpu = cpus()[0]?.model ?? 'unknown';
   const machine = `${osType()} ${hostname()} ${release()} ${arch()}`;
@@ -1434,24 +1490,24 @@ function measure(
     {
       sc: 'SC-002',
       measured: `p99 ${ms(captureP99)} ms; ${(captureUnder * 100).toFixed(1)}% ≤ ${CAPTURE_DEADLINE_MS} ms (n=${captureValues.length})`,
-      bound: `p99 < ${CAPTURE_DEADLINE_MS} ms and ≥99% of capture events ≤ ${CAPTURE_DEADLINE_MS} ms`,
+      bound: `p99 ≤ ${CAPTURE_DEADLINE_MS} ms and ≥99% of capture events ≤ ${CAPTURE_DEADLINE_MS} ms`,
       status: statusOf(sc002),
     },
     {
       sc: 'injection',
-      measured: `p99 ${ms(injectionP99)} ms; ${(injectionUnder * 100).toFixed(1)}% ≤ ${READY_BOUND_MS} ms (n=${injectionValues.length})`,
-      bound: `p99 ≤ ${READY_BOUND_MS} ms and ≥99% of injection hooks ≤ ${READY_BOUND_MS} ms (previous summary ready)`,
+      measured: `p99 ${ms(injectionP99)} ms; ${(injectionUnder * 100).toFixed(1)}% ≤ ${READY_BOUND_MS} ms (n=${injectionValues.length}); worst ${injectionTiming.worstGroup}`,
+      bound: `every (agent, event) group passes: every injection hook ≤ ${READY_BOUND_MS} ms (previous summary ready)`,
       status: statusOf(injectionPass),
     },
     {
       sc: 'session start',
-      measured: `ready max ${ms(readyMax)} ms (n=${input.readySamples.length}); pending max ${ms(pendingMax)} ms (n=${input.pendingSamples.length}), ${pendingSentence(input.pendingSamples)}`,
-      bound: `ready ≤ ${READY_BOUND_MS} ms; pending ≤ ${PENDING_BOUND_MS} ms (INJECTION_DEADLINE_MS: 300 ms budget + 1 s summary wait)`,
+      measured: `ready max ${ms(readyMax)} ms (n=${input.readySamples.length}); pending max ${ms(pendingMax)} ms (n=${input.pendingSamples.length}), ${pending.text}`,
+      bound: `ready ≤ ${READY_BOUND_MS} ms; pending n > 0, every pack carries summary_pending and every sample ≤ ${PENDING_BOUND_MS} ms (INJECTION_DEADLINE_MS: 300 ms budget + 1 s summary wait)`,
       status: statusOf(readyPass && pendingPass),
     },
     {
       sc: 'SC-003',
-      measured: `max VmHWM ${input.observeRssKb} kB (${(input.observeRssKb / 1024).toFixed(1)} MB) over ${input.observeRuns} observe runs; growth ${Math.round(perThousand)} bytes / 1,000 events`,
+      measured: `max VmHWM ${workerRssKb} kB (${(workerRssKb / 1024).toFixed(1)} MB); ${workerRuns}; growth ${Math.round(perThousand)} bytes / 1,000 events`,
       bound: '< 150 MB worker peak RSS; growth recorded',
       status: statusOf(sc003),
     },
@@ -1474,6 +1530,17 @@ function measure(
       status: statusOf(sc010),
     },
     {
+      sc: 'lifecycle',
+      measured: lifecyclePass
+        ? 'fork/resume/compact/clear all pass'
+        : lifecycleRows
+            .filter((row) => !row.pass)
+            .map((row) => `${row.check}: ${row.offenders.length === 0 ? 'no tagged sequences' : row.offenders.join(', ')}`)
+            .join('; '),
+      bound: 'every tagged sequence matches contracts/agents.md',
+      status: statusOf(lifecyclePass),
+    },
+    {
       sc: 'directives',
       measured: leakedDirectives.length === 0 ? '0 directive phrases in memories/packs' : `${leakedDirectives.length} directive phrases in memories/packs`,
       bound: 'zero corpus directive phrases in memories and packs (FR-021)',
@@ -1493,21 +1560,20 @@ function measure(
   const captureTable = mdTable(
     ['Agent', 'Event', 'n', 'p50 ms', 'p95 ms', 'p99 ms', 'max ms', 'Bound', 'Status'],
     [false, false, true, true, true, true, true, false, false],
-    timingRows(input.captureSamples, () => CAPTURE_DEADLINE_MS),
+    timingRows(input.captureSamples, () => CAPTURE_DEADLINE_MS).rows,
   );
   const injectionTable = mdTable(
     ['Agent', 'Event', 'n', 'p50 ms', 'p95 ms', 'p99 ms', 'max ms', 'Bound', 'Status'],
     [false, false, true, true, true, true, true, false, false],
-    timingRows(input.injectionSamples, () => READY_BOUND_MS),
+    injectionTiming.rows,
   );
   const waitRows: string[][] = [];
-  const pushWait = (label: string, samples: Sample[], bound: number, sentence: string): void => {
+  const pushWait = (label: string, samples: Sample[], bound: number, sentence: string, status: string): void => {
     if (samples.length === 0) {
-      waitRows.push(['all', label, '0', 'n/a', 'n/a', 'n/a', `${bound} ms`, sentence, 'n/a']);
+      waitRows.push(['all', label, '0', 'n/a', 'n/a', 'n/a', `${bound} ms`, sentence, status]);
       return;
     }
     const values = samples.map((sample) => sample.ms);
-    const ok = values.every((value) => value <= bound);
     waitRows.push([
       'all',
       label,
@@ -1517,11 +1583,12 @@ function measure(
       ms(Math.max(...values)),
       `${bound} ms`,
       sentence,
-      statusOf(ok),
+      status,
     ]);
   };
-  pushWait('ready', input.readySamples, READY_BOUND_MS, pendingSentence(input.readySamples));
-  pushWait('pending', input.pendingSamples, PENDING_BOUND_MS, pendingSentence(input.pendingSamples));
+  pushWait('ready', input.readySamples, READY_BOUND_MS, pendingSentence(input.readySamples).text,
+    input.readySamples.length === 0 ? 'n/a' : statusOf(readyPass));
+  pushWait('pending', input.pendingSamples, PENDING_BOUND_MS, pending.text, statusOf(pendingPass));
   const waitTable = mdTable(
     ['Agent', 'Path', 'n', 'p50 ms', 'p95 ms', 'max ms', 'Bound', 'summary_pending', 'Status'],
     [false, false, true, true, true, true, false, false, false],
@@ -1605,7 +1672,7 @@ function measure(
     `- Fixture: \`${input.fixturePath}\` (${input.lines.length} lines).`,
     `- \`OBOETE_HOME\`: \`${input.home}\`. Config file absent (schema default preset \`workers-ai\`); child environment has no provider credentials, so summaries are rule-based (\`no_provider\`).`,
     `- Temporary git repository with one empty commit so \`HEAD\` exists. \`NODE_ENV=test\`.`,
-    `- Worker RSS: Linux \`/proc/<pid>/status\` \`VmHWM\`, polled every 50 ms on the \`observe\` processes this command spawned. A replay-owned \`worker_lease\` token is held across every \`SessionEnd\`/\`session_shutdown\` so the hook does not spawn its own worker; replay then releases and runs \`observe\` itself.`,
+    `- Worker RSS: Linux \`/proc/<pid>/status\` \`VmHWM\`, polled every 50 ms on replay's \`observe\` children and, from before the first hook through the final flush, hook-spawned workers found via \`worker_lease.pid\` using one read connection. The lease poll excludes replay's own pid and observe children; a busy read is skipped. A replay-owned \`worker_lease\` token is held across every \`SessionEnd\`/\`session_shutdown\` and the pending windows; hooks can still spawn workers while the lease is free.`,
     '',
     'Commands executed:',
     '',
@@ -1618,13 +1685,13 @@ function measure(
     '',
     '### SC-002 capture time',
     '',
-    `Capture-only hooks (\`hookDeadlineMs\` ≠ \`INJECTION_DEADLINE_MS\`). Bound ${CAPTURE_DEADLINE_MS} ms. Status is p99 ≤ bound and ≥99% of samples ≤ bound.`,
+    `Capture-only hooks (\`hookDeadlineMs\` ≠ \`INJECTION_DEADLINE_MS\`). Bound ${CAPTURE_DEADLINE_MS} ms. Row status is informational: p99 ≤ bound and ≥99% of samples ≤ bound. SC-002 is judged on the pooled capture sample.`,
     '',
     captureTable,
     '',
     '### Injection hooks',
     '',
-    `Classified by \`hookDeadlineMs(agent, event) === INJECTION_DEADLINE_MS\` (Claude/Codex \`SessionStart\`/\`UserPromptSubmit\`, Grok \`SessionStart\`/\`UserPromptSubmit\`/\`PreToolUse\`/\`PostToolUse\`, Pi \`inject\` for \`session_start\`/\`input\`). Every row is judged at ${READY_BOUND_MS} ms (p99 ≤ ${READY_BOUND_MS} ms). The per-agent pending session-start sample is excluded here and reported only in the session-start table at ${PENDING_BOUND_MS} ms. Session-start events that ran while the lease was held for another agent's pending window are also omitted (they are not the ready path). Pi capture of those events stays in the capture table; the inject child is measured here.`,
+    `Classified by \`hookDeadlineMs(agent, event) === INJECTION_DEADLINE_MS\` (Claude/Codex \`SessionStart\`/\`UserPromptSubmit\`, Grok \`SessionStart\`/\`UserPromptSubmit\`/\`PreToolUse\`/\`PostToolUse\`, Pi \`inject\` for \`session_start\`/\`input\`). Every (agent, event) group must pass: every sample ≤ ${READY_BOUND_MS} ms, with no 99% allowance. The per-agent pending session-start sample is excluded here and reported only in the session-start table at ${PENDING_BOUND_MS} ms. Session-start events that ran while the lease was held for another agent's pending window are also omitted (they are not the ready path). Pi capture of those events stays in the capture table; the inject child is measured here.`,
     '',
     injectionTable,
     '',
@@ -1634,7 +1701,7 @@ function measure(
     '',
     '### Session-start wait',
     '',
-    `Ready path: previous session summarized (bound ${READY_BOUND_MS} ms). Pending path: one sample per agent, the last session, with the lease kept held from that agent's penultimate SessionEnd through its last SessionStart (and Pi \`inject --kind start\`) so the hook cannot spawn a worker and the pack must take the pending path (bound ${PENDING_BOUND_MS} ms = the engine's INJECTION_DEADLINE_MS: the 300 ms ready budget plus the 1 s summary wait of FR-024; inject.ts caps the wait at the remaining budget). The lease hold is what makes the pending path deterministic.`,
+    `Ready path: previous session summarized (bound ${READY_BOUND_MS} ms). Pending path: one sample per agent whose hold window opens, with the lease kept held from that agent's last session end preceding its own last session start through that start (and Pi \`inject --kind start\`) so the hook cannot spawn a worker and the pack must take the pending path (bound ${PENDING_BOUND_MS} ms = the engine's INJECTION_DEADLINE_MS: the 300 ms ready budget plus the 1 s summary wait of FR-024; inject.ts caps the wait at the remaining budget). Passing requires at least one sample and the summary-pending sentence in every sample's pack. The lease hold is what makes the pending path deterministic.`,
     '',
     waitTable,
     '',
@@ -1642,8 +1709,8 @@ function measure(
     '',
     '### SC-003 worker memory and database growth',
     '',
-    `- Observe runs spawned by replay: ${input.observeRuns}.`,
-    `- Max VmHWM: ${input.observeRssKb} kB = ${(input.observeRssKb / 1024).toFixed(3)} MB (bound 150 MB, ${statusOf(sc003)}).`,
+    `- ${workerRuns}.`,
+    `- Max VmHWM: ${workerRssKb} kB = ${(workerRssKb / 1024).toFixed(3)} MB (bound 150 MB, ${statusOf(sc003)}).`,
     `- \`memory.db\` + \`-wal\` before: ${input.dbBytesBefore} bytes; after: ${dbBytesAfter} bytes; delta ${dbBytesAfter - input.dbBytesBefore} bytes; ${Math.round(perThousand)} bytes per 1,000 events.`,
     `- Rows: raw_events=${rawEvents}, memories=${memories}, injections=${injections}, injection_items=${injectionItems}.`,
     '',
@@ -1681,7 +1748,7 @@ function measure(
     '',
     '### Lifecycle',
     '',
-    'Each `tags.lifecycle` sequence checked against contracts/agents.md. `fork`: the forked session\'s `conversation_id` differs from the preceding session of that agent. `resume`: that SessionStart created no `injections` row and printed no pack. `compact`: the conversation\'s `context_epoch` equals the number of detector-clean (`classification_state = done`) `compaction_summary` rows of that conversation (Claude\'s PostCompact + SessionStart(compact) pair counts once, A16). `clear`: a new session id and a new conversation. A compaction hook that misses the detector deadline stores a `failed` row and by A16 opens no epoch.',
+    'Each `tags.lifecycle` sequence checked against contracts/agents.md. `fork`: the forked session\'s `conversation_id` differs from the preceding session of that agent. `resume`: that SessionStart created no `injections` row and printed no pack. `compact`: at least one detector-clean (`classification_state = done`) `compaction_summary` row exists, and the conversation\'s `context_epoch` equals that row count (Claude\'s PostCompact + SessionStart(compact) pair counts once, A16). `clear`: a new session id and a new conversation. A compaction hook that misses the detector deadline stores a `failed` row and by A16 opens no epoch; 0/0 fails this check.',
     '',
     lifecycleTable,
     '',
@@ -1708,12 +1775,18 @@ function measure(
     startedAt: input.startedAt,
     lines: input.lines.length,
     capture: { n: captureValues.length, p99: captureP99, under: captureUnder, pass: sc002 },
-    injection: { n: input.injectionSamples.length },
+    injection: { n: input.injectionSamples.length, samples: input.injectionSamples },
     sessionStart: {
       ready: { n: input.readySamples.length, max: readyMax, pass: readyPass },
-      pending: { n: input.pendingSamples.length, max: pendingMax, pass: pendingPass },
+      pending: { n: input.pendingSamples.length, max: pendingMax, summaryPending: pending.hits, pass: pendingPass },
     },
-    worker: { observeRuns: input.observeRuns, rssKb: input.observeRssKb, pass: sc003 },
+    worker: {
+      observeRuns: input.observeRuns,
+      hookWorkerRuns: input.hookWorkerRuns,
+      hookWorkerRssKb: input.hookWorkerRssKb,
+      rssKb: workerRssKb,
+      pass: sc003,
+    },
     growth: {
       before: input.dbBytesBefore,
       after: dbBytesAfter,

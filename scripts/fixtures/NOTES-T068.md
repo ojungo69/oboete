@@ -8,21 +8,31 @@ Database is created with `openDatabase({ path, timeoutMs })` once before the fir
 never migrates. Config file is absent (schema default preset `workers-ai`); child env has no
 provider credentials, so observe takes the `no_provider` rule-based path.
 
-Worker RSS is Linux-only: `/proc/<pid>/status` `VmHWM`, 50 ms poll, on the `observe` processes
-replay itself spawns. After SessionEnd the hook may already have spawned a detached worker; replay
-waits for the lease then runs `observe` (often an empty pass). Peak RSS is therefore of those
-spawned runs, not necessarily the hook-spawned worker.
+Lease hold. Replay writes its own token into `worker_lease` row 1 (`LEASE_TOKEN`, fresh heartbeat)
+before every `SessionEnd`/`session_shutdown` hook, so `isLeaseFree` is false and the hook spawns no
+detached worker; replay then releases the lease and runs `observe` itself, which is the worker run
+whose RSS is measured. For one session start per agent (the last one, with the hold opened at that
+agent's last session end preceding it) the lease stays held through the start hook, so the pack must
+take the pending path; the hold is what makes that sample deterministic (4/4 carried
+`summary_pending` on the recorded run; the fixture's tail is shaped so the latest session state at
+each of those starts is a pending one). Workers the hook spawns at the head of a session block while
+the lease is free are found through `worker_lease.pid` by a 50 ms poll and their VmHWM counts too.
 
-Pending session-start: after the penultimate SessionEnd of each agent, replay skips its own
-`observe` until that agent's last SessionStart. The hook-spawned worker is not killed, so a
-non-adjacent last session can still land on the ready path. Recorded, not forced.
+Every printed pass/fail feeds the exit code: capture (SC-002, pooled per spec), injection (every
+group, every sample ≤ 300 ms), session start (ready ≤ 300 ms; pending n > 0, all packs pending,
+≤ `INJECTION_DEADLINE_MS`), SC-003, SC-005, SC-009, SC-010, lifecycle, directives, hook exits.
 
 Pi capture prints no pack (`INJECTION_BRANCHES.pi` is empty). Replay also spawns
 `inject --agent pi --kind start|prompt` after `session_start`/`input`, matching the extension.
 
-`scripts/fixtures/smoke-first-sessions.mjs` is deleted; its placeholder expansion and hook command
-are in `replay.ts`. `NOTES-T067.md` still names the smoke script; that file is outside this task.
-
-This run (2026-09-05T19:32:55Z, ~6 min, load `2.62 7.76 10.70`): SC-002 pass (p99 290.8 ms, 99.5% ≤ 300 ms; Grok PostToolUse max 1187 ms and Stop p99 318 ms still inside the 99% cut). SC-003 pass (69.5 MB). SC-005 pass. SC-010 pass. SC-009 fail 17.5% (7/40): rule-based summaries keep the first prompt, not later planted facts. Four directive phrases reached memories/packs via those summaries (allowed in raw_events: 64 rows). Pending session-start n=4, none carried `summary_pending` (hook-spawned worker won). Ready max 582.8 ms. Grok compact left no `last_compaction_key` row.
+Recorded run (2026-09-06T03:10:26Z, ~4 min, load `0.38 0.42 1.40`): SC-002 pass (p99 181.2 ms,
+100% ≤ 300 ms, n=717); injection pass (p99 203.1 ms, worst group codex/UserPromptSubmit 207.1 ms);
+session start pass (ready max 198.3 ms; pending max 1185.7 ms, 4/4 `summary_pending`); SC-003 pass
+(111.2 MB over 43 replay-spawned + 42 hook-spawned worker runs); SC-005, SC-010, lifecycle
+(fork 3, resume 4, compact 4, clear 4), directives (0 after FR-021), hook exits (1143/1143) pass.
+SC-009 fail 17.5% (7/40): rule-based summaries keep the first prompt, not later planted facts, so the
+exit code is 1 until the fixture is replayed with a provider. An earlier run at load 10.79 pushed
+codex UserPromptSubmit p99 to 301.7 ms; run the replay on a quiet machine. The evidence's `Commit:`
+line names the tree the bundle was built from, one commit before the one that records it.
 
 Did not touch `src/capture.ts`, privacy, injection, worker, db, tests, or the generator.
