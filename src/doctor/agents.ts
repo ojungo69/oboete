@@ -319,7 +319,7 @@ export function piItem(
     }
   }
 
-  const diag = db === null ? [] : piDiagnostics(db);
+  const diag = db === null ? [] : piDiagnostics(db, now);
   if (hangs.length > 0) {
     const oldest = Math.max(...hangs);
     const seconds = Math.max(0, Math.round(oldest / 1000));
@@ -342,16 +342,19 @@ export function piItem(
   return healthy('pi', 'No Pi diagnostics.');
 }
 
-function piDiagnostics(db: DatabaseSync): string[] {
+/** Diagnostics of the last 24 hours (data-model: the `.started` files themselves are kept that long). */
+const DIAGNOSTICS_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function piDiagnostics(db: DatabaseSync, now: number): string[] {
   try {
     const rows = db
       .prepare(
         `SELECT message_code, SUM(count) AS count, MAX(last_seen_at) AS last_seen_at
          FROM diagnostics
-         WHERE agent = 'pi' AND cleared_at IS NULL
+         WHERE agent = 'pi' AND cleared_at IS NULL AND last_seen_at > ?
          GROUP BY message_code`,
       )
-      .all();
+      .all(now - DIAGNOSTICS_WINDOW_MS);
     return rows.flatMap((row) => {
       const code = typeof row.message_code === 'string' ? row.message_code : '';
       if (code === '') return [];
