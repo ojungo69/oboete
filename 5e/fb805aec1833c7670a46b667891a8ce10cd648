@@ -1,0 +1,107 @@
+scripts/e2e/probe-lib/agents.mjs
+  s_359fcac8e97f88::t_e3886d403a24dd 648
+  s_359fcac8e97f88::t_f17b2d6899af4f 336
+  s_359fcac8e97f88::t_4053dacb3447d2 17
+  s_359fcac8e97f88::t_3a3356a09d179e 356-357
+  s_359fcac8e97f88::t_a8053771157b8e 682
+  s_359fcac8e97f88::t_2868ca1c32e1e0 715
+  s_359fcac8e97f88::t_10b8bf06b6020b 378-381
+  s_359fcac8e97f88::t_311bfb20feebdb 793-796,802
+  s_359fcac8e97f88::t_d6e83bf196e12b 807
+  s_359fcac8e97f88::t_fd6ca126d49173 478
+scripts/e2e/isolated-user.mjs
+  s_359fcac8e97f88::t_ec234934d4bd9d 181
+  s_359fcac8e97f88::t_66267df38baa02 1797-1798
+  s_359fcac8e97f88::t_d7dbfdd927c3ae 1850
+  s_359fcac8e97f88::t_6cdf28bc1715fb 932
+  s_359fcac8e97f88::t_2f43aee7ccb204 155
+  s_359fcac8e97f88::t_8e49f00e22015f 1149-1152
+  s_359fcac8e97f88::t_d789ddcd4ab8dc 67-68
+  s_359fcac8e97f88::t_e8d2bce9a03a9d 116
+scripts/e2e/probe-lib/trusthash.mjs
+  s_359fcac8e97f88::t_a34b9a5d32cc6e 11-15,17-23
+scripts/e2e/probes/grok.mjs
+  s_359fcac8e97f88::t_92b169c34e5639 353-356
+  s_359fcac8e97f88::t_265b49f2922165 157,258,262
+scripts/e2e/mcp-clients.mjs
+  s_359fcac8e97f88::t_ba80b3b00a71c6 25
+  s_359fcac8e97f88::t_1acc4ae407a088 254
+  s_359fcac8e97f88::t_ac6c9307d5cb00 538-539
+  s_359fcac8e97f88::t_f9919f5890f68c 218
+  s_359fcac8e97f88::t_fcb4fd0378ba25 747-748
+  s_359fcac8e97f88::t_0633854b8ed18c 504-505
+  s_359fcac8e97f88::t_6a63210fbad1f1 696-697
+  s_359fcac8e97f88::t_a1d0b3ca1cdf19 361
+scripts/e2e/probe-lib/mcp-tee.mjs
+  s_359fcac8e97f88::t_e0a447e8e98efe 69-73
+scripts/fixtures/generate-1000-events.mjs
+  s_359fcac8e97f88::t_c083e5fb6011b6 1220-1223
+  s_359fcac8e97f88::t_1f8e66b298853c 1281
+  s_359fcac8e97f88::t_9014376b61c08a 1625
+  s_359fcac8e97f88::t_246e2f2e113051 1291
+  s_359fcac8e97f88::t_d3265f7219c131 780
+scripts/e2e/probe-lib/tmux.mjs
+  s_359fcac8e97f88::t_dae08b35fbf661 164
+  s_359fcac8e97f88::t_62e5724989f0ce 135
+scripts/e2e/dogfood.sh
+  s_359fcac8e97f88::t_dc9f0f19261c3c 26
+  s_359fcac8e97f88::t_ad936714f2e321 31-33
+scripts/measure-cold-start.mjs
+  s_359fcac8e97f88::t_9e610c021fdf65 162
+  s_359fcac8e97f88::t_997a1a39faa3d2 301-306,308-319
+  s_359fcac8e97f88::t_7cabf488fe08af 234-240
+  s_359fcac8e97f88::t_0988a8de58aed2 180
+scripts/e2e/probes/claude.mjs
+  s_359fcac8e97f88::t_5c849942a0f475 494-495
+  s_359fcac8e97f88::t_f09e42e8731b29 459,465-472,474
+  s_359fcac8e97f88::t_2fed93f05c41b1 480-487
+  s_359fcac8e97f88::t_08587788fb16ab 269-272
+  s_359fcac8e97f88::t_523c27b21199eb 393-395
+  s_359fcac8e97f88::t_05c7ccbb35d68d 434,438-445,447
+  s_359fcac8e97f88::t_c9ef86d6e2e593 309-312
+  s_359fcac8e97f88::t_ec259c91c8764f 196,201
+  s_359fcac8e97f88::t_14f406e0c68a7a 214,218,455
+scripts/e2e/probe-contracts.mjs
+  s_359fcac8e97f88::t_afc28cac0e99f1 243-245,248
+  s_359fcac8e97f88::t_e1d5478d9b0154 215-216
+  s_359fcac8e97f88::t_d9d546b0acee45 180
+  s_359fcac8e97f88::t_44f962f5baccd6 68-69
+scripts/e2e/probes/providers.mjs
+  s_359fcac8e97f88::t_0396286566999c 142-150
+  s_359fcac8e97f88::t_c5530d3a0d4958 223-229
+  s_359fcac8e97f88::t_4236a48ad54e09 109,237
+scripts/e2e/probe-lib/pi-extension.ts
+  s_359fcac8e97f88::t_dab6cca71c6119 94
+  s_359fcac8e97f88::t_3e557adbe58aec 62
+  s_359fcac8e97f88::t_39b697737128e6 167-168
+scripts/e2e/probes/pi.mjs
+  s_359fcac8e97f88::t_c2c757338f3dcf 489-496
+  s_359fcac8e97f88::t_d04ac854c871e3 305-308,312-314
+  s_359fcac8e97f88::t_f5e20b66e0f7be 58,63
+  s_359fcac8e97f88::t_8cc697377fab52 46-50,184,341-342,346
+scripts/e2e/probes/codex.mjs
+  s_359fcac8e97f88::t_fd2bb51929c309 487,489
+  s_359fcac8e97f88::t_e689231bf3d648 448,450
+  s_359fcac8e97f88::t_3e63a769002a8e 349-352
+  s_359fcac8e97f88::t_20f9aa72bf735d 140
+  s_359fcac8e97f88::t_9a56d9a56ac8be 412-415
+  s_359fcac8e97f88::t_118cadd30774cc 510
+  s_359fcac8e97f88::t_5dc9c87b3b55df 494
+  s_359fcac8e97f88::t_4e0f6b9da19e29 498
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "5efb805aec1833c7670a46b667891a8ce10cd648",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
