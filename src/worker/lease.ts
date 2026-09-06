@@ -6,7 +6,7 @@ import { isBusyError } from '../db/open.js';
 export const STALE_AFTER_MS = 6_000;
 export const FUTURE_SKEW_MS = 60_000;
 
-function stale(heartbeatAt: unknown, now: number): boolean {
+export function stale(heartbeatAt: unknown, now: number): boolean {
   const ts =
     typeof heartbeatAt === 'number'
       ? heartbeatAt

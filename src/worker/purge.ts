@@ -6,7 +6,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { BLANK_CHARACTERS_SQL, SUMMARIZABLE_KINDS_SQL } from './batches.js';
 import { assertLease, transactionImmediate } from './lease.js';
 
-const PI_HANG_AFTER_MS = 30_000;
+export const PI_HANG_AFTER_MS = 30_000;
 const PI_ACK_REMOVE_AFTER_MS = 24 * 60 * 60 * 1000;
 
 // A row of a pending or running batch is never deleted here: forcing it into a fallback batch is

@@ -44,7 +44,7 @@ export const SETUP_RESULT_KEY = 'setup.last_result';
 const AGENTS: readonly SetupAgent[] = ['claude', 'codex', 'grok', 'pi'];
 type Preset = PresetName | 'none';
 const PRESETS = [...Object.keys(PRESET_CATALOG), 'none'] as Preset[];
-const VIEW_LINE = 'Open the memory viewer with `oboete view --open`.';
+export const VIEW_LINE = 'Open the memory viewer with `oboete view --open`.';
 const DATABASE_TIMEOUT_MS = 5_000;
 
 export type SetupDeps = {
@@ -489,22 +489,31 @@ function report(deps: SetupDeps, json: boolean, rows: readonly AgentRow[], notes
 }
 
 function table(rows: readonly AgentRow[]): string {
-  const header = ['agent', 'wired', 'probe', 'trust', 'native memory'];
-  const cells = rows.map((row) => [
-    row.agent,
-    row.wired,
-    row.probe,
-    row.trust,
-    row.native_memory ?? 'none',
-  ]);
+  return renderTable(
+    ['agent', 'wired', 'probe', 'trust', 'native memory'],
+    rows.map((row) => [row.agent, row.wired, row.probe, row.trust, row.native_memory ?? 'none']),
+  );
+}
+
+export function renderTable(
+  header: readonly string[],
+  rows: readonly (readonly string[])[],
+  extras: readonly (string | undefined)[] = [],
+): string {
   const widths = header.map((title, column) =>
-    Math.max(title.length, ...cells.map((cell) => cell[column]?.length ?? 0)),
+    Math.max(title.length, ...rows.map((row) => row[column]?.length ?? 0)),
   );
   const line = (cell: readonly string[]): string =>
     `${cell.map((value, column) => value.padEnd(widths[column] ?? 0)).join('  ').trimEnd()}\n`;
-  return `\n${line(header)}${cells.map(line).join('')}\n`;
+  let out = `\n${line(header)}`;
+  for (const [index, row] of rows.entries()) {
+    out += line(row);
+    const extra = extras[index];
+    if (extra !== undefined && extra !== '') out += extra;
+  }
+  return `${out}\n`;
 }
 
-function describe(error: unknown): string {
+export function describe(error: unknown): string {
   return error instanceof Error ? error.message.split('\n')[0] ?? error.name : String(error);
 }

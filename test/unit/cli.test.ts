@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -33,10 +33,25 @@ test('unknown command exits 2 and prints usage to stderr', () => {
   assert.match(result.stderr, /Usage: oboete/);
 });
 
-test('oboete doctor exits 2 because it is not implemented yet', () => {
-  const result = run(['doctor']);
-  assert.equal(result.status, 2);
-  assert.equal(result.stderr, 'oboete doctor is not implemented yet\n');
+test('oboete doctor prints a report', async () => {
+  await withTempHome(async (home) => {
+    const userHome = join(home, 'user');
+    mkdirSync(userHome, { recursive: true });
+    const result = spawnSync(process.execPath, [bin, 'doctor', '--json', '--no-probe-agents'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: userHome,
+        OBOETE_HOME: home,
+        PATH: join(home, 'empty-bin'),
+      },
+    });
+    assert.notEqual(result.status, 2, result.stderr);
+    const report = JSON.parse(result.stdout) as { items: unknown; notes: unknown; view: unknown };
+    assert.ok(Array.isArray(report.items));
+    assert.match(JSON.stringify(report.notes), /lexical/);
+    assert.match(String(report.view), /oboete view --open/);
+  });
 });
 
 /**

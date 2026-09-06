@@ -87,10 +87,14 @@ test('FR-016: a provider credential pasted into a session reaches no stored row,
     assert.ok(pack !== '', 'the next session receives a pack');
     assert.equal(pack.includes(CREDENTIAL), false, pack);
 
-    const doctor = spawnSync(process.execPath, [resolve(process.cwd(), 'dist/oboete.mjs'), 'doctor'], {
-      env: fixture.env,
-      encoding: 'utf8',
-    });
+    const doctor = spawnSync(
+      process.execPath,
+      [resolve(process.cwd(), 'dist/oboete.mjs'), 'doctor', '--no-probe-agents'],
+      {
+        env: fixture.env,
+        encoding: 'utf8',
+      },
+    );
     // The command ran and said something (T069 makes it a report; until then it says it is not implemented).
     assert.equal(doctor.error, undefined);
     assert.notEqual(doctor.status, null);

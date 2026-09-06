@@ -56,23 +56,36 @@ export class MigrationMismatchError extends Error {
 
 export class SchemaAheadError extends Error {
   readonly code = 'SCHEMA_AHEAD';
+  readonly userVersion: number;
   constructor(userVersion: number) {
     super(
       `Database schema version ${userVersion} is newer than this bundle (${LATEST_SCHEMA_VERSION})`,
     );
     this.name = 'SchemaAheadError';
+    this.userVersion = userVersion;
   }
 }
 
+export function sqliteErrorInfo(error: unknown): {
+  message: string;
+  errcode?: number;
+  errstr?: string;
+} {
+  const message =
+    error instanceof Error ? (error.message.split('\n')[0] ?? error.name) : String(error);
+  if (typeof error !== 'object' || error === null) return { message };
+  const record = error as { errcode?: unknown; errstr?: unknown };
+  return {
+    message,
+    errcode: typeof record.errcode === 'number' ? record.errcode : undefined,
+    errstr: typeof record.errstr === 'string' ? record.errstr : undefined,
+  };
+}
+
 export function isBusyError(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null) {
-    return false;
-  }
-  const sqliteError = error as { errcode?: unknown; errstr?: unknown };
-  if (sqliteError.errcode === 5 || sqliteError.errcode === 6) {
-    return true;
-  }
-  return typeof sqliteError.errstr === 'string' && /database is locked|busy/.test(sqliteError.errstr);
+  const info = sqliteErrorInfo(error);
+  if (info.errcode === 5 || info.errcode === 6) return true;
+  return typeof info.errstr === 'string' && /database is locked|busy/.test(info.errstr);
 }
 
 export function openDatabase(options: {

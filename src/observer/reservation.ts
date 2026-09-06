@@ -60,7 +60,6 @@ export function reserveAttempt(
     }
 
     const day = utcDay(options.now);
-    const resetAt = nextUtcMidnight(options.now);
     const presetUsage = db
       .prepare(
         'SELECT exhausted_at, reset_at FROM provider_usage WHERE utc_day = ? AND preset = ?',
@@ -85,22 +84,7 @@ export function reserveAttempt(
     }
 
     const reservationId = randomUUID();
-    db.prepare(
-      `INSERT INTO provider_usage
-         (utc_day, preset, calls, neurons_estimate, reset_at)
-       VALUES (?, ?, 1, 0, ?)
-       ON CONFLICT(utc_day, preset) DO UPDATE SET
-         calls = COALESCE(provider_usage.calls, 0) + 1,
-         reset_at = excluded.reset_at,
-         exhausted_at = CASE
-           WHEN COALESCE(provider_usage.reset_at, 0) <= ? THEN NULL
-           ELSE provider_usage.exhausted_at
-         END,
-         exhausted_reservation_id = CASE
-           WHEN COALESCE(provider_usage.reset_at, 0) <= ? THEN NULL
-           ELSE provider_usage.exhausted_reservation_id
-         END`,
-    ).run(day, options.preset, resetAt, options.now, options.now);
+    recordProviderAttempt(db, { preset: options.preset, now: options.now });
 
     const batch = db
       .prepare(
@@ -116,6 +100,30 @@ export function reserveAttempt(
     }
     return { ok: true, reservationId };
   });
+}
+
+export function recordProviderAttempt(
+  db: DatabaseSync,
+  options: { preset: PresetName; now: number },
+): void {
+  const day = utcDay(options.now);
+  const resetAt = nextUtcMidnight(options.now);
+  db.prepare(
+    `INSERT INTO provider_usage
+       (utc_day, preset, calls, neurons_estimate, reset_at)
+     VALUES (?, ?, 1, 0, ?)
+     ON CONFLICT(utc_day, preset) DO UPDATE SET
+       calls = COALESCE(provider_usage.calls, 0) + 1,
+       reset_at = excluded.reset_at,
+       exhausted_at = CASE
+         WHEN COALESCE(provider_usage.reset_at, 0) <= ? THEN NULL
+         ELSE provider_usage.exhausted_at
+       END,
+       exhausted_reservation_id = CASE
+         WHEN COALESCE(provider_usage.reset_at, 0) <= ? THEN NULL
+         ELSE provider_usage.exhausted_reservation_id
+       END`,
+  ).run(day, options.preset, resetAt, options.now, options.now);
 }
 
 export function recordExhausted(

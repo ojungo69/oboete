@@ -3,19 +3,19 @@ import { PRESET_CATALOG, readCredentials } from '../config.js';
 import { runtimeStateGet, runtimeStateSet } from '../worker/purge.js';
 
 const CACHE_KEY = 'workers_ai_catalog';
-const CACHE_MS = 24 * 60 * 60 * 1000;
+export const CACHE_MS = 24 * 60 * 60 * 1000;
 const PAGE_SIZE = 100;
 const MAX_PAGES = 20;
 const REQUEST_TIMEOUT_MS = 10_000;
 // The whole walk shares one budget so a slow endpoint cannot hold the worker for MAX_PAGES x 10 s.
 const WALK_BUDGET_MS = 30_000;
-type CatalogValue = {
+export type CatalogValue = {
   models: string[];
   defaultModelPresent: boolean;
   hasPaidOnlyModels: boolean;
   fetchedAt: number;
 };
-type CachedCatalog = CatalogValue & { accountId: string };
+export type CachedCatalog = CatalogValue & { accountId: string };
 export type WorkersAiCatalog = CatalogValue & { fromCache: boolean };
 
 function result(row: CachedCatalog, fromCache: boolean): WorkersAiCatalog {
@@ -27,7 +27,7 @@ function result(row: CachedCatalog, fromCache: boolean): WorkersAiCatalog {
     fromCache,
   };
 }
-function cachedCatalog(db: DatabaseSync): CachedCatalog | null {
+export function cachedCatalog(db: DatabaseSync): CachedCatalog | null {
   try {
     const row = JSON.parse(runtimeStateGet(db, CACHE_KEY) ?? 'null') as Partial<CachedCatalog> | null;
     return row !== null && Array.isArray(row.models) && row.models.every((model) => typeof model === 'string')
