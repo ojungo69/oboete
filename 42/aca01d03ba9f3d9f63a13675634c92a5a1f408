@@ -1,0 +1,20 @@
+src/doctor/storage.ts
+  s_359fcac8e97f88::t_e6b61cae063c71 90,154,366-371
+  s_359fcac8e97f88::t_e251af500246d5 372-373
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "42aca01d03ba9f3d9f63a13675634c92a5a1f408",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
