@@ -1,0 +1,160 @@
+.markdownlint.json
+  s_359fcac8e97f88::t_b0e098e5c8d391 1-39
+package.json
+  s_359fcac8e97f88::t_bc8eaba44f80eb 24
+docs/evidence/quality-debt-2026-09/codacy-main-issues.json
+  s_359fcac8e97f88::t_20a7cffbfa4785 1-4766
+scripts/quality-debt-record.mjs
+  s_8eca6528f7e821::t_beac72a30a3035 142-143,153,155-156,196
+  s_359fcac8e97f88::t_02c77403e05449 27,219-226
+  s_51bafde63ddd9e::t_a59638d4548923 15-16,41-45,131,137-138,144-147
+  s_5b3c29c037d91e::t_66b9fae17369e5 1,4-8,17-18,30-37,46-51,120,122-126,133,135-136,139,194-195,214,216,218
+  s_5b3c29c037d91e::t_f3c09a07fdcc2a 2,10,53-108,110-118,140-141,150-152,154,157-164,166-168,171-193,209,213
+  s_60877c03052477::t_091cff3b7c8e9d 12-14,52,109,129-130,210-211,215
+  s_359fcac8e97f88::t_ceaae58f0cd8dd 19-25,28
+  s_359fcac8e97f88::t_56c59b780c8e6c 227-246
+  s_2d45c147bb632c::t_deda18a2e3d4e8 3,11,26,29,38-39,119,121,127-128,132,134,148-149,169-170,198-199,203-207,212,217
+  s_5b3c29c037d91e::t_380db0604e18e6 197,200-202,208
+  s_5b3c29c037d91e::t_92a599c778e69a 40,165
+  s_359fcac8e97f88::t_453dc47cef0fc5 9
+sonar-project.properties
+  s_359fcac8e97f88::t_92a326e89e3924 16-17
+  s_79580a13bce7d5::t_c808cae81fee79 5
+scripts/quality-debt-record.test-support.mjs
+  s_0ec4092f1f4270::t_1c39e22a3d3898 1-11,15-35,38-43,51-56,74-83,85-94,102-111,118,127-131
+  s_51bafde63ddd9e::t_83f567b2bf6a30 12-13,36-37,84,95-100,112-117
+  s_60877c03052477::t_4465e433f6b6b6 44-50,57-73,101,119-123
+  s_359fcac8e97f88::t_f701bb01fcb600 124-126
+  s_359fcac8e97f88::t_2181fb87af1bd8 14
+specs/008-quality-debt-zero/research.md
+  s_359fcac8e97f88::t_304cc67765f1ca 1-182
+  s_359fcac8e97f88::t_41052733e547e4 183-195
+docs/evidence/quality-debt-2026-09.md
+  s_359fcac8e97f88::t_b4698e03d4a47b 1-2,13-739
+  s_51bafde63ddd9e::t_d58cbd4a68cb45 3-12
+specs/008-quality-debt-zero/quickstart.md
+  s_359fcac8e97f88::t_62bfbb96b8b41d 87-92
+  s_359fcac8e97f88::t_481de066046096 1-86
+specs/008-quality-debt-zero/checklists/requirements.md
+  s_359fcac8e97f88::t_6a6418d3f7fb96 1-37
+.codacy.yml
+  s_359fcac8e97f88::t_cd511c18d8181c 2-10,13-18,21-25
+scripts/quality-debt-record.test.mjs
+  s_5b3c29c037d91e::t_92a599c778e69a 34-37
+  s_51bafde63ddd9e::t_83f567b2bf6a30 13,32-33,43-58,71-106,237
+  s_2d45c147bb632c::t_bb8245f4f49282 38-40,295-299
+  s_2d45c147bb632c::t_f1d557dd488ad6 42,59-70,107-150
+  s_2d45c147bb632c::t_cf39b1f7f86aea 18-23
+  s_5b3c29c037d91e::t_b2b0c38f68acf9 305-306
+  s_5b3c29c037d91e::t_6bdb2bef73d4c8 293-294,301-304,307-308
+  s_359fcac8e97f88::t_eaa921dd749b24 41,310,331
+  s_2d45c147bb632c::t_ad208ea489f00a 234,278
+  s_5b3c29c037d91e::t_abbe29917e43d6 1-2,4-12,14-15
+  s_60877c03052477::t_4465e433f6b6b6 3,229,239-260,300,309,311-330
+  s_5b3c29c037d91e::t_4df161e3e412e5 16-17,24-31,151-228,230-233,235-236,238,261-277,279-292
+  s_359fcac8e97f88::t_f210ec7361a44f 332-336
+docs/evidence/quality-debt-2026-09/allocation.json
+  s_359fcac8e97f88::t_5d32dc0eca0708 1-741
+docs/evidence/quality-debt-2026-09/sonar-main-issues.json
+  s_359fcac8e97f88::t_9135ec59b90b35 1-2482
+.github/workflows/ci.yml
+  s_359fcac8e97f88::t_42a77572347c97 49-52
+  s_60877c03052477::t_091cff3b7c8e9d 53
+specs/008-quality-debt-zero/data-model.md
+  s_359fcac8e97f88::t_5dadfe730ed664 1-71
+specs/008-quality-debt-zero/plan.md
+  s_359fcac8e97f88::t_6a9da8ba9b9e54 1-139
+  s_359fcac8e97f88::t_5c1f8623aabc1f 140
+scripts/quality-debt-record-services.test.mjs
+  s_359fcac8e97f88::t_e9a0b2ae37c27c 495-514
+  s_0ec4092f1f4270::t_ae822ca59db80e 1-2,4-6,11-12,17-21,23-28,30-56,58-59,61-68,75-79,81-96,98-105,107-124,126-128,133-158,161-162,164-170,172-173,212,223-247,250-254,256-281,284-300,309,343-350,448-449,451,470,473,477,482,485,490
+  s_60877c03052477::t_091cff3b7c8e9d 106,125
+  s_51bafde63ddd9e::t_81e7d76304b7e5 421
+  s_60877c03052477::t_7eba8835cf440e 3,7,10,13-16,22,29,57,60,69-74,80,97,129-132,159-160,163,171,174-211,213-222,456,459,461,464,475,487
+  s_51bafde63ddd9e::t_b097b7d40507e9 8-9,248-249,255,282-283,301-308,310-342,445,453,472,484
+  s_60877c03052477::t_5d7869950401a5 351-420,422-444,452,467,478,491-494
+  s_359fcac8e97f88::t_af8900951b6752 446-447,450,454-455,457-458,460,462-463,465-466,468-469,471,474,476,479-481,483,486,488-489
+docs/evidence/quality-debt-2026-09/ledger.json
+  s_359fcac8e97f88::t_56a336a4fc7614 1-1814
+specs/008-quality-debt-zero/tasks.md
+  s_359fcac8e97f88::t_ce5ffe74337177 152
+  s_0ec4092f1f4270::t_672e558eb36c23 1-151
+specs/008-quality-debt-zero/spec.md
+  s_359fcac8e97f88::t_bcc6737c2640d2 1-174
+scripts/quality-debt-ledger.mjs
+  s_359fcac8e97f88::t_afa4570b9c99a3 1-52
+scripts/quality-debt-services.mjs
+  s_359fcac8e97f88::t_2af2a4c35ca865 1-296
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "637a65bdee1ff9da850a211d9af7f62b5cdae52e",
+  "prompts": {},
+  "sessions": {
+    "s_0ec4092f1f4270": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0728a-e9ac-79d1-aa4e-0e3ee10a6268",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_2d45c147bb632c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07835-0077-7663-b8b6-f57dea4bee1e",
+        "model": "gpt-6-astra"
+      },
+      "human_author": null
+    },
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_51bafde63ddd9e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07886-2f29-7b83-8fbe-962ac6f6214e",
+        "model": "gpt-6-astra"
+      },
+      "human_author": null
+    },
+    "s_5b3c29c037d91e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a077fe-a6ce-72e0-93d0-5228661b7b20",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_60877c03052477": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0786a-b315-7e70-8e7b-dfeee7ed856f",
+        "model": "gpt-6-astra"
+      },
+      "human_author": null
+    },
+    "s_79580a13bce7d5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0762a-4f1a-7af1-b877-9115ba20753a",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_8eca6528f7e821": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0782a-6b5b-75b1-84d7-562478d9a94a",
+        "model": "gpt-6-astra"
+      },
+      "human_author": null
+    }
+  }
+}
