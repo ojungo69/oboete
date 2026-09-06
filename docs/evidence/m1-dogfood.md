@@ -107,3 +107,24 @@ the account has balance again (grok 1.0.17 alpha, both as sender with its deferr
 receiver), and the six Claude Code, Codex and Pi pairs pass as before. Nothing in oboete changed
 between the two runs for those legs; the harness itself gained the round-9 simplification pass
 and the CodeQL fixes (1f11d087).
+
+## 2026-09-06 MCP clients run 2026-09-06T07-00-54-911Z
+
+- 4 of 4 agents pass
+- Report: <run>/report.json
+
+| agent | status | protocolVersion | toolName | frames | reason |
+|---|---|---|---|---:|---|
+| claude | pass | 2025-11-25 | mcp__oboete_probe__search | 7 | protocolVersion=2025-11-25; notifications/initialized; tools/list search,timeline,get; search memories=0 |
+| codex | pass | 2025-06-18 | mcp__oboete_probe__search | 7 | protocolVersion=2025-06-18; notifications/initialized; tools/list search,timeline,get; search memories=2 |
+| grok | pass | 2025-11-25 | oboete_probe__search | 7 | protocolVersion=2025-11-25; notifications/initialized; tools/list search,timeline,get; search memories=2 |
+| pi | pass | n/a | oboete_search | 0 | oboete_search memories=2 |
+
+- repo -32602: pass (-32602)
+- get missing isError: pass (isError: true)
+- claude: pass (protocolVersion=2025-11-25; notifications/initialized; tools/list search,timeline,get; search memories=0)
+- codex: pass (protocolVersion=2025-06-18; notifications/initialized; tools/list search,timeline,get; search memories=2)
+- grok: pass (protocolVersion=2025-11-25; notifications/initialized; tools/list search,timeline,get; search memories=2)
+- pi: pass (oboete_search memories=2)
+
+Isolated-user run of `scripts/e2e/mcp-clients.mjs --daily` from `~/oboete`. Each of Claude Code, Codex, and Grok Build listed and called `search` on a second `oboete_probe` registration (tee of `oboete mcp`, raw frames in the run dir); Pi called `oboete_search` and the tool result parsed as `oboete search --json`. Direct stdio rejected `repo` with `-32602` and `get m_missing` with `isError: true`. Probe registrations were removed; the setup `oboete` entries were left in place. Claude's search returned 0 memories because it ran first; Codex/Grok/Pi then saw 2, after that turn was captured.
