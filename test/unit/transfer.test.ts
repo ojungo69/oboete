@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
@@ -340,8 +340,10 @@ test('oboete export and oboete import wire the module with the exit codes of con
         stderr += text;
       },
     };
+    writeFileSync(file, 'stale', { mode: 0o644 });
     assert.equal(await runExport([file], io), 0);
     assert.match(stdout, /1 memor(y|ies)/);
+    assert.equal(statSync(file).mode & 0o777, 0o600, 'an existing world-readable target becomes owner-only');
 
     stdout = '';
     assert.equal(await runExport(['-'], io), 0);

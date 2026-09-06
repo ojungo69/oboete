@@ -3,7 +3,7 @@
 // as hashes), an imported row can only raise a sensitivity and never lowers one, a tombstone wins
 // in both directions, and every active imported row is quarantined as `local_only` /
 // `review_state = imported` until the worker classifies it. Nothing here is on the hook path.
-import { createReadStream, statSync } from 'node:fs';
+import { chmodSync, createReadStream, statSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import type { DatabaseSync } from 'node:sqlite';
 import { parseArgs } from 'node:util';
@@ -395,10 +395,12 @@ export async function runExport(argv: string[], io: Io = { writeOut: (t) => proc
       io.writeError(`Exported ${plural(counts.memories, 'memory', 'memories')} and ${plural(counts.tombstones, 'tombstone')}.\n`);
       return 0;
     }
-    const { writeFileSync } = await import('node:fs');
     const lines: string[] = [];
     const counts = exportMemories(db, (line) => lines.push(line), Date.now());
+    // The file carries private and local-only text: owner-only whether it is new or reused
+    // (`mode` only applies when writeFileSync creates the file).
     writeFileSync(target, `${lines.join('\n')}\n`, { mode: 0o600 });
+    chmodSync(target, 0o600);
     io.writeOut(`Exported ${plural(counts.memories, 'memory', 'memories')} and ${plural(counts.tombstones, 'tombstone')} to ${target}.\n`);
     return 0;
   });
@@ -428,14 +430,11 @@ export async function runImport(argv: string[], io: Io = { writeOut: (t) => proc
     io.writeError(`${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
   }
-  // A regular file has a size to check up front; a pipe (`-`, /dev/stdin, a process substitution)
-  // is read to a bounded string first, so a slow writer never holds the database's write lock.
-  let regular = false;
+  // Every input is read to a bounded string before the database is opened: a slow pipe or a file
+  // that grows after this check never holds the write lock, and the bound applies to what was read.
   if (file !== '-') {
     try {
-      const stat = statSync(file);
-      regular = stat.isFile();
-      if (regular && stat.size > MAX_FILE_BYTES) {
+      if (statSync(file).size > MAX_FILE_BYTES) {
         io.writeError(`${file} exceeds ${MAX_FILE_BYTES / (1024 * 1024)} MB; nothing was imported.\n`);
         return 2;
       }
@@ -444,9 +443,7 @@ export async function runImport(argv: string[], io: Io = { writeOut: (t) => proc
       return 2;
     }
   }
-  const source = regular
-    ? createReadStream(file, { encoding: 'utf8' })
-    : await readBounded(file === '-' ? process.stdin : createReadStream(file), MAX_FILE_BYTES);
+  const source = await readBounded(file === '-' ? process.stdin : createReadStream(file), MAX_FILE_BYTES);
   if (source === null) {
     io.writeError(`${file === '-' ? 'standard input' : file} exceeds ${MAX_FILE_BYTES / (1024 * 1024)} MB; nothing was imported.\n`);
     return 2;
