@@ -86,7 +86,7 @@ async function importInto(
 ): Promise<ImportResult> {
   const db = open(home);
   try {
-    return await importMemories(db, lines.join('\n') + '\n', { now: NOW, ...options });
+    return importMemories(db, lines.join('\n') + '\n', { now: NOW, ...options });
   } finally {
     db.close();
   }
@@ -186,7 +186,7 @@ test('a round trip into an empty installation keeps counts, tombstones, sources 
         const scope = memoryScope(targetDb, { repoId: REMOTE.id, destination: 'injection' });
         assert.equal(getMemory(targetDb, active, scope), null);
         // Importing the same file again changes nothing.
-        const again = await importMemories(targetDb, lines.join('\n') + '\n', { now: NOW });
+        const again = importMemories(targetDb, lines.join('\n') + '\n', { now: NOW });
         assert.equal(again.inserted, 0);
         assert.equal(again.tombstones, 0);
         assert.equal(again.unchanged, 2);
@@ -215,7 +215,7 @@ test('the sensitivity lattice never lowers a row and tombstones win in both dire
       const looser = insertMemory(targetDb, { repoId: REMOTE.id, title: 'Looser', body: 'Comes in as eligible.', sensitivity: 'private' });
       const goneThere = insertMemory(targetDb, { repoId: REMOTE.id, title: 'Gone there', body: 'Deleted at the source.' });
       const goneHere = insertMemory(targetDb, { repoId: REMOTE.id, title: 'Gone here', body: 'Deleted at the target.', deletedAt: NOW - 7 });
-      const result = await importMemories(targetDb, lines.join('\n') + '\n', { now: NOW });
+      const result = importMemories(targetDb, lines.join('\n') + '\n', { now: NOW });
       assert.deepEqual(result.rejected, []);
       const sensitivity = (id: string): unknown => targetDb.prepare('SELECT sensitivity FROM memories WHERE id = ?').get(id)?.sensitivity;
       const deleted = (id: string): unknown => targetDb.prepare('SELECT deleted_at FROM memories WHERE id = ?').get(id)?.deleted_at;
@@ -277,11 +277,11 @@ test('--map-repo moves a machine-local repository and a mapped tombstone still s
     await withTempHome(async (target) => {
       const targetDb = open(target);
       insertRepo(targetDb, { id: 'r_here', kind: 'common_dir', identity: '/home/other/work/.git' });
-      const unmapped = await importMemories(targetDb, lines.join('\n') + '\n', { now: NOW });
+      const unmapped = importMemories(targetDb, lines.join('\n') + '\n', { now: NOW });
       assert.equal(unmapped.inserted, 0);
       assert.match(unmapped.rejected[0]?.reason ?? '', /map-repo/);
 
-      const mapped = await importMemories(targetDb, lines.join('\n') + '\n', { now: NOW, mapRepo: { [LOCAL.id]: 'r_here' } });
+      const mapped = importMemories(targetDb, lines.join('\n') + '\n', { now: NOW, mapRepo: { [LOCAL.id]: 'r_here' } });
       assert.deepEqual(mapped.rejected, []);
       const material = materialHash('Moved', 'Comes from a common_dir repository.');
       const moved = targetDb.prepare('SELECT id, repo_id FROM memories WHERE content_hash = ?').get(contentHash('r_here', material));
@@ -309,12 +309,12 @@ test('--dry-run reports the counts and writes nothing; the file limits are enfor
       assert.equal(dry.applied, false);
       const targetDb = open(target);
       assert.equal(targetDb.prepare('SELECT COUNT(*) AS n FROM memories').get()?.n, 0);
-      const tooBig = await importMemories(targetDb, lines.join('\n') + '\n', { now: NOW, maxFileBytes: 10 });
+      const tooBig = importMemories(targetDb, lines.join('\n') + '\n', { now: NOW, maxFileBytes: 10 });
       assert.match(tooBig.rejected[0]?.reason ?? '', /256 MB|file size/i);
       // Blank lines count toward the limit too, and a flood of bad lines stops early.
-      const padded = await importMemories(targetDb, `${lines[0]}\n${' '.repeat(64)}\n`, { now: NOW, maxFileBytes: lines[0].length + 8 });
+      const padded = importMemories(targetDb, `${lines[0]}\n${' '.repeat(64)}\n`, { now: NOW, maxFileBytes: lines[0].length + 8 });
       assert.match(padded.rejected[0]?.reason ?? '', /file size/i);
-      const flood = await importMemories(targetDb, `${lines[0]}\n${'x\n'.repeat(500)}`, { now: NOW });
+      const flood = importMemories(targetDb, `${lines[0]}\n${'x\n'.repeat(500)}`, { now: NOW });
       assert.equal(flood.rejected.length, MAX_REJECTED + 1);
       assert.match(flood.rejected.at(-1)?.reason ?? '', /stopped here/);
       targetDb.close();

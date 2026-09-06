@@ -35,7 +35,7 @@ import { checkPaths, repositoryHead } from './staleness.js';
 
 
 /** Amendment A2: session start waits at most one second for a pending summary, then degrades. */
-export const SUMMARY_WAIT_MS = 1_000;
+const SUMMARY_WAIT_MS = 1_000;
 
 /** data-model.md memories.last_injected_at: a memory not injected for 90 days is retired. */
 const RETIREMENT_MS = 90 * 24 * 60 * 60 * 1_000;

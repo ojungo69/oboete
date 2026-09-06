@@ -22,9 +22,9 @@ import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from '.
 import type { VersionSpawn } from './setup/detect.js';
 import { describe, renderTable, VIEW_LINE } from './setup/setup.js';
 
-export const INTEGRITY_UNVERIFIED =
+const INTEGRITY_UNVERIFIED =
   'The database failed its integrity check, so this item could not be verified.';
-export const CONFIG_UNREADABLE =
+const CONFIG_UNREADABLE =
   'The configuration could not be read, so the provider was not checked.';
 
 export type DoctorStatus = 'healthy' | 'warning' | 'unverified' | 'degraded';

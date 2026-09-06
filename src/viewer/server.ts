@@ -78,7 +78,7 @@ function pageHtml(): string {
 }
 
 /** The browser launcher of contracts/cli.md `--open`; never through a shell. */
-export function openBrowser(url: string): void {
+function openBrowser(url: string): void {
   const [command, args] =
     process.platform === 'darwin'
       ? ['open', [url]]

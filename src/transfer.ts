@@ -4,7 +4,6 @@
 // in both directions, and every active imported row is quarantined as `local_only` /
 // `review_state = imported` until the worker classifies it. Nothing here is on the hook path.
 import { chmodSync, createReadStream, statSync, writeFileSync } from 'node:fs';
-import { createInterface } from 'node:readline';
 import type { DatabaseSync } from 'node:sqlite';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
@@ -16,8 +15,8 @@ import { ensureDirectories, oboetePaths, resolveHome } from './paths.js';
 import { cjkBigrams } from './retrieval/fts.js';
 
 export const EXPORT_FORMAT = 'oboete-export/1';
-export const MAX_LINE_BYTES = 64 * 1024;
-export const MAX_FILE_BYTES = 256 * 1024 * 1024;
+const MAX_LINE_BYTES = 64 * 1024;
+const MAX_FILE_BYTES = 256 * 1024 * 1024;
 /** Every rejection rolls the import back, so listing more than this many helps nobody. */
 export const MAX_REJECTED = 100;
 
@@ -236,23 +235,12 @@ function applyLine(
   else counts.inserted += 1;
 }
 
-async function* linesOf(source: string | AsyncIterable<string>): AsyncGenerator<string> {
-  if (typeof source === 'string') {
-    for (const line of source.split('\n')) yield line;
-    return;
-  }
-  yield* createInterface({ input: source as NodeJS.ReadableStream, crlfDelay: Number.POSITIVE_INFINITY });
-}
-
 /**
- * Reads `oboete-export/1` from a string or a line stream and applies it as one unit: a rejected
- * line, or `--dry-run`, rolls everything back, so the database is either fully imported or untouched.
+ * Reads `oboete-export/1` text and applies it as one unit: a rejected line, or `--dry-run`, rolls
+ * everything back, so the database is either fully imported or untouched. The caller bounds the
+ * text (runImport reads at most MAX_FILE_BYTES before opening the database).
  */
-export async function importMemories(
-  db: DatabaseSync,
-  source: string | AsyncIterable<string>,
-  options: ImportOptions,
-): Promise<ImportResult> {
+export function importMemories(db: DatabaseSync, source: string, options: ImportOptions): ImportResult {
   const result: ImportResult = { applied: false, inserted: 0, updated: 0, tombstones: 0, unchanged: 0, rejected: [] };
   const maxFileBytes = options.maxFileBytes ?? MAX_FILE_BYTES;
   const reject = (line: number, reason: string): void => {
@@ -288,7 +276,7 @@ export async function importMemories(
     let number = 0;
     let bytes = 0;
     let headerSeen = false;
-    for await (const raw of linesOf(source)) {
+    for (const raw of source.split('\n')) {
       const size = Buffer.byteLength(raw, 'utf8') + 1;
       bytes += size;
       if (bytes > maxFileBytes) {
@@ -449,7 +437,7 @@ export async function runImport(argv: string[], io: Io = { writeOut: (t) => proc
     return 2;
   }
   return await withDatabase(async (db) => {
-    const result = await importMemories(db, source, { now: Date.now(), dryRun, mapRepo });
+    const result = importMemories(db, source, { now: Date.now(), dryRun, mapRepo });
     for (const item of result.rejected) io.writeError(`line ${item.line}: ${item.reason}\n`);
     const summary = `${plural(result.inserted, 'memory', 'memories')} added, ${result.updated} raised in sensitivity, ${plural(result.tombstones, 'tombstone')} applied, ${result.unchanged} unchanged`;
     if (result.rejected.length > 0) {

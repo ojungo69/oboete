@@ -32,7 +32,7 @@ export type MemoryCliRuntime = {
 
 type CommandOptions = Record<string, { type: 'string' | 'boolean' }>;
 type ParsedCommand = ReturnType<typeof parseArgs>;
-export type SearchRow = {
+type SearchRow = {
   id: string;
   type: string;
   title: string;
