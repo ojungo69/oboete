@@ -1,0 +1,47 @@
+src/viewer/app/app.css
+  s_359fcac8e97f88::t_1f82e02076f315 1-53
+src/viewer/server.ts
+  s_359fcac8e97f88::t_6561dea0123a68 133-144
+  s_359fcac8e97f88::t_13d8c149229803 72-73
+specs/007-oboete-m1-alpha/tasks.md
+  s_359fcac8e97f88::t_4b539e8ca2e152 234
+test/unit/viewer-server.test.ts
+  s_359fcac8e97f88::t_6561dea0123a68 113,125-126,129
+src/viewer/app/tsconfig.json
+  s_359fcac8e97f88::t_1f82e02076f315 1-17
+src/viewer/app/api.ts
+  s_359fcac8e97f88::t_d7679638e9932b 1-109
+tsconfig.json
+  s_359fcac8e97f88::t_a2eae66e43c0c7 17
+specs/007-oboete-m1-alpha/plan.md
+  s_359fcac8e97f88::t_4b539e8ca2e152 297
+package.json
+  s_359fcac8e97f88::t_0822d276893bcf 22
+  s_359fcac8e97f88::t_ee3be8843f31b9 47
+eslint.config.js
+  s_359fcac8e97f88::t_0822d276893bcf 25-39
+  s_359fcac8e97f88::t_54692cf46577c7 24
+src/viewer/app/main.tsx
+  s_359fcac8e97f88::t_d4f59af4e535c8 1-250,252-259,261-296
+  s_359fcac8e97f88::t_13d8c149229803 251,260
+scripts/build.mjs
+  s_359fcac8e97f88::t_0822d276893bcf 55-70
+package-lock.json
+  s_359fcac8e97f88::t_c3e8d90fc0f782 34,752-755,759-763,765,768-771,775-778,781-782,785-788,791-792,795-799,801-804,808-811,813,815-818,822-825,829,832-835,839-846,849-858,861-864,868,871-874,1211-1215,1572-1573,1575,1578-1581,1583-1585,1587-1588,1591-1594,1596-1632,1635-1638,1640-1643,1645-1646
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "6c54dd5f532fa7c02fcd1d25dea5224fd18b678b",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
