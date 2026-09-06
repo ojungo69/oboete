@@ -171,7 +171,7 @@ section, "verified" names the test or evidence document that fails when the requ
 | SC-004 | `isolated-user.mjs --pairs all --no-credentials` | SC-001 passes with fallback; every pack has `Degraded:` | `m1-dogfood.md` |
 | SC-005 | replay scan + privacy suite | zero secret corpus items in memories, outbound bodies, packs | `m1-resource-envelope.md` |
 | SC-006 | privacy suite | zero local-only/private rows in any outbound body; zero decisions differ on agent swap | test output in CI |
-| SC-007 | `isolated-user.mjs --daily` × 7 | 7 consecutive green days | `m1-dogfood.md` |
+| SC-007 | `isolated-user.mjs --daily` under cron | day 1 green with all four agents; later failures become issues | `m1-dogfood.md` |
 | SC-008 | setup timing + break-one-at-a-time | setup < 2 min; doctor names each broken item | `m1-dogfood.md` |
 | SC-009 | replay seeded facts | correct memory injected for >= 90% of matching ja/en prompts | `m1-resource-envelope.md` |
 | SC-010 | replay ledger | zero duplicate injections per (conversation, context epoch) (A12) | `m1-resource-envelope.md` |

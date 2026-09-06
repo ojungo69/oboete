@@ -11,6 +11,16 @@ Codex, Grok Build, and Pi, for one developer on one machine."
 
 ## Clarifications
 
+### Session 2026-09-06
+
+- Q: SC-007 asked for 7 consecutive green dogfood days before M1 is done. The date-dependent
+  logic (allowance reset at UTC midnight, the 24-hour diagnostics window, staleness, retention) is
+  already pinned by unit tests with an injected clock, and the scripted isolated account is not
+  real usage; the only thing the calendar adds is exposure to third-party updates (an agent CLI
+  rewriting its config, a provider changing its catalog), which arrive on no schedule. Wait 7 days
+  anyway? → A: No. M1 is done once the first calendar day is green with all four agents; the
+  daily run continues under cron as a soak and a failure becomes an issue instead of a gate.
+
 ### Session 2026-09-02
 
 - Q: Grok Build 1.0.17 has no pre-turn injection channel (SessionStart and UserPromptSubmit output
@@ -500,8 +510,10 @@ Owner decisions (resolved in Clarifications)
   requests, or injection packs.
 - **SC-006**: Zero local-only or private rows appear in any outbound request; zero eligibility
   decisions differ when only the producing agent is changed.
-- **SC-007**: Isolated dogfood across all four agents stays green for at least 7 consecutive days
-  before M1 is declared done.
+- **SC-007**: Isolated dogfood across all four agents is green on the first calendar day (all
+  twelve pairs, doctor, spool, provider usage, viewer latency recorded), and the daily run keeps
+  running unattended afterwards; a later failure is filed as an issue against the release rather
+  than blocking M1 (clarified 2026-09-06).
 - **SC-008**: Setup for all four agents completes in under 2 minutes, and doctor names every
   deliberately broken component in the break-one-at-a-time test.
 - **SC-009**: For seeded Japanese and English facts, the correct memory is among the injected

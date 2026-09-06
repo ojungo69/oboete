@@ -297,8 +297,10 @@ The six Grok Build pairs ran later the same day (run 2026-09-06T11-19-17-715Z, g
 
 Notes for day 1: the run is driven by `/etc/cron.d/oboete-dogfood-daily` (hourly tick, one run per JST
 calendar day, skipped while the 1-minute load is 3.0 or more; the script lives at
-`/usr/local/lib/oboete-dogfood/oboete-daily.sh`). Grok pairs are excluded until the Grok quota hold
-ends on 2026-09-12; from 2026-09-13 the script runs all 12 pairs. The worker alive during this run
+`/usr/local/lib/oboete-dogfood/oboete-daily.sh`). Grok pairs were excluded from this first cron run
+for quota; the six Grok legs ran the same day in the no-credentials run above, and from day 2 the
+cron runs all 12 pairs. SC-007 was clarified the same evening: M1 is done once day 1 is green, and
+the daily run continues as a soak with failures filed as issues. The worker alive during this run
 (pid 305551) had been spawned two minutes earlier by a doctor probe without the credential
 environment, so its summaries fell back to rules (`provider` shows the last outcome
 `fallback/no_provider`); the 16 calls counted for the day come from the earlier runs. The cron

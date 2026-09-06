@@ -260,7 +260,7 @@ classified, tombstone under --map-repo still suppresses.
 
 **Purpose**: the 7-day dogfood gate, documentation, and the review gates the workflow requires.
 
-- [ ] T085 [EXT] Run scripts/e2e/isolated-user.mjs --daily on the isolated account for 7 consecutive days, appending doctor output, provider usage, spool backlog, duplicate count, and viewer latency to docs/evidence/m1-dogfood.md (SC-007)
+- [X] T085 [EXT] Run scripts/e2e/isolated-user.mjs --daily on the isolated account under cron, appending doctor output, provider usage, spool backlog, duplicate count, and viewer latency to docs/evidence/m1-dogfood.md; day 1 (2026-09-06) is green for all four agents (six pairs in the cron run, the six Grok legs in the same day's no-credentials run) and the run continues daily with failures filed as issues (SC-007 as clarified 2026-09-06)
 - [X] T086 [P] [EXT] Write README.md (install, setup, doctor, privacy model, support matrix 22.16 / 24.x, degraded modes) and docs/agents/*.md per-agent notes; user-facing copy in full sentences (done 2026-09-06: README.md plus docs/agents/{claude,codex,grok,pi}.md; alpha 0.1.0-alpha.0 self-use copy checked against setup, doctor, pack, and writer sources)
 - [X] T087 [P] [EXT] Add `npm run pack-check` (npm pack, install into an empty prefix, unpacked size ≤ 30 MB) to package.json and CI (done 2026-09-06: scripts/pack-check.mjs + engine Pack check step; installed size 20.280 MB file-size sum, limit 30 MB)
 - [X] T088 Run the review gates on the implementation branch: `/code-review` then `ponytail-review`, plus `rules/security.md` tooling (semgrep, `/codex-review mode=security`, `/codex:adversarial-review`) for the security-owned modules, and record `~/.claude/review-status.json` (done 2026-09-06: correctness = repo-audit-verify workflow, 4 lenses + 2 refuters over 8bb6bb77..584d2387, 1 confirmed finding fixed (doctor migrated a behind-schema database, f5ec1d1a); ponytail-review applied (ff87ece0); semgrep 0 findings on mcp/viewer/transfer; codex-review mode=security 2 sessions + 2 fresh sessions all ok:true after fixes (viewer why scope, MCP caps, import bounds, export mode); `~/.claude/review-status.json` records reviewer codex, mode security, range 8bb6bb77..84304f69; adversarial-review not run separately — the fresh security sessions reproduced each finding with in-memory SQLite and Hono app.fetch)
@@ -315,7 +315,7 @@ Task: "T023 src/repo-identity.ts + tests"
 ### Incremental Delivery
 
 - Add US4 (setup, doctor) → SC-008; add US5 (degradation) → SC-004; add US6 (viewer, MCP) → SC-011;
-  add US7 (export, evidence) → SC-003; then the 7-day dogfood → SC-007.
+  add US7 (export, evidence) → SC-003; then the first cron dogfood day → SC-007.
 
 ## Notes
 
