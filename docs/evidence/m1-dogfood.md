@@ -305,3 +305,63 @@ the daily run continues as a soak with failures filed as issues. The worker aliv
 environment, so its summaries fell back to rules (`provider` shows the last outcome
 `fallback/no_provider`); the 16 calls counted for the day come from the earlier runs. The cron
 script sources the credentials before it starts, so a worker it spawns carries them.
+
+## 2026-09-07 daily run (SC-007, day 2)
+
+- bundle 0.1.0-alpha.0, node v24.20.0, pairs `all`, 1-minute load at start 0.29, started 2026-09-06T15:05:04Z
+
+### Pairs (harness section, exit 0)
+
+#### 2026-09-06 run 2026-09-06T15-05-04-899Z
+
+- 12 of 12 pairs pass
+- No provider credentials: no
+- Report: <run>/report.json
+
+| seed | receive | status | elapsed ms | missing facts |
+|---|---|---:|---:|---|
+| claude | codex | pass | 79200 | none |
+| claude | grok | pass | 42937 | none |
+| claude | pi | pass | 42501 | none |
+| codex | claude | pass | 52282 | none |
+| codex | grok | pass | 53802 | none |
+| codex | pi | pass | 50555 | none |
+| grok | claude | pass | 50670 | none |
+| grok | codex | pass | 55621 | none |
+| grok | pi | pass | 107086 | none |
+| pi | claude | pass | 89452 | none |
+| pi | codex | pass | 56658 | none |
+| pi | grok | pass | 87474 | none |
+
+### Doctor (credentials sourced)
+
+| item | status | reason |
+|---|---|---|
+| config | healthy | Configuration at /home/oboete-dogfood/.oboete/config.toml loaded (mode 0o600). |
+| paused | healthy | Not paused. |
+| storage | healthy | `/home/oboete-dogfood/.oboete/memory.db` opened; PRAGMA quick_check returned ok; 75 memories. |
+| fts | healthy | Full-text search is available (lexical in M1). |
+| migration | healthy | The schema is at version 3, the latest this bundle knows. |
+| worker | healthy | No worker is running; a hook starts one when work is queued. |
+| spool | healthy | Spool is writable and empty. |
+| provider | unverified | Not probed this run; last worker outcome: fallback/no_provider/2026-09-06T10:04:16.743Z. |
+| allowance | healthy | Estimated 134 of 150 calls remaining today (2026-09-06); resets at 2026-09-07T00:00:00.000Z. |
+| catalog | warning | The catalog lists models that need a paid Workers plan; the configured model @cf/zai-org/glm-4.7-flash is only used if it is free. |
+| agent:claude | healthy | The hook fired and the event was stored (3337 milliseconds); trust: n/a. |
+| native-memory:claude | warning | claude: its own memory feature (claude_auto_memory) is enabled. oboete neither reads it nor changes it; the two run side by side. |
+| agent:codex | healthy | The hook fired and the event was stored (8445 milliseconds); trust: trusted. |
+| agent:grok | healthy | The hook fired and the event was stored (3783 milliseconds); trust: wired. |
+| agent:pi | healthy | The hook fired and the event was stored (5085 milliseconds); trust: wired. |
+| unrecognized-agents | healthy | No invocation from an unrecognized agent. |
+| pi | warning | The worker recorded pi_child_hang 2 times, last at 2026-09-06T08:43:51.944Z; the files are gone, this is the history. |
+
+### Metrics
+
+- Provider usage (UTC 2026-09-06): workers-ai 16 calls, 55.7 neurons, @cf/zai-org/glm-4.7-flash
+- Memories: 81 total, 81 live, 20 sharing a material hash (duplicates)
+- Injection items omitted as duplicate_in_conversation: 0 (cumulative)
+- Raw events failed: 0 of 235 (cumulative)
+- Spool backlog: 0 files (0 failed)
+- Viewer GET /api/memories: median 4 ms, max 42 ms over 5 requests, 8 memories listed (budget 2000 ms)
+- finished 2026-09-06T15:18:05Z, 1-minute load 0.60
+
