@@ -1,0 +1,57 @@
+{
+  "agent": "codex",
+  "agent_version": "codex-cli 0.153.0",
+  "captured_at": "2026-09-03T15:48:14.678Z",
+  "sources": [
+    "startup"
+  ],
+  "timeline": [
+    {
+      "event": "SessionStart",
+      "at": "2026-09-03T15:48:02.255Z",
+      "source": "startup",
+      "trigger": null,
+      "turn_id": null,
+      "session_id": "01a067f4-8dee-7663-a1ac-8ab9fa494854",
+      "keys": [
+        "session_id",
+        "transcript_path",
+        "cwd",
+        "hook_event_name",
+        "model",
+        "permission_mode",
+        "source"
+      ]
+    },
+    {
+      "event": "UserPromptSubmit",
+      "at": "2026-09-03T15:48:02.280Z",
+      "source": null,
+      "trigger": null,
+      "turn_id": "01a067f4-8e00-71c3-a93e-e4476aca41ae",
+      "session_id": "01a067f4-8dee-7663-a1ac-8ab9fa494854",
+      "keys": [
+        "session_id",
+        "turn_id",
+        "transcript_path",
+        "cwd",
+        "hook_event_name",
+        "model",
+        "permission_mode",
+        "prompt"
+      ]
+    }
+  ],
+  "session_starts": [
+    {
+      "session_id": "01a067f4-8dee-7663-a1ac-8ab9fa494854",
+      "transcript_path": "<run>/codex-session-start-sources/c/codex-home/sessions/2026/09/04/rollout-2026-09-04T00-47-55-01a067f4-8dee-7663-a1ac-8ab9fa494854.jsonl",
+      "cwd": "<repo>",
+      "hook_event_name": "SessionStart",
+      "model": "gpt-5.6-sol",
+      "permission_mode": "bypassPermissions",
+      "source": "startup"
+    }
+  ],
+  "pre_post": []
+}

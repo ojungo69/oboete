@@ -1,0 +1,501 @@
+{
+  "approach": "安全境界とSQLite契約を先に固定し、共通の捕捉・要約・検索・注入コアを作った後、4エージェントを実契約プローブ付きで縦に接続し、最後に隔離E2Eと7日間dogfoodでM1を判定する。",
+  "technical_context": {
+    "language": "TypeScript、Node.js >= 22.16。CLI、worker、MCP、viewer資産、SQL migrationを単一の dist/oboete.mjs にbundleし、Piには同bundleをimportする小さなsetup生成loaderだけを置く。",
+    "dependencies": [
+      "node:sqlite: WAL、FTS5、STRICT tableを使う唯一の永続化エンジン",
+      "ai: observerの構造化出力、provider切替、usage取得",
+      "@ai-sdk/openai-compatible: NVIDIA NIM、OpenRouter、Gemini、Ollama、Anthropic互換presetを同じ経路で扱う",
+      "workers-ai-provider: Cloudflare Workers AI既定preset。正確なpackage名とAPIはPhase 0で再確認する",
+      "zod: hook入力、設定、provider出力、export/import境界の検証",
+      "@secretlint/node: 保存前の秘密検出",
+      "@secretlint/secretlint-rule-preset-recommend: Secretlint本体だけでは実用ルールが不足するためのPrinciple VI追加例外",
+      "hono と @hono/node-server: loopback限定viewerとSSEをNode上で提供するための最小構成",
+      "preact: viewer SPA",
+      "vite: viewer資産とNode CLIを一つの実行bundleへまとめる",
+      "@modelcontextprotocol/sdk: stdio MCPを独自再実装しないための追加例外",
+      "smol-toml: 必須のconfig.tomlを安全に検証するための追加例外。既存agent設定の編集は部分更新とする",
+      "typescript、eslint、typescript-eslint: build前のtypecheckとlint専用のdev dependency"
+    ],
+    "storage": "既定は ~/.oboete/memory.db、OBOETE_HOMEとXDG/AppDataを解決する。SQLite WAL、foreign_keys=ON、synchronous=NORMAL。hookは短いbusy_timeoutで直接書き、失敗時は秘密伏せ字済みの一意なspool entryへ退避する。resident daemonやRPC portは置かない。",
+    "testing": "node:test、node:assert、temporary HOME、mock OpenAI互換server、複数子processによるSQLite競合試験、固定1,000-event fixture、4実agentを使う隔離LinuxユーザーE2E。build、typecheck、lint、test、npm pack、単一bundle、viewer API/SSE、provider失敗、12 ordered pairsをgateにする。",
+    "constraints": [
+      "M1は同一repositoryだけを注入範囲とし、vector、R2 sync、npm publication、macOS、Windowsは実装しない",
+      "agent provenanceは記録だけに使い、要約・検索・注入の適格性に使わない",
+      "新規memoryは保存直後から注入対象。approval queueは作らない",
+      "各agent固有memoryは検出して警告するだけで、読取・無効化・設定変更をしない",
+      "通常captureは300ms以内。DB競合・破損時もexit 0で、未保存内容はredacted spoolへ送る",
+      "session-start summary待ちは最大8秒、observer入力は最大12,000文字、worker RSSは150MB未満",
+      "Workers AI呼出しはsession終了時と10 turnごとの新規batchだけで、1 UTC日150回を上限とする",
+      "raw_eventsは7日で削除し、memoryはtombstoneまたはsupersession以外では消さない",
+      "remote egressはeligibleのみ。分類失敗はfail-closed、agent可用性はfail-open",
+      "Claude CodeとGrokのhook出力は10,000文字以下の平文で、JSON風の先頭・末尾や命令文を避ける",
+      "installed packageはunpacked 30MB未満を目標とし、telemetryを置かない",
+      "viewerはforeground実行時だけloopbackへbindし、MCPはagent所有のstdio子processとしてだけ動く"
+    ]
+  },
+  "source_tree": [
+    "package.json: bin、exports、Node下限、build/test/typecheck/lint契約",
+    "tsconfig.json: strict TypeScriptとNode/Preact設定",
+    "scripts/build.mjs: Viteのviewer出力をvirtual moduleとしてCLIへ埋め込み、単一bundleを生成",
+    "src/cli.ts: parseArgsによる全CLI dispatchと共通終了コード",
+    "src/contracts.ts: Zodによるevent、memory、observer、export、MCP契約",
+    "src/config.ts: OBOETE_HOME/XDG/AppData、config.toml、credential source、pause状態",
+    "src/storage.ts: node:sqlite接続、repository identity、transaction、migration runner",
+    "src/migrations/0001-core.sql: repos、sessions、turns、raw_events、worker_lease",
+    "src/migrations/0002-memory-search.sql: memories、source link、FTS5、CJK shadow、tombstone",
+    "src/migrations/0003-operations.sql: batches、injection ledger、destination rules、usage、diagnostics、sync_conflicts",
+    "src/privacy.ts: private span除去、path rule、Secretlint、entropy、伏せ字、sensitivity順序",
+    "src/capture.ts: native event正規化、300ms acceptance、spool回収、detached worker起動",
+    "src/observer.ts: worker lease、batch、provider preset、ADD/UPDATE/DELETE/NOOP適用、7日cleanup",
+    "src/fallback.ts: agent提供summaryとevent種別を使う同形状のルールベース要約",
+    "src/retrieval.ts: trigram/CJK/LIKE、BM25、RRF、MMR、citation staleness、適応的上限",
+    "src/injection.ts: session/prompt pack、marker、重複防止、Grok deferred state、why記録",
+    "src/agents/shared.ts: 共通hook stdin/stdout、agent判定、event id、常時exit 0",
+    "src/agents/claude.ts: Claude Code event adapter",
+    "src/agents/codex.ts: Codex hook、trusted_hash、rollout互換adapter",
+    "src/agents/grok.ts: Grok native event名、first-tool deferred injection",
+    "src/agents/pi.ts: Pi extension factory、bounded child process、例外封じ込め",
+    "src/setup.ts: agent検出、部分設定、egress確認、install/remove、実発火probe",
+    "src/doctor.ts: hook trust、DB/FTS、lease、provider、usage、spool、native memory警告",
+    "src/mcp.ts: search、timeline、get-by-idのstdio MCP",
+    "src/transfer.ts: version付きexport/import、content merge、tombstone、sensitivity単調性",
+    "src/viewer/server.ts: Hono loopback API、origin/CSRF保護、1秒polling SSE",
+    "src/viewer/app.tsx: Preactのsession/turn、search、pin、delete UI",
+    "src/viewer/style.css: viewerの最小responsive styling",
+    "test/unit/*.test.ts: migration、privacy、observer、retrieval、ledger、importの小さい回帰試験",
+    "test/contracts/<agent>/*.json: live probeで得た4 agentのversion付きhook fixture",
+    "test/fixtures/events-1000.ndjson: 決定的な英日、重複、秘密、大出力、4 agent workload",
+    "test/e2e/isolated-user.mjs: 別HOME・別Linuxユーザーで4 agentを実行するharness",
+    "evidence/m1-resource-envelope.json: hook時間、worker RSS、DB+WAL成長、環境情報",
+    "evidence/m1-dogfood.md: 12 pair、fallback、秘密corpus、7日連続結果"
+  ],
+  "schema": [
+    "schema_migrations: version INTEGER PRIMARY KEY、name、sha256、applied_at。SQLはimmutableでchecksum不一致を拒否し、PRAGMA user_versionも同期する",
+    "repos: id TEXT PRIMARY KEY、identity_kind remote|realpath、normalized_identity、display_root、created_at、last_seen_at。remoteからcredential/queryを除去してSHA-256化し、無い場合だけtoplevel realpathを使う",
+    "sessions: id、repo_id FK、agent、native_session_id、conversation_key、started_at、ended_at、status、turn_count、latest_summary_memory_id。UNIQUE(agent,native_session_id)でresumeを同一conversationとして扱う",
+    "turns: id、session_id FK、ordinal、native_prompt_id、started_at、ended_at、status。UNIQUE(session_id,ordinal)で10-turn batchと未完了turn除外に使う",
+    "raw_events: id TEXT PRIMARY KEY、repo_id、session_id、turn_id、agent、kind、native_event_id、content、payload_json、content_hash、sensitivity、classification_state、captured_at、expires_at、observed_batch_id。append-onlyで、contentは保存前にprivate除去・secret伏せ字済みとする",
+    "observation_batches: id、repo_id、session_id、through_event_id、trigger ten_turns|session_end、state pending|running|applied|fallback、provider_attempts、degraded_reason、claimed_at、completed_at。UNIQUE(session_id,through_event_id)で適用を冪等化する",
+    "memories: id、repo_id、type、title、content、cjk_bigram_shadow、content_hash UNIQUE、sensitivity、degraded_reason、source_session_id、valid_from、valid_to、system_from、system_to、superseded_by、pinned_at、pin_order、last_injected_at、deleted_at。hashにはrepo_idを含め、tombstone済み同内容を再活性化しない",
+    "memory_sources: memory_id、raw_event_id、citation_path、citation_commit、source_agent。PRIMARY KEY(memory_id,raw_event_id)でviewer、why、staleness検査に使う",
+    "memories_fts: FTS5 external-content index。content/titleはtrigram、cjk_bigram_shadowはU+E000 sentinel付き2文字tokenを3文字化して同じtrigram tokenizerへ載せる。3文字未満のqueryはescaped LIKEへ迂回し、この符号化はmigration固定前に日本語fixtureで検証する",
+    "destination_rules: destination remote_observer|local_observer|sync|injection、sensitivity、allowed、same_repo_required。PRIMARY KEY(destination,sensitivity)とし、全egress判定を一つの関数・seed tableへ集約する",
+    "injections: id、repo_id、session_id、conversation_key、turn_id、kind session_start|prompt|grok_deferred、channel、state built|attempted|emitted|omitted、marker、char_budget、degraded_reason、created_at、emitted_at",
+    "injection_items: injection_id、memory_id、decision included|omitted、reason、rank、bm25、rrf、mmr、stale、chars、conversation_key。included行にUNIQUE(conversation_key,memory_id)相当のpartial indexを置く",
+    "worker_lease: singleton_id CHECK(singleton_id=1)、owner_token、pid、acquired_at、heartbeat_at、expires_at。BEGIN IMMEDIATEとowner tokenでstale takeoverし、PIDだけを権威にしない",
+    "provider_usage: utc_day、preset、attempted_calls、reported_neurons、estimated_neurons、reset_at、exhausted_at、last_error_code、resolved_model。PRIMARY KEY(utc_day,preset)でcall予約をoutbound前にtransactionalに増やす",
+    "runtime_state: key PRIMARY KEY、value_json、updated_at。pause、最後のcleanup、schema状態など小さいmachine stateだけを保持する",
+    "diagnostics: id、kind、severity、agent、message_code、details_json、count、first_seen_at、last_seen_at、cleared_at。secret値を保存せずdoctorの根拠にする",
+    "sync_conflicts: M2互換の最小予約tableとしてid、repo_id、content_hash、local_state_json、remote_state_json、status、created_atを置くが、M1から書く経路は作らない",
+    "migration方針: setup、通常CLI、workerだけがmigrationを実行し、hookは未適用schemaを見たらredacted spoolへ逃がす。全migrationはtransactional・forward-only・checksum固定とし、fresh DBと前version fixtureの両方をtestする。将来の破壊的migrationだけ事前VACUUM INTO backupを要求する"
+  ],
+  "cli_contract": [
+    "oboete setup [--agents claude,codex,grok,pi] [--provider PRESET] [--remove]: installed agentを検出し、remote egress内容を表示・確認後に部分設定と実hook probeを行う。0=全選択成功、1=一部degraded、2=入力・確認不足、3=安全に設定更新できない",
+    "oboete doctor [--json] [--probe-provider]: agentごとの実発火・trust、DB integrity、FTS5、lease、provider、推定残量、exhaustion、spool、native memory共存を出す。0=healthy、1=degraded、2=usage error、3=storage integrity failure",
+    "oboete hook: hook stdin JSONを読み、必要時だけplain factual packをstdoutへ返す内部command。 malformed入力、DB障害、timeoutを含め常にexit 0",
+    "oboete capture --agent pi --event EVENT: Piのdetached child用。stdinの正規化済みeventを保存またはspoolし、常に0で終了する",
+    "oboete inject --agent pi --kind start|prompt: Pi childからbounded packをstdoutへ返す。0=packまたは明示的empty/degraded、2=invalid input",
+    "oboete observe [--batch ID]: spool回収、lease取得、分類、要約、cleanupを行い、queueが空なら終了する内部command。0=完了または別worker稼働中、1=fallback適用、3=回復不能storage error",
+    "oboete search QUERY [--json] [--limit N]: cwdからrepoを導出して同repoのactive memoryだけを返す。空結果も理由付きで0、2=invalid input、3=FTS/storage failure",
+    "oboete timeline [--session ID] [--json]: session/turn順にeventとmemory metadataを返す。0=成功、1=対象なし、2=invalid input、3=storage failure",
+    "oboete get MEMORY_ID [--json]: repo境界内のmemory、provenance、citation、状態を返す。0=成功、1=不存在または境界外、2=invalid input",
+    "oboete why SESSION_ID [--turn N] [--json]: packごとのincluded、検討対象からomittedになった候補、trim、stale、deferred、degraded理由を返す。0=成功、1=ledgerなし、2=invalid input",
+    "oboete pin MEMORY_ID [--order N] / unpin MEMORY_ID / delete MEMORY_ID: 同repoのmemoryを更新する。deleteはtombstoneで同contentを復活させない。0=成功、1=不存在、2=invalid input、3=storage failure",
+    "oboete pause / resume: runtime_stateだけを切替え、既存memoryを変更しない。0=成功、3=storage failure",
+    "oboete export [FILE|-]: schema version、repo identity、active memory、content無しtombstoneをJSONLで出す。0=成功、2=invalid destination、3=I/O failure",
+    "oboete import [FILE|-] [--dry-run]: content_hashでmergeし、tombstoneを維持し、sensitivityはより厳しい側だけを採用する。0=成功、1=競合を安全側で保留、2=invalid/untrusted format、3=storage failure",
+    "oboete mcp: stdio JSON-RPCでsearch、timeline、getを公開し、repo identityはMCP引数で受けずprocess cwdから導出する。0=正常EOF、2=protocol initialization error",
+    "oboete view [--host 127.0.0.1] [--port 0]: loopbackだけを許可し、session token付きURLを表示してforeground Hono/SSE viewerを動かす。0=正常終了、2=非loopback指定、3=bind/storage failure"
+  ],
+  "agent_adapters": [
+    {
+      "agent": "Claude Code",
+      "capture_events": [
+        "SessionStart: session開始とsourceを記録し、startup/compactだけstart packを返す",
+        "UserPromptSubmit: prompt捕捉とprompt relevance pack",
+        "PreToolUse: tool input",
+        "PostToolUse/PostToolUseFailure: tool outputと結果",
+        "Stop: last_assistant_messageを使ったturn終了",
+        "PostCompact: compact_summaryを無料のobserver入力として捕捉",
+        "SessionEnd: session終了を短時間で受理してworkerをdetach"
+      ],
+      "injection_channel": "SessionStartとUserPromptSubmitのplain stdout。先頭を `oboete memory context` とする事実文にし、10,000文字以内、常にexit 0。resumeではtranscript replayを信頼して再注入しない。",
+      "setup_writes": [
+        "~/.claude/settings.jsonへoboete所有handlerだけをmergeし、削除時も同handlerだけを除く",
+        "SessionStart timeoutを8秒待ち+余裕の10秒以上にする",
+        "user-scoped MCP登録はPhase 0で確認した公式経路を使う"
+      ],
+      "caveats": [
+        "stdoutが波括弧で始まり終わるとJSON誤解釈で無言消失する",
+        "UserPromptSubmitのexit 2はprompt自体を消す",
+        "SessionEnd全体は1.5秒でflush点にできない",
+        "workspace trust、managed-hook-only、disableAllHooksでは発火しないため実probeが必要",
+        "transcript schemaには依存せずlast_assistant_messageとcompact_summaryを優先する"
+      ]
+    },
+    {
+      "agent": "Codex CLI",
+      "capture_events": [
+        "SessionStart: startup/compactでstart pack、resumeは再注入なし",
+        "UserPromptSubmit: prompt捕捉とprompt pack",
+        "PreToolUse/PostToolUse: input/output",
+        "Stop/Interrupt: turn終了または中断",
+        "PostCompact: compaction境界",
+        "SessionEnd: session終了とdetached worker起動"
+      ],
+      "injection_channel": "SessionStartとUserPromptSubmitのadditionalContextだけを使う。handlerにadditionalContextLimit=0を明記し、OS tempへの2,500-token spillを無効化する。",
+      "setup_writes": [
+        "~/.codex/hooks.jsonへClaude互換JSON handlerをmerge",
+        "~/.codex/config.tomlへcanonical handler JSONのsha256 trusted_hashをroot dotted keyとして最小挿入",
+        "user-scoped MCP登録は公式CLIまたは確認済みconfig editを使う"
+      ],
+      "caveats": [
+        "trusted_hashが無い・不一致だとhookはexit 0のまま無言でskipされる",
+        "TOML全体の再serializeはコメントや無関係設定を壊すため行わない",
+        "現行rollout tool recordはcustom_tool_call/custom_tool_call_outputで、function_callはlegacy扱い",
+        "SessionEndは既定1秒・最大3秒でasync指定も同期化される",
+        "native memories設定は警告だけで変更しない"
+      ]
+    },
+    {
+      "agent": "Grok Build",
+      "capture_events": [
+        "SessionStart/UserPromptSubmit: event捕捉とpending pack作成のみ",
+        "PreToolUse: first-tool deferred packをattemptedとして返す",
+        "PostToolUse/PostToolUseFailure: tool結果捕捉とdeferred delivery確定",
+        "Stop reason=end_turn: lastAssistantMessageとturn終了",
+        "PostCompact: compaction境界",
+        "SessionEnd: session終了"
+      ],
+      "injection_channel": "turn開始前の経路は無い。最初のtool callでPreToolUseがpackを出すが確定はせず、対応するPostToolUseがattemptを確認してdeliveredにする。Preが走らなかった場合だけPostがpackを出す。denyではpendingを残し、次のtool callへ再試行する。",
+      "setup_writes": [
+        "~/.grok/hooks/oboete.jsonへ専用handlerを置き、Claude互換layerとbyte-identicalな二重登録を避ける",
+        "SessionStart/PreToolUse/PostToolUse timeoutを明示し、pack上限を10,000文字にする",
+        "確認済みのuser-scoped MCP登録を追加する"
+      ],
+      "caveats": [
+        "SessionStart/UserPromptSubmit stdoutはモデルへ届かない",
+        "PreToolUse contextはtool実行後に届き、denyでは消える",
+        "toolを呼ばないturnは注入なしとしてwhyとdoctorへ記録する",
+        "GROK_HOOK_EVENTをCLAUDE_PROJECT_DIRより先に見てagent誤判定を防ぐ",
+        "Stopはturn終了とsession終了で二回発火する",
+        "Claude plugin/hooksも加算的に発見されるためevent idとhandlerの両方を冪等化する"
+      ]
+    },
+    {
+      "agent": "Pi",
+      "capture_events": [
+        "session_start: session開始",
+        "input: interactive/rpc promptだけを捕捉しextension由来入力を除外",
+        "tool_result: toolName、input、content、isError、usageを一度に捕捉",
+        "agent_settled: 一つのuser turn終了",
+        "確認済みcompaction event: summary捕捉と次promptでstart pack再要求",
+        "session_shutdown: session終了"
+      ],
+      "injection_channel": "before_agent_startからbounded child `oboete inject`を起動し、結果をcustom messageとして返す。初回はstart+prompt、以後はprompt pack。DB・network処理はPi process内で行わない。",
+      "setup_writes": [
+        "~/.pi/agent/extensions/oboete.tsへ単一bundleをimportする薄いglobal loader",
+        "確認済みPi MCP設定、またはextensionからstdio MCPへ接続する設定",
+        "remove時はoboete所有loaderだけを削除"
+      ],
+      "caveats": [
+        "handlerに強制timeoutがなく逐次awaitされるため、全処理をtry/catchし自前AbortControllerでchildを期限管理する",
+        "captureはstdio待ちをせずdetached childへ渡す",
+        "appendEntryはLLM contextへ届かないので注入に使わない",
+        "project-local extensionはtrust前やheadlessで黙って無効になるためglobal配置を使う",
+        "Pi 0.84.4自体はNode >=22.19を要求するため、その環境ではcoreの22.16下限を自然に上回る"
+      ]
+    }
+  ],
+  "phases": [
+    {
+      "name": "Phase 0: 未確定契約の閉鎖と最小骨格",
+      "goal": "仕様を変えず、実装を左右する未検証の第三者契約だけをlive probeで閉じ、単一bundleの土台を作る。",
+      "steps": [
+        "4 agentの代表tool input/output、Codex PostToolUse時のrollout flush、Pi compaction eventをthrowaway HOMEで採取する",
+        "4 agentのuser-scoped MCP登録、native memory検出、effective context limit取得方法を一次資料と実probeで記録する",
+        "Workers AI provider package、Vercel AI SDK構造化出力API、catalogのfree model判定を再確認する",
+        "Principle VI追加dependencyの理由、FR-001..045とSC-001..011のtraceability表を確定する",
+        "Vite APIでviewerを埋め込んだ単一CLI bundle、node:test、typecheck、lintを起動できる骨格を作る"
+      ],
+      "files": [
+        "package.json",
+        "tsconfig.json",
+        "scripts/build.mjs",
+        "src/cli.ts",
+        "src/contracts.ts",
+        "docs/research/oboete-agent-mcp-contracts.md",
+        "test/contracts/"
+      ],
+      "risks": [
+        "hook/MCP仕様がagent更新で変わる",
+        "spec.mdがDraftのまま実装gateへ進む可能性",
+        "追加dependencyが30MB目標またはPrinciple VIに抵触する"
+      ],
+      "verification": "各probeを二回再現し、version付きfixtureへ固定する。npm run typecheck、lint、test、build、npm pack --dry-runを通し、distのengineが1ファイルかつunpacked 30MB未満であることを確認する。"
+    },
+    {
+      "name": "Phase 1: SQLite acceptance pointと秘密境界",
+      "goal": "競合・破損・秘密入力でもagentを止めず、redacted eventを一度だけ受理できる最小kernelを完成させる。",
+      "steps": [
+        "repository remoteまたはtoplevel realpathからrepo idを導出し、payloadのrepo idを無視する",
+        "番号付きmigration、STRICT/CHECK/FK、WAL、短いbusy_timeout、checksumを実装する",
+        "private spanを深さ付きscanで除去し、未閉鎖tagは残り全文を除去する",
+        "path rule、Secretlint、entropyで保存前に伏せ字し、判定timeout時は全文redacted placeholderへ落とす",
+        "決定的event id、direct SQLite insert、1 event 1 fileのatomic spool、idempotent recoveryを作る",
+        "pause/resume、unknown agent、capture failure diagnosticsを追加する"
+      ],
+      "files": [
+        "src/config.ts",
+        "src/storage.ts",
+        "src/migrations/0001-core.sql",
+        "src/migrations/0002-memory-search.sql",
+        "src/migrations/0003-operations.sql",
+        "src/privacy.ts",
+        "src/capture.ts",
+        "test/unit/storage.test.ts",
+        "test/unit/privacy.test.ts",
+        "test/unit/capture.test.ts"
+      ],
+      "risks": [
+        "@secretlint/nodeのcold startが300ms予算を圧迫する",
+        "巨大tool outputの完全保存、完全scan、300msを同時に満たせない可能性",
+        "disk full時の損失件数を同じdiskへ確実に永続化することは原理的に難しい",
+        "remote URLに埋め込まれたcredentialをidentityへ混入させる危険"
+      ],
+      "verification": "secret corpusがDB、spool、logのどこにも現れないこと、private除去、agent名だけ変更したeligibility同値性、32並行process、DB lock/corrupt/read-only HOMEでhook exit 0と300ms境界を試験する。"
+    },
+    {
+      "name": "Phase 2: Detached workerとobserver",
+      "goal": "一台一worker、10-turn/session-end batch、remote/local/fallbackの同形状memory生成を実現する。",
+      "steps": [
+        "spawn detached + unrefでobserveを開始し、worker_leaseをtransactionalに取得・heartbeat・stale takeoverする",
+        "spool回収、追加eventだけのbatch作成、7日raw cleanup、queue空でのlease解放と終了を実装する",
+        "Cloudflare Workers AIを既定にし、NVIDIA NIM、OpenRouter、Gemini、Ollama、Anthropic presetをOpenAI互換clientで定義する",
+        "workerで再度Secretlintとentropyを通し、remoteへはeligibleだけ、localへは同repoのeligible/local_only/privateだけを渡す",
+        "12,000文字excerpt、agent提供last message/compact summary、nearby memoryをobserver入力へ含める",
+        "Zod検証済みADD/UPDATE/DELETE/NOOPを一transactionで適用し、memory出力にも二回目のsecret scanを掛ける",
+        "session終了と10 turnごとに新規eventがある場合だけ1 callとし、150 attempts/day、UTC reset、3036 exhaustion、model alias不一致を記録する",
+        "malformed outputは一度だけ再試行し、content=null、length、network、cap、credentialなしではrule-based fallbackを使う"
+      ],
+      "files": [
+        "src/observer.ts",
+        "src/fallback.ts",
+        "src/storage.ts",
+        "src/contracts.ts",
+        "test/unit/observer.test.ts",
+        "test/unit/fallback.test.ts"
+      ],
+      "risks": [
+        "外部provider call後・DB commit前のcrashではprovider再呼出しを完全には防げない",
+        "Workers AI JSON Schemaは実測成功でも公式保証対象外",
+        "account-wide allowanceの真の残量は取得できない",
+        "時計ずれによるUTC reset誤差"
+      ],
+      "verification": "mock providerで正常、malformed、null content、429/3036、403/5035、timeout、alias変更を再現する。1 batch 1回、150回停止、残余fallback、exactly-once DB apply、言語保持、lease takeover、RSS 150MB未満を確認する。"
+    },
+    {
+      "name": "Phase 3: 検索、適応的pack、注入ledger",
+      "goal": "同repoの英日memoryを高精度・重複なしで選び、注入理由と劣化を後から説明可能にする。",
+      "steps": [
+        "FTS5 trigramとsentinel付きCJK bigram shadowを同期triggerで維持し、3文字未満はescaped LIKEにする",
+        "BM25のtrigram/CJK候補をRRFで統合し、文字n-gram similarityのMMRで重複内容を除く",
+        "thresholdをtop scoreに対する相対値とfixture校正済みfloorから決め、全DB件数を固定limitで切らない",
+        "agent/modelのdocumented context windowに一定割合を掛け、channel ceilingと小さい方をcharacter budgetにする",
+        "session startは最新の完了session summaryとpin order、prompt時はrelevance候補を選ぶ",
+        "90日未注入memoryを自動候補から外し、pinを例外とし、注入時にlast_injected_atを更新する",
+        "citation path/commitをshell無しで検証し、既定ではstaleness note付きで残す",
+        "marker、included/omitted、trim、empty/degraded、conversation単位dedup、summary pending 8秒fallbackをledgerへ保存する"
+      ],
+      "files": [
+        "src/retrieval.ts",
+        "src/injection.ts",
+        "src/storage.ts",
+        "test/unit/retrieval.test.ts",
+        "test/unit/injection.test.ts"
+      ],
+      "risks": [
+        "一つのFTS5 tokenizerでtrigramとCJK bigramを扱う符号化に誤検出が出る",
+        "各agent/modelのeffective context windowが安定して取得できない",
+        "hook stdoutがagentに消費された事実をDBと原子的に確定できない",
+        "BM25値をagent横断で絶対scoreとして扱うとthresholdが不安定になる"
+      ],
+      "verification": "英日golden queryでSC-009の90%以上、別repo漏洩0、session内重複0、10,000文字trim、8秒summary pending、stale citation、90日retirement、whyの全候補理由を試験する。"
+    },
+    {
+      "name": "Phase 4: Claude CodeとCodexの完全縦切り",
+      "goal": "二つのpre-turn注入可能agentでcaptureからcross-agent injectionまでを先に成立させる。",
+      "steps": [
+        "共通hook commandとevent normalizerを実装し、Claudeのlast_assistant_message/compact_summaryを直接使う",
+        "Claude settingsをatomic backup付きで部分mergeし、exit 0、plain stdout、10,000文字を固定する",
+        "Codex hooks.json、additionalContextLimit=0、canonical trusted_hashの計算と最小TOML編集を実装する",
+        "startup/compactとresumeを区別し、同conversation replayで二重注入しない",
+        "両agentのcapture/injection/MCP実発火probeをsetupとdoctorへ接続する"
+      ],
+      "files": [
+        "src/agents/shared.ts",
+        "src/agents/claude.ts",
+        "src/agents/codex.ts",
+        "src/setup.ts",
+        "src/doctor.ts",
+        "test/contracts/claude/",
+        "test/contracts/codex/"
+      ],
+      "risks": [
+        "Codex trust canonicalizationのversion drift",
+        "Claude workspace trustとCodex managed-hook-onlyによるsilent skip",
+        "既存設定を部分更新するparserの境界ケース",
+        "compaction/clear/resume matcherの意味差"
+      ],
+      "verification": "fresh HOMEでinstall/removeの往復後に無関係設定がbyte-equivalentで残ることを確認する。Claude→Codex、Codex→Claudeの3 facts、fallback、resume、compact、hook disabledを実CLIで通す。"
+    },
+    {
+      "name": "Phase 5: Grok deferredとPi in-process安全化",
+      "goal": "契約上弱い二つのagentを、Grokは事後注入、Piは外部child隔離でfail-openに接続する。",
+      "steps": [
+        "Grokのpending pack、Pre attempt、Post confirm/fallbackの状態機械を実装する",
+        "deny、既存guard、toolなしturn、Stop二重発火、Claude互換hook重複をledgerへ反映する",
+        "Pi global extensionからcapture childをdetachし、before_agent_startだけbounded inject childをawaitする",
+        "Piのinput source filter、tool_result一本化、agent_settled、session_shutdown、compactionを正規化する",
+        "全Pi handlerをtry/catchし、timeout/throwをdiagnosticへbest-effort記録する",
+        "Grok/Piのsetup、remove、doctor、MCP probeを追加する"
+      ],
+      "files": [
+        "src/agents/grok.ts",
+        "src/agents/pi.ts",
+        "src/setup.ts",
+        "src/doctor.ts",
+        "src/injection.ts",
+        "test/contracts/grok/",
+        "test/contracts/pi/"
+      ],
+      "risks": [
+        "Grok hook layer間順序が非公開",
+        "最初のtool callがdenyされた場合は次のtool callまでpackが届かない",
+        "Pi child timeout実装の不備がPi本体をhangさせる",
+        "Piの--no-extensionsやGrokのdisabled hookでは完全性を保証できない"
+      ],
+      "verification": "Grok allowed/denied/no-toolの各runでfirst tool result時点のpackとwhy状態を照合する。Piでchild hang、throw、DB lockを注入し、agent turnが継続することとcapture復旧を実CLIで確認する。"
+    },
+    {
+      "name": "Phase 6: 利用者向けCLI、MCP、viewer、移送",
+      "goal": "記憶の検査・訂正・検索・portable exportを、同じrepo/privacy境界の上へ載せる。",
+      "steps": [
+        "search、timeline、get、why、pin、unpin、delete、pause、resumeをstorage serviceへ直接接続する",
+        "stdio MCPのsearch/timeline/getを同じserviceへ接続し、repo引数を受け付けない",
+        "exportにactive memoryとcontent無しtombstoneを含め、importはcontent hash mergeとsensitivity maxを使う",
+        "Honoを127.0.0.1/::1だけにbindし、random session tokenとOrigin検査でmutation APIを守る",
+        "Preact SPAでsession/turn、sensitivity、provenance、search、pin、deleteを提供する",
+        "viewer processがDB update sequenceを1秒間隔でpollし、SSEで2秒以内に通知する",
+        "setupを2分以内、removeを可逆にし、doctorのbreak-one-at-a-time理由と結果を整える"
+      ],
+      "files": [
+        "src/cli.ts",
+        "src/mcp.ts",
+        "src/transfer.ts",
+        "src/setup.ts",
+        "src/doctor.ts",
+        "src/viewer/server.ts",
+        "src/viewer/app.tsx",
+        "src/viewer/style.css",
+        "test/unit/transfer.test.ts",
+        "test/unit/viewer.test.ts"
+      ],
+      "risks": [
+        "localhostだけではCSRF対策にならない",
+        "MCP process cwdと実repositoryのずれ",
+        "export仕様の非削除memoryとtombstone保存要件の表面的な矛盾",
+        "SSE pollingが長時間viewerでWAL checkpointを妨げる可能性"
+      ],
+      "verification": "API/MCP/CLIの同一結果、境界外IDの不存在扱い、import downgrade拒否、deleted content非復活、loopback以外bind拒否、CSRF拒否、memory作成からSSE表示まで2秒以内を試験する。"
+    },
+    {
+      "name": "Phase 7: 1,000-event evidence、隔離E2E、dogfood",
+      "goal": "SC-001..011を実測し、maintainer環境へ入れずにM1判定可能な証拠を残す。",
+      "steps": [
+        "4 agent、英日、秘密、private、重複、大出力を含む決定的1,000-event fixtureを確定する",
+        "performance.nowでhook時間、worker自身のprocess.memoryUsage().rss、DB+WAL+SHM sizeを測定する",
+        "DB missing/locked/corrupt、worker kill、provider error、read-only HOME、disk full相当を一つずつ注入する",
+        "別Linuxユーザーと別HOMEにpack済みoboeteをinstallし、独立した4 agent loginだけを使う",
+        "4 agentの異なるordered pair 12通りで3 facts、英日検索、Grok first-tool timing、fallbackを自動実行する",
+        "秘密corpusがDB、request capture、injectionに0件であることを機械比較する",
+        "7日連続dogfoodの毎日doctor、provider usage、spool、重複、viewer更新を記録する",
+        "7日green後もmaintainer承認なしには本人環境へinstallしない"
+      ],
+      "files": [
+        "test/fixtures/events-1000.ndjson",
+        "test/e2e/isolated-user.mjs",
+        "test/e2e/faults.mjs",
+        "evidence/m1-resource-envelope.json",
+        "evidence/m1-dogfood.md"
+      ],
+      "risks": [
+        "4 agentのloginまたはquotaがCIで再現できない",
+        "OS cacheや他process負荷で300ms/RSS測定が揺れる",
+        "7日間のagent upgradeで契約が途中変化する",
+        "disk fullの厳密なloss countは外部監視なしでは保証不能"
+      ],
+      "verification": "SC-001の12/12、SC-002の99%以上300ms内かつ全turn継続、RSS 150MB未満、秘密0、remote restricted row 0、検索90%以上、重複0、viewer 2秒以内、setup 2分以内、7日連続greenを満たして初めてM1 done候補とする。"
+    }
+  ],
+  "alternatives_considered": [
+    {
+      "option": "resident daemon、RPC server、常駐single writer",
+      "why_rejected": "Principle IIに反し、M1の一ファイル・daemon無しという製品境界を壊す。短命hookのWAL直書きとredacted spoolで吸収する。"
+    },
+    {
+      "option": "agentごとのSQLiteまたはagent provenanceによるpartition",
+      "why_rejected": "自動cross-agent memoryとagent-neutral eligibilityを破壊する。境界はrepoとsensitivityだけにする。"
+    },
+    {
+      "option": "GrokへAGENTS.mdやproject ruleを書いてpre-turn注入を模倣",
+      "why_rejected": "Clarificationでfirst-tool後のdeferred注入が決定済みで、永続instruction fileを毎turn書き換える方が汚染と競合を増やす。"
+    },
+    {
+      "option": "毎turn Workers AIを呼ぶ",
+      "why_rejected": "実測約45 neurons/callではfree allowanceを使い切る。10 turn/session-end batchと150/day capを採用する。"
+    },
+    {
+      "option": "agent提供summaryだけを使いobserverを削除",
+      "why_rejected": "無料入力として最大限再利用するが、FR-010のmemory分類とprovider preset要件を満たさない。credentialなし時のfallbackには使う。"
+    },
+    {
+      "option": "memory approval queue",
+      "why_rejected": "Clarificationのstore-then-reviewに反する。訂正はpin/delete/tombstoneで行う。"
+    },
+    {
+      "option": "固定token上限またはtop-N検索",
+      "why_rejected": "適応的context割合とrelevance threshold要件に反する。character budgetはcontext windowとchannel ceilingから計算する。"
+    },
+    {
+      "option": "M1でsqlite-vec、embedding、R2、age、aws4fetchを先行導入",
+      "why_rejected": "M2の範囲でありM1を遅らせる。schemaとCLI seamだけを将来互換に保つ。"
+    },
+    {
+      "option": "TOMLとMCPを独自の簡易parser/protocolで実装",
+      "why_rejected": "credential/configとagent tool境界で欠陥を増やす。小さい標準実装dependencyを理由付き例外として採用する。"
+    },
+    {
+      "option": "既存agent native memoryを読み込む、または無効化する",
+      "why_rejected": "FR-043とcredential/session store境界に反する。setup/doctorの共存警告だけに限定する。"
+    }
+  ],
+  "unknowns": [
+    "Claude Code、Codex、Grokの代表tool payload実形状とCodex PostToolUse時のrollout flush保証",
+    "4 agentのuser-scoped MCP登録先・trust・headless動作は今回のresearchで未検証",
+    "Claude auto-memoryを含むnative memory機能の安全な検出契約",
+    "各agent/modelのeffective context windowをhook時に取得できるか。取得不能時のversion付き保守値",
+    "workers-ai-providerの2026-09時点の正確なpackage名、AI SDK互換version、catalog APIの安定性",
+    "FTS5単一trigram tokenizer上のsentinel付きCJK bigram shadowが十分なBM25品質を出すか",
+    "@secretlint/nodeの単一bundle cold startが300ms以内か。超巨大eventの完全保存との両立",
+    "外部provider call後かつDB commit前のcrashに対する完全なexactly-once provider invocationは可能か",
+    "disk full時のloss countを同じlocal diskだけでdurableに残す方法",
+    "Piの正確なcompaction eventと既知の `pi -p --no-session` hangの影響",
+    "OBOETE_HOME、~/.oboete、XDG、AppDataの優先順位を憲法の二つの記述間で最終固定する必要",
+    "setupのreal agent probeが既存loginを読まず、2分以内かつ追加課金なしで全agentを検証できるか",
+    "Claude/Grok hookの10,000文字超過previewやCodex context上限が将来versionで変わった場合の最小対応version",
+    "spec.mdのStatusがDraftのままなので、実装開始前にowner承認済みへ移す必要があるか"
+  ],
+  "estimated_complexity": "large"
+}

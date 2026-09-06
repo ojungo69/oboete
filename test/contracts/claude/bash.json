@@ -1,0 +1,52 @@
+{
+  "agent": "claude",
+  "agent_version": "2.1.259 (Claude Code)",
+  "captured_at": "2026-09-03T15:43:49.670Z",
+  "native_tool": "Bash",
+  "normalized_tool": "bash",
+  "events": {
+    "PreToolUse": {
+      "session_id": "31654ffb-33da-460d-9fd7-2a0f3b21873b",
+      "transcript_path": "~/.claude/projects/<run>-claude-payload-shapes-repo/31654ffb-33da-460d-9fd7-2a0f3b21873b.jsonl",
+      "cwd": "<repo>",
+      "prompt_id": "a32a184c-2a67-4f46-a46f-927833ae6c4f",
+      "permission_mode": "bypassPermissions",
+      "effort": {
+        "level": "high"
+      },
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "echo probe-ok",
+        "description": "Echo probe-ok"
+      },
+      "tool_use_id": "toolu_01QyCYzBn6xTz27nvXjCQsMu"
+    },
+    "PostToolUse": {
+      "session_id": "31654ffb-33da-460d-9fd7-2a0f3b21873b",
+      "transcript_path": "~/.claude/projects/<run>-claude-payload-shapes-repo/31654ffb-33da-460d-9fd7-2a0f3b21873b.jsonl",
+      "cwd": "<repo>",
+      "prompt_id": "a32a184c-2a67-4f46-a46f-927833ae6c4f",
+      "permission_mode": "bypassPermissions",
+      "effort": {
+        "level": "high"
+      },
+      "hook_event_name": "PostToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "echo probe-ok",
+        "description": "Echo probe-ok"
+      },
+      "tool_response": {
+        "stdout": "probe-ok",
+        "stderr": "",
+        "interrupted": false,
+        "isImage": false,
+        "noOutputExpected": false
+      },
+      "tool_use_id": "toolu_01QyCYzBn6xTz27nvXjCQsMu",
+      "duration_ms": 41
+    }
+  },
+  "notes": "tool_input.command ; tool_response has NO command echo — Pre/Post must be joined by tool_use_id"
+}

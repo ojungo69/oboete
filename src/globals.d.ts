@@ -1,0 +1,11 @@
+declare const OBOETE_VERSION: string;
+
+declare module '*.sql' {
+  const text: string;
+  export default text;
+}
+
+declare module '*.md' {
+  const text: string;
+  export default text;
+}

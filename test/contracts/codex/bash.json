@@ -1,0 +1,39 @@
+{
+  "agent": "codex",
+  "agent_version": "codex-cli 0.153.0",
+  "captured_at": "2026-09-03T15:46:39.556Z",
+  "native_tool": "Bash",
+  "normalized_tool": "bash",
+  "events": {
+    "PreToolUse": {
+      "session_id": "01a067f2-e8e0-7061-881c-7465eb4eba9e",
+      "turn_id": "01a067f2-e8f3-75f3-95b2-386086502208",
+      "transcript_path": "<run>/codex-payload-shapes/codex-home/sessions/2026/09/04/rollout-2026-09-04T00-46-07-01a067f2-e8e0-7061-881c-7465eb4eba9e.jsonl",
+      "cwd": "<repo>",
+      "hook_event_name": "PreToolUse",
+      "model": "gpt-5.6-sol",
+      "permission_mode": "bypassPermissions",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "echo probe-ok"
+      },
+      "tool_use_id": "exec-84785e64-c8ba-481b-aeb5-2d15f5da42a5"
+    },
+    "PostToolUse": {
+      "session_id": "01a067f2-e8e0-7061-881c-7465eb4eba9e",
+      "turn_id": "01a067f2-e8f3-75f3-95b2-386086502208",
+      "transcript_path": "<run>/codex-payload-shapes/codex-home/sessions/2026/09/04/rollout-2026-09-04T00-46-07-01a067f2-e8e0-7061-881c-7465eb4eba9e.jsonl",
+      "cwd": "<repo>",
+      "hook_event_name": "PostToolUse",
+      "model": "gpt-5.6-sol",
+      "permission_mode": "bypassPermissions",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "echo probe-ok"
+      },
+      "tool_response": "probe-ok\n",
+      "tool_use_id": "exec-84785e64-c8ba-481b-aeb5-2d15f5da42a5"
+    }
+  },
+  "notes": "tool_input.command; tool_response is a bare string"
+}

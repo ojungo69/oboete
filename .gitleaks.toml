@@ -23,3 +23,29 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 paths = ['''^(legacy/)?harness/evidence/secrets\.test\.ts$''']
 regexes = ['''^0123456789abcdefghij$''']
+
+# 合成シークレット corpus (T024)。secretlint が検出できる正しい形式である必要があるので、
+# 値を崩して gitleaks を避けることはできない。path だけでなく、この corpus が実際に
+# 鳴らす 16 ルールに限定して外す (他の型の本物の値はこのファイルでも検出される)。
+[[allowlists]]
+description = "Synthetic secret corpus for the redaction tests (test/corpus/secrets.jsonl)."
+condition = "AND"
+targetRules = [
+  "gcp-api-key",
+  "generic-api-key",
+  "github-fine-grained-pat",
+  "github-pat",
+  "gitlab-pat",
+  "grafana-service-account-token",
+  "jwt",
+  "notion-api-token",
+  "npm-access-token",
+  "openai-api-key",
+  "private-key",
+  "sendgrid-api-token",
+  "slack-bot-token",
+  "slack-webhook-url",
+  "stripe-access-token",
+  "vault-service-token",
+]
+paths = ['''^test/corpus/secrets\.jsonl$''']

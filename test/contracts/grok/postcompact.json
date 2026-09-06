@@ -1,0 +1,45 @@
+{
+  "agent": "grok",
+  "PreCompact": {
+    "hookEventName": "pre_compact",
+    "sessionId": "01a06800-30c4-7d11-b7d4-184941e9c38a",
+    "cwd": "<repo>",
+    "workspaceRoot": "<repo>/",
+    "timestamp": "2026-09-03T16:00:48.381008936+00:00",
+    "transcriptPath": "<run>/grok-postcompact/auto/grok-home/sessions/<run>%2Fgrok-postcompact%2Fauto%2Frepo/01a06800-30c4-7d11-b7d4-184941e9c38a/updates.jsonl",
+    "permissionMode": "bypassPermissions",
+    "source": "auto",
+    "hook_event_name": "PreCompact",
+    "session_id": "01a06800-30c4-7d11-b7d4-184941e9c38a",
+    "transcript_path": "<run>/grok-postcompact/auto/grok-home/sessions/<run>%2Fgrok-postcompact%2Fauto%2Frepo/01a06800-30c4-7d11-b7d4-184941e9c38a/updates.jsonl",
+    "permission_mode": "bypassPermissions"
+  },
+  "PostCompact": {
+    "hookEventName": "post_compact",
+    "sessionId": "01a06800-30c4-7d11-b7d4-184941e9c38a",
+    "cwd": "<repo>",
+    "workspaceRoot": "<repo>/",
+    "timestamp": "2026-09-03T16:01:11.622755654+00:00",
+    "transcriptPath": "<run>/grok-postcompact/auto/grok-home/sessions/<run>%2Fgrok-postcompact%2Fauto%2Frepo/01a06800-30c4-7d11-b7d4-184941e9c38a/updates.jsonl",
+    "permissionMode": "bypassPermissions",
+    "source": "auto",
+    "hook_event_name": "PostCompact",
+    "session_id": "01a06800-30c4-7d11-b7d4-184941e9c38a",
+    "transcript_path": "<run>/grok-postcompact/auto/grok-home/sessions/<run>%2Fgrok-postcompact%2Fauto%2Frepo/01a06800-30c4-7d11-b7d4-184941e9c38a/updates.jsonl",
+    "permission_mode": "bypassPermissions"
+  },
+  "tuiPostCompact": {
+    "hookEventName": "post_compact",
+    "sessionId": "01a06801-3f5d-7b00-92bd-97a3527b82db",
+    "cwd": "<repo>",
+    "workspaceRoot": "<repo>/",
+    "timestamp": "2026-09-03T16:03:47.526376366+00:00",
+    "transcriptPath": "<run>/grok-postcompact/tui/grok-home/sessions/<run>%2Fgrok-postcompact%2Ftui%2Frepo/01a06801-3f5d-7b00-92bd-97a3527b82db/updates.jsonl",
+    "permissionMode": "bypassPermissions",
+    "source": "auto",
+    "hook_event_name": "PostCompact",
+    "session_id": "01a06801-3f5d-7b00-92bd-97a3527b82db",
+    "transcript_path": "<run>/grok-postcompact/tui/grok-home/sessions/<run>%2Fgrok-postcompact%2Ftui%2Frepo/01a06801-3f5d-7b00-92bd-97a3527b82db/updates.jsonl",
+    "permission_mode": "bypassPermissions"
+  }
+}

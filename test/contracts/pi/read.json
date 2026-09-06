@@ -1,0 +1,33 @@
+{
+  "agent": "pi",
+  "agent_version": "0.84.4",
+  "captured_at": "2026-09-03T16:10:19.550Z",
+  "native_tool": "read",
+  "normalized_tool": "read",
+  "events": {
+    "tool_call": {
+      "type": "tool_call",
+      "toolName": "read",
+      "toolCallId": "call_wnHa4XgdJAPaFblaEhbkN00q|fc_09807d12189ab82e016a999bd9795c87d09d571b9ed78189aa",
+      "input": {
+        "path": "README.md"
+      }
+    },
+    "tool_result": {
+      "type": "tool_result",
+      "toolName": "read",
+      "toolCallId": "call_wnHa4XgdJAPaFblaEhbkN00q|fc_09807d12189ab82e016a999bd9795c87d09d571b9ed78189aa",
+      "input": {
+        "path": "README.md"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "oboete probe repository\nsecond line\n"
+        }
+      ],
+      "isError": false
+    }
+  },
+  "notes": "input.path"
+}

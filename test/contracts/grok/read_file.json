@@ -1,0 +1,84 @@
+{
+  "agent": "grok",
+  "agent_version": "grok 1.0.17 (a549186d9d39) [alpha]",
+  "captured_at": "2026-09-03T15:53:47.240Z",
+  "native_tool": "read_file",
+  "normalized_tool": "read",
+  "events": {
+    "PreToolUse": {
+      "hookEventName": "pre_tool_use",
+      "sessionId": "01a067f7-94ec-7d90-9e94-7fac5f306978",
+      "cwd": "<repo>",
+      "workspaceRoot": "<repo>/",
+      "timestamp": "2026-09-03T15:51:46.299926853+00:00",
+      "transcriptPath": "<run>/grok-payload-shapes/grok-home/sessions/<run>%2Fgrok-payload-shapes%2Frepo/01a067f7-94ec-7d90-9e94-7fac5f306978/updates.jsonl",
+      "permissionMode": "bypassPermissions",
+      "toolName": "read_file",
+      "toolUseId": "call-03cd77ac-5958-48d0-b6f8-331b8dbc13ad-0",
+      "toolInput": {
+        "target_file": "README.md"
+      },
+      "toolInputTruncated": false,
+      "hook_event_name": "PreToolUse",
+      "session_id": "01a067f7-94ec-7d90-9e94-7fac5f306978",
+      "transcript_path": "<run>/grok-payload-shapes/grok-home/sessions/<run>%2Fgrok-payload-shapes%2Frepo/01a067f7-94ec-7d90-9e94-7fac5f306978/updates.jsonl",
+      "permission_mode": "bypassPermissions",
+      "tool_name": "read_file",
+      "tool_input": {
+        "target_file": "README.md"
+      },
+      "tool_use_id": "call-03cd77ac-5958-48d0-b6f8-331b8dbc13ad-0"
+    },
+    "PostToolUse": {
+      "hookEventName": "post_tool_use",
+      "sessionId": "01a067f7-94ec-7d90-9e94-7fac5f306978",
+      "cwd": "<repo>",
+      "workspaceRoot": "<repo>/",
+      "timestamp": "2026-09-03T15:51:46.330334480+00:00",
+      "transcriptPath": "<run>/grok-payload-shapes/grok-home/sessions/<run>%2Fgrok-payload-shapes%2Frepo/01a067f7-94ec-7d90-9e94-7fac5f306978/updates.jsonl",
+      "permissionMode": "bypassPermissions",
+      "toolName": "read_file",
+      "toolUseId": "call-03cd77ac-5958-48d0-b6f8-331b8dbc13ad-0",
+      "toolInput": {
+        "target_file": "README.md"
+      },
+      "toolResult": {
+        "type": "ReadFile",
+        "FileContent": {
+          "content": "1→oboete probe repository\nsecond line\n",
+          "content_concise": "1→oboete probe repository\nsecond line\n",
+          "absolute_path": "<repo>/README.md",
+          "offset": null,
+          "raw_output": "oboete probe repository\nsecond line\n",
+          "total_lines": 3
+        }
+      },
+      "toolInputTruncated": false,
+      "toolResultTruncated": false,
+      "durationMs": 0,
+      "isBackgrounded": false,
+      "hook_event_name": "PostToolUse",
+      "session_id": "01a067f7-94ec-7d90-9e94-7fac5f306978",
+      "transcript_path": "<run>/grok-payload-shapes/grok-home/sessions/<run>%2Fgrok-payload-shapes%2Frepo/01a067f7-94ec-7d90-9e94-7fac5f306978/updates.jsonl",
+      "permission_mode": "bypassPermissions",
+      "tool_name": "read_file",
+      "tool_input": {
+        "target_file": "README.md"
+      },
+      "tool_response": {
+        "type": "ReadFile",
+        "FileContent": {
+          "content": "1→oboete probe repository\nsecond line\n",
+          "content_concise": "1→oboete probe repository\nsecond line\n",
+          "absolute_path": "<repo>/README.md",
+          "offset": null,
+          "raw_output": "oboete probe repository\nsecond line\n",
+          "total_lines": 3
+        }
+      },
+      "tool_use_id": "call-03cd77ac-5958-48d0-b6f8-331b8dbc13ad-0",
+      "duration_ms": 0
+    }
+  },
+  "notes": "toolInput.target_file (relative); absolute at toolResult.FileContent.absolute_path"
+}

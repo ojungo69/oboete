@@ -29,8 +29,30 @@ jobs:
           mkdir -p coverage
           node --test --experimental-test-coverage \
             --test-reporter=spec --test-reporter-destination=stdout \
-            --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
+            --test-reporter=lcov --test-reporter-destination=coverage/dco-lcov.info \
             scripts/dco-check.test.mjs
+      - name: Install dependencies
+        run: npm ci
+      - name: Engine coverage
+        # Every test bundle inlines the src/ files it imports. Node's own --experimental-test-coverage
+        # maps them back through the inline source maps but lets one bundle's zero counts overwrite
+        # another's hits for the same src file, so the figure swung between 74 % and 79 % from run
+        # to run (2026-09-06). Collecting the raw V8 coverage instead and merging it with c8 takes
+        # the union across bundles. The scripts/e2e harness tests run here too; the real-bundle
+        # timing tests run below without instrumentation.
+        run: |
+          npm run build
+          mkdir -p coverage/v8
+          NODE_V8_COVERAGE="$PWD/coverage/v8" node --test --enable-source-maps \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            'build/test/unit/**/*.test.mjs' 'build/test/migrations/**/*.test.mjs' 'scripts/e2e/**/*.test.mjs'
+          npx c8 report --temp-directory coverage/v8 --reports-dir coverage --reporter=lcov \
+            --exclude-after-remap --exclude 'test/**' --exclude 'build/**' --exclude 'dist/**' \
+            --exclude 'node_modules/**' --exclude 'scripts/**/*.test.mjs'
+      - name: End-to-end bundle tests
+        # The hook tests time the real bundle against its 300 ms deadline, so they run alone and
+        # without coverage instrumentation, the way `npm test` runs them.
+        run: node --test --enable-source-maps --test-concurrency=1 'build/test/e2e-*.test.mjs'
       - name: Analyze with SonarQube Cloud
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
@@ -38,6 +60,36 @@ jobs:
           args: -Dsonar.qualitygate.wait=true
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  engine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.16.0", "24.x"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Build
+        run: npm run build
+      - name: Test
+        run: npm test
+      - name: Pack check
+        run: npm run pack-check
 
   secrets:
     runs-on: ubuntu-24.04

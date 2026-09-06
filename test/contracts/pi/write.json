@@ -1,0 +1,35 @@
+{
+  "agent": "pi",
+  "agent_version": "0.84.4",
+  "captured_at": "2026-09-03T16:10:19.550Z",
+  "native_tool": "write",
+  "normalized_tool": "write",
+  "events": {
+    "tool_call": {
+      "type": "tool_call",
+      "toolName": "write",
+      "toolCallId": "call_mrxIjoEvGqawjmgHfW9PwFjt|fc_09807d12189ab82e016a999bdcb29887d0a16aa0e03e59bfee",
+      "input": {
+        "path": "notes.txt",
+        "content": "alpha"
+      }
+    },
+    "tool_result": {
+      "type": "tool_result",
+      "toolName": "write",
+      "toolCallId": "call_mrxIjoEvGqawjmgHfW9PwFjt|fc_09807d12189ab82e016a999bdcb29887d0a16aa0e03e59bfee",
+      "input": {
+        "path": "notes.txt",
+        "content": "alpha"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "Successfully wrote 5 bytes to notes.txt"
+        }
+      ],
+      "isError": false
+    }
+  },
+  "notes": "input.path"
+}

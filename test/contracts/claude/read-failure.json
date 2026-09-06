@@ -1,0 +1,45 @@
+{
+  "agent": "claude",
+  "agent_version": "2.1.259 (Claude Code)",
+  "captured_at": "2026-09-03T15:44:43.851Z",
+  "native_tool": "Read",
+  "normalized_tool": "read",
+  "events": {
+    "PreToolUse": {
+      "session_id": "f65937f4-f116-4da1-b263-a55fba0ddb90",
+      "transcript_path": "~/.claude/projects/<run>-claude-tool-failure-repo/f65937f4-f116-4da1-b263-a55fba0ddb90.jsonl",
+      "cwd": "<repo>",
+      "prompt_id": "2ac7769c-0c79-48db-a827-9b8f6916d950",
+      "permission_mode": "bypassPermissions",
+      "effort": {
+        "level": "high"
+      },
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Read",
+      "tool_input": {
+        "file_path": "<repo>/missing-probe-file-does-not-exist.txt"
+      },
+      "tool_use_id": "toolu_01RqUXTsxEgXedyiJhnMCCKT"
+    },
+    "PostToolUseFailure": {
+      "session_id": "f65937f4-f116-4da1-b263-a55fba0ddb90",
+      "transcript_path": "~/.claude/projects/<run>-claude-tool-failure-repo/f65937f4-f116-4da1-b263-a55fba0ddb90.jsonl",
+      "cwd": "<repo>",
+      "prompt_id": "2ac7769c-0c79-48db-a827-9b8f6916d950",
+      "permission_mode": "bypassPermissions",
+      "effort": {
+        "level": "high"
+      },
+      "hook_event_name": "PostToolUseFailure",
+      "tool_name": "Read",
+      "tool_input": {
+        "file_path": "<repo>/missing-probe-file-does-not-exist.txt"
+      },
+      "tool_use_id": "toolu_01RqUXTsxEgXedyiJhnMCCKT",
+      "error": "File does not exist. Note: your current working directory is <repo>.",
+      "is_interrupt": false,
+      "duration_ms": 3
+    }
+  },
+  "notes": "PostToolUse also fires for this failed call: false; error is string (string)"
+}

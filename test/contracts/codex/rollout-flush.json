@@ -1,0 +1,31 @@
+{
+  "agent": "codex",
+  "agent_version": "codex-cli 0.153.0",
+  "captured_at": "2026-09-03T15:50:20.020Z",
+  "rows": [
+    {
+      "tool": "Bash",
+      "tool_use_id": "exec-acf961f9-01db-4140-b24c-cf275bfe4cec",
+      "transcript_has_tool_use_id": true,
+      "transcript_bytes": 49405
+    },
+    {
+      "tool": "apply_patch",
+      "tool_use_id": "exec-e05588d3-df39-4257-8aea-bbdf3e7fade9",
+      "transcript_has_tool_use_id": true,
+      "transcript_bytes": 52682
+    },
+    {
+      "tool": "apply_patch",
+      "tool_use_id": "exec-505735b7-0fef-405f-a69f-90efa1079551",
+      "transcript_has_tool_use_id": true,
+      "transcript_bytes": 57544
+    },
+    {
+      "tool": "Bash",
+      "tool_use_id": "exec-39e25c9c-2860-4207-b1a7-758d6a2cd8fb",
+      "transcript_has_tool_use_id": true,
+      "transcript_bytes": 61081
+    }
+  ]
+}

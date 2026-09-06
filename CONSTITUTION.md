@@ -1,5 +1,25 @@
 <!--
 Sync Impact Report
+- Version change: 3.1.0 -> 3.2.0 (2026-09-04, owner decision A19: the Anthropic observer preset is
+  removed from the product constraints; decision record in docs/research/m1-amendments-2026-09.md;
+  affected: spec 007 research R2/R13, plan Complexity Tracking row 15, contracts/cli.md,
+  contracts/observer.md, tasks T035, scripts/e2e/probes/providers.mjs)
+- Version change: 3.0.0 -> 3.1.0 (2026-09-03, M1 plan amendments A1-A10; decision record in
+  docs/research/m1-amendments-2026-09.md)
+- Modified principles:
+  - II. One File, No Daemon: "single file" defined as the engine bundle (heavy runtime packages
+    stay in node_modules); a loopback port bound by the foreground `oboete view` is allowed
+  - IV. Honest Degradation and Bounded Resources: capture hook 300 ms; session-start injection
+    may wait up to 1 s for a pending summary
+  - VI. Portable and Minimal: one data directory `~/.oboete/` (relocatable via OBOETE_HOME),
+    XDG/AppData split deferred (MINOR: expands the portability requirement's timing);
+    `@secretlint/core` + preset replaces `@secretlint/node`
+- Modified sections: Product Constraints (Codex hooks.json + trust row; Pi child-process
+  capture), Development Workflow (`grok -p`)
+- Templates: .specify/memory/constitution.md synced; specs/007-oboete-m1-alpha updated
+- Follow-up: M1 plan.md Constitution Check now passes without exceptions A1-A10
+
+Previous report (2.0.0 -> 3.0.0):
 - Version change: 2.0.0 -> 3.0.0 (product renamed to oboete; foundation, agent set,
   and delivery model redefined)
 - Modified principles:
@@ -42,12 +62,15 @@ prompts and tool inputs and outputs are given to the observer; only summaries ar
 ### II. One File, No Daemon
 
 The product is the SQLite file `~/.oboete/memory.db`. There MUST be no resident daemon, RPC
-server, or listening port. Hooks run as short-lived processes that write directly to the
+server, or listening port; the only port oboete ever binds is the loopback port of `oboete view`
+while the developer runs that command in the foreground. Hooks run as short-lived processes that write directly to the
 database in WAL mode. Background work (`oboete observe`) MUST be a detached process that is
 single per machine through a heartbeat `worker_lease` row in the database. The SQLite schema
 plus the CLI contract is the language-neutral seam: any component MAY later be rewritten in
 another language only behind that seam. The engine is TypeScript on Node.js >= 22.16 using
-`node:sqlite` with FTS5, bundled into a single file.
+`node:sqlite` with FTS5, bundled into a single engine file: oboete's own code plus the small
+pure-ESM packages the hook path needs; heavy runtime packages (AI SDK, Hono, Preact) stay in
+`node_modules` and are loaded lazily off the hook path.
 
 ### III. Local-First, Fail-Closed Classification
 
@@ -68,8 +91,10 @@ stores without explicit user selection.
 With zero credentials, capture and lexical search MUST work. When no LLM is reachable or the
 daily allowance is exhausted, a rule-based observer MUST produce summaries in the same schema,
 and every injection pack and `oboete doctor` MUST expose the degraded reason. Empty or stale
-results MUST NOT be reported as healthy. Budgets are explicit: hook process 300 ms (overflow
-appends to a spool file and exits 0), background worker RSS 150 MB, observer input 12,000
+results MUST NOT be reported as healthy. Budgets are explicit: capture hook process 300 ms (overflow
+appends to a spool file and exits 0), session-start injection 300 ms when the previous summary is
+ready and at most 1 s of waiting when it is pending (then the latest raw activity is injected,
+labelled), background worker RSS 150 MB, observer input 12,000
 characters, and a self-counted daily Workers AI Neuron allowance that resets at UTC midnight.
 Raw events are deleted after 7 days; memories are permanent and removed only through
 tombstones and supersession. Injection volume is adaptive: a relevance threshold plus a cap
@@ -90,9 +115,10 @@ Only one milestone may be in progress.
 ### VI. Portable and Minimal
 
 No Linux-only assumption may be written: no Unix sockets, `flock`, or bash-only hooks; paths
-follow XDG and AppData conventions. Dependencies are limited to those adopted by the design
+live under one data directory (`~/.oboete/`, relocatable through `OBOETE_HOME`); a per-platform
+XDG/AppData split is deferred to a later milestone. Dependencies are limited to those adopted by the design
 record (`node:sqlite`, the Vercel AI SDK with the OpenAI-compatible and Workers AI providers,
-`@secretlint/node`, `age-encryption`, `aws4fetch`, `zod`, Hono, Preact, Vite); any addition
+`@secretlint/core` with `@secretlint/secretlint-rule-preset-recommend`, `age-encryption`, `aws4fetch`, `zod`, Hono, Preact, Vite); any addition
 requires a written reason in the plan. oboete does NOT build a resident daemon, a manifest
 compiler, Verified Continuity, a Chroma or Python sidecar, Vectorize, a hosted viewer,
 team or RBAC features, a Rust rewrite ahead of measurement, or subscription OAuth reuse.
@@ -108,11 +134,14 @@ Deletion is preferred over addition; every abstraction needs a second concrete u
   ledger, and `sync_conflicts`. Migrations are numbered SQL files.
 - Agent integration: Claude Code and Grok Build use the same JSON hook command; the command
   identifies its caller from the environment and never assumes Claude Code. Codex uses
-  `~/.codex/config.toml` hooks; injection happens only at session start and prompt submit.
-  Pi loads an in-process extension that imports the capture functions and MUST wrap every call
-  in try/catch with a timeout. Search is exposed through `oboete mcp` over stdio.
+  handlers in `~/.codex/hooks.json` with the trust-hash row in `~/.codex/config.toml`, both
+  inside oboete-managed blocks; injection happens only at session start and prompt submit.
+  Pi loads an in-process extension that only enqueues to a detached `oboete capture` child under
+  a cooperative deadline and MUST wrap every call in try/catch; the child imports the capture
+  functions. Search is exposed through `oboete mcp` over stdio.
 - Observer: one OpenAI-compatible client with presets (Cloudflare Workers AI default, NVIDIA
-  NIM, OpenRouter, Gemini, Ollama, Anthropic). The prompt classifies against nearby existing
+  NIM, OpenRouter, Gemini, Ollama; the Anthropic API is not a preset, owner decision A19 of
+  2026-09-04). The prompt classifies against nearby existing
   memories as ADD, UPDATE, DELETE, or NOOP. Free-model availability is resolved from the
   provider catalog at run time, not hardcoded.
 - Retrieval and injection: session start injects the latest summary and pinned memories;
@@ -146,7 +175,7 @@ Deletion is preferred over addition; every abstraction needs a second concrete u
   build, typecheck, lint, tests, a packed-install check, real hook-to-injection E2E for each
   agent, provider-failure fallback, and the resource fixture numbers.
 - Dogfood runs on this WSL host under a separate Linux user with an isolated home and its own
-  agent logins, driving `claude -p`, `codex exec`, `grok --print`, and `pi -p` with real
+  agent logins, driving `claude -p`, `codex exec`, `grok -p`, and `pi -p` with real
   hooks. oboete MUST NOT be installed in the maintainer's own agent environment until the
   isolated E2E has been green for at least one week and the maintainer approves it again at
   that time. The OCI A1 host is excluded.
@@ -167,4 +196,4 @@ new or materially expanded principle, and PATCH for non-semantic clarification. 
 plan and pull request MUST state whether it complies with Principles I-VI and identify any
 approved exception. Unexplained violations block implementation or merge.
 
-**Version**: 3.0.0 | **Ratified**: 2026-08-12 | **Last Amended**: 2026-09-02
+**Version**: 3.2.0 | **Ratified**: 2026-08-12 | **Last Amended**: 2026-09-04

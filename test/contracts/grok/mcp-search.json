@@ -1,0 +1,34 @@
+{
+  "agent": "grok",
+  "toolNames": [
+    "search_tool",
+    "oboete_probe__search"
+  ],
+  "PreToolUse": {
+    "hookEventName": "pre_tool_use",
+    "sessionId": "01a06804-5b70-7db3-a1ac-b95b33f1d3f5",
+    "cwd": "<repo>",
+    "workspaceRoot": "<repo>/",
+    "timestamp": "2026-09-03T16:05:46.946247125+00:00",
+    "transcriptPath": "<run>/grok-mcp-registration/toml/grok-home/sessions/<run>%2Fgrok-mcp-registration%2Ftoml%2Frepo/01a06804-5b70-7db3-a1ac-b95b33f1d3f5/updates.jsonl",
+    "permissionMode": "bypassPermissions",
+    "toolName": "search_tool",
+    "toolUseId": "call-3fe62e6c-21cc-4163-9185-02b54c83951c-0",
+    "toolInput": {
+      "query": "oboete_probe search",
+      "limit": 5
+    },
+    "toolInputTruncated": false,
+    "hook_event_name": "PreToolUse",
+    "session_id": "01a06804-5b70-7db3-a1ac-b95b33f1d3f5",
+    "transcript_path": "<run>/grok-mcp-registration/toml/grok-home/sessions/<run>%2Fgrok-mcp-registration%2Ftoml%2Frepo/01a06804-5b70-7db3-a1ac-b95b33f1d3f5/updates.jsonl",
+    "permission_mode": "bypassPermissions",
+    "tool_name": "search_tool",
+    "tool_input": {
+      "query": "oboete_probe search",
+      "limit": 5
+    },
+    "tool_use_id": "call-3fe62e6c-21cc-4163-9185-02b54c83951c-0"
+  },
+  "mcpAddWrote": "[mcp_servers.oboete_probe]\ncommand = \"/usr/bin/node\"\nargs = [\"<repo>/mcp-dummy.mjs\"]\nenabled = true\n\n[mcp_servers.oboete_probe.env]\nPROBE_MCP_LOG = \"<repo>/mcp-cli.jsonl\"\n"
+}

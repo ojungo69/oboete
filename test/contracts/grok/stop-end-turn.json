@@ -1,0 +1,51 @@
+{
+  "agent": "grok",
+  "end_turn": {
+    "hookEventName": "stop",
+    "sessionId": "01a06808-0809-7cd2-8dc4-ab7f48e55707",
+    "cwd": "<repo>",
+    "workspaceRoot": "<repo>/",
+    "timestamp": "2026-09-03T16:09:54.523975497+00:00",
+    "transcriptPath": "<run>/grok-stop-messages/grok-home/sessions/<run>%2Fgrok-stop-messages%2Frepo/01a06808-0809-7cd2-8dc4-ab7f48e55707/updates.jsonl",
+    "promptId": "4d1a3212-7382-4412-a097-e95435bee6d5",
+    "permissionMode": "bypassPermissions",
+    "reason": "end_turn",
+    "stopHookActive": false,
+    "lastAssistantMessage": "DONE",
+    "backgroundTasks": [],
+    "sessionCrons": [],
+    "hook_event_name": "Stop",
+    "session_id": "01a06808-0809-7cd2-8dc4-ab7f48e55707",
+    "transcript_path": "<run>/grok-stop-messages/grok-home/sessions/<run>%2Fgrok-stop-messages%2Frepo/01a06808-0809-7cd2-8dc4-ab7f48e55707/updates.jsonl",
+    "permission_mode": "bypassPermissions"
+  },
+  "shutdown": {
+    "hookEventName": "stop",
+    "sessionId": "01a06808-0809-7cd2-8dc4-ab7f48e55707",
+    "cwd": "<repo>",
+    "workspaceRoot": "<repo>/",
+    "timestamp": "2026-09-03T16:09:54.620598475+00:00",
+    "transcriptPath": "<run>/grok-stop-messages/grok-home/sessions/<run>%2Fgrok-stop-messages%2Frepo/01a06808-0809-7cd2-8dc4-ab7f48e55707/updates.jsonl",
+    "permissionMode": "bypassPermissions",
+    "reason": "shutdown",
+    "stopHookActive": false,
+    "hook_event_name": "Stop",
+    "session_id": "01a06808-0809-7cd2-8dc4-ab7f48e55707",
+    "transcript_path": "<run>/grok-stop-messages/grok-home/sessions/<run>%2Fgrok-stop-messages%2Frepo/01a06808-0809-7cd2-8dc4-ab7f48e55707/updates.jsonl",
+    "permission_mode": "bypassPermissions"
+  },
+  "SessionEnd": {
+    "hookEventName": "session_end",
+    "sessionId": "01a06808-0809-7cd2-8dc4-ab7f48e55707",
+    "cwd": "<repo>",
+    "workspaceRoot": "<repo>/",
+    "timestamp": "2026-09-03T16:09:54.593838874+00:00",
+    "transcriptPath": "<run>/grok-stop-messages/grok-home/sessions/<run>%2Fgrok-stop-messages%2Frepo/01a06808-0809-7cd2-8dc4-ab7f48e55707/updates.jsonl",
+    "permissionMode": "bypassPermissions",
+    "reason": "shutdown",
+    "hook_event_name": "SessionEnd",
+    "session_id": "01a06808-0809-7cd2-8dc4-ab7f48e55707",
+    "transcript_path": "<run>/grok-stop-messages/grok-home/sessions/<run>%2Fgrok-stop-messages%2Frepo/01a06808-0809-7cd2-8dc4-ab7f48e55707/updates.jsonl",
+    "permission_mode": "bypassPermissions"
+  }
+}
