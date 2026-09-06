@@ -2,6 +2,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+// The "Engine coverage" step (.github/workflows/ci.yml) inflates wall time with V8 instrumentation.
+// Budget logic is asserted through the injected clock, so check wall-clock bounds only uninstrumented.
+export const WALL_CLOCK_IS_MEASURED = process.env.NODE_V8_COVERAGE === undefined;
+
 /**
  * Runs `fn` with `OBOETE_HOME` pointing at a fresh temporary directory, so a test never touches
  * the real `~/.oboete` (docs/dev/conventions.md "Tests").
