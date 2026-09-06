@@ -1,0 +1,21 @@
+test/unit/pack.test.ts
+  s_359fcac8e97f88::t_a46bf29e6bf01a 904-937
+src/injection/pack.ts
+  s_359fcac8e97f88::t_801cdf8d09e571 15,330-349,602,674-676
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "eff7ac2a656eea491bab401ee080f2546e576b7a",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
