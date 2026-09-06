@@ -1,0 +1,25 @@
+specs/007-oboete-m1-alpha/tasks.md
+  s_359fcac8e97f88::t_f6e1ef7d389543 263,318
+specs/007-oboete-m1-alpha/plan.md
+  s_359fcac8e97f88::t_f6e1ef7d389543 174
+specs/007-oboete-m1-alpha/spec.md
+  s_359fcac8e97f88::t_f6e1ef7d389543 14-23,513-516
+docs/evidence/m1-dogfood.md
+  s_359fcac8e97f88::t_f6e1ef7d389543 300-303
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "4c00b033dc58de33cf2ee343d0fa9859b739d62a",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
