@@ -1,0 +1,29 @@
+src/observer/llm.ts
+  s_86c1dd8ef0f2c2::t_bd3e36b35f9067 181-187
+test/unit/llm.test.ts
+  s_0ec4092f1f4270::t_0a276ef3e260df 419-452
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "8bb6bb7794b19dbf17570036c4dacdc8ae3e22ef",
+  "prompts": {},
+  "sessions": {
+    "s_0ec4092f1f4270": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0728a-e9ac-79d1-aa4e-0e3ee10a6268",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_86c1dd8ef0f2c2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7726dcc6-57f2-486b-9f09-5ebee0e48f95",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
