@@ -230,3 +230,65 @@ Exit codes: 1 for every degraded run, 3 for the corrupted header, 0 for the rest
 Isolated-user run of `scripts/e2e/isolated-user.mjs --no-credentials --daily --pairs claude:codex,claude:pi,codex:claude,codex:pi,pi:claude,pi:codex` with bundle 0.1.0-alpha.0 (commit 8baf3414): the provider credentials are removed from the agents' environment, so every summary is rule-based. All six pairs recalled the three seeded facts on the first turn, and `report.json` records `degraded_marker: true` for every receiving pack (the `> degraded:` line of contracts/agents.md). Elapsed 23–33 s per pair against 62–93 s on 2026-09-04, which is the provider deadline no longer being waited for.
 
 The six Grok Build pairs were not run today: the user put Grok on a quota hold until 2026-09-12 (the same hold covers implementation delegation), so the SC-004 statement "still passes SC-001" is shown for the six non-Grok pairs here and the six pairs that seed or receive with Grok Build remain to be repeated when the hold ends. The exhausted-allowance variant was exercised through doctor's break 6 (`allowance` degraded with the reset time) and the unit tests of the `daily_cap` / `provider_exhausted` degraded reasons (test/unit/degraded.test.ts); an end-to-end pair run with a pre-exhausted counter is still open.
+
+## 2026-09-06 daily run (SC-007, day 1)
+
+- bundle 0.1.0-alpha.0, node v24.20.0, pairs `claude:codex,claude:pi,codex:claude,codex:pi,pi:claude,pi:codex`, 1-minute load at start 0.82, started 2026-09-06T10:00:00Z
+
+### Pairs (harness section, exit 0)
+
+#### 2026-09-06 run 2026-09-06T10-00-00-137Z
+
+- 6 of 6 requested pairs pass (partial run; SC-001 needs all 12)
+- No provider credentials: no
+- Report: <run>/report.json
+
+| seed | receive | status | elapsed ms | missing facts |
+|---|---|---:|---:|---|
+| claude | codex | pass | 43282 | none |
+| claude | pi | pass | 35852 | none |
+| codex | claude | pass | 43490 | none |
+| codex | pi | pass | 48333 | none |
+| pi | claude | pass | 33946 | none |
+| pi | codex | pass | 41787 | none |
+
+### Doctor (credentials sourced)
+
+| item | status | reason |
+|---|---|---|
+| config | healthy | Configuration at /home/oboete-dogfood/.oboete/config.toml loaded (mode 0o600). |
+| paused | healthy | Not paused. |
+| storage | healthy | `/home/oboete-dogfood/.oboete/memory.db` opened; PRAGMA quick_check returned ok; 69 memories. |
+| fts | healthy | Full-text search is available (lexical in M1). |
+| migration | healthy | The schema is at version 3, the latest this bundle knows. |
+| worker | healthy | The worker process 305551 is alive (heartbeat 0 seconds ago). |
+| spool | healthy | Spool is writable and empty. |
+| provider | unverified | Not probed this run; last worker outcome: fallback/no_provider/2026-09-06T09:58:00.101Z. |
+| allowance | healthy | Estimated 134 of 150 calls remaining today (2026-09-06); resets at 2026-09-07T00:00:00.000Z. |
+| catalog | warning | The catalog lists models that need a paid Workers plan; the configured model @cf/zai-org/glm-4.7-flash is only used if it is free. |
+| agent:claude | healthy | The hook fired and the event was stored (5179 milliseconds); trust: n/a. |
+| native-memory:claude | warning | claude: its own memory feature (claude_auto_memory) is enabled. oboete neither reads it nor changes it; the two run side by side. |
+| agent:codex | healthy | The hook fired and the event was stored (7987 milliseconds); trust: trusted. |
+| agent:grok | healthy | The hook fired and the event was stored (4113 milliseconds); trust: wired. |
+| agent:pi | healthy | The hook fired and the event was stored (6313 milliseconds); trust: wired. |
+| unrecognized-agents | healthy | No invocation from an unrecognized agent. |
+| pi | warning | The worker recorded pi_child_hang 2 times, last at 2026-09-06T08:43:51.944Z; the files are gone, this is the history. |
+
+### Metrics
+
+- Provider usage (UTC 2026-09-06): workers-ai 16 calls, 55.7 neurons, @cf/zai-org/glm-4.7-flash
+- Memories: 75 total, 75 live, 18 sharing a material hash (duplicates)
+- Injection items omitted as duplicate_in_conversation: 0 (cumulative)
+- Raw events failed: 0 of 217 (cumulative)
+- Spool backlog: 0 files (0 failed)
+- Viewer GET /api/memories: median 4 ms, max 37 ms over 5 requests, 8 memories listed (budget 2000 ms)
+- finished 2026-09-06T10:04:17Z, 1-minute load 0.96
+
+Notes for day 1: the run is driven by `/etc/cron.d/oboete-dogfood-daily` (hourly tick, one run per JST
+calendar day, skipped while the 1-minute load is 3.0 or more; the script lives at
+`/usr/local/lib/oboete-dogfood/oboete-daily.sh`). Grok pairs are excluded until the Grok quota hold
+ends on 2026-09-12; from 2026-09-13 the script runs all 12 pairs. The worker alive during this run
+(pid 305551) had been spawned two minutes earlier by a doctor probe without the credential
+environment, so its summaries fell back to rules (`provider` shows the last outcome
+`fallback/no_provider`); the 16 calls counted for the day come from the earlier runs. The cron
+script sources the credentials before it starts, so a worker it spawns carries them.
