@@ -34,19 +34,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Engine coverage
-        # Include test bundles before source-map remapping, then report src/ TypeScript and scripts/.
-        # An explicit exclusion replaces Node 24's default, which skips the bundles themselves.
-        # The scripts/e2e harness stays instrumented; real bundle timing tests run below.
+        # Every test bundle inlines the src/ files it imports. Node's own --experimental-test-coverage
+        # maps them back through the inline source maps but lets one bundle's zero counts overwrite
+        # another's hits for the same src file, so the figure swung between 74 % and 79 % from run
+        # to run (2026-09-06). Collecting the raw V8 coverage instead and merging it with c8 takes
+        # the union across bundles. The scripts/e2e harness tests run here too; the real-bundle
+        # timing tests run below without instrumentation.
         run: |
           npm run build
-          mkdir -p coverage
-          node --test --enable-source-maps --experimental-test-coverage \
-            --test-coverage-include='build/test/**' \
-            --test-coverage-include='src/**/*.ts' --test-coverage-include='scripts/**' \
-            --test-coverage-exclude='scripts/**/*.test.mjs' \
+          mkdir -p coverage/v8
+          NODE_V8_COVERAGE="$PWD/coverage/v8" node --test --enable-source-maps \
             --test-reporter=spec --test-reporter-destination=stdout \
-            --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
             'build/test/unit/**/*.test.mjs' 'build/test/migrations/**/*.test.mjs' 'scripts/e2e/**/*.test.mjs'
+          npx c8 report --temp-directory coverage/v8 --reports-dir coverage --reporter=lcov \
+            --exclude-after-remap --exclude 'test/**' --exclude 'build/**' --exclude 'dist/**' \
+            --exclude 'node_modules/**' --exclude 'scripts/**/*.test.mjs'
       - name: End-to-end bundle tests
         # The hook tests time the real bundle against its 300 ms deadline, so they run alone and
         # without coverage instrumentation, the way `npm test` runs them.
