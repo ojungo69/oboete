@@ -1,0 +1,31 @@
+src/setup/managed-block.ts
+  s_359fcac8e97f88::t_44ee07c0e13ae1 106-124
+src/setup/write-codex.ts
+  s_359fcac8e97f88::t_44ee07c0e13ae1 106-107,159-160
+test/unit/write-codex.test.ts
+  s_359fcac8e97f88::t_8d108796df3f39 262-291
+src/injection/deferred.ts
+  s_359fcac8e97f88::t_44ee07c0e13ae1 485-489
+test/unit/managed-block.test.ts
+  s_359fcac8e97f88::t_8d108796df3f39 134-150
+  s_359fcac8e97f88::t_85c97ab2111889 132-133
+test/unit/deferred.test.ts
+  s_359fcac8e97f88::t_83461f12d7755c 693
+  s_359fcac8e97f88::t_8d108796df3f39 677-692,694-697
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "45ff7182f2875bfc0af6c1b20b3720697ab4dddc",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
