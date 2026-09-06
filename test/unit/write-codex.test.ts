@@ -234,6 +234,26 @@ test('removeCodex takes back the files oboete created', async () => {
   });
 });
 
+test('removeCodex removes its handlers and preserves a malformed marker-less config.toml', async () => {
+  await withTempHome(async (home) => {
+    const userGroup = { matcher: 'startup', hooks: [{ type: 'command', command: 'notify-send hi' }] };
+    const settings = { hooks: { SessionStart: [userGroup] } };
+    const hooksPath = join(home, 'hooks.json');
+    const configPath = join(home, 'config.toml');
+    writeFileSync(hooksPath, `${JSON.stringify(settings, null, 2)}\n`);
+    writeFileSync(configPath, 'model = "gpt-5"\n');
+    writeCodex(home, { node: NODE, bundle: BUNDLE });
+    const malformed = readFileSync(configPath, 'utf8').replace(/^# oboete:(?:begin|end)\n/gm, '') + 'broken = [\n';
+    writeFileSync(configPath, malformed);
+
+    assert.doesNotThrow(() => removeCodex(home, { node: NODE, bundle: BUNDLE }));
+    assert.deepEqual(JSON.parse(readFileSync(hooksPath, 'utf8')), settings);
+    assert.equal(readFileSync(configPath, 'utf8'), malformed);
+    assert.equal(existsSync(hooksPath + BACKUP_SUFFIX), false);
+    assert.equal(existsSync(configPath + BACKUP_SUFFIX), false);
+  });
+});
+
 test('Codex repairs and removes marker-less registration and trust rows while keeping developer tables', async () => {
   await withTempHome(async (home) => {
     const configPath = join(home, 'config.toml');

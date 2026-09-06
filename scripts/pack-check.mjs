@@ -144,6 +144,60 @@ function fail(message) {
   return true;
 }
 
+function packAndCheck(packDir, env) {
+  runNpm(['run', 'build'], { env, stdio: 'inherit' });
+
+  const packed = runNpm(['pack', '--json', `--pack-destination=${packDir}`], { env });
+  const manifest = packManifest(parsePackJson(packed.stdout));
+  const filesCheck = checkPackFiles(manifest.files ?? []);
+  let failed = false;
+  if (filesCheck.missing.length > 0) {
+    failed = fail(`FAIL: tarball missing ${filesCheck.missing.join(', ')}`);
+  }
+  if (filesCheck.forbidden.length > 0) {
+    failed = fail(`FAIL: tarball contains ${filesCheck.forbidden.join(', ')}`);
+  }
+  if (failed) return null;
+
+  const filename = manifest.filename;
+  if (!filename) throw new Error('npm pack --json omitted filename');
+  const tarball = join(packDir, filename);
+  if (!existsSync(tarball)) throw new Error(`tarball not written: ${tarball}`);
+  return { filename, tarball };
+}
+
+function installAndVerify({ filename, tarball }, prefix, env) {
+  runNpm(['install', '-g', `--prefix=${prefix}`, tarball], { env });
+
+  const installed = join(prefix, 'lib', 'node_modules', 'oboete');
+  if (!existsSync(installed)) throw new Error(`install missing ${installed}`);
+
+  const bytes = sumInstalledBytes(installed);
+  console.log(installedSizeLine(bytes));
+  let failed = false;
+  if (exceedsSizeLimit(bytes)) {
+    failed = fail(`FAIL: installed size ${bytes} bytes exceeds ${LIMIT_BYTES} bytes`);
+  }
+  console.log(`tarball: ${filename}`);
+
+  const bin = join(prefix, 'bin', 'oboete');
+  if (!existsSync(bin)) throw new Error(`installed bin missing: ${bin}`);
+  const version = spawnSync(bin, ['--version'], {
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: process.env,
+  });
+  if (version.error) throw new Error(`oboete --version: ${version.error.message}`);
+  if (version.status !== 0) {
+    const detail = (version.stderr || version.stdout || `exit ${String(version.status)}`).trim();
+    throw new Error(`oboete --version failed: ${detail}`);
+  }
+  const printed = version.stdout.trim();
+  if (!printed) throw new Error('oboete --version printed nothing');
+  console.log(`oboete --version: ${printed}`);
+  return failed;
+}
+
 function main() {
   let tmp;
   let failed = false;
@@ -158,51 +212,8 @@ function main() {
     const seeded = seedCache(cacheDir);
     const env = npmEnv(cacheDir, seeded ? { npm_config_prefer_offline: 'true' } : {});
 
-    runNpm(['run', 'build'], { env, stdio: 'inherit' });
-
-    const packed = runNpm(['pack', '--json', `--pack-destination=${packDir}`], { env });
-    const manifest = packManifest(parsePackJson(packed.stdout));
-    const filesCheck = checkPackFiles(manifest.files ?? []);
-    if (filesCheck.missing.length > 0) {
-      failed = fail(`FAIL: tarball missing ${filesCheck.missing.join(', ')}`);
-    }
-    if (filesCheck.forbidden.length > 0) {
-      failed = fail(`FAIL: tarball contains ${filesCheck.forbidden.join(', ')}`);
-    }
-    if (failed) return;
-
-    const filename = manifest.filename;
-    if (!filename) throw new Error('npm pack --json omitted filename');
-    const tarball = join(packDir, filename);
-    if (!existsSync(tarball)) throw new Error(`tarball not written: ${tarball}`);
-
-    runNpm(['install', '-g', `--prefix=${prefix}`, tarball], { env });
-
-    const installed = join(prefix, 'lib', 'node_modules', 'oboete');
-    if (!existsSync(installed)) throw new Error(`install missing ${installed}`);
-
-    const bytes = sumInstalledBytes(installed);
-    console.log(installedSizeLine(bytes));
-    if (exceedsSizeLimit(bytes)) {
-      failed = fail(`FAIL: installed size ${bytes} bytes exceeds ${LIMIT_BYTES} bytes`);
-    }
-    console.log(`tarball: ${filename}`);
-
-    const bin = join(prefix, 'bin', 'oboete');
-    if (!existsSync(bin)) throw new Error(`installed bin missing: ${bin}`);
-    const version = spawnSync(bin, ['--version'], {
-      encoding: 'utf8',
-      timeout: 30_000,
-      env: process.env,
-    });
-    if (version.error) throw new Error(`oboete --version: ${version.error.message}`);
-    if (version.status !== 0) {
-      const detail = (version.stderr || version.stdout || `exit ${String(version.status)}`).trim();
-      throw new Error(`oboete --version failed: ${detail}`);
-    }
-    const printed = version.stdout.trim();
-    if (!printed) throw new Error('oboete --version printed nothing');
-    console.log(`oboete --version: ${printed}`);
+    const packed = packAndCheck(packDir, env);
+    failed = packed === null || installAndVerify(packed, prefix, env);
   } catch (error) {
     failed = fail(`FAIL: ${error instanceof Error ? error.message : String(error)}`);
   } finally {

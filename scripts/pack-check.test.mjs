@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   LIMIT_BYTES,
@@ -64,3 +66,43 @@ test('checkPackFiles requires the four dist files and rejects src/test/build/leg
     'legacy/README.md',
   ]);
 });
+
+for (const { name, files, message } of [
+  {
+    name: 'a missing required file',
+    files: REQUIRED_PACK_FILES.slice(1),
+    message: 'FAIL: tarball missing dist/oboete.mjs',
+  },
+  {
+    name: 'a forbidden top-level path',
+    files: [...REQUIRED_PACK_FILES, 'src/cli.ts'],
+    message: 'FAIL: tarball contains src/cli.ts',
+  },
+]) {
+  test(`pack-check exits nonzero for ${name}`, (t) => {
+    const dir = tempTree();
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const stub = `
+      import childProcess from 'node:child_process';
+      import { syncBuiltinESMExports } from 'node:module';
+      childProcess.spawnSync = (command, args) => {
+        if (command === 'cp') return { status: 1 };
+        if (command === 'npm' && args[0] === 'run' && args[1] === 'build') return { status: 0 };
+        if (command === 'npm' && args[0] === 'pack') {
+          return { status: 0, stdout: ${JSON.stringify(JSON.stringify([{ files }]))} };
+        }
+        throw new Error('unexpected subprocess: ' + command + ' ' + args.join(' '));
+      };
+      syncBuiltinESMExports();
+    `;
+    const result = spawnSync(process.execPath, [
+      '--import', `data:text/javascript,${encodeURIComponent(stub)}`,
+      fileURLToPath(new URL('./pack-check.mjs', import.meta.url)),
+    ], { encoding: 'utf8', env: { ...process.env, TMPDIR: dir }, timeout: 30_000 });
+
+    assert.equal(result.error, undefined);
+    assert.equal(result.stderr.trim(), message);
+    assert.equal(result.status, 1);
+    assert.deepEqual(readdirSync(dir), [], 'the temporary pack directory is removed');
+  });
+}

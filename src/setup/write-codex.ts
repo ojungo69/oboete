@@ -150,7 +150,13 @@ function blockText(hooksPath: string, options: CodexSetupOptions, recoverFrom?: 
     });
   }
   if (recoverFrom !== undefined && existsSync(recoverFrom)) {
-    const config = parseToml(readFileSync(recoverFrom, 'utf8'));
+    let config;
+    try {
+      config = parseToml(readFileSync(recoverFrom, 'utf8'));
+    } catch {
+      // FR-031: an empty block leaves marker-less TOML untouched while hooks can still be removed.
+      return '';
+    }
     const rows = isPlainObject(config.hooks) && isPlainObject(config.hooks.state) ? config.hooks.state : {};
     // BUG-ASSESSMENT.md: trust hashes retain bundle identity even when hook positions are lost.
     for (const wiring of WIRING) {
