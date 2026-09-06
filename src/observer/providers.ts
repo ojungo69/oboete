@@ -105,6 +105,11 @@ export function providerRequestOptions(preset: PresetName): RequestOptions {
             type: 'json_schema',
             json_schema: { name: 'observer_output', schema: observerOutputJsonSchema },
           },
+          // The observer wants the JSON, not the model's deliberation. With thinking on, the
+          // default model spent 25-45 s and 1,600-3,700 completion tokens (60-136 neurons) on a
+          // one-event probe and the worker's 60 s deadline turned into fallback summaries; with it
+          // off the same call took 1.4 s, 122 tokens, 5.7 neurons (isolated account, 2026-09-06).
+          chat_template_kwargs: { enable_thinking: false },
         },
       },
     };

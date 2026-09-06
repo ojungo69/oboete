@@ -259,6 +259,7 @@ test('schema success returns validated output, model id, attempts, and header ne
   const responseFormat = requestBody?.response_format as Record<string, unknown> | undefined;
   assert.equal(responseFormat?.type, 'json_schema');
   assert.equal(typeof responseFormat?.json_schema, 'object');
+  assert.deepEqual(requestBody?.chat_template_kwargs, { enable_thinking: false }, 'thinking is off for the observer call');
 });
 
 test('neurons fall back to separate input and output token rates', async () => {
