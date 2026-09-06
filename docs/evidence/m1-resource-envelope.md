@@ -139,16 +139,16 @@ Load averages for the source tables: cold start `1.40 2.43 2.28 2/4249 14`; inst
 
 ### Setup
 
-- Date: 2026-09-05T19:32:55.392Z
+- Date: 2026-09-05T21:06:27.606Z
 - Machine: `Linux DESKTOP-PNCJSEO 6.18.33.2-microsoft-standard-WSL2 x64`.
 - CPU: `AMD Ryzen 9 5950X 16-Core Processor`.
 - Node: `/home/jura/.nvm/versions/node/v24.16.0/bin/node` (v24.16.0).
-- Commit: `0586cee4`.
-- Bundle: `/home/jura/projects/free-mem-p5-t068/dist/oboete.mjs`, 1444249 bytes.
+- Commit: `6554c826`.
+- Bundle: `/home/jura/projects/free-mem-p5-t068/dist/oboete.mjs`, 1455707 bytes.
 - Fixture: `/home/jura/projects/free-mem-p5-t068/test/fixtures/events-1000.jsonl` (1051 lines).
-- `OBOETE_HOME`: `/tmp/oboete-t068-home-0tb1E5`. Config file absent (schema default preset `workers-ai`); child environment has no provider credentials, so summaries are rule-based (`no_provider`).
+- `OBOETE_HOME`: `/tmp/oboete-replay-home-vS0lFW`. Config file absent (schema default preset `workers-ai`); child environment has no provider credentials, so summaries are rule-based (`no_provider`).
 - Temporary git repository with one empty commit so `HEAD` exists. `NODE_ENV=test`.
-- Worker RSS: Linux `/proc/<pid>/status` `VmHWM`, polled every 50 ms on the `observe` processes this command spawned.
+- Worker RSS: Linux `/proc/<pid>/status` `VmHWM`, polled every 50 ms on the `observe` processes this command spawned. A replay-owned `worker_lease` token is held across every `SessionEnd`/`session_shutdown` so the hook does not spawn its own worker; replay then releases and runs `observe` itself.
 
 Commands executed:
 
@@ -157,83 +157,83 @@ npm run build
 node dist/oboete.mjs fixture replay /home/jura/projects/free-mem-p5-t068/test/fixtures/events-1000.jsonl
 ```
 
-Load average at the start of the run: `2.62 7.76 10.70 1/3280 1680179`
+Load average at the start of the run: `10.79 4.23 4.65 17/2743 1910303`
 
 ### SC-002 capture time
 
-Capture-only hooks (everything that is not an injection event). Bound 300 ms. Status is p99 ≤ bound and ≥99% of samples ≤ bound.
+Capture-only hooks (`hookDeadlineMs` ≠ `INJECTION_DEADLINE_MS`). Bound 300 ms. Status is p99 ≤ bound and ≥99% of samples ≤ bound.
 
 | Agent | Event | n | p50 ms | p95 ms | p99 ms | max ms | Bound | Status |
 |---|---|---:|---:|---:|---:|---:|---|---|
-| claude | PostCompact | 1 | 178.6 | 178.6 | 178.6 | 178.6 | 300 ms | pass |
-| claude | PostToolUse | 56 | 190.4 | 243.5 | 249.0 | 250.0 | 300 ms | pass |
-| claude | PostToolUseFailure | 1 | 175.6 | 175.6 | 175.6 | 175.6 | 300 ms | pass |
-| claude | PreToolUse | 57 | 186.4 | 239.1 | 251.4 | 264.0 | 300 ms | pass |
-| claude | SessionEnd | 11 | 183.0 | 239.1 | 241.0 | 241.5 | 300 ms | pass |
-| claude | Stop | 58 | 195.1 | 258.4 | 261.7 | 262.5 | 300 ms | pass |
-| codex | PostCompact | 1 | 172.8 | 172.8 | 172.8 | 172.8 | 300 ms | pass |
-| codex | PostToolUse | 60 | 188.5 | 258.3 | 262.6 | 266.2 | 300 ms | pass |
-| codex | PostToolUseFailure | 1 | 176.4 | 176.4 | 176.4 | 176.4 | 300 ms | pass |
-| codex | PreToolUse | 61 | 188.5 | 253.7 | 257.7 | 259.3 | 300 ms | pass |
-| codex | SessionEnd | 11 | 191.9 | 269.4 | 285.1 | 289.0 | 300 ms | pass |
-| codex | Stop | 62 | 192.2 | 247.9 | 258.2 | 264.0 | 300 ms | pass |
-| grok | PermissionDenied | 1 | 192.1 | 192.1 | 192.1 | 192.1 | 300 ms | pass |
-| grok | PostCompact | 2 | 272.2 | 279.6 | 280.2 | 280.4 | 300 ms | pass |
-| grok | PostToolUse | 57 | 200.4 | 286.2 | 904.7 | 1187.5 | 300 ms | fail |
-| grok | PostToolUseFailure | 1 | 207.8 | 207.8 | 207.8 | 207.8 | 300 ms | pass |
-| grok | SessionEnd | 11 | 182.2 | 273.0 | 294.3 | 299.6 | 300 ms | pass |
-| grok | Stop | 60 | 205.1 | 292.5 | 318.4 | 335.4 | 300 ms | fail |
-| pi | agent_settled | 77 | 242.8 | 265.7 | 271.5 | 273.2 | 300 ms | pass |
-| pi | input | 77 | 229.4 | 260.5 | 269.9 | 290.3 | 300 ms | pass |
-| pi | session_compact | 1 | 243.3 | 243.3 | 243.3 | 243.3 | 300 ms | pass |
-| pi | session_shutdown | 15 | 224.9 | 260.7 | 263.1 | 263.7 | 300 ms | pass |
-| pi | session_start | 16 | 233.4 | 260.4 | 265.5 | 266.8 | 300 ms | pass |
-| pi | tool_result | 76 | 228.9 | 262.8 | 265.0 | 268.0 | 300 ms | pass |
-| all | * | 774 | 195.6 | 266.1 | 290.8 | 1187.5 | 300 ms | pass |
+| claude | PostCompact | 1 | 226.2 | 226.2 | 226.2 | 226.2 | 300 ms | pass |
+| claude | PostToolUse | 56 | 227.7 | 242.6 | 255.9 | 265.0 | 300 ms | pass |
+| claude | PostToolUseFailure | 1 | 226.6 | 226.6 | 226.6 | 226.6 | 300 ms | pass |
+| claude | PreToolUse | 57 | 219.8 | 238.4 | 240.4 | 241.5 | 300 ms | pass |
+| claude | SessionEnd | 11 | 230.5 | 237.0 | 237.6 | 237.7 | 300 ms | pass |
+| claude | Stop | 58 | 236.1 | 256.0 | 259.4 | 262.2 | 300 ms | pass |
+| codex | PostCompact | 1 | 213.8 | 213.8 | 213.8 | 213.8 | 300 ms | pass |
+| codex | PostToolUse | 60 | 227.2 | 245.1 | 255.6 | 266.5 | 300 ms | pass |
+| codex | PostToolUseFailure | 1 | 239.2 | 239.2 | 239.2 | 239.2 | 300 ms | pass |
+| codex | PreToolUse | 61 | 225.3 | 250.1 | 254.3 | 259.1 | 300 ms | pass |
+| codex | SessionEnd | 11 | 234.0 | 252.8 | 253.3 | 253.4 | 300 ms | pass |
+| codex | Stop | 62 | 224.7 | 242.5 | 249.1 | 252.3 | 300 ms | pass |
+| grok | PermissionDenied | 1 | 242.3 | 242.3 | 242.3 | 242.3 | 300 ms | pass |
+| grok | PostCompact | 2 | 212.7 | 217.0 | 217.4 | 217.5 | 300 ms | pass |
+| grok | PostToolUseFailure | 1 | 230.8 | 230.8 | 230.8 | 230.8 | 300 ms | pass |
+| grok | SessionEnd | 11 | 225.6 | 237.2 | 239.2 | 239.7 | 300 ms | pass |
+| grok | Stop | 60 | 250.9 | 271.0 | 274.4 | 277.9 | 300 ms | pass |
+| pi | agent_settled | 77 | 232.6 | 245.3 | 248.9 | 255.1 | 300 ms | pass |
+| pi | input | 77 | 226.8 | 246.7 | 252.0 | 255.2 | 300 ms | pass |
+| pi | session_compact | 1 | 223.0 | 223.0 | 223.0 | 223.0 | 300 ms | pass |
+| pi | session_shutdown | 15 | 228.2 | 239.7 | 240.3 | 240.5 | 300 ms | pass |
+| pi | session_start | 16 | 218.7 | 238.8 | 239.1 | 239.1 | 300 ms | pass |
+| pi | tool_result | 76 | 227.5 | 247.0 | 251.6 | 258.1 | 300 ms | pass |
+| all | * | 717 | 228.7 | 253.2 | 263.5 | 277.9 | 300 ms | pass |
 
 ### Injection hooks
 
-Claude/Codex `SessionStart`/`UserPromptSubmit`, Grok `SessionStart`/`UserPromptSubmit`/`PreToolUse`, Pi `inject` for `session_start`/`input`. Bound 300 ms on this table (session-start pending has its own table). Pi capture of those events stays in the capture table; the inject child is measured here.
+Classified by `hookDeadlineMs(agent, event) === INJECTION_DEADLINE_MS` (Claude/Codex `SessionStart`/`UserPromptSubmit`, Grok `SessionStart`/`UserPromptSubmit`/`PreToolUse`/`PostToolUse`, Pi `inject` for `session_start`/`input`). Every row is judged at 300 ms (p99 ≤ 300 ms). The per-agent pending session-start sample is excluded here and reported only in the session-start table at 1000 ms. Session-start events that ran while the lease was held for another agent's pending window are also omitted (they are not the ready path). Pi capture of those events stays in the capture table; the inject child is measured here.
 
 | Agent | Event | n | p50 ms | p95 ms | p99 ms | max ms | Bound | Status |
 |---|---|---:|---:|---:|---:|---:|---|---|
-| claude | SessionStart | 13 | 196.9 | 267.0 | 281.6 | 285.2 | 1000 ms | pass |
-| claude | UserPromptSubmit | 58 | 217.8 | 285.2 | 290.3 | 293.9 | 300 ms | pass |
-| codex | SessionStart | 13 | 216.7 | 282.6 | 302.9 | 308.0 | 1000 ms | pass |
-| codex | UserPromptSubmit | 62 | 222.3 | 300.8 | 313.4 | 313.7 | 300 ms | fail |
-| grok | PreToolUse | 59 | 194.4 | 316.7 | 388.3 | 481.4 | 300 ms | fail |
-| grok | SessionStart | 12 | 239.4 | 437.4 | 553.7 | 582.8 | 1000 ms | pass |
-| grok | UserPromptSubmit | 60 | 221.6 | 343.9 | 473.0 | 555.8 | 300 ms | fail |
-| pi | input | 76 | 170.6 | 207.3 | 247.0 | 325.0 | 300 ms | fail |
-| pi | session_start | 16 | 174.3 | 195.7 | 206.7 | 209.4 | 1000 ms | pass |
-| all | * | 369 | 208.6 | 309.0 | 407.9 | 582.8 | 1000 ms | fail |
+| claude | SessionStart | 12 | 250.8 | 261.0 | 262.6 | 263.1 | 300 ms | pass |
+| claude | UserPromptSubmit | 58 | 265.7 | 281.9 | 286.8 | 287.2 | 300 ms | pass |
+| codex | SessionStart | 10 | 246.3 | 274.9 | 276.0 | 276.3 | 300 ms | pass |
+| codex | UserPromptSubmit | 62 | 268.1 | 290.7 | 301.7 | 311.4 | 300 ms | fail |
+| grok | PostToolUse | 57 | 241.5 | 258.8 | 260.7 | 261.3 | 300 ms | pass |
+| grok | PreToolUse | 59 | 236.0 | 250.9 | 257.7 | 259.5 | 300 ms | pass |
+| grok | SessionStart | 10 | 253.1 | 275.2 | 275.7 | 275.8 | 300 ms | pass |
+| grok | UserPromptSubmit | 60 | 264.8 | 279.3 | 282.3 | 282.4 | 300 ms | pass |
+| pi | input | 76 | 170.4 | 188.3 | 192.9 | 193.4 | 300 ms | pass |
+| pi | session_start | 14 | 170.3 | 183.1 | 186.7 | 187.6 | 300 ms | pass |
+| all | * | 418 | 246.7 | 279.2 | 289.4 | 311.4 | 300 ms | pass |
 
 Size-tagged events (FILL-only JSON byte length, then ROOT substituted). Stdin above the 256 KiB read bound is stored as `partial` / `truncated = 1`.
 
 | seq | Agent | Event | tag | FILL JSON bytes | wall ms | classification_state | truncated |
 |---:|---|---|---|---:|---:|---|---:|
-| 761 | claude | UserPromptSubmit | at_bound | 1048576 | 252.8 | partial | 1 |
-| 777 | grok | UserPromptSubmit | at_bound | 1048576 | 239.9 | partial | 1 |
-| 793 | codex | UserPromptSubmit | above_bound | 1048577 | 250.9 | partial | 1 |
-| 809 | pi | input | above_bound | 2097152 | 246.5 | partial | 1 |
+| 761 | claude | UserPromptSubmit | at_bound | 1048576 | 244.0 | partial | 1 |
+| 777 | grok | UserPromptSubmit | at_bound | 1048576 | 234.5 | partial | 1 |
+| 793 | codex | UserPromptSubmit | above_bound | 1048577 | 245.3 | partial | 1 |
+| 809 | pi | input | above_bound | 2097152 | 229.4 | partial | 1 |
 
 ### Session-start wait
 
-Ready path: previous session summarized (bound 300 ms). Pending path: last session of each agent, synchronous `observe` skipped after the preceding SessionEnd (bound 1000 ms). The hook may still spawn a detached worker; that race is recorded, not killed.
+Ready path: previous session summarized (bound 300 ms). Pending path: one sample per agent, the last session, with the lease kept held from that agent's penultimate SessionEnd through its last SessionStart (and Pi `inject --kind start`) so the hook cannot spawn a worker and the pack must take the pending path (bound 1000 ms). The lease hold is what makes the pending path deterministic.
 
 | Agent | Path | n | p50 ms | p95 ms | max ms | Bound | summary_pending | Status |
 |---|---|---:|---:|---:|---:|---|---|---|
-| all | ready | 49 | 195.9 | 306.8 | 582.8 | 300 ms | 0/49 packs carry summary_pending | fail |
-| all | pending | 4 | 265.9 | 282.3 | 285.2 | 1000 ms | 0/4 packs carry summary_pending | pass |
+| all | ready | 45 | 242.5 | 274.3 | 276.3 | 300 ms | 0/45 packs carry summary_pending | pass |
+| all | pending | 4 | 1257.1 | 1278.1 | 1281.3 | 1000 ms | 4/4 packs carry summary_pending | fail |
 
-Ready max 582.8 ms (n=49, fail). Pending max 285.2 ms (n=4, pass).
+Ready max 276.3 ms (n=45, pass). Pending max 1281.3 ms (n=4, fail).
 
 ### SC-003 worker memory and database growth
 
-- Observe runs spawned by replay: 41.
-- Max VmHWM: 71124 kB = 69.457 MB (bound 150 MB, pass).
-- `memory.db` + `-wal` before: 221184 bytes; after: 3932160 bytes; delta 3710976 bytes; 3530900 bytes per 1,000 events.
-- Rows: raw_events=1322, memories=86, injections=292, injection_items=5468.
+- Observe runs spawned by replay: 43.
+- Max VmHWM: 114984 kB = 112.289 MB (bound 150 MB, pass).
+- `memory.db` + `-wal` before: 221184 bytes; after: 3964928 bytes; delta 3743744 bytes; 3562078 bytes per 1,000 events.
+- Rows: raw_events=1322, memories=87, injections=293, injection_items=5477.
 
 ### SC-005 secret scan
 
@@ -297,22 +297,40 @@ Misses:
 
 ### Lifecycle
 
-Session-start packs per (conversation, context_epoch) with count > 1: 0 (contracts/agents.md: one pack per conversation and epoch). A resume must add none; a fork is a new conversation; a compaction advances `context_epoch` exactly once.
+Each `tags.lifecycle` sequence checked against contracts/agents.md. `fork`: the forked session's `conversation_id` differs from the preceding session of that agent. `resume`: that SessionStart created no `injections` row and printed no pack. `compact`: the conversation's `context_epoch` equals the number of detector-clean (`classification_state = done`) `compaction_summary` rows of that conversation (Claude's PostCompact + SessionStart(compact) pair counts once, A16). `clear`: a new session id and a new conversation. A compaction hook that misses the detector deadline stores a `failed` row and by A16 opens no epoch.
 
-| agent | native_session_id | conversation_id | context_epoch | last_compaction_key |
-|---|---|---|---:|---|
-| claude | 217d4204-49e7-4e5a-8911-79e20872f3dc | 4d1b121c-aa15-42cd-831e-0d0f8fb18059 | 1 | abcbdf761bee9ff52bb6d008cc64e4ad0f3414236ad37fa4249babf8ce715f00 |
-| codex | 8699654e-8ae4-4da7-90e6-3620fecce2a7 | 4458a5a2-ad05-4501-95e9-075fd71f7fb5 | 1 | 13485807f934cb2733a22e00175394b969111ee5f360ddea74c76d30d14e40d0 |
-| pi | 443b6e30-2d75-4a6b-9a0c-0745524c61b6 | 83386a84-d65d-4d49-a14a-1f9f7cdcdc05 | 1 | 7868a64d |
+| check | n | pass/fail | offending sessions |
+|---|---:|---|---|
+| fork | 3 | pass | — |
+| resume | 4 | pass | — |
+| compact | 4 | pass | — |
+| clear | 4 | pass | — |
+
+`compaction_summary` rows:
+
+| agent | native_session_id | classification_state |
+|---|---|---|
+| claude | 217d4204-49e7-4e5a-8911-79e20872f3dc | done |
+| codex | 8699654e-8ae4-4da7-90e6-3620fecce2a7 | done |
+| grok | 12612e89-11b9-4a27-9067-4fb7f58668a7 | done |
+| grok | 12612e89-11b9-4a27-9067-4fb7f58668a7 | done |
+| pi | 443b6e30-2d75-4a6b-9a0c-0745524c61b6 | done |
+
+### Hook exits
+
+Capture and injection hooks (including Pi `inject`). Bound: every process exits 0; a non-zero status, a kill signal, or a spawn timeout is a contract violation (contracts/cli.md, FR-002). Wall time of these hooks stays in the timing tables above.
+
+All 1143 capture and injection hooks exited 0 (none killed, none timed out).
 
 ### Bounds
 
 | SC | Measured | Bound | Status |
 |---|---|---|---|
-| SC-002 | p99 290.8 ms; 99.5% ≤ 300 ms (n=774) | p99 < 300 ms and ≥99% of capture events ≤ 300 ms | pass |
-| SC-003 | max VmHWM 71124 kB (69.5 MB) over 41 observe runs; growth 3530900 bytes / 1,000 events | < 150 MB worker peak RSS; growth recorded | pass |
+| SC-002 | p99 263.5 ms; 100.0% ≤ 300 ms (n=717) | p99 < 300 ms and ≥99% of capture events ≤ 300 ms | pass |
+| SC-003 | max VmHWM 114984 kB (112.3 MB) over 43 observe runs; growth 3562078 bytes / 1,000 events | < 150 MB worker peak RSS; growth recorded | pass |
 | SC-005 | 0 secret ids in db/wal/spool/logs/packs | zero secret corpus values in db, wal, spool, logs, packs | pass |
 | SC-009 | ja 20.0% (4/20); en 15.0% (3/20); overall 17.5% (7/40) | ≥ 90% ja, en, and overall | fail |
 | SC-010 | 0 duplicate included (conversation_id, context_epoch, memory_id) groups; raw_events.id=1322 vs lines piped=1051 | zero duplicate included memories per (conversation, epoch) | pass |
+| hooks | all 1143 capture/injection hooks exited 0 | all hooks exit 0 | pass |
 
 One or more measured bounds failed. The numbers above are the run, not a softened reading.

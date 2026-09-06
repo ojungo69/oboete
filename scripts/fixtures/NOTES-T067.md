@@ -18,4 +18,4 @@
 
 **Pi `input.source`:** `interactive` / `rpc` / `extension` (size event stays `interactive`).
 
-**Smoke:** `scripts/fixtures/smoke-first-sessions.mjs` after `npm run build`: every hook process exits 0. Rows with `failure_reason: deadline` appear only when the host is loaded (the capture deadline is 300 ms); the same rows store cleanly on an idle host, and the fixture payloads are no larger than before (claude first session 8787 bytes vs 9291).
+**Replay:** `oboete fixture replay` after `npm run build`: every hook process exits 0. Rows with `failure_reason: deadline` appear only when the host is loaded (the capture deadline is 300 ms); the same rows store cleanly on an idle host, and the fixture payloads are no larger than before (claude first session 8787 bytes vs 9291).

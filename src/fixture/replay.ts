@@ -15,8 +15,10 @@ import {
 import { hostname, tmpdir, type as osType, cpus, release, arch } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
 
+import { CAPTURE_DEADLINE_MS, INJECTION_DEADLINE_MS, hookDeadlineMs } from '../capture.js';
 import { openDatabase } from '../db/open.js';
 import { DEGRADED_SENTENCES } from '../injection/pack.js';
 import { childEnvironment } from '../log.js';
@@ -28,15 +30,18 @@ const FILL_ALPHABET = 'The quick brown fox jumps over the lazy dog. ';
 const AT_BOUND = 1_048_576;
 const ABOVE_ONE = 1_048_577;
 const ABOVE_TWO = 2_097_152;
-const CAPTURE_BOUND_MS = 300;
 const READY_BOUND_MS = 300;
-const PENDING_BOUND_MS = 1_000;
+// spec.md US2 AC-3 / FR-024 bound the summary *wait* at 1 s; the hook's own deadline is the engine's
+// INJECTION_DEADLINE_MS (the 300 ms ready budget plus that wait), and inject.ts caps the wait at the
+// remaining budget, so the pending path is judged on wall time against 1300 ms.
+const PENDING_BOUND_MS = INJECTION_DEADLINE_MS;
 const WORKER_RSS_BOUND_KB = 150 * 1024;
 const RECALL_BOUND = 0.9;
 const HEADING = '## Fixture replay (T068)';
 const SUMMARY_PENDING = DEGRADED_SENTENCES.summary_pending;
 const SESSION_END = new Set(['SessionEnd', 'session_shutdown']);
 const AGENTS = ['claude', 'codex', 'grok', 'pi'] as const;
+const LEASE_TOKEN = 't068-replay';
 
 type Agent = (typeof AGENTS)[number];
 type SizeTag = 'at_bound' | 'above_bound';
@@ -59,6 +64,8 @@ type Line = {
 };
 type Spawned = {
   status: number | null;
+  signal: string | null;
+  timedOut: boolean;
   stdout: string;
   stderr: string;
   elapsedMs: number;
@@ -76,15 +83,25 @@ type SizeRow = {
 };
 type RecallHit = { id: string; lang: 'ja' | 'en'; query: string; expect: string; hit: boolean };
 type BoundRow = { sc: string; measured: string; bound: string; status: 'pass' | 'fail' };
+type HookFailure = {
+  seq: number;
+  agent: Agent;
+  event: string;
+  status: string;
+  stderr: string;
+};
+type ResumeCheck = {
+  seq: number;
+  agent: Agent;
+  session: string;
+  packPrinted: boolean;
+  injectionDelta: number;
+};
 
 function fillBytes(n: number): string {
   if (n <= 0) return '';
   const unit = FILL_ALPHABET;
   return unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
-}
-
-function sleep(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function isAgent(value: string): value is Agent {
@@ -156,7 +173,9 @@ function repositoryRoot(): string {
   for (;;) {
     if (existsSync(join(directory, 'package.json'))) return directory;
     const parent = dirname(directory);
-    if (parent === directory) return process.cwd();
+    if (parent === directory) {
+      throw new Error('could not find repository root: no package.json above cwd or the engine bundle');
+    }
     directory = parent;
   }
 }
@@ -191,14 +210,8 @@ function asLine(raw: unknown, index: number): Line {
   };
 }
 
-function injectionEvent(agent: Agent, event: string): boolean {
-  if (agent === 'claude' || agent === 'codex') {
-    return event === 'SessionStart' || event === 'UserPromptSubmit';
-  }
-  if (agent === 'grok') {
-    return event === 'SessionStart' || event === 'UserPromptSubmit' || event === 'PreToolUse';
-  }
-  return false;
+function isInjectionHook(agent: Agent, event: string): boolean {
+  return hookDeadlineMs(agent, event) === INJECTION_DEADLINE_MS;
 }
 
 function sessionStartEvent(agent: Agent, event: string): boolean {
@@ -260,6 +273,21 @@ function hookArgs(line: Line): { args: string[]; extra: NodeJS.ProcessEnv } {
   return { args: ['hook', '--agent', 'claude-or-grok', '--event', line.event], extra };
 }
 
+function firstStderrLine(text: string): string {
+  const line = text.replace(/\r/g, '').split('\n').find((entry) => entry.trim() !== '') ?? '';
+  return line.length > 120 ? `${line.slice(0, 117)}...` : line;
+}
+
+function hookStatusCell(spawned: Spawned): string {
+  if (spawned.timedOut) return 'timeout';
+  if (spawned.signal !== null) return spawned.signal;
+  return spawned.status === null ? 'null' : String(spawned.status);
+}
+
+function hookViolated(spawned: Spawned): boolean {
+  return spawned.timedOut || spawned.signal !== null || spawned.status !== 0;
+}
+
 function runChild(
   bundle: string,
   args: string[],
@@ -278,8 +306,11 @@ function runChild(
     maxBuffer: 16 * 1024 * 1024,
     killSignal: 'SIGTERM',
   });
+  const code = (result.error as { code?: string } | undefined)?.code;
   return {
     status: result.status,
+    signal: result.signal,
+    timedOut: code === 'ETIMEDOUT',
     stdout: result.stdout ?? '',
     stderr: result.stderr ?? '',
     elapsedMs: performance.now() - started,
@@ -298,33 +329,45 @@ function readVmHwm(pid: number): number {
   }
 }
 
-function runObserve(
-  bundle: string,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-): Promise<{ status: number | null; rssKb: number; elapsedMs: number }> {
-  return new Promise((resolvePromise) => {
-    const started = performance.now();
-    const child = spawn(process.execPath, [bundle, 'observe'], { cwd, env, stdio: 'ignore' });
-    let rssKb = 0;
-    const tick = (): void => {
-      if (child.pid !== undefined) {
-        const value = readVmHwm(child.pid);
-        if (value > rssKb) rssKb = value;
-      }
-    };
-    const timer = setInterval(tick, 50);
-    const finish = (status: number | null): void => {
+type ObserveProc = {
+  rssKb: () => number;
+  running: () => boolean;
+  status: () => number | null;
+  exited: Promise<number | null>;
+};
+
+function startObserve(bundle: string, cwd: string, env: NodeJS.ProcessEnv): ObserveProc {
+  const child = spawn(process.execPath, [bundle, 'observe'], { cwd, env, stdio: 'ignore' });
+  let rssKb = 0;
+  let running = true;
+  let status: number | null = null;
+  const tick = (): void => {
+    if (child.pid !== undefined) {
+      const value = readVmHwm(child.pid);
+      if (value > rssKb) rssKb = value;
+    }
+  };
+  const timer = setInterval(tick, 50);
+  const exited = new Promise<number | null>((resolvePromise) => {
+    const finish = (code: number | null): void => {
       tick();
       clearInterval(timer);
-      resolvePromise({ status, rssKb, elapsedMs: performance.now() - started });
+      running = false;
+      status = code;
+      resolvePromise(code);
     };
     child.on('error', () => finish(null));
     child.on('close', (code) => finish(code));
   });
+  return {
+    rssKb: () => rssKb,
+    running: () => running,
+    status: () => status,
+    exited,
+  };
 }
 
-function waitLeaseFree(dbPath: string, timeoutMs: number): void {
+async function waitLeaseFree(dbPath: string, timeoutMs: number): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
@@ -337,7 +380,82 @@ function waitLeaseFree(dbPath: string, timeoutMs: number): void {
     } catch {
       // The hook still holds the write lock, or the worker has not released it.
     }
-    sleep(50);
+    await sleep(50);
+  }
+}
+
+function runLeaseSql(dbPath: string, sql: string, params: (string | number | null)[]): void {
+  const deadline = Date.now() + 5_000;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const opened = openDatabase({ path: dbPath, timeoutMs: 500, hook: true });
+      try {
+        opened.db.prepare(sql).run(...params);
+        return;
+      } finally {
+        opened.db.close();
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('lease update failed');
+}
+
+function holdLease(dbPath: string): void {
+  const now = Date.now();
+  runLeaseSql(
+    dbPath,
+    'UPDATE worker_lease SET owner_token = ?, pid = ?, started_at = ?, heartbeat_at = ? WHERE id = 1',
+    [LEASE_TOKEN, process.pid, now, now],
+  );
+}
+
+function releaseHeldLease(dbPath: string): void {
+  runLeaseSql(
+    dbPath,
+    'UPDATE worker_lease SET owner_token = NULL, pid = NULL, started_at = NULL, heartbeat_at = NULL WHERE id = 1',
+    [],
+  );
+}
+
+function endedPendingCount(dbPath: string): number | null {
+  try {
+    const opened = openDatabase({ path: dbPath, timeoutMs: 200, hook: true });
+    try {
+      const row = opened.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM sessions WHERE status = 'ended' AND summary_state = 'pending'`,
+        )
+        .get() as { n?: unknown } | undefined;
+      return typeof row?.n === 'number' ? row.n : 0;
+    } finally {
+      opened.db.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+function startInjectionCount(dbPath: string, agent: Agent, nativeId: string): number {
+  try {
+    const opened = openDatabase({ path: dbPath, timeoutMs: 2_000, hook: true });
+    try {
+      const row = opened.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM injections i
+           JOIN sessions s ON s.id = i.session_id
+           WHERE s.agent = ? AND s.native_session_id = ?
+             AND i.kind = 'session_start' AND i.state <> 'omitted'`,
+        )
+        .get(agent, nativeId) as { n?: unknown } | undefined;
+      return typeof row?.n === 'number' ? row.n : 0;
+    } finally {
+      opened.db.close();
+    }
+  } catch {
+    return -1;
   }
 }
 
@@ -351,23 +469,13 @@ function fileBytes(path: string): number {
 
 function walkFiles(root: string): string[] {
   if (!existsSync(root)) return [];
-  const out: string[] = [];
-  const stack = [root];
-  while (stack.length > 0) {
-    const current = stack.pop() as string;
-    let entries;
-    try {
-      entries = readdirSync(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const path = join(current, entry.name);
-      if (entry.isDirectory()) stack.push(path);
-      else out.push(path);
-    }
+  try {
+    return readdirSync(root, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(entry.parentPath, entry.name));
+  } catch {
+    return [];
   }
-  return out;
 }
 
 function bufferHas(haystack: Buffer, needle: string): boolean {
@@ -448,6 +556,12 @@ function mdTable(headers: string[], right: boolean[], rows: string[][]): string 
   return `${head}\n${rule}\n${body}`;
 }
 
+function mdCell(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed === '') return '—';
+  return trimmed.replace(/\|/g, '\\|');
+}
+
 function groupKey(sample: Sample): string {
   return `${sample.agent}\t${sample.event}`;
 }
@@ -516,14 +630,8 @@ function lastSessions(lines: Line[]): {
   return { lastStartSeq, penultimateEndSeq };
 }
 
-function skipObserve(line: Line, lastStartSeen: Record<Agent, boolean>, penultimateEndSeq: Record<Agent, number>): boolean {
-  if (!SESSION_END.has(line.event)) return false;
-  for (const agent of AGENTS) {
-    if (!lastStartSeen[agent] && line.seq >= penultimateEndSeq[agent] && penultimateEndSeq[agent] > 0) {
-      return true;
-    }
-  }
-  return false;
+function skipObserve(line: Line, penultimateEndSeq: Record<Agent, number>): boolean {
+  return SESSION_END.has(line.event) && line.seq === penultimateEndSeq[line.agent];
 }
 
 function parseLines(file: string): Line[] {
@@ -598,7 +706,13 @@ export async function runFixture(argv: string[]): Promise<number> {
     return 2;
   }
 
-  const root = repositoryRoot();
+  let root: string;
+  try {
+    root = repositoryRoot();
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
   const bundle = bundlePath();
   if (!existsSync(bundle)) {
     process.stderr.write(`engine bundle not found: ${bundle}\n`);
@@ -630,7 +744,7 @@ export async function runFixture(argv: string[]): Promise<number> {
   const startedAt = new Date().toISOString();
   const loadAtStart = loadAverage();
   const { lastStartSeq, penultimateEndSeq } = lastSessions(lines);
-  const lastStartSeen: Record<Agent, boolean> = { claude: false, codex: false, grok: false, pi: false };
+  const pendingHold = new Set<Agent>();
   const pendingSessions = new Set<string>();
   for (const agent of AGENTS) {
     const start = lines.find((line) => line.agent === agent && line.seq === lastStartSeq[agent]);
@@ -646,10 +760,14 @@ export async function runFixture(argv: string[]): Promise<number> {
   const sessionStartPack = new Map<string, string>();
   const factsById = new Map<string, Fact>();
   const recallHits: RecallHit[] = [];
-  const grokRecallWait: { seq: number; session: string; fact: Fact }[] = [];
+  let grokRecallWait: { seq: number; session: string; fact: Fact }[] = [];
+  const hookFailures: HookFailure[] = [];
+  const resumeChecks: ResumeCheck[] = [];
+  let hookCount = 0;
   let observeRssKb = 0;
   let observeRuns = 0;
   let storageFailed = false;
+  let leaseHeld = false;
 
   const factsFrom = (line: Line): void => {
     const fact = line.tags?.fact;
@@ -662,11 +780,24 @@ export async function runFixture(argv: string[]): Promise<number> {
     if (text.trim() === '') return;
     packs.push({ seq: line.seq, agent: line.agent, session: line.session, event: line.event, text });
     const key = `${line.agent}:${line.session}`;
-    if (sessionStartEvent(line.agent, line.event) || (line.agent === 'grok' && line.event === 'PreToolUse' && !sessionStartPack.has(key))) {
-      if (!sessionStartPack.has(key) || sessionStartEvent(line.agent, line.event)) {
-        sessionStartPack.set(key, text);
-      }
+    if (
+      sessionStartEvent(line.agent, line.event) ||
+      (line.agent === 'grok' && line.event === 'PreToolUse' && !sessionStartPack.has(key))
+    ) {
+      sessionStartPack.set(key, text);
     }
+  };
+
+  const recordHook = (line: Line, spawned: Spawned, eventLabel: string): void => {
+    hookCount += 1;
+    if (!hookViolated(spawned)) return;
+    hookFailures.push({
+      seq: line.seq,
+      agent: line.agent,
+      event: eventLabel,
+      status: hookStatusCell(spawned),
+      stderr: firstStderrLine(spawned.stderr),
+    });
   };
 
   const checkRecall = (line: Line, pack: string): void => {
@@ -677,6 +808,57 @@ export async function runFixture(argv: string[]): Promise<number> {
     const start = sessionStartPack.get(`${line.agent}:${line.session}`) ?? '';
     const hit = pack.includes(fact.expect) || start.includes(fact.expect);
     recallHits.push({ id: fact.id, lang: fact.lang, query: fact.query, expect: fact.expect, hit });
+  };
+
+  let liveObserve: ObserveProc | undefined;
+
+  const harvestRss = (): void => {
+    if (liveObserve === undefined) return;
+    const value = liveObserve.rssKb();
+    if (value > observeRssKb) observeRssKb = value;
+    if (liveObserve.status() === 3) storageFailed = true;
+  };
+
+  const startWorker = (): void => {
+    if (liveObserve?.running() === true) return;
+    liveObserve = startObserve(bundle, repo, envBase);
+    observeRuns += 1;
+    void liveObserve.exited.then(() => harvestRss());
+  };
+
+  const waitEndedSummaries = async (timeoutMs: number): Promise<void> => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      harvestRss();
+      const pending = endedPendingCount(paths.db);
+      if (pending === 0) return;
+      if (liveObserve === undefined || !liveObserve.running()) startWorker();
+      await sleep(50);
+    }
+  };
+
+  const ensureLeaseHeld = async (): Promise<void> => {
+    if (leaseHeld) {
+      holdLease(paths.db);
+      return;
+    }
+    // A previous observe may still be looping on an active session's unbatched rows (up to 20 min).
+    // Steal after a short wait so SessionEnd is not blocked on that idle loop.
+    await waitLeaseFree(paths.db, 500);
+    holdLease(paths.db);
+    leaseHeld = true;
+  };
+
+  const dropLease = (): void => {
+    if (!leaseHeld) return;
+    releaseHeldLease(paths.db);
+    leaseHeld = false;
+  };
+
+  const observeNow = async (): Promise<void> => {
+    dropLease();
+    startWorker();
+    await waitEndedSummaries(45_000);
   };
 
   try {
@@ -694,7 +876,8 @@ export async function runFixture(argv: string[]): Promise<number> {
     for (const line of lines) {
       if (line.seq % 100 === 0) process.stderr.write(`replay ${line.seq}/${lines.length}\n`);
       const key = `${line.agent}:${line.session}`;
-      if (line.seq === lastStartSeq[line.agent]) lastStartSeen[line.agent] = true;
+      const isPendingStart = pendingSessions.has(key) && sessionStartEvent(line.agent, line.event);
+      const injection = isInjectionHook(line.agent, line.event);
 
       let payload = line.payload;
       let fillSize = 0;
@@ -724,11 +907,27 @@ export async function runFixture(argv: string[]): Promise<number> {
         return 2;
       }
 
+      const nativeId = nativeSessionId(line.agent, payload);
+      let resumeBefore = 0;
+      if (line.tags?.lifecycle === 'resume') {
+        resumeBefore = startInjectionCount(paths.db, line.agent, nativeId);
+      }
+
+      if (SESSION_END.has(line.event) || pendingHold.size > 0) {
+        try {
+          await ensureLeaseHeld();
+        } catch (error) {
+          process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+          return 3;
+        }
+      }
+
       const input = JSON.stringify(payload);
       const { args, extra } = hookArgs({ ...line, payload });
       const env = replayEnv(home, extra);
-      const timeoutMs = injectionEvent(line.agent, line.event) ? 15_000 : 10_000;
+      const timeoutMs = injection ? 15_000 : 10_000;
       const hooked = runChild(bundle, args, input, repo, env, timeoutMs);
+      recordHook(line, hooked, line.event);
       const sample: Sample = {
         agent: line.agent,
         event: line.event,
@@ -736,16 +935,20 @@ export async function runFixture(argv: string[]): Promise<number> {
         session: line.session,
         ms: hooked.elapsedMs,
       };
-      if (injectionEvent(line.agent, line.event)) injectionSamples.push(sample);
-      else captureSamples.push(sample);
+      const holdActive = pendingHold.size > 0;
+      if (injection && !isPendingStart && !(sessionStartEvent(line.agent, line.event) && holdActive)) {
+        injectionSamples.push(sample);
+      } else if (!injection) {
+        captureSamples.push(sample);
+      }
       recordPack(line, hooked.stdout);
 
       if (sessionStartEvent(line.agent, line.event) && line.agent !== 'pi') {
-        const pending = pendingSessions.has(key);
-        if (pending) pendingSamples.push(sample);
-        else if (line.seq > 1) readySamples.push(sample);
+        if (isPendingStart) pendingSamples.push(sample);
+        else if (line.seq > 1 && !holdActive) readySamples.push(sample);
       }
 
+      let injected: Spawned | undefined;
       if (line.agent === 'pi' && (line.event === 'session_start' || line.event === 'input') && line.tags?.size === undefined) {
         const envelope = payload as {
           cwd?: unknown;
@@ -760,7 +963,7 @@ export async function runFixture(argv: string[]): Promise<number> {
           prompt: typeof envelope.payload?.text === 'string' ? envelope.payload.text : undefined,
           model: typeof envelope.model === 'string' ? envelope.model : undefined,
         });
-        const injected = runChild(
+        injected = runChild(
           bundle,
           ['inject', '--agent', 'pi', '--kind', kind],
           injectInput,
@@ -768,6 +971,7 @@ export async function runFixture(argv: string[]): Promise<number> {
           envBase,
           kind === 'start' ? 15_000 : 10_000,
         );
+        recordHook(line, injected, `inject:${kind}`);
         const injectSample: Sample = {
           agent: 'pi',
           event: line.event,
@@ -775,12 +979,29 @@ export async function runFixture(argv: string[]): Promise<number> {
           session: line.session,
           ms: injected.elapsedMs,
         };
-        injectionSamples.push(injectSample);
         recordPack(line, injected.stdout);
         if (line.event === 'session_start') {
           if (pendingSessions.has(key)) pendingSamples.push(injectSample);
-          else if (line.seq > 1) readySamples.push(injectSample);
+          else if (!holdActive) {
+            injectionSamples.push(injectSample);
+            if (line.seq > 1) readySamples.push(injectSample);
+          }
+        } else {
+          injectionSamples.push(injectSample);
         }
+      }
+
+      if (line.tags?.lifecycle === 'resume') {
+        const after = startInjectionCount(paths.db, line.agent, nativeId);
+        const printed =
+          packText(hooked.stdout).trim() !== '' || (injected !== undefined && packText(injected.stdout).trim() !== '');
+        resumeChecks.push({
+          seq: line.seq,
+          agent: line.agent,
+          session: line.session,
+          packPrinted: printed,
+          injectionDelta: after < 0 || resumeBefore < 0 ? 1 : after - resumeBefore,
+        });
       }
 
       if (line.agent === 'grok' && line.event === 'PreToolUse') {
@@ -797,7 +1018,7 @@ export async function runFixture(argv: string[]): Promise<number> {
               hit: pack.includes(item.fact.expect) || start.includes(item.fact.expect),
             });
           }
-          grokRecallWait.splice(0, grokRecallWait.length, ...grokRecallWait.filter((item) => item.session !== line.session));
+          grokRecallWait = grokRecallWait.filter((item) => item.session !== line.session);
         }
       }
 
@@ -847,20 +1068,28 @@ export async function runFixture(argv: string[]): Promise<number> {
         });
       }
 
-      if (SESSION_END.has(line.event) && !skipObserve(line, lastStartSeen, penultimateEndSeq)) {
-        waitLeaseFree(paths.db, 30_000);
-        const observed = await runObserve(bundle, repo, envBase);
-        observeRuns += 1;
-        if (observed.rssKb > observeRssKb) observeRssKb = observed.rssKb;
-        if (observed.status === 3) storageFailed = true;
+      if (SESSION_END.has(line.event)) {
+        if (skipObserve(line, penultimateEndSeq)) pendingHold.add(line.agent);
+        else if (pendingHold.size === 0) await observeNow();
+      }
+
+      if (line.seq === lastStartSeq[line.agent]) {
+        pendingHold.delete(line.agent);
+        if (pendingHold.size === 0) await observeNow();
       }
     }
 
-    waitLeaseFree(paths.db, 30_000);
-    const finalObserve = await runObserve(bundle, repo, envBase);
-    observeRuns += 1;
-    if (finalObserve.rssKb > observeRssKb) observeRssKb = finalObserve.rssKb;
-    if (finalObserve.status === 3) storageFailed = true;
+    dropLease();
+    startWorker();
+    await waitEndedSummaries(60_000);
+    harvestRss();
+    if (liveObserve?.running() === true) {
+      holdLease(paths.db);
+      const stop = Date.now() + 5_000;
+      while (Date.now() < stop && liveObserve.running()) await sleep(50);
+      harvestRss();
+      releaseHeldLease(paths.db);
+    }
 
     if (storageFailed) {
       process.stderr.write('observe reported unusable storage\n');
@@ -881,6 +1110,9 @@ export async function runFixture(argv: string[]): Promise<number> {
         sessionStartPack,
         recallHits,
         grokRecallWait,
+        hookFailures,
+        hookCount,
+        resumeChecks,
         maps,
         observeRssKb,
         observeRuns,
@@ -910,6 +1142,24 @@ export async function runFixture(argv: string[]): Promise<number> {
   }
 }
 
+function sessionOrder(lines: Line[]): Record<Agent, string[]> {
+  const order: Record<Agent, string[]> = { claude: [], codex: [], grok: [], pi: [] };
+  const seen = new Set<string>();
+  for (const line of lines) {
+    const key = `${line.agent}:${line.session}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    order[line.agent].push(line.session);
+  }
+  return order;
+}
+
+function neighborSession(order: string[], label: string, offset: number): string | undefined {
+  const index = order.indexOf(label);
+  if (index < 0) return undefined;
+  return order[index + offset];
+}
+
 function measure(
   opened: ReturnType<typeof openDatabase>,
   paths: ReturnType<typeof oboetePaths>,
@@ -924,6 +1174,9 @@ function measure(
     sessionStartPack: Map<string, string>;
     recallHits: RecallHit[];
     grokRecallWait: { seq: number; session: string; fact: Fact }[];
+    hookFailures: HookFailure[];
+    hookCount: number;
+    resumeChecks: ResumeCheck[];
     maps: ReturnType<typeof corpus>;
     observeRssKb: number;
     observeRuns: number;
@@ -1005,34 +1258,137 @@ function measure(
     rows.length === 0 ? 1 : rows.filter((row) => row.hit).length / rows.length;
   const misses = input.recallHits.filter((row) => !row.hit);
 
-  const sessionStartCounts = db
+  const dbSessions = db
     .prepare(
-      `SELECT conversation_id AS conversation_id, context_epoch AS context_epoch, COUNT(*) AS n
-       FROM injections
-       WHERE kind = 'session_start' AND state <> 'omitted'
-       GROUP BY conversation_id, context_epoch`,
-    )
-    .all() as { conversation_id: unknown; context_epoch: unknown; n: unknown }[];
-  const extraStartPacks = sessionStartCounts.filter((row) => Number(row.n) > 1);
-  const compactSessions = db
-    .prepare(
-      `SELECT agent AS agent, native_session_id AS native_session_id, conversation_id AS conversation_id,
-              context_epoch AS context_epoch, last_compaction_key AS last_compaction_key
-       FROM sessions WHERE last_compaction_key IS NOT NULL`,
+      `SELECT id AS id, agent AS agent, native_session_id AS native_session_id,
+              conversation_id AS conversation_id, context_epoch AS context_epoch
+       FROM sessions`,
     )
     .all() as {
+    id: unknown;
     agent: unknown;
     native_session_id: unknown;
     conversation_id: unknown;
     context_epoch: unknown;
-    last_compaction_key: unknown;
   }[];
+  const sessionByNative = new Map<string, (typeof dbSessions)[number]>();
+  const sessionById = new Map<string, (typeof dbSessions)[number]>();
+  for (const row of dbSessions) {
+    sessionByNative.set(`${String(row.agent)}\t${String(row.native_session_id)}`, row);
+    sessionById.set(String(row.id), row);
+  }
+  const nativeByLabel = new Map<string, string>();
+  for (const line of input.lines) {
+    const key = `${line.agent}:${line.session}`;
+    if (!nativeByLabel.has(key)) nativeByLabel.set(key, nativeSessionId(line.agent, line.payload));
+  }
+  const order = sessionOrder(input.lines);
+  const conversationOf = (
+    agent: Agent,
+    label: string,
+  ): { native: string; conversationId: string; epoch: number } | undefined => {
+    const native = nativeByLabel.get(`${agent}:${label}`);
+    if (native === undefined) return undefined;
+    const row = sessionByNative.get(`${agent}\t${native}`);
+    if (row === undefined) return undefined;
+    const root = sessionById.get(String(row.conversation_id)) ?? row;
+    return {
+      native,
+      conversationId: String(row.conversation_id),
+      epoch: Number(root.context_epoch ?? 0),
+    };
+  };
+
+  type LifeRow = { check: string; n: number; pass: boolean; offenders: string[] };
+  const life = (check: string, results: { session: string; pass: boolean }[]): LifeRow => ({
+    check,
+    n: results.length,
+    pass: results.length > 0 && results.every((row) => row.pass),
+    offenders: results.filter((row) => !row.pass).map((row) => row.session),
+  });
+
+  const forkRows: { session: string; pass: boolean }[] = [];
+  const clearRows: { session: string; pass: boolean }[] = [];
+  const compactRows: { session: string; pass: boolean }[] = [];
+  for (const line of input.lines) {
+    const tag = line.tags?.lifecycle;
+    if (tag === undefined) continue;
+    const start = sessionStartEvent(line.agent, line.event);
+    if (tag === 'fork' || tag === 'clear') {
+      const subject = start ? line.session : neighborSession(order[line.agent], line.session, 1);
+      const parent = start ? neighborSession(order[line.agent], line.session, -1) : line.session;
+      const left = subject === undefined ? undefined : conversationOf(line.agent, subject);
+      const right = parent === undefined ? undefined : conversationOf(line.agent, parent);
+      const pass =
+        left !== undefined &&
+        right !== undefined &&
+        left.conversationId !== right.conversationId &&
+        (tag === 'fork' || left.native !== right.native);
+      const label = `${line.agent}:${subject ?? line.session}`;
+      if (tag === 'fork') forkRows.push({ session: label, pass });
+      else clearRows.push({ session: label, pass });
+    }
+    if (tag === 'compact') {
+      const conv = conversationOf(line.agent, line.session);
+      const clean =
+        conv === undefined
+          ? -1
+          : (
+              db
+                .prepare(
+                  `SELECT COUNT(*) AS n FROM raw_events e
+                   JOIN sessions s ON s.id = e.session_id
+                   WHERE e.kind = 'compaction_summary' AND s.conversation_id = ?
+                     AND e.classification_state = 'done'`,
+                )
+                .get(conv.conversationId) as { n?: unknown }
+            ).n;
+      const count = typeof clean === 'number' ? clean : -1;
+      compactRows.push({
+        session: `${line.agent}:${line.session}`,
+        pass: conv !== undefined && conv.epoch === count,
+      });
+    }
+  }
+  const resumeLife = life(
+    'resume',
+    input.resumeChecks.map((row) => ({
+      session: `${row.agent}:${row.session}`,
+      pass: !row.packPrinted && row.injectionDelta === 0,
+    })),
+  );
+  const lifecycleRows = [
+    life('fork', forkRows),
+    resumeLife,
+    life('compact', compactRows),
+    life('clear', clearRows),
+  ];
+
+  const compactionSummaries = db
+    .prepare(
+      `SELECT s.agent AS agent, s.native_session_id AS native_session_id,
+              e.classification_state AS classification_state
+       FROM raw_events e
+       JOIN sessions s ON s.id = e.session_id
+       WHERE e.kind = 'compaction_summary'
+       ORDER BY s.agent, e.captured_at, e.id`,
+    )
+    .all() as { agent: unknown; native_session_id: unknown; classification_state: unknown }[];
 
   const captureValues = input.captureSamples.map((sample) => sample.ms);
   const captureUnder =
-    captureValues.length === 0 ? 1 : captureValues.filter((value) => value <= CAPTURE_BOUND_MS).length / captureValues.length;
+    captureValues.length === 0
+      ? 1
+      : captureValues.filter((value) => value <= CAPTURE_DEADLINE_MS).length / captureValues.length;
   const captureP99 = percentile(captureValues, 99);
-  const sc002 = captureValues.length > 0 && captureUnder >= 0.99 && captureP99 < CAPTURE_BOUND_MS;
+  const sc002 = captureValues.length > 0 && captureUnder >= 0.99 && captureP99 < CAPTURE_DEADLINE_MS;
+  const injectionValues = input.injectionSamples.map((sample) => sample.ms);
+  const injectionUnder =
+    injectionValues.length === 0
+      ? 1
+      : injectionValues.filter((value) => value <= READY_BOUND_MS).length / injectionValues.length;
+  const injectionP99 = percentile(injectionValues, 99);
+  const injectionPass = injectionValues.length > 0 && injectionUnder >= 0.99 && injectionP99 <= READY_BOUND_MS;
   const readyMax = input.readySamples.length === 0 ? 0 : Math.max(...input.readySamples.map((sample) => sample.ms));
   const pendingMax = input.pendingSamples.length === 0 ? 0 : Math.max(...input.pendingSamples.map((sample) => sample.ms));
   const readyPass = input.readySamples.every((sample) => sample.ms <= READY_BOUND_MS);
@@ -1046,7 +1402,19 @@ function measure(
     (recallEn.length === 0 || recallRate(recallEn) >= RECALL_BOUND);
   const sc010 = duplicateGroups.length === 0;
   const directivesPass = leakedDirectives.length === 0;
-  const failed = !(sc002 && readyPass && pendingPass && sc003 && sc005 && sc009 && sc010 && directivesPass);
+  const hooksPass = input.hookFailures.length === 0;
+  const failed = !(
+    sc002 &&
+    injectionPass &&
+    readyPass &&
+    pendingPass &&
+    sc003 &&
+    sc005 &&
+    sc009 &&
+    sc010 &&
+    directivesPass &&
+    hooksPass
+  );
 
   const pendingSentence = (samples: Sample[]): string => {
     if (samples.length === 0) return 'n/a';
@@ -1065,9 +1433,21 @@ function measure(
   const bounds: BoundRow[] = [
     {
       sc: 'SC-002',
-      measured: `p99 ${ms(captureP99)} ms; ${(captureUnder * 100).toFixed(1)}% ≤ ${CAPTURE_BOUND_MS} ms (n=${captureValues.length})`,
-      bound: `p99 < ${CAPTURE_BOUND_MS} ms and ≥99% of capture events ≤ ${CAPTURE_BOUND_MS} ms`,
+      measured: `p99 ${ms(captureP99)} ms; ${(captureUnder * 100).toFixed(1)}% ≤ ${CAPTURE_DEADLINE_MS} ms (n=${captureValues.length})`,
+      bound: `p99 < ${CAPTURE_DEADLINE_MS} ms and ≥99% of capture events ≤ ${CAPTURE_DEADLINE_MS} ms`,
       status: statusOf(sc002),
+    },
+    {
+      sc: 'injection',
+      measured: `p99 ${ms(injectionP99)} ms; ${(injectionUnder * 100).toFixed(1)}% ≤ ${READY_BOUND_MS} ms (n=${injectionValues.length})`,
+      bound: `p99 ≤ ${READY_BOUND_MS} ms and ≥99% of injection hooks ≤ ${READY_BOUND_MS} ms (previous summary ready)`,
+      status: statusOf(injectionPass),
+    },
+    {
+      sc: 'session start',
+      measured: `ready max ${ms(readyMax)} ms (n=${input.readySamples.length}); pending max ${ms(pendingMax)} ms (n=${input.pendingSamples.length}), ${pendingSentence(input.pendingSamples)}`,
+      bound: `ready ≤ ${READY_BOUND_MS} ms; pending ≤ ${PENDING_BOUND_MS} ms (INJECTION_DEADLINE_MS: 300 ms budget + 1 s summary wait)`,
+      status: statusOf(readyPass && pendingPass),
     },
     {
       sc: 'SC-003',
@@ -1093,19 +1473,32 @@ function measure(
       bound: 'zero duplicate included memories per (conversation, epoch)',
       status: statusOf(sc010),
     },
+    {
+      sc: 'directives',
+      measured: leakedDirectives.length === 0 ? '0 directive phrases in memories/packs' : `${leakedDirectives.length} directive phrases in memories/packs`,
+      bound: 'zero corpus directive phrases in memories and packs (FR-021)',
+      status: statusOf(directivesPass),
+    },
+    {
+      sc: 'hooks',
+      measured:
+        input.hookFailures.length === 0
+          ? `all ${input.hookCount} capture/injection hooks exited 0`
+          : `${input.hookFailures.length} of ${input.hookCount} hooks non-zero, killed, or timed out`,
+      bound: 'all hooks exit 0',
+      status: statusOf(hooksPass),
+    },
   ];
 
   const captureTable = mdTable(
     ['Agent', 'Event', 'n', 'p50 ms', 'p95 ms', 'p99 ms', 'max ms', 'Bound', 'Status'],
     [false, false, true, true, true, true, true, false, false],
-    timingRows(input.captureSamples, () => CAPTURE_BOUND_MS),
+    timingRows(input.captureSamples, () => CAPTURE_DEADLINE_MS),
   );
-  const injectionBound = (sample: Sample): number =>
-    sample.event === 'SessionStart' || sample.event === 'session_start' ? PENDING_BOUND_MS : CAPTURE_BOUND_MS;
   const injectionTable = mdTable(
     ['Agent', 'Event', 'n', 'p50 ms', 'p95 ms', 'p99 ms', 'max ms', 'Bound', 'Status'],
     [false, false, true, true, true, true, true, false, false],
-    timingRows(input.injectionSamples, injectionBound),
+    timingRows(input.injectionSamples, () => READY_BOUND_MS),
   );
   const waitRows: string[][] = [];
   const pushWait = (label: string, samples: Sample[], bound: number, sentence: string): void => {
@@ -1161,17 +1554,42 @@ function measure(
     [false, false, false, false],
     bounds.map((row) => [row.sc, row.measured, row.bound, row.status]),
   );
-  const compactTable = mdTable(
-    ['agent', 'native_session_id', 'conversation_id', 'context_epoch', 'last_compaction_key'],
-    [false, false, false, true, false],
-    compactSessions.map((row) => [
-      String(row.agent),
-      String(row.native_session_id),
-      String(row.conversation_id),
-      String(row.context_epoch),
-      String(row.last_compaction_key),
+  const hookExitTable =
+    input.hookFailures.length === 0
+      ? `All ${input.hookCount} capture and injection hooks exited 0 (none killed, none timed out).`
+      : mdTable(
+          ['seq', 'Agent', 'Event', 'status', 'stderr'],
+          [true, false, false, false, false],
+          input.hookFailures.map((row) => [
+            String(row.seq),
+            row.agent,
+            row.event,
+            row.status,
+            mdCell(row.stderr),
+          ]),
+        );
+  const lifecycleTable = mdTable(
+    ['check', 'n', 'pass/fail', 'offending sessions'],
+    [false, true, false, false],
+    lifecycleRows.map((row) => [
+      row.check,
+      String(row.n),
+      statusOf(row.pass),
+      row.offenders.length === 0 ? '—' : row.offenders.join(', '),
     ]),
   );
+  const compactSummaryTable =
+    compactionSummaries.length === 0
+      ? 'No `compaction_summary` rows.'
+      : mdTable(
+          ['agent', 'native_session_id', 'classification_state'],
+          [false, false, false],
+          compactionSummaries.map((row) => [
+            String(row.agent),
+            String(row.native_session_id),
+            String(row.classification_state),
+          ]),
+        );
 
   const markdown = [
     HEADING,
@@ -1187,7 +1605,7 @@ function measure(
     `- Fixture: \`${input.fixturePath}\` (${input.lines.length} lines).`,
     `- \`OBOETE_HOME\`: \`${input.home}\`. Config file absent (schema default preset \`workers-ai\`); child environment has no provider credentials, so summaries are rule-based (\`no_provider\`).`,
     `- Temporary git repository with one empty commit so \`HEAD\` exists. \`NODE_ENV=test\`.`,
-    `- Worker RSS: Linux \`/proc/<pid>/status\` \`VmHWM\`, polled every 50 ms on the \`observe\` processes this command spawned.`,
+    `- Worker RSS: Linux \`/proc/<pid>/status\` \`VmHWM\`, polled every 50 ms on the \`observe\` processes this command spawned. A replay-owned \`worker_lease\` token is held across every \`SessionEnd\`/\`session_shutdown\` so the hook does not spawn its own worker; replay then releases and runs \`observe\` itself.`,
     '',
     'Commands executed:',
     '',
@@ -1200,13 +1618,13 @@ function measure(
     '',
     '### SC-002 capture time',
     '',
-    'Capture-only hooks (everything that is not an injection event). Bound 300 ms. Status is p99 ≤ bound and ≥99% of samples ≤ bound.',
+    `Capture-only hooks (\`hookDeadlineMs\` ≠ \`INJECTION_DEADLINE_MS\`). Bound ${CAPTURE_DEADLINE_MS} ms. Status is p99 ≤ bound and ≥99% of samples ≤ bound.`,
     '',
     captureTable,
     '',
     '### Injection hooks',
     '',
-    'Claude/Codex `SessionStart`/`UserPromptSubmit`, Grok `SessionStart`/`UserPromptSubmit`/`PreToolUse`, Pi `inject` for `session_start`/`input`. Bound 300 ms on this table (session-start pending has its own table). Pi capture of those events stays in the capture table; the inject child is measured here.',
+    `Classified by \`hookDeadlineMs(agent, event) === INJECTION_DEADLINE_MS\` (Claude/Codex \`SessionStart\`/\`UserPromptSubmit\`, Grok \`SessionStart\`/\`UserPromptSubmit\`/\`PreToolUse\`/\`PostToolUse\`, Pi \`inject\` for \`session_start\`/\`input\`). Every row is judged at ${READY_BOUND_MS} ms (p99 ≤ ${READY_BOUND_MS} ms). The per-agent pending session-start sample is excluded here and reported only in the session-start table at ${PENDING_BOUND_MS} ms. Session-start events that ran while the lease was held for another agent's pending window are also omitted (they are not the ready path). Pi capture of those events stays in the capture table; the inject child is measured here.`,
     '',
     injectionTable,
     '',
@@ -1216,7 +1634,7 @@ function measure(
     '',
     '### Session-start wait',
     '',
-    `Ready path: previous session summarized (bound ${READY_BOUND_MS} ms). Pending path: last session of each agent, synchronous \`observe\` skipped after the preceding SessionEnd (bound ${PENDING_BOUND_MS} ms). The hook may still spawn a detached worker; that race is recorded, not killed.`,
+    `Ready path: previous session summarized (bound ${READY_BOUND_MS} ms). Pending path: one sample per agent, the last session, with the lease kept held from that agent's penultimate SessionEnd through its last SessionStart (and Pi \`inject --kind start\`) so the hook cannot spawn a worker and the pack must take the pending path (bound ${PENDING_BOUND_MS} ms = the engine's INJECTION_DEADLINE_MS: the 300 ms ready budget plus the 1 s summary wait of FR-024; inject.ts caps the wait at the remaining budget). The lease hold is what makes the pending path deterministic.`,
     '',
     waitTable,
     '',
@@ -1263,9 +1681,19 @@ function measure(
     '',
     '### Lifecycle',
     '',
-    `Session-start packs per (conversation, context_epoch) with count > 1: ${extraStartPacks.length} (contracts/agents.md: one pack per conversation and epoch). A resume must add none; a fork is a new conversation; a compaction advances \`context_epoch\` exactly once.`,
+    'Each `tags.lifecycle` sequence checked against contracts/agents.md. `fork`: the forked session\'s `conversation_id` differs from the preceding session of that agent. `resume`: that SessionStart created no `injections` row and printed no pack. `compact`: the conversation\'s `context_epoch` equals the number of detector-clean (`classification_state = done`) `compaction_summary` rows of that conversation (Claude\'s PostCompact + SessionStart(compact) pair counts once, A16). `clear`: a new session id and a new conversation. A compaction hook that misses the detector deadline stores a `failed` row and by A16 opens no epoch.',
     '',
-    compactSessions.length === 0 ? 'No session carried a compaction key.' : compactTable,
+    lifecycleTable,
+    '',
+    '`compaction_summary` rows:',
+    '',
+    compactSummaryTable,
+    '',
+    '### Hook exits',
+    '',
+    'Capture and injection hooks (including Pi `inject`). Bound: every process exits 0; a non-zero status, a kill signal, or a spawn timeout is a contract violation (contracts/cli.md, FR-002). Wall time of these hooks stays in the timing tables above.',
+    '',
+    hookExitTable,
     '',
     '### Bounds',
     '',
@@ -1305,10 +1733,11 @@ function measure(
       pass: sc009,
     },
     duplicates: { groups: duplicateGroups.length, rawEvents, lines: input.lines.length, pass: sc010 },
+    hooks: { n: input.hookCount, failures: input.hookFailures.length, pass: hooksPass },
+    lifecycle: lifecycleRows,
     bounds,
     failed,
   };
 
   return { markdown, json, failed };
 }
-

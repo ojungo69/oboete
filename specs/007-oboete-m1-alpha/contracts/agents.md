@@ -212,8 +212,9 @@ spool).
   detector that never returns) and 100% in-deadline exits under every fault; the replay p99 is an
   additional SC-002 measurement, not the guarantee.
 - Injection hooks (`SessionStart`, `UserPromptSubmit`, Grok delivery hooks, Pi inject child):
-  300 ms when the previous summary is ready; at session start only, up to 1 s while it is
-  pending, then the latest raw activity labelled `summary pending`.
+  300 ms when the previous summary is ready; at session start only, the hook additionally waits
+  up to 1 s while it is pending (1.3 s wall in total, `INJECTION_DEADLINE_MS`; the wait is capped
+  at the remaining budget), then injects the latest raw activity labelled `summary pending`.
 - The detector (stdin cap, private strip, path rules, secretlint core + gated entropy) runs before
   the first write anywhere, including the spool.
 - The paused marker is checked before the database is opened.
