@@ -978,10 +978,6 @@ function dropLease(run: ReplayRun): void {
 }
 
 /**
- * One fixture line: the hook, the Pi injection it also drives, and the checks its tags ask
- * for. `null` continues the replay; a number is the exit code the replay stops with.
- */
-/**
  * The fixture's placeholders become this run's repository, secrets and directives. A size-tagged
  * line also asserts the byte count its tag promises, because the classification under test is the
  * one the byte count selects.
@@ -1024,7 +1020,6 @@ function isPiInjectEvent(line: Line): boolean {
   );
 }
 
-/** Runs `oboete inject` for one Pi line and files its pack and its sample like a hook's. */
 /** The stdin of `oboete inject --agent pi`, from the fixture envelope. */
 function piInjectInput(run: ReplayRun, payload: unknown): string {
   const envelope = payload as {
@@ -1041,6 +1036,7 @@ function piInjectInput(run: ReplayRun, payload: unknown): string {
   });
 }
 
+/** Runs `oboete inject` for one Pi line and files its pack and its sample like a hook's. */
 async function injectPiLine(
   run: ReplayRun,
   line: Line,
@@ -1234,6 +1230,10 @@ async function holdForLine(run: ReplayRun, line: Line): Promise<number | null> {
   }
 }
 
+/**
+ * One fixture line: the hook, the Pi injection it also drives, and the checks its tags ask
+ * for. `null` continues the replay; a number is the exit code the replay stops with.
+ */
 async function replayLine(run: ReplayRun, line: Line): Promise<number | null> {
   if (line.seq % 100 === 0) process.stderr.write(`replay ${line.seq}/${run.lines.length}\n`);
   const key = `${line.agent}:${line.session}`;
@@ -1397,7 +1397,11 @@ export async function runFixture(argv: string[]): Promise<number> {
   }
 }
 
-/** The fixture lines, the worker settle, and the report. The caller owns the poll handles. */
+/**
+ * The fixture lines, the worker settle, and the report. Stops the 50 ms lease poll before the
+ * measurement reads the worker's high-water mark; `runFixture`'s `finally` clears it on every
+ * other path and closes the database the poll reads.
+ */
 async function driveRun(
   run: ReplayRun,
   workerPoll: ReturnType<typeof setInterval>,
@@ -1509,7 +1513,7 @@ function privacyChecks(
     content: unknown;
   }[];
   const rawDirectiveRows = rawContents.filter(
-    (row) => typeof row.content === 'string' && input.maps.directives.some((phrase) => String(row.content).includes(phrase)),
+    (row) => typeof row.content === 'string' && input.maps.directives.some((phrase) => (row.content as string).includes(phrase)),
   ).length;
 
   return { leakedSecrets, leakedDirectives, negativesUnredacted, rawDirectiveRows };
@@ -1870,12 +1874,22 @@ function verdictsOf(input: MeasureInput, m: VerdictInput) {
   };
 }
 
+/**
+ * What `computeReport` measured: the six sub-records it merges, flattened. Every renderer below
+ * takes this whole record and destructures the part it needs.
+ */
+type ReportComputed = ReturnType<typeof computeReport>;
+
 /** The timing rows of the SC table: capture, injection, session start, worker RSS. */
 function timingBounds(
   input: MeasureInput,
-  computed: ReturnType<typeof computeReport>,
+  computed: ReportComputed,
 ): BoundRow[] {
-  const { captureP99, captureUnder, captureValues, injectionP99, injectionPass, injectionTiming, injectionUnder, injectionValues, pending, pendingMax, pendingPass, perThousand, readyMax, readyPass, sc002, sc003, workerRssKb, workerRuns } = computed;
+  const {
+    captureP99, captureUnder, captureValues, injectionP99, injectionPass, injectionTiming,
+    injectionUnder, injectionValues, pending, pendingMax, pendingPass, perThousand, readyMax,
+    readyPass, sc002, sc003, workerRssKb, workerRuns,
+  } = computed;
   return [
     {
       sc: 'SC-002',
@@ -1904,9 +1918,8 @@ function timingBounds(
   ];
 }
 
-/** The content rows of the SC table: secrets, recall, duplicates, lifecycle, directives, hooks. */
 /** SC-005, SC-009 and SC-010: what leaked, what was recalled, what was duplicated. */
-function leakBounds(input: MeasureInput, computed: ReturnType<typeof computeReport>): BoundRow[] {
+function leakBounds(input: MeasureInput, computed: ReportComputed): BoundRow[] {
   const { duplicateGroups, leakedSecrets, rawEvents, recallEn, recallJa, sc005, sc009, sc010 } = computed;
   return [
     {
@@ -1933,7 +1946,7 @@ function leakBounds(input: MeasureInput, computed: ReturnType<typeof computeRepo
 /** The lifecycle, directive and hook rows: sequences that must hold across the whole run. */
 function sequenceBounds(
   input: MeasureInput,
-  computed: ReturnType<typeof computeReport>,
+  computed: ReportComputed,
 ): BoundRow[] {
   const { directivesPass, hooksPass, leakedDirectives, lifecyclePass, lifecycleRows } = computed;
   return [
@@ -1969,7 +1982,7 @@ function sequenceBounds(
 /** The capture, injection, session-start wait and size tables. */
 function timingTables(
   input: MeasureInput,
-  computed: ReturnType<typeof computeReport>,
+  computed: ReportComputed,
 ) {
   const { injectionTiming, pending, pendingPass, readyPass } = computed;
   const captureTable = mdTable(
@@ -2028,7 +2041,7 @@ function timingTables(
 
 /** The recall misses, SC summary, hook exit, lifecycle and compaction tables. */
 /** The recall misses and the SC verdict table. */
-function recallTables(computed: ReturnType<typeof computeReport>, bounds: BoundRow[]) {
+function recallTables(computed: ReportComputed, bounds: BoundRow[]) {
   const { misses } = computed;
   const missTable =
     misses.length === 0
@@ -2047,7 +2060,7 @@ function recallTables(computed: ReturnType<typeof computeReport>, bounds: BoundR
 }
 
 /** The hook exits, the lifecycle checks, and the compaction summaries. */
-function lifecycleTables(input: MeasureInput, computed: ReturnType<typeof computeReport>) {
+function lifecycleTables(input: MeasureInput, computed: ReportComputed) {
   const { compactionSummaries, lifecycleRows } = computed;
   const hookExitTable =
     input.hookFailures.length === 0
@@ -2088,15 +2101,6 @@ function lifecycleTables(input: MeasureInput, computed: ReturnType<typeof comput
   return { hookExitTable, lifecycleTable, compactSummaryTable };
 }
 
-function findingTables(
-  input: MeasureInput,
-  computed: ReturnType<typeof computeReport>,
-  bounds: BoundRow[],
-) {
-  return { ...recallTables(computed, bounds), ...lifecycleTables(input, computed) };
-}
-
-/** The heading, the machine this ran on, and the capture and injection tables. */
 /** The heading and how this run was set up. */
 function setupSection(input: MeasureInput, machine: string, cpu: string): string[] {
   return [
@@ -2130,7 +2134,7 @@ function setupSection(input: MeasureInput, machine: string, cpu: string): string
 /** The capture, injection and session-start tables with the text that reads them. */
 function hookTimingSection(
   input: MeasureInput,
-  computed: ReturnType<typeof computeReport>,
+  computed: ReportComputed,
   tables: { captureTable: string; injectionTable: string; waitTable: string; sizeTable: string },
 ): string[] {
   const { readyMax, readyPass, pendingMax, pendingPass } = computed;
@@ -2166,9 +2170,13 @@ function hookTimingSection(
 /** Worker memory, database growth, and the secret, directive and duplicate scans. */
 function resourceSection(
   input: MeasureInput,
-  computed: ReturnType<typeof computeReport>,
+  computed: ReportComputed,
 ): string[] {
-  const { dbBytesAfter, duplicateGroups, injectionItems, injections, leakedDirectives, leakedDirectivesEllipsis, leakedSecrets, memories, negativesUnredacted, perThousand, rawDirectiveRows, rawEvents, sc003, workerRssKb, workerRuns } = computed;
+  const {
+    dbBytesAfter, duplicateGroups, injectionItems, injections, leakedDirectives,
+    leakedDirectivesEllipsis, leakedSecrets, memories, negativesUnredacted, perThousand,
+    rawDirectiveRows, rawEvents, sc003, workerRssKb, workerRuns,
+  } = computed;
   return [
     '### SC-003 worker memory and database growth',
     '',
@@ -2207,7 +2215,7 @@ function resourceSection(
 /** Fact recall, the lifecycle checks, hook exits, and the bounds table. */
 function recallSection(
   input: MeasureInput,
-  computed: ReturnType<typeof computeReport>,
+  computed: ReportComputed,
   tables: { missTable: string; scTable: string; hookExitTable: string; lifecycleTable: string; compactSummaryTable: string },
 ): string[] {
   const { failed, recallEn, recallJa } = computed;
@@ -2250,7 +2258,7 @@ function recallSection(
 /** The evidence section, in the order the document reads. */
 function reportMarkdown(
   input: MeasureInput,
-  computed: ReturnType<typeof computeReport>,
+  computed: ReportComputed,
   tables: { captureTable: string; injectionTable: string; waitTable: string; sizeTable: string; missTable: string; scTable: string; hookExitTable: string; lifecycleTable: string; compactSummaryTable: string },
 ): string {
   const cpu = cpus()[0]?.model ?? 'unknown';
@@ -2264,13 +2272,16 @@ function reportMarkdown(
   ].join('\n');
 }
 
-/** The same evidence as machine-readable JSON. */
 /** The timing, worker and growth halves of the machine report. */
 function timingJson(
   input: MeasureInput,
-  computed: ReturnType<typeof computeReport>,
+  computed: ReportComputed,
 ): Record<string, unknown> {
-  const { captureP99, captureUnder, captureValues, dbBytesAfter, injectionItems, injections, memories, pending, pendingMax, pendingPass, perThousand, rawEvents, readyMax, readyPass, sc002, sc003, workerRssKb } = computed;
+  const {
+    captureP99, captureUnder, captureValues, dbBytesAfter, injectionItems, injections, memories,
+    pending, pendingMax, pendingPass, perThousand, rawEvents, readyMax, readyPass, sc002, sc003,
+    workerRssKb,
+  } = computed;
   return {
     capture: { n: captureValues.length, p99: captureP99, under: captureUnder, pass: sc002 },
     injection: { n: input.injectionSamples.length, samples: input.injectionSamples },
@@ -2297,12 +2308,16 @@ function timingJson(
   };
 }
 
+/** The same evidence as machine-readable JSON. */
 function reportJson(
   input: MeasureInput,
-  computed: ReturnType<typeof computeReport>,
+  computed: ReportComputed,
   bounds: BoundRow[],
 ): Record<string, unknown> {
-  const { duplicateGroups, failed, hooksPass, leakedDirectives, leakedSecrets, lifecycleRows, misses, negativesUnredacted, rawDirectiveRows, rawEvents, recallEn, recallJa, sc009, sc010 } = computed;
+  const {
+    duplicateGroups, failed, hooksPass, leakedDirectives, leakedSecrets, lifecycleRows, misses,
+    negativesUnredacted, rawDirectiveRows, rawEvents, recallEn, recallJa, sc009, sc010,
+  } = computed;
   return {
     startedAt: input.startedAt,
     lines: input.lines.length,
@@ -2327,7 +2342,7 @@ function reportJson(
 /** The evidence section and its machine form, from what computeReport measured. */
 function renderReport(
   input: MeasureInput,
-  computed: ReturnType<typeof computeReport>,
+  computed: ReportComputed,
 ): { markdown: string; json: Record<string, unknown>; failed: boolean } {
   const bounds: BoundRow[] = [
     ...timingBounds(input, computed),
@@ -2335,7 +2350,7 @@ function renderReport(
     ...sequenceBounds(input, computed),
   ];
   const timing = timingTables(input, computed);
-  const finding = findingTables(input, computed, bounds);
+  const finding = { ...recallTables(computed, bounds), ...lifecycleTables(input, computed) };
   return {
     markdown: reportMarkdown(input, computed, { ...timing, ...finding }),
     json: reportJson(input, computed, bounds),

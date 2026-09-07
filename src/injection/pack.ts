@@ -467,7 +467,6 @@ function writeInjection(
   });
 }
 
-/** Shared tail of both builders: staleness, framing, budget, validation, ledger. */
 /** FR-029: every cited path and commit of every candidate, checked before the pack is built. */
 function checkedCitations(
   db: DatabaseSync,
@@ -516,6 +515,7 @@ function packItems(db: DatabaseSync, input: PackChannelInput, assembly: Assembly
   return items;
 }
 
+/** Shared tail of both builders: staleness, framing, budget, validation, ledger. */
 async function assemble(
   db: DatabaseSync,
   input: PackChannelInput,

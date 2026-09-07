@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, rmSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
 import { test } from 'node:test';
 
 import { replayHome } from '../../src/fixture/replay.js';
@@ -18,13 +19,14 @@ function withEnv(value: string | undefined, run: () => void): void {
 }
 
 test('--home and a set OBOETE_HOME name a directory the replay does not own', () => {
-  withEnv('/tmp/oboete-replay-env-home', () => {
+  const envHome = join(tmpdir(), 'oboete-replay-env-home');
+  withEnv(envHome, () => {
     const flag = replayHome({ home: 'relative-home' });
     assert.equal(flag.home, resolve('relative-home'));
     assert.equal(flag.createdHome, false);
 
     const env = replayHome({});
-    assert.equal(env.home, '/tmp/oboete-replay-env-home');
+    assert.equal(env.home, envHome);
     assert.equal(env.createdHome, false);
   });
 });

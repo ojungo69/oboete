@@ -156,16 +156,6 @@ function tokenize(glob: string): GlobToken[] {
   return tokens;
 }
 
-/**
- * Compiles one `.oboete.toml` path rule with gitignore semantics, because that is the form the
- * rules are written in: a pattern without a slash matches the file name at any depth, `**` crosses
- * directories (`**\/x` matches `x` at the root too), and `*` and `?` never cross one.
- *
- * The rule is repository-supplied input (R4), so it is not compiled into one regular expression:
- * several wildcards in one expression make a non-matching path take exponential time, which would
- * hang the capture hook. Each token instead sweeps the path once and marks the positions it can
- * reach, so a match costs the length of the rule times the length of the path.
- */
 type StarToken = Exclude<GlobToken, { kind: 'one' }>;
 
 /** Marks in `next` every position one character past a reached position the token accepts. */
@@ -206,6 +196,16 @@ function sweepStar(token: StarToken, path: string, reached: Uint8Array, next: Ui
   return any;
 }
 
+/**
+ * Compiles one `.oboete.toml` path rule with gitignore semantics, because that is the form the
+ * rules are written in: a pattern without a slash matches the file name at any depth, `**` crosses
+ * directories (`**\/x` matches `x` at the root too), and `*` and `?` never cross one.
+ *
+ * The rule is repository-supplied input (R4), so it is not compiled into one regular expression:
+ * several wildcards in one expression make a non-matching path take exponential time, which would
+ * hang the capture hook. Each token instead sweeps the path once and marks the positions it can
+ * reach, so a match costs the length of the rule times the length of the path.
+ */
 export function compileGlob(glob: string): GlobMatcher {
   const tokens = tokenize(glob);
   return {

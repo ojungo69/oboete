@@ -554,7 +554,6 @@ function sessionForPi(
   });
 }
 
-/** `oboete inject --agent pi --kind start|prompt`; agent-facing failures always return zero. */
 type PiInjectInput = z.infer<typeof piInjectInputSchema>;
 
 /** The `--agent pi --kind start|prompt` arguments, refused as one error for the hook log. */
@@ -677,6 +676,7 @@ async function writePiInjection(input: {
   if (text !== '') process.stdout.write(text);
 }
 
+/** `oboete inject --agent pi --kind start|prompt`; agent-facing failures always return zero. */
 export async function runInject(
   argv: string[],
   runtime: Partial<InjectRuntime> = {},

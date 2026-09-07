@@ -143,14 +143,10 @@ function stricter(a: Sensitivity, b: Sensitivity): Sensitivity {
 
 class Rejection extends Error {}
 
-/**
- * Applies one validated line inside the import transaction. Throws Rejection for a line the file
- * cannot carry (hash mismatch, unknown repository), which rolls the whole import back.
- */
 type ExistingRow = { id: string; sensitivity: Sensitivity; deleted_at: number | null };
 
 /** The title and body a line carries, refused when they do not match what the line claims. */
-function checkedText(line: ExportLine): { title: string; body: string; hasText: boolean } {
+function checkedText(line: ExportLine): { title: string; body: string } {
   const title = line.title ?? '';
   const body = line.body ?? '';
   const hasText = title !== '' || body !== '';
@@ -161,7 +157,7 @@ function checkedText(line: ExportLine): { title: string; body: string; hasText: 
   if (line.sensitivity === 'secret' && (hasText || line.sources.length > 0 || (line.concepts ?? '[]') !== '[]')) {
     throw new Rejection('a secret row must carry no title, body, concepts or sources');
   }
-  return { title, body, hasText };
+  return { title, body };
 }
 
 /** Applies a line whose content is already here: a tombstone, a stricter label, or nothing. */
@@ -190,6 +186,10 @@ function applyToExisting(
   }
 }
 
+/**
+ * Applies one validated line inside the import transaction. Throws Rejection for a line the file
+ * cannot carry (hash mismatch, unknown repository), which rolls the whole import back.
+ */
 function applyLine(
   db: DatabaseSync,
   line: ExportLine,
@@ -327,11 +327,6 @@ function repoResolver(state: {
   };
 }
 
-/**
- * Reads `oboete-export/1` text and applies it as one unit: a rejected line, or `--dry-run`, rolls
- * everything back, so the database is either fully imported or untouched. The caller bounds the
- * text (runImport reads at most MAX_FILE_BYTES before opening the database).
- */
 type ImportRun = {
   db: DatabaseSync;
   result: ImportResult;
@@ -410,6 +405,11 @@ function readExportLines(run: ImportRun, source: string): boolean {
   return headerSeen;
 }
 
+/**
+ * Reads `oboete-export/1` text and applies it as one unit: a rejected line, or `--dry-run`, rolls
+ * everything back, so the database is either fully imported or untouched. The caller bounds the
+ * text (runImport reads at most MAX_FILE_BYTES before opening the database).
+ */
 export function importMemories(db: DatabaseSync, source: string, options: ImportOptions): ImportResult {
   const result: ImportResult = { applied: false, inserted: 0, updated: 0, tombstones: 0, unchanged: 0, rejected: [] };
   const reject = (line: number, reason: string): void => {
@@ -510,7 +510,6 @@ export async function runExport(argv: string[], io: Io = processIo()): Promise<n
   });
 }
 
-/** `oboete import [file|-] [--dry-run] [--map-repo <old>=<current>]`: exit 2 on an invalid file. */
 type ImportArgs = { file: string; dryRun: boolean; mapRepo: Record<string, string> };
 
 /** The parsed `import` arguments, or the message that says why they are not usable. */
@@ -566,6 +565,7 @@ function importSummary(result: ImportResult): string {
   return `${plural(result.inserted, 'memory', 'memories')} added, ${result.updated} raised in sensitivity, ${plural(result.tombstones, 'tombstone')} applied, ${result.unchanged} unchanged`;
 }
 
+/** `oboete import [file|-] [--dry-run] [--map-repo <old>=<current>]`: exit 2 on an invalid file. */
 export async function runImport(argv: string[], io: Io = processIo()): Promise<number> {
   const args = importArgs(argv);
   if ('error' in args) {
