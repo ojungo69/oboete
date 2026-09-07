@@ -4337,5 +4337,21 @@
   "id": "7fc74b21c7bde3f5ff9b558373a539f2",
   "state": "fixed",
   "where": "#162"
+ },
+ {
+  "service": "codacy",
+  "id": "88da1827acc65948ba0e3a47eeb7d925",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "PATH_SCAN is built only from PATH_KEYS and JSON_VALUE, both module constants, so no payload value reaches the pattern (same finding as 3fe04e204c3d90d84b07fc9ae40ce4b9, re-issued under a new id when #162 rewrote the argument into String.raw)",
+  "verdict": "no payload-controlled pattern reaches the constructor: PATH_SCAN is assembled once at module load from PATH_KEYS and JSON_VALUE, so there is nothing for a validator to stand between; the payload is the string receiver of prefix.matchAll(PATH_SCAN), and the effect is bounded because the pattern's repetitions cannot backtrack ambiguously: the two \\s* around the colon each sit between literal characters, and the one {1,4096} quantifier runs over an alternation whose branches cannot both match a character (one excludes the backslash the other requires), over a receiver readStdinBounded already caps at 262,144 bytes"
+ },
+ {
+  "service": "codacy",
+  "id": "8ce19ec1d6d08ef9a28d6c15a9f2f3e0",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "scanKey is called only with AGENT_KEYS[agent].session and .tool, eight string literals in a module constant, and the payload is the subject of the match rather than part of the pattern (same finding as f5834f762e53f0596f3655477508677f, re-issued under a new id when #162 rewrote the argument into String.raw)",
+  "verdict": "no payload-controlled pattern reaches the constructor: agent comes from resolveAgent, which returns 'codex', 'pi', 'grok', 'claude' or 'unknown' from fixed comparisons on the handler's selector and two environment variables, and captureEvent returns at the 'unknown' guard before the scan, so AGENT_KEYS[agent].session and .tool is a lookup in a constant table of eight string literals; the payload is prefix, the string exec runs against, and the effect is bounded because the pattern's repetitions cannot backtrack ambiguously: the two \\s* around the colon each sit between literal characters, and the one {1,4096} quantifier runs over an alternation whose branches cannot both match a character (one excludes the backslash the other requires), over a receiver readStdinBounded already caps at 262,144 bytes"
  }
 ]

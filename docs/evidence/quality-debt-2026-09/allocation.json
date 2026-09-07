@@ -337,7 +337,9 @@
     "f41f371530c64b029188bab62e0d722a",
     "e8663dd2e1b2bebd385bcc8b3c6dec20",
     "b407b76b7f26b1de6a80423147d7d51c",
-    "bc473f9373cc44f2a96a2777632e5a3b"
+    "bc473f9373cc44f2a96a2777632e5a3b",
+    "88da1827acc65948ba0e3a47eeb7d925",
+    "8ce19ec1d6d08ef9a28d6c15a9f2f3e0"
   ],
   "B1": [
     "AaB3XkorIqdfylE4c2ql",
@@ -709,7 +711,14 @@
     "8e4e16e4abcce13076e3c2922da5ff98",
     "b0bce20c6334ec24bf9755b6d05139b7",
     "d6734b34a521c93a6bd75c091398fdb8",
-    "6d3e0f690f1fa1921d15ecb764a20cb0"
+    "6d3e0f690f1fa1921d15ecb764a20cb0",
+    "2a74d12048285a3863754b93c9a0f519",
+    "11a6c751ee3ef3cc3a66a1db39e096d6",
+    "5bcf01d4f78f9d5476572cd947e2668a",
+    "f6c15bc9b6667413493b7b82690ffd86",
+    "546303173f9b69d5036f0dcfe63aedb7",
+    "86298bfa5e70b8805e7a1909ea176c32",
+    "b6af2bb777dfa4198a6d06a333a0a0b"
   ],
   "D": [
     "161d5b6e6a57ae5ac63a3683a0271135",
@@ -724,18 +733,22 @@
     "ed0feeaa35efccb803dbcc520496b603",
     "7d9b63ea2aafe102e6476a3d93c9c9db",
     "102ad9e090737747988c737fdb66bd3b",
-    "fae407241cd282592ae2df6f14985e91"
+    "fae407241cd282592ae2df6f14985e91",
+    "13aac59837310b6e3f9466c6ec244d79",
+    "e5c566331a7a4187809f6a4b25baaced",
+    "925f06752f2e4d955e5cbd1226a388ba",
+    "6c7d15e7863e4975dd4b61c93e5a93b1"
   ],
   "counts": {
     "A": 302,
-    "E": 34,
+    "E": 36,
     "B1": 125,
     "B2": 55,
     "B3": 40,
     "C1": 27,
     "C2": 39,
     "C3": 17,
-    "C4": 55,
-    "D": 13
+    "C4": 62,
+    "D": 17
   }
 }
