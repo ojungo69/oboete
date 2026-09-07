@@ -215,6 +215,231 @@ const INSERT_MEMORY = `INSERT INTO memories
 const INSERT_SOURCE = `INSERT INTO memory_sources
   (memory_id, raw_event_id, citation_kind, citation_value, source_agent) VALUES (?, ?, ?, ?, ?)`;
 
+type ApplyStatements = ReturnType<typeof prepareApplyStatements>;
+type ApplyLists = Pick<ApplyResult, 'applied' | 'suppressed'>;
+
+type PreparedMutation = {
+  decision: ApplyDecision;
+  sensitivity: Sensitivity;
+  supersedes: string | null;
+};
+
+function prepareApplyStatements(db: DatabaseSync) {
+  return {
+    byContentHash: db.prepare('SELECT id, deleted_at FROM memories WHERE content_hash = ?'),
+    readTarget: db.prepare(
+      'SELECT id, sensitivity, deleted_at FROM memories WHERE id = ? AND repo_id = ?',
+    ),
+    insertMemory: db.prepare(INSERT_MEMORY),
+    insertSource: db.prepare(INSERT_SOURCE),
+  };
+}
+
+function applyDelete(
+  db: DatabaseSync,
+  input: ApplyInput,
+  item: Prepared,
+  target: string | null,
+  classification: Observation['classification'],
+): ApplyResult['applied'][number] {
+  // contracts/observer.md: a delete needs a reason, otherwise nothing happens.
+  if (target === null || classification.reason.trim() === '') {
+    return { index: item.index, decision: 'noop', memoryId: null };
+  }
+  const changes = Number(
+    db
+      .prepare(
+        'UPDATE memories SET deleted_at = ? WHERE id = ? AND repo_id = ? AND deleted_at IS NULL',
+      )
+      .run(input.now, target, input.repoId).changes,
+  );
+  return {
+    index: item.index,
+    decision: changes === 0 ? 'noop' : 'delete',
+    memoryId: changes === 0 ? null : target,
+  };
+}
+
+function recordExisting(
+  item: Prepared,
+  byContentHash: ApplyStatements['byContentHash'],
+  result: ApplyLists,
+): boolean {
+  const existing = byContentHash.get(item.content);
+  if (existing === undefined) return false;
+  // FR-035: the same content never returns once it was deleted; the reason is kept for `why`.
+  if (existing.deleted_at !== null) {
+    result.suppressed.push({ index: item.index, contentHash: item.content });
+    return true;
+  }
+  result.applied.push({ index: item.index, decision: 'noop', memoryId: String(existing.id) });
+  return true;
+}
+
+function prepareMutation(
+  input: ApplyInput,
+  item: Prepared,
+  rowsById: Map<string, RawEventRow>,
+  target: string | null,
+  decision: ApplyDecision,
+  readTarget: ApplyStatements['readTarget'],
+): PreparedMutation {
+  let sensitivity = strictest(
+    item.detectorClass,
+    ...item.sourceIds.map((id) => rowsById.get(id)?.sensitivity ?? 'secret'),
+  );
+  let supersedes: string | null = null;
+  if (decision === 'update' && target !== null) {
+    const targetRow = readTarget.get(target, input.repoId);
+    if (targetRow?.deleted_at !== null) {
+      // The target is gone or tombstoned: the content is still worth keeping, but it
+      // supersedes nothing and a tombstone stays a tombstone.
+      decision = 'add';
+    } else {
+      supersedes = target;
+      // max(target, every source row, detector): an eligible update cannot relax a stricter
+      // target (contracts/observer.md, tested against the outbound body).
+      sensitivity = strictest(sensitivity, targetRow.sensitivity as Sensitivity);
+    }
+  }
+  return { decision, sensitivity, supersedes };
+}
+
+function insertObservationCitations(
+  insertSource: ApplyStatements['insertSource'],
+  item: Prepared,
+  agent: string | null,
+): void {
+  // FR-029: the full path is kept here for the staleness check, never the shortened form.
+  for (const path of item.observation.citations.files_read) {
+    insertSource.run(item.memoryId, null, 'file_read', path, agent);
+  }
+  for (const path of item.observation.citations.files_modified) {
+    insertSource.run(item.memoryId, null, 'file_modified', path, agent);
+  }
+  for (const commit of item.observation.citations.commits) {
+    insertSource.run(item.memoryId, null, 'commit', commit, agent);
+  }
+}
+
+function insertObservationSources(
+  statements: ApplyStatements,
+  item: Prepared,
+  rowsById: Map<string, RawEventRow>,
+): void {
+  const agent = rowsById.get(item.sourceIds[0])?.agent ?? null;
+  for (const id of item.sourceIds) {
+    // FR-005: the agent is recorded as provenance and decides nothing.
+    statements.insertSource.run(item.memoryId, id, null, null, rowsById.get(id)?.agent ?? null);
+  }
+  insertObservationCitations(statements.insertSource, item, agent);
+}
+
+function insertPreparedObservation(
+  db: DatabaseSync,
+  input: ApplyInput,
+  item: Prepared,
+  rowsById: Map<string, RawEventRow>,
+  statements: ApplyStatements,
+  mutation: PreparedMutation,
+): ApplyResult['applied'][number] {
+  statements.insertMemory.run(
+    item.memoryId,
+    input.repoId,
+    item.observation.type,
+    item.observation.title,
+    item.observation.body,
+    JSON.stringify(item.observation.concepts),
+    cjkBigrams(`${item.observation.title} ${item.observation.body}`),
+    item.material,
+    item.content,
+    mutation.sensitivity,
+    // NULL only for provider output (data-model.md memories.degraded_reason).
+    input.fallbackReason,
+    input.sessionId,
+    input.batchId,
+    input.now,
+    input.now,
+  );
+
+  insertObservationSources(statements, item, rowsById);
+
+  if (mutation.supersedes !== null) {
+    db.prepare('UPDATE memories SET valid_to = ?, superseded_by = ? WHERE id = ?').run(
+      input.now,
+      item.memoryId,
+      mutation.supersedes,
+    );
+  }
+  return { index: item.index, decision: mutation.decision, memoryId: item.memoryId };
+}
+
+function applyPreparedObservation(
+  db: DatabaseSync,
+  input: ApplyInput,
+  item: Prepared,
+  rowsById: Map<string, RawEventRow>,
+  offered: Set<string>,
+  statements: ApplyStatements,
+  result: ApplyLists,
+): void {
+  const { classification } = item.observation;
+  // R10: a target that was not among the supplied nearby ids is not a target at all.
+  const target = classification.target !== null && offered.has(classification.target)
+    ? classification.target
+    : null;
+  let decision: ApplyDecision = classification.decision;
+  if (target === null && (decision === 'update' || decision === 'delete')) {
+    decision = decision === 'update' ? 'add' : 'noop';
+  }
+
+  if (decision === 'delete') {
+    result.applied.push(applyDelete(db, input, item, target, classification));
+    return;
+  }
+  if (decision === 'noop') {
+    result.applied.push({ index: item.index, decision: 'noop', memoryId: null });
+    return;
+  }
+  if (recordExisting(item, statements.byContentHash, result)) return;
+
+  const mutation = prepareMutation(input, item, rowsById, target, decision, statements.readTarget);
+  result.applied.push(insertPreparedObservation(db, input, item, rowsById, statements, mutation));
+}
+
+function applyPreparedObservations(
+  db: DatabaseSync,
+  token: string,
+  input: ApplyInput,
+  prepared: Prepared[],
+  rowsById: Map<string, RawEventRow>,
+  offered: Set<string>,
+  dropped: ApplyResult['dropped'],
+): ApplyResult {
+  if (!assertLease(db, token, input.now)) {
+    db.exec('ROLLBACK');
+    return { applied: [], suppressed: [], dropped: [], leaseLost: true };
+  }
+
+  const result: ApplyLists = { applied: [], suppressed: [] };
+  const statements = prepareApplyStatements(db);
+  for (const item of prepared) {
+    applyPreparedObservation(db, input, item, rowsById, offered, statements, result);
+  }
+
+  // Call policy 5: the batch reaches its terminal state in the same transaction as the mutations.
+  db.prepare(
+    'UPDATE observation_batches SET state = ?, completed_at = ?, degraded_reason = ? WHERE id = ?',
+  ).run(
+    input.fallbackReason === null ? 'applied' : 'fallback',
+    input.now,
+    input.fallbackReason,
+    input.batchId,
+  );
+
+  return { ...result, dropped, leaseLost: false };
+}
+
 /**
  * The whole result of one batch in one fenced transaction: every memory mutation and the batch's
  * terminal state commit together, so a lost lease discards everything and a repeated provider call
@@ -273,145 +498,9 @@ export async function applyObservations(
     });
   }
 
-  return transactionImmediate(db, () => {
-    if (!assertLease(db, token, input.now)) {
-      db.exec('ROLLBACK');
-      return { applied: [], suppressed: [], dropped: [], leaseLost: true };
-    }
-
-    const applied: ApplyResult['applied'] = [];
-    const suppressed: ApplyResult['suppressed'] = [];
-    const byContentHash = db.prepare('SELECT id, deleted_at FROM memories WHERE content_hash = ?');
-    const readTarget = db.prepare(
-      'SELECT id, sensitivity, deleted_at FROM memories WHERE id = ? AND repo_id = ?',
-    );
-    const insertMemory = db.prepare(INSERT_MEMORY);
-    const insertSource = db.prepare(INSERT_SOURCE);
-
-    for (const item of prepared) {
-      const { classification } = item.observation;
-      // R10: a target that was not among the supplied nearby ids is not a target at all.
-      const target = classification.target !== null && offered.has(classification.target)
-        ? classification.target
-        : null;
-      let decision: ApplyDecision = classification.decision;
-      if (target === null && (decision === 'update' || decision === 'delete')) {
-        decision = decision === 'update' ? 'add' : 'noop';
-      }
-
-      if (decision === 'delete') {
-        // contracts/observer.md: a delete needs a reason, otherwise nothing happens.
-        if (target === null || classification.reason.trim() === '') {
-          applied.push({ index: item.index, decision: 'noop', memoryId: null });
-          continue;
-        }
-        const changes = Number(
-          db
-            .prepare(
-              'UPDATE memories SET deleted_at = ? WHERE id = ? AND repo_id = ? AND deleted_at IS NULL',
-            )
-            .run(input.now, target, input.repoId).changes,
-        );
-        applied.push({
-          index: item.index,
-          decision: changes === 0 ? 'noop' : 'delete',
-          memoryId: changes === 0 ? null : target,
-        });
-        continue;
-      }
-
-      if (decision === 'noop') {
-        applied.push({ index: item.index, decision: 'noop', memoryId: null });
-        continue;
-      }
-
-      const existing = byContentHash.get(item.content);
-      if (existing !== undefined) {
-        // FR-035: the same content never returns once it was deleted; the reason is kept for `why`.
-        if (existing.deleted_at !== null) {
-          suppressed.push({ index: item.index, contentHash: item.content });
-          continue;
-        }
-        applied.push({ index: item.index, decision: 'noop', memoryId: String(existing.id) });
-        continue;
-      }
-
-      let sensitivity = strictest(
-        item.detectorClass,
-        ...item.sourceIds.map((id) => rowsById.get(id)?.sensitivity ?? 'secret'),
-      );
-      let supersedes: string | null = null;
-      if (decision === 'update' && target !== null) {
-        const targetRow = readTarget.get(target, input.repoId);
-        if (targetRow?.deleted_at !== null) {
-          // The target is gone or tombstoned: the content is still worth keeping, but it
-          // supersedes nothing and a tombstone stays a tombstone.
-          decision = 'add';
-        } else {
-          supersedes = target;
-          // max(target, every source row, detector): an eligible update cannot relax a stricter
-          // target (contracts/observer.md, tested against the outbound body).
-          sensitivity = strictest(sensitivity, targetRow.sensitivity as Sensitivity);
-        }
-      }
-
-      insertMemory.run(
-        item.memoryId,
-        input.repoId,
-        item.observation.type,
-        item.observation.title,
-        item.observation.body,
-        JSON.stringify(item.observation.concepts),
-        cjkBigrams(`${item.observation.title} ${item.observation.body}`),
-        item.material,
-        item.content,
-        sensitivity,
-        // NULL only for provider output (data-model.md memories.degraded_reason).
-        input.fallbackReason,
-        input.sessionId,
-        input.batchId,
-        input.now,
-        input.now,
-      );
-
-      const agent = rowsById.get(item.sourceIds[0])?.agent ?? null;
-      for (const id of item.sourceIds) {
-        // FR-005: the agent is recorded as provenance and decides nothing.
-        insertSource.run(item.memoryId, id, null, null, rowsById.get(id)?.agent ?? null);
-      }
-      // FR-029: the full path is kept here for the staleness check, never the shortened form.
-      for (const path of item.observation.citations.files_read) {
-        insertSource.run(item.memoryId, null, 'file_read', path, agent);
-      }
-      for (const path of item.observation.citations.files_modified) {
-        insertSource.run(item.memoryId, null, 'file_modified', path, agent);
-      }
-      for (const commit of item.observation.citations.commits) {
-        insertSource.run(item.memoryId, null, 'commit', commit, agent);
-      }
-
-      if (supersedes !== null) {
-        db.prepare('UPDATE memories SET valid_to = ?, superseded_by = ? WHERE id = ?').run(
-          input.now,
-          item.memoryId,
-          supersedes,
-        );
-      }
-      applied.push({ index: item.index, decision, memoryId: item.memoryId });
-    }
-
-    // Call policy 5: the batch reaches its terminal state in the same transaction as the mutations.
-    db.prepare(
-      'UPDATE observation_batches SET state = ?, completed_at = ?, degraded_reason = ? WHERE id = ?',
-    ).run(
-      input.fallbackReason === null ? 'applied' : 'fallback',
-      input.now,
-      input.fallbackReason,
-      input.batchId,
-    );
-
-    return { applied, suppressed, dropped, leaseLost: false };
-  });
+  return transactionImmediate(db, () =>
+    applyPreparedObservations(db, token, input, prepared, rowsById, offered, dropped),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -496,6 +585,216 @@ function withoutDirectiveLines(text: string): string {
   return rejectsDirectives(kept) === null ? kept : '';
 }
 
+type SessionSummaryText = { title: string; body: string };
+
+type SessionSummaryRecord = SessionSummaryText & {
+  memoryId: string;
+  repoId: string;
+  material: string;
+  content: string;
+  degraded: DegradedReason | null;
+  sessionId: string;
+  now: number;
+};
+
+function summarizableRows(db: DatabaseSync, sessionId: string): RawEventRow[] {
+  return (
+    db
+      .prepare('SELECT * FROM raw_events WHERE session_id = ? ORDER BY captured_at, id').all(sessionId) as unknown as RawEventRow[]
+  )
+    // A7: this summary is injected at the next session start, so a partial row reaches it as the
+    // tool name and the paths only, exactly as it reaches a batch.
+    .map(stripPartial)
+    .filter(isSummarizableRow);
+}
+
+function recordToolActivity(
+  row: RawEventRow,
+  investigated: string[],
+  modified: Map<string, number>,
+): void {
+  if (row.kind !== 'tool_call') return;
+  const tool = toolNameOf(row);
+  for (const path of toolPaths(row)) {
+    const display = shortenDisplayPath(path);
+    if (READ_TOOLS.has(tool) && !investigated.includes(display)) investigated.push(display);
+    if (WRITE_TOOLS.has(tool)) modified.set(display, (modified.get(display) ?? 0) + 1);
+  }
+}
+
+function sessionActivity(rows: RawEventRow[]): {
+  investigated: string[];
+  modified: Map<string, number>;
+} {
+  const investigated: string[] = [];
+  const modified = new Map<string, number>();
+  for (const row of rows) {
+    recordToolActivity(row, investigated, modified);
+  }
+  return { investigated, modified };
+}
+
+function sessionSummaryText(
+  db: DatabaseSync,
+  sessionId: string,
+  repoId: string,
+  rows: RawEventRow[],
+): SessionSummaryText {
+  const prompts = rows.filter((row) => row.kind === 'prompt' && (row.content ?? '').trim() !== '');
+  const firstPrompt = withoutDirectiveLines(prompts[0]?.content ?? rows[0].content ?? '');
+  const { investigated, modified } = sessionActivity(rows);
+
+  const learned = memoriesForSession(db, sessionId, memoryScope(db, { repoId, destination: 'injection' }))
+    .map((memory) => memory.title ?? '')
+    .filter((title) => title !== '');
+
+  // The last turn the session never finished is what it was about to do next.
+  const openTurn = db
+    .prepare(
+      'SELECT id FROM turns WHERE session_id = ? AND ended_at IS NULL ORDER BY ordinal DESC LIMIT 1',
+    )
+    .get(sessionId);
+  const nextPrompt =
+    openTurn === undefined
+      ? ''
+      : withoutDirectiveLines(prompts.findLast((row) => row.turn_id === openTurn.id)?.content ?? '');
+
+  const title = firstPrompt.slice(0, MAX_TITLE);
+  const body = summaryBody({
+    request: firstPrompt.slice(0, REQUEST_CHARS),
+    investigated,
+    learned,
+    completed: [...modified.entries()].map(([path, count]) => `${path} (${count})`),
+    nextSteps: nextPrompt.slice(0, NEXT_STEPS_CHARS),
+  });
+  return { title, body };
+}
+
+function degradedReasonForSession(db: DatabaseSync, sessionId: string): DegradedReason | null {
+  // contracts/observer.md: the most severe reason among the session's batches, NULL only when
+  // every batch was applied from a provider.
+  const reasons = new Set(db
+    .prepare('SELECT degraded_reason FROM observation_batches WHERE session_id = ?')
+    .all(sessionId)
+    .map((row) => row.degraded_reason)
+    .filter((reason): reason is DegradedReason =>
+      DEGRADED_PRECEDENCE.includes(reason as DegradedReason),
+    ));
+  return DEGRADED_PRECEDENCE.find((reason) => reasons.has(reason)) ?? null;
+}
+
+function insertSessionSummary(
+  db: DatabaseSync,
+  rows: RawEventRow[],
+  summary: SessionSummaryRecord,
+): void {
+  db.prepare(INSERT_MEMORY).run(
+    summary.memoryId,
+    summary.repoId,
+    'session_summary',
+    summary.title,
+    summary.body,
+    JSON.stringify([]),
+    cjkBigrams(`${summary.title} ${summary.body}`),
+    summary.material,
+    summary.content,
+    strictest(rows[0].sensitivity, ...rows.map((row) => row.sensitivity)),
+    summary.degraded,
+    summary.sessionId,
+    null,
+    summary.now,
+    summary.now,
+  );
+  const insertSource = db.prepare(INSERT_SOURCE);
+  for (const row of rows.slice(0, MAX_SOURCE_EVENT_IDS)) {
+    insertSource.run(summary.memoryId, row.id, null, null, row.agent);
+  }
+  db.prepare("UPDATE sessions SET summary_state = 'done', latest_summary_memory_id = ? WHERE id = ?").run(
+    summary.memoryId,
+    summary.sessionId,
+  );
+}
+
+function unfinishedBatchCount(db: DatabaseSync, sessionId: string): number {
+  return Number(
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM observation_batches
+           WHERE session_id = ? AND state NOT IN ('applied', 'fallback')`,
+      )
+      .get(sessionId)?.n,
+  );
+}
+
+function existingSessionSummary(
+  db: DatabaseSync,
+  sessionId: string,
+  content: string,
+): SummaryResult | null {
+  const existing = db.prepare('SELECT id, deleted_at FROM memories WHERE content_hash = ?').get(content);
+  if (existing === undefined) return null;
+  // FR-035: a deleted summary of identical content is not re-created; the session is still done.
+  const keep = existing.deleted_at === null ? String(existing.id) : null;
+  db.prepare("UPDATE sessions SET summary_state = 'done', latest_summary_memory_id = ? WHERE id = ?").run(
+    keep,
+    sessionId,
+  );
+  return { state: 'done', memoryId: keep };
+}
+
+function summarizeSession(
+  db: DatabaseSync,
+  token: string,
+  sessionId: string,
+  now: number,
+): SummaryResult {
+  if (!assertLease(db, token, now)) {
+    db.exec('ROLLBACK');
+    return { state: 'lease_lost', memoryId: null };
+  }
+
+  const session = db
+    .prepare('SELECT id, repo_id, status, summary_state FROM sessions WHERE id = ?')
+    .get(sessionId);
+  // Reconciliation targets `pending` only, so a finished session is never revisited.
+  if (session?.status !== 'ended' || session.summary_state !== 'pending') {
+    return { state: 'skipped', memoryId: null };
+  }
+  const repoId = String(session.repo_id);
+
+  const unfinished = unfinishedBatchCount(db, sessionId);
+  if (unfinished > 0) return { state: 'waiting', memoryId: null };
+
+  const rows = summarizableRows(db, sessionId);
+  if (rows.length === 0) {
+    // The spec edge case: nothing is produced and nothing is sent.
+    db.prepare("UPDATE sessions SET summary_state = 'no_content' WHERE id = ?").run(sessionId);
+    return { state: 'no_content', memoryId: null };
+  }
+
+  const { title, body } = sessionSummaryText(db, sessionId, repoId, rows);
+  const degraded = degradedReasonForSession(db, sessionId);
+  const material = materialHash(title, body);
+  const content = contentHash(repoId, material);
+  const memoryId = memoryIdFor(content);
+
+  const existing = existingSessionSummary(db, sessionId, content);
+  if (existing !== null) return existing;
+
+  insertSessionSummary(db, rows, {
+    memoryId,
+    repoId,
+    title,
+    body,
+    material,
+    content,
+    degraded,
+    sessionId,
+    now,
+  });
+  return { state: 'done', memoryId };
+}
+
 /**
  * The session summary of contracts/observer.md: derived from the session's own rows and the
  * observations already applied, never from a provider call. Insert, `latest_summary_memory_id` and
@@ -507,136 +806,5 @@ export function sessionSummary(
   sessionId: string,
   now: number,
 ): SummaryResult {
-  return transactionImmediate(db, () => {
-    if (!assertLease(db, token, now)) {
-      db.exec('ROLLBACK');
-      return { state: 'lease_lost', memoryId: null };
-    }
-
-    const session = db
-      .prepare('SELECT id, repo_id, status, summary_state FROM sessions WHERE id = ?')
-      .get(sessionId);
-    // Reconciliation targets `pending` only, so a finished session is never revisited.
-    if (session?.status !== 'ended' || session.summary_state !== 'pending') {
-      return { state: 'skipped', memoryId: null };
-    }
-    const repoId = String(session.repo_id);
-
-    const unfinished = Number(
-      db
-        .prepare(
-          `SELECT COUNT(*) AS n FROM observation_batches
-           WHERE session_id = ? AND state NOT IN ('applied', 'fallback')`,
-        )
-        .get(sessionId)?.n,
-    );
-    if (unfinished > 0) return { state: 'waiting', memoryId: null };
-
-    const rows = (
-      db
-        .prepare('SELECT * FROM raw_events WHERE session_id = ? ORDER BY captured_at, id').all(sessionId) as unknown as RawEventRow[]
-    )
-      // A7: this summary is injected at the next session start, so a partial row reaches it as the
-      // tool name and the paths only, exactly as it reaches a batch.
-      .map(stripPartial)
-      .filter(isSummarizableRow);
-    if (rows.length === 0) {
-      // The spec edge case: nothing is produced and nothing is sent.
-      db.prepare("UPDATE sessions SET summary_state = 'no_content' WHERE id = ?").run(sessionId);
-      return { state: 'no_content', memoryId: null };
-    }
-
-    const prompts = rows.filter((row) => row.kind === 'prompt' && (row.content ?? '').trim() !== '');
-    const firstPrompt = withoutDirectiveLines(prompts[0]?.content ?? rows[0].content ?? '');
-
-    const investigated: string[] = [];
-    const modified = new Map<string, number>();
-    for (const row of rows) {
-      if (row.kind !== 'tool_call') continue;
-      const tool = toolNameOf(row);
-      for (const path of toolPaths(row)) {
-        const display = shortenDisplayPath(path);
-        if (READ_TOOLS.has(tool) && !investigated.includes(display)) investigated.push(display);
-        if (WRITE_TOOLS.has(tool)) modified.set(display, (modified.get(display) ?? 0) + 1);
-      }
-    }
-
-    const learned = memoriesForSession(db, sessionId, memoryScope(db, { repoId, destination: 'injection' }))
-      .map((memory) => memory.title ?? '')
-      .filter((title) => title !== '');
-
-    // The last turn the session never finished is what it was about to do next.
-    const openTurn = db
-      .prepare(
-        'SELECT id FROM turns WHERE session_id = ? AND ended_at IS NULL ORDER BY ordinal DESC LIMIT 1',
-      )
-      .get(sessionId);
-    const nextPrompt =
-      openTurn === undefined
-        ? ''
-        : withoutDirectiveLines(prompts.findLast((row) => row.turn_id === openTurn.id)?.content ?? '');
-
-    const title = firstPrompt.slice(0, MAX_TITLE);
-    const body = summaryBody({
-      request: firstPrompt.slice(0, REQUEST_CHARS),
-      investigated,
-      learned,
-      completed: [...modified.entries()].map(([path, count]) => `${path} (${count})`),
-      nextSteps: nextPrompt.slice(0, NEXT_STEPS_CHARS),
-    });
-
-    // contracts/observer.md: the most severe reason among the session's batches, NULL only when
-    // every batch was applied from a provider.
-    const reasons = new Set(db
-      .prepare('SELECT degraded_reason FROM observation_batches WHERE session_id = ?')
-      .all(sessionId)
-      .map((row) => row.degraded_reason)
-      .filter((reason): reason is DegradedReason =>
-        DEGRADED_PRECEDENCE.includes(reason as DegradedReason),
-      ));
-    const degraded = DEGRADED_PRECEDENCE.find((reason) => reasons.has(reason)) ?? null;
-
-    const material = materialHash(title, body);
-    const content = contentHash(repoId, material);
-    const memoryId = memoryIdFor(content);
-
-    const existing = db.prepare('SELECT id, deleted_at FROM memories WHERE content_hash = ?').get(content);
-    if (existing !== undefined) {
-      // FR-035: a deleted summary of identical content is not re-created; the session is still done.
-      const keep = existing.deleted_at === null ? String(existing.id) : null;
-      db.prepare("UPDATE sessions SET summary_state = 'done', latest_summary_memory_id = ? WHERE id = ?").run(
-        keep,
-        sessionId,
-      );
-      return { state: 'done', memoryId: keep };
-    }
-
-    db.prepare(INSERT_MEMORY).run(
-      memoryId,
-      repoId,
-      'session_summary',
-      title,
-      body,
-      JSON.stringify([]),
-      cjkBigrams(`${title} ${body}`),
-      material,
-      content,
-      strictest(rows[0].sensitivity, ...rows.map((row) => row.sensitivity)),
-      degraded,
-      sessionId,
-      null,
-      now,
-      now,
-    );
-    const insertSource = db.prepare(INSERT_SOURCE);
-    for (const row of rows.slice(0, MAX_SOURCE_EVENT_IDS)) {
-      insertSource.run(memoryId, row.id, null, null, row.agent);
-    }
-    db.prepare("UPDATE sessions SET summary_state = 'done', latest_summary_memory_id = ? WHERE id = ?").run(
-      memoryId,
-      sessionId,
-    );
-
-    return { state: 'done', memoryId };
-  });
+  return transactionImmediate(db, () => summarizeSession(db, token, sessionId, now));
 }

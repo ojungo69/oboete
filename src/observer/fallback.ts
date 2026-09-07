@@ -16,12 +16,12 @@ import {
 export type FallbackEvent = {
   id: string;
   kind:
-    | 'prompt'
-    | 'tool_call'
-    | 'tool_result'
-    | 'tool_failure'
-    | 'last_assistant_message'
-    | 'compaction_summary';
+  | 'prompt'
+  | 'tool_call'
+  | 'tool_result'
+  | 'tool_failure'
+  | 'last_assistant_message'
+  | 'compaction_summary';
   turn_index: number;
   tool_call_id?: string;
   tool_name?: string;
@@ -199,42 +199,72 @@ function retryFirstLine(event: FallbackEvent): string {
   return firstLine(input?.text ?? '').slice(0, 200);
 }
 
+function bugfixForRetry(
+  failure: FallbackEvent, toolName: string, error: string,
+  retry: { call: FallbackEvent; result?: FallbackEvent },
+): Observation {
+  return observation(
+    'bugfix',
+    'bugfix',
+    `${toolName}: ${error.slice(0, 80)}`,
+    `${error.slice(0, 200)}\n${retryFirstLine(retry.call)}`,
+    ['problem-solution'],
+    [failure, retry.call, ...(retry.result === undefined ? [] : [retry.result])],
+    { files_modified: visibleInput(retry.call)?.paths ?? [] },
+  );
+}
+
+function discoveryForFailure(
+  failure: FallbackEvent, toolName: string, error: string,
+  call: FallbackEvent | undefined,
+): Observation {
+  return observation(
+    'discovery',
+    'discovery',
+    `${toolName}: ${error.slice(0, 80)}`,
+    error.slice(0, 200),
+    ['gotcha'],
+    [...(call === undefined ? [] : [call]), failure],
+    { files_read: visibleInput(call ?? failure)?.paths ?? [] },
+  );
+}
+
+function recordFailure(
+  turn: FallbackEvent[],
+  index: number,
+  failure: FallbackEvent,
+  bugfixes: Observation[],
+  discoveries: Observation[],
+): void {
+  const call = failedCall(turn, failure);
+  const toolName = failure.tool_name ?? call?.tool_name ?? '';
+  const error = firstLine(visibleText(failure, 'error'));
+  const retry = retryAfter(turn, index, toolName);
+  if (retry !== undefined) {
+    bugfixes.push(
+      bugfixForRetry(failure, toolName, error, retry),
+    );
+  } else {
+    discoveries.push(
+      discoveryForFailure(failure, toolName, error, call),
+    );
+  }
+}
+
+function failuresForTurn(
+  turn: FallbackEvent[], bugfixes: Observation[], discoveries: Observation[],
+): void {
+  for (const [index, failure] of turn.entries()) {
+    if (failure.kind !== 'tool_failure') continue;
+    recordFailure(turn, index, failure, bugfixes, discoveries);
+  }
+}
+
 function failures(events: FallbackEvent[]): { bugfixes: Observation[]; discoveries: Observation[] } {
   const bugfixes: Observation[] = [];
   const discoveries: Observation[] = [];
   for (const [, turn] of eventsByTurn(events)) {
-    for (const [index, failure] of turn.entries()) {
-      if (failure.kind !== 'tool_failure') continue;
-      const call = failedCall(turn, failure);
-      const toolName = failure.tool_name ?? call?.tool_name ?? '';
-      const error = firstLine(visibleText(failure, 'error'));
-      const retry = retryAfter(turn, index, toolName);
-      if (retry !== undefined) {
-        bugfixes.push(
-          observation(
-            'bugfix',
-            'bugfix',
-            `${toolName}: ${error.slice(0, 80)}`,
-            `${error.slice(0, 200)}\n${retryFirstLine(retry.call)}`,
-            ['problem-solution'],
-            [failure, retry.call, ...(retry.result === undefined ? [] : [retry.result])],
-            { files_modified: visibleInput(retry.call)?.paths ?? [] },
-          ),
-        );
-      } else {
-        discoveries.push(
-          observation(
-            'discovery',
-            'discovery',
-            `${toolName}: ${error.slice(0, 80)}`,
-            error.slice(0, 200),
-            ['gotcha'],
-            [...(call === undefined ? [] : [call]), failure],
-            { files_read: visibleInput(call ?? failure)?.paths ?? [] },
-          ),
-        );
-      }
-    }
+    failuresForTurn(turn, bugfixes, discoveries);
   }
   return { bugfixes, discoveries };
 }

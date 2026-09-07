@@ -108,17 +108,12 @@ function textOf(event: ObserverEvent): string {
     .join('\n');
 }
 
-/**
- * Assembles the one outbound request of a batch. Every field passes the same rule table, so a row
- * or a memory the destination may not receive is absent from the body rather than trimmed from it
- * later (contracts/observer.md, SC-006). Citations travel only inside the tool inputs of admitted
- * events; the request has no other place for a path.
- */
-export function buildObserverRequest(request: ObserverRequestInput): ObserverRequest {
-  const dropped: DroppedRow[] = [];
-  const events: ObserverEvent[] = [];
-  const freeSummaries: ObserverInput['free_summaries'] = {};
-
+function collectObserverEvents(
+  request: ObserverRequestInput,
+  dropped: DroppedRow[],
+  events: ObserverEvent[],
+  freeSummaries: ObserverInput['free_summaries'],
+): void {
   for (const row of request.rows) {
     const reason = refuse(request.rules, request.destination, row, request.repoId);
     if (reason !== null) {
@@ -137,7 +132,13 @@ export function buildObserverRequest(request: ObserverRequestInput): ObserverReq
     if (row.kind === 'compaction_summary') freeSummaries.compaction_summary = row.content ?? '';
   }
 
-  const nearby: ObserverInput['nearby'] = [];
+}
+
+function collectNearbyMemories(
+  request: ObserverRequestInput,
+  dropped: DroppedRow[],
+  nearby: ObserverInput['nearby'],
+): void {
   for (const candidate of request.nearby) {
     // R10: the candidates are same-repository by construction; the check makes that an invariant
     // rather than an assumption of the caller.
@@ -157,6 +158,24 @@ export function buildObserverRequest(request: ObserverRequestInput): ObserverReq
       deleted: candidate.deleted,
     });
   }
+
+}
+
+/**
+ * Assembles the one outbound request of a batch. Every field passes the same rule table, so a row
+ * or a memory the destination may not receive is absent from the body rather than trimmed from it
+ * later (contracts/observer.md, SC-006). Citations travel only inside the tool inputs of admitted
+ * events; the request has no other place for a path.
+ */
+export function buildObserverRequest(request: ObserverRequestInput): ObserverRequest {
+  const dropped: DroppedRow[] = [];
+  const events: ObserverEvent[] = [];
+  const freeSummaries: ObserverInput['free_summaries'] = {};
+
+  collectObserverEvents(request, dropped, events, freeSummaries);
+
+  const nearby: ObserverInput['nearby'] = [];
+  collectNearbyMemories(request, dropped, nearby);
 
   const admittedText = [
     ...events.map(textOf),
