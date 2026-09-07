@@ -1362,69 +1362,71 @@ export async function runFixture(argv: string[]): Promise<number> {
 
   const maps = corpus(root);
   const { home, createdHome } = replayHome(values);
+  const repo = mkdtempSync(join(tmpdir(), 'oboete-t068-repo-'));
   const keep = values.keep === true;
+  const paths = oboetePaths(home);
+  const envBase = replayEnv(home);
   const startedAt = new Date().toISOString();
   const loadAtStart = loadAverage();
-  const run = createRun({
-    bundle,
-    repo: mkdtempSync(join(tmpdir(), 'oboete-t068-repo-')),
-    home,
-    envBase: replayEnv(home),
-    paths: oboetePaths(home),
-    lines,
-    maps,
-    sessionWindows,
-  });
+  const run = createRun({ bundle, repo, home, envBase, paths, lines, maps, sessionWindows });
+  let workerPollDb: ReturnType<typeof openDatabase>['db'] | undefined;
+  let workerPoll: ReturnType<typeof setInterval> | undefined;
   try {
     initRepo(run.repo);
     mkdirSync(home, { recursive: true, mode: 0o700 });
     ensureDirectories(run.paths);
     const created = createDatabase(run);
     if (created !== null) return created;
-    return await driveRun(run, { values, outPath, fixturePath, startedAt, loadAtStart });
+    const dbBytesBefore = fileBytes(run.paths.db) + fileBytes(`${run.paths.db}-wal`);
+    workerPollDb = openDatabase({ path: run.paths.db, timeoutMs: 0, hook: true }).db;
+    const workerPid = workerPollDb.prepare('SELECT pid FROM worker_lease WHERE id = 1');
+    workerPoll = setInterval(() => pollHookWorker(run, workerPid), 50);
+    return await driveRun(run, workerPoll, {
+      values,
+      outPath,
+      fixturePath,
+      startedAt,
+      loadAtStart,
+      dbBytesBefore,
+    });
   } finally {
+    clearInterval(workerPoll);
+    workerPollDb?.close();
     cleanupReplay({ home, repo: run.repo, keep, createdHome });
   }
 }
 
-/** The fixture lines, the worker settle, and the report, under the worker poll. */
+/** The fixture lines, the worker settle, and the report. The caller owns the poll handles. */
 async function driveRun(
   run: ReplayRun,
+  workerPoll: ReturnType<typeof setInterval>,
   ctx: {
     values: ReplayPlan['values'];
     outPath: string | undefined;
     fixturePath: string;
     startedAt: string;
     loadAtStart: ReturnType<typeof loadAverage>;
+    dbBytesBefore: number;
   },
 ): Promise<number> {
-  const { values, outPath, fixturePath, startedAt, loadAtStart } = ctx;
-  const dbBytesBefore = fileBytes(run.paths.db) + fileBytes(`${run.paths.db}-wal`);
-  const workerPollDb = openDatabase({ path: run.paths.db, timeoutMs: 0, hook: true }).db;
-  const workerPid = workerPollDb.prepare('SELECT pid FROM worker_lease WHERE id = 1');
-  const workerPoll = setInterval(() => pollHookWorker(run, workerPid), 50);
+  const { values, outPath, fixturePath, startedAt, loadAtStart, dbBytesBefore } = ctx;
 
-  try {
-    for (const line of run.lines) {
-      const exit = await replayLine(run, line);
-      if (exit !== null) return exit;
-    }
-
-    await settleWorker(run);
-    clearInterval(workerPoll);
-
-    if (run.storageFailed) {
-      process.stderr.write('observe reported unusable storage\n');
-      return 3;
-    }
-
-    const measured = measureRun(run, { dbBytesBefore, fixturePath, startedAt, loadAtStart });
-    writeReport(values, outPath, measured);
-    return measured.failed ? 1 : 0;
-  } finally {
-    clearInterval(workerPoll);
-    workerPollDb.close();
+  for (const line of run.lines) {
+    const exit = await replayLine(run, line);
+    if (exit !== null) return exit;
   }
+
+  await settleWorker(run);
+  clearInterval(workerPoll);
+
+  if (run.storageFailed) {
+    process.stderr.write('observe reported unusable storage\n');
+    return 3;
+  }
+
+  const measured = measureRun(run, { dbBytesBefore, fixturePath, startedAt, loadAtStart });
+  writeReport(values, outPath, measured);
+  return measured.failed ? 1 : 0;
 }
 
 function sessionOrder(lines: Line[]): Record<Agent, string[]> {
