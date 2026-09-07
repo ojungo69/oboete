@@ -365,3 +365,63 @@ script sources the credentials before it starts, so a worker it spawns carries t
 - Viewer GET /api/memories: median 4 ms, max 42 ms over 5 requests, 8 memories listed (budget 2000 ms)
 - finished 2026-09-06T15:18:05Z, 1-minute load 0.60
 
+
+## 2026-09-08 daily run (SC-007, day 3)
+
+- bundle 0.1.0-alpha.0, node v24.20.0, pairs `all`, 1-minute load at start 0.08, started 2026-09-07T15:05:08Z
+
+### Pairs (harness section, exit 0)
+
+#### 2026-09-07 run 2026-09-07T15-05-08-149Z
+
+- 12 of 12 pairs pass
+- No provider credentials: no
+- Report: <run>/report.json
+
+| seed | receive | status | elapsed ms | missing facts |
+|---|---|---:|---:|---|
+| claude | codex | pass | 94723 | none |
+| claude | grok | pass | 49348 | none |
+| claude | pi | pass | 49894 | none |
+| codex | claude | pass | 46449 | none |
+| codex | grok | pass | 58709 | none |
+| codex | pi | pass | 52971 | none |
+| grok | claude | pass | 56110 | none |
+| grok | codex | pass | 44911 | none |
+| grok | pi | pass | 44977 | none |
+| pi | claude | pass | 64817 | none |
+| pi | codex | pass | 43286 | none |
+| pi | grok | pass | 99443 | none |
+
+### Doctor (credentials sourced)
+
+| item | status | reason |
+|---|---|---|
+| config | healthy | Configuration at /home/oboete-dogfood/.oboete/config.toml loaded (mode 0o600). |
+| paused | healthy | Not paused. |
+| storage | healthy | `/home/oboete-dogfood/.oboete/memory.db` opened; PRAGMA quick_check returned ok; 81 memories. |
+| fts | healthy | Full-text search is available (lexical in M1). |
+| migration | healthy | The schema is at version 3, the latest this bundle knows. |
+| worker | healthy | No worker is running; a hook starts one when work is queued. |
+| spool | healthy | Spool is writable and empty. |
+| provider | unverified | Not probed this run; last worker outcome: fallback/no_provider/2026-09-06T15:18:04.161Z. |
+| allowance | healthy | Estimated 150 of 150 calls remaining today (2026-09-07); resets at 2026-09-08T00:00:00.000Z. |
+| catalog | unverified | The cached catalog is stale; the worker refreshes it on the next batch. |
+| agent:claude | healthy | The hook fired and the event was stored (3132 milliseconds); trust: n/a. |
+| native-memory:claude | warning | claude: its own memory feature (claude_auto_memory) is enabled. oboete neither reads it nor changes it; the two run side by side. |
+| agent:codex | healthy | The hook fired and the event was stored (7547 milliseconds); trust: trusted. |
+| agent:grok | degraded | Grok rewrote its config.toml and dropped the oboete markers; the MCP table is still there. |
+| agent:pi | healthy | The hook fired and the event was stored (4777 milliseconds); trust: wired. |
+| unrecognized-agents | healthy | No invocation from an unrecognized agent. |
+| pi | healthy | No Pi diagnostics. |
+
+### Metrics
+
+- Provider usage (UTC 2026-09-07): no calls recorded
+- Memories: 84 total, 84 live, 21 sharing a material hash (duplicates)
+- Injection items omitted as duplicate_in_conversation: 0 (cumulative)
+- Raw events failed: 0 of 248 (cumulative)
+- Spool backlog: 0 files (0 failed)
+- Viewer GET /api/memories: median 3 ms, max 35 ms over 5 requests, 8 memories listed (budget 2000 ms)
+- finished 2026-09-07T15:17:02Z, 1-minute load 0.49
+
