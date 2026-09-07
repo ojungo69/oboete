@@ -275,6 +275,16 @@ for (const { args, service, index } of serviceModes) {
   }
 }
 
+// One resolved Codacy row waiting to be applied, and a credentials file of the layout under test.
+const codacyTokenFixture = (t, contents) => {
+  const { cwd, ledger } = fixture(t);
+  Object.assign(ledger[4], { state: 'resolved', reason: 'AcceptedUse' });
+  delete ledger[4].confirmed;
+  writeJson(cwd, 'ledger.json', ledger);
+  writeFileSync(join(cwd, 'CODACY_TOKEN.md'), contents);
+  return { cwd, ledger };
+};
+
 // The two credential files do not agree on a line number: SONAR_TOKEN.md keeps a sentence about the
 // token above it, CODACY_TOKEN.md holds the token alone. Both layouts must work, and no other line
 // may ever stand in for the token: a layout the reader cannot place the token in is refused, never
@@ -291,11 +301,7 @@ for (const [name, contents] of [
   ['a blank line where the note would be', '\nfixture-token\n'],
 ]) {
   test(`--apply-codacy reads the token from a file with ${name}`, (t) => {
-    const { cwd, ledger } = fixture(t);
-    Object.assign(ledger[4], { state: 'resolved', reason: 'AcceptedUse' });
-    delete ledger[4].confirmed;
-    writeJson(cwd, 'ledger.json', ledger);
-    writeFileSync(join(cwd, 'CODACY_TOKEN.md'), contents);
+    const { cwd, ledger } = codacyTokenFixture(t, contents);
     const result = run(cwd, ['--apply-codacy'], apiStub([{ status: 200 }, { status: 200 }]));
     assert.equal(result.status, 0, result.stderr);
     const calls = readCalls(cwd).filter((call) => call.url);
@@ -311,10 +317,6 @@ for (const [name, contents] of [
 // reader that dropped blank lines before choosing would put one of them in that header. Each case
 // asserts the exit code and the message, that no request was made, that the ledger is byte-identical
 // afterwards, and that no line of the file reaches stdout or stderr.
-//
-// The one case nothing here can catch is a file of a single token-shaped word: a lone `Credentials`
-// is indistinguishable from a credential, and only the service can say it is not one. Written with a
-// blank line under it, though, the file is two lines whose second is empty, and that is refused.
 const missing = 'must contain the token, alone or on the line under a note';
 const unexpected = 'contains an unexpected character';
 for (const [name, contents, message] of [
@@ -329,11 +331,7 @@ for (const [name, contents, message] of [
   ['a lone token has a blank line under it', 'fixture-token\n\n', missing],
 ]) {
   test(`--apply-codacy sends nothing when ${name}`, (t) => {
-    const { cwd, ledger } = fixture(t);
-    Object.assign(ledger[4], { state: 'resolved', reason: 'AcceptedUse' });
-    delete ledger[4].confirmed;
-    writeJson(cwd, 'ledger.json', ledger);
-    writeFileSync(join(cwd, 'CODACY_TOKEN.md'), contents);
+    const { cwd } = codacyTokenFixture(t, contents);
     const before = readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8');
     const result = run(cwd, ['--apply-codacy'], apiStub([]));
     assert.equal(result.status, 1);
@@ -350,11 +348,7 @@ for (const [name, contents, message] of [
 // nothing local can tell a bare token from a bare note shaped like one. What must hold is that the
 // service is the one that says no, and that the word itself never reaches the output.
 test('--apply-codacy sends a lone token-shaped word and reports the service rejecting it', (t) => {
-  const { cwd, ledger } = fixture(t);
-  Object.assign(ledger[4], { state: 'resolved', reason: 'AcceptedUse' });
-  delete ledger[4].confirmed;
-  writeJson(cwd, 'ledger.json', ledger);
-  writeFileSync(join(cwd, 'CODACY_TOKEN.md'), 'Credentials\n');
+  const { cwd } = codacyTokenFixture(t, 'Credentials\n');
   const before = readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8');
   // The stub compares the header against the word the file holds, so the assertion says that exact
   // word was sent. Comparing against the default fixture token would pass for any other word too.
