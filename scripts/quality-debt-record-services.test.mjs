@@ -306,9 +306,11 @@ for (const [name, contents] of [
 
 // A layout the reader cannot place the token in must send nothing. The dangerous outcome is not the
 // error, it is a run that quietly uses the line after the one the token was meant to be on: `ignored`
-// and `example.invalid/account` below would each satisfy the character check on their own. All six
-// are refused by the reader this replaces too — they are regression tests against the first attempt
-// at this change, which filtered blank lines and so sent `ignored` in the api-token header.
+// and `example.invalid/account` below would each satisfy the character check on their own. All eight
+// are refused by the reader this replaces too — they are regression tests against the two attempts
+// in this branch. Six of the eight fail against the first, every one of them by sending a request:
+// it filtered blank lines, so `ignored` went out in the api-token header. The last two fail against
+// the second, which dropped every trailing empty line and so read `Credentials\n\n` as one line.
 //
 // The one case nothing here can catch is a file of a single token-shaped word: a lone `Credentials`
 // is indistinguishable from a credential, and only the service can say it is not one. Written with a
