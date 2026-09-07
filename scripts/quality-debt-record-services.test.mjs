@@ -276,15 +276,15 @@ for (const { args, service, index } of serviceModes) {
 }
 
 // The two credential files do not agree on a line number: SONAR_TOKEN.md keeps a sentence about the
-// token above it, CODACY_TOKEN.md holds the token alone. Both layouts must work, and neither may
-// let a later line stand in for the token. A blank line must not shift the answer either.
+// token above it, CODACY_TOKEN.md holds the token alone. Both layouts must work, and no other line
+// may ever stand in for the token: a layout the reader cannot place the token in is refused, never
+// resolved by moving the choice onto the next line.
 for (const [name, contents] of [
   ['the token alone', 'fixture-token\n'],
   ['a note above the token', 'Codacy account token for ojungo69\nfixture-token\n'],
   ['a note above and text below', '# Test credentials\r\nfixture-token\r\nignored\r\n'],
   ['no trailing newline', 'fixture-token'],
-  ['blank lines around the token', '\n\nfixture-token\n\n'],
-  ['a note, a blank line and the token', 'Codacy account token\n\nfixture-token\n'],
+  ['several trailing newlines', 'Codacy account token\nfixture-token\n\n\n'],
 ]) {
   test(`--apply-codacy reads the token from a file with ${name}`, (t) => {
     const { cwd, ledger } = fixture(t);
@@ -301,19 +301,38 @@ for (const [name, contents] of [
   });
 }
 
-test('--apply-codacy refuses an empty credentials file', (t) => {
-  const { cwd, ledger } = fixture(t);
-  Object.assign(ledger[4], { state: 'resolved', reason: 'AcceptedUse' });
-  delete ledger[4].confirmed;
-  writeJson(cwd, 'ledger.json', ledger);
-  writeFileSync(join(cwd, 'CODACY_TOKEN.md'), '\n\n');
-  const before = readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8');
-  const result = run(cwd, ['--apply-codacy'], apiStub([]));
-  assert.equal(result.status, 1);
-  assert.equal(result.stderr, 'CODACY_TOKEN.md must contain the token, alone or on the line under a note\n');
-  assert.deepEqual(readCalls(cwd), []);
-  assert.equal(readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8'), before);
-});
+// A layout the reader cannot place the token in must send nothing. The dangerous outcome is not the
+// error, it is a run that quietly uses the line after the one the token was meant to be on: `ignored`
+// and `example.invalid/account` below would each satisfy the character check on their own. A file of
+// one word is the exception nothing can catch — a lone `Credentials` is shaped exactly like a token,
+// and only the service can say it is not one.
+const missing = 'must contain the token, alone or on the line under a note';
+const unexpected = 'contains an unexpected character';
+for (const [name, contents, message] of [
+  ['the file is empty', '\n\n', missing],
+  ['a blank line sits where the token belongs', '# Note\n\nexample.invalid/account\n', missing],
+  ['a blank line precedes a malformed token', '\nfixture token\nignored\n', unexpected],
+  ['blank lines surround the token', '\n\nfixture-token\n\n', missing],
+  ['a note is followed by a blank line', 'Codacy account token\n\nfixture-token\n', missing],
+  ['the only line is a sentence', 'Codacy account token for ojungo69\n', unexpected],
+]) {
+  test(`--apply-codacy sends nothing when ${name}`, (t) => {
+    const { cwd, ledger } = fixture(t);
+    Object.assign(ledger[4], { state: 'resolved', reason: 'AcceptedUse' });
+    delete ledger[4].confirmed;
+    writeJson(cwd, 'ledger.json', ledger);
+    writeFileSync(join(cwd, 'CODACY_TOKEN.md'), contents);
+    const before = readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8');
+    const result = run(cwd, ['--apply-codacy'], apiStub([]));
+    assert.equal(result.status, 1);
+    assert.equal(result.stderr, `CODACY_TOKEN.md ${message}\n`);
+    assert.deepEqual(readCalls(cwd), []);
+    assert.equal(readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8'), before);
+    for (const line of contents.split('\n')) {
+      if (line !== '') assert.equal((result.stdout + result.stderr).includes(line), false);
+    }
+  });
+}
 
 for (const [service, args] of [['SONAR', ['--apply-sonar']], ['CODACY', ['--apply-codacy']], ['SONAR', confirmArgs]]) {
   for (const [name, token] of [['carriage return', 'fixture\rtoken'], ['NUL', 'fixture\0token'], ['trailing space', 'fixture-token ']]) {

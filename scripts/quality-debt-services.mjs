@@ -70,11 +70,13 @@ async function discardBody(response) {
 
 function readToken(service) {
   const file = `${service}_TOKEN.md`;
-  // The token is on line 2, under the note that says what it is — unless the file is nothing but
-  // the token, which is how CODACY_TOKEN.md is written. Deciding on the number of lines rather than
-  // on what a line looks like leaves the character check below as the only thing that can reject a
-  // token, so a stray space in one still reports itself instead of being read as prose.
-  const lines = readFileSync(join(homedir(), file), 'utf8').split(/\r?\n/).filter((line) => line !== '');
+  // The token is on line 2, under the note that says what it is — unless the whole file is one line,
+  // which is how CODACY_TOKEN.md is written. Only the newline at the end of the file is discounted:
+  // no other blank line is skipped, because skipping one would move the choice down onto a line the
+  // author did not write the token on, and a malformed token would then be silently replaced by
+  // whatever follows it instead of being rejected by the character check below.
+  const lines = readFileSync(join(homedir(), file), 'utf8').split(/\r?\n/);
+  while (lines.length > 1 && lines.at(-1) === '') lines.pop();
   const token = lines.length === 1 ? lines[0] : lines[1];
   if (!token) throw new Error(`${file} must contain the token, alone or on the line under a note`);
   if (/[^A-Za-z0-9_.~+/=-]/.test(token)) throw new Error(`${file} contains an unexpected character`);
