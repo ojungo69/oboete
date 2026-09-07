@@ -822,12 +822,6 @@ type ReplayRun = {
   liveObserve: ObserveProc | undefined;
 };
 
-/** Every fact the fixture plants, indexed before the first hook so recall can look one up. */
-function factsFrom(run: ReplayRun, line: Line): void {
-  const fact = line.tags?.fact;
-  if (fact !== undefined) run.factsById.set(fact.id, fact);
-}
-
 /** Everything a replay accumulates while it runs, empty before its first hook. */
 function emptyTables(): Omit<
   ReplayRun,
@@ -889,7 +883,11 @@ function createRun(input: {
     pendingSessions,
     ...emptyTables(),
   };
-  for (const line of input.lines) factsFrom(run, line);
+  // Every fact the fixture plants, indexed before the first hook so recall can look one up.
+  for (const line of input.lines) {
+    const fact = line.tags?.fact;
+    if (fact !== undefined) run.factsById.set(fact.id, fact);
+  }
   return run;
 }
 
@@ -1907,13 +1905,6 @@ function timingBounds(
 }
 
 /** The content rows of the SC table: secrets, recall, duplicates, lifecycle, directives, hooks. */
-function contentBounds(
-  input: MeasureInput,
-  computed: ReturnType<typeof computeReport>,
-): BoundRow[] {
-  return [...leakBounds(input, computed), ...sequenceBounds(input, computed)];
-}
-
 /** SC-005, SC-009 and SC-010: what leaked, what was recalled, what was duplicated. */
 function leakBounds(input: MeasureInput, computed: ReturnType<typeof computeReport>): BoundRow[] {
   const { duplicateGroups, leakedSecrets, rawEvents, recallEn, recallJa, sc005, sc009, sc010 } = computed;
@@ -2338,7 +2329,11 @@ function renderReport(
   input: MeasureInput,
   computed: ReturnType<typeof computeReport>,
 ): { markdown: string; json: Record<string, unknown>; failed: boolean } {
-  const bounds: BoundRow[] = [...timingBounds(input, computed), ...contentBounds(input, computed)];
+  const bounds: BoundRow[] = [
+    ...timingBounds(input, computed),
+    ...leakBounds(input, computed),
+    ...sequenceBounds(input, computed),
+  ];
   const timing = timingTables(input, computed);
   const finding = findingTables(input, computed, bounds);
   return {
