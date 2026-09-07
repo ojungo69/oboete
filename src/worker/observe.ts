@@ -163,55 +163,93 @@ async function retryBusy<T>(work: () => T | Promise<T>): Promise<T> {
   }
 }
 
+function fallbackEventBase(row: BatchInput['rows'][number], turns: Map<string, number>) {
+  return {
+    id: row.id,
+    turn_index: row.turn_id === null ? 0 : (turns.get(row.turn_id) ?? 0),
+    sensitivity: row.sensitivity,
+    classification_state: row.classification_state === 'partial' ? 'partial' : 'done',
+  } as const;
+}
+
+function fallbackToolCall(
+  base: ReturnType<typeof fallbackEventBase>,
+  toolCallId: string | undefined,
+  payload: Record<string, unknown>,
+  row: BatchInput['rows'][number],
+): FallbackEvent {
+  return {
+    ...base,
+    kind: 'tool_call',
+    ...(toolCallId === undefined ? {} : { tool_call_id: toolCallId }),
+    tool_name: typeof payload.tool_name === 'string' ? payload.tool_name : 'other',
+    input: toolInputOf(row),
+  };
+}
+
+function fallbackToolResult(
+  base: ReturnType<typeof fallbackEventBase>,
+  toolCallId: string | undefined,
+  payload: Record<string, unknown>,
+  row: BatchInput['rows'][number],
+): FallbackEvent {
+  return {
+    ...base,
+    kind: 'tool_result',
+    ...(toolCallId === undefined ? {} : { tool_call_id: toolCallId }),
+    output: row.content ?? '',
+    is_error: payload.is_error === true,
+  };
+}
+
+function fallbackToolFailure(
+  base: ReturnType<typeof fallbackEventBase>,
+  toolCallId: string | undefined,
+  row: BatchInput['rows'][number],
+): FallbackEvent {
+  return {
+    ...base,
+    kind: 'tool_failure',
+    ...(toolCallId === undefined ? {} : { tool_call_id: toolCallId }),
+    error: row.content ?? '',
+  };
+}
+
+function appendFallbackEvent(
+  row: BatchInput['rows'][number],
+  turns: Map<string, number>,
+  events: FallbackEvent[],
+): void {
+  const payload = payloadOf(row) ?? {};
+  const base = fallbackEventBase(row, turns);
+  const toolCallId = typeof payload.tool_call_id === 'string' ? payload.tool_call_id : undefined;
+
+  switch (row.kind) {
+    case 'prompt':
+    case 'last_assistant_message':
+    case 'compaction_summary':
+      events.push({ ...base, kind: row.kind, text: row.content ?? '' });
+      break;
+    case 'tool_call':
+      events.push(fallbackToolCall(base, toolCallId, payload, row));
+      break;
+    case 'tool_result':
+      events.push(fallbackToolResult(base, toolCallId, payload, row));
+      break;
+    case 'tool_failure':
+      events.push(fallbackToolFailure(base, toolCallId, row));
+      break;
+    default:
+      break;
+  }
+}
+
 function fallbackEvents(input: BatchInput): FallbackEvent[] {
   const turns = new Map(input.turns.map((turn) => [turn.id, turn.ordinal]));
   const events: FallbackEvent[] = [];
 
   for (const row of input.rows) {
-    const payload = payloadOf(row) ?? {};
-    const base = {
-      id: row.id,
-      turn_index: row.turn_id === null ? 0 : (turns.get(row.turn_id) ?? 0),
-      sensitivity: row.sensitivity,
-      classification_state: row.classification_state === 'partial' ? 'partial' : 'done',
-    } as const;
-    const toolCallId = typeof payload.tool_call_id === 'string' ? payload.tool_call_id : undefined;
-
-    switch (row.kind) {
-      case 'prompt':
-      case 'last_assistant_message':
-      case 'compaction_summary':
-        events.push({ ...base, kind: row.kind, text: row.content ?? '' });
-        break;
-      case 'tool_call':
-        events.push({
-          ...base,
-          kind: 'tool_call',
-          ...(toolCallId === undefined ? {} : { tool_call_id: toolCallId }),
-          tool_name: typeof payload.tool_name === 'string' ? payload.tool_name : 'other',
-          input: toolInputOf(row),
-        });
-        break;
-      case 'tool_result':
-        events.push({
-          ...base,
-          kind: 'tool_result',
-          ...(toolCallId === undefined ? {} : { tool_call_id: toolCallId }),
-          output: row.content ?? '',
-          is_error: payload.is_error === true,
-        });
-        break;
-      case 'tool_failure':
-        events.push({
-          ...base,
-          kind: 'tool_failure',
-          ...(toolCallId === undefined ? {} : { tool_call_id: toolCallId }),
-          error: row.content ?? '',
-        });
-        break;
-      default:
-        break;
-    }
+    appendFallbackEvent(row, turns, events);
   }
   return events;
 }
@@ -308,17 +346,20 @@ function liveConsentOk(paths: OboetePaths, env: NodeJS.ProcessEnv, startedHash: 
   }
 }
 
-async function providerCall(
-  db: DatabaseSync,
-  token: string,
-  input: ReturnType<typeof buildObserverRequest>['input'],
-  batch: BatchRow,
-  config: OboeteConfig,
-  deps: ObserveDeps,
-  preset: PresetName,
-  model: string,
-  consentOk: () => boolean,
-): Promise<CallOutcome> {
+type ProviderCallOptions = {
+  db: DatabaseSync;
+  token: string;
+  input: ReturnType<typeof buildObserverRequest>['input'];
+  batch: BatchRow;
+  config: OboeteConfig;
+  deps: ObserveDeps;
+  preset: PresetName;
+  model: string;
+  consentOk: () => boolean;
+};
+
+async function providerCall(options: ProviderCallOptions): Promise<CallOutcome> {
+  const { db, token, input, batch, config, deps, preset, model, consentOk } = options;
   const entry = PRESET_CATALOG[preset];
   return await summarizeWithProvider(input, {
     preset,
@@ -392,31 +433,123 @@ function appliedMemoryIds(result: ApplyResult): string[] {
   );
 }
 
-async function processBatch(
-  db: DatabaseSync,
-  token: string,
-  batch: BatchRow,
-  config: OboeteConfig,
-  deps: ObserveDeps,
-  detect: (text: string) => Promise<DetectorResult>,
-  providerState: Map<string, DegradedReason | null>,
-  initialProviderReason: DegradedReason | null,
-  resolved: { preset: PresetName | 'none'; model: string },
-  consentOk: () => boolean,
-): Promise<BatchResult> {
-  const input = loadBatchInput(db, batch.id);
-  if (input === null) throw new Error('batch input missing');
-  const nearby = nearbyCandidates(db, {
+function nearbyForBatch(db: DatabaseSync, input: BatchInput): NearbyCandidate[] {
+  return nearbyCandidates(db, {
     repoId: input.session.repo_id,
     text: input.rows.map((row) => `${row.content ?? ''}\n${toolInputText(row)}`).join('\n'),
     limit: 8,
   });
+}
+
+type ProcessBatchOptions = {
+  db: DatabaseSync;
+  token: string;
+  batch: BatchRow;
+  config: OboeteConfig;
+  deps: ObserveDeps;
+  detect: (text: string) => Promise<DetectorResult>;
+  providerState: Map<string, DegradedReason | null>;
+  initialProviderReason: DegradedReason | null;
+  resolved: { preset: PresetName | 'none'; model: string };
+  consentOk: () => boolean;
+};
+
+/** The reason a fallback records: this session's own degraded state, else the worker's, else rules. */
+function fallbackReason(
+  providerState: Map<string, DegradedReason | null>,
+  sessionId: string,
+  initialProviderReason: DegradedReason | null,
+): DegradedReason {
+  const sessionState = providerState.has(sessionId)
+    ? providerState.get(sessionId)
+    : initialProviderReason;
+  return sessionState ?? 'rule_based';
+}
+
+/** The observer request for one batch, with the destination rules read at call time. */
+function requestForProvider(
+  db: DatabaseSync,
+  nearby: ReturnType<typeof nearbyForBatch>,
+  destination: 'remote_observer' | 'local_observer',
+  input: BatchInput,
+) {
+  return buildObserverRequest({
+    rows: input.rows,
+    session: input.session,
+    turns: input.turns,
+    destination,
+    repoId: input.session.repo_id,
+    nearby,
+    rules: loadDestinationRules(db),
+  });
+}
+
+type LanguageRetry = { done: BatchResult } | { outcome: CallOutcome };
+
+/**
+ * Records a successful provider answer and retries once if it came back in the wrong language, in
+ * the order the inline form used. A failed call is passed through untouched for the caller's own
+ * fallback branch.
+ */
+async function settleProviderOutcome(args: {
+  options: ProcessBatchOptions;
+  request: ReturnType<typeof buildObserverRequest>;
+  input: BatchInput;
+  nearby: ReturnType<typeof nearbyForBatch>;
+  preset: PresetName;
+  model: string;
+  outcome: CallOutcome;
+}): Promise<LanguageRetry> {
+  const { options, request, preset, outcome } = args;
+  const { db, token, deps } = options;
+  if (!outcome.ok) return { outcome };
+  if (!recordProviderResult(db, token, preset, outcome, deps.now())) {
+    return { done: { state: 'lease_lost', reason: null, memoryIds: [] } };
+  }
+  if (checkLanguage(request.input, outcome.output) !== 'mismatch') return { outcome };
+  return await retryOnLanguageMismatch(args);
+}
+
+
+/**
+ * One retry after the provider answered in the wrong language, in the order the inline form used:
+ * the retry's own result is recorded first, and only a second mismatch marks the session degraded
+ * and falls back. Returns the result the caller must return, or the outcome to carry on with.
+ */
+async function retryOnLanguageMismatch(args: {
+  options: ProcessBatchOptions;
+  request: ReturnType<typeof buildObserverRequest>;
+  input: BatchInput;
+  nearby: ReturnType<typeof nearbyForBatch>;
+  preset: PresetName;
+  model: string;
+}): Promise<LanguageRetry> {
+  const { options, request, input, nearby, preset, model } = args;
+  const { db, token, batch, config, deps, detect, providerState } = options;
+  const outcome = await providerCall({
+    db, token, input: request.input, batch, config, deps, preset, model, consentOk: options.consentOk,
+  });
+  if (outcome.ok && !recordProviderResult(db, token, preset, outcome, deps.now())) {
+    return { done: { state: 'lease_lost', reason: null, memoryIds: [] } };
+  }
+  if (outcome.ok && checkLanguage(request.input, outcome.output) === 'mismatch') {
+    providerState.set(batch.session_id, 'language_mismatch');
+    return {
+      done: await applyFallback(db, token, input, nearby, 'language_mismatch', detect, deps.now()),
+    };
+  }
+  return { outcome };
+}
+
+async function processBatch(options: ProcessBatchOptions): Promise<BatchResult> {
+  const { db, token, batch, config, deps, detect, providerState,
+    initialProviderReason, resolved, consentOk } = options;
+  const input = loadBatchInput(db, batch.id);
+  if (input === null) throw new Error('batch input missing');
+  const nearby = nearbyForBatch(db, input);
 
   if (batch.destination === 'fallback') {
-    const sessionState = providerState.has(batch.session_id)
-      ? providerState.get(batch.session_id)
-      : initialProviderReason;
-    const reason = sessionState ?? 'rule_based';
+    const reason = fallbackReason(providerState, batch.session_id, initialProviderReason);
     return await applyFallback(db, token, input, nearby, reason, detect, deps.now());
   }
 
@@ -425,63 +558,26 @@ async function processBatch(
     return await applyFallback(db, token, input, nearby, 'no_provider', detect, deps.now());
   }
 
-  const request = buildObserverRequest({
-    rows: input.rows,
-    session: input.session,
-    turns: input.turns,
-    destination: batch.destination,
-    repoId: input.session.repo_id,
-    nearby,
-    rules: loadDestinationRules(db),
-  });
+  const request = requestForProvider(db, nearby, batch.destination, input);
   if (!markExcerpted(db, token, batch.id, request.excerpted, deps.now())) {
     return { state: 'lease_lost', reason: null, memoryIds: [] };
   }
 
-  let outcome = await providerCall(
-    db,
-    token,
-    request.input,
-    batch,
-    config,
-    deps,
-    resolved.preset,
-    resolved.model,
-    consentOk,
-  );
-  if (outcome.ok) {
-    if (!recordProviderResult(db, token, resolved.preset, outcome, deps.now())) {
-      return { state: 'lease_lost', reason: null, memoryIds: [] };
-    }
-    if (checkLanguage(request.input, outcome.output) === 'mismatch') {
-      outcome = await providerCall(
-        db,
-        token,
-        request.input,
-        batch,
-        config,
-        deps,
-        resolved.preset,
-        resolved.model,
-        consentOk,
-      );
-      if (outcome.ok && !recordProviderResult(db, token, resolved.preset, outcome, deps.now())) {
-        return { state: 'lease_lost', reason: null, memoryIds: [] };
-      }
-      if (outcome.ok && checkLanguage(request.input, outcome.output) === 'mismatch') {
-        providerState.set(batch.session_id, 'language_mismatch');
-        return await applyFallback(
-          db,
-          token,
-          input,
-          nearby,
-          'language_mismatch',
-          detect,
-          deps.now(),
-        );
-      }
-    }
-  }
+  let outcome = await providerCall({
+    db, token, input: request.input, batch, config, deps,
+    preset: resolved.preset, model: resolved.model, consentOk,
+  });
+  const settled = await settleProviderOutcome({
+    options,
+    request,
+    input,
+    nearby,
+    preset: resolved.preset,
+    model: resolved.model,
+    outcome,
+  });
+  if ('done' in settled) return settled.done;
+  outcome = settled.outcome;
 
   if (!outcome.ok) {
     providerState.set(batch.session_id, outcome.reason);
@@ -748,9 +844,8 @@ function releaseForExit(
   });
 }
 
-/** Detached `oboete observe`: one bounded worker run, never a resident service (FR-009). */
-export async function runObserve(argv: string[], overrides: Partial<ObserveDeps> = {}): Promise<number> {
-  const deps: ObserveDeps = {
+function observeDependencies(overrides: Partial<ObserveDeps>): ObserveDeps {
+  return {
     now: overrides.now ?? Date.now,
     fetch: overrides.fetch ?? globalThis.fetch,
     spawn: overrides.spawn ?? nodeSpawn,
@@ -760,18 +855,9 @@ export async function runObserve(argv: string[], overrides: Partial<ObserveDeps>
     maxRunMs: overrides.maxRunMs ?? DEFAULT_MAX_RUN_MS,
     applyHook: overrides.applyHook ?? (() => undefined),
   };
-  const paths = oboetePaths(resolveHome(deps.env));
-  if (isPaused(paths)) return 0;
+}
 
-  const result: Counts = {
-    recovered: 0,
-    classified: 0,
-    reclassified: 0,
-    batches: 0,
-    applied: 0,
-    fallback: 0,
-    purged: 0,
-  };
+function openObserveDatabase(paths: OboetePaths): DatabaseSync | null {
   let db: DatabaseSync | null = null;
   try {
     ensureDirectories(paths);
@@ -784,10 +870,18 @@ export async function runObserve(argv: string[], overrides: Partial<ObserveDeps>
       // contracts/cli.md: the original storage failure still requires exit 3.
     }
     if (db?.isOpen) db.close();
-    return 3;
+    return null;
   }
 
-  const startedAt = deps.now();
+  return db;
+}
+
+/** The lease token, or the exit code this run ends with; tagged so a caller cannot confuse them. */
+type LeaseClaim = { ok: true; token: string } | { ok: false; exit: number };
+
+function claimObserveLease(
+  db: DatabaseSync, paths: OboetePaths, result: Counts, startedAt: number,
+): LeaseClaim {
   let token: string | null;
   try {
     token = claimLease(db, { pid: process.pid, now: startedAt });
@@ -798,228 +892,108 @@ export async function runObserve(argv: string[], overrides: Partial<ObserveDeps>
       // contracts/cli.md: either failure is a storage exit.
     }
     db.close();
-    return logEnd(paths, result, 3, 'storage_error');
+    return { ok: false, exit: logEnd(paths, result, 3, 'storage_error') };
   }
   if (token === null) {
     db.close();
-    return logEnd(paths, result, 0, 'another_worker');
+    return { ok: false, exit: logEnd(paths, result, 0, 'another_worker') };
   }
 
+  return { ok: true, token };
+}
+
+function resolveObserveModel(config: OboeteConfig): { preset: PresetName | 'none'; model: string } {
+  let resolved: { preset: PresetName | 'none'; model: string };
+  try {
+    resolved = resolveModel(config);
+  } catch {
+    resolved = { preset: config.observer.preset, model: '' };
+  }
+  return resolved;
+}
+
+function initialProviderFailure(
+  resolved: { preset: PresetName | 'none'; model: string },
+  credentials: ReturnType<typeof readCredentials> | null,
+  config: OboeteConfig,
+  env: NodeJS.ProcessEnv,
+): DegradedReason | null {
+  let initialProviderReason: DegradedReason | null;
+  if (resolved.preset === 'none' || credentials?.present !== true || resolved.model === '') {
+    initialProviderReason = 'no_provider';
+  } else if (!consentMatches(config, env)) {
+    initialProviderReason = 'consent_changed';
+  } else {
+    initialProviderReason = null;
+  }
+  return initialProviderReason;
+}
+
+/**
+ * A run that fell back reports it as exit 1, unless the storage exit already won or the run ended
+ * for a reason that is not about the provider: a lost lease, the max-run yield, or a batch error.
+ */
+function reportsFallbackExit(exit: number, usedFallback: boolean, endReason: string): boolean {
+  return exit !== 3 && usedFallback
+    && endReason !== 'lease_lost' && endReason !== 'max_run' && endReason !== 'batch_error';
+}
+
+/**
+ * Folds one batch's outcome into the run counters, and reports the two run-level facts the caller
+ * latches: the lease is gone, and a fallback happened for a reason other than there being no
+ * provider configured. Neither flag is ever cleared, so the caller only ever sets them.
+ */
+function recordBatchResult(
+  result: Counts,
+  batchResult: BatchResult,
+): { leaseLost: boolean; usedFallback: boolean } {
+  if (batchResult.state === 'lease_lost') return { leaseLost: true, usedFallback: false };
+  result.batches += 1;
+  result[batchResult.state] += 1;
+  return {
+    leaseLost: false,
+    usedFallback: batchResult.state === 'fallback' && batchResult.reason !== 'rule_based',
+  };
+}
+
+/** The run counters a worker run starts from; every phase adds to these. */
+function emptyCounts(): Counts {
+  return {
+    recovered: 0,
+    classified: 0,
+    reclassified: 0,
+    batches: 0,
+    applied: 0,
+    fallback: 0,
+    purged: 0,
+  };
+}
+
+async function observeLifecycle(overrides: Partial<ObserveDeps>): Promise<number> {
+  const deps = observeDependencies(overrides);
+  const paths = oboetePaths(resolveHome(deps.env));
+  if (isPaused(paths)) return 0;
+
+  const result = emptyCounts();
+  const db = openObserveDatabase(paths);
+  if (db === null) return 3;
+
+  const startedAt = deps.now();
+  const claim = claimObserveLease(db, paths, result, startedAt);
+  if (!claim.ok) return claim.exit;
+  const token = claim.token;
+
   let leaseLost = false;
-  const heartbeatTimer = setInterval(() => {
-    try {
-      if (!heartbeat(db as DatabaseSync, token as string, deps.now())) leaseLost = true;
-    } catch (error) {
-      appendLogQuietly(paths.observeLog, 'warn', 'heartbeat failed', { code: errorCode(error) });
-    }
-  }, Math.max(1, deps.heartbeatMs));
+  const heartbeatTimer = setInterval(heartbeatLease, Math.max(1, deps.heartbeatMs));
   heartbeatTimer.unref();
 
   let usedFallback = false;
   let catalogChecked = false;
   let yieldAfterPass = false;
-  let exit: number;
+  let exit: number | undefined;
   let endReason = 'empty';
 
-  try {
-    const config = loadConfig(paths);
-    let resolved: { preset: PresetName | 'none'; model: string };
-    try {
-      resolved = resolveModel(config);
-    } catch {
-      resolved = { preset: config.observer.preset, model: '' };
-    }
-    const presetEntry = resolved.preset === 'none' ? null : PRESET_CATALOG[resolved.preset];
-    const credentials =
-      resolved.preset === 'none'
-        ? null
-        : readCredentials(resolved.preset, deps.env, config.observer.agent_cli);
-    let initialProviderReason: DegradedReason | null;
-    if (resolved.preset === 'none' || credentials?.present !== true || resolved.model === '') {
-      initialProviderReason = 'no_provider';
-    } else if (!consentMatches(config, deps.env)) {
-      initialProviderReason = 'consent_changed';
-    } else {
-      initialProviderReason = null;
-    }
-    const startedConsentHash = consentHash(consentTuple(config, deps.env));
-    const consentOk = (): boolean => liveConsentOk(paths, deps.env, startedConsentHash);
-    const providerState = new Map<string, DegradedReason | null>();
-    const ancestorCache = createAncestorCache();
-    const detect = (text: string) =>
-      deps.detect({
-        text,
-        paths: [],
-        repoRoot: null,
-        secretPaths: config.privacy.secret_paths,
-        credentialValues: credentialValues(deps.env),
-      });
-
-    for (;;) {
-      if (deps.now() - startedAt >= Math.max(0, deps.maxRunMs)) {
-        yieldAfterPass = true;
-        endReason = 'max_run';
-        break;
-      }
-
-      const recovered = await retryBusy(() => recoverSpool(db, paths, token, deps.now()));
-      result.recovered += recovered.inserted;
-      if (leaseLost || !ownsLease(db, token)) break;
-
-      const classified = await retryBusy(() => classifyPending(db, token, deps.now(), detect));
-      result.classified += classified.examined;
-      if (classified.leaseLost || leaseLost) break;
-
-      const reclassified = await retryBusy(() => reclassifyImported(db, token, deps.now, detect));
-      result.reclassified += reclassified.examined;
-      if (reclassified.leaseLost || leaseLost) break;
-
-      const reclaimed = await retryBusy(() => reclaimStale(db, token, deps.now()));
-      if (reclaimed.leaseLost || leaseLost) break;
-
-      const purged = await retryBusy(() => purgeExpiredEvents(db, token, deps.now()));
-      result.purged += purged.deleted;
-      if (purged.leaseLost || leaseLost) break;
-
-      await retryBusy(() => cleanupPiAck(db, token, paths.piAck, deps.now()));
-      if (leaseLost || !ownsLease(db, token)) break;
-
-      const created = await retryBusy(() =>
-        createBatches(db, token, deps.now(), { preset: presetEntry?.egress ?? 'none' }),
-      );
-      if (created.leaseLost || leaseLost) break;
-
-      if (
-        !catalogChecked &&
-        resolved.preset === 'workers-ai' &&
-        credentials?.present === true
-      ) {
-        catalogChecked = true;
-        await retryBusy(() =>
-          refreshWorkersAiCatalog(db, { env: deps.env, now: deps.now(), fetchImpl: deps.fetch }),
-        );
-        if (leaseLost || !ownsLease(db, token)) break;
-      }
-
-      if (!adoptPendingBatches(db, token, deps.now())) break;
-      const batches = pendingBatches(db);
-      for (const batch of batches) {
-        if (leaseLost) break;
-        let batchResult: BatchResult | null = null;
-        let batchError: unknown;
-        try {
-          batchResult = await processBatch(
-            db,
-            token,
-            batch,
-            config,
-            deps,
-            detect,
-            providerState,
-            initialProviderReason,
-            resolved,
-            consentOk,
-          );
-          if (batchResult.state === 'lease_lost') {
-            leaseLost = true;
-          } else {
-            result.batches += 1;
-            result[batchResult.state] += 1;
-            if (batchResult.state === 'fallback' && batchResult.reason !== 'rule_based') {
-              usedFallback = true;
-            }
-          }
-        } catch (error) {
-          if (error instanceof LeaseLostError) leaseLost = true;
-          else {
-            batchError = error;
-            yieldAfterPass = true;
-          }
-        }
-
-        if (!leaseLost) {
-          try {
-            await retryBusy(() => checkpoint(db, 'PASSIVE'));
-            if (
-              batchResult !== null &&
-              !(await updateBatchCitations(
-                db,
-                token,
-                String(batch.repo_id ?? ''),
-                batchResult.memoryIds,
-                ancestorCache,
-                deps,
-              ))
-            ) {
-              leaseLost = true;
-            }
-          } catch (error) {
-            if (isStorageError(error)) throw error;
-            batchError = batchError ?? error;
-            yieldAfterPass = true;
-          }
-        }
-
-        appendLog(paths.observeLog, batchError === undefined ? 'info' : 'error', 'batch', {
-          id: batch.id,
-          state: batchResult?.state ?? 'error',
-          reason: batchResult?.reason ?? (batchError === undefined ? 'none' : errorCode(batchError)),
-          ...(batchResult?.detail === undefined ? {} : { detail: batchResult.detail.split(/[\r\n]/)[0] }),
-        });
-      }
-      if (leaseLost) break;
-
-      for (const sessionId of pendingSummaries(db)) {
-        try {
-          const summary = await retryBusy(() => sessionSummary(db, token, sessionId, deps.now()));
-          if (summary.state === 'lease_lost') {
-            leaseLost = true;
-            break;
-          }
-        } catch (error) {
-          if (isStorageError(error)) throw error;
-          appendLog(paths.observeLog, 'error', 'session summary failed', {
-            session: sessionId,
-            code: errorCode(error),
-          });
-          yieldAfterPass = true;
-        }
-      }
-      if (leaseLost) break;
-
-      if (yieldAfterPass || deps.now() - startedAt >= Math.max(0, deps.maxRunMs)) {
-        endReason = yieldAfterPass ? 'batch_error' : 'max_run';
-        yieldAfterPass = true;
-        break;
-      }
-
-      const released = releaseForExit(db, paths, token, deps.now(), result, 'empty', false);
-      if (released === 'lost') {
-        leaseLost = true;
-        break;
-      }
-      if (released === 'released') {
-        await retryBusy(() => checkpoint(db, 'TRUNCATE'));
-        break;
-      }
-      await sleep(Math.min(Math.max(1, deps.heartbeatMs), BUSY_RETRY_MS));
-    }
-
-    if (leaseLost) {
-      exit = 0;
-      endReason = 'lease_lost';
-    } else if (yieldAfterPass) {
-      if (endReason === 'max_run') {
-        // FR-009: a bounded worker releases even with queued work so the next hook can respawn it.
-        const released = releaseForExit(db, paths, token, deps.now(), result, endReason, true);
-        if (released === 'released') await retryBusy(() => checkpoint(db, 'TRUNCATE'));
-        else if (released === 'lost') endReason = 'lease_lost';
-      }
-      exit = 0;
-    } else {
-      exit = usedFallback ? 1 : 0;
-    }
-  } catch (error) {
+  function recordRunFailure(error: unknown, db: DatabaseSync, token: string): void {
     let logFailed = false;
     try {
       appendLog(paths.observeLog, 'error', 'worker step failed', { code: errorCode(error) });
@@ -1036,13 +1010,278 @@ export async function runObserve(argv: string[], overrides: Partial<ObserveDeps>
         // R6: preserve the original storage outcome; a held lease becomes stale for takeover.
       }
     }
+  }
+
+  function heartbeatLease(): void {
+    try {
+      // `db` is declared before the null check that narrows it, and this timer only ever fires
+      // after that check has passed.
+      if (!heartbeat(db as DatabaseSync, token, deps.now())) leaseLost = true;
+    } catch (error) {
+      appendLogQuietly(paths.observeLog, 'warn', 'heartbeat failed', { code: errorCode(error) });
+    }
+  }
+
+  async function observeClaimedLease(db: DatabaseSync, token: string): Promise<void> {
+    async function recoverAndClassify(): Promise<boolean> {
+      const recovered = await retryBusy(() => recoverSpool(db, paths, token, deps.now()));
+      result.recovered += recovered.inserted;
+      if (leaseLost || !ownsLease(db, token)) return true;
+
+      const classified = await retryBusy(() => classifyPending(db, token, deps.now(), detect));
+      result.classified += classified.examined;
+      if (classified.leaseLost || leaseLost) return true;
+
+      const reclassified = await retryBusy(() => reclassifyImported(db, token, deps.now, detect));
+      result.reclassified += reclassified.examined;
+      if (reclassified.leaseLost || leaseLost) return true;
+
+      return false;
+    }
+
+    async function maintainQueue(): Promise<boolean> {
+      const reclaimed = await retryBusy(() => reclaimStale(db, token, deps.now()));
+      if (reclaimed.leaseLost || leaseLost) return true;
+
+      const purged = await retryBusy(() => purgeExpiredEvents(db, token, deps.now()));
+      result.purged += purged.deleted;
+      if (purged.leaseLost || leaseLost) return true;
+
+      await retryBusy(() => cleanupPiAck(db, token, paths.piAck, deps.now()));
+      if (leaseLost || !ownsLease(db, token)) return true;
+
+      const created = await retryBusy(() =>
+        createBatches(db, token, deps.now(), { preset: presetEntry?.egress ?? 'none' }),
+      );
+      if (created.leaseLost || leaseLost) return true;
+
+      return false;
+    }
+
+    async function refreshCatalog(): Promise<boolean> {
+      if (
+        !catalogChecked &&
+        resolved.preset === 'workers-ai' &&
+        credentials?.present === true
+      ) {
+        catalogChecked = true;
+        await retryBusy(() =>
+          refreshWorkersAiCatalog(db, { env: deps.env, now: deps.now(), fetchImpl: deps.fetch }),
+        );
+        if (leaseLost || !ownsLease(db, token)) return true;
+      }
+
+      return false;
+    }
+
+    async function processPendingBatch(batch: BatchRow): Promise<void> {
+      async function checkpointBatch(): Promise<void> {
+        try {
+          await retryBusy(() => checkpoint(db, 'PASSIVE'));
+          if (
+            batchResult !== null &&
+            !(await updateBatchCitations(
+              db,
+              token,
+              String(batch.repo_id ?? ''),
+              batchResult.memoryIds,
+              ancestorCache,
+              deps,
+            ))
+          ) {
+            leaseLost = true;
+          }
+        } catch (error) {
+          if (isStorageError(error)) throw error;
+          batchError = batchError ?? error;
+          yieldAfterPass = true;
+        }
+      }
+
+      function logBatch(): void {
+        appendLog(paths.observeLog, batchError === undefined ? 'info' : 'error', 'batch', {
+          id: batch.id,
+          state: batchResult?.state ?? 'error',
+          reason: batchResult?.reason ?? (batchError === undefined ? 'none' : errorCode(batchError)),
+          ...(batchResult?.detail === undefined ? {} : { detail: batchResult.detail.split(/[\r\n]/)[0] }),
+        });
+      }
+
+      let batchResult: BatchResult | null = null;
+      let batchError: unknown;
+      try {
+        batchResult = (await processBatch({
+          db, token, batch, config, deps, detect, providerState,
+          initialProviderReason, resolved, consentOk,
+        }));
+        const recorded = recordBatchResult(result, batchResult);
+        if (recorded.leaseLost) leaseLost = true;
+        if (recorded.usedFallback) usedFallback = true;
+      } catch (error) {
+        if (error instanceof LeaseLostError) leaseLost = true;
+        else {
+          batchError = error;
+          yieldAfterPass = true;
+        }
+      }
+
+      if (!leaseLost) {
+        await checkpointBatch();
+      }
+
+      logBatch();
+
+    }
+
+    async function processPendingBatches(): Promise<void> {
+      const batches = pendingBatches(db);
+      for (const batch of batches) {
+        if (leaseLost) break;
+        await processPendingBatch(batch);
+      }
+    }
+
+    async function summarizeSession(sessionId: string): Promise<boolean> {
+      try {
+        const summary = await retryBusy(() => sessionSummary(db, token, sessionId, deps.now()));
+        if (summary.state === 'lease_lost') {
+          leaseLost = true;
+          return true;
+        }
+      } catch (error) {
+        if (isStorageError(error)) throw error;
+        appendLog(paths.observeLog, 'error', 'session summary failed', {
+          session: sessionId,
+          code: errorCode(error),
+        });
+        yieldAfterPass = true;
+      }
+      return false;
+    }
+
+    async function summarizePendingSessions(): Promise<void> {
+      for (const sessionId of pendingSummaries(db)) {
+        if (await summarizeSession(sessionId)) break;
+      }
+    }
+
+    async function releaseEmptyPass(): Promise<boolean> {
+      const released = releaseForExit(db, paths, token, deps.now(), result, 'empty', false);
+      if (released === 'lost') {
+        leaseLost = true;
+        return true;
+      }
+      if (released === 'released') {
+        await retryBusy(() => checkpoint(db, 'TRUNCATE'));
+        return true;
+      }
+      await sleep(Math.min(Math.max(1, deps.heartbeatMs), BUSY_RETRY_MS));
+      return false;
+    }
+
+    async function releaseMaxRun(): Promise<void> {
+      // FR-009: a bounded worker releases even with queued work so the next hook can respawn it.
+      const released = releaseForExit(db, paths, token, deps.now(), result, endReason, true);
+      if (released === 'released') await retryBusy(() => checkpoint(db, 'TRUNCATE'));
+      else if (released === 'lost') endReason = 'lease_lost';
+    }
+
+    async function processPass(): Promise<boolean> {
+      if (await recoverAndClassify()) return true;
+
+      if (await maintainQueue()) return true;
+
+      if (await refreshCatalog()) return true;
+
+      if (!adoptPendingBatches(db, token, deps.now())) return true;
+      await processPendingBatches();
+      if (leaseLost) return true;
+
+      await summarizePendingSessions();
+      if (leaseLost) return true;
+
+      if (yieldAfterPass || deps.now() - startedAt >= Math.max(0, deps.maxRunMs)) {
+        endReason = yieldAfterPass ? 'batch_error' : 'max_run';
+        yieldAfterPass = true;
+        return true;
+      }
+
+      return false;
+    }
+
+    async function finishLeaseRun(): Promise<void> {
+      if (leaseLost) {
+        exit = 0;
+        endReason = 'lease_lost';
+      } else if (yieldAfterPass) {
+        if (endReason === 'max_run') {
+          await releaseMaxRun();
+        }
+        exit = 0;
+      } else {
+        exit = usedFallback ? 1 : 0;
+      }
+    }
+
+    async function runPasses(): Promise<void> {
+      for (;;) {
+        if (deps.now() - startedAt >= Math.max(0, deps.maxRunMs)) {
+          yieldAfterPass = true;
+          endReason = 'max_run';
+          break;
+        }
+
+        if (await processPass()) break;
+
+        if (await releaseEmptyPass()) break;
+      }
+
+    }
+
+    const config = loadConfig(paths);
+    const resolved = resolveObserveModel(config);
+    const presetEntry = resolved.preset === 'none' ? null : PRESET_CATALOG[resolved.preset];
+    const credentials =
+      resolved.preset === 'none'
+        ? null
+        : readCredentials(resolved.preset, deps.env, config.observer.agent_cli);
+    const initialProviderReason = initialProviderFailure(resolved, credentials, config, deps.env);
+    const startedConsentHash = consentHash(consentTuple(config, deps.env));
+    const consentOk = (): boolean => liveConsentOk(paths, deps.env, startedConsentHash);
+    const providerState = new Map<string, DegradedReason | null>();
+    const ancestorCache = createAncestorCache();
+    const detect = (text: string) =>
+      deps.detect({
+        text,
+        paths: [],
+        repoRoot: null,
+        secretPaths: config.privacy.secret_paths,
+        credentialValues: credentialValues(deps.env),
+      });
+
+    await runPasses();
+    await finishLeaseRun();
+  }
+
+  try {
+    await observeClaimedLease(db, token);
+  } catch (error) {
+    recordRunFailure(error, db, token);
   } finally {
     clearInterval(heartbeatTimer);
     if (db.isOpen) db.close();
   }
 
-  if (exit !== 3 && usedFallback && endReason !== 'lease_lost' && endReason !== 'max_run' && endReason !== 'batch_error') {
+  // Every path above assigns it; the check is here so a future one that does not fails loudly
+  // instead of reporting `undefined` as this run's exit code (contracts/cli.md pins 0, 1 and 3).
+  if (exit === undefined) throw new Error('observe run produced no exit code');
+  if (reportsFallbackExit(exit, usedFallback, endReason)) {
     exit = 1;
   }
   return logEnd(paths, result, exit, endReason);
+}
+
+/** Detached `oboete observe`: one bounded worker run, never a resident service (FR-009). */
+export async function runObserve(argv: string[], overrides: Partial<ObserveDeps> = {}): Promise<number> {
+  return await observeLifecycle(overrides);
 }

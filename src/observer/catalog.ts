@@ -53,6 +53,43 @@ function paidOnly(model: unknown): boolean {
   });
 }
 
+function catalogPageRows(body: unknown): unknown[] {
+  if (typeof body !== 'object' || body === null || (body as { success?: unknown }).success !== true) {
+    throw new Error('catalog response unsuccessful');
+  }
+  const pageRows = (body as { result?: unknown }).result;
+  if (!Array.isArray(pageRows)) throw new Error('catalog result missing');
+  return pageRows;
+}
+
+function storeCatalog(
+  db: DatabaseSync,
+  accountId: string,
+  rows: unknown[],
+  now: number,
+): WorkersAiCatalog {
+  const models = rows.flatMap((model) => typeof model === 'object' && model !== null
+    && typeof (model as { name?: unknown }).name === 'string'
+    ? [(model as { name: string }).name] : []);
+  const value: CachedCatalog = {
+    accountId,
+    models,
+    defaultModelPresent: models.includes(PRESET_CATALOG['workers-ai'].defaultModel),
+    hasPaidOnlyModels: rows.some(paidOnly),
+    fetchedAt: now,
+  };
+  runtimeStateSet(db, CACHE_KEY, JSON.stringify(value), now);
+  return result(value, false);
+}
+
+/** Reject an exhausted page walk before calculating the next request's remaining budget. */
+function remainingCatalogBudget(page: number, walkDeadline: number): number {
+  if (page > MAX_PAGES) throw new Error('catalog page limit exceeded');
+  const remaining = walkDeadline - Date.now();
+  if (remaining <= 0) throw new Error('catalog walk budget exceeded');
+  return remaining;
+}
+
 export async function refreshWorkersAiCatalog(
   db: DatabaseSync,
   { env, now, fetchImpl = fetch }: { env: NodeJS.ProcessEnv; now: number; fetchImpl?: typeof fetch },
@@ -69,9 +106,7 @@ export async function refreshWorkersAiCatalog(
     const rows: unknown[] = [];
     const walkDeadline = Date.now() + WALK_BUDGET_MS;
     for (let page = 1; ; page += 1) {
-      if (page > MAX_PAGES) throw new Error('catalog page limit exceeded');
-      const remaining = walkDeadline - Date.now();
-      if (remaining <= 0) throw new Error('catalog walk budget exceeded');
+      const remaining = remainingCatalogBudget(page, walkDeadline);
       const response = await fetchImpl(
         `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/models/search?per_page=${PAGE_SIZE}&page=${page}`,
         {
@@ -81,27 +116,12 @@ export async function refreshWorkersAiCatalog(
       );
       if (!response.ok) throw new Error(`catalog HTTP ${response.status}`);
       const body: unknown = await response.json();
-      if (typeof body !== 'object' || body === null || (body as { success?: unknown }).success !== true) {
-        throw new Error('catalog response unsuccessful');
-      }
-      const pageRows = (body as { result?: unknown }).result;
-      if (!Array.isArray(pageRows)) throw new Error('catalog result missing');
+      const pageRows = catalogPageRows(body);
       rows.push(...pageRows);
       // Live models/search probe (2026-09-05): short pages and total_count do not imply exhaustion.
       if (pageRows.length === 0) break;
     }
-    const models = rows.flatMap((model) => typeof model === 'object' && model !== null
-      && typeof (model as { name?: unknown }).name === 'string'
-      ? [(model as { name: string }).name] : []);
-    const value: CachedCatalog = {
-      accountId,
-      models,
-      defaultModelPresent: models.includes(PRESET_CATALOG['workers-ai'].defaultModel),
-      hasPaidOnlyModels: rows.some(paidOnly),
-      fetchedAt: now,
-    };
-    runtimeStateSet(db, CACHE_KEY, JSON.stringify(value), now);
-    return result(value, false);
+    return storeCatalog(db, accountId, rows, now);
   } catch {
     return usableCached === null ? null : result(usableCached, true);
   }

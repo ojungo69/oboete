@@ -402,6 +402,47 @@ const CLASSIFY_CANDIDATES = `SELECT * FROM raw_events
     AND TRIM(COALESCE(content, '')) <> ''
   ORDER BY captured_at, id LIMIT ?`;
 
+type ClassificationUpdate = { id: string; sensitivity: Sensitivity; content: string | null };
+
+function classificationUpdate(
+  row: RawEventRow,
+  content: string,
+  result: Extract<DetectorResult, { ok: true }>,
+  inputResult: Extract<DetectorResult, { ok: true }>,
+): ClassificationUpdate {
+  return {
+    id: row.id,
+    sensitivity: strictest(
+      promoteSensitivity(row.sensitivity, result, 'done'),
+      promoteSensitivity(row.sensitivity, inputResult, 'done'),
+    ),
+    // FR-018: what this second run found is redacted in the stored row as well. `payload_json`
+    // is capture's normalized output and is not rewritten here; the sensitivity above is what
+    // keeps an unredacted tool input from travelling.
+    content: result.text === content ? null : result.text,
+  };
+}
+
+function storeClassificationUpdates(
+  db: DatabaseSync,
+  token: string,
+  now: number,
+  updates: ClassificationUpdate[],
+): boolean {
+  return transactionImmediate(db, () => {
+    if (!assertLease(db, token, now)) {
+      db.exec('ROLLBACK');
+      return true;
+    }
+    const update = db.prepare(
+      `UPDATE raw_events SET sensitivity = ?, classification_state = 'done', content = COALESCE(?, content)
+         WHERE id = ?`,
+    );
+    for (const row of updates) update.run(row.sensitivity, row.content, row.id);
+    return false;
+  });
+}
+
 /**
  * The worker's promotion pass (FR-017): a row stays `local_only` until a complete, clean detector
  * run promotes it. `private` and `secret` rows are not selected at all, and `partial` and `failed`
@@ -421,14 +462,19 @@ export async function classifyPending(
   // this set is what ends the loop instead.
   const seen = new Set<string>();
 
-  for (;;) {
-    const rows = asRawEventRows(db.prepare(CLASSIFY_CANDIDATES).all(CLASSIFY_LIMIT)).filter(
-      (row) => !seen.has(row.id),
-    );
-    if (rows.length === 0) break;
+  function countClassifications(updates: { sensitivity: Sensitivity }[]): void {
+    for (const row of updates) {
+      examined += 1;
+      if (row.sensitivity === 'secret') secret += 1;
+      else if (row.sensitivity === 'eligible') promoted += 1;
+    }
+  }
 
-    // The detector is async and may run in a worker thread, so it never runs inside a transaction.
-    const updates: { id: string; sensitivity: Sensitivity; content: string | null }[] = [];
+  /** Queue a row's promotion only when both its content and tool input pass detection. */
+  async function collectSuccessfulClassifications(
+    rows: RawEventRow[],
+    updates: ClassificationUpdate[],
+  ): Promise<void> {
     for (const row of rows) {
       seen.add(row.id);
       const content = row.content ?? '';
@@ -444,38 +490,24 @@ export async function classifyPending(
         failed += 1;
         continue;
       }
-      updates.push({
-        id: row.id,
-        sensitivity: strictest(
-          promoteSensitivity(row.sensitivity, result, 'done'),
-          promoteSensitivity(row.sensitivity, inputResult, 'done'),
-        ),
-        // FR-018: what this second run found is redacted in the stored row as well. `payload_json`
-        // is capture's normalized output and is not rewritten here; the sensitivity above is what
-        // keeps an unredacted tool input from travelling.
-        content: result.text === content ? null : result.text,
-      });
+      updates.push(classificationUpdate(row, content, result, inputResult));
     }
+  }
 
-    const lost = transactionImmediate(db, () => {
-      if (!assertLease(db, token, now)) {
-        db.exec('ROLLBACK');
-        return true;
-      }
-      const update = db.prepare(
-        `UPDATE raw_events SET sensitivity = ?, classification_state = 'done', content = COALESCE(?, content)
-         WHERE id = ?`,
-      );
-      for (const row of updates) update.run(row.sensitivity, row.content, row.id);
-      return false;
-    });
+  for (;;) {
+    const rows = asRawEventRows(db.prepare(CLASSIFY_CANDIDATES).all(CLASSIFY_LIMIT)).filter(
+      (row) => !seen.has(row.id),
+    );
+    if (rows.length === 0) break;
+
+    // The detector is async and may run in a worker thread, so it never runs inside a transaction.
+    const updates: ClassificationUpdate[] = [];
+    await collectSuccessfulClassifications(rows, updates);
+
+    const lost = storeClassificationUpdates(db, token, now, updates);
     if (lost) return { examined, promoted, secret, failed, leaseLost: true };
 
-    for (const row of updates) {
-      examined += 1;
-      if (row.sensitivity === 'secret') secret += 1;
-      else if (row.sensitivity === 'eligible') promoted += 1;
-    }
+    countClassifications(updates);
     if (rows.length < CLASSIFY_LIMIT) break;
   }
 
@@ -578,7 +610,7 @@ export function createBatches(
       .all()
       .map((row) => String(row.session_id));
 
-    for (const sessionId of sessionIds) {
+    function createSessionBatches(sessionId: string): void {
       const rows = asRawEventRows(
         db
           .prepare(
@@ -586,12 +618,12 @@ export function createBatches(
           )
           .all(sessionId),
       ).filter(isSummarizableRow);
-      if (rows.length === 0) continue;
+      if (rows.length === 0) return;
 
       const session = readSession(db, sessionId);
-      if (session === null) continue;
+      if (session === null) return;
       const trigger = triggerFor(session, rows, now);
-      if (trigger === null) continue;
+      if (trigger === null) return;
 
       // The newest row of the round; both batches of the round carry it, which is what makes them
       // one range in two destinations (data-model.md UNIQUE (session_id, through_event_id, destination)).
@@ -611,10 +643,12 @@ export function createBatches(
          WHERE session_id = ? AND through_event_id = ? AND destination = ?`,
       );
 
-      for (const destination of DESTINATION_ORDER) {
+      function createDestinationBatch(
+        destination: BatchDestination, session: SessionRow, trigger: BatchTrigger,
+      ): void {
         const list = byDestination.get(destination);
         // A batch is created only if it would carry at least one row.
-        if (list === undefined || list.length === 0) continue;
+        if (list === undefined || list.length === 0) return;
 
         const id = randomUUID();
         // data-model.md UNIQUE (session_id, through_event_id, destination). An earlier round can
@@ -656,6 +690,14 @@ export function createBatches(
         for (const row of list) claim.run(batch.id, row.id);
         created.push(batch);
       }
+
+      for (const destination of DESTINATION_ORDER) {
+        createDestinationBatch(destination, session, trigger);
+      }
+    }
+
+    for (const sessionId of sessionIds) {
+      createSessionBatches(sessionId);
     }
 
     return { created, leaseLost: false };
@@ -686,7 +728,6 @@ export function reclaimStale(
   });
 }
 
-/** A7: a partial row hands over its tool name and paths and none of the text it holds. */
 /**
  * A7: a `partial` row hands over metadata only — the tool name and the paths — never its truncated
  * text, to a provider or to anything that is injected later.

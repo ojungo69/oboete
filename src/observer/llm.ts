@@ -1,4 +1,9 @@
 import type { spawn } from 'node:child_process';
+import type {
+  APICallError as AiApiCallError,
+  generateText as aiGenerateText,
+  Output as AiOutput,
+} from 'ai';
 
 import type { AgentCli, Credentials, PresetName } from '../config.js';
 import {
@@ -178,24 +183,29 @@ function findApiError(
   return findCause(error, isInstance) as ApiError | undefined;
 }
 
-async function responseWithinLimit(response: Response): Promise<Response> {
-  const declaredLength = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
-    if (response.body !== null) {
-      try {
-        await response.body.cancel();
-      } catch {
-        // The size failure is authoritative.
-      }
-    }
-    const error = new Error('provider response exceeded 1 MB');
-    error.name = 'ResponseTooLargeError';
-    throw error;
+function rebuildResponse(
+  response: Response,
+  chunks: Uint8Array[],
+  size: number,
+): Response {
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
   }
-  if (response.body === null) return response;
+  return new Response(size === 0 ? null : bytes, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
 
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
+/** Read chunks in order, cancelling and rejecting when their combined size exceeds the limit. */
+async function readBoundedResponseChunks(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  chunks: Uint8Array[],
+): Promise<number> {
   let size = 0;
   while (true) {
     const chunk = await reader.read();
@@ -214,17 +224,30 @@ async function responseWithinLimit(response: Response): Promise<Response> {
     chunks.push(chunk.value);
   }
 
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
+  return size;
+}
+
+async function responseWithinLimit(response: Response): Promise<Response> {
+  const declaredLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+    if (response.body !== null) {
+      try {
+        await response.body.cancel();
+      } catch {
+        // The size failure is authoritative.
+      }
+    }
+    const error = new Error('provider response exceeded 1 MB');
+    error.name = 'ResponseTooLargeError';
+    throw error;
   }
-  return new Response(size === 0 ? null : bytes, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  });
+  if (response.body === null) return response;
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  const size = await readBoundedResponseChunks(reader, chunks);
+
+  return rebuildResponse(response, chunks, size);
 }
 
 function normalizeRuntimeModelId(model: string): string {
@@ -316,8 +339,47 @@ type SummarizeContext = {
   timeoutMs?: number;
 };
 
-function failure(reason: FailureReason, attempts: number, detail: string): CallOutcome {
+function failure(
+  reason: FailureReason,
+  attempts: number,
+  detail: string,
+): Extract<CallOutcome, { ok: false }> {
   return { ok: false, reason, attempts, detail };
+}
+
+function agentCliResultOutcome(
+  result: Awaited<ReturnType<typeof runAgentCli>>,
+  input: ObserverInput,
+  attempts: number,
+): CallOutcome | null {
+  if ('error' in result) {
+    if (result.error === 'timeout') {
+      return failure('timeout', attempts, 'the agent CLI timed out');
+    }
+    if (result.error === 'invalid_output' && attempts < 2) return null;
+    return failure(
+      result.error === 'invalid_output' ? 'unusable_output' : 'unreachable',
+      attempts,
+      result.error === 'invalid_output'
+        ? 'the agent CLI did not return its documented JSON output'
+        : 'the agent CLI process failed',
+    );
+  }
+  if (Buffer.byteLength(result.text, 'utf8') > MAX_RESPONSE_BYTES) {
+    return failure('unusable_output', attempts, 'provider response exceeded 1 MB');
+  }
+  const parsed = parseOutput(result.text, input);
+  if (parsed.ok) {
+    return {
+      ok: true,
+      output: parsed.output,
+      resolvedModel: null,
+      neurons: null,
+      attempts,
+    };
+  }
+  if (attempts >= 2) return failure('unusable_output', attempts, parsed.detail);
+  return null;
 }
 
 async function summarizeWithAgentCli(
@@ -339,51 +401,221 @@ async function summarizeWithAgentCli(
       timeoutMs: ctx.timeoutMs ?? (testFault('provider-hang') ? 500 : REQUEST_TIMEOUT_MS),
       ...(ctx.spawn === undefined ? {} : { spawn: ctx.spawn }),
     });
-    if ('error' in result) {
-      if (result.error === 'timeout') {
-        return failure('timeout', attempts, 'the agent CLI timed out');
-      }
-      if (result.error === 'invalid_output' && attempts < 2) continue;
-      return failure(
-        result.error === 'invalid_output' ? 'unusable_output' : 'unreachable',
-        attempts,
-        result.error === 'invalid_output'
-          ? 'the agent CLI did not return its documented JSON output'
-          : 'the agent CLI process failed',
-      );
-    }
-    if (Buffer.byteLength(result.text, 'utf8') > MAX_RESPONSE_BYTES) {
-      return failure('unusable_output', attempts, 'provider response exceeded 1 MB');
-    }
-    const parsed = parseOutput(result.text, input);
-    if (parsed.ok) {
-      return {
-        ok: true,
-        output: parsed.output,
-        resolvedModel: null,
-        neurons: null,
-        attempts,
-      };
-    }
-    if (attempts >= 2) return failure('unusable_output', attempts, parsed.detail);
+    const outcome = agentCliResultOutcome(result, input, attempts);
+    if (outcome !== null) return outcome;
   }
   return failure('unusable_output', attempts, 'the agent CLI response was unusable');
+}
+
+type ProviderRequestOptions = ReturnType<typeof providerRequestOptions>;
+type ProviderModel = Awaited<ReturnType<typeof createLanguageModel>>;
+type GenerateText = typeof aiGenerateText;
+type OutputFactory = typeof AiOutput;
+type ProviderReservation = Extract<ReturnType<SummarizeContext['reserve']>, { ok: true }>;
+type PreparedReservation =
+  | { ok: true; reservation: ProviderReservation }
+  | Extract<CallOutcome, { ok: false }>;
+
+/**
+ * A predicate rather than a boolean so the caller keeps the narrowing the inline check had: past
+ * this point `ctx.preset` is a real preset, and `'none'` cannot reach the catalog lookup.
+ */
+function providerConfigured(ctx: SummarizeContext): ctx is SummarizeContext & { preset: PresetName } {
+  return ctx.preset !== 'none' && ctx.credentials.present && ctx.model.trim() !== '';
+}
+
+function buildProviderPrompt(
+  input: ObserverInput,
+  requestOptions: ProviderRequestOptions,
+): ReturnType<typeof buildSummarizerPrompt> {
+  return buildSummarizerPrompt(
+    input,
+    requestOptions.structured === 'text-json' ? 'text-json' : 'schema',
+  );
+}
+
+function prepareProviderReservation(
+  ctx: SummarizeContext,
+  attempts: number,
+): PreparedReservation {
+  if (!ctx.consentOk()) {
+    return failure('consent_changed', attempts, 'observer consent changed before reservation');
+  }
+  const reservation = ctx.reserve();
+  if (!reservation.ok) {
+    return failure(
+      reservation.reason,
+      attempts,
+      `provider reservation refused: ${reservation.reason}`,
+    );
+  }
+  if (!ctx.consentOk()) {
+    return failure(
+      'consent_changed',
+      attempts,
+      'observer consent changed before the provider call',
+    );
+  }
+  return { ok: true, reservation };
+}
+
+function createProviderOutput(
+  Output: OutputFactory,
+  requestOptions: ProviderRequestOptions,
+) {
+  let baseOutput;
+  if (requestOptions.structured !== 'text-json') {
+    if (requestOptions.structured === 'json_schema') {
+      baseOutput = Output.object({ schema: observerOutputSchema, name: 'observer_output' });
+    } else {
+      baseOutput = Output.json();
+    }
+  }
+  const output =
+    baseOutput === undefined
+      ? undefined
+      : {
+        ...baseOutput,
+        async parseCompleteOutput({ text }: { text: string }) {
+          // Parsing stays here so the 1 MB check happens first.
+          return text;
+        },
+        async parsePartialOutput({ text }: { text: string }) {
+          return { partial: text };
+        },
+      };
+  return output;
+}
+
+type ProviderOutput = ReturnType<typeof createProviderOutput>;
+
+function providerGenerateOptions(
+  model: ProviderModel,
+  prompt: ReturnType<typeof buildSummarizerPrompt>,
+  ctx: SummarizeContext,
+  requestOptions: ProviderRequestOptions,
+  output: ProviderOutput,
+) {
+  return {
+    model,
+    system: prompt.system,
+    prompt: prompt.user,
+    maxRetries: 0,
+    abortSignal: AbortSignal.timeout(
+      ctx.timeoutMs ?? (testFault('provider-hang') ? 500 : REQUEST_TIMEOUT_MS),
+    ),
+    ...(requestOptions.providerOptions === undefined
+      ? {}
+      : {
+        providerOptions: requestOptions.providerOptions as ProviderOptions,
+      }),
+    ...(output === undefined ? {} : { output }),
+  };
+}
+
+/**
+ * Tagged so the two answers cannot be confused: `settled` carries what the caller must return,
+ * where a `null` outcome is this file's "retry the call" (summarizeWithProvider continues on it),
+ * and `usable` means the text itself is fine and parsing comes next.
+ */
+type TextCheck = { kind: 'usable' } | { kind: 'settled'; outcome: CallOutcome | null };
+
+function providerTextCheck(
+  result: Awaited<ReturnType<GenerateText>>,
+  attempts: number,
+): TextCheck {
+  if (result.finishReason === 'length') {
+    if (attempts < 2) return { kind: 'settled', outcome: null };
+    return {
+      kind: 'settled',
+      outcome: failure('unusable_output', attempts, 'provider output reached its length limit'),
+    };
+  }
+  if (result.text.trim() === '') {
+    if (attempts < 2) return { kind: 'settled', outcome: null };
+    return {
+      kind: 'settled',
+      outcome: failure('unusable_output', attempts, 'provider response contained no text'),
+    };
+  }
+  if (Buffer.byteLength(result.text, 'utf8') > MAX_RESPONSE_BYTES) {
+    return {
+      kind: 'settled',
+      outcome: failure('unusable_output', attempts, 'provider response exceeded 1 MB'),
+    };
+  }
+  return { kind: 'usable' };
+}
+
+function providerTextOutcome(
+  result: Awaited<ReturnType<GenerateText>>,
+  input: ObserverInput,
+  ctx: SummarizeContext,
+  attempts: number,
+  capturedHeaders: () => Record<string, string> | undefined,
+): CallOutcome | null {
+  const resolvedModel = result.finalStep.response.modelId || null;
+  if (
+    resolvedModel !== null &&
+    normalizeRuntimeModelId(resolvedModel) !== normalizeRuntimeModelId(ctx.model)
+  ) {
+    return failure('model_alias', attempts, 'the provider returned a different model id');
+  }
+  const textCheck = providerTextCheck(result, attempts);
+  if (textCheck.kind === 'settled') return textCheck.outcome;
+
+  const parsed = parseOutput(result.text, input);
+  if (!parsed.ok) {
+    if (attempts < 2) return null;
+    return failure('unusable_output', attempts, parsed.detail);
+  }
+  // A11: the crash window between a parsed response and its fenced apply, as a real kill -9
+  // (a throw would reach releaseForExit and release the lease, which the fault must skip).
+  if (testFault('worker-kill-after-response')) process.kill(process.pid, 'SIGKILL');
+  return {
+    ok: true,
+    output: parsed.output,
+    resolvedModel,
+    neurons: neuronsFrom(
+      result.finalStep.response.headers ?? capturedHeaders(),
+      result.usage,
+    ),
+    attempts,
+  };
+}
+
+function providerErrorOutcome(
+  error: unknown,
+  apiCallError: typeof AiApiCallError,
+  ctx: SummarizeContext,
+  reservation: ProviderReservation,
+  attempts: number,
+): CallOutcome | null {
+  if (isAbort(error)) return failure('timeout', attempts, 'the provider call timed out');
+  if (hasErrorName(error, ['ResponseTooLargeError'])) {
+    return failure('unusable_output', attempts, 'provider response exceeded 1 MB');
+  }
+  const apiError = findApiError(error, apiCallError.isInstance);
+  if (apiError === undefined) {
+    return failure('unreachable', attempts, 'the provider call failed without an HTTP status');
+  }
+  const classified = classifyApiError(apiError);
+  if (classified.exhaustedSignal) ctx.onExhausted(reservation.reservationId);
+  if (classified.retry && attempts < 2) return null;
+  return failure(classified.reason, attempts, classified.detail);
 }
 
 export async function summarizeWithProvider(
   input: ObserverInput,
   ctx: SummarizeContext,
 ): Promise<CallOutcome> {
-  if (ctx.preset === 'none' || !ctx.credentials.present || ctx.model.trim() === '') {
+  if (!providerConfigured(ctx)) {
     return failure('no_provider', 0, 'no usable observer provider is configured');
   }
   if (ctx.preset === 'agent-cli') return await summarizeWithAgentCli(input, ctx);
 
   const requestOptions = providerRequestOptions(ctx.preset);
-  const prompt = buildSummarizerPrompt(
-    input,
-    requestOptions.structured === 'text-json' ? 'text-json' : 'schema',
-  );
+  const prompt = buildProviderPrompt(input, requestOptions);
   const transportFetch = faultFetch(ctx.fetch ?? globalThis.fetch);
   let capturedHeaders: Record<string, string> | undefined;
   const captureFetch: typeof globalThis.fetch = async (request, init) => {
@@ -400,107 +632,29 @@ export async function summarizeWithProvider(
   }
 
   const { APICallError, generateText, Output } = await import('ai');
-  let baseOutput;
-  if (requestOptions.structured !== 'text-json') {
-    if (requestOptions.structured === 'json_schema') {
-      baseOutput = Output.object({ schema: observerOutputSchema, name: 'observer_output' });
-    } else {
-      baseOutput = Output.json();
-    }
+  const output = createProviderOutput(Output, requestOptions);
+  function capturedResponseHeaders(): Record<string, string> | undefined {
+    return capturedHeaders;
   }
-  const output =
-    baseOutput === undefined
-      ? undefined
-      : {
-          ...baseOutput,
-          async parseCompleteOutput({ text }: { text: string }) {
-            // Parsing stays here so the 1 MB check happens first.
-            return text;
-          },
-          async parsePartialOutput({ text }: { text: string }) {
-            return { partial: text };
-          },
-        };
   let attempts = 0;
   while (attempts < 2) {
-    if (!ctx.consentOk()) {
-      return failure('consent_changed', attempts, 'observer consent changed before reservation');
-    }
-    const reservation = ctx.reserve();
-    if (!reservation.ok) {
-      return failure(reservation.reason, attempts, `provider reservation refused: ${reservation.reason}`);
-    }
-    if (!ctx.consentOk()) {
-      return failure('consent_changed', attempts, 'observer consent changed before the provider call');
-    }
+    const prepared = prepareProviderReservation(ctx, attempts);
+    if (!prepared.ok) return prepared;
+    const reservation = prepared.reservation;
 
     attempts += 1;
     capturedHeaders = undefined;
+    let outcome: CallOutcome | null;
     try {
-      const result = await generateText({
-        model,
-        system: prompt.system,
-        prompt: prompt.user,
-        maxRetries: 0,
-        abortSignal: AbortSignal.timeout(
-          ctx.timeoutMs ?? (testFault('provider-hang') ? 500 : REQUEST_TIMEOUT_MS),
-        ),
-        ...(requestOptions.providerOptions === undefined
-          ? {}
-          : {
-              providerOptions: requestOptions.providerOptions as ProviderOptions,
-            }),
-        ...(output === undefined ? {} : { output }),
-      });
-
-      const resolvedModel = result.finalStep.response.modelId || null;
-      if (
-        resolvedModel !== null &&
-        normalizeRuntimeModelId(resolvedModel) !== normalizeRuntimeModelId(ctx.model)
-      ) {
-        return failure('model_alias', attempts, 'the provider returned a different model id');
-      }
-      if (result.finishReason === 'length') {
-        if (attempts < 2) continue;
-        return failure('unusable_output', attempts, 'provider output reached its length limit');
-      }
-      if (result.text.trim() === '') {
-        if (attempts < 2) continue;
-        return failure('unusable_output', attempts, 'provider response contained no text');
-      }
-      if (Buffer.byteLength(result.text, 'utf8') > MAX_RESPONSE_BYTES) {
-        return failure('unusable_output', attempts, 'provider response exceeded 1 MB');
-      }
-
-      const parsed = parseOutput(result.text, input);
-      if (!parsed.ok) {
-        if (attempts < 2) continue;
-        return failure('unusable_output', attempts, parsed.detail);
-      }
-      // A11: the crash window between a parsed response and its fenced apply, as a real kill -9
-      // (a throw would reach releaseForExit and release the lease, which the fault must skip).
-      if (testFault('worker-kill-after-response')) process.kill(process.pid, 'SIGKILL');
-      return {
-        ok: true,
-        output: parsed.output,
-        resolvedModel,
-        neurons: neuronsFrom(result.finalStep.response.headers ?? capturedHeaders, result.usage),
-        attempts,
-      };
+      const result = await generateText(
+        providerGenerateOptions(model, prompt, ctx, requestOptions, output),
+      );
+      outcome = providerTextOutcome(result, input, ctx, attempts, capturedResponseHeaders);
     } catch (error) {
-      if (isAbort(error)) return failure('timeout', attempts, 'the provider call timed out');
-      if (hasErrorName(error, ['ResponseTooLargeError'])) {
-        return failure('unusable_output', attempts, 'provider response exceeded 1 MB');
-      }
-      const apiError = findApiError(error, APICallError.isInstance);
-      if (apiError === undefined) {
-        return failure('unreachable', attempts, 'the provider call failed without an HTTP status');
-      }
-      const classified = classifyApiError(apiError);
-      if (classified.exhaustedSignal) ctx.onExhausted(reservation.reservationId);
-      if (classified.retry && attempts < 2) continue;
-      return failure(classified.reason, attempts, classified.detail);
+      outcome = providerErrorOutcome(error, APICallError, ctx, reservation, attempts);
     }
+    if (outcome === null) continue;
+    return outcome;
   }
   return failure('unusable_output', attempts, 'provider output was unusable');
 }

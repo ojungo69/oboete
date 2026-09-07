@@ -196,12 +196,50 @@ function isToolEventKind(kind: ObserverInput['events'][number]['kind']): boolean
   return TOOL_EVENT_KINDS.has(kind);
 }
 
-export function validateObserverOutput(
-  raw: unknown,
-  input: Pick<ObserverInput, 'events' | 'nearby'>,
-):
-  | { ok: true; output: ObserverOutput }
-  | { ok: false; reason: 'unusable_output'; detail: string } {
+function normalizeClassification(observation: Observation, nearbyIds: Set<string>): Observation {
+  let { decision, target } = observation.classification;
+  const { reason } = observation.classification;
+  // contracts/observer.md: unknown nearby target is add, not an error
+  if (target !== null && !nearbyIds.has(target)) {
+    target = null;
+    decision = 'add';
+  }
+  // contracts/observer.md: delete only with a reason
+  if (decision === 'delete' && reason.length === 0) {
+    decision = 'noop';
+  }
+  if (
+    decision === observation.classification.decision &&
+    target === observation.classification.target
+  ) {
+    return observation;
+  }
+  return {
+    ...observation,
+    classification: { decision, target, reason },
+  };
+}
+
+function foreignSourceId(observation: Observation, eventIds: Set<string>): string | null {
+  for (const id of observation.source_event_ids) {
+    if (!eventIds.has(id)) return id;
+  }
+  return null;
+}
+
+function foreignSourceDetail(observations: Observation[], eventIds: Set<string>): string | null {
+  for (const [index, observation] of observations.entries()) {
+    const id = foreignSourceId(observation, eventIds);
+    if (id !== null) return `observation ${index} source_event_ids ${id}`;
+  }
+  return null;
+}
+
+type ParsedObserverOutput =
+  | { ok: true; observations: Observation[] }
+  | { ok: false; reason: 'unusable_output'; detail: string };
+
+function parseObserverOutput(raw: unknown): ParsedObserverOutput {
   const received = rawOutputSchema.safeParse(raw);
   if (!received.success) {
     return {
@@ -223,44 +261,32 @@ export function validateObserverOutput(
       detail: z.prettifyError(parsed.error),
     };
   }
+  return { ok: true, observations: parsed.data.observations };
+}
+
+export function validateObserverOutput(
+  raw: unknown,
+  input: Pick<ObserverInput, 'events' | 'nearby'>,
+):
+  | { ok: true; output: ObserverOutput }
+  | { ok: false; reason: 'unusable_output'; detail: string } {
+  const parsed = parseObserverOutput(raw);
+  if (!parsed.ok) return parsed;
 
   const eventIds = new Set(input.events.map((event) => event.id));
-  for (const [index, observation] of parsed.data.observations.entries()) {
-    for (const id of observation.source_event_ids) {
-      if (!eventIds.has(id)) {
-        return {
-          ok: false,
-          reason: 'unusable_output',
-          detail: `observation ${index} source_event_ids ${id}`,
-        };
-      }
-    }
+  const detail = foreignSourceDetail(parsed.observations, eventIds);
+  if (detail !== null) {
+    return {
+      ok: false,
+      reason: 'unusable_output',
+      detail,
+    };
   }
 
   const nearbyIds = new Set(input.nearby.map((row) => row.id));
-  const observations = parsed.data.observations.map((observation) => {
-    let { decision, target } = observation.classification;
-    const { reason } = observation.classification;
-    // contracts/observer.md: unknown nearby target is add, not an error
-    if (target !== null && !nearbyIds.has(target)) {
-      target = null;
-      decision = 'add';
-    }
-    // contracts/observer.md: delete only with a reason
-    if (decision === 'delete' && reason.length === 0) {
-      decision = 'noop';
-    }
-    if (
-      decision === observation.classification.decision &&
-      target === observation.classification.target
-    ) {
-      return observation;
-    }
-    return {
-      ...observation,
-      classification: { decision, target, reason },
-    };
-  });
+  const observations = parsed.observations.map((observation) =>
+    normalizeClassification(observation, nearbyIds),
+  );
 
   return { ok: true, output: { observations } };
 }
@@ -386,6 +412,72 @@ function lastResort(next: ObserverInput): boolean {
   return cut;
 }
 
+function removeToolEvents(next: ObserverInput, overBudget: () => boolean): boolean {
+  let excerpted = false;
+  // Verbatim tool material is the cheapest thing to lose, oldest first.
+  while (overBudget()) {
+    const index = next.events.findIndex((event) => isToolEventKind(event.kind));
+    if (index === -1) break;
+    next.events.splice(index, 1);
+    excerpted = true;
+  }
+  return excerpted;
+}
+
+function truncateNearby(next: ObserverInput, overBudget: () => boolean): boolean {
+  let excerpted = false;
+  // A nearby memory is context from another session. Its body is capped and then cut, but the row
+  // stays so that `classification.target` can still name it.
+  for (const row of next.nearby) {
+    if (row.body.length <= MAX_NEARBY_BODY) continue;
+    row.body = row.body.slice(0, MAX_NEARBY_BODY);
+    excerpted = true;
+  }
+  for (const row of next.nearby) {
+    if (!overBudget()) break;
+    excerpted =
+      truncateFromEnd(next, row.body, (value) => {
+        row.body = value;
+      }) || excerpted;
+  }
+  return excerpted;
+}
+
+function truncateEventTexts(
+  next: ObserverInput,
+  events: ObserverInput['events'],
+  overBudget: () => boolean,
+): boolean {
+  let excerpted = false;
+  for (const event of events) {
+    if (!overBudget()) break;
+    excerpted =
+      truncateFromEnd(
+        next,
+        event.text,
+        (value) => {
+          event.text = value;
+        },
+        event.kind === 'prompt' ? MIN_PROMPT_TEXT : 0,
+      ) || excerpted;
+  }
+  return excerpted;
+}
+
+function truncateFreeSummaries(next: ObserverInput): boolean {
+  let excerpted = false;
+  // The free summaries are the highest thing in the keep order, so they are cut last of all.
+  excerpted =
+    truncateFromEnd(next, next.free_summaries.compaction_summary, (value) => {
+      next.free_summaries.compaction_summary = value;
+    }) || excerpted;
+  excerpted =
+    truncateFromEnd(next, next.free_summaries.last_assistant_message, (value) => {
+      next.free_summaries.last_assistant_message = value;
+    }) || excerpted;
+  return excerpted;
+}
+
 /**
  * FR-015: the input is cut to MAX_INPUT_CHARS. contracts/observer.md ("Input") states the keep
  * order - free summaries first, then prompts, then tool inputs and outputs by recency - so the cut
@@ -404,29 +496,10 @@ export function excerptInput(
   let excerpted = false;
   const overBudget = (): boolean => serializedSize(next) > MAX_INPUT_CHARS;
 
-  // Verbatim tool material is the cheapest thing to lose, oldest first.
-  while (overBudget()) {
-    const index = next.events.findIndex((event) => isToolEventKind(event.kind));
-    if (index === -1) break;
-    next.events.splice(index, 1);
-    excerpted = true;
-  }
+  excerpted = removeToolEvents(next, overBudget) || excerpted;
 
-  // A nearby memory is context from another session. Its body is capped and then cut, but the row
-  // stays so that `classification.target` can still name it.
   if (overBudget()) {
-    for (const row of next.nearby) {
-      if (row.body.length <= MAX_NEARBY_BODY) continue;
-      row.body = row.body.slice(0, MAX_NEARBY_BODY);
-      excerpted = true;
-    }
-    for (const row of next.nearby) {
-      if (!overBudget()) break;
-      excerpted =
-        truncateFromEnd(next, row.body, (value) => {
-          row.body = value;
-        }) || excerpted;
-    }
+    excerpted = truncateNearby(next, overBudget) || excerpted;
   }
 
   // The session's own words next, and a prompt keeps at least MIN_PROMPT_TEXT characters.
@@ -434,28 +507,8 @@ export function excerptInput(
     ...next.events.filter((event) => event.kind !== 'prompt'),
     ...next.events.filter((event) => event.kind === 'prompt'),
   ];
-  for (const event of byKeepOrder) {
-    if (!overBudget()) break;
-    excerpted =
-      truncateFromEnd(
-        next,
-        event.text,
-        (value) => {
-          event.text = value;
-        },
-        event.kind === 'prompt' ? MIN_PROMPT_TEXT : 0,
-      ) || excerpted;
-  }
-
-  // The free summaries are the highest thing in the keep order, so they are cut last of all.
-  excerpted =
-    truncateFromEnd(next, next.free_summaries.compaction_summary, (value) => {
-      next.free_summaries.compaction_summary = value;
-    }) || excerpted;
-  excerpted =
-    truncateFromEnd(next, next.free_summaries.last_assistant_message, (value) => {
-      next.free_summaries.last_assistant_message = value;
-    }) || excerpted;
+  excerpted = truncateEventTexts(next, byKeepOrder, overBudget) || excerpted;
+  excerpted = truncateFreeSummaries(next) || excerpted;
 
   if (overBudget()) excerpted = lastResort(next) || excerpted;
 

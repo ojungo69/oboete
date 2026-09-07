@@ -106,6 +106,40 @@ function recordHangs(db: DatabaseSync, token: string, invocations: string[], now
   });
 }
 
+function collectPiAckFile(
+  piAckDir: string,
+  name: string,
+  now: number,
+  hangInvocations: string[],
+  removePaths: string[],
+): number {
+  const path = join(piAckDir, name);
+  try {
+    if (name.endsWith('.done')) {
+      unlinkSync(path);
+      return 1;
+    }
+    if (!name.endsWith('.started')) return 0;
+    const age = now - statSync(path).mtimeMs;
+    if (age > PI_HANG_AFTER_MS) hangInvocations.push(name.slice(0, -'.started'.length));
+    if (age > PI_ACK_REMOVE_AFTER_MS) removePaths.push(path);
+  } catch (error) {
+    if (isEnoent(error)) return 0;
+    throw error;
+  }
+  return 0;
+}
+
+function removePiAckPath(path: string): number {
+  try {
+    unlinkSync(path);
+    return 1;
+  } catch (error) {
+    if (!isEnoent(error)) throw error;
+  }
+  return 0;
+}
+
 export function cleanupPiAck(
   db: DatabaseSync,
   token: string,
@@ -121,32 +155,13 @@ export function cleanupPiAck(
   const removePaths: string[] = [];
 
   for (const name of readdirSync(piAckDir)) {
-    const path = join(piAckDir, name);
-    try {
-      if (name.endsWith('.done')) {
-        unlinkSync(path);
-        folded += 1;
-        continue;
-      }
-      if (!name.endsWith('.started')) continue;
-      const age = now - statSync(path).mtimeMs;
-      if (age > PI_HANG_AFTER_MS) hangInvocations.push(name.slice(0, -'.started'.length));
-      if (age > PI_ACK_REMOVE_AFTER_MS) removePaths.push(path);
-    } catch (error) {
-      if (isEnoent(error)) continue;
-      throw error;
-    }
+    folded += collectPiAckFile(piAckDir, name, now, hangInvocations, removePaths);
   }
 
   if (hangInvocations.length > 0 && recordHangs(db, token, hangInvocations, now)) {
     hangs = hangInvocations.length;
     for (const path of removePaths) {
-      try {
-        unlinkSync(path);
-        removed += 1;
-      } catch (error) {
-        if (!isEnoent(error)) throw error;
-      }
+      removed += removePiAckPath(path);
     }
   }
   return { folded, hangs, removed };

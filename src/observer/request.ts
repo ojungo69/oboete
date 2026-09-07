@@ -108,17 +108,15 @@ function textOf(event: ObserverEvent): string {
     .join('\n');
 }
 
-/**
- * Assembles the one outbound request of a batch. Every field passes the same rule table, so a row
- * or a memory the destination may not receive is absent from the body rather than trimmed from it
- * later (contracts/observer.md, SC-006). Citations travel only inside the tool inputs of admitted
- * events; the request has no other place for a path.
- */
-export function buildObserverRequest(request: ObserverRequestInput): ObserverRequest {
+/** The admitted events of a request, the rows the rule table refused, and the free summaries. */
+function collectObserverEvents(request: ObserverRequestInput): {
+  dropped: DroppedRow[];
+  events: ObserverEvent[];
+  freeSummaries: ObserverInput['free_summaries'];
+} {
   const dropped: DroppedRow[] = [];
   const events: ObserverEvent[] = [];
   const freeSummaries: ObserverInput['free_summaries'] = {};
-
   for (const row of request.rows) {
     const reason = refuse(request.rules, request.destination, row, request.repoId);
     if (reason !== null) {
@@ -136,7 +134,15 @@ export function buildObserverRequest(request: ObserverRequestInput): ObserverReq
     }
     if (row.kind === 'compaction_summary') freeSummaries.compaction_summary = row.content ?? '';
   }
+  return { dropped, events, freeSummaries };
+}
 
+/** The nearby memories the destination may receive, and the candidates the rule table refused. */
+function collectNearbyMemories(request: ObserverRequestInput): {
+  dropped: DroppedRow[];
+  nearby: ObserverInput['nearby'];
+} {
+  const dropped: DroppedRow[] = [];
   const nearby: ObserverInput['nearby'] = [];
   for (const candidate of request.nearby) {
     // R10: the candidates are same-repository by construction; the check makes that an invariant
@@ -157,6 +163,23 @@ export function buildObserverRequest(request: ObserverRequestInput): ObserverReq
       deleted: candidate.deleted,
     });
   }
+  return { dropped, nearby };
+}
+
+/**
+ * Assembles the one outbound request of a batch. Every field passes the same rule table, so a row
+ * or a memory the destination may not receive is absent from the body rather than trimmed from it
+ * later (contracts/observer.md, SC-006). Citations travel only inside the tool inputs of admitted
+ * events; the request has no other place for a path.
+ */
+export function buildObserverRequest(request: ObserverRequestInput): ObserverRequest {
+  const admitted = collectObserverEvents(request);
+  const { events, freeSummaries } = admitted;
+
+  const nearbyResult = collectNearbyMemories(request);
+  const { nearby } = nearbyResult;
+  // Same order the single pass produced: every refused row, then every refused candidate.
+  const dropped: DroppedRow[] = [...admitted.dropped, ...nearbyResult.dropped];
 
   const admittedText = [
     ...events.map(textOf),
