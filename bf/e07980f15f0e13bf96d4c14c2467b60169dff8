@@ -1,0 +1,33 @@
+src/observer/llm.ts
+  s_48ff16e67d59e6::t_54fb203ebb981f 208-233,252
+src/observer/catalog.ts
+  s_48ff16e67d59e6::t_54fb203ebb981f 85-92,109
+src/worker/batches.ts
+  s_48ff16e67d59e6::t_54fb203ebb981f 473-477,495-505
+src/worker/observe.ts
+  s_359fcac8e97f88::t_702c63ae87a001 457-565,574,583,592-602,614-618
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "bfe07980f15f0e13bf96d4c14c2467b60169dff8",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_48ff16e67d59e6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07ad6-b007-7831-936c-62a1b23acddc",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
