@@ -137,7 +137,7 @@ function tryFixture(repoRoot, rel, obj) {
     writeFixture(repoRoot, rel, scrub(obj));
     return null;
   } catch (e) {
-    return String(e && e.message ? e.message : e);
+    return String(e?.message ? e.message : e);
   }
 }
 
@@ -346,8 +346,10 @@ export const probes = [
       const srcC = sessionSources(c.events);
       observed.push(...srcC);
       const tlC = compactTimeline(c.events);
-      evidence.push(`C_compact sources=[${srcC.join(",")}] events=${c.events.map((e) => e.event).join(">")}`);
-      evidence.push(`C_timeline=${JSON.stringify(tlC)}`);
+      evidence.push(
+        `C_compact sources=[${srcC.join(",")}] events=${c.events.map((e) => e.event).join(">")}`,
+        `C_timeline=${JSON.stringify(tlC)}`,
+      );
       saveText(dirC, "stdout.txt", c.stdout);
       writeFixture(ctx.repoRoot, "test/contracts/codex/session-start-compact.json", {
         agent: "codex",
@@ -407,8 +409,10 @@ export const probes = [
       observed.push(...srcD);
       const clearEv = dEvents.filter((e) => e.event === "SessionStart" && e.stdin?.source === "clear");
       const newIds = [...new Set(clearEv.map((e) => e.stdin?.session_id).filter(Boolean))];
-      evidence.push(`D_tui sources=[${srcD.join(",")}] clear_session_ids=[${newIds.join(",")}] seed_session=${seed.sessionId || "none"}`);
-      evidence.push(`D_new_session_id=${newIds.length ? newIds.some((id) => id !== seed.sessionId) : "no-clear-event"}`);
+      evidence.push(
+        `D_tui sources=[${srcD.join(",")}] clear_session_ids=[${newIds.join(",")}] seed_session=${seed.sessionId || "none"}`,
+        `D_new_session_id=${newIds.length ? newIds.some((id) => id !== seed.sessionId) : "no-clear-event"}`,
+      );
       if (tuiBlocked) evidence.push(`D_tui_blocked=${tuiBlocked}`);
 
       const uniq = [...new Set(observed)];
@@ -440,11 +444,11 @@ export const probes = [
       const preC = c.events.filter((e) => e.event === "PreCompact");
       const postC = c.events.filter((e) => e.event === "PostCompact");
       const sumC = postC.map((e) => summaryOf(e.stdin));
-      evidence.push(`C PreCompact n=${preC.length} keys=[${preC.map((e) => topKeys(e.stdin).join("|")).join(" ; ")}]`);
       evidence.push(
+        `C PreCompact n=${preC.length} keys=[${preC.map((e) => topKeys(e.stdin).join("|")).join(" ; ")}]`,
         `C PostCompact n=${postC.length} keys=[${postC.map((e) => topKeys(e.stdin).join("|")).join(" ; ")}] summary=${JSON.stringify(sumC)} identity=${JSON.stringify(compactionIdentity(postC))}`,
+        `C timeline=${JSON.stringify(compactTimeline(c.events))}`,
       );
-      evidence.push(`C timeline=${JSON.stringify(compactTimeline(c.events))}`);
       const ordC = orderOk(c.events);
       evidence.push(`C order_b=${ordC.ok} ${ordC.detail}`);
 
@@ -479,19 +483,19 @@ export const probes = [
       dEvents = parseEvents(eventsFile(seed.tree));
       const postD = dEvents.filter((e) => e.event === "PostCompact");
       const preD = dEvents.filter((e) => e.event === "PreCompact");
-      evidence.push(`D PreCompact n=${preD.length} keys=[${preD.map((e) => topKeys(e.stdin).join("|")).join(" ; ")}]`);
       evidence.push(
+        `D PreCompact n=${preD.length} keys=[${preD.map((e) => topKeys(e.stdin).join("|")).join(" ; ")}]`,
         `D PostCompact n=${postD.length} keys=[${postD.map((e) => topKeys(e.stdin).join("|")).join(" ; ")}] summary=${JSON.stringify(postD.map((e) => summaryOf(e.stdin)))} identity=${JSON.stringify(compactionIdentity(postD))}`,
+        `D timeline=${JSON.stringify(compactTimeline(dEvents))}`,
       );
-      evidence.push(`D timeline=${JSON.stringify(compactTimeline(dEvents))}`);
       if (tuiBlocked) evidence.push(`D_tui_blocked=${tuiBlocked}`);
 
       const posts = [...postC, ...postD];
-      const summary = posts.length ? summaryOf(posts[posts.length - 1].stdin) : { field: null, length: 0 };
+      const summary = posts.length ? summaryOf(posts.at(-1).stdin) : { field: null, length: 0 };
       evidence.push(`summary_field=${summary.field} summary_length=${summary.length}`);
 
       let aOk = false;
-      let aDetail = "need two PostCompact payloads";
+      let aDetail;
       if (postD.length >= 2) {
         const ident = compactionIdentity(postD);
         aOk = ident.ok;
@@ -503,8 +507,7 @@ export const probes = [
       }
       const ord = orderOk(postC.length ? c.events : dEvents);
       const bOk = ord.ok;
-      evidence.push(`pass_a=${aOk} ${aDetail}`);
-      evidence.push(`pass_b=${bOk} ${ord.detail}`);
+      evidence.push(`pass_a=${aOk} ${aDetail}`, `pass_b=${bOk} ${ord.detail}`);
 
       writeFixture(ctx.repoRoot, "test/contracts/codex/postcompact.json", {
         agent: "codex",

@@ -154,7 +154,7 @@ function saveFix(ctx, file, obj) {
     writeFixture(ctx.repoRoot, `test/contracts/grok/${file}`, obj);
     return file;
   } catch (e) {
-    return "skip:" + (e && e.message ? e.message : e);
+    return "skip:" + (e?.message ? e.message : e);
   }
 }
 
@@ -255,11 +255,11 @@ async function tuiTwoCompact(dir, { home, repo }) {
       /* ignore */
     }
     try {
-      fs.writeFileSync(paneFile, pane + "\nERR " + String(e && e.message ? e.message : e));
+      fs.writeFileSync(paneFile, pane + "\nERR " + String(e?.message ? e.message : e));
     } catch {
       /* ignore */
     }
-    return { ok: false, pane, error: String(e && e.message ? e.message : e) };
+    return { ok: false, pane, error: String(e?.message ? e.message : e) };
   } finally {
     try {
       if (tmux) tmux.kill();
@@ -350,7 +350,10 @@ export const probes = [
       }
       const oncePerCall = hookDeliveries >= 2;
       const oncePerBatch = hookDeliveries === 1;
-      const status = oncePerCall ? "fail" : oncePerBatch ? "pass" : "blocked";
+      let status;
+      if (oncePerCall) status = "fail";
+      else if (oncePerBatch) status = "pass";
+      else status = "blocked";
       if (status === "blocked") evidence.push("PreToolUse additionalContext not found in transcript");
       if (status === "fail") evidence.push("once per call (A15 default)");
       if (status === "pass") evidence.push("once per batch");

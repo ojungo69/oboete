@@ -43,7 +43,11 @@ const EXPECTED = {
 function writeBigTxt(repo) {
   fs.mkdirSync(repo, { recursive: true });
   let s = "";
-  for (let i = 0; s.length < 40960; i++) s += `line ${i} probe-compact-payload\n`;
+  let i = 0;
+  while (s.length < 40960) {
+    s += `line ${i} probe-compact-payload\n`;
+    i += 1;
+  }
   fs.writeFileSync(path.join(repo, "big.txt"), s.slice(0, 40960));
 }
 
@@ -51,12 +55,12 @@ function writeTurnEndCompactExt(file) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(
     file,
-    `import fs from "node:fs";
+    String.raw`import fs from "node:fs";
 const OUT = process.env.PROBE_EVENTS || "";
 let n = 0;
 function rec(obj) {
   if (!OUT) return;
-  try { fs.appendFileSync(OUT, JSON.stringify(obj) + "\\n"); } catch { /* ignore */ }
+  try { fs.appendFileSync(OUT, JSON.stringify(obj) + "\n"); } catch { /* ignore */ }
 }
 export default (pi) => {
   pi.on("turn_end", async (_e, ctx) => {
@@ -177,7 +181,7 @@ function toolText(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
-    .filter((b) => b && b.type === "text")
+    .filter((b) => b?.type === "text")
     .map((b) => b.text || "")
     .join("");
 }
@@ -298,12 +302,16 @@ export const probes = [
           notes: "run1 extra ext ctx.compact() on first turn_end; run2 --session same file + same ext",
         });
       }
+      const beforeCompactLine = (c) => `keys=[${c.keys}] reason=${c.reason} firstKept=${c.firstKeptEntryId}`;
+      const compactLine = (c) =>
+        `keys=[${c.keys}] id=${c.id} summaryLen=${c.summaryLen} firstKept=${c.firstKeptEntryId} reason=${c.reason} at=${c.at} ceKeys=[${c.ceKeys}]`;
+      const failedLine = (c) => `reason=${c.reason}`;
       const evidence = [
         `run1 exit=${r1.exitCode} elapsed_s=${(r1.elapsedMs / 1000).toFixed(1)} session=${r1.sessionId || "none"}`,
         `run2 exit=${r2 ? r2.exitCode : "skipped"} elapsed_s=${r2 ? (r2.elapsedMs / 1000).toFixed(1) : "n/a"} session=${r2?.sessionId || "none"}`,
-        `session_before_compact=${before.length} ${before.map((c) => `keys=[${c.keys}] reason=${c.reason} firstKept=${c.firstKeptEntryId}`).join(" | ") || "none"}`,
-        `session_compact=${compact.length} ${compact.map((c) => `keys=[${c.keys}] id=${c.id} summaryLen=${c.summaryLen} firstKept=${c.firstKeptEntryId} reason=${c.reason} at=${c.at} ceKeys=[${c.ceKeys}]`).join(" | ") || "none"}`,
-        `session_compact_failed=${failed.length} ${failed.map((c) => `reason=${c.reason}`).join(" | ") || "none"}`,
+        `session_before_compact=${before.length} ${before.map(beforeCompactLine).join(" | ") || "none"}`,
+        `session_compact=${compact.length} ${compact.map(compactLine).join(" | ") || "none"}`,
+        `session_compact_failed=${failed.length} ${failed.map(failedLine).join(" | ") || "none"}`,
         `compactionEntry.ids=${ids.join(",") || "none"} unique=${uniqueIds.length} (a) distinguishing=${a} candidates=[${ident.candidates.join(",")}] note=${ident.note || ""}`,
         `first compact at=${firstCompact?.at || "none"} next inject ${nextInj ? nextInj.event + " at=" + nextInj.at : "none"} (b) committed_before_next_inject=${b}`,
         `probe_compact_called=${named(events, "probe_compact_called").length} complete=${named(events, "probe_compact_complete").length} error=${JSON.stringify(named(events, "probe_compact_error").map((e) => e.stdin))}`,
@@ -330,12 +338,12 @@ export const probes = [
         prompt:
           "Call the tool oboete_probe with no arguments and reply with exactly the word DONE followed by the tool result",
       });
-      const calls = named(r.events, "tool_call").filter((e) => (e.stdin || {}).toolName === "oboete_probe");
-      const results = named(r.events, "tool_result").filter((e) => (e.stdin || {}).toolName === "oboete_probe");
+      const calls = named(r.events, "tool_call").filter((e) => e.stdin?.toolName === "oboete_probe");
+      const results = named(r.events, "tool_result").filter((e) => e.stdin?.toolName === "oboete_probe");
       const start = named(r.events, "before_agent_start")[0];
       const selected = start?.stdin?.systemPromptOptions?.selectedTools;
       const inSelected = Array.isArray(selected) && selected.includes("oboete_probe");
-      const resultText = results.map((e) => toolText((e.stdin || {}).content)).join(" ");
+      const resultText = results.map((e) => toolText(e.stdin?.content)).join(" ");
       const text = finalText("pi", r, r.events);
       const echoed = /oboete_probe ok/i.test(text) || /oboete_probe ok/i.test(resultText);
       const called = calls.length > 0 && results.length > 0;
@@ -478,11 +486,14 @@ export const probes = [
       }
       const text = finalText("pi", r, r.events);
       const continued = /\bDONE\b/.test(text) || named(r.events, "agent_settled").length > 0;
-      const durableNamed = durable[0]
-        ? durable[0].path + " :: " + durable[0].hits[0]
-        : tmpLogs[0]
-          ? tmpLogs[0].path + " :: " + tmpLogs[0].hits[0]
-          : realLogs[0] || null;
+      let durableNamed;
+      if (durable[0]) {
+        durableNamed = durable[0].path + " :: " + durable[0].hits[0];
+      } else if (tmpLogs[0]) {
+        durableNamed = tmpLogs[0].path + " :: " + tmpLogs[0].hits[0];
+      } else {
+        durableNamed = realLogs[0] || null;
+      }
       const evidence = [
         `exit=${r.exitCode} elapsed_s=${(r.elapsedMs / 1000).toFixed(1)} continued=${continued} text=${JSON.stringify(text).slice(0, 200)}`,
         `stderr hits=${stderrHits.length ? stderrHits.slice(0, 5).join(" | ") : "none"}`,

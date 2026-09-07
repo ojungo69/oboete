@@ -59,7 +59,7 @@ function safe(value: unknown): unknown {
     if (v === null || typeof v === "number" || typeof v === "boolean") return v;
     if (typeof v === "bigint") return String(v);
     if (typeof v === "function") return "[function " + (v as Function).name + "]";
-    if (typeof v === "undefined") return undefined;
+    if (v === undefined) return undefined;
     if (typeof v === "symbol") return String(v);
     if (depth > 12) return "[depth]";
     if (typeof v === "object") {
@@ -91,7 +91,7 @@ function rec(obj: unknown) {
   }
 }
 
-export default (pi: any) => {
+const piExtension = (pi: any) => {
   let messageUpdateCount = 0;
   let sessionId: unknown = null;
   let sessionFile: unknown = null;
@@ -164,3 +164,5 @@ export default (pi: any) => {
     }
   }
 };
+
+export default piExtension;

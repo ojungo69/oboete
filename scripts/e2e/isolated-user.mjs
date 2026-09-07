@@ -64,7 +64,8 @@ export function requireAgentSuccess(result, action) {
     .map((line) => line.trim())
     .find(Boolean);
   const unavailable = result.exitCode === 124 || AGENT_OUTAGE_RE.test(diagnostic);
-  const reason = `${action} exited ${result.exitCode}${detail ? `: ${detail.slice(0, 240)}` : ""}.`;
+  const detailSuffix = detail ? `: ${detail.slice(0, 240)}` : "";
+  const reason = `${action} exited ${result.exitCode}${detailSuffix}.`;
   if (unavailable) throw new PreconditionError(reason);
   throw new Error(reason);
 }
@@ -112,7 +113,7 @@ export function enumeratePairs(spec) {
   const seen = new Set();
   for (const item of spec.split(",")) {
     const parts = item.split(":").map((value) => value.trim().toLowerCase());
-    if (parts.length !== 2 || parts.some((value) => value === "")) {
+    if (parts.length !== 2 || parts.includes("")) {
       throw new Error(`invalid pair '${item}'; expected A:B`);
     }
     const [from, to] = parts;
@@ -151,7 +152,7 @@ export function parseArguments(argv) {
   }
   const timeoutMs = Number(values.timeout) * 1000;
   if (!Number.isSafeInteger(timeoutMs)) {
-    throw new Error("--timeout must be a positive integer number of seconds");
+    throw new TypeError("--timeout must be a positive integer number of seconds");
   }
   if (values["run-dir"] !== undefined && values["run-dir"].trim() === "") {
     throw new Error("--run-dir must not be empty");
@@ -177,7 +178,7 @@ export function buildFactSeedingPrompt(facts) {
   if (!Array.isArray(facts) || facts.length !== 3 || facts.some((fact) => typeof fact !== "string" || fact === "")) {
     throw new TypeError("fact seeding requires exactly three non-empty strings");
   }
-  const command = `printf '%s\\n' ${facts.map((fact) => shellQuote(fact)).join(" ")} >> NOTES.md`;
+  const command = String.raw`printf '%s\n' ${facts.map((fact) => shellQuote(fact)).join(" ")} >> NOTES.md`;
   return [
     "These three exact strings are durable facts about this repository. Preserve them verbatim:",
     ...facts,
@@ -928,7 +929,7 @@ async function launchAgent(
   const proc = await dependencies.runTimed(prepared.argv, {
     cwd: repo,
     // An agent CLI runs the developer's shell tools; childEnv keeps the credentials out of it.
-    env: dependencies.childEnv({ ...prepared.env, ...(launch.env ?? {}), OBOETE_HOME: oboeteHome }),
+    env: dependencies.childEnv({ ...prepared.env, ...launch.env, OBOETE_HOME: oboeteHome }),
     stdoutPath,
     stderrPath,
     timeoutMs: options.timeoutMs,
@@ -1145,7 +1146,11 @@ export async function waitForLifecycleState(database, agent, predicate, options,
   if (found) return found;
   const observed = (latest?.events ?? [])
     .slice(-12)
-    .map((event) => `${event.kind}:${event.nativeSessionId}${eventSource(event) ? `:${eventSource(event)}` : ""}`)
+    .map((event) => {
+      const source = eventSource(event);
+      const sourceSuffix = source ? `:${source}` : "";
+      return `${event.kind}:${event.nativeSessionId}${sourceSuffix}`;
+    })
     .join(",");
   const TimeoutError = options.contract ? Error : PreconditionError;
   throw new TimeoutError(
@@ -1790,7 +1795,8 @@ async function runLifecycleAgent(agent, context) {
     try {
       checkBefore = context.dependencies.inspectLifecycle(databasePath(suite.oboeteHome), agent);
       const result = await runners[check]({ ...context, agent, suite });
-      context.dependencies.log(`[${agent}:${check}] ${result.status}${result.reason ? `: ${result.reason}` : ""}`);
+      const reasonSuffix = result.reason ? `: ${result.reason}` : "";
+      context.dependencies.log(`[${agent}:${check}] ${result.status}${reasonSuffix}`);
       context.recordResult({ ...result, assertions: [...suite.preconditions, ...result.assertions] });
     } catch (error) {
       let reason = error instanceof Error ? error.message : String(error);
@@ -1842,7 +1848,7 @@ function markdownSection(report) {
 }
 
 function markdownCell(value) {
-  return String(value).replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+  return String(value).replaceAll(/[\\|]/g, (c) => `\\${c}`).replace(/\r?\n/g, " ");
 }
 
 function evidenceReason(reason) {

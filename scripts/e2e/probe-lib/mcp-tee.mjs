@@ -66,5 +66,9 @@ process.on("SIGTERM", stop);
 
 child.on("error", () => process.exit(1));
 child.on("close", (code, signal) => {
-  process.exit(code == null ? (signal ? 1 : 0) : code);
+  if (code == null) {
+    process.exit(signal ? 1 : 0);
+  } else {
+    process.exit(code);
+  }
 });

@@ -14,7 +14,7 @@ const PI_EXT_SRC = path.join(HERE, "pi-extension.ts");
 const HOME = os.homedir();
 const USERNAME = os.userInfo().username;
 function reEscape(s) {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
 }
 const HOME_RE = new RegExp(`(/home/|%2[Ff]home%2[Ff]|-home-)${reEscape(USERNAME)}-?`, "g");
 const RUN_ID_RE = String.raw`\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z`;
@@ -333,7 +333,7 @@ function hookCommand(hookPath, eventsPath, label, flags = []) {
 }
 
 export function shellQuote(s) {
-  return "'" + String(s).replace(/'/g, `'\\''`) + "'";
+  return "'" + String(s).replaceAll("'", String.raw`'\''`) + "'";
 }
 
 function normalizeSpecs(defaults, opts) {
@@ -353,7 +353,8 @@ function buildHooksJson(agent, hookPath, eventsPath, specs) {
   for (const spec of specs) {
     const event = spec.event;
     const label = spec.label || event;
-    const timeout = event === "SessionEnd" ? (agent === "codex" ? 3 : 10) : 20;
+    let timeout = 20;
+    if (event === "SessionEnd") timeout = agent === "codex" ? 3 : 10;
     const handler = { type: "command", command: hookCommand(hookPath, eventsPath, label, spec.flags || []), timeout };
     if (!hooks[event]) {
       const group = { hooks: [handler] };
@@ -374,7 +375,10 @@ function writeHookTree(dir, agent, opts) {
   fs.copyFileSync(HOOK_SRC, hookPath);
   const eventsPath = path.join(dir, "events.jsonl");
   fs.writeFileSync(eventsPath, "");
-  const defaults = agent === "claude" ? CLAUDE_EVENTS : agent === "codex" ? CODEX_EVENTS : GROK_EVENTS;
+  let defaults;
+  if (agent === "claude") defaults = CLAUDE_EVENTS;
+  else if (agent === "codex") defaults = CODEX_EVENTS;
+  else defaults = GROK_EVENTS;
   const specs = normalizeSpecs(defaults, opts);
   const json = buildHooksJson(agent, hookPath, eventsPath, specs);
   return { hookPath, eventsPath, json };
@@ -471,7 +475,7 @@ function envelopeMeta(agent, proc, events, envelope) {
 export function piContentText(content) {
   if (!Array.isArray(content)) return typeof content === "string" ? content : "";
   return content
-    .filter((b) => b && b.type === "text")
+    .filter((b) => b?.type === "text")
     .map((b) => b.text || "")
     .join("");
 }
@@ -641,7 +645,7 @@ export async function codex(dir, opts = {}) {
     ],
     {
       cwd: repo,
-      env: childEnv({ CODEX_HOME: home, ...(opts.env || {}) }),
+      env: childEnv({ CODEX_HOME: home, ...opts.env }),
       stdoutPath: path.join(dir, "stdout.txt"),
       stderrPath: path.join(dir, "stderr.txt"),
     },
@@ -675,7 +679,7 @@ export async function grok(dir, opts = {}) {
   argv.push("--output-format", "json", "--cwd", repo, ...(opts.extraArgs || []));
   const proc = await runTimed(argv, {
     cwd: repo,
-    env: childEnv({ GROK_HOME: home, ...GROK_ISOLATION_ENV, ...(opts.env || {}) }),
+    env: childEnv({ GROK_HOME: home, ...GROK_ISOLATION_ENV, ...opts.env }),
     stdoutPath: path.join(dir, "stdout.txt"),
     stderrPath: path.join(dir, "stderr.txt"),
     timeoutMs: opts.timeoutMs,
@@ -708,7 +712,7 @@ export async function pi(dir, opts = {}) {
     PI_CODING_AGENT_DIR: tmp,
     PROBE_EVENTS: eventsPath,
     ...(opts.marker ? { PROBE_MARKER: opts.marker } : {}),
-    ...(opts.env || {}),
+    ...opts.env,
   });
   const proc = await runTimed(
     ["pi", "-p", opts.prompt || toolUsePrompt("pi"), "--mode", "json", "--session-dir", sessions, ...(opts.extraArgs || [])],
@@ -786,17 +790,21 @@ export function compactionIdentity(posts) {
   if (n < 2) return { ok: false, candidates, values, n, note: "no observations" };
   const sigs = values.map((v) => JSON.stringify(v));
   const unique = new Set(sigs).size === n;
+  let note;
+  if (unique) note = undefined;
+  else if (candidates.length) note = "no distinguishing candidate";
+  else note = "no candidate";
   return {
     ok: unique,
     candidates,
     values,
     n,
-    note: unique ? undefined : candidates.length ? "no distinguishing candidate" : "no candidate",
+    note,
   };
 }
 
 export function grepLines(text, patterns) {
-  const re = new RegExp(patterns.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "i");
+  const re = new RegExp(patterns.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)).join("|"), "i");
   return (text || "")
     .split("\n")
     .filter((l) => re.test(l))

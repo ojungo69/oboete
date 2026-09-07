@@ -777,7 +777,7 @@ function emitTool(g, session, spec, tagsPre, tagsPost) {
     return;
   }
   const mapped = mapPiSpec(spec);
-  emitPiTool(g, session, mapped, { ...(tagsPre ?? {}), ...(tagsPost ?? {}) });
+  emitPiTool(g, session, mapped, { ...tagsPre, ...tagsPost });
 }
 
 function mapPiSpec(spec) {
@@ -1217,7 +1217,10 @@ function emitLifecycleBundle(g, agent) {
   const resume = newSession(g, agent);
   emitSessionStart(g, resume, defaultStartSource(agent));
   emitWorkTurn(g, resume, WORK[4], TOOLS[agent][0]);
-  const resumeSource = agent === 'grok' ? 'load' : agent === 'pi' ? 'startup' : 'resume';
+  let resumeSource;
+  if (agent === 'grok') resumeSource = 'load';
+  else if (agent === 'pi') resumeSource = 'startup';
+  else resumeSource = 'resume';
   emitSessionStart(g, resume, resumeSource, { lifecycle: 'resume' });
   emitWorkTurn(g, resume, WORK[5], TOOLS[agent][2]);
   emitCompact(g, resume);
@@ -1275,7 +1278,7 @@ function emitLifecycleBundle(g, agent) {
   }
   emitEnd(g, resume, 'fork');
   const forkShutdown = g.events[g.events.length - 1];
-  forkShutdown.tags = { ...(forkShutdown.tags ?? {}), lifecycle: 'fork' };
+  forkShutdown.tags = { ...forkShutdown.tags, lifecycle: 'fork' };
   const forked = newSession(g, agent);
   forked.transcript = resume.transcript;
   emitSessionStart(g, forked, 'startup');
@@ -1285,7 +1288,7 @@ function emitLifecycleBundle(g, agent) {
   emitWorkTurn(g, forked, WORK[2], 'bash');
   emitEnd(g, forked, 'new');
   const clearShutdown = g.events[g.events.length - 1];
-  clearShutdown.tags = { ...(clearShutdown.tags ?? {}), lifecycle: 'clear' };
+  clearShutdown.tags = { ...clearShutdown.tags, lifecycle: 'clear' };
   const cleared = newSession(g, agent);
   emitSessionStart(g, cleared, 'startup');
   emitWorkTurn(g, cleared, WORK[0], 'bash');
@@ -1619,7 +1622,7 @@ function assertCoverage(events, secrets, directives, body) {
         problems.push(`grok missing timestamp seq ${event.seq}`);
       } else {
         if (grokTimestamps.includes(ts)) problems.push(`duplicate grok timestamp ${ts} seq ${event.seq}`);
-        if (grokTimestamps.length > 0 && ts <= grokTimestamps[grokTimestamps.length - 1]) {
+        if (grokTimestamps.length > 0 && ts <= grokTimestamps.at(-1)) {
           problems.push(`grok timestamp not increasing seq ${event.seq}`);
         }
         grokTimestamps.push(ts);

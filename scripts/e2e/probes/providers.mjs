@@ -106,7 +106,7 @@ async function dummyKeySelfCheck() {
     });
     return { status: res.status, elapsed_ms: Date.now() - start };
   } catch (e) {
-    return { status: "error", error: String(e && e.message ? e.message : e), elapsed_ms: Date.now() - start };
+    return { status: "error", error: String(e?.message ? e.message : e), elapsed_ms: Date.now() - start };
   }
 }
 
@@ -139,7 +139,15 @@ function extractModelAndText(body) {
   if (Array.isArray(text)) {
     text = text.map((p) => (typeof p === "string" ? p : p?.text || "")).join("");
   }
-  return { model, text: typeof text === "string" ? text : text == null ? null : JSON.stringify(text) };
+  let outText;
+  if (typeof text === "string") {
+    outText = text;
+  } else if (text == null) {
+    outText = null;
+  } else {
+    outText = JSON.stringify(text);
+  }
+  return { model, text: outText };
 }
 
 function schemaHonoured(text) {
@@ -212,11 +220,13 @@ async function providerProbe(name, ctx) {
       };
       structured = schemaHonoured(second.text) ? "text-JSON" : "unusable";
     }
-    evidence.push(`HTTP ${first.http}`);
-    evidence.push(`auth=${preset.authName}`);
-    evidence.push(`model=${first.model_reported || "not reported"}`);
-    evidence.push(`response_format=${structured}`);
-    evidence.push(`elapsed_ms=${first.elapsed_ms}`);
+    evidence.push(
+      `HTTP ${first.http}`,
+      `auth=${preset.authName}`,
+      `model=${first.model_reported || "not reported"}`,
+      `response_format=${structured}`,
+      `elapsed_ms=${first.elapsed_ms}`,
+    );
     const pass = first.http >= 200 && first.http < 300;
     return {
       status: pass ? "pass" : "fail",
@@ -224,7 +234,7 @@ async function providerProbe(name, ctx) {
       data: { structured, http: first.http, model_reported: first.model_reported },
     };
   } catch (e) {
-    evidence.push(String(e && e.message ? e.message : e));
+    evidence.push(String(e?.message ? e.message : e));
     return { status: "fail", evidence };
   }
 }

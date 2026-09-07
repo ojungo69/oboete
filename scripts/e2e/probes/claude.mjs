@@ -78,6 +78,13 @@ function markerFlags(token) {
   return { hookFlags: { SessionStart: ["--plain", `'Note: ${token}'`] } };
 }
 
+// The compact_summary field as the evidence line shows it: its length, "absent", or its type.
+function compactSummaryDesc(s) {
+  if (typeof s.compact_summary === "string") return "len=" + s.compact_summary.length;
+  if (s.compact_summary == null) return "absent";
+  return typeof s.compact_summary;
+}
+
 function compactRelated(events) {
   return events
     .filter((e) =>
@@ -193,12 +200,12 @@ async function tuiTwoCompacts(dir, repo) {
     dump("after-compact-1");
     if (named(events, "PostCompact").length < 1) {
       tmux.send("");
-      events = await waitPostCompact(eventsPath, 1, 60_000);
+      await waitPostCompact(eventsPath, 1, 60_000);
     }
     await tuiSubmit(name, tmux, "/compact", { timeoutMs: 120_000 });
     await sleep(1500);
     if (/compact this conversation|Are you sure|Yes/i.test(tmux.capture())) tmux.send("");
-    events = await waitPostCompact(eventsPath, 2, 120_000);
+    await waitPostCompact(eventsPath, 2, 120_000);
     dump("after-compact-2");
     const pane = tmux.capture();
     await tuiQuit(tmux, name, { timeoutMs: 120_000 });
@@ -211,11 +218,11 @@ async function tuiTwoCompacts(dir, repo) {
       pane = "";
     }
     dump("error");
-    fs.appendFileSync(paneLog, "\n" + String(e && e.message ? e.message : e) + "\n");
+    fs.appendFileSync(paneLog, "\n" + String(e?.message ? e.message : e) + "\n");
     return {
       events: parseEvents(eventsPath),
       pane,
-      error: String(e && e.message ? e.message : e),
+      error: String(e?.message ? e.message : e),
       eventsPath,
     };
   } finally {
@@ -266,8 +273,10 @@ export const probes = [
         `A exit=${a.exitCode} source=${ssSource(a.events)} session=${a.sessionId || "none"} elapsed_s=${(a.elapsedMs / 1000).toFixed(1)}`,
       ];
       if (!a.sessionId) {
-        evidence.push(`A stdout_head=${(a.stdout || "").slice(0, 300).replace(/\s+/g, " ")}`);
-        evidence.push(`A events=${a.events.map((e) => e.event).join(",") || "none"}`);
+        evidence.push(
+          `A stdout_head=${(a.stdout || "").slice(0, 300).replace(/\s+/g, " ")}`,
+          `A events=${a.events.map((e) => e.event).join(",") || "none"}`,
+        );
         return { status: "fail", evidence, data: { a: { source: ssSource(a.events), sessionId: a.sessionId } } };
       }
       const b = await ctx.claude(path.join(ctx.dir, "b"), {
@@ -304,8 +313,10 @@ export const probes = [
       }
       const sourcesOk = data.A.source === "startup" && data.B.source === "resume" && data.C.source === "fork";
       const idOk = data.A.sessionId && data.A.sessionId === data.B.sessionId && data.C.sessionId && data.C.sessionId !== data.A.sessionId;
-      evidence.push(`id_continuity A==B=${data.A.sessionId === data.B.sessionId} C!=A=${data.C.sessionId !== data.A.sessionId}`);
-      evidence.push(`sources_ok=${sourcesOk} id_ok=${idOk}`);
+      evidence.push(
+        `id_continuity A==B=${data.A.sessionId === data.B.sessionId} C!=A=${data.C.sessionId !== data.A.sessionId}`,
+        `sources_ok=${sourcesOk} id_ok=${idOk}`,
+      );
       return { status: sourcesOk && idOk ? "pass" : "fail", evidence, data };
     },
   },
@@ -386,9 +397,9 @@ export const probes = [
           `exit=${r.exitCode}`,
           `Stop=${Boolean(stop)}`,
           `equal=${equal} equal_trim=${equalTrim}`,
-          `stop_hook_active=${Object.prototype.hasOwnProperty.call(stdin, "stop_hook_active") ? JSON.stringify(stdin.stop_hook_active) : "absent"}`,
-          `background_tasks_key=${Object.prototype.hasOwnProperty.call(stdin, "background_tasks")}`,
-          `session_crons_key=${Object.prototype.hasOwnProperty.call(stdin, "session_crons")}`,
+          `stop_hook_active=${Object.hasOwn(stdin, "stop_hook_active") ? JSON.stringify(stdin.stop_hook_active) : "absent"}`,
+          `background_tasks_key=${Object.hasOwn(stdin, "background_tasks")}`,
+          `session_crons_key=${Object.hasOwn(stdin, "session_crons")}`,
           `Stop.keys=[${keys.join(",")}]`,
           `result=${JSON.stringify(text).slice(0, 200)}`,
           `last_assistant_message=${JSON.stringify(last).slice(0, 200)}`,
@@ -427,12 +438,12 @@ export const probes = [
       const usage = usageOf(auto);
       evidence.push(
         `auto exit=${auto.exitCode} elapsed_s=${(auto.elapsedMs / 1000).toFixed(1)} PostCompact=${named(auto.events, "PostCompact").length} PreCompact=${named(auto.events, "PreCompact").length} usage=${usage ? JSON.stringify(usage) : "none"}`,
+        `auto seq=${compactRelated(auto.events).join(" | ") || "none"}`,
       );
-      evidence.push(`auto seq=${compactRelated(auto.events).join(" | ") || "none"}`);
       for (const ev of auto.events.filter((e) => e.event === "PreCompact" || e.event === "PostCompact")) {
         const s = ev.stdin && typeof ev.stdin === "object" ? ev.stdin : {};
         evidence.push(
-          `auto ${ev.event} keys=[${topKeys(s).join(",")}] trigger=${s.trigger ?? "absent"} compact_summary=${typeof s.compact_summary === "string" ? "len=" + s.compact_summary.length : s.compact_summary == null ? "absent" : typeof s.compact_summary}`,
+          `auto ${ev.event} keys=[${topKeys(s).join(",")}] trigger=${s.trigger ?? "absent"} compact_summary=${compactSummaryDesc(s)}`,
         );
       }
 
@@ -440,33 +451,40 @@ export const probes = [
       try {
         tui = await tuiTwoCompacts(path.join(ctx.dir, "tui"), gitInit(path.join(ctx.dir, "tui-repo")));
       } catch (e) {
-        tui = { events: [], error: String(e && e.message ? e.message : e), pane: "" };
+        tui = { events: [], error: String(e?.message ? e.message : e), pane: "" };
       }
       evidence.push(
         `tui PostCompact=${named(tui.events, "PostCompact").length} PreCompact=${named(tui.events, "PreCompact").length} error=${tui.error || "none"} pane_chars=${(tui.pane || "").length}`,
+        `tui seq=${compactRelated(tui.events).join(" | ") || "none"}`,
       );
-      evidence.push(`tui seq=${compactRelated(tui.events).join(" | ") || "none"}`);
       if (tui.error) evidence.push(`tui_error=${tui.error.replace(/https:\S+/g, "<url>").slice(0, 400)}`);
       if (tui.pane) evidence.push(`tui_pane=${tui.pane.replace(/https:\S+/g, "<url>").slice(-500).replace(/\s+/g, " ")}`);
       for (const ev of tui.events.filter((e) => e.event === "PreCompact" || e.event === "PostCompact")) {
         const s = ev.stdin && typeof ev.stdin === "object" ? ev.stdin : {};
         evidence.push(
-          `tui ${ev.event} keys=[${topKeys(s).join(",")}] trigger=${s.trigger ?? "absent"} compact_summary=${typeof s.compact_summary === "string" ? "len=" + s.compact_summary.length : s.compact_summary == null ? "absent" : typeof s.compact_summary}`,
+          `tui ${ev.event} keys=[${topKeys(s).join(",")}] trigger=${s.trigger ?? "absent"} compact_summary=${compactSummaryDesc(s)}`,
         );
       }
 
       const autoPosts = named(auto.events, "PostCompact");
       const tuiPosts = named(tui.events, "PostCompact");
-      const posts = tuiPosts.length >= 2 ? tuiPosts : autoPosts.length >= 2 ? autoPosts : [...autoPosts, ...tuiPosts];
+      let posts;
+      if (tuiPosts.length >= 2) {
+        posts = tuiPosts;
+      } else if (autoPosts.length >= 2) {
+        posts = autoPosts;
+      } else {
+        posts = [...autoPosts, ...tuiPosts];
+      }
       const a = compactionIdentity(posts);
       const bAuto = evalB(auto.events);
       const bTui = evalB(tui.events);
       const bOk = (autoPosts.length ? bAuto.ok : true) && (tuiPosts.length ? bTui.ok : true);
       evidence.push(
         `(a) n=${a.n} candidates=[${a.candidates.join(",")}] ok=${a.ok}${a.note ? " note=" + a.note : ""} values=${JSON.stringify(a.values)}`,
+        `(b) auto=${bAuto.ok} ${bAuto.details.join(" | ")}`,
+        `(b) tui=${bTui.ok} ${bTui.details.join(" | ")}`,
       );
-      evidence.push(`(b) auto=${bAuto.ok} ${bAuto.details.join(" | ")}`);
-      evidence.push(`(b) tui=${bTui.ok} ${bTui.details.join(" | ")}`);
 
       if (!autoPosts.length && !tuiPosts.length) {
         evidence.push(...TUI_MANUAL);
