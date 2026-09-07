@@ -280,8 +280,7 @@ for (const { args, service, index } of serviceModes) {
 // may ever stand in for the token: a layout the reader cannot place the token in is refused, never
 // resolved by moving the choice onto the next line.
 //
-// The first three below already pass against the reader this replaces; they are here so the change
-// is pinned as compatible, not because they detect it. The single-line layouts are the new ones.
+// All five layouts below must reach the service with the token in the api-token header.
 for (const [name, contents] of [
   ['a note above the token', 'Codacy account token for ojungo69\nfixture-token\n'],
   ['a note above and text below', '# Test credentials\r\nfixture-token\r\nignored\r\n'],
@@ -306,11 +305,10 @@ for (const [name, contents] of [
 
 // A layout the reader cannot place the token in must send nothing. The dangerous outcome is not the
 // error, it is a run that quietly uses the line after the one the token was meant to be on: `ignored`
-// and `example.invalid/account` below would each satisfy the character check on their own. All eight
-// are refused by the reader this replaces too — they are regression tests against the two attempts
-// in this branch. Six of the eight fail against the first, every one of them by sending a request:
-// it filtered blank lines, so `ignored` went out in the api-token header. The last two fail against
-// the second, which dropped every trailing empty line and so read `Credentials\n\n` as one line.
+// and `example.invalid/account` below would each satisfy the character check on their own, so a
+// reader that dropped blank lines before choosing would put one of them in that header. Each case
+// asserts the exit code and the message, that no request was made, that the ledger is byte-identical
+// afterwards, and that no line of the file reaches stdout or stderr.
 //
 // The one case nothing here can catch is a file of a single token-shaped word: a lone `Credentials`
 // is indistinguishable from a credential, and only the service can say it is not one. Written with a

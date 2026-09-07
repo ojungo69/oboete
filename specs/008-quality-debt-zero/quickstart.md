@@ -8,7 +8,7 @@
   search and analysis search and Codacy's commit and log endpoints all answer without credentials.
   Measured 2026-09-07 against `f2f5b4be` — the authenticated and anonymous issue counts are the same
   number, 36. So none of the verification commands handle a token, and none can leak one.
-- Credentials are needed only by the modes that change something on a service — `--apply-sonar`,
+- Credentials are needed only by the modes that authenticate to a service — `--apply-sonar`,
   `--apply-codacy` and `--confirm` — which read them themselves from `~/SONAR_TOKEN.md` and
   `~/CODACY_TOKEN.md` through `readToken` in `scripts/quality-debt-services.mjs`, and never print
   them. The SonarCloud token needs read scope + issue administration (verified 2026-09-07 with
