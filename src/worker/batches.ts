@@ -470,14 +470,11 @@ export async function classifyPending(
     }
   }
 
-  for (;;) {
-    const rows = asRawEventRows(db.prepare(CLASSIFY_CANDIDATES).all(CLASSIFY_LIMIT)).filter(
-      (row) => !seen.has(row.id),
-    );
-    if (rows.length === 0) break;
-
-    // The detector is async and may run in a worker thread, so it never runs inside a transaction.
-    const updates: ClassificationUpdate[] = [];
+  /** Queue a row's promotion only when both its content and tool input pass detection. */
+  async function collectSuccessfulClassifications(
+    rows: RawEventRow[],
+    updates: ClassificationUpdate[],
+  ): Promise<void> {
     for (const row of rows) {
       seen.add(row.id);
       const content = row.content ?? '';
@@ -495,6 +492,17 @@ export async function classifyPending(
       }
       updates.push(classificationUpdate(row, content, result, inputResult));
     }
+  }
+
+  for (;;) {
+    const rows = asRawEventRows(db.prepare(CLASSIFY_CANDIDATES).all(CLASSIFY_LIMIT)).filter(
+      (row) => !seen.has(row.id),
+    );
+    if (rows.length === 0) break;
+
+    // The detector is async and may run in a worker thread, so it never runs inside a transaction.
+    const updates: ClassificationUpdate[] = [];
+    await collectSuccessfulClassifications(rows, updates);
 
     const lost = storeClassificationUpdates(db, token, now, updates);
     if (lost) return { examined, promoted, secret, failed, leaseLost: true };
@@ -720,7 +728,6 @@ export function reclaimStale(
   });
 }
 
-/** A7: a partial row hands over its tool name and paths and none of the text it holds. */
 /**
  * A7: a `partial` row hands over metadata only — the tool name and the paths — never its truncated
  * text, to a provider or to anything that is injected later.

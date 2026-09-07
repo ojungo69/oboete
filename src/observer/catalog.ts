@@ -82,6 +82,14 @@ function storeCatalog(
   return result(value, false);
 }
 
+/** Reject an exhausted page walk before calculating the next request's remaining budget. */
+function remainingCatalogBudget(page: number, walkDeadline: number): number {
+  if (page > MAX_PAGES) throw new Error('catalog page limit exceeded');
+  const remaining = walkDeadline - Date.now();
+  if (remaining <= 0) throw new Error('catalog walk budget exceeded');
+  return remaining;
+}
+
 export async function refreshWorkersAiCatalog(
   db: DatabaseSync,
   { env, now, fetchImpl = fetch }: { env: NodeJS.ProcessEnv; now: number; fetchImpl?: typeof fetch },
@@ -98,9 +106,7 @@ export async function refreshWorkersAiCatalog(
     const rows: unknown[] = [];
     const walkDeadline = Date.now() + WALK_BUDGET_MS;
     for (let page = 1; ; page += 1) {
-      if (page > MAX_PAGES) throw new Error('catalog page limit exceeded');
-      const remaining = walkDeadline - Date.now();
-      if (remaining <= 0) throw new Error('catalog walk budget exceeded');
+      const remaining = remainingCatalogBudget(page, walkDeadline);
       const response = await fetchImpl(
         `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/models/search?per_page=${PAGE_SIZE}&page=${page}`,
         {

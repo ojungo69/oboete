@@ -205,6 +205,32 @@ function rebuildResponse(
   });
 }
 
+/** Read chunks in order, cancelling and rejecting when their combined size exceeds the limit. */
+async function readBoundedResponseChunks(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  chunks: Uint8Array[],
+): Promise<number> {
+  let size = 0;
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    size += chunk.value.byteLength;
+    if (size > MAX_RESPONSE_BYTES) {
+      try {
+        await reader.cancel();
+      } catch {
+        // The size failure is authoritative.
+      }
+      const error = new Error('provider response exceeded 1 MB');
+      error.name = 'ResponseTooLargeError';
+      throw error;
+    }
+    chunks.push(chunk.value);
+  }
+
+  return size;
+}
+
 async function responseWithinLimit(response: Response): Promise<Response> {
   const declaredLength = Number(response.headers.get('content-length'));
   if (declaredResponseTooLarge(declaredLength)) {
@@ -223,23 +249,7 @@ async function responseWithinLimit(response: Response): Promise<Response> {
 
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
-  let size = 0;
-  while (true) {
-    const chunk = await reader.read();
-    if (chunk.done) break;
-    size += chunk.value.byteLength;
-    if (size > MAX_RESPONSE_BYTES) {
-      try {
-        await reader.cancel();
-      } catch {
-        // The size failure is authoritative.
-      }
-      const error = new Error('provider response exceeded 1 MB');
-      error.name = 'ResponseTooLargeError';
-      throw error;
-    }
-    chunks.push(chunk.value);
-  }
+  const size = await readBoundedResponseChunks(reader, chunks);
 
   return rebuildResponse(response, chunks, size);
 }

@@ -454,6 +454,115 @@ type ProcessBatchOptions = {
   consentOk: () => boolean;
 };
 
+/** What `applyObservations` reads for a batch the provider answered: no fallback reason. */
+function providerApplyInput(args: {
+  output: Extract<CallOutcome, { ok: true }>['output'];
+  input: BatchInput;
+  nearby: ReturnType<typeof nearbyForBatch>;
+  detect: (text: string) => Promise<DetectorResult>;
+  now: number;
+}) {
+  const { output, input, nearby, detect, now } = args;
+  return {
+    batchId: input.batch.id,
+    repoId: input.session.repo_id,
+    sessionId: input.session.id,
+    output,
+    fallbackReason: null,
+    rows: input.rows,
+    nearby,
+    detect,
+    now,
+  };
+}
+
+/** The reason a fallback records: this session's own degraded state, else the worker's, else rules. */
+function fallbackReason(
+  providerState: Map<string, DegradedReason | null>,
+  sessionId: string,
+  initialProviderReason: DegradedReason | null,
+): DegradedReason {
+  const sessionState = providerState.has(sessionId)
+    ? providerState.get(sessionId)
+    : initialProviderReason;
+  return sessionState ?? 'rule_based';
+}
+
+/** The observer request for one batch, with the destination rules read at call time. */
+function requestForProvider(
+  db: DatabaseSync,
+  nearby: ReturnType<typeof nearbyForBatch>,
+  destination: 'remote_observer' | 'local_observer',
+  input: BatchInput,
+) {
+  return buildObserverRequest({
+    rows: input.rows,
+    session: input.session,
+    turns: input.turns,
+    destination,
+    repoId: input.session.repo_id,
+    nearby,
+    rules: loadDestinationRules(db),
+  });
+}
+
+type LanguageRetry = { done: BatchResult } | { outcome: CallOutcome };
+
+/**
+ * Records a successful provider answer and retries once if it came back in the wrong language, in
+ * the order the inline form used. A failed call is passed through untouched for the caller's own
+ * fallback branch.
+ */
+async function settleProviderOutcome(args: {
+  options: ProcessBatchOptions;
+  request: ReturnType<typeof buildObserverRequest>;
+  input: BatchInput;
+  nearby: ReturnType<typeof nearbyForBatch>;
+  preset: PresetName;
+  model: string;
+  outcome: CallOutcome;
+}): Promise<LanguageRetry> {
+  const { options, request, preset, outcome } = args;
+  const { db, token, deps } = options;
+  if (!outcome.ok) return { outcome };
+  if (!recordProviderResult(db, token, preset, outcome, deps.now())) {
+    return { done: { state: 'lease_lost', reason: null, memoryIds: [] } };
+  }
+  if (checkLanguage(request.input, outcome.output) !== 'mismatch') return { outcome };
+  return await retryOnLanguageMismatch(args);
+}
+
+
+/**
+ * One retry after the provider answered in the wrong language, in the order the inline form used:
+ * the retry's own result is recorded first, and only a second mismatch marks the session degraded
+ * and falls back. Returns the result the caller must return, or the outcome to carry on with.
+ */
+async function retryOnLanguageMismatch(args: {
+  options: ProcessBatchOptions;
+  request: ReturnType<typeof buildObserverRequest>;
+  input: BatchInput;
+  nearby: ReturnType<typeof nearbyForBatch>;
+  preset: PresetName;
+  model: string;
+}): Promise<LanguageRetry> {
+  const { options, request, input, nearby, preset, model } = args;
+  const { db, token, batch, config, deps, detect, providerState } = options;
+  const outcome = await providerCall({
+    db, token, input: request.input, batch, config, deps, preset, model, consentOk: options.consentOk,
+  });
+  if (outcome.ok && !recordProviderResult(db, token, preset, outcome, deps.now())) {
+    return { done: { state: 'lease_lost', reason: null, memoryIds: [] } };
+  }
+  if (outcome.ok && checkLanguage(request.input, outcome.output) === 'mismatch') {
+    providerState.set(batch.session_id, 'language_mismatch');
+    return {
+      done: await applyFallback(db, token, input, nearby, 'language_mismatch', detect, deps.now()),
+    };
+  }
+  return { outcome };
+}
+
 async function processBatch(options: ProcessBatchOptions): Promise<BatchResult> {
   const { db, token, batch, config, deps, detect, providerState,
     initialProviderReason, resolved, consentOk } = options;
@@ -461,16 +570,8 @@ async function processBatch(options: ProcessBatchOptions): Promise<BatchResult> 
   if (input === null) throw new Error('batch input missing');
   const nearby = nearbyForBatch(db, input);
 
-  function fallbackReason(): DegradedReason {
-    const sessionState = providerState.has(batch.session_id)
-      ? providerState.get(batch.session_id)
-      : initialProviderReason;
-    const reason = sessionState ?? 'rule_based';
-    return reason;
-  }
-
   if (batch.destination === 'fallback') {
-    const reason = fallbackReason();
+    const reason = fallbackReason(providerState, batch.session_id, initialProviderReason);
     return await applyFallback(db, token, input, nearby, reason, detect, deps.now());
   }
 
@@ -479,20 +580,7 @@ async function processBatch(options: ProcessBatchOptions): Promise<BatchResult> 
     return await applyFallback(db, token, input, nearby, 'no_provider', detect, deps.now());
   }
 
-  function requestForProvider(destination: 'remote_observer' | 'local_observer', input: BatchInput) {
-    const request = buildObserverRequest({
-      rows: input.rows,
-      session: input.session,
-      turns: input.turns,
-      destination,
-      repoId: input.session.repo_id,
-      nearby,
-      rules: loadDestinationRules(db),
-    });
-    return request;
-  }
-
-  const request = requestForProvider(batch.destination, input);
+  const request = requestForProvider(db, nearby, batch.destination, input);
   if (!markExcerpted(db, token, batch.id, request.excerpted, deps.now())) {
     return { state: 'lease_lost', reason: null, memoryIds: [] };
   }
@@ -501,32 +589,17 @@ async function processBatch(options: ProcessBatchOptions): Promise<BatchResult> 
     db, token, input: request.input, batch, config, deps,
     preset: resolved.preset, model: resolved.model, consentOk,
   });
-  if (outcome.ok) {
-    if (!recordProviderResult(db, token, resolved.preset, outcome, deps.now())) {
-      return { state: 'lease_lost', reason: null, memoryIds: [] };
-    }
-    if (checkLanguage(request.input, outcome.output) === 'mismatch') {
-      outcome = await providerCall({
-        db, token, input: request.input, batch, config, deps,
-        preset: resolved.preset, model: resolved.model, consentOk,
-      });
-      if (outcome.ok && !recordProviderResult(db, token, resolved.preset, outcome, deps.now())) {
-        return { state: 'lease_lost', reason: null, memoryIds: [] };
-      }
-      if (outcome.ok && checkLanguage(request.input, outcome.output) === 'mismatch') {
-        providerState.set(batch.session_id, 'language_mismatch');
-        return await applyFallback(
-          db,
-          token,
-          input,
-          nearby,
-          'language_mismatch',
-          detect,
-          deps.now(),
-        );
-      }
-    }
-  }
+  const settled = await settleProviderOutcome({
+    options,
+    request,
+    input,
+    nearby,
+    preset: resolved.preset,
+    model: resolved.model,
+    outcome,
+  });
+  if ('done' in settled) return settled.done;
+  outcome = settled.outcome;
 
   if (!outcome.ok) {
     providerState.set(batch.session_id, outcome.reason);
@@ -538,21 +611,11 @@ async function processBatch(options: ProcessBatchOptions): Promise<BatchResult> 
 
   providerState.set(batch.session_id, null);
   await deps.applyHook();
-  function providerApplyInput(output: Extract<CallOutcome, { ok: true }>['output'], input: BatchInput) {
-    return {
-      batchId: input.batch.id,
-      repoId: input.session.repo_id,
-      sessionId: input.session.id,
-      output,
-      fallbackReason: null,
-      rows: input.rows,
-      nearby,
-      detect,
-      now: deps.now(),
-    };
-  }
-
-  const applied = await applyObservations(db, token, providerApplyInput(outcome.output, input));
+  const applied = await applyObservations(
+    db,
+    token,
+    providerApplyInput({ output: outcome.output, input, nearby, detect, now: deps.now() }),
+  );
   return {
     state: applied.leaseLost ? 'lease_lost' : 'applied',
     reason: null,
