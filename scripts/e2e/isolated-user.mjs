@@ -1148,7 +1148,8 @@ export async function waitForLifecycleState(database, agent, predicate, options,
     .slice(-12)
     .map((event) => {
       const source = eventSource(event);
-      return `${event.kind}:${event.nativeSessionId}${source ? `:${source}` : ""}`;
+      const sourceSuffix = source ? `:${source}` : "";
+      return `${event.kind}:${event.nativeSessionId}${sourceSuffix}`;
     })
     .join(",");
   const TimeoutError = options.contract ? Error : PreconditionError;
@@ -1847,7 +1848,7 @@ function markdownSection(report) {
 }
 
 function markdownCell(value) {
-  return String(value).replaceAll(/\\/g, String.raw`\\`).replaceAll(/\|/g, "\\|").replace(/\r?\n/g, " ");
+  return String(value).replaceAll(/[\\|]/g, (c) => `\\${c}`).replace(/\r?\n/g, " ");
 }
 
 function evidenceReason(reason) {

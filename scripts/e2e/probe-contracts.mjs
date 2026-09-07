@@ -65,8 +65,8 @@ function pipe(s) {
   // The backslash goes first: escaping only the bar turns an evidence string that already holds
   // `\\|` into `\\\\|`, which renders as a literal backslash followed by a live column separator.
   return String(s || "")
-    .replaceAll(/\\/g, "\\\\")
-    .replaceAll(/\|/g, String.raw`\|`)
+    .replaceAll("\\", String.raw`\\`)
+    .replaceAll("|", String.raw`\|`)
     .replace(/\s+/g, " ")
     .trim();
 }

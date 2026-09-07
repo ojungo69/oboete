@@ -215,7 +215,7 @@ export function exitCodeFor(rows, stdioStatus = "pass") {
 }
 
 function markdownCell(value) {
-  return String(value ?? "").replaceAll(/\\/g, String.raw`\\`).replaceAll(/\|/g, "\\|").replace(/\r?\n/g, " ");
+  return String(value ?? "").replaceAll(/[\\|]/g, (c) => `\\${c}`).replace(/\r?\n/g, " ");
 }
 
 export function markdownSection(report) {

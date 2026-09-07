@@ -78,6 +78,13 @@ function markerFlags(token) {
   return { hookFlags: { SessionStart: ["--plain", `'Note: ${token}'`] } };
 }
 
+// The compact_summary field as the evidence line shows it: its length, "absent", or its type.
+function compactSummaryDesc(s) {
+  if (typeof s.compact_summary === "string") return "len=" + s.compact_summary.length;
+  if (s.compact_summary == null) return "absent";
+  return typeof s.compact_summary;
+}
+
 function compactRelated(events) {
   return events
     .filter((e) =>
@@ -435,16 +442,8 @@ export const probes = [
       );
       for (const ev of auto.events.filter((e) => e.event === "PreCompact" || e.event === "PostCompact")) {
         const s = ev.stdin && typeof ev.stdin === "object" ? ev.stdin : {};
-        let compactSummaryDesc;
-        if (typeof s.compact_summary === "string") {
-          compactSummaryDesc = "len=" + s.compact_summary.length;
-        } else if (s.compact_summary == null) {
-          compactSummaryDesc = "absent";
-        } else {
-          compactSummaryDesc = typeof s.compact_summary;
-        }
         evidence.push(
-          `auto ${ev.event} keys=[${topKeys(s).join(",")}] trigger=${s.trigger ?? "absent"} compact_summary=${compactSummaryDesc}`,
+          `auto ${ev.event} keys=[${topKeys(s).join(",")}] trigger=${s.trigger ?? "absent"} compact_summary=${compactSummaryDesc(s)}`,
         );
       }
 
@@ -462,16 +461,8 @@ export const probes = [
       if (tui.pane) evidence.push(`tui_pane=${tui.pane.replace(/https:\S+/g, "<url>").slice(-500).replace(/\s+/g, " ")}`);
       for (const ev of tui.events.filter((e) => e.event === "PreCompact" || e.event === "PostCompact")) {
         const s = ev.stdin && typeof ev.stdin === "object" ? ev.stdin : {};
-        let compactSummaryDesc;
-        if (typeof s.compact_summary === "string") {
-          compactSummaryDesc = "len=" + s.compact_summary.length;
-        } else if (s.compact_summary == null) {
-          compactSummaryDesc = "absent";
-        } else {
-          compactSummaryDesc = typeof s.compact_summary;
-        }
         evidence.push(
-          `tui ${ev.event} keys=[${topKeys(s).join(",")}] trigger=${s.trigger ?? "absent"} compact_summary=${compactSummaryDesc}`,
+          `tui ${ev.event} keys=[${topKeys(s).join(",")}] trigger=${s.trigger ?? "absent"} compact_summary=${compactSummaryDesc(s)}`,
         );
       }
 

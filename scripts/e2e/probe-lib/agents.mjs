@@ -333,7 +333,7 @@ function hookCommand(hookPath, eventsPath, label, flags = []) {
 }
 
 export function shellQuote(s) {
-  return "'" + String(s).replaceAll(/'/g, String.raw`'\''`) + "'";
+  return "'" + String(s).replaceAll("'", String.raw`'\''`) + "'";
 }
 
 function normalizeSpecs(defaults, opts) {
