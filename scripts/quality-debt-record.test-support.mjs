@@ -80,7 +80,10 @@ export function run(cwd, args = [], preload = '') {
 }
 
 
-export function apiStub(responses, verification = {}) {
+// expected is the credential the recorded `authMatches` is compared against. A test that writes a
+// token file of its own passes the token it wrote, so the boolean says the reader sent that exact
+// value rather than merely something other than the default fixture.
+export function apiStub(responses, verification = {}, expected = 'fixture-token') {
   return `
     import { appendFileSync } from 'node:fs';
     import os from 'node:os';
@@ -103,8 +106,8 @@ export function apiStub(responses, verification = {}) {
         body: headers.get('content-type') === 'application/json' ? JSON.parse(options.body ?? '{}')
           : Object.fromEntries(new URLSearchParams(options.body)),
         authMatches: String(url).startsWith('https://sonarcloud.io/')
-          ? headers.get('authorization') === 'Basic ' + Buffer.from('fixture-token:').toString('base64')
-          : headers.get('api-token') === 'fixture-token',
+          ? headers.get('authorization') === 'Basic ' + Buffer.from(${JSON.stringify(expected)} + ':').toString('base64')
+          : headers.get('api-token') === ${JSON.stringify(expected)},
         contentType: headers.get('content-type'), redirect: options.redirect,
       });
       let response;

@@ -70,8 +70,19 @@ async function discardBody(response) {
 
 function readToken(service) {
   const file = `${service}_TOKEN.md`;
-  const token = readFileSync(join(homedir(), file), 'utf8').split(/\r?\n/)[1];
-  if (!token) throw new Error(`${file} must contain the token on line 2`);
+  // The token is on line 2, under the note that says what it is — unless the whole file is one line,
+  // which is how CODACY_TOKEN.md is written. Exactly one trailing empty string is dropped, the one
+  // the newline at the end of the file produces; a second means the author wrote a blank line, and
+  // the file is then two lines whose second is empty, which is refused. Nothing else is skipped:
+  // skipping a blank would move the choice onto a line the author did not put the token on, and a
+  // malformed token would be replaced by whatever follows instead of being rejected below.
+  const lines = readFileSync(join(homedir(), file), 'utf8').split(/\r?\n/);
+  if (lines.length > 1 && lines.at(-1) === '') lines.pop();
+  // A file of one line is taken at its word. Nothing can tell a bare token from a bare note that
+  // happens to be shaped like one, so a sole line that passes the check below is sent, and the
+  // service's own rejection is what says it was not a credential.
+  const token = lines.length === 1 ? lines[0] : lines[1];
+  if (!token) throw new Error(`${file} must contain the token, alone or on the line under a note`);
   if (/[^A-Za-z0-9_.~+/=-]/.test(token)) throw new Error(`${file} contains an unexpected character`);
   return token;
 }
