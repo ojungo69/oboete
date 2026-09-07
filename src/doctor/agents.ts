@@ -401,14 +401,17 @@ function piDiagnostics(db: DatabaseSync, now: number): string[] {
 
 function sanitizeDisplayName(value: string): string {
   let out = '';
-  for (let i = 0; i < value.length && out.length < 64; i += 1) {
+  // A while loop, not a for: an escape sequence advances the index by its own length, and S2310
+  // forbids writing a for-counter from the body.
+  let i = 0;
+  while (i < value.length && out.length < 64) {
     const code = value.codePointAt(i)!;
     if (code === 27) {
-      i = escapeSequenceEnd(value, i);
+      i = escapeSequenceEnd(value, i) + 1;
       continue;
     }
-    if (code <= 31 || (code >= 127 && code <= 159)) continue;
-    out += value[i];
+    if (code > 31 && !(code >= 127 && code <= 159)) out += value[i];
+    i += 1;
   }
   return out;
 }
