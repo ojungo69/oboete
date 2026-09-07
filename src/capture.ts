@@ -824,14 +824,17 @@ function openCaptureDatabase(
   let opened: ReturnType<typeof openDatabase> | null = null;
   try {
     opened = openDatabase({ path: paths.db, timeoutMs, hook: true });
-    // data-model: the hook never migrates, so an older file is left to the worker.
+    // data-model: the hook never migrates, so an older file is left to the worker. The handle is
+    // dropped before it is closed, so a throwing close cannot leave the caller writing through a
+    // connection this function has already refused.
     if (opened.schemaBehind) {
-      opened.db.close();
+      const behind = opened;
       opened = null;
+      behind.db.close();
     }
   } catch {
-    // A missing or unopenable database is an availability problem, not a privacy one (R1): the
-    // sanitized event goes to the spool below.
+    // A missing or unopenable database is an availability problem, not a privacy one (R1): `write`
+    // spools the sanitized event when this returns null.
   }
 
   return opened;
@@ -910,7 +913,6 @@ type PersistCapture = (
 ) => Promise<CaptureOutcome>;
 
 type CaptureContext = {
-  paths: OboetePaths;
   capturedAt: number;
   diagnostics: Diagnostic[];
   kindFromName: EventKind | undefined;
@@ -987,7 +989,8 @@ async function captureAdapted(
   deadlineMs: number,
   agent: AdapterAgent,
 ): Promise<CaptureOutcome> {
-  const { paths, diagnostics } = context;
+  const { paths } = input;
+  const { diagnostics } = context;
   if (adapted.kind === 'unmapped') {
     return captureUnmapped(deps, input, adapted, context, persist, deadlineMs, agent);
   }
@@ -1084,7 +1087,7 @@ export async function captureEvent(deps: CaptureDeps, input: CaptureInput): Prom
   const kindFromName = EVENT_KIND_BY_NAME[input.eventName];
   const payloadHash = contentHash(stdin.text);
 
-  const context = { paths, capturedAt, diagnostics, kindFromName, payloadHash };
+  const context = { capturedAt, diagnostics, kindFromName, payloadHash };
 
   // FR-006: an invocation whose handler carries no fixed selector keeps `unknown` provenance, and
   // its payload is never read as an agent's payload; doctor reports the counter.
@@ -1116,7 +1119,7 @@ export async function captureEvent(deps: CaptureDeps, input: CaptureInput): Prom
   return captureAdapted(deps, input, adapted, context, persist, deadlineMs, agent);
 }
 
-type UnparsedCaptureContext = Omit<CaptureContext, 'paths'> & {
+type UnparsedCaptureContext = CaptureContext & {
   agent: AdapterAgent;
   stdin: StdinRead;
 };

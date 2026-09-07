@@ -14,6 +14,7 @@ import {
   type ToolName,
 } from '../events.js';
 import {
+  adaptPromptEvent,
   asRecord,
   buildEnvelope,
   capPaths,
@@ -150,19 +151,6 @@ function adaptGrokSessionStart(
   ]);
 }
 
-function adaptGrokPrompt(
-  input: AdapterInput,
-  payload: Record<string, unknown>,
-  envelope: Envelope,
-  turn: { prompt_id?: string },
-): AdapterOutput {
-  const prompt = readContent(payload, 'prompt');
-  if (prompt === undefined) return metadataOnly(input, 'payload_invalid');
-  return toEvents([
-    { ...envelope, ...turn, kind: 'prompt', text: capText(prompt), input_source: 'user' },
-  ]);
-}
-
 function adaptGrokToolFailure(
   input: AdapterInput,
   payload: Record<string, unknown>,
@@ -232,7 +220,7 @@ export function adaptGrok(input: AdapterInput): AdapterOutput {
     case 'SessionStart':
       return adaptGrokSessionStart(input, payload, envelope);
     case 'UserPromptSubmit':
-      return adaptGrokPrompt(input, payload, envelope, turn);
+      return adaptPromptEvent(input, payload, envelope, turn);
     case 'PreToolUse':
     case 'PostToolUse':
       return adaptGrokTool(input, payload, envelope, turn);

@@ -148,15 +148,17 @@ function currentTrustState(hooksPath: string): Record<string, { trusted_hash: st
   return state;
 }
 
+/**
+ * `null` means the file could not be read or parsed. With no block to strip, removeTomlBlock cuts a
+ * marked region and refuses a marker-less file, which is what such a file gets either way, so the
+ * caller answers with an empty block.
+ */
 function readRecoveryConfig(recoverFrom: string): Record<string, unknown> | null {
-  let config: Record<string, unknown> | null = null;
   try {
-    config = parseToml(readFileSync(recoverFrom, 'utf8'));
+    return parseToml(readFileSync(recoverFrom, 'utf8'));
   } catch {
-    // Unreadable recovery config: with no block to strip, removeTomlBlock cuts a marked region and
-    // refuses a marker-less file, which is what such a file gets either way.
+    return null;
   }
-  return config;
 }
 
 function restoreWiringTrust(
@@ -201,6 +203,7 @@ function blockText(hooksPath: string, options: CodexSetupOptions, recoverFrom?: 
   const state = currentTrustState(hooksPath);
   if (recoverFrom !== undefined && existsSync(recoverFrom)) {
     const config = readRecoveryConfig(recoverFrom);
+    // Unreadable or unparseable: the same empty block a marker-less file gets.
     if (config === null) return '';
     restoreTrustState(hooksPath, options, config, state);
   }

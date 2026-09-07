@@ -358,23 +358,18 @@ export function piItem(
 }
 
 function piHangAges(paths: OboetePaths, now: number): number[] {
+  if (!existsSync(paths.piAck)) return [];
   const hangs: number[] = [];
-  if (existsSync(paths.piAck)) {
-    collectPiHangAges(paths.piAck, now, hangs);
-  }
-  return hangs;
-}
-
-function collectPiHangAges(directory: string, now: number, hangs: number[]): void {
-  for (const name of readdirSync(directory)) {
+  for (const name of readdirSync(paths.piAck)) {
     if (!name.endsWith('.started')) continue;
     try {
-      const age = now - statSync(join(directory, name)).mtimeMs;
+      const age = now - statSync(join(paths.piAck, name)).mtimeMs;
       if (age > PI_HANG_AFTER_MS) hangs.push(age);
     } catch {
       // The ack file was removed while we listed the directory.
     }
   }
+  return hangs;
 }
 
 /** Diagnostics of the last 24 hours (data-model: the `.started` files themselves are kept that long). */

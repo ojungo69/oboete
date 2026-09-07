@@ -245,7 +245,7 @@ function wireSelected(
   detected: readonly AgentDetection[],
   deps: SetupDeps,
   note: Note,
-): Map<SetupAgent, ReturnType<typeof wire>> {
+): Map<SetupAgent, AgentRow['wired']> {
   const wiring = new Map<SetupAgent, AgentRow['wired']>();
   for (const agent of selected) {
     wiring.set(
@@ -281,7 +281,11 @@ function agentRows(
   });
 }
 
-function setupExitCode(
+/**
+ * The exit code, and the two operator-facing notes and the runtime_state row that go with it. It
+ * writes, so the caller runs it before building the report rather than inside the call that does.
+ */
+function recordSetupResult(
   rows: AgentRow[],
   options: Options,
   database: DatabaseSync | null,
@@ -368,7 +372,8 @@ export async function runSetup(argv: string[], overrides: Partial<SetupDeps> = {
     const probes = await probeSelected(selected, wiring, deps, database, options.remove);
 
     const rows = agentRows(selected, after, wiring, probes, note);
-    return finishSetup(deps, options, paths, notes, rows, setupExitCode(rows, options, database, note));
+    const code = recordSetupResult(rows, options, database, note);
+    return finishSetup(deps, options, paths, notes, rows, code);
   } finally {
     database?.close();
   }

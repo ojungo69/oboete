@@ -170,22 +170,21 @@ function mmrRedundant(
   const relevance = maxRrf > 0 ? (picked.row.score_rrf ?? 0) / maxRrf : 0;
   const bestSim = selected.length > 0 ? picked.maxSim : 0;
   // R5: LIKE never votes, so rrf is 0; do not treat any cosine > 0 as redundancy.
-  const redundant =
+  return (
     maxRrf > 0 &&
     selected.length > 0 &&
     bestSim > 0 &&
-    (1 - lambda) * bestSim >= lambda * relevance;
-  return redundant;
+    (1 - lambda) * bestSim >= lambda * relevance
+  );
 }
 
-function selectNextMmr(
+/** The next candidate MMR picks: the highest score, ties broken by id. */
+function bestMmrCandidate(
   remaining: MmrCandidate[],
   selected: RankRow[],
-  rejected: { row: RankRow; reason: 'mmr_redundant' }[],
   maxRrf: number,
   lambda: number,
-  limit: number,
-): void {
+): { index: number; mmr: number } {
   let bestIndex = 0;
   let bestMmr = Number.NEGATIVE_INFINITY;
   for (let i = 0; i < remaining.length; i++) {
@@ -201,10 +200,19 @@ function selectNextMmr(
       bestIndex = i;
     }
   }
+  return { index: bestIndex, mmr: bestMmr };
+}
 
-  const [picked] = remaining.splice(bestIndex, 1);
-  const redundant = mmrRedundant(picked, maxRrf, selected, lambda);
-  if (redundant || selected.length >= limit) {
+/** Keeps the picked candidate or rejects it, and refreshes what the rest are now similar to. */
+function admitMmrCandidate(
+  picked: MmrCandidate,
+  bestMmr: number,
+  remaining: MmrCandidate[],
+  selected: RankRow[],
+  rejected: { row: RankRow; reason: 'mmr_redundant' }[],
+  bounds: { maxRrf: number; lambda: number; limit: number },
+): void {
+  if (mmrRedundant(picked, bounds.maxRrf, selected, bounds.lambda) || selected.length >= bounds.limit) {
     rejected.push({ row: picked.row, reason: 'mmr_redundant' });
     return;
   }
@@ -232,7 +240,10 @@ export function mmrSelect(
   const rejected: { row: RankRow; reason: 'mmr_redundant' }[] = [];
 
   while (remaining.length > 0) {
-    selectNextMmr(remaining, selected, rejected, maxRrf, lambda, limit);
+    // The splice stays here so the loop's own condition can be seen to make progress.
+    const best = bestMmrCandidate(remaining, selected, maxRrf, lambda);
+    const [picked] = remaining.splice(best.index, 1);
+    admitMmrCandidate(picked, best.mmr, remaining, selected, rejected, { maxRrf, lambda, limit });
   }
 
   return { selected, rejected };

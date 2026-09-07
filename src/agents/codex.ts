@@ -10,6 +10,8 @@ import {
   type ToolName,
 } from '../events.js';
 import {
+  adaptPromptEvent,
+  adaptToolFailureEvent,
   asRecord,
   buildEnvelope,
   capPaths,
@@ -149,33 +151,6 @@ function adaptCodexSessionStart(
   return toEvents([{ ...envelope, ...turn, kind: 'session_start', source }]);
 }
 
-function adaptCodexPrompt(
-  input: AdapterInput,
-  payload: Record<string, unknown>,
-  envelope: Envelope,
-  turn: { prompt_id?: string },
-): AdapterOutput {
-  const prompt = readContent(payload, 'prompt');
-  if (prompt === undefined) return metadataOnly(input, 'payload_invalid');
-  return toEvents([
-    { ...envelope, ...turn, kind: 'prompt', text: capText(prompt), input_source: 'user' },
-  ]);
-}
-
-function adaptCodexToolFailure(
-  input: AdapterInput,
-  payload: Record<string, unknown>,
-  envelope: Envelope,
-  turn: { prompt_id?: string },
-): AdapterOutput {
-  const callId = readString(payload, 'tool_use_id');
-  const error = readContent(payload, 'error');
-  if (callId === undefined || error === undefined) return metadataOnly(input, 'payload_invalid');
-  return toEvents([
-    { ...envelope, ...turn, kind: 'tool_failure', tool_call_id: callId, error: capText(error) },
-  ]);
-}
-
 export function adaptCodex(input: AdapterInput): AdapterOutput {
   const payload = asRecord(input.payload);
   if (payload === null) return metadataOnly(input, 'payload_invalid');
@@ -194,12 +169,12 @@ export function adaptCodex(input: AdapterInput): AdapterOutput {
     case 'SessionStart':
       return adaptCodexSessionStart(input, payload, envelope, turn);
     case 'UserPromptSubmit':
-      return adaptCodexPrompt(input, payload, envelope, turn);
+      return adaptPromptEvent(input, payload, envelope, turn);
     case 'PreToolUse':
     case 'PostToolUse':
       return adaptCodexTool(input, payload, envelope, turn);
     case 'PostToolUseFailure':
-      return adaptCodexToolFailure(input, payload, envelope, turn);
+      return adaptToolFailureEvent(input, payload, envelope, turn);
     case 'Stop':
       // Codex hands the final assistant text to `codex exec --output-last-message`, not to the Stop
       // hook, whose documented input carries no message field, so the turn end is all there is.

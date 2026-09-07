@@ -71,10 +71,10 @@ export async function providerItem(input: {
 }): Promise<DoctorItem> {
   const { config, paths, db, integrityFailed, deps, options, now } = input;
   const configured = configuredProvider(config, integrityFailed, deps.env);
-  if (isDoctorItem(configured)) return configured;
+  if (!('kind' in configured)) return configured;
   const { config: readyConfig, preset, credentials } = configured;
   const probe = providerProbeReadiness(readyConfig, preset, db, options, now);
-  if (isDoctorItem(probe)) return probe;
+  if (!('kind' in probe)) return probe;
   const { db: openDb, model, estimate } = probe;
 
   try {
@@ -110,7 +110,13 @@ export async function providerItem(input: {
   }
 }
 
+/**
+ * Both halves of the provider check answer either with the doctor item they already decided on, or
+ * with what the next step needs. The `kind` tag is what tells them apart: a structural test on
+ * `status` would break the day either bag grew a field of that name.
+ */
 type ConfiguredProvider = {
+  kind: 'configured';
   config: OboeteConfig;
   preset: Exclude<PresetName, 'none'>;
   credentials: ReturnType<typeof readCredentials>;
@@ -118,11 +124,7 @@ type ConfiguredProvider = {
 
 type ProviderProbeReadiness =
   | DoctorItem
-  | { db: DatabaseSync; model: string; estimate: ReturnType<typeof usageEstimate> };
-
-function isDoctorItem(value: object): value is DoctorItem {
-  return (value as Partial<DoctorItem>).status !== undefined;
-}
+  | { kind: 'ready'; db: DatabaseSync; model: string; estimate: ReturnType<typeof usageEstimate> };
 
 function configuredProvider(
   config: OboeteConfig | null,
@@ -160,7 +162,7 @@ function configuredProvider(
         '`oboete setup --provider <preset>` (workers-ai is the free remote default; ollama stays local)',
     );
   }
-  return { config, preset, credentials };
+  return { kind: 'configured', config, preset, credentials };
 }
 
 function providerProbeReadiness(
@@ -194,7 +196,7 @@ function providerProbeReadiness(
   const estimate = usageEstimate(db, now);
   const capItem = providerCapItem(preset, estimate);
   if (capItem !== null) return capItem;
-  return { db, model, estimate };
+  return { kind: 'ready', db, model, estimate };
 }
 
 function providerCapItem(

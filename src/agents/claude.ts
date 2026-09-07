@@ -11,6 +11,8 @@ import {
   type ToolName,
 } from '../events.js';
 import {
+  adaptPromptEvent,
+  adaptToolFailureEvent,
   asRecord,
   buildEnvelope,
   capPaths,
@@ -155,33 +157,6 @@ function adaptClaudeSessionStart(
   return toEvents([{ ...envelope, ...turn, kind: 'session_start', source }]);
 }
 
-function adaptClaudePrompt(
-  input: AdapterInput,
-  payload: Record<string, unknown>,
-  envelope: Envelope,
-  turn: { prompt_id?: string },
-): AdapterOutput {
-  const prompt = readContent(payload, 'prompt');
-  if (prompt === undefined) return metadataOnly(input, 'payload_invalid');
-  return toEvents([
-    { ...envelope, ...turn, kind: 'prompt', text: capText(prompt), input_source: 'user' },
-  ]);
-}
-
-function adaptClaudeToolFailure(
-  input: AdapterInput,
-  payload: Record<string, unknown>,
-  envelope: Envelope,
-  turn: { prompt_id?: string },
-): AdapterOutput {
-  const callId = readString(payload, 'tool_use_id');
-  const error = readContent(payload, 'error');
-  if (callId === undefined || error === undefined) return metadataOnly(input, 'payload_invalid');
-  return toEvents([
-    { ...envelope, ...turn, kind: 'tool_failure', tool_call_id: callId, error: capText(error) },
-  ]);
-}
-
 function adaptClaudeStop(
   payload: Record<string, unknown>,
   envelope: Envelope,
@@ -214,12 +189,12 @@ export function adaptClaude(input: AdapterInput): AdapterOutput {
     case 'SessionStart':
       return adaptClaudeSessionStart(input, payload, envelope, turn);
     case 'UserPromptSubmit':
-      return adaptClaudePrompt(input, payload, envelope, turn);
+      return adaptPromptEvent(input, payload, envelope, turn);
     case 'PreToolUse':
     case 'PostToolUse':
       return adaptClaudeTool(input, payload, envelope, turn);
     case 'PostToolUseFailure':
-      return adaptClaudeToolFailure(input, payload, envelope, turn);
+      return adaptToolFailureEvent(input, payload, envelope, turn);
     case 'Stop':
       return adaptClaudeStop(payload, envelope, turn);
     case 'PostCompact':
