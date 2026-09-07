@@ -3594,5 +3594,249 @@
   "id": "AaB3XkiJIqdfylE4c2ov",
   "state": "fixed",
   "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkc9IqdfylE4c2nm",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkc9IqdfylE4c2nn",
+  "state": "resolved",
+  "where": "String(row.session_id ?? '') is the intended coercion of whatever a Grok fixture payload carries as session_id (a number is a valid key for GROK_SESSION_ID and the resume lookup); a string-only guard would change that key",
+  "transition": "wontfix"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkc9IqdfylE4c2no",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkc9IqdfylE4c2ns",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkc9IqdfylE4c2nt",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkc9IqdfylE4c2nu",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkc9IqdfylE4c2nw",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkc9IqdfylE4c2nx",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkc9IqdfylE4c2ny",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkc9IqdfylE4c2nz",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkc9IqdfylE4c2n1",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkfvIqdfylE4c2oS",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkfvIqdfylE4c2oT",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkfdIqdfylE4c2oM",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkfdIqdfylE4c2oN",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkfdIqdfylE4c2oP",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkfdIqdfylE4c2oQ",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkfdIqdfylE4c2oR",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkgRIqdfylE4c2oV",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkgRIqdfylE4c2oW",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkgRIqdfylE4c2oX",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkllIqdfylE4c2pm",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XklBIqdfylE4c2pe",
+  "state": "fixed",
+  "where": "#160"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XklBIqdfylE4c2pg",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XklBIqdfylE4c2ph",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XklBIqdfylE4c2pi",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkzIqdfylE4c2pZ",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkzIqdfylE4c2pa",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkzIqdfylE4c2pb",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkbIqdfylE4c2pQ",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkbIqdfylE4c2pR",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkbIqdfylE4c2pT",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkhpIqdfylE4c2oj",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkhcIqdfylE4c2of",
+  "state": "resolved",
+  "where": "The memory_sources rows reach the page without their id (the same rows are the CLI and MCP output, whose shape is fixed), and the list is shown in table order and never reordered, so the position is the only identity the page has",
+  "transition": "wontfix"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkhcIqdfylE4c2og",
+  "state": "resolved",
+  "where": "No field of a ledger item is unique within one injection: a pack merged before the tool call carries the same memory as planned and then omitted (reparentItems), and the rows have no id on the wire; the list is shown in ledger order and never reordered, so the position is the only identity the page has",
+  "transition": "wontfix"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkhcIqdfylE4c2oh",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkhcIqdfylE4c2oi",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkh3IqdfylE4c2ok",
+  "state": "fixed",
+  "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkh3IqdfylE4c2ol",
+  "state": "resolved",
+  "where": "Hono derives the route parameter names and their types from the string literal; a String.raw template widens the route to string and c.req.param('name') becomes string | undefined, so the literal with the escaped backslash stays",
+  "transition": "wontfix"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkh3IqdfylE4c2om",
+  "state": "fixed",
+  "where": "#163"
  }
 ]
