@@ -2039,7 +2039,6 @@ function timingTables(
   return { captureTable, injectionTable, waitTable, sizeTable };
 }
 
-/** The recall misses, SC summary, hook exit, lifecycle and compaction tables. */
 /** The recall misses and the SC verdict table. */
 function recallTables(computed: ReportComputed, bounds: BoundRow[]) {
   const { misses } = computed;
