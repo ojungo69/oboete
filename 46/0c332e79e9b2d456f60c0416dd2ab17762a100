@@ -1,0 +1,36 @@
+scripts/e2e/probe-contracts.mjs
+  s_4b63e288f02d53::t_040a193263dc2f 68
+  s_4b63e288f02d53::t_ea29bc1d8c727d 69
+scripts/e2e/isolated-user.mjs
+  s_359fcac8e97f88::t_d837f45623a11d 1151-1152,1851
+scripts/e2e/mcp-clients.mjs
+  s_359fcac8e97f88::t_4aff315c5f8485 218
+scripts/e2e/probe-lib/agents.mjs
+  s_359fcac8e97f88::t_c7868ab9d279da 336
+scripts/e2e/probes/claude.mjs
+  s_359fcac8e97f88::t_a1cc50f3074330 81-87,446,465
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "460c332e79e9b2d456f60c0416dd2ab17762a100",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_4b63e288f02d53": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07977-1bb4-70c3-ae3b-a949f8b4ca25",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
