@@ -1,0 +1,21 @@
+scripts/quality-debt-record-services.test.mjs
+  s_359fcac8e97f88::t_d3b93354fd7d91 359-361,365
+scripts/quality-debt-record.test-support.mjs
+  s_359fcac8e97f88::t_037007b89956af 83-86,109-110
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "1172924bd11f79020531ccf200371f2e75b1aa06",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
