@@ -8,7 +8,9 @@
   `readToken` in `scripts/quality-debt-services.mjs` reads them: line 2, under the note saying what
   the token is, unless the file is a single line, which is then the token itself. A file whose
   line 2 is blank has no token. The shell equivalent used below is
-  `tokenof() { awk 'NR==2{print; exit} END{if (NR==1) print}' "$1"; }`.
+  `tokenof` below, which refuses — with a non-zero status, so the `set -e` block stops before any
+  request — an empty candidate and one carrying anything outside `A-Za-z0-9_.~+/=-`. Every layout
+  the two rules are compared on is pinned by `scripts/quality-debt-record-token-parity.test.mjs`.
 - SonarCloud token needs read scope + issue administration (verified 2026-09-07 with `additionalFields=transitions`).
 - Codacy: anonymous read works for the public repository; per-issue ignores need an account API token (`CODACY_API_TOKEN`) for `npx @codacy/codacy-cloud-cli` (checkpoint C1 in the plan).
 - Inventories: `sonar-main-issues.json` and `codacy-main-issues.json` exported on 2026-09-07 (session scratchpad; copied next to the disposition record when batch A opens).
@@ -61,10 +63,12 @@ Expected: the installed bundle's `sha256sum` equals the tarball's `dist/oboete.m
 ## Service counts (after each merge's analysis)
 
 ```bash
-tokenof() { awk 'NR==2{print; exit} END{if (NR==1) print}' "$1"; }
+( set -e   # a subshell, so a refused credential stops the block without closing your shell
+tokenof() { awk 'NR==2{print; exit} END{if (NR==1) print}' "$1" | sed 's/\r$//' | grep -aEx '[A-Za-z0-9_.~+/=-]+'; }
 T=$(tokenof ~/SONAR_TOKEN.md)
 curl -s -u "$T:" 'https://sonarcloud.io/api/issues/search?componentKeys=ojungo69_free-mem&branch=main&resolved=false&ps=1' | python3 -c 'import sys,json; print("sonar open", json.load(sys.stdin)["total"])'
 curl -s -X POST 'https://app.codacy.com/api/v3/analysis/organizations/gh/ojungo69/repositories/oboete/issues/search?limit=1' -H 'content-type: application/json' -d '{}' | python3 -c 'import sys,json; d=json.load(sys.stdin); print("codacy current", d["pagination"].get("total", len(d["data"])))'
+)
 ```
 
 Expected trajectory: Sonar 310 → ≈ 295 (A) → ≈ 95 (B) → ≈ 30 (C) → 0 (F). Codacy 397 → ≈ 112 (A) → ≈ 40 (C) → ≈ 30 (D) → 0 (F). The Quality Gate conditions on `main` stay `OK` and `coverage` stays ≥ 93.3 %.
@@ -81,13 +85,15 @@ Expected: `--check --planned` exits 0 once every batch has merged; `--check` exi
 ## Final analysis confirmation (batch F, before writing 0 / 0)
 
 ```bash
-tokenof() { awk 'NR==2{print; exit} END{if (NR==1) print}' "$1"; }
+( set -e   # a subshell, so a refused credential stops the block without closing your shell
+tokenof() { awk 'NR==2{print; exit} END{if (NR==1) print}' "$1" | sed 's/\r$//' | grep -aEx '[A-Za-z0-9_.~+/=-]+'; }
 T=$(tokenof ~/SONAR_TOKEN.md); C=$(tokenof ~/CODACY_TOKEN.md); SHA=$(git rev-parse origin/main)
 curl -s -u "$T:" "https://sonarcloud.io/api/project_analyses/search?project=ojungo69_free-mem&branch=main&ps=1" | python3 -c "import sys,json; a=json.load(sys.stdin)['analyses'][0]; print(a['key'], a['revision'], a['date']); assert a['revision']=='$SHA', 'latest Sonar analysis is not the final SHA'"
 B="https://app.codacy.com/api/v3/analysis/organizations/gh/ojungo69/repositories/oboete/commits/$SHA"
 curl -s "https://app.codacy.com/api/v3/analysis/organizations/gh/ojungo69/repositories/oboete" | python3 -c "import sys,json; c=json.load(sys.stdin)['data']['lastAnalysedCommit']; print(c['sha'], c.get('endedAnalysis')); assert c['sha']=='$SHA' and c.get('endedAnalysis'), 'Codacy last analysed commit is not the final SHA'"
 curl -s -H "api-token: $C" "$B" | python3 -c "import sys,json; c=json.load(sys.stdin)['commit']; print(c['sha'], c.get('startedAnalysis'), c.get('endedAnalysis')); assert c['sha']=='$SHA' and c.get('endedAnalysis'), 'Codacy has not finished analysing the final SHA'"
 curl -s -H "api-token: $C" "$B/logs" | python3 -c "import sys,json; s={x['title']: x['status'] for x in json.load(sys.stdin)['data']['steps']}; print(s); need=['Opengrep','Lizard','markdownlint','Stylelint','ShellCheck','TSQLLint','SQLint']; bad=[t for t in need if s.get(t)!='success']; assert not bad, 'steps not successful: %s' % bad; other=[t for t,v in s.items() if v!='success' and t!='ESLint']; assert not other, 'other steps not successful: %s' % other; assert 'ESLint' not in s, 'ESLint step still runs (research R10: the tool is disabled by decision C3)'"
+)
 ```
 
 Expected: the Sonar analysis `revision` equals the final SHA; the repository's `data.lastAnalysedCommit` is the final SHA with an `endedAnalysis` timestamp (`--confirm` re-checks exactly this and refuses with `Codacy: the last analysed commit is not <sha>` otherwise, because the issue search has no commit selector; it also requires the Sonar analysis `revision` to be the same SHA and refuses with `Sonar: analysis <key> is not of commit <sha>` otherwise; neither message repeats a value from a response, run the curl above to see it); the Codacy commit response (`{commit, quality, coverage, meta}`, shape read from the live API on 2026-09-07) has `commit.sha` equal to the SHA and an `endedAnalysis` timestamp; the analysis log lists every required step as `success` and no ESLint step at all (research R10: the tool crashed on every commit and is disabled by decision C3; a log that still shows it means the disable did not take). Every assert exits non-zero otherwise. Only then run the two count commands and record 0 / 0 with these ids. No repository edit follows this SHA: the polish tasks are part of the last pull request.
