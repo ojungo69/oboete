@@ -255,7 +255,7 @@
   "service": "codacy",
   "id": "7935279dc22d4b6af001014179ebdff1",
   "state": "excluded",
-  "where": "Codacy repository setting: pattern Stylelint_scss_function-disallowed-list disabled (PATCH \u2026/tools/1f03328a-086e-459e-bfa3-73e56f01020f with a patterns array); app.css is plain CSS and the SCSS-only rule cannot apply, every other Stylelint rule keeps running"
+  "where": "Codacy repository setting: pattern Stylelint_scss_function-disallowed-list disabled (PATCH …/tools/1f03328a-086e-459e-bfa3-73e56f01020f with a patterns array); app.css is plain CSS and the SCSS-only rule cannot apply, every other Stylelint rule keeps running"
  },
  {
   "service": "codacy",
@@ -1810,5 +1810,260 @@
   "id": "8d7c0aaca1c1e2feee03858ac5214591",
   "state": "excluded",
   "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XklBIqdfylE4c2pc",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "agent output captured by the privacy detector, up to 1 MiB, controller: agent or the model behind it; effect: 1.4 s per 50,000 spaces after `<` blew the detector deadline (fail-closed drop) — real, fixed with a regex that examines each character once"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmSIqdfylE4c2p4",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "tool_name from the agent hook payload, a substring of the capped stdin with no cap of its own, controller: agent; effect: 1.3 s per 40,000-character name in the capture hook — real, fixed with an indexOf split"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmSIqdfylE4c2p5",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "same value and fix as events.ts:328 (codex spelling)"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmSIqdfylE4c2p6",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "same value and fix as events.ts:328 (grok spelling, no prefix)"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkoIqdfylE4c2pV",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "git remote URL from the clone's own .git/config, controller: whoever configured this clone; effect: bounded by the URL length — not exploitable, replaced by a loop for the rule"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkoIqdfylE4c2pW",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "same value as repo-identity.ts:63"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkcRIqdfylE4c2nj",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "managed block text built from oboete's own setup templates (the operator's file is parsed as TOML, never by this pattern) — not exploitable, replaced by a loop for the rule"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2ru",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "agent stdout captured by the e2e harness (degraded marker line), controller: the agent under test; effect: super-linear on that line before the rewrite, on an operator-run harness — not exploitable; anchored single-pass patterns now, linear in the line"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrWIqdfylE4c2sD",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "the client's own config.toml as read by the harness, controller: whoever writes that file; effect: super-linear on the file before the rewrite, on an operator-run harness — not exploitable; trimEnd now, linear in the file"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qa",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "fenced model reply in the probe harness, controller: the model behind the agent under test; effect: super-linear on the reply before the rewrite, on an operator-run harness — not exploitable; startsWith/endsWith/slice now, linear in the reply"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmfIqdfylE4c2p7",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "tmux pane line, controller: the TUI of the agent under test; effect: super-linear on the line before the rewrite, on an operator-run harness — not exploitable; single-pass prompt pattern now, linear in the line"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpTIqdfylE4c2q_",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "provider reply in the probe harness, controller: the model; effect: super-linear on the reply before the rewrite, on an operator-run harness — not exploitable; slice/trim fence strip now, linear in the reply"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksHIqdfylE4c2sk",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "fixture transcript path built by the generator itself, controller: the generator constant; effect: bounded — not exploitable, lastIndexOf slice for the rule"
+ },
+ {
+  "service": "codacy",
+  "id": "d3b9d9cfec9a260b9bc67f7dc5bfd707",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "sudo cat > file: the file is read as root and written as the invoking user on purpose (the report lands in that user's checkout); shellcheck directive with the reason at the line — not a defect"
+ },
+ {
+  "service": "codacy",
+  "id": "365aff788b569c400b4b80434ec21768",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "same as dogfood.sh:27"
+ },
+ {
+  "service": "codacy",
+  "id": "e8663dd2e1b2bebd385bcc8b3c6dec20",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "command name from argv, controller: the operator; `oboete constructor` reached Object.prototype and crashed with a TypeError instead of the usage — real (robustness), fixed with Object.hasOwn"
+ },
+ {
+  "service": "codacy",
+  "id": "dafdbd571c370b7fba8ce99f3564089e",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "jobId is the test's own literal (dco) and the indent width is a number; no value from outside the test enters the RegExp",
+  "verdict": "test constants — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "9205cba2e3f2cf9bba1767d7cac332d",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "jobId is the test's own literal (dco) and the indent width is a number; no value from outside the test enters the RegExp",
+  "verdict": "test constants — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "89f699a542cc7004922db089eccd8a28",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "the 40-hex string is the commit SHA that pins SonarSource/sonarqube-scan-action, not a key; the token comes from secrets.SONAR_TOKEN on the next lines",
+  "verdict": "action pin — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "44227dfca703cd22b6549c27140b342",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "PI_TOOLS[native] runs after Object.hasOwn(PI_TOOLS, native) on the line above, so a payload name can only select an own entry of the constant table",
+  "verdict": "tool name from the Pi payload, guarded by hasOwn — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "3fe04e204c3d90d84b07fc9ae40ce4b9",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "the RegExp is built once from PATH_KEYS and JSON_VALUE, both module constants; no payload text enters the pattern",
+  "verdict": "module constants — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "f5834f762e53f0596f3655477508677f",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "scanKey is called with keys.session and keys.tool, constants of the agent table; the payload is only the subject string",
+  "verdict": "module constants — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "6bed5dd752cbea6bc7380c487d90d4d5",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "owner_token is a randomUUID lease token compared in JavaScript against the row read from the local SQLite file (in a directory oboete creates with mode 0700); no remote party can time the comparison",
+  "verdict": "local lease token — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "c19402d47d336de1dcbfe06a0941546e",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "same lease token as observe.ts:220, compared inside a write transaction on the local database",
+  "verdict": "local lease token — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "9a7dcbd9763eafd49000cc2713240859",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "token === null tests whether a lease was acquired; the operand is null, not a secret",
+  "verdict": "null check — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "4d4300224281450a2475c8eae7f02eaa",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "hash !== null tests whether the span was an issued pack; the operand is null, not a secret",
+  "verdict": "null check — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "ef1d4ba180c1a55371892f6012cd34fc",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "token !== '' tests whether the variable is set; the operand is the empty string, not a secret",
+  "verdict": "empty-string check — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "8b7418a747f9f274c583330c80f6d0f1",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "trusted_hash === hash compares two hashes of the operator's own config files on the same machine; there is no remote party to observe the timing",
+  "verdict": "local file hashes — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "60d9a958fc1f01dca7c13c3848cc93e6",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "the loop reads header[key] from the parsed TOML to build a path; nothing is assigned through the key, so no object can be polluted",
+  "verdict": "read-only traversal — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "8a6b8522689d3e902fc9868a85312760",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "tableAt reads value[key] after isPlainObject and Object.hasOwn checks; nothing is assigned through the key",
+  "verdict": "read-only traversal — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "1012225090f36c0cd8030d0f9a7bd8f",
+  "state": "fixed",
+  "where": "#160",
+  "verdict": "glob from the repository's .oboete.toml (a non-operator controller) reaching compileGlob through globRuleError; the class itself is one character and cannot backtrack, but the rule was compiled before its 256-character bound was reported and the tokenizer searched the rest of the rule at every `[` (6.8 s per 1 MiB on the capture path) — real (availability), fixed: length gate before compile, linear tokenizer"
+ },
+ {
+  "service": "codacy",
+  "id": "f41f371530c64b029188bab62e0d722a",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "only `?` placeholders are joined into the SQL; the memory ids are bound as parameters",
+  "verdict": "bound parameters — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "b407b76b7f26b1de6a80423147d7d51c",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "only `?` placeholders are joined into the SQL; the memory ids are bound as parameters",
+  "verdict": "bound parameters — not applicable"
+ },
+ {
+  "service": "codacy",
+  "id": "bc473f9373cc44f2a96a2777632e5a3b",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "browser code: every caller passes a literal /api path with encodeURIComponent on the id, and the request goes to the page's own origin",
+  "verdict": "viewer frontend, literal same-origin paths — not applicable"
  }
 ]

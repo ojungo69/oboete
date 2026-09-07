@@ -80,7 +80,7 @@ export function applyTomlBlock(
   const target = resolveTarget(file);
   const lines = readLines(target);
   const region = findRegion(lines, file);
-  const inner = blockText.replace(/^\n+|\n+$/g, '');
+  const inner = trimNewlines(blockText);
   const block = inner === '' ? [BLOCK_BEGIN, BLOCK_END] : [BLOCK_BEGIN, ...inner.split('\n'), BLOCK_END];
   const outside = region ? [...lines.slice(0, region.start), ...lines.slice(region.end + 1)] : lines;
   const current = parseTomlOrThrow(joinLines(outside), file);
@@ -159,6 +159,15 @@ export function hasUnmarkedTomlBlock(file: string, blockText: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** The block text without leading and trailing newlines; the former regex re-scanned a long run. */
+function trimNewlines(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && text[start] === '\n') start += 1;
+  while (end > start && text[end - 1] === '\n') end -= 1;
+  return text.slice(start, end);
 }
 
 function tableAt(root: unknown, path: readonly string[]): unknown {

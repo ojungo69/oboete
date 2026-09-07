@@ -22,7 +22,7 @@ import {
 } from '../../src/config.js';
 import { appendLog, scrubCredentials } from '../../src/log.js';
 import { ensureDirectories, oboetePaths, resolveHome } from '../../src/paths.js';
-import { withTempHome } from '../helpers/home.js';
+import { WALL_CLOCK_IS_MEASURED, withTempHome } from '../helpers/home.js';
 
 // Computed independently of the implementation with node:crypto:
 // sha256(JSON.stringify([preset, host, credentialSource, costClass, egressClasses])).
@@ -362,6 +362,31 @@ test('loadRepoRules accepts path rules only', async () => {
     assert.throws(
       () => loadRepoRules(home),
       (error: unknown) => error instanceof RepoConfigError && error.code === 'repo_config_malformed',
+    );
+
+    // A rule over the bound is refused without being compiled: 1 MiB of `[` once cost 6.8 s in the
+    // glob tokenizer before the length issue was reported, on the capture path.
+    writeFileSync(
+      join(home, '.oboete.toml'),
+      `[privacy]\nsecret_paths = ${JSON.stringify(['['.repeat(1024 * 1024)])}\n`,
+    );
+    const started = performance.now();
+    assert.throws(
+      () => loadRepoRules(home),
+      (error: unknown) => error instanceof RepoConfigError && error.code === 'repo_config_malformed',
+    );
+    const elapsed = performance.now() - started;
+    if (WALL_CLOCK_IS_MEASURED) assert.ok(elapsed < 500, `took ${elapsed.toFixed(0)} ms`);
+    // The witness that the rule was not compiled: over the bound and malformed, the error names
+    // only the length, never the class.
+    writeFileSync(
+      join(home, '.oboete.toml'),
+      `[privacy]\nsecret_paths = ${JSON.stringify([`${'['.repeat(300)}[z-a]`])}\n`,
+    );
+    assert.throws(
+      () => loadRepoRules(home),
+      (error: unknown) =>
+        error instanceof RepoConfigError && error.code === 'repo_config_malformed' && !error.message.includes('usable path rule'),
     );
   });
 });

@@ -291,7 +291,7 @@ function readIfPresent(file) {
 
 function appendProbeToml(file, block) {
   const text = readIfPresent(file);
-  const kept = text === undefined ? "" : `${removeTomlServerTables(text, PROBE_NAME).replace(/\s+$/u, "")}\n`;
+  const kept = text === undefined ? "" : `${removeTomlServerTables(text, PROBE_NAME).trimEnd()}\n`;
   // mode applies only when the file is created; an existing file keeps its own mode.
   fs.writeFileSync(file, `${kept}${block.trim()}\n`, { mode: 0o600 });
 }

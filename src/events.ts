@@ -322,13 +322,32 @@ const NATIVE_TOOL_NAMES: Record<AgentName, Readonly<Record<string, ToolName>>> =
   unknown: {},
 };
 
-// How each agent spells an MCP tool. Pi is absent: no probe has shown Pi's MCP naming, and an
-// invented pattern would mislabel an extension tool, so Pi's unlisted names stay `other`.
-const MCP_TOOL_PATTERNS: Partial<Record<AgentName, RegExp>> = {
-  claude: /^mcp__(.+?)__(.+)$/,
-  codex: /^mcp__(.+?)__(.+)$/,
-  grok: /^(.+?)__(.+)$/,
+// How each agent spells an MCP tool: the prefix, then `<server>__<tool>`. Pi is absent: no probe
+// has shown Pi's MCP naming, and an invented pattern would mislabel an extension tool, so Pi's
+// unlisted names stay `other`.
+const MCP_TOOL_PREFIXES: Partial<Record<AgentName, string>> = {
+  claude: 'mcp__',
+  codex: 'mcp__',
+  grok: '',
 };
+
+// What `.` never matched in the former `/^mcp__(.+?)__(.+)$/`: a name carrying one of these is
+// still not an MCP name.
+const LINE_TERMINATOR = /[\n\r\u2028\u2029]/;
+
+/**
+ * `<prefix><server>__<tool>` split at the first `__` after a non-empty server name, with a
+ * non-empty tool name after it. A regular expression did this before, and its lazy group made the
+ * engine re-scan the rest of the name for every `_` it passed (1.3 s on a 40,000-character name
+ * from a payload), so the split is spelled out.
+ */
+function splitMcpName(native: string, prefix: string): [string, string] | null {
+  if (!native.startsWith(prefix) || LINE_TERMINATOR.test(native)) return null;
+  const rest = native.slice(prefix.length);
+  const separator = rest.indexOf('__', 1);
+  if (separator === -1 || separator + 2 >= rest.length) return null;
+  return [rest.slice(0, separator), rest.slice(separator + 2)];
+}
 
 export function normalizeToolName(agent: AgentName, native: string): ToolName {
   const table = NATIVE_TOOL_NAMES[agent];
@@ -336,9 +355,10 @@ export function normalizeToolName(agent: AgentName, native: string): ToolName {
   // not be read as a mapping (FR-004: an event never dictates what oboete records).
   const mapped = Object.hasOwn(table, native) ? table[native] : undefined;
   if (mapped !== undefined) return mapped;
-  const match = MCP_TOOL_PATTERNS[agent]?.exec(native);
-  if (match) {
-    const name = `mcp:${match[1]}/${match[2]}`;
+  const prefix = MCP_TOOL_PREFIXES[agent];
+  const parts = prefix === undefined ? null : splitMcpName(native, prefix);
+  if (parts) {
+    const name = `mcp:${parts[0]}/${parts[1]}`;
     // A server or tool name carrying a slash would forge a normalized name, so it stays `other`.
     if (isToolName(name)) return name;
   }

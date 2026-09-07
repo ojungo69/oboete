@@ -23,6 +23,7 @@ import {
   detectInWorker,
   detectSync,
   compileGlob,
+  globRuleError,
   matchSecretPath,
   redactSecrets,
   stripPrivate,
@@ -162,6 +163,27 @@ test('fail-closed: stripPrivate removes every private span, including an unclose
   assert.deepEqual(stripPrivate('no tag here'), { text: 'no tag here', removed: 0 });
 });
 
+test('stripPrivate reads an unclosed tag prefix once, not once per space', () => {
+  // Captured text is agent output up to 1 MiB. The tag itself was always fast; the shape that
+  // backtracked (1.4 s on 50,000 spaces) is the second one below: spaces after `<` and no tag.
+  const text = `<${' '.repeat(1024 * 1024)}private>`;
+  const started = performance.now();
+  const result = stripPrivate(text);
+  const elapsed = performance.now() - started;
+  assert.deepEqual(result, { text: '', removed: 1 });
+  if (WALL_CLOCK_IS_MEASURED) assert.ok(elapsed < 200, `took ${elapsed.toFixed(0)} ms`);
+  // The non-matching shape is the one that backtracked: a run of spaces after `<` and then not a tag.
+  const noTag = `<${' '.repeat(1024 * 1024)}x`;
+  const startedNoTag = performance.now();
+  assert.deepEqual(stripPrivate(noTag), { text: noTag, removed: 0 });
+  const elapsedNoTag = performance.now() - startedNoTag;
+  if (WALL_CLOCK_IS_MEASURED) assert.ok(elapsedNoTag < 200, `took ${elapsedNoTag.toFixed(0)} ms`);
+  assert.deepEqual(stripPrivate(`< ${'x'.repeat(1024 * 1024)}`), {
+    text: `< ${'x'.repeat(1024 * 1024)}`,
+    removed: 0,
+  });
+});
+
 test('fail-closed: a private span never reaches the detector result', async () => {
   const wrapped = corpusLine('github-classic-pat').secret;
   const detected = assertDetected(
@@ -216,6 +238,20 @@ test('fail-closed: a path rule matches the repository-relative and the raw form'
   assert.equal(matchSecretPath('/etc/ssl/server.pem', ['/etc/**'], null), '/etc/**');
   assert.equal(matchSecretPath('/etc/ssl/server.pem', ['*.pem'], null), '*.pem');
   assert.equal(matchSecretPath('server.pem', [], root), null);
+});
+
+test('a rule of unclosed brackets is tokenized once, not once per bracket', () => {
+  // An operator rule (~/.oboete/config.toml) has no length bound, and each `[` used to search the
+  // rest of the rule for a `]` that was never there: 1 MiB of `[` took over 4 s, now under 200 ms,
+  // so the bound below holds on a loaded runner and fails on the old code by a wide margin.
+  const started = performance.now();
+  assert.equal(globRuleError('['.repeat(1024 * 1024)), null);
+  const elapsed = performance.now() - started;
+  if (WALL_CLOCK_IS_MEASURED) assert.ok(elapsed < 1500, `took ${elapsed.toFixed(0)} ms`);
+  assert.equal(compileGlob('[ab]c[').test('bc['), true);
+  assert.equal(compileGlob('[ab]c[').test('cc['), false);
+  assert.equal(compileGlob('a[[]b').test('a[b'), true);
+  assert.equal(compileGlob('[a[b]c').test('[c'), true);
 });
 
 test('a full repository rule list keeps one path match bounded', () => {

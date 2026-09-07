@@ -28,9 +28,11 @@ test('--version prints the package version', () => {
 });
 
 test('unknown command exits 2 and prints usage to stderr', () => {
-  const result = run(['not-a-command']);
-  assert.equal(result.status, 2);
-  assert.match(result.stderr, /Usage: oboete/);
+  for (const name of ['not-a-command', 'constructor', '__proto__', 'toString']) {
+    const result = run([name]);
+    assert.equal(result.status, 2, name);
+    assert.match(result.stderr, /Usage: oboete/, name);
+  }
 });
 
 test('oboete doctor prints a report', async () => {

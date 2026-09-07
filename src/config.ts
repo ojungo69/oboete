@@ -128,6 +128,10 @@ const injectionSchema = z.strictObject({
  */
 function secretPathRule(rule: z.ZodString): z.ZodType<string> {
   return rule.superRefine((value, context) => {
+    // Zod runs this refinement even when `max` already failed, so a rule the schema has refused
+    // (over the bound, or empty) is not compiled: that issue is the answer, and the compile cost
+    // stays bounded by the schema's own `max`.
+    if (context.issues.length > 0) return;
     const error = globRuleError(value);
     if (error !== null) context.addIssue({ code: 'custom', message: `is not a usable path rule (${error})` });
   });

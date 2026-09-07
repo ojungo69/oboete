@@ -91,7 +91,9 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  const load = commands[name];
+  // `oboete constructor` would otherwise pick Object's constructor off the prototype and crash
+  // with a TypeError instead of printing the usage.
+  const load = Object.hasOwn(commands, name) ? commands[name] : undefined;
   if (load) {
     const run = await load();
     const from = argv.indexOf(name);

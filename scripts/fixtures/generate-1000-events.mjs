@@ -707,7 +707,7 @@ function emitGrokTool(g, session, spec, tagsPre, tagsPost) {
       timed_out: false,
       description: pre.toolInput.description,
       current_dir: ROOT_PH,
-      output_file: `${session.transcript.replace(/updates\.jsonl$|[^/]+\.jsonl$/, '')}terminal/${id}.log`,
+      output_file: `${session.transcript.slice(0, session.transcript.lastIndexOf('/') + 1)}terminal/${id}.log`,
       total_bytes: Buffer.byteLength(spec.body),
     };
     post.toolResult = result;

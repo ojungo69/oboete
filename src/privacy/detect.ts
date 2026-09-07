@@ -69,7 +69,11 @@ export type DetectorResult =
  * text. The removed text is never part of the result.
  */
 export function stripPrivate(text: string): { text: string; removed: number } {
-  const tag = /<\s*(\/?)\s*private\s*>/gi;
+  // The optional slash sits between two whitespace runs, so the earlier `\s*(\/?)\s*` form let the
+  // engine split a run of spaces every possible way before failing (1.4 s on 50,000 spaces, and the
+  // captured text can be 1 MiB). With the slash required before the second run, each character is
+  // examined once.
+  const tag = /<\s*(?:(\/)\s*)?private\s*>/gi;
   let depth = 0;
   let kept = '';
   let cursor = 0;
@@ -112,38 +116,43 @@ function tokenize(glob: string): GlobToken[] {
   const tokens: GlobToken[] = [];
   // A rule without a slash matches the file name at any depth, as it does in .gitignore.
   if (!glob.includes('/')) tokens.push({ kind: 'anyDirectories' });
-  for (let index = 0; index < glob.length; index += 1) {
+  // A `[` opens a class only when some `]` lies after it, and the class then consumes that `]`, so
+  // the search below always hits and a rule made of `[` with no `]` is read once, not once per `[`.
+  const lastClose = glob.lastIndexOf(']');
+  let index = 0;
+  while (index < glob.length) {
     const character = glob[index] as string;
     if (character === '*') {
       if (glob[index + 1] === '*') {
         // `**/` is zero or more directories, so `a/**/b` matches `a/b` as well as `a/x/b`.
         if (glob[index + 2] === '/') {
           tokens.push({ kind: 'anyDirectories' });
-          index += 2;
+          index += 3;
         } else {
           tokens.push({ kind: 'anyStar' });
-          index += 1;
+          index += 2;
         }
       } else {
         tokens.push({ kind: 'segmentStar' });
+        index += 1;
       }
       continue;
     }
     if (character === '?') {
       tokens.push({ kind: 'one', test: (candidate) => candidate !== '/' });
+      index += 1;
       continue;
     }
-    if (character === '[') {
-      const end = glob.indexOf(']', index + 1);
-      if (end !== -1) {
-        const body = glob.slice(index + 1, end).replace(/^[!^]/, '^');
-        const expression = new RegExp(`^[${body}]$`);
-        tokens.push({ kind: 'one', test: (candidate) => expression.test(candidate) });
-        index = end;
-        continue;
-      }
+    if (character === '[' && index < lastClose) {
+      const close = glob.indexOf(']', index + 1);
+      const body = glob.slice(index + 1, close).replace(/^[!^]/, '^');
+      const expression = new RegExp(`^[${body}]$`);
+      tokens.push({ kind: 'one', test: (candidate) => expression.test(candidate) });
+      index = close + 1;
+      continue;
     }
     tokens.push({ kind: 'one', test: (candidate) => candidate === character });
+    index += 1;
   }
   return tokens;
 }

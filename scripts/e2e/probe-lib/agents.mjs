@@ -831,8 +831,8 @@ export function oversizedOutcome(r, dir) {
 
 export function stripFences(text) {
   const t = String(text || "").trim();
-  const m = t.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/);
-  return (m ? m[1] : t).trim();
+  if (t.length < 6 || !t.startsWith("```") || !t.endsWith("```")) return t;
+  return t.slice(t.startsWith("```json") ? 7 : 3, -3).trim();
 }
 
 export function parseObservationsJson(text) {
