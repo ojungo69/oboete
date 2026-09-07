@@ -630,7 +630,7 @@ open 46 / fixed 45 / resolved 19 / excluded 287
 | ec24f91da77ed0722e0e71f300351662 | Lizard_nloc-medium | src/doctor/provider.ts:315 | fixed (planned) | #166 |
 | 8615949cc9064bddaccd3ab613d65fb2 | Lizard_nloc-medium | src/doctor/storage.ts:38 | fixed (planned) | #166 |
 | a7ff455628bd7793e1a0f87d9be3723d | Lizard_nloc-medium | src/doctor/storage.ts:143 | fixed (planned) | #166 |
-| 7fc74b21c7bde3f5ff9b558373a539f2 | Lizard_nloc-medium | src/events.ts:168 | fixed (planned) | #166 |
+| 7fc74b21c7bde3f5ff9b558373a539f2 | Lizard_nloc-medium | src/events.ts:168 | fixed (planned) | #162 |
 | d7031b338e6f7512b5fd5ed4a6257f17 | Lizard_file-nloc-medium | src/fixture/replay.ts:1 | open |  |
 | 51024f006140e9bc315a9218468bc848 | Lizard_nloc-medium | src/fixture/replay.ts:696 | fixed (planned) | #164 |
 | 4790455d8db963ddff6afd9f8e2df464 | Lizard_nloc-medium | src/injection/deferred.ts:203 | fixed (planned) | #164 |
@@ -649,7 +649,7 @@ open 46 / fixed 45 / resolved 19 / excluded 287
 | 9c55aae5e3bdd0bf530eb6ec7b70eec6 | Lizard_nloc-medium | src/observer/llm.ts:110 | fixed (planned) | #165 |
 | 188840d78c29d17901a37c07a2879cbe | Lizard_nloc-medium | src/observer/request.ts:117 | fixed (planned) | #165 |
 | 1012225090f36c0cd8030d0f9a7bd8f | Semgrep_javascript_dos_rule-non-literal-regexp | src/privacy/detect.ts:140 | resolved (planned) | The class body comes from a repository .oboete.toml rule that is refused above 256 characters before it is compiled and tokenized once; the RegExp is a single character class and cannot backtrack (#160 fixed the compile-before-bound and the quadratic tokenizer) — glob from the repository's .oboete.toml (a non-operator controller) reaching compileGlob through globRuleError; the class itself is one character and cannot backtrack, but the rule was compiled before its 256-character bound was reported and the tokenizer searched the rest of the rule at every `[` (6.8 s per 1 MiB on the capture path) — real (availability), fixed: length gate before compile, linear tokenizer |
-| 6b8a3d3310884f227d775ae9b98b7136 | Lizard_nloc-medium | src/repo-identity.ts:73 | fixed (planned) | #166 |
+| 6b8a3d3310884f227d775ae9b98b7136 | Lizard_nloc-medium | src/repo-identity.ts:73 | fixed (planned) | #162 |
 | 8b7418a747f9f274c583330c80f6d0f1 | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/setup/detect.ts:187 | resolved (planned) | trusted_hash === hash compares two hashes of the operator's own config files on the same machine; there is no remote party to observe the timing — local file hashes — not applicable |
 | 7229071f8c9bc53fbb3044e81d01d86a | Lizard_nloc-medium | src/setup/detect.ts:211 | fixed (planned) | #166 |
 | 8a6b8522689d3e902fc9868a85312760 | Semgrep_javascript.lang.security.audit.prototype-pollution.prototype-pollution-loop.prototype-pollution-loop | src/setup/managed-block.ts:168 | resolved (planned) | tableAt reads value[key] after isPlainObject and Object.hasOwn checks; nothing is assigned through the key — read-only traversal — not applicable |
