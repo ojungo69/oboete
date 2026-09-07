@@ -280,13 +280,15 @@ for (const { args, service, index } of serviceModes) {
 // may ever stand in for the token: a layout the reader cannot place the token in is refused, never
 // resolved by moving the choice onto the next line.
 //
-// All five layouts below must reach the service with the token in the api-token header.
+// All seven layouts below must reach the service with the token in the api-token header.
 for (const [name, contents] of [
   ['a note above the token', 'Codacy account token for ojungo69\nfixture-token\n'],
   ['a note above and text below', '# Test credentials\r\nfixture-token\r\nignored\r\n'],
   ['several trailing newlines', 'Codacy account token\nfixture-token\n\n\n'],
   ['the token alone', 'fixture-token\n'],
   ['no trailing newline', 'fixture-token'],
+  ['the token alone and a CRLF ending', 'fixture-token\r\n'],
+  ['a blank line where the note would be', '\nfixture-token\n'],
 ]) {
   test(`--apply-codacy reads the token from a file with ${name}`, (t) => {
     const { cwd, ledger } = fixture(t);
@@ -317,6 +319,7 @@ const missing = 'must contain the token, alone or on the line under a note';
 const unexpected = 'contains an unexpected character';
 for (const [name, contents, message] of [
   ['the file is empty', '\n\n', missing],
+  ['the file is zero bytes', '', missing],
   ['a blank line sits where the token belongs', '# Note\n\nexample.invalid/account\n', missing],
   ['a blank line precedes a malformed token', '\nfixture token\nignored\n', unexpected],
   ['blank lines surround the token', '\n\nfixture-token\n\n', missing],
@@ -342,6 +345,25 @@ for (const [name, contents, message] of [
     }
   });
 }
+
+// The ambiguity the reader accepts knowingly: a file of one token-shaped word is sent, because
+// nothing local can tell a bare token from a bare note shaped like one. What must hold is that the
+// service is the one that says no, and that the word itself never reaches the output.
+test('--apply-codacy sends a lone token-shaped word and reports the service rejecting it', (t) => {
+  const { cwd, ledger } = fixture(t);
+  Object.assign(ledger[4], { state: 'resolved', reason: 'AcceptedUse' });
+  delete ledger[4].confirmed;
+  writeJson(cwd, 'ledger.json', ledger);
+  writeFileSync(join(cwd, 'CODACY_TOKEN.md'), 'Credentials\n');
+  const before = readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8');
+  const result = run(cwd, ['--apply-codacy'], apiStub([{ status: 401 }]));
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, 'Codacy token rejected\n');
+  assert.deepEqual(readCalls(cwd).filter((call) => call.url).map((call) => [call.url, call.authMatches]),
+    [['https://app.codacy.com/api/v3/user', false]]);
+  assert.equal(readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8'), before);
+  assert.equal((result.stdout + result.stderr).includes('Credentials'), false);
+});
 
 for (const [service, args] of [['SONAR', ['--apply-sonar']], ['CODACY', ['--apply-codacy']], ['SONAR', confirmArgs]]) {
   for (const [name, token] of [['carriage return', 'fixture\rtoken'], ['NUL', 'fixture\0token'], ['trailing space', 'fixture-token ']]) {

@@ -4,10 +4,15 @@
 
 ## Prerequisites
 
-- Every query below is read-only and anonymous: the repository is public, and SonarCloud's issue
-  search and analysis search and Codacy's commit and log endpoints all answer without credentials.
-  Measured 2026-09-07 against `f2f5b4be` — the authenticated and anonymous issue counts are the same
-  number, 36. So none of the verification commands handle a token, and none can leak one.
+- The two service-query blocks — "Service counts" and "Final analysis confirmation" — are read-only
+  and anonymous: the repository is public, and SonarCloud's issue search and analysis search and
+  Codacy's repository, commit and log endpoints all answer without credentials. Measured 2026-09-07
+  against `f2f5b4be`: the authenticated and anonymous issue counts are the same number, 36, and the
+  Codacy commit and log responses are byte-identical either way. So neither block reads, holds or
+  transmits a token, and neither can leak one. This says nothing about the candidate-bundle block
+  under "Per-batch verification", which sources `~/.oboete-credentials` under `set -a` so the dogfood
+  harness can reach the agents' providers; those variables live in the `sudo -u oboete-dogfood` shell
+  and are the account's own, not the service tokens this section is about.
 - Credentials are needed only by the modes that authenticate to a service — `--apply-sonar`,
   `--apply-codacy` and `--confirm` — which read them themselves from `~/SONAR_TOKEN.md` and
   `~/CODACY_TOKEN.md` through `readToken` in `scripts/quality-debt-services.mjs`, and never print
