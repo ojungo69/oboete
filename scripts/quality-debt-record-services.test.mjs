@@ -356,11 +356,13 @@ test('--apply-codacy sends a lone token-shaped word and reports the service reje
   writeJson(cwd, 'ledger.json', ledger);
   writeFileSync(join(cwd, 'CODACY_TOKEN.md'), 'Credentials\n');
   const before = readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8');
-  const result = run(cwd, ['--apply-codacy'], apiStub([{ status: 401 }]));
+  // The stub compares the header against the word the file holds, so the assertion says that exact
+  // word was sent. Comparing against the default fixture token would pass for any other word too.
+  const result = run(cwd, ['--apply-codacy'], apiStub([{ status: 401 }], {}, 'Credentials'));
   assert.equal(result.status, 1);
   assert.equal(result.stderr, 'Codacy token rejected\n');
   assert.deepEqual(readCalls(cwd).filter((call) => call.url).map((call) => [call.url, call.authMatches]),
-    [['https://app.codacy.com/api/v3/user', false]]);
+    [['https://app.codacy.com/api/v3/user', true]]);
   assert.equal(readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8'), before);
   assert.equal((result.stdout + result.stderr).includes('Credentials'), false);
 });
