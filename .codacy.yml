@@ -1,9 +1,25 @@
 ---
-include_paths:
-  - "src/**"
-  - "scripts/**"
+# Codacy analysis scope. `include_paths` on its own excludes nothing (it only carves exceptions out of
+# `exclude_paths`), so every rule below is an exclusion with the file class it covers and why it
+# cannot hide a finding in the shipped src/ tree. Full disposition: docs/evidence/quality-debt-2026-09.md
+exclude_paths:
+  - "legacy/**"          # frozen historical evidence, not product code (also excluded on SonarCloud)
+  - "package-lock.json"  # generated lockfile
+  - "build/**"           # build output
+  - "dist/**"            # bundle output
+  - "coverage/**"        # coverage output
 
 engines:
+  tsqllint:
+    exclude_paths:
+      - "src/db/migrations/**"   # T-SQL (SQL Server) rules; the files are SQLite migrations
+  SQLint:
+    exclude_paths:
+      - "src/db/migrations/**"   # generic SQL linter (PostgreSQL grammar); the files are SQLite migrations
   lizard:
     exclude_paths:
-      - "legacy/**"
+      - "test/**"                # unit/fault test bodies are linear given/when/then scripts; src/ and scripts/ (incl. scripts/e2e/*.test.mjs) stay measured
+  opengrep:
+    exclude_paths:
+      - "test/**"                # rules assume untrusted input reaches the call; tests run under the operator's own account
+      - "scripts/e2e/**"         # operator-run dogfood harness, not in the npm package; src/ and the other scripts/ stay covered
