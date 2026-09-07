@@ -1865,35 +1865,35 @@
   "id": "AaB3XkqvIqdfylE4c2ru",
   "state": "fixed",
   "where": "#160",
-  "verdict": "agent stdout captured by the e2e harness (degraded marker line), controller: the agent under test; effect: bounded by one captured line — not exploitable, anchored patterns for the rule"
+  "verdict": "agent stdout captured by the e2e harness (degraded marker line), controller: the agent under test; effect: super-linear on that line before the rewrite, on an operator-run harness — not exploitable; anchored single-pass patterns now, linear in the line"
  },
  {
   "service": "sonar",
   "id": "AaB3XkrWIqdfylE4c2sD",
   "state": "fixed",
   "where": "#160",
-  "verdict": "the client's own config.toml as read by the harness, controller: whoever writes that file; effect: bounded by the file size — not exploitable, trimEnd for the rule"
+  "verdict": "the client's own config.toml as read by the harness, controller: whoever writes that file; effect: super-linear on the file before the rewrite, on an operator-run harness — not exploitable; trimEnd now, linear in the file"
  },
  {
   "service": "sonar",
   "id": "AaB3XknlIqdfylE4c2qa",
   "state": "fixed",
   "where": "#160",
-  "verdict": "fenced model reply in the probe harness, controller: the model behind the agent under test; effect: bounded only by the agent's timeout, in an operator-run harness — not exploitable, startsWith/endsWith/slice for the rule"
+  "verdict": "fenced model reply in the probe harness, controller: the model behind the agent under test; effect: super-linear on the reply before the rewrite, on an operator-run harness — not exploitable; startsWith/endsWith/slice now, linear in the reply"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmfIqdfylE4c2p7",
   "state": "fixed",
   "where": "#160",
-  "verdict": "tmux pane line, controller: the TUI of the agent under test; effect: bounded by the pane width — not exploitable, single-pass prompt pattern for the rule"
+  "verdict": "tmux pane line, controller: the TUI of the agent under test; effect: super-linear on the line before the rewrite, on an operator-run harness — not exploitable; single-pass prompt pattern now, linear in the line"
  },
  {
   "service": "sonar",
   "id": "AaB3XkpTIqdfylE4c2q_",
   "state": "fixed",
   "where": "#160",
-  "verdict": "provider reply in the probe harness, controller: the model; effect: bounded by the reply the harness stores — not exploitable, slice/trim fence strip for the rule"
+  "verdict": "provider reply in the probe harness, controller: the model; effect: super-linear on the reply before the rewrite, on an operator-run harness — not exploitable; slice/trim fence strip now, linear in the reply"
  },
  {
   "service": "sonar",
@@ -1976,7 +1976,7 @@
   "id": "6bed5dd752cbea6bc7380c487d90d4d5",
   "state": "resolved",
   "reason": "FalsePositive",
-  "where": "owner_token is a randomUUID lease token compared inside the local SQLite file (directory mode 0700); no remote party can time the comparison",
+  "where": "owner_token is a randomUUID lease token compared in JavaScript against the row read from the local SQLite file (in a directory oboete creates with mode 0700); no remote party can time the comparison",
   "verdict": "local lease token — not applicable"
  },
  {

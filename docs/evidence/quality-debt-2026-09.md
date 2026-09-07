@@ -25,7 +25,7 @@ open 282 / fixed 13 / resolved 0 / excluded 15
 | AaB3XkqvIqdfylE4c2rr | javascript:S7765 | scripts/e2e/isolated-user.mjs:115 | open |  |
 | AaB3XkqvIqdfylE4c2rs | javascript:S7786 | scripts/e2e/isolated-user.mjs:154 | open |  |
 | AaB3XkqvIqdfylE4c2rt | javascript:S7780 | scripts/e2e/isolated-user.mjs:180 | open |  |
-| AaB3XkqvIqdfylE4c2ru | javascript:S8786 | scripts/e2e/isolated-user.mjs:197 | fixed (planned) | #160 — agent stdout captured by the e2e harness (degraded marker line), controller: the agent under test; effect: bounded by one captured line — not exploitable, anchored patterns for the rule |
+| AaB3XkqvIqdfylE4c2ru | javascript:S8786 | scripts/e2e/isolated-user.mjs:197 | fixed (planned) | #160 — agent stdout captured by the e2e harness (degraded marker line), controller: the agent under test; effect: super-linear on that line before the rewrite, on an operator-run harness — not exploitable; anchored single-pass patterns now, linear in the line |
 | AaB3XkqvIqdfylE4c2rv | javascript:S3776 | scripts/e2e/isolated-user.mjs:462 | open |  |
 | AaB3XkqvIqdfylE4c2rw | javascript:S107 | scripts/e2e/isolated-user.mjs:906 | open |  |
 | AaB3XkqvIqdfylE4c2rx | javascript:S7744 | scripts/e2e/isolated-user.mjs:924 | open |  |
@@ -41,7 +41,7 @@ open 282 / fixed 13 / resolved 0 / excluded 15
 | AaB3XkrWIqdfylE4c2sA | javascript:S7781 | scripts/e2e/mcp-clients.mjs:218 | open |  |
 | AaB3XkrWIqdfylE4c2sB | javascript:S7780 | scripts/e2e/mcp-clients.mjs:218 | open |  |
 | AaB3XkrWIqdfylE4c2sC | javascript:S7780 | scripts/e2e/mcp-clients.mjs:254 | open |  |
-| AaB3XkrWIqdfylE4c2sD | javascript:S8786 | scripts/e2e/mcp-clients.mjs:294 | fixed (planned) | #160 — MCP client output line, controller: the client process the harness started; effect: bounded by one line — not exploitable, trimEnd for the rule |
+| AaB3XkrWIqdfylE4c2sD | javascript:S8786 | scripts/e2e/mcp-clients.mjs:294 | fixed (planned) | #160 — the client's own config.toml as read by the harness, controller: whoever writes that file; effect: super-linear on the file before the rewrite, on an operator-run harness — not exploitable; trimEnd now, linear in the file |
 | AaB3XkrWIqdfylE4c2sF | javascript:S3776 | scripts/e2e/mcp-clients.mjs:349 | open |  |
 | AaB3XkrWIqdfylE4c2sG | javascript:S6397 | scripts/e2e/mcp-clients.mjs:361 | open |  |
 | AaB3XkrWIqdfylE4c2sH | javascript:S3776 | scripts/e2e/mcp-clients.mjs:420 | open |  |
@@ -74,14 +74,14 @@ open 282 / fixed 13 / resolved 0 / excluded 15
 | AaB3XknlIqdfylE4c2qX | javascript:S3358 | scripts/e2e/probe-lib/agents.mjs:794 | open |  |
 | AaB3XknlIqdfylE4c2qY | javascript:S7780 | scripts/e2e/probe-lib/agents.mjs:799 | open |  |
 | AaB3XknlIqdfylE4c2qZ | javascript:S6594 | scripts/e2e/probe-lib/agents.mjs:834 | open |  |
-| AaB3XknlIqdfylE4c2qa | javascript:S8786 | scripts/e2e/probe-lib/agents.mjs:834 | fixed (planned) | #160 — fenced model reply in the probe harness, controller: the model behind the agent under test; effect: bounded by the reply size the harness already caps — not exploitable, startsWith/endsWith/slice for the rule |
+| AaB3XknlIqdfylE4c2qa | javascript:S8786 | scripts/e2e/probe-lib/agents.mjs:834 | fixed (planned) | #160 — fenced model reply in the probe harness, controller: the model behind the agent under test; effect: super-linear on the reply before the rewrite, on an operator-run harness — not exploitable; startsWith/endsWith/slice now, linear in the reply |
 | AaB3XkoDIqdfylE4c2qd | javascript:S3776 | scripts/e2e/probe-lib/hook.mjs:40 | open |  |
 | AaB3XkoXIqdfylE4c2qi | javascript:S3358 | scripts/e2e/probe-lib/mcp-tee.mjs:69 | open |  |
 | AaB3Xkm9IqdfylE4c2qB | typescript:S3776 | scripts/e2e/probe-lib/pi-extension.ts:57 | open |  |
 | AaB3Xkm9IqdfylE4c2qC | typescript:S7741 | scripts/e2e/probe-lib/pi-extension.ts:62 | open |  |
 | AaB3Xkm9IqdfylE4c2qD | typescript:S6551 | scripts/e2e/probe-lib/pi-extension.ts:80 | open |  |
 | AaB3Xkm9IqdfylE4c2qE | typescript:S7726 | scripts/e2e/probe-lib/pi-extension.ts:94 | open |  |
-| AaB3XkmfIqdfylE4c2p7 | javascript:S8786 | scripts/e2e/probe-lib/tmux.mjs:94 | fixed (planned) | #160 — tmux pane line, controller: the TUI of the agent under test; effect: bounded by the pane width — not exploitable, single-pass prompt pattern for the rule |
+| AaB3XkmfIqdfylE4c2p7 | javascript:S8786 | scripts/e2e/probe-lib/tmux.mjs:94 | fixed (planned) | #160 — tmux pane line, controller: the TUI of the agent under test; effect: super-linear on the line before the rewrite, on an operator-run harness — not exploitable; single-pass prompt pattern now, linear in the line |
 | AaB3XkmfIqdfylE4c2p8 | javascript:S6397 | scripts/e2e/probe-lib/tmux.mjs:94 | open |  |
 | AaB3XkmfIqdfylE4c2p- | javascript:S7744 | scripts/e2e/probe-lib/tmux.mjs:135 | open |  |
 | AaB3XkmfIqdfylE4c2p_ | javascript:S7778 | scripts/e2e/probe-lib/tmux.mjs:165 | open |  |
@@ -134,7 +134,7 @@ open 282 / fixed 13 / resolved 0 / excluded 15
 | AaB3XkqBIqdfylE4c2rh | javascript:S3358 | scripts/e2e/probes/pi.mjs:483 | open |  |
 | AaB3XkpTIqdfylE4c2q9 | javascript:S6582 | scripts/e2e/probes/providers.mjs:109 | open |  |
 | AaB3XkpTIqdfylE4c2q- | javascript:S3358 | scripts/e2e/probes/providers.mjs:142 | open |  |
-| AaB3XkpTIqdfylE4c2q_ | javascript:S8786 | scripts/e2e/probes/providers.mjs:148 | fixed (planned) | #160 — provider reply in the probe harness, controller: the model; effect: bounded by the reply the harness stores — not exploitable, slice/trim fence strip for the rule |
+| AaB3XkpTIqdfylE4c2q_ | javascript:S8786 | scripts/e2e/probes/providers.mjs:148 | fixed (planned) | #160 — provider reply in the probe harness, controller: the model; effect: super-linear on the reply before the rewrite, on an operator-run harness — not exploitable; slice/trim fence strip now, linear in the reply |
 | AaB3XkpTIqdfylE4c2rA | javascript:S3776 | scripts/e2e/probes/providers.mjs:183 | open |  |
 | AaB3XkpTIqdfylE4c2rB | javascript:S7778 | scripts/e2e/probes/providers.mjs:213 | open |  |
 | AaB3XkpTIqdfylE4c2rC | javascript:S7778 | scripts/e2e/probes/providers.mjs:214 | open |  |
@@ -221,7 +221,7 @@ open 282 / fixed 13 / resolved 0 / excluded 15
 | AaB3XkbZIqdfylE4c2ne | typescript:S6582 | src/doctor/storage.ts:300 | open |  |
 | AaB3XkbZIqdfylE4c2nf | typescript:S4624 | src/doctor/storage.ts:356 | open |  |
 | AaB3XkmSIqdfylE4c2p3 | typescript:S4624 | src/events.ts:174 | open |  |
-| AaB3XkmSIqdfylE4c2p4 | typescript:S8786 | src/events.ts:328 | fixed (planned) | #160 — tool_name from the agent hook payload, uncapped, controller: agent; effect: 1.3 s per 40,000-character name in the capture hook — real, fixed with an indexOf split |
+| AaB3XkmSIqdfylE4c2p4 | typescript:S8786 | src/events.ts:328 | fixed (planned) | #160 — tool_name from the agent hook payload, a substring of the capped stdin with no cap of its own, controller: agent; effect: 1.3 s per 40,000-character name in the capture hook — real, fixed with an indexOf split |
 | AaB3XkmSIqdfylE4c2p5 | typescript:S8786 | src/events.ts:329 | fixed (planned) | #160 — same value and fix as events.ts:328 (codex spelling) |
 | AaB3XkmSIqdfylE4c2p6 | typescript:S8786 | src/events.ts:330 | fixed (planned) | #160 — same value and fix as events.ts:328 (grok spelling, no prefix) |
 | AaB3Xkc9IqdfylE4c2nm | typescript:S7786 | src/fixture/replay.ts:199 | open |  |
@@ -283,7 +283,7 @@ open 282 / fixed 13 / resolved 0 / excluded 15
 | AaB3XkkzIqdfylE4c2pa | typescript:S7776 | src/privacy/egress.ts:7 | open |  |
 | AaB3XkkzIqdfylE4c2pb | typescript:S6582 | src/privacy/egress.ts:58 | open |  |
 | AaB3XkkoIqdfylE4c2pU | typescript:S7776 | src/repo-identity.ts:40 | open |  |
-| AaB3XkkoIqdfylE4c2pV | typescript:S8786 | src/repo-identity.ts:63 | fixed (planned) | #160 — git remote URL from the repository config, controller: repository owner; effect: bounded by the URL length — not exploitable, replaced by a loop for the rule |
+| AaB3XkkoIqdfylE4c2pV | typescript:S8786 | src/repo-identity.ts:63 | fixed (planned) | #160 — git remote URL from the clone's own .git/config, controller: whoever configured this clone; effect: bounded by the URL length — not exploitable, replaced by a loop for the rule |
 | AaB3XkkoIqdfylE4c2pW | typescript:S8786 | src/repo-identity.ts:65 | fixed (planned) | #160 — same value as repo-identity.ts:63 |
 | AaB3XkkoIqdfylE4c2pX | typescript:S4624 | src/repo-identity.ts:96 | open |  |
 | AaB3XkkoIqdfylE4c2pY | typescript:S7750 | src/repo-identity.ts:160 | open |  |
@@ -293,7 +293,7 @@ open 282 / fixed 13 / resolved 0 / excluded 15
 | AaB3XkkCIqdfylE4c2pK | typescript:S7780 | src/retrieval/query.ts:49 | open |  |
 | AaB3XkkCIqdfylE4c2pL | typescript:S7780 | src/retrieval/query.ts:133 | open |  |
 | AaB3Xkj2IqdfylE4c2pI | typescript:S3776 | src/retrieval/rank.ts:157 | open |  |
-| AaB3XkcRIqdfylE4c2nj | typescript:S8786 | src/setup/managed-block.ts:83 | fixed (planned) | #160 — managed block text from oboete's own setup templates and the operator's config file — not exploitable, replaced by a loop for the rule |
+| AaB3XkcRIqdfylE4c2nj | typescript:S8786 | src/setup/managed-block.ts:83 | fixed (planned) | #160 — managed block text built from oboete's own setup templates (the operator's file is parsed as TOML, never by this pattern) — not exploitable, replaced by a loop for the rule |
 | AaB3XkcRIqdfylE4c2nk | typescript:S3776 | src/setup/managed-block.ts:188 | open |  |
 | AaB3XkbrIqdfylE4c2ng | typescript:S3776 | src/setup/setup.ts:158 | open |  |
 | AaB3Xkb6IqdfylE4c2nh | typescript:S7780 | src/setup/shell-quote.ts:7 | open |  |
@@ -349,7 +349,7 @@ open 89 / fixed 4 / resolved 17 / excluded 287
 | b4619766029e7251d522865ebf644399 | markdownlint_MD024 | legacy/specs/001-agent-memory-core/tasks.md:85 | excluded (planned) | .codacy.yml exclude_paths (legacy/**, package-lock.json, build/**, dist/**, coverage/**) |
 | da9922607b53e56e63f2e3843799462e | Lizard_file-nloc-medium | package-lock.json:1 | excluded (planned) | .codacy.yml exclude_paths (legacy/**, package-lock.json, build/**, dist/**, coverage/**) |
 | dafdbd571c370b7fba8ce99f3564089e | Semgrep_javascript_dos_rule-non-literal-regexp | scripts/dco-check.test.mjs:105 | resolved (planned) | jobId is the test's own literal (dco) and the indent width is a number; no value from outside the test enters the RegExp — test constants — not applicable |
-| 9205cba2e3f2cf9bba1767d7cac332d | Semgrep_javascript_dos_rule-non-literal-regexp | scripts/dco-check.test.mjs:109 | resolved (planned) | same as dco-check.test.mjs:105 — test constants — not applicable |
+| 9205cba2e3f2cf9bba1767d7cac332d | Semgrep_javascript_dos_rule-non-literal-regexp | scripts/dco-check.test.mjs:109 | resolved (planned) | jobId is the test's own literal (dco) and the indent width is a number; no value from outside the test enters the RegExp — test constants — not applicable |
 | d3b9d9cfec9a260b9bc67f7dc5bfd707 | shellcheck_SC2024 | scripts/e2e/dogfood.sh:27 | fixed (planned) | #160 — sudo cat &gt; file: the file is read as root and written as the invoking user on purpose (the report lands in that user's checkout); shellcheck directive with the reason at the line — not a defect |
 | 365aff788b569c400b4b80434ec21768 | shellcheck_SC2024 | scripts/e2e/dogfood.sh:32 | fixed (planned) | #160 — same as dogfood.sh:27 |
 | 4d7c78512df37e8e9cd84c05be7b5457 | Lizard_file-nloc-medium | scripts/e2e/isolated-user.mjs:1 | open |  |
@@ -665,7 +665,7 @@ open 89 / fixed 4 / resolved 17 / excluded 287
 | c19402d47d336de1dcbfe06a0941546e | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/worker/lease.ts:84 | resolved (planned) | same lease token as observe.ts:220, compared inside a write transaction on the local database — local lease token — not applicable |
 | f347b941757ef85eff4d9e526869252e | Lizard_file-nloc-medium | src/worker/observe.ts:1 | open |  |
 | 2fe9cb6af3e5bc0a51b72ebeee4bcd37 | Lizard_nloc-medium | src/worker/observe.ts:166 | open |  |
-| 6bed5dd752cbea6bc7380c487d90d4d5 | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/worker/observe.ts:220 | resolved (planned) | owner_token is a randomUUID lease token compared inside the local SQLite file (mode 0600); no remote party can time the comparison — local lease token — not applicable |
+| 6bed5dd752cbea6bc7380c487d90d4d5 | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/worker/observe.ts:220 | resolved (planned) | owner_token is a randomUUID lease token compared in JavaScript against the row read from the local SQLite file (in a directory oboete creates with mode 0700); no remote party can time the comparison — local lease token — not applicable |
 | ba8cb52aaf85df5e56aef6e700030d0a | Lizard_parameter-count-medium | src/worker/observe.ts:311 | open |  |
 | 99f1e25fc60fe2a8f0c836e8a50ab71f | Lizard_nloc-medium | src/worker/observe.ts:752 | open |  |
 | 9a7dcbd9763eafd49000cc2713240859 | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/worker/observe.ts:804 | resolved (planned) | token === null tests whether a lease was acquired; the operand is null, not a secret — null check — not applicable |
