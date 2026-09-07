@@ -1,0 +1,19 @@
+docs/evidence/quality-debt-2026-09.md
+  s_359fcac8e97f88::t_c50114d223c573 18,257-258,260,263-264,267-269,273,318-319,322-325,327,331,335,645-650,665,668,670-671
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "1b97a44a64af5ecb2a2d9aaa7f108ccc05d05743",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
