@@ -1,0 +1,21 @@
+test/unit/replay.test.ts
+  s_359fcac8e97f88::t_26e2c21751c1c9 1-43
+src/fixture/replay.ts
+  s_359fcac8e97f88::t_38aa6c5fa7190b 775-785,787,1219-1230,1247-1248,1610-1615,1640-1646,1648-1656,1673-1674,1676-1680,1697-1698,1700-1701,1717-1748,1751-1816,1818-1822,1825-1828,1833,1837-1847,1849-1855,1880-1889,1898,1935,1937-1942,1994-2003,2054-2060,2085-2096,2121-2130,2162-2173,2176,2205-2221,2223,2225-2232,2260-2262,2272,2274-2286,2288
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "be7fd845b077d89ab3d737e5664b12b6edc2afa7",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
