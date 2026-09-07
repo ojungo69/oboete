@@ -2065,5 +2065,759 @@
   "reason": "FalsePositive",
   "where": "browser code: every caller passes a literal /api path with encodeURIComponent on the id, and the request goes to the page's own origin",
   "verdict": "viewer frontend, literal same-origin paths — not applicable"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkoXIqdfylE4c2qi",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkorIqdfylE4c2ql",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkorIqdfylE4c2qm",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpTIqdfylE4c2q9",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpTIqdfylE4c2q-",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpTIqdfylE4c2rB",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpTIqdfylE4c2rC",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpTIqdfylE4c2rD",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpTIqdfylE4c2rE",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpTIqdfylE4c2rF",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmfIqdfylE4c2p8",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmfIqdfylE4c2p-",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmfIqdfylE4c2p_",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksHIqdfylE4c2sl",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksHIqdfylE4c2sm",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksHIqdfylE4c2so",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksHIqdfylE4c2sp",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksHIqdfylE4c2sq",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksHIqdfylE4c2su",
+  "state": "resolved",
+  "where": "The discarded JSON.parse(JSON.stringify(event)) is a serialisability check for the exact call that writes the JSONL line; structuredClone accepts values JSON.stringify rejects (BigInt) and drops nothing, so it would not catch the same inputs.",
+  "transition": "wontfix"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksHIqdfylE4c2sv",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrIIqdfylE4c2r7",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrIIqdfylE4c2r8",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrIIqdfylE4c2r9",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkphIqdfylE4c2rH",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkphIqdfylE4c2rJ",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkphIqdfylE4c2rK",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkphIqdfylE4c2rL",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkphIqdfylE4c2rM",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkphIqdfylE4c2rN",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkphIqdfylE4c2rO",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkphIqdfylE4c2rP",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkphIqdfylE4c2rQ",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkphIqdfylE4c2rR",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2sw",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2sx",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2sy",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2sz",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2s0",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2s1",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2s2",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2s3",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2s4",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2s5",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2s6",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2s7",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2s8",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2s9",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2s-",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2s_",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksZIqdfylE4c2tA",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpxIqdfylE4c2rS",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpxIqdfylE4c2rT",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpxIqdfylE4c2rU",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpxIqdfylE4c2rV",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrWIqdfylE4c2r-",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrWIqdfylE4c2r_",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrWIqdfylE4c2sA",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrWIqdfylE4c2sB",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrWIqdfylE4c2sC",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrWIqdfylE4c2sG",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrWIqdfylE4c2sI",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrWIqdfylE4c2sJ",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrWIqdfylE4c2sL",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrWIqdfylE4c2sM",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqRIqdfylE4c2ri",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqRIqdfylE4c2rj",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqRIqdfylE4c2rk",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqRIqdfylE4c2rm",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqRIqdfylE4c2rn",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqRIqdfylE4c2ro",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqRIqdfylE4c2rp",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkm9IqdfylE4c2qC",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkm9IqdfylE4c2qD",
+  "state": "resolved",
+  "where": "Every typeof result has returned from an earlier branch of walk(), so this String(v) is unreachable; v can never be an object here.",
+  "transition": "falsepositive"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkm9IqdfylE4c2qE",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2qr",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2qs",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2qt",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2qu",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2qv",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2qw",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2qx",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2qy",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2qz",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2q1",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2q2",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2q3",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2q4",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2q5",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2q6",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2q7",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2q8",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2rq",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2rr",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2rs",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2rt",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2rx",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2ry",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2r0",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2r1",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2r2",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2r3",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqBIqdfylE4c2rX",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqBIqdfylE4c2rY",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqBIqdfylE4c2rZ",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqBIqdfylE4c2ra",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqBIqdfylE4c2rb",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqBIqdfylE4c2rc",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqBIqdfylE4c2rd",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqBIqdfylE4c2re",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqBIqdfylE4c2rf",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqBIqdfylE4c2rh",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qI",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qJ",
+  "state": "resolved",
+  "where": "childEnv returns env from two exits, but the early exit skips the loop that deletes credential-named keys, so the two returned objects differ; the function does not always return the same value.",
+  "transition": "falsepositive"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qM",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qN",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qO",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qP",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qR",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qT",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qU",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qV",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qW",
+  "state": "resolved",
+  "where": "waitUntil returns last from two exits, but last holds the first truthy result or the final falsy value at the deadline; the function does not always return the same value.",
+  "transition": "falsepositive"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qX",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qY",
+  "state": "fixed",
+  "where": "#161"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qZ",
+  "state": "fixed",
+  "where": "#160"
  }
 ]
