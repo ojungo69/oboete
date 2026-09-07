@@ -807,7 +807,12 @@ async function write(options: WriteOptions): Promise<CaptureOutcome> {
     );
     const opened = openCaptureDatabase(paths, timeoutMs);
     if (opened !== null) {
-      return writeToDatabase(options, opened.db, remaining);
+      // The handle is closed where it was opened: nothing between the two can leak it.
+      try {
+        return await writeToDatabase(options, opened.db, remaining);
+      } finally {
+        opened.db.close();
+      }
     }
   }
   const outcome = spoolAll(paths, identity, rows);
@@ -846,45 +851,41 @@ async function writeToDatabase(
   remaining: () => number,
 ): Promise<CaptureOutcome> {
   const { deps, paths, identity, rows, diagnostics, capturedAt, injection } = options;
+  const sessionExisted =
+    injection === undefined ||
+    readSession(db, injection.event.agent, injection.event.native_session_id) !== undefined;
+  // One read-then-write unit, one transaction (conventions "Database access"): a failure
+  // half way through would otherwise leave rows behind that the spool then writes again
+  // under the id of another turn (R7: the direct path keys by the ordinal it read).
+  let stored: ReturnType<typeof storeRows>;
   try {
-    const sessionExisted =
-      injection === undefined ||
-      readSession(db, injection.event.agent, injection.event.native_session_id) !== undefined;
-    // One read-then-write unit, one transaction (conventions "Database access"): a failure
-    // half way through would otherwise leave rows behind that the spool then writes again
-    // under the id of another turn (R7: the direct path keys by the ordinal it read).
-    let stored: ReturnType<typeof storeRows>;
-    try {
-      stored = transactionImmediate(db, () => {
-        recognizePacks(db, rows);
-        return storeRows(db, identity, rows, diagnostics, capturedAt);
-      });
-    } catch {
-      // R1: a storage failure before the transaction commits writes the sanitized event to the
-      // spool. Injection then sees no database and records index_unavailable in the hook log.
-      const outcome = spoolAll(paths, identity, rows);
-      return {
-        ...outcome,
-        stdout: await injectAfterCapture(deps, paths, identity, injection, undefined),
-      };
-    }
-    const stdout = await injectAfterCapture(
-      deps,
-      paths,
-      identity,
-      injection,
-      db,
-      !sessionExisted,
-    );
-    spawnAfterCapture(deps, db, stored, remaining);
+    stored = transactionImmediate(db, () => {
+      recognizePacks(db, rows);
+      return storeRows(db, identity, rows, diagnostics, capturedAt);
+    });
+  } catch {
+    // R1: a storage failure before the transaction commits writes the sanitized event to the
+    // spool. Injection then sees no database and records index_unavailable in the hook log.
+    const outcome = spoolAll(paths, identity, rows);
     return {
-      outcome: rows.length === 0 ? 'dropped' : 'stored',
-      rows: stored.inserted,
-      stdout,
+      ...outcome,
+      stdout: await injectAfterCapture(deps, paths, identity, injection, undefined),
     };
-  } finally {
-    db.close();
   }
+  const stdout = await injectAfterCapture(
+    deps,
+    paths,
+    identity,
+    injection,
+    db,
+    !sessionExisted,
+  );
+  spawnAfterCapture(deps, db, stored, remaining);
+  return {
+    outcome: rows.length === 0 ? 'dropped' : 'stored',
+    rows: stored.inserted,
+    stdout,
+  };
 }
 
 function spawnAfterCapture(

@@ -268,12 +268,6 @@ function eventPaths(event: NormalizedEvent): readonly string[] {
 }
 
 /**
- * Wraps the events an adapter produced with the paths the detector must see first (FR-018).
- * `namedPaths` are paths the adapter read from the payload that no event field carries, such as the
- * file a tool result is the body of: without them a repository path rule could never classify that
- * row (FR-017, R4).
- */
-/**
  * The prompt event three adapters build identically: Claude, Codex and Grok all carry the user's
  * text in `prompt` and nothing else that distinguishes them here.
  */
@@ -305,6 +299,12 @@ export function adaptToolFailureEvent(
   ]);
 }
 
+/**
+ * Wraps the events an adapter produced with the paths the detector must see first (FR-018).
+ * `namedPaths` are paths the adapter read from the payload that no event field carries, such as the
+ * file a tool result is the body of: without them a repository path rule could never classify that
+ * row (FR-017, R4).
+ */
 export function toEvents(events: NormalizedEvent[], namedPaths: string[] = []): AdapterOutput {
   const paths: (string | undefined)[] = [...namedPaths];
   for (const event of events) paths.push(...eventPaths(event));
