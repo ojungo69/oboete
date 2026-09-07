@@ -164,8 +164,8 @@ test('fail-closed: stripPrivate removes every private span, including an unclose
 });
 
 test('stripPrivate reads an unclosed tag prefix once, not once per space', () => {
-  // Captured text is agent output up to 1 MiB; the tag pattern once backtracked across a run of
-  // spaces after `<` and took 1.4 s on 50,000 of them, blowing the detector deadline.
+  // Captured text is agent output up to 1 MiB. The tag itself was always fast; the shape that
+  // backtracked (1.4 s on 50,000 spaces) is the second one below: spaces after `<` and no tag.
   const text = `<${' '.repeat(1024 * 1024)}private>`;
   const started = performance.now();
   const result = stripPrivate(text);
@@ -241,12 +241,13 @@ test('fail-closed: a path rule matches the repository-relative and the raw form'
 });
 
 test('a rule of unclosed brackets is tokenized once, not once per bracket', () => {
-  // Inside the bound the tokenizer must still be linear: each `[` used to search the rest of the
-  // rule for a `]` that was never there.
+  // An operator rule (~/.oboete/config.toml) has no length bound, and each `[` used to search the
+  // rest of the rule for a `]` that was never there: 1 MiB of `[` took over 4 s, now under 200 ms,
+  // so the bound below holds on a loaded runner and fails on the old code by a wide margin.
   const started = performance.now();
-  assert.equal(globRuleError('['.repeat(200_000)), null);
+  assert.equal(globRuleError('['.repeat(1024 * 1024)), null);
   const elapsed = performance.now() - started;
-  if (WALL_CLOCK_IS_MEASURED) assert.ok(elapsed < 200, `took ${elapsed.toFixed(0)} ms`);
+  if (WALL_CLOCK_IS_MEASURED) assert.ok(elapsed < 1500, `took ${elapsed.toFixed(0)} ms`);
   assert.equal(compileGlob('[ab]c[').test('bc['), true);
   assert.equal(compileGlob('[ab]c[').test('cc['), false);
   assert.equal(compileGlob('a[[]b').test('a[b'), true);

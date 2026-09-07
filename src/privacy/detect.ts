@@ -116,9 +116,9 @@ function tokenize(glob: string): GlobToken[] {
   const tokens: GlobToken[] = [];
   // A rule without a slash matches the file name at any depth, as it does in .gitignore.
   if (!glob.includes('/')) tokens.push({ kind: 'anyDirectories' });
-  // The next `]` at or after the cursor, or -1 once none remains: looked up again only after the
-  // cursor passes it, so a rule made of `[` with no `]` is read once instead of once per bracket.
-  let nextClose = 0;
+  // A `[` opens a class only when some `]` lies after it, and the class then consumes that `]`, so
+  // the search below always hits and a rule made of `[` with no `]` is read once, not once per `[`.
+  const lastClose = glob.lastIndexOf(']');
   for (let index = 0; index < glob.length; index += 1) {
     const character = glob[index] as string;
     if (character === '*') {
@@ -140,15 +140,13 @@ function tokenize(glob: string): GlobToken[] {
       tokens.push({ kind: 'one', test: (candidate) => candidate !== '/' });
       continue;
     }
-    if (character === '[') {
-      if (nextClose !== -1 && nextClose <= index) nextClose = glob.indexOf(']', index + 1);
-      if (nextClose !== -1) {
-        const body = glob.slice(index + 1, nextClose).replace(/^[!^]/, '^');
-        const expression = new RegExp(`^[${body}]$`);
-        tokens.push({ kind: 'one', test: (candidate) => expression.test(candidate) });
-        index = nextClose;
-        continue;
-      }
+    if (character === '[' && index < lastClose) {
+      const close = glob.indexOf(']', index + 1);
+      const body = glob.slice(index + 1, close).replace(/^[!^]/, '^');
+      const expression = new RegExp(`^[${body}]$`);
+      tokens.push({ kind: 'one', test: (candidate) => expression.test(candidate) });
+      index = close;
+      continue;
     }
     tokens.push({ kind: 'one', test: (candidate) => candidate === character });
   }

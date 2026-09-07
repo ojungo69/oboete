@@ -436,7 +436,8 @@ test('normalizeToolName maps each agent native tool name from the fixtures', () 
 });
 
 test('normalizeToolName splits an MCP name once, not once per underscore', () => {
-  // Native names arrive uncapped from agent payloads; the former lazy regex took 1.3 s on this.
+  // Native names have no cap of their own inside the capped stdin payload. The accepted shape was
+  // always fast; the rejected one below is where the former lazy regex took 1.3 s.
   const native = `mcp__${'_'.repeat(40_000)}`;
   const started = performance.now();
   const normalized = normalizeToolName('claude', native);

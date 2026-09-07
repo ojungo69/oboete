@@ -126,11 +126,12 @@ const injectionSchema = z.strictObject({
  * the blanket catch that answers `detector_error`, so one malformed rule would blank the content of
  * every event that carries a path instead of naming itself.
  */
-function secretPathRule(rule: z.ZodString, maxLength = Number.POSITIVE_INFINITY): z.ZodType<string> {
+function secretPathRule(rule: z.ZodString): z.ZodType<string> {
   return rule.superRefine((value, context) => {
-    // Zod runs this refinement even when `max` already failed, so a rule over the bound is not
-    // compiled: the length issue is the answer, and the compile cost stays bounded by `maxLength`.
-    if (value.length > maxLength) return;
+    // Zod runs this refinement even when `max` already failed, so a rule the schema has refused
+    // (over the bound, or empty) is not compiled: that issue is the answer, and the compile cost
+    // stays bounded by the schema's own `max`.
+    if (context.issues.length > 0) return;
     const error = globRuleError(value);
     if (error !== null) context.addIssue({ code: 'custom', message: `is not a usable path rule (${error})` });
   });
@@ -166,7 +167,7 @@ const repoRulesSchema = z.strictObject({
   privacy: z
     .strictObject({
       secret_paths: z
-        .array(secretPathRule(z.string().min(1).max(MAX_REPO_SECRET_PATH_LENGTH), MAX_REPO_SECRET_PATH_LENGTH))
+        .array(secretPathRule(z.string().min(1).max(MAX_REPO_SECRET_PATH_LENGTH)))
         .max(MAX_REPO_SECRET_PATHS)
         .default([]),
     })

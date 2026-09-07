@@ -1823,7 +1823,7 @@
   "id": "AaB3XkmSIqdfylE4c2p4",
   "state": "fixed",
   "where": "#160",
-  "verdict": "tool_name from the agent hook payload, uncapped, controller: agent; effect: 1.3 s per 40,000-character name in the capture hook — real, fixed with an indexOf split"
+  "verdict": "tool_name from the agent hook payload, a substring of the capped stdin with no cap of its own, controller: agent; effect: 1.3 s per 40,000-character name in the capture hook — real, fixed with an indexOf split"
  },
  {
   "service": "sonar",
@@ -1844,7 +1844,7 @@
   "id": "AaB3XkkoIqdfylE4c2pV",
   "state": "fixed",
   "where": "#160",
-  "verdict": "git remote URL from the repository config, controller: repository owner; effect: bounded by the URL length — not exploitable, replaced by a loop for the rule"
+  "verdict": "git remote URL from the clone's own .git/config, controller: whoever configured this clone; effect: bounded by the URL length — not exploitable, replaced by a loop for the rule"
  },
  {
   "service": "sonar",
@@ -1858,7 +1858,7 @@
   "id": "AaB3XkcRIqdfylE4c2nj",
   "state": "fixed",
   "where": "#160",
-  "verdict": "managed block text from oboete's own setup templates and the operator's config file — not exploitable, replaced by a loop for the rule"
+  "verdict": "managed block text built from oboete's own setup templates (the operator's file is parsed as TOML, never by this pattern) — not exploitable, replaced by a loop for the rule"
  },
  {
   "service": "sonar",
@@ -1872,14 +1872,14 @@
   "id": "AaB3XkrWIqdfylE4c2sD",
   "state": "fixed",
   "where": "#160",
-  "verdict": "MCP client output line, controller: the client process the harness started; effect: bounded by one line — not exploitable, trimEnd for the rule"
+  "verdict": "the client's own config.toml as read by the harness, controller: whoever writes that file; effect: bounded by the file size — not exploitable, trimEnd for the rule"
  },
  {
   "service": "sonar",
   "id": "AaB3XknlIqdfylE4c2qa",
   "state": "fixed",
   "where": "#160",
-  "verdict": "fenced model reply in the probe harness, controller: the model behind the agent under test; effect: bounded by the reply size the harness already caps — not exploitable, startsWith/endsWith/slice for the rule"
+  "verdict": "fenced model reply in the probe harness, controller: the model behind the agent under test; effect: bounded only by the agent's timeout, in an operator-run harness — not exploitable, startsWith/endsWith/slice for the rule"
  },
  {
   "service": "sonar",
@@ -1936,7 +1936,7 @@
   "id": "9205cba2e3f2cf9bba1767d7cac332d",
   "state": "resolved",
   "reason": "FalsePositive",
-  "where": "same as dco-check.test.mjs:105",
+  "where": "jobId is the test's own literal (dco) and the indent width is a number; no value from outside the test enters the RegExp",
   "verdict": "test constants — not applicable"
  },
  {
@@ -1976,7 +1976,7 @@
   "id": "6bed5dd752cbea6bc7380c487d90d4d5",
   "state": "resolved",
   "reason": "FalsePositive",
-  "where": "owner_token is a randomUUID lease token compared inside the local SQLite file (mode 0600); no remote party can time the comparison",
+  "where": "owner_token is a randomUUID lease token compared inside the local SQLite file (directory mode 0700); no remote party can time the comparison",
   "verdict": "local lease token — not applicable"
  },
  {

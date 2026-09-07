@@ -377,6 +377,17 @@ test('loadRepoRules accepts path rules only', async () => {
     );
     const elapsed = performance.now() - started;
     if (WALL_CLOCK_IS_MEASURED) assert.ok(elapsed < 500, `took ${elapsed.toFixed(0)} ms`);
+    // The witness that the rule was not compiled: over the bound and malformed, the error names
+    // only the length, never the class.
+    writeFileSync(
+      join(home, '.oboete.toml'),
+      `[privacy]\nsecret_paths = ${JSON.stringify([`${'['.repeat(300)}[z-a]`])}\n`,
+    );
+    assert.throws(
+      () => loadRepoRules(home),
+      (error: unknown) =>
+        error instanceof RepoConfigError && error.code === 'repo_config_malformed' && !error.message.includes('usable path rule'),
+    );
   });
 });
 
