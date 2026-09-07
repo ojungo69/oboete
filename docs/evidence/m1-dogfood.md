@@ -425,3 +425,5 @@ script sources the credentials before it starts, so a worker it spawns carries t
 - Viewer GET /api/memories: median 3 ms, max 35 ms over 5 requests, 8 memories listed (budget 2000 ms)
 - finished 2026-09-07T15:17:02Z, 1-minute load 0.49
 
+
+- Filed against the release (SC-007): https://github.com/ojungo69/oboete/issues/170
