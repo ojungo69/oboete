@@ -1,0 +1,43 @@
+specs/008-quality-debt-zero/research.md
+  s_359fcac8e97f88::t_0e23ec9428d6b4 75,98
+  s_359fcac8e97f88::t_9e29c5f73c1c88 147
+docs/evidence/quality-debt-2026-09.md
+  s_359fcac8e97f88::t_2cd9bb9da4396a 589,592
+  s_359fcac8e97f88::t_e16557680b3db4 335,357-358,360-361,367,548,560,562,656,660,671
+  s_359fcac8e97f88::t_ef7c8b29c688f8 6-7
+docs/evidence/quality-debt-2026-09/codacy-main-issues.json
+  s_359fcac8e97f88::t_e90e4105b84e4b 4765-4920,4922
+specs/008-quality-debt-zero/data-model.md
+  s_359fcac8e97f88::t_54efdbce8c5d8f 11
+  s_359fcac8e97f88::t_05e76aac7eae96 19,22
+specs/008-quality-debt-zero/plan.md
+  s_359fcac8e97f88::t_54efdbce8c5d8f 73,105,112-113
+  s_359fcac8e97f88::t_44b8577793ea4d 29
+docs/evidence/quality-debt-2026-09/ledger.json
+  s_359fcac8e97f88::t_2cd9bb9da4396a 4346,4354
+  s_359fcac8e97f88::t_1b0b0747b2fafd 4340-4345,4347-4353,4355
+specs/008-quality-debt-zero/tasks.md
+  s_359fcac8e97f88::t_e658fdcd1c2714 91
+  s_359fcac8e97f88::t_54efdbce8c5d8f 108-109
+  s_359fcac8e97f88::t_44b8577793ea4d 103,107,111,120
+docs/evidence/quality-debt-2026-09/allocation.json
+  s_359fcac8e97f88::t_5ffba9d8150139 340-342,714-721,736-740,744,751-752
+specs/008-quality-debt-zero/quickstart.md
+  s_359fcac8e97f88::t_44b8577793ea4d 85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "5cc05cf7af8193d8e04ce57ffbd1a2cdd6867f15",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-opus-5"
+      },
+      "human_author": null
+    }
+  }
+}
