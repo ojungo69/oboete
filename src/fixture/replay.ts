@@ -693,7 +693,18 @@ function statusOf(pass: boolean): 'pass' | 'fail' {
   return pass ? 'pass' : 'fail';
 }
 
-export async function runFixture(argv: string[]): Promise<number> {
+type ReplayPlan = {
+  values: { out?: string; json?: boolean; home?: string; keep?: boolean };
+  fixturePath: string;
+  outPath: string | undefined;
+  root: string;
+  bundle: string;
+  lines: Line[];
+  sessionWindows: ReturnType<typeof lastSessions>;
+};
+
+/** `oboete fixture replay <file>` and its flags; a number is the exit code it stops with. */
+function replayArgv(argv: string[]): { values: ReplayPlan['values']; fixture: string } | number {
   let parsed;
   try {
     parsed = parseArgs({
@@ -711,14 +722,21 @@ export async function runFixture(argv: string[]): Promise<number> {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n${usage()}`);
     return 2;
   }
-
   const { values, positionals } = parsed;
   if (positionals[0] !== 'replay' || positionals[1] === undefined || positionals.length !== 2) {
     process.stderr.write(usage());
     return 2;
   }
+  return { values, fixture: positionals[1] };
+}
 
-  const fixturePath = resolve(positionals[1]);
+/** Reads argv and the files it names. A number is the exit code the replay stops with. */
+function replayPlan(argv: string[]): ReplayPlan | number {
+  const parsed = replayArgv(argv);
+  if (typeof parsed === 'number') return parsed;
+  const { values, fixture } = parsed;
+
+  const fixturePath = resolve(fixture);
   if (!existsSync(fixturePath)) {
     process.stderr.write(`fixture file not found: ${fixturePath}\n`);
     return 2;
@@ -751,447 +769,669 @@ export async function runFixture(argv: string[]): Promise<number> {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
   }
+  return { values, fixturePath, outPath, root, bundle, lines, sessionWindows };
+}
+
+/**
+ * `--home`, then `OBOETE_HOME`, then a fresh temporary directory. `createdHome` marks the last
+ * case, the only one where the directory is this run's to remove: an `OBOETE_HOME` that is set but
+ * empty also lands there, and used to leak the directory it made.
+ */
+export function replayHome(values: ReplayPlan['values']): { home: string; createdHome: boolean } {
+  if (values.home !== undefined) return { home: resolve(values.home), createdHome: false };
+  const fromEnv = process.env.OBOETE_HOME;
+  if (fromEnv !== undefined && fromEnv !== '') {
+    const home = isAbsolute(fromEnv) ? resolve(fromEnv) : resolve(process.cwd(), fromEnv);
+    return { home, createdHome: false };
+  }
+  return { home: mkdtempSync(join(tmpdir(), 'oboete-t068-home-')), createdHome: true };
+}
+
+type ReplayRun = {
+  bundle: string;
+  repo: string;
+  home: string;
+  envBase: NodeJS.ProcessEnv;
+  paths: ReturnType<typeof oboetePaths>;
+  lines: Line[];
+  maps: ReturnType<typeof corpus>;
+  lastStartSeq: ReturnType<typeof lastSessions>['lastStartSeq'];
+  holdFromSeq: ReturnType<typeof lastSessions>['holdFromSeq'];
+  pendingHold: Set<Agent>;
+  pendingSessions: Set<string>;
+  captureSamples: Sample[];
+  injectionSamples: Sample[];
+  readySamples: Sample[];
+  pendingSamples: Sample[];
+  sizeRows: SizeRow[];
+  packs: { seq: number; agent: Agent; session: string; event: string; text: string }[];
+  sessionStartPack: Map<string, string>;
+  factsById: Map<string, Fact>;
+  recallHits: RecallHit[];
+  grokRecallWait: { seq: number; session: string; fact: Fact }[];
+  hookFailures: HookFailure[];
+  resumeChecks: ResumeCheck[];
+  hookCount: number;
+  observeRssKb: number;
+  observeRuns: number;
+  hookWorkerRssKb: number;
+  hookWorkerPids: Set<number>;
+  observePids: Set<number>;
+  storageFailed: boolean;
+  leaseHeld: boolean;
+  liveObserve: ObserveProc | undefined;
+};
+
+/** Everything a replay accumulates while it runs, empty before its first hook. */
+function emptyTables(): Omit<
+  ReplayRun,
+  'bundle' | 'repo' | 'home' | 'envBase' | 'paths' | 'lines' | 'maps' | 'lastStartSeq' | 'holdFromSeq' | 'pendingSessions'
+> {
+  return {
+    pendingHold: new Set<Agent>(),
+    captureSamples: [],
+    injectionSamples: [],
+    readySamples: [],
+    pendingSamples: [],
+    sizeRows: [],
+    packs: [],
+    sessionStartPack: new Map<string, string>(),
+    factsById: new Map<string, Fact>(),
+    recallHits: [],
+    grokRecallWait: [],
+    hookFailures: [],
+    resumeChecks: [],
+    hookCount: 0,
+    observeRssKb: 0,
+    observeRuns: 0,
+    hookWorkerRssKb: 0,
+    hookWorkerPids: new Set<number>(),
+    observePids: new Set<number>(),
+    storageFailed: false,
+    leaseHeld: false,
+    liveObserve: undefined,
+  };
+}
+
+/** The mutable state one replay carries from its first hook to its report. */
+function createRun(input: {
+  bundle: string;
+  repo: string;
+  home: string;
+  envBase: NodeJS.ProcessEnv;
+  paths: ReturnType<typeof oboetePaths>;
+  lines: Line[];
+  maps: ReturnType<typeof corpus>;
+  sessionWindows: ReturnType<typeof lastSessions>;
+}): ReplayRun {
+  const { lastStartSeq, holdFromSeq } = input.sessionWindows;
+  const pendingSessions = new Set<string>();
+  for (const agent of AGENTS) {
+    const start = input.lines.find((line) => line.agent === agent && line.seq === lastStartSeq[agent]);
+    if (start !== undefined) pendingSessions.add(`${agent}:${start.session}`);
+  }
+  const run: ReplayRun = {
+    bundle: input.bundle,
+    repo: input.repo,
+    home: input.home,
+    envBase: input.envBase,
+    paths: input.paths,
+    lines: input.lines,
+    maps: input.maps,
+    lastStartSeq,
+    holdFromSeq,
+    pendingSessions,
+    ...emptyTables(),
+  };
+  // Every fact the fixture plants, indexed before the first hook so recall can look one up.
+  for (const line of input.lines) {
+    const fact = line.tags?.fact;
+    if (fact !== undefined) run.factsById.set(fact.id, fact);
+  }
+  return run;
+}
+
+/** A pack the hook printed, kept for the recall and directive checks. */
+function recordPack(run: ReplayRun, line: Line, stdout: string): void {
+  const text = packText(stdout);
+  if (text.trim() === '') return;
+  run.packs.push({ seq: line.seq, agent: line.agent, session: line.session, event: line.event, text });
+  const key = `${line.agent}:${line.session}`;
+  if (
+    sessionStartEvent(line.agent, line.event) ||
+    (line.agent === 'grok' && line.event === 'PreToolUse' && !run.sessionStartPack.has(key))
+  ) {
+    run.sessionStartPack.set(key, text);
+  }
+}
+
+/** Counts the hook and keeps the ones that broke the contract. */
+function recordHook(run: ReplayRun, line: Line, spawned: Spawned, eventLabel: string): void {
+  run.hookCount += 1;
+  if (!hookViolated(spawned)) return;
+  run.hookFailures.push({
+    seq: line.seq,
+    agent: line.agent,
+    event: eventLabel,
+    status: hookStatusCell(spawned),
+    stderr: firstStderrLine(spawned.stderr),
+  });
+}
+
+/** Did the pack this line asked for carry the fact the fixture planted earlier? */
+function checkRecall(run: ReplayRun, line: Line, pack: string): void {
+  const id = line.tags?.recall;
+  if (id === undefined) return;
+  const fact = run.factsById.get(id);
+  if (fact === undefined) return;
+  const start = run.sessionStartPack.get(`${line.agent}:${line.session}`) ?? '';
+  const hit = pack.includes(fact.expect) || start.includes(fact.expect);
+  run.recallHits.push({ id: fact.id, lang: fact.lang, query: fact.query, expect: fact.expect, hit });
+}
+
+/** The live observe run's high-water mark; SC-003 is measured over every run of it. */
+function harvestRss(run: ReplayRun): void {
+  if (run.liveObserve === undefined) return;
+  const value = run.liveObserve.rssKb();
+  if (value > run.observeRssKb) run.observeRssKb = value;
+  if (run.liveObserve.status() === 3) run.storageFailed = true;
+}
+
+/** Replay owns the worker: one run at a time, started here rather than by the hook. */
+function startWorker(run: ReplayRun): void {
+  if (run.liveObserve?.running() === true) return;
+  run.liveObserve = startObserve(run.bundle, run.repo, run.envBase);
+  if (run.liveObserve.pid !== undefined) run.observePids.add(run.liveObserve.pid);
+  run.observeRuns += 1;
+  void run.liveObserve.exited.then(() => harvestRss(run));
+}
+
+/** Waits for every ended session to have a summary, restarting the worker while it waits. */
+async function waitEndedSummaries(run: ReplayRun, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    harvestRss(run);
+    const pending = endedPendingCount(run.paths.db);
+    if (pending === 0) return;
+    startWorker(run);
+    await sleep(50);
+  }
+}
+
+/** Holds the lease so the hook spawns no worker of its own. */
+async function ensureLeaseHeld(run: ReplayRun): Promise<void> {
+  if (run.leaseHeld) {
+    holdLease(run.paths.db);
+    return;
+  }
+  // A previous observe may still be looping on an active session's unbatched rows (up to 20 min).
+  // Steal after a short wait so SessionEnd is not blocked on that idle loop.
+  await waitLeaseFree(run.paths.db, 500);
+  holdLease(run.paths.db);
+  run.leaseHeld = true;
+}
+
+function dropLease(run: ReplayRun): void {
+  if (!run.leaseHeld) return;
+  releaseHeldLease(run.paths.db);
+  run.leaseHeld = false;
+}
+
+/**
+ * The fixture's placeholders become this run's repository, secrets and directives. A size-tagged
+ * line also asserts the byte count its tag promises, because the classification under test is the
+ * one the byte count selects.
+ */
+function expandLine(run: ReplayRun, line: Line): { payload: unknown; fillSize: number } | number {
+  try {
+    if (line.tags?.size === undefined) {
+      const payload = expandPayload(line.payload, {
+        root: run.repo,
+        secrets: run.maps.secrets,
+        directives: run.maps.directives,
+        fill: true,
+      });
+      return { payload, fillSize: 0 };
+    }
+    const filled = expandPayload(line.payload, { fill: true });
+    const fillSize = Buffer.byteLength(JSON.stringify(filled));
+    const tag = line.tags.size;
+    const ok = tag === 'at_bound' ? fillSize === AT_BOUND : fillSize === ABOVE_ONE || fillSize === ABOVE_TWO;
+    if (!ok) {
+      const expected = tag === 'at_bound' ? String(AT_BOUND) : `${ABOVE_ONE} or ${ABOVE_TWO}`;
+      process.stderr.write(
+        `size tag ${tag} seq=${line.seq}: FILL-only JSON is ${fillSize} bytes, expected ${expected}\n`,
+      );
+      return 2;
+    }
+    return { payload: expandPayload(filled, { root: run.repo, fill: false }), fillSize };
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
+}
+
+/** The Pi extension injects in process, so replay drives `oboete inject` for the same events. */
+function isPiInjectEvent(line: Line): boolean {
+  return (
+    line.agent === 'pi' &&
+    (line.event === 'session_start' || line.event === 'input') &&
+    line.tags?.size === undefined
+  );
+}
+
+/** The stdin of `oboete inject --agent pi`, from the fixture envelope. */
+function piInjectInput(run: ReplayRun, payload: unknown): string {
+  const envelope = payload as {
+    cwd?: unknown;
+    session_id?: unknown;
+    model?: unknown;
+    payload?: { text?: unknown };
+  };
+  return JSON.stringify({
+    cwd: typeof envelope.cwd === 'string' ? envelope.cwd : run.repo,
+    session_id: typeof envelope.session_id === 'string' ? envelope.session_id : nativeSessionId('pi', payload),
+    prompt: typeof envelope.payload?.text === 'string' ? envelope.payload.text : undefined,
+    model: typeof envelope.model === 'string' ? envelope.model : undefined,
+  });
+}
+
+/** Runs `oboete inject` for one Pi line and files its pack and its sample like a hook's. */
+async function injectPiLine(
+  run: ReplayRun,
+  line: Line,
+  payload: unknown,
+  seen: { isPendingStart: boolean; holdActive: boolean },
+): Promise<Spawned> {
+  const kind = line.event === 'session_start' ? 'start' : 'prompt';
+  const injectInput = piInjectInput(run, payload);
+  const injected = await runChild(
+    run.bundle,
+    ['inject', '--agent', 'pi', '--kind', kind],
+    injectInput,
+    run.repo,
+    run.envBase,
+    kind === 'start' ? 15_000 : 10_000,
+  );
+  recordHook(run, line, injected, `inject:${kind}`);
+  const injectSample: Sample = {
+    agent: 'pi',
+    event: line.event,
+    seq: line.seq,
+    session: line.session,
+    ms: injected.elapsedMs,
+  };
+  recordPack(run, line, injected.stdout);
+  if (line.event !== 'session_start') {
+    run.injectionSamples.push(injectSample);
+  } else if (seen.isPendingStart && seen.holdActive) {
+    run.pendingSamples.push(injectSample);
+  } else if (!seen.holdActive) {
+    run.injectionSamples.push(injectSample);
+    if (line.seq > 1) run.readySamples.push(injectSample);
+  }
+  return injected;
+}
+
+/** FR-025: a resumed session prints its pack again and opens no second injection. */
+function recordResume(
+  run: ReplayRun,
+  line: Line,
+  seen: { nativeId: string; resumeBefore: number; hooked: Spawned; injected: Spawned | undefined },
+): void {
+  const after = startInjectionCount(run.paths.db, line.agent, seen.nativeId);
+  const printed =
+    packText(seen.hooked.stdout).trim() !== '' ||
+    (seen.injected !== undefined && packText(seen.injected.stdout).trim() !== '');
+  const unreadable = after < 0 || seen.resumeBefore < 0;
+  const injectionDelta = unreadable ? 1 : after - seen.resumeBefore;
+  run.resumeChecks.push({
+    seq: line.seq,
+    agent: line.agent,
+    session: line.session,
+    packPrinted: printed,
+    injectionDelta,
+  });
+}
+
+/** Grok's pack arrives on the next tool call, so its recall checks are settled there. */
+function settleGrokRecall(run: ReplayRun, line: Line, key: string, hooked: Spawned): void {
+  if (line.agent !== 'grok' || line.event !== 'PreToolUse') return;
+  const waiting = run.grokRecallWait.filter((item) => item.session === line.session);
+  if (waiting.length === 0) return;
+  const pack = packText(hooked.stdout);
+  const start = run.sessionStartPack.get(key) ?? '';
+  for (const item of waiting) {
+    run.recallHits.push({
+      id: item.fact.id,
+      lang: item.fact.lang,
+      query: item.fact.query,
+      expect: item.fact.expect,
+      hit: pack.includes(item.fact.expect) || start.includes(item.fact.expect),
+    });
+  }
+  run.grokRecallWait = run.grokRecallWait.filter((item) => item.session !== line.session);
+}
+
+/** A line tagged with a fact id asks whether that fact came back in this turn's pack. */
+function openRecall(run: ReplayRun, line: Line, hooked: Spawned): void {
+  if (line.tags?.recall === undefined) return;
+  if (line.agent === 'grok') {
+    const fact = run.factsById.get(line.tags.recall);
+    if (fact !== undefined) run.grokRecallWait.push({ seq: line.seq, session: line.session, fact });
+    return;
+  }
+  const pack =
+    run.packs
+      .filter((entry) => entry.agent === line.agent && entry.session === line.session && entry.seq >= line.seq)
+      .map((entry) => entry.text)
+      .join('\n') || packText(hooked.stdout);
+  checkRecall(run, line, pack);
+}
+
+/** How the engine classified the size-tagged event it just stored, read back for the size table. */
+function lastClassification(run: ReplayRun): { classification: string; truncated: number } {
+  let classification: string;
+  let truncated = 0;
+  try {
+    const opened = openDatabase({ path: run.paths.db, timeoutMs: 2_000, hook: true });
+    try {
+      const row = opened.db
+        .prepare(
+          `SELECT classification_state AS classification_state, truncated AS truncated
+           FROM raw_events ORDER BY captured_at DESC, id DESC LIMIT 1`,
+        )
+        .get() as { classification_state?: unknown; truncated?: unknown } | undefined;
+      classification = typeof row?.classification_state === 'string' ? row.classification_state : 'missing';
+      truncated = typeof row?.truncated === 'number' ? row.truncated : 0;
+    } finally {
+      opened.db.close();
+    }
+  } catch {
+    classification = 'unreadable';
+  }
+  return { classification, truncated };
+}
+
+/** One row of the size table: the tag the fixture promised and what the engine made of it. */
+function recordSize(run: ReplayRun, line: Line, tag: SizeRow['tag'], fillSize: number, hooked: Spawned): void {
+  const { classification, truncated } = lastClassification(run);
+  run.sizeRows.push({
+    seq: line.seq,
+    agent: line.agent,
+    event: line.event,
+    tag,
+    fillBytes: fillSize,
+    ms: hooked.elapsedMs,
+    classification,
+    truncated,
+  });
+}
+
+/**
+ * The worker runs after a session ends, unless the fixture holds that agent open so the next
+ * session start finds a pending summary; the hold is released at that start.
+ */
+async function settleObserve(run: ReplayRun, line: Line): Promise<void> {
+  if (SESSION_END.has(line.event)) {
+    if (skipObserve(line, run.holdFromSeq)) run.pendingHold.add(line.agent);
+    else if (run.pendingHold.size === 0) await observeNow(run);
+  }
+  if (line.seq === run.lastStartSeq[line.agent]) {
+    run.pendingHold.delete(line.agent);
+    if (run.pendingHold.size === 0) await observeNow(run);
+  }
+}
+
+/** Spawns the engine bundle for one line and files its sample under the table it belongs to. */
+async function runHookLine(
+  run: ReplayRun,
+  line: Line,
+  payload: unknown,
+  kind: { injection: boolean; isPendingStart: boolean },
+): Promise<{ hooked: Spawned; holdActive: boolean }> {
+  const input = JSON.stringify(payload);
+  const { args, extra } = hookArgs({ ...line, payload });
+  const env = replayEnv(run.home, extra);
+  const timeoutMs = kind.injection ? 15_000 : 10_000;
+  const hooked = await runChild(run.bundle, args, input, run.repo, env, timeoutMs);
+  recordHook(run, line, hooked, line.event);
+  const sample: Sample = {
+    agent: line.agent,
+    event: line.event,
+    seq: line.seq,
+    session: line.session,
+    ms: hooked.elapsedMs,
+  };
+  const holdActive = run.pendingHold.size > 0;
+  if (kind.injection && !(sessionStartEvent(line.agent, line.event) && holdActive)) {
+    run.injectionSamples.push(sample);
+  } else if (!kind.injection) {
+    run.captureSamples.push(sample);
+  }
+  recordPack(run, line, hooked.stdout);
+
+  if (sessionStartEvent(line.agent, line.event) && line.agent !== 'pi') {
+    if (kind.isPendingStart && holdActive) run.pendingSamples.push(sample);
+    else if (line.seq > 1 && !holdActive) run.readySamples.push(sample);
+  }
+  return { hooked, holdActive };
+}
+
+/** A session end, and every line while a hold is open, runs under replay's own lease. */
+async function holdForLine(run: ReplayRun, line: Line): Promise<number | null> {
+  if (!SESSION_END.has(line.event) && run.pendingHold.size === 0) return null;
+  try {
+    await ensureLeaseHeld(run);
+    return null;
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 3;
+  }
+}
+
+/**
+ * One fixture line: the hook, the Pi injection it also drives, and the checks its tags ask
+ * for. `null` continues the replay; a number is the exit code the replay stops with.
+ */
+async function replayLine(run: ReplayRun, line: Line): Promise<number | null> {
+  if (line.seq % 100 === 0) process.stderr.write(`replay ${line.seq}/${run.lines.length}\n`);
+  const key = `${line.agent}:${line.session}`;
+  const isPendingStart = run.pendingSessions.has(key) && sessionStartEvent(line.agent, line.event);
+  const injection = isInjectionHook(line.agent, line.event);
+
+  const expanded = expandLine(run, line);
+  if (typeof expanded === 'number') return expanded;
+  const { payload, fillSize } = expanded;
+
+  const nativeId = nativeSessionId(line.agent, payload);
+  let resumeBefore = 0;
+  if (line.tags?.lifecycle === 'resume') {
+    resumeBefore = startInjectionCount(run.paths.db, line.agent, nativeId);
+  }
+
+  const held = await holdForLine(run, line);
+  if (held !== null) return held;
+
+  const { hooked, holdActive } = await runHookLine(run, line, payload, { injection, isPendingStart });
+
+  const injected = isPiInjectEvent(line)
+    ? await injectPiLine(run, line, payload, { isPendingStart, holdActive })
+    : undefined;
+
+  if (line.tags?.lifecycle === 'resume') {
+    recordResume(run, line, { nativeId, resumeBefore, hooked, injected });
+  }
+  settleGrokRecall(run, line, key, hooked);
+  openRecall(run, line, hooked);
+
+  if (line.tags?.size !== undefined) recordSize(run, line, line.tags.size, fillSize, hooked);
+  await settleObserve(run, line);
+  return null;
+}
+
+/** Runs the worker now and waits for the summaries the ended sessions are owed. */
+async function observeNow(run: ReplayRun): Promise<void> {
+  dropLease(run);
+  startWorker(run);
+  await waitEndedSummaries(run, 45_000);
+}
+
+/**
+ * The last worker run: every ended session is owed a summary, and a run still going gets five more
+ * seconds under a held lease so its high-water mark is measured before the report is written.
+ */
+async function settleWorker(run: ReplayRun): Promise<void> {
+  dropLease(run);
+  startWorker(run);
+  await waitEndedSummaries(run, 60_000);
+  harvestRss(run);
+  if (run.liveObserve?.running() !== true) return;
+  holdLease(run.paths.db);
+  const stop = Date.now() + 5_000;
+  while (Date.now() < stop && run.liveObserve.running()) await sleep(50);
+  harvestRss(run);
+  releaseHeldLease(run.paths.db);
+}
+
+/** The database is created once, before the first hook; the hook itself never migrates. */
+function createDatabase(run: ReplayRun): number | null {
+  try {
+    openDatabase({ path: run.paths.db, timeoutMs: 5_000 }).db.close();
+    return null;
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 3;
+  }
+}
+
+/** Workers the hook spawned while the lease was free are found through the lease row's pid. */
+function pollHookWorker(run: ReplayRun, workerPid: ReturnType<ReturnType<typeof openDatabase>['db']['prepare']>): void {
+  try {
+    const pid = workerPid.get()?.pid;
+    if (typeof pid === 'number' && pid !== process.pid && !run.observePids.has(pid)) {
+      run.hookWorkerPids.add(pid);
+      run.hookWorkerRssKb = Math.max(run.hookWorkerRssKb, readVmHwm(pid));
+    }
+  } catch {
+    // T068 / R6: a busy lease read must not interrupt replay; the next poll retries it.
+  }
+}
+
+/** `--json` prints the machine form, `--out` replaces the evidence section, else stdout. */
+function writeReport(
+  values: ReplayPlan['values'],
+  outPath: string | undefined,
+  measured: { markdown: string; json: Record<string, unknown> },
+): void {
+  if (values.json === true) process.stdout.write(`${JSON.stringify(measured.json, null, 2)}\n`);
+  if (outPath !== undefined) replaceSection(outPath, measured.markdown);
+  else if (values.json !== true) process.stdout.write(`${measured.markdown}\n`);
+}
+
+/** The repository is this run's own; the home is removed only when this run created it. */
+function cleanupReplay(input: { home: string; repo: string; keep: boolean; createdHome: boolean }): void {
+  if (input.keep) {
+    process.stderr.write(`kept home=${input.home} repo=${input.repo}\n`);
+    return;
+  }
+  rmSync(input.repo, { recursive: true, force: true });
+  if (input.createdHome) rmSync(input.home, { recursive: true, force: true });
+}
+
+/** Reads the finished run out of its own database and renders the evidence section. */
+function measureRun(
+  run: ReplayRun,
+  input: { dbBytesBefore: number; fixturePath: string; startedAt: string; loadAtStart: string },
+): ReturnType<typeof measure> {
+  const opened = openDatabase({ path: run.paths.db, timeoutMs: 5_000 });
+  try {
+    return measure(opened, run.paths, {
+      ...run,
+      ...input,
+      hookWorkerRuns: run.hookWorkerPids.size,
+    });
+  } finally {
+    opened.db.close();
+  }
+}
+
+export async function runFixture(argv: string[]): Promise<number> {
+  const plan = replayPlan(argv);
+  if (typeof plan === 'number') return plan;
+  const { values, fixturePath, outPath, root, bundle, lines, sessionWindows } = plan;
 
   const maps = corpus(root);
-  const createdHome = values.home === undefined && process.env.OBOETE_HOME === undefined;
-  let home: string;
-  if (values.home !== undefined) {
-    home = resolve(values.home);
-  } else if (process.env.OBOETE_HOME !== undefined && process.env.OBOETE_HOME !== '') {
-    home = isAbsolute(process.env.OBOETE_HOME)
-      ? resolve(process.env.OBOETE_HOME)
-      : resolve(process.cwd(), process.env.OBOETE_HOME);
-  } else {
-    home = mkdtempSync(join(tmpdir(), 'oboete-t068-home-'));
-  }
+  const { home, createdHome } = replayHome(values);
   const repo = mkdtempSync(join(tmpdir(), 'oboete-t068-repo-'));
   const keep = values.keep === true;
   const paths = oboetePaths(home);
   const envBase = replayEnv(home);
   const startedAt = new Date().toISOString();
   const loadAtStart = loadAverage();
-  const { lastStartSeq, holdFromSeq } = sessionWindows;
-  const pendingHold = new Set<Agent>();
-  const pendingSessions = new Set<string>();
-  for (const agent of AGENTS) {
-    const start = lines.find((line) => line.agent === agent && line.seq === lastStartSeq[agent]);
-    if (start !== undefined) pendingSessions.add(`${agent}:${start.session}`);
-  }
-
-  const captureSamples: Sample[] = [];
-  const injectionSamples: Sample[] = [];
-  const readySamples: Sample[] = [];
-  const pendingSamples: Sample[] = [];
-  const sizeRows: SizeRow[] = [];
-  const packs: { seq: number; agent: Agent; session: string; event: string; text: string }[] = [];
-  const sessionStartPack = new Map<string, string>();
-  const factsById = new Map<string, Fact>();
-  const recallHits: RecallHit[] = [];
-  let grokRecallWait: { seq: number; session: string; fact: Fact }[] = [];
-  const hookFailures: HookFailure[] = [];
-  const resumeChecks: ResumeCheck[] = [];
-  let hookCount = 0;
-  let observeRssKb = 0;
-  let observeRuns = 0;
-  let hookWorkerRssKb = 0;
-  const hookWorkerPids = new Set<number>();
-  const observePids = new Set<number>();
+  const run = createRun({ bundle, repo, home, envBase, paths, lines, maps, sessionWindows });
   let workerPollDb: ReturnType<typeof openDatabase>['db'] | undefined;
   let workerPoll: ReturnType<typeof setInterval> | undefined;
-  let storageFailed = false;
-  let leaseHeld = false;
-
-  const factsFrom = (line: Line): void => {
-    const fact = line.tags?.fact;
-    if (fact !== undefined) factsById.set(fact.id, fact);
-  };
-  for (const line of lines) factsFrom(line);
-
-  const recordPack = (line: Line, stdout: string): void => {
-    const text = packText(stdout);
-    if (text.trim() === '') return;
-    packs.push({ seq: line.seq, agent: line.agent, session: line.session, event: line.event, text });
-    const key = `${line.agent}:${line.session}`;
-    if (
-      sessionStartEvent(line.agent, line.event) ||
-      (line.agent === 'grok' && line.event === 'PreToolUse' && !sessionStartPack.has(key))
-    ) {
-      sessionStartPack.set(key, text);
-    }
-  };
-
-  const recordHook = (line: Line, spawned: Spawned, eventLabel: string): void => {
-    hookCount += 1;
-    if (!hookViolated(spawned)) return;
-    hookFailures.push({
-      seq: line.seq,
-      agent: line.agent,
-      event: eventLabel,
-      status: hookStatusCell(spawned),
-      stderr: firstStderrLine(spawned.stderr),
-    });
-  };
-
-  const checkRecall = (line: Line, pack: string): void => {
-    const id = line.tags?.recall;
-    if (id === undefined) return;
-    const fact = factsById.get(id);
-    if (fact === undefined) return;
-    const start = sessionStartPack.get(`${line.agent}:${line.session}`) ?? '';
-    const hit = pack.includes(fact.expect) || start.includes(fact.expect);
-    recallHits.push({ id: fact.id, lang: fact.lang, query: fact.query, expect: fact.expect, hit });
-  };
-
-  let liveObserve: ObserveProc | undefined;
-
-  const harvestRss = (): void => {
-    if (liveObserve === undefined) return;
-    const value = liveObserve.rssKb();
-    if (value > observeRssKb) observeRssKb = value;
-    if (liveObserve.status() === 3) storageFailed = true;
-  };
-
-  const startWorker = (): void => {
-    if (liveObserve?.running() === true) return;
-    liveObserve = startObserve(bundle, repo, envBase);
-    if (liveObserve.pid !== undefined) observePids.add(liveObserve.pid);
-    observeRuns += 1;
-    void liveObserve.exited.then(() => harvestRss());
-  };
-
-  const waitEndedSummaries = async (timeoutMs: number): Promise<void> => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      harvestRss();
-      const pending = endedPendingCount(paths.db);
-      if (pending === 0) return;
-      startWorker();
-      await sleep(50);
-    }
-  };
-
-  const ensureLeaseHeld = async (): Promise<void> => {
-    if (leaseHeld) {
-      holdLease(paths.db);
-      return;
-    }
-    // A previous observe may still be looping on an active session's unbatched rows (up to 20 min).
-    // Steal after a short wait so SessionEnd is not blocked on that idle loop.
-    await waitLeaseFree(paths.db, 500);
-    holdLease(paths.db);
-    leaseHeld = true;
-  };
-
-  const dropLease = (): void => {
-    if (!leaseHeld) return;
-    releaseHeldLease(paths.db);
-    leaseHeld = false;
-  };
-
-  const observeNow = async (): Promise<void> => {
-    dropLease();
-    startWorker();
-    await waitEndedSummaries(45_000);
-  };
-
   try {
-    initRepo(repo);
+    initRepo(run.repo);
     mkdirSync(home, { recursive: true, mode: 0o700 });
-    ensureDirectories(paths);
-    try {
-      openDatabase({ path: paths.db, timeoutMs: 5_000 }).db.close();
-    } catch (error) {
-      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-      return 3;
-    }
-    const dbBytesBefore = fileBytes(paths.db) + fileBytes(`${paths.db}-wal`);
-    workerPollDb = openDatabase({ path: paths.db, timeoutMs: 0, hook: true }).db;
+    ensureDirectories(run.paths);
+    const created = createDatabase(run);
+    if (created !== null) return created;
+    const dbBytesBefore = fileBytes(run.paths.db) + fileBytes(`${run.paths.db}-wal`);
+    workerPollDb = openDatabase({ path: run.paths.db, timeoutMs: 0, hook: true }).db;
     const workerPid = workerPollDb.prepare('SELECT pid FROM worker_lease WHERE id = 1');
-    workerPoll = setInterval(() => {
-      try {
-        const pid = workerPid.get()?.pid;
-        if (typeof pid === 'number' && pid !== process.pid && !observePids.has(pid)) {
-          hookWorkerPids.add(pid);
-          hookWorkerRssKb = Math.max(hookWorkerRssKb, readVmHwm(pid));
-        }
-      } catch {
-        // T068 / R6: a busy lease read must not interrupt replay; the next poll retries it.
-      }
-    }, 50);
-
-    for (const line of lines) {
-      if (line.seq % 100 === 0) process.stderr.write(`replay ${line.seq}/${lines.length}\n`);
-      const key = `${line.agent}:${line.session}`;
-      const isPendingStart = pendingSessions.has(key) && sessionStartEvent(line.agent, line.event);
-      const injection = isInjectionHook(line.agent, line.event);
-
-      let payload = line.payload;
-      let fillSize = 0;
-      try {
-        if (line.tags?.size !== undefined) {
-          const filled = expandPayload(payload, { fill: true });
-          fillSize = Buffer.byteLength(JSON.stringify(filled));
-          const tag = line.tags.size;
-          const ok = tag === 'at_bound' ? fillSize === AT_BOUND : fillSize === ABOVE_ONE || fillSize === ABOVE_TWO;
-          if (!ok) {
-            const expected = tag === 'at_bound' ? String(AT_BOUND) : `${ABOVE_ONE} or ${ABOVE_TWO}`;
-            process.stderr.write(
-              `size tag ${tag} seq=${line.seq}: FILL-only JSON is ${fillSize} bytes, expected ${expected}\n`,
-            );
-            return 2;
-          }
-          payload = expandPayload(filled, { root: repo, fill: false });
-        } else {
-          payload = expandPayload(payload, {
-            root: repo,
-            secrets: maps.secrets,
-            directives: maps.directives,
-            fill: true,
-          });
-        }
-      } catch (error) {
-        process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-        return 2;
-      }
-
-      const nativeId = nativeSessionId(line.agent, payload);
-      let resumeBefore = 0;
-      if (line.tags?.lifecycle === 'resume') {
-        resumeBefore = startInjectionCount(paths.db, line.agent, nativeId);
-      }
-
-      if (SESSION_END.has(line.event) || pendingHold.size > 0) {
-        try {
-          await ensureLeaseHeld();
-        } catch (error) {
-          process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-          return 3;
-        }
-      }
-
-      const input = JSON.stringify(payload);
-      const { args, extra } = hookArgs({ ...line, payload });
-      const env = replayEnv(home, extra);
-      const timeoutMs = injection ? 15_000 : 10_000;
-      const hooked = await runChild(bundle, args, input, repo, env, timeoutMs);
-      recordHook(line, hooked, line.event);
-      const sample: Sample = {
-        agent: line.agent,
-        event: line.event,
-        seq: line.seq,
-        session: line.session,
-        ms: hooked.elapsedMs,
-      };
-      const holdActive = pendingHold.size > 0;
-      if (injection && !(sessionStartEvent(line.agent, line.event) && holdActive)) {
-        injectionSamples.push(sample);
-      } else if (!injection) {
-        captureSamples.push(sample);
-      }
-      recordPack(line, hooked.stdout);
-
-      if (sessionStartEvent(line.agent, line.event) && line.agent !== 'pi') {
-        if (isPendingStart && holdActive) pendingSamples.push(sample);
-        else if (line.seq > 1 && !holdActive) readySamples.push(sample);
-      }
-
-      let injected: Spawned | undefined;
-      if (line.agent === 'pi' && (line.event === 'session_start' || line.event === 'input') && line.tags?.size === undefined) {
-        const envelope = payload as {
-          cwd?: unknown;
-          session_id?: unknown;
-          model?: unknown;
-          payload?: { text?: unknown };
-        };
-        const kind = line.event === 'session_start' ? 'start' : 'prompt';
-        const injectInput = JSON.stringify({
-          cwd: typeof envelope.cwd === 'string' ? envelope.cwd : repo,
-          session_id: typeof envelope.session_id === 'string' ? envelope.session_id : nativeSessionId('pi', payload),
-          prompt: typeof envelope.payload?.text === 'string' ? envelope.payload.text : undefined,
-          model: typeof envelope.model === 'string' ? envelope.model : undefined,
-        });
-        injected = await runChild(
-          bundle,
-          ['inject', '--agent', 'pi', '--kind', kind],
-          injectInput,
-          repo,
-          envBase,
-          kind === 'start' ? 15_000 : 10_000,
-        );
-        recordHook(line, injected, `inject:${kind}`);
-        const injectSample: Sample = {
-          agent: 'pi',
-          event: line.event,
-          seq: line.seq,
-          session: line.session,
-          ms: injected.elapsedMs,
-        };
-        recordPack(line, injected.stdout);
-        if (line.event === 'session_start') {
-          if (isPendingStart && holdActive) pendingSamples.push(injectSample);
-          else if (!holdActive) {
-            injectionSamples.push(injectSample);
-            if (line.seq > 1) readySamples.push(injectSample);
-          }
-        } else {
-          injectionSamples.push(injectSample);
-        }
-      }
-
-      if (line.tags?.lifecycle === 'resume') {
-        const after = startInjectionCount(paths.db, line.agent, nativeId);
-        const printed =
-          packText(hooked.stdout).trim() !== '' || (injected !== undefined && packText(injected.stdout).trim() !== '');
-        resumeChecks.push({
-          seq: line.seq,
-          agent: line.agent,
-          session: line.session,
-          packPrinted: printed,
-          injectionDelta: after < 0 || resumeBefore < 0 ? 1 : after - resumeBefore,
-        });
-      }
-
-      if (line.agent === 'grok' && line.event === 'PreToolUse') {
-        const waiting = grokRecallWait.filter((item) => item.session === line.session);
-        if (waiting.length > 0) {
-          const pack = packText(hooked.stdout);
-          const start = sessionStartPack.get(key) ?? '';
-          for (const item of waiting) {
-            recallHits.push({
-              id: item.fact.id,
-              lang: item.fact.lang,
-              query: item.fact.query,
-              expect: item.fact.expect,
-              hit: pack.includes(item.fact.expect) || start.includes(item.fact.expect),
-            });
-          }
-          grokRecallWait = grokRecallWait.filter((item) => item.session !== line.session);
-        }
-      }
-
-      if (line.tags?.recall !== undefined) {
-        if (line.agent === 'grok') {
-          const fact = factsById.get(line.tags.recall);
-          if (fact !== undefined) grokRecallWait.push({ seq: line.seq, session: line.session, fact });
-        } else {
-          const pack =
-            packs
-              .filter((entry) => entry.agent === line.agent && entry.session === line.session && entry.seq >= line.seq)
-              .map((entry) => entry.text)
-              .join('\n') || packText(hooked.stdout);
-          checkRecall(line, pack);
-        }
-      }
-
-      if (line.tags?.size !== undefined) {
-        let classification = 'missing';
-        let truncated = 0;
-        try {
-          const opened = openDatabase({ path: paths.db, timeoutMs: 2_000, hook: true });
-          try {
-            const row = opened.db
-              .prepare(
-                `SELECT classification_state AS classification_state, truncated AS truncated
-                 FROM raw_events ORDER BY captured_at DESC, id DESC LIMIT 1`,
-              )
-              .get() as { classification_state?: unknown; truncated?: unknown } | undefined;
-            classification = typeof row?.classification_state === 'string' ? row.classification_state : 'missing';
-            truncated = typeof row?.truncated === 'number' ? row.truncated : 0;
-          } finally {
-            opened.db.close();
-          }
-        } catch {
-          classification = 'unreadable';
-        }
-        sizeRows.push({
-          seq: line.seq,
-          agent: line.agent,
-          event: line.event,
-          tag: line.tags.size,
-          fillBytes: fillSize,
-          ms: hooked.elapsedMs,
-          classification,
-          truncated,
-        });
-      }
-
-      if (SESSION_END.has(line.event)) {
-        if (skipObserve(line, holdFromSeq)) pendingHold.add(line.agent);
-        else if (pendingHold.size === 0) await observeNow();
-      }
-
-      if (line.seq === lastStartSeq[line.agent]) {
-        pendingHold.delete(line.agent);
-        if (pendingHold.size === 0) await observeNow();
-      }
-    }
-
-    dropLease();
-    startWorker();
-    await waitEndedSummaries(60_000);
-    harvestRss();
-    if (liveObserve?.running() === true) {
-      holdLease(paths.db);
-      const stop = Date.now() + 5_000;
-      while (Date.now() < stop && liveObserve.running()) await sleep(50);
-      harvestRss();
-      releaseHeldLease(paths.db);
-    }
-    clearInterval(workerPoll);
-
-    if (storageFailed) {
-      process.stderr.write('observe reported unusable storage\n');
-      return 3;
-    }
-
-    const opened = openDatabase({ path: paths.db, timeoutMs: 5_000 });
-    let measured;
-    try {
-      measured = measure(opened, paths, {
-        lines,
-        captureSamples,
-        injectionSamples,
-        readySamples,
-        pendingSamples,
-        sizeRows,
-        packs,
-        sessionStartPack,
-        recallHits,
-        grokRecallWait,
-        hookFailures,
-        hookCount,
-        resumeChecks,
-        maps,
-        observeRssKb,
-        observeRuns,
-        hookWorkerRssKb,
-        hookWorkerRuns: hookWorkerPids.size,
-        dbBytesBefore,
-        home,
-        fixturePath,
-        bundle,
-        startedAt,
-        loadAtStart,
-      });
-    } finally {
-      opened.db.close();
-    }
-
-    if (values.json === true) process.stdout.write(`${JSON.stringify(measured.json, null, 2)}\n`);
-    if (outPath !== undefined) replaceSection(outPath, measured.markdown);
-    else if (values.json !== true) process.stdout.write(`${measured.markdown}\n`);
-
-    return measured.failed ? 1 : 0;
+    workerPoll = setInterval(() => pollHookWorker(run, workerPid), 50);
+    return await driveRun(run, workerPoll, {
+      values,
+      outPath,
+      fixturePath,
+      startedAt,
+      loadAtStart,
+      dbBytesBefore,
+    });
   } finally {
     clearInterval(workerPoll);
     workerPollDb?.close();
-    if (!keep) {
-      rmSync(repo, { recursive: true, force: true });
-      if (createdHome) rmSync(home, { recursive: true, force: true });
-    } else {
-      process.stderr.write(`kept home=${home} repo=${repo}\n`);
-    }
+    cleanupReplay({ home, repo: run.repo, keep, createdHome });
   }
+}
+
+/**
+ * The fixture lines, the worker settle, and the report. Stops the 50 ms lease poll before the
+ * measurement reads the worker's high-water mark; `runFixture`'s `finally` clears it on every
+ * other path and closes the database the poll reads.
+ */
+async function driveRun(
+  run: ReplayRun,
+  workerPoll: ReturnType<typeof setInterval>,
+  ctx: {
+    values: ReplayPlan['values'];
+    outPath: string | undefined;
+    fixturePath: string;
+    startedAt: string;
+    loadAtStart: ReturnType<typeof loadAverage>;
+    dbBytesBefore: number;
+  },
+): Promise<number> {
+  const { values, outPath, fixturePath, startedAt, loadAtStart, dbBytesBefore } = ctx;
+
+  for (const line of run.lines) {
+    const exit = await replayLine(run, line);
+    if (exit !== null) return exit;
+  }
+
+  await settleWorker(run);
+  clearInterval(workerPoll);
+
+  if (run.storageFailed) {
+    process.stderr.write('observe reported unusable storage\n');
+    return 3;
+  }
+
+  const measured = measureRun(run, { dbBytesBefore, fixturePath, startedAt, loadAtStart });
+  writeReport(values, outPath, measured);
+  return measured.failed ? 1 : 0;
 }
 
 function sessionOrder(lines: Line[]): Record<Agent, string[]> {
@@ -1212,10 +1452,195 @@ function neighborSession(order: string[], label: string, offset: number): string
   return order[index + offset];
 }
 
-function measure(
-  opened: ReturnType<typeof openDatabase>,
+/** The share of samples inside a bound, and the p99 the report prints beside it. */
+function shareUnder(values: number[], bound: number): { under: number; p99: number } {
+  const under = values.length === 0 ? 1 : values.filter((value) => value <= bound).length / values.length;
+  return { under, p99: percentile(values, 99) };
+}
+
+function maxMs(samples: Sample[]): number {
+  return samples.length === 0 ? 0 : Math.max(...samples.map((sample) => sample.ms));
+}
+
+/** A2: a start taken while the previous summary was pending must say so in its own pack. */
+function pendingSentence(
+  input: { packs: { seq: number; text: string }[]; sessionStartPack: Map<string, string> },
+  samples: Sample[],
+): { hits: number; text: string } {
+  const hits = samples.filter((sample) => {
+    const pack =
+      input.packs.find((entry) => entry.seq === sample.seq)?.text ??
+      input.sessionStartPack.get(`${sample.agent}:${sample.session}`) ??
+      '';
+    return pack.includes(SUMMARY_PENDING);
+  }).length;
+  return { hits, text: `${hits}/${samples.length} packs carry summary_pending` };
+}
+
+/** Every byte this run wrote anywhere, so a leaked secret is found wherever it landed. */
+function writtenSurfaces(paths: ReturnType<typeof oboetePaths>, packBlob: string): Buffer[] {
+  const dbBuffers = [paths.db, `${paths.db}-wal`, `${paths.db}-shm`]
+    .filter((path) => existsSync(path))
+    .map((path) => readFileSync(path));
+  const extraFiles = [...walkFiles(paths.spool), ...walkFiles(paths.logs)].map((path) => readFileSync(path));
+  return [...dbBuffers, ...extraFiles, Buffer.from(packBlob, 'utf8')];
+}
+
+/** SC-005 and FR-021: no planted secret reaches a written surface, no directive reaches a memory. */
+function privacyChecks(
+  db: ReturnType<typeof openDatabase>['db'],
   paths: ReturnType<typeof oboetePaths>,
-  input: {
+  input: { maps: ReturnType<typeof corpus>; packBlob: string },
+): { leakedSecrets: string[]; leakedDirectives: string[]; negativesUnredacted: number; rawDirectiveRows: number } {
+  const surfaces = writtenSurfaces(paths, input.packBlob);
+  const leakedSecrets = input.maps.secretValues
+    .filter((row) => surfaces.some((buffer) => bufferHas(buffer, row.secret)))
+    .map((row) => row.id);
+
+  const memoryRows = db.prepare('SELECT title AS title, body AS body FROM memories').all() as {
+    title: unknown;
+    body: unknown;
+  }[];
+  const memoryText = memoryRows
+    .map((row) => `${typeof row.title === 'string' ? row.title : ''}\n${typeof row.body === 'string' ? row.body : ''}`)
+    .join('\n');
+  const negativesUnredacted = input.maps.negatives.filter((row) => memoryText.includes(row.text)).length;
+  const leakedDirectives = input.maps.directives.filter(
+    (phrase) => memoryText.includes(phrase) || input.packBlob.includes(phrase),
+  );
+
+  const rawContents = db.prepare('SELECT content AS content FROM raw_events WHERE content IS NOT NULL').all() as {
+    content: unknown;
+  }[];
+  const rawDirectiveRows = rawContents.filter(
+    (row) => typeof row.content === 'string' && input.maps.directives.some((phrase) => (row.content as string).includes(phrase)),
+  ).length;
+
+  return { leakedSecrets, leakedDirectives, negativesUnredacted, rawDirectiveRows };
+}
+
+type LifeRow = { check: string; n: number; pass: boolean; offenders: string[] };
+type LifeResult = { session: string; pass: boolean };
+type ConversationOf = (agent: Agent, label: string) => { native: string; conversationId: string; epoch: number } | undefined;
+
+/** One lifecycle row of the report: how many sessions were checked and which ones failed. */
+function life(check: string, results: LifeResult[]): LifeRow {
+  return {
+    check,
+    n: results.length,
+    pass: results.length > 0 && results.every((row) => row.pass),
+    offenders: results.filter((row) => !row.pass).map((row) => row.session),
+  };
+}
+
+/** Maps a fixture's session label to the conversation the engine actually opened for it. */
+function conversationLookup(db: ReturnType<typeof openDatabase>['db'], lines: Line[]): ConversationOf {
+  const dbSessions = db
+    .prepare(
+      `SELECT id AS id, agent AS agent, native_session_id AS native_session_id,
+              conversation_id AS conversation_id, context_epoch AS context_epoch
+       FROM sessions`,
+    )
+    .all() as {
+    id: unknown;
+    agent: unknown;
+    native_session_id: unknown;
+    conversation_id: unknown;
+    context_epoch: unknown;
+  }[];
+  const sessionByNative = new Map<string, (typeof dbSessions)[number]>();
+  const sessionById = new Map<string, (typeof dbSessions)[number]>();
+  for (const row of dbSessions) {
+    sessionByNative.set(`${String(row.agent)}\t${String(row.native_session_id)}`, row);
+    sessionById.set(String(row.id), row);
+  }
+  const nativeByLabel = new Map<string, string>();
+  for (const line of lines) {
+    const key = `${line.agent}:${line.session}`;
+    if (!nativeByLabel.has(key)) nativeByLabel.set(key, nativeSessionId(line.agent, line.payload));
+  }
+  return (agent, label) => {
+    const native = nativeByLabel.get(`${agent}:${label}`);
+    if (native === undefined) return undefined;
+    const row = sessionByNative.get(`${agent}\t${native}`);
+    if (row === undefined) return undefined;
+    const root = sessionById.get(String(row.conversation_id)) ?? row;
+    return { native, conversationId: String(row.conversation_id), epoch: Number(root.context_epoch ?? 0) };
+  };
+}
+
+/** A fork and a clear both open a new conversation; only a clear also opens a new native session. */
+function branchResult(
+  line: Line,
+  order: string[],
+  conversationOf: ConversationOf,
+  tag: 'fork' | 'clear',
+): LifeResult {
+  const start = sessionStartEvent(line.agent, line.event);
+  const subject = start ? line.session : neighborSession(order, line.session, 1);
+  const parent = start ? neighborSession(order, line.session, -1) : line.session;
+  const left = subject === undefined ? undefined : conversationOf(line.agent, subject);
+  const right = parent === undefined ? undefined : conversationOf(line.agent, parent);
+  const pass =
+    left !== undefined &&
+    right !== undefined &&
+    left.conversationId !== right.conversationId &&
+    (tag === 'fork' || left.native !== right.native);
+  return { session: `${line.agent}:${subject ?? line.session}`, pass };
+}
+
+/** A compaction adds one epoch and one classified summary row to the same conversation. */
+function compactResult(
+  db: ReturnType<typeof openDatabase>['db'],
+  line: Line,
+  conversationOf: ConversationOf,
+): LifeResult {
+  const conv = conversationOf(line.agent, line.session);
+  const clean =
+    conv === undefined
+      ? -1
+      : (
+          db
+            .prepare(
+              `SELECT COUNT(*) AS n FROM raw_events e
+               JOIN sessions s ON s.id = e.session_id
+               WHERE e.kind = 'compaction_summary' AND s.conversation_id = ?
+                 AND e.classification_state = 'done'`,
+            )
+            .get(conv.conversationId) as { n?: unknown }
+        ).n;
+  const count = typeof clean === 'number' ? clean : -1;
+  return {
+    session: `${line.agent}:${line.session} epoch=${conv?.epoch ?? 'missing'} rows=${count}`,
+    pass: conv !== undefined && count >= 1 && conv.epoch === count,
+  };
+}
+
+/** Every line the fixture tagged with a lifecycle event, grouped by the check it feeds. */
+function lifecycleTags(
+  db: ReturnType<typeof openDatabase>['db'],
+  lines: Line[],
+  conversationOf: ConversationOf,
+): { fork: LifeResult[]; clear: LifeResult[]; compact: LifeResult[] } {
+  const order = sessionOrder(lines);
+  const tagged = { fork: [] as LifeResult[], clear: [] as LifeResult[], compact: [] as LifeResult[] };
+  for (const line of lines) {
+    const tag = line.tags?.lifecycle;
+    if (tag === 'fork' || tag === 'clear') {
+      tagged[tag].push(branchResult(line, order[line.agent], conversationOf, tag));
+    } else if (tag === 'compact') {
+      tagged.compact.push(compactResult(db, line, conversationOf));
+    }
+  }
+  return tagged;
+}
+
+/** The share of recall probes whose fact came back; an empty set counts as a pass. */
+function recallRateOf(rows: RecallHit[]): number {
+  return rows.length === 0 ? 1 : rows.filter((row) => row.hit).length / rows.length;
+}
+
+type MeasureInput = {
     lines: Line[];
     captureSamples: Sample[];
     injectionSamples: Sample[];
@@ -1240,9 +1665,23 @@ function measure(
     bundle: string;
     startedAt: string;
     loadAtStart: string;
-  },
+};
+
+/** SC-002, SC-003, SC-005, SC-009, SC-010, lifecycle and directives, as one evidence section. */
+function measure(
+  opened: ReturnType<typeof openDatabase>,
+  paths: ReturnType<typeof oboetePaths>,
+  input: MeasureInput,
 ): { markdown: string; json: Record<string, unknown>; failed: boolean } {
-  const { db } = opened;
+  return renderReport(input, computeReport(opened, paths, input));
+}
+
+/** The row counts and database growth the report states, read once. */
+function dbCounts(
+  db: ReturnType<typeof openDatabase>['db'],
+  paths: ReturnType<typeof oboetePaths>,
+  input: MeasureInput,
+) {
   const dbBytesAfter = fileBytes(paths.db) + fileBytes(`${paths.db}-wal`);
   const perThousand = input.lines.length === 0 ? 0 : (dbBytesAfter - input.dbBytesBefore) * (1000 / input.lines.length);
   const rawEvents = countQuery(db, 'SELECT COUNT(*) AS n FROM raw_events');
@@ -1259,42 +1698,100 @@ function measure(
     )
     .all() as { conversation_id: unknown; context_epoch: unknown; memory_id: unknown; n: unknown }[];
 
+  return { dbBytesAfter, perThousand, rawEvents, memories, injections, injectionItems, duplicateGroups };
+}
+
+/** FR-025 and contracts/agents.md: fork, resume, compaction and clear each keep their shape. */
+function lifecycleReport(
+  db: ReturnType<typeof openDatabase>['db'],
+  input: MeasureInput,
+): { lifecycleRows: LifeRow[]; lifecyclePass: boolean } {
+  const conversationOf = conversationLookup(db, input.lines);
+  const tagged = lifecycleTags(db, input.lines, conversationOf);
+  const resumeLife = life(
+    'resume',
+    input.resumeChecks.map((row) => ({
+      session: `${row.agent}:${row.session}`,
+      pass: !row.packPrinted && row.injectionDelta === 0,
+    })),
+  );
+  const lifecycleRows = [
+    life('fork', tagged.fork),
+    resumeLife,
+    life('compact', tagged.compact),
+    life('clear', tagged.clear),
+  ];
+  const lifecyclePass = lifecycleRows.every((row) => row.pass);
+  return { lifecycleRows, lifecyclePass };
+}
+
+/** SC-002 and the injection and session-start bounds, from the samples this run took. */
+function timingReport(input: MeasureInput) {
+  const captureValues = input.captureSamples.map((sample) => sample.ms);
+  const { under: captureUnder, p99: captureP99 } = shareUnder(captureValues, CAPTURE_DEADLINE_MS);
+  const sc002 = captureValues.length > 0 && captureUnder >= 0.99 && captureP99 <= CAPTURE_DEADLINE_MS;
+  const injectionValues = input.injectionSamples.map((sample) => sample.ms);
+  const { under: injectionUnder, p99: injectionP99 } = shareUnder(injectionValues, READY_BOUND_MS);
+  const injectionTiming = timingRows(input.injectionSamples, () => READY_BOUND_MS, 1);
+  const injectionPass = injectionTiming.pass;
+  const pending = pendingSentence(input, input.pendingSamples);
+  const readyMax = maxMs(input.readySamples);
+  const pendingMax = maxMs(input.pendingSamples);
+  const readyPass = input.readySamples.every((sample) => sample.ms <= READY_BOUND_MS);
+  const pendingPass =
+    input.pendingSamples.length > 0 &&
+    pending.hits === input.pendingSamples.length &&
+    input.pendingSamples.every((sample) => sample.ms <= PENDING_BOUND_MS);
+  return {
+    captureValues,
+    captureUnder,
+    captureP99,
+    sc002,
+    injectionValues,
+    injectionUnder,
+    injectionP99,
+    injectionTiming,
+    injectionPass,
+    pending,
+    readyMax,
+    pendingMax,
+    readyPass,
+    pendingPass,
+  };
+}
+
+/** Everything the report states about this run, read out of the run's own database. */
+function computeReport(
+  opened: ReturnType<typeof openDatabase>,
+  paths: ReturnType<typeof oboetePaths>,
+  input: MeasureInput,
+) {
+  const { db } = opened;
+  const counts = dbCounts(db, paths, input);
   const packBlob = input.packs.map((pack) => pack.text).join('\n');
-  const dbBuffers = [paths.db, `${paths.db}-wal`, `${paths.db}-shm`].filter((path) => existsSync(path)).map((path) => readFileSync(path));
-  const extraFiles = [...walkFiles(paths.spool), ...walkFiles(paths.logs)].map((path) => readFileSync(path));
-  const surfaces = [...dbBuffers, ...extraFiles, Buffer.from(packBlob, 'utf8')];
+  const privacy = privacyChecks(db, paths, { maps: input.maps, packBlob });
+  const recall = recallTally(input);
+  const lifecycle = lifecycleReport(db, input);
+  const compactionSummaries = compactionRows(db);
+  const timing = timingReport(input);
+  const workerRssKb = Math.max(input.observeRssKb, input.hookWorkerRssKb);
+  const workerRuns = `observe runs: ${input.observeRuns} spawned by replay, ${input.hookWorkerRuns} hook-spawned (polled via worker_lease.pid)`;
+  const verdicts = verdictsOf(input, { ...counts, ...privacy, ...recall, ...lifecycle, ...timing, workerRssKb });
+  return {
+    ...counts,
+    ...privacy,
+    ...recall,
+    ...lifecycle,
+    ...timing,
+    ...verdicts,
+    compactionSummaries,
+    workerRssKb,
+    workerRuns,
+  };
+}
 
-  const leakedSecrets: string[] = [];
-  for (const row of input.maps.secretValues) {
-    if (surfaces.some((buffer) => bufferHas(buffer, row.secret))) leakedSecrets.push(row.id);
-  }
-
-  const memoryRows = db.prepare('SELECT title AS title, body AS body FROM memories').all() as {
-    title: unknown;
-    body: unknown;
-  }[];
-  const memoryText = memoryRows
-    .map((row) => `${typeof row.title === 'string' ? row.title : ''}\n${typeof row.body === 'string' ? row.body : ''}`)
-    .join('\n');
-  let negativesUnredacted = 0;
-  for (const row of input.maps.negatives) {
-    if (memoryText.includes(row.text)) negativesUnredacted += 1;
-  }
-
-  const leakedDirectives: string[] = [];
-  for (const phrase of input.maps.directives) {
-    if (memoryText.includes(phrase) || packBlob.includes(phrase)) leakedDirectives.push(phrase);
-  }
-  let rawDirectiveRows = 0;
-  const rawContents = db.prepare('SELECT content AS content FROM raw_events WHERE content IS NOT NULL').all() as {
-    content: unknown;
-  }[];
-  for (const row of rawContents) {
-    const content = row.content;
-    if (typeof content !== 'string') continue;
-    if (input.maps.directives.some((phrase) => content.includes(phrase))) rawDirectiveRows += 1;
-  }
-
+/** Grok's last pending recall probes are settled against the session-start pack, then tallied. */
+function recallTally(input: MeasureInput): { recallJa: RecallHit[]; recallEn: RecallHit[]; misses: RecallHit[] } {
   for (const waiting of input.grokRecallWait) {
     const start = input.sessionStartPack.get(`grok:${waiting.session}`) ?? '';
     input.recallHits.push({
@@ -1305,121 +1802,16 @@ function measure(
       hit: start.includes(waiting.fact.expect),
     });
   }
-
-  const recallJa = input.recallHits.filter((row) => row.lang === 'ja');
-  const recallEn = input.recallHits.filter((row) => row.lang === 'en');
-  const recallRate = (rows: RecallHit[]): number =>
-    rows.length === 0 ? 1 : rows.filter((row) => row.hit).length / rows.length;
-  const misses = input.recallHits.filter((row) => !row.hit);
-
-  const dbSessions = db
-    .prepare(
-      `SELECT id AS id, agent AS agent, native_session_id AS native_session_id,
-              conversation_id AS conversation_id, context_epoch AS context_epoch
-       FROM sessions`,
-    )
-    .all() as {
-    id: unknown;
-    agent: unknown;
-    native_session_id: unknown;
-    conversation_id: unknown;
-    context_epoch: unknown;
-  }[];
-  const sessionByNative = new Map<string, (typeof dbSessions)[number]>();
-  const sessionById = new Map<string, (typeof dbSessions)[number]>();
-  for (const row of dbSessions) {
-    sessionByNative.set(`${String(row.agent)}\t${String(row.native_session_id)}`, row);
-    sessionById.set(String(row.id), row);
-  }
-  const nativeByLabel = new Map<string, string>();
-  for (const line of input.lines) {
-    const key = `${line.agent}:${line.session}`;
-    if (!nativeByLabel.has(key)) nativeByLabel.set(key, nativeSessionId(line.agent, line.payload));
-  }
-  const order = sessionOrder(input.lines);
-  const conversationOf = (
-    agent: Agent,
-    label: string,
-  ): { native: string; conversationId: string; epoch: number } | undefined => {
-    const native = nativeByLabel.get(`${agent}:${label}`);
-    if (native === undefined) return undefined;
-    const row = sessionByNative.get(`${agent}\t${native}`);
-    if (row === undefined) return undefined;
-    const root = sessionById.get(String(row.conversation_id)) ?? row;
-    return {
-      native,
-      conversationId: String(row.conversation_id),
-      epoch: Number(root.context_epoch ?? 0),
-    };
+  return {
+    recallJa: input.recallHits.filter((row) => row.lang === 'ja'),
+    recallEn: input.recallHits.filter((row) => row.lang === 'en'),
+    misses: input.recallHits.filter((row) => !row.hit),
   };
+}
 
-  type LifeRow = { check: string; n: number; pass: boolean; offenders: string[] };
-  const life = (check: string, results: { session: string; pass: boolean }[]): LifeRow => ({
-    check,
-    n: results.length,
-    pass: results.length > 0 && results.every((row) => row.pass),
-    offenders: results.filter((row) => !row.pass).map((row) => row.session),
-  });
-
-  const forkRows: { session: string; pass: boolean }[] = [];
-  const clearRows: { session: string; pass: boolean }[] = [];
-  const compactRows: { session: string; pass: boolean }[] = [];
-  for (const line of input.lines) {
-    const tag = line.tags?.lifecycle;
-    if (tag === undefined) continue;
-    const start = sessionStartEvent(line.agent, line.event);
-    if (tag === 'fork' || tag === 'clear') {
-      const subject = start ? line.session : neighborSession(order[line.agent], line.session, 1);
-      const parent = start ? neighborSession(order[line.agent], line.session, -1) : line.session;
-      const left = subject === undefined ? undefined : conversationOf(line.agent, subject);
-      const right = parent === undefined ? undefined : conversationOf(line.agent, parent);
-      const pass =
-        left !== undefined &&
-        right !== undefined &&
-        left.conversationId !== right.conversationId &&
-        (tag === 'fork' || left.native !== right.native);
-      const label = `${line.agent}:${subject ?? line.session}`;
-      if (tag === 'fork') forkRows.push({ session: label, pass });
-      else clearRows.push({ session: label, pass });
-    }
-    if (tag === 'compact') {
-      const conv = conversationOf(line.agent, line.session);
-      const clean =
-        conv === undefined
-          ? -1
-          : (
-              db
-                .prepare(
-                  `SELECT COUNT(*) AS n FROM raw_events e
-                   JOIN sessions s ON s.id = e.session_id
-                   WHERE e.kind = 'compaction_summary' AND s.conversation_id = ?
-                     AND e.classification_state = 'done'`,
-                )
-                .get(conv.conversationId) as { n?: unknown }
-            ).n;
-      const count = typeof clean === 'number' ? clean : -1;
-      compactRows.push({
-        session: `${line.agent}:${line.session} epoch=${conv?.epoch ?? 'missing'} rows=${count}`,
-        pass: conv !== undefined && count >= 1 && conv.epoch === count,
-      });
-    }
-  }
-  const resumeLife = life(
-    'resume',
-    input.resumeChecks.map((row) => ({
-      session: `${row.agent}:${row.session}`,
-      pass: !row.packPrinted && row.injectionDelta === 0,
-    })),
-  );
-  const lifecycleRows = [
-    life('fork', forkRows),
-    resumeLife,
-    life('compact', compactRows),
-    life('clear', clearRows),
-  ];
-  const lifecyclePass = lifecycleRows.every((row) => row.pass);
-
-  const compactionSummaries = db
+/** Every compaction summary the worker classified, in the order it saw them. */
+function compactionRows(db: ReturnType<typeof openDatabase>['db']) {
+  return db
     .prepare(
       `SELECT s.agent AS agent, s.native_session_id AS native_session_id,
               e.classification_state AS classification_state
@@ -1429,69 +1821,76 @@ function measure(
        ORDER BY s.agent, e.captured_at, e.id`,
     )
     .all() as { agent: unknown; native_session_id: unknown; classification_state: unknown }[];
+}
 
-  const captureValues = input.captureSamples.map((sample) => sample.ms);
-  const captureUnder =
-    captureValues.length === 0
-      ? 1
-      : captureValues.filter((value) => value <= CAPTURE_DEADLINE_MS).length / captureValues.length;
-  const captureP99 = percentile(captureValues, 99);
-  const sc002 = captureValues.length > 0 && captureUnder >= 0.99 && captureP99 <= CAPTURE_DEADLINE_MS;
-  const injectionValues = input.injectionSamples.map((sample) => sample.ms);
-  const injectionUnder =
-    injectionValues.length === 0
-      ? 1
-      : injectionValues.filter((value) => value <= READY_BOUND_MS).length / injectionValues.length;
-  const injectionP99 = percentile(injectionValues, 99);
-  const injectionTiming = timingRows(input.injectionSamples, () => READY_BOUND_MS, 1);
-  const injectionPass = injectionTiming.pass;
-  const pendingSentence = (samples: Sample[]): { hits: number; text: string } => {
-    const hits = samples.filter((sample) => {
-      const pack =
-        input.packs.find((entry) => entry.seq === sample.seq)?.text ??
-        input.sessionStartPack.get(`${sample.agent}:${sample.session}`) ??
-        '';
-      return pack.includes(SUMMARY_PENDING);
-    }).length;
-    return { hits, text: `${hits}/${samples.length} packs carry summary_pending` };
-  };
-  const pending = pendingSentence(input.pendingSamples);
-  const readyMax = input.readySamples.length === 0 ? 0 : Math.max(...input.readySamples.map((sample) => sample.ms));
-  const pendingMax = input.pendingSamples.length === 0 ? 0 : Math.max(...input.pendingSamples.map((sample) => sample.ms));
-  const readyPass = input.readySamples.every((sample) => sample.ms <= READY_BOUND_MS);
-  const pendingPass =
-    input.pendingSamples.length > 0 &&
-    pending.hits === input.pendingSamples.length &&
-    input.pendingSamples.every((sample) => sample.ms <= PENDING_BOUND_MS);
-  const workerRssKb = Math.max(input.observeRssKb, input.hookWorkerRssKb);
-  const workerRuns = `observe runs: ${input.observeRuns} spawned by replay, ${input.hookWorkerRuns} hook-spawned (polled via worker_lease.pid)`;
-  const sc003 = workerRssKb < WORKER_RSS_BOUND_KB;
-  const sc005 = leakedSecrets.length === 0;
+/** What the verdicts are computed from. */
+type VerdictInput = {
+  duplicateGroups: unknown[];
+  leakedSecrets: string[];
+  leakedDirectives: string[];
+  recallJa: RecallHit[];
+  recallEn: RecallHit[];
+  lifecyclePass: boolean;
+  sc002: boolean;
+  injectionPass: boolean;
+  readyPass: boolean;
+  pendingPass: boolean;
+  workerRssKb: number;
+};
+
+/** Every printed pass or fail, and the exit code they add up to. */
+function verdictsOf(input: MeasureInput, m: VerdictInput) {
+  const sc003 = m.workerRssKb < WORKER_RSS_BOUND_KB;
+  const sc005 = m.leakedSecrets.length === 0;
   const sc009 =
-    recallRate(input.recallHits) >= RECALL_BOUND &&
-    (recallJa.length === 0 || recallRate(recallJa) >= RECALL_BOUND) &&
-    (recallEn.length === 0 || recallRate(recallEn) >= RECALL_BOUND);
-  const sc010 = duplicateGroups.length === 0;
-  const directivesPass = leakedDirectives.length === 0;
-  const leakedDirectivesEllipsis = leakedDirectives.length > 5 ? ' …' : '';
+    recallRateOf(input.recallHits) >= RECALL_BOUND &&
+    (m.recallJa.length === 0 || recallRateOf(m.recallJa) >= RECALL_BOUND) &&
+    (m.recallEn.length === 0 || recallRateOf(m.recallEn) >= RECALL_BOUND);
+  const sc010 = m.duplicateGroups.length === 0;
+  const directivesPass = m.leakedDirectives.length === 0;
   const hooksPass = input.hookFailures.length === 0;
   const failed = !(
-    sc002 &&
-    injectionPass &&
-    readyPass &&
-    pendingPass &&
+    m.sc002 &&
+    m.injectionPass &&
+    m.readyPass &&
+    m.pendingPass &&
     sc003 &&
     sc005 &&
     sc009 &&
     sc010 &&
-    lifecyclePass &&
+    m.lifecyclePass &&
     directivesPass &&
     hooksPass
   );
+  return {
+    sc003,
+    sc005,
+    sc009,
+    sc010,
+    directivesPass,
+    leakedDirectivesEllipsis: m.leakedDirectives.length > 5 ? ' …' : '',
+    hooksPass,
+    failed,
+  };
+}
 
-  const cpu = cpus()[0]?.model ?? 'unknown';
-  const machine = `${osType()} ${hostname()} ${release()} ${arch()}`;
-  const bounds: BoundRow[] = [
+/**
+ * What `computeReport` measured: the six sub-records it merges, flattened. Every renderer below
+ * takes this whole record and destructures the part it needs.
+ */
+type ReportComputed = ReturnType<typeof computeReport>;
+
+/** The timing rows of the SC table: capture, injection, session start, worker RSS. */
+function timingBounds(
+  input: MeasureInput,
+  computed: ReportComputed,
+): BoundRow[] {
+  const {
+    captureP99, captureUnder, captureValues, injectionP99, injectionPass, injectionTiming,
+    injectionUnder, injectionValues, pending, pendingMax, pendingPass, perThousand, readyMax,
+    readyPass, sc002, sc003, workerRssKb, workerRuns,
+  } = computed;
+  return [
     {
       sc: 'SC-002',
       measured: `p99 ${ms(captureP99)} ms; ${(captureUnder * 100).toFixed(1)}% ≤ ${CAPTURE_DEADLINE_MS} ms (n=${captureValues.length})`,
@@ -1516,6 +1915,13 @@ function measure(
       bound: '< 150 MB worker peak RSS; growth recorded',
       status: statusOf(sc003),
     },
+  ];
+}
+
+/** SC-005, SC-009 and SC-010: what leaked, what was recalled, what was duplicated. */
+function leakBounds(input: MeasureInput, computed: ReportComputed): BoundRow[] {
+  const { duplicateGroups, leakedSecrets, rawEvents, recallEn, recallJa, sc005, sc009, sc010 } = computed;
+  return [
     {
       sc: 'SC-005',
       measured: leakedSecrets.length === 0 ? '0 secret ids in db/wal/spool/logs/packs' : `leaked ${leakedSecrets.join(', ')}`,
@@ -1524,7 +1930,7 @@ function measure(
     },
     {
       sc: 'SC-009',
-      measured: `ja ${(recallRate(recallJa) * 100).toFixed(1)}% (${recallJa.filter((row) => row.hit).length}/${recallJa.length}); en ${(recallRate(recallEn) * 100).toFixed(1)}% (${recallEn.filter((row) => row.hit).length}/${recallEn.length}); overall ${(recallRate(input.recallHits) * 100).toFixed(1)}% (${input.recallHits.filter((row) => row.hit).length}/${input.recallHits.length})`,
+      measured: `ja ${(recallRateOf(recallJa) * 100).toFixed(1)}% (${recallJa.filter((row) => row.hit).length}/${recallJa.length}); en ${(recallRateOf(recallEn) * 100).toFixed(1)}% (${recallEn.filter((row) => row.hit).length}/${recallEn.length}); overall ${(recallRateOf(input.recallHits) * 100).toFixed(1)}% (${input.recallHits.filter((row) => row.hit).length}/${input.recallHits.length})`,
       bound: '≥ 90% ja, en, and overall',
       status: statusOf(sc009),
     },
@@ -1534,6 +1940,16 @@ function measure(
       bound: 'zero duplicate included memories per (conversation, epoch)',
       status: statusOf(sc010),
     },
+  ];
+}
+
+/** The lifecycle, directive and hook rows: sequences that must hold across the whole run. */
+function sequenceBounds(
+  input: MeasureInput,
+  computed: ReportComputed,
+): BoundRow[] {
+  const { directivesPass, hooksPass, leakedDirectives, lifecyclePass, lifecycleRows } = computed;
+  return [
     {
       sc: 'lifecycle',
       measured: lifecyclePass
@@ -1561,7 +1977,14 @@ function measure(
       status: statusOf(hooksPass),
     },
   ];
+}
 
+/** The capture, injection, session-start wait and size tables. */
+function timingTables(
+  input: MeasureInput,
+  computed: ReportComputed,
+) {
+  const { injectionTiming, pending, pendingPass, readyPass } = computed;
   const captureTable = mdTable(
     ['Agent', 'Event', 'n', 'p50 ms', 'p95 ms', 'p99 ms', 'max ms', 'Bound', 'Status'],
     [false, false, true, true, true, true, true, false, false],
@@ -1591,7 +2014,7 @@ function measure(
       status,
     ]);
   };
-  pushWait('ready', input.readySamples, READY_BOUND_MS, pendingSentence(input.readySamples).text,
+  pushWait('ready', input.readySamples, READY_BOUND_MS, pendingSentence(input, input.readySamples).text,
     input.readySamples.length === 0 ? 'n/a' : statusOf(readyPass));
   pushWait('pending', input.pendingSamples, PENDING_BOUND_MS, pending.text, statusOf(pendingPass));
   const waitTable = mdTable(
@@ -1613,6 +2036,12 @@ function measure(
       String(row.truncated),
     ]),
   );
+  return { captureTable, injectionTable, waitTable, sizeTable };
+}
+
+/** The recall misses and the SC verdict table. */
+function recallTables(computed: ReportComputed, bounds: BoundRow[]) {
+  const { misses } = computed;
   const missTable =
     misses.length === 0
       ? 'None.'
@@ -1626,6 +2055,12 @@ function measure(
     [false, false, false, false],
     bounds.map((row) => [row.sc, row.measured, row.bound, row.status]),
   );
+  return { missTable, scTable };
+}
+
+/** The hook exits, the lifecycle checks, and the compaction summaries. */
+function lifecycleTables(input: MeasureInput, computed: ReportComputed) {
+  const { compactionSummaries, lifecycleRows } = computed;
   const hookExitTable =
     input.hookFailures.length === 0
       ? `All ${input.hookCount} capture and injection hooks exited 0 (none killed, none timed out).`
@@ -1662,8 +2097,12 @@ function measure(
             String(row.classification_state),
           ]),
         );
+  return { hookExitTable, lifecycleTable, compactSummaryTable };
+}
 
-  const markdown = [
+/** The heading and how this run was set up. */
+function setupSection(input: MeasureInput, machine: string, cpu: string): string[] {
+  return [
     HEADING,
     '',
     '### Setup',
@@ -1688,6 +2127,18 @@ function measure(
     '',
     `Load average at the start of the run: \`${input.loadAtStart}\``,
     '',
+  ];
+}
+
+/** The capture, injection and session-start tables with the text that reads them. */
+function hookTimingSection(
+  input: MeasureInput,
+  computed: ReportComputed,
+  tables: { captureTable: string; injectionTable: string; waitTable: string; sizeTable: string },
+): string[] {
+  const { readyMax, readyPass, pendingMax, pendingPass } = computed;
+  const { captureTable, injectionTable, waitTable, sizeTable } = tables;
+  return [
     '### SC-002 capture time',
     '',
     `Capture-only hooks (\`hookDeadlineMs\` ≠ \`INJECTION_DEADLINE_MS\`). Bound ${CAPTURE_DEADLINE_MS} ms. Row status is informational: p99 ≤ bound and ≥99% of samples ≤ bound. SC-002 is judged on the pooled capture sample.`,
@@ -1712,6 +2163,20 @@ function measure(
     '',
     `Ready max ${ms(readyMax)} ms (n=${input.readySamples.length}, ${statusOf(readyPass)}). Pending max ${ms(pendingMax)} ms (n=${input.pendingSamples.length}, ${statusOf(pendingPass)}).`,
     '',
+  ];
+}
+
+/** Worker memory, database growth, and the secret, directive and duplicate scans. */
+function resourceSection(
+  input: MeasureInput,
+  computed: ReportComputed,
+): string[] {
+  const {
+    dbBytesAfter, duplicateGroups, injectionItems, injections, leakedDirectives,
+    leakedDirectivesEllipsis, leakedSecrets, memories, negativesUnredacted, perThousand,
+    rawDirectiveRows, rawEvents, sc003, workerRssKb, workerRuns,
+  } = computed;
+  return [
     '### SC-003 worker memory and database growth',
     '',
     `- ${workerRuns}.`,
@@ -1743,9 +2208,21 @@ function measure(
     '',
     `raw_events.id count ${rawEvents} vs lines piped ${input.lines.length}. Pi \`tool_result\` stores two kinds per line, so the id count can exceed the line count; a re-delivery would collapse onto an existing id.`,
     '',
+  ];
+}
+
+/** Fact recall, the lifecycle checks, hook exits, and the bounds table. */
+function recallSection(
+  input: MeasureInput,
+  computed: ReportComputed,
+  tables: { missTable: string; scTable: string; hookExitTable: string; lifecycleTable: string; compactSummaryTable: string },
+): string[] {
+  const { failed, recallEn, recallJa } = computed;
+  const { missTable, scTable, hookExitTable, lifecycleTable, compactSummaryTable } = tables;
+  return [
     '### SC-009 fact recall',
     '',
-    `Japanese ${(recallRate(recallJa) * 100).toFixed(1)}% (${recallJa.filter((row) => row.hit).length}/${recallJa.length}); English ${(recallRate(recallEn) * 100).toFixed(1)}% (${recallEn.filter((row) => row.hit).length}/${recallEn.length}); overall ${(recallRate(input.recallHits) * 100).toFixed(1)}% (${input.recallHits.filter((row) => row.hit).length}/${input.recallHits.length}). Bound ≥ 90%. Summaries are rule-based (\`preset\` default with no credentials).`,
+    `Japanese ${(recallRateOf(recallJa) * 100).toFixed(1)}% (${recallJa.filter((row) => row.hit).length}/${recallJa.length}); English ${(recallRateOf(recallEn) * 100).toFixed(1)}% (${recallEn.filter((row) => row.hit).length}/${recallEn.length}); overall ${(recallRateOf(input.recallHits) * 100).toFixed(1)}% (${input.recallHits.filter((row) => row.hit).length}/${input.recallHits.length}). Bound ≥ 90%. Summaries are rule-based (\`preset\` default with no credentials).`,
     '',
     'Misses:',
     '',
@@ -1774,11 +2251,37 @@ function measure(
     failed
       ? 'One or more measured bounds failed. The numbers above are the run, not a softened reading.'
       : 'Every listed bound passed on this run.',
-  ].join('\n');
+  ];
+}
 
-  const json = {
-    startedAt: input.startedAt,
-    lines: input.lines.length,
+/** The evidence section, in the order the document reads. */
+function reportMarkdown(
+  input: MeasureInput,
+  computed: ReportComputed,
+  tables: { captureTable: string; injectionTable: string; waitTable: string; sizeTable: string; missTable: string; scTable: string; hookExitTable: string; lifecycleTable: string; compactSummaryTable: string },
+): string {
+  const cpu = cpus()[0]?.model ?? 'unknown';
+  const machine = `${osType()} ${hostname()} ${release()} ${arch()}`;
+  const { captureTable, injectionTable, waitTable, sizeTable, missTable, scTable, hookExitTable, lifecycleTable, compactSummaryTable } = tables;
+  return [
+    ...setupSection(input, machine, cpu),
+    ...hookTimingSection(input, computed, { captureTable, injectionTable, waitTable, sizeTable }),
+    ...resourceSection(input, computed),
+    ...recallSection(input, computed, { missTable, scTable, hookExitTable, lifecycleTable, compactSummaryTable }),
+  ].join('\n');
+}
+
+/** The timing, worker and growth halves of the machine report. */
+function timingJson(
+  input: MeasureInput,
+  computed: ReportComputed,
+): Record<string, unknown> {
+  const {
+    captureP99, captureUnder, captureValues, dbBytesAfter, injectionItems, injections, memories,
+    pending, pendingMax, pendingPass, perThousand, rawEvents, readyMax, readyPass, sc002, sc003,
+    workerRssKb,
+  } = computed;
+  return {
     capture: { n: captureValues.length, p99: captureP99, under: captureUnder, pass: sc002 },
     injection: { n: input.injectionSamples.length, samples: input.injectionSamples },
     sessionStart: {
@@ -1801,12 +2304,29 @@ function measure(
       injections,
       injectionItems,
     },
+  };
+}
+
+/** The same evidence as machine-readable JSON. */
+function reportJson(
+  input: MeasureInput,
+  computed: ReportComputed,
+  bounds: BoundRow[],
+): Record<string, unknown> {
+  const {
+    duplicateGroups, failed, hooksPass, leakedDirectives, leakedSecrets, lifecycleRows, misses,
+    negativesUnredacted, rawDirectiveRows, rawEvents, recallEn, recallJa, sc009, sc010,
+  } = computed;
+  return {
+    startedAt: input.startedAt,
+    lines: input.lines.length,
+    ...timingJson(input, computed),
     secrets: { leaked: leakedSecrets, negativesUnredacted },
     directives: { leaked: leakedDirectives.length, rawRows: rawDirectiveRows },
     recall: {
-      ja: recallRate(recallJa),
-      en: recallRate(recallEn),
-      overall: recallRate(input.recallHits),
+      ja: recallRateOf(recallJa),
+      en: recallRateOf(recallEn),
+      overall: recallRateOf(input.recallHits),
       misses: misses.map((row) => ({ id: row.id, query: row.query })),
       pass: sc009,
     },
@@ -1816,6 +2336,24 @@ function measure(
     bounds,
     failed,
   };
-
-  return { markdown, json, failed };
 }
+
+/** The evidence section and its machine form, from what computeReport measured. */
+function renderReport(
+  input: MeasureInput,
+  computed: ReportComputed,
+): { markdown: string; json: Record<string, unknown>; failed: boolean } {
+  const bounds: BoundRow[] = [
+    ...timingBounds(input, computed),
+    ...leakBounds(input, computed),
+    ...sequenceBounds(input, computed),
+  ];
+  const timing = timingTables(input, computed);
+  const finding = { ...recallTables(computed, bounds), ...lifecycleTables(input, computed) };
+  return {
+    markdown: reportMarkdown(input, computed, { ...timing, ...finding }),
+    json: reportJson(input, computed, bounds),
+    failed: computed.failed,
+  };
+}
+

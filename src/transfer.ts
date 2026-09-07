@@ -143,6 +143,49 @@ function stricter(a: Sensitivity, b: Sensitivity): Sensitivity {
 
 class Rejection extends Error {}
 
+type ExistingRow = { id: string; sensitivity: Sensitivity; deleted_at: number | null };
+
+/** The title and body a line carries, refused when they do not match what the line claims. */
+function checkedText(line: ExportLine): { title: string; body: string } {
+  const title = line.title ?? '';
+  const body = line.body ?? '';
+  const hasText = title !== '' || body !== '';
+  if (hasText && materialHash(title, body) !== line.material_hash) {
+    throw new Rejection('material_hash does not match the title and body');
+  }
+  // A secret row travels as its hashes only (FR-020): text under that label is not ours to store.
+  if (line.sensitivity === 'secret' && (hasText || line.sources.length > 0 || (line.concepts ?? '[]') !== '[]')) {
+    throw new Rejection('a secret row must carry no title, body, concepts or sources');
+  }
+  return { title, body };
+}
+
+/** Applies a line whose content is already here: a tombstone, a stricter label, or nothing. */
+function applyToExisting(
+  db: DatabaseSync,
+  line: ExportLine,
+  existing: ExistingRow,
+  counts: ImportResult,
+): void {
+  if (existing.deleted_at !== null) {
+    // FR-035: a deleted memory never comes back, whatever the file says.
+    counts.unchanged += 1;
+    return;
+  }
+  if (line.deleted_at !== null) {
+    db.prepare('UPDATE memories SET deleted_at = ? WHERE id = ?').run(line.deleted_at, existing.id);
+    counts.tombstones += 1;
+    return;
+  }
+  const merged = stricter(existing.sensitivity, line.sensitivity);
+  if (merged !== existing.sensitivity) {
+    db.prepare('UPDATE memories SET sensitivity = ? WHERE id = ?').run(merged, existing.id);
+    counts.updated += 1;
+  } else {
+    counts.unchanged += 1;
+  }
+}
+
 /**
  * Applies one validated line inside the import transaction. Throws Rejection for a line the file
  * cannot carry (hash mismatch, unknown repository), which rolls the whole import back.
@@ -159,51 +202,56 @@ function applyLine(
       `repository ${line.repo_id} is not known here; map it with --map-repo ${line.repo_id}=<local repository id>`,
     );
   }
-  const title = line.title ?? '';
-  const body = line.body ?? '';
-  const hasText = title !== '' || body !== '';
-  if (hasText && materialHash(title, body) !== line.material_hash) {
-    throw new Rejection('material_hash does not match the title and body');
-  }
-  // A secret row travels as its hashes only (FR-020): text under that label is not ours to store.
-  if (line.sensitivity === 'secret' && (hasText || line.sources.length > 0 || (line.concepts ?? '[]') !== '[]')) {
-    throw new Rejection('a secret row must carry no title, body, concepts or sources');
-  }
+  const { title, body } = checkedText(line);
   // Identity is recomputed here from the local repository and never taken from the file.
   const content = contentHash(repoId, line.material_hash);
   const id = memoryIdFor(content);
   const existing = db
     .prepare('SELECT id, sensitivity, deleted_at FROM memories WHERE content_hash = ?')
-    .get(content) as { id: string; sensitivity: Sensitivity; deleted_at: number | null } | undefined;
+    .get(content) as ExistingRow | undefined;
   const tombstone = line.deleted_at !== null;
 
   if (existing !== undefined) {
-    if (existing.deleted_at !== null) {
-      // FR-035: a deleted memory never comes back, whatever the file says.
-      counts.unchanged += 1;
-      return;
-    }
-    if (tombstone) {
-      db.prepare('UPDATE memories SET deleted_at = ? WHERE id = ?').run(line.deleted_at, existing.id);
-      counts.tombstones += 1;
-      return;
-    }
-    const merged = stricter(existing.sensitivity, line.sensitivity);
-    if (merged !== existing.sensitivity) {
-      db.prepare('UPDATE memories SET sensitivity = ? WHERE id = ?').run(merged, existing.id);
-      counts.updated += 1;
-    } else {
-      counts.unchanged += 1;
-    }
+    applyToExisting(db, line, existing, counts);
     return;
   }
 
+  insertImported(db, line, { id, repoId, content, title, body, tombstone });
+  if (tombstone) counts.tombstones += 1;
+  else counts.inserted += 1;
+}
+
+/** The row and its citations, as they land on a first import. */
+function insertImported(db: DatabaseSync, line: ExportLine, row: ImportedRow): void {
   // R12: an active row lands quarantined; a tombstone keeps only its hashes and its time.
-  const sensitivity = tombstone ? line.sensitivity : stricter('local_only', line.sensitivity);
+  const sensitivity = row.tombstone
+    ? line.sensitivity
+    : stricter('local_only', line.sensitivity);
   db.prepare(
     `INSERT INTO memories (${MEMORY_COLUMNS}, cjk_bigrams)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
-  ).run(
+  ).run(...memoryValues(line, row, sensitivity));
+  insertSources(db, row.id, line.sources);
+}
+
+/** The identity and text an imported row carries, all recomputed locally. */
+type ImportedRow = {
+  id: string;
+  repoId: string;
+  content: string;
+  title: string;
+  body: string;
+  tombstone: boolean;
+};
+
+/** The memories row in MEMORY_COLUMNS order, with cjk_bigrams last. */
+function memoryValues(
+  line: ExportLine,
+  row: ImportedRow,
+  sensitivity: ExportLine['sensitivity'],
+): (string | number | null)[] {
+  const { id, repoId, content, title, body, tombstone } = row;
+  return [
     id,
     repoId,
     line.type,
@@ -223,16 +271,138 @@ function applyLine(
     line.deleted_at,
     line.created_at,
     tombstone ? '' : cjkBigrams(`${title} ${body}`),
-  );
+  ];
+}
+
+/** The citations of one imported memory. */
+function insertSources(db: DatabaseSync, id: string, sources: ExportLine['sources']): void {
   const insertSource = db.prepare(
     `INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, citation_value, source_agent)
      VALUES (?, NULL, ?, ?, ?)`,
   );
-  for (const source of line.sources) {
+  for (const source of sources) {
     insertSource.run(id, source.citation_kind, source.citation_value, source.source_agent);
   }
-  if (tombstone) counts.tombstones += 1;
-  else counts.inserted += 1;
+}
+
+/** One physical line as JSON, or the reason it cannot be read. */
+function parseImportLine(line: string, size: number): { value: unknown } | { reason: string } {
+  if (size > MAX_LINE_BYTES + 1) return { reason: `line exceeds ${MAX_LINE_BYTES / 1024} KB` };
+  try {
+    return { value: JSON.parse(line) };
+  } catch {
+    return { reason: 'not valid JSON' };
+  }
+}
+
+type FileRepo = { identity_kind: string; normalized_identity: string };
+
+/**
+ * The file's repository id to a local one, or null when the developer must say which repository
+ * here it is. A remote identity means the same repository on every machine, so it is adopted; a
+ * machine-local one needs `--map-repo`.
+ */
+function repoResolver(state: {
+  db: DatabaseSync;
+  now: number;
+  mapRepo: Map<string, string>;
+  localRepos: Set<string>;
+  fileRepos: Map<string, FileRepo>;
+}): (fileRepoId: string) => string | null {
+  return (fileRepoId: string): string | null => {
+    const mapped = state.mapRepo.get(fileRepoId);
+    if (mapped !== undefined) return state.localRepos.has(mapped) ? mapped : null;
+    if (state.localRepos.has(fileRepoId)) return fileRepoId;
+    const known = state.fileRepos.get(fileRepoId);
+    if (known?.identity_kind !== 'remote') return null;
+    if (sha256Hex(known.normalized_identity).slice(0, 16) !== fileRepoId) return null;
+    state.db
+      .prepare(
+        `INSERT INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
+       VALUES (?, 'remote', ?, ?, ?, ?)`,
+      )
+      .run(fileRepoId, known.normalized_identity, known.normalized_identity, state.now, state.now);
+    state.localRepos.add(fileRepoId);
+    return fileRepoId;
+  };
+}
+
+type ImportRun = {
+  db: DatabaseSync;
+  result: ImportResult;
+  maxFileBytes: number;
+  reject: (line: number, reason: string) => void;
+  repoOf: (fileRepoId: string) => string | null;
+  fileRepos: Map<string, FileRepo>;
+};
+
+/** The reason the reader must stop at this line, or null to keep reading. */
+function stopReason(run: ImportRun, bytes: number): string | null {
+  if (bytes > run.maxFileBytes) {
+    return `file size exceeds ${Math.floor(run.maxFileBytes / (1024 * 1024))} MB; the import stopped here`;
+  }
+  if (run.result.rejected.length >= MAX_REJECTED) {
+    return `more than ${MAX_REJECTED} lines were rejected; the import stopped here`;
+  }
+  return null;
+}
+
+/** Applies one memory line, turning a rejection into a recorded reason. */
+function applyMemoryLine(run: ImportRun, value: unknown, number: number): void {
+  const memory = lineSchema.safeParse(value);
+  if (!memory.success) {
+    run.reject(number, z.prettifyError(memory.error).split('\n')[0] ?? 'invalid line');
+    return;
+  }
+  try {
+    applyLine(run.db, memory.data, run.repoOf, run.result);
+  } catch (error) {
+    if (!(error instanceof Rejection)) throw error;
+    run.reject(number, error.message);
+  }
+}
+
+/** The first non-blank line is the export header; it names the repositories the file carries. */
+function readHeader(run: ImportRun, value: unknown, number: number): boolean {
+  const header = headerSchema.safeParse(value);
+  if (!header.success) {
+    run.reject(number, `the first line must be an ${EXPORT_FORMAT} header`);
+    return false;
+  }
+  for (const repo of header.data.repos) run.fileRepos.set(repo.id, repo);
+  return true;
+}
+
+/** Reads the file's lines into the open transaction; returns whether a header was seen. */
+function readExportLines(run: ImportRun, source: string): boolean {
+  let number = 0;
+  let bytes = 0;
+  let headerSeen = false;
+  for (const raw of source.split('\n')) {
+    // The physical source line, so a rejection names the line the developer sees in the file.
+    number += 1;
+    const size = Buffer.byteLength(raw, 'utf8') + 1;
+    bytes += size;
+    const stop = stopReason(run, bytes);
+    if (stop !== null) {
+      run.reject(number, stop);
+      break;
+    }
+    const line = raw.replace(/\r$/u, '');
+    if (line.trim() === '') continue;
+    const parsed = parseImportLine(line, size);
+    if ('reason' in parsed) {
+      run.reject(number, parsed.reason);
+      continue;
+    }
+    if (!headerSeen) {
+      if (!readHeader(run, parsed.value, number)) break;
+      headerSeen = true;
+      continue;
+    }
+    applyMemoryLine(run, parsed.value, number);
+  }
+  return headerSeen;
 }
 
 /**
@@ -242,28 +412,19 @@ function applyLine(
  */
 export function importMemories(db: DatabaseSync, source: string, options: ImportOptions): ImportResult {
   const result: ImportResult = { applied: false, inserted: 0, updated: 0, tombstones: 0, unchanged: 0, rejected: [] };
-  const maxFileBytes = options.maxFileBytes ?? MAX_FILE_BYTES;
   const reject = (line: number, reason: string): void => {
     result.rejected.push({ line, reason });
   };
   const mapRepo = new Map(Object.entries(options.mapRepo ?? {}));
   const localRepos = new Set(db.prepare('SELECT id FROM repos').all().map((row) => String(row.id)));
-  const fileRepos = new Map<string, { identity_kind: string; normalized_identity: string }>();
-  const repoOf = (fileRepoId: string): string | null => {
-    const mapped = mapRepo.get(fileRepoId);
-    if (mapped !== undefined) return localRepos.has(mapped) ? mapped : null;
-    if (localRepos.has(fileRepoId)) return fileRepoId;
-    const known = fileRepos.get(fileRepoId);
-    // A remote identity means the same repository on every machine; a machine-local one needs
-    // the developer to say which repository here it is (--map-repo).
-    if (known?.identity_kind !== 'remote') return null;
-    if (sha256Hex(known.normalized_identity).slice(0, 16) !== fileRepoId) return null;
-    db.prepare(
-      `INSERT INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
-       VALUES (?, 'remote', ?, ?, ?, ?)`,
-    ).run(fileRepoId, known.normalized_identity, known.normalized_identity, options.now, options.now);
-    localRepos.add(fileRepoId);
-    return fileRepoId;
+  const fileRepos = new Map<string, FileRepo>();
+  const run: ImportRun = {
+    db,
+    result,
+    maxFileBytes: options.maxFileBytes ?? MAX_FILE_BYTES,
+    reject,
+    repoOf: repoResolver({ db, now: options.now, mapRepo, localRepos, fileRepos }),
+    fileRepos,
   };
 
   for (const [old, current] of mapRepo) {
@@ -273,57 +434,7 @@ export function importMemories(db: DatabaseSync, source: string, options: Import
   db.exec('BEGIN IMMEDIATE');
   let committed = false;
   try {
-    let number = 0;
-    let bytes = 0;
-    let headerSeen = false;
-    for (const raw of source.split('\n')) {
-      // The physical source line, so a rejection names the line the developer sees in the file.
-      number += 1;
-      const size = Buffer.byteLength(raw, 'utf8') + 1;
-      bytes += size;
-      if (bytes > maxFileBytes) {
-        reject(number, `file size exceeds ${Math.floor(maxFileBytes / (1024 * 1024))} MB; the import stopped here`);
-        break;
-      }
-      if (result.rejected.length >= MAX_REJECTED) {
-        reject(number, `more than ${MAX_REJECTED} lines were rejected; the import stopped here`);
-        break;
-      }
-      const line = raw.replace(/\r$/u, '');
-      if (line.trim() === '') continue;
-      if (size > MAX_LINE_BYTES + 1) {
-        reject(number, `line exceeds ${MAX_LINE_BYTES / 1024} KB`);
-        continue;
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        reject(number, 'not valid JSON');
-        continue;
-      }
-      if (!headerSeen) {
-        const header = headerSchema.safeParse(parsed);
-        if (!header.success) {
-          reject(number, `the first line must be an ${EXPORT_FORMAT} header`);
-          break;
-        }
-        headerSeen = true;
-        for (const repo of header.data.repos) fileRepos.set(repo.id, repo);
-        continue;
-      }
-      const memory = lineSchema.safeParse(parsed);
-      if (!memory.success) {
-        reject(number, z.prettifyError(memory.error).split('\n')[0] ?? 'invalid line');
-        continue;
-      }
-      try {
-        applyLine(db, memory.data, repoOf, result);
-      } catch (error) {
-        if (!(error instanceof Rejection)) throw error;
-        reject(number, error.message);
-      }
-    }
+    const headerSeen = readExportLines(run, source);
     if (!headerSeen && result.rejected.length === 0) reject(0, `the file is empty; expected an ${EXPORT_FORMAT} header`);
     if (result.rejected.length > 0) {
       // The file is applied as a whole: a rejected line means none of it was written.
@@ -399,10 +510,10 @@ export async function runExport(argv: string[], io: Io = processIo()): Promise<n
   });
 }
 
-/** `oboete import [file|-] [--dry-run] [--map-repo <old>=<current>]`: exit 2 on an invalid file. */
-export async function runImport(argv: string[], io: Io = processIo()): Promise<number> {
-  let file: string;
-  let dryRun: boolean;
+type ImportArgs = { file: string; dryRun: boolean; mapRepo: Record<string, string> };
+
+/** The parsed `import` arguments, or the message that says why they are not usable. */
+function importArgs(argv: string[]): ImportArgs | { error: string } {
   const mapRepo: Record<string, string> = {};
   try {
     const { values, positionals } = parseArgs({
@@ -412,23 +523,28 @@ export async function runImport(argv: string[], io: Io = processIo()): Promise<n
       options: { 'dry-run': { type: 'boolean' }, 'map-repo': { type: 'string', multiple: true } },
     });
     if (positionals.length > 1) throw new Error('import takes at most one file argument.');
-    file = positionals[0] ?? '-';
-    dryRun = values['dry-run'] === true;
     for (const mapping of values['map-repo'] ?? []) {
       const [old, current, ...rest] = mapping.split('=');
       if (!old || !current || rest.length > 0) throw new Error('--map-repo takes <old-id>=<current-id>.');
       mapRepo[old] = current;
     }
+    return { file: positionals[0] ?? '-', dryRun: values['dry-run'] === true, mapRepo };
   } catch (error) {
-    io.writeError(`${error instanceof Error ? error.message : String(error)}\n`);
-    return 2;
+    return { error: error instanceof Error ? error.message : String(error) };
   }
-  // Every input is read to a bounded string before the database is opened: a slow pipe or a file
-  // that grows after this check never holds the write lock, and the bound applies to what was read.
+}
+
+/**
+ * The file's text, or the message that says why it cannot be imported. Every input is read to a
+ * bounded string before the database is opened: a slow pipe or a file that grows after the size
+ * check never holds the write lock, and the bound applies to what was read.
+ */
+async function importSource(file: string, io: Io): Promise<string | number> {
+  const overSize = `exceeds ${MAX_FILE_BYTES / (1024 * 1024)} MB; nothing was imported.`;
   if (file !== '-') {
     try {
       if (statSync(file).size > MAX_FILE_BYTES) {
-        io.writeError(`${file} exceeds ${MAX_FILE_BYTES / (1024 * 1024)} MB; nothing was imported.\n`);
+        io.writeError(`${file} ${overSize}\n`);
         return 2;
       }
     } catch {
@@ -438,18 +554,35 @@ export async function runImport(argv: string[], io: Io = processIo()): Promise<n
   }
   const source = await readBounded(file === '-' ? process.stdin : createReadStream(file), MAX_FILE_BYTES);
   if (source === null) {
-    io.writeError(`${file === '-' ? 'standard input' : file} exceeds ${MAX_FILE_BYTES / (1024 * 1024)} MB; nothing was imported.\n`);
+    io.writeError(`${file === '-' ? 'standard input' : file} ${overSize}\n`);
     return 2;
   }
+  return source;
+}
+
+/** The one line `import` prints for a result that was applied or would be. */
+function importSummary(result: ImportResult): string {
+  return `${plural(result.inserted, 'memory', 'memories')} added, ${result.updated} raised in sensitivity, ${plural(result.tombstones, 'tombstone')} applied, ${result.unchanged} unchanged`;
+}
+
+/** `oboete import [file|-] [--dry-run] [--map-repo <old>=<current>]`: exit 2 on an invalid file. */
+export async function runImport(argv: string[], io: Io = processIo()): Promise<number> {
+  const args = importArgs(argv);
+  if ('error' in args) {
+    io.writeError(`${args.error}\n`);
+    return 2;
+  }
+  const source = await importSource(args.file, io);
+  if (typeof source !== 'string') return source;
   return await withDatabase(async (db) => {
-    const result = importMemories(db, source, { now: Date.now(), dryRun, mapRepo });
+    const result = importMemories(db, source, { now: Date.now(), dryRun: args.dryRun, mapRepo: args.mapRepo });
     for (const item of result.rejected) io.writeError(`line ${item.line}: ${item.reason}\n`);
-    const summary = `${plural(result.inserted, 'memory', 'memories')} added, ${result.updated} raised in sensitivity, ${plural(result.tombstones, 'tombstone')} applied, ${result.unchanged} unchanged`;
     if (result.rejected.length > 0) {
       io.writeError(`Nothing was imported: ${plural(result.rejected.length, 'line')} rejected.\n`);
       return 2;
     }
-    io.writeOut(dryRun ? `Dry run: ${summary} would be written.\n` : `Imported: ${summary}.\n`);
+    const summary = importSummary(result);
+    io.writeOut(args.dryRun ? `Dry run: ${summary} would be written.\n` : `Imported: ${summary}.\n`);
     return 0;
   });
 }

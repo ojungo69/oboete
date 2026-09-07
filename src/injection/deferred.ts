@@ -196,6 +196,39 @@ async function packRejection(
 }
 
 /**
+ * Adds the built pack's planned items to the live record's blocks, in order, under its budget.
+ * The blocks array is extended in place; the returned rows are the items that did not fit or were
+ * already carried by the live record.
+ */
+function foldPlanned(
+  items: readonly PackItem[],
+  blocks: PendingBlock[],
+  budget: number,
+  used: number,
+): MergePlan['omissions'] {
+  const known = new Set(
+    blocks.map((block) => block.memoryId).filter((id): id is string => id !== null),
+  );
+  const omissions: MergePlan['omissions'] = [];
+  let size = used;
+  for (const item of items.filter((entry) => entry.decision === 'planned')) {
+    if (item.memoryId !== null && known.has(item.memoryId)) {
+      omissions.push({ item, reason: 'duplicate_in_conversation' });
+      continue;
+    }
+    const cost = blockCost(item.lines);
+    if (size + cost > budget) {
+      omissions.push({ item, reason: 'budget' });
+      continue;
+    }
+    size += cost;
+    blocks.push({ memoryId: item.memoryId, rawEventId: item.rawEventId, lines: item.lines });
+    if (item.memoryId !== null) known.add(item.memoryId);
+  }
+  return omissions;
+}
+
+/**
  * `null` when the conversation has no live record, which is the case where the built pack simply
  * becomes the pending one. Reads only, so the caller can validate the text it would store before
  * the transaction that stores it.
@@ -216,30 +249,12 @@ function planMerge(db: DatabaseSync, input: StorePendingInput): MergePlan | null
   const budget = Number(live.char_budget ?? input.pack.charBudget);
 
   const blocks = [...previous.blocks];
-  const known = new Set(
-    blocks.map((block) => block.memoryId).filter((id): id is string => id !== null),
-  );
-  let used = renderPack({
+  const used = renderPack({
     repositoryLine: previous.repositoryLine,
     blocks: blocks.map((block) => block.lines),
     degraded,
   }).length;
-
-  const omissions: { item: PackItem; reason: ItemReason }[] = [];
-  for (const item of input.pack.items.filter((entry) => entry.decision === 'planned')) {
-    if (item.memoryId !== null && known.has(item.memoryId)) {
-      omissions.push({ item, reason: 'duplicate_in_conversation' });
-      continue;
-    }
-    const cost = blockCost(item.lines);
-    if (used + cost > budget) {
-      omissions.push({ item, reason: 'budget' });
-      continue;
-    }
-    used += cost;
-    blocks.push({ memoryId: item.memoryId, rawEventId: item.rawEventId, lines: item.lines });
-    if (item.memoryId !== null) known.add(item.memoryId);
-  }
+  const omissions = foldPlanned(input.pack.items, blocks, budget, used);
 
   return {
     liveId,
@@ -264,6 +279,80 @@ export type StorePendingInput = {
   validation: PackValidation;
 };
 
+/** No live record: this is the pack pack.ts validated as a whole when it built it. */
+function storeFirstPending(db: DatabaseSync, input: StorePendingInput): string {
+  db.prepare(`UPDATE injections SET state = 'pending' WHERE id = ?`).run(input.pack.injectionId);
+  writePending(
+    db,
+    input.conversationId,
+    {
+      injectionId: input.pack.injectionId,
+      repositoryLine: input.pack.repositoryLine,
+      degraded: input.pack.degraded,
+      blocks: input.pack.items
+        .filter((item) => item.decision === 'planned')
+        .map((item) => ({
+          memoryId: item.memoryId,
+          rawEventId: item.rawEventId,
+          lines: item.lines,
+        })),
+      text: input.pack.text,
+    },
+    input.now,
+  );
+  return input.pack.injectionId;
+}
+
+/** The merged text did not pass the whole-pack checks, so the live record keeps what it has. */
+function refusePending(
+  db: DatabaseSync,
+  input: StorePendingInput,
+  plan: MergePlan,
+  rejection: Rejection,
+): string {
+  omitPlanned(db, input.pack.injectionId, rejection === 'control_characters' ? null : rejection);
+  reparentItems(db, input.pack.injectionId, plan.liveId);
+  if (rejection === 'control_characters') {
+    // A control character in a stored pack means the stored text itself cannot be trusted, and
+    // that is the one case pack.ts answers by emitting nothing at all (index_unavailable).
+    omitPlanned(db, plan.liveId, 'not_delivered');
+    omitInjection(db, plan.liveId, 'index_unavailable');
+    clearPending(db, input.conversationId);
+  }
+  return plan.liveId;
+}
+
+/** The merged pack replaces the live record's text under the same id. */
+function mergePending(db: DatabaseSync, input: StorePendingInput, plan: MergePlan): string {
+  // The omissions are written on the new pack's own rows, so the live record's planned row for
+  // the same memory keeps standing: it is the copy that is rendered and delivered (FR-026).
+  for (const omission of plan.omissions) {
+    omitItem(db, input.pack.injectionId, omission.item, omission.reason);
+  }
+  reparentItems(db, input.pack.injectionId, plan.liveId);
+  db.prepare(
+    'UPDATE injections SET pack_hash = ?, chars_used = ?, degraded_reason = ? WHERE id = ?',
+  ).run(
+    createHash('sha256').update(plan.text, 'utf8').digest('hex'),
+    plan.text.length,
+    plan.degraded,
+    plan.liveId,
+  );
+  writePending(
+    db,
+    input.conversationId,
+    {
+      injectionId: plan.liveId,
+      repositoryLine: plan.repositoryLine,
+      degraded: plan.degraded,
+      blocks: plan.blocks,
+      text: plan.text,
+    },
+    input.now,
+  );
+  return plan.liveId;
+}
+
 /**
  * Rule 1: the built pack becomes the conversation's pending record. An existing live record is not
  * replaced: its planned items stay, the new ones are added under the same budget, and the merged
@@ -278,31 +367,7 @@ export async function storePending(db: DatabaseSync, input: StorePendingInput): 
 
   return transactionImmediate(db, () => {
     const plan = planMerge(db, input);
-    if (plan === null) {
-      // No live record: this is the pack pack.ts validated as a whole when it built it.
-      db.prepare(`UPDATE injections SET state = 'pending' WHERE id = ?`).run(
-        input.pack.injectionId,
-      );
-      writePending(
-        db,
-        input.conversationId,
-        {
-          injectionId: input.pack.injectionId,
-          repositoryLine: input.pack.repositoryLine,
-          degraded: input.pack.degraded,
-          blocks: input.pack.items
-            .filter((item) => item.decision === 'planned')
-            .map((item) => ({
-              memoryId: item.memoryId,
-              rawEventId: item.rawEventId,
-              lines: item.lines,
-            })),
-          text: input.pack.text,
-        },
-        input.now,
-      );
-      return input.pack.injectionId;
-    }
+    if (plan === null) return storeFirstPending(db, input);
 
     if (plan.text !== validated?.text) {
       // Another hook changed the record between the check and this transaction, so the text that
@@ -313,46 +378,8 @@ export async function storePending(db: DatabaseSync, input: StorePendingInput): 
       return plan.liveId;
     }
 
-    if (rejection !== null) {
-      omitPlanned(db, input.pack.injectionId, rejection === 'control_characters' ? null : rejection);
-      reparentItems(db, input.pack.injectionId, plan.liveId);
-      if (rejection === 'control_characters') {
-        // A control character in a stored pack means the stored text itself cannot be trusted, and
-        // that is the one case pack.ts answers by emitting nothing at all (index_unavailable).
-        omitPlanned(db, plan.liveId, 'not_delivered');
-        omitInjection(db, plan.liveId, 'index_unavailable');
-        clearPending(db, input.conversationId);
-      }
-      return plan.liveId;
-    }
-
-    // The omissions are written on the new pack's own rows, so the live record's planned row for
-    // the same memory keeps standing: it is the copy that is rendered and delivered (FR-026).
-    for (const omission of plan.omissions) {
-      omitItem(db, input.pack.injectionId, omission.item, omission.reason);
-    }
-    reparentItems(db, input.pack.injectionId, plan.liveId);
-    db.prepare(
-      'UPDATE injections SET pack_hash = ?, chars_used = ?, degraded_reason = ? WHERE id = ?',
-    ).run(
-      createHash('sha256').update(plan.text, 'utf8').digest('hex'),
-      plan.text.length,
-      plan.degraded,
-      plan.liveId,
-    );
-    writePending(
-      db,
-      input.conversationId,
-      {
-        injectionId: plan.liveId,
-        repositoryLine: plan.repositoryLine,
-        degraded: plan.degraded,
-        blocks: plan.blocks,
-        text: plan.text,
-      },
-      input.now,
-    );
-    return plan.liveId;
+    if (rejection !== null) return refusePending(db, input, plan, rejection);
+    return mergePending(db, input, plan);
   });
 }
 

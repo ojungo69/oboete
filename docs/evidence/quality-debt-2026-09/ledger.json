@@ -3838,5 +3838,107 @@
   "id": "AaB3Xkh3IqdfylE4c2om",
   "state": "fixed",
   "where": "#163"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkbIqdfylE4c2pP",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkbIqdfylE4c2pS",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkbIqdfylE4c2pO",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkc9IqdfylE4c2nv",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkc9IqdfylE4c2n0",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkfdIqdfylE4c2oO",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XklBIqdfylE4c2pd",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XklBIqdfylE4c2pf",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkfNIqdfylE4c2oL",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "codacy",
+  "id": "2fa843f30085b6b69eb20803d9f42b29",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "codacy",
+  "id": "51024f006140e9bc315a9218468bc848",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "codacy",
+  "id": "70fb319e0568bdf82a90f8d38044f075",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "codacy",
+  "id": "ac8b3fbc5586f26a8d14d31393b5e185",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "codacy",
+  "id": "c806aac9bc4126782a6690a61ce95445",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "codacy",
+  "id": "12bfd84c920feb7513165e1963e42022",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "codacy",
+  "id": "b2c9c11e8227925bc3a297d756804448",
+  "state": "fixed",
+  "where": "#164"
+ },
+ {
+  "service": "codacy",
+  "id": "4790455d8db963ddff6afd9f8e2df464",
+  "state": "fixed",
+  "where": "#164"
  }
 ]

@@ -112,6 +112,21 @@ type GlobToken =
 
 export type GlobMatcher = { test(path: string): boolean };
 
+/** The star token at `index` and how many characters it spans: a double star with a slash, a double star, or one star. */
+function starToken(glob: string, index: number): { token: GlobToken; width: number } {
+  if (glob[index + 1] !== '*') return { token: { kind: 'segmentStar' }, width: 1 };
+  // `**/` is zero or more directories, so `a/**/b` matches `a/b` as well as `a/x/b`.
+  if (glob[index + 2] === '/') return { token: { kind: 'anyDirectories' }, width: 3 };
+  return { token: { kind: 'anyStar' }, width: 2 };
+}
+
+/** The class token opened by the `[` at `index`, whose `]` is at `close`. */
+function classToken(glob: string, index: number, close: number): GlobToken {
+  const body = glob.slice(index + 1, close).replace(/^[!^]/, '^');
+  const expression = new RegExp(`^[${body}]$`);
+  return { kind: 'one', test: (candidate) => expression.test(candidate) };
+}
+
 function tokenize(glob: string): GlobToken[] {
   const tokens: GlobToken[] = [];
   // A rule without a slash matches the file name at any depth, as it does in .gitignore.
@@ -123,38 +138,62 @@ function tokenize(glob: string): GlobToken[] {
   while (index < glob.length) {
     const character = glob[index] as string;
     if (character === '*') {
-      if (glob[index + 1] === '*') {
-        // `**/` is zero or more directories, so `a/**/b` matches `a/b` as well as `a/x/b`.
-        if (glob[index + 2] === '/') {
-          tokens.push({ kind: 'anyDirectories' });
-          index += 3;
-        } else {
-          tokens.push({ kind: 'anyStar' });
-          index += 2;
-        }
-      } else {
-        tokens.push({ kind: 'segmentStar' });
-        index += 1;
-      }
-      continue;
-    }
-    if (character === '?') {
+      const star = starToken(glob, index);
+      tokens.push(star.token);
+      index += star.width;
+    } else if (character === '?') {
       tokens.push({ kind: 'one', test: (candidate) => candidate !== '/' });
       index += 1;
-      continue;
-    }
-    if (character === '[' && index < lastClose) {
+    } else if (character === '[' && index < lastClose) {
       const close = glob.indexOf(']', index + 1);
-      const body = glob.slice(index + 1, close).replace(/^[!^]/, '^');
-      const expression = new RegExp(`^[${body}]$`);
-      tokens.push({ kind: 'one', test: (candidate) => expression.test(candidate) });
+      tokens.push(classToken(glob, index, close));
       index = close + 1;
-      continue;
+    } else {
+      tokens.push({ kind: 'one', test: (candidate) => candidate === character });
+      index += 1;
     }
-    tokens.push({ kind: 'one', test: (candidate) => candidate === character });
-    index += 1;
   }
   return tokens;
+}
+
+type StarToken = Exclude<GlobToken, { kind: 'one' }>;
+
+/** Marks in `next` every position one character past a reached position the token accepts. */
+function sweepOne(
+  token: Extract<GlobToken, { kind: 'one' }>,
+  path: string,
+  reached: Uint8Array,
+  next: Uint8Array,
+): boolean {
+  let any = false;
+  for (let at = 0; at < path.length; at += 1) {
+    if (reached[at] === 1 && token.test(path[at] as string)) {
+      next[at + 1] = 1;
+      any = true;
+    }
+  }
+  return any;
+}
+
+/**
+ * Marks in `next` every position a star can slide to. `open` is "some earlier reachable position
+ * can still slide to here"; a `*` stops at a separator, `**` does not, and a double star followed
+ * by a slash lands only just after one.
+ */
+function sweepStar(token: StarToken, path: string, reached: Uint8Array, next: Uint8Array): boolean {
+  let any = false;
+  let open = false;
+  for (let at = 0; at <= path.length; at += 1) {
+    const afterSeparator = open && at > 0 && path[at - 1] === '/';
+    if (reached[at] === 1) open = true;
+    const here = token.kind === 'anyDirectories' ? reached[at] === 1 || afterSeparator : open;
+    if (here) {
+      next[at] = 1;
+      any = true;
+    }
+    if (token.kind === 'segmentStar' && path[at] === '/') open = false;
+  }
+  return any;
 }
 
 /**
@@ -176,30 +215,8 @@ export function compileGlob(glob: string): GlobMatcher {
       reached[0] = 1;
       for (const token of tokens) {
         next.fill(0);
-        let any = false;
-        if (token.kind === 'one') {
-          for (let at = 0; at < path.length; at += 1) {
-            if (reached[at] === 1 && token.test(path[at] as string)) {
-              next[at + 1] = 1;
-              any = true;
-            }
-          }
-        } else {
-          // `open` is "some earlier reachable position can still slide to here"; a `*` stops at a
-          // separator, `**` does not, and `**/` lands only just after one.
-          let open = false;
-          for (let at = 0; at <= path.length; at += 1) {
-            const afterSeparator = open && at > 0 && path[at - 1] === '/';
-            if (reached[at] === 1) open = true;
-            const here =
-              token.kind === 'anyDirectories' ? reached[at] === 1 || afterSeparator : open;
-            if (here) {
-              next[at] = 1;
-              any = true;
-            }
-            if (token.kind === 'segmentStar' && path[at] === '/') open = false;
-          }
-        }
+        const any =
+          token.kind === 'one' ? sweepOne(token, path, reached, next) : sweepStar(token, path, reached, next);
         if (!any) return false;
         [reached, next] = [next, reached];
       }
