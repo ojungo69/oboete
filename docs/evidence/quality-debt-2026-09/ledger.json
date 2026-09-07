@@ -3940,5 +3940,167 @@
   "id": "4790455d8db963ddff6afd9f8e2df464",
   "state": "fixed",
   "where": "#164"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xke6IqdfylE4c2oF",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkiJIqdfylE4c2os",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xke6IqdfylE4c2oG",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xke6IqdfylE4c2oH",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkd4IqdfylE4c2n7",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkioIqdfylE4c2oy",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkiJIqdfylE4c2on",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkiJIqdfylE4c2oo",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkiJIqdfylE4c2op",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkiJIqdfylE4c2oq",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkeZIqdfylE4c2n_",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkeJIqdfylE4c2n8",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkeZIqdfylE4c2n9",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkdqIqdfylE4c2n6",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkioIqdfylE4c2ox",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkeqIqdfylE4c2oC",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkiYIqdfylE4c2ow",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "codacy",
+  "id": "ba8cb52aaf85df5e56aef6e700030d0a",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "codacy",
+  "id": "6d2c3e2bc43d69bfb5d0699166672f79",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "codacy",
+  "id": "99f1e25fc60fe2a8f0c836e8a50ab71f",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "codacy",
+  "id": "46e6b08df61cfa75ea028ea6572af4df",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "codacy",
+  "id": "2fe9cb6af3e5bc0a51b72ebeee4bcd37",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "codacy",
+  "id": "9c55aae5e3bdd0bf530eb6ec7b70eec6",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "codacy",
+  "id": "188840d78c29d17901a37c07a2879cbe",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "codacy",
+  "id": "ef0d4048b972a68b7161482442f6cfd2",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "codacy",
+  "id": "d00d96e60329780ad296180f2e3a9c4b",
+  "state": "fixed",
+  "where": "#165"
+ },
+ {
+  "service": "codacy",
+  "id": "ed0ec10c89a6aba269a1fb49ceea2522",
+  "state": "fixed",
+  "where": "#165"
  }
 ]
