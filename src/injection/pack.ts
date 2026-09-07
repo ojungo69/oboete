@@ -351,6 +351,122 @@ function blockCost(block: readonly string[]): number {
   return block.join('\n').length + 1;
 }
 
+/** Drops an item from the pack, keeping the reason the ledger shows. */
+function omit(item: PackItem, reason: ItemReason): void {
+  item.decision = 'omitted';
+  item.reason = reason;
+  item.lines = [];
+}
+
+/** One memory's pack item, marked stale when a citation of its own no longer holds. */
+function memoryItem(
+  memory: Assembly['memories'][number],
+  own: readonly Citation[],
+  context: { commitsFresh: boolean; pathState: Map<string, boolean>; now: number },
+): PackItem {
+  const stale = own.find((citation) =>
+    citation.kind === 'commit' ? !context.commitsFresh : context.pathState.get(citation.value) === false,
+  );
+  let staleReason: 'stale_path' | 'stale_commit' | null = null;
+  if (stale !== undefined) staleReason = stale.kind === 'commit' ? 'stale_commit' : 'stale_path';
+  const staleNote = staleReason === null ? '' : `; ${STALE_NOTES[staleReason]}`;
+  const shown = stale ?? own[0];
+  const note =
+    memory.label !== 'related' || shown === undefined ? '' : ` [${canonicalLine(shown.value)}${staleNote}]`;
+  const head =
+    memory.label === 'summary'
+      ? `> session summary (${relativeTime(memory.createdAt ?? context.now, context.now)}):`
+      : `> ${memory.label}: ${canonicalLine(memory.title)}${note}`;
+  return {
+    sourceKind: memory.label === 'summary' ? 'session_summary' : 'memory',
+    memoryId: memory.id,
+    rawEventId: null,
+    decision: 'planned',
+    // A stale citation is the more specific record; the memory is still injected, marked.
+    reason: staleReason ?? memory.reason,
+    rank: memory.rank,
+    scoreBm25: memory.scoreBm25 ?? null,
+    scoreRrf: memory.scoreRrf ?? null,
+    scoreMmr: memory.scoreMmr ?? null,
+    stale: stale === undefined ? 0 : 1,
+    lines: [head, ...bodyLines(memory.body)],
+  };
+}
+
+/** One recent raw event's pack item. */
+function activityItem(activity: Assembly['activity'][number]): PackItem {
+  return {
+    sourceKind: 'raw_activity',
+    memoryId: null,
+    rawEventId: activity.rawEventId,
+    decision: 'planned',
+    reason: null,
+    rank: null,
+    stale: 0,
+    lines: [`> recent activity: ${canonicalLine(activity.line)}`],
+  };
+}
+
+/** The planned items that fit the budget, in order; the rest are omitted with `budget`. */
+function withinBudget(items: PackItem[], budget: { budgetChars: number; used: number }): PackItem[] {
+  const kept: PackItem[] = [];
+  let used = budget.used;
+  for (const item of items) {
+    if (item.decision !== 'planned') continue;
+    const cost = blockCost(item.lines);
+    if (used + cost > budget.budgetChars) {
+      omit(item, 'budget');
+      continue;
+    }
+    used += cost;
+    kept.push(item);
+  }
+  return kept;
+}
+
+/** Drops every kept item the detector answers for; returns the ones that survive. */
+async function dropDetected(kept: PackItem[], detect: SecretDetector): Promise<PackItem[]> {
+  for (const item of kept) {
+    if (await detect(item.lines.join('\n'))) omit(item, 'secret_detected');
+  }
+  return kept.filter((item) => item.decision === 'planned');
+}
+
+/**
+ * docs/dev/conventions.md: the record and the rows it accounts for are one write unit, so no
+ * reader ever finds a pack whose items are missing.
+ */
+function writeInjection(
+  db: DatabaseSync,
+  input: PackChannelInput,
+  assembly: Assembly,
+  items: PackItem[],
+  text: string,
+): string {
+  return transactionImmediate(db, () => {
+    const id = createInjection(db, {
+      repoId: input.repoId,
+      sessionId: input.sessionId,
+      conversationId: input.conversationId,
+      turnId: input.turnId ?? null,
+      kind: assembly.kind,
+      channel: input.channel,
+      state: input.state ?? 'built',
+      epoch: input.epoch,
+      packHash: packHash(text),
+      charBudget: assembly.budgetChars,
+      charsUsed: text.length,
+      degradedReason: assembly.degraded,
+      createdAt: input.now,
+    });
+    planItems(db, { id, conversationId: input.conversationId, epoch: input.epoch }, [
+      ...items,
+      ...assembly.omitted,
+    ]);
+    return id;
+  });
+}
+
 /** Shared tail of both builders: staleness, framing, budget, validation, ledger. */
 async function assemble(
   db: DatabaseSync,
@@ -375,94 +491,38 @@ async function assemble(
   const repoHead = citesCommit ? repositoryHead(input.repoRoot, input.remainingBudget?.()) : null;
   const fresh = repoHead === null ? new Set<string>() : freshCitations(db, ids, repoHead);
 
-  const items: PackItem[] = [];
-  for (const memory of assembly.memories) {
-    const own = citations.get(memory.id) ?? [];
-    const commitsFresh = fresh.has(memory.id);
-    const stale = own.find((citation) =>
-      citation.kind === 'commit' ? !commitsFresh : pathState.get(citation.value) === false,
-    );
-    let staleReason: 'stale_path' | 'stale_commit' | null = null;
-    if (stale !== undefined) staleReason = stale.kind === 'commit' ? 'stale_commit' : 'stale_path';
-    const staleNote = staleReason === null ? '' : `; ${STALE_NOTES[staleReason]}`;
-    const shown = stale ?? own[0];
-    const note =
-      memory.label !== 'related' || shown === undefined ? '' : ` [${canonicalLine(shown.value)}${staleNote}]`;
-
-    const head =
-      memory.label === 'summary'
-        ? `> session summary (${relativeTime(memory.createdAt ?? input.now, input.now)}):`
-        : `> ${memory.label}: ${canonicalLine(memory.title)}${note}`;
-
-    items.push({
-      sourceKind: memory.label === 'summary' ? 'session_summary' : 'memory',
-      memoryId: memory.id,
-      rawEventId: null,
-      decision: 'planned',
-      // A stale citation is the more specific record; the memory is still injected, marked.
-      reason: staleReason ?? memory.reason,
-      rank: memory.rank,
-      scoreBm25: memory.scoreBm25 ?? null,
-      scoreRrf: memory.scoreRrf ?? null,
-      scoreMmr: memory.scoreMmr ?? null,
-      stale: stale === undefined ? 0 : 1,
-      lines: [head, ...bodyLines(memory.body)],
-    });
-  }
-
-  for (const activity of assembly.activity) {
-    items.push({
-      sourceKind: 'raw_activity',
-      memoryId: null,
-      rawEventId: activity.rawEventId,
-      decision: 'planned',
-      reason: null,
-      rank: null,
-      stale: 0,
-      lines: [`> recent activity: ${canonicalLine(activity.line)}`],
-    });
-  }
+  const items = [
+    ...assembly.memories.map((memory) =>
+      memoryItem(memory, citations.get(memory.id) ?? [], {
+        commitsFresh: fresh.has(memory.id),
+        pathState,
+        now: input.now,
+      }),
+    ),
+    ...assembly.activity.map(activityItem),
+  ];
 
   // FR-021: an item that reads as an instruction to the agent is dropped, not framed harder. The
   // corpus is matched with the observer's normalization (A13), so a full-width or half-width form
   // of a phrase is the same phrase.
   for (const item of items) {
     if (rejectsDirectives(item.lines.join('\n'), assembly.directives) !== null) {
-      item.decision = 'omitted';
-      item.reason = 'directive';
-      item.lines = [];
+      omit(item, 'directive');
     }
   }
 
   const degraded = assembly.degraded;
-  const kept: PackItem[] = [];
-  let used = renderPack({ repositoryLine, blocks: [], degraded }).length;
-  for (const item of items) {
-    if (item.decision !== 'planned') continue;
-    const cost = blockCost(item.lines);
-    if (used + cost > assembly.budgetChars) {
-      item.decision = 'omitted';
-      item.reason = 'budget';
-      item.lines = [];
-      continue;
-    }
-    used += cost;
-    kept.push(item);
-  }
+  const kept = withinBudget(items, {
+    budgetChars: assembly.budgetChars,
+    used: renderPack({ repositoryLine, blocks: [], degraded }).length,
+  });
 
   let text = renderPack({ repositoryLine, blocks: kept.map((item) => item.lines), degraded });
 
   // FR-018: the finished pack is scanned as a whole; a hit drops the item that carries it and the
   // pack is rendered again. A pack with a detector hit is never emitted.
   if (kept.length > 0 && (await input.detect(text))) {
-    for (const item of kept) {
-      if (await input.detect(item.lines.join('\n'))) {
-        item.decision = 'omitted';
-        item.reason = 'secret_detected';
-        item.lines = [];
-      }
-    }
-    const survivors = kept.filter((item) => item.decision === 'planned');
+    const survivors = await dropDetected(kept, input.detect);
     text = renderPack({ repositoryLine, blocks: survivors.map((item) => item.lines), degraded });
     kept.length = 0;
     kept.push(...survivors);
@@ -480,28 +540,7 @@ async function assemble(
 
   // docs/dev/conventions.md: the record and the rows it accounts for are one write unit, so no
   // reader ever finds a pack whose items are missing.
-  const injectionId = transactionImmediate(db, () => {
-    const id = createInjection(db, {
-      repoId: input.repoId,
-      sessionId: input.sessionId,
-      conversationId: input.conversationId,
-      turnId: input.turnId ?? null,
-      kind: assembly.kind,
-      channel: input.channel,
-      state: input.state ?? 'built',
-      epoch: input.epoch,
-      packHash: packHash(text),
-      charBudget: assembly.budgetChars,
-      charsUsed: text.length,
-      degradedReason: degraded,
-      createdAt: input.now,
-    });
-    planItems(db, { id, conversationId: input.conversationId, epoch: input.epoch }, [
-      ...items,
-      ...assembly.omitted,
-    ]);
-    return id;
-  });
+  const injectionId = writeInjection(db, input, assembly, items, text);
 
   return {
     injectionId,
@@ -546,6 +585,24 @@ function recordOmitted(
   return null;
 }
 
+/**
+ * FR-024 with A2: the previous session decides what a session-start pack carries. While its
+ * summary is pending the pack waits at most one second and falls back to that session's recent
+ * raw activity; an older session's summary never stands in for it.
+ */
+function previousSession(
+  db: DatabaseSync,
+  input: SessionStartInput,
+): { summary: MemoryRow | null; activity: ActivityRow[]; degraded: DegradedReason | null } {
+  const state = latestSessionState(db, input.repoId);
+  const outcome = state?.summaryState === 'pending' ? input.waitForSummary(SUMMARY_WAIT_MS) : 'ready';
+  const summary = latestSessionSummary(db, input.repoId);
+  if (outcome === 'pending' && state !== null) {
+    return { summary: null, activity: latestRawActivity(db, state.sessionId), degraded: 'summary_pending' };
+  }
+  return { summary, activity: [], degraded: null };
+}
+
 export async function buildSessionStartPack(
   db: DatabaseSync,
   input: SessionStartInput,
@@ -554,20 +611,9 @@ export async function buildSessionStartPack(
   if (sessionStartEmitted(db, input.conversationId, input.epoch)) return null;
 
   const scope = memoryScope(db, { repoId: input.repoId, destination: 'injection' });
-  let degraded: DegradedReason | null = null;
-  let activity: ActivityRow[] = [];
-
-  // FR-024 with A2: the previous session decides. While its summary is pending the pack waits at
-  // most one second, and an older session's summary never stands in for it.
-  const state = latestSessionState(db, input.repoId);
-  const outcome =
-    state?.summaryState === 'pending' ? input.waitForSummary(SUMMARY_WAIT_MS) : 'ready';
-  let summary = latestSessionSummary(db, input.repoId);
-  if (outcome === 'pending' && state !== null) {
-    summary = null;
-    activity = latestRawActivity(db, state.sessionId);
-    degraded = 'summary_pending';
-  }
+  const previous = previousSession(db, input);
+  let degraded: DegradedReason | null = previous.degraded;
+  const summary = previous.summary;
 
   const delivered = alreadyIncluded(db, input.conversationId, input.epoch);
   const omitted: LedgerItem[] = [];
@@ -604,7 +650,7 @@ export async function buildSessionStartPack(
   return assemble(db, input, {
     kind: 'session_start',
     memories,
-    activity,
+    activity: previous.activity,
     omitted,
     degraded,
     budgetChars: budget.chars,

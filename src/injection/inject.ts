@@ -357,20 +357,13 @@ async function deferPack(
   });
 }
 
-async function injectGrok(context: HookContext, validation: PackValidation): Promise<string> {
-  const db = context.db;
-  if (db === undefined) return '';
-  const now = context.event.captured_at;
-
+/** The Grok lane builds a pack on a session or prompt event and defers it to the next tool call. */
+async function deferGrokPack(context: HookContext, validation: PackValidation): Promise<void> {
   if (context.eventName === 'SessionStart' && context.event.kind === 'session_start') {
     // Grok reports both resume and --fork-session as `load`: only a new native id opens a root.
-    if (context.event.source === 'resume' && !context.sessionCreated) return '';
-    await deferPack(
-      context,
-      await startPack(context, 'grok:PreToolUse', validation, true),
-      validation,
-    );
-    return '';
+    if (context.event.source === 'resume' && !context.sessionCreated) return;
+    await deferPack(context, await startPack(context, 'grok:PreToolUse', validation, true), validation);
+    return;
   }
   if (context.eventName === 'UserPromptSubmit' && context.event.kind === 'prompt') {
     await deferPack(
@@ -378,47 +371,89 @@ async function injectGrok(context: HookContext, validation: PackValidation): Pro
       await promptPack(context, 'grok:PreToolUse', context.event.text, validation, true),
       validation,
     );
-    return '';
   }
-  if (context.eventName === 'PreToolUse' && context.event.kind === 'tool_call') {
-    const text = attachOnPreToolUse(db, {
-      conversationId: context.conversationId,
-      toolCallId: context.event.tool_call_id,
-      now,
-    });
-    return text === null ? '' : envelope('PreToolUse', text);
+}
+
+/** The Grok lane attaches the deferred pack to the tool call itself. */
+function grokOnToolCall(context: HookContext, db: DatabaseSync, toolCallId: string): string {
+  const text = attachOnPreToolUse(db, {
+    conversationId: context.conversationId,
+    toolCallId,
+    now: context.event.captured_at,
+  });
+  return text === null ? '' : envelope('PreToolUse', text);
+}
+
+/** The tool's result confirms delivery, or carries the pack when the call could not. */
+function grokOnToolResult(
+  context: HookContext,
+  db: DatabaseSync,
+  toolCallId: string,
+  isError: boolean,
+): string {
+  const delivered = confirmOnPostToolUse(db, {
+    conversationId: context.conversationId,
+    toolCallId,
+    exitCode: isError ? 1 : 0,
+    now: context.event.captured_at,
+  });
+  if (delivered.status === 'emitted') markLatestDeferred(context);
+  return delivered.text === null ? '' : envelope('PostToolUse', delivered.text);
+}
+
+/** A failed or denied tool call still resolves the deferred row. */
+function grokOnToolFailure(
+  context: HookContext,
+  db: DatabaseSync,
+  toolCallId: string,
+  kind: 'PostToolUseFailure' | 'PermissionDenied',
+): void {
+  const state = markFailure(db, {
+    conversationId: context.conversationId,
+    toolCallId,
+    kind,
+    now: context.event.captured_at,
+  });
+  if (state === 'emitted') markLatestDeferred(context);
+}
+
+/** The Grok lane's answer on a tool hook: attach on the call, confirm or mark on its outcome. */
+function grokToolHook(context: HookContext, db: DatabaseSync): string {
+  const event = context.event;
+  if (context.eventName === 'PreToolUse' && event.kind === 'tool_call') {
+    return grokOnToolCall(context, db, event.tool_call_id);
   }
-  if (context.eventName === 'PostToolUse' && context.event.kind === 'tool_result') {
-    const delivered = confirmOnPostToolUse(db, {
-      conversationId: context.conversationId,
-      toolCallId: context.event.tool_call_id,
-      exitCode: context.event.is_error ? 1 : 0,
-      now,
-    });
-    if (delivered.status === 'emitted') markLatestDeferred(context);
-    return delivered.text === null ? '' : envelope('PostToolUse', delivered.text);
+  if (context.eventName === 'PostToolUse' && event.kind === 'tool_result') {
+    return grokOnToolResult(context, db, event.tool_call_id, event.is_error);
   }
   if (
     (context.eventName === 'PostToolUseFailure' || context.eventName === 'PermissionDenied') &&
-    context.event.kind === 'tool_failure'
+    event.kind === 'tool_failure'
   ) {
-    const state = markFailure(db, {
-      conversationId: context.conversationId,
-      toolCallId: context.event.tool_call_id,
-      kind: context.eventName,
-      now,
-    });
-    if (state === 'emitted') markLatestDeferred(context);
+    grokOnToolFailure(context, db, event.tool_call_id, context.eventName);
     return '';
   }
   if (context.eventName === 'Stop') {
     closeOnStop(db, {
       conversationId: context.conversationId,
       sawAnyToolHook: sawToolHook(context),
-      now,
+      now: event.captured_at,
     });
   }
   return '';
+}
+
+async function injectGrok(context: HookContext, validation: PackValidation): Promise<string> {
+  const db = context.db;
+  if (db === undefined) return '';
+  const isPackEvent =
+    (context.eventName === 'SessionStart' && context.event.kind === 'session_start') ||
+    (context.eventName === 'UserPromptSubmit' && context.event.kind === 'prompt');
+  if (isPackEvent) {
+    await deferGrokPack(context, validation);
+    return '';
+  }
+  return grokToolHook(context, db);
 }
 
 /** Called by capture after the normalized event was stored, or with no database after spooling. */
@@ -520,6 +555,127 @@ function sessionForPi(
 }
 
 /** `oboete inject --agent pi --kind start|prompt`; agent-facing failures always return zero. */
+type PiInjectInput = z.infer<typeof piInjectInputSchema>;
+
+/** The `--agent pi --kind start|prompt` arguments, refused as one error for the hook log. */
+function piInjectKind(argv: string[]): 'start' | 'prompt' {
+  const { values } = parseArgs({
+    args: argv,
+    strict: false,
+    allowPositionals: true,
+    options: { agent: { type: 'string' }, kind: { type: 'string' } },
+  });
+  const kind = values.kind;
+  if (values.agent !== 'pi' || (kind !== 'start' && kind !== 'prompt')) {
+    throw new Error('inject_arguments_invalid');
+  }
+  return kind;
+}
+
+/** The event Pi's injection hook stands for: the session's start, or the prompt it carries. */
+function piInjectEvent(
+  kind: 'start' | 'prompt',
+  input: PiInjectInput,
+  model: string | undefined,
+  now: number,
+): NormalizedEvent {
+  const common = {
+    agent: 'pi' as const,
+    native_session_id: input.session_id,
+    cwd: input.cwd,
+    captured_at: now,
+    model: input.model ?? model,
+  };
+  if (kind === 'start') return { ...common, kind: 'session_start', source: 'startup' };
+  return { ...common, kind: 'prompt', text: input.prompt ?? '', input_source: 'user' };
+}
+
+/** Opens the database for the hook, or answers null once it says the index is unavailable. */
+function openForInject(
+  paths: OboetePaths,
+  kind: 'start' | 'prompt',
+  timeoutMs: number,
+): ReturnType<typeof openDatabase> | null {
+  let opened: ReturnType<typeof openDatabase>;
+  try {
+    opened = openDatabase({ path: paths.db, timeoutMs, hook: true });
+  } catch {
+    indexUnavailable({ agent: 'pi', eventName: kind, paths });
+    return null;
+  }
+  if (opened.schemaBehind) {
+    opened.db.close();
+    indexUnavailable({ agent: 'pi', eventName: kind, paths });
+    return null;
+  }
+  return opened;
+}
+
+/** The hook context Pi's in-process injection runs against; one place assembles it. */
+function piHookContext(input: {
+  kind: ReturnType<typeof piInjectKind>;
+  input: PiInjectInput;
+  session: ReturnType<typeof sessionForPi>;
+  identity: ReturnType<typeof resolveRepoIdentity>;
+  config: HookContext['config'];
+  paths: HookContext['paths'];
+  db: DatabaseSync;
+  secretPaths: HookContext['secretPaths'];
+  remainingBudget: HookContext['remainingBudget'];
+  sleep: HookContext['sleep'];
+  now: number;
+}): HookContext {
+  const { session, identity } = input;
+  return {
+    agent: 'pi',
+    eventName: input.kind,
+    event: piInjectEvent(input.kind, input.input, session.model, input.now),
+    sessionId: session.sessionId,
+    conversationId: session.conversationId,
+    turnId: session.turnId,
+    epoch: session.epoch,
+    repoId: identity.id,
+    repoIdentityDisplay: identity.normalizedIdentity,
+    repoRoot: identity.root,
+    model: input.input.model ?? session.model,
+    cwd: input.input.cwd,
+    config: input.config,
+    paths: input.paths,
+    db: input.db,
+    sessionCreated: false,
+    secretPaths: input.secretPaths,
+    remainingBudget: input.remainingBudget,
+    sleep: input.sleep,
+  };
+}
+
+/** Opens the Pi session on the already-open database and writes the pack it produces to stdout. */
+async function writePiInjection(input: {
+  kind: ReturnType<typeof piInjectKind>;
+  input: PiInjectInput;
+  identity: ReturnType<typeof resolveRepoIdentity>;
+  config: HookContext['config'];
+  paths: HookContext['paths'];
+  db: DatabaseSync;
+  secretPaths: HookContext['secretPaths'];
+  remainingBudget: HookContext['remainingBudget'];
+  sleep: HookContext['sleep'];
+  now: number;
+}): Promise<void> {
+  const session = sessionForPi(input.db, {
+    nativeSessionId: input.input.session_id,
+    identity: input.identity,
+    model: input.input.model,
+    now: input.now,
+  });
+  const text = await injectPi(
+    piHookContext({ ...input, session }),
+    input.kind,
+    input.input.prompt ?? '',
+  );
+  if (text !== '') process.stdout.write(text);
+}
+
 export async function runInject(
   argv: string[],
   runtime: Partial<InjectRuntime> = {},
@@ -528,17 +684,7 @@ export async function runInject(
   const live = { ...defaultRuntime(), ...runtime };
 
   try {
-    const { values } = parseArgs({
-      args: argv,
-      strict: false,
-      allowPositionals: true,
-      options: { agent: { type: 'string' }, kind: { type: 'string' } },
-    });
-    const agent = values.agent;
-    const kind = values.kind;
-    if (agent !== 'pi' || (kind !== 'start' && kind !== 'prompt')) {
-      throw new Error('inject_arguments_invalid');
-    }
+    const kind = piInjectKind(argv);
     if (isPaused(paths)) return 0;
     const parsed = piInjectInputSchema.safeParse(JSON.parse(live.readStdin()));
     if (!parsed.success) throw new Error('inject_input_invalid');
@@ -553,78 +699,22 @@ export async function runInject(
       ...loadRepoRules(identity.root).secretPaths,
     ];
     if (remainingBudget() <= 0) throw new Error('inject_deadline');
-    let opened: ReturnType<typeof openDatabase>;
-    try {
-      opened = openDatabase({
-        path: paths.db,
-        timeoutMs: Math.max(1, Math.min(150, Math.floor(remainingBudget()))),
-        hook: true,
-      });
-    } catch {
-      indexUnavailable({ agent: 'pi', eventName: kind, paths });
-      return 0;
-    }
-    if (opened.schemaBehind) {
-      opened.db.close();
-      indexUnavailable({ agent: 'pi', eventName: kind, paths });
-      return 0;
-    }
+    const opened = openForInject(paths, kind, Math.max(1, Math.min(150, Math.floor(remainingBudget()))));
+    if (opened === null) return 0;
 
     try {
-      const now = live.now();
-      const session = sessionForPi(opened.db, {
-        nativeSessionId: parsed.data.session_id,
-        identity,
-        model: parsed.data.model,
-        now,
-      });
-      const event: NormalizedEvent =
-        kind === 'start'
-          ? {
-              agent: 'pi',
-              native_session_id: parsed.data.session_id,
-              cwd: parsed.data.cwd,
-              captured_at: now,
-              model: parsed.data.model ?? session.model,
-              kind: 'session_start',
-              source: 'startup',
-            }
-          : {
-              agent: 'pi',
-              native_session_id: parsed.data.session_id,
-              cwd: parsed.data.cwd,
-              captured_at: now,
-              model: parsed.data.model ?? session.model,
-              kind: 'prompt',
-              text: parsed.data.prompt ?? '',
-              input_source: 'user',
-            };
-      const text = await injectPi(
-        {
-          agent: 'pi',
-          eventName: kind,
-          event,
-          sessionId: session.sessionId,
-          conversationId: session.conversationId,
-          turnId: session.turnId,
-          epoch: session.epoch,
-          repoId: identity.id,
-          repoIdentityDisplay: identity.normalizedIdentity,
-          repoRoot: identity.root,
-          model: parsed.data.model ?? session.model,
-          cwd: parsed.data.cwd,
-          config,
-          paths,
-          db: opened.db,
-          sessionCreated: false,
-          secretPaths,
-          remainingBudget,
-          sleep: live.sleep,
-        },
+      await writePiInjection({
         kind,
-        parsed.data.prompt ?? '',
-      );
-      if (text !== '') process.stdout.write(text);
+        input: parsed.data,
+        identity,
+        config,
+        paths,
+        db: opened.db,
+        secretPaths,
+        remainingBudget,
+        sleep: live.sleep,
+        now: live.now(),
+      });
     } finally {
       opened.db.close();
     }

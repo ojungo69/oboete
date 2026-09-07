@@ -168,6 +168,82 @@ function Ledger({ injections }: { injections: Injection[] }) {
   );
 }
 
+/** The left column: every recorded session, with the selected one's turns unfolded. */
+function SessionList(props: {
+  sessions: Session[];
+  selected: string | null;
+  onSelect: (id: string | null) => void;
+}) {
+  const { sessions, selected, onSelect } = props;
+  return (
+    <nav class="sessions">
+      <h2>Sessions</h2>
+      <button type="button" class={selected === null ? 'current' : ''} onClick={() => onSelect(null)}>
+        All memories
+      </button>
+      {sessions.length === 0 ? <p class="muted">No session has been recorded yet.</p> : null}
+      {sessions.map((entry) => (
+        <div key={entry.id} class={`session ${selected === entry.id ? 'current' : ''}`}>
+          <button type="button" onClick={() => onSelect(entry.id)}>
+            <strong>{entry.agent}</strong> {entry.status}, {entry.turn_count} {entry.turn_count === 1 ? 'turn' : 'turns'}
+            <br />
+            <span class="muted">{when(entry.started_at)}</span>
+            {entry.summary_state === 'pending' ? <span class="badge review"> summary pending</span> : null}
+          </button>
+          {selected === entry.id ? (
+            <ol class="turns">
+              {entry.turns.map((turn) => (
+                <li key={turn.id}>
+                  Turn {turn.ordinal}: {memoryCount(turn.memory_ids.length)}
+                </li>
+              ))}
+            </ol>
+          ) : null}
+        </div>
+      ))}
+    </nav>
+  );
+}
+
+/** The right column: the search box, the ledger of the selected session, and the memories shown. */
+function MemoryPane(props: {
+  query: string;
+  onQuery: (value: string) => void;
+  hits: { hits: SearchHit[]; note: string } | null;
+  ledger: Injection[] | null;
+  session: Session | null;
+  shown: Memory[];
+  onChanged: () => void;
+  onError: (message: string) => void;
+}) {
+  const { query, hits, ledger, session, shown } = props;
+  return (
+    <main class="memories">
+      <label class="search">
+        <span>Search memories</span>
+        <input
+          type="search"
+          value={query}
+          placeholder="Words to look for (search is lexical in this milestone)"
+          onInput={(event) => props.onQuery((event.currentTarget as HTMLInputElement).value)}
+        />
+      </label>
+      {hits === null ? null : <SearchResults hits={hits.hits} note={hits.note} />}
+      {ledger === null ? null : (
+        <section>
+          <h2>Why this session received memories</h2>
+          <Ledger injections={ledger} />
+        </section>
+      )}
+      <h2>{session === null ? 'All memories' : `Memories of session ${session.id}`}</h2>
+      {shown.length === 0 ? <p class="muted">There is nothing recorded here yet.</p> : null}
+      {shown.map((memory) => (
+        <MemoryCard key={memory.id} memory={memory} onChanged={props.onChanged} onError={props.onError} />
+      ))}
+    </main>
+  );
+}
+
 function App() {
   const [repository, setRepository] = useState('');
   const [memories, setMemories] = useState<Memory[]>([]);
@@ -248,55 +324,17 @@ function App() {
       </header>
       {error === null ? null : <p class="error">{error}</p>}
       <div class="columns">
-        <nav class="sessions">
-          <h2>Sessions</h2>
-          <button type="button" class={selected === null ? 'current' : ''} onClick={() => setSelected(null)}>
-            All memories
-          </button>
-          {sessions.length === 0 ? <p class="muted">No session has been recorded yet.</p> : null}
-          {sessions.map((entry) => (
-            <div key={entry.id} class={`session ${selected === entry.id ? 'current' : ''}`}>
-              <button type="button" onClick={() => setSelected(entry.id)}>
-                <strong>{entry.agent}</strong> {entry.status}, {entry.turn_count} {entry.turn_count === 1 ? 'turn' : 'turns'}
-                <br />
-                <span class="muted">{when(entry.started_at)}</span>
-                {entry.summary_state === 'pending' ? <span class="badge review"> summary pending</span> : null}
-              </button>
-              {selected === entry.id ? (
-                <ol class="turns">
-                  {entry.turns.map((turn) => (
-                    <li key={turn.id}>
-                      Turn {turn.ordinal}: {memoryCount(turn.memory_ids.length)}
-                    </li>
-                  ))}
-                </ol>
-              ) : null}
-            </div>
-          ))}
-        </nav>
-        <main class="memories">
-          <label class="search">
-            <span>Search memories</span>
-            <input
-              type="search"
-              value={query}
-              placeholder="Words to look for (search is lexical in this milestone)"
-              onInput={(event) => setQuery((event.currentTarget as HTMLInputElement).value)}
-            />
-          </label>
-          {hits === null ? null : <SearchResults hits={hits.hits} note={hits.note} />}
-          {ledger === null ? null : (
-            <section>
-              <h2>Why this session received memories</h2>
-              <Ledger injections={ledger} />
-            </section>
-          )}
-          <h2>{session === null ? 'All memories' : `Memories of session ${session.id}`}</h2>
-          {shown.length === 0 ? <p class="muted">There is nothing recorded here yet.</p> : null}
-          {shown.map((memory) => (
-            <MemoryCard key={memory.id} memory={memory} onChanged={refresh} onError={setError} />
-          ))}
-        </main>
+        <SessionList sessions={sessions} selected={selected} onSelect={setSelected} />
+        <MemoryPane
+          query={query}
+          onQuery={setQuery}
+          hits={hits}
+          ledger={ledger}
+          session={session}
+          shown={shown}
+          onChanged={refresh}
+          onError={setError}
+        />
       </div>
     </>
   );
