@@ -275,6 +275,46 @@ for (const { args, service, index } of serviceModes) {
   }
 }
 
+// The two credential files do not agree on a line number: SONAR_TOKEN.md keeps a sentence about the
+// token above it, CODACY_TOKEN.md holds the token alone. Both layouts must work, and neither may
+// let a later line stand in for the token. A blank line must not shift the answer either.
+for (const [name, contents] of [
+  ['the token alone', 'fixture-token\n'],
+  ['a note above the token', 'Codacy account token for ojungo69\nfixture-token\n'],
+  ['a note above and text below', '# Test credentials\r\nfixture-token\r\nignored\r\n'],
+  ['no trailing newline', 'fixture-token'],
+  ['blank lines around the token', '\n\nfixture-token\n\n'],
+  ['a note, a blank line and the token', 'Codacy account token\n\nfixture-token\n'],
+]) {
+  test(`--apply-codacy reads the token from a file with ${name}`, (t) => {
+    const { cwd, ledger } = fixture(t);
+    Object.assign(ledger[4], { state: 'resolved', reason: 'AcceptedUse' });
+    delete ledger[4].confirmed;
+    writeJson(cwd, 'ledger.json', ledger);
+    writeFileSync(join(cwd, 'CODACY_TOKEN.md'), contents);
+    const result = run(cwd, ['--apply-codacy'], apiStub([{ status: 200 }, { status: 200 }]));
+    assert.equal(result.status, 0, result.stderr);
+    const calls = readCalls(cwd).filter((call) => call.url);
+    assert.deepEqual(calls.map((call) => call.url),
+      ['https://app.codacy.com/api/v3/user', `${codacyIssues}/${ledger[4].id}`]);
+    assert.deepEqual(calls.map((call) => call.authMatches), [true, true]);
+  });
+}
+
+test('--apply-codacy refuses an empty credentials file', (t) => {
+  const { cwd, ledger } = fixture(t);
+  Object.assign(ledger[4], { state: 'resolved', reason: 'AcceptedUse' });
+  delete ledger[4].confirmed;
+  writeJson(cwd, 'ledger.json', ledger);
+  writeFileSync(join(cwd, 'CODACY_TOKEN.md'), '\n\n');
+  const before = readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8');
+  const result = run(cwd, ['--apply-codacy'], apiStub([]));
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, 'CODACY_TOKEN.md must contain the token, alone or on the line under a note\n');
+  assert.deepEqual(readCalls(cwd), []);
+  assert.equal(readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8'), before);
+});
+
 for (const [service, args] of [['SONAR', ['--apply-sonar']], ['CODACY', ['--apply-codacy']], ['SONAR', confirmArgs]]) {
   for (const [name, token] of [['carriage return', 'fixture\rtoken'], ['NUL', 'fixture\0token'], ['trailing space', 'fixture-token ']]) {
     test(`${args[0]} rejects a ${name} in the token without disclosing it`, (t) => {
