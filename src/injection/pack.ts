@@ -536,7 +536,7 @@ async function assemble(
   // FR-018: the finished pack is scanned as a whole; a hit drops the item that carries it and the
   // pack is rendered again. A pack with a detector hit is never emitted.
   if (kept.length > 0 && (await input.detect(text))) {
-    const survivors = await dropDetected(kept, input.detect);
+    const survivors = await dropDetected(kept, (text) => input.detect(text));
     text = renderPack({ repositoryLine, blocks: survivors.map((item) => item.lines), degraded });
     kept.length = 0;
     kept.push(...survivors);

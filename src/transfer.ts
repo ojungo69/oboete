@@ -540,17 +540,24 @@ function importArgs(argv: string[]): ImportArgs | { error: string } {
  * bounded string before the database is opened: a slow pipe or a file that grows after the size
  * check never holds the write lock, and the bound applies to what was read.
  */
-async function importSource(file: string): Promise<string | { error: string }> {
+async function importSource(file: string, io: Io): Promise<string | number> {
   const overSize = `exceeds ${MAX_FILE_BYTES / (1024 * 1024)} MB; nothing was imported.`;
   if (file !== '-') {
     try {
-      if (statSync(file).size > MAX_FILE_BYTES) return { error: `${file} ${overSize}` };
+      if (statSync(file).size > MAX_FILE_BYTES) {
+        io.writeError(`${file} ${overSize}\n`);
+        return 2;
+      }
     } catch {
-      return { error: `${file} could not be read.` };
+      io.writeError(`${file} could not be read.\n`);
+      return 2;
     }
   }
   const source = await readBounded(file === '-' ? process.stdin : createReadStream(file), MAX_FILE_BYTES);
-  if (source === null) return { error: `${file === '-' ? 'standard input' : file} ${overSize}` };
+  if (source === null) {
+    io.writeError(`${file === '-' ? 'standard input' : file} ${overSize}\n`);
+    return 2;
+  }
   return source;
 }
 
@@ -565,11 +572,8 @@ export async function runImport(argv: string[], io: Io = processIo()): Promise<n
     io.writeError(`${args.error}\n`);
     return 2;
   }
-  const source = await importSource(args.file);
-  if (typeof source !== 'string') {
-    io.writeError(`${source.error}\n`);
-    return 2;
-  }
+  const source = await importSource(args.file, io);
+  if (typeof source !== 'string') return source;
   return await withDatabase(async (db) => {
     const result = importMemories(db, source, { now: Date.now(), dryRun: args.dryRun, mapRepo: args.mapRepo });
     for (const item of result.rejected) io.writeError(`line ${item.line}: ${item.reason}\n`);

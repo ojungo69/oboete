@@ -33,11 +33,14 @@ test('an unset or empty OBOETE_HOME makes a temporary home this run owns and rem
   for (const value of [undefined, '']) {
     withEnv(value, () => {
       const made = replayHome({});
-      assert.equal(isAbsolute(made.home), true);
-      assert.equal(existsSync(made.home), true);
-      // The empty case used to report false here, so the directory it made was left behind.
-      assert.equal(made.createdHome, true);
-      rmSync(made.home, { recursive: true, force: true });
+      try {
+        assert.equal(isAbsolute(made.home), true);
+        assert.equal(existsSync(made.home), true);
+        // The empty case used to report false here, so the directory it made was left behind.
+        assert.equal(made.createdHome, true);
+      } finally {
+        rmSync(made.home, { recursive: true, force: true });
+      }
     });
   }
 });

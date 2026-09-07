@@ -594,10 +594,11 @@ function piInjectEvent(
 function openForInject(
   paths: OboetePaths,
   kind: 'start' | 'prompt',
-  timeoutMs: number,
+  remainingBudget: () => number,
 ): ReturnType<typeof openDatabase> | null {
   let opened: ReturnType<typeof openDatabase>;
   try {
+    const timeoutMs = Math.max(1, Math.min(150, Math.floor(remainingBudget())));
     opened = openDatabase({ path: paths.db, timeoutMs, hook: true });
   } catch {
     indexUnavailable({ agent: 'pi', eventName: kind, paths });
@@ -699,7 +700,7 @@ export async function runInject(
       ...loadRepoRules(identity.root).secretPaths,
     ];
     if (remainingBudget() <= 0) throw new Error('inject_deadline');
-    const opened = openForInject(paths, kind, Math.max(1, Math.min(150, Math.floor(remainingBudget()))));
+    const opened = openForInject(paths, kind, remainingBudget);
     if (opened === null) return 0;
 
     try {
