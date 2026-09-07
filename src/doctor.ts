@@ -302,9 +302,8 @@ function loadedConfigItem(
   paths: OboetePaths,
   config: OboeteConfig,
 ): { item: DoctorItem; config: OboeteConfig | null } {
-  let mode: number;
   try {
-    mode = statSync(paths.config).mode;
+    const mode = statSync(paths.config).mode;
     if ((mode & 0o077) !== 0) {
       const octal = `0o${(mode & 0o777).toString(8).padStart(3, '0')}`;
       return {
@@ -329,13 +328,11 @@ function loadedConfigItem(
     };
   }
 
-  // The same stat the try above already took: a second one could throw past this function's own
-  // degraded-item handling.
-  const permissions = mode & 0o777;
+  const mode = statSync(paths.config).mode & 0o777;
   return {
     item: healthy(
       'config',
-      `Configuration at ${paths.config} loaded (mode 0o${permissions.toString(8).padStart(3, '0')}).`,
+      `Configuration at ${paths.config} loaded (mode 0o${mode.toString(8).padStart(3, '0')}).`,
     ),
     config,
   };
