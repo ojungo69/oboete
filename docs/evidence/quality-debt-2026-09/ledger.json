@@ -3372,14 +3372,14 @@
   "service": "sonar",
   "id": "AaB3XkbGIqdfylE4c2nX",
   "state": "resolved",
-  "where": "row.probe is a SQLite TEXT column read by the doctor; String() is the intended coercion of a scalar the schema stores as text, and a typeof guard would only add a branch no row can take",
+  "where": "row.probe is a field of the setup result that oboete itself wrote to runtime_state as JSON (doctor/agents.ts lastSetupResult); the doctor prints the stored value as it is, with 'none' for an absent one, and String() is that rendering — a non-string there would be oboete's own bug, shown rather than hidden",
   "transition": "wontfix"
  },
  {
   "service": "sonar",
   "id": "AaB3XkbGIqdfylE4c2nY",
   "state": "resolved",
-  "where": "row.trust is a SQLite TEXT column read by the doctor; String() is the intended coercion of a scalar the schema stores as text, and a typeof guard would only add a branch no row can take",
+  "where": "row.trust is a field of the setup result that oboete itself wrote to runtime_state as JSON (doctor/agents.ts lastSetupResult); the doctor prints the stored value as it is, with 'none' for an absent one, and String() is that rendering — a non-string there would be oboete's own bug, shown rather than hidden",
   "transition": "wontfix"
  },
  {
@@ -3488,14 +3488,14 @@
   "service": "sonar",
   "id": "AaB3XklOIqdfylE4c2pj",
   "state": "resolved",
-  "where": "input.query is the MCP tool argument passed through to the child CLI; String() is the intended coercion to one argv entry, and the CLI validates the value",
+  "where": "input.query is the argument of the Pi native tool, declared `type: 'string'` and required in the tool schema Pi enforces before the call; String() turns that declared string into one argv entry for the child CLI, which rejects an empty one",
   "transition": "wontfix"
  },
  {
   "service": "sonar",
   "id": "AaB3XklOIqdfylE4c2pk",
   "state": "resolved",
-  "where": "input.id is the MCP tool argument passed through to the child CLI; String() is the intended coercion to one argv entry, and the CLI validates the value",
+  "where": "input.id is the argument of the Pi native tool, declared `type: 'string'` and required in the tool schema Pi enforces before the call; String() turns that declared string into one argv entry for the child CLI, which rejects an empty one",
   "transition": "wontfix"
  },
  {

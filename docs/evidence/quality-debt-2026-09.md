@@ -211,8 +211,8 @@ open 102 / fixed 182 / resolved 11 / excluded 15
 | AaB3XkmFIqdfylE4c2p0 | typescript:S7778 | src/doctor.ts:152 | fixed (planned) | #162 |
 | AaB3XkmFIqdfylE4c2p1 | typescript:S7778 | src/doctor.ts:153 | fixed (planned) | #162 |
 | AaB3XkmFIqdfylE4c2p2 | typescript:S3358 | src/doctor.ts:163 | fixed (planned) | #162 |
-| AaB3XkbGIqdfylE4c2nX | typescript:S6551 | src/doctor/agents.ts:245 | resolved (planned) | row.probe is a SQLite TEXT column read by the doctor; String() is the intended coercion of a scalar the schema stores as text, and a typeof guard would only add a branch no row can take |
-| AaB3XkbGIqdfylE4c2nY | typescript:S6551 | src/doctor/agents.ts:245 | resolved (planned) | row.trust is a SQLite TEXT column read by the doctor; String() is the intended coercion of a scalar the schema stores as text, and a typeof guard would only add a branch no row can take |
+| AaB3XkbGIqdfylE4c2nX | typescript:S6551 | src/doctor/agents.ts:245 | resolved (planned) | row.probe is a field of the setup result that oboete itself wrote to runtime_state as JSON (doctor/agents.ts lastSetupResult); the doctor prints the stored value as it is, with 'none' for an absent one, and String() is that rendering — a non-string there would be oboete's own bug, shown rather than hidden |
+| AaB3XkbGIqdfylE4c2nY | typescript:S6551 | src/doctor/agents.ts:245 | resolved (planned) | row.trust is a field of the setup result that oboete itself wrote to runtime_state as JSON (doctor/agents.ts lastSetupResult); the doctor prints the stored value as it is, with 'none' for an absent one, and String() is that rendering — a non-string there would be oboete's own bug, shown rather than hidden |
 | AaB3XkbGIqdfylE4c2nZ | typescript:S3776 | src/doctor/agents.ts:293 | open |  |
 | AaB3XkbGIqdfylE4c2na | typescript:S4624 | src/doctor/agents.ts:364 | fixed (planned) | #162 |
 | AaB3XkbGIqdfylE4c2nb | typescript:S3776 | src/doctor/agents.ts:371 | open |  |
@@ -271,8 +271,8 @@ open 102 / fixed 182 / resolved 11 / excluded 15
 | AaB3Xke6IqdfylE4c2oJ | typescript:S1874 | src/observer/llm.ts:451 | fixed (planned) | #162 |
 | AaB3Xke6IqdfylE4c2oK | typescript:S1874 | src/observer/llm.ts:482 | fixed (planned) | #162 |
 | AaB3XkdqIqdfylE4c2n6 | typescript:S3776 | src/observer/request.ts:117 | open |  |
-| AaB3XklOIqdfylE4c2pj | typescript:S6551 | src/pi-extension.ts:262 | resolved (planned) | input.query is the MCP tool argument passed through to the child CLI; String() is the intended coercion to one argv entry, and the CLI validates the value |
-| AaB3XklOIqdfylE4c2pk | typescript:S6551 | src/pi-extension.ts:276 | resolved (planned) | input.id is the MCP tool argument passed through to the child CLI; String() is the intended coercion to one argv entry, and the CLI validates the value |
+| AaB3XklOIqdfylE4c2pj | typescript:S6551 | src/pi-extension.ts:262 | resolved (planned) | input.query is the argument of the Pi native tool, declared `type: 'string'` and required in the tool schema Pi enforces before the call; String() turns that declared string into one argv entry for the child CLI, which rejects an empty one |
+| AaB3XklOIqdfylE4c2pk | typescript:S6551 | src/pi-extension.ts:276 | resolved (planned) | input.id is the argument of the Pi native tool, declared `type: 'string'` and required in the tool schema Pi enforces before the call; String() turns that declared string into one argv entry for the child CLI, which rejects an empty one |
 | AaB3XklBIqdfylE4c2pc | typescript:S8786 | src/privacy/detect.ts:72 | fixed ✓ | #160 — agent output captured by the privacy detector, up to 1 MiB, controller: agent or the model behind it; effect: 1.4 s per 50,000 spaces after `&lt;` blew the detector deadline (fail-closed drop) — real, fixed with a regex that examines each character once |
 | AaB3XklBIqdfylE4c2pd | typescript:S3776 | src/privacy/detect.ts:111 | open |  |
 | AaB3XklBIqdfylE4c2pe | typescript:S2310 | src/privacy/detect.ts:142 | open |  |
