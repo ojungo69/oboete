@@ -1,0 +1,39 @@
+src/agents/claude.ts
+  s_359fcac8e97f88::t_ddfa090dd2eaa1 14-15,192,197
+src/agents/codex.ts
+  s_359fcac8e97f88::t_6d57f885e513c9 13-14,172,177
+src/agents/grok.ts
+  s_359fcac8e97f88::t_a3ad5f2b922b9f 17,223
+src/agents/index.ts
+  s_359fcac8e97f88::t_ec24a1fa4e50d5 276-307
+src/capture.ts
+  s_359fcac8e97f88::t_655fc55fc7b1a1 827-829,831,833,836-837,992-993,1090,1122
+src/doctor.ts
+  s_359fcac8e97f88::t_9712be48f80262 305,307,332-334,338
+src/doctor/agents.ts
+  s_359fcac8e97f88::t_3ef4c9325b6ee1 361,363,366,372
+src/doctor/provider.ts
+  s_359fcac8e97f88::t_161f71acbb96ab 74,77,113-117,119,127,165,199
+src/retrieval/rank.ts
+  s_359fcac8e97f88::t_78e569feb1a62a 173,177-178,181-182,187,203-204,206-215,243-246
+src/setup/setup.ts
+  s_359fcac8e97f88::t_e506383ad1f1e8 248,284-288,375-376
+src/setup/write-codex.ts
+  s_359fcac8e97f88::t_360d14f1a7908a 151-155,158,160,206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "bdb94dc289f048c0cf40762d7a46ff47ae6ae848",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
