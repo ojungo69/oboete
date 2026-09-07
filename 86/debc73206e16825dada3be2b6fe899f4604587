@@ -1,0 +1,19 @@
+src/setup/managed-block.ts
+  s_465cf667322f59::t_f73dfa717d53db 205-206,226-230
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "86debc73206e16825dada3be2b6fe899f4604587",
+  "prompts": {},
+  "sessions": {
+    "s_465cf667322f59": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07ad9-bbfa-70a2-a839-d718363750c9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
