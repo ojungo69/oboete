@@ -1,0 +1,21 @@
+docs/evidence/quality-debt-2026-09.md
+  s_359fcac8e97f88::t_7e16fce208d701 28,44,77,84,137,224,286,296,352,668
+docs/evidence/quality-debt-2026-09/ledger.json
+  s_359fcac8e97f88::t_884379323d13e0 1868,1875,1882,1889,1896,1979
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "17daaacfd242b539f6948e34a77e46c961511c05",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
