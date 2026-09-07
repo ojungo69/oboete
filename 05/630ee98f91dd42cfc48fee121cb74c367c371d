@@ -1,0 +1,39 @@
+src/privacy/detect.ts
+  s_359fcac8e97f88::t_9ecb5767fe2540 122-123,130,133,137,143,152,157,215,270,322
+src/privacy/egress.ts
+  s_359fcac8e97f88::t_f7ba22cf9c8742 6-7,32,58
+src/viewer/app/api.ts
+  s_359fcac8e97f88::t_c6278d71f5764d 80
+src/injection/pack.ts
+  s_359fcac8e97f88::t_bd4855827ee051 87,278,385-387,390
+src/mcp.ts
+  s_359fcac8e97f88::t_a4a3915467060d 24
+src/viewer/app/main.tsx
+  s_359fcac8e97f88::t_9d877d0974424e 35-39,45-46,156-157,269,279
+src/injection/staleness.ts
+  s_359fcac8e97f88::t_fa137f6e688e21 43,45,82
+src/viewer/server.ts
+  s_359fcac8e97f88::t_7fce912a10b5cd 82-85,242-243
+src/injection/deferred.ts
+  s_359fcac8e97f88::t_568122f6a855e6 307,478
+src/fixture/replay.ts
+  s_359fcac8e97f88::t_8b15f924206075 199,278,570,651,757-766,868,937,939,1476,1734
+src/transfer.ts
+  s_359fcac8e97f88::t_d439786193e876 259,344-347,375,403
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "05630ee98f91dd42cfc48fee121cb74c367c371d",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
