@@ -279,12 +279,15 @@ for (const { args, service, index } of serviceModes) {
 // token above it, CODACY_TOKEN.md holds the token alone. Both layouts must work, and no other line
 // may ever stand in for the token: a layout the reader cannot place the token in is refused, never
 // resolved by moving the choice onto the next line.
+//
+// The first three below already pass against the reader this replaces; they are here so the change
+// is pinned as compatible, not because they detect it. The single-line layouts are the new ones.
 for (const [name, contents] of [
-  ['the token alone', 'fixture-token\n'],
   ['a note above the token', 'Codacy account token for ojungo69\nfixture-token\n'],
   ['a note above and text below', '# Test credentials\r\nfixture-token\r\nignored\r\n'],
-  ['no trailing newline', 'fixture-token'],
   ['several trailing newlines', 'Codacy account token\nfixture-token\n\n\n'],
+  ['the token alone', 'fixture-token\n'],
+  ['no trailing newline', 'fixture-token'],
 ]) {
   test(`--apply-codacy reads the token from a file with ${name}`, (t) => {
     const { cwd, ledger } = fixture(t);
@@ -303,9 +306,13 @@ for (const [name, contents] of [
 
 // A layout the reader cannot place the token in must send nothing. The dangerous outcome is not the
 // error, it is a run that quietly uses the line after the one the token was meant to be on: `ignored`
-// and `example.invalid/account` below would each satisfy the character check on their own. A file of
-// one word is the exception nothing can catch — a lone `Credentials` is shaped exactly like a token,
-// and only the service can say it is not one.
+// and `example.invalid/account` below would each satisfy the character check on their own. All six
+// are refused by the reader this replaces too — they are regression tests against the first attempt
+// at this change, which filtered blank lines and so sent `ignored` in the api-token header.
+//
+// The one case nothing here can catch is a file of a single token-shaped word: a lone `Credentials`
+// is indistinguishable from a credential, and only the service can say it is not one. Written with a
+// blank line under it, though, the file is two lines whose second is empty, and that is refused.
 const missing = 'must contain the token, alone or on the line under a note';
 const unexpected = 'contains an unexpected character';
 for (const [name, contents, message] of [
@@ -315,6 +322,8 @@ for (const [name, contents, message] of [
   ['blank lines surround the token', '\n\nfixture-token\n\n', missing],
   ['a note is followed by a blank line', 'Codacy account token\n\nfixture-token\n', missing],
   ['the only line is a sentence', 'Codacy account token for ojungo69\n', unexpected],
+  ['a lone word has a blank line under it', 'Credentials\n\n', missing],
+  ['a lone token has a blank line under it', 'fixture-token\n\n', missing],
 ]) {
   test(`--apply-codacy sends nothing when ${name}`, (t) => {
     const { cwd, ledger } = fixture(t);
