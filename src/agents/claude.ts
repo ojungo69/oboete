@@ -5,11 +5,14 @@
 // `last_assistant_message`, and `PostCompact` carries `compact_summary`.
 import {
   normalizeToolName,
+  type Envelope,
   type NormalizedEvent,
   type SessionStartSource,
   type ToolName,
 } from '../events.js';
 import {
+  adaptPromptEvent,
+  adaptToolFailureEvent,
   asRecord,
   buildEnvelope,
   capPaths,
@@ -96,6 +99,80 @@ function claudeTool(native: string, toolName: ToolName): ToolMapping | undefined
   return toolName.startsWith('mcp:') ? genericTool() : undefined;
 }
 
+function adaptClaudeTool(
+  input: AdapterInput,
+  payload: Record<string, unknown>,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const native = readString(payload, 'tool_name');
+  const callId = readString(payload, 'tool_use_id');
+  if (native === undefined || callId === undefined) return metadataOnly(input, 'payload_invalid');
+  const toolName = normalizeToolName('claude', native);
+  const mapping = claudeTool(native, toolName);
+  // Until a fixture describes the tool, only its metadata is kept (R13 row 1).
+  if (mapping === undefined) return metadataOnly(input, 'unmapped_payload', native);
+  const toolInput = mapping.input(readRecord(payload, 'tool_input'));
+  if (input.eventName === 'PreToolUse') {
+    return toEvents([
+      {
+        ...envelope,
+        ...turn,
+        kind: 'tool_call',
+        tool_call_id: callId,
+        tool_name_native: native,
+        tool_name: toolName,
+        input: toolInput,
+      },
+    ]);
+  }
+  return toEvents(
+    [
+      {
+        ...envelope,
+        ...turn,
+        kind: 'tool_result',
+        tool_call_id: callId,
+        output: mapping.output(payload.tool_response),
+        // A failed call never reaches PostToolUse on Claude Code (R13 probe 2026-09-03).
+        is_error: false,
+      },
+    ],
+    // The result is the body of the file the call named, so the path rules must see that path
+    // even though the result event has no path field (FR-017, R4).
+    toolInput.paths,
+  );
+}
+
+function adaptClaudeSessionStart(
+  input: AdapterInput,
+  payload: Record<string, unknown>,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const source = CLAUDE_SOURCES.find((known) => known === readString(payload, 'source'));
+  // A source outside the verified set is not guessed: reading a fork as a startup would join
+  // two conversations (contracts/agents.md "Event identity and conversation identity").
+  if (source === undefined) return metadataOnly(input, 'payload_invalid');
+  return toEvents([{ ...envelope, ...turn, kind: 'session_start', source }]);
+}
+
+function adaptClaudeStop(
+  payload: Record<string, unknown>,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const message = readContent(payload, 'last_assistant_message');
+  const events: NormalizedEvent[] = [];
+  if (message !== undefined) {
+    events.push({ ...envelope, ...turn, kind: 'last_assistant_message', text: capText(message) });
+  }
+  // The turn ordinal belongs to capture, which counts turns per session; the adapter has no
+  // counter, which is why the event id of a turn_end uses `prompt_id` when there is one (R7).
+  events.push({ ...envelope, ...turn, kind: 'turn_end', turn_index: 0, reason: 'stop' });
+  return toEvents(events);
+}
+
 export function adaptClaude(input: AdapterInput): AdapterOutput {
   const payload = asRecord(input.payload);
   if (payload === null) return metadataOnly(input, 'payload_invalid');
@@ -108,81 +185,18 @@ export function adaptClaude(input: AdapterInput): AdapterOutput {
   });
   if (envelope === null) return metadataOnly(input, 'payload_invalid');
   const turn = promptRef(readString(payload, 'prompt_id'));
-
   switch (input.eventName) {
-    case 'SessionStart': {
-      const source = CLAUDE_SOURCES.find((known) => known === readString(payload, 'source'));
-      // A source outside the verified set is not guessed: reading a fork as a startup would join
-      // two conversations (contracts/agents.md "Event identity and conversation identity").
-      if (source === undefined) return metadataOnly(input, 'payload_invalid');
-      return toEvents([{ ...envelope, ...turn, kind: 'session_start', source }]);
-    }
-    case 'UserPromptSubmit': {
-      const prompt = readContent(payload, 'prompt');
-      if (prompt === undefined) return metadataOnly(input, 'payload_invalid');
-      return toEvents([
-        { ...envelope, ...turn, kind: 'prompt', text: capText(prompt), input_source: 'user' },
-      ]);
-    }
+    case 'SessionStart':
+      return adaptClaudeSessionStart(input, payload, envelope, turn);
+    case 'UserPromptSubmit':
+      return adaptPromptEvent(input, payload, envelope, turn);
     case 'PreToolUse':
-    case 'PostToolUse': {
-      const native = readString(payload, 'tool_name');
-      const callId = readString(payload, 'tool_use_id');
-      if (native === undefined || callId === undefined) return metadataOnly(input, 'payload_invalid');
-      const toolName = normalizeToolName('claude', native);
-      const mapping = claudeTool(native, toolName);
-      // Until a fixture describes the tool, only its metadata is kept (R13 row 1).
-      if (mapping === undefined) return metadataOnly(input, 'unmapped_payload', native);
-      const toolInput = mapping.input(readRecord(payload, 'tool_input'));
-      if (input.eventName === 'PreToolUse') {
-        return toEvents([
-          {
-            ...envelope,
-            ...turn,
-            kind: 'tool_call',
-            tool_call_id: callId,
-            tool_name_native: native,
-            tool_name: toolName,
-            input: toolInput,
-          },
-        ]);
-      }
-      return toEvents(
-        [
-          {
-            ...envelope,
-            ...turn,
-            kind: 'tool_result',
-            tool_call_id: callId,
-            output: mapping.output(payload.tool_response),
-            // A failed call never reaches PostToolUse on Claude Code (R13 probe 2026-09-03).
-            is_error: false,
-          },
-        ],
-        // The result is the body of the file the call named, so the path rules must see that path
-        // even though the result event has no path field (FR-017, R4).
-        toolInput.paths,
-      );
-    }
-    case 'PostToolUseFailure': {
-      const callId = readString(payload, 'tool_use_id');
-      const error = readContent(payload, 'error');
-      if (callId === undefined || error === undefined) return metadataOnly(input, 'payload_invalid');
-      return toEvents([
-        { ...envelope, ...turn, kind: 'tool_failure', tool_call_id: callId, error: capText(error) },
-      ]);
-    }
-    case 'Stop': {
-      const message = readContent(payload, 'last_assistant_message');
-      const events: NormalizedEvent[] = [];
-      if (message !== undefined) {
-        events.push({ ...envelope, ...turn, kind: 'last_assistant_message', text: capText(message) });
-      }
-      // The turn ordinal belongs to capture, which counts turns per session; the adapter has no
-      // counter, which is why the event id of a turn_end uses `prompt_id` when there is one (R7).
-      events.push({ ...envelope, ...turn, kind: 'turn_end', turn_index: 0, reason: 'stop' });
-      return toEvents(events);
-    }
+    case 'PostToolUse':
+      return adaptClaudeTool(input, payload, envelope, turn);
+    case 'PostToolUseFailure':
+      return adaptToolFailureEvent(input, payload, envelope, turn);
+    case 'Stop':
+      return adaptClaudeStop(payload, envelope, turn);
     case 'PostCompact':
       return toEvents([
         {

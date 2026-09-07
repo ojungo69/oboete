@@ -102,30 +102,7 @@ export async function runDoctor(argv: string[], overrides: Partial<DoctorDeps> =
   let integrityFailed = false;
 
   try {
-    let loaded: { item: DoctorItem; config: OboeteConfig | null };
-    try {
-      loaded = loadConfigItem(paths);
-    } catch (error) {
-      loaded = { item: failedItem('config', error), config: null };
-    }
-    items.push(loaded.item);
-    const config = loaded.config;
-
-    items.push(guardItem('paused', () => pausedItem(paths)));
-
-    let storage;
-    try {
-      storage = openStorage(paths);
-    } catch (error) {
-      storage = {
-        item: failedItem('storage', error),
-        db: null,
-        schemaVersion: null,
-        schemaAhead: false,
-        integrityFailed: false,
-      };
-    }
-    items.push(storage.item);
+    const { config, storage } = collectInitialDoctorItems(paths, items);
     db = storage.db;
     integrityFailed = storage.integrityFailed;
 
@@ -146,11 +123,7 @@ export async function runDoctor(argv: string[], overrides: Partial<DoctorDeps> =
       guardItem('pi', () => piItem(paths, db, integrityFailed, now)),
     );
   } finally {
-    try {
-      db?.close();
-    } catch {
-      // The report still has to print.
-    }
+    closeDoctorStorage(db);
   }
 
   const degradedCount = items.filter((entry) => entry.status === 'degraded').length;
@@ -161,6 +134,45 @@ export async function runDoctor(argv: string[], overrides: Partial<DoctorDeps> =
   report(deps, options.json, items);
   appendLog(paths.hookLog, exit === 0 ? 'info' : 'warn', 'doctor', { exit, degraded: degradedCount });
   return exit;
+}
+
+function closeDoctorStorage(db: DatabaseSync | null): void {
+  try {
+    db?.close();
+  } catch {
+    // The report still has to print.
+  }
+}
+
+function collectInitialDoctorItems(
+  paths: OboetePaths,
+  items: DoctorItem[],
+): { config: OboeteConfig | null; storage: ReturnType<typeof openStorage> } {
+  let loaded: { item: DoctorItem; config: OboeteConfig | null };
+  try {
+    loaded = loadConfigItem(paths);
+  } catch (error) {
+    loaded = { item: failedItem('config', error), config: null };
+  }
+  items.push(loaded.item);
+  const config = loaded.config;
+
+  items.push(guardItem('paused', () => pausedItem(paths)));
+
+  let storage;
+  try {
+    storage = openStorage(paths);
+  } catch (error) {
+    storage = {
+      item: failedItem('storage', error),
+      db: null,
+      schemaVersion: null,
+      schemaAhead: false,
+      integrityFailed: false,
+    };
+  }
+  items.push(storage.item);
+  return { config, storage };
 }
 
 export function healthy(name: string, reason: string): DoctorItem {
@@ -283,6 +295,13 @@ function loadConfigItem(paths: OboetePaths): { item: DoctorItem; config: OboeteC
     };
   }
 
+  return loadedConfigItem(paths, config);
+}
+
+function loadedConfigItem(
+  paths: OboetePaths,
+  config: OboeteConfig,
+): { item: DoctorItem; config: OboeteConfig | null } {
   try {
     const mode = statSync(paths.config).mode;
     if ((mode & 0o077) !== 0) {

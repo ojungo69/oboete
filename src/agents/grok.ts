@@ -6,8 +6,15 @@
 // `PermissionDenied` fires only for a permission-rule deny and carries no reason; `Stop` carries
 // `lastAssistantMessage` on `end_turn`; `PostCompact` has no summary but a per-compaction
 // `timestamp`.
-import { normalizeToolName, type NormalizedEvent, type ToolInput, type ToolName } from '../events.js';
 import {
+  normalizeToolName,
+  type Envelope,
+  type NormalizedEvent,
+  type ToolInput,
+  type ToolName,
+} from '../events.js';
+import {
+  adaptPromptEvent,
   asRecord,
   buildEnvelope,
   capPaths,
@@ -84,6 +91,121 @@ function failed(result: Record<string, unknown> | null): boolean {
   return typeof code === 'number' && code !== 0;
 }
 
+function adaptGrokTool(
+  input: AdapterInput,
+  payload: Record<string, unknown>,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const native = readString(payload, 'toolName');
+  const callId = readString(payload, 'toolUseId');
+  if (native === undefined || callId === undefined) return metadataOnly(input, 'payload_invalid');
+  const toolName = normalizeToolName('grok', native);
+  const mapping = grokTool(native, toolName);
+  // Until a fixture describes the tool, only its metadata is kept (R13 row 1).
+  if (mapping === undefined) return metadataOnly(input, 'unmapped_payload', native);
+  const toolInput = mapping.input(readRecord(payload, 'toolInput'));
+  if (input.eventName === 'PreToolUse') {
+    return toEvents([
+      {
+        ...envelope,
+        ...turn,
+        kind: 'tool_call',
+        tool_call_id: callId,
+        tool_name_native: native,
+        tool_name: toolName,
+        input: toolInput,
+      },
+    ]);
+  }
+  const result = readRecord(payload, 'toolResult');
+  return toEvents(
+    [
+      {
+        ...envelope,
+        ...turn,
+        kind: 'tool_result',
+        tool_call_id: callId,
+        output: mapping.output(result),
+        is_error: failed(result),
+      },
+    ],
+    // The result is the body of the file the call named, so the path rules must see that path
+    // even though the result event has no path field (FR-017, R4).
+    toolInput.paths,
+  );
+}
+
+function adaptGrokSessionStart(
+  input: AdapterInput,
+  payload: Record<string, unknown>,
+  envelope: Envelope,
+): AdapterOutput {
+  const source = readString(payload, 'source');
+  // `new` is Grok's word for a fresh headless session. `load` covers both resume and
+  // `--fork-session`, which differ only by the session id, so capture's conversation policy
+  // decides between them (R13 probe 2026-09-03).
+  if (source !== 'new' && source !== 'load') return metadataOnly(input, 'payload_invalid');
+  return toEvents([
+    { ...envelope, kind: 'session_start', source: source === 'new' ? 'startup' : 'resume' },
+  ]);
+}
+
+function adaptGrokToolFailure(
+  input: AdapterInput,
+  payload: Record<string, unknown>,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const callId = readString(payload, 'toolUseId');
+  const error = readContent(payload, 'error');
+  if (callId === undefined || error === undefined) return metadataOnly(input, 'payload_invalid');
+  return toEvents([
+    { ...envelope, ...turn, kind: 'tool_failure', tool_call_id: callId, error: capText(error) },
+  ]);
+}
+
+function adaptGrokPermissionDenied(
+  input: AdapterInput,
+  payload: Record<string, unknown>,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const callId = readString(payload, 'toolUseId');
+  if (callId === undefined) return metadataOnly(input, 'payload_invalid');
+  return toEvents([
+    {
+      ...envelope,
+      ...turn,
+      kind: 'tool_failure',
+      tool_call_id: callId,
+      // The payload carries no reason field, and the event fires only for a permission-rule
+      // deny, so the text states that and nothing more (R13 probe 2026-09-03).
+      error: 'permission denied by a permission rule',
+    },
+  ]);
+}
+
+function adaptGrokStop(
+  input: AdapterInput,
+  payload: Record<string, unknown>,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const reason = readString(payload, 'reason');
+  // A second Stop fires at session end with `shutdown` or `channel_closed`; recording it would
+  // add a ghost turn with no prompt (contracts/agents.md Grok row).
+  if (reason !== 'end_turn') return metadataOnly(input, 'event_not_captured');
+  const message = readContent(payload, 'lastAssistantMessage');
+  const events: NormalizedEvent[] = [];
+  if (message !== undefined) {
+    events.push({ ...envelope, ...turn, kind: 'last_assistant_message', text: capText(message) });
+  }
+  // The turn ordinal belongs to capture, which counts turns per session (R7).
+  events.push({ ...envelope, ...turn, kind: 'turn_end', turn_index: 0, reason });
+  return toEvents(events);
+}
+
 export function adaptGrok(input: AdapterInput): AdapterOutput {
   const payload = asRecord(input.payload);
   if (payload === null) return metadataOnly(input, 'payload_invalid');
@@ -94,102 +216,20 @@ export function adaptGrok(input: AdapterInput): AdapterOutput {
   if (envelope === null) return metadataOnly(input, 'payload_invalid');
   // Tool events carry no promptId (R13 probe); Stop and UserPromptSubmit do.
   const turn = promptRef(readString(payload, 'promptId'));
-
   switch (input.eventName) {
-    case 'SessionStart': {
-      const source = readString(payload, 'source');
-      // `new` is Grok's word for a fresh headless session. `load` covers both resume and
-      // `--fork-session`, which differ only by the session id, so capture's conversation policy
-      // decides between them (R13 probe 2026-09-03).
-      if (source !== 'new' && source !== 'load') return metadataOnly(input, 'payload_invalid');
-      return toEvents([
-        { ...envelope, kind: 'session_start', source: source === 'new' ? 'startup' : 'resume' },
-      ]);
-    }
-    case 'UserPromptSubmit': {
-      const prompt = readContent(payload, 'prompt');
-      if (prompt === undefined) return metadataOnly(input, 'payload_invalid');
-      return toEvents([
-        { ...envelope, ...turn, kind: 'prompt', text: capText(prompt), input_source: 'user' },
-      ]);
-    }
+    case 'SessionStart':
+      return adaptGrokSessionStart(input, payload, envelope);
+    case 'UserPromptSubmit':
+      return adaptPromptEvent(input, payload, envelope, turn);
     case 'PreToolUse':
-    case 'PostToolUse': {
-      const native = readString(payload, 'toolName');
-      const callId = readString(payload, 'toolUseId');
-      if (native === undefined || callId === undefined) return metadataOnly(input, 'payload_invalid');
-      const toolName = normalizeToolName('grok', native);
-      const mapping = grokTool(native, toolName);
-      // Until a fixture describes the tool, only its metadata is kept (R13 row 1).
-      if (mapping === undefined) return metadataOnly(input, 'unmapped_payload', native);
-      const toolInput = mapping.input(readRecord(payload, 'toolInput'));
-      if (input.eventName === 'PreToolUse') {
-        return toEvents([
-          {
-            ...envelope,
-            ...turn,
-            kind: 'tool_call',
-            tool_call_id: callId,
-            tool_name_native: native,
-            tool_name: toolName,
-            input: toolInput,
-          },
-        ]);
-      }
-      const result = readRecord(payload, 'toolResult');
-      return toEvents(
-        [
-          {
-            ...envelope,
-            ...turn,
-            kind: 'tool_result',
-            tool_call_id: callId,
-            output: mapping.output(result),
-            is_error: failed(result),
-          },
-        ],
-        // The result is the body of the file the call named, so the path rules must see that path
-        // even though the result event has no path field (FR-017, R4).
-        toolInput.paths,
-      );
-    }
-    case 'PostToolUseFailure': {
-      const callId = readString(payload, 'toolUseId');
-      const error = readContent(payload, 'error');
-      if (callId === undefined || error === undefined) return metadataOnly(input, 'payload_invalid');
-      return toEvents([
-        { ...envelope, ...turn, kind: 'tool_failure', tool_call_id: callId, error: capText(error) },
-      ]);
-    }
-    case 'PermissionDenied': {
-      const callId = readString(payload, 'toolUseId');
-      if (callId === undefined) return metadataOnly(input, 'payload_invalid');
-      return toEvents([
-        {
-          ...envelope,
-          ...turn,
-          kind: 'tool_failure',
-          tool_call_id: callId,
-          // The payload carries no reason field, and the event fires only for a permission-rule
-          // deny, so the text states that and nothing more (R13 probe 2026-09-03).
-          error: 'permission denied by a permission rule',
-        },
-      ]);
-    }
-    case 'Stop': {
-      const reason = readString(payload, 'reason');
-      // A second Stop fires at session end with `shutdown` or `channel_closed`; recording it would
-      // add a ghost turn with no prompt (contracts/agents.md Grok row).
-      if (reason !== 'end_turn') return metadataOnly(input, 'event_not_captured');
-      const message = readContent(payload, 'lastAssistantMessage');
-      const events: NormalizedEvent[] = [];
-      if (message !== undefined) {
-        events.push({ ...envelope, ...turn, kind: 'last_assistant_message', text: capText(message) });
-      }
-      // The turn ordinal belongs to capture, which counts turns per session (R7).
-      events.push({ ...envelope, ...turn, kind: 'turn_end', turn_index: 0, reason });
-      return toEvents(events);
-    }
+    case 'PostToolUse':
+      return adaptGrokTool(input, payload, envelope, turn);
+    case 'PostToolUseFailure':
+      return adaptGrokToolFailure(input, payload, envelope, turn);
+    case 'PermissionDenied':
+      return adaptGrokPermissionDenied(input, payload, envelope, turn);
+    case 'Stop':
+      return adaptGrokStop(input, payload, envelope, turn);
     case 'PostCompact':
       return toEvents([
         {

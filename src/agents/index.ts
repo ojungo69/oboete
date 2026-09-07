@@ -268,6 +268,38 @@ function eventPaths(event: NormalizedEvent): readonly string[] {
 }
 
 /**
+ * The prompt event three adapters build identically: Claude, Codex and Grok all carry the user's
+ * text in `prompt` and nothing else that distinguishes them here.
+ */
+export function adaptPromptEvent(
+  input: AdapterInput,
+  payload: Record<string, unknown>,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const prompt = readContent(payload, 'prompt');
+  if (prompt === undefined) return metadataOnly(input, 'payload_invalid');
+  return toEvents([
+    { ...envelope, ...turn, kind: 'prompt', text: capText(prompt), input_source: 'user' },
+  ]);
+}
+
+/** The tool-failure event Claude and Codex build identically, both keyed by `tool_use_id`. */
+export function adaptToolFailureEvent(
+  input: AdapterInput,
+  payload: Record<string, unknown>,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const callId = readString(payload, 'tool_use_id');
+  const error = readContent(payload, 'error');
+  if (callId === undefined || error === undefined) return metadataOnly(input, 'payload_invalid');
+  return toEvents([
+    { ...envelope, ...turn, kind: 'tool_failure', tool_call_id: callId, error: capText(error) },
+  ]);
+}
+
+/**
  * Wraps the events an adapter produced with the paths the detector must see first (FR-018).
  * `namedPaths` are paths the adapter read from the payload that no event field carries, such as the
  * file a tool result is the body of: without them a repository path rule could never classify that

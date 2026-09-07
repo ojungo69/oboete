@@ -4102,5 +4102,240 @@
   "id": "ed0ec10c89a6aba269a1fb49ceea2522",
   "state": "fixed",
   "where": "#165"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkchIqdfylE4c2nl",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkbGIqdfylE4c2nZ",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkcRIqdfylE4c2nk",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkbGIqdfylE4c2nb",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkX3IqdfylE4c2nW",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkbrIqdfylE4c2ng",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkl3IqdfylE4c2pp",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkl3IqdfylE4c2pq",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkOIqdfylE4c2pM",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkl3IqdfylE4c2po",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkj2IqdfylE4c2pI",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkhBIqdfylE4c2od",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkhNIqdfylE4c2oe",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkgmIqdfylE4c2oZ",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "493c22bd60eb713112d9ca9dc9f26bf9",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "ced391779bf4a169a7c8df8395191c4f",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "6b8a3d3310884f227d775ae9b98b7136",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "codacy",
+  "id": "dbb1a53f19a6df43679f5149885b330e",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "75db7a535b822f1cd6d58ae67257921a",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "34f433a4c39a2918bbd993e41727fc39",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "53fa56ddf778a0e859e1f2883640040a",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "8615949cc9064bddaccd3ab613d65fb2",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "77635429d1f6f5ac9a4b30db32223ad9",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "c006fe6abea142b9e53a84d31030c021",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "34065213795f36e210d7e7c6383938cc",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "dd612e2e9fbbc8c3ec2f2594060800a8",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "3967d0a7a26e3d0dbd841c3074809d67",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "cdcb204be8f7e0941ec2d1eca871d4",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "5f95cd08281c5f3a410e055acf395f2",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "ec24f91da77ed0722e0e71f300351662",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "7229071f8c9bc53fbb3044e81d01d86a",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "77fc49747550698c069aab368599e606",
+  "state": "resolved",
+  "where": "Lizard's TypeScript reader loses this file's structure: it reports unescapeJson, a three-line function, as spanning lines 84 to 157 and reports no other function in a 356-line file that defines 24, so the 73 is a merge of every following declaration and not a function length. Same measurement on main; nothing in the file is over the limit.",
+  "reason": "FalsePositive"
+ },
+ {
+  "service": "codacy",
+  "id": "2128c682e98d0c083fb017cf7801d418",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "a7ff455628bd7793e1a0f87d9be3723d",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "9223ded563847f7eafa65e318dcfb35a",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "2274afa53c8a513e266b40542e03314a",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "fd5a3f38eaf5d74f4fd9a362e0c51673",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "88b03f53b48660ec02a18d10af3fcae0",
+  "state": "fixed",
+  "where": "#166"
+ },
+ {
+  "service": "codacy",
+  "id": "7fc74b21c7bde3f5ff9b558373a539f2",
+  "state": "fixed",
+  "where": "#162"
  }
 ]

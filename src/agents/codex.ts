@@ -4,11 +4,14 @@
 // `PostCompact` carries no summary field, and `/new` fires no SessionStart at all (A18).
 import {
   normalizeToolName,
+  type Envelope,
   type SessionStartSource,
   type ToolInput,
   type ToolName,
 } from '../events.js';
 import {
+  adaptPromptEvent,
+  adaptToolFailureEvent,
   asRecord,
   buildEnvelope,
   capPaths,
@@ -93,6 +96,61 @@ function codexTool(native: string, toolName: ToolName): ToolMapping | undefined 
   return toolName.startsWith('mcp:') ? genericTool() : undefined;
 }
 
+function adaptCodexTool(
+  input: AdapterInput,
+  payload: Record<string, unknown>,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const native = readString(payload, 'tool_name');
+  const callId = readString(payload, 'tool_use_id');
+  if (native === undefined || callId === undefined) return metadataOnly(input, 'payload_invalid');
+  const mapping = codexTool(native, normalizeToolName('codex', native));
+  // Until a fixture describes the tool, only its metadata is kept (R13 row 1).
+  if (mapping === undefined) return metadataOnly(input, 'unmapped_payload', native);
+  const raw = readRecord(payload, 'tool_input');
+  const toolInput = mapping.input(raw);
+  if (input.eventName === 'PreToolUse') {
+    return toEvents([
+      {
+        ...envelope,
+        ...turn,
+        kind: 'tool_call',
+        tool_call_id: callId,
+        tool_name_native: native,
+        tool_name: mapping.name?.(raw) ?? normalizeToolName('codex', native),
+        input: toolInput,
+      },
+    ]);
+  }
+  return toEvents(
+    [
+      {
+        ...envelope,
+        ...turn,
+        kind: 'tool_result',
+        tool_call_id: callId,
+        output: mapping.output(payload.tool_response),
+        is_error: false,
+      },
+    ],
+    // The paths a patch names live only in the call, so the result would otherwise reach the
+    // path rules without them (FR-017, R4).
+    toolInput.paths,
+  );
+}
+
+function adaptCodexSessionStart(
+  input: AdapterInput,
+  payload: Record<string, unknown>,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const source = CODEX_SOURCES.find((known) => known === readString(payload, 'source'));
+  if (source === undefined) return metadataOnly(input, 'payload_invalid');
+  return toEvents([{ ...envelope, ...turn, kind: 'session_start', source }]);
+}
+
 export function adaptCodex(input: AdapterInput): AdapterOutput {
   const payload = asRecord(input.payload);
   if (payload === null) return metadataOnly(input, 'payload_invalid');
@@ -107,67 +165,16 @@ export function adaptCodex(input: AdapterInput): AdapterOutput {
   // Codex supplies no prompt id; `turn_id` is its per-turn identity and is what keeps two turns of
   // one session apart in the event id (R7, contracts/agents.md "Event identity").
   const turn = promptRef(readString(payload, 'turn_id'));
-
   switch (input.eventName) {
-    case 'SessionStart': {
-      const source = CODEX_SOURCES.find((known) => known === readString(payload, 'source'));
-      if (source === undefined) return metadataOnly(input, 'payload_invalid');
-      return toEvents([{ ...envelope, ...turn, kind: 'session_start', source }]);
-    }
-    case 'UserPromptSubmit': {
-      const prompt = readContent(payload, 'prompt');
-      if (prompt === undefined) return metadataOnly(input, 'payload_invalid');
-      return toEvents([
-        { ...envelope, ...turn, kind: 'prompt', text: capText(prompt), input_source: 'user' },
-      ]);
-    }
+    case 'SessionStart':
+      return adaptCodexSessionStart(input, payload, envelope, turn);
+    case 'UserPromptSubmit':
+      return adaptPromptEvent(input, payload, envelope, turn);
     case 'PreToolUse':
-    case 'PostToolUse': {
-      const native = readString(payload, 'tool_name');
-      const callId = readString(payload, 'tool_use_id');
-      if (native === undefined || callId === undefined) return metadataOnly(input, 'payload_invalid');
-      const mapping = codexTool(native, normalizeToolName('codex', native));
-      // Until a fixture describes the tool, only its metadata is kept (R13 row 1).
-      if (mapping === undefined) return metadataOnly(input, 'unmapped_payload', native);
-      const raw = readRecord(payload, 'tool_input');
-      const toolInput = mapping.input(raw);
-      if (input.eventName === 'PreToolUse') {
-        return toEvents([
-          {
-            ...envelope,
-            ...turn,
-            kind: 'tool_call',
-            tool_call_id: callId,
-            tool_name_native: native,
-            tool_name: mapping.name?.(raw) ?? normalizeToolName('codex', native),
-            input: toolInput,
-          },
-        ]);
-      }
-      return toEvents(
-        [
-          {
-            ...envelope,
-            ...turn,
-            kind: 'tool_result',
-            tool_call_id: callId,
-            output: mapping.output(payload.tool_response),
-            is_error: false,
-          },
-        ],
-        // The paths a patch names live only in the call, so the result would otherwise reach the
-        // path rules without them (FR-017, R4).
-        toolInput.paths,
-      );
-    }
-    case 'PostToolUseFailure': {
-      const callId = readString(payload, 'tool_use_id');
-      const error = readContent(payload, 'error');
-      if (callId === undefined || error === undefined) return metadataOnly(input, 'payload_invalid');
-      return toEvents([
-        { ...envelope, ...turn, kind: 'tool_failure', tool_call_id: callId, error: capText(error) },
-      ]);
-    }
+    case 'PostToolUse':
+      return adaptCodexTool(input, payload, envelope, turn);
+    case 'PostToolUseFailure':
+      return adaptToolFailureEvent(input, payload, envelope, turn);
     case 'Stop':
       // Codex hands the final assistant text to `codex exec --output-last-message`, not to the Stop
       // hook, whose documented input carries no message field, so the turn end is all there is.

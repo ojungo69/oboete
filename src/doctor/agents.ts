@@ -100,9 +100,31 @@ function oneAgentItem(
   const label = AGENT_LABEL[agent.agent];
   const captureConsequence = `${label} sessions capture nothing and receive no memories.`;
   const setupRecovery = `\`oboete setup --agents ${agent.agent}\``;
+  const context = { name, label, captureConsequence, setupRecovery };
 
+  const preProbe = preProbeAgentItem(agent, db, integrityFailed, options, markersMissing, context);
+  if (preProbe !== null) return preProbe;
+  const result = results.get(agent.agent);
+  return probedAgentItem(agent, result, context);
+}
+
+type AgentItemContext = {
+  name: string;
+  label: string;
+  captureConsequence: string;
+  setupRecovery: string;
+};
+
+function preProbeAgentItem(
+  agent: AgentDetection,
+  db: DatabaseSync | null,
+  integrityFailed: boolean,
+  options: DoctorOptions,
+  markersMissing: boolean,
+  context: AgentItemContext,
+): DoctorItem | null {
+  const { name, label, captureConsequence, setupRecovery } = context;
   if (!agent.installed) return healthy(name, 'Not installed.');
-
   if (markersMissing) {
     return degraded(
       name,
@@ -111,15 +133,8 @@ function oneAgentItem(
       `Run ${setupRecovery}.`,
     );
   }
-
-  if (hookMissing(agent)) {
-    const reason =
-      agent.agent === 'codex' && agent.trust === 'untrusted'
-        ? `Codex has not trusted the hook definition in ${agent.configPath}.`
-        : `No oboete hook in ${agent.configPath}.`;
-    return degraded(name, reason, captureConsequence, setupRecovery);
-  }
-
+  const missingHook = missingHookItem(agent, context);
+  if (missingHook !== null) return missingHook;
   if (db === null) {
     return dbUnread(
       name,
@@ -129,7 +144,6 @@ function oneAgentItem(
       '`oboete doctor` after storage is repaired.',
     );
   }
-
   if (options.noProbeAgents) {
     return unverified(
       name,
@@ -138,7 +152,6 @@ function oneAgentItem(
       '`oboete doctor` (without --no-probe-agents)',
     );
   }
-
   if (agent.cliPath === null) {
     return unverified(
       name,
@@ -147,8 +160,26 @@ function oneAgentItem(
       `Install the ${label} CLI on the PATH, then run \`oboete doctor\`.`,
     );
   }
+  return null;
+}
 
-  const result = results.get(agent.agent);
+function missingHookItem(agent: AgentDetection, context: AgentItemContext): DoctorItem | null {
+  if (hookMissing(agent)) {
+    const reason =
+      agent.agent === 'codex' && agent.trust === 'untrusted'
+        ? `Codex has not trusted the hook definition in ${agent.configPath}.`
+        : `No oboete hook in ${agent.configPath}.`;
+    return degraded(context.name, reason, context.captureConsequence, context.setupRecovery);
+  }
+  return null;
+}
+
+function probedAgentItem(
+  agent: AgentDetection,
+  result: ProbeResult | undefined,
+  context: AgentItemContext,
+): DoctorItem {
+  const { name, label, captureConsequence, setupRecovery } = context;
   if (result === undefined) {
     return unverified(
       name,
@@ -204,12 +235,8 @@ export function probeReason(label: string, code: string): string {
       return `${label} was stopped by a signal before the probe finished.`;
     case 'deadline_exceeded':
       return `${label} did not finish the probe within 90 seconds.`;
-    default: {
-      const exit = /^agent_exit_(-?\d+)$/.exec(code);
-      return exit
-        ? `${label} exited with code ${exit[1]} before the probe finished.`
-        : `The ${label} probe could not be verified.`;
-    }
+    default:
+      return agentExitReason(label, code);
   }
 }
 
@@ -306,19 +333,7 @@ export function piItem(
     );
   }
 
-  const hangs: number[] = [];
-  if (existsSync(paths.piAck)) {
-    for (const name of readdirSync(paths.piAck)) {
-      if (!name.endsWith('.started')) continue;
-      try {
-        const age = now - statSync(join(paths.piAck, name)).mtimeMs;
-        if (age > PI_HANG_AFTER_MS) hangs.push(age);
-      } catch {
-        // The ack file was removed while we listed the directory.
-      }
-    }
-  }
-
+  const hangs = piHangAges(paths, now);
   const diag = db === null ? [] : piDiagnostics(db, now);
   if (hangs.length > 0) {
     const oldest = Math.max(...hangs);
@@ -340,6 +355,21 @@ export function piItem(
     );
   }
   return healthy('pi', 'No Pi diagnostics.');
+}
+
+function piHangAges(paths: OboetePaths, now: number): number[] {
+  if (!existsSync(paths.piAck)) return [];
+  const hangs: number[] = [];
+  for (const name of readdirSync(paths.piAck)) {
+    if (!name.endsWith('.started')) continue;
+    try {
+      const age = now - statSync(join(paths.piAck, name)).mtimeMs;
+      if (age > PI_HANG_AFTER_MS) hangs.push(age);
+    } catch {
+      // The ack file was removed while we listed the directory.
+    }
+  }
+  return hangs;
 }
 
 /** Diagnostics of the last 24 hours (data-model: the `.started` files themselves are kept that long). */
@@ -371,24 +401,44 @@ function piDiagnostics(db: DatabaseSync, now: number): string[] {
 
 function sanitizeDisplayName(value: string): string {
   let out = '';
-  for (let i = 0; i < value.length && out.length < 64; i += 1) {
+  // A while loop, not a for: an escape sequence advances the index by its own length, and S2310
+  // forbids writing a for-counter from the body.
+  let i = 0;
+  while (i < value.length && out.length < 64) {
     const code = value.codePointAt(i)!;
     if (code === 27) {
-      const next = value[i + 1];
-      if (next === '[') {
-        i += 2;
-        while (i < value.length) {
-          const end = value.codePointAt(i)!;
-          if (end >= 64 && end <= 126) break;
-          i += 1;
-        }
-      } else {
-        i += 1;
-      }
+      i = escapeSequenceEnd(value, i) + 1;
       continue;
     }
-    if (code <= 31 || (code >= 127 && code <= 159)) continue;
-    out += value[i];
+    if (code > 31 && !(code >= 127 && code <= 159)) out += value[i];
+    i += 1;
   }
   return out;
+}
+
+function escapeSequenceEnd(value: string, i: number): number {
+  const next = value[i + 1];
+  if (next === '[') {
+    i += 2;
+    i = csiSequenceEnd(value, i);
+  } else {
+    i += 1;
+  }
+  return i;
+}
+
+function csiSequenceEnd(value: string, i: number): number {
+  while (i < value.length) {
+    const end = value.codePointAt(i)!;
+    if (end >= 64 && end <= 126) break;
+    i += 1;
+  }
+  return i;
+}
+
+function agentExitReason(label: string, code: string): string {
+  const exit = /^agent_exit_(-?\d+)$/.exec(code);
+  return exit
+    ? `${label} exited with code ${exit[1]} before the probe finished.`
+    : `The ${label} probe could not be verified.`;
 }

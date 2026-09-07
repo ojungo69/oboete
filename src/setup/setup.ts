@@ -78,6 +78,9 @@ type Options = {
   json: boolean;
 };
 
+type SetupPaths = ReturnType<typeof oboetePaths>;
+type Note = (...lines: string[]) => void;
+
 function defaults(): SetupDeps {
   return {
     env: process.env,
@@ -155,6 +158,163 @@ function parseOptions(argv: string[]): Options {
   };
 }
 
+function finishSetup(
+  deps: SetupDeps,
+  options: Options,
+  paths: SetupPaths,
+  notes: readonly string[],
+  rows: AgentRow[],
+  code: number,
+): number {
+  report(deps, options.json, rows, notes);
+  appendLog(paths.hookLog, code === 0 ? 'info' : 'warn', 'setup', {
+    agents: rows.map((row) => row.agent).join(',') || 'none',
+    remove: options.remove,
+    exit: code,
+  });
+  return code;
+}
+
+function consentedConfig(
+  config: OboeteConfig,
+  paths: SetupPaths,
+  provider: Preset | null,
+  options: Options,
+  deps: SetupDeps,
+  note: Note,
+): OboeteConfig | null {
+  if (!options.remove) {
+    note(...consentDisplay(config, deps.env));
+    const decision = decideConsent({
+      config,
+      env: deps.env,
+      acceptEgress: options.acceptEgress,
+      yes: options.yes,
+    });
+    if (decision.state === 'missing') {
+      note(
+        'Setup changed nothing: this destination has not been consented to.',
+        'Accept it with `oboete setup --accept-egress`, or with `oboete setup --yes` once a stored',
+        'record matches the tuple above. `oboete setup --provider ollama` keeps everything on this machine.',
+      );
+      return null;
+    }
+    // The stored record is what the observer recomputes before every reservation and every send
+    // (R8, contracts/observer.md call policy 6), so every run that gets past the gate records the
+    // tuple it displayed -- a local preset included, whose record would otherwise stay the remote
+    // hash of an earlier run and degrade every batch with `consent_changed` with no way back.
+    if (provider !== null) saveProviderPreset(paths, provider);
+    if (config.consent.hash !== decision.hash) saveConsent(paths, decision.hash, Date.now());
+    config = loadConfig(paths);
+    note(...credentialGuidance(config, deps.env));
+  }
+  return config;
+}
+
+function openSetupDatabase(paths: SetupPaths, note: Note): DatabaseSync | null {
+  let database: DatabaseSync | null = null;
+  try {
+    database = openDatabase({ path: paths.db, timeoutMs: DATABASE_TIMEOUT_MS }).db;
+  } catch (error) {
+    note(
+      `The memory database ${paths.db} could not be opened (${describe(error)}), so no probe ran and`,
+      'nothing was recorded for doctor. The agent configuration files below were still updated.',
+    );
+  }
+  return database;
+}
+
+function recordConsentState(
+  database: DatabaseSync | null,
+  config: OboeteConfig,
+  remove: boolean,
+): void {
+  if (!remove && database !== null && config.consent.hash !== undefined) {
+    runtimeStateSet(
+      database,
+      CONSENT_STATE_KEY,
+      JSON.stringify({ hash: config.consent.hash, accepted_at: config.consent.accepted_at }),
+      Date.now(),
+    );
+  }
+}
+
+function wireSelected(
+  selected: readonly AgentDetection[],
+  options: Options,
+  detected: readonly AgentDetection[],
+  deps: SetupDeps,
+  note: Note,
+): Map<SetupAgent, AgentRow['wired']> {
+  const wiring = new Map<SetupAgent, AgentRow['wired']>();
+  for (const agent of selected) {
+    wiring.set(
+      agent.agent,
+      options.remove ? unwire(agent, deps, note) : wire(agent, detected, deps, note),
+    );
+  }
+  return wiring;
+}
+
+function agentRows(
+  selected: readonly AgentDetection[],
+  after: readonly AgentDetection[],
+  wiring: ReadonlyMap<SetupAgent, ReturnType<typeof wire>>,
+  probes: Awaited<ReturnType<typeof probeSelected>>,
+  note: Note,
+): AgentRow[] {
+  return selected.map((agent) => {
+    const current = after.find((entry) => entry.agent === agent.agent) ?? agent;
+    if (current.nativeMemory !== null) {
+      note(
+        `${agent.agent}: its own memory feature (${current.nativeMemory}) is enabled. oboete neither reads`,
+        'it nor changes it; the two run side by side.',
+      );
+    }
+    return {
+      agent: agent.agent,
+      wired: wiring.get(agent.agent) ?? 'not installed',
+      probe: probes.get(agent.agent) ?? 'skipped',
+      trust: current.trust,
+      native_memory: current.nativeMemory,
+    };
+  });
+}
+
+/**
+ * The exit code, and the two operator-facing notes and the runtime_state row that go with it. It
+ * writes, so the caller runs it before building the report rather than inside the call that does.
+ */
+function recordSetupResult(
+  rows: AgentRow[],
+  options: Options,
+  database: DatabaseSync | null,
+  note: Note,
+): number {
+  if (rows.length === 0) {
+    note(
+      'No supported agent was found on this machine, so setup changed no agent configuration.',
+      'Install Claude Code, Codex, Grok Build or Pi and run `oboete setup` again.',
+    );
+  }
+  if (options.remove) {
+    note('The agent configuration files hold nothing of oboete any more; the consent record is kept.');
+  }
+  if (database !== null) {
+    runtimeStateSet(database, SETUP_RESULT_KEY, JSON.stringify({ at: Date.now(), agents: rows }), Date.now());
+  }
+
+  const failed =
+    database === null ||
+    rows.some(
+      (row) =>
+        row.wired === 'failed' ||
+        row.probe === 'fail' ||
+        row.probe === 'timeout',
+    );
+  return failed ? 1 : 0;
+}
+
 export async function runSetup(argv: string[], overrides: Partial<SetupDeps> = {}): Promise<number> {
   const deps: SetupDeps = { ...defaults(), ...overrides };
 
@@ -173,21 +333,13 @@ export async function runSetup(argv: string[], overrides: Partial<SetupDeps> = {
   const note = (...lines: string[]): void => {
     notes.push(...lines);
   };
-  const finish = (rows: AgentRow[], code: number): number => {
-    report(deps, options.json, rows, notes);
-    appendLog(paths.hookLog, code === 0 ? 'info' : 'warn', 'setup', {
-      agents: rows.map((row) => row.agent).join(',') || 'none',
-      remove: options.remove,
-      exit: code,
-    });
-    return code;
-  };
-  let config: OboeteConfig;
+
+  let config: OboeteConfig | null;
   try {
     config = loadConfig(paths);
   } catch (error) {
     note(describe(error));
-    return finish([], 2);
+    return finishSetup(deps, options, paths, notes, [], 2);
   }
   // `--provider` names the destination this run would settle on. It is applied in memory so the
   // consent screen shows that destination, and written only once the run is past the gate: a
@@ -204,104 +356,24 @@ export async function runSetup(argv: string[], overrides: Partial<SetupDeps> = {
       ? detected.filter((agent) => agent.installed)
       : detected.filter((agent) => names.includes(agent.agent));
 
-  if (!options.remove) {
-    note(...consentDisplay(config, deps.env));
-    const decision = decideConsent({
-      config,
-      env: deps.env,
-      acceptEgress: options.acceptEgress,
-      yes: options.yes,
-    });
-    if (decision.state === 'missing') {
-      note(
-        'Setup changed nothing: this destination has not been consented to.',
-        'Accept it with `oboete setup --accept-egress`, or with `oboete setup --yes` once a stored',
-        'record matches the tuple above. `oboete setup --provider ollama` keeps everything on this machine.',
-      );
-      return finish([], 2);
-    }
-    // The stored record is what the observer recomputes before every reservation and every send
-    // (R8, contracts/observer.md call policy 6), so every run that gets past the gate records the
-    // tuple it displayed -- a local preset included, whose record would otherwise stay the remote
-    // hash of an earlier run and degrade every batch with `consent_changed` with no way back.
-    if (provider !== null) saveProviderPreset(paths, provider);
-    if (config.consent.hash !== decision.hash) saveConsent(paths, decision.hash, Date.now());
-    config = loadConfig(paths);
-    note(...credentialGuidance(config, deps.env));
-  }
+  config = consentedConfig(config, paths, provider, options, deps, note);
+  if (config === null) return finishSetup(deps, options, paths, notes, [], 2);
 
-  let database: DatabaseSync | null = null;
-  try {
-    database = openDatabase({ path: paths.db, timeoutMs: DATABASE_TIMEOUT_MS }).db;
-  } catch (error) {
-    note(
-      `The memory database ${paths.db} could not be opened (${describe(error)}), so no probe ran and`,
-      'nothing was recorded for doctor. The agent configuration files below were still updated.',
-    );
-  }
+  const database = openSetupDatabase(paths, note);
 
   try {
-    if (!options.remove && database !== null && config.consent.hash !== undefined) {
-      runtimeStateSet(
-        database,
-        CONSENT_STATE_KEY,
-        JSON.stringify({ hash: config.consent.hash, accepted_at: config.consent.accepted_at }),
-        Date.now(),
-      );
-    }
+    recordConsentState(database, config, options.remove);
 
-    const wiring = new Map<SetupAgent, AgentRow['wired']>();
-    for (const agent of selected) {
-      wiring.set(
-        agent.agent,
-        options.remove ? unwire(agent, deps, note) : wire(agent, detected, deps, note),
-      );
-    }
+    const wiring = wireSelected(selected, options, detected, deps, note);
 
     // Trust and native memory are read after the write, so the report states the file as it now
     // stands rather than the state setup found (FR-031: report trust before reporting success).
     const after = detectAgents(deps.env, deps.versionSpawn);
     const probes = await probeSelected(selected, wiring, deps, database, options.remove);
 
-    const rows: AgentRow[] = selected.map((agent) => {
-      const current = after.find((entry) => entry.agent === agent.agent) ?? agent;
-      if (current.nativeMemory !== null) {
-        note(
-          `${agent.agent}: its own memory feature (${current.nativeMemory}) is enabled. oboete neither reads`,
-          'it nor changes it; the two run side by side.',
-        );
-      }
-      return {
-        agent: agent.agent,
-        wired: wiring.get(agent.agent) ?? 'not installed',
-        probe: probes.get(agent.agent) ?? 'skipped',
-        trust: current.trust,
-        native_memory: current.nativeMemory,
-      };
-    });
-
-    if (rows.length === 0) {
-      note(
-        'No supported agent was found on this machine, so setup changed no agent configuration.',
-        'Install Claude Code, Codex, Grok Build or Pi and run `oboete setup` again.',
-      );
-    }
-    if (options.remove) {
-      note('The agent configuration files hold nothing of oboete any more; the consent record is kept.');
-    }
-    if (database !== null) {
-      runtimeStateSet(database, SETUP_RESULT_KEY, JSON.stringify({ at: Date.now(), agents: rows }), Date.now());
-    }
-
-    const failed =
-      database === null ||
-      rows.some(
-        (row) =>
-          row.wired === 'failed' ||
-          row.probe === 'fail' ||
-          row.probe === 'timeout',
-      );
-    return finish(rows, failed ? 1 : 0);
+    const rows = agentRows(selected, after, wiring, probes, note);
+    const code = recordSetupResult(rows, options, database, note);
+    return finishSetup(deps, options, paths, notes, rows, code);
   } finally {
     database?.close();
   }

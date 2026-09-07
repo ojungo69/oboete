@@ -42,6 +42,60 @@ type ProcessOutcome =
   | { kind: 'closed'; code: number | null }
   | { kind: 'error'; error: unknown };
 
+type ProbeResultInput = {
+  target: ProbeTarget;
+  outcome: ProcessOutcome;
+  lookup: Awaited<ReturnType<typeof lookupBeforeDeadline>>;
+  signal: AbortSignal;
+  now: () => number;
+  started: number;
+};
+
+function codexInvocation(
+  target: ProbeTarget,
+  cliPath: string,
+  message: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+): Invocation {
+  env.CODEX_HOME = dirname(target.configPath);
+  return {
+    command: cliPath,
+    args: [
+      'exec',
+      '--sandbox',
+      'read-only',
+      '--skip-git-repo-check',
+      '--json',
+      '-C',
+      cwd,
+      message,
+    ],
+    env,
+    cwd,
+  };
+}
+
+function grokInvocation(
+  target: ProbeTarget,
+  cliPath: string,
+  message: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+): Invocation {
+  env.GROK_HOME = dirname(dirname(target.configPath));
+  env.GROK_CLAUDE_HOOKS_ENABLED = '0';
+  env.GROK_CLAUDE_MCPS_ENABLED = '0';
+  env.GROK_CURSOR_HOOKS_ENABLED = '0';
+  env.GROK_CURSOR_MCPS_ENABLED = '0';
+  return {
+    command: cliPath,
+    args: ['-p', message, '--output-format', 'json', '--cwd', cwd],
+    env,
+    cwd,
+  };
+}
+
 /**
  * The probe only needs one turn with no tool, so it runs with the agent's own guardrails on and in
  * a throwaway working directory instead of the developer's tree (FR-031). Codex has no approval
@@ -65,34 +119,9 @@ function invocation(
         cwd,
       };
     case 'codex':
-      env.CODEX_HOME = dirname(target.configPath);
-      return {
-        command: cliPath,
-        args: [
-          'exec',
-          '--sandbox',
-          'read-only',
-          '--skip-git-repo-check',
-          '--json',
-          '-C',
-          cwd,
-          message,
-        ],
-        env,
-        cwd,
-      };
+      return codexInvocation(target, cliPath, message, env, cwd);
     case 'grok':
-      env.GROK_HOME = dirname(dirname(target.configPath));
-      env.GROK_CLAUDE_HOOKS_ENABLED = '0';
-      env.GROK_CLAUDE_MCPS_ENABLED = '0';
-      env.GROK_CURSOR_HOOKS_ENABLED = '0';
-      env.GROK_CURSOR_MCPS_ENABLED = '0';
-      return {
-        command: cliPath,
-        args: ['-p', message, '--output-format', 'json', '--cwd', cwd],
-        env,
-        cwd,
-      };
+      return grokInvocation(target, cliPath, message, env, cwd);
     case 'pi':
       env.PI_CODING_AGENT_DIR = dirname(dirname(target.configPath));
       return {
@@ -183,6 +212,49 @@ async function lookupBeforeDeadline(
   }
 }
 
+function probeResult(input: ProbeResultInput): ProbeResult {
+  const { target, outcome, lookup, signal, now, started } = input;
+  if (lookup === 'found') {
+    return {
+      agent: target.agent,
+      status: 'pass',
+      elapsedMs: elapsed(now, started),
+      reason: 'probe_event_stored',
+    };
+  }
+  if (lookup === 'error') {
+    return {
+      agent: target.agent,
+      status: 'fail',
+      elapsedMs: elapsed(now, started),
+      reason: 'probe_lookup_failed',
+    };
+  }
+  if (outcome.kind === 'closed') {
+    return {
+      agent: target.agent,
+      status: 'fail',
+      elapsedMs: elapsed(now, started),
+      reason:
+        outcome.code === 0 ? 'probe_event_missing' : `agent_exit_${outcome.code ?? 'signal'}`,
+    };
+  }
+  if (lookup === 'timeout' || signal.aborted) {
+    return {
+      agent: target.agent,
+      status: 'timeout',
+      elapsedMs: elapsed(now, started),
+      reason: 'deadline_exceeded',
+    };
+  }
+  return {
+    agent: target.agent,
+    status: 'fail',
+    elapsedMs: elapsed(now, started),
+    reason: 'spawn_failed',
+  };
+}
+
 async function runProbe(
   target: ProbeTarget,
   deps: ProbeDeps,
@@ -218,45 +290,7 @@ async function runProbe(
     // A run that failed has nothing left to land, so only a clean exit is waited out.
     const cleanExit = outcome.kind === 'closed' && outcome.code === 0;
     const lookup = await lookupBeforeDeadline(deps, target.agent, marker, signal, cleanExit);
-    if (lookup === 'found') {
-      return {
-        agent: target.agent,
-        status: 'pass',
-        elapsedMs: elapsed(now, started),
-        reason: 'probe_event_stored',
-      };
-    }
-    if (lookup === 'error') {
-      return {
-        agent: target.agent,
-        status: 'fail',
-        elapsedMs: elapsed(now, started),
-        reason: 'probe_lookup_failed',
-      };
-    }
-    if (outcome.kind === 'closed') {
-      return {
-        agent: target.agent,
-        status: 'fail',
-        elapsedMs: elapsed(now, started),
-        reason:
-          outcome.code === 0 ? 'probe_event_missing' : `agent_exit_${outcome.code ?? 'signal'}`,
-      };
-    }
-    if (lookup === 'timeout' || signal.aborted) {
-      return {
-        agent: target.agent,
-        status: 'timeout',
-        elapsedMs: elapsed(now, started),
-        reason: 'deadline_exceeded',
-      };
-    }
-    return {
-      agent: target.agent,
-      status: 'fail',
-      elapsedMs: elapsed(now, started),
-      reason: 'spawn_failed',
-    };
+    return probeResult({ target, outcome, lookup, signal, now, started });
   } finally {
     try {
       rmSync(child.cwd, { recursive: true, force: true });

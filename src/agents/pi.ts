@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import {
   normalizeToolName,
+  type Envelope,
   type InputSource,
   type NormalizedEvent,
   type ToolInput,
@@ -103,6 +104,96 @@ function inputSource(source: string | undefined): InputSource {
   return 'user';
 }
 
+function adaptPiTool(
+  input: AdapterInput,
+  payload: Record<string, unknown> | null,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const native = readString(payload, 'toolName');
+  const callId = readString(payload, 'toolCallId');
+  if (native === undefined || callId === undefined) return metadataOnly(input, 'payload_invalid');
+  // Until a fixture describes the tool, only its metadata is kept (R13 row 1). Pi has no
+  // verified MCP naming, so an unlisted name is never read as a server tool either.
+  if (!Object.hasOwn(PI_TOOLS, native)) return metadataOnly(input, 'unmapped_payload', native);
+  const mapping = PI_TOOLS[native];
+  if (mapping === undefined) return metadataOnly(input, 'unmapped_payload', native);
+  // Pi delivers the call and its result in one event, so both normalized events are built here.
+  return toEvents([
+    {
+      ...envelope,
+      ...turn,
+      kind: 'tool_call',
+      tool_call_id: callId,
+      tool_name_native: native,
+      tool_name: normalizeToolName('pi', native),
+      input: mapping(readRecord(payload, 'input')),
+    },
+    {
+      ...envelope,
+      ...turn,
+      kind: 'tool_result',
+      tool_call_id: callId,
+      output: blockText(payload?.content),
+      is_error: payload?.isError === true,
+    },
+  ]);
+}
+
+function adaptPiInput(
+  input: AdapterInput,
+  payload: Record<string, unknown> | null,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const text = readContent(payload, 'text');
+  if (text === undefined) return metadataOnly(input, 'payload_invalid');
+  return toEvents([
+    {
+      ...envelope,
+      ...turn,
+      kind: 'prompt',
+      text: capText(text),
+      input_source: inputSource(readString(payload, 'source')),
+    },
+  ]);
+}
+
+function adaptPiSettled(
+  payload: Record<string, unknown> | null,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const message = readContent(payload, 'text');
+  const events: NormalizedEvent[] = [];
+  if (message !== undefined && message !== '') {
+    events.push({ ...envelope, ...turn, kind: 'last_assistant_message', text: capText(message) });
+  }
+  // The turn ordinal belongs to capture, which counts turns per session (R7).
+  events.push({ ...envelope, ...turn, kind: 'turn_end', turn_index: 0, reason: 'agent_settled' });
+  return toEvents(events);
+}
+
+function adaptPiCompaction(
+  input: AdapterInput,
+  payload: Record<string, unknown> | null,
+  envelope: Envelope,
+  turn: { prompt_id?: string },
+): AdapterOutput {
+  const entry = readRecord(payload, 'compactionEntry');
+  const key = readString(entry, 'id');
+  if (key === undefined) return metadataOnly(input, 'payload_invalid');
+  return toEvents([
+    {
+      ...envelope,
+      ...turn,
+      kind: 'compaction_summary',
+      text: capText(readContent(entry, 'summary') ?? ''),
+      compaction_key: capText(key),
+    },
+  ]);
+}
+
 export function adaptPi(input: AdapterInput): AdapterOutput {
   const wire = piEnvelopeSchema.safeParse(input.payload);
   if (!wire.success) return metadataOnly(input, 'payload_invalid');
@@ -114,83 +205,23 @@ export function adaptPi(input: AdapterInput): AdapterOutput {
   if (envelope === null) return metadataOnly(input, 'payload_invalid');
   const payload = asRecord(wire.data.payload);
   const turn = promptRef(wire.data.prompt_id);
-
   switch (input.eventName) {
     case 'session_start':
       // `reason` is `startup` for a start, a resume and a fork alike, so a resume is recognized by
       // session id continuity and never by this field (R13 probe 2026-09-03).
       return toEvents([{ ...envelope, ...turn, kind: 'session_start', source: 'startup' }]);
-    case 'input': {
-      const text = readContent(payload, 'text');
-      if (text === undefined) return metadataOnly(input, 'payload_invalid');
-      return toEvents([
-        {
-          ...envelope,
-          ...turn,
-          kind: 'prompt',
-          text: capText(text),
-          input_source: inputSource(readString(payload, 'source')),
-        },
-      ]);
-    }
-    case 'tool_result': {
-      const native = readString(payload, 'toolName');
-      const callId = readString(payload, 'toolCallId');
-      if (native === undefined || callId === undefined) return metadataOnly(input, 'payload_invalid');
-      // Until a fixture describes the tool, only its metadata is kept (R13 row 1). Pi has no
-      // verified MCP naming, so an unlisted name is never read as a server tool either.
-      if (!Object.hasOwn(PI_TOOLS, native)) return metadataOnly(input, 'unmapped_payload', native);
-      const mapping = PI_TOOLS[native];
-      if (mapping === undefined) return metadataOnly(input, 'unmapped_payload', native);
-      // Pi delivers the call and its result in one event, so both normalized events are built here.
-      return toEvents([
-        {
-          ...envelope,
-          ...turn,
-          kind: 'tool_call',
-          tool_call_id: callId,
-          tool_name_native: native,
-          tool_name: normalizeToolName('pi', native),
-          input: mapping(readRecord(payload, 'input')),
-        },
-        {
-          ...envelope,
-          ...turn,
-          kind: 'tool_result',
-          tool_call_id: callId,
-          output: blockText(payload?.content),
-          is_error: payload?.isError === true,
-        },
-      ]);
-    }
-    case 'agent_settled': {
-      const message = readContent(payload, 'text');
-      const events: NormalizedEvent[] = [];
-      if (message !== undefined && message !== '') {
-        events.push({ ...envelope, ...turn, kind: 'last_assistant_message', text: capText(message) });
-      }
-      // The turn ordinal belongs to capture, which counts turns per session (R7).
-      events.push({ ...envelope, ...turn, kind: 'turn_end', turn_index: 0, reason: 'agent_settled' });
-      return toEvents(events);
-    }
+    case 'input':
+      return adaptPiInput(input, payload, envelope, turn);
+    case 'tool_result':
+      return adaptPiTool(input, payload, envelope, turn);
+    case 'agent_settled':
+      return adaptPiSettled(payload, envelope, turn);
     case 'session_shutdown':
       return toEvents([
         { ...envelope, ...turn, kind: 'session_end', reason: capText(readContent(payload, 'reason') ?? '') },
       ]);
-    case 'session_compact': {
-      const entry = readRecord(payload, 'compactionEntry');
-      const key = readString(entry, 'id');
-      if (key === undefined) return metadataOnly(input, 'payload_invalid');
-      return toEvents([
-        {
-          ...envelope,
-          ...turn,
-          kind: 'compaction_summary',
-          text: capText(readContent(entry, 'summary') ?? ''),
-          compaction_key: capText(key),
-        },
-      ]);
-    }
+    case 'session_compact':
+      return adaptPiCompaction(input, payload, envelope, turn);
     default:
       return metadataOnly(input, 'event_not_captured');
   }

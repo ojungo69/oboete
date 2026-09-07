@@ -45,6 +45,15 @@ export type AgentDetection = {
   nativeMemory: NativeMemory | null;
 };
 
+type AgentCandidate = {
+  agent: SetupAgent;
+  cli: string;
+  home: string;
+  configPath: string;
+  trust: AgentTrust;
+  nativeMemory: NativeMemory | null;
+};
+
 const handlerSchema = z.looseObject({
   type: z.string().optional(),
   command: z.string().optional(),
@@ -207,11 +216,7 @@ function claudeMemoryEnabled(claudeHome: string): boolean {
   }
 }
 
-/** Read-only installed-agent, wiring-trust and native-memory coexistence detection (FR-031/032/043). */
-export function detectAgents(
-  env: NodeJS.ProcessEnv = process.env,
-  spawnFn: VersionSpawn = spawnSync,
-): AgentDetection[] {
+function agentCandidates(env: NodeJS.ProcessEnv): AgentCandidate[] {
   const home = userHome(env);
   const claudeHome = configuredHome(env, 'CLAUDE_CONFIG_DIR', join(home, '.claude'));
   const codexHome = configuredHome(env, 'CODEX_HOME', join(home, '.codex'));
@@ -219,14 +224,7 @@ export function detectAgents(
   const piHome = configuredHome(env, 'PI_CODING_AGENT_DIR', join(home, '.pi', 'agent'));
   const codexConfig = readCodexConfig(join(codexHome, 'config.toml'));
 
-  const agents: {
-    agent: SetupAgent;
-    cli: string;
-    home: string;
-    configPath: string;
-    trust: AgentTrust;
-    nativeMemory: NativeMemory | null;
-  }[] = [
+  return [
     {
       agent: 'claude',
       cli: 'claude',
@@ -260,6 +258,14 @@ export function detectAgents(
       nativeMemory: null,
     },
   ];
+}
+
+/** Read-only installed-agent, wiring-trust and native-memory coexistence detection (FR-031/032/043). */
+export function detectAgents(
+  env: NodeJS.ProcessEnv = process.env,
+  spawnFn: VersionSpawn = spawnSync,
+): AgentDetection[] {
+  const agents = agentCandidates(env);
 
   const cliPaths = agents.map(({ cli }) => resolveOnPath(cli, env));
   const probeEnv = childEnvironment(env);

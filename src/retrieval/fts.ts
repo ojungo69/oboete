@@ -97,6 +97,36 @@ function splitByScript(text: string): string[] {
   return parts;
 }
 
+function indexCjkSegments(run: string, pushCjkRun: (run: string) => void): void {
+  let searchable = '';
+  for (const { segment, isWordLike } of wordSegmenter.segment(run)) {
+    if (!isWordLike || STOP_WORDS.has(segment)) {
+      pushCjkRun(searchable);
+      searchable = '';
+    } else {
+      searchable += segment;
+    }
+  }
+  pushCjkRun(searchable);
+}
+
+function indexWordSegments(
+  run: string,
+  trigram: string[],
+  likeFallback: string,
+  pushIndexed: (terms: string[], term: string) => void,
+): string {
+  for (const { segment, isWordLike } of wordSegmenter.segment(run)) {
+    if (!isWordLike) continue;
+    const lower = segment.toLowerCase();
+    if (STOP_WORDS.has(lower)) continue;
+    const length = codePointLength(lower);
+    if (length >= 3) pushIndexed(trigram, lower);
+    else if (length > codePointLength(likeFallback)) likeFallback = lower;
+  }
+  return likeFallback;
+}
+
 export function segmentQuery(text: string): QueryTerms {
   const trigram: string[] = [];
   const cjk: string[] = [];
@@ -116,26 +146,10 @@ export function segmentQuery(text: string): QueryTerms {
 
   for (const run of splitByScript(text)) {
     if (isAllCjk(run)) {
-      let searchable = '';
-      for (const { segment, isWordLike } of wordSegmenter.segment(run)) {
-        if (!isWordLike || STOP_WORDS.has(segment)) {
-          pushCjkRun(searchable);
-          searchable = '';
-        } else {
-          searchable += segment;
-        }
-      }
-      pushCjkRun(searchable);
+      indexCjkSegments(run, pushCjkRun);
       continue;
     }
-    for (const { segment, isWordLike } of wordSegmenter.segment(run)) {
-      if (!isWordLike) continue;
-      const lower = segment.toLowerCase();
-      if (STOP_WORDS.has(lower)) continue;
-      const length = codePointLength(lower);
-      if (length >= 3) pushIndexed(trigram, lower);
-      else if (length > codePointLength(likeFallback)) likeFallback = lower;
-    }
+    likeFallback = indexWordSegments(run, trigram, likeFallback, pushIndexed);
   }
 
   if (trigram.length === 0 && cjk.length === 0 && likeFallback.length > 0) {

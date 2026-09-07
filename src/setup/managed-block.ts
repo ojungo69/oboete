@@ -185,16 +185,25 @@ function sameMcpCommand(value: unknown, expected: unknown): boolean {
     value.command === expected.command && isDeepStrictEqual(value.args, expected.args);
 }
 
-function sameOwnedTable(value: unknown, expected: unknown): boolean {
-  if (!isPlainObject(value) || !isPlainObject(expected)) return false;
-  if (sameMcpCommand(value, expected)) {
-    return Object.keys(value).every((key) => ['command', 'args', 'enabled'].includes(key));
-  }
+function hasOnlyOwnedMcpKeys(value: Record<string, unknown>): boolean {
+  return Object.keys(value).every((key) => ['command', 'args', 'enabled'].includes(key));
+}
+
+function sameTrustRow(value: Record<string, unknown>, expected: Record<string, unknown>): boolean {
   return Object.keys(expected).length === 1 && typeof expected.trusted_hash === 'string' &&
     isDeepStrictEqual(value, expected);
 }
 
-function stripTomlTables(lines: string[], current: unknown, expected: unknown, previous?: unknown): string[] {
+function sameOwnedTable(value: unknown, expected: unknown): boolean {
+  if (!isPlainObject(value) || !isPlainObject(expected)) return false;
+  if (sameMcpCommand(value, expected)) {
+    return hasOnlyOwnedMcpKeys(value);
+  }
+  return sameTrustRow(value, expected);
+}
+
+/** Table headers outside multiline values, in source order; array tables have no removable path. */
+function findTomlTableHeaders(lines: string[]): { start: number; path: string[] }[] {
   const headers: { start: number; path: string[] }[] = [];
   for (const [start, line] of lines.entries()) {
     if (!line.trimStart().startsWith('[')) continue;
@@ -214,6 +223,11 @@ function stripTomlTables(lines: string[], current: unknown, expected: unknown, p
       continue;
     }
   }
+  return headers;
+}
+
+function stripTomlTables(lines: string[], current: unknown, expected: unknown, previous?: unknown): string[] {
+  const headers = findTomlTableHeaders(lines);
   let next = lines;
   for (let index = headers.length - 1; index >= 0; index -= 1) {
     const { start, path } = headers[index];
