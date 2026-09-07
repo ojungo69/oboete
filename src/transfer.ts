@@ -256,7 +256,7 @@ export function importMemories(db: DatabaseSync, source: string, options: Import
     const known = fileRepos.get(fileRepoId);
     // A remote identity means the same repository on every machine; a machine-local one needs
     // the developer to say which repository here it is (--map-repo).
-    if (known === undefined || known.identity_kind !== 'remote') return null;
+    if (known?.identity_kind !== 'remote') return null;
     if (sha256Hex(known.normalized_identity).slice(0, 16) !== fileRepoId) return null;
     db.prepare(
       `INSERT INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
@@ -341,6 +341,10 @@ export function importMemories(db: DatabaseSync, source: string, options: Import
 
 type Io = { writeOut(text: string): void; writeError(text: string): void };
 
+function processIo(): Io {
+  return { writeOut: (t) => process.stdout.write(t), writeError: (t) => process.stderr.write(t) };
+}
+
 /** The whole stream as one string, or null once it exceeds `limit` bytes (reading stops there). */
 async function readBounded(input: NodeJS.ReadableStream, limit: number): Promise<string | null> {
   const chunks: Buffer[] = [];
@@ -368,7 +372,7 @@ function plural(count: number, noun: string, plural = `${noun}s`): string {
 }
 
 /** `oboete export [file|-]`: the file, or stdout for `-` and when no file is named. */
-export async function runExport(argv: string[], io: Io = { writeOut: (t) => process.stdout.write(t), writeError: (t) => process.stderr.write(t) }): Promise<number> {
+export async function runExport(argv: string[], io: Io = processIo()): Promise<number> {
   let target: string;
   try {
     const { positionals } = parseArgs({ args: argv, allowPositionals: true, strict: true, options: {} });
@@ -396,7 +400,7 @@ export async function runExport(argv: string[], io: Io = { writeOut: (t) => proc
 }
 
 /** `oboete import [file|-] [--dry-run] [--map-repo <old>=<current>]`: exit 2 on an invalid file. */
-export async function runImport(argv: string[], io: Io = { writeOut: (t) => process.stdout.write(t), writeError: (t) => process.stderr.write(t) }): Promise<number> {
+export async function runImport(argv: string[], io: Io = processIo()): Promise<number> {
   let file: string;
   let dryRun: boolean;
   const mapRepo: Record<string, string> = {};

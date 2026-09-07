@@ -3,8 +3,8 @@ import type { DatabaseSync } from 'node:sqlite';
 export type Destination = 'remote_observer' | 'local_observer' | 'injection' | 'sync';
 export type Sensitivity = 'local_only' | 'eligible' | 'secret' | 'private';
 
-const DESTINATIONS: Destination[] = ['remote_observer', 'local_observer', 'injection', 'sync'];
-const SENSITIVITIES: Sensitivity[] = ['local_only', 'eligible', 'secret', 'private'];
+const DESTINATIONS = new Set<Destination>(['remote_observer', 'local_observer', 'injection', 'sync']);
+const SENSITIVITIES = new Set<Sensitivity>(['local_only', 'eligible', 'secret', 'private']);
 
 export type DestinationRules = Map<
   Destination,
@@ -29,7 +29,7 @@ export function loadDestinationRules(db: DatabaseSync): DestinationRules {
   for (const row of rows) {
     const destination = String(row.destination) as Destination;
     const sensitivity = String(row.sensitivity) as Sensitivity;
-    if (!DESTINATIONS.includes(destination) || !SENSITIVITIES.includes(sensitivity)) continue;
+    if (!DESTINATIONS.has(destination) || !SENSITIVITIES.has(sensitivity)) continue;
     // A row that is not allowed carries no scope, so only allowed rows shape the entry.
     if (Number(row.allowed) !== 1) continue;
 
@@ -55,7 +55,7 @@ export function isAllowed(
   // FR-020: a secret row is never sent anywhere, whatever the table happens to say.
   if (sensitivity === 'secret') return false;
   const entry = rules.get(destination);
-  if (entry === undefined || !entry.allowed.has(sensitivity)) return false;
+  if (entry?.allowed.has(sensitivity) !== true) return false;
   return !entry.sameRepoRequired || sameRepo;
 }
 

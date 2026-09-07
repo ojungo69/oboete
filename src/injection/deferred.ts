@@ -304,7 +304,7 @@ export async function storePending(db: DatabaseSync, input: StorePendingInput): 
       return input.pack.injectionId;
     }
 
-    if (validated === null || plan.text !== validated.text) {
+    if (plan.text !== validated?.text) {
       // Another hook changed the record between the check and this transaction, so the text that
       // would be stored is not the text that was validated. Nothing is merged and the memories stay
       // injectable for the next turn (FR-026, rule 5).
@@ -475,7 +475,7 @@ function deliver(
     const attempt = attempts.find((entry) => entry.tool_call_id === input.toolCallId);
     let text: string | null = null;
 
-    if (attempt !== undefined && attempt.delivery === 'delivered') {
+    if (attempt?.delivery === 'delivered') {
       return { status: 'already', text: null };
     }
     // A15 counts the calls of the batch that carried the pack. A later call of the conversation

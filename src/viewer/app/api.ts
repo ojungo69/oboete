@@ -77,7 +77,7 @@ const token = new URLSearchParams(location.search).get('token') ?? '';
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...init,
-    headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}` },
+    headers: { ...init.headers, authorization: `Bearer ${token}` },
   });
   if (!response.ok) {
     throw new Error(

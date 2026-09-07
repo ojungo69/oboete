@@ -21,7 +21,7 @@ import { resolveRepoIdentity } from './repo-identity.js';
 
 /** The legacy-era revisions this server speaks; the last one is what an unknown client gets. */
 const PROTOCOL_VERSIONS = ['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'] as const;
-const LATEST_PROTOCOL = PROTOCOL_VERSIONS[PROTOCOL_VERSIONS.length - 1];
+const LATEST_PROTOCOL = PROTOCOL_VERSIONS.at(-1) as (typeof PROTOCOL_VERSIONS)[number];
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
 const DATABASE_TIMEOUT_MS = 2_000;

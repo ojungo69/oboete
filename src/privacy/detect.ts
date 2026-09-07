@@ -210,7 +210,7 @@ export function compileGlob(glob: string): GlobMatcher {
 
 /** FR-039: a rule is written with forward slashes, so a Windows path is compared in that form. */
 function withForwardSlashes(value: string): string {
-  return value.replace(/\\/g, '/');
+  return value.replaceAll('\\', '/');
 }
 
 /**
@@ -265,7 +265,7 @@ type Span = { start: number; end: number; rule: string };
 const SECRET_CHARACTER = /[A-Za-z0-9+/=_-]/;
 
 const CANDIDATE_PATTERNS = [
-  /(?:api[_-]?key|token|secret|password|passwd|pwd|auth|credential|bearer)\s*[:=]\s*["']?([A-Za-z0-9+/=_.-]{16,})/gi,
+  /(?:api[_-]?key|token|secret|password|passwd|pwd|auth|credential|bearer)\s*[:=]\s*["']?([a-z0-9+/=_.-]{16,})/gi,
   /\bBearer\s+([A-Za-z0-9+/=_.-]{16,})/g,
 ];
 
@@ -317,7 +317,7 @@ function replaceSpans(text: string, spans: Span[]): { text: string; hits: Redact
   // Two rules can report overlapping ranges, and one marker must replace one region.
   const merged: Span[] = [];
   for (const span of sorted) {
-    const last = merged[merged.length - 1];
+    const last = merged.at(-1);
     if (last !== undefined && span.start <= last.end) last.end = Math.max(last.end, span.end);
     else merged.push({ ...span });
   }

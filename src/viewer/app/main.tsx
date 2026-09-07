@@ -32,11 +32,18 @@ function when(at: number | null): string {
   return at === null ? 'unknown time' : new Date(at).toLocaleString();
 }
 
+function memoryCount(count: number): string {
+  if (count === 0) return 'no memories';
+  return count === 1 ? '1 memory' : `${count} memories`;
+}
+
 function Provenance({ memory }: { memory: Memory }) {
   if (memory.sources.length === 0) return <p class="muted">Provenance: not recorded.</p>;
   return (
     <ul class="sources">
       {memory.sources.map((source, index) => (
+        // The rows reach the page without their id (the same rows are the CLI output), and the list
+        // is shown in table order and never reordered, so the position is its identity.
         <li key={index}>
           {source.citation_kind ?? 'source'}: <code>{source.citation_value ?? source.raw_event_id ?? 'unspecified'}</code>
           {source.source_agent === null ? '' : ` (from ${source.source_agent})`}
@@ -146,6 +153,8 @@ function Ledger({ injections }: { injections: Injection[] }) {
           </p>
           <ul>
             {injection.items.map((item, index) => (
+              // Same as the provenance list: a merged pack can carry one memory twice (planned, then
+              // omitted), so no field of the row is unique; the rows arrive in ledger order.
               <li key={index}>
                 {item.decision}: {item.title ?? item.sourceKind ?? 'item'}
                 {item.reason === null ? '' : ` (${item.reason.replaceAll('_', ' ')})`}
@@ -257,7 +266,7 @@ function App() {
                 <ol class="turns">
                   {entry.turns.map((turn) => (
                     <li key={turn.id}>
-                      Turn {turn.ordinal}: {turn.memory_ids.length === 0 ? 'no memories' : `${turn.memory_ids.length} ${turn.memory_ids.length === 1 ? 'memory' : 'memories'}`}
+                      Turn {turn.ordinal}: {memoryCount(turn.memory_ids.length)}
                     </li>
                   ))}
                 </ol>
@@ -267,7 +276,7 @@ function App() {
         </nav>
         <main class="memories">
           <label class="search">
-            Search memories
+            <span>Search memories</span>
             <input
               type="search"
               value={query}
