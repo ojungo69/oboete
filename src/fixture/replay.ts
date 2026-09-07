@@ -1137,6 +1137,8 @@ function openRecall(run: ReplayRun, line: Line, hooked: Spawned): void {
 
 /** How the engine classified the size-tagged event it just stored, read back for the size table. */
 function lastClassification(run: ReplayRun): { classification: string; truncated: number } {
+  let classification: string;
+  let truncated = 0;
   try {
     const opened = openDatabase({ path: run.paths.db, timeoutMs: 2_000, hook: true });
     try {
@@ -1146,16 +1148,15 @@ function lastClassification(run: ReplayRun): { classification: string; truncated
            FROM raw_events ORDER BY captured_at DESC, id DESC LIMIT 1`,
         )
         .get() as { classification_state?: unknown; truncated?: unknown } | undefined;
-      return {
-        classification: typeof row?.classification_state === 'string' ? row.classification_state : 'missing',
-        truncated: typeof row?.truncated === 'number' ? row.truncated : 0,
-      };
+      classification = typeof row?.classification_state === 'string' ? row.classification_state : 'missing';
+      truncated = typeof row?.truncated === 'number' ? row.truncated : 0;
     } finally {
       opened.db.close();
     }
   } catch {
-    return { classification: 'unreadable', truncated: 0 };
+    classification = 'unreadable';
   }
+  return { classification, truncated };
 }
 
 /** One row of the size table: the tag the fixture promised and what the engine made of it. */
