@@ -563,43 +563,53 @@ function storeRows(
     // nothing else either - no second turn, no second epoch.
     if (seen.get(id) !== undefined) continue;
 
-    // Only a row this session has not seen reopens it: a re-delivered `session_end` must not.
-    reopenSession(db, session);
-    advanceEpoch(db, session, row, id);
-    const turnId = placeInTurn(db, session, row);
-    if (row.kind === 'session_end') {
-      db.prepare(
-        `UPDATE sessions SET status = 'ended', ended_at = ?, summary_state = COALESCE(summary_state, 'pending') WHERE id = ?`,
-      ).run(row.capturedAt, session.id);
-    }
-
-    db.prepare(
-      `INSERT OR IGNORE INTO raw_events (
-         id, repo_id, session_id, turn_id, agent, kind, content, truncated, payload_json,
-         content_hash, sensitivity, classification_state, captured_at, expires_at, via_spool)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-    ).run(
-      id,
-      identity.id,
-      session.id,
-      turnId,
-      row.agent,
-      row.kind,
-      row.content,
-      row.truncated,
-      JSON.stringify(row.payload),
-      row.contentHash,
-      row.sensitivity,
-      row.classificationState,
-      row.capturedAt,
-      row.capturedAt + RAW_EVENT_TTL_MS,
-    );
+    storeCapturedRow(db, identity, row, session, id);
     inserted += 1;
     trigger ||=
       BATCH_TRIGGER_KINDS.has(row.kind) ||
       (row.kind === 'prompt' && session.turnCount % TURN_BATCH === 0);
   }
   return { inserted, trigger };
+}
+
+function storeCapturedRow(
+  db: DatabaseSync,
+  identity: RepoIdentity,
+  row: RowDraft,
+  session: SessionRow,
+  id: string,
+): void {
+  // Only a row this session has not seen reopens it: a re-delivered `session_end` must not.
+  reopenSession(db, session);
+  advanceEpoch(db, session, row, id);
+  const turnId = placeInTurn(db, session, row);
+  if (row.kind === 'session_end') {
+    db.prepare(
+      `UPDATE sessions SET status = 'ended', ended_at = ?, summary_state = COALESCE(summary_state, 'pending') WHERE id = ?`,
+    ).run(row.capturedAt, session.id);
+  }
+
+  db.prepare(
+    `INSERT OR IGNORE INTO raw_events (
+         id, repo_id, session_id, turn_id, agent, kind, content, truncated, payload_json,
+         content_hash, sensitivity, classification_state, captured_at, expires_at, via_spool)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+  ).run(
+    id,
+    identity.id,
+    session.id,
+    turnId,
+    row.agent,
+    row.kind,
+    row.content,
+    row.truncated,
+    JSON.stringify(row.payload),
+    row.contentHash,
+    row.sensitivity,
+    row.classificationState,
+    row.capturedAt,
+    row.capturedAt + RAW_EVENT_TTL_MS,
+  );
 }
 
 function recordDiagnostic(db: DatabaseSync, diagnostic: Diagnostic, now: number): void {
@@ -773,16 +783,19 @@ async function injectAfterCapture(
   }
 }
 
-async function write(
-  deps: CaptureDeps,
-  paths: OboetePaths,
-  identity: RepoIdentity,
-  rows: RowDraft[],
-  diagnostics: Diagnostic[],
-  capturedAt: number,
-  injection: InjectionSeed | undefined,
-  deadlineMs: number,
-): Promise<CaptureOutcome> {
+type WriteOptions = {
+  deps: CaptureDeps;
+  paths: OboetePaths;
+  identity: RepoIdentity;
+  rows: RowDraft[];
+  diagnostics: Diagnostic[];
+  capturedAt: number;
+  injection: InjectionSeed | undefined;
+  deadlineMs: number;
+};
+
+async function write(options: WriteOptions): Promise<CaptureOutcome> {
+  const { deps, paths, identity, rows, diagnostics, injection, deadlineMs } = options;
   const remaining = (): number => deadlineMs - deps.elapsedMs();
   if (rows.length === 0 && diagnostics.length === 0) return { outcome: 'dropped', rows: 0 };
 
@@ -792,68 +805,9 @@ async function write(
       1,
       Math.min(BUSY_TIMEOUT_CEILING_MS, Math.floor(remaining() - SPOOL_RESERVE_MS)),
     );
-    let opened: ReturnType<typeof openDatabase> | null = null;
-    try {
-      opened = openDatabase({ path: paths.db, timeoutMs, hook: true });
-      // data-model: the hook never migrates, so an older file is left to the worker.
-      if (opened.schemaBehind) {
-        opened.db.close();
-        opened = null;
-      }
-    } catch {
-      // A missing or unopenable database is an availability problem, not a privacy one (R1): the
-      // sanitized event goes to the spool below.
-    }
-
+    const opened = openCaptureDatabase(paths, timeoutMs);
     if (opened !== null) {
-      try {
-        const sessionExisted =
-          injection === undefined ||
-          readSession(opened.db, injection.event.agent, injection.event.native_session_id) !== undefined;
-        // One read-then-write unit, one transaction (conventions "Database access"): a failure
-        // half way through would otherwise leave rows behind that the spool then writes again
-        // under the id of another turn (R7: the direct path keys by the ordinal it read).
-        let stored: ReturnType<typeof storeRows>;
-        try {
-          stored = transactionImmediate(opened.db, () => {
-            recognizePacks(opened.db, rows);
-            return storeRows(opened.db, identity, rows, diagnostics, capturedAt);
-          });
-        } catch {
-          // R1: a storage failure before the transaction commits writes the sanitized event to the
-          // spool. Injection then sees no database and records index_unavailable in the hook log.
-          const outcome = spoolAll(paths, identity, rows);
-          return {
-            ...outcome,
-            stdout: await injectAfterCapture(deps, paths, identity, injection, undefined),
-          };
-        }
-        const stdout = await injectAfterCapture(
-          deps,
-          paths,
-          identity,
-          injection,
-          opened.db,
-          !sessionExisted,
-        );
-        try {
-          if (stored.trigger && remaining() >= SPAWN_MIN_REMAINING_MS && isLeaseFree(opened.db, Date.now())) {
-            // R6: a hook spawns the detached worker only when the lease is free or stale. The lease
-            // is compared against the real clock, which is the clock its heartbeats are written on.
-            deps.spawnWorker();
-          }
-        } catch {
-          // The rows are committed already, so a failed spawn must not lose the outcome or the pack:
-          // it is best-effort and the next hook retries it (FR-002, R6).
-        }
-        return {
-          outcome: rows.length === 0 ? 'dropped' : 'stored',
-          rows: stored.inserted,
-          stdout,
-        };
-      } finally {
-        opened.db.close();
-      }
+      return writeToDatabase(options, opened.db, remaining);
     }
   }
   const outcome = spoolAll(paths, identity, rows);
@@ -863,106 +817,179 @@ async function write(
   };
 }
 
-/**
- * The capture path itself, without the process wiring, so the deadline clock, the detector and the
- * worker spawn can be supplied by a test. Never throws for a payload reason: every branch ends in a
- * row, a spool file, a diagnostics counter or a log line, and the caller always exits 0 (FR-002).
- */
-export async function captureEvent(deps: CaptureDeps, input: CaptureInput): Promise<CaptureOutcome> {
-  const { paths } = input;
-  // R12: the paused marker is read before stdin and before the database.
-  if (isPaused(paths)) return { outcome: 'paused', rows: 0 };
+function openCaptureDatabase(
+  paths: OboetePaths,
+  timeoutMs: number,
+): ReturnType<typeof openDatabase> | null {
+  let opened: ReturnType<typeof openDatabase> | null = null;
   try {
-    ensureDirectories(paths);
+    opened = openDatabase({ path: paths.db, timeoutMs, hook: true });
+    // data-model: the hook never migrates, so an older file is left to the worker.
+    if (opened.schemaBehind) {
+      opened.db.close();
+      opened = null;
+    }
   } catch {
-    // FR-002: an unwritable data directory is an availability problem. The database and the spool
-    // are tried anyway, so the loss is counted and reported on stderr instead of raising here.
+    // A missing or unopenable database is an availability problem, not a privacy one (R1): the
+    // sanitized event goes to the spool below.
   }
 
-  const capturedAt = deps.now();
-  const deadlineMs = hookDeadlineMs(input.agent, input.eventName);
-  const persist = (
-    identity: RepoIdentity,
-    rows: RowDraft[],
-    entries: Diagnostic[],
-    injection?: InjectionSeed,
-  ): Promise<CaptureOutcome> =>
-    write(deps, paths, identity, rows, entries, capturedAt, injection, deadlineMs);
-  const stdin = input.readStdin();
-  const diagnostics: Diagnostic[] = (input.priorFailures ?? []).map((code) => ({
-    kind: 'pi_child_failed',
-    agent: input.agent,
-    messageCode: code,
-  }));
-  const kindFromName = EVENT_KIND_BY_NAME[input.eventName];
-  const payloadHash = contentHash(stdin.text);
+  return opened;
+}
 
-  // FR-006: an invocation whose handler carries no fixed selector keeps `unknown` provenance, and
-  // its payload is never read as an agent's payload; doctor reports the counter.
-  if (input.agent === 'unknown') {
-    diagnostics.push({ kind: 'unknown_agent', agent: 'unknown', messageCode: input.eventName || 'none' });
-    const rows =
-      kindFromName === undefined
-        ? []
-        : [
-            metadataRow({
-              agent: 'unknown',
-              nativeSessionId: UNKNOWN_SESSION,
-              kind: kindFromName,
-              eventName: input.eventName,
-              capturedAt,
-              payloadHash,
-              payload: { failure_reason: 'unknown_agent', event: input.eventName },
-            }),
-          ];
-    // FR-004: the repository comes from the directory the hook runs in, never from a payload.
-    return persist(resolveRepoIdentity(process.cwd(), gitOptions(deps, deadlineMs)), rows, diagnostics);
-  }
-
-  const agent: AdapterAgent = input.agent;
-  let payload: unknown;
-  let parsed = true;
+async function writeToDatabase(
+  options: WriteOptions,
+  db: DatabaseSync,
+  remaining: () => number,
+): Promise<CaptureOutcome> {
+  const { deps, paths, identity, rows, diagnostics, capturedAt, injection } = options;
   try {
-    payload = JSON.parse(stdin.text);
+    const sessionExisted =
+      injection === undefined ||
+      readSession(db, injection.event.agent, injection.event.native_session_id) !== undefined;
+    // One read-then-write unit, one transaction (conventions "Database access"): a failure
+    // half way through would otherwise leave rows behind that the spool then writes again
+    // under the id of another turn (R7: the direct path keys by the ordinal it read).
+    let stored: ReturnType<typeof storeRows>;
+    try {
+      stored = transactionImmediate(db, () => {
+        recognizePacks(db, rows);
+        return storeRows(db, identity, rows, diagnostics, capturedAt);
+      });
+    } catch {
+      // R1: a storage failure before the transaction commits writes the sanitized event to the
+      // spool. Injection then sees no database and records index_unavailable in the hook log.
+      const outcome = spoolAll(paths, identity, rows);
+      return {
+        ...outcome,
+        stdout: await injectAfterCapture(deps, paths, identity, injection, undefined),
+      };
+    }
+    const stdout = await injectAfterCapture(
+      deps,
+      paths,
+      identity,
+      injection,
+      db,
+      !sessionExisted,
+    );
+    spawnAfterCapture(deps, db, stored, remaining);
+    return {
+      outcome: rows.length === 0 ? 'dropped' : 'stored',
+      rows: stored.inserted,
+      stdout,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function spawnAfterCapture(
+  deps: CaptureDeps,
+  db: DatabaseSync,
+  stored: ReturnType<typeof storeRows>,
+  remaining: () => number,
+): void {
+  try {
+    if (stored.trigger && remaining() >= SPAWN_MIN_REMAINING_MS && isLeaseFree(db, Date.now())) {
+      // R6: a hook spawns the detached worker only when the lease is free or stale. The lease
+      // is compared against the real clock, which is the clock its heartbeats are written on.
+      deps.spawnWorker();
+    }
   } catch {
-    parsed = false;
+    // The rows are committed already, so a failed spawn must not lose the outcome or the pack:
+    // it is best-effort and the next hook retries it (FR-002, R6).
   }
+}
 
-  if (!parsed) {
-    return captureUnparsed(deps, input, {
-      agent,
-      stdin,
-      capturedAt,
-      diagnostics,
-      kindFromName,
-      payloadHash,
-    }, deadlineMs);
+type PersistCapture = (
+  identity: RepoIdentity,
+  rows: RowDraft[],
+  entries: Diagnostic[],
+  injection?: InjectionSeed,
+) => Promise<CaptureOutcome>;
+
+type CaptureContext = {
+  paths: OboetePaths;
+  capturedAt: number;
+  diagnostics: Diagnostic[];
+  kindFromName: EventKind | undefined;
+  payloadHash: string;
+};
+
+function captureUnknownAgent(
+  deps: CaptureDeps,
+  input: CaptureInput,
+  context: CaptureContext,
+  persist: PersistCapture,
+  deadlineMs: number,
+): Promise<CaptureOutcome> {
+  const { capturedAt, diagnostics, kindFromName, payloadHash } = context;
+  diagnostics.push({ kind: 'unknown_agent', agent: 'unknown', messageCode: input.eventName || 'none' });
+  const rows =
+    kindFromName === undefined
+      ? []
+      : [
+          metadataRow({
+            agent: 'unknown',
+            nativeSessionId: UNKNOWN_SESSION,
+            kind: kindFromName,
+            eventName: input.eventName,
+            capturedAt,
+            payloadHash,
+            payload: { failure_reason: 'unknown_agent', event: input.eventName },
+          }),
+        ];
+  // FR-004: the repository comes from the directory the hook runs in, never from a payload.
+  return persist(resolveRepoIdentity(process.cwd(), gitOptions(deps, deadlineMs)), rows, diagnostics);
+}
+
+function captureUnmapped(
+  deps: CaptureDeps,
+  input: CaptureInput,
+  adapted: Extract<AdapterOutput, { kind: 'unmapped' }>,
+  context: CaptureContext,
+  persist: PersistCapture,
+  deadlineMs: number,
+  agent: AdapterAgent,
+): CaptureOutcome | Promise<CaptureOutcome> {
+  const { capturedAt, diagnostics, kindFromName, payloadHash } = context;
+  if (adapted.reason === 'event_not_captured') {
+    return { outcome: 'not_captured', rows: 0, reason: adapted.reason };
   }
+  const sessionId = adapted.metadata.nativeSessionId;
+  if (sessionId === null || kindFromName === undefined) {
+    diagnostics.push({ kind: 'unreadable_payload', agent, messageCode: input.eventName || 'none' });
+    return persist(resolveRepoIdentity(process.cwd(), gitOptions(deps, deadlineMs)), [], diagnostics);
+  }
+  const row = metadataRow({
+    agent,
+    nativeSessionId: sessionId,
+    kind: kindFromName,
+    eventName: input.eventName,
+    capturedAt,
+    payloadHash,
+    payload: {
+      failure_reason: adapted.reason,
+      event: input.eventName,
+      tool_name: adapted.metadata.toolName ?? undefined,
+    },
+  });
+  return persist(resolveRepoIdentity(process.cwd(), gitOptions(deps, deadlineMs)), [row], diagnostics);
+}
 
-  const adapted: AdapterOutput = adapt({ agent, eventName: input.eventName, payload, capturedAt });
+async function captureAdapted(
+  deps: CaptureDeps,
+  input: CaptureInput,
+  adapted: AdapterOutput,
+  context: CaptureContext,
+  persist: PersistCapture,
+  deadlineMs: number,
+  agent: AdapterAgent,
+): Promise<CaptureOutcome> {
+  const { paths, diagnostics } = context;
   if (adapted.kind === 'unmapped') {
-    if (adapted.reason === 'event_not_captured') {
-      return { outcome: 'not_captured', rows: 0, reason: adapted.reason };
-    }
-    const sessionId = adapted.metadata.nativeSessionId;
-    if (sessionId === null || kindFromName === undefined) {
-      diagnostics.push({ kind: 'unreadable_payload', agent, messageCode: input.eventName || 'none' });
-      return persist(resolveRepoIdentity(process.cwd(), gitOptions(deps, deadlineMs)), [], diagnostics);
-    }
-    const row = metadataRow({
-      agent,
-      nativeSessionId: sessionId,
-      kind: kindFromName,
-      eventName: input.eventName,
-      capturedAt,
-      payloadHash,
-      payload: {
-        failure_reason: adapted.reason,
-        event: input.eventName,
-        tool_name: adapted.metadata.toolName ?? undefined,
-      },
-    });
-    return persist(resolveRepoIdentity(process.cwd(), gitOptions(deps, deadlineMs)), [row], diagnostics);
+    return captureUnmapped(deps, input, adapted, context, persist, deadlineMs, agent);
   }
 
   const events = adapted.events;
@@ -992,6 +1019,18 @@ export async function captureEvent(deps: CaptureDeps, input: CaptureInput): Prom
     secretPaths: settings.secretPaths,
   }, deadlineMs);
 
+  return persistDetectedEvents(events, fields, detected, persist, identity, diagnostics, injection);
+}
+
+function persistDetectedEvents(
+  events: NormalizedEvent[],
+  fields: ReturnType<typeof textFields>,
+  detected: DetectorResult,
+  persist: PersistCapture,
+  identity: RepoIdentity,
+  diagnostics: Diagnostic[],
+  injection: InjectionSeed,
+): Promise<CaptureOutcome> {
   if (!detected.ok) {
     const rows = events.map((event) => failedEventRow(event, detected.reason));
     return persist(identity, rows, diagnostics, injection);
@@ -1017,6 +1056,92 @@ export async function captureEvent(deps: CaptureDeps, input: CaptureInput): Prom
 }
 
 /**
+ * The capture path itself, without the process wiring, so the deadline clock, the detector and the
+ * worker spawn can be supplied by a test. Never throws for a payload reason: every branch ends in a
+ * row, a spool file, a diagnostics counter or a log line, and the caller always exits 0 (FR-002).
+ */
+export async function captureEvent(deps: CaptureDeps, input: CaptureInput): Promise<CaptureOutcome> {
+  const { paths } = input;
+  // R12: the paused marker is read before stdin and before the database.
+  if (isPaused(paths)) return { outcome: 'paused', rows: 0 };
+  try {
+    ensureDirectories(paths);
+  } catch {
+    // FR-002: an unwritable data directory is an availability problem. The database and the spool
+    // are tried anyway, so the loss is counted and reported on stderr instead of raising here.
+  }
+
+  const capturedAt = deps.now();
+  const deadlineMs = hookDeadlineMs(input.agent, input.eventName);
+  const persist: PersistCapture = (identity, rows, entries, injection) =>
+    write({ deps, paths, identity, rows, diagnostics: entries, capturedAt, injection, deadlineMs });
+  const stdin = input.readStdin();
+  const diagnostics: Diagnostic[] = (input.priorFailures ?? []).map((code) => ({
+    kind: 'pi_child_failed',
+    agent: input.agent,
+    messageCode: code,
+  }));
+  const kindFromName = EVENT_KIND_BY_NAME[input.eventName];
+  const payloadHash = contentHash(stdin.text);
+
+  const context = { paths, capturedAt, diagnostics, kindFromName, payloadHash };
+
+  // FR-006: an invocation whose handler carries no fixed selector keeps `unknown` provenance, and
+  // its payload is never read as an agent's payload; doctor reports the counter.
+  if (input.agent === 'unknown') {
+    return captureUnknownAgent(deps, input, context, persist, deadlineMs);
+  }
+
+  const agent: AdapterAgent = input.agent;
+  let payload: unknown;
+  let parsed = true;
+  try {
+    payload = JSON.parse(stdin.text);
+  } catch {
+    parsed = false;
+  }
+
+  if (!parsed) {
+    return captureUnparsed(deps, input, {
+      agent,
+      stdin,
+      capturedAt,
+      diagnostics,
+      kindFromName,
+      payloadHash,
+    }, deadlineMs);
+  }
+
+  const adapted: AdapterOutput = adapt({ agent, eventName: input.eventName, payload, capturedAt });
+  return captureAdapted(deps, input, adapted, context, persist, deadlineMs, agent);
+}
+
+type UnparsedCaptureContext = Omit<CaptureContext, 'paths'> & {
+  agent: AdapterAgent;
+  stdin: StdinRead;
+};
+
+function persistUnparsedRows(
+  deps: CaptureDeps,
+  paths: OboetePaths,
+  identity: RepoIdentity,
+  rows: RowDraft[],
+  context: UnparsedCaptureContext,
+  deadlineMs: number,
+): Promise<CaptureOutcome> {
+  return write({
+    deps,
+    paths,
+    identity,
+    rows,
+    diagnostics: context.diagnostics,
+    capturedAt: context.capturedAt,
+    injection: undefined,
+    deadlineMs,
+  });
+}
+
+/**
  * A payload that did not parse. Above the read bound that is the expected case (A7): the read part
  * goes through the detector and is kept as a `partial` row with the kind of the `--event` argument
  * and the session id and paths of a bounded prefix scan. Below the bound the payload is broken, so
@@ -1025,14 +1150,7 @@ export async function captureEvent(deps: CaptureDeps, input: CaptureInput): Prom
 async function captureUnparsed(
   deps: CaptureDeps,
   input: CaptureInput,
-  context: {
-    agent: AdapterAgent;
-    stdin: StdinRead;
-    capturedAt: number;
-    diagnostics: Diagnostic[];
-    kindFromName: EventKind | undefined;
-    payloadHash: string;
-  },
+  context: UnparsedCaptureContext,
   deadlineMs: number,
 ): Promise<CaptureOutcome> {
   const { paths } = input;
@@ -1047,7 +1165,7 @@ async function captureUnparsed(
       agent: context.agent,
       messageCode: input.eventName || 'none',
     });
-    return write(deps, paths, identity, [], context.diagnostics, context.capturedAt, undefined, deadlineMs);
+    return persistUnparsedRows(deps, paths, identity, [], context, deadlineMs);
   }
 
   const base = {
@@ -1058,21 +1176,17 @@ async function captureUnparsed(
     capturedAt: context.capturedAt,
     payloadHash: context.payloadHash,
   };
-  const metadata: Record<string, unknown> = {
-    event: input.eventName,
-    tool_name: scanned.toolName ?? undefined,
-    paths: scanned.paths,
-  };
+  const metadata = scannedPayloadMetadata(input.eventName, scanned);
 
   if (!context.stdin.truncated) {
     const row = metadataRow({ ...base, payload: { ...metadata, failure_reason: 'payload_invalid' } });
-    return write(deps, paths, identity, [row], context.diagnostics, context.capturedAt, undefined, deadlineMs);
+    return persistUnparsedRows(deps, paths, identity, [row], context, deadlineMs);
   }
 
   const settings = readSettings(paths, identity.root);
   if (settings === null) {
     const row = metadataRow({ ...base, payload: { ...metadata, failure_reason: 'config_malformed' } });
-    return write(deps, paths, identity, [row], context.diagnostics, context.capturedAt, undefined, deadlineMs);
+    return persistUnparsedRows(deps, paths, identity, [row], context, deadlineMs);
   }
 
   const detected = await runDetector(deps, {
@@ -1083,9 +1197,29 @@ async function captureUnparsed(
   }, deadlineMs);
   if (!detected.ok) {
     const row = metadataRow({ ...base, payload: { ...metadata, failure_reason: detected.reason } });
-    return write(deps, paths, identity, [row], context.diagnostics, context.capturedAt, undefined, deadlineMs);
+    return persistUnparsedRows(deps, paths, identity, [row], context, deadlineMs);
   }
 
+  const row = partialCaptureRow(base, metadata, detected);
+  return persistUnparsedRows(deps, paths, identity, [row], context, deadlineMs);
+}
+
+function scannedPayloadMetadata(
+  eventName: string,
+  scanned: ReturnType<typeof scanPartialPrefix>,
+): Record<string, unknown> {
+  return {
+    event: eventName,
+    tool_name: scanned.toolName ?? undefined,
+    paths: scanned.paths,
+  };
+}
+
+function partialCaptureRow(
+  base: Omit<Parameters<typeof metadataRow>[0], 'payload'>,
+  metadata: Record<string, unknown>,
+  detected: Extract<DetectorResult, { ok: true }>,
+): RowDraft {
   const prefix = detected.pathRule === null ? (detected.texts[0] ?? '') : null;
   const row = metadataRow({
     ...base,
@@ -1098,7 +1232,7 @@ async function captureUnparsed(
   });
   row.content = prefix;
   row.contentHash = prefix === null ? null : contentHash(prefix);
-  return write(deps, paths, identity, [row], context.diagnostics, context.capturedAt, undefined, deadlineMs);
+  return row;
 }
 
 type CaptureSettings = { config: OboeteConfig; secretPaths: string[] };

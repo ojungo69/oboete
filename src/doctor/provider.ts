@@ -70,6 +70,65 @@ export async function providerItem(input: {
   now: number;
 }): Promise<DoctorItem> {
   const { config, paths, db, integrityFailed, deps, options, now } = input;
+  const configured = configuredProvider(config, integrityFailed, deps.env);
+  if (isDoctorItem(configured)) return configured;
+  const { config: readyConfig, preset, credentials } = configured;
+  const probe = providerProbeReadiness(readyConfig, preset, db, options, now);
+  if (isDoctorItem(probe)) return probe;
+  const { db: openDb, model, estimate } = probe;
+
+  try {
+    const outcome = await summarizeWithProvider(PROVIDER_PROBE_INPUT, {
+      preset,
+      model,
+      agentCli: readyConfig.observer.agent_cli,
+      credentials,
+      consentOk: () => consentMatches(readyConfig, deps.env),
+      reserve: () => doctorReserve(openDb, preset, now),
+      onExhausted: (reservationId) => recordExhausted(openDb, { preset, reservationId, now }),
+      fetch: deps.fetch,
+      spawn: deps.spawn,
+      now: deps.now,
+      timeoutMs: PROVIDER_PROBE_TIMEOUT_MS,
+    });
+
+    if (outcome.ok) {
+      return healthy(
+        'provider',
+        `Provider ${preset} answered with model ${outcome.resolvedModel ?? model}.`,
+      );
+    }
+    return degraded(
+      'provider',
+      outcomeSentence(outcome),
+      FALLBACK_CONSEQUENCE,
+      providerRecovery(outcome.reason, readyConfig, paths, deps.env, estimate.resetAt),
+    );
+  } catch (error) {
+    if (isBusyError(error)) return failedItem('provider', error);
+    throw error;
+  }
+}
+
+type ConfiguredProvider = {
+  config: OboeteConfig;
+  preset: Exclude<PresetName, 'none'>;
+  credentials: ReturnType<typeof readCredentials>;
+};
+
+type ProviderProbeReadiness =
+  | DoctorItem
+  | { db: DatabaseSync; model: string; estimate: ReturnType<typeof usageEstimate> };
+
+function isDoctorItem(value: object): value is DoctorItem {
+  return (value as Partial<DoctorItem>).status !== undefined;
+}
+
+function configuredProvider(
+  config: OboeteConfig | null,
+  integrityFailed: boolean,
+  env: NodeJS.ProcessEnv,
+): DoctorItem | ConfiguredProvider {
   if (config === null) return configUnread('provider');
   if (integrityFailed) {
     return dbUnread(
@@ -91,17 +150,26 @@ export async function providerItem(input: {
     );
   }
 
-  const credentials = readCredentials(preset, deps.env, config.observer.agent_cli);
+  const credentials = readCredentials(preset, env, config.observer.agent_cli);
   if (!credentials.present) {
     return degraded(
       'provider',
       `No credentials are set for the ${preset} preset (${credentials.source}).`,
       'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
-      credentialSteps(config, deps.env) ||
+      credentialSteps(config, env) ||
         '`oboete setup --provider <preset>` (workers-ai is the free remote default; ollama stays local)',
     );
   }
+  return { config, preset, credentials };
+}
 
+function providerProbeReadiness(
+  config: OboeteConfig,
+  preset: Exclude<PresetName, 'none'>,
+  db: DatabaseSync | null,
+  options: DoctorOptions,
+  now: number,
+): ProviderProbeReadiness {
   if (!options.probeProvider) {
     const last = db === null ? 'none yet' : lastProviderOutcome(db);
     return unverified(
@@ -124,6 +192,15 @@ export async function providerItem(input: {
 
   const model = (config.observer.model ?? PRESET_CATALOG[preset].defaultModel).trim();
   const estimate = usageEstimate(db, now);
+  const capItem = providerCapItem(preset, estimate);
+  if (capItem !== null) return capItem;
+  return { db, model, estimate };
+}
+
+function providerCapItem(
+  preset: Exclude<PresetName, 'none'>,
+  estimate: ReturnType<typeof usageEstimate>,
+): DoctorItem | null {
   if (PRESET_CATALOG[preset].capped && estimate.exhausted) {
     return degraded(
       'provider',
@@ -140,38 +217,7 @@ export async function providerItem(input: {
       `Wait for the reset at ${iso(estimate.resetAt)} or choose another preset with \`oboete setup --provider\`.`,
     );
   }
-
-  try {
-    const outcome = await summarizeWithProvider(PROVIDER_PROBE_INPUT, {
-      preset,
-      model,
-      agentCli: config.observer.agent_cli,
-      credentials,
-      consentOk: () => consentMatches(config, deps.env),
-      reserve: () => doctorReserve(db, preset, now),
-      onExhausted: (reservationId) => recordExhausted(db, { preset, reservationId, now }),
-      fetch: deps.fetch,
-      spawn: deps.spawn,
-      now: deps.now,
-      timeoutMs: PROVIDER_PROBE_TIMEOUT_MS,
-    });
-
-    if (outcome.ok) {
-      return healthy(
-        'provider',
-        `Provider ${preset} answered with model ${outcome.resolvedModel ?? model}.`,
-      );
-    }
-    return degraded(
-      'provider',
-      outcomeSentence(outcome),
-      FALLBACK_CONSEQUENCE,
-      providerRecovery(outcome.reason, config, paths, deps.env, estimate.resetAt),
-    );
-  } catch (error) {
-    if (isBusyError(error)) return failedItem('provider', error);
-    throw error;
-  }
+  return null;
 }
 
 function doctorReserve(
@@ -280,6 +326,14 @@ export function allowanceItem(
       '`oboete doctor` after storage is repaired.',
     );
   }
+  return allowanceEstimateItem(preset, db, now);
+}
+
+function allowanceEstimateItem(
+  preset: Exclude<PresetName, 'none'>,
+  db: DatabaseSync,
+  now: number,
+): DoctorItem {
   try {
     const estimate = usageEstimate(db, now);
     if (estimate.exhausted) {
@@ -343,6 +397,15 @@ export function catalogItems(
       ),
     ];
   }
+  return catalogCacheItems(config, cache, env, now);
+}
+
+function catalogCacheItems(
+  config: OboeteConfig,
+  cache: NonNullable<ReturnType<typeof cachedCatalog>>,
+  env: NodeJS.ProcessEnv,
+  now: number,
+): DoctorItem[] {
   const accountId = readCredentials('workers-ai', env).values.accountId ?? '';
   if (cache.accountId !== accountId) {
     return [
@@ -364,6 +427,13 @@ export function catalogItems(
       ),
     ];
   }
+  return catalogModelItems(config, cache);
+}
+
+function catalogModelItems(
+  config: OboeteConfig,
+  cache: NonNullable<ReturnType<typeof cachedCatalog>>,
+): DoctorItem[] {
   const configured = (config.observer.model ?? PRESET_CATALOG['workers-ai'].defaultModel).trim();
   if (!cache.models.includes(configured)) {
     return [

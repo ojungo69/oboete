@@ -132,13 +132,7 @@ function group(wiring: Wiring, options: CodexSetupOptions): CodexGroup {
   return group;
 }
 
-/**
- * The MCP registration and one trust row per oboete handler, keyed by the position the handler
- * holds in the merged `hooks.json`: a group the developer wrote ahead of oboete's shifts the
- * index, so the positions are read back from the file rather than assumed. Only oboete's own
- * handlers get a row; trusting the developer's hooks is not oboete's decision to make.
- */
-function blockText(hooksPath: string, options: CodexSetupOptions, recoverFrom?: string): string {
+function currentTrustState(hooksPath: string): Record<string, { trusted_hash: string }> {
   const merged = mergedGroups(hooksPath);
   const state: Record<string, { trusted_hash: string }> = {};
   for (const wiring of WIRING) {
@@ -151,31 +145,64 @@ function blockText(hooksPath: string, options: CodexSetupOptions, recoverFrom?: 
       });
     });
   }
+  return state;
+}
+
+function readRecoveryConfig(recoverFrom: string): Record<string, unknown> | null {
+  let config: Record<string, unknown> | null = null;
+  try {
+    config = parseToml(readFileSync(recoverFrom, 'utf8'));
+  } catch {
+    // Unreadable recovery config: with no block to strip, removeTomlBlock cuts a marked region and
+    // refuses a marker-less file, which is what such a file gets either way.
+  }
+  return config;
+}
+
+function restoreWiringTrust(
+  hooksPath: string,
+  options: CodexSetupOptions,
+  wiring: Wiring,
+  rows: Record<string, unknown>,
+  state: Record<string, { trusted_hash: string }>,
+): void {
+  const prefix = trustKey(hooksPath, wiring.event, 0, 0).slice(0, -3);
+  const expected = group(wiring, options);
+  const hashes = new Set([
+    trustedHash(wiring.event, expected.matcher, expected.hooks[0]),
+    ...Object.entries(state).filter(([key]) => key.startsWith(prefix)).map(([, row]) => row.trusted_hash),
+  ]);
+  for (const [key, row] of Object.entries(rows)) {
+    if (key.startsWith(prefix) && /^\d+:\d+$/.test(key.slice(prefix.length)) &&
+      isPlainObject(row) && typeof row.trusted_hash === 'string' && hashes.has(row.trusted_hash)) {
+      state[key] = { trusted_hash: row.trusted_hash };
+    }
+  }
+}
+
+function restoreTrustState(
+  hooksPath: string,
+  options: CodexSetupOptions,
+  config: Record<string, unknown>,
+  state: Record<string, { trusted_hash: string }>,
+): void {
+  const rows = isPlainObject(config.hooks) && isPlainObject(config.hooks.state) ? config.hooks.state : {};
+  // BUG-ASSESSMENT.md: trust hashes retain bundle identity even when hook positions are lost.
+  for (const wiring of WIRING) restoreWiringTrust(hooksPath, options, wiring, rows, state);
+}
+
+/**
+ * The MCP registration and one trust row per oboete handler, keyed by the position the handler
+ * holds in the merged `hooks.json`: a group the developer wrote ahead of oboete's shifts the
+ * index, so the positions are read back from the file rather than assumed. Only oboete's own
+ * handlers get a row; trusting the developer's hooks is not oboete's decision to make.
+ */
+function blockText(hooksPath: string, options: CodexSetupOptions, recoverFrom?: string): string {
+  const state = currentTrustState(hooksPath);
   if (recoverFrom !== undefined && existsSync(recoverFrom)) {
-    let config;
-    try {
-      config = parseToml(readFileSync(recoverFrom, 'utf8'));
-    } catch {
-      // Unreadable recovery config: with no block to strip, removeTomlBlock cuts a marked region and
-      // refuses a marker-less file, which is what such a file gets either way.
-      return '';
-    }
-    const rows = isPlainObject(config.hooks) && isPlainObject(config.hooks.state) ? config.hooks.state : {};
-    // BUG-ASSESSMENT.md: trust hashes retain bundle identity even when hook positions are lost.
-    for (const wiring of WIRING) {
-      const prefix = trustKey(hooksPath, wiring.event, 0, 0).slice(0, -3);
-      const expected = group(wiring, options);
-      const hashes = new Set([
-        trustedHash(wiring.event, expected.matcher, expected.hooks[0]),
-        ...Object.entries(state).filter(([key]) => key.startsWith(prefix)).map(([, row]) => row.trusted_hash),
-      ]);
-      for (const [key, row] of Object.entries(rows)) {
-        if (key.startsWith(prefix) && /^\d+:\d+$/.test(key.slice(prefix.length)) &&
-          isPlainObject(row) && typeof row.trusted_hash === 'string' && hashes.has(row.trusted_hash)) {
-          state[key] = { trusted_hash: row.trusted_hash };
-        }
-      }
-    }
+    const config = readRecoveryConfig(recoverFrom);
+    if (config === null) return '';
+    restoreTrustState(hooksPath, options, config, state);
   }
   // `hooks` and `hooks.state` carry no key of their own, so smol-toml emits only the
   // `[hooks.state."<key>"]` rows and never a `[hooks]` header to collide with the developer's.

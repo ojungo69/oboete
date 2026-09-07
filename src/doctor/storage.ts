@@ -67,6 +67,10 @@ export function openStorage(paths: OboetePaths): StorageOpen {
     };
   }
 
+  return openExistingStorage(paths);
+}
+
+function openExistingStorage(paths: OboetePaths): StorageOpen {
   try {
     // `hook: true` reads the schema version without migrating: a diagnosis must not rewrite the
     // file it examines, and the migration item is the one that names a pending migration.
@@ -90,54 +94,62 @@ export function openStorage(paths: OboetePaths): StorageOpen {
     }
     return finishStorageOpen(paths, opened.db, opened.schemaVersion, false);
   } catch (error) {
-    if (error instanceof SchemaAheadError) {
-      return {
-        item: healthy(
-          'storage',
-          `\`${paths.db}\` opened; the schema is newer than this bundle knows.`,
-        ),
-        db: null,
-        schemaVersion: error.userVersion,
-        schemaAhead: true,
-        integrityFailed: false,
-      };
-    }
-    if (isIntegrityFailure(error)) {
-      return {
-        item: degraded(
-          'storage',
-          integritySentence(error),
-          'Hooks spool every event; nothing is summarized, injected or searchable until storage is repaired.',
-          CORRUPT_RECOVERY,
-        ),
-        db: null,
-        schemaVersion: null,
-        schemaAhead: false,
-        integrityFailed: true,
-      };
-    }
-    if (isReadonlyError(error)) {
-      return {
-        item: notWritableItem(paths),
-        db: null,
-        schemaVersion: null,
-        schemaAhead: false,
-        integrityFailed: false,
-      };
-    }
+    return storageOpenFailure(paths, error);
+  }
+}
+
+function storageOpenFailure(paths: OboetePaths, error: unknown): StorageOpen {
+  if (error instanceof SchemaAheadError) {
+    return schemaAheadStorage(paths, error.userVersion);
+  }
+  if (isIntegrityFailure(error)) {
     return {
       item: degraded(
         'storage',
-        describe(error),
-        'Hooks spool every event and nothing is summarized or injected.',
-        '`oboete setup`',
+        integritySentence(error),
+        'Hooks spool every event; nothing is summarized, injected or searchable until storage is repaired.',
+        CORRUPT_RECOVERY,
       ),
+      db: null,
+      schemaVersion: null,
+      schemaAhead: false,
+      integrityFailed: true,
+    };
+  }
+  if (isReadonlyError(error)) {
+    return {
+      item: notWritableItem(paths),
       db: null,
       schemaVersion: null,
       schemaAhead: false,
       integrityFailed: false,
     };
   }
+  return {
+    item: degraded(
+      'storage',
+      describe(error),
+      'Hooks spool every event and nothing is summarized or injected.',
+      '`oboete setup`',
+    ),
+    db: null,
+    schemaVersion: null,
+    schemaAhead: false,
+    integrityFailed: false,
+  };
+}
+
+function schemaAheadStorage(paths: OboetePaths, schemaVersion: number): StorageOpen {
+  return {
+    item: healthy(
+      'storage',
+      `\`${paths.db}\` opened; the schema is newer than this bundle knows.`,
+    ),
+    db: null,
+    schemaVersion,
+    schemaAhead: true,
+    integrityFailed: false,
+  };
 }
 
 function finishStorageOpen(
@@ -151,34 +163,16 @@ function finishStorageOpen(
     const result = row?.quick_check;
     if (result !== 'ok') {
       closeQuietly(db);
-      return {
-        item: degraded(
-          'storage',
-          `PRAGMA quick_check returned ${String(result)}.`,
-          'Hooks spool every event; nothing is summarized, injected or searchable until storage is repaired.',
-          CORRUPT_RECOVERY,
-        ),
-        db: null,
+      return integrityFailureStorage(
         schemaVersion,
         schemaAhead,
-        integrityFailed: true,
-      };
+        `PRAGMA quick_check returned ${String(result)}.`,
+      );
     }
   } catch (error) {
     if (isIntegrityFailure(error)) {
       closeQuietly(db);
-      return {
-        item: degraded(
-          'storage',
-          integritySentence(error),
-          'Hooks spool every event; nothing is summarized, injected or searchable until storage is repaired.',
-          CORRUPT_RECOVERY,
-        ),
-        db: null,
-        schemaVersion,
-        schemaAhead,
-        integrityFailed: true,
-      };
+      return integrityFailureStorage(schemaVersion, schemaAhead, integritySentence(error));
     }
     throw error;
   }
@@ -193,6 +187,25 @@ function finishStorageOpen(
     schemaVersion,
     schemaAhead,
     integrityFailed: false,
+  };
+}
+
+function integrityFailureStorage(
+  schemaVersion: number,
+  schemaAhead: boolean,
+  reason: string,
+): StorageOpen {
+  return {
+    item: degraded(
+      'storage',
+      reason,
+      'Hooks spool every event; nothing is summarized, injected or searchable until storage is repaired.',
+      CORRUPT_RECOVERY,
+    ),
+    db: null,
+    schemaVersion,
+    schemaAhead,
+    integrityFailed: true,
   };
 }
 

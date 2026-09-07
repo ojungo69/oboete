@@ -185,13 +185,21 @@ function sameMcpCommand(value: unknown, expected: unknown): boolean {
     value.command === expected.command && isDeepStrictEqual(value.args, expected.args);
 }
 
+function hasOnlyOwnedMcpKeys(value: Record<string, unknown>): boolean {
+  return Object.keys(value).every((key) => ['command', 'args', 'enabled'].includes(key));
+}
+
+function sameTrustRow(value: Record<string, unknown>, expected: Record<string, unknown>): boolean {
+  return Object.keys(expected).length === 1 && typeof expected.trusted_hash === 'string' &&
+    isDeepStrictEqual(value, expected);
+}
+
 function sameOwnedTable(value: unknown, expected: unknown): boolean {
   if (!isPlainObject(value) || !isPlainObject(expected)) return false;
   if (sameMcpCommand(value, expected)) {
-    return Object.keys(value).every((key) => ['command', 'args', 'enabled'].includes(key));
+    return hasOnlyOwnedMcpKeys(value);
   }
-  return Object.keys(expected).length === 1 && typeof expected.trusted_hash === 'string' &&
-    isDeepStrictEqual(value, expected);
+  return sameTrustRow(value, expected);
 }
 
 function stripTomlTables(lines: string[], current: unknown, expected: unknown, previous?: unknown): string[] {

@@ -99,31 +99,7 @@ export function openDatabase(options: {
     throw new DatabaseMissingError(`Database file does not exist: ${options.path}`);
   }
 
-  const db = new (loadSqlite().DatabaseSync)(options.path, { timeout: options.timeoutMs });
-  try {
-    db.exec('PRAGMA journal_mode = WAL');
-    db.exec('PRAGMA foreign_keys = ON');
-    db.exec('PRAGMA synchronous = NORMAL');
-    if (hook) {
-      db.exec('PRAGMA wal_autocheckpoint = 0');
-      const schemaVersion = readUserVersion(db);
-      return {
-        db,
-        schemaVersion,
-        schemaBehind: schemaVersion < LATEST_SCHEMA_VERSION,
-      };
-    }
-
-    const schemaVersion = migrate(db);
-    return { db, schemaVersion, schemaBehind: false };
-  } catch (error) {
-    try {
-      db.close();
-    } catch {
-      // Prefer the original open/migrate error.
-    }
-    throw error;
-  }
+  return openConfiguredDatabase(options, hook);
 }
 
 function readUserVersion(db: DatabaseSync): number {
@@ -207,4 +183,35 @@ function migrate(db: DatabaseSync): number {
   }
 
   return userVersion;
+}
+
+function openConfiguredDatabase(
+  options: Parameters<typeof openDatabase>[0],
+  hook: boolean,
+): OpenedDatabase {
+  const db = new (loadSqlite().DatabaseSync)(options.path, { timeout: options.timeoutMs });
+  try {
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('PRAGMA synchronous = NORMAL');
+    if (hook) {
+      db.exec('PRAGMA wal_autocheckpoint = 0');
+      const schemaVersion = readUserVersion(db);
+      return {
+        db,
+        schemaVersion,
+        schemaBehind: schemaVersion < LATEST_SCHEMA_VERSION,
+      };
+    }
+
+    const schemaVersion = migrate(db);
+    return { db, schemaVersion, schemaBehind: false };
+  } catch (error) {
+    try {
+      db.close();
+    } catch {
+      // Prefer the original open/migrate error.
+    }
+    throw error;
+  }
 }
