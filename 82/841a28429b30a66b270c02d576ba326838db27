@@ -1,0 +1,21 @@
+scripts/quality-debt-record-services.test.mjs
+  s_359fcac8e97f88::t_baf0aa67a8d23f 309-313
+specs/008-quality-debt-zero/quickstart.md
+  s_359fcac8e97f88::t_baf0aa67a8d23f 7-12,64-65,84-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "82841a28429b30a66b270c02d576ba326838db27",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
