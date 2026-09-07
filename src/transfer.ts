@@ -216,12 +216,42 @@ function applyLine(
     return;
   }
 
+  insertImported(db, line, { id, repoId, content, title, body, tombstone });
+  if (tombstone) counts.tombstones += 1;
+  else counts.inserted += 1;
+}
+
+/** The row and its citations, as they land on a first import. */
+function insertImported(db: DatabaseSync, line: ExportLine, row: ImportedRow): void {
   // R12: an active row lands quarantined; a tombstone keeps only its hashes and its time.
-  const sensitivity = tombstone ? line.sensitivity : stricter('local_only', line.sensitivity);
+  const sensitivity = row.tombstone
+    ? line.sensitivity
+    : stricter('local_only', line.sensitivity);
   db.prepare(
     `INSERT INTO memories (${MEMORY_COLUMNS}, cjk_bigrams)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
-  ).run(
+  ).run(...memoryValues(line, row, sensitivity));
+  insertSources(db, row.id, line.sources);
+}
+
+/** The identity and text an imported row carries, all recomputed locally. */
+type ImportedRow = {
+  id: string;
+  repoId: string;
+  content: string;
+  title: string;
+  body: string;
+  tombstone: boolean;
+};
+
+/** The memories row in MEMORY_COLUMNS order, with cjk_bigrams last. */
+function memoryValues(
+  line: ExportLine,
+  row: ImportedRow,
+  sensitivity: ExportLine['sensitivity'],
+): (string | number | null)[] {
+  const { id, repoId, content, title, body, tombstone } = row;
+  return [
     id,
     repoId,
     line.type,
@@ -241,16 +271,18 @@ function applyLine(
     line.deleted_at,
     line.created_at,
     tombstone ? '' : cjkBigrams(`${title} ${body}`),
-  );
+  ];
+}
+
+/** The citations of one imported memory. */
+function insertSources(db: DatabaseSync, id: string, sources: ExportLine['sources']): void {
   const insertSource = db.prepare(
     `INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, citation_value, source_agent)
      VALUES (?, NULL, ?, ?, ?)`,
   );
-  for (const source of line.sources) {
+  for (const source of sources) {
     insertSource.run(id, source.citation_kind, source.citation_value, source.source_agent);
   }
-  if (tombstone) counts.tombstones += 1;
-  else counts.inserted += 1;
 }
 
 /** One physical line as JSON, or the reason it cannot be read. */

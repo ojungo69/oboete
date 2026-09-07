@@ -1027,25 +1027,30 @@ function isPiInjectEvent(line: Line): boolean {
 }
 
 /** Runs `oboete inject` for one Pi line and files its pack and its sample like a hook's. */
-async function injectPiLine(
-  run: ReplayRun,
-  line: Line,
-  payload: unknown,
-  seen: { isPendingStart: boolean; holdActive: boolean },
-): Promise<Spawned> {
+/** The stdin of `oboete inject --agent pi`, from the fixture envelope. */
+function piInjectInput(run: ReplayRun, payload: unknown): string {
   const envelope = payload as {
     cwd?: unknown;
     session_id?: unknown;
     model?: unknown;
     payload?: { text?: unknown };
   };
-  const kind = line.event === 'session_start' ? 'start' : 'prompt';
-  const injectInput = JSON.stringify({
+  return JSON.stringify({
     cwd: typeof envelope.cwd === 'string' ? envelope.cwd : run.repo,
     session_id: typeof envelope.session_id === 'string' ? envelope.session_id : nativeSessionId('pi', payload),
     prompt: typeof envelope.payload?.text === 'string' ? envelope.payload.text : undefined,
     model: typeof envelope.model === 'string' ? envelope.model : undefined,
   });
+}
+
+async function injectPiLine(
+  run: ReplayRun,
+  line: Line,
+  payload: unknown,
+  seen: { isPendingStart: boolean; holdActive: boolean },
+): Promise<Spawned> {
+  const kind = line.event === 'session_start' ? 'start' : 'prompt';
+  const injectInput = piInjectInput(run, payload);
   const injected = await runChild(
     run.bundle,
     ['inject', '--agent', 'pi', '--kind', kind],
@@ -1355,6 +1360,7 @@ export async function runFixture(argv: string[]): Promise<number> {
   if (typeof plan === 'number') return plan;
   const { values, fixturePath, outPath, root, bundle, lines, sessionWindows } = plan;
 
+  const maps = corpus(root);
   const { home, createdHome } = replayHome(values);
   const keep = values.keep === true;
   const startedAt = new Date().toISOString();
@@ -1366,23 +1372,39 @@ export async function runFixture(argv: string[]): Promise<number> {
     envBase: replayEnv(home),
     paths: oboetePaths(home),
     lines,
-    maps: corpus(root),
+    maps,
     sessionWindows,
   });
-  let workerPollDb: ReturnType<typeof openDatabase>['db'] | undefined;
-  let workerPoll: ReturnType<typeof setInterval> | undefined;
-
   try {
     initRepo(run.repo);
     mkdirSync(home, { recursive: true, mode: 0o700 });
     ensureDirectories(run.paths);
     const created = createDatabase(run);
     if (created !== null) return created;
-    const dbBytesBefore = fileBytes(run.paths.db) + fileBytes(`${run.paths.db}-wal`);
-    workerPollDb = openDatabase({ path: run.paths.db, timeoutMs: 0, hook: true }).db;
-    const workerPid = workerPollDb.prepare('SELECT pid FROM worker_lease WHERE id = 1');
-    workerPoll = setInterval(() => pollHookWorker(run, workerPid), 50);
+    return await driveRun(run, { values, outPath, fixturePath, startedAt, loadAtStart });
+  } finally {
+    cleanupReplay({ home, repo: run.repo, keep, createdHome });
+  }
+}
 
+/** The fixture lines, the worker settle, and the report, under the worker poll. */
+async function driveRun(
+  run: ReplayRun,
+  ctx: {
+    values: ReplayPlan['values'];
+    outPath: string | undefined;
+    fixturePath: string;
+    startedAt: string;
+    loadAtStart: ReturnType<typeof loadAverage>;
+  },
+): Promise<number> {
+  const { values, outPath, fixturePath, startedAt, loadAtStart } = ctx;
+  const dbBytesBefore = fileBytes(run.paths.db) + fileBytes(`${run.paths.db}-wal`);
+  const workerPollDb = openDatabase({ path: run.paths.db, timeoutMs: 0, hook: true }).db;
+  const workerPid = workerPollDb.prepare('SELECT pid FROM worker_lease WHERE id = 1');
+  const workerPoll = setInterval(() => pollHookWorker(run, workerPid), 50);
+
+  try {
     for (const line of run.lines) {
       const exit = await replayLine(run, line);
       if (exit !== null) return exit;
@@ -1401,8 +1423,7 @@ export async function runFixture(argv: string[]): Promise<number> {
     return measured.failed ? 1 : 0;
   } finally {
     clearInterval(workerPoll);
-    workerPollDb?.close();
-    cleanupReplay({ home, repo: run.repo, keep, createdHome });
+    workerPollDb.close();
   }
 }
 
@@ -1795,23 +1816,23 @@ function compactionRows(db: ReturnType<typeof openDatabase>['db']) {
     .all() as { agent: unknown; native_session_id: unknown; classification_state: unknown }[];
 }
 
+/** What the verdicts are computed from. */
+type VerdictInput = {
+  duplicateGroups: unknown[];
+  leakedSecrets: string[];
+  leakedDirectives: string[];
+  recallJa: RecallHit[];
+  recallEn: RecallHit[];
+  lifecyclePass: boolean;
+  sc002: boolean;
+  injectionPass: boolean;
+  readyPass: boolean;
+  pendingPass: boolean;
+  workerRssKb: number;
+};
+
 /** Every printed pass or fail, and the exit code they add up to. */
-function verdictsOf(
-  input: MeasureInput,
-  m: {
-    duplicateGroups: unknown[];
-    leakedSecrets: string[];
-    leakedDirectives: string[];
-    recallJa: RecallHit[];
-    recallEn: RecallHit[];
-    lifecyclePass: boolean;
-    sc002: boolean;
-    injectionPass: boolean;
-    readyPass: boolean;
-    pendingPass: boolean;
-    workerRssKb: number;
-  },
-) {
+function verdictsOf(input: MeasureInput, m: VerdictInput) {
   const sc003 = m.workerRssKb < WORKER_RSS_BOUND_KB;
   const sc005 = m.leakedSecrets.length === 0;
   const sc009 =
@@ -1885,7 +1906,12 @@ function contentBounds(
   input: MeasureInput,
   computed: ReturnType<typeof computeReport>,
 ): BoundRow[] {
-  const { directivesPass, duplicateGroups, hooksPass, leakedDirectives, leakedSecrets, lifecyclePass, lifecycleRows, rawEvents, recallEn, recallJa, sc005, sc009, sc010 } = computed;
+  return [...leakBounds(input, computed), ...sequenceBounds(input, computed)];
+}
+
+/** SC-005, SC-009 and SC-010: what leaked, what was recalled, what was duplicated. */
+function leakBounds(input: MeasureInput, computed: ReturnType<typeof computeReport>): BoundRow[] {
+  const { duplicateGroups, leakedSecrets, rawEvents, recallEn, recallJa, sc005, sc009, sc010 } = computed;
   return [
     {
       sc: 'SC-005',
@@ -1905,6 +1931,16 @@ function contentBounds(
       bound: 'zero duplicate included memories per (conversation, epoch)',
       status: statusOf(sc010),
     },
+  ];
+}
+
+/** The lifecycle, directive and hook rows: sequences that must hold across the whole run. */
+function sequenceBounds(
+  input: MeasureInput,
+  computed: ReturnType<typeof computeReport>,
+): BoundRow[] {
+  const { directivesPass, hooksPass, leakedDirectives, lifecyclePass, lifecycleRows } = computed;
+  return [
     {
       sc: 'lifecycle',
       measured: lifecyclePass
@@ -1991,7 +2027,7 @@ function timingTables(
       String(row.truncated),
     ]),
   );
-  return { captureTable, injectionTable, waitRows, pushWait, waitTable, sizeTable };
+  return { captureTable, injectionTable, waitTable, sizeTable };
 }
 
 /** The recall misses, SC summary, hook exit, lifecycle and compaction tables. */
@@ -2223,15 +2259,13 @@ function reportMarkdown(
 }
 
 /** The same evidence as machine-readable JSON. */
-function reportJson(
+/** The timing, worker and growth halves of the machine report. */
+function timingJson(
   input: MeasureInput,
   computed: ReturnType<typeof computeReport>,
-  bounds: BoundRow[],
 ): Record<string, unknown> {
-  const { captureP99, captureUnder, captureValues, dbBytesAfter, duplicateGroups, failed, hooksPass, injectionItems, injections, leakedDirectives, leakedSecrets, lifecycleRows, memories, misses, negativesUnredacted, pending, pendingMax, pendingPass, perThousand, rawDirectiveRows, rawEvents, readyMax, readyPass, recallEn, recallJa, sc002, sc003, sc009, sc010, workerRssKb } = computed;
+  const { captureP99, captureUnder, captureValues, dbBytesAfter, injectionItems, injections, memories, pending, pendingMax, pendingPass, perThousand, rawEvents, readyMax, readyPass, sc002, sc003, workerRssKb } = computed;
   return {
-    startedAt: input.startedAt,
-    lines: input.lines.length,
     capture: { n: captureValues.length, p99: captureP99, under: captureUnder, pass: sc002 },
     injection: { n: input.injectionSamples.length, samples: input.injectionSamples },
     sessionStart: {
@@ -2254,6 +2288,19 @@ function reportJson(
       injections,
       injectionItems,
     },
+  };
+}
+
+function reportJson(
+  input: MeasureInput,
+  computed: ReturnType<typeof computeReport>,
+  bounds: BoundRow[],
+): Record<string, unknown> {
+  const { duplicateGroups, failed, hooksPass, leakedDirectives, leakedSecrets, lifecycleRows, misses, negativesUnredacted, rawDirectiveRows, rawEvents, recallEn, recallJa, sc009, sc010 } = computed;
+  return {
+    startedAt: input.startedAt,
+    lines: input.lines.length,
+    ...timingJson(input, computed),
     secrets: { leaked: leakedSecrets, negativesUnredacted },
     directives: { leaked: leakedDirectives.length, rawRows: rawDirectiveRows },
     recall: {

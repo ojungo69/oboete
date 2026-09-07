@@ -468,14 +468,12 @@ function writeInjection(
 }
 
 /** Shared tail of both builders: staleness, framing, budget, validation, ledger. */
-async function assemble(
+/** FR-029: every cited path and commit of every candidate, checked before the pack is built. */
+function checkedCitations(
   db: DatabaseSync,
   input: PackChannelInput,
   assembly: Assembly,
-): Promise<BuiltPack | null> {
-  const repositoryLine = `> repository: ${canonicalLine(withoutUserinfo(input.repoIdentityDisplay))}`;
-
-  // FR-029: every cited path and commit of every candidate is checked before the pack is built.
+): { citations: Map<string, Citation[]>; pathState: Map<string, boolean>; fresh: Set<string> } {
   const ids = assembly.memories.map((memory) => memory.id);
   const citations = citationsOf(db, ids);
   const all = [...citations.values()].flat();
@@ -490,6 +488,17 @@ async function assemble(
   const citesCommit = all.some((citation) => citation.kind === 'commit');
   const repoHead = citesCommit ? repositoryHead(input.repoRoot, input.remainingBudget?.()) : null;
   const fresh = repoHead === null ? new Set<string>() : freshCitations(db, ids, repoHead);
+  return { citations, pathState, fresh };
+}
+
+async function assemble(
+  db: DatabaseSync,
+  input: PackChannelInput,
+  assembly: Assembly,
+): Promise<BuiltPack | null> {
+  const repositoryLine = `> repository: ${canonicalLine(withoutUserinfo(input.repoIdentityDisplay))}`;
+
+  const { citations, pathState, fresh } = checkedCitations(db, input, assembly);
 
   const items = [
     ...assembly.memories.map((memory) =>
