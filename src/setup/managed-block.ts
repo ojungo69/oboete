@@ -202,7 +202,8 @@ function sameOwnedTable(value: unknown, expected: unknown): boolean {
   return sameTrustRow(value, expected);
 }
 
-function stripTomlTables(lines: string[], current: unknown, expected: unknown, previous?: unknown): string[] {
+/** Table headers outside multiline values, in source order; array tables have no removable path. */
+function findTomlTableHeaders(lines: string[]): { start: number; path: string[] }[] {
   const headers: { start: number; path: string[] }[] = [];
   for (const [start, line] of lines.entries()) {
     if (!line.trimStart().startsWith('[')) continue;
@@ -222,6 +223,11 @@ function stripTomlTables(lines: string[], current: unknown, expected: unknown, p
       continue;
     }
   }
+  return headers;
+}
+
+function stripTomlTables(lines: string[], current: unknown, expected: unknown, previous?: unknown): string[] {
+  const headers = findTomlTableHeaders(lines);
   let next = lines;
   for (let index = headers.length - 1; index >= 0; index -= 1) {
     const { start, path } = headers[index];
