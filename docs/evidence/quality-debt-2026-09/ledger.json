@@ -3,253 +3,295 @@
   "service": "sonar",
   "id": "AaB3XkjNIqdfylE4c2o5",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjNIqdfylE4c2o8",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjcIqdfylE4c2pF",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjNIqdfylE4c2o-",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjNIqdfylE4c2o9",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjNIqdfylE4c2pC",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjNIqdfylE4c2pE",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjNIqdfylE4c2o3",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjNIqdfylE4c2o4",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjNIqdfylE4c2pA",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjNIqdfylE4c2o6",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjNIqdfylE4c2o7",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjNIqdfylE4c2o_",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjNIqdfylE4c2pB",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjNIqdfylE4c2pD",
   "state": "excluded",
-  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)"
+  "where": "sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "codacy",
   "id": "3536c70ee8b5825f074e7598ca528b30",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "cb335d19da9f526c4e5fbd47c77423c8",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "780b6d1f8654fadb13c21ff5714aaa16",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "6a779d420ff1dcb3a78141e96b34b817",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "9b863612f97e9db14ac6c3c92f3324b3",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "dff3fce2903a07b3bc3da2202356ea8a",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "96d98f980e41884758c0e59a88ccf836",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "4ba87729a2aad660913aed1496522dc1",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b6f19e1f2b8fbfc1f0f0b55e717a6867",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "8337bfccee96baeff5ab20f739245fcc",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "4c2d09478ab7b1e67df58f4bf00f67d7",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "5fd689a9a9a917942db301a84f2d68c6",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "99462045d937b19947210ce4250831e5",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "1094856d70b2b8a0b49873854303101e",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "cb44ac1fb3a3505649febeff982a2c07",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "e3f3c83e64f4e5dc114958b4bc4f0005",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "128fa0cd306b18e93ee887abc0f9461a",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "3729976944f005ca13d56e48b77f7e48",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "e833fd112e34f4a081587bf1a9e8b4e6",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "2083272d07ba8bd360c7a1bf2b41fcff",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "303a4250149371efcda46e23bca25742",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "cae3b5dd6422699d6c5809c364c85028",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "a99854a404ef0ffd59900e6ff528a14d",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b8b451649664924a6efbcdf1752b656e",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "deb31f6072b18f73bf2c72edd7bcbde1",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "e124a523f7624203ac97b11a6e3a29f1",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "c412739744c311785e20e32b8219586c",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
@@ -261,1667 +303,1942 @@
   "service": "codacy",
   "id": "dccfba471a15a3133145a5910081d551",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "9a383588078107a413fed6db6feb8222",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "3c4bdb773c79f874408a31f7783908d2",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "ea7cae5417ec99e91ed8a55d5897c4cf",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "51792de63a192f9a79a1bdfafaf729c9",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "e912202051a72a486e24e5661f651f7e",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "1338b3c626cc57a0f8306d22aa8534bb",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "cb9078acb108dfa01d1f9dc7ce27ff83",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "189ff7c8c30c2c2146a4bb0a86e04c9f",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "36aad791312b974b923a9c64f5cb5c97",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "7001b39120b60918527820572a47897",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "2c93e68d6e3649b876e0edee9392612b",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "ad2657776a9d175fb7b54ce0db499d35",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "507158741da362479fdf92bee67ab229",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "35dfac2855d21608c677b2ebfe4053a8",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "42e93f79748cc2d26abdbd4dc7913cfc",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "fb09689e46c8a4906a68b840a815d5b2",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "efa71f11ccd707657fe09b0a7dec335c",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "6d9d3b2678aa8da13384925fb129116b",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "73c7e9ca62dde04d2c7d70b38b6fc808",
   "state": "excluded",
-  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)"
+  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "88ed289ddfd430c2ba19d6260f0d0eb7",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "ffdb7a2650c8e28bbda09430fd2066a7",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "7f7f8a5f13e30600b2e2c9cf641348f0",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "4982c20d40c8b926361c963fb54d185b",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "8cd01d1ba65a7ebff668532cd234bd4d",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "5c589b2d800f0584f57e26c9bf1c8d92",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "5d42d0f919bf2252a4cab40733dfaac2",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "729e685e5a2b08a311fa6a6c6fc7d63",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "57a3f055aa88329e48c70cd92d449762",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "8de53a9dc0bf68725cf24a842bf1262e",
   "state": "excluded",
-  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)"
+  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "8892536d3de382257b46924bb0c2b2d6",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "6bdbb64c10408573f8e7c99eec854ac1",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "59b9259f1438972c2f2f24a3f6bacee9",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "22c65a293eb5e81598eb8a25ee0a6c09",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "fd32a7c7ade1dbd5ab3e136ef90b5090",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "3a9735f18fc7f205178c94af815ab408",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "f750f242a32e2ae56f824f0747df48c7",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "c14b26b21fa269c4135c55bc627d6449",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "a1431986377f00326163811f99046de",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "99962a27ef95baab01555495da7c32e0",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "14d24f3ab10fdae90f91bb5d7ee65893",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "74c381f8cc9d244f40dda492648f5d53",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "8486f3aa7fe4eee69a1196ef8647fa83",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "d9fe61011b483caf37af5ea8d9cfc6c3",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "fa30b11d1a3332dac0ae58a345e0000b",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "623ef40b5d4499c449af2d162ed6156d",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "139208e243f34b6b15cade6337ca2e08",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b502efcc50740d92e75b60da391e179",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b294bf034ebae593e32cd84b39f420bb",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "30652370876693beff4df10babbb67af",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "bfe51da42268ec84060caa418838c75e",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "a610eb0854d5299a96dadcd52b35c3cd",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "91f972582bf40dcbf27e35bdcea39283",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "ea67156c2895ab4ede9d16a5e1a26c73",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "e022e0134178899ab5cb53f69a030296",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "2073e79ce8e93288565d20fed56e16ba",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "3979d89174e2ff73326bb7500cae56dc",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "3aeb7cad29c20f4ed59ca6ebf20c4d8e",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "42f7f15ba775feb09d48e0f39ac0697b",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "edd3de9a0ad5aad618ab9c1f614d4fcc",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "72498945213332fa105517c7f3ecde97",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "e4eea701d9771240bafcdcd37a187f68",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "bae787825c33429a01ee8b69429287b1",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "39f4a5ef8e7079322d436cfa7ebe426e",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "92d7fd4004f5dea88760ef7d123f3481",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "1ec7051454c4496061ccdd1bf05068c0",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "ad89cee0e960004d774787070092d3d0",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "d4466aa9ba6682b5cca442211d3fd9cc",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "9246022b16a22622d328331dc4b7759",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "a39e02858493c5e2dd01398efb555334",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "7cf2377ba9337299cb69f5fdb5f0efb4",
   "state": "excluded",
-  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)"
+  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "71eb3e089e61e5670774d002eeb2ba0f",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "155446c0c6ea6d067a29d36e95acd343",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "7dc74cb5fd3e0874acf666c85369ad93",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "fcb11a5527e523ef935887026d4c9767",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "73d60eb1e64d9bd8517be69d375f3faa",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "940b261112b867d043525e6162d43310",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "a04a363ec5085ca26acc77f2d5d343e4",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "a6281c230d924f257daa441461c9f3de",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "246441e0ae15ff80c511322b7349cb84",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "1c9a231ee05d8174e8949a9489b55843",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "cde33452c10cb47778f96e7ccde42775",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "76c90f47e3aa4d61dbaf1b92ec2a93d5",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "c269671a81060e213663a693df0852be",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "9d9b6911e166551d4b277b86859dbdce",
   "state": "excluded",
-  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)"
+  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "301400387ed1b908c5fa1386f863879d",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "bfb6f382f172896fe83a87603aa4e5bb",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "2a8417ee33d621661a0d394ada046434",
   "state": "excluded",
-  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)"
+  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "7693d5f89efbe903b80c23254f4d1b60",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "da078de23e1559235b4cfd995f66d91a",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "9357afb603980e1c2e2f1d6cc870a97c",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "5da6d23674cda3ba4da7fafd86c22627",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "43fce8d402763da6add56abbca377c27",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "1f62f8fb52577ac6affe874dc10e0fbe",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "3660f51e137957881ccc502b4fe4291b",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "ccca58cce6c8abffcf8c4e5efb9e8d49",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "2482c95e63adcd8fe9e665df29f0b406",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "23ee50367da8508741e0f84f56aeb53d",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "dfa839ae1107879d8febe15e7136f246",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "695f575e56ea4f57961bceff1afe1155",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "47bc274da533289abd8d253a021cc1dc",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "41ca13c879294973351648070392983d",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "55d2d415529d2d16e8017d0003910591",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "e09c267e647bb3218e41f387d4eada9f",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "50ba92a4c162ca7f7e40c7455dffc60c",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "5121e2bac3a33133533a00abb7ffcc1f",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "d4c8234b5d7a3b2d7cc8ba030b91862e",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "e2546cbfbe68687e67e8ceaf4b8c928c",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "8c875818e0498ae5b1d7f96734a11d4b",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "34e4e588dbe20c931c61c439bde15491",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "c1ddf3cf54f40c931008446c9b481dd6",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "1b3f2945ba64dd9d0408f52ed5be64ff",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "7f7592da8fab086c76fa0861abd9839a",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "43d192ad2b9355970560b24178c3a1f6",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "85d26b12df6b908bb7412219f1542c6",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b15fb16ea8231bb4e6f8342244cf120c",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "c5827fd89d0867463be87e10e735fc1f",
   "state": "excluded",
-  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)"
+  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "6cc0f0cf163dba95c6ce6659508fff80",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "2f1943cff014ecec4328edd0a5a4a8ef",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "99b67e40ce65b6bc3e974cf415284a19",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b12cb01d6f6a94f64813c0dd47d00726",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "5e065e65864febd4afce0de440bad3f5",
   "state": "excluded",
-  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)"
+  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b4ed76c7d8cb2f99b19a941a7a771d5e",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b22e10cf8a73fc88db8a7b4537266a1f",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "1430695c14daabb7b31650aeb51eda72",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b99c644cf61ba6aa0799da75c36f227",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "4d1e364aa1fcf6103fd4a89f9e7f1e70",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "606b3cd7eb776791d9066c6f6c6dcc9c",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "e502ad39b63a8f261185a0c54aba0633",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "593d735f9b8557fa5afcf9c5aa33464b",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "4568365464cac23f691ec92e6a0ee20f",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b4619766029e7251d522865ebf644399",
   "state": "excluded",
-  "where": ".codacy.yml exclude_paths (legacy/**, package-lock.json, build/**, dist/**, coverage/**)"
+  "where": ".codacy.yml exclude_paths (legacy/**, package-lock.json, build/**, dist/**, coverage/**)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "14b5d27c1e18dae59e3fc3baedbe2b90",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "f3967090ee4a88da7796cb64d88ec2a3",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "ac2e8e8997e04cbe34502db4d8a6f835",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "36037336430ef0e2f0d3e8567f8bbf9b",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "ff27bea75dc91add354af56ca38cd47",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "23d3489b09459eb4edd1affc5d410900",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "97bb6e3f01aaaccaf7ecf982df4697f2",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b534cb5fcf8bad98259d3b770646b87d",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b7ffc988267e098c96f71bab7ea979d3",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "3ef585f8eea0b8e6b2dd0ad1a8de0729",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "9284668591c6c2abb845cc291e413133",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "424090e37d00107772d291b48324a353",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "3f03c2393da1cd0f647aa1f07f19456b",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "7a302cafb42a1caf43bae80fe6eefe21",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "16acb3325ddc3a2814dbc8c1c0914bd4",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "47ec2f419e1a3d69efb8819846fb18bb",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "50d63d563abd209a7fac047ee230c105",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "24bda2fef1deb0310d953134e3fdec17",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "caa6249f2c872b457b16516b7420a314",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "34d33ba9b00726608f484622496a7fce",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "eb4d190f8082613c37cbceddd2e081ee",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "3c38819c4c0120be10886358bbd00451",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "a70490cbbc397f0440469152deea17d2",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "a46e8f6959f8067eff7a82b25d632f13",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "1bd1796137ab2f358811534de2e4d2d2",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "58094a8244fbf85791a96f199246d626",
   "state": "excluded",
-  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)"
+  "where": ".markdownlint.json MD024 siblings_only (repeated headings are per-section structure)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "3992845e47534cc14930e215aa61dc95",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "bdce2c15a17a7255cae8ecdcad7b26ca",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "43ed4d58ae9ab776cba9c9de3c3d10c1",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "93cfb71afd3c14ac192f09fa5cf20c08",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "9337eba7c08a96eb7f4d61dd2c9aa0a0",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "482933151109c23425e44215e6fa0802",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b825f821604e672d0cfbe025755c9d99",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "8e33cf7f7cf4fc0a952338c1f4c8f5bc",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "a2ff1ad4db95206c90f0fdbdcb0b7164",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "2be758ac8e7393a71f4e46a87acebe1d",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "a763b4d8ee37c313369dc624586df554",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "903e5e8377933c094bf841fbbe013360",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "5aac9e0a9aeaf90eb5827ad5b98fe099",
   "state": "excluded",
-  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "d09fe6edf52aa0920da7b88742c7455d",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "218278d3967ab3be233a2ebaddbe37bc",
   "state": "excluded",
-  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "8841d1d3cca65b1635d06136bc5b6b73",
   "state": "excluded",
-  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "af8029bf7e15f6dd7fde96da9f9fb43",
   "state": "excluded",
-  "where": ".codacy.yml exclude_paths (legacy/**, package-lock.json, build/**, dist/**, coverage/**)"
+  "where": ".codacy.yml exclude_paths (legacy/**, package-lock.json, build/**, dist/**, coverage/**)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "354e5538b2421839516fdcaee96b2374",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "82c772355ec4c4f1d33137f877c7881a",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "7efb75e09ce9dbbbe2f6ee7d0b6328fb",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b540cdfc0b4bc84574334ab1b24886b0",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "aaf43e3e5245d4fbfeaff63889f79f8b",
   "state": "excluded",
-  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "2382308285fd4741803b25116973e0fd",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "dd2a142fafeaa5446ccbef7ee3bf06fa",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "eba9e4f2bbcebf52ce5b40f31e44b1e5",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "bf68f47f8029c8367df963e7f9c31cc1",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "adc24e93056348882acf6ea5b1698298",
   "state": "excluded",
-  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b2917116744bb97e405d89185671999d",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "272040e51efcf24e37091548f17039cb",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "c1fb01c937931957a084ace4cb5c20f1",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "2d118566fa7f861e1df0f7708adff751",
   "state": "excluded",
-  "where": ".codacy.yml exclude_paths (legacy/**, package-lock.json, build/**, dist/**, coverage/**)"
+  "where": ".codacy.yml exclude_paths (legacy/**, package-lock.json, build/**, dist/**, coverage/**)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "9acd559c4eed33ff57a670bd7b02b9fc",
   "state": "excluded",
-  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "e47398758fbd45c65bea8ca7cfb0663f",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "82e1b1a2994d99e9707e63b4f8c6a4bd",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "69f11c43f2345790efaae5e40381a7ee",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b3117a9b1f04f8cd975573d12ed9aa5a",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "36ed4cb5c0f6520a05c384f863e51989",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "976292bf732d5c7a54d298535ba5b838",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "329090587cef292d63ce40552b5ed37",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "52576a601d4c7ed126f3b89167e8a4b2",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "357b924ec62d9de911d388e42a144d21",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "619c65c86d1f9cb5cc7e46e109f1367f",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "62939ea141043036c15ca75e2fe53ad5",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "b3c56bd47092f59598324e19a8c79f1d",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "f125a147a16dd2ffd6ec505d1a10025c",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "1fc22dfc933952024dda95f02b0b64a",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "1ef737e1a36c40654614d574e7507f4b",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "71505be25855504e239b2ef2f5a591cd",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "edea31501f449b9dadd8f1aac0f85363",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "6dcfff68255223ab7dc3d2f991b1b51",
   "state": "excluded",
-  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "68d1de22c1209bfe63f84ee18f2c886b",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "5f462367d1412a79e89183438e71a5df",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "8274023d1d3f9f5716f0f3919eff0a6",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "8d7c819898c9f11024f0635831e7bae2",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "45c6f74ef1710ac87b341d184550d3d1",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "da9922607b53e56e63f2e3843799462e",
   "state": "excluded",
-  "where": ".codacy.yml exclude_paths (legacy/**, package-lock.json, build/**, dist/**, coverage/**)"
+  "where": ".codacy.yml exclude_paths (legacy/**, package-lock.json, build/**, dist/**, coverage/**)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "c4e0293324537688f7bc0907445eca0b",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "ceea4de2e19a14b9667f3a9429492c79",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "4063b8f9da159effa14b2b1b62ee2027",
   "state": "excluded",
-  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "c3b50f5dd494b9cb342aaf42fd8b4aef",
   "state": "excluded",
-  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "de0e737f6eff1acda55f7b447b8c7df5",
   "state": "excluded",
-  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "549bbe133beefce3c9e88cf4f8164e9b",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "e5ca519808bf52467e255fd9eb9f1af4",
   "state": "excluded",
-  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "5c789b08593776ed027547d3e440d69a",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "f405411bd97afa79fe3636bc80fc414f",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "513d17814cab31ba73ffe117f84a921c",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "ac9c62e10e48b1c034ca7c363a6f3cb3",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "82bd08ccac0befa20054fc4eabfcc21e",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "1c719452d200a9889b71f93789f9116a",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "3abc40293b30e91bbdec962ba9b2b4f2",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "ac96ab6671626db5bb71b92a7b95b8dc",
   "state": "excluded",
-  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)"
+  "where": ".codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "5e6f19147e27d75820051f16f14c9b97",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "4185267b557f87f4711a850d5324f9ad",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "86ce37c0014ca087ff5b4b6a63fe9576",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "db645f6cdfe045e4cc43c01d7efb16aa",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "1b1ed6f7ce816cef1a82abc5201197f5",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "435a172b850f415065bcdd05874fb402",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "93f5958355352a2a1c4bb24a7b033ade",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "72f5dc2775f0cf36fc96e99b66fd02e9",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "3c9505a8324b4ec565678fad178a66ce",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "665cac56b505302ad66145333d3b1f05",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "ab0b74f030fb484c4df74a304ed43ad",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "c47d70c327f73ad1491f3586a980b6c5",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "7847a1f89fd21ab4e11adf143200faf4",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "116d180e053268fd5387962849249cb7",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "dae895bac3c05f8d73c00f3e0db3d406",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "c0aadf2687d17691105e9ad3f9813f3c",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "476757e55dff21c0262cbf21be608528",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "bd45817214555c433d1794c784fb2721",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "dee04322a08ca04e268589b162a75a2d",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "5eb2f4b55d593208dcf28fe0741c2869",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "542f40bc2709db2f7cc202b3d67c67e2",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "cedbbaf80a9b1ebecc3b83a669250485",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "2073451f74f35a3eeec776c3836b61a7",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "d1571f7137ace2897e4750e125345b7a",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "cc6e29996b9888962a9004f0d7e94d2a",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "4502e71422d363963bc319b3f65fbcbe",
   "state": "excluded",
-  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)"
+  "where": ".codacy.yml engines.lizard.exclude_paths test/** (linear test bodies)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "573e0f173d64df8c16549634a6f4be69",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "5ef8c8258e2c68913eb0c0d1de21b81b",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "876d4687199627eef21a8a1696967710",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "8d7c0aaca1c1e2feee03858ac5214591",
   "state": "excluded",
-  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)"
+  "where": ".codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set)",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "sonar",
   "id": "AaB3XklBIqdfylE4c2pc",
   "state": "fixed",
   "where": "#160",
-  "verdict": "agent output captured by the privacy detector, up to 1 MiB, controller: agent or the model behind it; effect: 1.4 s per 50,000 spaces after `<` blew the detector deadline (fail-closed drop) — real, fixed with a regex that examines each character once"
+  "verdict": "agent output captured by the privacy detector, up to 1 MiB, controller: agent or the model behind it; effect: 1.4 s per 50,000 spaces after `<` blew the detector deadline (fail-closed drop) — real, fixed with a regex that examines each character once",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmSIqdfylE4c2p4",
   "state": "fixed",
   "where": "#160",
-  "verdict": "tool_name from the agent hook payload, a substring of the capped stdin with no cap of its own, controller: agent; effect: 1.3 s per 40,000-character name in the capture hook — real, fixed with an indexOf split"
+  "verdict": "tool_name from the agent hook payload, a substring of the capped stdin with no cap of its own, controller: agent; effect: 1.3 s per 40,000-character name in the capture hook — real, fixed with an indexOf split",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmSIqdfylE4c2p5",
   "state": "fixed",
   "where": "#160",
-  "verdict": "same value and fix as events.ts:328 (codex spelling)"
+  "verdict": "same value and fix as events.ts:328 (codex spelling)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmSIqdfylE4c2p6",
   "state": "fixed",
   "where": "#160",
-  "verdict": "same value and fix as events.ts:328 (grok spelling, no prefix)"
+  "verdict": "same value and fix as events.ts:328 (grok spelling, no prefix)",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkoIqdfylE4c2pV",
   "state": "fixed",
   "where": "#160",
-  "verdict": "git remote URL from the clone's own .git/config, controller: whoever configured this clone; effect: bounded by the URL length — not exploitable, replaced by a loop for the rule"
+  "verdict": "git remote URL from the clone's own .git/config, controller: whoever configured this clone; effect: bounded by the URL length — not exploitable, replaced by a loop for the rule",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkoIqdfylE4c2pW",
   "state": "fixed",
   "where": "#160",
-  "verdict": "same value as repo-identity.ts:63"
+  "verdict": "same value as repo-identity.ts:63",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkcRIqdfylE4c2nj",
   "state": "fixed",
   "where": "#160",
-  "verdict": "managed block text built from oboete's own setup templates (the operator's file is parsed as TOML, never by this pattern) — not exploitable, replaced by a loop for the rule"
+  "verdict": "managed block text built from oboete's own setup templates (the operator's file is parsed as TOML, never by this pattern) — not exploitable, replaced by a loop for the rule",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkqvIqdfylE4c2ru",
   "state": "fixed",
   "where": "#160",
-  "verdict": "agent stdout captured by the e2e harness (degraded marker line), controller: the agent under test; effect: super-linear on that line before the rewrite, on an operator-run harness — not exploitable; anchored single-pass patterns now, linear in the line"
+  "verdict": "agent stdout captured by the e2e harness (degraded marker line), controller: the agent under test; effect: super-linear on that line before the rewrite, on an operator-run harness — not exploitable; anchored single-pass patterns now, linear in the line",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkrWIqdfylE4c2sD",
   "state": "fixed",
   "where": "#160",
-  "verdict": "the client's own config.toml as read by the harness, controller: whoever writes that file; effect: super-linear on the file before the rewrite, on an operator-run harness — not exploitable; trimEnd now, linear in the file"
+  "verdict": "the client's own config.toml as read by the harness, controller: whoever writes that file; effect: super-linear on the file before the rewrite, on an operator-run harness — not exploitable; trimEnd now, linear in the file",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XknlIqdfylE4c2qa",
   "state": "fixed",
   "where": "#160",
-  "verdict": "fenced model reply in the probe harness, controller: the model behind the agent under test; effect: super-linear on the reply before the rewrite, on an operator-run harness — not exploitable; startsWith/endsWith/slice now, linear in the reply"
+  "verdict": "fenced model reply in the probe harness, controller: the model behind the agent under test; effect: super-linear on the reply before the rewrite, on an operator-run harness — not exploitable; startsWith/endsWith/slice now, linear in the reply",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmfIqdfylE4c2p7",
   "state": "fixed",
   "where": "#160",
-  "verdict": "tmux pane line, controller: the TUI of the agent under test; effect: super-linear on the line before the rewrite, on an operator-run harness — not exploitable; single-pass prompt pattern now, linear in the line"
+  "verdict": "tmux pane line, controller: the TUI of the agent under test; effect: super-linear on the line before the rewrite, on an operator-run harness — not exploitable; single-pass prompt pattern now, linear in the line",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XkpTIqdfylE4c2q_",
   "state": "fixed",
   "where": "#160",
-  "verdict": "provider reply in the probe harness, controller: the model; effect: super-linear on the reply before the rewrite, on an operator-run harness — not exploitable; slice/trim fence strip now, linear in the reply"
+  "verdict": "provider reply in the probe harness, controller: the model; effect: super-linear on the reply before the rewrite, on an operator-run harness — not exploitable; slice/trim fence strip now, linear in the reply",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
   "id": "AaB3XksHIqdfylE4c2sk",
   "state": "fixed",
   "where": "#160",
-  "verdict": "fixture transcript path built by the generator itself, controller: the generator constant; effect: bounded — not exploitable, lastIndexOf slice for the rule"
+  "verdict": "fixture transcript path built by the generator itself, controller: the generator constant; effect: bounded — not exploitable, lastIndexOf slice for the rule",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "codacy",
   "id": "d3b9d9cfec9a260b9bc67f7dc5bfd707",
   "state": "fixed",
   "where": "#160",
-  "verdict": "sudo cat > file: the file is read as root and written as the invoking user on purpose (the report lands in that user's checkout); shellcheck directive with the reason at the line — not a defect"
+  "verdict": "sudo cat > file: the file is read as root and written as the invoking user on purpose (the report lands in that user's checkout); shellcheck directive with the reason at the line — not a defect",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "365aff788b569c400b4b80434ec21768",
   "state": "fixed",
   "where": "#160",
-  "verdict": "same as dogfood.sh:27"
+  "verdict": "same as dogfood.sh:27",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
   "id": "e8663dd2e1b2bebd385bcc8b3c6dec20",
   "state": "fixed",
   "where": "#160",
-  "verdict": "command name from argv, controller: the operator; `oboete constructor` reached Object.prototype and crashed with a TypeError instead of the usage — real (robustness), fixed with Object.hasOwn"
+  "verdict": "command name from argv, controller: the operator; `oboete constructor` reached Object.prototype and crashed with a TypeError instead of the usage — real (robustness), fixed with Object.hasOwn",
+  "confirmed": "1816a503d4209d5e4cd94dd1253fd5bb7ecbacf6"
  },
  {
   "service": "codacy",
@@ -2038,9 +2355,10 @@
  {
   "service": "codacy",
   "id": "1012225090f36c0cd8030d0f9a7bd8f",
-  "state": "fixed",
-  "where": "#160",
-  "verdict": "glob from the repository's .oboete.toml (a non-operator controller) reaching compileGlob through globRuleError; the class itself is one character and cannot backtrack, but the rule was compiled before its 256-character bound was reported and the tokenizer searched the rest of the rule at every `[` (6.8 s per 1 MiB on the capture path) — real (availability), fixed: length gate before compile, linear tokenizer"
+  "state": "resolved",
+  "where": "The class body comes from a repository .oboete.toml rule that is refused above 256 characters before it is compiled and tokenized once; the RegExp is a single character class and cannot backtrack (#160 fixed the compile-before-bound and the quadratic tokenizer)",
+  "verdict": "glob from the repository's .oboete.toml (a non-operator controller) reaching compileGlob through globRuleError; the class itself is one character and cannot backtrack, but the rule was compiled before its 256-character bound was reported and the tokenizer searched the rest of the rule at every `[` (6.8 s per 1 MiB on the capture path) — real (availability), fixed: length gate before compile, linear tokenizer",
+  "reason": "NotExploitable"
  },
  {
   "service": "codacy",
@@ -2130,7 +2448,8 @@
   "service": "sonar",
   "id": "AaB3XkmfIqdfylE4c2p8",
   "state": "fixed",
-  "where": "#161"
+  "where": "#160",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  },
  {
   "service": "sonar",
@@ -2490,8 +2809,9 @@
  {
   "service": "sonar",
   "id": "AaB3XkqRIqdfylE4c2rp",
-  "state": "fixed",
-  "where": "#161"
+  "state": "resolved",
+  "where": "A top-level await changes the exit code when main() never settles on a drained event loop (0 with the promise chain, 13 with the await); the probe runner keeps the chain so its exit code stays what dogfood.sh expects",
+  "transition": "wontfix"
  },
  {
   "service": "sonar",
@@ -2818,6 +3138,7 @@
   "service": "sonar",
   "id": "AaB3XknlIqdfylE4c2qZ",
   "state": "fixed",
-  "where": "#160"
+  "where": "#160",
+  "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
  }
 ]

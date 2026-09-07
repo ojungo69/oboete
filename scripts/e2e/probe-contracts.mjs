@@ -240,10 +240,8 @@ async function main() {
 }
 
 if (path.resolve(process.argv[1] || "") === fileURLToPath(import.meta.url)) {
-  try {
-    await main();
-  } catch (e) {
+  main().catch((e) => {
     console.error(e);
     process.exit(1);
-  }
+  });
 }
