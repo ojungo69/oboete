@@ -929,13 +929,13 @@ function initialProviderFailure(
   return initialProviderReason;
 }
 
-/** The end reasons that do not suppress the degraded exit code: everything but these three. */
-function endReasonReportsFallback(endReason: string): boolean {
-  return endReason !== 'lease_lost' && endReason !== 'max_run' && endReason !== 'batch_error';
-}
-
+/**
+ * A run that fell back reports it as exit 1, unless the storage exit already won or the run ended
+ * for a reason that is not about the provider: a lost lease, the max-run yield, or a batch error.
+ */
 function reportsFallbackExit(exit: number, usedFallback: boolean, endReason: string): boolean {
-  return exit !== 3 && usedFallback && endReasonReportsFallback(endReason);
+  return exit !== 3 && usedFallback
+    && endReason !== 'lease_lost' && endReason !== 'max_run' && endReason !== 'batch_error';
 }
 
 /** The run counters a worker run starts from; every phase adds to these. */
