@@ -196,7 +196,7 @@ function asLine(raw: unknown, index: number): Line {
   if (raw === null || typeof raw !== 'object') throw new Error(`fixture line ${index + 1} is not an object`);
   const row = raw as Record<string, unknown>;
   if (typeof row.seq !== 'number' || typeof row.event !== 'string' || typeof row.session !== 'string') {
-    throw new Error(`fixture line ${index + 1} is missing seq/event/session`);
+    throw new TypeError(`fixture line ${index + 1} is missing seq/event/session`);
   }
   if (typeof row.agent !== 'string' || !isAgent(row.agent)) {
     throw new Error(`fixture line ${index + 1} has unknown agent`);
@@ -275,7 +275,7 @@ function hookArgs(line: Line): { args: string[]; extra: NodeJS.ProcessEnv } {
 }
 
 function firstStderrLine(text: string): string {
-  const line = text.replace(/\r/g, '').split('\n').find((entry) => entry.trim() !== '') ?? '';
+  const line = text.replaceAll('\r', '').split('\n').find((entry) => entry.trim() !== '') ?? '';
   return line.length > 120 ? `${line.slice(0, 117)}...` : line;
 }
 
@@ -567,7 +567,7 @@ function mdTable(headers: string[], right: boolean[], rows: string[][]): string 
 function mdCell(text: string): string {
   const trimmed = text.trim();
   if (trimmed === '') return '—';
-  return trimmed.replace(/\|/g, '\\|');
+  return trimmed.replaceAll('|', String.raw`\|`);
 }
 
 function groupKey(sample: Sample): string {
@@ -648,7 +648,7 @@ function lastSessions(lines: Line[]): {
   }
   const holdFromSeq = { claude: 0, codex: 0, grok: 0, pi: 0 };
   for (const agent of AGENTS) {
-    holdFromSeq[agent] = ends[agent].filter((seq) => seq < lastStartSeq[agent]).pop() ?? 0;
+    holdFromSeq[agent] = ends[agent].findLast((seq) => seq < lastStartSeq[agent]) ?? 0;
   }
   return { lastStartSeq, holdFromSeq };
 }
@@ -754,14 +754,16 @@ export async function runFixture(argv: string[]): Promise<number> {
 
   const maps = corpus(root);
   const createdHome = values.home === undefined && process.env.OBOETE_HOME === undefined;
-  const home =
-    values.home !== undefined
-      ? resolve(values.home)
-      : process.env.OBOETE_HOME !== undefined && process.env.OBOETE_HOME !== ''
-        ? isAbsolute(process.env.OBOETE_HOME)
-          ? resolve(process.env.OBOETE_HOME)
-          : resolve(process.cwd(), process.env.OBOETE_HOME)
-        : mkdtempSync(join(tmpdir(), 'oboete-t068-home-'));
+  let home: string;
+  if (values.home !== undefined) {
+    home = resolve(values.home);
+  } else if (process.env.OBOETE_HOME !== undefined && process.env.OBOETE_HOME !== '') {
+    home = isAbsolute(process.env.OBOETE_HOME)
+      ? resolve(process.env.OBOETE_HOME)
+      : resolve(process.cwd(), process.env.OBOETE_HOME);
+  } else {
+    home = mkdtempSync(join(tmpdir(), 'oboete-t068-home-'));
+  }
   const repo = mkdtempSync(join(tmpdir(), 'oboete-t068-repo-'));
   const keep = values.keep === true;
   const paths = oboetePaths(home);
@@ -863,7 +865,7 @@ export async function runFixture(argv: string[]): Promise<number> {
       harvestRss();
       const pending = endedPendingCount(paths.db);
       if (pending === 0) return;
-      if (liveObserve === undefined || !liveObserve.running()) startWorker();
+      startWorker();
       await sleep(50);
     }
   };
@@ -932,8 +934,9 @@ export async function runFixture(argv: string[]): Promise<number> {
           const tag = line.tags.size;
           const ok = tag === 'at_bound' ? fillSize === AT_BOUND : fillSize === ABOVE_ONE || fillSize === ABOVE_TWO;
           if (!ok) {
+            const expected = tag === 'at_bound' ? String(AT_BOUND) : `${ABOVE_ONE} or ${ABOVE_TWO}`;
             process.stderr.write(
-              `size tag ${tag} seq=${line.seq}: FILL-only JSON is ${fillSize} bytes, expected ${tag === 'at_bound' ? AT_BOUND : `${ABOVE_ONE} or ${ABOVE_TWO}`}\n`,
+              `size tag ${tag} seq=${line.seq}: FILL-only JSON is ${fillSize} bytes, expected ${expected}\n`,
             );
             return 2;
           }
@@ -1470,6 +1473,7 @@ function measure(
     (recallEn.length === 0 || recallRate(recallEn) >= RECALL_BOUND);
   const sc010 = duplicateGroups.length === 0;
   const directivesPass = leakedDirectives.length === 0;
+  const leakedDirectivesEllipsis = leakedDirectives.length > 5 ? ' …' : '';
   const hooksPass = input.hookFailures.length === 0;
   const failed = !(
     sc002 &&
@@ -1727,7 +1731,7 @@ function measure(
     '',
     leakedDirectives.length === 0
       ? `All ${input.maps.directives.length} directive phrases are absent from memories.title, memories.body, and packs.`
-      : `Directive phrases in memories or packs (${leakedDirectives.length}): ${leakedDirectives.slice(0, 5).join(' | ')}${leakedDirectives.length > 5 ? ' …' : ''}.`,
+      : `Directive phrases in memories or packs (${leakedDirectives.length}): ${leakedDirectives.slice(0, 5).join(' | ')}${leakedDirectivesEllipsis}.`,
     '',
     `${rawDirectiveRows} raw_events.content rows still carry a directive phrase (allowed; they may remain in raw events and the spool).`,
     '',

@@ -79,12 +79,10 @@ function pageHtml(): string {
 
 /** The browser launcher of contracts/cli.md `--open`; never through a shell. */
 function openBrowser(url: string): void {
-  const [command, args] =
-    process.platform === 'darwin'
-      ? ['open', [url]]
-      : process.platform === 'win32'
-        ? ['cmd', ['/c', 'start', '', url]]
-        : ['xdg-open', [url]];
+  let command = 'xdg-open';
+  let args = [url];
+  if (process.platform === 'darwin') command = 'open';
+  else if (process.platform === 'win32') [command, args] = ['cmd', ['/c', 'start', '', url]];
   const child = spawn(command, args, { detached: true, stdio: 'ignore' });
   child.on('error', () => {
     // The URL is already printed; a machine without a launcher is not an error of the viewer.
@@ -241,7 +239,8 @@ export async function startViewer(options: ViewerOptions): Promise<ViewerHandle>
 
   const server = await new Promise<ReturnType<typeof serve>>((resolve, reject) => {
     const instance = serve({ fetch: app.fetch, hostname: host, port: options.port ?? 0 }, (info) => {
-      origin = `http://${info.family === 'IPv6' ? `[${info.address}]` : info.address}:${info.port}`;
+      const address = info.family === 'IPv6' ? `[${info.address}]` : info.address;
+      origin = `http://${address}:${info.port}`;
       resolve(instance);
     });
     instance.once('error', reject);

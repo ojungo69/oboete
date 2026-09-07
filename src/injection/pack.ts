@@ -84,7 +84,7 @@ export type SecretDetector = (text: string) => boolean | Promise<boolean>;
 
 /** The control characters `canonicalLine` removed; a finished pack must not carry one back. */
 export function hasControlCharacter(text: string): boolean {
-  return /[\p{Cc}\p{Cf}]/u.test(text.replace(/\n/g, ''));
+  return /[\p{Cc}\p{Cf}]/u.test(text.replaceAll('\n', ''));
 }
 
 export type PackChannelInput = {
@@ -275,7 +275,7 @@ function latestRawActivity(db: DatabaseSync, sessionId: string): ActivityRow[] {
     )
     .all(sessionId, RAW_ACTIVITY_LIMIT);
   return rows
-    .reverse()
+    .toReversed()
     .map((row) => ({ rawEventId: String(row.id), line: activityLine(row) }))
     .filter((activity) => activity.line !== '');
 }
@@ -382,13 +382,12 @@ async function assemble(
     const stale = own.find((citation) =>
       citation.kind === 'commit' ? !commitsFresh : pathState.get(citation.value) === false,
     );
-    const staleReason: 'stale_path' | 'stale_commit' | null =
-      stale === undefined ? null : stale.kind === 'commit' ? 'stale_commit' : 'stale_path';
+    let staleReason: 'stale_path' | 'stale_commit' | null = null;
+    if (stale !== undefined) staleReason = stale.kind === 'commit' ? 'stale_commit' : 'stale_path';
+    const staleNote = staleReason === null ? '' : `; ${STALE_NOTES[staleReason]}`;
     const shown = stale ?? own[0];
     const note =
-      memory.label !== 'related' || shown === undefined
-        ? ''
-        : ` [${canonicalLine(shown.value)}${staleReason === null ? '' : `; ${STALE_NOTES[staleReason]}`}]`;
+      memory.label !== 'related' || shown === undefined ? '' : ` [${canonicalLine(shown.value)}${staleNote}]`;
 
     const head =
       memory.label === 'summary'

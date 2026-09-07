@@ -40,9 +40,9 @@ function git(
  */
 export function repositoryHead(repoRoot: string, budgetMs: number = GIT_TIMEOUT_MS): string | null {
   const timeout = Math.min(GIT_TIMEOUT_MS, Math.floor(budgetMs));
-  if (!(timeout > 0)) return null;
+  if (Number.isNaN(timeout) || timeout <= 0) return null;
   const head = git(repoRoot, ['rev-parse', 'HEAD'], timeout);
-  return head === null || head.status !== 0 || head.stdout === '' ? null : head.stdout;
+  return head?.status !== 0 || head.stdout === '' ? null : head.stdout;
 }
 
 /**
@@ -79,7 +79,7 @@ export function checkCommits(
   if (commits.length === 0) return result;
 
   const head = git(repoRoot, ['rev-parse', 'HEAD']);
-  if (head === null || head.status !== 0 || head.stdout === '') {
+  if (head?.status !== 0 || head.stdout === '') {
     for (const commit of commits) result.set(commit, false);
     return result;
   }
