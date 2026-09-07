@@ -37,7 +37,7 @@ const DEFAULT_PORTS: Record<string, string> = {
   'git:': '9418',
 };
 
-const REMOTE_SCHEMES = ['https:', 'http:', 'ssh:', 'git:', 'file:'];
+const REMOTE_SCHEMES = new Set(['https:', 'http:', 'ssh:', 'git:', 'file:']);
 
 function git(spawn: GitSpawn, cwd: string, args: string[], timeout: number): string | null {
   // FR-004: the identity comes from the repository at `cwd` and nothing else, so git's own
@@ -92,14 +92,15 @@ function normalizeRemote(url: string): string | null {
   } catch {
     return null;
   }
-  if (!REMOTE_SCHEMES.includes(parsed.protocol)) return null;
+  if (!REMOTE_SCHEMES.has(parsed.protocol)) return null;
 
   // Reading only hostname, port and pathname drops the userinfo, the query and the fragment.
   const host = parsed.hostname.toLowerCase();
   const port = parsed.port !== '' && parsed.port !== DEFAULT_PORTS[parsed.protocol] ? `:${parsed.port}` : '';
   const path = trimPath(parsed.pathname);
   if (host === '' && path === '') return null;
-  return `${host}${port}${path.startsWith('/') ? path : `/${path}`}`;
+  const absolutePath = path.startsWith('/') ? path : `/${path}`;
+  return `${host}${port}${absolutePath}`;
 }
 
 function realpath(path: string): string {
@@ -162,8 +163,7 @@ export function resolveRepoIdentity(
 function otherRemoteUrl(run: (args: string[]) => string | null): string | null {
   const names = (run(['remote']) ?? '')
     .split('\n')
-    .map((name) => name.trim())
-    .filter((name) => name !== '');
-  const name = names[0];
+    .map((name) => name.trim());
+  const name = names.find((name) => name !== '');
   return name === undefined ? null : run(['remote', 'get-url', name]);
 }

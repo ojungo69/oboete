@@ -147,7 +147,7 @@ export function segmentQuery(text: string): QueryTerms {
     indexed.length > MAX_QUERY_TERMS
       ? new Set(
           indexed
-            .sort((left, right) => codePointLength(right) - codePointLength(left))
+            .toSorted((left, right) => codePointLength(right) - codePointLength(left))
             .slice(0, MAX_QUERY_TERMS),
         )
       : null;

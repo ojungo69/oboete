@@ -636,7 +636,7 @@ async function reclassifyImported(
       .map((row) => ({ id: String(row.id), title: String(row.title ?? ''), body: String(row.body ?? '') }));
     if (rows.length === 0) return { examined, leaseLost: false };
     examined += rows.length;
-    after = rows[rows.length - 1]?.id ?? after;
+    after = rows.at(-1)?.id ?? after;
 
     const decided: { id: string; decision: 'unreviewed' | 'secret'; title: string; body: string }[] = [];
     for (const row of rows) {
@@ -750,7 +750,6 @@ function releaseForExit(
 
 /** Detached `oboete observe`: one bounded worker run, never a resident service (FR-009). */
 export async function runObserve(argv: string[], overrides: Partial<ObserveDeps> = {}): Promise<number> {
-  void argv;
   const deps: ObserveDeps = {
     now: overrides.now ?? Date.now,
     fetch: overrides.fetch ?? globalThis.fetch,
@@ -835,12 +834,14 @@ export async function runObserve(argv: string[], overrides: Partial<ObserveDeps>
       resolved.preset === 'none'
         ? null
         : readCredentials(resolved.preset, deps.env, config.observer.agent_cli);
-    const initialProviderReason: DegradedReason | null =
-      resolved.preset === 'none' || credentials?.present !== true || resolved.model === ''
-        ? 'no_provider'
-        : !consentMatches(config, deps.env)
-          ? 'consent_changed'
-          : null;
+    let initialProviderReason: DegradedReason | null;
+    if (resolved.preset === 'none' || credentials?.present !== true || resolved.model === '') {
+      initialProviderReason = 'no_provider';
+    } else if (!consentMatches(config, deps.env)) {
+      initialProviderReason = 'consent_changed';
+    } else {
+      initialProviderReason = null;
+    }
     const startedConsentHash = consentHash(consentTuple(config, deps.env));
     const consentOk = (): boolean => liveConsentOk(paths, deps.env, startedConsentHash);
     const providerState = new Map<string, DegradedReason | null>();
@@ -999,7 +1000,6 @@ export async function runObserve(argv: string[], overrides: Partial<ObserveDeps>
       }
       if (released === 'released') {
         await retryBusy(() => checkpoint(db, 'TRUNCATE'));
-        endReason = 'empty';
         break;
       }
       await sleep(Math.min(Math.max(1, deps.heartbeatMs), BUSY_RETRY_MS));

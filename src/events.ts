@@ -171,7 +171,8 @@ export function canonicalJson(value: unknown): string {
   const entries = Object.entries(value as Record<string, unknown>)
     .filter(([, item]) => item !== undefined)
     .sort(([left], [right]) => (left < right ? -1 : 1));
-  return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`;
+  const members = entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',');
+  return `{${members}}`;
 }
 
 export function contentHash(value: string): string {

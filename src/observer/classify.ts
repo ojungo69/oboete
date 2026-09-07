@@ -343,7 +343,7 @@ export async function applyObservations(
       let supersedes: string | null = null;
       if (decision === 'update' && target !== null) {
         const targetRow = readTarget.get(target, input.repoId);
-        if (targetRow === undefined || targetRow.deleted_at !== null) {
+        if (targetRow?.deleted_at !== null) {
           // The target is gone or tombstoned: the content is still worth keeping, but it
           // supersedes nothing and a tombstone stays a tombstone.
           decision = 'add';
@@ -517,7 +517,7 @@ export function sessionSummary(
       .prepare('SELECT id, repo_id, status, summary_state FROM sessions WHERE id = ?')
       .get(sessionId);
     // Reconciliation targets `pending` only, so a finished session is never revisited.
-    if (session === undefined || session.status !== 'ended' || session.summary_state !== 'pending') {
+    if (session?.status !== 'ended' || session.summary_state !== 'pending') {
       return { state: 'skipped', memoryId: null };
     }
     const repoId = String(session.repo_id);
@@ -587,14 +587,14 @@ export function sessionSummary(
 
     // contracts/observer.md: the most severe reason among the session's batches, NULL only when
     // every batch was applied from a provider.
-    const reasons = db
+    const reasons = new Set(db
       .prepare('SELECT degraded_reason FROM observation_batches WHERE session_id = ?')
       .all(sessionId)
       .map((row) => row.degraded_reason)
       .filter((reason): reason is DegradedReason =>
         DEGRADED_PRECEDENCE.includes(reason as DegradedReason),
-      );
-    const degraded = DEGRADED_PRECEDENCE.find((reason) => reasons.includes(reason)) ?? null;
+      ));
+    const degraded = DEGRADED_PRECEDENCE.find((reason) => reasons.has(reason)) ?? null;
 
     const material = materialHash(title, body);
     const content = contentHash(repoId, material);

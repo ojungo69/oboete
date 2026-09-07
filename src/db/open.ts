@@ -1,13 +1,14 @@
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import type * as Sqlite from 'node:sqlite';
-import type { DatabaseSync } from 'node:sqlite';
 
 import { sha256Hex } from '../hash.js';
 
 import sql0001 from './migrations/0001_core.sql';
 import sql0002 from './migrations/0002_memory_search.sql';
 import sql0003 from './migrations/0003_operations.sql';
+
+type DatabaseSync = Sqlite.DatabaseSync;
 
 /**
  * `node:sqlite` is loaded on the first open, not at import: on Node 22.16 loading it emits an

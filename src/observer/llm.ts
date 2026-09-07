@@ -72,7 +72,9 @@ const ERROR_OUTCOME_ROWS: ReadonlyArray<{
 
 const NUMERIC_AUTH_CODES = new Set([9103, 9109, 10000, 10001]);
 
-function sameCode(left: number | string | undefined, right: number | string): boolean {
+type ProviderCode = number | string;
+
+function sameCode(left: ProviderCode | undefined, right: ProviderCode): boolean {
   return String(left) === String(right);
 }
 
@@ -132,11 +134,12 @@ function classifyApiError(error: ApiError): {
   const reason = row?.outcome ?? 'unreachable';
   const retry =
     status === 408 || sameCode(bodyCode, 3007) || (status === 429 && sameCode(bodyCode, 3040));
+  const httpStatus = status === undefined ? '' : ` with HTTP ${status}`;
   return {
     reason,
     retry,
     exhaustedSignal: status === 429 && sameCode(bodyCode, 3036),
-    detail: `provider request failed${status === undefined ? '' : ` with HTTP ${status}`}`,
+    detail: `provider request failed${httpStatus}`,
   };
 }
 
@@ -397,12 +400,14 @@ export async function summarizeWithProvider(
   }
 
   const { APICallError, generateText, Output } = await import('ai');
-  const baseOutput =
-    requestOptions.structured === 'text-json'
-      ? undefined
-      : requestOptions.structured === 'json_schema'
-        ? Output.object({ schema: observerOutputSchema, name: 'observer_output' })
-        : Output.json();
+  let baseOutput;
+  if (requestOptions.structured !== 'text-json') {
+    if (requestOptions.structured === 'json_schema') {
+      baseOutput = Output.object({ schema: observerOutputSchema, name: 'observer_output' });
+    } else {
+      baseOutput = Output.json();
+    }
+  }
   const output =
     baseOutput === undefined
       ? undefined
@@ -448,7 +453,7 @@ export async function summarizeWithProvider(
         ...(output === undefined ? {} : { output }),
       });
 
-      const resolvedModel = result.response.modelId || null;
+      const resolvedModel = result.finalStep.response.modelId || null;
       if (
         resolvedModel !== null &&
         normalizeRuntimeModelId(resolvedModel) !== normalizeRuntimeModelId(ctx.model)
@@ -479,7 +484,7 @@ export async function summarizeWithProvider(
         ok: true,
         output: parsed.output,
         resolvedModel,
-        neurons: neuronsFrom(result.response.headers ?? capturedHeaders, result.usage),
+        neurons: neuronsFrom(result.finalStep.response.headers ?? capturedHeaders, result.usage),
         attempts,
       };
     } catch (error) {

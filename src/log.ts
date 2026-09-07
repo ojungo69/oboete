@@ -40,7 +40,9 @@ export function credentialValues(env: NodeJS.ProcessEnv): string[] {
     .sort((a, b) => b.length - a.length);
 }
 
-function formatValue(value: string | number | boolean): string {
+type LogValue = string | number | boolean;
+
+function formatValue(value: LogValue): string {
   const text = String(value);
   return /[\s"]/.test(text) ? JSON.stringify(text) : text;
 }

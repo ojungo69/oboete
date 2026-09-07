@@ -369,12 +369,11 @@ async function changePin(
       runtime.writeOut(
         `${JSON.stringify({ id, action: pinned ? 'pinned' : 'unpinned', pinned_at: pinnedAt, pin_order: order })}\n`,
       );
+    } else if (pinned) {
+      const atOrder = order === null ? '' : ` at order ${order}`;
+      runtime.writeOut(`Pinned memory ${id}${atOrder}.\n`);
     } else {
-      runtime.writeOut(
-        pinned
-          ? `Pinned memory ${id}${order === null ? '' : ` at order ${order}`}.\n`
-          : `Unpinned memory ${id}.\n`,
-      );
+      runtime.writeOut(`Unpinned memory ${id}.\n`);
     }
     return 0;
   });

@@ -595,7 +595,7 @@ export function createBatches(
 
       // The newest row of the round; both batches of the round carry it, which is what makes them
       // one range in two destinations (data-model.md UNIQUE (session_id, through_event_id, destination)).
-      const throughEventId = rows[rows.length - 1].id;
+      const throughEventId = rows.at(-1)!.id;
 
       const byDestination = new Map<BatchDestination, RawEventRow[]>();
       for (const row of rows) {

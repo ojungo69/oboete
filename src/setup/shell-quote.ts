@@ -4,5 +4,6 @@
 // writers, so a path with a space -- or with a quote in it -- cannot be handled three ways.
 /** A single-quoted POSIX shell word; a single quote inside one is closed, escaped and reopened. */
 export function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
+  const escapedQuote = String.raw`'\''`;
+  return `'${value.replaceAll("'", escapedQuote)}'`;
 }

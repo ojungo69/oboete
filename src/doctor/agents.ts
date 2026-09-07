@@ -361,7 +361,8 @@ function piDiagnostics(db: DatabaseSync, now: number): string[] {
       const last = asNumber(row.last_seen_at);
       const count = countOf(row, 'count');
       const when = last === null ? 'at an unknown time' : `last at ${iso(last)}`;
-      return [`The worker recorded ${code} ${count === 1 ? 'once' : `${count} times`}, ${when}`];
+      const frequency = count === 1 ? 'once' : `${count} times`;
+      return [`The worker recorded ${code} ${frequency}, ${when}`];
     });
   } catch {
     return [];
@@ -371,13 +372,13 @@ function piDiagnostics(db: DatabaseSync, now: number): string[] {
 function sanitizeDisplayName(value: string): string {
   let out = '';
   for (let i = 0; i < value.length && out.length < 64; i += 1) {
-    const code = value.charCodeAt(i);
+    const code = value.codePointAt(i)!;
     if (code === 27) {
       const next = value[i + 1];
       if (next === '[') {
         i += 2;
         while (i < value.length) {
-          const end = value.charCodeAt(i);
+          const end = value.codePointAt(i)!;
           if (end >= 64 && end <= 126) break;
           i += 1;
         }

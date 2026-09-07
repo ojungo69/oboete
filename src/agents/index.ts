@@ -76,9 +76,9 @@ const PATH_KEYS = ['file_path', 'filePath', 'path', 'target_file', 'notebook_pat
 
 // A JSON string value: an escaped character counts as one, so a Windows path (`C:\\repo\\.env`)
 // is captured whole instead of ending at its first backslash.
-const JSON_VALUE = '"((?:[^"\\\\]|\\\\.){1,4096})"';
+const JSON_VALUE = String.raw`"((?:[^"\\]|\\.){1,4096})"`;
 
-const PATH_SCAN = new RegExp(`"(?:${PATH_KEYS.join('|')})"\\s*:\\s*${JSON_VALUE}`, 'g');
+const PATH_SCAN = new RegExp(String.raw`"(?:${PATH_KEYS.join('|')})"\s*:\s*${JSON_VALUE}`, 'g');
 
 /** The JSON escapes a path or an identifier can carry; the others cannot appear in one. */
 function unescapeJson(value: string): string {
@@ -319,7 +319,7 @@ export function scanPartialPrefix(
 
 function scanKey(prefix: string, key: string): string | null {
   // The key is one of oboete's own constants, so it is never a pattern from a payload.
-  const match = new RegExp(`"${key}"\\s*:\\s*${JSON_VALUE}`).exec(prefix);
+  const match = new RegExp(String.raw`"${key}"\s*:\s*${JSON_VALUE}`).exec(prefix);
   return match?.[1] === undefined ? null : unescapeJson(match[1]);
 }
 
