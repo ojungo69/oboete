@@ -938,6 +938,24 @@ function reportsFallbackExit(exit: number, usedFallback: boolean, endReason: str
     && endReason !== 'lease_lost' && endReason !== 'max_run' && endReason !== 'batch_error';
 }
 
+/**
+ * Folds one batch's outcome into the run counters, and reports the two run-level facts the caller
+ * latches: the lease is gone, and a fallback happened for a reason other than there being no
+ * provider configured. Neither flag is ever cleared, so the caller only ever sets them.
+ */
+function recordBatchResult(
+  result: Counts,
+  batchResult: BatchResult,
+): { leaseLost: boolean; usedFallback: boolean } {
+  if (batchResult.state === 'lease_lost') return { leaseLost: true, usedFallback: false };
+  result.batches += 1;
+  result[batchResult.state] += 1;
+  return {
+    leaseLost: false,
+    usedFallback: batchResult.state === 'fallback' && batchResult.reason !== 'rule_based',
+  };
+}
+
 /** The run counters a worker run starts from; every phase adds to these. */
 function emptyCounts(): Counts {
   return {
@@ -1056,18 +1074,6 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>): Promise<number
       return false;
     }
 
-    function recordBatchResult(batchResult: BatchResult): void {
-      if (batchResult.state === 'lease_lost') {
-        leaseLost = true;
-      } else {
-        result.batches += 1;
-        result[batchResult.state] += 1;
-        if (batchResult.state === 'fallback' && batchResult.reason !== 'rule_based') {
-          usedFallback = true;
-        }
-      }
-    }
-
     async function processPendingBatch(batch: BatchRow): Promise<void> {
       async function checkpointBatch(): Promise<void> {
         try {
@@ -1108,7 +1114,9 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>): Promise<number
           db, token, batch, config, deps, detect, providerState,
           initialProviderReason, resolved, consentOk,
         }));
-        recordBatchResult(batchResult);
+        const recorded = recordBatchResult(result, batchResult);
+        if (recorded.leaseLost) leaseLost = true;
+        if (recorded.usedFallback) usedFallback = true;
       } catch (error) {
         if (error instanceof LeaseLostError) leaseLost = true;
         else {
