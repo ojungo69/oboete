@@ -454,28 +454,6 @@ type ProcessBatchOptions = {
   consentOk: () => boolean;
 };
 
-/** What `applyObservations` reads for a batch the provider answered: no fallback reason. */
-function providerApplyInput(args: {
-  output: Extract<CallOutcome, { ok: true }>['output'];
-  input: BatchInput;
-  nearby: ReturnType<typeof nearbyForBatch>;
-  detect: (text: string) => Promise<DetectorResult>;
-  now: number;
-}) {
-  const { output, input, nearby, detect, now } = args;
-  return {
-    batchId: input.batch.id,
-    repoId: input.session.repo_id,
-    sessionId: input.session.id,
-    output,
-    fallbackReason: null,
-    rows: input.rows,
-    nearby,
-    detect,
-    now,
-  };
-}
-
 /** The reason a fallback records: this session's own degraded state, else the worker's, else rules. */
 function fallbackReason(
   providerState: Map<string, DegradedReason | null>,
@@ -611,11 +589,17 @@ async function processBatch(options: ProcessBatchOptions): Promise<BatchResult> 
 
   providerState.set(batch.session_id, null);
   await deps.applyHook();
-  const applied = await applyObservations(
-    db,
-    token,
-    providerApplyInput({ output: outcome.output, input, nearby, detect, now: deps.now() }),
-  );
+  const applied = await applyObservations(db, token, {
+    batchId: input.batch.id,
+    repoId: input.session.repo_id,
+    sessionId: input.session.id,
+    output: outcome.output,
+    fallbackReason: null,
+    rows: input.rows,
+    nearby,
+    detect,
+    now: deps.now(),
+  });
   return {
     state: applied.leaseLost ? 'lease_lost' : 'applied',
     reason: null,
@@ -860,13 +844,6 @@ function releaseForExit(
   });
 }
 
-type ObserveSteps<T> = Generator<Promise<unknown>, T, unknown>;
-
-// Synchronous delegation adds no await between a phase and its caller.
-function* observeResult<T>(pending: Promise<T>): ObserveSteps<Awaited<T>> {
-  return (yield pending) as Awaited<T>;
-}
-
 function observeDependencies(overrides: Partial<ObserveDeps>): ObserveDeps {
   return {
     now: overrides.now ?? Date.now,
@@ -899,9 +876,12 @@ function openObserveDatabase(paths: OboetePaths): DatabaseSync | null {
   return db;
 }
 
+/** The lease token, or the exit code this run ends with; tagged so a caller cannot confuse them. */
+type LeaseClaim = { ok: true; token: string } | { ok: false; exit: number };
+
 function claimObserveLease(
   db: DatabaseSync, paths: OboetePaths, result: Counts, startedAt: number,
-): string | number {
+): LeaseClaim {
   let token: string | null;
   try {
     token = claimLease(db, { pid: process.pid, now: startedAt });
@@ -912,14 +892,14 @@ function claimObserveLease(
       // contracts/cli.md: either failure is a storage exit.
     }
     db.close();
-    return logEnd(paths, result, 3, 'storage_error');
+    return { ok: false, exit: logEnd(paths, result, 3, 'storage_error') };
   }
   if (token === null) {
     db.close();
-    return logEnd(paths, result, 0, 'another_worker');
+    return { ok: false, exit: logEnd(paths, result, 0, 'another_worker') };
   }
 
-  return token;
+  return { ok: true, token };
 }
 
 function resolveObserveModel(config: OboeteConfig): { preset: PresetName | 'none'; model: string } {
@@ -949,20 +929,18 @@ function initialProviderFailure(
   return initialProviderReason;
 }
 
-function hasFallbackExitReason(endReason: string): boolean {
+/** The end reasons that do not suppress the degraded exit code: everything but these three. */
+function endReasonReportsFallback(endReason: string): boolean {
   return endReason !== 'lease_lost' && endReason !== 'max_run' && endReason !== 'batch_error';
 }
 
 function reportsFallbackExit(exit: number, usedFallback: boolean, endReason: string): boolean {
-  return exit !== 3 && usedFallback && hasFallbackExitReason(endReason);
+  return exit !== 3 && usedFallback && endReasonReportsFallback(endReason);
 }
 
-function* observeLifecycle(overrides: Partial<ObserveDeps>): ObserveSteps<number> {
-  const deps = observeDependencies(overrides);
-  const paths = oboetePaths(resolveHome(deps.env));
-  if (isPaused(paths)) return 0;
-
-  const result: Counts = {
+/** The run counters a worker run starts from; every phase adds to these. */
+function emptyCounts(): Counts {
+  return {
     recovered: 0,
     classified: 0,
     reclassified: 0,
@@ -971,12 +949,21 @@ function* observeLifecycle(overrides: Partial<ObserveDeps>): ObserveSteps<number
     fallback: 0,
     purged: 0,
   };
+}
+
+async function observeLifecycle(overrides: Partial<ObserveDeps>): Promise<number> {
+  const deps = observeDependencies(overrides);
+  const paths = oboetePaths(resolveHome(deps.env));
+  if (isPaused(paths)) return 0;
+
+  const result = emptyCounts();
   const db = openObserveDatabase(paths);
   if (db === null) return 3;
 
   const startedAt = deps.now();
-  const token = claimObserveLease(db, paths, result, startedAt);
-  if (typeof token !== 'string') return token;
+  const claim = claimObserveLease(db, paths, result, startedAt);
+  if (!claim.ok) return claim.exit;
+  const token = claim.token;
 
   let leaseLost = false;
   const heartbeatTimer = setInterval(heartbeatLease, Math.max(1, deps.heartbeatMs));
@@ -985,7 +972,7 @@ function* observeLifecycle(overrides: Partial<ObserveDeps>): ObserveSteps<number
   let usedFallback = false;
   let catalogChecked = false;
   let yieldAfterPass = false;
-  let exit!: number;
+  let exit: number | undefined;
   let endReason = 'empty';
 
   function recordRunFailure(error: unknown, db: DatabaseSync, token: string): void {
@@ -1009,58 +996,60 @@ function* observeLifecycle(overrides: Partial<ObserveDeps>): ObserveSteps<number
 
   function heartbeatLease(): void {
     try {
-      if (!heartbeat(db as DatabaseSync, token as string, deps.now())) leaseLost = true;
+      // `db` is declared before the null check that narrows it, and this timer only ever fires
+      // after that check has passed.
+      if (!heartbeat(db as DatabaseSync, token, deps.now())) leaseLost = true;
     } catch (error) {
       appendLogQuietly(paths.observeLog, 'warn', 'heartbeat failed', { code: errorCode(error) });
     }
   }
 
-  function* observeClaimedLease(db: DatabaseSync, token: string): ObserveSteps<void> {
-    function* recoverAndClassify(): ObserveSteps<boolean> {
-      const recovered = yield* observeResult(retryBusy(() => recoverSpool(db, paths, token, deps.now())));
+  async function observeClaimedLease(db: DatabaseSync, token: string): Promise<void> {
+    async function recoverAndClassify(): Promise<boolean> {
+      const recovered = await retryBusy(() => recoverSpool(db, paths, token, deps.now()));
       result.recovered += recovered.inserted;
       if (leaseLost || !ownsLease(db, token)) return true;
 
-      const classified = yield* observeResult(retryBusy(() => classifyPending(db, token, deps.now(), detect)));
+      const classified = await retryBusy(() => classifyPending(db, token, deps.now(), detect));
       result.classified += classified.examined;
       if (classified.leaseLost || leaseLost) return true;
 
-      const reclassified = yield* observeResult(retryBusy(() => reclassifyImported(db, token, deps.now, detect)));
+      const reclassified = await retryBusy(() => reclassifyImported(db, token, deps.now, detect));
       result.reclassified += reclassified.examined;
       if (reclassified.leaseLost || leaseLost) return true;
 
       return false;
     }
 
-    function* maintainQueue(): ObserveSteps<boolean> {
-      const reclaimed = yield* observeResult(retryBusy(() => reclaimStale(db, token, deps.now())));
+    async function maintainQueue(): Promise<boolean> {
+      const reclaimed = await retryBusy(() => reclaimStale(db, token, deps.now()));
       if (reclaimed.leaseLost || leaseLost) return true;
 
-      const purged = yield* observeResult(retryBusy(() => purgeExpiredEvents(db, token, deps.now())));
+      const purged = await retryBusy(() => purgeExpiredEvents(db, token, deps.now()));
       result.purged += purged.deleted;
       if (purged.leaseLost || leaseLost) return true;
 
-      yield* observeResult(retryBusy(() => cleanupPiAck(db, token, paths.piAck, deps.now())));
+      await retryBusy(() => cleanupPiAck(db, token, paths.piAck, deps.now()));
       if (leaseLost || !ownsLease(db, token)) return true;
 
-      const created = yield* observeResult(retryBusy(() =>
+      const created = await retryBusy(() =>
         createBatches(db, token, deps.now(), { preset: presetEntry?.egress ?? 'none' }),
-      ));
+      );
       if (created.leaseLost || leaseLost) return true;
 
       return false;
     }
 
-    function* refreshCatalog(): ObserveSteps<boolean> {
+    async function refreshCatalog(): Promise<boolean> {
       if (
         !catalogChecked &&
         resolved.preset === 'workers-ai' &&
         credentials?.present === true
       ) {
         catalogChecked = true;
-        yield* observeResult(retryBusy(() =>
+        await retryBusy(() =>
           refreshWorkersAiCatalog(db, { env: deps.env, now: deps.now(), fetchImpl: deps.fetch }),
-        ));
+        );
         if (leaseLost || !ownsLease(db, token)) return true;
       }
 
@@ -1079,20 +1068,20 @@ function* observeLifecycle(overrides: Partial<ObserveDeps>): ObserveSteps<number
       }
     }
 
-    function* processPendingBatch(batch: BatchRow): ObserveSteps<void> {
-      function* checkpointBatch(): ObserveSteps<void> {
+    async function processPendingBatch(batch: BatchRow): Promise<void> {
+      async function checkpointBatch(): Promise<void> {
         try {
-          yield* observeResult(retryBusy(() => checkpoint(db, 'PASSIVE')));
+          await retryBusy(() => checkpoint(db, 'PASSIVE'));
           if (
             batchResult !== null &&
-            !(yield* observeResult(updateBatchCitations(
+            !(await updateBatchCitations(
               db,
               token,
               String(batch.repo_id ?? ''),
               batchResult.memoryIds,
               ancestorCache,
               deps,
-            )))
+            ))
           ) {
             leaseLost = true;
           }
@@ -1115,10 +1104,10 @@ function* observeLifecycle(overrides: Partial<ObserveDeps>): ObserveSteps<number
       let batchResult: BatchResult | null = null;
       let batchError: unknown;
       try {
-        batchResult = (yield* observeResult(processBatch({
+        batchResult = (await processBatch({
           db, token, batch, config, deps, detect, providerState,
           initialProviderReason, resolved, consentOk,
-        })));
+        }));
         recordBatchResult(batchResult);
       } catch (error) {
         if (error instanceof LeaseLostError) leaseLost = true;
@@ -1129,24 +1118,24 @@ function* observeLifecycle(overrides: Partial<ObserveDeps>): ObserveSteps<number
       }
 
       if (!leaseLost) {
-        yield* checkpointBatch();
+        await checkpointBatch();
       }
 
       logBatch();
 
     }
 
-    function* processPendingBatches(): ObserveSteps<void> {
+    async function processPendingBatches(): Promise<void> {
       const batches = pendingBatches(db);
       for (const batch of batches) {
         if (leaseLost) break;
-        yield* processPendingBatch(batch);
+        await processPendingBatch(batch);
       }
     }
 
-    function* summarizeSession(sessionId: string): ObserveSteps<boolean> {
+    async function summarizeSession(sessionId: string): Promise<boolean> {
       try {
-        const summary = yield* observeResult(retryBusy(() => sessionSummary(db, token, sessionId, deps.now())));
+        const summary = await retryBusy(() => sessionSummary(db, token, sessionId, deps.now()));
         if (summary.state === 'lease_lost') {
           leaseLost = true;
           return true;
@@ -1162,45 +1151,45 @@ function* observeLifecycle(overrides: Partial<ObserveDeps>): ObserveSteps<number
       return false;
     }
 
-    function* summarizePendingSessions(): ObserveSteps<void> {
+    async function summarizePendingSessions(): Promise<void> {
       for (const sessionId of pendingSummaries(db)) {
-        if (yield* summarizeSession(sessionId)) break;
+        if (await summarizeSession(sessionId)) break;
       }
     }
 
-    function* releaseEmptyPass(): ObserveSteps<boolean> {
+    async function releaseEmptyPass(): Promise<boolean> {
       const released = releaseForExit(db, paths, token, deps.now(), result, 'empty', false);
       if (released === 'lost') {
         leaseLost = true;
         return true;
       }
       if (released === 'released') {
-        yield* observeResult(retryBusy(() => checkpoint(db, 'TRUNCATE')));
+        await retryBusy(() => checkpoint(db, 'TRUNCATE'));
         return true;
       }
-      yield* observeResult(sleep(Math.min(Math.max(1, deps.heartbeatMs), BUSY_RETRY_MS)));
+      await sleep(Math.min(Math.max(1, deps.heartbeatMs), BUSY_RETRY_MS));
       return false;
     }
 
-    function* releaseMaxRun(): ObserveSteps<void> {
+    async function releaseMaxRun(): Promise<void> {
       // FR-009: a bounded worker releases even with queued work so the next hook can respawn it.
       const released = releaseForExit(db, paths, token, deps.now(), result, endReason, true);
-      if (released === 'released') yield* observeResult(retryBusy(() => checkpoint(db, 'TRUNCATE')));
+      if (released === 'released') await retryBusy(() => checkpoint(db, 'TRUNCATE'));
       else if (released === 'lost') endReason = 'lease_lost';
     }
 
-    function* processPass(): ObserveSteps<boolean> {
-      if (yield* recoverAndClassify()) return true;
+    async function processPass(): Promise<boolean> {
+      if (await recoverAndClassify()) return true;
 
-      if (yield* maintainQueue()) return true;
+      if (await maintainQueue()) return true;
 
-      if (yield* refreshCatalog()) return true;
+      if (await refreshCatalog()) return true;
 
       if (!adoptPendingBatches(db, token, deps.now())) return true;
-      yield* processPendingBatches();
+      await processPendingBatches();
       if (leaseLost) return true;
 
-      yield* summarizePendingSessions();
+      await summarizePendingSessions();
       if (leaseLost) return true;
 
       if (yieldAfterPass || deps.now() - startedAt >= Math.max(0, deps.maxRunMs)) {
@@ -1212,13 +1201,13 @@ function* observeLifecycle(overrides: Partial<ObserveDeps>): ObserveSteps<number
       return false;
     }
 
-    function* finishLeaseRun(): ObserveSteps<void> {
+    async function finishLeaseRun(): Promise<void> {
       if (leaseLost) {
         exit = 0;
         endReason = 'lease_lost';
       } else if (yieldAfterPass) {
         if (endReason === 'max_run') {
-          yield* releaseMaxRun();
+          await releaseMaxRun();
         }
         exit = 0;
       } else {
@@ -1226,7 +1215,7 @@ function* observeLifecycle(overrides: Partial<ObserveDeps>): ObserveSteps<number
       }
     }
 
-    function* runPasses(): ObserveSteps<void> {
+    async function runPasses(): Promise<void> {
       for (;;) {
         if (deps.now() - startedAt >= Math.max(0, deps.maxRunMs)) {
           yieldAfterPass = true;
@@ -1234,9 +1223,9 @@ function* observeLifecycle(overrides: Partial<ObserveDeps>): ObserveSteps<number
           break;
         }
 
-        if (yield* processPass()) break;
+        if (await processPass()) break;
 
-        if (yield* releaseEmptyPass()) break;
+        if (await releaseEmptyPass()) break;
       }
 
     }
@@ -1262,12 +1251,12 @@ function* observeLifecycle(overrides: Partial<ObserveDeps>): ObserveSteps<number
         credentialValues: credentialValues(deps.env),
       });
 
-    yield* runPasses();
-    yield* finishLeaseRun();
+    await runPasses();
+    await finishLeaseRun();
   }
 
   try {
-    yield* observeClaimedLease(db, token);
+    await observeClaimedLease(db, token);
   } catch (error) {
     recordRunFailure(error, db, token);
   } finally {
@@ -1275,6 +1264,9 @@ function* observeLifecycle(overrides: Partial<ObserveDeps>): ObserveSteps<number
     if (db.isOpen) db.close();
   }
 
+  // Every path above assigns it; the check is here so a future one that does not fails loudly
+  // instead of reporting `undefined` as this run's exit code (contracts/cli.md pins 0, 1 and 3).
+  if (exit === undefined) throw new Error('observe run produced no exit code');
   if (reportsFallbackExit(exit, usedFallback, endReason)) {
     exit = 1;
   }
@@ -1283,17 +1275,5 @@ function* observeLifecycle(overrides: Partial<ObserveDeps>): ObserveSteps<number
 
 /** Detached `oboete observe`: one bounded worker run, never a resident service (FR-009). */
 export async function runObserve(argv: string[], overrides: Partial<ObserveDeps> = {}): Promise<number> {
-  const execution = observeLifecycle(overrides);
-  let step = execution.next();
-  while (!step.done) {
-    let value: unknown;
-    try {
-      value = await step.value;
-    } catch (error) {
-      step = execution.throw(error);
-      continue;
-    }
-    step = execution.next(value);
-  }
-  return step.value;
+  return await observeLifecycle(overrides);
 }

@@ -108,12 +108,15 @@ function textOf(event: ObserverEvent): string {
     .join('\n');
 }
 
-function collectObserverEvents(
-  request: ObserverRequestInput,
-  dropped: DroppedRow[],
-  events: ObserverEvent[],
-  freeSummaries: ObserverInput['free_summaries'],
-): void {
+/** The admitted events of a request, the rows the rule table refused, and the free summaries. */
+function collectObserverEvents(request: ObserverRequestInput): {
+  dropped: DroppedRow[];
+  events: ObserverEvent[];
+  freeSummaries: ObserverInput['free_summaries'];
+} {
+  const dropped: DroppedRow[] = [];
+  const events: ObserverEvent[] = [];
+  const freeSummaries: ObserverInput['free_summaries'] = {};
   for (const row of request.rows) {
     const reason = refuse(request.rules, request.destination, row, request.repoId);
     if (reason !== null) {
@@ -131,14 +134,16 @@ function collectObserverEvents(
     }
     if (row.kind === 'compaction_summary') freeSummaries.compaction_summary = row.content ?? '';
   }
-
+  return { dropped, events, freeSummaries };
 }
 
-function collectNearbyMemories(
-  request: ObserverRequestInput,
-  dropped: DroppedRow[],
-  nearby: ObserverInput['nearby'],
-): void {
+/** The nearby memories the destination may receive, and the candidates the rule table refused. */
+function collectNearbyMemories(request: ObserverRequestInput): {
+  dropped: DroppedRow[];
+  nearby: ObserverInput['nearby'];
+} {
+  const dropped: DroppedRow[] = [];
+  const nearby: ObserverInput['nearby'] = [];
   for (const candidate of request.nearby) {
     // R10: the candidates are same-repository by construction; the check makes that an invariant
     // rather than an assumption of the caller.
@@ -158,7 +163,7 @@ function collectNearbyMemories(
       deleted: candidate.deleted,
     });
   }
-
+  return { dropped, nearby };
 }
 
 /**
@@ -168,14 +173,13 @@ function collectNearbyMemories(
  * events; the request has no other place for a path.
  */
 export function buildObserverRequest(request: ObserverRequestInput): ObserverRequest {
-  const dropped: DroppedRow[] = [];
-  const events: ObserverEvent[] = [];
-  const freeSummaries: ObserverInput['free_summaries'] = {};
+  const admitted = collectObserverEvents(request);
+  const { events, freeSummaries } = admitted;
 
-  collectObserverEvents(request, dropped, events, freeSummaries);
-
-  const nearby: ObserverInput['nearby'] = [];
-  collectNearbyMemories(request, dropped, nearby);
+  const nearbyResult = collectNearbyMemories(request);
+  const { nearby } = nearbyResult;
+  // Same order the single pass produced: every refused row, then every refused candidate.
+  const dropped: DroppedRow[] = [...admitted.dropped, ...nearbyResult.dropped];
 
   const admittedText = [
     ...events.map(textOf),

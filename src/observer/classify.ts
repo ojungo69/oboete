@@ -726,7 +726,7 @@ function unfinishedBatchCount(db: DatabaseSync, sessionId: string): number {
   );
 }
 
-function existingSessionSummary(
+function finishWithExistingSummary(
   db: DatabaseSync,
   sessionId: string,
   content: string,
@@ -778,7 +778,7 @@ function summarizeSession(
   const content = contentHash(repoId, material);
   const memoryId = memoryIdFor(content);
 
-  const existing = existingSessionSummary(db, sessionId, content);
+  const existing = finishWithExistingSummary(db, sessionId, content);
   if (existing !== null) return existing;
 
   insertSessionSummary(db, rows, {

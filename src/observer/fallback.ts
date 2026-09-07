@@ -16,12 +16,12 @@ import {
 export type FallbackEvent = {
   id: string;
   kind:
-  | 'prompt'
-  | 'tool_call'
-  | 'tool_result'
-  | 'tool_failure'
-  | 'last_assistant_message'
-  | 'compaction_summary';
+    | 'prompt'
+    | 'tool_call'
+    | 'tool_result'
+    | 'tool_failure'
+    | 'last_assistant_message'
+    | 'compaction_summary';
   turn_index: number;
   tool_call_id?: string;
   tool_name?: string;

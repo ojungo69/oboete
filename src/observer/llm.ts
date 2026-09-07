@@ -31,28 +31,28 @@ const OUTPUT_NEURONS_PER_MILLION_TOKENS = 36_400;
 
 export type CallOutcome =
   | {
-    ok: true;
-    output: ObserverOutput;
-    resolvedModel: string | null;
-    neurons: number | null;
-    attempts: number;
-  }
+      ok: true;
+      output: ObserverOutput;
+      resolvedModel: string | null;
+      neurons: number | null;
+      attempts: number;
+    }
   | {
-    ok: false;
-    reason:
-    | 'daily_cap'
-    | 'provider_exhausted'
-    | 'provider_paid'
-    | 'auth_failed'
-    | 'unreachable'
-    | 'timeout'
-    | 'unusable_output'
-    | 'model_alias'
-    | 'consent_changed'
-    | 'no_provider';
-    attempts: number;
-    detail: string;
-  };
+      ok: false;
+      reason:
+        | 'daily_cap'
+        | 'provider_exhausted'
+        | 'provider_paid'
+        | 'auth_failed'
+        | 'unreachable'
+        | 'timeout'
+        | 'unusable_output'
+        | 'model_alias'
+        | 'consent_changed'
+        | 'no_provider';
+      attempts: number;
+      detail: string;
+    };
 
 type FailureReason = Extract<CallOutcome, { ok: false }>['reason'];
 type ApiError = { statusCode?: number; responseBody?: string; cause?: unknown };
@@ -65,15 +65,15 @@ const ERROR_OUTCOME_ROWS: ReadonlyArray<{
   bodyCode: number | string | null;
   outcome: FailureReason;
 }> = [
-    { status: 429, bodyCode: 3036, outcome: 'provider_exhausted' },
-    { status: 429, bodyCode: 3040, outcome: 'provider_exhausted' },
-    { status: 403, bodyCode: 5035, outcome: 'provider_paid' },
-    { status: null, bodyCode: 3007, outcome: 'unreachable' },
-    { status: 401, bodyCode: null, outcome: 'auth_failed' },
-    { status: 403, bodyCode: null, outcome: 'auth_failed' },
-    { status: 408, bodyCode: null, outcome: 'unreachable' },
-    { status: 429, bodyCode: null, outcome: 'provider_exhausted' },
-  ];
+  { status: 429, bodyCode: 3036, outcome: 'provider_exhausted' },
+  { status: 429, bodyCode: 3040, outcome: 'provider_exhausted' },
+  { status: 403, bodyCode: 5035, outcome: 'provider_paid' },
+  { status: null, bodyCode: 3007, outcome: 'unreachable' },
+  { status: 401, bodyCode: null, outcome: 'auth_failed' },
+  { status: 403, bodyCode: null, outcome: 'auth_failed' },
+  { status: 408, bodyCode: null, outcome: 'unreachable' },
+  { status: 429, bodyCode: null, outcome: 'provider_exhausted' },
+];
 
 const NUMERIC_AUTH_CODES = new Set([9103, 9109, 10000, 10001]);
 
@@ -183,10 +183,6 @@ function findApiError(
   return findCause(error, isInstance) as ApiError | undefined;
 }
 
-function declaredResponseTooLarge(declaredLength: number): boolean {
-  return Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES;
-}
-
 function rebuildResponse(
   response: Response,
   chunks: Uint8Array[],
@@ -233,7 +229,7 @@ async function readBoundedResponseChunks(
 
 async function responseWithinLimit(response: Response): Promise<Response> {
   const declaredLength = Number(response.headers.get('content-length'));
-  if (declaredResponseTooLarge(declaredLength)) {
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
     if (response.body !== null) {
       try {
         await response.body.cancel();
@@ -386,15 +382,11 @@ function agentCliResultOutcome(
   return null;
 }
 
-function agentCliConfigurationMissing(ctx: SummarizeContext): boolean {
-  return !ctx.credentials.present || ctx.model.trim() === '';
-}
-
 async function summarizeWithAgentCli(
   input: ObserverInput,
   ctx: SummarizeContext,
 ): Promise<CallOutcome> {
-  if (agentCliConfigurationMissing(ctx)) {
+  if (!ctx.credentials.present || ctx.model.trim() === '') {
     return failure('no_provider', 0, 'the agent-cli preset is not configured');
   }
   const prompt = buildSummarizerPrompt(input, 'text-json');
@@ -424,8 +416,12 @@ type PreparedReservation =
   | { ok: true; reservation: ProviderReservation }
   | Extract<CallOutcome, { ok: false }>;
 
-function providerConfigurationMissing(ctx: SummarizeContext): boolean {
-  return ctx.preset === 'none' || !ctx.credentials.present || ctx.model.trim() === '';
+/**
+ * A predicate rather than a boolean so the caller keeps the narrowing the inline check had: past
+ * this point `ctx.preset` is a real preset, and `'none'` cannot reach the catalog lookup.
+ */
+function providerConfigured(ctx: SummarizeContext): ctx is SummarizeContext & { preset: PresetName } {
+  return ctx.preset !== 'none' && ctx.credentials.present && ctx.model.trim() !== '';
 }
 
 function buildProviderPrompt(
@@ -436,10 +432,6 @@ function buildProviderPrompt(
     input,
     requestOptions.structured === 'text-json' ? 'text-json' : 'schema',
   );
-}
-
-function providerTransportFetch(ctx: SummarizeContext): typeof globalThis.fetch {
-  return faultFetch(ctx.fetch ?? globalThis.fetch);
 }
 
 function prepareProviderReservation(
@@ -521,22 +513,38 @@ function providerGenerateOptions(
   };
 }
 
-function providerTextFailure(
+/**
+ * Tagged so the two answers cannot be confused: `settled` carries what the caller must return,
+ * where a `null` outcome is this file's "retry the call" (summarizeWithProvider continues on it),
+ * and `usable` means the text itself is fine and parsing comes next.
+ */
+type TextCheck = { kind: 'usable' } | { kind: 'settled'; outcome: CallOutcome | null };
+
+function providerTextCheck(
   result: Awaited<ReturnType<GenerateText>>,
   attempts: number,
-): CallOutcome | null | undefined {
+): TextCheck {
   if (result.finishReason === 'length') {
-    if (attempts < 2) return null;
-    return failure('unusable_output', attempts, 'provider output reached its length limit');
+    if (attempts < 2) return { kind: 'settled', outcome: null };
+    return {
+      kind: 'settled',
+      outcome: failure('unusable_output', attempts, 'provider output reached its length limit'),
+    };
   }
   if (result.text.trim() === '') {
-    if (attempts < 2) return null;
-    return failure('unusable_output', attempts, 'provider response contained no text');
+    if (attempts < 2) return { kind: 'settled', outcome: null };
+    return {
+      kind: 'settled',
+      outcome: failure('unusable_output', attempts, 'provider response contained no text'),
+    };
   }
   if (Buffer.byteLength(result.text, 'utf8') > MAX_RESPONSE_BYTES) {
-    return failure('unusable_output', attempts, 'provider response exceeded 1 MB');
+    return {
+      kind: 'settled',
+      outcome: failure('unusable_output', attempts, 'provider response exceeded 1 MB'),
+    };
   }
-  return undefined;
+  return { kind: 'usable' };
 }
 
 function providerTextOutcome(
@@ -553,8 +561,8 @@ function providerTextOutcome(
   ) {
     return failure('model_alias', attempts, 'the provider returned a different model id');
   }
-  const textFailure = providerTextFailure(result, attempts);
-  if (textFailure !== undefined) return textFailure;
+  const textCheck = providerTextCheck(result, attempts);
+  if (textCheck.kind === 'settled') return textCheck.outcome;
 
   const parsed = parseOutput(result.text, input);
   if (!parsed.ok) {
@@ -601,14 +609,14 @@ export async function summarizeWithProvider(
   input: ObserverInput,
   ctx: SummarizeContext,
 ): Promise<CallOutcome> {
-  if (providerConfigurationMissing(ctx)) {
+  if (!providerConfigured(ctx)) {
     return failure('no_provider', 0, 'no usable observer provider is configured');
   }
   if (ctx.preset === 'agent-cli') return await summarizeWithAgentCli(input, ctx);
 
-  const requestOptions = providerRequestOptions(ctx.preset as PresetName);
+  const requestOptions = providerRequestOptions(ctx.preset);
   const prompt = buildProviderPrompt(input, requestOptions);
-  const transportFetch = providerTransportFetch(ctx);
+  const transportFetch = faultFetch(ctx.fetch ?? globalThis.fetch);
   let capturedHeaders: Record<string, string> | undefined;
   const captureFetch: typeof globalThis.fetch = async (request, init) => {
     const response = await transportFetch(request, init);
@@ -616,7 +624,7 @@ export async function summarizeWithProvider(
     return await responseWithinLimit(response);
   };
 
-  const model = await createLanguageModel(ctx.preset as PresetName, ctx.model, ctx.credentials, {
+  const model = await createLanguageModel(ctx.preset, ctx.model, ctx.credentials, {
     fetch: captureFetch,
   }).catch(() => null);
   if (model === null) {
