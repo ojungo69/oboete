@@ -3140,5 +3140,341 @@
   "state": "fixed",
   "where": "#160",
   "confirmed": "a0d2c7f5-31e1-4b40-9986-7853662be920"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkgzIqdfylE4c2oa",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkgzIqdfylE4c2ob",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkgzIqdfylE4c2oc",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkl3IqdfylE4c2pn",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkl3IqdfylE4c2pr",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkl3IqdfylE4c2ps",
+  "state": "resolved",
+  "where": "runHook and runCapture consume this numeric return; returning undefined or a failure code would violate their specified always-zero CLI exit contract.",
+  "transition": "wontfix"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkjoIqdfylE4c2pG",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkjoIqdfylE4c2pH",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmFIqdfylE4c2pt",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmFIqdfylE4c2pu",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmFIqdfylE4c2pv",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmFIqdfylE4c2pw",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmFIqdfylE4c2px",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmFIqdfylE4c2py",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmFIqdfylE4c2pz",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmFIqdfylE4c2p0",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmFIqdfylE4c2p1",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmFIqdfylE4c2p2",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkbGIqdfylE4c2nX",
+  "state": "resolved",
+  "where": "row.probe is a SQLite TEXT column read by the doctor; String() is the intended coercion of a scalar the schema stores as text, and a typeof guard would only add a branch no row can take",
+  "transition": "wontfix"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkbGIqdfylE4c2nY",
+  "state": "resolved",
+  "where": "row.trust is a SQLite TEXT column read by the doctor; String() is the intended coercion of a scalar the schema stores as text, and a typeof guard would only add a branch no row can take",
+  "transition": "wontfix"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkbGIqdfylE4c2na",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkbGIqdfylE4c2nc",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkbGIqdfylE4c2nd",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkbZIqdfylE4c2ne",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkbZIqdfylE4c2nf",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkmSIqdfylE4c2p3",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XklZIqdfylE4c2pl",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkjBIqdfylE4c2o1",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkjBIqdfylE4c2o2",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkeZIqdfylE4c2n-",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkeZIqdfylE4c2oA",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkeZIqdfylE4c2oB",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xke6IqdfylE4c2oD",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xke6IqdfylE4c2oE",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xke6IqdfylE4c2oI",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xke6IqdfylE4c2oJ",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xke6IqdfylE4c2oK",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XklOIqdfylE4c2pj",
+  "state": "resolved",
+  "where": "input.query is the MCP tool argument passed through to the child CLI; String() is the intended coercion to one argv entry, and the CLI validates the value",
+  "transition": "wontfix"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XklOIqdfylE4c2pk",
+  "state": "resolved",
+  "where": "input.id is the MCP tool argument passed through to the child CLI; String() is the intended coercion to one argv entry, and the CLI validates the value",
+  "transition": "wontfix"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkoIqdfylE4c2pU",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkoIqdfylE4c2pX",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkoIqdfylE4c2pY",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkOIqdfylE4c2pN",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkCIqdfylE4c2pJ",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkCIqdfylE4c2pK",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkkCIqdfylE4c2pL",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkb6IqdfylE4c2nh",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkb6IqdfylE4c2ni",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkdaIqdfylE4c2n5",
+  "state": "resolved",
+  "where": "input is the RequestInfo | URL of a fetch fault injector; String() is the intended URL text of a string or URL, and a Request is never passed here",
+  "transition": "wontfix"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkioIqdfylE4c2oz",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xki0IqdfylE4c2o0",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkiJIqdfylE4c2or",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkiJIqdfylE4c2ot",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkiJIqdfylE4c2ou",
+  "state": "fixed",
+  "where": "#162"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkiJIqdfylE4c2ov",
+  "state": "fixed",
+  "where": "#162"
  }
 ]
