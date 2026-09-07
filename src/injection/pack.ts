@@ -491,15 +491,9 @@ function checkedCitations(
   return { citations, pathState, fresh };
 }
 
-async function assemble(
-  db: DatabaseSync,
-  input: PackChannelInput,
-  assembly: Assembly,
-): Promise<BuiltPack | null> {
-  const repositoryLine = `> repository: ${canonicalLine(withoutUserinfo(input.repoIdentityDisplay))}`;
-
+/** Every candidate as a pack item, with the ones that read as instructions already omitted. */
+function packItems(db: DatabaseSync, input: PackChannelInput, assembly: Assembly): PackItem[] {
   const { citations, pathState, fresh } = checkedCitations(db, input, assembly);
-
   const items = [
     ...assembly.memories.map((memory) =>
       memoryItem(memory, citations.get(memory.id) ?? [], {
@@ -519,6 +513,17 @@ async function assemble(
       omit(item, 'directive');
     }
   }
+  return items;
+}
+
+async function assemble(
+  db: DatabaseSync,
+  input: PackChannelInput,
+  assembly: Assembly,
+): Promise<BuiltPack | null> {
+  const repositoryLine = `> repository: ${canonicalLine(withoutUserinfo(input.repoIdentityDisplay))}`;
+
+  const items = packItems(db, input, assembly);
 
   const degraded = assembly.degraded;
   const kept = withinBudget(items, {

@@ -1089,12 +1089,14 @@ function recordResume(
   const printed =
     packText(seen.hooked.stdout).trim() !== '' ||
     (seen.injected !== undefined && packText(seen.injected.stdout).trim() !== '');
+  const unreadable = after < 0 || seen.resumeBefore < 0;
+  const injectionDelta = unreadable ? 1 : after - seen.resumeBefore;
   run.resumeChecks.push({
     seq: line.seq,
     agent: line.agent,
     session: line.session,
     packPrinted: printed,
-    injectionDelta: after < 0 || seen.resumeBefore < 0 ? 1 : after - seen.resumeBefore,
+    injectionDelta,
   });
 }
 
@@ -2033,12 +2035,9 @@ function timingTables(
 }
 
 /** The recall misses, SC summary, hook exit, lifecycle and compaction tables. */
-function findingTables(
-  input: MeasureInput,
-  computed: ReturnType<typeof computeReport>,
-  bounds: BoundRow[],
-) {
-  const { compactionSummaries, lifecycleRows, misses } = computed;
+/** The recall misses and the SC verdict table. */
+function recallTables(computed: ReturnType<typeof computeReport>, bounds: BoundRow[]) {
+  const { misses } = computed;
   const missTable =
     misses.length === 0
       ? 'None.'
@@ -2052,6 +2051,12 @@ function findingTables(
     [false, false, false, false],
     bounds.map((row) => [row.sc, row.measured, row.bound, row.status]),
   );
+  return { missTable, scTable };
+}
+
+/** The hook exits, the lifecycle checks, and the compaction summaries. */
+function lifecycleTables(input: MeasureInput, computed: ReturnType<typeof computeReport>) {
+  const { compactionSummaries, lifecycleRows } = computed;
   const hookExitTable =
     input.hookFailures.length === 0
       ? `All ${input.hookCount} capture and injection hooks exited 0 (none killed, none timed out).`
@@ -2088,8 +2093,15 @@ function findingTables(
             String(row.classification_state),
           ]),
         );
+  return { hookExitTable, lifecycleTable, compactSummaryTable };
+}
 
-  return { missTable, scTable, hookExitTable, lifecycleTable, compactSummaryTable };
+function findingTables(
+  input: MeasureInput,
+  computed: ReturnType<typeof computeReport>,
+  bounds: BoundRow[],
+) {
+  return { ...recallTables(computed, bounds), ...lifecycleTables(input, computed) };
 }
 
 /** The heading, the machine this ran on, and the capture and injection tables. */
