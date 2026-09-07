@@ -1,0 +1,70 @@
+src/retrieval/rank.ts
+  s_8c3ba3b86b2cfd::t_6dde14b9c5e2e5 157-192,196-219,235
+  s_8c3ba3b86b2cfd::t_63a6baed6cc828 193-195
+src/doctor/provider.ts
+  s_8c3ba3b86b2cfd::t_f9196157b3c17a 73-131,153,159,163-164,166-172,195-203,220,329-336,400-408,430-436
+src/db/open.ts
+  s_8c3ba3b86b2cfd::t_7523114945f374 102,187-216
+  s_359fcac8e97f88::t_9f65beb7f4ac85 217
+src/setup/detect.ts
+  s_8c3ba3b86b2cfd::t_f9196157b3c17a 48-56,219,227,261-268
+src/capture.ts
+  s_8c3ba3b86b2cfd::t_d1e798f3b2e893 566,575-581,786-798,808,810,820-824,838,840-845,885,887-892
+  s_8c3ba3b86b2cfd::t_e52ae442e41958 594-596,837,955
+  s_8c3ba3b86b2cfd::t_e7e2958910f70c 582-593,597-613,826-831,833-834,846-883,894-898,900-901,903,905-912,914-954,956-963,965-979,981-989,992,1022-1033,1058-1086,1088-1118,1123-1143,1153,1168,1183,1189,1200,1203-1204,1216-1222,1235
+  s_8c3ba3b86b2cfd::t_564d5e7cdda778 913,990,1087,1119-1122,1179,1205-1215
+  s_359fcac8e97f88::t_f702d9e7ff6134 614
+src/doctor.ts
+  s_8c3ba3b86b2cfd::t_f9196157b3c17a 105,126,139-177,298-304
+src/setup/managed-block.ts
+  s_8c3ba3b86b2cfd::t_f9196157b3c17a 188-196,200,202
+src/setup/setup.ts
+  s_8c3ba3b86b2cfd::t_17e518c9e2d33f 333
+  s_8c3ba3b86b2cfd::t_f9196157b3c17a 81-83,161-313,332,356,358,361,363,370-371
+  s_8c3ba3b86b2cfd::t_6c63f2f69641dc 338,355
+src/doctor/storage.ts
+  s_8c3ba3b86b2cfd::t_f9196157b3c17a 70-73,97-105,109-111,116-124,128-152,166,169-170,175,193-210
+  s_359fcac8e97f88::t_5cbf741a28d332 211
+src/agents/grok.ts
+  s_8c3ba3b86b2cfd::t_8a7afe9ebadbbb 10-15,93-220,232-235,237-244
+  s_359fcac8e97f88::t_87cc4fd795fdf9 9
+src/agents/pi.ts
+  s_8c3ba3b86b2cfd::t_8a7afe9ebadbbb 10,107-196,213-218,223-224
+src/setup/write-codex.ts
+  s_8c3ba3b86b2cfd::t_f9196157b3c17a 135,148-178,181-206
+src/setup/probe.ts
+  s_8c3ba3b86b2cfd::t_f9196157b3c17a 45-98,122,124,215-257,293
+src/agents/codex.ts
+  s_8c3ba3b86b2cfd::t_8a7afe9ebadbbb 7,97-178,194-197,199-202
+src/retrieval/fts.ts
+  s_8c3ba3b86b2cfd::t_6dde14b9c5e2e5 100-129,149,152
+src/agents/claude.ts
+  s_8c3ba3b86b2cfd::t_8a7afe9ebadbbb 8,100-200,214-217,219-224
+src/doctor/agents.ts
+  s_8c3ba3b86b2cfd::t_17e518c9e2d33f 371-376
+  s_8c3ba3b86b2cfd::t_f9196157b3c17a 103,105-116,118-127,136-137,163-164,166-182,238-239,336,360-370,377-379,412,420-446
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "b1994e114aee63e1f3de9c47e8bad472aa9d0f2a",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_8c3ba3b86b2cfd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a079ea-9cb6-7350-8d6c-8cb1a230c175",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
