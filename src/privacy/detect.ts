@@ -119,25 +119,28 @@ function tokenize(glob: string): GlobToken[] {
   // A `[` opens a class only when some `]` lies after it, and the class then consumes that `]`, so
   // the search below always hits and a rule made of `[` with no `]` is read once, not once per `[`.
   const lastClose = glob.lastIndexOf(']');
-  for (let index = 0; index < glob.length; index += 1) {
+  let index = 0;
+  while (index < glob.length) {
     const character = glob[index] as string;
     if (character === '*') {
       if (glob[index + 1] === '*') {
         // `**/` is zero or more directories, so `a/**/b` matches `a/b` as well as `a/x/b`.
         if (glob[index + 2] === '/') {
           tokens.push({ kind: 'anyDirectories' });
-          index += 2;
+          index += 3;
         } else {
           tokens.push({ kind: 'anyStar' });
-          index += 1;
+          index += 2;
         }
       } else {
         tokens.push({ kind: 'segmentStar' });
+        index += 1;
       }
       continue;
     }
     if (character === '?') {
       tokens.push({ kind: 'one', test: (candidate) => candidate !== '/' });
+      index += 1;
       continue;
     }
     if (character === '[' && index < lastClose) {
@@ -145,10 +148,11 @@ function tokenize(glob: string): GlobToken[] {
       const body = glob.slice(index + 1, close).replace(/^[!^]/, '^');
       const expression = new RegExp(`^[${body}]$`);
       tokens.push({ kind: 'one', test: (candidate) => expression.test(candidate) });
-      index = close;
+      index = close + 1;
       continue;
     }
     tokens.push({ kind: 'one', test: (candidate) => candidate === character });
+    index += 1;
   }
   return tokens;
 }
