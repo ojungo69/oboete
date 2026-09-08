@@ -57,6 +57,10 @@ sudo rm -rf /var/tmp/oboete-harness && sudo mkdir -p /var/tmp/oboete-harness \
 # memory tools when `claude` is not on PATH.
 # the harness refuses any HOME other than the account's own, and the agents' logins and oboete's consent record
 # live in the real configuration directories, so HOME stays real and the five configuration variables point at copies
+# A previous run that failed its copy-back leaves the account's only live Claude credential inside
+# `candidate-homes` as a regular file. Deleting that to start again is what locks the account out, so put it
+# back before removing anything, and stop if it cannot be put back.
+sudo -u oboete-dogfood -H bash -lc 'C=~/candidate-homes/claude/.credentials.json; if [ -f "$C" ] && [ ! -L "$C" ]; then cp -a "$C" ~/.claude/.credentials.json || { echo "a previous run left the only live Claude credential at $C; refusing to delete it"; exit 1; }; fi'
 sudo -u oboete-dogfood -H bash -lc 'rm -rf ~/candidate ~/candidate-homes && mkdir -p ~/candidate ~/candidate-homes \
   && cp -a ~/.oboete ~/candidate-homes/oboete && cp -a ~/.claude ~/candidate-homes/claude && cp -a ~/.claude.json ~/candidate-homes/claude/.claude.json && cp -a ~/.codex ~/candidate-homes/codex && cp -a ~/.grok ~/candidate-homes/grok && cp -a ~/.pi/agent ~/candidate-homes/pi \
   && npm install --prefix ~/candidate <tarball> && sha256sum ~/candidate/node_modules/oboete/dist/oboete.mjs'
@@ -90,6 +94,9 @@ sudo -u oboete-dogfood -H bash -lc "$CAND; oboete setup --agents claude,codex,gr
 # backups and agent history quote whichever bundle path they were written under. This counts references;
 # it does not say an entry is structurally valid or that the agent would execute it, and it sees only
 # paths under a `node_modules/oboete/dist/` directory -- a literal path anywhere else is outside it.
+# It also reads the files as text, so it assumes the serialization `oboete setup` writes: single-quoted
+# paths in hook commands (`shellQuote`). A JSON hook command written with double quotes would carry the
+# escaping backslash into the token and be rejected.
 sudo -u oboete-dogfood -H bash -lc "$CAND; set -o pipefail
 D=\$HOME/candidate/node_modules/oboete/dist
 set -- \"\$CLAUDE_CONFIG_DIR/settings.json 8\" \"\$CLAUDE_CONFIG_DIR/.claude.json 1\" \"\$CODEX_HOME/config.toml 1\" \\
