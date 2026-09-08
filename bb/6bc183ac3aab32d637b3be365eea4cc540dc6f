@@ -1,0 +1,57 @@
+scripts/e2e/probe-lib/claude-tui.mjs
+  s_0579347241e0fa::t_33694dbfa22a81 1-101
+scripts/e2e/probe-lib/pi-errors.mjs
+  s_0579347241e0fa::t_a857bc03441f2f 1-129
+scripts/e2e/probes/claude.mjs
+  s_0579347241e0fa::t_fdae260d76eb26 20
+scripts/e2e/probes/pi.mjs
+  s_0579347241e0fa::t_d252ed7b4b7c61 15-24
+src/doctor.ts
+  s_0579347241e0fa::t_eb8abd79427a93 23
+src/doctor/provider.ts
+  s_0579347241e0fa::t_cf824821ae5be8 37
+src/doctor/storage.ts
+  s_0579347241e0fa::t_23ad81f9d6fd45 18
+src/observer/apply.ts
+  s_0579347241e0fa::t_c429982a3cb0fc 1-337
+src/observer/classify.ts
+  s_0579347241e0fa::t_91a7760422f3b1 4-5,169,175
+src/observer/llm-errors.ts
+  s_0579347241e0fa::t_b04cb9fedc4f5d 1-128
+src/observer/llm.ts
+  s_0579347241e0fa::t_165a2fab66074a 9,57
+src/setup/report.ts
+  s_0579347241e0fa::t_fb57ae266d4bd0 1-43
+src/setup/setup.ts
+  s_0579347241e0fa::t_0fdbb895cadc22 36,64
+src/worker/batches.ts
+  s_0579347241e0fa::t_4d20027382b87f 10
+src/worker/observe.ts
+  s_0579347241e0fa::t_45498f06bc983a 26,58
+src/worker/spool-recovery.ts
+  s_0579347241e0fa::t_ee8bf0d96d6c5f 1-206
+test/unit/batches.test.ts
+  s_0579347241e0fa::t_b3099c35a568f2 18
+test/unit/capture.test.ts
+  s_0579347241e0fa::t_0ebe0b96e64435 39
+test/unit/classify.test.ts
+  s_0579347241e0fa::t_edf9097e5c22e7 10
+test/unit/cli-memories.test.ts
+  s_0579347241e0fa::t_39b3bb585598a7 18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "bb6bc183ac3aab32d637b3be365eea4cc540dc6f",
+  "prompts": {},
+  "sessions": {
+    "s_0579347241e0fa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ea2d7529-9dd2-49fc-85a0-d91170ff956a",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
