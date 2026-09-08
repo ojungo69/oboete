@@ -489,40 +489,27 @@ script sources the credentials before it starts, so a worker it spawns carries t
 
 ### Why the five Grok legs failed
 
-Every failing leg's own output is the same line, in `<run>/grok-to-claude/seed/stdout.txt` and under
-`codex-to-grok/receive`:
+Every failing leg reports `Not signed in.`, including `<run>/grok-to-claude/seed/stdout.txt` and
+`codex-to-grok/receive`.
 
-```
-{"type":"error","message":"Not signed in. To authenticate without a browser, run:\n  grok login --device-code\n\nAlternatively, set the XAI_API_KEY environment variable or run `grok login` on a machine with a browser."}
-```
+The pairs run alphabetically: `claude → grok`, the second pair, passed in 63 s with the fact recalled.
+From `codex → grok` on, every Grok leg failed; the three Grok seeding legs ended in about 500 ms. This
+shows that Grok could authenticate at the start of the run and could not later in it.
 
-The order is what identifies the cause. The pairs run alphabetically and `claude → grok` is the second
-of them: it passed, in 63 s, with the fact recalled. From `codex → grok` on, every leg that touches
-grok fails, the three where grok seeds in about 500 ms because the CLI cannot open a session at all.
-So grok was signed in when the run started and was not a few minutes later.
+`prepareGrokAgent` (`scripts/e2e/isolated-user.mjs:928`) copies the account's `~/.grok/auth.json`
+into each pair configuration and points `GROK_HOME` at that copy. That is the copied-credential hazard
+tracked in issue #175, but this run does not identify a particular refresh or prove token retirement.
+`prepareCodexAgent` and `preparePiAgent` also copy `auth.json`, so their exposure is part of that
+follow-up.
 
-`prepareGrokAgent` (`scripts/e2e/isolated-user.mjs:928`) copies the account's
-`~/.grok/auth.json` into each pair's own configuration directory and points `GROK_HOME` at it. When
-grok refreshes its token inside one of those copies, the server retires the token the account's file
-still holds — the mechanism issue #175 records, now observed for Grok. The account's
-`~/.grok/auth.json` has not been written since 2026-09-07 00:17, which is what a credential file that
-only ever gets copied looks like, and day 3 (`2026-09-08T05-23-31`) passed 12 of 12 only because no
-refresh fell inside it.
+`prepareClaudeAgent` copies `settings.json` alone and passes it with `--settings`; it does not set a
+per-leg credential configuration variable, so Claude inherits its credential configuration. This run
+records no Claude authentication failure, not a general guarantee that Claude cannot fail this way.
 
-Claude is the one agent the run cannot break this way: `prepareClaudeAgent` copies `settings.json`
-alone, passes it with `--settings` and sets no home variable, so the CLI reads the account's real
-`~/.claude` and refreshes the credentials in place. `prepareCodexAgent` and `preparePiAgent` copy
-`auth.json` the way the Grok one does, so the same hazard is open for them and has only not been hit
-yet.
-
-How long a restored login lasts is a question about the token, not about the number of runs: the
-account's `auth.json` was last written on 2026-09-07 00:17 and the runs of 2026-09-08 05:23 and
-2026-09-08 15:05 both started from it, the first passing 12 of 12. What ends it is the first leg whose
-copy has to refresh — the copy gets the new token, the account's file keeps the retired one, and every
-later leg starts from a credential the server no longer accepts. Restoring the login buys another such
-interval, not a fixed number of runs, so SC-007 counts this failure as traced to #175 rather than to
-oboete, and the fix belongs there: let each agent read the account's own credential file instead of a
-per-leg copy of it, which is what the Claude leg already does.
+The T033 candidate verification at `2026-09-08T05-23-31` passed 12 of 12 pairs; it is separate from
+the day-3 daily run `2026-09-07T15-05-08-149Z`. Neither result identifies whether a token refresh
+occurred. SC-007 records the observed Grok CLI authentication failure, while issue #175 follows the
+copied-credential hypothesis and its remediation.
 
 
 - Filed against the release (SC-007): https://github.com/ojungo69/oboete/issues/180
