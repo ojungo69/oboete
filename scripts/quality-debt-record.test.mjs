@@ -18,12 +18,12 @@ test('--check accepts a complete ledger', (t) => {
 
 for (const [name, change, counts, problem] of [
   ['missing row', (ledger) => ledger.pop(), '1 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason',
-    new RegExp(`missing 1: codacy:${codacyViewerId}`)],
-  ['duplicate row', (ledger) => ledger.push(ledger[0]), '0 missing, 1 duplicate, 0 open, 0 unconfirmed, 0 resolved-without-reason', /duplicate 1: sonar:s-worker/],
-  ['empty resolved reason', (ledger) => { ledger[2].where = ' \t'; }, '0 missing, 0 duplicate, 0 open, 0 unconfirmed, 1 resolved-without-reason', /resolved-without-reason 1: sonar:s-regexp/],
-  ['explicit open state', (ledger) => { ledger[0].state = 'open'; }, '0 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason', /open 1: sonar:s-worker/],
-  ['missing state', (ledger) => { delete ledger[0].state; }, '0 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason', /open 1: sonar:s-worker/],
-  ['unknown state', (ledger) => { ledger[0].state = 'unknown'; }, '0 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason', /open 1: sonar:s-worker/],
+    `missing 1: codacy:${codacyViewerId}`],
+  ['duplicate row', (ledger) => ledger.push(ledger[0]), '0 missing, 1 duplicate, 0 open, 0 unconfirmed, 0 resolved-without-reason', 'duplicate 1: sonar:s-worker'],
+  ['empty resolved reason', (ledger) => { ledger[2].where = ' \t'; }, '0 missing, 0 duplicate, 0 open, 0 unconfirmed, 1 resolved-without-reason', 'resolved-without-reason 1: sonar:s-regexp'],
+  ['explicit open state', (ledger) => { ledger[0].state = 'open'; }, '0 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason', 'open 1: sonar:s-worker'],
+  ['missing state', (ledger) => { delete ledger[0].state; }, '0 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason', 'open 1: sonar:s-worker'],
+  ['unknown state', (ledger) => { ledger[0].state = 'unknown'; }, '0 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason', 'open 1: sonar:s-worker'],
 ]) {
   test(`--check rejects a ${name}`, (t) => {
     const { cwd, ledger } = fixture(t);
@@ -31,7 +31,7 @@ for (const [name, change, counts, problem] of [
     writeJson(cwd, 'ledger.json', ledger);
     const result = run(cwd, ['--check']);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, problem);
+    assert.ok(result.stderr.includes(problem), result.stderr);
     const withoutWhere = name === 'empty resolved reason' ? 1 : 0;
     assert.equal(result.stdout.trim(), `5 ids: ${counts}, 0 unknown, ${withoutWhere} without-where, 0 without-verdict`);
     if (name.endsWith('state')) {
@@ -138,7 +138,7 @@ test('--check requires a valid Codacy reason even with --planned', (t) => {
       ledger[4].confirmed = confirmed;
       const result = run(cwd, ['--apply-codacy', '--dry-run']);
       assert.equal(result.status, 1);
-      assert.match(result.stderr, new RegExp(`${codacyViewerId}.*reason`));
+      assert.equal(result.stderr, `codacy ${codacyViewerId}: resolved without a valid reason\n`);
       assert.equal(result.stdout, '');
     }
   }
@@ -242,7 +242,7 @@ test('--check rejects missing or repeated allocations, even with a complete ledg
   writeJson(cwd, 'allocation.json', allocation);
   const result = run(cwd, ['--check']);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, new RegExp(`allocation missing: codacy:${codacyViewerId}`));
+  assert.ok(result.stderr.includes(`allocation missing: codacy:${codacyViewerId}`), result.stderr);
   assert.match(result.stderr, /allocation duplicate: sonar:s-worker.*C1/);
   assert.match(result.stderr, /allocation unknown: stale-id/);
   assert.equal(result.stdout.trim(), '5 ids: 0 missing, 0 duplicate, 0 open, 0 unconfirmed, 0 resolved-without-reason, 0 unknown, 0 without-where, 0 without-verdict');

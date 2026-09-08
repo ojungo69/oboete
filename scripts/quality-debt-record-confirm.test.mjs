@@ -30,7 +30,7 @@ test('--confirm reads all pages once per service and only confirms absent planne
   assert.match(result.stdout, /sonar: 1 confirmed, 1 still open/);
   assert.match(result.stdout, /codacy: 1 confirmed, 1 still open/);
   assert.match(result.stdout, /sonar s-sql: still open/);
-  assert.match(result.stdout, new RegExp(`codacy ${codacyViewerId}: still open`));
+  assert.ok(result.stdout.includes(`codacy ${codacyViewerId}: still open`), result.stdout);
   const text = readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8');
   const saved = JSON.parse(text);
   assert.equal(saved[0].confirmed, 'analysis-key');

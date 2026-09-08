@@ -13,7 +13,7 @@ One row reported by a service on `main` — as of 5e03d67f for the rows exported
 | Field | Source | Notes |
 |---|---|---|
 | `service` | fixed | `sonar` or `codacy` |
-| `id` | service | SonarCloud issue key (`AZ...`) or Codacy `issueId` (non-empty lowercase hex, observed at 30–32 characters and preserved exactly). Stable across analyses while the code line survives. |
+| `id` | service | SonarCloud issue key (`AZ...`) or Codacy `issueId` (non-empty lowercase hex preserved exactly, with no inferred width restriction). Stable across analyses while the code line survives. |
 | `rule` | service | Sonar rule key (`typescript:S3776`) or Codacy pattern id (`Lizard_nloc-medium`) |
 | `severity` | service | Sonar `BLOCKER…INFO`; Codacy `Error/Warning/Info` |
 | `file`, `line` | service | Repository-relative path; line as of the commit the row was exported from — `5e03d67f` for the 2026-09-07 rows, `9e52c3c2` for the 13 added on 2026-09-08 |

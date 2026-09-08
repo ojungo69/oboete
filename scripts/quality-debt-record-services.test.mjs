@@ -139,7 +139,7 @@ for (const status of [204, 429]) {
       { status: 200 }, codacyOpen(...ledger.slice(3).map((row) => row.id)), { status: 200 }, { status },
     ]));
     assert.equal(result.status, status === 429 ? 1 : 0, result.stderr);
-    if (status === 429) assert.match(result.stderr, new RegExp(`${codacyViewerId}.*429`));
+    if (status === 429) assert.equal(result.stderr, `Codacy ${codacyViewerId}: PATCH returned HTTP 429\n`);
     assert.doesNotMatch(result.stdout + result.stderr, /fixture-token/);
     const events = readFileSync(join(cwd, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(events.length, 6);
