@@ -71,15 +71,19 @@ sudo -u oboete-dogfood -H bash -lc 'rm -rf ~/candidate ~/candidate-homes && mkdi
 # copy and lost while the account's token is retired anyway (issue #175).
 sudo -u oboete-dogfood -H bash -lc 'ln -sfn ~/.claude/.credentials.json ~/candidate-homes/claude/.credentials.json'
 CAND='export OBOETE_HOME=$HOME/candidate-homes/oboete CLAUDE_CONFIG_DIR=$HOME/candidate-homes/claude CODEX_HOME=$HOME/candidate-homes/codex GROK_HOME=$HOME/candidate-homes/grok PI_CODING_AGENT_DIR=$HOME/candidate-homes/pi PATH=$HOME/candidate/node_modules/.bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH; set -a; . $HOME/.oboete-credentials; set +a'
-sudo -u oboete-dogfood -H bash -lc "$CAND; oboete setup --agents claude,codex,grok --provider workers-ai --yes --json"
 # Pi is left out of --agents on purpose: setup declines to write the loader whenever PI_CODING_AGENT_DIR points
 # away from $HOME/.pi/agent (src/setup/setup.ts:464, issue #174). Write the loader instead -- the paths must be
 # absolute and expanded, which is why this is a command and not a block to retype. Without it Pi keeps the copied
-# loader, which names the daily install, and its six pairs say nothing about the candidate.
+# loader, which names the daily install, and its six pairs say nothing about the candidate. Write it *before*
+# setup: setup probes Claude (src/setup/setup.ts:372,533 and src/setup/probe.ts:117), a probe can refresh the
+# token, and the CLI writes credentials through a rename that replaces the symlink above with a regular file.
+# Anything that can fail and end the run has to fail while that file is still a symlink, or the restoration at
+# the end never happens and the account is left holding a token the server has already retired.
 sudo -u oboete-dogfood -H bash -lc 'B=$HOME/candidate/node_modules/oboete/dist; D=$HOME/candidate-homes/pi/extensions; mkdir -p $D; umask 177; { echo "// oboete:managed written by \`oboete setup\`; \`oboete setup --remove\` deletes it."; echo "import { piExtension } from \"file://$B/pi-extension.mjs\";"; echo "export default (pi) => piExtension(pi, { node: \"$(command -v node)\", bundle: \"$B/oboete.mjs\" });"; } > $D/oboete.js'
+sudo -u oboete-dogfood -H bash -lc "$CAND; oboete setup --agents claude,codex,grok --provider workers-ai --yes --json"
 # Every path under a `node_modules/oboete/dist/` directory in the live configuration must be one of the
-# candidate's two bundles, and each file must hold as many as setup wrote. A short count means a
-# registration was deleted; an unexpected path means one names the daily install, a `.backup` sibling, or
+# candidate's two bundles, and each file must hold as many as setup wrote. A short count says a
+# matching token is gone -- deleted with its registration, or repointed somewhere the pattern does not reach; an unexpected path means one names the daily install, a `.backup` sibling, or
 # the daily `pi-extension.mjs` beside a candidate engine. Whole path tokens are compared, not prefixes,
 # and matches are counted rather than lines, because a minified config puts eight on one line. The seven
 # files are named individually: a recursive scan cannot work here, since session transcripts, rotated
