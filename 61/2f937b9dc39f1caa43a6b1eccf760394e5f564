@@ -1,0 +1,21 @@
+scripts/e2e/candidate-wiring.mjs
+  s_359fcac8e97f88::t_677667018d6d03 1-38
+specs/008-quality-debt-zero/quickstart.md
+  s_359fcac8e97f88::t_2ffa7f6e91d3ac 80-86,93-95,98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "612f937b9dc39f1caa43a6b1eccf760394e5f564",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
