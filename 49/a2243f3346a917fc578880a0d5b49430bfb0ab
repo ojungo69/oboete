@@ -1,0 +1,23 @@
+scripts/e2e/isolated-user.mjs
+  s_359fcac8e97f88::t_6cab1fd21a57f1 1481-1484,1492
+scripts/e2e/probes/codex.mjs
+  s_359fcac8e97f88::t_8a41c67e11112c 399-410,424,518,707
+specs/008-quality-debt-zero/quickstart.md
+  s_359fcac8e97f88::t_aa4599339799ff 59-64,86
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "49a2243f3346a917fc578880a0d5b49430bfb0ab",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
