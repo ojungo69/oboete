@@ -1,0 +1,35 @@
+docs/evidence/quality-debt-2026-09/batch-d-candidate-replay.json
+  s_49c4523e80af0c::t_745b5ad62d0630 1-3218
+test/helpers/observer-fixture.ts
+  s_49c4523e80af0c::t_9bbfe96826ad24 1-202
+test/unit/spool-recovery.test.ts
+  s_49c4523e80af0c::t_9bbfe96826ad24 1-161
+test/unit/apply.test.ts
+  s_49c4523e80af0c::t_9bbfe96826ad24 1-428
+specs/008-quality-debt-zero/tasks.md
+  s_49c4523e80af0c::t_329c15353e3adb 120
+test/unit/classify.test.ts
+  s_49c4523e80af0c::t_9bbfe96826ad24 6,17-29
+docs/evidence/quality-debt-2026-09/batch-d-verification.md
+  s_49c4523e80af0c::t_6f3016a5aa7af6 132,134-153
+  s_49c4523e80af0c::t_6f8538db2054df 11
+  s_49c4523e80af0c::t_a43e24ef7b2441 1-10,12-131,133,154-157
+docs/evidence/quality-debt-2026-09/batch-d-base-replay.json
+  s_49c4523e80af0c::t_745b5ad62d0630 1-3218
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "7af4afd1768668f9c0732b6a76bed1a2c432b15e",
+  "prompts": {},
+  "sessions": {
+    "s_49c4523e80af0c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08247-7f3b-73a2-af35-16a66e78370d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
