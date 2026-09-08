@@ -12,6 +12,8 @@ export const codacyIssues = 'https://app.codacy.com/api/v3/analysis/organization
 export const sonarAnalyses = 'https://sonarcloud.io/api/project_analyses/search';
 export const codacyRepository = 'https://app.codacy.com/api/v3/analysis/organizations/gh/ojungo69/repositories/oboete';
 export const confirmArgs = ['--confirm', '--sonar-analysis', 'analysis-key', '--codacy-commit', 'commit-sha'];
+export const codacyHarnessId = 'cdcb204be8f7e0941ec2d1eca871d4';
+export const codacyViewerId = '7001b39120b60918527820572a47897';
 
 export function fixture(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'quality-debt-record-'));
@@ -26,23 +28,23 @@ export function fixture(t) {
     { id: 's-regexp', rule: 'typescript:S8786', sev: 'MAJOR', file: 'src/worker/observe.ts', line: 3, msg: 'Regular expression' },
   ];
   const codacy = [
-    { id: 'c-harness', tool: 'Opengrep', pattern: 'Semgrep_fs', cat: 'Security', sub: 'FileAccess', sev: 'Error', file: 'scripts/e2e/probe.mjs', line: 7, msg: 'Path', text: '' },
-    { id: 'c-viewer', tool: 'Lizard', pattern: 'Lizard_nloc-medium', cat: 'Complexity', sub: '', sev: 'Warning', file: 'src/viewer/app/main.tsx', line: 12, msg: 'Length', text: '' },
+    { id: codacyHarnessId, tool: 'Opengrep', pattern: 'Semgrep_fs', cat: 'Security', sub: 'FileAccess', sev: 'Error', file: 'scripts/e2e/probe.mjs', line: 7, msg: 'Path', text: '' },
+    { id: codacyViewerId, tool: 'Lizard', pattern: 'Lizard_nloc-medium', cat: 'Complexity', sub: '', sev: 'Warning', file: 'src/viewer/app/main.tsx', line: 12, msg: 'Length', text: '' },
   ];
   const ledger = [
     { service: 'sonar', id: 's-worker', state: 'fixed', where: '#123' },
     { service: 'sonar', id: 's-sql', state: 'excluded', where: 'sonar-project.properties:2' },
     { service: 'sonar', id: 's-regexp', state: 'resolved', where: 'The pattern is a constant.', transition: 'falsepositive', verdict: 'Constant pattern — not applicable' },
-    { service: 'codacy', id: 'c-harness', state: 'excluded', where: '.codacy.yml:3', verdict: 'Test fixture paths — not applicable' },
-    { service: 'codacy', id: 'c-viewer', state: 'fixed', where: '#124' },
+    { service: 'codacy', id: codacyHarnessId, state: 'excluded', where: '.codacy.yml:3', verdict: 'Test fixture paths — not applicable' },
+    { service: 'codacy', id: codacyViewerId, state: 'fixed', where: '#124' },
   ];
   for (const row of ledger) row.confirmed = 'fixture-confirmation';
   writeJson(cwd, 'sonar-main-issues.json', sonar);
   writeJson(cwd, 'codacy-main-issues.json', codacy);
   writeJson(cwd, 'ledger.json', ledger);
   const allocation = {
-    A: ['s-sql', 'c-harness'], E: ['s-regexp'], B1: [], B2: [], B3: [],
-    C1: ['s-worker'], C2: [], C3: ['c-viewer'], C4: [], D: [],
+    A: ['s-sql', codacyHarnessId], E: ['s-regexp'], B1: [], B2: [], B3: [],
+    C1: ['s-worker'], C2: [], C3: [codacyViewerId], C4: [], D: [],
     counts: { A: 2, E: 1, B1: 0, B2: 0, B3: 0, C1: 1, C2: 0, C3: 1, C4: 0, D: 0 },
   };
   writeJson(cwd, 'allocation.json', allocation);
