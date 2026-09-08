@@ -59,20 +59,25 @@ sudo rm -rf /var/tmp/oboete-harness && sudo mkdir -p /var/tmp/oboete-harness \
 # live in the real configuration directories, so HOME stays real and the five configuration variables point at copies
 # Initialization is one command with `set -e`, and the guard is its first step, because these run as a
 # sequence a reader pastes: a guard in its own command exits 1 and the next line still deletes what it
-# preserved. The guard does not decide anything. A regular file at `$C` can only happen when Claude
-# refreshed its token during a run and the teardown below never completed -- the teardown *moves* the file
-# back, so a successful one leaves nothing behind. If that file is byte-identical to the account's own, it
-# is a leftover and goes; if it differs, one of the two is a token the server has already retired and
-# nothing here can tell which, so the run stops and says where both are. Deciding that automatically is
-# what locked this account out on 2026-09-08. To resolve a stop: run `claude -p hi` as the account. If it
-# answers, the account's file is live and `rm -f ~/candidate-homes/claude/.credentials.json`. If it fails
-# with an auth error, the copy is the live one: `mv -f ~/candidate-homes/claude/.credentials.json
-# ~/.claude/.credentials.json`. Then start again.
+# preserved. The guard does not decide anything. A regular file at `$C` is state a previous run left
+# unfinished -- the teardown *moves* the file back, so a run that reached the end leaves nothing here --
+# and neither its origin nor which credential the server still honours can be read off the filesystem.
+# If it is byte-identical to the account's own, deleting it loses nothing and the run continues. If it
+# differs, the run stops and prints both paths. Deciding between them automatically is what locked this
+# account out on 2026-09-08, and no local check settles it either: `claude -p hi` can answer from a
+# cached access token whose refresh token has already been retired, so a successful call is not evidence
+# that the account's file is the live one. To resolve a stop, destroy neither: put the copy somewhere
+# outside the run first --
+#   sudo -u oboete-dogfood -H bash -lc 'mv ~/candidate-homes/claude/.credentials.json ~/claude-credentials.$(date +%s).json'
+# -- and then use the account normally. If Claude keeps working, delete the saved file once you are
+# confident; if it starts failing to authenticate, copy the saved file over `~/.claude/.credentials.json`
+# and try again. If neither works the account needs an interactive `claude` login, which only a person can
+# do. Only start another run once `~/candidate-homes` is gone.
 sudo -u oboete-dogfood -H bash -lc 'set -e
 C=~/candidate-homes/claude/.credentials.json; A=~/.claude/.credentials.json
 if [ -f "$C" ] && [ ! -L "$C" ]; then
   if cmp -s "$C" "$A"; then rm -f "$C"
-  else echo "a previous run left a Claude credential at $C that differs from $A; one of them is retired and this cannot tell which -- resolve it by hand (see the runbook) before running again"; exit 1
+  else echo "an unfinished run left a Claude credential at $C that differs from $A; which one the server still honours cannot be determined here -- preserve both and resolve it by hand (see the runbook) before running again"; exit 1
   fi
 fi
 rm -rf ~/candidate ~/candidate-homes && mkdir -p ~/candidate ~/candidate-homes \
