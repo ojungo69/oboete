@@ -36,7 +36,7 @@ import { ensureDirectories, oboetePaths, type OboetePaths } from '../../src/path
 import { detectSync, type DetectorInput } from '../../src/privacy/detect.js';
 import type { GitSpawn } from '../../src/repo-identity.js';
 import { listSpool, readSpoolEntry, spoolEntrySchema } from '../../src/spool.js';
-import { recoverSpool } from '../../src/worker/batches.js';
+import { recoverSpool } from '../../src/worker/spool-recovery.js';
 import { claimLease } from '../../src/worker/lease.js';
 import { WALL_CLOCK_IS_MEASURED, withTempHome } from '../helpers/home.js';
 

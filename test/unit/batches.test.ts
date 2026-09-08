@@ -11,11 +11,11 @@ import {
   classifyPending,
   createBatches,
   loadBatchInput,
-  recoverSpool,
   reclaimStale,
   toolInputOf,
   BLANK_CODE_POINTS,
 } from '../../src/worker/batches.js';
+import { recoverSpool } from '../../src/worker/spool-recovery.js';
 import { claimLease } from '../../src/worker/lease.js';
 import { withTempHome } from '../helpers/home.js';
 

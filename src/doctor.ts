@@ -20,7 +20,7 @@ import { appendLog, errorCode } from './log.js';
 import { LEXICAL_NOTE } from './memories-cli.js';
 import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from './paths.js';
 import type { VersionSpawn } from './setup/detect.js';
-import { describe, renderTable, VIEW_LINE } from './setup/setup.js';
+import { describe, renderTable, VIEW_LINE } from './setup/report.js';
 
 const INTEGRITY_UNVERIFIED =
   'The database failed its integrity check, so this item could not be verified.';

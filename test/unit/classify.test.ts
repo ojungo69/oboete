@@ -7,9 +7,9 @@ import { test } from 'node:test';
 
 import { openDatabase } from '../../src/db/open.js';
 import { nearbyCandidates, type NearbyCandidate } from '../../src/db/queries.js';
+import { applyObservations } from '../../src/observer/apply.js';
 import {
   DEGRADED_PRECEDENCE,
-  applyObservations,
   checkLanguage,
   rejectsDirectives,
   sessionSummary,

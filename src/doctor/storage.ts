@@ -15,7 +15,7 @@ import {
   type DoctorItem,
 } from '../doctor.js';
 import type { OboetePaths } from '../paths.js';
-import { describe } from '../setup/setup.js';
+import { describe } from '../setup/report.js';
 import { listSpool } from '../spool.js';
 import { stale } from '../worker/lease.js';
 
