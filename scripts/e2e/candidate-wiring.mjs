@@ -1,17 +1,24 @@
 // Checks that every oboete entry `oboete setup` owns names the candidate bundle.
 //
-// Counting text matches is not enough: an entry can be deleted and its path left behind in a
-// comment, and the total is unchanged. The hook and MCP entries live in JSON, so they are read as
-// JSON and counted per file; the two config.toml lines and the Pi loader are read as text with
-// commented-out lines excluded. Usage:
+// The point is to look at registrations, not at text. Counting occurrences of the bundle path lets a
+// deleted entry hide behind the same path in a comment or an unused property, which is how a missing
+// MCP registration went unnoticed for four dogfood runs. So: the hook files are read as JSON and the
+// commands are taken from the groups oboete marks as its own, the MCP server is read from its own
+// entry, the two config.toml lines must be assignments rather than comments, and the Pi loader must
+// carry both of the paths it needs -- the extension it imports and the engine it passes on. Usage:
 //
 //   node scripts/e2e/candidate-wiring.mjs <bundle> <claude-home> <codex-home> <grok-home> <pi-dir>
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-const SUFFIX = "oboete/dist/oboete.mjs";
+const CLAUDE_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "PostCompact", "SessionEnd"];
+const CODEX_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "PostCompact", "SessionEnd"];
+const GROK_EVENTS = [...CLAUDE_EVENTS.slice(0, 5), "PermissionDenied", ...CLAUDE_EVENTS.slice(5)];
+
 const [, , want, claudeHome, codexHome, grokHome, piDir] = process.argv;
 if (!want || !piDir) throw new Error("usage: candidate-wiring.mjs <bundle> <claude> <codex> <grok> <pi>");
+const extension = path.join(path.dirname(want), "pi-extension.mjs");
+const bad = [];
 
 // The file names below are literals, so only the directory arguments can carry a traversal; each
 // read is resolved and required to stay under the directory it was asked for.
@@ -22,44 +29,66 @@ function readUnder(directory, ...names) {
   return readFileSync(file, "utf8");
 }
 
-// Splitting on the separators a shell command or a JSON string can use keeps this linear; a regex
-// that matches the path and everything before it backtracks on long lines.
-const bundlePaths = (value) => value.split(/[\s'"]+/).filter((word) => word.endsWith(SUFFIX));
+// Splitting on the separators a shell command can use keeps this linear, and comparing whole words
+// rejects a neighbouring path such as oboete.mjs.backup that a suffix match would accept.
+const namesBundle = (value) => value.split(/[\s'"]+/).some((word) => word === want);
 
-const bad = [];
-const stringsIn = (value, out = []) => {
-  if (typeof value === "string") out.push(...bundlePaths(value));
-  else if (value && typeof value === "object") for (const nested of Object.values(value)) stringsIn(nested, out);
-  return out;
-};
-
-function checkJson(label, expected, directory, ...names) {
-  let found;
+function checkHooks(label, directory, names, events) {
+  let hooks;
   try {
-    found = stringsIn(JSON.parse(readUnder(directory, ...names)));
+    ({ hooks } = JSON.parse(readUnder(directory, ...names)));
   } catch (error) {
     bad.push(`${label}: ${error.message}`);
     return;
   }
-  if (found.length !== expected) bad.push(`${label}: ${found.length} entries name the bundle, expected ${expected}`);
-  for (const value of found) if (value !== want) bad.push(`${label}: ${value}`);
+  for (const event of events) {
+    const commands = (hooks?.[event] ?? [])
+      .filter((group) => group?.oboete === true)
+      .flatMap((group) => group.hooks ?? [])
+      .filter((entry) => entry?.type === "command")
+      .map((entry) => entry.command);
+    if (commands.length !== 1) bad.push(`${label}: ${commands.length} oboete commands for ${event}, expected 1`);
+    else if (!namesBundle(commands[0])) bad.push(`${label}: ${event} does not run the candidate: ${commands[0]}`);
+  }
 }
 
-function checkLine(label, directory, ...names) {
-  const live = readUnder(directory, ...names)
+function checkMcp(label, directory, name) {
+  let server;
+  try {
+    server = JSON.parse(readUnder(directory, name))?.mcpServers?.oboete;
+  } catch (error) {
+    bad.push(`${label}: ${error.message}`);
+    return;
+  }
+  if (!server) bad.push(`${label}: no mcpServers.oboete registration`);
+  else if (!(server.args ?? []).includes(want)) bad.push(`${label}: mcpServers.oboete does not run the candidate`);
+}
+
+// An assignment, so that moving the path into a comment on the same line fails the check.
+function checkAssignment(label, directory, name) {
+  const live = readUnder(directory, name)
     .split("\n")
-    .filter((line) => line.includes(SUFFIX) && !/^\s*(#|\/\/)/.test(line));
-  if (live.length !== 1) bad.push(`${label}: ${live.length} live lines name the bundle, expected 1`);
-  else for (const value of bundlePaths(live[0])) if (value !== want) bad.push(`${label}: ${value}`);
+    .filter((line) => /^\s*[\w.-]+\s*=/.test(line) && line.split("#")[0].includes("oboete/dist/oboete.mjs"));
+  if (live.length !== 1) bad.push(`${label}: ${live.length} assignments name the bundle, expected 1`);
+  else if (!namesBundle(live[0].split("#")[0])) bad.push(`${label}: ${live[0].trim()}`);
 }
 
-checkJson("claude/settings.json", 8, claudeHome, "settings.json");
-checkJson("claude/.claude.json", 1, claudeHome, ".claude.json");
-checkJson("codex/hooks.json", 7, codexHome, "hooks.json");
-checkJson("grok/hooks/oboete.json", 9, grokHome, "hooks", "oboete.json");
-checkLine("codex/config.toml", codexHome, "config.toml");
-checkLine("grok/config.toml", grokHome, "config.toml");
-checkLine("pi/extensions/oboete.js", piDir, "extensions", "oboete.js");
+function checkPiLoader(label, directory, ...names) {
+  const source = readUnder(directory, ...names);
+  const strings = source.match(/"[^"\n]*"/g) ?? [];
+  const values = strings.map((literal) => literal.slice(1, -1));
+  if (!values.some((value) => value === `file://${extension}`)) bad.push(`${label}: does not import ${extension}`);
+  if (!values.includes(want)) bad.push(`${label}: does not pass the candidate engine bundle`);
+  if (!/export default\s*\(/.test(source)) bad.push(`${label}: no default export, so Pi loads nothing`);
+}
+
+checkHooks("claude/settings.json", claudeHome, ["settings.json"], CLAUDE_EVENTS);
+checkMcp("claude/.claude.json", claudeHome, ".claude.json");
+checkHooks("codex/hooks.json", codexHome, ["hooks.json"], CODEX_EVENTS);
+checkHooks("grok/hooks/oboete.json", grokHome, ["hooks", "oboete.json"], GROK_EVENTS);
+checkAssignment("codex/config.toml", codexHome, "config.toml");
+checkAssignment("grok/config.toml", grokHome, "config.toml");
+checkPiLoader("pi/extensions/oboete.js", piDir, "extensions", "oboete.js");
 
 if (bad.length > 0) {
   console.error(bad.join("\n"));
