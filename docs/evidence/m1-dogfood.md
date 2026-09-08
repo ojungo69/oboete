@@ -487,5 +487,31 @@ script sources the credentials before it starts, so a worker it spawns carries t
 - Viewer GET /api/memories: median 4 ms, max 37 ms over 5 requests, 11 memories listed (budget 2000 ms)
 - finished 2026-09-08T15:13:11Z, 1-minute load 0.11
 
+### Why the five Grok legs failed
+
+Every failing leg's own output is the same line, in `<run>/grok-to-claude/seed/stdout.txt` and under
+`codex-to-grok/receive`:
+
+```
+{"type":"error","message":"Not signed in. To authenticate without a browser, run:\n  grok login --device-code\n\nAlternatively, set the XAI_API_KEY environment variable or run `grok login` on a machine with a browser."}
+```
+
+The order is what identifies the cause. The pairs run alphabetically and `claude → grok` is the second
+of them: it passed, in 63 s, with the fact recalled. From `codex → grok` on, every leg that touches
+grok fails, the three where grok seeds in about 500 ms because the CLI cannot open a session at all.
+So grok was signed in when the run started and was not a few minutes later.
+
+`prepareGrokHome` (`scripts/e2e/probe-lib/agents.mjs`) gives each leg a `copyGrokHome` of the
+account's `~/.grok`, `auth.json` included, and points `GROK_HOME` at the copy. When grok refreshes its
+token inside a copy, the server retires the token the original file still holds — the mechanism
+issue #175 records for Claude, now observed for Grok. The account's `~/.grok/auth.json` has not been
+written since 2026-09-07 00:17, which is what a home that only ever gets copied looks like, and day 3
+(`2026-09-08T05-23-31`) passed 12 of 12 only because no refresh fell inside it.
+
+The daily run therefore has a one-run budget for Grok. Restoring the login makes the next run pass and
+then breaks it the same way, so SC-007 counts this failure as traced to #175 rather than to oboete,
+and the fix belongs there: a shared credential path per agent instead of a per-leg copy, as the Claude
+leg already has with a symlink.
+
 
 - Filed against the release (SC-007): https://github.com/ojungo69/oboete/issues/180
