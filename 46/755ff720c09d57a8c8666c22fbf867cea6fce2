@@ -1,0 +1,19 @@
+docs/evidence/m1-dogfood.md
+  s_0579347241e0fa::t_c575516f788bba 504-516,520-521
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "46755ff720c09d57a8c8666c22fbf867cea6fce2",
+  "prompts": {},
+  "sessions": {
+    "s_0579347241e0fa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ea2d7529-9dd2-49fc-85a0-d91170ff956a",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
