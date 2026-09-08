@@ -1,0 +1,19 @@
+specs/008-quality-debt-zero/quickstart.md
+  s_359fcac8e97f88::t_c3af080ac92603 87-88,99-102,116
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "9b0d16e04acdf8d7126a14a0d80d73f9e9c19a9b",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
