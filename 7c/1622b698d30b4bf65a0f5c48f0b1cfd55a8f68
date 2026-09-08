@@ -1,0 +1,29 @@
+docs/evidence/quality-debt-2026-09/allocation.json
+  s_0579347241e0fa::t_b1c53abed0a36c 740-741,753
+specs/008-quality-debt-zero/tasks.md
+  s_0579347241e0fa::t_c2eb935bf6de60 77,91,103
+  s_0579347241e0fa::t_5a2c6d2cb617f4 131-132
+docs/evidence/quality-debt-2026-09/codacy-main-issues.json
+  s_0579347241e0fa::t_e722da3fc81f13 4921-4932
+docs/evidence/quality-debt-2026-09.md
+  s_0579347241e0fa::t_c2eb935bf6de60 6-7
+  s_0579347241e0fa::t_e8a3789869ad68 8
+  s_0579347241e0fa::t_2e24e74e9c607e 335,519
+  s_0579347241e0fa::t_8e7957f0a64a49 10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "7c1622b698d30b4bf65a0f5c48f0b1cfd55a8f68",
+  "prompts": {},
+  "sessions": {
+    "s_0579347241e0fa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ea2d7529-9dd2-49fc-85a0-d91170ff956a",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
