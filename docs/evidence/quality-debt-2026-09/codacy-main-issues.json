@@ -4918,5 +4918,17 @@
 "line": 1,
 "msg": "File src/setup/setup.ts has 508 non-comment lines of code",
 "text": "// `oboete setup`: detect the installed agents, show what a remote destination would receive and"
+},
+{
+"id": "16267458dd41ebb61fa3aec7549291cc",
+"tool": "Lizard",
+"pattern": "Lizard_file-nloc-medium",
+"cat": "Complexity",
+"sub": "",
+"sev": "Warning",
+"file": "scripts/e2e/probes/claude.mjs",
+"line": 1,
+"msg": "File scripts/e2e/probes/claude.mjs has 539 non-comment lines of code",
+"text": "import fs from \"node:fs\";"
 }
 ]
