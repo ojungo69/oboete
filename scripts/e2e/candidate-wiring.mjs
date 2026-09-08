@@ -9,6 +9,7 @@
 //
 //   node scripts/e2e/candidate-wiring.mjs <bundle> <claude-home> <codex-home> <grok-home> <pi-dir>
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 
 const CLAUDE_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "PostCompact", "SessionEnd"];
@@ -20,18 +21,20 @@ if (!want || !piDir) throw new Error("usage: candidate-wiring.mjs <bundle> <clau
 const extension = path.join(path.dirname(want), "pi-extension.mjs");
 const bad = [];
 
-// The file names below are literals, so only the directory arguments can carry a traversal; each
-// read is resolved and required to stay under the directory it was asked for.
+// The file names below are literals, so only the directory arguments can carry a traversal. Checking
+// a resolved path against another argument would prove nothing, so the bound is the account's own
+// home directory, which the caller cannot set: every configured home the dogfood run points at lives
+// under it, and a resolved path outside it is refused before anything is read.
+const HOME = path.resolve(homedir()) + path.sep;
 function readUnder(directory, ...names) {
-  const root = path.resolve(directory);
-  const file = path.resolve(root, ...names);
-  if (file !== root && !file.startsWith(root + path.sep)) throw new Error(`path escapes ${root}: ${file}`);
+  const file = path.resolve(directory, ...names);
+  if (!file.startsWith(HOME)) throw new Error(`refusing to read outside ${HOME}: ${file}`);
   return readFileSync(file, "utf8");
 }
 
 // Splitting on the separators a shell command can use keeps this linear, and comparing whole words
 // rejects a neighbouring path such as oboete.mjs.backup that a suffix match would accept.
-const namesBundle = (value) => value.split(/[\s'"]+/).some((word) => word === want);
+const namesBundle = (value) => value.split(/[\s'"]+/).includes(want);
 
 function checkHooks(label, directory, names, events) {
   let hooks;
@@ -77,7 +80,7 @@ function checkPiLoader(label, directory, ...names) {
   const source = readUnder(directory, ...names);
   const strings = source.match(/"[^"\n]*"/g) ?? [];
   const values = strings.map((literal) => literal.slice(1, -1));
-  if (!values.some((value) => value === `file://${extension}`)) bad.push(`${label}: does not import ${extension}`);
+  if (!values.includes(`file://${extension}`)) bad.push(`${label}: does not import ${extension}`);
   if (!values.includes(want)) bad.push(`${label}: does not pass the candidate engine bundle`);
   if (!/export default\s*\(/.test(source)) bad.push(`${label}: no default export, so Pi loads nothing`);
 }
