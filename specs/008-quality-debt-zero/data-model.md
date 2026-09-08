@@ -2,13 +2,13 @@
 
 **Date**: 2026-09-07 | **Plan**: [plan.md](./plan.md)
 
-The feature has no runtime data. Its only artefact is the disposition record, which maps every 2026-09-07 finding to an end state.
+The feature has no runtime data. Its only artefact is the disposition record, which maps every finding in the two inventories to an end state — the 2026-09-07 export and the rows added while the feature ran (T030a).
 
 ## Entities
 
 ### Finding
 
-One row reported by a service on `main` at 5e03d67f.
+One row reported by a service on `main` — as of 5e03d67f for the rows exported 2026-09-07, and of the later commit an added row was read at (T030a).
 
 | Field | Source | Notes |
 |---|---|---|
@@ -16,10 +16,10 @@ One row reported by a service on `main` at 5e03d67f.
 | `id` | service | SonarCloud issue key (`AZ...`) or Codacy `issueId` (32 hex). Stable across analyses while the code line survives. |
 | `rule` | service | Sonar rule key (`typescript:S3776`) or Codacy pattern id (`Lizard_nloc-medium`) |
 | `severity` | service | Sonar `BLOCKER…INFO`; Codacy `Error/Warning/Info` |
-| `file`, `line` | service | Repository-relative path; line as of 5e03d67f |
+| `file`, `line` | service | Repository-relative path; line as of the commit the row was exported from — `5e03d67f` for the 2026-09-07 rows, `9e52c3c2` for the 13 added on 2026-09-08 |
 | `population` | derived | `inapplicable` / `mechanical` / `complexity` / `security` (research R1) |
 
-Identity: `(service, id)`. The two inventories (`sonar-main-issues.json`, `codacy-main-issues.json`, exported 2026-09-07) are the complete set; 310 + 397 rows.
+Identity: `(service, id)`. The two inventories (`sonar-main-issues.json`, `codacy-main-issues.json`) hold every finding that must be dispositioned; 310 + 410 rows. They start as the 2026-09-07 export of `5e03d67f` and grow only when a service reports a finding no row covers — 13 such rows were added on 2026-09-08 from the live search at `9e52c3c2` (T030a). A row is never removed: a finding that stops being reported keeps its row and its disposition, because the acceptance is the service's own count, not the size of this file.
 
 ### Disposition
 
