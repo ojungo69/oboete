@@ -57,11 +57,19 @@ sudo rm -rf /var/tmp/oboete-harness && sudo mkdir -p /var/tmp/oboete-harness \
 # memory tools when `claude` is not on PATH.
 # the harness refuses any HOME other than the account's own, and the agents' logins and oboete's consent record
 # live in the real configuration directories, so HOME stays real and the five configuration variables point at copies
-# A previous run that failed its copy-back leaves the account's only live Claude credential inside
-# `candidate-homes` as a regular file. Deleting that to start again is what locks the account out, so put it
-# back before removing anything, and stop if it cannot be put back.
-sudo -u oboete-dogfood -H bash -lc 'C=~/candidate-homes/claude/.credentials.json; if [ -f "$C" ] && [ ! -L "$C" ]; then cp -a "$C" ~/.claude/.credentials.json || { echo "a previous run left the only live Claude credential at $C; refusing to delete it"; exit 1; }; fi'
-sudo -u oboete-dogfood -H bash -lc 'rm -rf ~/candidate ~/candidate-homes && mkdir -p ~/candidate ~/candidate-homes \
+# A run whose copy-back did not finish leaves the account's only live Claude credential inside
+# `candidate-homes` as a regular file, and deleting that to start again is what locks the account out. The
+# teardown below puts the symlink back after a successful copy-back, so a regular file here means the copy-back
+# did not happen -- unless the account's own file is newer, which means it has been refreshed since and this
+# copy is a retired token that must not be written back over it. Both live in the same command as the cleanup:
+# as two commands, a guard that exits 1 stops only itself and the next line still deletes the file.
+sudo -u oboete-dogfood -H bash -lc 'C=~/candidate-homes/claude/.credentials.json; A=~/.claude/.credentials.json
+if [ -f "$C" ] && [ ! -L "$C" ]; then
+  if [ "$A" -nt "$C" ]; then rm -f "$C"
+  else cp -a "$C" "$A" || { echo "a previous run left the only live Claude credential at $C; refusing to delete it"; exit 1; }
+  fi
+fi
+rm -rf ~/candidate ~/candidate-homes && mkdir -p ~/candidate ~/candidate-homes \
   && cp -a ~/.oboete ~/candidate-homes/oboete && cp -a ~/.claude ~/candidate-homes/claude && cp -a ~/.claude.json ~/candidate-homes/claude/.claude.json && cp -a ~/.codex ~/candidate-homes/codex && cp -a ~/.grok ~/candidate-homes/grok && cp -a ~/.pi/agent ~/candidate-homes/pi \
   && npm install --prefix ~/candidate <tarball> && sha256sum ~/candidate/node_modules/oboete/dist/oboete.mjs'
 # A token refresh retires the old refresh token server-side, so a credential file the candidate run owns and then
@@ -121,7 +129,10 @@ sudo -u oboete-dogfood -H bash -lc "$CAND; oboete doctor --probe-provider"   # t
 # If the CLI replaced the symlink, the run holds the only token the provider still accepts; put it back before
 # deleting the copies, or the account is locked out exactly as it was on 2026-09-08. `set -e` matters here: with
 # the copy-back and the `rm` merely sequenced, a failed copy still deletes the only credential that works.
-sudo -u oboete-dogfood -H bash -lc 'set -e; C=~/candidate-homes/claude/.credentials.json; if [ -f "$C" ] && [ ! -L "$C" ]; then cp -a "$C" ~/.claude/.credentials.json; fi; rm -rf ~/candidate ~/candidate-homes' && sudo rm -rf /var/tmp/oboete-harness
+# The symlink goes back before the `rm`, so that a regular file left in `candidate-homes` means one thing only:
+# the copy-back did not finish. Without that, a copy left behind after a *successful* restore is replayed over a
+# newer daily credential by the next run.
+sudo -u oboete-dogfood -H bash -lc 'set -e; C=~/candidate-homes/claude/.credentials.json; if [ -f "$C" ] && [ ! -L "$C" ]; then cp -a "$C" ~/.claude/.credentials.json; ln -sfn ~/.claude/.credentials.json "$C"; fi; rm -rf ~/candidate ~/candidate-homes' && sudo rm -rf /var/tmp/oboete-harness
 ```
 
 Expected: three separate facts, each with its own scope; the conclusion is only as wide as the three together. **What is installed**: the `sha256sum` of `~/candidate/node_modules/oboete/dist/oboete.mjs` equals the tarball's `dist/oboete.mjs` hash. **What is referenced**: `oboete setup` exits 0 for the three agents it can wire (the copied consent record satisfies `--yes`), and the reference check prints `every bundle path in the live configuration is the candidate` — every `node_modules/oboete/dist/…` token in the seven files is either the candidate `oboete.mjs` or `file://…/pi-extension.mjs` beside it, with the per-file counts intact: 8 in Claude's `settings.json`, 1 in `.claude.json`, 7 in Codex's `hooks.json`, 9 in Grok's, 1 in each `config.toml`, 2 in the Pi loader (its import and its engine). Verified against the live homes and copies mutated six ways: a deleted `mcpServers.oboete` (short count), a hook repointed at the daily install, a bundle repointed at `oboete.mjs.backup`, a Pi loader importing the daily `pi-extension.mjs` while passing the candidate engine, and every file missing are all rejected; minifying a config, which changes nothing, still passes. It counts references, so an entry deleted with its path left behind in a sibling property or a comment keeps its count, and it sees only tokens under a `node_modules/oboete/dist/` directory: a value naming a bundle somewhere else entirely — `/tmp/oboete.mjs`, a `PATH` lookup, a symlink — matches no pattern and is counted by nothing, so a Pi loader that imports the candidate extension and passes such a path, with the candidate engine left in a comment to keep the count at 2, still passes. **What actually runs**: `12 of 12 pairs pass`; every lifecycle check `pass` for both agents; `oboete doctor --probe-provider` exits 0 with every `agent:` row healthy. Read that row for exactly what it checks: the agent is detected and its configuration is trusted (`src/doctor/agents.ts:243-255` — Claude needs an owned hook group, Grok and Pi only that their files exist), and one prompt event was captured through the live hook (`src/setup/probe.ts:112,313-321`). It does not walk every hook event or the MCP registration, and it records no bundle identity. So the identity argument is bounded: files name no other bundle *under a `node_modules/oboete/dist/` directory* — a mixed installation assembled from paths outside that pattern would not be caught, and issue #177 is what closes it by having doctor report the bundle each hook executed. `catalog unverified` and the `native-memory:claude` warning are informational and do not affect the exit. Doctor inspects `candidate-homes/oboete`, copied from the daily `~/.oboete` at the start of the run, not the per-pair databases the pairs write — so if `worker` reads degraded, establish whether that lease came from this run before calling it a leftover. A failing row is not evidence about the bundle until the agent's own `result` field has been read: an expired login fails a pair exactly the way a broken build does. Candidate SHA, both hashes, run id, and both lines go into the PR body. The daily cron's install, its real `~/.oboete`, and its agent configurations are untouched; the copies are removed afterwards.
