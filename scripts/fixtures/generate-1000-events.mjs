@@ -428,13 +428,7 @@ function toolUseId(g, session) {
   return `call_${g.hex(22)}|fc_${g.hex(48)}`;
 }
 
-function emitClaudeTool(g, session, spec, tagsPre, tagsPost) {
-  const id = toolUseId(g, session);
-  const pre = claudeBase(session, 'PreToolUse');
-  pre.tool_use_id = id;
-  const post = claudeBase(session, 'PostToolUse');
-  post.tool_use_id = id;
-  if (spec.kind === 'read') {
+function emitClaudeRead(g, session, spec, pre, post, tagsPre, tagsPost) {
     pre.tool_name = 'Read';
     pre.tool_input = { file_path: abs(spec.file) };
     Object.assign(post, pre);
@@ -452,9 +446,9 @@ function emitClaudeTool(g, session, spec, tagsPre, tagsPost) {
     post.duration_ms = 3;
     push(g, session, 'PreToolUse', pre, tagsPre);
     push(g, session, 'PostToolUse', post, tagsPost);
-    return;
-  }
-  if (spec.kind === 'write') {
+}
+
+function emitClaudeWrite(g, session, spec, pre, post, tagsPre, tagsPost) {
     pre.tool_name = 'Write';
     pre.tool_input = { file_path: abs(spec.file), content: spec.body };
     Object.assign(post, pre);
@@ -470,9 +464,9 @@ function emitClaudeTool(g, session, spec, tagsPre, tagsPost) {
     post.duration_ms = 10;
     push(g, session, 'PreToolUse', pre, tagsPre);
     push(g, session, 'PostToolUse', post, tagsPost);
-    return;
-  }
-  if (spec.kind === 'edit') {
+}
+
+function emitClaudeEdit(g, session, spec, pre, post, tagsPre, tagsPost) {
     pre.tool_name = 'Edit';
     pre.tool_input = {
       file_path: abs(spec.file),
@@ -502,9 +496,9 @@ function emitClaudeTool(g, session, spec, tagsPre, tagsPost) {
     post.duration_ms = 5;
     push(g, session, 'PreToolUse', pre, tagsPre);
     push(g, session, 'PostToolUse', post, tagsPost);
-    return;
-  }
-  if (spec.kind === 'bash') {
+}
+
+function emitClaudeBash(g, session, spec, pre, post, tagsPre, tagsPost) {
     pre.tool_name = 'Bash';
     pre.tool_input = { command: spec.cmd, description: spec.description ?? 'Run command' };
     Object.assign(post, pre);
@@ -519,6 +513,28 @@ function emitClaudeTool(g, session, spec, tagsPre, tagsPost) {
     post.duration_ms = 41;
     push(g, session, 'PreToolUse', pre, tagsPre);
     push(g, session, 'PostToolUse', post, tagsPost);
+}
+
+function emitClaudeTool(g, session, spec, tagsPre, tagsPost) {
+  const id = toolUseId(g, session);
+  const pre = claudeBase(session, 'PreToolUse');
+  pre.tool_use_id = id;
+  const post = claudeBase(session, 'PostToolUse');
+  post.tool_use_id = id;
+  if (spec.kind === 'read') {
+    emitClaudeRead(g, session, spec, pre, post, tagsPre, tagsPost);
+    return;
+  }
+  if (spec.kind === 'write') {
+    emitClaudeWrite(g, session, spec, pre, post, tagsPre, tagsPost);
+    return;
+  }
+  if (spec.kind === 'edit') {
+    emitClaudeEdit(g, session, spec, pre, post, tagsPre, tagsPost);
+    return;
+  }
+  if (spec.kind === 'bash') {
+    emitClaudeBash(g, session, spec, pre, post, tagsPre, tagsPost);
     return;
   }
   pre.tool_name = spec.toolName ?? 'Read';
@@ -570,13 +586,7 @@ function emitCodexTool(g, session, spec, tagsPre, tagsPost) {
   push(g, session, 'PostToolUse', post, tagsPost);
 }
 
-function emitGrokTool(g, session, spec, tagsPre, tagsPost) {
-  const id = toolUseId(g, session);
-  const pre = grokBase(g, session, 'PreToolUse');
-  pre.toolUseId = id;
-  pre.tool_use_id = id;
-  pre.toolInputTruncated = false;
-  if (spec.kind === 'read') {
+function emitGrokRead(g, session, spec, pre, id, tagsPre, tagsPost) {
     pre.toolName = 'read_file';
     pre.tool_name = 'read_file';
     pre.toolInput = { target_file: spec.file };
@@ -608,9 +618,9 @@ function emitGrokTool(g, session, spec, tagsPre, tagsPost) {
     post.tool_response = result;
     push(g, session, 'PreToolUse', pre, tagsPre);
     push(g, session, 'PostToolUse', post, tagsPost);
-    return;
-  }
-  if (spec.kind === 'write') {
+}
+
+function emitGrokWrite(g, session, spec, pre, id, tagsPre, tagsPost) {
     pre.toolName = 'write';
     pre.tool_name = 'write';
     pre.toolInput = { file_path: spec.file, content: spec.body };
@@ -642,9 +652,9 @@ function emitGrokTool(g, session, spec, tagsPre, tagsPost) {
     post.tool_response = result;
     push(g, session, 'PreToolUse', pre, tagsPre);
     push(g, session, 'PostToolUse', post, tagsPost);
-    return;
-  }
-  if (spec.kind === 'edit') {
+}
+
+function emitGrokEdit(g, session, spec, pre, id, tagsPre, tagsPost) {
     pre.toolName = 'search_replace';
     pre.tool_name = 'search_replace';
     pre.toolInput = { file_path: spec.file, old_string: spec.oldText, new_string: spec.newText };
@@ -676,9 +686,9 @@ function emitGrokTool(g, session, spec, tagsPre, tagsPost) {
     post.tool_response = result;
     push(g, session, 'PreToolUse', pre, tagsPre);
     push(g, session, 'PostToolUse', post, tagsPost);
-    return;
-  }
-  if (spec.kind === 'bash' || spec.kind === 'bash-fail') {
+}
+
+function emitGrokBash(g, session, spec, pre, id, tagsPre, tagsPost) {
     pre.toolName = 'run_terminal_command';
     pre.tool_name = 'run_terminal_command';
     pre.toolInput = { command: spec.cmd, description: spec.description ?? 'Run command' };
@@ -714,9 +724,9 @@ function emitGrokTool(g, session, spec, tagsPre, tagsPost) {
     post.tool_response = result;
     push(g, session, 'PreToolUse', pre, tagsPre);
     push(g, session, 'PostToolUse', post, tagsPost);
-    return;
-  }
-  if (spec.kind === 'deny') {
+}
+
+function emitGrokDenied(g, session, spec, pre, id, tagsPre, tagsPost) {
     pre.toolName = 'run_terminal_command';
     pre.tool_name = 'run_terminal_command';
     pre.toolInput = { command: spec.cmd, description: spec.description ?? 'Run command' };
@@ -731,6 +741,32 @@ function emitGrokTool(g, session, spec, tagsPre, tagsPost) {
     denied.tool_input = pre.toolInput;
     denied.toolInputTruncated = false;
     push(g, session, 'PermissionDenied', denied, tagsPost);
+}
+
+function emitGrokTool(g, session, spec, tagsPre, tagsPost) {
+  const id = toolUseId(g, session);
+  const pre = grokBase(g, session, 'PreToolUse');
+  pre.toolUseId = id;
+  pre.tool_use_id = id;
+  pre.toolInputTruncated = false;
+  if (spec.kind === 'read') {
+    emitGrokRead(g, session, spec, pre, id, tagsPre, tagsPost);
+    return;
+  }
+  if (spec.kind === 'write') {
+    emitGrokWrite(g, session, spec, pre, id, tagsPre, tagsPost);
+    return;
+  }
+  if (spec.kind === 'edit') {
+    emitGrokEdit(g, session, spec, pre, id, tagsPre, tagsPost);
+    return;
+  }
+  if (spec.kind === 'bash' || spec.kind === 'bash-fail') {
+    emitGrokBash(g, session, spec, pre, id, tagsPre, tagsPost);
+    return;
+  }
+  if (spec.kind === 'deny') {
+    emitGrokDenied(g, session, spec, pre, id, tagsPre, tagsPost);
     return;
   }
   pre.toolName = 'run_terminal_command';
@@ -910,17 +946,15 @@ function emitEnd(g, session, reason) {
   );
 }
 
-function emitCompact(g, session) {
-  const tags = { lifecycle: 'compact' };
-  if (session.agent === 'claude') {
+function emitClaudeCompact(g, session, tags) {
     emitSessionStart(g, session, 'compact', tags);
     const payload = claudeBase(session, 'PostCompact');
     payload.trigger = 'auto';
     payload.compact_summary = 'The session read project files and applied a small edit.';
     push(g, session, 'PostCompact', payload);
-    return;
-  }
-  if (session.agent === 'codex') {
+}
+
+function emitCodexCompact(g, session, tags) {
     const post = {
       session_id: session.nativeId,
       turn_id: session.promptId ?? g.uuid(),
@@ -932,17 +966,18 @@ function emitCompact(g, session) {
     };
     push(g, session, 'PostCompact', post, tags);
     emitSessionStart(g, session, 'compact');
-    return;
-  }
-  if (session.agent === 'grok') {
+}
+
+function emitGrokCompact(g, session, tags) {
     const first = grokBase(g, session, 'PostCompact');
     first.source = 'auto';
     push(g, session, 'PostCompact', first, tags);
     const second = grokBase(g, session, 'PostCompact');
     second.source = 'auto';
     push(g, session, 'PostCompact', second);
-    return;
-  }
+}
+
+function emitPiCompact(g, session, tags) {
   const id = g.hex(8);
   push(
     g,
@@ -963,13 +998,30 @@ function emitCompact(g, session) {
   );
 }
 
+function emitCompact(g, session) {
+  const tags = { lifecycle: 'compact' };
+  if (session.agent === 'claude') {
+    emitClaudeCompact(g, session, tags);
+    return;
+  }
+  if (session.agent === 'codex') {
+    emitCodexCompact(g, session, tags);
+    return;
+  }
+  if (session.agent === 'grok') {
+    emitGrokCompact(g, session, tags);
+    return;
+  }
+  emitPiCompact(g, session, tags);
+}
+
 function assistantLine(work) {
   return work.lang === 'ja'
     ? `${work.file} を更新した。次はテストを回す。`
     : `Updated ${work.file}. Next step is to run the tests.`;
 }
 
-function emitWorkTurn(g, session, work, toolKind, extra = {}) {
+function workTurnKind(toolKind, extra) {
   let kind = toolKind;
   if (extra.secretPlace === 'input') kind = 'bash';
   if (
@@ -981,6 +1033,10 @@ function emitWorkTurn(g, session, work, toolKind, extra = {}) {
     // tool_response / output_for_prompt / Pi content, so force a tool that stores spec.body there.
     if (kind !== 'bash' && kind !== 'bash-read' && kind !== 'read') kind = 'read';
   }
+  return kind;
+}
+
+function workTurnTags(extra) {
   const promptTags = {};
   const outputTags = {};
   const inputTags = {};
@@ -992,7 +1048,10 @@ function emitWorkTurn(g, session, work, toolKind, extra = {}) {
   if (extra.fact !== undefined && extra.factPlace === 'prompt') promptTags.fact = extra.fact;
   if (extra.fact !== undefined && extra.factPlace === 'output') outputTags.fact = extra.fact;
   if (extra.recall !== undefined) promptTags.recall = extra.recall;
+  return { promptTags, outputTags, inputTags };
+}
 
+function emitWorkPrompt(g, session, work, extra, promptTags) {
   let promptText = extra.promptText ?? work.prompt;
   if (extra.secretPlace === 'prompt') promptText = `${promptText}\n${secretToken(extra.secret)}`;
   if (extra.directivePlace === 'prompt') {
@@ -1002,9 +1061,10 @@ function emitWorkTurn(g, session, work, toolKind, extra = {}) {
     promptText = `${promptText}\n${statementOf(extra.fact)}`;
   }
   emitPrompt(g, session, promptText, promptTags);
+}
 
-  if (extra.fail === 'claude-read') {
-    emitTool(
+function emitClaudeReadFailure(g, session, work, outputTags) {
+  emitTool(
       g,
       session,
       {
@@ -1016,49 +1076,49 @@ function emitWorkTurn(g, session, work, toolKind, extra = {}) {
       undefined,
       outputTags,
     );
-    emitStop(g, session, assistantLine(work));
-    return;
-  }
-  if (extra.fail === 'codex-bash') {
-    emitTool(
+  emitStop(g, session, assistantLine(work));
+}
+
+function emitCodexBashFailure(g, session, work, outputTags) {
+  emitTool(
       g,
       session,
       { kind: 'fail', cmd: 'false', error: 'Exit code 1\ncommand failed' },
       undefined,
       outputTags,
     );
-    emitStop(g, session, assistantLine(work));
-    return;
-  }
-  if (extra.fail === 'grok-deny') {
-    emitTool(g, session, { kind: 'deny', cmd: 'echo perm-probe', body: '' }, undefined, outputTags);
-    emitStop(g, session, assistantLine(work));
-    return;
-  }
-  if (extra.fail === 'grok-exit') {
-    emitTool(
+  emitStop(g, session, assistantLine(work));
+}
+
+function emitGrokDeniedTurn(g, session, work, outputTags) {
+  emitTool(g, session, { kind: 'deny', cmd: 'echo perm-probe', body: '' }, undefined, outputTags);
+  emitStop(g, session, assistantLine(work));
+}
+
+function emitGrokExitFailure(g, session, work, outputTags) {
+  emitTool(
       g,
       session,
       { kind: 'bash-fail', cmd: "bash -c 'echo boom >&2; exit 3'", body: 'boom\n' },
       undefined,
       outputTags,
     );
-    emitStop(g, session, assistantLine(work));
-    return;
-  }
-  if (extra.fail === 'grok-post-fail') {
-    emitTool(
+  emitStop(g, session, assistantLine(work));
+}
+
+function emitGrokPostFailure(g, session, work, outputTags) {
+  emitTool(
       g,
       session,
       { kind: 'fail', cmd: 'false', error: 'tool handler crashed' },
       undefined,
       outputTags,
     );
-    emitStop(g, session, assistantLine(work));
-    return;
-  }
-  if (extra.fail === 'pi-error') {
-    emitTool(
+  emitStop(g, session, assistantLine(work));
+}
+
+function emitPiFailure(g, session, work, outputTags) {
+  emitTool(
       g,
       session,
       {
@@ -1071,11 +1131,10 @@ function emitWorkTurn(g, session, work, toolKind, extra = {}) {
       undefined,
       outputTags,
     );
-    emitStop(g, session, assistantLine(work));
-    return;
-  }
+  emitStop(g, session, assistantLine(work));
+}
 
-  const spec = specFor(session.agent, kind, work);
+function applyWorkTurnExtras(spec, extra) {
   if (extra.secretPlace === 'output') spec.body = `${spec.body}\n${secretToken(extra.secret)}`;
   if (extra.secretPlace === 'input') {
     spec.cmd = `${spec.cmd} # ${secretToken(extra.secret)}`;
@@ -1086,6 +1145,40 @@ function emitWorkTurn(g, session, work, toolKind, extra = {}) {
   if (extra.fact !== undefined && extra.factPlace === 'output') {
     spec.body = `${spec.body}\n${statementOf(extra.fact)}`;
   }
+}
+
+function emitWorkTurn(g, session, work, toolKind, extra = {}) {
+  const kind = workTurnKind(toolKind, extra);
+  const { promptTags, outputTags, inputTags } = workTurnTags(extra);
+  emitWorkPrompt(g, session, work, extra, promptTags);
+
+  if (extra.fail === 'claude-read') {
+    emitClaudeReadFailure(g, session, work, outputTags);
+    return;
+  }
+  if (extra.fail === 'codex-bash') {
+    emitCodexBashFailure(g, session, work, outputTags);
+    return;
+  }
+  if (extra.fail === 'grok-deny') {
+    emitGrokDeniedTurn(g, session, work, outputTags);
+    return;
+  }
+  if (extra.fail === 'grok-exit') {
+    emitGrokExitFailure(g, session, work, outputTags);
+    return;
+  }
+  if (extra.fail === 'grok-post-fail') {
+    emitGrokPostFailure(g, session, work, outputTags);
+    return;
+  }
+  if (extra.fail === 'pi-error') {
+    emitPiFailure(g, session, work, outputTags);
+    return;
+  }
+
+  const spec = specFor(session.agent, kind, work);
+  applyWorkTurnExtras(spec, extra);
   emitTool(
     g,
     session,
@@ -1213,21 +1306,7 @@ function emitFailureTurn(g, agent) {
   emitEnd(g, session);
 }
 
-function emitLifecycleBundle(g, agent) {
-  const resume = newSession(g, agent);
-  emitSessionStart(g, resume, defaultStartSource(agent));
-  emitWorkTurn(g, resume, WORK[4], TOOLS[agent][0]);
-  let resumeSource;
-  if (agent === 'grok') resumeSource = 'load';
-  else if (agent === 'pi') resumeSource = 'startup';
-  else resumeSource = 'resume';
-  emitSessionStart(g, resume, resumeSource, { lifecycle: 'resume' });
-  emitWorkTurn(g, resume, WORK[5], TOOLS[agent][2]);
-  emitCompact(g, resume);
-  emitWorkTurn(g, resume, WORK[6], TOOLS[agent][3]);
-  emitWorkTurn(g, resume, WORK[7], TOOLS[agent][0]);
-
-  if (agent === 'claude') {
+function emitClaudeLifecycle(g, agent, resume) {
     const forked = newSession(g, agent);
     forked.transcript = resume.transcript;
     emitSessionStart(g, forked, 'fork', { lifecycle: 'fork' });
@@ -1244,9 +1323,9 @@ function emitLifecycleBundle(g, agent) {
     emitWorkTurn(g, cleared, WORK[2], 'write');
     emitWorkTurn(g, cleared, WORK[3], 'edit');
     emitEnd(g, cleared);
-    return;
-  }
-  if (agent === 'codex') {
+}
+
+function emitCodexLifecycle(g, agent, resume) {
     // No fork source in the verified enum. /new: parent has no SessionEnd, child source=startup.
     const child = newSession(g, agent);
     emitSessionStart(g, child, 'startup', { lifecycle: 'clear' });
@@ -1256,9 +1335,9 @@ function emitLifecycleBundle(g, agent) {
     emitWorkTurn(g, child, WORK[3], 'patch-update');
     emitEnd(g, child);
     emitEnd(g, resume);
-    return;
-  }
-  if (agent === 'grok') {
+}
+
+function emitGrokLifecycle(g, agent, resume) {
     const forked = newSession(g, agent);
     emitSessionStart(g, forked, 'load', { lifecycle: 'fork' });
     emitWorkTurn(g, forked, WORK[7], 'read');
@@ -1274,8 +1353,9 @@ function emitLifecycleBundle(g, agent) {
     emitWorkTurn(g, cleared, WORK[3], 'edit');
     emitEnd(g, cleared);
     emitEnd(g, resume);
-    return;
-  }
+}
+
+function emitPiLifecycle(g, agent, resume) {
   emitEnd(g, resume, 'fork');
   const forkShutdown = g.events[g.events.length - 1];
   forkShutdown.tags = { ...forkShutdown.tags, lifecycle: 'fork' };
@@ -1296,6 +1376,26 @@ function emitLifecycleBundle(g, agent) {
   emitWorkTurn(g, cleared, WORK[2], 'write');
   emitWorkTurn(g, cleared, WORK[3], 'edit');
   emitEnd(g, cleared);
+}
+
+function emitLifecycleBundle(g, agent) {
+  const resume = newSession(g, agent);
+  emitSessionStart(g, resume, defaultStartSource(agent));
+  emitWorkTurn(g, resume, WORK[4], TOOLS[agent][0]);
+  let resumeSource;
+  if (agent === 'grok') resumeSource = 'load';
+  else if (agent === 'pi') resumeSource = 'startup';
+  else resumeSource = 'resume';
+  emitSessionStart(g, resume, resumeSource, { lifecycle: 'resume' });
+  emitWorkTurn(g, resume, WORK[5], TOOLS[agent][2]);
+  emitCompact(g, resume);
+  emitWorkTurn(g, resume, WORK[6], TOOLS[agent][3]);
+  emitWorkTurn(g, resume, WORK[7], TOOLS[agent][0]);
+
+  if (agent === 'claude') emitClaudeLifecycle(g, agent, resume);
+  else if (agent === 'codex') emitCodexLifecycle(g, agent, resume);
+  else if (agent === 'grok') emitGrokLifecycle(g, agent, resume);
+  else emitPiLifecycle(g, agent, resume);
 }
 
 function emitSizeEvent(g, agent, target, sizeTag) {
@@ -1360,9 +1460,7 @@ function promptTextOf(event) {
   return '';
 }
 
-function adapterOutputText(event) {
-  const payload = event.payload;
-  if (event.agent === 'claude' && event.event === 'PostToolUse') {
+function claudeAdapterOutput(payload) {
     const response = payload.tool_response;
     const tool = payload.tool_name;
     // Write/Edit adapter output is the path (`writtenPath`), not file content.
@@ -1376,30 +1474,42 @@ function adapterOutputText(event) {
     const stderr = typeof response.stderr === 'string' ? response.stderr : '';
     if ('stdout' in response || 'stderr' in response) return `${stdout}\n${stderr}`;
     return '';
+}
+
+function grokAdapterOutput(payload) {
+  const result = payload.toolResult ?? {};
+  if (typeof result.FileContent?.content === 'string') return result.FileContent.content;
+  if (typeof result.EditsApplied?.tool_output_for_prompt === 'string') {
+    return result.EditsApplied.tool_output_for_prompt;
+  }
+  if (typeof result.output_for_prompt === 'string') return result.output_for_prompt;
+  return '';
+}
+
+function piAdapterOutput(payload) {
+  const blocks = payload.payload?.content;
+  if (!Array.isArray(blocks)) return '';
+  return blocks.map((block) => (typeof block?.text === 'string' ? block.text : '')).join('\n');
+}
+
+function adapterOutputText(event) {
+  const payload = event.payload;
+  if (event.agent === 'claude' && event.event === 'PostToolUse') {
+    return claudeAdapterOutput(payload);
   }
   if (event.agent === 'codex' && event.event === 'PostToolUse') {
     return typeof payload.tool_response === 'string' ? payload.tool_response : '';
   }
   if (event.agent === 'grok' && event.event === 'PostToolUse') {
-    const result = payload.toolResult ?? {};
-    if (typeof result.FileContent?.content === 'string') return result.FileContent.content;
-    if (typeof result.EditsApplied?.tool_output_for_prompt === 'string') {
-      return result.EditsApplied.tool_output_for_prompt;
-    }
-    if (typeof result.output_for_prompt === 'string') return result.output_for_prompt;
-    return '';
+    return grokAdapterOutput(payload);
   }
   if (event.agent === 'pi' && event.event === 'tool_result') {
-    const blocks = payload.payload?.content;
-    if (!Array.isArray(blocks)) return '';
-    return blocks.map((block) => (typeof block?.text === 'string' ? block.text : '')).join('\n');
+    return piAdapterOutput(payload);
   }
   return '';
 }
 
-function coverage(events, secrets, directives) {
-  const byAgent = countBy(events, (event) => event.agent);
-  const byEvent = countBy(events, (event) => `${event.agent}:${event.event}`);
+function newCoverageStats(secrets) {
   const secretIds = new Set(
     secrets.filter((row) => row.secret !== null).map((row) => row.id),
   );
@@ -1413,22 +1523,40 @@ function coverage(events, secrets, directives) {
   const lifecycle = { resume: new Set(), compact: new Set(), fork: new Set(), clear: new Set() };
   const sizes = [];
   const langs = { ja: 0, en: 0 };
+  return {
+    secretIds, seenSecrets, dirPrompt, dirOutput, factsPlanted, factsRecalled,
+    plantSession, recallSession, lifecycle, sizes, langs,
+  };
+}
 
-  for (const event of events) {
-    const tags = event.tags ?? {};
-    if (tags.secret !== undefined) seenSecrets.add(tags.secret);
+function collectDirectiveCoverage(event, tags, stats) {
+    const { dirPrompt, dirOutput } = stats;
     if (tags.directive !== undefined) {
       const promptEvent =
         event.event === 'UserPromptSubmit' || event.event === 'input';
       if (promptEvent) dirPrompt.add(tags.directive);
       else dirOutput.add(tags.directive);
     }
+}
+
+function collectFactCoverage(event, tags, stats) {
+    const { factsPlanted, plantSession, langs } = stats;
     if (tags.fact !== undefined) {
       factsPlanted.add(tags.fact.id);
       plantSession.set(tags.fact.id, `${event.agent}:${event.session}`);
       if (tags.fact.lang === 'ja') langs.ja += 1;
       else langs.en += 1;
     }
+}
+
+function collectCoverageEvent(event, stats) {
+    const {
+      seenSecrets, factsRecalled, recallSession, lifecycle, sizes,
+    } = stats;
+    const tags = event.tags ?? {};
+    if (tags.secret !== undefined) seenSecrets.add(tags.secret);
+    collectDirectiveCoverage(event, tags, stats);
+    collectFactCoverage(event, tags, stats);
     if (tags.recall !== undefined) {
       factsRecalled.add(tags.recall);
       recallSession.set(tags.recall, `${event.agent}:${event.session}`);
@@ -1438,22 +1566,23 @@ function coverage(events, secrets, directives) {
       const bytes = Buffer.byteLength(JSON.stringify(expandFillOnly(event.payload)));
       sizes.push({ agent: event.agent, seq: event.seq, tag: tags.size, bytes });
     }
-  }
+}
 
-  const missingSecrets = [...secretIds].filter((id) => !seenSecrets.has(id));
-  const negativeIds = secrets.filter((row) => row.secret === null).map((row) => row.id);
-  const missingNegatives = negativeIds.filter((id) => !seenSecrets.has(id));
+function collectCoverageEvents(events, stats) {
+  for (const event of events) {
+    collectCoverageEvent(event, stats);
+  }
+}
+
+function missingDirectives(directives, dirPrompt, dirOutput) {
   const missingDir = [];
   for (let i = 0; i < directives.length; i += 1) {
     if (!dirPrompt.has(i) || !dirOutput.has(i)) missingDir.push(i);
   }
-  const missingPlant = FACTS.filter((fact) => !factsPlanted.has(fact.id)).map((fact) => fact.id);
-  const missingRecall = FACTS.filter((fact) => !factsRecalled.has(fact.id)).map((fact) => fact.id);
-  const sameSessionRecall = [];
-  for (const id of factsRecalled) {
-    if (plantSession.get(id) === recallSession.get(id)) sameSessionRecall.push(id);
-  }
+  return missingDir;
+}
 
+function missingRequiredKinds(byEvent) {
   const required = {
     claude: ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'PostCompact', 'SessionEnd'],
     codex: ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'PostCompact', 'SessionEnd'],
@@ -1466,49 +1595,82 @@ function coverage(events, secrets, directives) {
       if ((byEvent[`${agent}:${name}`] ?? 0) === 0) missingKinds.push(`${agent}:${name}`);
     }
   }
+  return missingKinds;
+}
+
+function coverageGaps(stats, secrets, directives, byEvent) {
+  const {
+    secretIds, seenSecrets, dirPrompt, dirOutput, factsPlanted, factsRecalled,
+    plantSession, recallSession,
+  } = stats;
+  const missingSecrets = [...secretIds].filter((id) => !seenSecrets.has(id));
+  const negativeIds = secrets.filter((row) => row.secret === null).map((row) => row.id);
+  const missingNegatives = negativeIds.filter((id) => !seenSecrets.has(id));
+  const missingDir = missingDirectives(directives, dirPrompt, dirOutput);
+  const missingPlant = FACTS.filter((fact) => !factsPlanted.has(fact.id)).map((fact) => fact.id);
+  const missingRecall = FACTS.filter((fact) => !factsRecalled.has(fact.id)).map((fact) => fact.id);
+  const sameSessionRecall = [];
+  for (const id of factsRecalled) {
+    if (plantSession.get(id) === recallSession.get(id)) sameSessionRecall.push(id);
+  }
+
+  const missingKinds = missingRequiredKinds(byEvent);
+  return {
+    missingSecrets, negativeIds, missingNegatives, missingDir,
+    missingPlant, missingRecall, sameSessionRecall, missingKinds,
+  };
+}
+
+function coverage(events, secrets, directives) {
+  const byAgent = countBy(events, (event) => event.agent);
+  const byEvent = countBy(events, (event) => `${event.agent}:${event.event}`);
+  const stats = newCoverageStats(secrets);
+  collectCoverageEvents(events, stats);
+  const gaps = coverageGaps(stats, secrets, directives, byEvent);
 
   return {
     total: events.length,
     byAgent,
     byEvent,
     secrets: {
-      required: secretIds.size,
-      seen: seenSecrets.size,
-      missing: missingSecrets,
-      negatives: negativeIds.length,
-      missingNegatives,
+      required: stats.secretIds.size,
+      seen: stats.seenSecrets.size,
+      missing: gaps.missingSecrets,
+      negatives: gaps.negativeIds.length,
+      missingNegatives: gaps.missingNegatives,
     },
     directives: {
       total: directives.length,
-      prompt: dirPrompt.size,
-      output: dirOutput.size,
-      missing: missingDir,
+      prompt: stats.dirPrompt.size,
+      output: stats.dirOutput.size,
+      missing: gaps.missingDir,
     },
     facts: {
-      planted: factsPlanted.size,
-      recalled: factsRecalled.size,
-      ja: langs.ja,
-      en: langs.en,
-      missingPlant,
-      missingRecall,
-      sameSessionRecall,
+      planted: stats.factsPlanted.size,
+      recalled: stats.factsRecalled.size,
+      ja: stats.langs.ja,
+      en: stats.langs.en,
+      missingPlant: gaps.missingPlant,
+      missingRecall: gaps.missingRecall,
+      sameSessionRecall: gaps.sameSessionRecall,
     },
     lifecycle: Object.fromEntries(
-      Object.entries(lifecycle).map(([name, set]) => [name, [...set]]),
+      Object.entries(stats.lifecycle).map(([name, set]) => [name, [...set]]),
     ),
-    sizes,
-    missingKinds,
+    sizes: stats.sizes,
+    missingKinds: gaps.missingKinds,
   };
 }
 
-function assertCoverage(events, secrets, directives, body) {
-  const report = coverage(events, secrets, directives);
-  const problems = [];
+function assertAgentCoverage(report, problems) {
   if (report.total < 1000) problems.push(`only ${report.total} events`);
   for (const agent of AGENTS) {
     const n = report.byAgent[agent] ?? 0;
     if (n < 240) problems.push(`${agent} has ${n} events`);
   }
+}
+
+function assertCorpusCoverage(report, problems) {
   if (report.secrets.missing.length > 0) {
     problems.push(`missing secrets ${report.secrets.missing.join(',')}`);
   }
@@ -1527,12 +1689,18 @@ function assertCoverage(events, secrets, directives, body) {
     problems.push(`recall in same session ${report.facts.sameSessionRecall.join(',')}`);
   }
   if (report.missingKinds.length > 0) problems.push(`missing kinds ${report.missingKinds.join(',')}`);
+}
+
+function assertLifecycleCoverage(report, problems) {
   for (const name of ['resume', 'compact', 'clear']) {
     if (report.lifecycle[name].length < 4) problems.push(`lifecycle ${name} agents=${report.lifecycle[name]}`);
   }
   if (!report.lifecycle.fork.includes('claude') || !report.lifecycle.fork.includes('grok') || !report.lifecycle.fork.includes('pi')) {
     problems.push(`lifecycle fork agents=${report.lifecycle.fork}`);
   }
+}
+
+function assertSizeCoverage(report, problems) {
   const at = report.sizes.filter((row) => row.tag === 'at_bound' && row.bytes === AT_BOUND);
   const above = report.sizes.filter((row) => row.tag === 'above_bound');
   if (at.length < 2) problems.push(`at_bound count ${at.length}`);
@@ -1547,9 +1715,119 @@ function assertCoverage(events, secrets, directives, body) {
       problems.push(`size seq ${row.seq} above_bound is ${row.bytes}`);
     }
   }
+}
+
+function assertNoSecretLeaks(secrets, body, problems) {
   for (const row of secrets) {
     if (row.secret !== null && body.includes(row.secret)) problems.push(`secret value leaked for ${row.id}`);
   }
+}
+
+function validateFactEvent(event, tags, blob, problems) {
+  if (tags.fact !== undefined) {
+    const expect = tags.fact.expect;
+    if (typeof expect !== 'string' || expect === '' || !blob.includes(expect)) {
+      problems.push(`fact ${tags.fact.id} expect missing from payload seq ${event.seq}`);
+    }
+    if (
+      (event.event === 'PostToolUse' || event.event === 'tool_result') &&
+      !adapterOutputText(event).includes(expect)
+    ) {
+      problems.push(`fact ${tags.fact.id} expect not in adapter output seq ${event.seq}`);
+    }
+  }
+}
+
+function validatePiSecretEvent(event, tags, token, problems) {
+  if (event.event === 'tool_result' && !adapterOutputText(event).includes(token)) {
+    const inputBlob = JSON.stringify(event.payload.payload?.input ?? {});
+    const toolName = event.payload.payload?.toolName;
+    if (!inputBlob.includes(token)) {
+      problems.push(`secret ${tags.secret} not in pi input or content seq ${event.seq}`);
+    } else if (toolName === 'write' || toolName === 'edit') {
+      problems.push(`secret ${tags.secret} in pi ${toolName} input seq ${event.seq}`);
+    }
+  }
+}
+
+function validateSecretEvent(event, tags, blob, problems) {
+  if (tags.secret !== undefined) {
+    const token = secretToken(tags.secret);
+    if (!blob.includes(token)) {
+      problems.push(`secret token missing from payload seq ${event.seq} id=${tags.secret}`);
+    }
+    if (event.event === 'PostToolUse' && !adapterOutputText(event).includes(token)) {
+      problems.push(`secret ${tags.secret} not in adapter output seq ${event.seq}`);
+    }
+    validatePiSecretEvent(event, tags, token, problems);
+  }
+}
+
+function validatePiDirectiveEvent(event, tags, token, problems) {
+  if (event.event === 'tool_result' && !adapterOutputText(event).includes(token)) {
+    const toolName = event.payload.payload?.toolName;
+    if (toolName === 'write' || toolName === 'edit') {
+      problems.push(`directive ${tags.directive} in pi ${toolName} input seq ${event.seq}`);
+    }
+  }
+}
+
+function validateDirectiveEvent(event, tags, blob, problems) {
+  if (tags.directive !== undefined) {
+    const token = directiveToken(tags.directive);
+    if (!blob.includes(token)) {
+      problems.push(`directive token missing from payload seq ${event.seq} index=${tags.directive}`);
+    }
+    if (event.event === 'PostToolUse' && !adapterOutputText(event).includes(token)) {
+      problems.push(`directive ${tags.directive} not in adapter output seq ${event.seq}`);
+    }
+    validatePiDirectiveEvent(event, tags, token, problems);
+  }
+}
+
+function validateRecallEvent(event, tags, factsById, problems) {
+  if (tags.recall !== undefined) {
+    const fact = factsById.get(tags.recall);
+    const prompt = promptTextOf(event);
+    if (fact === undefined || !prompt.includes(fact.query)) {
+      problems.push(`recall ${tags.recall} prompt missing query seq ${event.seq}`);
+    }
+  }
+}
+
+function validateGrokTimestamp(event, grokTimestamps, problems) {
+  const ts = event.payload.timestamp;
+  if (typeof ts !== 'string' || ts === '') {
+    problems.push(`grok missing timestamp seq ${event.seq}`);
+  } else {
+    if (grokTimestamps.includes(ts)) problems.push(`duplicate grok timestamp ${ts} seq ${event.seq}`);
+    if (grokTimestamps.length > 0 && ts <= grokTimestamps.at(-1)) {
+      problems.push(`grok timestamp not increasing seq ${event.seq}`);
+    }
+    grokTimestamps.push(ts);
+  }
+}
+
+function validateGrokFork(event, tags, problems) {
+  if (tags.lifecycle === 'fork') {
+    const expected = `${ROOT_PH}/.oboete-replay/grok/${event.session}.jsonl`;
+    if (event.payload.transcriptPath !== expected) {
+      problems.push(`grok fork reuses transcript seq ${event.seq}`);
+    }
+  }
+}
+
+function validateGrokEvent(event, tags, grokTimestamps, grokCompacts, problems) {
+  if (event.agent === 'grok') {
+    validateGrokTimestamp(event, grokTimestamps, problems);
+    if (event.event === 'PostCompact') {
+      grokCompacts[event.session] = (grokCompacts[event.session] ?? 0) + 1;
+    }
+    validateGrokFork(event, tags, problems);
+  }
+}
+
+function validateCoverageEvents(events, problems) {
   const factsById = new Map(FACTS.map((fact) => [fact.id, fact]));
   const grokTimestamps = [];
   const grokCompacts = {};
@@ -1564,89 +1842,28 @@ function assertCoverage(events, secrets, directives, body) {
     if (event.agent === 'claude' && Object.hasOwn(event.payload, 'model')) {
       problems.push(`claude payload has model at seq ${event.seq}`);
     }
-    if (tags.fact !== undefined) {
-      const expect = tags.fact.expect;
-      if (typeof expect !== 'string' || expect === '' || !blob.includes(expect)) {
-        problems.push(`fact ${tags.fact.id} expect missing from payload seq ${event.seq}`);
-      }
-      if (
-        (event.event === 'PostToolUse' || event.event === 'tool_result') &&
-        !adapterOutputText(event).includes(expect)
-      ) {
-        problems.push(`fact ${tags.fact.id} expect not in adapter output seq ${event.seq}`);
-      }
-    }
-    if (tags.secret !== undefined) {
-      const token = secretToken(tags.secret);
-      if (!blob.includes(token)) {
-        problems.push(`secret token missing from payload seq ${event.seq} id=${tags.secret}`);
-      }
-      if (event.event === 'PostToolUse' && !adapterOutputText(event).includes(token)) {
-        problems.push(`secret ${tags.secret} not in adapter output seq ${event.seq}`);
-      }
-      if (event.event === 'tool_result' && !adapterOutputText(event).includes(token)) {
-        const inputBlob = JSON.stringify(event.payload.payload?.input ?? {});
-        const toolName = event.payload.payload?.toolName;
-        if (!inputBlob.includes(token)) {
-          problems.push(`secret ${tags.secret} not in pi input or content seq ${event.seq}`);
-        } else if (toolName === 'write' || toolName === 'edit') {
-          problems.push(`secret ${tags.secret} in pi ${toolName} input seq ${event.seq}`);
-        }
-      }
-    }
-    if (tags.directive !== undefined) {
-      const token = directiveToken(tags.directive);
-      if (!blob.includes(token)) {
-        problems.push(`directive token missing from payload seq ${event.seq} index=${tags.directive}`);
-      }
-      if (event.event === 'PostToolUse' && !adapterOutputText(event).includes(token)) {
-        problems.push(`directive ${tags.directive} not in adapter output seq ${event.seq}`);
-      }
-      if (event.event === 'tool_result' && !adapterOutputText(event).includes(token)) {
-        const toolName = event.payload.payload?.toolName;
-        if (toolName === 'write' || toolName === 'edit') {
-          problems.push(`directive ${tags.directive} in pi ${toolName} input seq ${event.seq}`);
-        }
-      }
-    }
-    if (tags.recall !== undefined) {
-      const fact = factsById.get(tags.recall);
-      const prompt = promptTextOf(event);
-      if (fact === undefined || !prompt.includes(fact.query)) {
-        problems.push(`recall ${tags.recall} prompt missing query seq ${event.seq}`);
-      }
-    }
-    if (event.agent === 'grok') {
-      const ts = event.payload.timestamp;
-      if (typeof ts !== 'string' || ts === '') {
-        problems.push(`grok missing timestamp seq ${event.seq}`);
-      } else {
-        if (grokTimestamps.includes(ts)) problems.push(`duplicate grok timestamp ${ts} seq ${event.seq}`);
-        if (grokTimestamps.length > 0 && ts <= grokTimestamps.at(-1)) {
-          problems.push(`grok timestamp not increasing seq ${event.seq}`);
-        }
-        grokTimestamps.push(ts);
-      }
-      if (event.event === 'PostCompact') {
-        grokCompacts[event.session] = (grokCompacts[event.session] ?? 0) + 1;
-      }
-      if (tags.lifecycle === 'fork') {
-        const expected = `${ROOT_PH}/.oboete-replay/grok/${event.session}.jsonl`;
-        if (event.payload.transcriptPath !== expected) {
-          problems.push(`grok fork reuses transcript seq ${event.seq}`);
-        }
-      }
-    }
+    validateFactEvent(event, tags, blob, problems);
+    validateSecretEvent(event, tags, blob, problems);
+    validateDirectiveEvent(event, tags, blob, problems);
+    validateRecallEvent(event, tags, factsById, problems);
+    validateGrokEvent(event, tags, grokTimestamps, grokCompacts, problems);
     if (event.agent === 'pi' && event.event === 'input') {
       piSources.add(event.payload.payload?.source);
     }
   }
+  return { grokCompacts, piSources };
+}
+
+function assertAdapterCoverage(grokCompacts, piSources, problems) {
   if (!Object.values(grokCompacts).some((n) => n >= 2)) {
     problems.push('no grok session compact twice');
   }
   for (const source of PI_INPUT_SOURCES) {
     if (!piSources.has(source)) problems.push(`pi input source missing ${source}`);
   }
+}
+
+function coverageTurnsBySession(events, problems) {
   const turnsBySession = {};
   for (const event of events) {
     if (event.event === 'UserPromptSubmit' || event.event === 'input') {
@@ -1656,16 +1873,26 @@ function assertCoverage(events, secrets, directives, body) {
   for (const [label, turns] of Object.entries(turnsBySession)) {
     if (turns < 4 || turns > 12) problems.push(`session ${label} has ${turns} turns`);
   }
+  return turnsBySession;
+}
+
+function assertCoverage(events, secrets, directives, body) {
+  const report = coverage(events, secrets, directives);
+  const problems = [];
+  assertAgentCoverage(report, problems);
+  assertCorpusCoverage(report, problems);
+  assertLifecycleCoverage(report, problems);
+  assertSizeCoverage(report, problems);
+  assertNoSecretLeaks(secrets, body, problems);
+  const { grokCompacts, piSources } = validateCoverageEvents(events, problems);
+  assertAdapterCoverage(grokCompacts, piSources, problems);
+  const turnsBySession = coverageTurnsBySession(events, problems);
   if (problems.length > 0) throw new Error(`coverage failed:\n- ${problems.join('\n- ')}`);
   report.turnsBySession = turnsBySession;
   return report;
 }
 
-function generate() {
-  const secrets = loadJsonl(join(REPO, 'test/corpus/secrets.jsonl'));
-  const directives = loadJsonl(join(REPO, 'test/corpus/directives.jsonl'));
-  const g = createState();
-
+function createFactPlans() {
   const plants = { claude: [], codex: [], grok: [], pi: [] };
   const recalls = { claude: [], codex: [], grok: [], pi: [] };
   for (let i = 0; i < FACTS.length; i += 1) {
@@ -1675,7 +1902,10 @@ function generate() {
     plants[plantAgent].push(fact);
     recalls[recallAgent].push(fact);
   }
+  return { plants, recalls };
+}
 
+function createCorpusPlans(secrets, directives) {
   const secretRows = secrets.filter((row) => row.secret !== null);
   const negativeRows = secrets.filter((row) => row.secret === null);
   const secretPlan = { claude: [], codex: [], grok: [], pi: [] };
@@ -1692,6 +1922,16 @@ function generate() {
     dirPromptPlan[AGENTS[i % 4]].push(i);
     dirOutputPlan[AGENTS[(i + 2) % 4]].push(i);
   }
+  return { secretPlan, dirPromptPlan, dirOutputPlan };
+}
+
+function generate() {
+  const secrets = loadJsonl(join(REPO, 'test/corpus/secrets.jsonl'));
+  const directives = loadJsonl(join(REPO, 'test/corpus/directives.jsonl'));
+  const g = createState();
+
+  const { plants, recalls } = createFactPlans();
+  const { secretPlan, dirPromptPlan, dirOutputPlan } = createCorpusPlans(secrets, directives);
 
   for (const agent of AGENTS) emitSmokeSession(g, agent);
 

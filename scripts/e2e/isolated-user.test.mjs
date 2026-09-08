@@ -29,6 +29,8 @@ import {
 import { PreconditionError, childEnv as probeChildEnv } from "./probe-lib/agents.mjs";
 import { readyTui } from "./probe-lib/tmux.mjs";
 
+const SINGLE_QUOTED = /'([^']+)'/g;
+
 test("parseArguments accepts the T054 flags", () => {
   const options = parseArguments([
     "--pairs",
@@ -263,7 +265,7 @@ test("createLifecycleReport records every check, assertion, and blocked reason",
   assert.deepEqual(report.lifecycle_checks[0].event_delta, [{ kind: "prompt", native_session_id: "session" }]);
 });
 
-test("inspectLifecycle reads the identity and delivery evidence without writing", (t) => {
+function lifecycleDatabase(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "oboete-lifecycle-db-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const oboeteHome = path.join(directory, ".oboete");
@@ -290,7 +292,11 @@ test("inspectLifecycle reads the identity and delivery evidence without writing"
       VALUES ('memory', 'repo', 'session_summary', 'session', 'hash', 'local_only');
   `);
   t.after(() => db.close());
+  return { directory, file, db };
+}
 
+test("inspectLifecycle reads the identity and delivery evidence without writing", (t) => {
+  const { directory, file, db } = lifecycleDatabase(t);
   const snapshot = inspectLifecycle(file, "codex");
   assert.equal(snapshot.sessions[0].contextEpoch, 1);
   assert.equal(snapshot.sessions[0].status, "active");
@@ -431,6 +437,191 @@ function addMemoryInjection(snapshot, agent, kind, channel, sessionId = "child",
   });
 }
 
+function compactLifecycleState(agent) {
+  const before = lifecycleSnapshot(agent);
+  const after = structuredClone(before);
+  after.sessions[0].contextEpoch = 1;
+  after.events.push({
+    id: "event-compact", sessionId: "parent", nativeSessionId: "native-parent",
+    kind: "compaction_summary", payload: {}, capturedAt: 3,
+  });
+  after.events.push({
+    id: "event-compact-start", sessionId: "parent", nativeSessionId: "native-parent",
+    kind: "session_start", payload: { source: "compact" }, capturedAt: 4,
+  });
+  if (agent === "codex") after.events.push({
+    id: "event-next-prompt", sessionId: "parent", nativeSessionId: "native-parent",
+    kind: "prompt", payload: {}, capturedAt: 5,
+  });
+  addMemoryInjection(after, agent, "session_start", `${agent}:SessionStart`, "parent", 1);
+  after.memories.push({ ...after.memories[0], id: "new-summary" });
+  after.items.at(-1).memoryId = "new-summary";
+
+  const result = evaluateLifecycleCheck({
+    agent,
+    check: "compact",
+    before,
+    after,
+    parentNativeSessionId: "native-parent",
+  });
+  assert.equal(result.status, "pass", result.reason);
+
+  const start = (snapshot) => snapshot.events.find((event) => event.id === "event-compact-start");
+  return { before, after, result, start };
+}
+
+function assertRejectedCompactMutations(agent, before, after, start) {
+  for (const [label, mutate, reason] of [
+    ["missing compact start", (snapshot) => { snapshot.events = snapshot.events.filter((event) => event.id !== "event-compact-start"); }, /SessionStart source=compact/],
+    ["wrong source", (snapshot) => { start(snapshot).payload.source = "startup"; }, /SessionStart source=compact/],
+    ["wrong session", (snapshot) => { start(snapshot).sessionId = "other"; }, /SessionStart source=compact/],
+    ["duplicate compact start", (snapshot) => snapshot.events.push({ ...start(snapshot), id: "duplicate" }), /SessionStart source=compact/],
+    ["duplicate compaction", (snapshot) => snapshot.events.push({ ...snapshot.events.find((event) => event.kind === "compaction_summary"), id: "duplicate" }), /one compaction event/],
+    ["prompt fallback", (snapshot) => { snapshot.injections[0].channel = `${agent}:UserPromptSubmit`; }, /session-start pack/],
+    ["pending pack", (snapshot) => { snapshot.injections[0].state = "pending"; }, /session-start pack/],
+    ["old epoch pack", (snapshot) => { snapshot.injections[0].contextEpoch = 0; }, /session-start pack/],
+    ["duplicate pack", (snapshot) => snapshot.injections.push({ ...snapshot.injections[0], id: "duplicate" }), /session-start pack/],
+    ["extra fallback pack", (snapshot) => snapshot.injections.push({ ...snapshot.injections[0], id: "fallback", channel: `${agent}:UserPromptSubmit` }), /session-start pack/],
+    ["extra pending pack", (snapshot) => snapshot.injections.push({ ...snapshot.injections[0], id: "pending", state: "pending" }), /session-start pack/],
+    ["extra old epoch pack", (snapshot) => snapshot.injections.push({ ...snapshot.injections[0], id: "old-epoch", contextEpoch: 0 }), /session-start pack/],
+    ["no repository memory", (snapshot) => { snapshot.items[0].memoryId = "other-repo-memory"; }, /includes repository memory/],
+    ["deleted repository memory", (snapshot) => { snapshot.memories.at(-1).deletedAt = 6; }, /includes repository memory/],
+    ["foreign repository memory", (snapshot) => { snapshot.memories.at(-1).repoId = "other-repo"; }, /includes repository memory/],
+    ["lost earlier event", (snapshot) => snapshot.events.shift(), /no event captured before compaction is lost/],
+  ]) {
+    const invalid = structuredClone(after);
+    mutate(invalid);
+    const rejected = evaluateLifecycleCheck({
+      agent, check: "compact", before, after: invalid, parentNativeSessionId: "native-parent",
+    });
+    assert.equal(rejected.status, "fail", label);
+    assert.match(rejected.reason, reason, label);
+  }
+}
+
+function addClearLifecycleEvents(after, agent) {
+  after.events.push({
+    id: "event-clear-start",
+    sessionId: "child",
+    nativeSessionId: "native-child",
+    kind: "session_start",
+    payload: { source: agent === "codex" ? "startup" : "clear" },
+    capturedAt: 3,
+  });
+  after.events.push(
+    {
+      id: "event-clear-prompt",
+      sessionId: "child",
+      nativeSessionId: "native-child",
+      kind: "prompt",
+      payload: {},
+      capturedAt: 4,
+    },
+    {
+      id: "event-clear-end",
+      sessionId: "child",
+      nativeSessionId: "native-child",
+      kind: "turn_end",
+      payload: {},
+      capturedAt: 5,
+    },
+  );
+  addMemoryInjection(
+    after,
+    agent,
+    "session_start",
+    `${agent}:SessionStart`,
+  );
+  after.memories.push({ ...after.memories[0], id: "new-summary" });
+  after.items.at(-1).memoryId = "new-summary";
+}
+
+function clearLifecycleState(agent) {
+  const before = lifecycleSnapshot(agent);
+  if (agent === "codex") {
+    Object.assign(before.sessions[0], { status: "active", summaryState: null });
+    Object.assign(before.memories[0], { sourceSessionId: "seed", type: "session_summary" });
+  }
+  addMemoryInjection(before, agent, "session_start", `${agent}:SessionStart`, "parent");
+  const beforePrompt = structuredClone(before);
+  const after = structuredClone(before);
+  after.sessions.push(childSession());
+  addClearLifecycleEvents(after, agent);
+
+  const result = evaluateLifecycleCheck({
+    agent,
+    check: "clear",
+    before,
+    beforePrompt: agent === "codex" ? beforePrompt : undefined,
+    after,
+    parentNativeSessionId: "native-parent",
+    childNativeSessionId: "native-child",
+  });
+  assert.equal(result.status, "pass", result.reason);
+  return { before, beforePrompt, after, result };
+}
+
+function assertRejectedClearMutations(agent, before, beforePrompt, after) {
+  for (const [label, mutate, reason] of [
+    ["wrong injection channel", (snapshot) => { snapshot.injections[1].channel = `${agent}:UserPromptSubmit`; }, /emits one session-start pack through/],
+    ...(agent === "claude" ? [
+      ["missing clear SessionStart", (snapshot) => { snapshot.events = snapshot.events.filter((event) => event.id !== "event-clear-start"); }, /Claude clear records one SessionStart source=clear/],
+    ] : []),
+  ]) {
+    const invalid = structuredClone(after);
+    mutate(invalid);
+    const rejected = evaluateLifecycleCheck({
+      agent, check: "clear", before, beforePrompt, after: invalid,
+      parentNativeSessionId: "native-parent", childNativeSessionId: "native-child",
+    });
+    assert.equal(rejected.status, "fail", label);
+    assert.equal(rejected.assertions.find((item) => reason.test(item.assertion))?.pass, false, label);
+  }
+}
+
+function assertCodexClearLifecycle(before, beforePrompt, after, result, agent) {
+  assert.equal(result.evidence.parent_session_end_count, 0);
+  const parentState = result.assertions.find((item) => /parent stays active/.test(item.assertion));
+  assert.equal(parentState.actual, "active");
+  assert.match(parentState.assertion, /\/new fires no SessionEnd.*2026-09-05T07-03-44-495Z/);
+  assert.match(result.assertions.find((item) => /startup.*precedes/.test(item.assertion)).assertion, /2026-09-05T07-03-44-495Z/);
+  assert.ok(result.assertions.find((item) => /includes a memory from the parent repository/.test(item.assertion)).expected.includes("new-summary"));
+  const start = (snapshot) => snapshot.events.find((event) => event.id === "event-clear-start");
+  for (const [label, mutate, reason] of [
+    ["missing startup", (snapshot) => { snapshot.events = snapshot.events.filter((event) => event.id !== "event-clear-start"); }, /one SessionStart source=startup/],
+    ["late startup", (snapshot) => { start(snapshot).capturedAt = 6; }, /startup.*precedes/],
+    ["simultaneous startup", (snapshot) => { start(snapshot).capturedAt = 4; }, /startup.*precedes/],
+    ["missing timestamp", (snapshot) => { delete start(snapshot).capturedAt; }, /startup.*precedes/],
+    ["null timestamp", (snapshot) => { start(snapshot).capturedAt = null; }, /startup.*precedes/],
+    ["wrong source", (snapshot) => { start(snapshot).payload.source = "clear"; }, /one SessionStart source=startup/],
+    ["duplicate startup", (snapshot) => snapshot.events.push({ ...start(snapshot), id: "duplicate" }), /one SessionStart source=startup/],
+    ["pending pack", (snapshot) => { snapshot.injections[1].state = "pending"; }, /session-start pack/],
+    ["extra fallback pack", (snapshot) => snapshot.injections.push({ ...snapshot.injections[1], id: "fallback", channel: "codex:UserPromptSubmit" }), /session-start pack/],
+    ["no repository memory", (snapshot) => { snapshot.items[1].memoryId = "other-repo-memory"; }, /includes a memory from the parent repository/],
+    ["parent injection changed", (snapshot) => { snapshot.injections[0].deliveryCount += 1; }, /parent conversation.*unchanged/],
+    ["parent injection added", (snapshot) => addMemoryInjection(snapshot, agent, "prompt", "codex:UserPromptSubmit", "parent"), /parent conversation.*unchanged/],
+    ["parent ended", (snapshot) => { snapshot.sessions[0].status = "ended"; }, /parent stays active/],
+    ["parent missing", (snapshot) => { snapshot.sessions.shift(); }, /parent stays active/],
+  ]) {
+    const invalid = structuredClone(after);
+    mutate(invalid);
+    const rejected = evaluateLifecycleCheck({
+      agent, check: "clear", before, beforePrompt, after: invalid,
+      parentNativeSessionId: "native-parent", childNativeSessionId: "native-child",
+    });
+    assert.equal(rejected.status, "fail", label);
+    assert.match(rejected.reason, reason, label);
+  }
+  const reused = structuredClone(before);
+  reused.sessions.push(childSession());
+  const reusedRoot = evaluateLifecycleCheck({
+    agent, check: "clear", before: reused, beforePrompt: reused, after,
+    parentNativeSessionId: "native-parent", childNativeSessionId: "native-child",
+  });
+  assert.equal(reusedRoot.status, "fail");
+  assert.match(reusedRoot.reason, /fresh root conversation/);
+}
+
 for (const agent of ["claude", "codex"]) {
   test(`${agent} resume evaluation enforces identity, epoch, and production hook policy`, () => {
     const before = lifecycleSnapshot(agent);
@@ -488,61 +679,8 @@ for (const agent of ["claude", "codex"]) {
   });
 
   test(`${agent} compact evaluation requires one epoch and preserves prior events`, () => {
-    const before = lifecycleSnapshot(agent);
-    const after = structuredClone(before);
-    after.sessions[0].contextEpoch = 1;
-    after.events.push({
-      id: "event-compact", sessionId: "parent", nativeSessionId: "native-parent",
-      kind: "compaction_summary", payload: {}, capturedAt: 3,
-    });
-    after.events.push({
-      id: "event-compact-start", sessionId: "parent", nativeSessionId: "native-parent",
-      kind: "session_start", payload: { source: "compact" }, capturedAt: 4,
-    });
-    if (agent === "codex") after.events.push({
-      id: "event-next-prompt", sessionId: "parent", nativeSessionId: "native-parent",
-      kind: "prompt", payload: {}, capturedAt: 5,
-    });
-    addMemoryInjection(after, agent, "session_start", `${agent}:SessionStart`, "parent", 1);
-    after.memories.push({ ...after.memories[0], id: "new-summary" });
-    after.items.at(-1).memoryId = "new-summary";
-
-    const result = evaluateLifecycleCheck({
-      agent,
-      check: "compact",
-      before,
-      after,
-      parentNativeSessionId: "native-parent",
-    });
-    assert.equal(result.status, "pass", result.reason);
-
-    const start = (snapshot) => snapshot.events.find((event) => event.id === "event-compact-start");
-    for (const [label, mutate, reason] of [
-      ["missing compact start", (snapshot) => { snapshot.events = snapshot.events.filter((event) => event.id !== "event-compact-start"); }, /SessionStart source=compact/],
-      ["wrong source", (snapshot) => { start(snapshot).payload.source = "startup"; }, /SessionStart source=compact/],
-      ["wrong session", (snapshot) => { start(snapshot).sessionId = "other"; }, /SessionStart source=compact/],
-      ["duplicate compact start", (snapshot) => snapshot.events.push({ ...start(snapshot), id: "duplicate" }), /SessionStart source=compact/],
-      ["duplicate compaction", (snapshot) => snapshot.events.push({ ...snapshot.events.find((event) => event.kind === "compaction_summary"), id: "duplicate" }), /one compaction event/],
-      ["prompt fallback", (snapshot) => { snapshot.injections[0].channel = `${agent}:UserPromptSubmit`; }, /session-start pack/],
-      ["pending pack", (snapshot) => { snapshot.injections[0].state = "pending"; }, /session-start pack/],
-      ["old epoch pack", (snapshot) => { snapshot.injections[0].contextEpoch = 0; }, /session-start pack/],
-      ["duplicate pack", (snapshot) => snapshot.injections.push({ ...snapshot.injections[0], id: "duplicate" }), /session-start pack/],
-      ["extra fallback pack", (snapshot) => snapshot.injections.push({ ...snapshot.injections[0], id: "fallback", channel: `${agent}:UserPromptSubmit` }), /session-start pack/],
-      ["extra pending pack", (snapshot) => snapshot.injections.push({ ...snapshot.injections[0], id: "pending", state: "pending" }), /session-start pack/],
-      ["extra old epoch pack", (snapshot) => snapshot.injections.push({ ...snapshot.injections[0], id: "old-epoch", contextEpoch: 0 }), /session-start pack/],
-      ["no repository memory", (snapshot) => { snapshot.items[0].memoryId = "other-repo-memory"; }, /includes repository memory/],
-      ["deleted repository memory", (snapshot) => { snapshot.memories.at(-1).deletedAt = 6; }, /includes repository memory/],
-      ["foreign repository memory", (snapshot) => { snapshot.memories.at(-1).repoId = "other-repo"; }, /includes repository memory/],
-      ["lost earlier event", (snapshot) => snapshot.events.shift(), /no event captured before compaction is lost/],
-    ]) {
-      const invalid = structuredClone(after);
-      mutate(invalid);
-      const rejected = evaluateLifecycleCheck({
-        agent, check: "compact", before, after: invalid, parentNativeSessionId: "native-parent",
-      });
-      assert.equal(rejected.status, "fail", label);
-      assert.match(rejected.reason, reason, label);
-    }
+    const { before, after, result, start } = compactLifecycleState(agent);
+    assertRejectedCompactMutations(agent, before, after, start);
 
     if (agent === "codex") {
       const order = result.assertions.find((item) => /compact SessionStart precedes the next prompt/.test(item.assertion));
@@ -633,116 +771,10 @@ for (const agent of ["claude", "codex"]) {
   });
 
   test(`${agent} clear evaluation enforces its measured injection source`, () => {
-    const before = lifecycleSnapshot(agent);
+    const { before, beforePrompt, after, result } = clearLifecycleState(agent);
+    assertRejectedClearMutations(agent, before, beforePrompt, after);
     if (agent === "codex") {
-      Object.assign(before.sessions[0], { status: "active", summaryState: null });
-      Object.assign(before.memories[0], { sourceSessionId: "seed", type: "session_summary" });
-    }
-    addMemoryInjection(before, agent, "session_start", `${agent}:SessionStart`, "parent");
-    const beforePrompt = structuredClone(before);
-    const after = structuredClone(before);
-    after.sessions.push(childSession());
-    after.events.push({
-      id: "event-clear-start",
-      sessionId: "child",
-      nativeSessionId: "native-child",
-      kind: "session_start",
-      payload: { source: agent === "codex" ? "startup" : "clear" },
-      capturedAt: 3,
-    });
-    after.events.push(
-      {
-        id: "event-clear-prompt",
-        sessionId: "child",
-        nativeSessionId: "native-child",
-        kind: "prompt",
-        payload: {},
-        capturedAt: 4,
-      },
-      {
-        id: "event-clear-end",
-        sessionId: "child",
-        nativeSessionId: "native-child",
-        kind: "turn_end",
-        payload: {},
-        capturedAt: 5,
-      },
-    );
-    addMemoryInjection(
-      after,
-      agent,
-      "session_start",
-      `${agent}:SessionStart`,
-    );
-    after.memories.push({ ...after.memories[0], id: "new-summary" });
-    after.items.at(-1).memoryId = "new-summary";
-
-    const result = evaluateLifecycleCheck({
-      agent,
-      check: "clear",
-      before,
-      beforePrompt: agent === "codex" ? beforePrompt : undefined,
-      after,
-      parentNativeSessionId: "native-parent",
-      childNativeSessionId: "native-child",
-    });
-    assert.equal(result.status, "pass", result.reason);
-    for (const [label, mutate, reason] of [
-      ["wrong injection channel", (snapshot) => { snapshot.injections[1].channel = `${agent}:UserPromptSubmit`; }, /emits one session-start pack through/],
-      ...(agent === "claude" ? [
-        ["missing clear SessionStart", (snapshot) => { snapshot.events = snapshot.events.filter((event) => event.id !== "event-clear-start"); }, /Claude clear records one SessionStart source=clear/],
-      ] : []),
-    ]) {
-      const invalid = structuredClone(after);
-      mutate(invalid);
-      const rejected = evaluateLifecycleCheck({
-        agent, check: "clear", before, beforePrompt, after: invalid,
-        parentNativeSessionId: "native-parent", childNativeSessionId: "native-child",
-      });
-      assert.equal(rejected.status, "fail", label);
-      assert.equal(rejected.assertions.find((item) => reason.test(item.assertion))?.pass, false, label);
-    }
-    if (agent === "codex") {
-      assert.equal(result.evidence.parent_session_end_count, 0);
-      const parentState = result.assertions.find((item) => /parent stays active/.test(item.assertion));
-      assert.equal(parentState.actual, "active");
-      assert.match(parentState.assertion, /\/new fires no SessionEnd.*2026-09-05T07-03-44-495Z/);
-      assert.match(result.assertions.find((item) => /startup.*precedes/.test(item.assertion)).assertion, /2026-09-05T07-03-44-495Z/);
-      assert.ok(result.assertions.find((item) => /includes a memory from the parent repository/.test(item.assertion)).expected.includes("new-summary"));
-      const start = (snapshot) => snapshot.events.find((event) => event.id === "event-clear-start");
-      for (const [label, mutate, reason] of [
-        ["missing startup", (snapshot) => { snapshot.events = snapshot.events.filter((event) => event.id !== "event-clear-start"); }, /one SessionStart source=startup/],
-        ["late startup", (snapshot) => { start(snapshot).capturedAt = 6; }, /startup.*precedes/],
-        ["simultaneous startup", (snapshot) => { start(snapshot).capturedAt = 4; }, /startup.*precedes/],
-        ["missing timestamp", (snapshot) => { delete start(snapshot).capturedAt; }, /startup.*precedes/],
-        ["null timestamp", (snapshot) => { start(snapshot).capturedAt = null; }, /startup.*precedes/],
-        ["wrong source", (snapshot) => { start(snapshot).payload.source = "clear"; }, /one SessionStart source=startup/],
-        ["duplicate startup", (snapshot) => snapshot.events.push({ ...start(snapshot), id: "duplicate" }), /one SessionStart source=startup/],
-        ["pending pack", (snapshot) => { snapshot.injections[1].state = "pending"; }, /session-start pack/],
-        ["extra fallback pack", (snapshot) => snapshot.injections.push({ ...snapshot.injections[1], id: "fallback", channel: "codex:UserPromptSubmit" }), /session-start pack/],
-        ["no repository memory", (snapshot) => { snapshot.items[1].memoryId = "other-repo-memory"; }, /includes a memory from the parent repository/],
-        ["parent injection changed", (snapshot) => { snapshot.injections[0].deliveryCount += 1; }, /parent conversation.*unchanged/],
-        ["parent injection added", (snapshot) => addMemoryInjection(snapshot, agent, "prompt", "codex:UserPromptSubmit", "parent"), /parent conversation.*unchanged/],
-        ["parent ended", (snapshot) => { snapshot.sessions[0].status = "ended"; }, /parent stays active/],
-        ["parent missing", (snapshot) => { snapshot.sessions.shift(); }, /parent stays active/],
-      ]) {
-        const invalid = structuredClone(after);
-        mutate(invalid);
-        const rejected = evaluateLifecycleCheck({
-          agent, check: "clear", before, beforePrompt, after: invalid,
-          parentNativeSessionId: "native-parent", childNativeSessionId: "native-child",
-        });
-        assert.equal(rejected.status, "fail", label);
-        assert.match(rejected.reason, reason, label);
-      }
-      const reused = structuredClone(before);
-      reused.sessions.push(childSession());
-      const reusedRoot = evaluateLifecycleCheck({
-        agent, check: "clear", before: reused, beforePrompt: reused, after,
-        parentNativeSessionId: "native-parent", childNativeSessionId: "native-child",
-      });
-      assert.equal(reusedRoot.status, "fail");
-      assert.match(reusedRoot.reason, /fresh root conversation/);
+      assertCodexClearLifecycle(before, beforePrompt, after, result, agent);
     }
   });
 }
@@ -1100,20 +1132,27 @@ function recordingDependencies(home) {
   };
 }
 
-// Drive the harness through recorded hook/ledger effects, without starting an agent or tmux.
-function lifecycleRun(t, agent, {
-  startupSummary = true, followupFailure = false,
-  compactStart = true, compactPrompt = true, compactTurnEndDelayMs = 600, timeoutMs = 5_000,
-  summaryState = "done", summaryDelayMs = 600, noCredentials = false, daily = false,
-  observerLeaseDelayMs = 200,
-  earlyClearStartup = false, clearStart = true,
-} = {}) {
+function newLifecycleRunState(t) {
   const { home } = isolatedAccount(t);
   const runDir = path.join(home, "run");
   const dependencies = recordingDependencies(home);
   const state = { sessions: [], events: [], injections: [], items: [], memories: [] };
   const operations = [];
   const timeline = [];
+  return { runDir, dependencies, state, operations, timeline };
+}
+
+// Drive the harness through recorded hook/ledger effects, without starting an agent or tmux.
+function lifecycleRun(configuration) {
+  const { t, agent, options = {} } = configuration;
+  const {
+    startupSummary = true, followupFailure = false,
+    compactStart = true, compactPrompt = true, compactTurnEndDelayMs = 600, timeoutMs = 5_000,
+    summaryState = "done", summaryDelayMs = 600, noCredentials = false, daily = false,
+    observerLeaseDelayMs = 200,
+    earlyClearStartup = false, clearStart = true,
+  } = options;
+  const { runDir, dependencies, state, operations, timeline } = newLifecycleRunState(t);
   let clock = Date.parse("2026-09-05T09:00:00.000Z");
   let action;
   let compactPending = false;
@@ -1161,13 +1200,10 @@ function lifecycleRun(t, agent, {
     if (completed) event(id, "turn_end");
     operations.push(`turn:${id}`);
   };
+
   const runTimed = dependencies.runTimed;
-  dependencies.runTimed = async (argv, options) => {
-    const leg = path.basename(path.dirname(options.stdoutPath));
-    if (argv[0] === "oboete" && argv[1] === "observe") {
-      assert.ok(clock >= observerBusyUntil, "observe must wait for the existing worker's lease");
-    }
-    let result = await runTimed(argv, options);
+
+  function recordObserveEffects(argv, leg) {
     if (argv[0] === "oboete" && argv[1] === "observe" && leg === "clear") {
       operations.push("observe:parent");
       timeline.push({ action, type: "observe-parent", at: clock });
@@ -1176,41 +1212,55 @@ function lifecycleRun(t, agent, {
     } else if (argv[0] === "oboete" && argv[1] === "observe") {
       state.sessions.find((row) => row.id === "seed").summaryState = "done";
     }
-    if (argv[0] === agent) {
-      if (leg === "seed") {
-        open("seed", "startup");
-        turn("seed");
-        event("seed", "session_end");
-        state.memories.push({ id: "memory-parent", repoId: "repo", type: "session_summary", sourceSessionId: "seed", deletedAt: null });
-      } else if (leg === "parent") {
-        open("parent", "startup");
-        pack("parent", "session_start", `${agent}:SessionStart`);
-        if (!startupSummary) {
-          state.injections.at(-1).state = "omitted";
-          state.items.pop();
-        }
-        turn("parent");
-        event("parent", "session_end");
-      } else if (leg === "resume") {
-        if (agent === "claude") event("parent", "session_start", { source: "resume" });
-        turn("parent");
-        event("parent", "session_end");
-      } else if (leg === "compact") {
-        if (!followupFailure) {
-          state.sessions.find((row) => row.id === "parent").contextEpoch += 1;
-          event("parent", "compaction_summary");
-          event("parent", "session_start", { source: "compact" });
-          pack("parent", "session_start", "claude:SessionStart");
-        }
-        event("parent", "session_end");
-      } else if (leg === "compact-followup") {
-        result = { ...result, exitCode: 2, stderr: "invalid request in follow-up" };
-      } else if (leg === "fork") {
-        open("fork", "fork");
-        pack("fork", "prompt", "claude:UserPromptSubmit");
-        turn("fork");
-        event("fork", "session_end");
+  }
+
+  function recordAgentEffects(leg, result) {
+    if (leg === "seed") {
+      open("seed", "startup");
+      turn("seed");
+      event("seed", "session_end");
+      state.memories.push({ id: "memory-parent", repoId: "repo", type: "session_summary", sourceSessionId: "seed", deletedAt: null });
+    } else if (leg === "parent") {
+      open("parent", "startup");
+      pack("parent", "session_start", `${agent}:SessionStart`);
+      if (!startupSummary) {
+        state.injections.at(-1).state = "omitted";
+        state.items.pop();
       }
+      turn("parent");
+      event("parent", "session_end");
+    } else if (leg === "resume") {
+      if (agent === "claude") event("parent", "session_start", { source: "resume" });
+      turn("parent");
+      event("parent", "session_end");
+    } else if (leg === "compact") {
+      if (!followupFailure) {
+        state.sessions.find((row) => row.id === "parent").contextEpoch += 1;
+        event("parent", "compaction_summary");
+        event("parent", "session_start", { source: "compact" });
+        pack("parent", "session_start", "claude:SessionStart");
+      }
+      event("parent", "session_end");
+    } else if (leg === "compact-followup") {
+      result = { ...result, exitCode: 2, stderr: "invalid request in follow-up" };
+    } else if (leg === "fork") {
+      open("fork", "fork");
+      pack("fork", "prompt", "claude:UserPromptSubmit");
+      turn("fork");
+      event("fork", "session_end");
+    }
+    return result;
+  }
+
+  dependencies.runTimed = async (argv, options) => {
+    const leg = path.basename(path.dirname(options.stdoutPath));
+    if (argv[0] === "oboete" && argv[1] === "observe") {
+      assert.ok(clock >= observerBusyUntil, "observe must wait for the existing worker's lease");
+    }
+    let result = await runTimed(argv, options);
+    recordObserveEffects(argv, leg);
+    if (argv[0] === agent) {
+      result = recordAgentEffects(leg, result);
     }
     fs.mkdirSync(path.dirname(options.stdoutPath), { recursive: true });
     fs.writeFileSync(options.stdoutPath, result.stdout);
@@ -1279,131 +1329,109 @@ function lifecycleRun(t, agent, {
       },
     };
   };
+
+  function loadPendingCommand(argv) {
+    pending = argv.at(-1);
+    if (earlyClearStartup && action === "clear" && pending.startsWith("Recall the repository")) {
+      open("clear", "startup");
+      pack("clear", "session_start", "codex:SessionStart");
+    }
+    pane = agent === "codex" ? `› ${pending}` : `╭─────────────────╮\n│ > ${pending}\n╰─────────────────╯`;
+    recallEnters = 0;
+  }
+
+  function compactPendingCommand() {
+    state.sessions.find((row) => row.id === "parent").contextEpoch += 1;
+    event("parent", "compaction_summary");
+    event("parent", "turn_end"); // /compact completes its own task before the follow-up prompt.
+    timeline.push({ action, type: "post-compact", at: clock });
+    compactPending = true;
+  }
+
+  function clearPendingCommand() {
+    event("parent", "session_end");
+    active = "clear";
+    open("clear", clearStart ? "clear" : undefined);
+    clearPackAt = clock + 1_000;
+  }
+
+  function quitPendingCommand() {
+    event(state.sessions.some((row) => row.id === active) ? active : "parent", "session_end");
+  }
+
+  function followCompactPendingCommand() {
+    compactPending = false;
+    // Separate captures expose the lazy hook before UserPromptSubmit reaches the database.
+    if (compactStart) compactStartAt = clock + 200;
+    if (compactPrompt) compactPromptAt = clock + 400;
+    compactTurnEndAt = clock + 400 + compactTurnEndDelayMs;
+  }
+
+  function regularPendingCommand() {
+    if (!state.sessions.some((row) => row.id === active)) {
+      open(active, "startup");
+      pack(active, "session_start", `${agent}:SessionStart`);
+      clock += 200;
+    }
+    if (agent === "codex") {
+      const epoch = state.sessions.find((row) => row.id === active).contextEpoch;
+      if (!state.injections.some((row) => row.sessionId === active && row.contextEpoch === epoch)) {
+        pack(active, "session_start", "codex:UserPromptSubmit");
+      }
+    }
+    turn(active);
+  }
+
+  function submitPendingCommand() {
+    operations.push(pending);
+    if (pending === "/compact") {
+      compactPendingCommand();
+    } else if (pending === "/new") {
+      active = "clear";
+    } else if (pending === "/clear") {
+      clearPendingCommand();
+    } else if (pending === "/quit") {
+      quitPendingCommand();
+    } else if (compactPending) {
+      followCompactPendingCommand();
+    } else {
+      regularPendingCommand();
+    }
+    pane = agent === "codex" ? "› Ask Codex" : clearPackAt !== undefined
+      ? "Running SessionStart hooks..." : "● DONE\n╭─────────────────╮\n│ > \n╰─────────────────╯\nshift+tab";
+  }
+
   dependencies.tmux = (argv) => {
     timeline.push({ action, type: "key", key: argv.at(-1), at: clock });
     if (argv.includes("-l")) {
-      pending = argv.at(-1);
-      if (earlyClearStartup && action === "clear" && pending.startsWith("Recall the repository")) {
-        open("clear", "startup");
-        pack("clear", "session_start", "codex:SessionStart");
-      }
-      pane = agent === "codex" ? `› ${pending}` : `╭─────────────────╮\n│ > ${pending}\n╰─────────────────╯`;
-      recallEnters = 0;
+      loadPendingCommand(argv);
     }
     if (argv.at(-1) === "C-m") {
       // Claude may drop Enter while finishing startup; its framed > composer must trigger retry.
       if (agent === "claude" && pending.startsWith("Recall the repository") && ++recallEnters === 1) return { status: 0 };
-      operations.push(pending);
-      if (pending === "/compact") {
-        state.sessions.find((row) => row.id === "parent").contextEpoch += 1;
-        event("parent", "compaction_summary");
-        event("parent", "turn_end"); // /compact completes its own task before the follow-up prompt.
-        timeline.push({ action, type: "post-compact", at: clock });
-        compactPending = true;
-      } else if (pending === "/new") {
-        active = "clear";
-      } else if (pending === "/clear") {
-        event("parent", "session_end");
-        active = "clear";
-        open("clear", clearStart ? "clear" : undefined);
-        clearPackAt = clock + 1_000;
-      } else if (pending === "/quit") {
-        event(state.sessions.some((row) => row.id === active) ? active : "parent", "session_end");
-      } else if (compactPending) {
-        compactPending = false;
-        // Separate captures expose the lazy hook before UserPromptSubmit reaches the database.
-        if (compactStart) compactStartAt = clock + 200;
-        if (compactPrompt) compactPromptAt = clock + 400;
-        compactTurnEndAt = clock + 400 + compactTurnEndDelayMs;
-      } else {
-        if (!state.sessions.some((row) => row.id === active)) {
-          open(active, "startup");
-          pack(active, "session_start", `${agent}:SessionStart`);
-          clock += 200;
-        }
-        if (agent === "codex") {
-          const epoch = state.sessions.find((row) => row.id === active).contextEpoch;
-          if (!state.injections.some((row) => row.sessionId === active && row.contextEpoch === epoch)) {
-            pack(active, "session_start", "codex:UserPromptSubmit");
-          }
-        }
-        turn(active);
-      }
-      pane = agent === "codex" ? "› Ask Codex" : clearPackAt !== undefined
-        ? "Running SessionStart hooks..." : "● DONE\n╭─────────────────╮\n│ > \n╰─────────────────╯\nshift+tab";
+      submitPendingCommand();
     }
     return { status: 0 };
   };
-  return {
-    dependencies, operations, timeline, runDir,
-    run: () => runHarness({ lifecycle: true, agents: [agent], timeoutMs, runDir, noCredentials, daily }, dependencies),
-  };
+  function lifecycleResult() {
+    return {
+      dependencies, operations, timeline, runDir,
+      run: () => runHarness({ lifecycle: true, agents: [agent], timeoutMs, runDir, noCredentials, daily }, dependencies),
+    };
+  }
+  return lifecycleResult();
 }
 
 for (const agent of ["claude", "codex"]) {
   test(`${agent} lifecycle seeds S1, drives S2, and persists each completed check`, async (t) => {
-    const fixture = lifecycleRun(t, agent);
+    const fixture = lifecycleRun({ t, agent });
     const report = await fixture.run();
-    assert.equal(report.summary, "4 of 4 lifecycle checks pass.", JSON.stringify(report.lifecycle_checks));
-    const calls = fixture.dependencies.calls.filter((call) => call.argv[0] === agent);
-    assert.match(calls[0].argv.join(" "), /durable facts/);
-    const parent = calls[1].argv;
-    assert.ok(parent.includes("Reply with exactly DONE and do not use tools."));
-    assert.equal(parent.some((word) => /cedar|heron|琥珀|native-seed/.test(word)), false);
-    for (const call of calls.slice(2)) assert.ok(call.argv.includes("native-parent"));
-    assert.ok(report.lifecycle_checks.every((row) => row.assertions.some((item) => /S1's repository summary/.test(item.assertion) && item.pass)));
-    const observers = fixture.dependencies.calls.filter((call) => call.argv[0] === "oboete" && call.argv[1] === "observe");
-    assert.equal(observers.length, agent === "claude" ? 2 : 1);
-    for (const observer of observers) {
-      assert.deepEqual(observer.env, observers[0].env);
-      assert.equal(observer.env.OBOETE_NIM_API_KEY, "nim-secret");
-    }
-    const clearEvents = fixture.timeline.filter((event) => event.action === "clear");
-    const observed = clearEvents.find((event) => event.type === "observe-parent");
-    const summarized = clearEvents.find((event) => event.type === "parent-summary");
-    const recalled = clearEvents.find((event) => event.type === "key" && event.key.startsWith("Recall the repository"));
-    const clearCheck = report.lifecycle_checks.find((row) => row.check === "clear");
-    assert.deepEqual(clearCheck.assertions.find((item) => /includes a memory from the parent repository/.test(item.assertion)).actual,
-      [agent === "claude" ? "memory-observed-parent" : "memory-parent"]);
+    const evidence = assertLifecycleRunBasics(agent, fixture, report);
     if (agent === "claude") {
-      const ended = clearEvents.find((event) => event.type === "session-end");
-      assert.ok(ended.at < observed.at && observed.at < summarized.at && summarized.at < recalled.at,
-        "recall waits for SessionEnd, the observer lease, and the parent's summary");
-      const submitKeys = clearEvents.filter((event) => event.type === "key" && event.at > recalled.at);
-      assert.deepEqual(submitKeys.slice(0, 2).map((event) => event.key), ["C-m", "C-m"]);
+      assertClaudeLifecycleTimeline(evidence);
     }
     if (agent === "codex") {
-      assert.equal(observed, undefined, "no observe between /new and recall");
-      assert.equal(summarized, undefined, "an active parent cannot be summarized");
-      const compact = fixture.operations.indexOf("/compact");
-      assert.equal(fixture.operations[compact + 1], "Reply with exactly DONE and do not use tools.");
-      assert.equal(fixture.operations[compact + 2], "turn:parent");
-      assert.equal(fixture.operations[compact + 3], "/quit");
-      const compactEvents = fixture.timeline.filter((event) => event.action === "compact");
-      const postCompactIndex = compactEvents.findIndex((event) => event.type === "post-compact");
-      const start = compactEvents.find((event) => event.type === "compact-start");
-      assert.ok(start, "the next turn triggers the lazy SessionStart(compact)");
-      const nextKey = compactEvents.slice(postCompactIndex + 1).find((event) => event.type === "key");
-      assert.ok(nextKey.at - compactEvents[postCompactIndex].at >= 1_000, "settle after PostCompact before the next turn");
-      assert.ok(nextKey.at < start.at, "send the next turn before waiting for its SessionStart");
-      const compactCheck = report.lifecycle_checks.find((row) => row.check === "compact");
-      const compactStartEvent = compactCheck.event_delta.find((event) => event.kind === "session_start");
-      const compactPrompt = compactCheck.event_delta.find((event) => event.kind === "prompt");
-      assert.ok(compactStartEvent.captured_at < compactPrompt.captured_at);
-      assert.ok(compactEvents.some((event) => event.type === "snapshot" &&
-        event.at >= compactStartEvent.captured_at && event.at < compactPrompt.captured_at),
-      "keep waiting when SessionStart has arrived but the prompt has not");
-      assert.ok(compactCheck.event_delta.some((event) => event.kind === "turn_end" && event.captured_at > compactPrompt.captured_at));
-      const clear = fixture.operations.indexOf("/new");
-      assert.equal(fixture.operations[clear - 1], "turn:parent");
-      assert.match(fixture.operations[clear + 1], /Recall the repository/);
-      assert.equal(fixture.operations[clear + 2], "turn:clear");
-      const newCommand = clearEvents.findLast((event) => event.type === "key" && event.key === "C-m" && event.at < recalled.at);
-      assert.ok(recalled.at - newCommand.at >= 1_000, "settle the composer after /new before recalling");
-      const quitIndex = clearEvents.findIndex((event) => event.key === "/quit");
-      const lastSnapshot = clearEvents.slice(0, quitIndex).findLast((event) => event.type === "snapshot");
-      const firstExitKey = clearEvents.find((event) => event.type === "key" && event.at > lastSnapshot.at);
-      assert.ok(firstExitKey.at - lastSnapshot.at >= 1_000, "settle after the final evidence snapshot before any exit key");
+      assertCodexLifecycleTimeline(fixture, report, evidence);
     }
   });
 }
@@ -1413,7 +1441,7 @@ for (const [label, options, status, reason] of [
   ["the next turn_end", { compactTurnEndDelayMs: Infinity }, "blocked", /^Codex post-compact prompt and following turn_end was not observed/],
   ["the next prompt", { compactPrompt: false }, "blocked", /^Codex post-compact prompt and following turn_end was not observed/],
 ]) test(`Codex compact times out without ${label} after sending the next turn and kills without quit`, async (t) => {
-  const fixture = lifecycleRun(t, "codex", { ...options, timeoutMs: 1_500 });
+  const fixture = lifecycleRun({ t, agent: "codex", options: { ...options, timeoutMs: 1_500 } });
   const report = await fixture.run();
   const compact = report.lifecycle_checks.find((row) => row.check === "compact");
   assert.equal(compact.status, status);
@@ -1428,7 +1456,7 @@ for (const [label, options, status, reason] of [
 });
 
 test("Claude clear accepts no_content and keeps no-credentials on its observer", async (t) => {
-  const fixture = lifecycleRun(t, "claude", { summaryState: "no_content", noCredentials: true });
+  const fixture = lifecycleRun({ t, agent: "claude", options: { summaryState: "no_content", noCredentials: true } });
   const report = await fixture.run();
   const clear = report.lifecycle_checks.find((row) => row.check === "clear");
   assert.equal(clear.status, "pass", clear.reason);
@@ -1445,7 +1473,7 @@ test("Claude clear accepts no_content and keeps no-credentials on its observer",
 });
 
 test("Claude clear blocks a pending parent summary before recall", async (t) => {
-  const fixture = lifecycleRun(t, "claude", { summaryDelayMs: Infinity, timeoutMs: 1_500 });
+  const fixture = lifecycleRun({ t, agent: "claude", options: { summaryDelayMs: Infinity, timeoutMs: 1_500 } });
   const report = await fixture.run();
   const clear = report.lifecycle_checks.find((row) => row.check === "clear");
   assert.equal(clear.status, "blocked");
@@ -1454,7 +1482,7 @@ test("Claude clear blocks a pending parent summary before recall", async (t) => 
 });
 
 test("Claude clear fails when SessionStart source=clear is missing", async (t) => {
-  const fixture = lifecycleRun(t, "claude", { clearStart: false, timeoutMs: 1_500 });
+  const fixture = lifecycleRun({ t, agent: "claude", options: { clearStart: false, timeoutMs: 1_500 } });
   const report = await fixture.run();
   const clear = report.lifecycle_checks.find((row) => row.check === "clear");
   assert.equal(clear.status, "fail");
@@ -1465,7 +1493,7 @@ test("Claude clear fails when SessionStart source=clear is missing", async (t) =
 for (const [status, options] of [
   ["pass", {}], ["blocked", { summaryDelayMs: Infinity }], ["fail", { clearStart: false }],
 ]) test(`Claude clear links observe output in report.json on ${status}`, async (t) => {
-  const fixture = lifecycleRun(t, "claude", { ...options, timeoutMs: 1_500 });
+  const fixture = lifecycleRun({ t, agent: "claude", options: { ...options, timeoutMs: 1_500 } });
   await fixture.run();
   const report = JSON.parse(fs.readFileSync(path.join(fixture.runDir, "report.json"), "utf8"));
   const clear = report.lifecycle_checks.find((row) => row.check === "clear");
@@ -1486,7 +1514,7 @@ test("daily lifecycle evidence bounds and scrubs reasons while report.json keeps
     ["HTTP 401: Bearer demo.jwt-token+/= denied", "HTTP 401: Bearer [redacted] denied"],
     ["pane C:\\tmp\\a | b", "pane C:\\\\tmp\\\\a \\| b"],
   ]) {
-    const fixture = lifecycleRun(t, "codex", { daily: true });
+    const fixture = lifecycleRun({ t, agent: "codex", options: { daily: true } });
     const reason = `${firstLine}\nprivate pane at ${fixture.runDir}\nsecond private pane line`;
     fixture.dependencies.tuiSession = () => ({
       capture() { throw new PreconditionError(reason); },
@@ -1505,7 +1533,7 @@ test("daily lifecycle evidence bounds and scrubs reasons while report.json keeps
 });
 
 test("an omitted S2 startup pack fails the seed precondition and links all completed seed legs", async (t) => {
-  const fixture = lifecycleRun(t, "codex", { startupSummary: false });
+  const fixture = lifecycleRun({ t, agent: "codex", options: { startupSummary: false } });
   const report = await fixture.run();
   for (const row of report.lifecycle_checks) {
     assert.equal(row.status, "fail");
@@ -1516,7 +1544,7 @@ test("an omitted S2 startup pack fails the seed precondition and links all compl
 });
 
 test("Codex /new leaves the parent active and completes the child's lazy startup turn", async (t) => {
-  const report = await lifecycleRun(t, "codex").run();
+  const report = await lifecycleRun({ t, agent: "codex" }).run();
   const clear = report.lifecycle_checks.find((row) => row.check === "clear");
   assert.equal(clear.status, "pass", clear.reason);
   assert.equal(clear.evidence.parent_session_end_count, 0);
@@ -1529,7 +1557,7 @@ test("Codex /new leaves the parent active and completes the child's lazy startup
 });
 
 test("Codex /new recalls without waiting for a parent summary in no-credentials mode", async (t) => {
-  const fixture = lifecycleRun(t, "codex", { summaryDelayMs: Infinity, noCredentials: true, timeoutMs: 1_500 });
+  const fixture = lifecycleRun({ t, agent: "codex", options: { summaryDelayMs: Infinity, noCredentials: true, timeoutMs: 1_500 } });
   const report = await fixture.run();
   const clear = report.lifecycle_checks.find((row) => row.check === "clear");
   assert.equal(clear.status, "pass", clear.reason);
@@ -1543,21 +1571,21 @@ test("Codex /new recalls without waiting for a parent summary in no-credentials 
 });
 
 test("Codex clear rejects a startup that arrives while the recall prompt is still being typed", async (t) => {
-  const report = await lifecycleRun(t, "codex", { earlyClearStartup: true }).run();
+  const report = await lifecycleRun({ t, agent: "codex", options: { earlyClearStartup: true } }).run();
   const clear = report.lifecycle_checks.find((row) => row.check === "clear");
   assert.equal(clear.status, "fail");
   assert.match(clear.reason, /before the recall prompt is submitted/);
 });
 
 test("an occupied observer lease blocks instead of starting a competing observe", async (t) => {
-  const fixture = lifecycleRun(t, "codex", { observerLeaseDelayMs: Infinity, timeoutMs: 1_500 });
+  const fixture = lifecycleRun({ t, agent: "codex", options: { observerLeaseDelayMs: Infinity, timeoutMs: 1_500 } });
   const report = await fixture.run();
   assert.ok(report.lifecycle_checks.every((check) => check.status === "blocked" && /observer lease/.test(check.reason)));
   assert.equal(fixture.dependencies.calls.some((call) => call.argv[1] === "observe"), false);
 });
 
 test("a Claude compaction follow-up failure retains both legs' output paths", async (t) => {
-  const report = await lifecycleRun(t, "claude", { followupFailure: true }).run();
+  const report = await lifecycleRun({ t, agent: "claude", options: { followupFailure: true } }).run();
   const compact = report.lifecycle_checks.find((row) => row.check === "compact");
   assert.equal(compact.status, "fail");
   assert.match(compact.reason, /invalid request in follow-up/);
@@ -1623,7 +1651,7 @@ test("every harness test file is run by npm test", () => {
   );
 
   const { scripts } = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-  const globs = [...scripts.test.matchAll(/'([^']+)'/g)].map((match) => match[1]);
+  const globs = [...scripts.test.matchAll(SINGLE_QUOTED)].map((match) => match[1]);
   for (const file of files) {
     assert.ok(
       globs.some((glob) => path.matchesGlob(file, glob)),
@@ -1631,3 +1659,72 @@ test("every harness test file is run by npm test", () => {
     );
   }
 });
+
+function assertClaudeLifecycleTimeline(options) {
+  const { clearEvents, observed, summarized, recalled } = options;
+  const ended = clearEvents.find((event) => event.type === "session-end");
+  assert.ok(ended.at < observed.at && observed.at < summarized.at && summarized.at < recalled.at,
+    "recall waits for SessionEnd, the observer lease, and the parent's summary");
+  const submitKeys = clearEvents.filter((event) => event.type === "key" && event.at > recalled.at);
+  assert.deepEqual(submitKeys.slice(0, 2).map((event) => event.key), ["C-m", "C-m"]);
+}
+
+function assertCodexLifecycleTimeline(fixture, report, evidence) {
+  const { clearEvents, observed, summarized, recalled } = evidence;
+  assert.equal(observed, undefined, "no observe between /new and recall");
+  assert.equal(summarized, undefined, "an active parent cannot be summarized");
+  const compact = fixture.operations.indexOf("/compact");
+  assert.equal(fixture.operations[compact + 1], "Reply with exactly DONE and do not use tools.");
+  assert.equal(fixture.operations[compact + 2], "turn:parent");
+  assert.equal(fixture.operations[compact + 3], "/quit");
+  const compactEvents = fixture.timeline.filter((event) => event.action === "compact");
+  const postCompactIndex = compactEvents.findIndex((event) => event.type === "post-compact");
+  const start = compactEvents.find((event) => event.type === "compact-start");
+  assert.ok(start, "the next turn triggers the lazy SessionStart(compact)");
+  const nextKey = compactEvents.slice(postCompactIndex + 1).find((event) => event.type === "key");
+  assert.ok(nextKey.at - compactEvents[postCompactIndex].at >= 1_000, "settle after PostCompact before the next turn");
+  assert.ok(nextKey.at < start.at, "send the next turn before waiting for its SessionStart");
+  const compactCheck = report.lifecycle_checks.find((row) => row.check === "compact");
+  const compactStartEvent = compactCheck.event_delta.find((event) => event.kind === "session_start");
+  const compactPrompt = compactCheck.event_delta.find((event) => event.kind === "prompt");
+  assert.ok(compactStartEvent.captured_at < compactPrompt.captured_at);
+  assert.ok(compactEvents.some((event) => event.type === "snapshot" &&
+    event.at >= compactStartEvent.captured_at && event.at < compactPrompt.captured_at),
+  "keep waiting when SessionStart has arrived but the prompt has not");
+  assert.ok(compactCheck.event_delta.some((event) => event.kind === "turn_end" && event.captured_at > compactPrompt.captured_at));
+  const clear = fixture.operations.indexOf("/new");
+  assert.equal(fixture.operations[clear - 1], "turn:parent");
+  assert.match(fixture.operations[clear + 1], /Recall the repository/);
+  assert.equal(fixture.operations[clear + 2], "turn:clear");
+  const newCommand = clearEvents.findLast((event) => event.type === "key" && event.key === "C-m" && event.at < recalled.at);
+  assert.ok(recalled.at - newCommand.at >= 1_000, "settle the composer after /new before recalling");
+  const quitIndex = clearEvents.findIndex((event) => event.key === "/quit");
+  const lastSnapshot = clearEvents.slice(0, quitIndex).findLast((event) => event.type === "snapshot");
+  const firstExitKey = clearEvents.find((event) => event.type === "key" && event.at > lastSnapshot.at);
+  assert.ok(firstExitKey.at - lastSnapshot.at >= 1_000, "settle after the final evidence snapshot before any exit key");
+}
+
+function assertLifecycleRunBasics(agent, fixture, report) {
+  assert.equal(report.summary, "4 of 4 lifecycle checks pass.", JSON.stringify(report.lifecycle_checks));
+  const calls = fixture.dependencies.calls.filter((call) => call.argv[0] === agent);
+  assert.match(calls[0].argv.join(" "), /durable facts/);
+  const parent = calls[1].argv;
+  assert.ok(parent.includes("Reply with exactly DONE and do not use tools."));
+  assert.equal(parent.some((word) => /cedar|heron|琥珀|native-seed/.test(word)), false);
+  for (const call of calls.slice(2)) assert.ok(call.argv.includes("native-parent"));
+  assert.ok(report.lifecycle_checks.every((row) => row.assertions.some((item) => /S1's repository summary/.test(item.assertion) && item.pass)));
+  const observers = fixture.dependencies.calls.filter((call) => call.argv[0] === "oboete" && call.argv[1] === "observe");
+  assert.equal(observers.length, agent === "claude" ? 2 : 1);
+  for (const observer of observers) {
+    assert.deepEqual(observer.env, observers[0].env);
+    assert.equal(observer.env.OBOETE_NIM_API_KEY, "nim-secret");
+  }
+  const clearEvents = fixture.timeline.filter((event) => event.action === "clear");
+  const observed = clearEvents.find((event) => event.type === "observe-parent");
+  const summarized = clearEvents.find((event) => event.type === "parent-summary");
+  const recalled = clearEvents.find((event) => event.type === "key" && event.key.startsWith("Recall the repository"));
+  const clearCheck = report.lifecycle_checks.find((row) => row.check === "clear");
+  assert.deepEqual(clearCheck.assertions.find((item) => /includes a memory from the parent repository/.test(item.assertion)).actual,
+    [agent === "claude" ? "memory-observed-parent" : "memory-parent"]);
+  return { clearEvents, observed, summarized, recalled };
+}

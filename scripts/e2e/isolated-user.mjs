@@ -243,17 +243,18 @@ function recallPrompt(agent, noCredentials) {
   ].join("\n");
 }
 
-export function createReport({
-  runId,
-  runDir,
-  startedAt,
-  finishedAt,
-  noCredentials,
-  timeoutMs,
-  daily = false,
-  requestedPairs,
-  results,
-}) {
+export function createReport(options) {
+  const {
+    runId,
+    runDir,
+    startedAt,
+    finishedAt,
+    noCredentials,
+    timeoutMs,
+    daily = false,
+    requestedPairs,
+    results,
+  } = options;
   const passed = results.filter((result) => result.status === "pass").length;
   const report = {
     runId,
@@ -286,17 +287,18 @@ export function createReport({
   return redactValue(report, runDir, "<run>");
 }
 
-export function createLifecycleReport({
-  runId,
-  runDir,
-  startedAt,
-  finishedAt,
-  noCredentials,
-  timeoutMs,
-  daily = false,
-  agents,
-  results,
-}) {
+export function createLifecycleReport(options) {
+  const {
+    runId,
+    runDir,
+    startedAt,
+    finishedAt,
+    noCredentials,
+    timeoutMs,
+    daily = false,
+    agents,
+    results,
+  } = options;
   const passed = results.filter((result) => result.status === "pass").length;
   const total = agents.length * LIFECYCLE_CHECKS.length;
   return redactValue(
@@ -341,29 +343,34 @@ function parsePayload(value) {
   }
 }
 
+function readLifecycleEvents(db, agent) {
+  const sessions = db
+    .prepare(
+      `SELECT id, repo_id AS repoId, native_session_id AS nativeSessionId,
+                conversation_id AS conversationId, context_epoch AS contextEpoch,
+                status, summary_state AS summaryState
+         FROM sessions WHERE agent = ? ORDER BY started_at, id`,
+    )
+    .all(agent)
+    .map((row) => ({ ...row, contextEpoch: Number(row.contextEpoch) }));
+  const events = db
+    .prepare(
+      `SELECT e.id, e.session_id AS sessionId, s.native_session_id AS nativeSessionId,
+                e.kind, e.payload_json AS payloadJson, e.captured_at AS capturedAt
+         FROM raw_events e JOIN sessions s ON s.id = e.session_id
+         WHERE s.agent = ? ORDER BY e.captured_at, e.rowid`,
+    )
+    .all(agent)
+    .map(({ payloadJson, ...row }) => ({ ...row, payload: parsePayload(payloadJson) }));
+  return { sessions, events };
+}
+
 /** Read-only evidence for the lifecycle assertions. */
 export function inspectLifecycle(databasePath, agent) {
   if (!fs.existsSync(databasePath)) throw new PreconditionError(`The oboete database is missing: ${databasePath}.`);
   const db = new DatabaseSync(databasePath, { readOnly: true, timeout: 1000 });
   try {
-    const sessions = db
-      .prepare(
-        `SELECT id, repo_id AS repoId, native_session_id AS nativeSessionId,
-                conversation_id AS conversationId, context_epoch AS contextEpoch,
-                status, summary_state AS summaryState
-         FROM sessions WHERE agent = ? ORDER BY started_at, id`,
-      )
-      .all(agent)
-      .map((row) => ({ ...row, contextEpoch: Number(row.contextEpoch) }));
-    const events = db
-      .prepare(
-        `SELECT e.id, e.session_id AS sessionId, s.native_session_id AS nativeSessionId,
-                e.kind, e.payload_json AS payloadJson, e.captured_at AS capturedAt
-         FROM raw_events e JOIN sessions s ON s.id = e.session_id
-         WHERE s.agent = ? ORDER BY e.captured_at, e.rowid`,
-      )
-      .all(agent)
-      .map(({ payloadJson, ...row }) => ({ ...row, payload: parsePayload(payloadJson) }));
+    const { sessions, events } = readLifecycleEvents(db, agent);
     const injections = db
       .prepare(
         `SELECT i.id, i.session_id AS sessionId, i.conversation_id AS conversationId,
@@ -466,6 +473,302 @@ function evaluated(assertions) {
   };
 }
 
+function evaluateResumeCheck(assertions, agent, before, after, parentBefore, parentAfter) {
+  assertion(
+    assertions,
+    "resume keeps the same oboete session and conversation",
+    parentBefore !== undefined &&
+      parentAfter !== undefined &&
+      parentAfter.id === parentBefore.id &&
+      parentAfter.conversationId === parentBefore.conversationId,
+    parentBefore === undefined ? null : { id: parentBefore.id, conversationId: parentBefore.conversationId },
+    parentAfter === undefined ? null : { id: parentAfter.id, conversationId: parentAfter.conversationId },
+  );
+  assertion(
+    assertions,
+    "resume leaves context_epoch unchanged",
+    parentBefore !== undefined && parentAfter?.contextEpoch === parentBefore.contextEpoch,
+    parentBefore?.contextEpoch ?? null,
+    parentAfter?.contextEpoch ?? null,
+  );
+  const starts = added(before, after, "events").filter(
+    (event) => event.sessionId === parentAfter?.id && event.kind === "session_start" && eventSource(event) === "resume",
+  );
+  assertion(
+    assertions,
+    agent === "codex"
+      ? "Codex production hooks omit SessionStart source=resume"
+      : "Claude records one SessionStart source=resume",
+    starts.length === (agent === "codex" ? 0 : 1),
+    agent === "codex" ? 0 : 1,
+    starts.length,
+  );
+  const prompts = added(before, after, "events").filter(
+    (event) => event.sessionId === parentAfter?.id && event.kind === "prompt",
+  );
+  assertion(assertions, "resume records one prompt on the resumed session", prompts.length === 1, 1, prompts.length);
+  const beforeStart = injectionFingerprint(before, parentBefore?.conversationId, "session_start");
+  const afterStart = injectionFingerprint(after, parentAfter?.conversationId, "session_start");
+  assertion(
+    assertions,
+    "resume adds no session-start injection",
+    JSON.stringify(afterStart) === JSON.stringify(beforeStart),
+    beforeStart,
+    afterStart,
+  );
+  return evaluated(assertions);
+}
+
+function assertCompactPromptOrder(assertions, agent, compactStarts, newEvents) {
+  if (agent === "codex") {
+    const start = compactStarts[0];
+    const prompt = newEvents.find((event) => event.kind === "prompt");
+    assertion(
+      assertions,
+      `the compact SessionStart precedes the next prompt (lazy hook, run ${CODEX_LIFECYCLE_RUN})`,
+      Number.isFinite(start?.capturedAt) && Number.isFinite(prompt?.capturedAt) &&
+        start.capturedAt < prompt.capturedAt,
+      "SessionStart captured_at < next prompt captured_at",
+      { sessionStart: start?.capturedAt ?? null, prompt: prompt?.capturedAt ?? null },
+    );
+  }
+}
+
+function assertCompactPack(assertions, agent, before, after, parentBefore, parentAfter) {
+  const epoch = parentBefore === undefined ? null : parentBefore.contextEpoch + 1;
+  const channel = `${agent}:SessionStart`;
+  const packs = added(before, after, "injections").filter(
+    (injection) =>
+      injection.sessionId === parentAfter?.id &&
+      injection.kind === "session_start",
+  );
+  assertion(
+    assertions,
+    `compaction emits one new-epoch session-start pack through ${channel}`,
+    packs.length === 1 && packs[0].channel === channel &&
+      packs[0].state === "emitted" && packs[0].contextEpoch === epoch,
+    [{ channel, state: "emitted", contextEpoch: epoch }],
+    packs.map(({ channel, state, contextEpoch }) => ({ channel, state, contextEpoch })),
+  );
+  const packIds = new Set(packs.map((injection) => injection.id));
+  const included = includedMemoryIds(after, (item) => packIds.has(item.injectionId));
+  const repository = repoMemoryIds(after, parentBefore?.repoId);
+  assertion(
+    assertions,
+    "the compact session-start pack includes repository memory",
+    includesRepositoryMemory(repository, included),
+    [...repository],
+    [...included],
+  );
+}
+
+function evaluateCompactCheck(assertions, agent, before, after, parentBefore, parentAfter) {
+  const newEvents = added(before, after, "events").filter((event) => event.sessionId === parentAfter?.id);
+  const compactions = newEvents.filter((event) => event.kind === "compaction_summary");
+  const compactStarts = newEvents.filter(
+    (event) => event.kind === "session_start" && eventSource(event) === "compact",
+  );
+  assertion(
+    assertions,
+    "compaction advances context_epoch exactly once",
+    parentBefore !== undefined && parentAfter?.contextEpoch === parentBefore.contextEpoch + 1,
+    parentBefore === undefined ? null : parentBefore.contextEpoch + 1,
+    parentAfter?.contextEpoch ?? null,
+  );
+  assertion(assertions, "one compaction event is recorded", compactions.length === 1, 1, compactions.length);
+  assertion(
+    assertions,
+    "one SessionStart source=compact is recorded",
+    compactStarts.length === 1,
+    1,
+    compactStarts.length,
+  );
+  assertCompactPromptOrder(assertions, agent, compactStarts, newEvents);
+  assertCompactPack(assertions, agent, before, after, parentBefore, parentAfter);
+  const remaining = new Set(after.events.map((event) => event.id));
+  const lost = before.events
+    .filter((event) => event.sessionId === parentBefore?.id)
+    .map((event) => event.id)
+    .filter((id) => !remaining.has(id));
+  assertion(assertions, "no event captured before compaction is lost", lost.length === 0, [], lost);
+  return evaluated(assertions);
+}
+
+function assertClaudeForkEvents(assertions, agent, before, after, child) {
+  if (agent === "claude") {
+    const forkStarts = added(before, after, "events").filter(
+      (event) => event.sessionId === child?.id && event.kind === "session_start" && eventSource(event) === "fork",
+    );
+    assertion(assertions, "Claude fork records one SessionStart source=fork", forkStarts.length === 1, 1, forkStarts.length);
+    const starts = after.injections.filter(
+      (injection) => injection.sessionId === child?.id && injection.kind === "session_start",
+    );
+    assertion(assertions, "Claude fork emits no SessionStart pack", starts.length === 0, 0, starts.length);
+  }
+}
+
+function evaluateForkCheck(options) {
+  const { assertions, agent, before, after, parentBefore, parentAfter, child, memories } = options;
+  const included = includedMemoryIds(after, (item) => item.conversationId === child?.conversationId);
+  assertion(
+    assertions,
+    "fork creates a separate root conversation",
+    child !== undefined &&
+      parentBefore !== undefined &&
+      child.id !== parentBefore.id &&
+      child.conversationId === child.id &&
+      child.conversationId !== parentBefore.conversationId,
+    "new session whose conversation_id equals its id and differs from the parent",
+    child === undefined ? null : { id: child.id, conversationId: child.conversationId },
+  );
+  assertion(
+    assertions,
+    "fork keeps the parent repository identity",
+    child !== undefined && child.repoId === parentBefore?.repoId,
+    parentBefore?.repoId ?? null,
+    child?.repoId ?? null,
+  );
+  assertion(
+    assertions,
+    "fork includes a memory from the parent repository",
+    includesRepositoryMemory(memories, included),
+    [...memories],
+    [...included],
+  );
+  const beforeParent = injectionFingerprint(before, parentBefore?.conversationId);
+  const afterParent = injectionFingerprint(after, parentAfter?.conversationId);
+  assertion(
+    assertions,
+    "fork adds no injection to the parent conversation",
+    JSON.stringify(afterParent) === JSON.stringify(beforeParent),
+    beforeParent,
+    afterParent,
+  );
+  assertClaudeForkEvents(assertions, agent, before, after, child);
+  return evaluated(assertions);
+}
+
+function assertClearIdentity(assertions, agent, before, child, parentBefore) {
+  if (agent === "codex") {
+    assertion(
+      assertions,
+      "Codex /new creates a fresh root conversation in the same repository",
+      child !== undefined &&
+        parentBefore !== undefined &&
+        !before.sessions.some((row) => row.id === child.id) &&
+        child.id !== parentBefore.id &&
+        child.conversationId === child.id &&
+        child.conversationId !== parentBefore.conversationId &&
+        child.repoId === parentBefore.repoId,
+      "new root in the parent repository",
+      child === undefined ? null : { id: child.id, conversationId: child.conversationId, repoId: child.repoId },
+    );
+  } else {
+    assertion(
+      assertions,
+      "Claude clear stays in the parent repository",
+      child !== undefined && child.repoId === parentBefore?.repoId,
+      parentBefore?.repoId ?? null,
+      child?.repoId ?? null,
+    );
+  }
+}
+
+function assertCodexClearStart(assertions, before, beforePrompt, newEvents) {
+  const commandEvents = beforePrompt === undefined ? [] : added(before, beforePrompt, "events");
+  const commandSessions = beforePrompt === undefined ? [] : added(before, beforePrompt, "sessions");
+  const earlyStarts = commandEvents.filter((event) => event.kind === "session_start");
+  assertion(
+    assertions,
+    "Codex /new creates no oboete session or session_start before the recall prompt is submitted (A18 detection at the first turn)",
+    beforePrompt !== undefined && commandSessions.length === 0 && earlyStarts.length === 0,
+    { sessions: 0, sessionStarts: 0 },
+    { sessions: commandSessions.length, sessionStarts: earlyStarts.length },
+  );
+  const starts = newEvents.filter((event) => event.kind === "session_start");
+  assertion(
+    assertions,
+    "Codex /new records exactly one SessionStart source=startup on the child",
+    starts.length === 1 && eventSource(starts[0]) === "startup",
+    ["startup"],
+    starts.map(eventSource),
+  );
+  const start = starts[0];
+  const prompt = newEvents.find((event) => event.kind === "prompt");
+  assertion(
+    assertions,
+    `Codex /new SessionStart source=startup precedes the child's prompt (lazy hook, run ${CODEX_CLEAR_RUN})`,
+    Number.isFinite(start?.capturedAt) && Number.isFinite(prompt?.capturedAt) &&
+      start.capturedAt < prompt.capturedAt,
+    "SessionStart captured_at < child prompt captured_at",
+    { sessionStart: start?.capturedAt ?? null, prompt: prompt?.capturedAt ?? null },
+  );
+}
+
+function assertClearPack(assertions, agent, before, after, child, memories) {
+  const channel = `${agent}:SessionStart`;
+  const starts = added(before, after, "injections").filter(
+    (injection) =>
+      injection.sessionId === child?.id &&
+      injection.kind === "session_start",
+  );
+  assertion(
+    assertions,
+    `${agent} clear emits one session-start pack through ${channel}`,
+    starts.length === 1 && starts[0].channel === channel && starts[0].state === "emitted",
+    [{ channel, state: "emitted" }],
+    starts.map(({ channel, state }) => ({ channel, state })),
+  );
+  const startIds = new Set(starts.map((injection) => injection.id));
+  const clearMemoryIds = includedMemoryIds(after, (item) => startIds.has(item.injectionId));
+  assertion(
+    assertions,
+    "clear includes a memory from the parent repository",
+    includesRepositoryMemory(memories, clearMemoryIds),
+    [...memories],
+    [...clearMemoryIds],
+  );
+}
+
+function evaluateClearCheck(options) {
+  const { assertions, agent, before, beforePrompt, after, parentBefore, parentAfter, child, memories } = options;
+  assertClearIdentity(assertions, agent, before, child, parentBefore);
+  const newEvents = added(before, after, "events").filter((event) => event.sessionId === child?.id);
+  if (agent === "codex") {
+    assertCodexClearStart(assertions, before, beforePrompt, newEvents);
+    const beforeParent = injectionFingerprint(before, parentBefore?.conversationId);
+    const afterParent = injectionFingerprint(after, parentAfter?.conversationId);
+    assertion(
+      assertions,
+      "Codex /new leaves the parent conversation's injections unchanged",
+      JSON.stringify(afterParent) === JSON.stringify(beforeParent),
+      beforeParent,
+      afterParent,
+    );
+    assertion(
+      assertions,
+      `Codex parent stays active because /new fires no SessionEnd (run ${CODEX_CLEAR_RUN})`,
+      parentAfter?.status === "active",
+      "active",
+      parentAfter?.status ?? null,
+    );
+  } else {
+    const starts = newEvents.filter(
+      (event) => event.kind === "session_start" && eventSource(event) === "clear",
+    );
+    assertion(assertions, "Claude clear records one SessionStart source=clear", starts.length === 1, 1, starts.length);
+  }
+  assertClearPack(assertions, agent, before, after, child, memories);
+  return {
+    ...evaluated(assertions),
+    ...(agent === "codex" ? { evidence: {
+      parent_session_end_count: added(before, after, "events").filter(
+        (event) => event.sessionId === parentBefore?.id && event.kind === "session_end",
+      ).length,
+    } } : {}),
+  };
+}
+
 /** Apply the contracts/agents.md identity rules to evidence captured around one real CLI action. */
 export function evaluateLifecycleCheck({
   agent,
@@ -481,276 +784,22 @@ export function evaluateLifecycleCheck({
   const parentAfter = session(after, parentNativeSessionId);
 
   if (check === "resume") {
-    assertion(
-      assertions,
-      "resume keeps the same oboete session and conversation",
-      parentBefore !== undefined &&
-        parentAfter !== undefined &&
-        parentAfter.id === parentBefore.id &&
-        parentAfter.conversationId === parentBefore.conversationId,
-      parentBefore === undefined ? null : { id: parentBefore.id, conversationId: parentBefore.conversationId },
-      parentAfter === undefined ? null : { id: parentAfter.id, conversationId: parentAfter.conversationId },
-    );
-    assertion(
-      assertions,
-      "resume leaves context_epoch unchanged",
-      parentBefore !== undefined && parentAfter?.contextEpoch === parentBefore.contextEpoch,
-      parentBefore?.contextEpoch ?? null,
-      parentAfter?.contextEpoch ?? null,
-    );
-    const starts = added(before, after, "events").filter(
-      (event) => event.sessionId === parentAfter?.id && event.kind === "session_start" && eventSource(event) === "resume",
-    );
-    assertion(
-      assertions,
-      agent === "codex"
-        ? "Codex production hooks omit SessionStart source=resume"
-        : "Claude records one SessionStart source=resume",
-      starts.length === (agent === "codex" ? 0 : 1),
-      agent === "codex" ? 0 : 1,
-      starts.length,
-    );
-    const prompts = added(before, after, "events").filter(
-      (event) => event.sessionId === parentAfter?.id && event.kind === "prompt",
-    );
-    assertion(assertions, "resume records one prompt on the resumed session", prompts.length === 1, 1, prompts.length);
-    const beforeStart = injectionFingerprint(before, parentBefore?.conversationId, "session_start");
-    const afterStart = injectionFingerprint(after, parentAfter?.conversationId, "session_start");
-    assertion(
-      assertions,
-      "resume adds no session-start injection",
-      JSON.stringify(afterStart) === JSON.stringify(beforeStart),
-      beforeStart,
-      afterStart,
-    );
-    return evaluated(assertions);
+    return evaluateResumeCheck(assertions, agent, before, after, parentBefore, parentAfter);
   }
 
   if (check === "compact") {
-    const newEvents = added(before, after, "events").filter((event) => event.sessionId === parentAfter?.id);
-    const compactions = newEvents.filter((event) => event.kind === "compaction_summary");
-    const compactStarts = newEvents.filter(
-      (event) => event.kind === "session_start" && eventSource(event) === "compact",
-    );
-    assertion(
-      assertions,
-      "compaction advances context_epoch exactly once",
-      parentBefore !== undefined && parentAfter?.contextEpoch === parentBefore.contextEpoch + 1,
-      parentBefore === undefined ? null : parentBefore.contextEpoch + 1,
-      parentAfter?.contextEpoch ?? null,
-    );
-    assertion(assertions, "one compaction event is recorded", compactions.length === 1, 1, compactions.length);
-    assertion(
-      assertions,
-      "one SessionStart source=compact is recorded",
-      compactStarts.length === 1,
-      1,
-      compactStarts.length,
-    );
-    if (agent === "codex") {
-      const start = compactStarts[0];
-      const prompt = newEvents.find((event) => event.kind === "prompt");
-      assertion(
-        assertions,
-        `the compact SessionStart precedes the next prompt (lazy hook, run ${CODEX_LIFECYCLE_RUN})`,
-        Number.isFinite(start?.capturedAt) && Number.isFinite(prompt?.capturedAt) &&
-          start.capturedAt < prompt.capturedAt,
-        "SessionStart captured_at < next prompt captured_at",
-        { sessionStart: start?.capturedAt ?? null, prompt: prompt?.capturedAt ?? null },
-      );
-    }
-    const epoch = parentBefore === undefined ? null : parentBefore.contextEpoch + 1;
-    const channel = `${agent}:SessionStart`;
-    const packs = added(before, after, "injections").filter(
-      (injection) =>
-        injection.sessionId === parentAfter?.id &&
-        injection.kind === "session_start",
-    );
-    assertion(
-      assertions,
-      `compaction emits one new-epoch session-start pack through ${channel}`,
-      packs.length === 1 && packs[0].channel === channel &&
-        packs[0].state === "emitted" && packs[0].contextEpoch === epoch,
-      [{ channel, state: "emitted", contextEpoch: epoch }],
-      packs.map(({ channel, state, contextEpoch }) => ({ channel, state, contextEpoch })),
-    );
-    const packIds = new Set(packs.map((injection) => injection.id));
-    const included = includedMemoryIds(after, (item) => packIds.has(item.injectionId));
-    const repository = repoMemoryIds(after, parentBefore?.repoId);
-    assertion(
-      assertions,
-      "the compact session-start pack includes repository memory",
-      includesRepositoryMemory(repository, included),
-      [...repository],
-      [...included],
-    );
-    const remaining = new Set(after.events.map((event) => event.id));
-    const lost = before.events
-      .filter((event) => event.sessionId === parentBefore?.id)
-      .map((event) => event.id)
-      .filter((id) => !remaining.has(id));
-    assertion(assertions, "no event captured before compaction is lost", lost.length === 0, [], lost);
-    return evaluated(assertions);
+    return evaluateCompactCheck(assertions, agent, before, after, parentBefore, parentAfter);
   }
 
   const child = session(after, childNativeSessionId);
   const memories = repoMemoryIds(after, parentBefore?.repoId);
 
   if (check === "fork") {
-    const included = includedMemoryIds(after, (item) => item.conversationId === child?.conversationId);
-    assertion(
-      assertions,
-      "fork creates a separate root conversation",
-      child !== undefined &&
-        parentBefore !== undefined &&
-        child.id !== parentBefore.id &&
-        child.conversationId === child.id &&
-        child.conversationId !== parentBefore.conversationId,
-      "new session whose conversation_id equals its id and differs from the parent",
-      child === undefined ? null : { id: child.id, conversationId: child.conversationId },
-    );
-    assertion(
-      assertions,
-      "fork keeps the parent repository identity",
-      child !== undefined && child.repoId === parentBefore?.repoId,
-      parentBefore?.repoId ?? null,
-      child?.repoId ?? null,
-    );
-    assertion(
-      assertions,
-      "fork includes a memory from the parent repository",
-      includesRepositoryMemory(memories, included),
-      [...memories],
-      [...included],
-    );
-    const beforeParent = injectionFingerprint(before, parentBefore?.conversationId);
-    const afterParent = injectionFingerprint(after, parentAfter?.conversationId);
-    assertion(
-      assertions,
-      "fork adds no injection to the parent conversation",
-      JSON.stringify(afterParent) === JSON.stringify(beforeParent),
-      beforeParent,
-      afterParent,
-    );
-    if (agent === "claude") {
-      const forkStarts = added(before, after, "events").filter(
-        (event) => event.sessionId === child?.id && event.kind === "session_start" && eventSource(event) === "fork",
-      );
-      assertion(assertions, "Claude fork records one SessionStart source=fork", forkStarts.length === 1, 1, forkStarts.length);
-      const starts = after.injections.filter(
-        (injection) => injection.sessionId === child?.id && injection.kind === "session_start",
-      );
-      assertion(assertions, "Claude fork emits no SessionStart pack", starts.length === 0, 0, starts.length);
-    }
-    return evaluated(assertions);
+    return evaluateForkCheck({ assertions, agent, before, after, parentBefore, parentAfter, child, memories });
   }
 
   if (check === "clear") {
-    if (agent === "codex") {
-      assertion(
-        assertions,
-        "Codex /new creates a fresh root conversation in the same repository",
-        child !== undefined &&
-          parentBefore !== undefined &&
-          !before.sessions.some((row) => row.id === child.id) &&
-          child.id !== parentBefore.id &&
-          child.conversationId === child.id &&
-          child.conversationId !== parentBefore.conversationId &&
-          child.repoId === parentBefore.repoId,
-        "new root in the parent repository",
-        child === undefined ? null : { id: child.id, conversationId: child.conversationId, repoId: child.repoId },
-      );
-    } else {
-      assertion(
-        assertions,
-        "Claude clear stays in the parent repository",
-        child !== undefined && child.repoId === parentBefore?.repoId,
-        parentBefore?.repoId ?? null,
-        child?.repoId ?? null,
-      );
-    }
-    const newEvents = added(before, after, "events").filter((event) => event.sessionId === child?.id);
-    if (agent === "codex") {
-      const commandEvents = beforePrompt === undefined ? [] : added(before, beforePrompt, "events");
-      const commandSessions = beforePrompt === undefined ? [] : added(before, beforePrompt, "sessions");
-      const earlyStarts = commandEvents.filter((event) => event.kind === "session_start");
-      assertion(
-        assertions,
-        "Codex /new creates no oboete session or session_start before the recall prompt is submitted (A18 detection at the first turn)",
-        beforePrompt !== undefined && commandSessions.length === 0 && earlyStarts.length === 0,
-        { sessions: 0, sessionStarts: 0 },
-        { sessions: commandSessions.length, sessionStarts: earlyStarts.length },
-      );
-      const starts = newEvents.filter((event) => event.kind === "session_start");
-      assertion(
-        assertions,
-        "Codex /new records exactly one SessionStart source=startup on the child",
-        starts.length === 1 && eventSource(starts[0]) === "startup",
-        ["startup"],
-        starts.map(eventSource),
-      );
-      const start = starts[0];
-      const prompt = newEvents.find((event) => event.kind === "prompt");
-      assertion(
-        assertions,
-        `Codex /new SessionStart source=startup precedes the child's prompt (lazy hook, run ${CODEX_CLEAR_RUN})`,
-        Number.isFinite(start?.capturedAt) && Number.isFinite(prompt?.capturedAt) &&
-          start.capturedAt < prompt.capturedAt,
-        "SessionStart captured_at < child prompt captured_at",
-        { sessionStart: start?.capturedAt ?? null, prompt: prompt?.capturedAt ?? null },
-      );
-      const beforeParent = injectionFingerprint(before, parentBefore?.conversationId);
-      const afterParent = injectionFingerprint(after, parentAfter?.conversationId);
-      assertion(
-        assertions,
-        "Codex /new leaves the parent conversation's injections unchanged",
-        JSON.stringify(afterParent) === JSON.stringify(beforeParent),
-        beforeParent,
-        afterParent,
-      );
-      assertion(
-        assertions,
-        `Codex parent stays active because /new fires no SessionEnd (run ${CODEX_CLEAR_RUN})`,
-        parentAfter?.status === "active",
-        "active",
-        parentAfter?.status ?? null,
-      );
-    } else {
-      const starts = newEvents.filter(
-        (event) => event.kind === "session_start" && eventSource(event) === "clear",
-      );
-      assertion(assertions, "Claude clear records one SessionStart source=clear", starts.length === 1, 1, starts.length);
-    }
-    const channel = `${agent}:SessionStart`;
-    const starts = added(before, after, "injections").filter(
-      (injection) =>
-        injection.sessionId === child?.id &&
-        injection.kind === "session_start",
-    );
-    assertion(
-      assertions,
-      `${agent} clear emits one session-start pack through ${channel}`,
-      starts.length === 1 && starts[0].channel === channel && starts[0].state === "emitted",
-      [{ channel, state: "emitted" }],
-      starts.map(({ channel, state }) => ({ channel, state })),
-    );
-    const startIds = new Set(starts.map((injection) => injection.id));
-    const clearMemoryIds = includedMemoryIds(after, (item) => startIds.has(item.injectionId));
-    assertion(
-      assertions,
-      "clear includes a memory from the parent repository",
-      includesRepositoryMemory(memories, clearMemoryIds),
-      [...memories],
-      [...clearMemoryIds],
-    );
-    return {
-      ...evaluated(assertions),
-      ...(agent === "codex" ? { evidence: {
-        parent_session_end_count: added(before, after, "events").filter(
-          (event) => event.sessionId === parentBefore?.id && event.kind === "session_end",
-        ).length,
-      } } : {}),
-    };
+    return evaluateClearCheck({ assertions, agent, before, beforePrompt, after, parentBefore, parentAfter, child, memories });
   }
 
   throw new Error(`Unknown lifecycle check: ${check}.`);
@@ -822,106 +871,114 @@ function prepareOboeteHome(destination, source) {
   copySetupFile(path.join(source, "config.toml"), path.join(destination, "config.toml"), true);
 }
 
+function prepareClaudeAgent(config, homes, prompt, extraArgs) {
+  const settings = path.join(config, "settings.json");
+  copySetupFile(path.join(homes.claude, "settings.json"), settings, true);
+  return {
+    argv: [
+      "claude",
+      "-p",
+      prompt,
+      "--settings",
+      settings,
+      "--dangerously-skip-permissions",
+      "--output-format",
+      "json",
+      ...extraArgs,
+    ],
+    env: {},
+    config,
+  };
+}
+
+function prepareCodexAgent(config, homes, prompt, repo, extraArgs) {
+  for (const file of ["auth.json", "config.toml", "hooks.json"]) {
+    copySetupFile(path.join(homes.codex, file), path.join(config, file), file !== "auth.json");
+  }
+  const configToml = path.join(config, "config.toml");
+  // The TUI asks "Do you trust the contents of this directory?" for a repository it has not
+  // seen, and Escape (the first key tuiSubmit sends) answers "No, quit"; a headless leg never
+  // asks. Trust the synthetic repository up front, the way the CLI records a "Yes, continue".
+  const trusted = `\n[projects.${JSON.stringify(repo)}]\ntrust_level = "trusted"\n`;
+  fs.writeFileSync(
+    configToml,
+    retargetCodexTrust(
+      fs.readFileSync(configToml, "utf8"),
+      path.join(homes.codex, "hooks.json"),
+      path.join(config, "hooks.json"),
+    ) + trusted,
+  );
+  return {
+    argv: [
+      "codex",
+      "exec",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--skip-git-repo-check",
+      "--json",
+      "-C",
+      repo,
+      ...extraArgs,
+      prompt,
+    ],
+    env: { CODEX_HOME: config },
+    config,
+  };
+}
+
+function prepareGrokAgent(config, homes, prompt, repo) {
+  copySetupFile(path.join(homes.grok, "auth.json"), path.join(config, "auth.json"));
+  copySetupFile(path.join(homes.grok, "config.toml"), path.join(config, "config.toml"), true);
+  copySetupFile(
+    path.join(homes.grok, "hooks", "oboete.json"),
+    path.join(config, "hooks", "oboete.json"),
+    true,
+  );
+  return {
+    argv: ["grok", "-p", prompt, "--always-approve", "--output-format", "json", "--cwd", repo],
+    env: { GROK_HOME: config, ...GROK_ISOLATION_ENV },
+  };
+}
+
+function preparePiAgent(config, directory, homes, prompt) {
+  for (const file of ["auth.json", "settings.json", "models-store.json"]) {
+    copySetupFile(path.join(homes.pi, file), path.join(config, file));
+  }
+  copySetupFile(
+    path.join(homes.pi, "extensions", "oboete.js"),
+    path.join(config, "extensions", "oboete.js"),
+    true,
+  );
+  const sessions = path.join(directory, "pi-sessions");
+  fs.mkdirSync(sessions, { recursive: true });
+  return {
+    argv: ["pi", "-p", prompt, "--mode", "json", "--session-dir", sessions],
+    env: { PI_CODING_AGENT_DIR: config },
+  };
+}
+
 function prepareAgent(agent, directory, homes, prompt, repo, extraArgs = []) {
   const config = path.join(directory, "agent-home");
   switch (agent) {
     case "claude": {
-      const settings = path.join(config, "settings.json");
-      copySetupFile(path.join(homes.claude, "settings.json"), settings, true);
-      return {
-        argv: [
-          "claude",
-          "-p",
-          prompt,
-          "--settings",
-          settings,
-          "--dangerously-skip-permissions",
-          "--output-format",
-          "json",
-          ...extraArgs,
-        ],
-        env: {},
-        config,
-      };
+      return prepareClaudeAgent(config, homes, prompt, extraArgs);
     }
     case "codex": {
-      for (const file of ["auth.json", "config.toml", "hooks.json"]) {
-        copySetupFile(path.join(homes.codex, file), path.join(config, file), file !== "auth.json");
-      }
-      const configToml = path.join(config, "config.toml");
-      // The TUI asks "Do you trust the contents of this directory?" for a repository it has not
-      // seen, and Escape (the first key tuiSubmit sends) answers "No, quit"; a headless leg never
-      // asks. Trust the synthetic repository up front, the way the CLI records a "Yes, continue".
-      const trusted = `\n[projects.${JSON.stringify(repo)}]\ntrust_level = "trusted"\n`;
-      fs.writeFileSync(
-        configToml,
-        retargetCodexTrust(
-          fs.readFileSync(configToml, "utf8"),
-          path.join(homes.codex, "hooks.json"),
-          path.join(config, "hooks.json"),
-        ) + trusted,
-      );
-      return {
-        argv: [
-          "codex",
-          "exec",
-          "--dangerously-bypass-approvals-and-sandbox",
-          "--skip-git-repo-check",
-          "--json",
-          "-C",
-          repo,
-          ...extraArgs,
-          prompt,
-        ],
-        env: { CODEX_HOME: config },
-        config,
-      };
+      return prepareCodexAgent(config, homes, prompt, repo, extraArgs);
     }
     case "grok": {
-      copySetupFile(path.join(homes.grok, "auth.json"), path.join(config, "auth.json"));
-      copySetupFile(path.join(homes.grok, "config.toml"), path.join(config, "config.toml"), true);
-      copySetupFile(
-        path.join(homes.grok, "hooks", "oboete.json"),
-        path.join(config, "hooks", "oboete.json"),
-        true,
-      );
-      return {
-        argv: ["grok", "-p", prompt, "--always-approve", "--output-format", "json", "--cwd", repo],
-        env: { GROK_HOME: config, ...GROK_ISOLATION_ENV },
-      };
+      return prepareGrokAgent(config, homes, prompt, repo);
     }
     case "pi": {
-      for (const file of ["auth.json", "settings.json", "models-store.json"]) {
-        copySetupFile(path.join(homes.pi, file), path.join(config, file));
-      }
-      copySetupFile(
-        path.join(homes.pi, "extensions", "oboete.js"),
-        path.join(config, "extensions", "oboete.js"),
-        true,
-      );
-      const sessions = path.join(directory, "pi-sessions");
-      fs.mkdirSync(sessions, { recursive: true });
-      return {
-        argv: ["pi", "-p", prompt, "--mode", "json", "--session-dir", sessions],
-        env: { PI_CODING_AGENT_DIR: config },
-      };
+      return preparePiAgent(config, directory, homes, prompt);
     }
     default:
       throw new Error(`unknown agent: ${agent}`);
   }
 }
 
-async function launchAgent(
-  agent,
-  directory,
-  repo,
-  prompt,
-  options,
-  homes,
-  dependencies,
-  oboeteHome,
-  launch = {},
+async function launchAgent(configuration
 ) {
+  const { agent, directory, repo, prompt, options, homes, dependencies, oboeteHome, launch = {} } = configuration;
   fs.mkdirSync(directory, { recursive: true });
   const prepared = prepareAgent(agent, launch.runtimeDir ?? directory, homes, prompt, repo, launch.extraArgs ?? []);
   const stdoutPath = path.join(directory, "stdout.txt");
@@ -987,6 +1044,74 @@ function resultPaths(pairDir) {
   };
 }
 
+function evaluatePairRecall(pair, received, facts, options, finish, search) {
+  const assertion = assertAgentOutput(finalText(pair.to, received, []), facts, {
+    requireDegraded: options.noCredentials,
+  });
+  return finish(assertion.pass ? "pass" : "fail", assertion.missingFacts, {
+    ...(assertion.pass
+      ? {}
+      : {
+          reason:
+            assertion.missingFacts.length > 0
+              ? "facts_missing_from_first_turn"
+              : "degraded_marker_missing_from_first_turn",
+        }),
+    degradedMarker: assertion.degradedMarker,
+    searchAttempts: search.attempts,
+  });
+}
+
+function configureRemote(repo, directory, options, dependencies) {
+  return dependencies.runTimed(["git", "config", "remote.origin.url", SYNTHETIC_REMOTE], {
+    cwd: repo,
+    env: dependencies.childEnv(),
+    stdoutPath: path.join(directory, "git.stdout.txt"),
+    stderrPath: path.join(directory, "git.stderr.txt"),
+    timeoutMs: Math.min(15_000, options.timeoutMs),
+  });
+}
+
+function preparePairHome(pairDir, homes, dependencies, options) {
+  const oboeteHome = path.join(pairDir, "oboete-home");
+  prepareOboeteHome(oboeteHome, homes.oboete);
+  // FR-016: `oboete observe` is the one leg that reaches a provider, so it is the one leg that
+  // asks for the credentials; --no-credentials is the run that takes them away from it.
+  const env = dependencies.childEnv(
+    { OBOETE_HOME: oboeteHome },
+    { credentials: !options.noCredentials },
+  );
+
+  return { oboeteHome, env };
+}
+
+function launchPairSeed(configuration) {
+  const { pair, pairDir, repo, facts, options, homes, dependencies, oboeteHome } = configuration;
+  return launchAgent({
+    agent: pair.from,
+    directory: path.join(pairDir, "seed"),
+    repo,
+    prompt: buildFactSeedingPrompt(facts),
+    options,
+    homes,
+    dependencies,
+    oboeteHome,
+  });
+}
+
+function launchPairRecall(pair, pairDir, repo, options, homes, dependencies, oboeteHome) {
+  return launchAgent({
+    agent: pair.to,
+    directory: path.join(pairDir, "receive"),
+    repo,
+    prompt: recallPrompt(pair.to, options.noCredentials),
+    options,
+    homes,
+    dependencies,
+    oboeteHome,
+  });
+}
+
 async function runPair(pair, context) {
   const { options, runId, runDir, homes, dependencies } = context;
   const started = dependencies.now();
@@ -1005,35 +1130,13 @@ async function runPair(pair, context) {
   try {
     fs.mkdirSync(pairDir, { recursive: true, mode: 0o700 });
     const repo = dependencies.gitInit(path.join(pairDir, "repo"));
-    const git = await dependencies.runTimed(["git", "config", "remote.origin.url", SYNTHETIC_REMOTE], {
-      cwd: repo,
-      env: dependencies.childEnv(),
-      stdoutPath: path.join(pairDir, "git.stdout.txt"),
-      stderrPath: path.join(pairDir, "git.stderr.txt"),
-      timeoutMs: Math.min(15_000, options.timeoutMs),
-    });
+    const git = await configureRemote(repo, pairDir, options, dependencies);
     if (git.exitCode !== 0) return finish("fail", facts, { reason: `git_remote_exit_${git.exitCode}` });
 
-    const oboeteHome = path.join(pairDir, "oboete-home");
-    prepareOboeteHome(oboeteHome, homes.oboete);
-    // FR-016: `oboete observe` is the one leg that reaches a provider, so it is the one leg that
-    // asks for the credentials; --no-credentials is the run that takes them away from it.
-    const env = dependencies.childEnv(
-      { OBOETE_HOME: oboeteHome },
-      { credentials: !options.noCredentials },
-    );
+    const { oboeteHome, env } = preparePairHome(pairDir, homes, dependencies, options);
 
     dependencies.log(`[${pair.from}:${pair.to}] seed`);
-    const seeded = await launchAgent(
-      pair.from,
-      path.join(pairDir, "seed"),
-      repo,
-      buildFactSeedingPrompt(facts),
-      options,
-      homes,
-      dependencies,
-      oboeteHome,
-    );
+    const seeded = await launchPairSeed({ pair, pairDir, repo, facts, options, homes, dependencies, oboeteHome });
     if (seeded.exitCode !== 0) {
       return finish("fail", facts, { reason: `seed_agent_exit_${seeded.exitCode}` });
     }
@@ -1060,37 +1163,14 @@ async function runPair(pair, context) {
     fs.writeFileSync(notes, "The seeded facts are intentionally hidden during the recall check.\n");
 
     dependencies.log(`[${pair.from}:${pair.to}] receive`);
-    const received = await launchAgent(
-      pair.to,
-      path.join(pairDir, "receive"),
-      repo,
-      recallPrompt(pair.to, options.noCredentials),
-      options,
-      homes,
-      dependencies,
-      oboeteHome,
-    );
+    const received = await launchPairRecall(pair, pairDir, repo, options, homes, dependencies, oboeteHome);
     if (received.exitCode !== 0) {
       return finish("fail", facts, {
         reason: `receive_agent_exit_${received.exitCode}`,
         searchAttempts: search.attempts,
       });
     }
-    const assertion = assertAgentOutput(finalText(pair.to, received, []), facts, {
-      requireDegraded: options.noCredentials,
-    });
-    return finish(assertion.pass ? "pass" : "fail", assertion.missingFacts, {
-      ...(assertion.pass
-        ? {}
-        : {
-            reason:
-              assertion.missingFacts.length > 0
-                ? "facts_missing_from_first_turn"
-                : "degraded_marker_missing_from_first_turn",
-          }),
-      degradedMarker: assertion.degradedMarker,
-      searchAttempts: search.attempts,
-    });
+    return evaluatePairRecall(pair, received, facts, options, finish, search);
   } catch (error) {
     return finish(error instanceof PreconditionError ? "skipped" : "fail", facts, {
       reason: error instanceof Error ? error.message : String(error),
@@ -1158,20 +1238,7 @@ export async function waitForLifecycleState(database, agent, predicate, options,
   );
 }
 
-/** Only the pane's required overrides may appear in tmux's world-readable -e arguments. */
-export function startLifecycleTui({
-  agent,
-  action,
-  directory,
-  runtimeDir,
-  repo,
-  parentNativeSessionId,
-  oboeteHome,
-  homes,
-  dependencies,
-}) {
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const prepared = prepareAgent(agent, runtimeDir, homes, "", repo);
+function lifecycleTuiArgv(agent, prepared, parentNativeSessionId, action) {
   const argv =
     agent === "claude"
       ? [
@@ -1183,6 +1250,25 @@ export function startLifecycleTui({
           parentNativeSessionId,
         ]
       : tuiCmd([action === "fork" ? "fork" : "resume", parentNativeSessionId]);
+  return argv;
+}
+
+/** Only the pane's required overrides may appear in tmux's world-readable -e arguments. */
+export function startLifecycleTui(options) {
+  const {
+    agent,
+    action,
+    directory,
+    runtimeDir,
+    repo,
+    parentNativeSessionId,
+    oboeteHome,
+    homes,
+    dependencies,
+  } = options;
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const prepared = prepareAgent(agent, runtimeDir, homes, "", repo);
+  const argv = lifecycleTuiArgv(agent, prepared, parentNativeSessionId, action);
   const name = `oboete-${agent}-${action}-${process.pid}-${Date.now().toString(36)}`.slice(0, 60);
   const env = {
     TERM: "xterm-256color",
@@ -1283,17 +1369,17 @@ async function runResumeLifecycle(context) {
   const before = dependencies.inspectLifecycle(databasePath(suite.oboeteHome), agent);
   const directory = path.join(suite.root, "resume");
   const extraArgs = agent === "claude" ? ["--resume", suite.parentNativeSessionId] : ["resume", suite.parentNativeSessionId];
-  const result = await launchAgent(
+  const result = await launchAgent({
     agent,
     directory,
-    suite.repo,
-    DONE_PROMPT,
+    repo: suite.repo,
+    prompt: DONE_PROMPT,
     options,
     homes,
     dependencies,
-    suite.oboeteHome,
-    { runtimeDir: suite.runtimeDir, extraArgs },
-  );
+    oboeteHome: suite.oboeteHome,
+    launch: { runtimeDir: suite.runtimeDir, extraArgs },
+  });
   requireAgentSuccess(result, `${agent} resume`);
   const after = dependencies.inspectLifecycle(databasePath(suite.oboeteHome), agent);
   return actionResult(
@@ -1312,14 +1398,10 @@ async function runResumeLifecycle(context) {
   );
 }
 
-async function runCodexCompactLifecycle(context) {
-  const { agent, suite, options, homes, dependencies } = context;
-  const started = dependencies.now();
-  const database = databasePath(suite.oboeteHome);
-  const directory = path.join(suite.root, "compact");
-  const opened = startLifecycleTui({
+function openSuiteTui(agent, action, directory, suite, homes, dependencies) {
+  return startLifecycleTui({
     agent,
-    action: "compact",
+    action,
     directory,
     runtimeDir: suite.runtimeDir,
     repo: suite.repo,
@@ -1328,6 +1410,36 @@ async function runCodexCompactLifecycle(context) {
     homes,
     dependencies,
   });
+}
+
+function codexCompactResult(configuration) {
+  const { agent, started, dependencies, before, after, suite, directory, opened } = configuration;
+  return actionResult(
+    agent,
+    "compact",
+    started,
+    dependencies,
+    evaluateLifecycleCheck({
+      agent,
+      check: "compact",
+      before,
+      after,
+      parentNativeSessionId: suite.parentNativeSessionId,
+    }),
+    {
+      pane: path.join(directory, "pane.txt"),
+      argv: opened.argv,
+      eventDelta: eventDelta(before, after),
+    },
+  );
+}
+
+async function runCodexCompactLifecycle(context) {
+  const { agent, suite, options, homes, dependencies } = context;
+  const started = dependencies.now();
+  const database = databasePath(suite.oboeteHome);
+  const directory = path.join(suite.root, "compact");
+  const opened = openSuiteTui(agent, "compact", directory, suite, homes, dependencies);
   let before;
   let after;
   try {
@@ -1383,24 +1495,7 @@ async function runCodexCompactLifecycle(context) {
     if (after !== undefined) await tuiQuit(opened.tui, opened.name, options, dependencies);
     else opened.tui.kill();
   }
-  return actionResult(
-    agent,
-    "compact",
-    started,
-    dependencies,
-    evaluateLifecycleCheck({
-      agent,
-      check: "compact",
-      before,
-      after,
-      parentNativeSessionId: suite.parentNativeSessionId,
-    }),
-    {
-      pane: path.join(directory, "pane.txt"),
-      argv: opened.argv,
-      eventDelta: eventDelta(before, after),
-    },
-  );
+  return codexCompactResult({ agent, started, dependencies, before, after, suite, directory, opened });
 }
 
 async function runCompactLifecycle(context) {
@@ -1415,17 +1510,17 @@ async function runCompactLifecycle(context) {
     env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "100000" },
   };
   const run = async (name, prompt) => {
-    const result = await launchAgent(
+    const result = await launchAgent({
       agent,
-      path.join(suite.root, name),
-      suite.repo,
+      directory: path.join(suite.root, name),
+      repo: suite.repo,
       prompt,
       options,
       homes,
       dependencies,
-      suite.oboeteHome,
-      { runtimeDir: suite.runtimeDir, ...launch },
-    );
+      oboeteHome: suite.oboeteHome,
+      launch: { runtimeDir: suite.runtimeDir, ...launch },
+    });
     requireAgentSuccess(result, `${agent} compact`);
   };
   await run("compact", CLAUDE_COMPACT_PROMPT);
@@ -1458,6 +1553,42 @@ async function runCompactLifecycle(context) {
   );
 }
 
+function forkLifecycleResult(configuration) {
+  const { agent, started, dependencies, before, after, suite, childNativeSessionId, details } = configuration;
+  return actionResult(
+    agent,
+    "fork",
+    started,
+    dependencies,
+    evaluateLifecycleCheck({
+      agent,
+      check: "fork",
+      before,
+      after,
+      parentNativeSessionId: suite.parentNativeSessionId,
+      childNativeSessionId,
+    }),
+    details,
+  );
+}
+
+function launchClaudeFork(agent, directory, suite, options, homes, dependencies) {
+  return launchAgent({
+    agent,
+    directory,
+    repo: suite.repo,
+    prompt: lifecycleRecallPrompt(agent),
+    options,
+    homes,
+    dependencies,
+    oboeteHome: suite.oboeteHome,
+    launch: {
+      runtimeDir: suite.runtimeDir,
+      extraArgs: ["--resume", suite.parentNativeSessionId, "--fork-session"],
+    },
+  });
+}
+
 async function runForkLifecycle(context) {
   const { agent, suite, options, homes, dependencies } = context;
   const started = dependencies.now();
@@ -1469,20 +1600,7 @@ async function runForkLifecycle(context) {
   let childNativeSessionId;
 
   if (agent === "claude") {
-    const result = await launchAgent(
-      agent,
-      directory,
-      suite.repo,
-      lifecycleRecallPrompt(agent),
-      options,
-      homes,
-      dependencies,
-      suite.oboeteHome,
-      {
-        runtimeDir: suite.runtimeDir,
-        extraArgs: ["--resume", suite.parentNativeSessionId, "--fork-session"],
-      },
-    );
+    const result = await launchClaudeFork(agent, directory, suite, options, homes, dependencies);
     requireAgentSuccess(result, `${agent} fork`);
     after = dependencies.inspectLifecycle(database, agent);
     childNativeSessionId = claudeNativeSessionFromStart(before, after, "fork");
@@ -1492,17 +1610,7 @@ async function runForkLifecycle(context) {
       eventDelta: eventDelta(before, after),
     };
   } else {
-    const opened = startLifecycleTui({
-      agent,
-      action: "fork",
-      directory,
-      runtimeDir: suite.runtimeDir,
-      repo: suite.repo,
-      parentNativeSessionId: suite.parentNativeSessionId,
-      oboeteHome: suite.oboeteHome,
-      homes,
-      dependencies,
-    });
+    const opened = openSuiteTui(agent, "fork", directory, suite, homes, dependencies);
     let beforePrompt;
     try {
       await readyTui(agent, opened.tui, options, dependencies);
@@ -1529,20 +1637,69 @@ async function runForkLifecycle(context) {
     );
   }
 
+  return forkLifecycleResult({ agent, started, dependencies, before, after, suite, childNativeSessionId, details });
+}
+
+function clearLifecycleResult(configuration) {
+  const { agent, started, dependencies, before, beforePrompt, after, suite, childNativeSessionId, directory, opened } = configuration;
   return actionResult(
     agent,
-    "fork",
+    "clear",
     started,
     dependencies,
     evaluateLifecycleCheck({
       agent,
-      check: "fork",
+      check: "clear",
       before,
+      beforePrompt,
       after,
       parentNativeSessionId: suite.parentNativeSessionId,
       childNativeSessionId,
     }),
-    details,
+    {
+      pane: path.join(directory, "pane.txt"),
+      argv: opened.argv,
+      eventDelta: eventDelta(before, after),
+      ...lifecycleEvidence(suite.root, ["clear/observe"]),
+    },
+  );
+}
+
+function waitForClearParentEnd(database, agent, before, suite, options, dependencies) {
+  return waitForLifecycleState(
+    database,
+    agent,
+    (snapshot) => added(before, snapshot, "events").some(
+      (event) => event.nativeSessionId === suite.parentNativeSessionId && event.kind === "session_end",
+    ),
+    options,
+    dependencies,
+    "Claude parent SessionEnd",
+  );
+}
+
+function waitForClearParentSummary(database, agent, suite, options, dependencies) {
+  return waitForLifecycleState(
+    database,
+    agent,
+    (snapshot) => ["done", "no_content"].includes(session(snapshot, suite.parentNativeSessionId)?.summaryState),
+    options,
+    dependencies,
+    `${agent} parent summary done or no_content`,
+  );
+}
+
+function waitForClaudeClearStart(database, agent, before, options, dependencies) {
+  return waitForLifecycleState(
+    database,
+    agent,
+    (snapshot) =>
+      added(before, snapshot, "events").some(
+        (event) => event.kind === "session_start" && eventSource(event) === "clear",
+      ),
+    { ...options, contract: true },
+    dependencies,
+    "Claude SessionStart source=clear",
   );
 }
 
@@ -1551,17 +1708,7 @@ async function runClearLifecycle(context) {
   const started = dependencies.now();
   const database = databasePath(suite.oboeteHome);
   const directory = path.join(suite.root, "clear");
-  const opened = startLifecycleTui({
-    agent,
-    action: "clear",
-    directory,
-    runtimeDir: suite.runtimeDir,
-    repo: suite.repo,
-    parentNativeSessionId: suite.parentNativeSessionId,
-    oboeteHome: suite.oboeteHome,
-    homes,
-    dependencies,
-  });
+  const opened = openSuiteTui(agent, "clear", directory, suite, homes, dependencies);
   let before;
   let beforePrompt;
   let after;
@@ -1572,38 +1719,12 @@ async function runClearLifecycle(context) {
       : dependencies.inspectLifecycle(database, agent);
     await tuiSubmit(opened.name, opened.tui, agent === "codex" ? "/new" : "/clear", options, dependencies);
     if (agent === "claude") {
-      await waitForLifecycleState(
-        database,
-        agent,
-        (snapshot) => added(before, snapshot, "events").some(
-          (event) => event.nativeSessionId === suite.parentNativeSessionId && event.kind === "session_end",
-        ),
-        options,
-        dependencies,
-        "Claude parent SessionEnd",
-      );
+      await waitForClearParentEnd(database, agent, before, suite, options, dependencies);
       // A2 never substitutes an older summary while the ended parent's summary is pending.
       const observe = await runObserver(suite.repo, directory, suite.oboeteHome, options, dependencies);
       if (![0, 1].includes(observe.exitCode)) throw new Error(`Oboete observe exited ${observe.exitCode}.`);
-      await waitForLifecycleState(
-        database,
-        agent,
-        (snapshot) => ["done", "no_content"].includes(session(snapshot, suite.parentNativeSessionId)?.summaryState),
-        options,
-        dependencies,
-        `${agent} parent summary done or no_content`,
-      );
-      await waitForLifecycleState(
-        database,
-        agent,
-        (snapshot) =>
-          added(before, snapshot, "events").some(
-            (event) => event.kind === "session_start" && eventSource(event) === "clear",
-          ),
-        { ...options, contract: true },
-        dependencies,
-        "Claude SessionStart source=clear",
-      );
+      await waitForClearParentSummary(database, agent, suite, options, dependencies);
+      await waitForClaudeClearStart(database, agent, before, options, dependencies);
     }
     await readyTui(agent, opened.tui, options, dependencies);
     // /new's startup hook is lazy: capture A18's first-turn detection boundary before submitting.
@@ -1641,82 +1762,10 @@ async function runClearLifecycle(context) {
     agent === "codex"
       ? nativeSessionFromPrompt(beforePrompt, after, suite.parentNativeSessionId)
       : claudeNativeSessionFromStart(before, after, "clear");
-  return actionResult(
-    agent,
-    "clear",
-    started,
-    dependencies,
-    evaluateLifecycleCheck({
-      agent,
-      check: "clear",
-      before,
-      beforePrompt,
-      after,
-      parentNativeSessionId: suite.parentNativeSessionId,
-      childNativeSessionId,
-    }),
-    {
-      pane: path.join(directory, "pane.txt"),
-      argv: opened.argv,
-      eventDelta: eventDelta(before, after),
-      ...lifecycleEvidence(suite.root, ["clear/observe"]),
-    },
-  );
+  return clearLifecycleResult({ agent, started, dependencies, before, beforePrompt, after, suite, childNativeSessionId, directory, opened });
 }
 
-async function seedLifecycle(agent, context) {
-  const { options, runId, runDir, homes, dependencies } = context;
-  const root = path.join(runDir, "lifecycle", agent);
-  const repo = dependencies.gitInit(path.join(root, "repo"));
-  const git = await dependencies.runTimed(["git", "config", "remote.origin.url", SYNTHETIC_REMOTE], {
-    cwd: repo,
-    env: dependencies.childEnv(),
-    stdoutPath: path.join(root, "git.stdout.txt"),
-    stderrPath: path.join(root, "git.stderr.txt"),
-    timeoutMs: Math.min(15_000, options.timeoutMs),
-  });
-  if (git.exitCode !== 0) throw new Error(`Git remote setup exited ${git.exitCode}.`);
-
-  const oboeteHome = path.join(root, "oboete-home");
-  prepareOboeteHome(oboeteHome, homes.oboete);
-  const runtimeDir = path.join(root, "runtime");
-  const facts = factSet(`lifecycle-${runId}-${agent}`);
-  const seeded = await launchAgent(
-    agent,
-    path.join(root, "seed"),
-    repo,
-    buildFactSeedingPrompt(facts),
-    options,
-    homes,
-    dependencies,
-    oboeteHome,
-    { runtimeDir },
-  );
-  requireAgentSuccess(seeded, `${agent} seed`);
-  const noteCheck = assertAgentOutput(readIfPresent(path.join(repo, "NOTES.md")), facts);
-  if (!noteCheck.pass) throw new Error("The seed file is missing one or more lifecycle facts.");
-
-  const observerEnv = dependencies.childEnv(
-    { OBOETE_HOME: oboeteHome },
-    { credentials: !options.noCredentials },
-  );
-  const observe = await runObserver(repo, root, oboeteHome, options, dependencies);
-  if (![0, 1].includes(observe.exitCode)) throw new Error(`Oboete observe exited ${observe.exitCode}.`);
-  const search = await waitForSummary(repo, path.join(root, "search"), facts, options, dependencies, observerEnv);
-  if (!search.found) throw new Error("The seed summary was not found.");
-
-  const snapshot = dependencies.inspectLifecycle(databasePath(oboeteHome), agent);
-  if (snapshot.sessions.length !== 1) {
-    throw new Error(`Expected one seed session, found ${snapshot.sessions.length}.`);
-  }
-  fs.writeFileSync(path.join(repo, "NOTES.md"), "The lifecycle facts are intentionally hidden.\n");
-  // S1 owns the facts. S2 receives them only through its startup pack, so lifecycle actions
-  // cannot pass from a replay of the fact-seeding prompt, and S1 remains an ended summary source.
-  const parent = await launchAgent(
-    agent, path.join(root, "parent"), repo, DONE_PROMPT,
-    options, homes, dependencies, oboeteHome, { runtimeDir },
-  );
-  requireAgentSuccess(parent, `${agent} lifecycle parent`);
+function verifyLifecycleParent(agent, root, repo, oboeteHome, runtimeDir, dependencies, snapshot) {
   const after = dependencies.inspectLifecycle(databasePath(oboeteHome), agent);
   const parents = added(snapshot, after, "sessions");
   if (parents.length !== 1) {
@@ -1753,6 +1802,68 @@ async function seedLifecycle(agent, context) {
   };
 }
 
+function prepareLifecycleParent(oboeteHome, agent, dependencies, repo) {
+  const snapshot = dependencies.inspectLifecycle(databasePath(oboeteHome), agent);
+  if (snapshot.sessions.length !== 1) {
+    throw new Error(`Expected one seed session, found ${snapshot.sessions.length}.`);
+  }
+  fs.writeFileSync(path.join(repo, "NOTES.md"), "The lifecycle facts are intentionally hidden.\n");
+  return snapshot;
+}
+
+async function seedLifecycle(agent, context) {
+  const { options, runId, runDir, homes, dependencies } = context;
+  const root = path.join(runDir, "lifecycle", agent);
+  const repo = dependencies.gitInit(path.join(root, "repo"));
+  const git = await configureRemote(repo, root, options, dependencies);
+  if (git.exitCode !== 0) throw new Error(`Git remote setup exited ${git.exitCode}.`);
+
+  const oboeteHome = path.join(root, "oboete-home");
+  prepareOboeteHome(oboeteHome, homes.oboete);
+  const runtimeDir = path.join(root, "runtime");
+  const facts = factSet(`lifecycle-${runId}-${agent}`);
+  const seeded = await launchAgent({
+    agent,
+    directory: path.join(root, "seed"),
+    repo,
+    prompt: buildFactSeedingPrompt(facts),
+    options,
+    homes,
+    dependencies,
+    oboeteHome,
+    launch: { runtimeDir },
+  });
+  requireAgentSuccess(seeded, `${agent} seed`);
+  const noteCheck = assertAgentOutput(readIfPresent(path.join(repo, "NOTES.md")), facts);
+  if (!noteCheck.pass) throw new Error("The seed file is missing one or more lifecycle facts.");
+
+  const observerEnv = dependencies.childEnv(
+    { OBOETE_HOME: oboeteHome },
+    { credentials: !options.noCredentials },
+  );
+  const observe = await runObserver(repo, root, oboeteHome, options, dependencies);
+  if (![0, 1].includes(observe.exitCode)) throw new Error(`Oboete observe exited ${observe.exitCode}.`);
+  const search = await waitForSummary(repo, path.join(root, "search"), facts, options, dependencies, observerEnv);
+  if (!search.found) throw new Error("The seed summary was not found.");
+
+  const snapshot = prepareLifecycleParent(oboeteHome, agent, dependencies, repo);
+  // S1 owns the facts. S2 receives them only through its startup pack, so lifecycle actions
+  // cannot pass from a replay of the fact-seeding prompt, and S1 remains an ended summary source.
+  const parent = await launchAgent({
+    agent,
+    directory: path.join(root, "parent"),
+    repo,
+    prompt: DONE_PROMPT,
+    options,
+    homes,
+    dependencies,
+    oboeteHome,
+    launch: { runtimeDir },
+  });
+  requireAgentSuccess(parent, `${agent} lifecycle parent`);
+  return verifyLifecycleParent(agent, root, repo, oboeteHome, runtimeDir, dependencies, snapshot);
+}
+
 function lifecycleEvidence(root, legs) {
   const evidence = {};
   for (const stream of ["stdout", "stderr"]) {
@@ -1764,21 +1875,53 @@ function lifecycleEvidence(root, legs) {
   return evidence;
 }
 
+function recordLifecycleSeedFailure(agent, context, error) {
+  const reason = error instanceof Error ? error.message : String(error);
+  for (const check of LIFECYCLE_CHECKS) context.recordResult({
+    agent,
+    check,
+    elapsedMs: 0,
+    status: error instanceof PreconditionError ? "blocked" : "fail",
+    assertions: error.assertions ?? [],
+    reason,
+    ...lifecycleEvidence(path.join(context.runDir, "lifecycle", agent), ["seed", "observe", "search", "parent"]),
+  });
+}
+
+function recordLifecycleCheckFailure(agent, context, suite, check, started, checkBefore, error) {
+  let reason = error instanceof Error ? error.message : String(error);
+  let status = error instanceof PreconditionError ? "blocked" : "fail";
+  const evidence = lifecycleEvidence(suite.root, [check, `${check}-followup`, `${check}/observe`]);
+  const directory = path.join(suite.root, check);
+  const pane = path.join(directory, "pane.txt");
+  if (fs.existsSync(pane)) evidence.pane = pane;
+  if (checkBefore !== undefined) {
+    try {
+      const checkAfter = context.dependencies.inspectLifecycle(databasePath(suite.oboeteHome), agent);
+      evidence.eventDelta = eventDelta(checkBefore, checkAfter);
+    } catch (inspectionError) {
+      status = "fail";
+      reason += ` Evidence inspection failed: ${inspectionError instanceof Error ? inspectionError.message : String(inspectionError)}`;
+    }
+  }
+  context.dependencies.log(`[${agent}:${check}] ${status}: ${reason}`);
+  context.recordResult({
+    agent,
+    check,
+    elapsedMs: Math.max(0, context.dependencies.now() - started),
+    status,
+    assertions: suite.preconditions,
+    reason,
+    ...evidence,
+  });
+}
+
 async function runLifecycleAgent(agent, context) {
   let suite;
   try {
     suite = await seedLifecycle(agent, context);
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    for (const check of LIFECYCLE_CHECKS) context.recordResult({
-      agent,
-      check,
-      elapsedMs: 0,
-      status: error instanceof PreconditionError ? "blocked" : "fail",
-      assertions: error.assertions ?? [],
-      reason,
-      ...lifecycleEvidence(path.join(context.runDir, "lifecycle", agent), ["seed", "observe", "search", "parent"]),
-    });
+    recordLifecycleSeedFailure(agent, context, error);
     return;
   }
 
@@ -1799,31 +1942,7 @@ async function runLifecycleAgent(agent, context) {
       context.dependencies.log(`[${agent}:${check}] ${result.status}${reasonSuffix}`);
       context.recordResult({ ...result, assertions: [...suite.preconditions, ...result.assertions] });
     } catch (error) {
-      let reason = error instanceof Error ? error.message : String(error);
-      let status = error instanceof PreconditionError ? "blocked" : "fail";
-      const evidence = lifecycleEvidence(suite.root, [check, `${check}-followup`, `${check}/observe`]);
-      const directory = path.join(suite.root, check);
-      const pane = path.join(directory, "pane.txt");
-      if (fs.existsSync(pane)) evidence.pane = pane;
-      if (checkBefore !== undefined) {
-        try {
-          const checkAfter = context.dependencies.inspectLifecycle(databasePath(suite.oboeteHome), agent);
-          evidence.eventDelta = eventDelta(checkBefore, checkAfter);
-        } catch (inspectionError) {
-          status = "fail";
-          reason += ` Evidence inspection failed: ${inspectionError instanceof Error ? inspectionError.message : String(inspectionError)}`;
-        }
-      }
-      context.dependencies.log(`[${agent}:${check}] ${status}: ${reason}`);
-      context.recordResult({
-        agent,
-        check,
-        elapsedMs: Math.max(0, context.dependencies.now() - started),
-        status,
-        assertions: suite.preconditions,
-        reason,
-        ...evidence,
-      });
+      recordLifecycleCheckFailure(agent, context, suite, check, started, checkBefore, error);
     }
   }
 }
@@ -1893,30 +2012,7 @@ function writeDaily(report, repoRoot) {
   }
 }
 
-export async function runHarness(options, overrides = {}) {
-  const dependencies = {
-    runTimed,
-    gitInit,
-    childEnv,
-    inspectLifecycle,
-    observerLeaseIsFree,
-    tmux,
-    tuiSession: tmuxSession,
-    sleep,
-    now: Date.now,
-    env: process.env,
-    home: os.homedir(),
-    repoRoot: REPO_ROOT,
-    log: (message) => console.error(message),
-    ...overrides,
-  };
-  const started = new Date(dependencies.now());
-  const runId = runIdNow(started);
-  const runDir = path.resolve(options.runDir ?? path.join(dependencies.home, ".cache", "oboete-e2e", runId));
-  const homes = resolveSourceHomes(dependencies.env, dependencies.home);
-  fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
-
-  const results = [];
+function createReportReader(options, runId, runDir, started, dependencies, results) {
   const reportNow = options.lifecycle
     ? () =>
         createLifecycleReport({
@@ -1942,6 +2038,34 @@ export async function runHarness(options, overrides = {}) {
           requestedPairs: options.pairs.length,
           results,
         });
+  return reportNow;
+}
+
+export async function runHarness(options, overrides = {}) {
+  const dependencies = {
+    runTimed,
+    gitInit,
+    childEnv,
+    inspectLifecycle,
+    observerLeaseIsFree,
+    tmux,
+    tuiSession: tmuxSession,
+    sleep,
+    now: Date.now,
+    env: process.env,
+    home: os.homedir(),
+    repoRoot: REPO_ROOT,
+    log: (message) => console.error(message),
+    ...overrides,
+  };
+  const started = new Date(dependencies.now());
+  const runId = runIdNow(started);
+  const runDir = path.resolve(options.runDir ?? path.join(dependencies.home, ".cache", "oboete-e2e", runId));
+  const homes = resolveSourceHomes(dependencies.env, dependencies.home);
+  fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
+
+  const results = [];
+  const reportNow = createReportReader(options, runId, runDir, started, dependencies, results);
   if (options.lifecycle) {
     const recordResult = (result) => {
       results.push(result);

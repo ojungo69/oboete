@@ -112,6 +112,10 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
 }
 
+function closeProbeFile(fd) {
+  if (fd !== undefined) fs.closeSync(fd);
+}
+
 export function blockAgentApiFailure(dir, result) {
   if (!result || !["fail", "blocked"].includes(result.status)) return result;
   let entries;
@@ -132,7 +136,7 @@ export function blockAgentApiFailure(dir, result) {
     } catch {
       continue;
     } finally {
-      if (fd !== undefined) fs.closeSync(fd);
+      closeProbeFile(fd);
     }
     const line = text.split(/\r?\n/).find((value) => agents.AGENT_OUTAGE_RE.test(value));
     if (!line) continue;
@@ -143,13 +147,7 @@ export function blockAgentApiFailure(dir, result) {
   return result;
 }
 
-async function main() {
-  const opts = parseArgs(process.argv.slice(2));
-  const all = await loadProbes();
-  if (opts.list) {
-    for (const p of all) console.log(`${p.id}\t${p.agent}\t${p.row}`);
-    return;
-  }
+function selectProbes(all, opts) {
   let selected = all;
   if (opts.run) {
     const ids = opts.run.split(",").map((s) => s.trim()).filter(Boolean);
@@ -164,6 +162,64 @@ async function main() {
   } else if (!opts.all) {
     usage(2);
   }
+  return selected;
+}
+
+function probeContext(dir, runRoot, runId, repoRoot, grokSeed, grokSeedError, probe) {
+  const ctx = {
+    dir,
+    runRoot,
+    runId,
+    repoRoot,
+    grokSeed,
+    grokSeedError,
+    log: (...a) => console.error(`[${probe.id}]`, ...a),
+    claude: agents.claude,
+    codex: agents.codex,
+    grok: agents.grok,
+    pi: agents.pi,
+    seedGrokHome: agents.seedGrokHome,
+  };
+  return ctx;
+}
+
+function probeFailure(e) {
+  let result;
+  const evidence = [String(e?.stack ? e.stack : e)];
+  if (/probe timeout /.test(String(e?.message ? e.message : e))) {
+    tmux(["kill-server"]);
+    evidence.push("tmux server oboete-probes killed");
+  }
+  result = { status: "fail", evidence };
+  return result;
+}
+
+async function runProbe(probe, ctx, grokSeedError) {
+  let result;
+  const needsGrok = probe.agent === "grok" || probe.id === "agent-cli-json";
+  if (needsGrok && grokSeedError) {
+    result = { status: "blocked", evidence: ["grok seed failed: " + grokSeedError] };
+  } else {
+    try {
+      result = await withTimeout(probe.run(ctx), PROBE_MS, probe.id);
+      if (!result || !["pass", "fail", "blocked", "skipped"].includes(result.status)) {
+        result = { status: "fail", evidence: ["invalid result status"], data: result };
+      }
+    } catch (e) {
+      result = probeFailure(e);
+    }
+  }
+  return result;
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const all = await loadProbes();
+  if (opts.list) {
+    for (const p of all) console.log(`${p.id}\t${p.agent}\t${p.row}`);
+    return;
+  }
+  const selected = selectProbes(all, opts);
 
   const repoRoot = path.resolve(HERE, "../..");
   const runId = runIdNow();
@@ -185,41 +241,10 @@ async function main() {
   for (const probe of selected) {
     const dir = path.join(runRoot, probe.id);
     fs.mkdirSync(dir, { recursive: true });
-    const ctx = {
-      dir,
-      runRoot,
-      runId,
-      repoRoot,
-      grokSeed,
-      grokSeedError,
-      log: (...a) => console.error(`[${probe.id}]`, ...a),
-      claude: agents.claude,
-      codex: agents.codex,
-      grok: agents.grok,
-      pi: agents.pi,
-      seedGrokHome: agents.seedGrokHome,
-    };
+    const ctx = probeContext(dir, runRoot, runId, repoRoot, grokSeed, grokSeedError, probe);
     ctx.log("start");
     const started = Date.now();
-    let result;
-    const needsGrok = probe.agent === "grok" || probe.id === "agent-cli-json";
-    if (needsGrok && grokSeedError) {
-      result = { status: "blocked", evidence: ["grok seed failed: " + grokSeedError] };
-    } else {
-      try {
-        result = await withTimeout(probe.run(ctx), PROBE_MS, probe.id);
-        if (!result || !["pass", "fail", "blocked", "skipped"].includes(result.status)) {
-          result = { status: "fail", evidence: ["invalid result status"], data: result };
-        }
-      } catch (e) {
-        const evidence = [String(e?.stack ? e.stack : e)];
-        if (/probe timeout /.test(String(e?.message ? e.message : e))) {
-          tmux(["kill-server"]);
-          evidence.push("tmux server oboete-probes killed");
-        }
-        result = { status: "fail", evidence };
-      }
-    }
+    const result = await runProbe(probe, ctx, grokSeedError);
     blockAgentApiFailure(dir, result);
     result.id = probe.id;
     result.agent = probe.agent;
