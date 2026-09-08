@@ -58,25 +58,26 @@ sudo -u oboete-dogfood -H bash -lc 'rm -rf ~/candidate ~/candidate-homes && mkdi
   && npm install --prefix ~/candidate <tarball> && sha256sum ~/candidate/node_modules/oboete/dist/oboete.mjs'
 # A token refresh retires the old refresh token server-side, so a credential file the candidate run owns and then
 # deletes leaves the account holding a token the server has already dropped -- on 2026-09-08 that cost the dogfood
-# account its Claude login and needed an interactive re-login. Symlinks let a refresh write through to the real file.
-sudo -u oboete-dogfood -H bash -lc 'ln -sfn ~/.claude/.credentials.json ~/candidate-homes/claude/.credentials.json \
-  && ln -sfn ~/.codex/auth.json ~/candidate-homes/codex/auth.json && ln -sfn ~/.grok/auth.json ~/candidate-homes/grok/auth.json \
-  && ln -sfn ~/.pi/agent/auth.json ~/candidate-homes/pi/auth.json'
+# account its Claude login and needed an interactive re-login. Claude reads its credentials from the configured home
+# the whole run through (`prepareClaudeAgent` copies only settings.json), so a symlink there writes a refresh back to
+# the real file. That is the only agent the symlink reaches: `prepareCodexAgent`, `prepareGrokAgent` and
+# `preparePiAgent` copy `auth.json` again into each leg's own directory, so a refresh inside a leg is written to that
+# copy and lost, and the account's token is retired all the same (issue #175).
+sudo -u oboete-dogfood -H bash -lc 'ln -sfn ~/.claude/.credentials.json ~/candidate-homes/claude/.credentials.json'
 CAND='export OBOETE_HOME=$HOME/candidate-homes/oboete CLAUDE_CONFIG_DIR=$HOME/candidate-homes/claude CODEX_HOME=$HOME/candidate-homes/codex GROK_HOME=$HOME/candidate-homes/grok PI_CODING_AGENT_DIR=$HOME/candidate-homes/pi PATH=$HOME/candidate/node_modules/.bin:$PATH; set -a; . $HOME/.oboete-credentials; set +a'
 sudo -u oboete-dogfood -H bash -lc "$CAND; oboete setup --agents claude,codex,grok --provider workers-ai --yes --json"
 # Pi is left out of --agents on purpose: setup declines to write the loader whenever PI_CODING_AGENT_DIR points
-# away from $HOME/.pi/agent (src/setup/setup.ts:464, issue #174). Write $PI_CODING_AGENT_DIR/extensions/oboete.js
-# by hand, mode 600, with exactly what writePi would have written -- three lines, candidate paths:
-#   // oboete:managed written by `oboete setup`; `oboete setup --remove` deletes it.
-#   import { piExtension } from "file://$HOME/candidate/node_modules/oboete/dist/pi-extension.mjs";
-#   export default (pi) => piExtension(pi, { node: "/usr/bin/node", bundle: "$HOME/candidate/node_modules/oboete/dist/oboete.mjs" });
-# Without it Pi keeps the copied loader, which names the daily install, and its six pairs say nothing about the candidate.
-# Session transcripts and rotated backups quote whichever bundle path they were written under, so the check reads
-# only live configuration; scanning the whole copied home makes it unpassable on any account with history.
-sudo -u oboete-dogfood -H bash -lc "$CAND; set -o pipefail && grep -rhoE \"[^\\\"' ]*node_modules/oboete/dist/oboete[.]mjs\" \
-  --exclude='*.jsonl' --exclude='*.backup.*' --exclude='*.oboete-backup' --exclude='*.log' --exclude-dir=projects --exclude-dir=sessions --exclude-dir=history \
-  \$CLAUDE_CONFIG_DIR \$CODEX_HOME \$GROK_HOME \$PI_CODING_AGENT_DIR | sort | uniq -c | tee /dev/stderr \
-  | awk -v want=\"\$HOME/candidate/node_modules/oboete/dist/oboete.mjs\" 'BEGIN { n = 0 } \$2 != want { print \"non-candidate bundle reference: \" \$2 > \"/dev/stderr\"; bad = 1 } { n += \$1 } END { if (bad || n == 0) exit 1 }'"
+# away from $HOME/.pi/agent (src/setup/setup.ts:464, issue #174). Write the loader instead -- the paths must be
+# absolute and expanded, which is why this is a command and not a block to retype. Without it Pi keeps the copied
+# loader, which names the daily install, and its six pairs say nothing about the candidate.
+sudo -u oboete-dogfood -H bash -lc 'B=$HOME/candidate/node_modules/oboete/dist; D=$HOME/candidate-homes/pi/extensions; mkdir -p $D; umask 177; { echo "// oboete:managed written by \`oboete setup\`; \`oboete setup --remove\` deletes it."; echo "import { piExtension } from \"file://$B/pi-extension.mjs\";"; echo "export default (pi) => piExtension(pi, { node: \"$(command -v node)\", bundle: \"$B/oboete.mjs\" });"; } > $D/oboete.js'
+# The check names the configuration files `oboete setup` writes, plus the loader above. A recursive scan of the
+# copied homes cannot work: session transcripts, rotated backups and agent history quote whichever bundle path they
+# were written under, and no exclusion list stays right as the agents add directories. The counts go through a
+# variable rather than `tee /dev/stderr`, which is not writable when the command runs under `sudo -u`.
+sudo -u oboete-dogfood -H bash -lc "$CAND; refs=\$(grep -hoE \"[^\\\"' ]*node_modules/oboete/dist/oboete[.]mjs\" \
+  \$CLAUDE_CONFIG_DIR/settings.json \$CODEX_HOME/config.toml \$CODEX_HOME/hooks.json \$GROK_HOME/config.toml \$GROK_HOME/hooks/oboete.json \$PI_CODING_AGENT_DIR/extensions/oboete.js | sort | uniq -c); \
+  printf '%s\n' \"\$refs\"; printf '%s\n' \"\$refs\" | awk -v want=\"\$HOME/candidate/node_modules/oboete/dist/oboete.mjs\" 'BEGIN { n = 0 } \$2 != want { print \"non-candidate bundle reference: \" \$2; bad = 1 } { n += \$1 } END { if (bad || n == 0) exit 1 }'"
 sudo -u oboete-dogfood -H bash -lc "$CAND; node /var/tmp/oboete-harness/scripts/e2e/isolated-user.mjs --daily --pairs all"
 # when lifecycle code or the TUI changed:
 sudo -u oboete-dogfood -H bash -lc "$CAND; node /var/tmp/oboete-harness/scripts/e2e/isolated-user.mjs --lifecycle --agents claude,codex"
@@ -84,7 +85,7 @@ sudo -u oboete-dogfood -H bash -lc "$CAND; oboete doctor --probe-provider"   # t
 sudo -u oboete-dogfood -H bash -lc 'rm -rf ~/candidate ~/candidate-homes' && sudo rm -rf /var/tmp/oboete-harness
 ```
 
-Expected: the installed bundle's `sha256sum` equals the tarball's `dist/oboete.mjs` hash; `oboete setup` exits 0 for the three agents it can wire (the copied consent record satisfies `--yes`); the `uniq -c` output lists exactly one distinct bundle path, under `candidate/node_modules/oboete/dist/`, with a count covering the hook and MCP entries `oboete setup` wrote plus the hand-written Pi loader (a second path, or one under the daily install, fails the check); `12 of 12 pairs pass`; in the doctor table every `agent:` row healthy, which is what says the candidate is the bundle the agents actually loaded. Run right after the pairs, `worker` reads `degraded` because that run's worker exited still holding the lease, and `catalog` reads `unverified`; both are the run's own leftovers, and `oboete doctor` exits 1 on the first of them. A failing row is not evidence about the bundle until the agent's own `result` field has been read: an expired login fails a pair exactly the way a broken build does. Candidate SHA, both hashes, run id, and both lines go into the PR body. The daily cron's install, its real `~/.oboete`, and its agent configurations are untouched; the copies are removed afterwards.
+Expected: the installed bundle's `sha256sum` equals the tarball's `dist/oboete.mjs` hash; `oboete setup` exits 0 for the three agents it can wire (the copied consent record satisfies `--yes`); the `uniq -c` output lists exactly one distinct bundle path, under `candidate/node_modules/oboete/dist/`, with a count of 27 across the six files -- 8 in Claude's `settings.json`, 1 + 7 in Codex's `config.toml` and `hooks.json`, 1 + 9 in Grok's, 1 in the Pi loader (a second path, or one under the daily install, fails the check); `12 of 12 pairs pass`; in the doctor table every `agent:` row healthy, which is what says the candidate is the bundle the agents actually loaded. Run right after the pairs, `worker` reads `degraded` because that run's worker exited still holding the lease, and `catalog` reads `unverified`; both are the run's own leftovers, and `oboete doctor` exits 1 on the first of them. A failing row is not evidence about the bundle until the agent's own `result` field has been read: an expired login fails a pair exactly the way a broken build does. Candidate SHA, both hashes, run id, and both lines go into the PR body. The daily cron's install, its real `~/.oboete`, and its agent configurations are untouched; the copies are removed afterwards.
 
 ## Service counts (after each merge's analysis)
 
