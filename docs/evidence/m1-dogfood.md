@@ -515,10 +515,14 @@ alone, passes it with `--settings` and sets no home variable, so the CLI reads t
 `auth.json` the way the Grok one does, so the same hazard is open for them and has only not been hit
 yet.
 
-The daily run therefore has a one-run budget for Grok. Restoring the login makes the next run pass and
-then breaks it the same way, so SC-007 counts this failure as traced to #175 rather than to oboete,
-and the fix belongs there: let each agent read the account's own credential file instead of a per-leg
-copy of it, which is what the Claude leg already does.
+How long a restored login lasts is a question about the token, not about the number of runs: the
+account's `auth.json` was last written on 2026-09-07 00:17 and the runs of 2026-09-08 05:23 and
+2026-09-08 15:05 both started from it, the first passing 12 of 12. What ends it is the first leg whose
+copy has to refresh — the copy gets the new token, the account's file keeps the retired one, and every
+later leg starts from a credential the server no longer accepts. Restoring the login buys another such
+interval, not a fixed number of runs, so SC-007 counts this failure as traced to #175 rather than to
+oboete, and the fix belongs there: let each agent read the account's own credential file instead of a
+per-leg copy of it, which is what the Claude leg already does.
 
 
 - Filed against the release (SC-007): https://github.com/ojungo69/oboete/issues/180
