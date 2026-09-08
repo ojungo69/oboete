@@ -348,6 +348,15 @@ function normalizeSpecs(defaults, opts) {
   return list;
 }
 
+function buildHookGroup(agent, event, spec, handler) {
+  const group = { hooks: [handler] };
+  if (spec.matcher) group.matcher = spec.matcher;
+  else if (agent === "codex" && event === "SessionStart") {
+    group.matcher = "startup|resume|clear|compact";
+  }
+  return group;
+}
+
 function buildHooksJson(agent, hookPath, eventsPath, specs) {
   const hooks = {};
   for (const spec of specs) {
@@ -357,12 +366,7 @@ function buildHooksJson(agent, hookPath, eventsPath, specs) {
     if (event === "SessionEnd") timeout = agent === "codex" ? 3 : 10;
     const handler = { type: "command", command: hookCommand(hookPath, eventsPath, label, spec.flags || []), timeout };
     if (!hooks[event]) {
-      const group = { hooks: [handler] };
-      if (spec.matcher) group.matcher = spec.matcher;
-      else if (agent === "codex" && event === "SessionStart") {
-        group.matcher = "startup|resume|clear|compact";
-      }
-      hooks[event] = [group];
+      hooks[event] = [buildHookGroup(agent, event, spec, handler)];
     } else {
       hooks[event][0].hooks.push(handler);
     }
@@ -418,58 +422,71 @@ export function parseJsonl(text) {
     .filter(Boolean);
 }
 
+function claudeEnvelopeMeta(envelope, meta) {
+  const env = envelope;
+  meta.sessionId = env?.session_id || null;
+  const mu = env?.modelUsage || {};
+  let best = -1;
+  for (const [id, u] of Object.entries(mu)) {
+    const n = (u && (u.output_tokens ?? u.outputTokens)) || 0;
+    if (n > best) {
+      best = n;
+      meta.model = id;
+    }
+  }
+}
+
+function codexEnvelopeMeta(proc, events, meta) {
+  for (const line of parseJsonl(proc.stdout)) {
+    if (line.type === "thread.started") meta.sessionId = line.thread_id || line.threadId || meta.sessionId;
+  }
+  for (const ev of events) {
+    const s = ev.stdin || {};
+    if (s.model) meta.model = s.model;
+    if (s.session_id) meta.sessionId = meta.sessionId || s.session_id;
+  }
+}
+
+function grokEnvelopeMeta(envelope, events, meta) {
+  const env = envelope;
+  meta.sessionId = env?.sessionId || env?.session_id || null;
+  const mu = env?.modelUsage || {};
+  meta.model = Object.keys(mu)[0] || null;
+  for (const ev of events) {
+    const s = ev.stdin || {};
+    meta.sessionId = meta.sessionId || s.sessionId || s.session_id;
+  }
+}
+
+function piEnvelopeMeta(proc, events, meta) {
+  const lines = parseJsonl(proc.stdout);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].type === "turn_end" && lines[i].message?.model) {
+      meta.model = lines[i].message.model;
+      break;
+    }
+  }
+  for (const ev of events) {
+    if (ev.sessionId) meta.sessionId = ev.sessionId;
+  }
+}
+
+function eventSessionId(events, sessionId) {
+  for (const ev of events) {
+    const s = ev.stdin || {};
+    sessionId = s.session_id || s.sessionId || sessionId;
+  }
+  return sessionId;
+}
+
 function envelopeMeta(agent, proc, events, envelope) {
-  let sessionId = null;
-  let model = null;
-  if (agent === "claude") {
-    const env = envelope;
-    sessionId = env?.session_id || null;
-    const mu = env?.modelUsage || {};
-    let best = -1;
-    for (const [id, u] of Object.entries(mu)) {
-      const n = (u && (u.output_tokens ?? u.outputTokens)) || 0;
-      if (n > best) {
-        best = n;
-        model = id;
-      }
-    }
-  } else if (agent === "codex") {
-    for (const line of parseJsonl(proc.stdout)) {
-      if (line.type === "thread.started") sessionId = line.thread_id || line.threadId || sessionId;
-    }
-    for (const ev of events) {
-      const s = ev.stdin || {};
-      if (s.model) model = s.model;
-      if (s.session_id) sessionId = sessionId || s.session_id;
-    }
-  } else if (agent === "grok") {
-    const env = envelope;
-    sessionId = env?.sessionId || env?.session_id || null;
-    const mu = env?.modelUsage || {};
-    model = Object.keys(mu)[0] || null;
-    for (const ev of events) {
-      const s = ev.stdin || {};
-      sessionId = sessionId || s.sessionId || s.session_id;
-    }
-  } else if (agent === "pi") {
-    const lines = parseJsonl(proc.stdout);
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (lines[i].type === "turn_end" && lines[i].message?.model) {
-        model = lines[i].message.model;
-        break;
-      }
-    }
-    for (const ev of events) {
-      if (ev.sessionId) sessionId = ev.sessionId;
-    }
-  }
-  if (!sessionId) {
-    for (const ev of events) {
-      const s = ev.stdin || {};
-      sessionId = s.session_id || s.sessionId || sessionId;
-    }
-  }
-  return { sessionId, model };
+  const meta = { sessionId: null, model: null };
+  if (agent === "claude") claudeEnvelopeMeta(envelope, meta);
+  else if (agent === "codex") codexEnvelopeMeta(proc, events, meta);
+  else if (agent === "grok") grokEnvelopeMeta(envelope, events, meta);
+  else if (agent === "pi") piEnvelopeMeta(proc, events, meta);
+  if (!meta.sessionId) meta.sessionId = eventSessionId(events, meta.sessionId);
+  return meta;
 }
 
 export function piContentText(content) {
@@ -480,44 +497,66 @@ export function piContentText(content) {
     .join("");
 }
 
-export function finalText(agent, proc, events) {
-  if (agent === "claude") {
-    const env = parseMaybeJson(proc.stdout);
-    if (typeof env?.result === "string") return env.result;
+function claudeFinalText(proc) {
+  const env = parseMaybeJson(proc.stdout);
+  return typeof env?.result === "string" ? env.result : undefined;
+}
+
+function codexFinalText(proc) {
+  for (const line of parseJsonl(proc.stdout).reverse()) {
+    if (line.type === "item.completed" && line.item?.text) return line.item.text;
   }
-  if (agent === "codex") {
-    for (const line of parseJsonl(proc.stdout).reverse()) {
-      if (line.type === "item.completed" && line.item?.text) return line.item.text;
+  return undefined;
+}
+
+function grokFinalText(proc, events) {
+  for (const ev of events) {
+    if (ev.event === "Stop") {
+      const s = ev.stdin || {};
+      if (s.reason === "end_turn" && s.lastAssistantMessage) return s.lastAssistantMessage;
     }
   }
-  if (agent === "grok") {
-    for (const ev of events) {
-      if (ev.event === "Stop") {
-        const s = ev.stdin || {};
-        if (s.reason === "end_turn" && s.lastAssistantMessage) return s.lastAssistantMessage;
-      }
+  const env = parseMaybeJson(proc.stdout);
+  return typeof env?.text === "string" ? env.text : undefined;
+}
+
+// Pi is the one agent with no fall-through: an unrecognised transcript is its trimmed stdout.
+function piFinalText(proc) {
+  const lines = parseJsonl(proc.stdout);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i];
+    if (l.type === "turn_end" || l.type === "message_end") {
+      const t = piContentText(l.message?.content);
+      if (t) return t;
     }
-    const env = parseMaybeJson(proc.stdout);
-    if (typeof env?.text === "string") return env.text;
   }
-  if (agent === "pi") {
-    const lines = parseJsonl(proc.stdout);
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const l = lines[i];
-      if (l.type === "turn_end" || l.type === "message_end") {
-        const t = piContentText(l.message?.content);
-        if (t) return t;
-      }
-    }
-    return proc.stdout.trim();
-  }
+  return proc.stdout.trim();
+}
+
+// The first Stop event answers for every agent that has one, even when its message is empty.
+function stopEventText(events) {
   for (const ev of events) {
     if (ev.event === "Stop") {
       const s = ev.stdin || {};
       return s.last_assistant_message || s.lastAssistantMessage || "";
     }
   }
-  return proc.stdout.slice(-2000);
+  return undefined;
+}
+
+function agentFinalText(agent, proc, events) {
+  if (agent === "claude") return claudeFinalText(proc);
+  if (agent === "codex") return codexFinalText(proc);
+  if (agent === "grok") return grokFinalText(proc, events);
+  if (agent === "pi") return piFinalText(proc);
+  return undefined;
+}
+
+export function finalText(agent, proc, events) {
+  const own = agentFinalText(agent, proc, events);
+  if (own !== undefined) return own;
+  const stop = stopEventText(events);
+  return stop === undefined ? proc.stdout.slice(-2000) : stop;
 }
 
 function packResult(agent, dir, repo, tree, proc, eventsPath) {
@@ -772,9 +811,7 @@ function flattenOneLevel(stdin) {
   return out;
 }
 
-export function compactionIdentity(posts) {
-  const payloads = (posts || []).map((e) => flattenOneLevel(e?.stdin));
-  const n = payloads.length;
+function compactionCandidates(payloads) {
   const keySet = new Set();
   for (const p of payloads) {
     for (const k of Object.keys(p)) {
@@ -782,7 +819,13 @@ export function compactionIdentity(posts) {
       if (COMPACTION_KEY_EXACT.test(k) || COMPACTION_KEY_SUFFIX.test(k)) keySet.add(k);
     }
   }
-  const candidates = [...keySet];
+  return [...keySet];
+}
+
+export function compactionIdentity(posts) {
+  const payloads = (posts || []).map((e) => flattenOneLevel(e?.stdin));
+  const n = payloads.length;
+  const candidates = compactionCandidates(payloads);
   const values = payloads.map((p) => Object.fromEntries(candidates.map((k) => [k, p[k]])));
   if (n === 1) {
     return { ok: false, candidates, values, n, note: `single observation; candidate keys = [${candidates.join(", ")}]` };
@@ -872,6 +915,35 @@ export function writeFixture(repoRoot, rel, obj) {
   return dest;
 }
 
+function recordShapeSuccess(options) {
+  const { native, exp, r, preEvent, postEvent, evidence, ctx, fixtureDir, agent, version, captured_at, pre, post } = options;
+  const inKeys = topKeys(toolInputOf(pre) || toolInputOf(post));
+  let outKeys = topKeys(toolOutputOf(post));
+  if (post.stdin && "details" in post.stdin && !outKeys.includes("details")) outKeys = [...outKeys, "details"];
+  const diff = exp.output
+    ? `${keyDiff(inKeys, exp.input)}; out ${keyDiff(outKeys, exp.output)}`
+    : keyDiff(inKeys, exp.input);
+  evidence.push(`${native} input=[${inKeys.join(",")}] output=[${outKeys.join(",")}] path=${exp.path} (${diff})`);
+  const events = {
+    [preEvent]: redactValue(pre.stdin, r.repo),
+    [postEvent]: redactValue(post.stdin, r.repo),
+  };
+  writeFixture(ctx.repoRoot, `test/contracts/${fixtureDir}/${exp.file}`, {
+    agent,
+    agent_version: version,
+    captured_at,
+    native_tool: native,
+    normalized_tool: exp.normalized,
+    events,
+    notes: exp.path,
+  });
+}
+
+function recordMissingShape(native, pre, post, preEvent, postEvent, evidence, missing) {
+  missing.push(native);
+  evidence.push(`${native}: missing ${!pre ? preEvent : ""}${!post ? postEvent : ""}`);
+}
+
 export function shapeProbe({ agent, expected, launch, preEvent = "PreToolUse", postEvent = "PostToolUse", fixtureDir }) {
   return async (ctx) => {
     const r = await launch(ctx);
@@ -882,29 +954,23 @@ export function shapeProbe({ agent, expected, launch, preEvent = "PreToolUse", p
     for (const [native, exp] of Object.entries(expected)) {
       const { pre, post } = pairFor(r.events, native, preEvent, postEvent);
       if (!pre || !post) {
-        missing.push(native);
-        evidence.push(`${native}: missing ${!pre ? preEvent : ""}${!post ? postEvent : ""}`);
+        recordMissingShape(native, pre, post, preEvent, postEvent, evidence, missing);
         continue;
       }
-      const inKeys = topKeys(toolInputOf(pre) || toolInputOf(post));
-      let outKeys = topKeys(toolOutputOf(post));
-      if (post.stdin && "details" in post.stdin && !outKeys.includes("details")) outKeys = [...outKeys, "details"];
-      const diff = exp.output
-        ? `${keyDiff(inKeys, exp.input)}; out ${keyDiff(outKeys, exp.output)}`
-        : keyDiff(inKeys, exp.input);
-      evidence.push(`${native} input=[${inKeys.join(",")}] output=[${outKeys.join(",")}] path=${exp.path} (${diff})`);
-      const events = {
-        [preEvent]: redactValue(pre.stdin, r.repo),
-        [postEvent]: redactValue(post.stdin, r.repo),
-      };
-      writeFixture(ctx.repoRoot, `test/contracts/${fixtureDir}/${exp.file}`, {
+      recordShapeSuccess({
+        native,
+        exp,
+        r,
+        preEvent,
+        postEvent,
+        evidence,
+        ctx,
+        fixtureDir,
         agent,
-        agent_version: version,
+        version,
         captured_at,
-        native_tool: native,
-        normalized_tool: exp.normalized,
-        events,
-        notes: exp.path,
+        pre,
+        post,
       });
     }
     evidence.push(

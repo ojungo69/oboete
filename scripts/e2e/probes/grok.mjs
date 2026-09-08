@@ -189,6 +189,16 @@ function labeledMcpMethods(frames) {
   return frames.filter((f) => f.frame?.method).map((f) => `${f.dir}:${f.frame.method}`);
 }
 
+function previousPostTime(posts, tPost) {
+  const prevPost = [...posts].reverse().find((p) => (Date.parse(p.at) || 0) < tPost);
+  return prevPost ? Date.parse(prevPost.at) || 0 : Number.NEGATIVE_INFINITY;
+}
+
+function injectionFailure(viol, post, matchingPre) {
+  const extra = matchingPre ? "" : " (no PreCompact recorded)";
+  return { ok: false, note: `violator ${viol.event}@${viol.at} before PostCompact@${post.at}${extra}` };
+}
+
 function injectionOrder(events) {
   const posts = named(events, "PostCompact");
   const pres = named(events, "PreCompact");
@@ -206,8 +216,7 @@ function injectionOrder(events) {
       tPre = Date.parse(matchingPre.at) || 0;
     } else {
       missingPre = true;
-      const prevPost = [...posts].reverse().find((p) => (Date.parse(p.at) || 0) < tPost);
-      tPre = prevPost ? Date.parse(prevPost.at) || 0 : Number.NEGATIVE_INFINITY;
+      tPre = previousPostTime(posts, tPost);
     }
     const viol = events.find((e) => {
       if (!isInj(e)) return false;
@@ -215,13 +224,22 @@ function injectionOrder(events) {
       return t >= tPre && t < tPost;
     });
     if (viol) {
-      const extra = matchingPre ? "" : " (no PreCompact recorded)";
-      return { ok: false, note: `violator ${viol.event}@${viol.at} before PostCompact@${post.at}${extra}` };
+      return injectionFailure(viol, post, matchingPre);
     }
   }
   const last = posts[posts.length - 1];
   const extra = missingPre ? "; no PreCompact recorded" : "";
   return { ok: true, note: `all injections after matching PreCompact have at >= PostCompact.at (last@${last.at})${extra}` };
+}
+
+function captureGrokPane(tmux) {
+  let pane = "";
+  try {
+    pane = tmux ? tmux.capture() : "";
+  } catch {
+    /* ignore */
+  }
+  return pane;
 }
 
 async function tuiTwoCompact(dir, { home, repo }) {
@@ -248,12 +266,7 @@ async function tuiTwoCompact(dir, { home, repo }) {
     fs.writeFileSync(paneFile, pane);
     return { ok: true, pane };
   } catch (e) {
-    let pane = "";
-    try {
-      pane = tmux ? tmux.capture() : "";
-    } catch {
-      /* ignore */
-    }
+    const pane = captureGrokPane(tmux);
     try {
       fs.writeFileSync(paneFile, pane + "\nERR " + String(e?.message ? e.message : e));
     } catch {
@@ -267,6 +280,193 @@ async function tuiTwoCompact(dir, { home, repo }) {
       /* ignore */
     }
   }
+}
+
+function describeGrokCompact(ev) {
+  const s = ev?.stdin || {};
+  const sum = summaryOf(s);
+  return {
+    at: ev.at,
+    keys: topKeys(s),
+    matcher: s.matcher ?? s.trigger ?? s.compactTrigger ?? s.source ?? null,
+    summary: sum.field
+      ? { name: sum.field, length: sum.length, preview: typeof s[sum.field] === "string" ? s[sum.field].slice(0, 120) : null }
+      : null,
+  };
+}
+
+function grokPostcompactStatus(options) {
+  const { posts, tuiPosts, allPostEvs, ident, bOk, bNote, tui, evidence } = options;
+  let status;
+  if (!posts.length && !tuiPosts.length) {
+    status = "blocked";
+    evidence.push("no PostCompact fired; could not force compaction");
+    if (!tui.ok) {
+      evidence.push(
+        "TUI manual steps: GROK_HOME=<tui grok-home> grok --cwd <repo> --yolo ; wait ready ; /compact Enter ; wait ; /compact Enter ; compare the two PostCompact stdin payloads for a native id/counter/timestamp",
+      );
+    }
+  } else if (allPostEvs.length < 2) {
+    status = "blocked";
+    evidence.push("only one PostCompact; identity (a) untested. TUI two /compact did not yield a second event");
+    if (!tui.ok) {
+      evidence.push(
+        "TUI manual steps: GROK_HOME=<tui grok-home> grok --cwd <repo> --yolo ; /compact twice in one session ; capture PostCompact stdin",
+      );
+    }
+  } else if (!ident.ok) {
+    status = "fail";
+    evidence.push("(a) failed: two PostCompact not distinguishable (A16 default)");
+  } else if (!bOk) {
+    status = "fail";
+    evidence.push("(b) failed: " + bNote);
+  } else {
+    status = "pass";
+  }
+  return status;
+}
+
+function grokHeadlessCompact(r) {
+  const preC = named(r.events, "PreCompact");
+  const postC = named(r.events, "PostCompact");
+  const posts = postC.map(describeGrokCompact);
+  const pres = preC.map(describeGrokCompact);
+  const bHead = injectionOrder(r.events);
+  return { preC, postC, posts, pres, bHead };
+}
+
+function grokTuiCompactAnalysis(head, tuiEvents) {
+  const tuiPostEvs = named(tuiEvents, "PostCompact");
+  const tuiPosts = tuiPostEvs.map(describeGrokCompact);
+  const allPostEvs = head.postC.concat(tuiPostEvs);
+  const ident = compactionIdentity(allPostEvs);
+  const bTui = tuiPostEvs.length ? injectionOrder(tuiEvents) : { ok: true, note: "no tui PostCompact" };
+  const bOk = (head.postC.length ? head.bHead.ok : true) && (tuiPostEvs.length ? bTui.ok : true);
+  const bNote = [head.bHead.note, tuiPostEvs.length ? bTui.note : null].filter(Boolean).join(" | ");
+  return { tuiPostEvs, tuiPosts, allPostEvs, ident, bTui, bOk, bNote };
+}
+
+function grokCompactEvidence(head, analysis, tui, nbytes, r) {
+  return [
+    `(a) identity: headless_PostCompact_n=${head.posts.length} tui_PostCompact_n=${analysis.tuiPosts.length} ok=${analysis.ident.ok} candidates=[${analysis.ident.candidates.join(",")}] note=${analysis.ident.note || ""} values=${JSON.stringify(analysis.ident.values)}`,
+    `(b) order: ${analysis.bNote} b_ok=${analysis.bOk}`,
+    `payload PreCompact_n=${head.pres.length} keys=${head.pres[0] ? head.pres[0].keys.join(",") : "none"} matcher=${JSON.stringify(head.pres[0]?.matcher ?? null)}`,
+    `payload PostCompact keys=${head.posts[0] ? head.posts[0].keys.join(",") : "none"} summary=${JSON.stringify(head.posts[0]?.summary || null)} matcher=${JSON.stringify(head.posts[0]?.matcher ?? null)}`,
+    `tui ok=${tui.ok} error=${tui.error || "none"} pane=${JSON.stringify(String(tui.pane || "").replace(/\s+/g, " ").slice(0, 240))}`,
+    `big.txt_bytes=${nbytes} exit=${r.exitCode} elapsed_s=${(r.elapsedMs / 1000).toFixed(1)} model=${r.model || "none"}`,
+  ];
+}
+
+function grokPostcompactResult(options) {
+  const { ctx, r, nbytes, tuiHome, tui, head, tuiEvents } = options;
+  const analysis = grokTuiCompactAnalysis(head, tuiEvents);
+  saveFix(ctx, "postcompact.json", {
+    agent: "grok",
+    PreCompact: redactValue(head.preC[0]?.stdin ?? null, r.repo),
+    PostCompact: redactValue(head.postC[0]?.stdin ?? null, r.repo),
+    tuiPostCompact: redactValue(analysis.tuiPostEvs[0]?.stdin ?? null, tuiHome.repo),
+  });
+  const evidence = grokCompactEvidence(head, analysis, tui, nbytes, r);
+  const status = grokPostcompactStatus({
+    posts: head.posts,
+    tuiPosts: analysis.tuiPosts,
+    allPostEvs: analysis.allPostEvs,
+    ident: analysis.ident,
+    bOk: analysis.bOk,
+    bNote: analysis.bNote,
+    tui,
+    evidence,
+  });
+  return { status, evidence, data: { posts: head.posts, pres: head.pres, tuiPosts: analysis.tuiPosts, ident: analysis.ident, tui } };
+}
+
+function prepareGrokMcpProbe(ctx) {
+  const dummy = path.join(ctx.dir, "mcp-dummy.mjs");
+  fs.copyFileSync(MCP_SRC, dummy);
+  const prompt =
+    "Call the MCP tool oboete_probe search with query hello and reply DONE followed by the tool result";
+  const logToml = path.join(ctx.dir, "mcp-toml.jsonl");
+  const logCli = path.join(ctx.dir, "mcp-cli.jsonl");
+  const mcpToml = `
+[mcp_servers.oboete_probe]
+command = ${tomlStr(process.execPath)}
+args = [${tomlStr(dummy)}]
+env = { PROBE_MCP_LOG = ${tomlStr(logToml)} }
+enabled = true
+`;
+  return { dummy, prompt, logToml, logCli, mcpToml };
+}
+
+function prepareGrokMcpAdd(ctx, dummy, logCli) {
+  const addHome = path.join(ctx.dir, "cli-add-home");
+  fs.cpSync(ctx.grokSeed, addHome, { recursive: true });
+  const cfg = path.join(addHome, "config.toml");
+  const before = fs.existsSync(cfg) ? fs.readFileSync(cfg, "utf8") : "";
+  const addArgs = [
+    "grok",
+    "mcp",
+    "add",
+    "--scope",
+    "user",
+    "oboete_probe",
+    "-e",
+    `PROBE_MCP_LOG=${logCli}`,
+    "--",
+    process.execPath,
+    dummy,
+  ];
+  return { addHome, cfg, before, addArgs };
+}
+
+function grokMcpAddResult(cfg, before, addProc) {
+  const after = fs.existsSync(cfg) ? fs.readFileSync(cfg, "utf8") : "";
+  return {
+    exit: addProc.exitCode,
+    stdout: (addProc.stdout || "").slice(0, 2000),
+    stderr: (addProc.stderr || "").slice(0, 2000),
+    wrote: after,
+    changed: after !== before,
+  };
+}
+
+function grokMcpResult({ ctx, tomlRun, cliRun, logToml, logCli, mcpAdd }) {
+  const framesToml = readMcpFrames(logToml).frames;
+  const framesCli = readMcpFrames(logCli).frames;
+  const methToml = labeledMcpMethods(framesToml);
+  const methCli = labeledMcpMethods(framesCli);
+  const has = (meth, name) => meth.some((x) => x.includes(name));
+  const tomlPres = named(tomlRun.events, "PreToolUse");
+  const cliPres = named(cliRun.events, "PreToolUse");
+  const pres = tomlPres.concat(cliPres);
+  const toolNames = [...new Set(pres.map((e) => toolNameOf(e)).filter(Boolean))];
+  const text = [finalText("grok", tomlRun, tomlRun.events), finalText("grok", cliRun, cliRun.events)].join("\n");
+  const echoed = /dummy result for hello/i.test(text);
+  const framesOk =
+    (has(methToml, "initialize") && has(methToml, "tools/list") && has(methToml, "tools/call")) ||
+    (has(methCli, "initialize") && has(methCli, "tools/list") && has(methCli, "tools/call"));
+  const firstRepo = tomlPres.length ? tomlRun.repo : cliRun.repo;
+  saveFix(ctx, "mcp-search.json", {
+    agent: "grok",
+    toolNames,
+    PreToolUse: redactValue(pres[0]?.stdin ?? null, firstRepo),
+    mcpAddWrote: redactValue(mcpAdd.wrote ?? null, ctx.dir),
+  });
+  const wrote = mcpAdd.wrote || "";
+  const wroteSnippet = wrote.includes("oboete_probe")
+    ? wrote.slice(Math.max(0, wrote.indexOf("oboete_probe") - 40), wrote.indexOf("oboete_probe") + 400)
+    : wrote.slice(0, 400);
+  return {
+    status: framesOk && echoed ? "pass" : "fail",
+    evidence: [
+      `toml frames=${methToml.join(",") || "none"}`,
+      `cli frames=${methCli.join(",") || "none"}`,
+      `PreToolUse toolName=[${toolNames.join(",")}]`,
+      `echoed_dummy=${echoed} text=${JSON.stringify(text.slice(0, 240))}`,
+      `mcp add exit=${mcpAdd.exit} changed=${mcpAdd.changed} wrote=${JSON.stringify(wroteSnippet)}`,
+      `mcp add stdout=${JSON.stringify((mcpAdd.stdout || "").slice(0, 200))} stderr=${JSON.stringify((mcpAdd.stderr || "").slice(0, 200))}`,
+    ],
+    data: { toolNames, methToml, methCli, mcpAdd },
+  };
 }
 
 const MARKER_HOOKS = (marker) =>
@@ -481,23 +681,7 @@ deny = ["Bash(*)", "Bash(echo perm-probe)"]
         repo,
         configToml: COMPACT_TOML,
       });
-      const preC = named(r.events, "PreCompact");
-      const postC = named(r.events, "PostCompact");
-      const describe = (ev) => {
-        const s = ev?.stdin || {};
-        const sum = summaryOf(s);
-        return {
-          at: ev.at,
-          keys: topKeys(s),
-          matcher: s.matcher ?? s.trigger ?? s.compactTrigger ?? s.source ?? null,
-          summary: sum.field
-            ? { name: sum.field, length: sum.length, preview: typeof s[sum.field] === "string" ? s[sum.field].slice(0, 120) : null }
-            : null,
-        };
-      };
-      const posts = postC.map(describe);
-      const pres = preC.map(describe);
-      const bHead = injectionOrder(r.events);
+      const head = grokHeadlessCompact(r);
 
       const tuiDir = path.join(ctx.dir, "tui");
       const tuiRepo = path.join(tuiDir, "repo");
@@ -509,54 +693,7 @@ deny = ["Bash(*)", "Bash(echo perm-probe)"]
       });
       const tui = await tuiTwoCompact(tuiDir, { home: tuiHome.home, repo: tuiHome.repo });
       const tuiEvents = parseEvents(tuiHome.eventsPath);
-      const tuiPostEvs = named(tuiEvents, "PostCompact");
-      const tuiPosts = tuiPostEvs.map(describe);
-      const allPostEvs = postC.concat(tuiPostEvs);
-      const ident = compactionIdentity(allPostEvs);
-      const bTui = tuiPostEvs.length ? injectionOrder(tuiEvents) : { ok: true, note: "no tui PostCompact" };
-      const bOk = (postC.length ? bHead.ok : true) && (tuiPostEvs.length ? bTui.ok : true);
-      const bNote = [bHead.note, tuiPostEvs.length ? bTui.note : null].filter(Boolean).join(" | ");
-      saveFix(ctx, "postcompact.json", {
-        agent: "grok",
-        PreCompact: redactValue(preC[0]?.stdin ?? null, r.repo),
-        PostCompact: redactValue(postC[0]?.stdin ?? null, r.repo),
-        tuiPostCompact: redactValue(tuiPostEvs[0]?.stdin ?? null, tuiHome.repo),
-      });
-      const evidence = [
-        `(a) identity: headless_PostCompact_n=${posts.length} tui_PostCompact_n=${tuiPosts.length} ok=${ident.ok} candidates=[${ident.candidates.join(",")}] note=${ident.note || ""} values=${JSON.stringify(ident.values)}`,
-        `(b) order: ${bNote} b_ok=${bOk}`,
-        `payload PreCompact_n=${pres.length} keys=${pres[0] ? pres[0].keys.join(",") : "none"} matcher=${JSON.stringify(pres[0]?.matcher ?? null)}`,
-        `payload PostCompact keys=${posts[0] ? posts[0].keys.join(",") : "none"} summary=${JSON.stringify(posts[0]?.summary || null)} matcher=${JSON.stringify(posts[0]?.matcher ?? null)}`,
-        `tui ok=${tui.ok} error=${tui.error || "none"} pane=${JSON.stringify(String(tui.pane || "").replace(/\s+/g, " ").slice(0, 240))}`,
-        `big.txt_bytes=${nbytes} exit=${r.exitCode} elapsed_s=${(r.elapsedMs / 1000).toFixed(1)} model=${r.model || "none"}`,
-      ];
-      let status;
-      if (!posts.length && !tuiPosts.length) {
-        status = "blocked";
-        evidence.push("no PostCompact fired; could not force compaction");
-        if (!tui.ok) {
-          evidence.push(
-            "TUI manual steps: GROK_HOME=<tui grok-home> grok --cwd <repo> --yolo ; wait ready ; /compact Enter ; wait ; /compact Enter ; compare the two PostCompact stdin payloads for a native id/counter/timestamp",
-          );
-        }
-      } else if (allPostEvs.length < 2) {
-        status = "blocked";
-        evidence.push("only one PostCompact; identity (a) untested. TUI two /compact did not yield a second event");
-        if (!tui.ok) {
-          evidence.push(
-            "TUI manual steps: GROK_HOME=<tui grok-home> grok --cwd <repo> --yolo ; /compact twice in one session ; capture PostCompact stdin",
-          );
-        }
-      } else if (!ident.ok) {
-        status = "fail";
-        evidence.push("(a) failed: two PostCompact not distinguishable (A16 default)");
-      } else if (!bOk) {
-        status = "fail";
-        evidence.push("(b) failed: " + bNote);
-      } else {
-        status = "pass";
-      }
-      return { status, evidence, data: { posts, pres, tuiPosts, ident, tui } };
+      return grokPostcompactResult({ ctx, r, nbytes, tuiHome, tui, head, tuiEvents });
     },
   },
   {
@@ -629,42 +766,14 @@ deny = ["Bash(*)", "Bash(echo perm-probe)"]
     agent: "grok",
     row: ROW_MCP,
     async run(ctx) {
-      const dummy = path.join(ctx.dir, "mcp-dummy.mjs");
-      fs.copyFileSync(MCP_SRC, dummy);
-      const prompt =
-        "Call the MCP tool oboete_probe search with query hello and reply DONE followed by the tool result";
-      const logToml = path.join(ctx.dir, "mcp-toml.jsonl");
-      const logCli = path.join(ctx.dir, "mcp-cli.jsonl");
-      const mcpToml = `
-[mcp_servers.oboete_probe]
-command = ${tomlStr(process.execPath)}
-args = [${tomlStr(dummy)}]
-env = { PROBE_MCP_LOG = ${tomlStr(logToml)} }
-enabled = true
-`;
+      const { dummy, prompt, logToml, logCli, mcpToml } = prepareGrokMcpProbe(ctx);
       const tomlRun = await ctx.grok(path.join(ctx.dir, "toml"), {
         prompt,
         grokSeed: ctx.grokSeed,
         configToml: mcpToml,
         env: { PROBE_MCP_LOG: logToml },
       });
-      const addHome = path.join(ctx.dir, "cli-add-home");
-      fs.cpSync(ctx.grokSeed, addHome, { recursive: true });
-      const cfg = path.join(addHome, "config.toml");
-      const before = fs.existsSync(cfg) ? fs.readFileSync(cfg, "utf8") : "";
-      const addArgs = [
-        "grok",
-        "mcp",
-        "add",
-        "--scope",
-        "user",
-        "oboete_probe",
-        "-e",
-        `PROBE_MCP_LOG=${logCli}`,
-        "--",
-        process.execPath,
-        dummy,
-      ];
+      const { addHome, cfg, before, addArgs } = prepareGrokMcpAdd(ctx, dummy, logCli);
       const addProc = await runTimed(addArgs, {
         cwd: ctx.dir,
         env: childEnv({ GROK_HOME: addHome, ...GROK_ISOLATION_ENV }),
@@ -672,57 +781,14 @@ enabled = true
         stderrPath: path.join(ctx.dir, "mcp-add.err"),
         timeoutMs: 60_000,
       });
-      const after = fs.existsSync(cfg) ? fs.readFileSync(cfg, "utf8") : "";
-      const mcpAdd = {
-        exit: addProc.exitCode,
-        stdout: (addProc.stdout || "").slice(0, 2000),
-        stderr: (addProc.stderr || "").slice(0, 2000),
-        wrote: after,
-        changed: after !== before,
-      };
+      const mcpAdd = grokMcpAddResult(cfg, before, addProc);
       const cliRun = await ctx.grok(path.join(ctx.dir, "cli"), {
         prompt,
         grokSeed: ctx.grokSeed,
         homeFrom: addHome,
         env: { PROBE_MCP_LOG: logCli },
       });
-      const framesToml = readMcpFrames(logToml).frames;
-      const framesCli = readMcpFrames(logCli).frames;
-      const methToml = labeledMcpMethods(framesToml);
-      const methCli = labeledMcpMethods(framesCli);
-      const has = (meth, name) => meth.some((x) => x.includes(name));
-      const tomlPres = named(tomlRun.events, "PreToolUse");
-      const cliPres = named(cliRun.events, "PreToolUse");
-      const pres = tomlPres.concat(cliPres);
-      const toolNames = [...new Set(pres.map((e) => toolNameOf(e)).filter(Boolean))];
-      const text = [finalText("grok", tomlRun, tomlRun.events), finalText("grok", cliRun, cliRun.events)].join("\n");
-      const echoed = /dummy result for hello/i.test(text);
-      const framesOk =
-        (has(methToml, "initialize") && has(methToml, "tools/list") && has(methToml, "tools/call")) ||
-        (has(methCli, "initialize") && has(methCli, "tools/list") && has(methCli, "tools/call"));
-      const firstRepo = tomlPres.length ? tomlRun.repo : cliRun.repo;
-      saveFix(ctx, "mcp-search.json", {
-        agent: "grok",
-        toolNames,
-        PreToolUse: redactValue(pres[0]?.stdin ?? null, firstRepo),
-        mcpAddWrote: redactValue(mcpAdd.wrote ?? null, ctx.dir),
-      });
-      const wrote = mcpAdd.wrote || "";
-      const wroteSnippet = wrote.includes("oboete_probe")
-        ? wrote.slice(Math.max(0, wrote.indexOf("oboete_probe") - 40), wrote.indexOf("oboete_probe") + 400)
-        : wrote.slice(0, 400);
-      return {
-        status: framesOk && echoed ? "pass" : "fail",
-        evidence: [
-          `toml frames=${methToml.join(",") || "none"}`,
-          `cli frames=${methCli.join(",") || "none"}`,
-          `PreToolUse toolName=[${toolNames.join(",")}]`,
-          `echoed_dummy=${echoed} text=${JSON.stringify(text.slice(0, 240))}`,
-          `mcp add exit=${mcpAdd.exit} changed=${mcpAdd.changed} wrote=${JSON.stringify(wroteSnippet)}`,
-          `mcp add stdout=${JSON.stringify((mcpAdd.stdout || "").slice(0, 200))} stderr=${JSON.stringify((mcpAdd.stderr || "").slice(0, 200))}`,
-        ],
-        data: { toolNames, methToml, methCli, mcpAdd },
-      };
+      return grokMcpResult({ ctx, tomlRun, cliRun, logToml, logCli, mcpAdd });
     },
   },
   {

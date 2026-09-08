@@ -191,17 +191,28 @@ async function callPreset(preset, creds, withSchema) {
   };
 }
 
+function dummyKeyEvidence(dummy) {
+  return dummy.status === "error"
+    ? `dummy-key self-check: error ${dummy.error}`
+    : `dummy-key self-check: HTTP ${dummy.status} ${dummy.elapsed_ms}ms`;
+}
+
+function schemaResponseHonoured(response) {
+  return response.http >= 200 && response.http < 300 && schemaHonoured(response.text);
+}
+
+function schemaFallbackNeeded(response) {
+  return response.schema_rejected ||
+    (response.http >= 200 && response.http < 300 && !schemaHonoured(response.text));
+}
+
 async function providerProbe(name, ctx) {
   const preset = PRESETS[name];
   const creds = loadCredentials();
   const evidence = [];
   if (name === "nim") {
     const dummy = await dummyKeySelfCheck();
-    evidence.push(
-      dummy.status === "error"
-        ? `dummy-key self-check: error ${dummy.error}`
-        : `dummy-key self-check: HTTP ${dummy.status} ${dummy.elapsed_ms}ms`,
-    );
+    evidence.push(dummyKeyEvidence(dummy));
   }
   const missing = preset.cred.filter((k) => !creds[k]);
   if (missing.length) {
@@ -211,8 +222,8 @@ async function providerProbe(name, ctx) {
   try {
     let first = await callPreset(preset, creds, true);
     let structured = "rejected";
-    if (first.http >= 200 && first.http < 300 && schemaHonoured(first.text)) structured = "honoured";
-    else if (first.schema_rejected || (first.http >= 200 && first.http < 300 && !schemaHonoured(first.text))) {
+    if (schemaResponseHonoured(first)) structured = "honoured";
+    else if (schemaFallbackNeeded(first)) {
       const second = await callPreset(preset, creds, false);
       first = {
         ...second,
@@ -239,6 +250,97 @@ async function providerProbe(name, ctx) {
   }
 }
 
+function launchClaudeCli(ctx, repo) {
+  return runTimed(
+    ["claude", "-p", SUMMARIZE, "--output-format", "json", "--dangerously-skip-permissions"],
+    {
+      cwd: repo,
+      env: childEnv(),
+      stdoutPath: path.join(ctx.dir, "claude_out.json"),
+      stderrPath: path.join(ctx.dir, "claude_err.txt"),
+    },
+  );
+}
+
+function recordClaudeCliResult(claude, evidence, per) {
+  let claudeObj = null;
+  try {
+    claudeObj = JSON.parse(claude.stdout);
+  } catch {
+    claudeObj = null;
+  }
+  const claudeText = typeof claudeObj?.result === "string" ? claudeObj.result : "";
+  const claudeOk = !!parseObservationsJson(claudeText);
+  const claudeModel = pickClaudeModel(claudeObj);
+  per.claude = { ok: claudeOk, elapsed_s: claude.elapsedMs / 1000, model: claudeModel, where: "result" };
+  evidence.push(
+    `claude ${claudeOk ? "pass" : "fail"} ${per.claude.elapsed_s.toFixed(2)}s text=result model=${claudeModel || "none"} ver=${binVersion("claude")}`,
+  );
+  return claudeOk;
+}
+
+function recordCodexCliResult(lastMsg, codex, evidence, per) {
+  const last = fs.existsSync(lastMsg) ? fs.readFileSync(lastMsg, "utf8") : "";
+  let itemText = "";
+  for (const line of parseJsonl(codex.stdout)) {
+    if (line.type === "item.completed" && line.item?.text) itemText = line.item.text;
+  }
+  const codexText = last.trim() || itemText;
+  const codexOk = !!parseObservationsJson(codexText);
+  per.codex = { ok: codexOk, elapsed_s: codex.elapsedMs / 1000, model: "none", where: "output-last-message" };
+  evidence.push(
+    `codex ${codexOk ? "pass" : "fail"} ${per.codex.elapsed_s.toFixed(2)}s text=output-last-message model=none ver=${binVersion("codex")}`,
+  );
+  return codexOk;
+}
+
+function recordGrokCliResult(grok, evidence, per) {
+  let grokObj = null;
+  try {
+    grokObj = JSON.parse(grok.stdout);
+  } catch {
+    grokObj = null;
+  }
+  const grokText = typeof grokObj?.text === "string" ? grokObj.text : "";
+  const grokOk = !!parseObservationsJson(grokText);
+  const grokModel = grokObj?.modelUsage ? Object.keys(grokObj.modelUsage)[0] : null;
+  per.grok = { ok: grokOk, elapsed_s: grok.elapsedMs / 1000, model: grokModel, where: "text" };
+  evidence.push(
+    `grok ${grokOk ? "pass" : "fail"} ${per.grok.elapsed_s.toFixed(2)}s text=text model=${grokModel || "none"} ver=${binVersion("grok")}`,
+  );
+  return grokOk;
+}
+
+function preparePiHome(ctx, HOME) {
+  const pHome = path.join(ctx.dir, "piagent");
+  const sessions = path.join(pHome, "sessions");
+  fs.mkdirSync(sessions, { recursive: true });
+  copyMode(path.join(HOME, ".pi/agent/auth.json"), path.join(pHome, "auth.json"));
+  for (const name of ["settings.json", "models-store.json"]) {
+    const src = path.join(HOME, ".pi/agent", name);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(pHome, name));
+  }
+  return { pHome, sessions };
+}
+
+function recordPiCliResult(pi, evidence, per) {
+  let piText = "";
+  let piModel = null;
+  for (const line of parseJsonl(pi.stdout)) {
+    if (line.type === "message_end" || line.type === "turn_end") {
+      const t = piContentText(line.message?.content);
+      if (t) piText = t;
+      if (line.message?.model) piModel = line.message.model;
+    }
+  }
+  const piOk = !!parseObservationsJson(piText);
+  per.pi = { ok: piOk, elapsed_s: pi.elapsedMs / 1000, model: piModel, where: "turn_end text blocks" };
+  evidence.push(
+    `pi ${piOk ? "pass" : "fail"} ${per.pi.elapsed_s.toFixed(2)}s text=turn_end text blocks model=${piModel || "none"} ver=${binVersion("pi")}`,
+  );
+  return piOk;
+}
+
 export const probes = [
   {
     id: "agent-cli-json",
@@ -250,28 +352,8 @@ export const probes = [
       const per = {};
       const HOME = os.homedir();
 
-      const claude = await runTimed(
-        ["claude", "-p", SUMMARIZE, "--output-format", "json", "--dangerously-skip-permissions"],
-        {
-          cwd: repo,
-          env: childEnv(),
-          stdoutPath: path.join(ctx.dir, "claude_out.json"),
-          stderrPath: path.join(ctx.dir, "claude_err.txt"),
-        },
-      );
-      let claudeObj = null;
-      try {
-        claudeObj = JSON.parse(claude.stdout);
-      } catch {
-        claudeObj = null;
-      }
-      const claudeText = typeof claudeObj?.result === "string" ? claudeObj.result : "";
-      const claudeOk = !!parseObservationsJson(claudeText);
-      const claudeModel = pickClaudeModel(claudeObj);
-      per.claude = { ok: claudeOk, elapsed_s: claude.elapsedMs / 1000, model: claudeModel, where: "result" };
-      evidence.push(
-        `claude ${claudeOk ? "pass" : "fail"} ${per.claude.elapsed_s.toFixed(2)}s text=result model=${claudeModel || "none"} ver=${binVersion("claude")}`,
-      );
+      const claude = await launchClaudeCli(ctx, repo);
+      const claudeOk = recordClaudeCliResult(claude, evidence, per);
 
       const lastMsg = path.join(ctx.dir, "codex_lastmsg.txt");
       const cHome = path.join(ctx.dir, "codex-home");
@@ -286,17 +368,7 @@ export const probes = [
           stderrPath: path.join(ctx.dir, "codex_err.txt"),
         },
       );
-      const last = fs.existsSync(lastMsg) ? fs.readFileSync(lastMsg, "utf8") : "";
-      let itemText = "";
-      for (const line of parseJsonl(codex.stdout)) {
-        if (line.type === "item.completed" && line.item?.text) itemText = line.item.text;
-      }
-      const codexText = last.trim() || itemText;
-      const codexOk = !!parseObservationsJson(codexText);
-      per.codex = { ok: codexOk, elapsed_s: codex.elapsedMs / 1000, model: "none", where: "output-last-message" };
-      evidence.push(
-        `codex ${codexOk ? "pass" : "fail"} ${per.codex.elapsed_s.toFixed(2)}s text=output-last-message model=none ver=${binVersion("codex")}`,
-      );
+      const codexOk = recordCodexCliResult(lastMsg, codex, evidence, per);
 
       const grokSeed = ctx.grokSeed || (await seedGrokHome(path.dirname(ctx.dir)));
       const gHome = path.join(ctx.dir, "grok-home");
@@ -307,48 +379,16 @@ export const probes = [
         stdoutPath: path.join(ctx.dir, "grok_out.json"),
         stderrPath: path.join(ctx.dir, "grok_err.txt"),
       });
-      let grokObj = null;
-      try {
-        grokObj = JSON.parse(grok.stdout);
-      } catch {
-        grokObj = null;
-      }
-      const grokText = typeof grokObj?.text === "string" ? grokObj.text : "";
-      const grokOk = !!parseObservationsJson(grokText);
-      const grokModel = grokObj?.modelUsage ? Object.keys(grokObj.modelUsage)[0] : null;
-      per.grok = { ok: grokOk, elapsed_s: grok.elapsedMs / 1000, model: grokModel, where: "text" };
-      evidence.push(
-        `grok ${grokOk ? "pass" : "fail"} ${per.grok.elapsed_s.toFixed(2)}s text=text model=${grokModel || "none"} ver=${binVersion("grok")}`,
-      );
+      const grokOk = recordGrokCliResult(grok, evidence, per);
 
-      const pHome = path.join(ctx.dir, "piagent");
-      const sessions = path.join(pHome, "sessions");
-      fs.mkdirSync(sessions, { recursive: true });
-      copyMode(path.join(HOME, ".pi/agent/auth.json"), path.join(pHome, "auth.json"));
-      for (const name of ["settings.json", "models-store.json"]) {
-        const src = path.join(HOME, ".pi/agent", name);
-        if (fs.existsSync(src)) fs.copyFileSync(src, path.join(pHome, name));
-      }
+      const { pHome, sessions } = preparePiHome(ctx, HOME);
       const pi = await runTimed(["pi", "-p", SUMMARIZE, "--mode", "json", "--session-dir", sessions], {
         cwd: repo,
         env: childEnv({ PI_CODING_AGENT_DIR: pHome }),
         stdoutPath: path.join(ctx.dir, "pi_out.jsonl"),
         stderrPath: path.join(ctx.dir, "pi_err.txt"),
       });
-      let piText = "";
-      let piModel = null;
-      for (const line of parseJsonl(pi.stdout)) {
-        if (line.type === "message_end" || line.type === "turn_end") {
-          const t = piContentText(line.message?.content);
-          if (t) piText = t;
-          if (line.message?.model) piModel = line.message.model;
-        }
-      }
-      const piOk = !!parseObservationsJson(piText);
-      per.pi = { ok: piOk, elapsed_s: pi.elapsedMs / 1000, model: piModel, where: "turn_end text blocks" };
-      evidence.push(
-        `pi ${piOk ? "pass" : "fail"} ${per.pi.elapsed_s.toFixed(2)}s text=turn_end text blocks model=${piModel || "none"} ver=${binVersion("pi")}`,
-      );
+      const piOk = recordPiCliResult(pi, evidence, per);
 
       const all = claudeOk && codexOk && grokOk && piOk;
       return { status: all ? "pass" : "fail", evidence, data: per };

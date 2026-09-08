@@ -100,6 +100,21 @@ function compactRelated(events) {
     });
 }
 
+function postWindow(pres, posts, p) {
+  const prevPre = [...pres].reverse().find((q) => q.i < p.i);
+  let lo;
+  let noPre = false;
+  if (prevPre) {
+    lo = prevPre.i;
+  } else {
+    noPre = true;
+    const prevPost = [...posts].reverse().find((q) => q.i < p.i);
+    lo = prevPost ? prevPost.i : -1;
+  }
+  const note = noPre ? " (no PreCompact recorded)" : "";
+  return { lo, note };
+}
+
 function evalB(events) {
   const indexed = (events || []).map((e, i) => ({ i, e }));
   const posts = indexed.filter((x) => x.e.event === "PostCompact");
@@ -110,17 +125,7 @@ function evalB(events) {
   const details = [];
   let ok = true;
   for (const p of posts) {
-    const prevPre = [...pres].reverse().find((q) => q.i < p.i);
-    let lo;
-    let noPre = false;
-    if (prevPre) {
-      lo = prevPre.i;
-    } else {
-      noPre = true;
-      const prevPost = [...posts].reverse().find((q) => q.i < p.i);
-      lo = prevPost ? prevPost.i : -1;
-    }
-    const note = noPre ? " (no PreCompact recorded)" : "";
+    const { lo, note } = postWindow(pres, posts, p);
     const before = indexed.find((x) => x.i > lo && x.i < p.i && isInj(x));
     const after = indexed.find((x) => x.i > p.i && isInj(x));
     if (before) {
@@ -157,14 +162,44 @@ async function waitPostCompact(eventsPath, n, ms) {
   );
 }
 
-async function tuiTwoCompacts(dir, repo) {
-  const { settingsPath, eventsPath } = writeClaudeSettings(dir);
+function writeClaudeTuiLauncher(dir, settingsPath) {
   const launch = path.join(dir, "tui.sh");
   fs.writeFileSync(
     launch,
     `#!/bin/bash\nexport PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"\nexec claude --settings ${JSON.stringify(settingsPath)} --dangerously-skip-permissions\n`,
     { mode: 0o755 },
   );
+  return launch;
+}
+
+function appendClaudePaneDump(paneLog, tmux, label) {
+  try {
+    fs.appendFileSync(paneLog, `\n----- ${label} -----\n` + tmux.capture() + "\n");
+  } catch {
+    /* ignore */
+  }
+}
+
+function claudeTuiFailure(tmux, paneLog, error, eventsPath) {
+  let pane = "";
+  try {
+    pane = tmux.capture();
+  } catch {
+    pane = "";
+  }
+  appendClaudePaneDump(paneLog, tmux, "error");
+  fs.appendFileSync(paneLog, "\n" + String(error?.message ? error.message : error) + "\n");
+  return {
+    events: parseEvents(eventsPath),
+    pane,
+    error: String(error?.message ? error.message : error),
+    eventsPath,
+  };
+}
+
+async function tuiTwoCompacts(dir, repo) {
+  const { settingsPath, eventsPath } = writeClaudeSettings(dir);
+  const launch = writeClaudeTuiLauncher(dir, settingsPath);
   const name = `pbc${process.pid}${Date.now().toString(36)}`.replace(/[^a-zA-Z0-9]/g, "").slice(0, 24);
   // tmuxSession turns each variable into a `-e NAME=VALUE` argument of the tmux client, and a
   // command line is world-readable in /proc, so a pane is handed the variables it needs rather
@@ -178,26 +213,19 @@ async function tuiTwoCompacts(dir, repo) {
     env: { TERM: "xterm-256color" },
   });
   const paneLog = path.join(dir, "tmux-pane.txt");
-  const dump = (label) => {
-    try {
-      fs.appendFileSync(paneLog, `\n----- ${label} -----\n` + tmux.capture() + "\n");
-    } catch {
-      /* ignore */
-    }
-  };
   try {
     await sleep(2000);
     await readyTui("claude", tmux);
-    dump("after-onboard");
+    appendClaudePaneDump(paneLog, tmux, "after-onboard");
     await tuiSubmit(name, tmux, "Reply with exactly the word DONE. Do not use tools.", { timeoutMs: 120_000 });
     await tmux.waitFor(/\bDONE\b/, 120_000);
-    dump("after-done");
+    appendClaudePaneDump(paneLog, tmux, "after-done");
     await sleep(2000);
     await tuiSubmit(name, tmux, "/compact", { timeoutMs: 120_000 });
     await sleep(1500);
     if (/compact this conversation|Are you sure|Yes/i.test(tmux.capture())) tmux.send("");
     let events = await waitPostCompact(eventsPath, 1, 120_000);
-    dump("after-compact-1");
+    appendClaudePaneDump(paneLog, tmux, "after-compact-1");
     if (named(events, "PostCompact").length < 1) {
       tmux.send("");
       await waitPostCompact(eventsPath, 1, 60_000);
@@ -206,25 +234,12 @@ async function tuiTwoCompacts(dir, repo) {
     await sleep(1500);
     if (/compact this conversation|Are you sure|Yes/i.test(tmux.capture())) tmux.send("");
     await waitPostCompact(eventsPath, 2, 120_000);
-    dump("after-compact-2");
+    appendClaudePaneDump(paneLog, tmux, "after-compact-2");
     const pane = tmux.capture();
     await tuiQuit(tmux, name, { timeoutMs: 120_000 });
     return { events: parseEvents(eventsPath), pane, eventsPath };
   } catch (e) {
-    let pane = "";
-    try {
-      pane = tmux.capture();
-    } catch {
-      pane = "";
-    }
-    dump("error");
-    fs.appendFileSync(paneLog, "\n" + String(e?.message ? e.message : e) + "\n");
-    return {
-      events: parseEvents(eventsPath),
-      pane,
-      error: String(e?.message ? e.message : e),
-      eventsPath,
-    };
+    return claudeTuiFailure(tmux, paneLog, e, eventsPath);
   } finally {
     try {
       tmux.kill();
@@ -232,6 +247,124 @@ async function tuiTwoCompacts(dir, repo) {
       /* ignore */
     }
   }
+}
+
+function recordClaudeSessionRuns(runs, evidence, data) {
+  for (const run of runs) {
+    const source = ssSource(run.r.events);
+    const text = finalText("claude", run.r, run.r.events) || "";
+    const delivered = text.includes(run.token);
+    data[run.name] = {
+      source,
+      sessionId: run.r.sessionId || null,
+      delivered,
+      text: text.slice(0, 400),
+    };
+    evidence.push(
+      `${run.name} source=${source} expected=${run.expect} session=${run.r.sessionId || "none"} marker_delivered=${delivered} answer=${text.slice(0, 200).replace(/\s+/g, " ")}`,
+    );
+  }
+}
+
+function claudeToolFailureEvents(r) {
+  return r.events
+    .filter((e) => ["PreToolUse", "PostToolUse", "PostToolUseFailure"].includes(e.event))
+    .map((e) => `${e.event}:${e.stdin?.tool_name || e.stdin?.toolName || "?"}`)
+    .join(",");
+}
+
+function recordMissingClaudeToolFailure(options) {
+  const { native, failPair, fail, alsoPost, r, evidence, missing } = options;
+  missing.push(native);
+  evidence.push(
+    `${native}: missing ${!failPair.pre ? "PreToolUse" : ""}${!fail ? "PostToolUseFailure" : ""}; PostToolUse=${alsoPost}; events=${claudeToolFailureEvents(r)}`,
+  );
+}
+
+function recordClaudeToolFailureSuccess(options) {
+  const { native, file, normalized, r, version, captured_at, evidence, ctx, failPair, fail, alsoPost } = options;
+  const failKeys = topKeys(fail.stdin);
+  const err = fail.stdin?.error;
+  const errKeys = err && typeof err === "object" ? topKeys(err) : typeof err;
+  evidence.push(
+    `${native} PostToolUseFailure keys=[${failKeys.join(",")}] error_field=${errKeys} PostToolUse_also=${alsoPost}`,
+  );
+  writeFixture(ctx.repoRoot, `test/contracts/claude/${file}`, {
+    agent: "claude",
+    agent_version: version,
+    captured_at,
+    native_tool: native,
+    normalized_tool: normalized,
+    events: {
+      PreToolUse: redactValue(failPair.pre.stdin, r.repo),
+      PostToolUseFailure: redactValue(fail.stdin, r.repo),
+    },
+    notes: `PostToolUse also fires for this failed call: ${alsoPost}; error is ${typeof err}${typeof err === "string" ? " (string)" : ""}`,
+  });
+}
+
+function appendAutoCompactPayloadEvidence(evidence, events) {
+  for (const ev of events.filter((e) => e.event === "PreCompact" || e.event === "PostCompact")) {
+    const s = ev.stdin && typeof ev.stdin === "object" ? ev.stdin : {};
+    evidence.push(
+      `auto ${ev.event} keys=[${topKeys(s).join(",")}] trigger=${s.trigger ?? "absent"} compact_summary=${compactSummaryDesc(s)}`,
+    );
+  }
+}
+
+function appendTuiCompactPayloadEvidence(evidence, events) {
+  for (const ev of events.filter((e) => e.event === "PreCompact" || e.event === "PostCompact")) {
+    const s = ev.stdin && typeof ev.stdin === "object" ? ev.stdin : {};
+    evidence.push(
+      `tui ${ev.event} keys=[${topKeys(s).join(",")}] trigger=${s.trigger ?? "absent"} compact_summary=${compactSummaryDesc(s)}`,
+    );
+  }
+}
+
+function appendAutoCompactEvidence(evidence, auto) {
+  const usage = usageOf(auto);
+  evidence.push(
+    `auto exit=${auto.exitCode} elapsed_s=${(auto.elapsedMs / 1000).toFixed(1)} PostCompact=${named(auto.events, "PostCompact").length} PreCompact=${named(auto.events, "PreCompact").length} usage=${usage ? JSON.stringify(usage) : "none"}`,
+    `auto seq=${compactRelated(auto.events).join(" | ") || "none"}`,
+  );
+  appendAutoCompactPayloadEvidence(evidence, auto.events);
+  return usage;
+}
+
+function appendTuiCompactEvidence(evidence, tui) {
+  evidence.push(
+    `tui PostCompact=${named(tui.events, "PostCompact").length} PreCompact=${named(tui.events, "PreCompact").length} error=${tui.error || "none"} pane_chars=${(tui.pane || "").length}`,
+    `tui seq=${compactRelated(tui.events).join(" | ") || "none"}`,
+  );
+  if (tui.error) evidence.push(`tui_error=${tui.error.replace(/https:\S+/g, "<url>").slice(0, 400)}`);
+  if (tui.pane) evidence.push(`tui_pane=${tui.pane.replace(/https:\S+/g, "<url>").slice(-500).replace(/\s+/g, " ")}`);
+  appendTuiCompactPayloadEvidence(evidence, tui.events);
+}
+
+function selectCompactPosts(autoPosts, tuiPosts) {
+  let posts;
+  if (tuiPosts.length >= 2) {
+    posts = tuiPosts;
+  } else if (autoPosts.length >= 2) {
+    posts = autoPosts;
+  } else {
+    posts = [...autoPosts, ...tuiPosts];
+  }
+  return posts;
+}
+
+function prepareClaudeAuto(ctx, evidence) {
+  const autoDir = path.join(ctx.dir, "auto");
+  const repo = gitInit(path.join(autoDir, "repo"));
+  const big = path.join(repo, "big.txt");
+  const bytes = writeCompactFixture(big);
+  evidence.push(`big.txt_bytes=${bytes}`);
+  const autoEnv = { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "100000" };
+  return { autoDir, repo, autoEnv };
+}
+
+function claudePostcompactStatus(a, bOk) {
+  return a.ok && bOk ? "pass" : "fail";
 }
 
 export const probes = [
@@ -297,20 +430,7 @@ export const probes = [
         { name: "C", token: "PROBE-SS-fork", expect: "fork", r: c },
       ];
       const data = {};
-      for (const run of runs) {
-        const source = ssSource(run.r.events);
-        const text = finalText("claude", run.r, run.r.events) || "";
-        const delivered = text.includes(run.token);
-        data[run.name] = {
-          source,
-          sessionId: run.r.sessionId || null,
-          delivered,
-          text: text.slice(0, 400),
-        };
-        evidence.push(
-          `${run.name} source=${source} expected=${run.expect} session=${run.r.sessionId || "none"} marker_delivered=${delivered} answer=${text.slice(0, 200).replace(/\s+/g, " ")}`,
-        );
-      }
+      recordClaudeSessionRuns(runs, evidence, data);
       const sourcesOk = data.A.source === "startup" && data.B.source === "resume" && data.C.source === "fork";
       const idOk = data.A.sessionId && data.A.sessionId === data.B.sessionId && data.C.sessionId && data.C.sessionId !== data.A.sessionId;
       evidence.push(
@@ -345,32 +465,21 @@ export const probes = [
         const fail = failPair.post;
         const alsoPost = Boolean(postPair.post);
         if (!failPair.pre || !fail) {
-          missing.push(native);
-          evidence.push(
-            `${native}: missing ${!failPair.pre ? "PreToolUse" : ""}${!fail ? "PostToolUseFailure" : ""}; PostToolUse=${alsoPost}; events=${r.events
-              .filter((e) => ["PreToolUse", "PostToolUse", "PostToolUseFailure"].includes(e.event))
-              .map((e) => `${e.event}:${e.stdin?.tool_name || e.stdin?.toolName || "?"}`)
-              .join(",")}`,
-          );
+          recordMissingClaudeToolFailure({ native, failPair, fail, alsoPost, r, evidence, missing });
           continue;
         }
-        const failKeys = topKeys(fail.stdin);
-        const err = fail.stdin?.error;
-        const errKeys = err && typeof err === "object" ? topKeys(err) : typeof err;
-        evidence.push(
-          `${native} PostToolUseFailure keys=[${failKeys.join(",")}] error_field=${errKeys} PostToolUse_also=${alsoPost}`,
-        );
-        writeFixture(ctx.repoRoot, `test/contracts/claude/${file}`, {
-          agent: "claude",
-          agent_version: version,
+        recordClaudeToolFailureSuccess({
+          native,
+          file,
+          normalized,
+          r,
+          version,
           captured_at,
-          native_tool: native,
-          normalized_tool: normalized,
-          events: {
-            PreToolUse: redactValue(failPair.pre.stdin, r.repo),
-            PostToolUseFailure: redactValue(fail.stdin, r.repo),
-          },
-          notes: `PostToolUse also fires for this failed call: ${alsoPost}; error is ${typeof err}${typeof err === "string" ? " (string)" : ""}`,
+          evidence,
+          ctx,
+          failPair,
+          fail,
+          alsoPost,
         });
       }
       return { status: missing.length ? "fail" : "pass", evidence, data: { missing, sessionId: r.sessionId } };
@@ -414,12 +523,7 @@ export const probes = [
     row: ROW_COMPACT,
     async run(ctx) {
       const evidence = [];
-      const autoDir = path.join(ctx.dir, "auto");
-      const repo = gitInit(path.join(autoDir, "repo"));
-      const big = path.join(repo, "big.txt");
-      const bytes = writeCompactFixture(big);
-      evidence.push(`big.txt_bytes=${bytes}`);
-      const autoEnv = { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "100000" };
+      const { autoDir, repo, autoEnv } = prepareClaudeAuto(ctx, evidence);
       let auto = await ctx.claude(autoDir, { repo, prompt: CLAUDE_COMPACT_PROMPT, env: autoEnv });
       if (!named(auto.events, "PostCompact").length && auto.sessionId) {
         const auto2 = await ctx.claude(path.join(ctx.dir, "auto2"), {
@@ -435,17 +539,7 @@ export const probes = [
         };
         evidence.push(`auto2 resume exit=${auto2.exitCode} PostCompact=${named(auto2.events, "PostCompact").length} elapsed_s=${(auto2.elapsedMs / 1000).toFixed(1)}`);
       }
-      const usage = usageOf(auto);
-      evidence.push(
-        `auto exit=${auto.exitCode} elapsed_s=${(auto.elapsedMs / 1000).toFixed(1)} PostCompact=${named(auto.events, "PostCompact").length} PreCompact=${named(auto.events, "PreCompact").length} usage=${usage ? JSON.stringify(usage) : "none"}`,
-        `auto seq=${compactRelated(auto.events).join(" | ") || "none"}`,
-      );
-      for (const ev of auto.events.filter((e) => e.event === "PreCompact" || e.event === "PostCompact")) {
-        const s = ev.stdin && typeof ev.stdin === "object" ? ev.stdin : {};
-        evidence.push(
-          `auto ${ev.event} keys=[${topKeys(s).join(",")}] trigger=${s.trigger ?? "absent"} compact_summary=${compactSummaryDesc(s)}`,
-        );
-      }
+      const usage = appendAutoCompactEvidence(evidence, auto);
 
       let tui = { events: [], error: "not-run", pane: "" };
       try {
@@ -453,29 +547,11 @@ export const probes = [
       } catch (e) {
         tui = { events: [], error: String(e?.message ? e.message : e), pane: "" };
       }
-      evidence.push(
-        `tui PostCompact=${named(tui.events, "PostCompact").length} PreCompact=${named(tui.events, "PreCompact").length} error=${tui.error || "none"} pane_chars=${(tui.pane || "").length}`,
-        `tui seq=${compactRelated(tui.events).join(" | ") || "none"}`,
-      );
-      if (tui.error) evidence.push(`tui_error=${tui.error.replace(/https:\S+/g, "<url>").slice(0, 400)}`);
-      if (tui.pane) evidence.push(`tui_pane=${tui.pane.replace(/https:\S+/g, "<url>").slice(-500).replace(/\s+/g, " ")}`);
-      for (const ev of tui.events.filter((e) => e.event === "PreCompact" || e.event === "PostCompact")) {
-        const s = ev.stdin && typeof ev.stdin === "object" ? ev.stdin : {};
-        evidence.push(
-          `tui ${ev.event} keys=[${topKeys(s).join(",")}] trigger=${s.trigger ?? "absent"} compact_summary=${compactSummaryDesc(s)}`,
-        );
-      }
+      appendTuiCompactEvidence(evidence, tui);
 
       const autoPosts = named(auto.events, "PostCompact");
       const tuiPosts = named(tui.events, "PostCompact");
-      let posts;
-      if (tuiPosts.length >= 2) {
-        posts = tuiPosts;
-      } else if (autoPosts.length >= 2) {
-        posts = autoPosts;
-      } else {
-        posts = [...autoPosts, ...tuiPosts];
-      }
+      const posts = selectCompactPosts(autoPosts, tuiPosts);
       const a = compactionIdentity(posts);
       const bAuto = evalB(auto.events);
       const bTui = evalB(tui.events);
@@ -494,7 +570,7 @@ export const probes = [
           data: { a, bAuto, bTui, usage, autoTokens: usage, tuiError: tui.error || null },
         };
       }
-      const status = a.ok && bOk ? "pass" : "fail";
+      const status = claudePostcompactStatus(a, bOk);
       return { status, evidence, data: { a, bAuto, bTui, usage } };
     },
   },

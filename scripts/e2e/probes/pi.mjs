@@ -53,9 +53,7 @@ function writeBigTxt(repo) {
 
 function writeTurnEndCompactExt(file) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(
-    file,
-    String.raw`import fs from "node:fs";
+  const source = String.raw`import fs from "node:fs";
 const OUT = process.env.PROBE_EVENTS || "";
 let n = 0;
 function rec(obj) {
@@ -85,8 +83,8 @@ export default (pi) => {
     });
   });
 };
-`,
-  );
+`;
+  fs.writeFileSync(file, source);
 }
 
 function compactBits(ev) {
@@ -186,12 +184,14 @@ function toolText(content) {
     .join("");
 }
 
+const WHITESPACE = /\s+/;
+
 function bashChildId(r) {
   for (const ev of named(r.events, "tool_result")) {
     const s = ev.stdin || {};
     if (s.toolName !== "bash") continue;
     const t = toolText(s.content).trim();
-    if (t) return t.split(/\s+/)[0];
+    if (t) return t.split(WHITESPACE)[0];
   }
   return null;
 }
@@ -226,6 +226,166 @@ async function launchCompact(ctx, dir, extPath) {
     settings: COMPACT_SETTINGS,
     extraArgs: ["-e", extPath],
   });
+}
+
+function collectCompactionData(r1, r2) {
+  const events = [...(r1.events || []), ...(r2?.events || [])];
+  const before = named(events, "session_before_compact").map(compactBits);
+  const compactEvs = named(events, "session_compact");
+  const compact = compactEvs.map(compactBits);
+  const failed = named(events, "session_compact_failed").map(compactBits);
+  const ident = compactionIdentity(compactEvs);
+  const ids = compact.map((c) => c.id).filter(Boolean);
+  const uniqueIds = [...new Set(ids)];
+  const a = ident.ok;
+  const firstCompact = compact[0];
+  const injectNames = ["before_agent_start", "turn_start", "context"];
+  const nextInj = firstCompact ? nextAfter(events, firstCompact.at, injectNames) : null;
+  const b = Boolean(firstCompact && nextInj && Date.parse(nextInj.at) > Date.parse(firstCompact.at));
+  const usages = named(events, "probe_context_usage").map((e) => e.stdin);
+  const lastUsage = usages.length ? usages[usages.length - 1] : null;
+  return { events, before, compact, failed, ident, ids, uniqueIds, a, firstCompact, nextInj, b, lastUsage };
+}
+
+function writeCompactionFixture(ctx, r1, data) {
+  const { events, compact } = data;
+  if (compact.length) {
+    writeFixture(ctx.repoRoot, "test/contracts/pi/compaction.json", {
+      agent: "pi",
+      agent_version: binVersion("pi"),
+      captured_at: new Date().toISOString(),
+      events: {
+        session_before_compact: named(events, "session_before_compact").map((e) => redactValue(e.stdin, r1.repo)),
+        session_compact: named(events, "session_compact").map((e) => redactValue(e.stdin, r1.repo)),
+      },
+      notes: "run1 extra ext ctx.compact() on first turn_end; run2 --session same file + same ext",
+    });
+  }
+}
+
+function compactionEvidence(r1, r2, data) {
+  const { events, before, compact, failed, ident, ids, uniqueIds, a, firstCompact, nextInj, b, lastUsage } = data;
+  const beforeCompactLine = (c) => `keys=[${c.keys}] reason=${c.reason} firstKept=${c.firstKeptEntryId}`;
+  const compactLine = (c) =>
+    `keys=[${c.keys}] id=${c.id} summaryLen=${c.summaryLen} firstKept=${c.firstKeptEntryId} reason=${c.reason} at=${c.at} ceKeys=[${c.ceKeys}]`;
+  const failedLine = (c) => `reason=${c.reason}`;
+  return [
+    `run1 exit=${r1.exitCode} elapsed_s=${(r1.elapsedMs / 1000).toFixed(1)} session=${r1.sessionId || "none"}`,
+    `run2 exit=${r2 ? r2.exitCode : "skipped"} elapsed_s=${r2 ? (r2.elapsedMs / 1000).toFixed(1) : "n/a"} session=${r2?.sessionId || "none"}`,
+    `session_before_compact=${before.length} ${before.map(beforeCompactLine).join(" | ") || "none"}`,
+    `session_compact=${compact.length} ${compact.map(compactLine).join(" | ") || "none"}`,
+    `session_compact_failed=${failed.length} ${failed.map(failedLine).join(" | ") || "none"}`,
+    `compactionEntry.ids=${ids.join(",") || "none"} unique=${uniqueIds.length} (a) distinguishing=${a} candidates=[${ident.candidates.join(",")}] note=${ident.note || ""}`,
+    `first compact at=${firstCompact?.at || "none"} next inject ${nextInj ? nextInj.event + " at=" + nextInj.at : "none"} (b) committed_before_next_inject=${b}`,
+    `probe_compact_called=${named(events, "probe_compact_called").length} complete=${named(events, "probe_compact_complete").length} error=${JSON.stringify(named(events, "probe_compact_error").map((e) => e.stdin))}`,
+    `getContextUsage=${JSON.stringify(lastUsage)}`,
+    `DONE r1=${/\bDONE\b/.test(finalText("pi", r1, r1.events))} r2=${r2 ? /\bDONE\b/.test(finalText("pi", r2, r2.events)) : "n/a"}`,
+  ];
+}
+
+function stdoutErrorTypes(stdout) {
+  const stdoutTypes = [];
+  for (const line of (stdout || "").split("\n")) {
+    try {
+      const o = JSON.parse(line);
+      if (o && /error/i.test(String(o.type || ""))) stdoutTypes.push(o.type);
+    } catch {
+      /* skip */
+    }
+  }
+  return stdoutTypes;
+}
+
+function sessionErrorRecords(tree, throwRe) {
+  const sessionTypes = [];
+  const durable = [];
+  for (const f of sessionJsonlPaths(tree)) {
+    const body = fs.readFileSync(f, "utf8");
+    for (const line of body.split("\n").filter(Boolean)) {
+      try {
+        sessionTypes.push(JSON.parse(line).type);
+      } catch {
+        /* skip */
+      }
+    }
+    const hits = searchLines(body, throwRe);
+    if (hits.length) durable.push({ path: f, hits });
+  }
+  return { sessionTypes, durable };
+}
+
+function findErrorLogs(root, skipLog, throwRe) {
+  if (!fs.existsSync(root)) return [];
+  let ents;
+  try {
+    ents = fs.readdirSync(root, { recursive: true, withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const e of ents) {
+    if (!e.isFile()) continue;
+    const fp = entryPath(root, e);
+    if (hasNodeModules(fp)) continue;
+    if (!/\.(log|txt|jsonl)$/i.test(e.name) || skipLog.has(e.name)) continue;
+    const body = fs.readFileSync(fp, "utf8");
+    if (throwRe.test(body)) out.push({ path: fp, hits: searchLines(body, throwRe) });
+  }
+  return out;
+}
+
+function findRealErrorLogs(real, afterReal, throwRe) {
+  const realLogs = [];
+  for (const e of afterReal.entries || []) {
+    if (e.dir || !/\.(log|txt)$/i.test(e.path)) continue;
+    const p = path.join(real, e.path);
+    try {
+      if (fs.existsSync(p) && throwRe.test(fs.readFileSync(p, "utf8"))) realLogs.push(p);
+    } catch {
+      /* unreadable */
+    }
+  }
+  return realLogs;
+}
+
+function durableErrorPath(durable, tmpLogs, realLogs) {
+  let durableNamed;
+  if (durable[0]) {
+    durableNamed = durable[0].path + " :: " + durable[0].hits[0];
+  } else if (tmpLogs[0]) {
+    durableNamed = tmpLogs[0].path + " :: " + tmpLogs[0].hits[0];
+  } else {
+    durableNamed = realLogs[0] || null;
+  }
+  return durableNamed;
+}
+
+function piErrorEvidence(options) {
+  const {
+    r,
+    continued,
+    text,
+    stderrHits,
+    stdoutTypes,
+    stdoutHits,
+    sessionTypes,
+    durable,
+    tmpLogs,
+    realDiff,
+    realLogs,
+    durableNamed,
+    tmpDiff,
+  } = options;
+  return [
+    `exit=${r.exitCode} elapsed_s=${(r.elapsedMs / 1000).toFixed(1)} continued=${continued} text=${JSON.stringify(text).slice(0, 200)}`,
+    `stderr hits=${stderrHits.length ? stderrHits.slice(0, 5).join(" | ") : "none"}`,
+    `stdout error types=${stdoutTypes.join(",") || "none"} stdout hits=${stdoutHits.length ? stdoutHits.slice(0, 3).join(" | ") : "none"}`,
+    `session jsonl types=[${sessionTypes.join(",")}] throw records=${durable.length ? JSON.stringify(redactValue(durable, r.repo)).slice(0, 500) : "none"}`,
+    `piagent logs with throw=${tmpLogs.length ? JSON.stringify(redactValue(tmpLogs, r.repo)).slice(0, 400) : "none"}`,
+    `~/.pi/agent added=${realDiff.added.join(",") || "none"} changed=${realDiff.changed.join(",") || "none"} throw logs=${realLogs.join(",") || "none"}`,
+    `durable=${durableNamed || "no durable record"} (stderr/in-memory only unless a path is named)`,
+    `tmp tree files=${(tmpDiff.entries || []).map((e) => e.path).slice(0, 40).join(",")}`,
+  ];
 }
 
 export const probes = [
@@ -275,49 +435,10 @@ export const probes = [
           extraArgs: ["--session", file1, "-e", extPath],
         });
       }
-      const events = [...(r1.events || []), ...(r2?.events || [])];
-      const before = named(events, "session_before_compact").map(compactBits);
-      const compactEvs = named(events, "session_compact");
-      const compact = compactEvs.map(compactBits);
-      const failed = named(events, "session_compact_failed").map(compactBits);
-      const ident = compactionIdentity(compactEvs);
-      const ids = compact.map((c) => c.id).filter(Boolean);
-      const uniqueIds = [...new Set(ids)];
-      const a = ident.ok;
-      const firstCompact = compact[0];
-      const injectNames = ["before_agent_start", "turn_start", "context"];
-      const nextInj = firstCompact ? nextAfter(events, firstCompact.at, injectNames) : null;
-      const b = Boolean(firstCompact && nextInj && Date.parse(nextInj.at) > Date.parse(firstCompact.at));
-      const usages = named(events, "probe_context_usage").map((e) => e.stdin);
-      const lastUsage = usages.length ? usages[usages.length - 1] : null;
-      if (compact.length) {
-        writeFixture(ctx.repoRoot, "test/contracts/pi/compaction.json", {
-          agent: "pi",
-          agent_version: binVersion("pi"),
-          captured_at: new Date().toISOString(),
-          events: {
-            session_before_compact: named(events, "session_before_compact").map((e) => redactValue(e.stdin, r1.repo)),
-            session_compact: named(events, "session_compact").map((e) => redactValue(e.stdin, r1.repo)),
-          },
-          notes: "run1 extra ext ctx.compact() on first turn_end; run2 --session same file + same ext",
-        });
-      }
-      const beforeCompactLine = (c) => `keys=[${c.keys}] reason=${c.reason} firstKept=${c.firstKeptEntryId}`;
-      const compactLine = (c) =>
-        `keys=[${c.keys}] id=${c.id} summaryLen=${c.summaryLen} firstKept=${c.firstKeptEntryId} reason=${c.reason} at=${c.at} ceKeys=[${c.ceKeys}]`;
-      const failedLine = (c) => `reason=${c.reason}`;
-      const evidence = [
-        `run1 exit=${r1.exitCode} elapsed_s=${(r1.elapsedMs / 1000).toFixed(1)} session=${r1.sessionId || "none"}`,
-        `run2 exit=${r2 ? r2.exitCode : "skipped"} elapsed_s=${r2 ? (r2.elapsedMs / 1000).toFixed(1) : "n/a"} session=${r2?.sessionId || "none"}`,
-        `session_before_compact=${before.length} ${before.map(beforeCompactLine).join(" | ") || "none"}`,
-        `session_compact=${compact.length} ${compact.map(compactLine).join(" | ") || "none"}`,
-        `session_compact_failed=${failed.length} ${failed.map(failedLine).join(" | ") || "none"}`,
-        `compactionEntry.ids=${ids.join(",") || "none"} unique=${uniqueIds.length} (a) distinguishing=${a} candidates=[${ident.candidates.join(",")}] note=${ident.note || ""}`,
-        `first compact at=${firstCompact?.at || "none"} next inject ${nextInj ? nextInj.event + " at=" + nextInj.at : "none"} (b) committed_before_next_inject=${b}`,
-        `probe_compact_called=${named(events, "probe_compact_called").length} complete=${named(events, "probe_compact_complete").length} error=${JSON.stringify(named(events, "probe_compact_error").map((e) => e.stdin))}`,
-        `getContextUsage=${JSON.stringify(lastUsage)}`,
-        `DONE r1=${/\bDONE\b/.test(finalText("pi", r1, r1.events))} r2=${r2 ? /\bDONE\b/.test(finalText("pi", r2, r2.events)) : "n/a"}`,
-      ];
+      const data = collectCompactionData(r1, r2);
+      writeCompactionFixture(ctx, r1, data);
+      const evidence = compactionEvidence(r1, r2, data);
+      const { before, compact, failed, uniqueIds, a, b } = data;
       let status = "pass";
       if (!compact.length && !before.length) {
         status = "blocked";
@@ -430,80 +551,29 @@ export const probes = [
       const throwRe = /probe throw at before_agent_start/;
       const stderrHits = searchLines(r.stderr, /Extension error|probe throw/);
       const stdoutHits = searchLines(r.stdout, throwRe);
-      const stdoutTypes = [];
-      for (const line of (r.stdout || "").split("\n")) {
-        try {
-          const o = JSON.parse(line);
-          if (o && /error/i.test(String(o.type || ""))) stdoutTypes.push(o.type);
-        } catch {
-          /* skip */
-        }
-      }
-      const sessionTypes = [];
-      const durable = [];
-      for (const f of sessionJsonlPaths(r.tree)) {
-        const body = fs.readFileSync(f, "utf8");
-        for (const line of body.split("\n").filter(Boolean)) {
-          try {
-            sessionTypes.push(JSON.parse(line).type);
-          } catch {
-            /* skip */
-          }
-        }
-        const hits = searchLines(body, throwRe);
-        if (hits.length) durable.push({ path: f, hits });
-      }
+      const stdoutTypes = stdoutErrorTypes(r.stdout);
+      const { sessionTypes, durable } = sessionErrorRecords(r.tree, throwRe);
       const skipLog = new Set(["events.jsonl", "stdout.txt", "stderr.txt"]);
-      const walkLogs = (root) => {
-        if (!fs.existsSync(root)) return [];
-        let ents;
-        try {
-          ents = fs.readdirSync(root, { recursive: true, withFileTypes: true });
-        } catch {
-          return [];
-        }
-        const out = [];
-        for (const e of ents) {
-          if (!e.isFile()) continue;
-          const fp = entryPath(root, e);
-          if (hasNodeModules(fp)) continue;
-          if (!/\.(log|txt|jsonl)$/i.test(e.name) || skipLog.has(e.name)) continue;
-          const body = fs.readFileSync(fp, "utf8");
-          if (throwRe.test(body)) out.push({ path: fp, hits: searchLines(body, throwRe) });
-        }
-        return out;
-      };
-      const tmpLogs = walkLogs(r.tree);
-      const realLogs = [];
-      for (const e of afterReal.entries || []) {
-        if (e.dir || !/\.(log|txt)$/i.test(e.path)) continue;
-        const p = path.join(real, e.path);
-        try {
-          if (fs.existsSync(p) && throwRe.test(fs.readFileSync(p, "utf8"))) realLogs.push(p);
-        } catch {
-          /* unreadable */
-        }
-      }
+      const tmpLogs = findErrorLogs(r.tree, skipLog, throwRe);
+      const realLogs = findRealErrorLogs(real, afterReal, throwRe);
       const text = finalText("pi", r, r.events);
       const continued = /\bDONE\b/.test(text) || named(r.events, "agent_settled").length > 0;
-      let durableNamed;
-      if (durable[0]) {
-        durableNamed = durable[0].path + " :: " + durable[0].hits[0];
-      } else if (tmpLogs[0]) {
-        durableNamed = tmpLogs[0].path + " :: " + tmpLogs[0].hits[0];
-      } else {
-        durableNamed = realLogs[0] || null;
-      }
-      const evidence = [
-        `exit=${r.exitCode} elapsed_s=${(r.elapsedMs / 1000).toFixed(1)} continued=${continued} text=${JSON.stringify(text).slice(0, 200)}`,
-        `stderr hits=${stderrHits.length ? stderrHits.slice(0, 5).join(" | ") : "none"}`,
-        `stdout error types=${stdoutTypes.join(",") || "none"} stdout hits=${stdoutHits.length ? stdoutHits.slice(0, 3).join(" | ") : "none"}`,
-        `session jsonl types=[${sessionTypes.join(",")}] throw records=${durable.length ? JSON.stringify(redactValue(durable, r.repo)).slice(0, 500) : "none"}`,
-        `piagent logs with throw=${tmpLogs.length ? JSON.stringify(redactValue(tmpLogs, r.repo)).slice(0, 400) : "none"}`,
-        `~/.pi/agent added=${realDiff.added.join(",") || "none"} changed=${realDiff.changed.join(",") || "none"} throw logs=${realLogs.join(",") || "none"}`,
-        `durable=${durableNamed || "no durable record"} (stderr/in-memory only unless a path is named)`,
-        `tmp tree files=${(tmpDiff.entries || []).map((e) => e.path).slice(0, 40).join(",")}`,
-      ];
+      const durableNamed = durableErrorPath(durable, tmpLogs, realLogs);
+      const evidence = piErrorEvidence({
+        r,
+        continued,
+        text,
+        stderrHits,
+        stdoutTypes,
+        stdoutHits,
+        sessionTypes,
+        durable,
+        tmpLogs,
+        realDiff,
+        realLogs,
+        durableNamed,
+        tmpDiff,
+      });
       const status = durableNamed ? "pass" : "fail";
       return { status, evidence, data: { continued, durableNamed, stderrHits, throw: THROW } };
     },

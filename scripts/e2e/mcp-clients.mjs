@@ -346,6 +346,13 @@ function firstLine(text) {
 const TOOL_NAME_TOKEN = /mcp__oboete_probe__\w+|oboete_probe__\w+|oboete_search/g;
 const TOOL_NAME_EXACT = /^(?:mcp__)?oboete_probe__\w+$|^oboete_search$/;
 
+function collectObjectToolNames(value, acc) {
+  for (const [key, item] of Object.entries(value)) {
+    if (/^(tool_?name|name)$/i.test(key) && typeof item === "string" && TOOL_NAME_EXACT.test(item)) acc.add(item);
+    else collectToolNames(item, acc);
+  }
+}
+
 function collectToolNames(value, acc) {
   if (typeof value === "string") {
     if (TOOL_NAME_EXACT.test(value)) acc.add(value);
@@ -357,10 +364,7 @@ function collectToolNames(value, acc) {
     return;
   }
   if (!value || typeof value !== "object") return;
-  for (const [key, item] of Object.entries(value)) {
-    if (/^(tool_?name|name)$/i.test(key) && typeof item === "string" && TOOL_NAME_EXACT.test(item)) acc.add(item);
-    else collectToolNames(item, acc);
-  }
+  collectObjectToolNames(value, acc);
 }
 
 export function extractToolName({ stdout = "", stderr = "", hookLog = "", dbPayloads = [] } = {}) {
@@ -417,12 +421,7 @@ function recentDbToolNames(home, agent, sinceMs) {
   }
 }
 
-export function assertPiJson(stdout) {
-  const lines = parseJsonl(stdout);
-  const types = [...new Set(lines.map((line) => line.type).filter(Boolean))];
-  const named = (line) => line?.toolName || line?.tool_name || line?.name || "";
-  const calls = lines.filter((line) => named(line) === "oboete_search" || (line.type === "tool_call" && /oboete_search/.test(JSON.stringify(line))));
-  const results = lines.filter((line) => line.type === "tool_result" && /oboete_search/.test(JSON.stringify(line)));
+function piResultTexts(results, calls, lines) {
   const texts = [];
   for (const line of results.concat(calls, lines)) {
     const content = line.content || line.message?.content || line.result;
@@ -431,6 +430,10 @@ export function assertPiJson(stdout) {
       for (const block of content) if (typeof block?.text === "string") texts.push(block.text);
     }
   }
+  return texts;
+}
+
+function parsePiMemories(texts, stdout) {
   let parsed = null;
   for (const text of texts) {
     const obj = parseMaybeJson(text);
@@ -443,6 +446,17 @@ export function assertPiJson(stdout) {
     const obj = parseMaybeJson(stdout);
     if (obj && Array.isArray(obj.memories)) parsed = obj;
   }
+  return parsed;
+}
+
+export function assertPiJson(stdout) {
+  const lines = parseJsonl(stdout);
+  const types = [...new Set(lines.map((line) => line.type).filter(Boolean))];
+  const named = (line) => line?.toolName || line?.tool_name || line?.name || "";
+  const calls = lines.filter((line) => named(line) === "oboete_search" || (line.type === "tool_call" && /oboete_search/.test(JSON.stringify(line))));
+  const results = lines.filter((line) => line.type === "tool_result" && /oboete_search/.test(JSON.stringify(line)));
+  const texts = piResultTexts(results, calls, lines);
+  const parsed = parsePiMemories(texts, stdout);
   if (calls.length === 0 && !parsed) {
     return {
       ok: false,
@@ -580,6 +594,45 @@ function agentEnv(agent, extra) {
   return childEnv(extra);
 }
 
+function assertStdioOutput(proc, log) {
+  const outFrames = (proc.stdout || "")
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return { parse_error: line.slice(0, 120) };
+      }
+    });
+  for (const frame of outFrames) writeLog(log, "out", frame);
+  const repoFrame = outFrames.find((frame) => frame?.id === 1) || outFrames[0];
+  const getFrame = outFrames.find((frame) => frame?.id === 2) || outFrames[1];
+  const repoAssert = assertRepoRejected(repoFrame);
+  const getAssert = assertGetMissing(getFrame);
+  const ok = repoAssert.ok && getAssert.ok;
+  return {
+    status: ok ? "pass" : "fail",
+    frames: readMcpFrames(log).frames.length,
+    assertions: [
+      `repo -32602: ${repoAssert.ok ? "pass" : "fail"} (${repoAssert.reason})`,
+      `get missing isError: ${getAssert.ok ? "pass" : "fail"} (${getAssert.reason})`,
+    ],
+    reason: ok ? "stdio repo rejection and missing get" : [repoAssert, getAssert].filter((a) => !a.ok).map((a) => a.reason).join("; "),
+    proc,
+  };
+}
+
+function closeStdioFiles(outFd, errFd, inFd) {
+  for (const fd of [outFd, errFd, inFd]) {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
 async function runStdio({ repo, bundle, log, env }) {
   fs.mkdirSync(path.dirname(log), { recursive: true });
   fs.writeFileSync(log, "");
@@ -615,13 +668,7 @@ async function runStdio({ repo, bundle, log, env }) {
       stdio: [inFd, outFd, errFd],
     });
   } finally {
-    for (const fd of [outFd, errFd, inFd]) {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        /* already closed */
-      }
-    }
+    closeStdioFiles(outFd, errFd, inFd);
   }
   const proc = {
     exitCode: child?.status == null ? 1 : child.status,
@@ -629,32 +676,52 @@ async function runStdio({ repo, bundle, log, env }) {
     stderr: readIfPresent(stderrPath) ?? "",
     elapsedMs: Date.now() - start,
   };
-  const outFrames = (proc.stdout || "")
-    .split("\n")
-    .filter((line) => line.trim())
-    .map((line) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return { parse_error: line.slice(0, 120) };
-      }
-    });
-  for (const frame of outFrames) writeLog(log, "out", frame);
-  const repoFrame = outFrames.find((frame) => frame?.id === 1) || outFrames[0];
-  const getFrame = outFrames.find((frame) => frame?.id === 2) || outFrames[1];
-  const repoAssert = assertRepoRejected(repoFrame);
-  const getAssert = assertGetMissing(getFrame);
-  const ok = repoAssert.ok && getAssert.ok;
-  return {
-    status: ok ? "pass" : "fail",
-    frames: readMcpFrames(log).frames.length,
-    assertions: [
-      `repo -32602: ${repoAssert.ok ? "pass" : "fail"} (${repoAssert.reason})`,
-      `get missing isError: ${getAssert.ok ? "pass" : "fail"} (${getAssert.reason})`,
-    ],
-    reason: ok ? "stdio repo rejection and missing get" : [repoAssert, getAssert].filter((a) => !a.ok).map((a) => a.reason).join("; "),
-    proc,
-  };
+  return assertStdioOutput(proc, log);
+}
+
+function readMcpAgentEvidence(log, proc, home, agent, started) {
+  const parsed = readMcpFrames(log);
+  const extracted = extractToolName({
+    stdout: proc.stdout,
+    stderr: proc.stderr,
+    hookLog: readHookLog(home),
+    dbPayloads: recentDbToolNames(home, agent, started - 5_000),
+  });
+  return { parsed, extracted };
+}
+
+function mcpAgentReport(agent, proc, parsed, extracted) {
+  const asserted = assertAgentFrames(parsed.frames);
+  const toolName = extracted.toolName;
+  const reasonParts = [];
+  if (!asserted.ok) reasonParts.push(asserted.reason);
+  if (extracted.reason && toolName === "unknown") reasonParts.push(extracted.reason);
+  if (proc.exitCode !== 0 && asserted.ok) reasonParts.push(`exit=${proc.exitCode}`);
+  const status = asserted.ok ? "pass" : "fail";
+  return buildReportRow({
+    agent,
+    status,
+    protocolVersion: asserted.protocolVersion || parsed.protocolVersion,
+    toolName,
+    frames: parsed.frames.length,
+    reason: reasonParts.join("; ") || asserted.reason,
+  });
+}
+
+async function cleanupMcpAgent(registered, agent, env, dir, codexConfig, grokConfig) {
+  if (registered || agent === "claude" || agent === "grok") {
+    try {
+      if (agent === "claude") await unregisterClaude({ env, dir });
+      else if (agent === "codex") unregisterCodex(codexConfig);
+      else if (agent === "grok") await unregisterGrok({ env, dir, configPath: grokConfig });
+    } catch {
+      /* still leave oboete itself alone */
+    }
+  }
+}
+
+function agentErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function runMcpAgent(agent, context) {
@@ -685,46 +752,18 @@ async function runMcpAgent(agent, context) {
       dir,
       timeoutMs,
     });
-    const parsed = readMcpFrames(log);
-    const extracted = extractToolName({
-      stdout: proc.stdout,
-      stderr: proc.stderr,
-      hookLog: readHookLog(home),
-      dbPayloads: recentDbToolNames(home, agent, started - 5_000),
-    });
+    const { parsed, extracted } = readMcpAgentEvidence(log, proc, home, agent, started);
     if (isUnavailable(proc) && parsed.frames.length === 0) {
       const combined = `${proc.stderr}\n${proc.stdout}`;
       return blockedRow(agent, `${agent} exited ${proc.exitCode}: ${firstLine(combined) || "unavailable"}`);
     }
-    const asserted = assertAgentFrames(parsed.frames);
-    const toolName = extracted.toolName;
-    const reasonParts = [];
-    if (!asserted.ok) reasonParts.push(asserted.reason);
-    if (extracted.reason && toolName === "unknown") reasonParts.push(extracted.reason);
-    if (proc.exitCode !== 0 && asserted.ok) reasonParts.push(`exit=${proc.exitCode}`);
-    const status = asserted.ok ? "pass" : "fail";
-    return buildReportRow({
-      agent,
-      status,
-      protocolVersion: asserted.protocolVersion || parsed.protocolVersion,
-      toolName,
-      frames: parsed.frames.length,
-      reason: reasonParts.join("; ") || asserted.reason,
-    });
+    return mcpAgentReport(agent, proc, parsed, extracted);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = agentErrorMessage(error);
     if (error instanceof PreconditionError || AGENT_OUTAGE_RE.test(message)) return blockedRow(agent, message);
     return failRow(agent, message);
   } finally {
-    if (registered || agent === "claude" || agent === "grok") {
-      try {
-        if (agent === "claude") await unregisterClaude({ env, dir });
-        else if (agent === "codex") unregisterCodex(codexConfig);
-        else if (agent === "grok") await unregisterGrok({ env, dir, configPath: grokConfig });
-      } catch {
-        /* still leave oboete itself alone */
-      }
-    }
+    await cleanupMcpAgent(registered, agent, env, dir, codexConfig, grokConfig);
   }
 }
 
@@ -758,7 +797,7 @@ async function runPi(context) {
       reason: asserted.reason,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = agentErrorMessage(error);
     if (error instanceof PreconditionError || AGENT_OUTAGE_RE.test(message)) return blockedRow("pi", message);
     return failRow("pi", message);
   }
@@ -779,6 +818,34 @@ function reportMarkdown(report) {
   for (const file of report.frame_files || []) markdown += `- ${file}\n`;
   markdown += "\n";
   return markdown;
+}
+
+function finishHarnessReport(options, dependencies, stdio, rows, runId, runDir, started) {
+  const assertions = [...stdio.assertions];
+  for (const row of rows) {
+    assertions.push(`${row.agent}: ${row.status} (${row.reason})`);
+  }
+  const finished = new Date(dependencies.now());
+  const report = redactValue(
+    {
+      runId,
+      runDir,
+      started_at: started.toISOString(),
+      finished_at: finished.toISOString(),
+      agents: rows,
+      stdio: { status: stdio.status, frames: stdio.frames, reason: stdio.reason },
+      assertions,
+      frame_files: frameFiles(runDir, options.agents),
+      summary: `${rows.filter((row) => row.status === "pass").length} of ${rows.length} agents pass`,
+      exit_code: exitCodeFor(rows, stdio.status),
+    },
+    runDir,
+    "<run>",
+  );
+  fs.writeFileSync(path.join(runDir, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
+  fs.writeFileSync(path.join(runDir, "report.md"), reportMarkdown(report));
+  if (options.daily) writeDaily(report, dependencies.cwd);
+  return report;
 }
 
 export async function runHarness(options, overrides = {}) {
@@ -819,31 +886,7 @@ export async function runHarness(options, overrides = {}) {
     fs.writeFileSync(path.join(runDir, "report.json"), `${JSON.stringify({ agents: rows }, null, 2)}\n`);
   }
 
-  const assertions = [...stdio.assertions];
-  for (const row of rows) {
-    assertions.push(`${row.agent}: ${row.status} (${row.reason})`);
-  }
-  const finished = new Date(dependencies.now());
-  const report = redactValue(
-    {
-      runId,
-      runDir,
-      started_at: started.toISOString(),
-      finished_at: finished.toISOString(),
-      agents: rows,
-      stdio: { status: stdio.status, frames: stdio.frames, reason: stdio.reason },
-      assertions,
-      frame_files: frameFiles(runDir, options.agents),
-      summary: `${rows.filter((row) => row.status === "pass").length} of ${rows.length} agents pass`,
-      exit_code: exitCodeFor(rows, stdio.status),
-    },
-    runDir,
-    "<run>",
-  );
-  fs.writeFileSync(path.join(runDir, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
-  fs.writeFileSync(path.join(runDir, "report.md"), reportMarkdown(report));
-  if (options.daily) writeDaily(report, dependencies.cwd);
-  return report;
+  return finishHarnessReport(options, dependencies, stdio, rows, runId, runDir, started);
 }
 
 async function main(argv) {

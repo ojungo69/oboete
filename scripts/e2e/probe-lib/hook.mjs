@@ -37,22 +37,7 @@ function append(rec) {
 }
 
 let finished = false;
-function finish(raw) {
-  if (finished) return;
-  finished = true;
-  let stdin;
-  try {
-    stdin = raw ? JSON.parse(raw) : raw;
-  } catch {
-    stdin = raw;
-  }
-  const rec = {
-    event,
-    env: envSnapshot(),
-    stdin,
-    at: new Date().toISOString(),
-    stdinBytes: Buffer.byteLength(raw || "", "utf8"),
-  };
+function recordTranscript(rec, stdin) {
   if (flags.grepTranscript && stdin && typeof stdin === "object") {
     const tp = stdin.transcript_path || stdin.transcriptPath;
     const id = stdin.tool_use_id || stdin.toolUseId;
@@ -66,7 +51,9 @@ function finish(raw) {
       }
     }
   }
-  append(rec);
+}
+
+function writeHookResponse() {
   if (flags.deny) {
     process.stdout.write(
       JSON.stringify({
@@ -90,6 +77,27 @@ function finish(raw) {
     const text = flags.plain.startsWith("{") ? ` ${flags.plain}` : flags.plain;
     process.stdout.write(text);
   }
+}
+
+function finish(raw) {
+  if (finished) return;
+  finished = true;
+  let stdin;
+  try {
+    stdin = raw ? JSON.parse(raw) : raw;
+  } catch {
+    stdin = raw;
+  }
+  const rec = {
+    event,
+    env: envSnapshot(),
+    stdin,
+    at: new Date().toISOString(),
+    stdinBytes: Buffer.byteLength(raw || "", "utf8"),
+  };
+  recordTranscript(rec, stdin);
+  append(rec);
+  writeHookResponse();
   process.exit(0);
 }
 

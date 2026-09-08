@@ -52,11 +52,31 @@ function piEnv(): Record<string, string> {
   return e;
 }
 
+function safeObjectKeys(value: object, depth: number, walk: (v: unknown, depth: number) => unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(value)) {
+    try {
+      out[k] = walk((value as Record<string, unknown>)[k], depth + 1);
+    } catch {
+      out[k] = "[throw]";
+    }
+  }
+  return out;
+}
+
+function clippedString(value: string): string {
+  return value.length > 4000 ? value.slice(0, 4000) + "…[TRUNC]" : value;
+}
+
+function isSimpleValue(value: unknown): boolean {
+  return value === null || typeof value === "number" || typeof value === "boolean";
+}
+
 function safe(value: unknown): unknown {
   const seen = new WeakSet<object>();
   const walk = (v: unknown, depth: number): unknown => {
-    if (typeof v === "string") return v.length > 4000 ? v.slice(0, 4000) + "…[TRUNC]" : v;
-    if (v === null || typeof v === "number" || typeof v === "boolean") return v;
+    if (typeof v === "string") return clippedString(v);
+    if (isSimpleValue(v)) return v;
     if (typeof v === "bigint") return String(v);
     if (typeof v === "function") return "[function " + (v as Function).name + "]";
     if (v === undefined) return undefined;
@@ -67,15 +87,7 @@ function safe(value: unknown): unknown {
       if (seen.has(o)) return "[circular]";
       seen.add(o);
       if (Array.isArray(o)) return o.slice(0, 200).map((x) => walk(x, depth + 1));
-      const out: Record<string, unknown> = {};
-      for (const k of Object.keys(o)) {
-        try {
-          out[k] = walk((o as Record<string, unknown>)[k], depth + 1);
-        } catch {
-          out[k] = "[throw]";
-        }
-      }
-      return out;
+      return safeObjectKeys(o, depth, walk);
     }
     return String(v);
   };
