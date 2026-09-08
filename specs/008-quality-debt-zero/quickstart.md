@@ -182,6 +182,24 @@ node scripts/quality-debt-record.mjs --check             # batch F: every planne
 
 Expected: `--check --planned` exits 0 once every batch has merged; `--check` exits 0 only at the end of F with `721 ids: 0 missing, 0 duplicate, 0 open, 0 unconfirmed, 0 resolved-without-reason`. A random sample of 20 rows traces to a PR, a service comment, or a configuration line.
 
+## Live inventory coverage (after each merge's analyses)
+
+```bash
+node scripts/quality-debt-record.mjs --check-live
+```
+
+This reads both services' public current-issue searches for `main`. A complete search whose IDs are
+all covered by the inventory exits 0 without output. An uncovered ID is reported with its service and
+exits 1; a failed request or incomplete/invalid page also exits 1. The mode does not read credentials
+or the ledger and writes no files. A successful coverage check can include known open issues, so the
+service-count checks above remain required for the final 0 / 0 result.
+
+The real `--apply-codacy` mode also reads the complete current issue set before its first PATCH.
+Pending resolved IDs already absent from that set receive a local confirmation with the search
+absence and timestamp. Current IDs retain the existing reason/comment, incremental persistence and
+fail-fast handling: a refused PATCH stops later rows. `--apply-codacy --dry-run` stays offline and
+prints all planned PATCH requests; filtering against the live set happens only in the real run.
+
 ## Final analysis confirmation (batch F, before writing 0 / 0)
 
 ```bash

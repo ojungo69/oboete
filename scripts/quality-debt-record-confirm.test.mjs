@@ -5,26 +5,32 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
-  apiStub, codacyIssues, codacyRepository, confirmArgs, evidence, fixture, readCalls, run, sonarAnalyses, writeJson,
+  apiStub, codacyIssues, codacyRepository, codacyViewerId, confirmArgs, evidence, fixture, readCalls, run,
+  sonarAnalyses, writeJson,
 } from './quality-debt-record.test-support.mjs';
+
+const codacyOpenId = '33333333333333333333333333333333';
+const codacyOtherId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const codacyLastId = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const generatedCodacyId = (index) => (0x1000 + index).toString(16).padStart(30 + index % 3, '0');
 
 test('--confirm reads all pages once per service and only confirms absent planned ids', (t) => {
   const { cwd, ledger } = fixture(t);
   for (const row of ledger) delete row.confirmed;
   ledger.push({ service: 'sonar', id: 's-confirmed', state: 'fixed', confirmed: 'older-analysis' });
-  ledger.push({ service: 'codacy', id: 'c-open', state: 'open' });
+  ledger.push({ service: 'codacy', id: codacyOpenId, state: 'open' });
   writeJson(cwd, 'ledger.json', ledger);
   const result = run(cwd, confirmArgs, apiStub([
     { body: { issues: Array.from({ length: 500 }, (_, i) => ({ key: `s-other-${i}` })), paging: { total: 501 } } },
     { body: { issues: [{ key: 's-sql' }], total: 501 } },
-    { body: { data: Array.from({ length: 100 }, (_, i) => ({ issueId: `c-other-${i}` })), pagination: { cursor: 'next/+=', total: 101 } } },
-    { body: { data: [{ issueId: 'c-viewer' }], pagination: { total: 101 } } },
+    { body: { data: Array.from({ length: 100 }, (_, i) => ({ issueId: generatedCodacyId(i) })), pagination: { cursor: 'next/+=', total: 101 } } },
+    { body: { data: [{ issueId: codacyViewerId }], pagination: { total: 101 } } },
   ]));
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /sonar: 1 confirmed, 1 still open/);
   assert.match(result.stdout, /codacy: 1 confirmed, 1 still open/);
   assert.match(result.stdout, /sonar s-sql: still open/);
-  assert.match(result.stdout, /codacy c-viewer: still open/);
+  assert.ok(result.stdout.includes(`codacy ${codacyViewerId}: still open`), result.stdout);
   const text = readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8');
   const saved = JSON.parse(text);
   assert.equal(saved[0].confirmed, 'analysis-key');
@@ -51,8 +57,8 @@ test('--confirm reads all pages once per service and only confirms absent planne
 for (const service of ['sonar', 'codacy']) {
   for (const failure of [{ status: 503 }, { body: {} }, { body: service === 'sonar'
     ? { issues: [{}], total: 502 } : { data: [{}], pagination: {} } }, { body: service === 'sonar'
-    ? { issues: [{ key: 'last' }], total: 502 } : { data: [{ issueId: 'last' }], pagination: {} } }, { body: service === 'sonar'
-    ? { issues: [{ key: 'last' }], total: 501 } : { data: [{ issueId: 'last' }], pagination: { total: 2 } } }]) {
+    ? { issues: [{ key: 'last' }], total: 502 } : { data: [{ issueId: codacyLastId }], pagination: {} } }, { body: service === 'sonar'
+    ? { issues: [{ key: 'last' }], total: 501 } : { data: [{ issueId: codacyLastId }], pagination: { total: 2 } } }]) {
     test(`--confirm leaves ${service} unchanged after an incomplete or invalid page: ${JSON.stringify(failure)}`, (t) => {
       const { cwd, ledger } = fixture(t);
       delete ledger[service === 'sonar' ? 0 : 4].confirmed;
@@ -60,7 +66,7 @@ for (const service of ['sonar', 'codacy']) {
       const before = readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8');
       const first = service === 'sonar'
         ? { issues: Array.from({ length: 500 }, (_, i) => ({ key: `other-${i}` })), total: 502 }
-        : { data: [{ issueId: 'other' }], pagination: { cursor: 'next', total: 3 } };
+        : { data: [{ issueId: codacyOtherId }], pagination: { cursor: 'next', total: 3 } };
       const result = run(cwd, confirmArgs, apiStub([{ body: first }, failure]));
       assert.equal(result.status, 1);
       assert.ok(result.stderr.toLowerCase().includes(service), result.stderr);
@@ -134,13 +140,13 @@ for (const [service, response, message] of [
 
 for (const [name, responses, message] of [
   ['repeated id across pages without a total', [
-    { body: { data: [{ issueId: 'other' }], pagination: { cursor: 'next' } } },
-    { body: { data: [{ issueId: 'other' }], pagination: {} } },
+    { body: { data: [{ issueId: codacyOtherId }], pagination: { cursor: 'next' } } },
+    { body: { data: [{ issueId: codacyOtherId }], pagination: {} } },
   ], 'Codacy issues search returned a repeated id'],
   ['null total on the first page', [{ body: { data: [], pagination: { total: null } } }],
     'Codacy issues search returned an invalid total'],
   ['null total after a known total', [
-    { body: { data: [{ issueId: 'other' }], pagination: { cursor: 'next', total: 2 } } },
+    { body: { data: [{ issueId: codacyOtherId }], pagination: { cursor: 'next', total: 2 } } },
     { body: { data: [], pagination: { total: null } } },
   ], 'Codacy issues search total changed between pages'],
 ]) {

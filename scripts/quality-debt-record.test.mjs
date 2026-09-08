@@ -4,7 +4,9 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { confirmArgs, evidence, fixture, run, writeJson } from './quality-debt-record.test-support.mjs';
+import {
+  codacyHarnessId, codacyViewerId, confirmArgs, evidence, fixture, run, writeJson,
+} from './quality-debt-record.test-support.mjs';
 
 test('--check accepts a complete ledger', (t) => {
   const { cwd } = fixture(t);
@@ -15,12 +17,13 @@ test('--check accepts a complete ledger', (t) => {
 });
 
 for (const [name, change, counts, problem] of [
-  ['missing row', (ledger) => ledger.pop(), '1 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason', /missing 1: codacy:c-viewer/],
-  ['duplicate row', (ledger) => ledger.push(ledger[0]), '0 missing, 1 duplicate, 0 open, 0 unconfirmed, 0 resolved-without-reason', /duplicate 1: sonar:s-worker/],
-  ['empty resolved reason', (ledger) => { ledger[2].where = ' \t'; }, '0 missing, 0 duplicate, 0 open, 0 unconfirmed, 1 resolved-without-reason', /resolved-without-reason 1: sonar:s-regexp/],
-  ['explicit open state', (ledger) => { ledger[0].state = 'open'; }, '0 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason', /open 1: sonar:s-worker/],
-  ['missing state', (ledger) => { delete ledger[0].state; }, '0 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason', /open 1: sonar:s-worker/],
-  ['unknown state', (ledger) => { ledger[0].state = 'unknown'; }, '0 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason', /open 1: sonar:s-worker/],
+  ['missing row', (ledger) => ledger.pop(), '1 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason',
+    `missing 1: codacy:${codacyViewerId}`],
+  ['duplicate row', (ledger) => ledger.push(ledger[0]), '0 missing, 1 duplicate, 0 open, 0 unconfirmed, 0 resolved-without-reason', 'duplicate 1: sonar:s-worker'],
+  ['empty resolved reason', (ledger) => { ledger[2].where = ' \t'; }, '0 missing, 0 duplicate, 0 open, 0 unconfirmed, 1 resolved-without-reason', 'resolved-without-reason 1: sonar:s-regexp'],
+  ['explicit open state', (ledger) => { ledger[0].state = 'open'; }, '0 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason', 'open 1: sonar:s-worker'],
+  ['missing state', (ledger) => { delete ledger[0].state; }, '0 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason', 'open 1: sonar:s-worker'],
+  ['unknown state', (ledger) => { ledger[0].state = 'unknown'; }, '0 missing, 0 duplicate, 1 open, 0 unconfirmed, 0 resolved-without-reason', 'open 1: sonar:s-worker'],
 ]) {
   test(`--check rejects a ${name}`, (t) => {
     const { cwd, ledger } = fixture(t);
@@ -28,7 +31,7 @@ for (const [name, change, counts, problem] of [
     writeJson(cwd, 'ledger.json', ledger);
     const result = run(cwd, ['--check']);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, problem);
+    assert.ok(result.stderr.includes(problem), result.stderr);
     const withoutWhere = name === 'empty resolved reason' ? 1 : 0;
     assert.equal(result.stdout.trim(), `5 ids: ${counts}, 0 unknown, ${withoutWhere} without-where, 0 without-verdict`);
     if (name.endsWith('state')) {
@@ -73,15 +76,15 @@ for (const state of ['fixed', 'resolved', 'excluded']) {
 }
 
 for (const [service, id, rule, file, state, required] of [
-  ['codacy', 'c-viewer', 'Semgrep_fs', 'src/viewer/app/main.tsx', 'fixed', true],
-  ['codacy', 'c-harness', 'Semgrep_key', '.github/workflows/ci.yml', 'fixed', true],
-  ['codacy', 'c-harness', 'Semgrep_regex', 'scripts/dco-check.test.mjs', 'resolved', true],
-  ['codacy', 'c-harness', 'shellcheck_SC2024', 'scripts/e2e/dogfood.sh', 'fixed', true],
+  ['codacy', codacyViewerId, 'Semgrep_fs', 'src/viewer/app/main.tsx', 'fixed', true],
+  ['codacy', codacyHarnessId, 'Semgrep_key', '.github/workflows/ci.yml', 'fixed', true],
+  ['codacy', codacyHarnessId, 'Semgrep_regex', 'scripts/dco-check.test.mjs', 'resolved', true],
+  ['codacy', codacyHarnessId, 'shellcheck_SC2024', 'scripts/e2e/dogfood.sh', 'fixed', true],
   ['sonar', 's-regexp', 'typescript:S8786', 'src/worker/observe.ts', 'resolved', true],
   ['sonar', 's-regexp', 'javascript:S8786', 'scripts/e2e/probe.mjs', 'fixed', true],
-  ['codacy', 'c-harness', 'Semgrep_fs', 'scripts/e2e/probe.mjs', 'excluded', false],
+  ['codacy', codacyHarnessId, 'Semgrep_fs', 'scripts/e2e/probe.mjs', 'excluded', false],
   ['sonar', 's-worker', 'typescript:S3776', 'src/worker/observe.ts', 'fixed', false],
-  ['codacy', 'c-viewer', 'Lizard_nloc-medium', 'src/viewer/app/main.tsx', 'fixed', false],
+  ['codacy', codacyViewerId, 'Lizard_nloc-medium', 'src/viewer/app/main.tsx', 'fixed', false],
 ]) {
   test(`--check requires a verdict only for fixed or resolved rows of the security population: ${rule} ${file} ${state}`, (t) => {
     const { cwd, ledger, sonar, codacy } = fixture(t);
@@ -135,7 +138,7 @@ test('--check requires a valid Codacy reason even with --planned', (t) => {
       ledger[4].confirmed = confirmed;
       const result = run(cwd, ['--apply-codacy', '--dry-run']);
       assert.equal(result.status, 1);
-      assert.match(result.stderr, /c-viewer.*reason/);
+      assert.equal(result.stderr, `codacy ${codacyViewerId}: resolved without a valid reason\n`);
       assert.equal(result.stdout, '');
     }
   }
@@ -161,8 +164,8 @@ test('--allocate gives exclusions priority and respects worker and viewer owners
   assert.equal(result.status, 0, result.stderr);
   const allocation = JSON.parse(readFileSync(join(cwd, evidence, 'allocation.json'), 'utf8'));
   assert.deepEqual(allocation, {
-    A: ['s-sql', 'c-harness'], E: ['s-regexp'], B1: [], B2: [], B3: [],
-    C1: ['s-worker'], C2: [], C3: ['c-viewer'], C4: [], D: [],
+    A: ['s-sql', codacyHarnessId], E: ['s-regexp'], B1: [], B2: [], B3: [],
+    C1: ['s-worker'], C2: [], C3: [codacyViewerId], C4: [], D: [],
     counts: { A: 2, E: 1, B1: 0, B2: 0, B3: 0, C1: 1, C2: 0, C3: 1, C4: 0, D: 0 },
   });
   assert.deepEqual(JSON.parse(result.stdout), allocation.counts);
@@ -239,7 +242,7 @@ test('--check rejects missing or repeated allocations, even with a complete ledg
   writeJson(cwd, 'allocation.json', allocation);
   const result = run(cwd, ['--check']);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /allocation missing: codacy:c-viewer/);
+  assert.ok(result.stderr.includes(`allocation missing: codacy:${codacyViewerId}`), result.stderr);
   assert.match(result.stderr, /allocation duplicate: sonar:s-worker.*C1/);
   assert.match(result.stderr, /allocation unknown: stale-id/);
   assert.equal(result.stdout.trim(), '5 ids: 0 missing, 0 duplicate, 0 open, 0 unconfirmed, 0 resolved-without-reason, 0 unknown, 0 without-where, 0 without-verdict');
@@ -256,12 +259,12 @@ for (const args of [['--check'], ['--check', '--planned']]) {
 
   test(`${args.join(' ')} reports ledger ids outside the service's inventory`, (t) => {
     const { cwd, ledger } = fixture(t);
-    ledger.push({ ...ledger[0], id: 'c-viewer' });
+    ledger.push({ ...ledger[0], id: codacyViewerId });
     writeJson(cwd, 'ledger.json', ledger);
     const before = readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8');
     const result = run(cwd, args);
     assert.equal(result.status, 1);
-    assert.equal(result.stderr, 'unknown 1: sonar:c-viewer\n');
+    assert.equal(result.stderr, `unknown 1: sonar:${codacyViewerId}\n`);
     assert.match(result.stdout, /0 resolved-without-reason, 1 unknown/);
     assert.equal(readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8'), before);
   });
@@ -280,14 +283,14 @@ test('default mode keeps the manual prefix and writes sorted findings, verdicts,
   const text = readFileSync(markdown, 'utf8');
   assert.ok(text.startsWith(prefix));
   assert.doesNotMatch(text, /Old generated content/);
-  assert.equal((text.match(/^\| [sc]-/gm) ?? []).length, 5);
+  assert.equal((text.match(/^\| (?:s-|[0-9a-f]+ \|)/gm) ?? []).length, 5);
   assert.ok(text.indexOf('## SonarCloud') < text.indexOf('## Codacy'));
   assert.ok(text.indexOf('| s-sql |') < text.indexOf('| s-regexp |'));
   assert.ok(text.indexOf('| s-regexp |') < text.indexOf('| s-worker |'));
   assert.match(text, /open 0 \/ fixed 1 \/ resolved 1 \/ excluded 1/);
   assert.match(text, /open 1 \/ fixed 0 \/ resolved 0 \/ excluded 1/);
   assert.ok(text.includes('| s-regexp | typescript:S8786 | src/worker/observe.ts:3 | resolved ✓ | The pattern is a constant. — constant \\| pattern — not applicable |'));
-  assert.ok(text.includes('| c-viewer | Lizard_nloc-medium | src/viewer/app/main.tsx:12 | open |  |'));
+  assert.ok(text.includes(`| ${codacyViewerId} | Lizard_nloc-medium | src/viewer/app/main.tsx:12 | open |  |`));
   assert.ok(text.includes('## History\n\n| service | id | from | to | when | why |'));
   assert.ok(text.includes('| sonar | s-regexp | open | resolved | 2026-09-07 | Reviewed \\| literal<br>pattern |'));
   assert.equal(run(cwd).status, 0);
