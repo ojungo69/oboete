@@ -66,13 +66,18 @@ sudo rm -rf /var/tmp/oboete-harness && sudo mkdir -p /var/tmp/oboete-harness \
 # differs, the run stops and prints both paths. Deciding between them automatically is what locked this
 # account out on 2026-09-08, and no local check settles it either: `claude -p hi` can answer from a
 # cached access token whose refresh token has already been retired, so a successful call is not evidence
-# that the account's file is the live one. To resolve a stop, destroy neither: put the copy somewhere
-# outside the run first --
-#   sudo -u oboete-dogfood -H bash -lc 'mv ~/candidate-homes/claude/.credentials.json ~/claude-credentials.$(date +%s).json'
-# -- and then use the account normally. If Claude keeps working, delete the saved file once you are
-# confident; if it starts failing to authenticate, copy the saved file over `~/.claude/.credentials.json`
-# and try again. If neither works the account needs an interactive `claude` login, which only a person can
-# do. Only start another run once `~/candidate-homes` is gone.
+# that the account's file is the live one. To resolve a stop, destroy neither. Move the copy out of the run
+# first, into a name `mktemp` reserves so it cannot land on an earlier archive:
+#   sudo -u oboete-dogfood -H bash -lc 'set -e; S=$(mktemp ~/claude-credentials.XXXXXX)
+#   mv ~/candidate-homes/claude/.credentials.json "$S"; chmod 600 "$S"; echo "saved the copy at $S"'
+# Then use the account normally. If Claude keeps working, delete that file once you are satisfied. If it
+# starts failing to authenticate, archive the account's own version the same way *before* putting the
+# saved one in its place, so both originals survive a fallback that also fails:
+#   sudo -u oboete-dogfood -H bash -lc 'set -e; A=$(mktemp ~/claude-credentials.XXXXXX)
+#   cp -a ~/.claude/.credentials.json "$A"; chmod 600 "$A"; echo "saved the account version at $A"
+#   cp -a <the file saved above> ~/.claude/.credentials.json'
+# If neither version authenticates, the account needs an interactive `claude` login, which only a person
+# can do. Only start another run once `~/candidate-homes` is gone.
 sudo -u oboete-dogfood -H bash -lc 'set -e
 C=~/candidate-homes/claude/.credentials.json; A=~/.claude/.credentials.json
 if [ -f "$C" ] && [ ! -L "$C" ]; then
