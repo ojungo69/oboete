@@ -487,5 +487,29 @@ script sources the credentials before it starts, so a worker it spawns carries t
 - Viewer GET /api/memories: median 4 ms, max 37 ms over 5 requests, 11 memories listed (budget 2000 ms)
 - finished 2026-09-08T15:13:11Z, 1-minute load 0.11
 
+### Why the five Grok legs failed
+
+Every failing leg reports `Not signed in.`, including `<run>/grok-to-claude/seed/stdout.txt` and
+`codex-to-grok/receive`.
+
+The pairs run alphabetically: `claude → grok`, the second pair, passed in 63 s with the fact recalled.
+From `codex → grok` on, every Grok leg failed; the three Grok seeding legs ended in about 500 ms. This
+shows that Grok could authenticate at the start of the run and could not later in it.
+
+`prepareGrokAgent` (`scripts/e2e/isolated-user.mjs:928`) copies the account's `~/.grok/auth.json`
+into each pair configuration and points `GROK_HOME` at that copy. That is the copied-credential hazard
+tracked in issue #175, but this run does not identify a particular refresh or prove token retirement.
+`prepareCodexAgent` and `preparePiAgent` also copy `auth.json`, so their exposure is part of that
+follow-up.
+
+`prepareClaudeAgent` copies `settings.json` alone and passes it with `--settings`; it does not set a
+per-leg credential configuration variable, so Claude inherits its credential configuration. This run
+records no Claude authentication failure, not a general guarantee that Claude cannot fail this way.
+
+The T033 candidate verification at `2026-09-08T05-23-31` passed 12 of 12 pairs; it is separate from
+the day-3 daily run `2026-09-07T15-05-08-149Z`. Neither result identifies whether a token refresh
+occurred. SC-007 records the observed Grok CLI authentication failure, while issue #175 follows the
+copied-credential hypothesis and its remediation.
+
 
 - Filed against the release (SC-007): https://github.com/ojungo69/oboete/issues/180
