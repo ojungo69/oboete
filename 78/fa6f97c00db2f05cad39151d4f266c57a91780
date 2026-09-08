@@ -1,0 +1,21 @@
+specs/008-quality-debt-zero/plan.md
+  s_49c4523e80af0c::t_3a16a217d488d6 113
+specs/008-quality-debt-zero/tasks.md
+  s_49c4523e80af0c::t_928cd97708eecd 109,111
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "78fa6f97c00db2f05cad39151d4f266c57a91780",
+  "prompts": {},
+  "sessions": {
+    "s_49c4523e80af0c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08247-7f3b-73a2-af35-16a66e78370d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
