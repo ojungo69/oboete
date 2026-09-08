@@ -3263,31 +3263,36 @@
   "service": "sonar",
   "id": "AaB3XkgzIqdfylE4c2oa",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkgzIqdfylE4c2ob",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkgzIqdfylE4c2oc",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkl3IqdfylE4c2pn",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkl3IqdfylE4c2pr",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
@@ -3300,73 +3305,85 @@
   "service": "sonar",
   "id": "AaB3XkjoIqdfylE4c2pG",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjoIqdfylE4c2pH",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmFIqdfylE4c2pt",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmFIqdfylE4c2pu",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmFIqdfylE4c2pv",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmFIqdfylE4c2pw",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmFIqdfylE4c2px",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmFIqdfylE4c2py",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmFIqdfylE4c2pz",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmFIqdfylE4c2p0",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmFIqdfylE4c2p1",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmFIqdfylE4c2p2",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
@@ -3386,103 +3403,120 @@
   "service": "sonar",
   "id": "AaB3XkbGIqdfylE4c2na",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkbGIqdfylE4c2nc",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkbGIqdfylE4c2nd",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkbZIqdfylE4c2ne",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkbZIqdfylE4c2nf",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkmSIqdfylE4c2p3",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XklZIqdfylE4c2pl",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjBIqdfylE4c2o1",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkjBIqdfylE4c2o2",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkeZIqdfylE4c2n-",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkeZIqdfylE4c2oA",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkeZIqdfylE4c2oB",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xke6IqdfylE4c2oD",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xke6IqdfylE4c2oE",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xke6IqdfylE4c2oI",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xke6IqdfylE4c2oJ",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xke6IqdfylE4c2oK",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
@@ -3502,55 +3536,64 @@
   "service": "sonar",
   "id": "AaB3XkkoIqdfylE4c2pU",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkoIqdfylE4c2pX",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkoIqdfylE4c2pY",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkOIqdfylE4c2pN",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkCIqdfylE4c2pJ",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkCIqdfylE4c2pK",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkCIqdfylE4c2pL",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkb6IqdfylE4c2nh",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkb6IqdfylE4c2ni",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
@@ -3563,43 +3606,50 @@
   "service": "sonar",
   "id": "AaB3XkioIqdfylE4c2oz",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xki0IqdfylE4c2o0",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkiJIqdfylE4c2or",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkiJIqdfylE4c2ot",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkiJIqdfylE4c2ou",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkiJIqdfylE4c2ov",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkc9IqdfylE4c2nm",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
@@ -3612,187 +3662,218 @@
   "service": "sonar",
   "id": "AaB3Xkc9IqdfylE4c2no",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkc9IqdfylE4c2ns",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkc9IqdfylE4c2nt",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkc9IqdfylE4c2nu",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkc9IqdfylE4c2nw",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkc9IqdfylE4c2nx",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkc9IqdfylE4c2ny",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkc9IqdfylE4c2nz",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkc9IqdfylE4c2n1",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkfvIqdfylE4c2oS",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkfvIqdfylE4c2oT",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkfdIqdfylE4c2oM",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkfdIqdfylE4c2oN",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkfdIqdfylE4c2oP",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkfdIqdfylE4c2oQ",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkfdIqdfylE4c2oR",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkgRIqdfylE4c2oV",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkgRIqdfylE4c2oW",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkgRIqdfylE4c2oX",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkllIqdfylE4c2pm",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XklBIqdfylE4c2pe",
   "state": "fixed",
-  "where": "#160"
+  "where": "#160",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XklBIqdfylE4c2pg",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XklBIqdfylE4c2ph",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XklBIqdfylE4c2pi",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkzIqdfylE4c2pZ",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkzIqdfylE4c2pa",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkzIqdfylE4c2pb",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkbIqdfylE4c2pQ",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkbIqdfylE4c2pR",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkbIqdfylE4c2pT",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkhpIqdfylE4c2oj",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
@@ -3812,19 +3893,22 @@
   "service": "sonar",
   "id": "AaB3XkhcIqdfylE4c2oh",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkhcIqdfylE4c2oi",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkh3IqdfylE4c2ok",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
@@ -3837,457 +3921,533 @@
   "service": "sonar",
   "id": "AaB3Xkh3IqdfylE4c2om",
   "state": "fixed",
-  "where": "#163"
+  "where": "#163",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkbIqdfylE4c2pP",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkbIqdfylE4c2pS",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkbIqdfylE4c2pO",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkc9IqdfylE4c2nv",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkc9IqdfylE4c2n0",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkfdIqdfylE4c2oO",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XklBIqdfylE4c2pd",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XklBIqdfylE4c2pf",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkfNIqdfylE4c2oL",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "codacy",
   "id": "2fa843f30085b6b69eb20803d9f42b29",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "51024f006140e9bc315a9218468bc848",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "70fb319e0568bdf82a90f8d38044f075",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "ac8b3fbc5586f26a8d14d31393b5e185",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "c806aac9bc4126782a6690a61ce95445",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "12bfd84c920feb7513165e1963e42022",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "b2c9c11e8227925bc3a297d756804448",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "4790455d8db963ddff6afd9f8e2df464",
   "state": "fixed",
-  "where": "#164"
+  "where": "#164",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "sonar",
   "id": "AaB3Xke6IqdfylE4c2oF",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkiJIqdfylE4c2os",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xke6IqdfylE4c2oG",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xke6IqdfylE4c2oH",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkd4IqdfylE4c2n7",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkioIqdfylE4c2oy",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkiJIqdfylE4c2on",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkiJIqdfylE4c2oo",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkiJIqdfylE4c2op",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkiJIqdfylE4c2oq",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkeZIqdfylE4c2n_",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkeJIqdfylE4c2n8",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkeZIqdfylE4c2n9",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkdqIqdfylE4c2n6",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkioIqdfylE4c2ox",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkeqIqdfylE4c2oC",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkiYIqdfylE4c2ow",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "codacy",
   "id": "ba8cb52aaf85df5e56aef6e700030d0a",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "6d2c3e2bc43d69bfb5d0699166672f79",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "99f1e25fc60fe2a8f0c836e8a50ab71f",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "46e6b08df61cfa75ea028ea6572af4df",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "2fe9cb6af3e5bc0a51b72ebeee4bcd37",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "9c55aae5e3bdd0bf530eb6ec7b70eec6",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "188840d78c29d17901a37c07a2879cbe",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "ef0d4048b972a68b7161482442f6cfd2",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "d00d96e60329780ad296180f2e3a9c4b",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "ed0ec10c89a6aba269a1fb49ceea2522",
   "state": "fixed",
-  "where": "#165"
+  "where": "#165",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "sonar",
   "id": "AaB3XkchIqdfylE4c2nl",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkbGIqdfylE4c2nZ",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkcRIqdfylE4c2nk",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkbGIqdfylE4c2nb",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkX3IqdfylE4c2nW",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkbrIqdfylE4c2ng",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkl3IqdfylE4c2pp",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkl3IqdfylE4c2pq",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkkOIqdfylE4c2pM",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkl3IqdfylE4c2po",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3Xkj2IqdfylE4c2pI",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkhBIqdfylE4c2od",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkhNIqdfylE4c2oe",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "sonar",
   "id": "AaB3XkgmIqdfylE4c2oZ",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
  },
  {
   "service": "codacy",
   "id": "493c22bd60eb713112d9ca9dc9f26bf9",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "ced391779bf4a169a7c8df8395191c4f",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "6b8a3d3310884f227d775ae9b98b7136",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "dbb1a53f19a6df43679f5149885b330e",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "75db7a535b822f1cd6d58ae67257921a",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "34f433a4c39a2918bbd993e41727fc39",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "53fa56ddf778a0e859e1f2883640040a",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "8615949cc9064bddaccd3ab613d65fb2",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "77635429d1f6f5ac9a4b30db32223ad9",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "c006fe6abea142b9e53a84d31030c021",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "34065213795f36e210d7e7c6383938cc",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "dd612e2e9fbbc8c3ec2f2594060800a8",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "3967d0a7a26e3d0dbd841c3074809d67",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "cdcb204be8f7e0941ec2d1eca871d4",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "5f95cd08281c5f3a410e055acf395f2",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "ec24f91da77ed0722e0e71f300351662",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "7229071f8c9bc53fbb3044e81d01d86a",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
@@ -4300,43 +4460,50 @@
   "service": "codacy",
   "id": "2128c682e98d0c083fb017cf7801d418",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "a7ff455628bd7793e1a0f87d9be3723d",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "9223ded563847f7eafa65e318dcfb35a",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "2274afa53c8a513e266b40542e03314a",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "fd5a3f38eaf5d74f4fd9a362e0c51673",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "88b03f53b48660ec02a18d10af3fcae0",
   "state": "fixed",
-  "where": "#166"
+  "where": "#166",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
   "id": "7fc74b21c7bde3f5ff9b558373a539f2",
   "state": "fixed",
-  "where": "#162"
+  "where": "#162",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
@@ -4353,5 +4520,439 @@
   "reason": "FalsePositive",
   "where": "scanKey is called only with AGENT_KEYS[agent].session and .tool, eight string literals in a module constant, and the payload is the subject of the match rather than part of the pattern (same finding as f5834f762e53f0596f3655477508677f, re-issued under a new id when #162 rewrote the argument into String.raw)",
   "verdict": "no payload-controlled pattern reaches the constructor: agent comes from resolveAgent, which returns 'codex', 'pi', 'grok', 'claude' or 'unknown' from fixed comparisons on the handler's selector and two environment variables, and captureEvent returns at the 'unknown' guard before the scan, so AGENT_KEYS[agent].session and .tool is a lookup in a constant table of eight string literals; the payload is prefix, the string exec runs against, and the effect is bounded because the pattern's repetitions cannot backtrack ambiguously: the two \\s* around the colon each sit between literal characters, and the one {1,4096} quantifier runs over an alternation whose branches cannot both match a character (one excludes the backslash the other requires), over a receiver readStdinBounded already caps at 262,144 bytes"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrWIqdfylE4c2sF",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrWIqdfylE4c2sH",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkrWIqdfylE4c2sK",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksHIqdfylE4c2sn",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksHIqdfylE4c2sr",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksHIqdfylE4c2st",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XksHIqdfylE4c2ss",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2rv",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2rw",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2rz",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqvIqdfylE4c2r4",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqRIqdfylE4c2rl",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qQ",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpAIqdfylE4c2q0",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpxIqdfylE4c2rW",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkqBIqdfylE4c2rg",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XknlIqdfylE4c2qS",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkoDIqdfylE4c2qd",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3Xkm9IqdfylE4c2qB",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkphIqdfylE4c2rI",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpTIqdfylE4c2rA",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "sonar",
+  "id": "AaB3XkpTIqdfylE4c2rG",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "f77d7379-3762-4d79-b220-92921b2561a4"
+ },
+ {
+  "service": "codacy",
+  "id": "6d3e97f7a82005437b401405e5d6bce4",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "ddef21ef7284c05f49875db8b2764adf",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "3c6a4706ef5da43523fbd6049a8c2e0b",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "4b6878f7afe49b2d03ddb37a642baf19",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "1ff4a9ad7a424c0e586783f79aa10af5",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "3bfdd27fafb47c7dc899f71074d430bf",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "ea0249da1fa22c0298b73109c302b103",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "1c095e585ae3ace9e0bc8535a1af331",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "c6cca1c63d1e3ee82d7c82d3190e3e7b",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "81ce07a4e589e89cdf2afbf76745f3e5",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "2048c656de1414609fe2ae1ca8b4ba88",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "5ab3f2291befe24966212f639cb083da",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "5c963b7dd33080dcd28577b7cbe8bddd",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "5b625c80327691523aa5b73f97ac29dd",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "744cb0807e2a53d2a2d26182ea35fdd5",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "a670638b05ce29b63c0061ff4cd84245",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "ac1b7cd6643c571b65f4e53a916cae02",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "85790da90171cb935d277b26f5eca67d",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "dc05198a31e8c44afa3e0b282509fa99",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "ce3d1798d16dc6b44b650e4c0cdfd0d2",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "532dcb2f393f01e11c2227dda0a9d4f3",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "644a1bf744e8042a39372007b191b0e3",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "edb26eab97af4a457864508aae125b49",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "13b87a7ce026ee26c0659610eb01fd0f",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "838d0ad0ceaf49f6d70bdddd22dcfebe",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "86887a65b2a6a6ed7c17cd7606507999",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "ee3f1ba6c5b21dd624ff5cc32ecfa05a",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "5102155bc3095b429052406f0180d55a",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "4f98bea2b5ff929673ae67e7426689be",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "8e4e16e4abcce13076e3c2922da5ff98",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "b0bce20c6334ec24bf9755b6d05139b7",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "d6734b34a521c93a6bd75c091398fdb8",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "6d3e0f690f1fa1921d15ecb764a20cb0",
+  "state": "resolved",
+  "reason": "FalsePositive",
+  "where": "shellQuote is one return statement and Lizard measures it at 3 NLOC in the same tree; the 492 came from the reader's span, which ran past the function until batch B1 rewrote the /'/g literal below it"
+ },
+ {
+  "service": "codacy",
+  "id": "2a74d12048285a3863754b93c9a0f519",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "11a6c751ee3ef3cc3a66a1db39e096d6",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "5bcf01d4f78f9d5476572cd947e2668a",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "f6c15bc9b6667413493b7b82690ffd86",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "546303173f9b69d5036f0dcfe63aedb7",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "86298bfa5e70b8805e7a1909ea176c32",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "b6af2bb777dfa4198a6d06a333a0a0b",
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  }
 ]
