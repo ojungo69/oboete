@@ -77,24 +77,28 @@ sudo -u oboete-dogfood -H bash -lc "$CAND; oboete setup --agents claude,codex,gr
 # absolute and expanded, which is why this is a command and not a block to retype. Without it Pi keeps the copied
 # loader, which names the daily install, and its six pairs say nothing about the candidate.
 sudo -u oboete-dogfood -H bash -lc 'B=$HOME/candidate/node_modules/oboete/dist; D=$HOME/candidate-homes/pi/extensions; mkdir -p $D; umask 177; { echo "// oboete:managed written by \`oboete setup\`; \`oboete setup --remove\` deletes it."; echo "import { piExtension } from \"file://$B/pi-extension.mjs\";"; echo "export default (pi) => piExtension(pi, { node: \"$(command -v node)\", bundle: \"$B/oboete.mjs\" });"; } > $D/oboete.js'
-# Every bundle path in the live configuration must be the candidate's, per file, so that a registration
-# deleted along with its path shows up as a short count and one repointed at the daily install shows up
-# as a second path. The seven files are named individually because a recursive scan cannot work here:
-# session transcripts, rotated backups and agent history quote whichever bundle path they were written
-# under. This says nothing about whether an entry is structurally valid -- doctor below covers that.
+# Every path under a `node_modules/oboete/dist/` directory in the live configuration must be one of the
+# candidate's two bundles, and each file must hold as many as setup wrote. A short count means a
+# registration was deleted; an unexpected path means one names the daily install, a `.backup` sibling, or
+# the daily `pi-extension.mjs` beside a candidate engine. Whole path tokens are compared, not prefixes,
+# and matches are counted rather than lines, because a minified config puts eight on one line. The seven
+# files are named individually: a recursive scan cannot work here, since session transcripts, rotated
+# backups and agent history quote whichever bundle path they were written under. This counts references;
+# it does not say an entry is structurally valid or that the agent would execute it.
 sudo -u oboete-dogfood -H bash -lc "$CAND; set -o pipefail
-W=\$HOME/candidate/node_modules/oboete/dist/oboete.mjs
+D=\$HOME/candidate/node_modules/oboete/dist
 set -- \"\$CLAUDE_CONFIG_DIR/settings.json 8\" \"\$CLAUDE_CONFIG_DIR/.claude.json 1\" \"\$CODEX_HOME/config.toml 1\" \\
-  \"\$CODEX_HOME/hooks.json 7\" \"\$GROK_HOME/config.toml 1\" \"\$GROK_HOME/hooks/oboete.json 9\" \"\$PI_CODING_AGENT_DIR/extensions/oboete.js 1\"
+  \"\$CODEX_HOME/hooks.json 7\" \"\$GROK_HOME/config.toml 1\" \"\$GROK_HOME/hooks/oboete.json 9\" \"\$PI_CODING_AGENT_DIR/extensions/oboete.js 2\"
 bad=0
 for spec in \"\$@\"; do
   f=\${spec% *}; want=\${spec##* }
-  n=\$(grep -oE \"[^\\\"' ]*node_modules/oboete/dist/oboete[.]mjs\" \"\$f\" | wc -l) || n=0
-  [ \"\$n\" = \"\$want\" ] || { echo \"\$f: \$n references, expected \$want\"; bad=1; }
+  n=\$(grep -oE \"[^\\\"' ]*node_modules/oboete/dist/[^\\\"' ]*\" \"\$f\" | wc -l) || n=0
+  [ \"\$n\" = \"\$want\" ] || { echo \"\$f: \$n bundle paths, expected \$want\"; bad=1; }
 done
-paths=\$(grep -hoE \"[^\\\"' ]*node_modules/oboete/dist/oboete[.]mjs\" \"\${@%% *}\" | sort -u)
-[ \"\$paths\" = \"\$W\" ] || { echo \"bundle paths in the live configuration: \$paths\"; bad=1; }
-[ \"\$bad\" = 0 ] && echo 'every reference in the live configuration is the candidate'
+for p in \$(grep -hoE \"[^\\\"' ]*node_modules/oboete/dist/[^\\\"' ]*\" \"\${@%% *}\" | sort -u); do
+  case \$p in \"\$D/oboete.mjs\"|\"file://\$D/pi-extension.mjs\") ;; *) echo \"unexpected bundle path: \$p\"; bad=1;; esac
+done
+[ \"\$bad\" = 0 ] && echo 'every bundle path in the live configuration is the candidate'
 exit \$bad"
 sudo -u oboete-dogfood -H bash -lc "$CAND; node /var/tmp/oboete-harness/scripts/e2e/isolated-user.mjs --daily --pairs all"
 # Required whenever lifecycle code or the TUI changed: `--pairs` never enters runCompactLifecycle,
@@ -107,7 +111,7 @@ sudo -u oboete-dogfood -H bash -lc "$CAND; oboete doctor --probe-provider"   # t
 sudo -u oboete-dogfood -H bash -lc 'set -e; C=~/candidate-homes/claude/.credentials.json; if [ -f "$C" ] && [ ! -L "$C" ]; then cp -a "$C" ~/.claude/.credentials.json; fi; rm -rf ~/candidate ~/candidate-homes' && sudo rm -rf /var/tmp/oboete-harness
 ```
 
-Expected: three separate facts, which are only evidence about the candidate together. **What is installed**: the `sha256sum` of `~/candidate/node_modules/oboete/dist/oboete.mjs` equals the tarball's `dist/oboete.mjs` hash. **What is referenced**: `oboete setup` exits 0 for the three agents it can wire (the copied consent record satisfies `--yes`), and the reference check prints `every reference in the live configuration is the candidate` with the seven per-file counts intact — 8 in Claude's `settings.json`, 1 in `.claude.json`, 7 in Codex's `hooks.json`, 9 in Grok's, 1 assignment in each `config.toml` and 1 in the Pi loader. A registration deleted with its path is a short count; one repointed at the daily install or at `oboete.mjs.backup` is a second path. It is a negative check — no daily reference survives — not a proof that each entry is well formed: it counts references, so an entry deleted with its path left behind in a sibling property or a comment keeps its count. What each registration means is `src/setup/detect.ts`'s to say, and asking a check in this runbook to re-derive that is asking it to reimplement setup; issue #177 moves the question to `oboete doctor`, which already parses these files for real. A count that came back 27 instead of 28 is how the missing MCP registration was found on 2026-09-08. **What actually runs**: `12 of 12 pairs pass`; every lifecycle check `pass` for both agents; `oboete doctor --probe-provider` exits 0 with every `agent:` row healthy, which fires each agent's real hook and reports its `trust:` state, so an entry the agent would refuse to execute fails here. `src/setup/probe.ts` checks the agent, the prompt kind and the probe marker, and records no bundle identity — the identity comes from the first two facts: the only bundle the live configuration can reach is the installed one, and its hash is known. `catalog unverified` and the `native-memory:claude` warning are informational and do not affect the exit. Doctor inspects `candidate-homes/oboete`, copied from the daily `~/.oboete` at the start of the run, not the per-pair databases the pairs write — so if `worker` reads degraded, establish whether that lease came from this run before calling it a leftover. A failing row is not evidence about the bundle until the agent's own `result` field has been read: an expired login fails a pair exactly the way a broken build does. Candidate SHA, both hashes, run id, and both lines go into the PR body. The daily cron's install, its real `~/.oboete`, and its agent configurations are untouched; the copies are removed afterwards.
+Expected: three separate facts, each with its own scope; the conclusion is only as wide as the three together. **What is installed**: the `sha256sum` of `~/candidate/node_modules/oboete/dist/oboete.mjs` equals the tarball's `dist/oboete.mjs` hash. **What is referenced**: `oboete setup` exits 0 for the three agents it can wire (the copied consent record satisfies `--yes`), and the reference check prints `every bundle path in the live configuration is the candidate` — every `node_modules/oboete/dist/…` token in the seven files is either the candidate `oboete.mjs` or `file://…/pi-extension.mjs` beside it, with the per-file counts intact: 8 in Claude's `settings.json`, 1 in `.claude.json`, 7 in Codex's `hooks.json`, 9 in Grok's, 1 in each `config.toml`, 2 in the Pi loader (its import and its engine). Verified against the live homes and copies mutated six ways: a deleted `mcpServers.oboete` (short count), a hook repointed at the daily install, a bundle repointed at `oboete.mjs.backup`, a Pi loader importing the daily `pi-extension.mjs` while passing the candidate engine, and every file missing are all rejected; minifying a config, which changes nothing, still passes. It counts references, so an entry deleted with its path left behind in a sibling property or a comment keeps its count, and any path the seven files do not spell — anything reached through `PATH`, a symlink, or a `node_modules` resolution — is outside it. **What actually runs**: `12 of 12 pairs pass`; every lifecycle check `pass` for both agents; `oboete doctor --probe-provider` exits 0 with every `agent:` row healthy. Read that row for exactly what it checks: the agent is detected and its configuration is trusted (`src/doctor/agents.ts:243-255` — Claude needs an owned hook group, Grok and Pi only that their files exist), and one prompt event was captured through the live hook (`src/setup/probe.ts:112,313-321`). It does not walk every hook event or the MCP registration, and it records no bundle identity. So the identity argument is bounded: the two hashes fix the installed bundle, and the reference check says the seven files name no other one — a mixed installation reached by some path they do not spell would not be caught, and issue #177 is what closes it by having doctor report the bundle each hook executed. `catalog unverified` and the `native-memory:claude` warning are informational and do not affect the exit. Doctor inspects `candidate-homes/oboete`, copied from the daily `~/.oboete` at the start of the run, not the per-pair databases the pairs write — so if `worker` reads degraded, establish whether that lease came from this run before calling it a leftover. A failing row is not evidence about the bundle until the agent's own `result` field has been read: an expired login fails a pair exactly the way a broken build does. Candidate SHA, both hashes, run id, and both lines go into the PR body. The daily cron's install, its real `~/.oboete`, and its agent configurations are untouched; the copies are removed afterwards.
 
 ## Service counts (after each merge's analysis)
 
