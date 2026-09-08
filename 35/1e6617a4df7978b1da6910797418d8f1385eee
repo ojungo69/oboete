@@ -1,0 +1,19 @@
+scripts/e2e/candidate-wiring.mjs
+  s_359fcac8e97f88::t_59722d36592d9c 12,24-28,30-31,37,83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "351e6617a4df7978b1da6910797418d8f1385eee",
+  "prompts": {},
+  "sessions": {
+    "s_359fcac8e97f88": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f9c3192-6829-4488-bc3b-1ff1e111fdea",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
