@@ -396,9 +396,8 @@ function recordCodexPostcompact(options) {
   return { posts, summary, aOk, bOk };
 }
 
-// One read answers both questions. Asking with existsSync first and reading afterwards leaves a
-// window in which the file can appear or vanish between the two calls, and reports the state the
-// file was in rather than the state it is in. ENOENT is the absent case; every other error stands.
+// One read: existsSync first reports the state the file was in, not the state it is in.
+// ENOENT is the absent case; every other error stands.
 function readConfigToml(file) {
   try {
     return fs.readFileSync(file, "utf8");

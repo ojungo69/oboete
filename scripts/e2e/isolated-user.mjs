@@ -1478,9 +1478,8 @@ async function runCodexCompactLifecycle(context) {
       dependencies,
       "Codex post-compact prompt and following turn_end",
     );
-    // Lizard's JavaScript reader loses this function's closing brace when an object literal is
-    // written inline in an argument list, and then measures it as everything up to the next
-    // declaration; the named local keeps the measurement on the function that is actually here.
+    // Lizard's JavaScript reader loses this function's closing brace when an object literal sits
+    // inline in an argument list, so the value lives in a named local.
     const contractOptions = { ...options, contract: true };
     after = await waitForLifecycleState(
       database,
