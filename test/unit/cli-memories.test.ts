@@ -15,7 +15,7 @@ import {
 import type { MemoryCliRuntime } from '../../src/memories-cli.js';
 import { contentHash, materialHash, memoryIdFor } from '../../src/db/identity.js';
 import { openDatabase } from '../../src/db/open.js';
-import { applyObservations } from '../../src/observer/classify.js';
+import { applyObservations } from '../../src/observer/apply.js';
 import type { ObserverOutput } from '../../src/observer/contract.js';
 import { oboetePaths } from '../../src/paths.js';
 import type { DetectorResult } from '../../src/privacy/detect.js';

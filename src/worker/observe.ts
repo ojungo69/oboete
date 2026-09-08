@@ -23,13 +23,12 @@ import {
   updateCitationState,
 } from '../injection/staleness.js';
 import { appendLog, appendLogQuietly, credentialValues, errorCode } from '../log.js';
+import { applyObservations, type ApplyResult } from '../observer/apply.js';
 import { refreshWorkersAiCatalog } from '../observer/catalog.js';
 import {
-  applyObservations,
   checkLanguage,
   rejectsDirectives,
   sessionSummary,
-  type ApplyResult,
   type DegradedReason,
 } from '../observer/classify.js';
 import { fallbackObserve, type FallbackEvent } from '../observer/fallback.js';
@@ -49,7 +48,6 @@ import {
   loadBatchInput,
   payloadOf,
   reclaimStale,
-  recoverSpool,
   toolInputOf,
   toolInputText,
   BLANK_CHARACTERS_SQL,
@@ -57,6 +55,7 @@ import {
   type BatchInput,
   type BatchRow,
 } from './batches.js';
+import { recoverSpool } from './spool-recovery.js';
 import { assertLease, claimLease, heartbeat, releaseLease, transactionImmediate } from './lease.js';
 import {
   checkpoint,
