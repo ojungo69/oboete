@@ -150,7 +150,9 @@ sudo -u oboete-dogfood -H bash -lc "$CAND; oboete doctor --probe-provider"   # t
 # a copy plus a relink: a rename inside one filesystem is atomic, so a failure or an interruption leaves the
 # account's file either wholly the old one or wholly the new one, never half-written, and there is no window in
 # which the token exists in both places. It also leaves nothing behind on success, which is what lets the guard
-# at the top of this runbook read a regular file as "the previous run did not get this far".
+# at the top of this runbook read a regular file as "the previous run did not get this far". Run it on every
+# exit path, including a failed one: `oboete setup` probes Claude before anything else here does, so a run
+# that stops at setup, at the reference check, or at any later step can already hold the refreshed token.
 sudo -u oboete-dogfood -H bash -lc 'set -e; C=~/candidate-homes/claude/.credentials.json
 if [ -f "$C" ] && [ ! -L "$C" ]; then mv -f "$C" ~/.claude/.credentials.json; fi
 rm -rf ~/candidate ~/candidate-homes' && sudo rm -rf /var/tmp/oboete-harness
