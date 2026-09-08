@@ -26,7 +26,7 @@ Bring SonarCloud (310 open code smells) and Codacy (397 current issues) to zero 
 
 **Constraints**: No behaviour change (FR-007, FR-008); no gate weakened (FR-003); security-owned modules, the viewer front end, and real security findings written in this session (FR-006, CLAUDE.md frontend rule); Grok delegation paused until 2026-09-12 so Codex is the only external implementer; the daily dogfood evidence cron commits in the shared checkout hourly at :20 and requires it on `main` and clean, so the shared checkout is **pinned to `main` for the whole feature** and all editing (session and Codex) happens in linked worktrees (research R8).
 
-**Scale/Scope**: 720 findings (allocation: A 302, E 36, B1 125, B2 55, B3 40, C1 27, C2 39, C3 17, C4 62, D 17) across ≈ 120 files — 707 in the 2026-09-07 export plus the 13 the live search reported on 2026-09-08 (T030a); 12 pull requests; ≈ 30 service-side resolutions.
+**Scale/Scope**: 721 findings (allocation: A 302, E 36, B1 125, B2 55, B3 40, C1 27, C2 39, C3 17, C4 62, D 18) across ≈ 120 files — 707 in the 2026-09-07 export plus the 13 the live search reported on 2026-09-08 (T030a) and the Claude probe file-length finding added on 2026-09-09 (T036); 12 pull requests; ≈ 30 service-side resolutions.
 
 ## Constitution Check
 
