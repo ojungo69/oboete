@@ -150,10 +150,16 @@ export async function applyCodacy(ledger, dryRun, inventory) {
   const rows = pendingResolved('codacy', ledger, inventory);
   if (rows.length === 0) return;
   const headers = dryRun ? undefined : await codacyHeaders();
+  const open = dryRun ? undefined : await openCodacyIssues();
   for (const row of rows) {
     const body = JSON.stringify({ ignored: true, reason: row.reason, comment: row.where });
     if (dryRun) {
       console.log(`PATCH ${codacyIssues}/${encodeURIComponent(row.id)} ${body}`);
+      continue;
+    }
+    if (!open.has(row.id)) {
+      row.confirmed = `Absent from current Codacy issue search ${new Date().toISOString()}`;
+      writeLedger(ledger);
       continue;
     }
     await pause(200);
@@ -200,18 +206,21 @@ function sonarTotal(data, page, previous) {
   return total;
 }
 
-/** Adds the ids of one page to `open`, refusing an id that is not a non-empty string or was already listed. */
+/** Adds valid service ids from one page to `open`, refusing repeats; Codacy ids are lowercase hex. */
 function collectIds(open, items, field, service) {
   for (const item of items) {
-    if (typeof item[field] !== 'string' || !item[field]) throw new Error(`${service} issues search returned an invalid id`);
-    if (open.has(item[field])) throw new Error(`${service} issues search returned a repeated id`);
-    open.add(item[field]);
+    const id = item?.[field];
+    if (typeof id !== 'string' || !id || (service === 'Codacy' && /[^0-9a-f]/.test(id))) {
+      throw new Error(`${service} issues search returned an invalid id`);
+    }
+    if (open.has(id)) throw new Error(`${service} issues search returned a repeated id`);
+    open.add(id);
   }
 }
 
-async function openSonarIssues(authorization) {
+export async function openSonarIssues(authorization) {
   const open = new Set();
-  const headers = { Authorization: authorization };
+  const headers = authorization === undefined ? {} : { Authorization: authorization };
   let total;
   for (let page = 1; ; page++) {
     const response = await request('Sonar',
@@ -240,7 +249,7 @@ function codacyTotal(data, previous) {
   return total;
 }
 
-async function openCodacyIssues() {
+export async function openCodacyIssues() {
   const open = new Set();
   const cursors = new Set();
   const params = new URLSearchParams({ limit: '100' });

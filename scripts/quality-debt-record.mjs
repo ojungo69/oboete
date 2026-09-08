@@ -5,11 +5,13 @@ import { parseArgs } from 'node:util';
 import {
   dispositionState, evidence, identity, indexLedger, isConfirmed, readJson, resolvedWithoutReason, securityPopulation,
 } from './quality-debt-ledger.mjs';
-import { applyCodacy, applySonar, confirmLedger } from './quality-debt-services.mjs';
+import { applyCodacy, applySonar, confirmLedger, openCodacyIssues, openSonarIssues } from './quality-debt-services.mjs';
 
 const batches = ['A', 'E', 'B1', 'B2', 'B3', 'C1', 'C2', 'C3', 'C4', 'D'];
-const usage = 'Usage: quality-debt-record.mjs [--allocate | --check [--planned] | --apply-sonar [--dry-run]'
+const usage = 'Usage: quality-debt-record.mjs [--allocate | --check [--planned] | --check-live | --apply-sonar [--dry-run]'
   + ' | --apply-codacy [--dry-run] | --confirm --sonar-analysis <analysisKey> --codacy-commit <sha>]'
+  + '\n--check-live searches both public main issue sets and fails if either has an id outside the frozen inventory.'
+  + '\n--apply-codacy checks the current Codacy issue set before PATCHing; ids already absent are confirmed locally.'
   + '\n--confirm records the analysis key and commit SHA as labels; the caller must verify beforehand'
   + ' that both services finished analysing that revision'
   + ' (specs/008-quality-debt-zero/quickstart.md, "Final analysis confirmation").'
@@ -165,6 +167,17 @@ function check(rows, ledger, planned) {
     || Object.entries(problems).some(([name, ids]) => ids.length > 0 && !(planned && name === 'unconfirmed')) ? 1 : 0;
 }
 
+async function checkLive(rows) {
+  const known = new Set(rows.map(identity));
+  const open = { sonar: await openSonarIssues(), codacy: await openCodacyIssues() };
+  const uncovered = Object.fromEntries(Object.entries(open).map(([service, ids]) => [service,
+    [...ids].filter((id) => !known.has(`${service}:${id}`))]));
+  for (const [service, ids] of Object.entries(uncovered)) {
+    if (ids.length) console.error(`${service} uncovered ${ids.length}: ${ids.join(', ')}`);
+  }
+  if (uncovered.sonar.length || uncovered.codacy.length) process.exitCode = 1;
+}
+
 function tableRow(cells) {
   const escaped = cells.map((cell) => String(cell ?? '')
     .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -212,11 +225,11 @@ function generate(rows, ledger) {
 
 async function main() {
   const { values } = parseArgs({ options: {
-    allocate: { type: 'boolean' }, check: { type: 'boolean' }, planned: { type: 'boolean' },
+    allocate: { type: 'boolean' }, check: { type: 'boolean' }, 'check-live': { type: 'boolean' }, planned: { type: 'boolean' },
     'apply-sonar': { type: 'boolean' }, 'apply-codacy': { type: 'boolean' }, 'dry-run': { type: 'boolean' },
     confirm: { type: 'boolean' }, 'sonar-analysis': { type: 'string' }, 'codacy-commit': { type: 'string' },
   } });
-  const modes = ['allocate', 'check', 'apply-sonar', 'apply-codacy', 'confirm'].filter((mode) => values[mode]);
+  const modes = ['allocate', 'check', 'check-live', 'apply-sonar', 'apply-codacy', 'confirm'].filter((mode) => values[mode]);
   const [mode] = modes;
   const dryRun = values['dry-run'];
   const sonarAnalysis = values['sonar-analysis'];
@@ -236,6 +249,10 @@ async function main() {
   }
   if (mode === 'confirm') {
     await confirmLedger(readJson('ledger.json'), sonarAnalysis, codacyCommit, rows);
+    return;
+  }
+  if (mode === 'check-live') {
+    await checkLive(rows);
     return;
   }
   if (mode === 'allocate') allocate(rows);
