@@ -56,6 +56,12 @@ sudo rm -rf /var/tmp/oboete-harness && sudo mkdir -p /var/tmp/oboete-harness \
 sudo -u oboete-dogfood -H bash -lc 'rm -rf ~/candidate ~/candidate-homes && mkdir -p ~/candidate ~/candidate-homes \
   && cp -a ~/.oboete ~/candidate-homes/oboete && cp -a ~/.claude ~/candidate-homes/claude && cp -a ~/.codex ~/candidate-homes/codex && cp -a ~/.grok ~/candidate-homes/grok && cp -a ~/.pi/agent ~/candidate-homes/pi \
   && npm install --prefix ~/candidate <tarball> && sha256sum ~/candidate/node_modules/oboete/dist/oboete.mjs'
+# A token refresh retires the old refresh token server-side, so a credential file the candidate run owns and then
+# deletes leaves the account holding a token the server has already dropped -- on 2026-09-08 that cost the dogfood
+# account its Claude login and needed an interactive re-login. Symlinks let a refresh write through to the real file.
+sudo -u oboete-dogfood -H bash -lc 'ln -sfn ~/.claude/.credentials.json ~/candidate-homes/claude/.credentials.json \
+  && ln -sfn ~/.codex/auth.json ~/candidate-homes/codex/auth.json && ln -sfn ~/.grok/auth.json ~/candidate-homes/grok/auth.json \
+  && ln -sfn ~/.pi/agent/auth.json ~/candidate-homes/pi/auth.json'
 CAND='export OBOETE_HOME=$HOME/candidate-homes/oboete CLAUDE_CONFIG_DIR=$HOME/candidate-homes/claude CODEX_HOME=$HOME/candidate-homes/codex GROK_HOME=$HOME/candidate-homes/grok PI_CODING_AGENT_DIR=$HOME/candidate-homes/pi PATH=$HOME/candidate/node_modules/.bin:$PATH; set -a; . $HOME/.oboete-credentials; set +a'
 sudo -u oboete-dogfood -H bash -lc "$CAND; oboete setup --agents claude,codex,grok --provider workers-ai --yes --json"
 # Pi is left out of --agents on purpose: setup declines to write the loader whenever PI_CODING_AGENT_DIR points
@@ -77,7 +83,7 @@ sudo -u oboete-dogfood -H bash -lc "$CAND; node /var/tmp/oboete-harness/scripts/
 sudo -u oboete-dogfood -H bash -lc 'rm -rf ~/candidate ~/candidate-homes' && sudo rm -rf /var/tmp/oboete-harness
 ```
 
-Expected: the installed bundle's `sha256sum` equals the tarball's `dist/oboete.mjs` hash; `oboete setup` exits 0 for the three agents it can wire (the copied consent record satisfies `--yes`); the `uniq -c` output lists exactly one distinct bundle path, under `candidate/node_modules/oboete/dist/`, with a count covering the hook and MCP entries `oboete setup` wrote plus the hand-written Pi loader (a second path, or one under the daily install, fails the check); `12 of 12 pairs pass`; doctor table without `degraded` / `failed`. Candidate SHA, both hashes, run id, and both lines go into the PR body. The daily cron's install, its real `~/.oboete`, and its agent configurations are untouched; the copies are removed afterwards.
+Expected: the installed bundle's `sha256sum` equals the tarball's `dist/oboete.mjs` hash; `oboete setup` exits 0 for the three agents it can wire (the copied consent record satisfies `--yes`); the `uniq -c` output lists exactly one distinct bundle path, under `candidate/node_modules/oboete/dist/`, with a count covering the hook and MCP entries `oboete setup` wrote plus the hand-written Pi loader (a second path, or one under the daily install, fails the check); `12 of 12 pairs pass`; doctor table without `degraded` / `failed`. A failing row is not evidence about the bundle until the agent's own `result` field has been read: an expired login fails a pair exactly the way a broken build does. Candidate SHA, both hashes, run id, and both lines go into the PR body. The daily cron's install, its real `~/.oboete`, and its agent configurations are untouched; the copies are removed afterwards.
 
 ## Service counts (after each merge's analysis)
 

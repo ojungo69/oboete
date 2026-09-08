@@ -1478,6 +1478,10 @@ async function runCodexCompactLifecycle(context) {
       dependencies,
       "Codex post-compact prompt and following turn_end",
     );
+    // Lizard's JavaScript reader loses this function's closing brace when an object literal is
+    // written inline in an argument list, and then measures it as everything up to the next
+    // declaration; the named local keeps the measurement on the function that is actually here.
+    const contractOptions = { ...options, contract: true };
     after = await waitForLifecycleState(
       database,
       agent,
@@ -1485,7 +1489,7 @@ async function runCodexCompactLifecycle(context) {
         (event) => event.nativeSessionId === suite.parentNativeSessionId &&
           event.kind === "session_start" && eventSource(event) === "compact",
       ),
-      { ...options, contract: true },
+      contractOptions,
       dependencies,
       "Codex SessionStart source=compact",
     );

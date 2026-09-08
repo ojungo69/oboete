@@ -396,6 +396,18 @@ function recordCodexPostcompact(options) {
   return { posts, summary, aOk, bOk };
 }
 
+// One read answers both questions. Asking with existsSync first and reading afterwards leaves a
+// window in which the file can appear or vanish between the two calls, and reports the state the
+// file was in rather than the state it is in. ENOENT is the absent case; every other error stands.
+function readConfigToml(file) {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  }
+}
+
 function configureCodexMcp(seed, log) {
   const mcpToml = [
     "",
@@ -409,7 +421,7 @@ function configureCodexMcp(seed, log) {
     "",
   ].join("\n");
   const cfg = path.join(seed.tree, "config.toml");
-  const prev = fs.existsSync(cfg) ? fs.readFileSync(cfg, "utf8") : "";
+  const prev = readConfigToml(cfg);
   if (!prev.includes("[mcp_servers.oboete_probe]")) fs.writeFileSync(cfg, prev + mcpToml);
   truncateEvents(seed.tree);
 }
@@ -503,7 +515,7 @@ export const probes = [
       const need = ["SessionStart", "PreToolUse", "PostToolUse", "Stop"];
       const missing = need.filter((n) => !names.includes(n));
       const cfg = path.join(r.tree, "config.toml");
-      const toml = fs.existsSync(cfg) ? fs.readFileSync(cfg, "utf8") : "";
+      const toml = readConfigToml(cfg);
       const rows = (toml.match(/trusted_hash/g) || []).length;
       return {
         status: missing.length ? "fail" : "pass",
@@ -692,7 +704,7 @@ export const probes = [
     async run(ctx) {
       const seed = await ctx.codex(ctx.dir, { prompt: DONE_PROMPT, trust: true });
       const cfg = path.join(seed.tree, "config.toml");
-      const toml = fs.existsSync(cfg) ? fs.readFileSync(cfg, "utf8") : "";
+      const toml = readConfigToml(cfg);
       const rows = (toml.match(/trusted_hash/g) || []).length;
       truncateEvents(seed.tree);
       let tuiBlocked = null;
