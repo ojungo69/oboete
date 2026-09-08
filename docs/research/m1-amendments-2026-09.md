@@ -8,6 +8,29 @@ that delegation after an adversarial multi-agent comparison against claude-mem (
 lenses, 3 refuters per finding, 18 of 29 findings survived, opus synthesis). The synthesis report
 is appended verbatim below.
 
+## Product direction reaffirmed (2026-09-08)
+
+**決定者**: repository owner。開発目的と継続方針を会話で再確認し、記録を依頼された。
+本節は [CONSTITUTION.md](../../CONSTITUTION.md) の現行方針を補足する。既存の数値基準、
+安全境界、マイルストーン順序は維持する。以下は目標と判断基準であり、達成済みという報告ではない。
+
+開始理由は、利用者が claude-mem の Claude サブスクリプション・OpenRouter・Gemini 経由の
+要約で繰り返しエラーを経験し、Chroma などによるメモリ圧迫にも困っていたこと。
+cmem pro への加入を必要とせず同等の記憶体験を実現し、Ollama などのローカル LLM も
+要約モデルとして選べることを目指す。有料化への懸念は動機であり、claude-mem の将来の
+有料必須化を確認したという意味ではない。選択したモデルや計算資源の費用とは区別する。
+
+独自実装を続け、当面は TypeScript を維持する。現時点で claude-mem の全面フォークへの
+切替や全面 Rust 化は行わない。優先して実使用で確認・改善するのは次の三点。
+
+1. Ollama などの実 LLM で要約が安定し、失敗しても保持対象の記録を失わず復旧できること。
+2. 日本語を含め、必要な情報を実際に思い出せること。
+3. 長時間使ってもメモリ消費が増え続けないこと。エンジンとローカルモデルの消費を区別し、全体も評価する。
+
+ルールベースへの退避やテスト成功だけで、上記の製品目的を達成したことにしない。
+Rust は流行や安定性への期待だけで採用せず、起動コスト・メモリ・配布上の制約を実測し、
+既存の SQLite / CLI 契約を保った部分移行で改善できる場合に検討する。
+
 ## Decisions
 
 | id | decision | applied where |
