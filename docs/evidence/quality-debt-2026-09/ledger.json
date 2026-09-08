@@ -4783,9 +4783,9 @@
  {
   "service": "codacy",
   "id": "a670638b05ce29b63c0061ff4cd84245",
-  "state": "resolved",
-  "reason": "FalsePositive",
-  "where": "startLifecycleTui already took a single destructured options parameter, the shape this feature adopts as the fix for parameter-count findings, and Lizard counted its nine destructured properties as nine parameters"
+  "state": "fixed",
+  "where": "#173",
+  "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
  },
  {
   "service": "codacy",
