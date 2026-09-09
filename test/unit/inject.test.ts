@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { DatabaseSync } from 'node:sqlite';
@@ -12,128 +12,16 @@ import {
   hookDeadlineMs,
   runHook,
 } from '../../src/capture.js';
-import { openDatabase } from '../../src/db/open.js';
-import { memoryScope } from '../../src/db/queries.js';
 import type { AgentName, NormalizedEvent } from '../../src/events.js';
 import {
   injectForHook,
-  runInject,
   type HookContext,
 } from '../../src/injection/inject.js';
 import { whyReport } from '../../src/injection/ledger.js';
-import { ensureDirectories, oboetePaths, type OboetePaths } from '../../src/paths.js';
+import { NOW, insertMemory, insertSession, scope, seedSummary, stdoutOf, withFixture, type Fixture } from '../helpers/inject-fixture.js';
 import { detectSync } from '../../src/privacy/detect.js';
-import { cjkBigrams } from '../../src/retrieval/fts.js';
-import { resolveRepoIdentity, type RepoIdentity } from '../../src/repo-identity.js';
+import { oboetePaths } from '../../src/paths.js';
 import { withTempHome } from '../helpers/home.js';
-
-const NOW = 1_800_000_000_000;
-
-type Fixture = {
-  db: DatabaseSync;
-  paths: OboetePaths;
-  repo: string;
-  identity: RepoIdentity;
-};
-
-const scope = (fixture: Fixture) =>
-  memoryScope(fixture.db, { repoId: fixture.identity.id, destination: 'injection' });
-
-async function withFixture(run: (fixture: Fixture) => Promise<void>): Promise<void> {
-  await withTempHome(async (home) => {
-    const paths = oboetePaths(home);
-    ensureDirectories(paths);
-    const repo = join(home, 'workspace');
-    mkdirSync(repo, { recursive: true });
-    spawnSync('git', ['-C', repo, 'init', '--quiet']);
-    const identity = resolveRepoIdentity(repo);
-    const { db } = openDatabase({ path: paths.db, timeoutMs: 2_000 });
-    db.prepare(
-      `INSERT INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(identity.id, identity.identityKind, identity.normalizedIdentity, identity.root, NOW, NOW);
-    try {
-      await run({ db, paths, repo, identity });
-    } finally {
-      db.close();
-    }
-  });
-}
-
-function insertSession(
-  fixture: Fixture,
-  input: {
-    id: string;
-    agent: AgentName;
-    nativeId?: string;
-    conversationId?: string;
-    status?: 'active' | 'ended';
-    endedAt?: number;
-    summaryState?: 'pending' | 'done' | 'no_content';
-    summaryId?: string;
-    epoch?: number;
-    model?: string;
-  },
-): void {
-  fixture.db.prepare(
-    `INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, model,
-       started_at, ended_at, status, turn_count, latest_summary_memory_id, context_epoch, summary_state)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
-  ).run(
-    input.id,
-    fixture.identity.id,
-    input.agent,
-    input.nativeId ?? `native-${input.id}`,
-    input.conversationId ?? input.id,
-    input.model ?? null,
-    NOW - 10_000,
-    input.endedAt ?? null,
-    input.status ?? 'active',
-    input.summaryId ?? null,
-    input.epoch ?? 0,
-    input.summaryState ?? null,
-  );
-}
-
-function insertMemory(
-  fixture: Fixture,
-  input: { id: string; title: string; body: string; type?: string; pinned?: boolean },
-): void {
-  fixture.db.prepare(
-    `INSERT INTO memories (id, repo_id, type, title, body, cjk_bigrams, material_hash,
-       content_hash, sensitivity, review_state, pinned_at, pin_order, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'eligible', 'unreviewed', ?, ?, ?)`,
-  ).run(
-    input.id,
-    fixture.identity.id,
-    input.type ?? 'discovery',
-    input.title,
-    input.body,
-    cjkBigrams(`${input.title} ${input.body}`),
-    `material-${input.id}`,
-    `content-${input.id}`,
-    input.pinned ? NOW - 1_000 : null,
-    input.pinned ? 1 : null,
-    NOW - 5_000,
-  );
-}
-
-function seedSummary(fixture: Fixture): void {
-  insertMemory(fixture, {
-    id: 'm-summary',
-    type: 'session_summary',
-    title: 'Previous session',
-    body: 'The previous database migration completed.',
-  });
-  insertSession(fixture, {
-    id: 's-previous',
-    agent: 'claude',
-    status: 'ended',
-    endedAt: NOW - 2_000,
-    summaryState: 'done',
-    summaryId: 'm-summary',
-  });
-}
 
 function modelFor(agent: AgentName): string {
   if (agent === 'claude') return 'claude-opus-5[1m]';
@@ -225,21 +113,6 @@ function envelope(text: string): { hookSpecificOutput: { hookEventName: string; 
   return JSON.parse(text) as {
     hookSpecificOutput: { hookEventName: string; additionalContext: string };
   };
-}
-
-async function stdoutOf(run: () => Promise<number>): Promise<string> {
-  const chunks: string[] = [];
-  const original = process.stdout.write.bind(process.stdout);
-  process.stdout.write = ((chunk: string) => {
-    chunks.push(String(chunk));
-    return true;
-  }) as typeof process.stdout.write;
-  try {
-    assert.equal(await run(), 0);
-  } finally {
-    process.stdout.write = original;
-  }
-  return chunks.join('');
 }
 
 test('Claude injects plain session-start and prompt packs and confirms their items', async () => {
@@ -568,70 +441,6 @@ test('Grok retries a denied attempt and confirms a failed execution', async () =
   });
 });
 
-test('Pi start and prompt run through the strict inject child', async () => {
-  await withFixture(async (fixture) => {
-    seedSummary(fixture);
-    insertSession(fixture, {
-      id: 's-pi-start',
-      agent: 'pi',
-      nativeId: 'pi-start',
-      model: 'gpt-5.6-luna',
-    });
-    insertMemory(fixture, {
-      id: 'm-pi',
-      title: 'SQLite busy timeout',
-      body: 'Pi can retrieve the same note.',
-    });
-    const runtime = (body: Record<string, unknown>) => ({
-      readStdin: () => JSON.stringify(body),
-      now: () => NOW,
-      elapsedMs: () => 0,
-      sleep: () => {},
-    });
-
-    const start = await stdoutOf(() =>
-      runInject(
-        ['--agent', 'pi', '--kind', 'start'],
-        runtime({ cwd: fixture.repo, session_id: 'pi-start', model: 'gpt-5.6-luna' }),
-      ),
-    );
-    assert.ok(start.startsWith('oboete memory context'));
-
-    const prompt = await stdoutOf(() =>
-      runInject(
-        ['--agent', 'pi', '--kind', 'prompt'],
-        runtime({
-          cwd: fixture.repo,
-          session_id: 'pi-prompt',
-          prompt: 'SQLite busy timeout',
-          model: 'gpt-5.6-luna',
-        }),
-      ),
-    );
-    assert.ok(prompt.includes('SQLite busy timeout'));
-    const created = fixture.db
-      .prepare("SELECT id, conversation_id FROM sessions WHERE agent = 'pi' AND native_session_id = ?")
-      .get('pi-prompt');
-    assert.notEqual(created, undefined);
-    assert.equal(created?.conversation_id, created?.id);
-    assert.equal(
-      fixture.db
-        .prepare('SELECT session_id FROM injections WHERE session_id = ? LIMIT 1')
-        .get(created?.id as string)?.session_id,
-      created?.id,
-      'the capture child will reuse the same persisted root',
-    );
-
-    const invalid = await stdoutOf(() =>
-      runInject(
-        ['--agent', 'pi', '--kind', 'prompt'],
-        runtime({ cwd: fixture.repo, session_id: 'pi-prompt', prompt: 'SQLite', extra: true }),
-      ),
-    );
-    assert.equal(invalid, '', 'the stdin schema is strict');
-  });
-});
-
 test('only session start polls a pending summary and stops after one second', async () => {
   await withFixture(async (fixture) => {
     insertSession(fixture, {
@@ -769,67 +578,5 @@ test('a storage error in a Grok delivery hook is contained and logged without ev
     const log = readFileSync(fixture.paths.hookLog, 'utf8');
     assert.match(log, /injection failed agent=grok event=PreToolUse reason=ERR_SQLITE_ERROR/);
     assert.doesNotMatch(log, /SQLite busy timeout|no such table/);
-  });
-});
-
-test('paused Pi injection returns zero before reading stdin or creating storage', async () => {
-  await withTempHome(async (home) => {
-    const paths = oboetePaths(home);
-    writeFileSync(paths.paused, 'paused');
-    assert.equal(await stdoutOf(() => runInject(['--agent', 'pi', '--kind', 'prompt'], {
-      readStdin: () => assert.fail('paused injection must not read stdin'),
-    })), '');
-    assert.equal(existsSync(paths.db), false);
-    assert.equal(existsSync(paths.hookLog), false);
-  });
-});
-
-test('Pi injection with an expired deadline leaves storage unopened', async () => {
-  await withTempHome(async (home) => {
-    const paths = oboetePaths(home);
-    assert.equal(await stdoutOf(() => runInject(['--agent', 'pi', '--kind', 'prompt'], {
-      readStdin: () => JSON.stringify({ cwd: home, session_id: 'too-late', prompt: 'private input' }),
-      elapsedMs: () => 301,
-    })), '');
-    assert.equal(existsSync(paths.db), false);
-    const log = readFileSync(paths.hookLog, 'utf8');
-    assert.match(log, /inject failed agent=pi reason=Error/);
-    assert.doesNotMatch(log, /private input/);
-  });
-});
-
-test('Pi injection reports an older schema without migrating it', async () => {
-  await withFixture(async (fixture) => {
-    fixture.db.exec('PRAGMA user_version = 1');
-    assert.equal(await stdoutOf(() => runInject(['--agent', 'pi', '--kind', 'start'], {
-      readStdin: () => JSON.stringify({ cwd: fixture.repo, session_id: 'old-schema' }),
-      elapsedMs: () => 0,
-    })), '');
-    assert.equal(fixture.db.prepare('PRAGMA user_version').get()?.user_version, 1);
-    assert.equal(fixture.db.prepare('SELECT count(*) AS n FROM sessions').get()?.n, 0);
-    assert.match(readFileSync(fixture.paths.hookLog, 'utf8'), /agent=pi event=start degraded=index_unavailable/);
-  });
-});
-
-test('Pi fills a missing model and reuses the persisted conversation epoch and latest turn', async () => {
-  await withFixture(async (fixture) => {
-    insertSession(fixture, { id: 'pi-root', agent: 'pi', nativeId: 'native-root', epoch: 2 });
-    insertSession(fixture, { id: 'pi-resume', agent: 'pi', nativeId: 'native-resume', conversationId: 'pi-root' });
-    fixture.db.prepare("INSERT INTO turns (id, session_id, ordinal) VALUES ('pi-turn-1', 'pi-resume', 1), ('pi-turn-2', 'pi-resume', 2)").run();
-    insertMemory(fixture, { id: 'm-resumed', title: 'SQLite busy timeout', body: 'Reuse the existing session.' });
-    const output = await stdoutOf(() => runInject(['--agent', 'pi', '--kind', 'prompt'], {
-      readStdin: () => JSON.stringify({ cwd: fixture.repo, session_id: 'native-resume', prompt: 'SQLite busy timeout', model: 'gpt-5.6-luna' }),
-      now: () => NOW, elapsedMs: () => 0,
-    }));
-    assert.match(output, /SQLite busy timeout/);
-    assert.deepEqual(
-      { ...fixture.db.prepare("SELECT model, conversation_id FROM sessions WHERE id = 'pi-resume'").get() },
-      { model: 'gpt-5.6-luna', conversation_id: 'pi-root' },
-    );
-    assert.deepEqual(
-      { ...fixture.db.prepare('SELECT session_id, conversation_id, context_epoch, turn_id, state FROM injections').get() },
-      { session_id: 'pi-resume', conversation_id: 'pi-root', context_epoch: 2, turn_id: 'pi-turn-2', state: 'emitted' },
-    );
-    assert.equal(fixture.db.prepare("SELECT last_injected_at FROM memories WHERE id = 'm-resumed'").get()?.last_injected_at, NOW);
   });
 });

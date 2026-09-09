@@ -21,7 +21,7 @@ import { parseArgs } from 'node:util';
 import { CAPTURE_DEADLINE_MS, INJECTION_DEADLINE_MS, hookDeadlineMs } from '../capture.js';
 import { openDatabase } from '../db/open.js';
 import { compareCodeUnits } from '../hash.js';
-import { DEGRADED_SENTENCES } from '../injection/pack.js';
+import { DEGRADED_SENTENCES } from '../injection/pack-format.js';
 import { childEnvironment } from '../log.js';
 import { ensureDirectories, oboetePaths } from '../paths.js';
 import { isLeaseFree } from '../worker/lease.js';
@@ -2356,4 +2356,3 @@ function renderReport(
     failed: computed.failed,
   };
 }
-

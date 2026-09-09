@@ -117,6 +117,39 @@ Parallelism: E alone first (session). Then B1 ∥ B2 (Codex) while B3 is written
 
 ## Checkpoints for the maintainer
 
+### Batch D continuation, 2026-09-09
+
+PR #185 retains FR-016 as written. Whether a first extraction closes the 500-NLOC finding is
+not a seam criterion. Re-read the twelve retained files, move each independently testable
+concern, then measure and justify any remaining cohesive module. The six completed extractions
+remain unchanged. The handoff's current checkout layout supersedes the original cron layout
+above: the integration checkout stays on `008-qd-d`; each concurrent writer uses its own linked
+worktree. PR #186's CLI prerequisites are already merged.
+
+| Area | Extraction scope | Verification |
+|---|---|---|
+| Capture | Process/CLI adapter to `src/capture-command.ts`; the capture transaction, deadline and hook protocol stay in `capture.ts`. Update direct imports and move the adapter tests without changing assertions. | Capture, hook and storage-fault tests; compare all moved bodies and the bundled runtime. |
+| Worker | Batch application to `src/worker/observe-batch.ts`; imported-memory maintenance to `src/worker/imported.ts`; preserve lease fencing, consent callbacks, retry order and exact dependency types. Keep citation maintenance separate if its independently testable concern remains in an over-limit module. | Observe, privacy, lease, staleness and worker/provider fault tests. |
+| Injection | Pi command to `src/injection/pi.ts`; pure pack framing/items to `src/injection/pack-format.ts`. Keep common delivery/validation in `inject.ts`, and selection/ledger in `pack.ts`; update every importer and move direct tests. | Injection, pack, deferred, degradation, why and agent-fault tests; privacy review. |
+| Replay | Separate completed-run measurement and evidence rendering from the replay driver, retaining exact output, measurements and exit verdicts. | Replay tests, identical report output from the same recorded inputs, full fixture replay. |
+| Isolated harness | Separate lifecycle state assertions, lifecycle execution, and the process operations shared by pair/lifecycle modes. Move the corresponding existing tests; keep the CLI entrypoint, event barriers and cleanup ordering. | All harness tests, import-cycle check, all-pair and lifecycle candidate dogfood. |
+| Fixture generator | Move the post-generation coverage validator, retaining emission order and all validation. | Generator output byte equality and coverage validation. |
+| Probe helpers and suites | Separate process runtime from frame/evidence decoding; MCP frame assertions from its driver; Codex/Grok lifecycle and MCP probes from payload probes. Preserve every probe ID and discovery contract; helpers stay in `probe-lib/`. | All harness tests, probe discovery and affected real probe IDs. |
+
+Review the resulting source boundaries before editing each area. No new dependency, timing
+budget, public command, credential policy or gate definition belongs to these extractions.
+Export names and signatures are preserved; internal import paths follow the moved definitions
+as in T037, with no compatibility wrappers. Type-only references do not create runtime cycles.
+Preserve moved function bodies and test assertions; use the compiler and existing suites to
+verify the new imports. Measure all resulting files with Lizard and re-read any over-limit
+residual before recording its disposition.
+
+Runtime validation remains a separate gate. The ordinary replay strips provider credentials;
+an isolated diagnostic may test the existing configured `--home` path with an operator-owned
+preload restricted to the measured bundle's `observe` command. Such a diagnostic does not
+change the product or prove acceptance: only full base/candidate results against the unchanged
+bounds can satisfy T032/T039. The daily installation and credentials remain outside the edits.
+
 - **C1 (before A's analysis and before F)**: A Codacy **account API token** is needed for (a) nothing for markdownlint any more (Codacy reads `.markdownlint.json` on its own, research R4), (b) disabling the one SCSS Stylelint pattern (`PATCH …/tools/{uuid}` with a `patterns` array; if refused because the repository follows the organisation standard, a per-issue ignore instead, never an edit of the shared standard), (c) ≈ 30 per-issue ignores (`PATCH …/issues/{hexId}` with reason and comment). Ask once at the start of A. Provided on 2026-09-07 as `~/CODACY_TOKEN.md` line 2 (verified against `GET /api/v3/user` before use). Without it the maintainer performs the same actions by hand from the list in the record. Either way the feature is **not complete** until the actions have run and the final `main` analysis reports 0 on both services (FR-002); a handed-over list is an intermediate artefact.
 - **C2 (during E)**: If any security-flavoured finding is real, report it before fixing, with the controller, validation, sink, and effect, so the maintainer knows a real weakness existed in M1 alpha.
 - **C3 (before F, found and decided 2026-09-07)**: Codacy's ESLint step has crashed on every analysed commit (research R10), so the 397 findings contain no ESLint finding. Decision: disable Codacy's ESLint tool for the repository (the repository's own ESLint 9 gate is the lint standard; Codacy's ESLint 8 cannot read it); the alternative, triaging the ≈ 1,100 findings the tool would surface, was declined. The feature's 0 / 0 is not written while the step still appears in the analysis log.

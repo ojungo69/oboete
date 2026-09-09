@@ -7,12 +7,12 @@ import { memoryScope } from '../../src/db/queries.js';
 import { CHANNEL_CAPS } from '../../src/injection/budget.js';
 import { whyReport } from '../../src/injection/ledger.js';
 import {
-  DEGRADED_SENTENCES,
   buildPromptPack,
   buildSessionStartPack,
   type PromptPackInput,
   type SessionStartInput,
 } from '../../src/injection/pack.js';
+import { DEGRADED_SENTENCES } from '../../src/injection/pack-format.js';
 import { PACK_HEADER } from '../../src/injection/recognize.js';
 import { sessionSummary } from '../../src/observer/classify.js';
 import {

@@ -16,14 +16,13 @@ import {
   whyReport,
 } from '../../src/injection/ledger.js';
 import {
-  DEGRADED_SENTENCES,
   buildPromptPack,
   buildSessionStartPack,
-  guardLeadingBrace,
   markInjectedMemories,
   type PromptPackInput,
   type SessionStartInput,
 } from '../../src/injection/pack.js';
+import { DEGRADED_SENTENCES } from '../../src/injection/pack-format.js';
 import { oboetePaths } from '../../src/paths.js';
 import { cjkBigrams } from '../../src/retrieval/fts.js';
 import { withTempHome } from '../helpers/home.js';
@@ -273,11 +272,6 @@ test('a malicious title, path and remote identity cannot escape the framing', as
       pack!.text,
     );
   });
-});
-
-test('the leading-brace guard holds even when a caller hands it JSON', () => {
-  assert.equal(guardLeadingBrace('{"hookSpecificOutput": 1}'), ' {"hookSpecificOutput": 1}');
-  assert.equal(guardLeadingBrace('oboete memory context'), 'oboete memory context');
 });
 
 test('the session-start pack is emitted once per context epoch and again in the next one', async () => {
