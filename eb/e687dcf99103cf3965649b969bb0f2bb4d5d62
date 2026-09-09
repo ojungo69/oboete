@@ -1,0 +1,180 @@
+scripts/e2e/probe-lib/isolated-lifecycle-state.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-477
+test/helpers/capture.ts
+  s_49c4523e80af0c::t_ec428e22badfee 1-122
+src/worker/citations.ts
+  s_49c4523e80af0c::t_ec428e22badfee 1-100
+scripts/e2e/probe-lib/isolated-lifecycle.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-773
+scripts/e2e/probe-contracts.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 7-8,58-62,89,143,260
+scripts/e2e/probe-lib/redact.test.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 2-4
+docs/evidence/quality-debt-2026-09/batch-d-continuation.md
+  s_49c4523e80af0c::t_a1f9cd37c37c47 1-56
+specs/008-quality-debt-zero/tasks.md
+  s_49c4523e80af0c::t_6c5fa724aa9014 109,113-114,121,127-128,131-132
+  s_49c4523e80af0c::t_e4399b9c18b86b 125-126
+  s_49c4523e80af0c::t_54271216c5514b 122
+  s_49c4523e80af0c::t_a1f9cd37c37c47 120,129-130
+scripts/e2e/probe-lib/mcp-assertions.test.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 14
+scripts/e2e/probe-lib/grok-lifecycle.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-5,7-399
+  s_49c4523e80af0c::t_994da598923fe1 6
+scripts/e2e/isolated-lifecycle.test.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-681
+scripts/e2e/probe-lib/agent-events.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-522
+  s_49c4523e80af0c::t_994da598923fe1 523-539
+docs/evidence/quality-debt-2026-09.md
+  s_49c4523e80af0c::t_79df5d1f51c1f8 335,356,391,424,467,525,537,577,649,652,681
+  s_49c4523e80af0c::t_54271216c5514b 596
+  s_49c4523e80af0c::t_e4399b9c18b86b 645
+scripts/e2e/probes/pi.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 4-6,9-10,18
+src/worker/imported.ts
+  s_49c4523e80af0c::t_ec428e22badfee 1-73
+scripts/e2e/probes/providers.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 4-7,12-14,18
+src/capture-command.ts
+  s_49c4523e80af0c::t_ec428e22badfee 1-211
+test/fault-pi.test.ts
+  s_49c4523e80af0c::t_7ae7e06eb7c17f 4
+scripts/e2e/probes/claude.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 5-9,11-13,23
+scripts/e2e/probe-lib/tmux.test.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 8-10
+scripts/e2e/isolated-lifecycle-report.test.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-36
+docs/evidence/quality-debt-2026-09/ledger.json
+  s_49c4523e80af0c::t_d693d71cb95257 4961-4962,4975,4989,4994-4995,5000-5001,5006-5007,5012-5013,5025-5026,5031-5032,5039
+  s_49c4523e80af0c::t_e4399b9c18b86b 4982
+  s_49c4523e80af0c::t_54271216c5514b 5020
+src/worker/observe-batch.ts
+  s_49c4523e80af0c::t_ec428e22badfee 1-453
+test/unit/capture.test.ts
+  s_49c4523e80af0c::t_ec428e22badfee 11,22,25,31-39
+  s_49c4523e80af0c::t_7ae7e06eb7c17f 24
+test/fault-storage.test.ts
+  s_49c4523e80af0c::t_ec428e22badfee 17-18
+src/fixture/replay-report.ts
+  s_49c4523e80af0c::t_2086904eb1e4af 1-8,11-533
+  s_49c4523e80af0c::t_aa4ca322c7f0cd 9-10
+test/unit/inject.test.ts
+  s_49c4523e80af0c::t_ec428e22badfee 14
+test/unit/replay-evaluate.test.ts
+  s_49c4523e80af0c::t_aa4ca322c7f0cd 1-111
+src/capture-compaction.ts
+  s_49c4523e80af0c::t_7ae7e06eb7c17f 1-61
+docs/evidence/quality-debt-2026-09/batch-d-provider-diagnostic.md
+  s_49c4523e80af0c::t_1834ea07fdc81c 1-6,8-57
+  s_49c4523e80af0c::t_4520af309d0f9c 7
+scripts/e2e/probe-lib/mcp-report.test.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-38
+scripts/e2e/probe-lib/childenv.test.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 4-6
+scripts/e2e/fixture-coverage.test.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-19
+scripts/e2e/mcp-clients.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 12-14,18,20-27
+test/unit/capture-compaction.test.ts
+  s_49c4523e80af0c::t_7ae7e06eb7c17f 1-92
+scripts/e2e/probe-lib/agents.mjs
+  s_49c4523e80af0c::t_994da598923fe1 15
+  s_49c4523e80af0c::t_31469ae6b8c390 7-8
+  s_49c4523e80af0c::t_6b4abda6b788c2 14
+scripts/e2e/isolated-user.test-support.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-178
+test/unit/replay.test.ts
+  s_49c4523e80af0c::t_b85a98f24d9dbb 55-56,96-97,143
+  s_49c4523e80af0c::t_2086904eb1e4af 7,51-54,57-95,98-136,138-142,144-168
+  s_49c4523e80af0c::t_6a4b42aab285fa 137
+  s_49c4523e80af0c::t_830971461f2d03 169
+  s_49c4523e80af0c::t_aa4ca322c7f0cd 8-9
+scripts/e2e/isolated-lifecycle-state.test.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-475
+scripts/e2e/probes/codex.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 4-8,152-153,188-189
+scripts/e2e/isolated-user.test.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 8-9
+scripts/e2e/probe-lib/pi-errors.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 3-5
+scripts/fixtures/generate-1000-events.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 48-61,1481
+scripts/e2e/probe-lib/codex-mcp.mjs
+  s_49c4523e80af0c::t_994da598923fe1 6,9
+  s_49c4523e80af0c::t_31469ae6b8c390 1-5,7-8,10-122
+scripts/e2e/probe-lib/codex-lifecycle.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-4,7-474
+  s_49c4523e80af0c::t_994da598923fe1 5-6
+scripts/e2e/probe-lib/claude-tui.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 4-13
+specs/008-quality-debt-zero/plan.md
+  s_49c4523e80af0c::t_54271216c5514b 131
+  s_49c4523e80af0c::t_a6e9af1b717c18 137
+  s_49c4523e80af0c::t_6c5fa724aa9014 91,94,113
+specs/008-quality-debt-zero/research.md
+  s_49c4523e80af0c::t_54271216c5514b 163
+  s_49c4523e80af0c::t_a1f9cd37c37c47 169
+  s_49c4523e80af0c::t_e4399b9c18b86b 165,183
+  s_49c4523e80af0c::t_389ceafd96d6b0 149,151,153-155,157-162,164,166-168,170-182
+scripts/e2e/isolated-agent.test.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-175
+src/fixture/replay.ts
+  s_49c4523e80af0c::t_aa4ca322c7f0cd 19,21-22,36,47
+  s_49c4523e80af0c::t_2086904eb1e4af 13-14,63,74,1276
+scripts/e2e/probe-lib/agent-events.test.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-32
+scripts/e2e/probe-lib/isolated-agent.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-374
+scripts/fixtures/fixture-coverage.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-535
+scripts/e2e/probe-lib/tmux.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 4-8
+src/cli.ts
+  s_49c4523e80af0c::t_ec428e22badfee 33-34
+docs/evidence/quality-debt-2026-09/batch-d-provider-replay.json
+  s_49c4523e80af0c::t_1e8cc27b758dbe 1-3214
+src/capture.ts
+  s_49c4523e80af0c::t_ec428e22badfee 38-39
+  s_49c4523e80af0c::t_7ae7e06eb7c17f 26
+src/worker/observe.ts
+  s_49c4523e80af0c::t_ec428e22badfee 17,20,33-34,36-40,47
+scripts/e2e/isolated-user.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 9-11,13-28
+scripts/e2e/probe-lib/mcp-assertions.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-230
+scripts/e2e/probe-lib/mcp-report.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-103
+scripts/e2e/probe-lib/grok-mcp.mjs
+  s_49c4523e80af0c::t_875159d5ad9601 6
+  s_49c4523e80af0c::t_31469ae6b8c390 1-5,7-142
+scripts/e2e/probes/grok.mjs
+  s_49c4523e80af0c::t_994da598923fe1 5,7
+  s_49c4523e80af0c::t_31469ae6b8c390 4,6,289-292
+src/fixture/replay-evaluate.ts
+  s_49c4523e80af0c::t_aa4ca322c7f0cd 1-550
+scripts/e2e/probe-lib/process.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-124
+test/unit/capture-command.test.ts
+  s_49c4523e80af0c::t_ec428e22badfee 1-200
+scripts/e2e/probe-lib/isolated-lifecycle-report.mjs
+  s_49c4523e80af0c::t_31469ae6b8c390 1-84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "ebe687dcf99103cf3965649b969bb0f2bb4d5d62",
+  "prompts": {},
+  "sessions": {
+    "s_49c4523e80af0c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08247-7f3b-73a2-af35-16a66e78370d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
