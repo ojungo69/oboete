@@ -1,0 +1,76 @@
+specs/008-quality-debt-zero/spec.md
+  s_49c4523e80af0c::t_a4090989358fc7 143
+specs/008-quality-debt-zero/quickstart.md
+  s_49c4523e80af0c::t_a4090989358fc7 183
+docs/evidence/quality-debt-2026-09/ledger.json
+  s_49c4523e80af0c::t_747424ffb142f8 5070-5074,5076,5079-5083,5085,5088-5093,5096-5100,5102,5105-5109,5111,5114-5119,5122-5127,5130-5135,5138-5143,5146-5150,5152,5155-5160,5163-5168,5171-5176
+  s_49c4523e80af0c::t_60bf148896aad4 5075,5084,5101,5110,5151
+  s_49c4523e80af0c::t_437f30d42a1a17 5137
+  s_49c4523e80af0c::t_6cd60915e93d5d 5077-5078,5086-5087,5094-5095,5103-5104,5112-5113,5120-5121,5128-5129,5136,5144-5145,5153-5154,5161-5162,5169-5170,5177-5178
+scripts/quality-debt-ledger.mjs
+  s_49c4523e80af0c::t_2d60f8c9cb5426 38
+docs/evidence/quality-debt-2026-09/batch-d-continuation-base-replay.json
+  s_49c4523e80af0c::t_3ff36132d5f640 1-3218
+scripts/quality-debt-record.test.mjs
+  s_49c4523e80af0c::t_2f516440964b4a 85-86,182-183
+docs/evidence/quality-debt-2026-09/batch-d-pr-alert-responses.json
+  s_49c4523e80af0c::t_8022f253136c84 1-195
+specs/008-quality-debt-zero/research.md
+  s_49c4523e80af0c::t_a4090989358fc7 176
+docs/evidence/quality-debt-2026-09/batch-d-analysis-followup.md
+  s_49c4523e80af0c::t_b489c78c1adde3 36-43
+  s_49c4523e80af0c::t_93f713fbb85b38 1-35
+specs/008-quality-debt-zero/plan.md
+  s_49c4523e80af0c::t_a4090989358fc7 29,107-110,115
+  s_49c4523e80af0c::t_2f516440964b4a 31
+  s_49c4523e80af0c::t_32c61f619d4ec1 30
+docs/evidence/quality-debt-2026-09/codacy-main-issues.json
+  s_49c4523e80af0c::t_747424ffb142f8 4933-4954
+docs/evidence/quality-debt-2026-09/batch-d-continuation-resources.md
+  s_49c4523e80af0c::t_3ff36132d5f640 1-19,23-79
+  s_49c4523e80af0c::t_0c88eb5730d02b 20-22
+docs/evidence/quality-debt-2026-09.md
+  s_49c4523e80af0c::t_a4090989358fc7 6-7
+  s_49c4523e80af0c::t_f1909d92263e66 80-81,88-89,237
+  s_49c4523e80af0c::t_7f029930ebc446 18,87,90,152,188,236,260,346,367,522
+docs/evidence/quality-debt-2026-09/batch-d-continuation-candidate-replay.json
+  s_49c4523e80af0c::t_3ff36132d5f640 1-3218
+specs/008-quality-debt-zero/data-model.md
+  s_49c4523e80af0c::t_7ba92c186e4981 32
+docs/evidence/quality-debt-2026-09/batch-d-continuation.md
+  s_49c4523e80af0c::t_6115b7aa0bb427 53-56,59-61
+  s_49c4523e80af0c::t_b757d631b18c88 57-58
+docs/evidence/quality-debt-2026-09/batch-d-continuation-resources.json
+  s_49c4523e80af0c::t_3ff36132d5f640 1-62,65-71,74-80,83-89,92-98,101-107,110-116,119-125,128-134,137-143,146-152,155-161,164-170,173-179,182-188,191-197,200-206,209-215,218-224,227-233,236-242,245-251,254-260,263-269,272-278,281-287,290-296,299-305,308-314,317-323,326-332,335-341,344-346,349
+  s_49c4523e80af0c::t_0c88eb5730d02b 63-64,72-73,81-82,90-91,99-100,108-109,117-118,126-127,135-136,144-145,153-154,162-163,171-172,180-181,189-190,198-199,207-208,216-217,225-226,234-235,243-244,252-253,261-262,270-271,279-280,288-289,297-298,306-307,315-316,324-325,333-334,342-343,347-348
+scripts/quality-debt-record.mjs
+  s_49c4523e80af0c::t_2d60f8c9cb5426 73
+docs/evidence/quality-debt-2026-09/batch-d-continuation-dogfood.json
+  s_49c4523e80af0c::t_42932d0ab6fee7 1-1112
+specs/008-quality-debt-zero/tasks.md
+  s_49c4523e80af0c::t_a4090989358fc7 133,142
+  s_49c4523e80af0c::t_6115b7aa0bb427 150-151
+  s_49c4523e80af0c::t_b757d631b18c88 121
+docs/evidence/quality-debt-2026-09/sonar-main-issues.json
+  s_49c4523e80af0c::t_747424ffb142f8 2481-2568,2570
+docs/evidence/quality-debt-2026-09/allocation.json
+  s_49c4523e80af0c::t_3c945c9c341a43 320-324,474-477,534-536,578-579,752-754,758-761,766
+docs/evidence/quality-debt-2026-09/batch-d-continuation-dogfood.md
+  s_49c4523e80af0c::t_b489c78c1adde3 1-45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "c8fb5d7c09d4ff08cbb22a43f46aa7da5cf4db8a",
+  "prompts": {},
+  "sessions": {
+    "s_49c4523e80af0c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08247-7f3b-73a2-af35-16a66e78370d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
