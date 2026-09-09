@@ -4,61 +4,39 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
-  mkdirSync,
   readFileSync,
-  readdirSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
 
 import {
   CAPTURE_DEADLINE_MS,
   INJECTION_DEADLINE_MS,
   RAW_EVENT_TTL_MS,
   SPOOL_RESERVE_MS,
-  STDIN_READ_BOUND,
-  applyCompaction,
-  captureEvent,
-  readStdinBounded,
-  runCapture,
-  runHook,
-  type CaptureDeps,
-  type CaptureOutcome,
 } from '../../src/capture.js';
+import { STDIN_READ_BOUND } from '../../src/capture-command.js';
 import { openDatabase } from '../../src/db/open.js';
-import { eventIdKey, type AgentName, type NormalizedEvent } from '../../src/events.js';
-import { ensureDirectories, oboetePaths, type OboetePaths } from '../../src/paths.js';
+import { eventIdKey, type NormalizedEvent } from '../../src/events.js';
+import type { OboetePaths } from '../../src/paths.js';
 import { detectSync, type DetectorInput } from '../../src/privacy/detect.js';
 import type { GitSpawn } from '../../src/repo-identity.js';
 import { listSpool, readSpoolEntry, spoolEntrySchema } from '../../src/spool.js';
 import { recoverSpool } from '../../src/worker/spool-recovery.js';
 import { claimLease } from '../../src/worker/lease.js';
-import { WALL_CLOCK_IS_MEASURED, withTempHome } from '../helpers/home.js';
-
-type Json = Record<string, unknown>;
-
-const NOW = 1_757_000_000_000;
-
-function repositoryRoot(): string {
-  let directory = fileURLToPath(new URL('.', import.meta.url));
-  for (;;) {
-    if (existsSync(join(directory, 'package.json'))) return directory;
-    const parent = dirname(directory);
-    assert.notEqual(parent, directory, 'the repository root must contain package.json');
-    directory = parent;
-  }
-}
-
-const ROOT = repositoryRoot();
-
-function fixture(agent: string, name: string): Json {
-  return JSON.parse(readFileSync(join(ROOT, 'test', 'contracts', agent, name), 'utf8')) as Json;
-}
+import {
+  NOW,
+  ROOT,
+  claudePostToolUse,
+  fixture,
+  withCapture,
+  type Json,
+} from '../helpers/capture.js';
+import { WALL_CLOCK_IS_MEASURED } from '../helpers/home.js';
 
 type CorpusLine = { id: string; secret: string; text: string };
 
@@ -72,93 +50,6 @@ function corpusLine(id: string): CorpusLine {
   const line = CORPUS.find((entry) => entry.id === id);
   if (line === undefined) assert.fail(`the corpus is missing the line ${id}`);
   return line;
-}
-
-type Context = {
-  home: string;
-  repo: string;
-  paths: OboetePaths;
-  deps: CaptureDeps;
-  spawned: number;
-  capture(
-    agent: AgentName,
-    eventName: string,
-    payload: unknown,
-    over?: {
-      deps?: Partial<CaptureDeps>;
-      text?: string;
-      truncated?: boolean;
-      priorFailures?: string[];
-    },
-  ): Promise<CaptureOutcome>;
-  all(sql: string, ...params: (string | number)[]): Json[];
-};
-
-/**
- * A temporary data directory with a migrated database and a working directory that stands in for a
- * repository. The detector is the real one, called in this process: the worker is the hook's wall
- * time bound (contracts/agents.md SLAs), which the end-to-end test exercises through the bundle.
- */
-async function withCapture(
-  fn: (context: Context) => Promise<void>,
-  options: { database?: boolean } = {},
-): Promise<void> {
-  await withTempHome(async (home) => {
-    const paths = oboetePaths(home);
-    ensureDirectories(paths);
-    const repo = join(home, 'workspace');
-    mkdirSync(repo, { recursive: true });
-    if (options.database !== false) openDatabase({ path: paths.db, timeoutMs: 2_000 }).db.close();
-
-    const context: Context = {
-      home,
-      repo,
-      paths,
-      spawned: 0,
-      deps: {
-        // The cutoff is the worker's business; in process the real detector simply runs.
-        detect: (input) => detectSync(input),
-        now: () => NOW,
-        elapsedMs: () => 0,
-        spawnWorker: () => {
-          context.spawned += 1;
-        },
-      },
-      capture: (agent, eventName, payload, over = {}) => {
-        const text = over.text ?? JSON.stringify(payload);
-        return captureEvent(
-          { ...context.deps, ...over.deps },
-          {
-            agent,
-            eventName,
-            paths,
-            readStdin: () => ({ text, truncated: over.truncated ?? false }),
-            priorFailures: over.priorFailures,
-          },
-        );
-      },
-      all: (sql, ...params) => {
-        const opened = openDatabase({ path: paths.db, timeoutMs: 2_000 });
-        try {
-          return opened.db.prepare(sql).all(...params) as Json[];
-        } finally {
-          opened.db.close();
-        }
-      },
-    };
-    await fn(context);
-  });
-}
-
-function claudePostToolUse(repo: string, content: string): Json {
-  const payload = { ...((fixture('claude', 'read.json').events as Json).PostToolUse as Json) };
-  payload.cwd = repo;
-  payload.tool_response = {
-    type: 'text',
-    file: { filePath: `${repo}/README.md`, content, numLines: 1, startLine: 1, totalLines: 1 },
-  };
-  (payload.tool_input as Json).file_path = `${repo}/README.md`;
-  return payload;
 }
 
 function expectedToolResultId(payload: Json, repo: string, output: string): string {
@@ -407,92 +298,6 @@ test('a Codex hook with a new session id and no SessionStart starts a new root (
     assert.equal(sessions.length, 2);
     for (const session of sessions) assert.equal(session.conversation_id, session.id);
   });
-});
-
-function compactionEvent(agent: AgentName, key: string, text: string): NormalizedEvent {
-  return {
-    agent,
-    native_session_id: 'session-1',
-    cwd: '/repo',
-    captured_at: NOW,
-    kind: 'compaction_summary',
-    text,
-    compaction_key: key,
-  };
-}
-
-test('applyCompaction advances the epoch once per compaction on Grok', async () => {
-  const first = compactionEvent('grok', '2026-09-03T16:01:11.622755654+00:00', '');
-  const again = compactionEvent('grok', '2026-09-03T16:04:02.101110000+00:00', '');
-
-  const opened = applyCompaction('grok', first, { contextEpoch: 0, lastCompactionKey: null }, 'id-1');
-  assert.equal(opened?.contextEpoch, 1);
-  assert.equal(
-    applyCompaction('grok', first, opened as never, 'id-1'),
-    null,
-    'a re-delivery adds no epoch',
-  );
-  const second = applyCompaction('grok', again, opened as never, 'id-2');
-  assert.equal(second?.contextEpoch, 2);
-});
-
-test('applyCompaction keys Claude Code and Codex compactions by the event id (A16)', async () => {
-  const claudeStart: NormalizedEvent = {
-    agent: 'claude',
-    native_session_id: 'session-1',
-    cwd: '/repo',
-    captured_at: NOW,
-    kind: 'session_start',
-    source: 'compact',
-  };
-  // On Claude Code the SessionStart(compact) hook runs ~24 ms before PostCompact, so it opens the
-  // epoch and PostCompact only confirms it (R13 "Compaction identity and order", A16).
-  const opened = applyCompaction(
-    'claude',
-    claudeStart,
-    { contextEpoch: 0, lastCompactionKey: null },
-    'start-1',
-  );
-  assert.equal(opened?.contextEpoch, 1);
-  // A16: without a native per-compaction value the key is the stored id of the PostCompact row.
-  const confirmed = applyCompaction(
-    'claude',
-    compactionEvent('claude', '', 'summary text'),
-    opened as never,
-    'postcompact-1',
-  );
-  assert.equal(confirmed?.contextEpoch, 1, 'PostCompact must not advance the epoch a second time');
-  const next = applyCompaction('claude', claudeStart, confirmed as never, 'start-2');
-  assert.equal(next?.contextEpoch, 2, 'the next compaction opens the next epoch');
-
-  const codex = compactionEvent('codex', '', '');
-  const codexOpened = applyCompaction(
-    'codex',
-    codex,
-    { contextEpoch: 0, lastCompactionKey: null },
-    'postcompact-2',
-  );
-  assert.equal(codexOpened?.contextEpoch, 1);
-  assert.equal(applyCompaction('codex', codex, codexOpened as never, 'postcompact-2'), null);
-  // Codex fires SessionStart(compact) after PostCompact, so it only reads the epoch.
-  assert.equal(
-    applyCompaction(
-      'codex',
-      { ...codex, kind: 'session_start', source: 'compact' } as never,
-      codexOpened as never,
-      'start-3',
-    ),
-    null,
-  );
-});
-
-test('applyCompaction keys Pi compactions by compactionEntry.id', async () => {
-  const first = compactionEvent('pi', '480afbf2', 'summary');
-  const second = compactionEvent('pi', '4283239e', 'summary');
-  const opened = applyCompaction('pi', first, { contextEpoch: 0, lastCompactionKey: null }, 'id-1');
-  assert.equal(opened?.contextEpoch, 1);
-  assert.equal(applyCompaction('pi', first, opened as never, 'id-1'), null);
-  assert.equal(applyCompaction('pi', second, opened as never, 'id-2')?.contextEpoch, 2);
 });
 
 test('a Claude compaction advances the epoch of the root session exactly once', async () => {
@@ -1156,95 +961,6 @@ test('the paused marker stops capture before anything is written', async () => {
   });
 });
 
-test('runHook without a selector records unknown provenance and a diagnostics counter', async () => {
-  await withCapture(async (context) => {
-    const payload = claudePostToolUse(context.repo, 'notes');
-
-    const code = await runHook(['--event', 'PostToolUse'], {
-      deps: context.deps,
-      readStdin: () => ({ text: JSON.stringify(payload), truncated: false }),
-    });
-
-    assert.equal(code, 0);
-    const rows = context.all('SELECT agent, classification_state FROM raw_events');
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0]?.agent, 'unknown');
-    assert.equal(rows[0]?.classification_state, 'failed');
-    const diagnostics = context.all('SELECT kind, agent, count FROM diagnostics');
-    assert.equal(diagnostics.length, 1);
-    assert.equal(diagnostics[0]?.kind, 'unknown_agent');
-    assert.equal(diagnostics[0]?.agent, 'unknown');
-  });
-});
-
-test('runHook writes one line per invocation and nothing to stdout', async () => {
-  await withCapture(async (context) => {
-    const payload = claudePostToolUse(context.repo, 'notes');
-    const written: string[] = [];
-    const original = process.stdout.write.bind(process.stdout);
-    process.stdout.write = ((chunk: string) => {
-      written.push(String(chunk));
-      return true;
-    }) as typeof process.stdout.write;
-    try {
-      await runHook(['--agent', 'claude-or-grok', '--event', 'PostToolUse'], {
-        deps: context.deps,
-        readStdin: () => ({ text: JSON.stringify(payload), truncated: false }),
-      });
-    } finally {
-      process.stdout.write = original;
-    }
-
-    assert.deepEqual(written, []);
-    const log = readFileSync(context.paths.hookLog, 'utf8').trimEnd().split('\n');
-    assert.equal(log.length, 1);
-    assert.match(log[0] as string, /agent=claude event=PostToolUse/);
-  });
-});
-
-test('the Pi capture child acknowledges before it reads stdin and records prior failures', async () => {
-  await withCapture(async (context) => {
-    const started = join(context.paths.piAck, 'inv-1.started');
-    let acknowledgedBeforeRead = false;
-    const envelope = {
-      event: 'input',
-      session_id: 'pi-session',
-      cwd: context.repo,
-      payload: { text: 'what changed in the parser?', source: 'interactive' },
-    };
-
-    const code = await runCapture(
-      [
-        '--agent',
-        'pi',
-        '--event',
-        'input',
-        '--invocation',
-        'inv-1',
-        '--prior-failures',
-        'spawn_failed,timeout',
-      ],
-      {
-        deps: context.deps,
-        readStdin: () => {
-          acknowledgedBeforeRead = existsSync(started);
-          return { text: JSON.stringify(envelope), truncated: false };
-        },
-      },
-    );
-
-    assert.equal(code, 0);
-    assert.equal(acknowledgedBeforeRead, true, 'the acknowledgement must precede the stdin read');
-    assert.equal(existsSync(started), false);
-    assert.equal(existsSync(join(context.paths.piAck, 'inv-1.done')), true);
-    assert.equal(context.all('SELECT id FROM raw_events').length, 1);
-    const codes = context
-      .all(`SELECT message_code FROM diagnostics WHERE kind = 'pi_child_failed' ORDER BY message_code`)
-      .map((row) => row.message_code);
-    assert.deepEqual(codes, ['spawn_failed', 'timeout']);
-  });
-});
-
 test('the worker is spawned at the end of a turn only while the lease is free', async () => {
   await withCapture(async (context) => {
     const base = { session_id: 'session-spawn', cwd: context.repo, prompt_id: 'prompt-1' };
@@ -1270,43 +986,6 @@ test('the worker is spawned at the end of a turn only while the lease is free', 
   });
 });
 
-test('a data directory that cannot be created still exits 0 and reports the count (FR-002)', async (t) => {
-  if (process.getuid?.() === 0) {
-    t.skip('the root user writes into a directory without write permission');
-    return;
-  }
-  await withTempHome(async (home) => {
-    // Nothing exists yet, so creating the data directory is the first thing that fails.
-    chmodSync(home, 0o500);
-    const written: string[] = [];
-    const original = process.stderr.write.bind(process.stderr);
-    process.stderr.write = ((chunk: string) => {
-      written.push(String(chunk));
-      return true;
-    }) as typeof process.stderr.write;
-    let code: number;
-    try {
-      code = await runHook(['--agent', 'claude-or-grok', '--event', 'PostToolUse'], {
-        deps: {
-          detect: (input) => detectSync(input),
-          now: () => NOW,
-          elapsedMs: () => 0,
-          spawnWorker: () => undefined,
-        },
-        readStdin: () => ({
-          text: JSON.stringify(claudePostToolUse(home, 'notes')),
-          truncated: false,
-        }),
-      });
-    } finally {
-      process.stderr.write = original;
-      chmodSync(home, 0o700);
-    }
-    assert.equal(code, 0, 'contracts/cli.md: the hook always exits 0');
-    assert.match(written.join(''), /1 event/, 'the loss is reported to stderr');
-  });
-});
-
 test('a worker spawn that throws leaves the stored rows alone', async () => {
   await withCapture(async (context) => {
     const base = { session_id: 'session-spawn-throws', cwd: context.repo, prompt_id: 'prompt-1' };
@@ -1328,64 +1007,4 @@ test('a worker spawn that throws leaves the stored rows alone', async () => {
     const kinds = context.all('SELECT kind FROM raw_events ORDER BY kind').map((row) => row.kind);
     assert.deepEqual(kinds, ['last_assistant_message', 'turn_end']);
   });
-});
-
-test('files written by capture stay owner-only', async () => {
-  await withCapture(async (context) => {
-    await context.capture('claude', 'PostToolUse', claudePostToolUse(context.repo, 'notes'));
-    await runHook(['--agent', 'claude-or-grok', '--event', 'PostToolUse'], {
-      deps: context.deps,
-      readStdin: () => ({ text: '{}', truncated: false }),
-    });
-
-    for (const file of [context.paths.hookLog, context.paths.spool, context.paths.spoolFailed]) {
-      assert.equal(statSync(file).mode & 0o077, 0, `${file} is readable by other users`);
-    }
-    assert.deepEqual(
-      readdirSync(context.paths.spool).sort(),
-      ['failed', 'pi-ack'],
-      'only the two directories live in an empty spool',
-    );
-  });
-});
-
-test('stdin is read one byte past the bound, and only that byte makes the payload partial', () => {
-  // A source that hands out `available` bytes in chunks, counting what the reader asked for.
-  function source(available: number): { read: (target: Buffer, length: number) => number; asked: () => number } {
-    let sent = 0;
-    let asked = 0;
-    return {
-      read: (target, length) => {
-        asked += length;
-        const count = Math.min(length, available - sent);
-        if (count <= 0) return 0;
-        target.fill(0x61, 0, count);
-        sent += count;
-        return count;
-      },
-      asked: () => asked,
-    };
-  }
-
-  const short = source(10);
-  assert.deepEqual(readStdinBounded(short.read), { text: 'a'.repeat(10), truncated: false });
-
-  // A payload of exactly the bound was not cut: nothing is missing, so the row is complete (A7).
-  const exact = source(STDIN_READ_BOUND);
-  const atBound = readStdinBounded(exact.read);
-  assert.equal(atBound.truncated, false);
-  assert.equal(atBound.text.length, STDIN_READ_BOUND);
-
-  const over = source(STDIN_READ_BOUND + 1);
-  const past = readStdinBounded(over.read);
-  assert.equal(past.truncated, true);
-  assert.equal(past.text.length, STDIN_READ_BOUND, 'the byte past the bound is never stored');
-
-  // A14: capture time does not grow with the payload, so the rest is never drained.
-  const huge = source(64 * 1_024 * 1_024);
-  assert.equal(readStdinBounded(huge.read).truncated, true);
-  assert.ok(
-    huge.asked() <= STDIN_READ_BOUND + 1,
-    `the hook asked for ${huge.asked()} bytes of a 64 MiB payload`,
-  );
 });

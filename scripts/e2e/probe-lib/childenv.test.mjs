@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { childEnv } from "./agents.mjs";
+import {
+  childEnv,
+} from "./process.mjs";
 
 /** The variables a developer's shell carries when they run a probe, put back afterwards. */
 function withCredentialsInEnvironment(fn) {
@@ -59,4 +61,3 @@ test("childEnv drops a credential passed to it explicitly unless credentials wer
   assert.equal(agent.OBOETE_NIM_API_KEY, undefined);
   assert.equal(childEnv({ OBOETE_NIM_API_KEY: "nim-key" }, { credentials: true }).OBOETE_NIM_API_KEY, "nim-key");
 });
-

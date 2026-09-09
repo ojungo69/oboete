@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { redactValue } from "./agents.mjs";
+import {
+  redactValue,
+} from "./agent-events.mjs";
 
 function sessionJsonlPaths(tree) {
   const dir = path.join(tree, "sessions");

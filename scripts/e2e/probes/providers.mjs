@@ -2,16 +2,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  copyMode,
+  seedGrokHome,
+} from "../probe-lib/agents.mjs";
+import {
   binVersion,
   childEnv,
-  copyMode,
   gitInit,
+  runTimed,
+} from "../probe-lib/process.mjs";
+import {
   parseJsonl,
   parseObservationsJson,
   piContentText,
-  runTimed,
-  seedGrokHome,
-} from "../probe-lib/agents.mjs";
+} from "../probe-lib/agent-events.mjs";
 
 const ROW_CLI =
   "`agent-cli` preset: headless JSON output of `claude -p`, `codex exec`, `grok -p` for a summarization prompt";

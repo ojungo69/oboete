@@ -5,17 +5,11 @@
 // contracts/cli.md (`hook`, `capture`), research.md R1, R4, R6, R7, R12, data-model.md
 // (raw_events, sessions, turns, diagnostics, "Spool entry"), spec FR-001 to FR-008, FR-017 to
 // FR-019, FR-021, FR-024/FR-026, and amendments A7, A12, A14, A16, A18.
-import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, readSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { performance } from 'node:perf_hooks';
 import type { DatabaseSync } from 'node:sqlite';
-import { parseArgs } from 'node:util';
 
 import {
   adapt,
-  resolveAgent,
   scanPartialPrefix,
   textFields,
   type AdapterAgent,
@@ -29,6 +23,7 @@ import {
   loadRepoRules,
   type OboeteConfig,
 } from './config.js';
+import { applyCompaction, type CompactionState } from './capture-compaction.js';
 import { openDatabase } from './db/open.js';
 import {
   contentHash,
@@ -40,14 +35,13 @@ import {
   type SessionStartSource,
 } from './events.js';
 import { appendLogQuietly, credentialValues, errorCode } from './log.js';
-import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from './paths.js';
-import { detectInWorker, type DetectorInput, type DetectorResult } from './privacy/detect.js';
+import { ensureDirectories, type OboetePaths } from './paths.js';
+import type { DetectorInput, DetectorResult } from './privacy/detect.js';
 import { resolveRepoIdentity, type GitSpawn, type RepoIdentity } from './repo-identity.js';
 import { writeSpoolEntry, type SpoolEntry } from './spool.js';
 import { isLeaseFree, transactionImmediate } from './worker/lease.js';
 import type { HookContext } from './injection/inject.js';
 import { stripRecognizedPacks } from './injection/recognize.js';
-import { testFault } from './testing/faults.js';
 
 /** The absolute budget of a capture hook, measured from process start (contracts/agents.md). */
 export const CAPTURE_DEADLINE_MS = 300;
@@ -63,31 +57,13 @@ export const ROW_BUILD_MARGIN_MS = 20;
  * cutoff to zero and store a content-less `failed` row although the database was writable.
  */
 export const DETECTOR_MIN_MS = 60;
-/**
- * How much of stdin the hook reads before it stops (A7 with the A14 default, 2026-09-04). The
- * secret-dense worst case of the full detector measures 406-665 ms per 1 MB on Node 22 and 24, so
- * the 1 MB bound of the spec cannot hold the 240 ms detector cutoff; 256 KiB keeps that worst case
- * near 100-170 ms and stays above A14's 200 KB escalation floor. The read part is treated exactly
- * as A7 prescribes: a redacted `partial` row marked truncated.
- */
-export const STDIN_READ_BOUND = 262_144;
 /** data-model raw_events: `expires_at` = captured_at + 7 days (FR-008). */
 export const RAW_EVENT_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 
 const BUSY_TIMEOUT_CEILING_MS = 150;
 const SPAWN_MIN_REMAINING_MS = 10;
 const TURN_BATCH = 10;
-const STDIN_WAIT_LIMIT = 100;
 const UNKNOWN_SESSION = 'unknown';
-/** The key that records "this epoch was opened by Claude Code's SessionStart(compact)" (A16). */
-const CLAUDE_COMPACT_START_KEY = 'session_start:compact';
-/**
- * The same record for the other order: Claude Code's two compaction hooks fire about 24 ms apart
- * and are serialized only by `BEGIN IMMEDIATE`, so `PostCompact` can commit first. The prefix marks
- * an epoch its `PostCompact` opened, so the companion `SessionStart(compact)` confirms it instead of
- * advancing a second time (A16).
- */
-const CLAUDE_COMPACT_POST_PREFIX = 'post_compact:';
 
 // The normalized kind of an event name, used where no adapter runs: the partial row of an
 // oversized payload and the rows of an unreadable payload keep the kind of the fixed `--event`
@@ -219,56 +195,6 @@ export function payloadJson(event: NormalizedEvent): Record<string, unknown> {
       break;
   }
   return payload;
-}
-
-export type CompactionState = { contextEpoch: number; lastCompactionKey: string | null };
-
-/**
- * The context epoch of a conversation (A12): 0 at the root, +1 per compaction. The authoritative
- * event is one per agent, and the key that distinguishes two compactions is what the R13 probe
- * found ("Compaction identity and order", 2026-09-03): Grok Build's `PostCompact.timestamp`, Pi's
- * `compactionEntry.id`, and on Claude Code and Codex the compaction event's own id, which the
- * caller passes as `eventIdentity` because it is the stored `raw_events.id` of that very row (A16,
- * which collapses two byte-identical compactions of one turn). Claude Code is the one agent whose
- * `SessionStart source = compact` runs about 24 ms *before* `PostCompact`, so there that hook opens
- * the epoch and `PostCompact` only confirms it. Returns the new state, or null when the event
- * leaves the epoch untouched.
- */
-export function applyCompaction(
-  agent: AgentName,
-  event: NormalizedEvent,
-  state: CompactionState,
-  eventIdentity: string,
-): CompactionState | null {
-  const stored = state.lastCompactionKey;
-  // The compaction the current epoch belongs to, whichever of Claude Code's two hooks opened it.
-  const openedKey =
-    stored?.startsWith(CLAUDE_COMPACT_POST_PREFIX)
-      ? stored.slice(CLAUDE_COMPACT_POST_PREFIX.length)
-      : stored;
-
-  if (agent === 'claude' && event.kind === 'session_start' && event.source === 'compact') {
-    if (stored === CLAUDE_COMPACT_START_KEY) return null;
-    // The `PostCompact` of this same compaction committed first and already opened the epoch, so
-    // this hook only consumes the marker; the next `PostCompact` opens the next epoch (A16).
-    if (openedKey !== stored) return { contextEpoch: state.contextEpoch, lastCompactionKey: openedKey };
-    return { contextEpoch: state.contextEpoch + 1, lastCompactionKey: CLAUDE_COMPACT_START_KEY };
-  }
-  if (event.kind !== 'compaction_summary') return null;
-
-  const key = event.compaction_key !== '' ? event.compaction_key : eventIdentity;
-  if (openedKey === key) return null;
-  // The companion hook already opened this epoch, so PostCompact only records its own key, which
-  // is what lets the next SessionStart(compact) open the next epoch.
-  if (agent === 'claude' && stored === CLAUDE_COMPACT_START_KEY) {
-    return { contextEpoch: state.contextEpoch, lastCompactionKey: key };
-  }
-  return {
-    contextEpoch: state.contextEpoch + 1,
-    // ponytail: the marker is the record that this epoch is still waiting for its companion hook;
-    // a Claude session whose SessionStart(compact) never arrives keeps it until the next compaction.
-    lastCompactionKey: agent === 'claude' ? `${CLAUDE_COMPACT_POST_PREFIX}${key}` : key,
-  };
 }
 
 function deterministicId(parts: string[]): string {
@@ -1281,188 +1207,4 @@ async function runDetector(
   } catch {
     return { ok: false, reason: 'detector_error' };
   }
-}
-
-// -- process wiring ---------------------------------------------------------------------------
-
-export type CaptureRuntime = { deps: CaptureDeps; readStdin: () => StdinRead };
-
-function sleep(milliseconds: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
-}
-
-/** One chunk of standard input; the seam a test replaces to drive the read bound exactly. */
-export type StdinReader = (target: Buffer, length: number) => number;
-
-const fromStandardInput: StdinReader = (target, length) => readSync(0, target, 0, length, null);
-
-/**
- * Reads at most `STDIN_READ_BOUND` bytes and stops; the rest is never drained, so capture time does
- * not grow with the payload (A7, A14). A pipe with nothing ready yet answers EAGAIN, which is
- * waited out in short steps rather than spun on.
- */
-export function readStdinBounded(read: StdinReader = fromStandardInput): StdinRead {
-  const chunks: Buffer[] = [];
-  const buffer = Buffer.allocUnsafe(64 * 1_024);
-  let total = 0;
-  let waits = 0;
-
-  // One byte past the bound is read but never stored: a payload of exactly the bound was not cut,
-  // so only a byte beyond it makes the row partial (A7).
-  while (total <= STDIN_READ_BOUND) {
-    let taken: number;
-    try {
-      taken = read(buffer, Math.min(buffer.length, STDIN_READ_BOUND + 1 - total));
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'EAGAIN' && waits < STDIN_WAIT_LIMIT) {
-        waits += 1;
-        sleep(1);
-        continue;
-      }
-      break;
-    }
-    if (taken === 0) break;
-    chunks.push(Buffer.from(buffer.subarray(0, taken)));
-    total += taken;
-  }
-  return {
-    text: Buffer.concat(chunks).subarray(0, STDIN_READ_BOUND).toString('utf8'),
-    truncated: total > STDIN_READ_BOUND,
-  };
-}
-
-function defaultRuntime(): CaptureRuntime {
-  const bundlePath = process.argv[1] ?? '';
-  return {
-    deps: {
-      detect: (input, cutoffMs) => detectInWorker(input, { cutoffMs, workerScript: bundlePath }),
-      now: () => Date.now(),
-      // performance.now() counts from process start, which is where the budget is measured from.
-      elapsedMs: () => performance.now(),
-      spawnWorker: () => {
-        const child = spawn(process.execPath, [bundlePath, 'observe'], {
-          detached: true,
-          stdio: 'ignore',
-        });
-        // A spawn failure arrives as an asynchronous 'error' event after the hook has returned, so
-        // without a listener it would throw past the exit-0 contract (FR-002); the spawn is
-        // best-effort, and the next hook retries it.
-        child.on('error', () => {});
-        child.unref();
-      },
-    },
-    readStdin: () => readStdinBounded(),
-  };
-}
-
-function option(values: Record<string, unknown>, name: string): string | undefined {
-  const value = values[name];
-  return typeof value === 'string' && value !== '' ? value : undefined;
-}
-
-async function runCaptureCommand(
-  input: Omit<CaptureInput, 'readStdin'>,
-  runtime: CaptureRuntime,
-): Promise<number> {
-  let outcome: CaptureOutcome;
-  try {
-    outcome = await captureEvent(runtime.deps, { ...input, readStdin: runtime.readStdin });
-  } catch (error) {
-    // FR-002: the agent is never blocked, so every failure ends as one log line and exit 0.
-    appendLogQuietly(input.paths.hookLog, 'error', 'capture failed', {
-      agent: input.agent,
-      event: input.eventName,
-      reason: errorCode(error),
-    });
-    return 0;
-  }
-
-  if (outcome.outcome !== 'paused') {
-    appendLogQuietly(input.paths.hookLog, 'info', 'capture', {
-      agent: input.agent,
-      event: input.eventName,
-      outcome: outcome.outcome,
-      rows: outcome.rows,
-    });
-  }
-  if (outcome.stdout !== undefined && outcome.stdout !== '') process.stdout.write(outcome.stdout);
-  return 0;
-}
-
-/** `oboete hook --agent codex|claude-or-grok --event <name>` (contracts/cli.md); always exits 0. */
-export async function runHook(argv: string[], runtime: Partial<CaptureRuntime> = {}): Promise<number> {
-  const { values } = parseArgs({
-    args: argv,
-    strict: false,
-    allowPositionals: true,
-    options: { agent: { type: 'string' }, event: { type: 'string' } },
-  });
-  const paths = oboetePaths(resolveHome());
-  return runCaptureCommand(
-    {
-      agent: resolveAgent(option(values, 'agent'), process.env),
-      eventName: option(values, 'event') ?? '',
-      paths,
-    },
-    { ...defaultRuntime(), ...runtime },
-  );
-}
-
-/**
- * `oboete capture --agent pi --event <name> --invocation <id> [--prior-failures <codes>]`: Pi's
- * detached capture child. The acknowledgement is written before stdin is read and renamed on the
- * way out, which is how doctor tells a hung child from a failed spawn (data-model "Pi", A8).
- */
-export async function runCapture(
-  argv: string[],
-  runtime: Partial<CaptureRuntime> = {},
-): Promise<number> {
-  // FR-002: an unanticipated bug in the Pi capture child must still leave the agent unblocked.
-  if (testFault('pi-throw')) throw new Error('OBOETE_TEST_FAULT: pi-throw');
-  const { values } = parseArgs({
-    args: argv,
-    strict: false,
-    allowPositionals: true,
-    options: {
-      agent: { type: 'string' },
-      event: { type: 'string' },
-      invocation: { type: 'string' },
-      'prior-failures': { type: 'string' },
-    },
-  });
-  const paths = oboetePaths(resolveHome());
-  const invocation = option(values, 'invocation');
-  const started = invocation === undefined ? null : join(paths.piAck, `${invocation}.started`);
-
-  if (started !== null) {
-    try {
-      ensureDirectories(paths);
-      writeFileSync(started, '', { mode: 0o600 });
-    } catch {
-      // FR-007: the acknowledgement is diagnostics; capture continues without it.
-    }
-  }
-
-  const code = await runCaptureCommand(
-    {
-      agent: resolveAgent(option(values, 'agent'), process.env),
-      eventName: option(values, 'event') ?? '',
-      paths,
-      priorFailures: (option(values, 'prior-failures') ?? '')
-        .split(',')
-        .map((entry) => entry.trim())
-        .filter((entry) => entry !== ''),
-    },
-    { ...defaultRuntime(), ...runtime },
-  );
-
-  if (started !== null) {
-    try {
-      if (existsSync(started)) renameSync(started, started.replace(/\.started$/, '.done'));
-    } catch {
-      // The worker records a `.started` file older than 30 s as `pi_child_hang` (data-model "Pi").
-    }
-  }
-  return code;
 }

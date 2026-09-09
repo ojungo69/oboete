@@ -14,7 +14,8 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { TestContext } from 'node:test';
 
-import { CAPTURE_DEADLINE_MS, STDIN_READ_BOUND } from '../src/capture.js';
+import { STDIN_READ_BOUND } from '../src/capture-command.js';
+import { CAPTURE_DEADLINE_MS } from '../src/capture.js';
 import {
   claudePayload,
   fixture,

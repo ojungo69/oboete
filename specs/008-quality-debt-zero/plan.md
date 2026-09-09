@@ -88,10 +88,10 @@ scripts/
 ├── e2e/dogfood.sh                #   SC2024 verdict
 └── (other scripts/*.mjs, scripts/e2e/**)   # Codex batches
 
-test/                             # untouched except: a new test added next to a real security fix
+test/                             # matching tests follow extracted modules; assertions stay unchanged
 ```
 
-**Structure Decision**: Existing single-package layout. New files are limited to analysis configuration, the disposition record, and modules created by the three-plus-two seam splits listed in research R7.
+**Structure Decision**: Existing single-package layout. New files are limited to analysis configuration, the disposition record, and the source/test seams listed in research R7. Added tests cover previously untested rendering/frame/fixture-validation boundaries.
 
 ## Batches and order
 
@@ -110,7 +110,7 @@ Each batch is one pull request; each passes the PR #155 gate before merge; `main
 | C2 | Structural, `src/capture.ts` (incl. S107 on `write`), `src/agents/**`, `src/setup/**`, `src/doctor*`, `src/repo-identity.ts`, `src/events.ts`, `src/db/open.ts`, `src/retrieval/**` | Codex | as above | 39 (allocation) | B2 |
 | C3 | Structural, session-owned `src/**` incl. `src/viewer/app/main.tsx` (`App`, 73 NLOC) and `src/fixture/replay.ts` | session | as above | 17 (allocation) | B3 |
 | C4 | Structural + S107 (`launchAgent`) in `scripts/**` incl. `scripts/e2e/*.test.mjs` (6 function-length rows); candidate-bundle dogfood before merge | Codex, dogfood by session | Sonar S3776/S107, Codacy function length + parameter count, file under `scripts/` | 62 (allocation) | B1 |
-| D | File-length seams: split `worker/observe.ts`, `capture.ts`, `fixture/replay.ts`, `isolated-user.mjs`, `generate-1000-events.mjs`; won't-fix rows for the other 8 (research R4/R7 tables); the 4 the 2026-09-08 refresh added (`probes/pi.mjs`, `observer/classify.ts`, `observer/llm.ts`, `setup/setup.ts`), plus the Claude probe finding added on 2026-09-09, decided the same way in T036 and implemented by whichever of the two branches owns the file | Codex on branch `008-qd-d-codex` (`observe.ts`, `capture.ts`, two scripts); session on `008-qd-d` (`replay.ts`), folded with `--ff-only` | Codacy file length not excluded by A | 18 (allocation; per-file decisions in T036) | C1–C4 |
+| D | File-length seams in all 18 measured files (R7): 13 original findings fixed, 5 cohesive residuals resolved; two new over-limit lifecycle modules explicitly assessed pending native service IDs | Session integrates `008-qd-d`; capture/worker and harness work stays in scoped linked worktrees, injection/replay owned by the session | Codacy file length not excluded by A | 18 frozen IDs; new analysis IDs included when reported | C1–C4 |
 | F | Service-side calls and confirmations: Sonar transitions + comments, Codacy ignores with reason + comment (API, hex ids), confirmation of every planned `fixed` / `excluded` row against the analysis that dropped it, polish edits, then 0 / 0 against the final `main` SHA | session | owns no ids (research R9) | 0 (records confirmations) | all, token in hand |
 
 Parallelism: E alone first (session). Then B1 ∥ B2 (Codex) while B3 is written here; then C1 ∥ C2 ∥ C4 (Codex) while C3 is written here; then D; then F. At most three Codex jobs at once, each in `~/projects/free-mem-wt/<batch>` on its own branch `008-qd-<batch>` (a Codex batch that shares a pull request with session work, as in D, uses `008-qd-<batch>-codex` and is folded into the session branch with `git -C ~/projects/free-mem-wt/008 merge --ff-only`); the session's worktree is `~/projects/free-mem-wt/008`; the shared checkout stays on `main` and is only advanced with `git pull --ff-only` after a merge (research R8; memory `fold-in-runs-in-the-worktree-when-chained-after-cd`).
@@ -128,13 +128,13 @@ worktree. PR #186's CLI prerequisites are already merged.
 
 | Area | Extraction scope | Verification |
 |---|---|---|
-| Capture | Process/CLI adapter to `src/capture-command.ts`; the capture transaction, deadline and hook protocol stay in `capture.ts`. Update direct imports and move the adapter tests without changing assertions. | Capture, hook and storage-fault tests; compare all moved bodies and the bundled runtime. |
+| Capture | Process/CLI adapter to `src/capture-command.ts` and pure epoch state transitions to `src/capture-compaction.ts`; the capture transaction, deadline and hook protocol stay in `capture.ts`. Update direct imports and move the adapter tests without changing assertions. | Capture, hook and storage-fault tests; compare all moved bodies and the bundled runtime. |
 | Worker | Batch application to `src/worker/observe-batch.ts`; imported-memory maintenance to `src/worker/imported.ts`; preserve lease fencing, consent callbacks, retry order and exact dependency types. Keep citation maintenance separate if its independently testable concern remains in an over-limit module. | Observe, privacy, lease, staleness and worker/provider fault tests. |
 | Injection | Pi command to `src/injection/pi.ts`; pure pack framing/items to `src/injection/pack-format.ts`. Keep common delivery/validation in `inject.ts`, and selection/ledger in `pack.ts`; update every importer and move direct tests. | Injection, pack, deferred, degradation, why and agent-fault tests; privacy review. |
 | Replay | Separate completed-run measurement and evidence rendering from the replay driver, retaining exact output, measurements and exit verdicts. | Replay tests, identical report output from the same recorded inputs, full fixture replay. |
 | Isolated harness | Separate lifecycle state assertions, lifecycle execution, and the process operations shared by pair/lifecycle modes. Move the corresponding existing tests; keep the CLI entrypoint, event barriers and cleanup ordering. | All harness tests, import-cycle check, all-pair and lifecycle candidate dogfood. |
 | Fixture generator | Move the post-generation coverage validator, retaining emission order and all validation. | Generator output byte equality and coverage validation. |
-| Probe helpers and suites | Separate process runtime from frame/evidence decoding; MCP frame assertions from its driver; Codex/Grok lifecycle and MCP probes from payload probes. Preserve every probe ID and discovery contract; helpers stay in `probe-lib/`. | All harness tests, probe discovery and affected real probe IDs. |
+| Probe helpers and suites | Separate process runtime from frame/evidence decoding; MCP frame assertions and reports from its driver; Codex/Grok lifecycle and MCP probes from payload probes. Preserve every probe ID and discovery contract; helpers stay in `probe-lib/`. | All harness tests, probe discovery and affected real probe IDs. |
 
 Review the resulting source boundaries before editing each area. No new dependency, timing
 budget, public command, credential policy or gate definition belongs to these extractions.

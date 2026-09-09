@@ -2,16 +2,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  toolUsePrompt,
+} from "../probe-lib/agents.mjs";
+import {
   binVersion,
+} from "../probe-lib/process.mjs";
+import {
   compactionIdentity,
   finalText,
   named,
   redactValue,
   shapeProbe,
-  toolUsePrompt,
   topKeys,
   writeFixture,
-} from "../probe-lib/agents.mjs";
+} from "../probe-lib/agent-events.mjs";
 import {
   durableErrorPath,
   findErrorLogs,

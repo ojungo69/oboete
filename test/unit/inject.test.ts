@@ -10,8 +10,8 @@ import {
   CAPTURE_DEADLINE_MS,
   INJECTION_DEADLINE_MS,
   hookDeadlineMs,
-  runHook,
 } from '../../src/capture.js';
+import { runHook } from '../../src/capture-command.js';
 import type { AgentName, NormalizedEvent } from '../../src/events.js';
 import {
   injectForHook,

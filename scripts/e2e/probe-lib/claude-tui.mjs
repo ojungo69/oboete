@@ -1,7 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { named, parseEvents, waitUntil, writeClaudeSettings } from "./agents.mjs";
+import {
+  writeClaudeSettings,
+} from "./agents.mjs";
+import {
+  waitUntil,
+} from "./process.mjs";
+import {
+  named,
+  parseEvents,
+} from "./agent-events.mjs";
 import { readyTui, tmuxSession, tuiQuit, tuiSubmit } from "./tmux.mjs";
 
 async function waitPostCompact(eventsPath, n, ms) {

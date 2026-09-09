@@ -4958,9 +4958,8 @@
  {
   "service": "codacy",
   "id": "161d5b6e6a57ae5ac63a3683a0271135",
-  "state": "resolved",
-  "reason": "AcceptedUse",
-  "where": "one concern: choose and deliver the pack per agent channel; the Grok tool-hook trio is the only separable cluster, about 90 NLOC, and it shares envelope and deferPack with the other channels (31 % over)"
+  "state": "fixed",
+  "where": "#185"
  },
  {
   "service": "codacy",
@@ -4973,77 +4972,71 @@
   "id": "f347b941757ef85eff4d9e526869252e",
   "state": "resolved",
   "reason": "AcceptedUse",
-  "where": "the same hook path from the worker side (lease, batch loop, provider call, fallback synthesis, citation update); extracting the provider call leaves 900 NLOC, so crossing 500 is the same three-to-four-module change on the latency-critical side (121 % over)"
+  "where": "single cohesive module after batch, citation and import-maintenance extraction: one bounded leased run owns queue passes, heartbeat, retry, summary completion and release (568 NLOC; 13.6% over 500)"
  },
  {
   "service": "codacy",
   "id": "d7031b338e6f7512b5fd5ed4a6257f17",
   "state": "resolved",
   "reason": "AcceptedUse",
-  "where": "one driver: replay the 1,000-event fixture through the real bundle and report the timings; the separable report rendering is about 150 NLOC of the 1,600 that would have to move (321 % over)"
+  "where": "single cohesive module after completed-run evaluation and report extraction: one stateful execution driver shares ReplayRun across fixture parsing, hook/worker startup, lease/pending windows, sample accumulation and cleanup (1143 NLOC; 128.6% over 500)"
  },
  {
   "service": "codacy",
   "id": "e4b6c81044d927678dcb047c885e9def",
   "state": "resolved",
   "reason": "AcceptedUse",
-  "where": "one concern: the MCP client probes and their frame assertions (68 % over)"
+  "where": "single cohesive module after wire assertions and reporting moved out: client registration, execution and cleanup form one transaction whose restoration is coupled to the commands it starts (546 NLOC; 9.2% over 500)"
  },
  {
   "service": "codacy",
   "id": "4d7c78512df37e8e9cd84c05be7b5457",
-  "state": "resolved",
-  "reason": "AcceptedUse",
-  "where": "one driver: prepare each agent's home, run the pair and lifecycle legs, and write the report; startLifecycleTui is 41 NLOC of the 1,450 that would have to move (290 % over)"
+  "state": "fixed",
+  "where": "#185"
  },
  {
   "service": "codacy",
   "id": "4bc93ee6ffd7581f439e52f96c13e4fb",
-  "state": "resolved",
-  "reason": "AcceptedUse",
-  "where": "one concern: the agent launch table and the helpers every probe shares, so a per-agent split would duplicate the shared launcher (80 % over)"
+  "state": "fixed",
+  "where": "#185"
  },
  {
   "service": "codacy",
   "id": "dbc89550977f0b36857c5f7f82d33f26",
-  "state": "resolved",
-  "reason": "AcceptedUse",
-  "where": "harness test file: one scenario list, measured by Lizard because it is not under test/, and its six long functions were fixed in #173 (227 % over)"
+  "state": "fixed",
+  "where": "#185"
  },
  {
   "service": "codacy",
   "id": "7f441e27985b09cd86bb7ef37794fe8",
-  "state": "resolved",
-  "reason": "AcceptedUse",
-  "where": "one probe suite (60 % over)"
+  "state": "fixed",
+  "where": "#185"
  },
  {
   "service": "codacy",
   "id": "ed0feeaa35efccb803dbcc520496b603",
   "state": "resolved",
   "reason": "AcceptedUse",
-  "where": "one concern, the capture hook: normalise the payload, decide the turn and epoch, and store or spool it inside the deadline; the store-or-spool path leaves 900 NLOC behind, so crossing 500 needs three or four modules on the path where a batch C sample measured 301.3 ms against the 300 ms budget (136 % over)"
+  "where": "single cohesive module after process/CLI and compaction-state extraction: one capture transaction shares the adapted/redacted draft, absolute deadline, turn/epoch decision and store-or-spool outcome (999 NLOC; 99.8% over 500)"
  },
  {
   "service": "codacy",
   "id": "7d9b63ea2aafe102e6476a3d93c9c9db",
-  "state": "resolved",
-  "reason": "AcceptedUse",
-  "where": "one concern: assemble and render the injection pack, whose queries, budget selection and rendering are steps of one assembly over the same PackItem (20 % over)"
+  "state": "fixed",
+  "where": "#185"
  },
  {
   "service": "codacy",
   "id": "102ad9e090737747988c737fdb66bd3b",
-  "state": "resolved",
-  "reason": "AcceptedUse",
-  "where": "one probe suite (49 % over)"
+  "state": "fixed",
+  "where": "#185"
  },
  {
   "service": "codacy",
   "id": "fae407241cd282592ae2df6f14985e91",
   "state": "resolved",
   "reason": "AcceptedUse",
-  "where": "one generator: emit the corpus and assert its coverage; the embedded data tables are 65 lines of the 1,320 that would have to move (263 % over)"
+  "where": "single cohesive module after coverage validation and fixed corpus inputs moved out: one ordered emitter shares seeded clock/random state, session sequence and payload builders (1344 NLOC; 168.8% over 500)"
  },
  {
   "service": "codacy",

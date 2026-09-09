@@ -1,7 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { PreconditionError, isCredentialVariable, waitUntil } from "./agents.mjs";
+import {
+  PreconditionError,
+  isCredentialVariable,
+  waitUntil,
+} from "./process.mjs";
 
 export const TMUX_SOCKET = "oboete-probes";
 

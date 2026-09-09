@@ -2,21 +2,25 @@ import path from "node:path";
 import {
   CLAUDE_COMPACT_PROMPT,
   CLAUDE_EVENTS,
+  oversizedPrompt,
+  toolUsePrompt,
+  writeCompactFixture,
+} from "../probe-lib/agents.mjs";
+import {
   binVersion,
+  gitInit,
+} from "../probe-lib/process.mjs";
+import {
   compactionIdentity,
   finalText,
-  gitInit,
   named,
   oversizedOutcome,
-  oversizedPrompt,
   pairFor,
   redactValue,
   shapeProbe,
   topKeys,
-  toolUsePrompt,
-  writeCompactFixture,
   writeFixture,
-} from "../probe-lib/agents.mjs";
+} from "../probe-lib/agent-events.mjs";
 import { tuiTwoCompacts } from "../probe-lib/claude-tui.mjs";
 
 const ROW_SHAPES = "Native tool payload shapes for read/write/edit/bash on all four agents";
