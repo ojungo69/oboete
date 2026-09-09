@@ -1,0 +1,56 @@
+specs/008-quality-debt-zero/tasks.md
+  s_49c4523e80af0c::t_c1df00d709ec30 113-114,122,125-128
+  s_49c4523e80af0c::t_1b47eb47568ba5 123-124
+src/injection/deferred.ts
+  s_49c4523e80af0c::t_0006e529290d32 20-21
+src/cli.ts
+  s_49c4523e80af0c::t_0006e529290d32 36
+test/unit/degraded.test.ts
+  s_49c4523e80af0c::t_0006e529290d32 15
+src/injection/pack.ts
+  s_49c4523e80af0c::t_0006e529290d32 33-37
+test/unit/inject.test.ts
+  s_49c4523e80af0c::t_f596a781950a9d 2,23
+  s_49c4523e80af0c::t_5ed2aac318375a 21
+src/injection/inject.ts
+  s_49c4523e80af0c::t_0006e529290d32 1,5,9,59,63,456
+test/unit/pi-inject.test.ts
+  s_49c4523e80af0c::t_5ed2aac318375a 8
+  s_49c4523e80af0c::t_0006e529290d32 1-7,9-134
+specs/008-quality-debt-zero/plan.md
+  s_49c4523e80af0c::t_c1df00d709ec30 120-152
+test/helpers/inject-fixture.ts
+  s_49c4523e80af0c::t_0006e529290d32 2-121
+  s_49c4523e80af0c::t_f596a781950a9d 1
+  s_49c4523e80af0c::t_5ed2aac318375a 122-136
+src/injection/pack-format.ts
+  s_49c4523e80af0c::t_0006e529290d32 1-173
+test/unit/why.test.ts
+  s_49c4523e80af0c::t_0006e529290d32 17
+src/fixture/replay.ts
+  s_49c4523e80af0c::t_0006e529290d32 24
+src/injection/pi.ts
+  s_49c4523e80af0c::t_0006e529290d32 1-272
+src/why.ts
+  s_49c4523e80af0c::t_0006e529290d32 11
+test/unit/pack-format.test.ts
+  s_49c4523e80af0c::t_0006e529290d32 1-9
+test/unit/pack.test.ts
+  s_49c4523e80af0c::t_0006e529290d32 25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "c1eac4d95695c6fad4b034074742891ec3477f35",
+  "prompts": {},
+  "sessions": {
+    "s_49c4523e80af0c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08247-7f3b-73a2-af35-16a66e78370d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
