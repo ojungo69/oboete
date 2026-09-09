@@ -1,0 +1,39 @@
+docs/evidence/quality-debt-2026-09/batch-d-pr-alert-responses.json
+  s_49c4523e80af0c::t_6370ccf8593ec3 194-450
+docs/evidence/quality-debt-2026-09/batch-d-continuation.md
+  s_49c4523e80af0c::t_31aa3e5ec838c5 60
+specs/008-quality-debt-zero/plan.md
+  s_49c4523e80af0c::t_31aa3e5ec838c5 29,107-110
+docs/evidence/quality-debt-2026-09/allocation.json
+  s_49c4523e80af0c::t_ee64732661451d 325-329,482-485,544-546,589-590,769-772
+docs/evidence/quality-debt-2026-09/sonar-main-issues.json
+  s_49c4523e80af0c::t_9292e64df568ba 2569-2656
+specs/008-quality-debt-zero/quickstart.md
+  s_49c4523e80af0c::t_31aa3e5ec838c5 183
+docs/evidence/quality-debt-2026-09/ledger.json
+  s_49c4523e80af0c::t_c216e24a9ee9af 5186-5187,5195-5196,5203-5204,5212-5213,5221-5222,5229-5230,5237-5238,5245-5246,5253-5254,5262-5263,5270-5271
+  s_49c4523e80af0c::t_9292e64df568ba 5179-5185,5188-5194,5197-5202,5205-5211,5214-5220,5223-5228,5231-5236,5239-5244,5247-5252,5255-5261,5264-5269
+docs/evidence/quality-debt-2026-09/batch-d-analysis-followup.md
+  s_49c4523e80af0c::t_1e1c741ce9e503 4-9,38-46
+specs/008-quality-debt-zero/tasks.md
+  s_49c4523e80af0c::t_31aa3e5ec838c5 133,142,150-151
+docs/evidence/quality-debt-2026-09.md
+  s_49c4523e80af0c::t_f3043678adb065 81,83,90,92,94,96,159,196,245,247,271
+  s_49c4523e80af0c::t_31aa3e5ec838c5 6-7,18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "c9a9e585ca89e1b2191baa14fe309bdd58f98fb6",
+  "prompts": {},
+  "sessions": {
+    "s_49c4523e80af0c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08247-7f3b-73a2-af35-16a66e78370d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
