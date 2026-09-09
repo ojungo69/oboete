@@ -57,5 +57,5 @@ fail. Grok's usage-balance exhaustion prevents the required twelve-pair run.
 [Fresh resource comparisons](batch-d-continuation-resources.md) meet all timing/RSS bounds and
 all 32 timing comparisons, while both replays still fail SC-009 at 7/40 recall.
 [Analysis follow-up](batch-d-analysis-followup.md) records thirteen additional native service
-IDs and their individual dispositions, bringing the inventory to 734; the initial source-check
+IDs and their individual dispositions, plus eleven corresponding Sonar push-branch IDs, bringing the inventory to 745; the initial source-check
 counts above are retained as historical evidence. No tool setting or daily installation changed.

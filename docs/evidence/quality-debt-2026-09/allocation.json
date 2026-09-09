@@ -322,6 +322,11 @@
     "AaCFAMJqz18_BjK2pBK4",
     "AaCFAMJqz18_BjK2pBK5",
     "AaCFAMWuz18_BjK2pBK_",
+    "AaCFANODz18_BjK2pBOa",
+    "AaCFANODz18_BjK2pBOZ",
+    "AaCFANNFz18_BjK2pBOW",
+    "AaCFANNFz18_BjK2pBOX",
+    "AaCFANUaz18_BjK2pBOd",
     "d3b9d9cfec9a260b9bc67f7dc5bfd707",
     "365aff788b569c400b4b80434ec21768",
     "dafdbd571c370b7fba8ce99f3564089e",
@@ -474,7 +479,10 @@
     "AaB3XkpTIqdfylE4c2rF",
     "AaCFAMJqz18_BjK2pBK3",
     "AaCFAMJqz18_BjK2pBK6",
-    "AaCFAMTgz18_BjK2pBK9"
+    "AaCFAMTgz18_BjK2pBK9",
+    "AaCFANNFz18_BjK2pBOV",
+    "AaCFANNFz18_BjK2pBOY",
+    "AaCFANRiz18_BjK2pBOb"
   ],
   "B2": [
     "AaB3XkbGIqdfylE4c2na",
@@ -533,7 +541,9 @@
     "AaB3XkkoIqdfylE4c2pU",
     "AaB3XkkoIqdfylE4c2pX",
     "AaCFAMXmz18_BjK2pBLB",
-    "AaCFAMWfz18_BjK2pBK-"
+    "AaCFAMWfz18_BjK2pBK-",
+    "AaCFANVkz18_BjK2pBOf",
+    "AaCFANUFz18_BjK2pBOc"
   ],
   "B3": [
     "AaB3XkkbIqdfylE4c2pQ",
@@ -576,7 +586,8 @@
     "AaB3XkkzIqdfylE4c2pZ",
     "AaB3XkkzIqdfylE4c2pa",
     "AaB3XkkzIqdfylE4c2pb",
-    "AaCFAMXQz18_BjK2pBLA"
+    "AaCFAMXQz18_BjK2pBLA",
+    "AaCFANVEz18_BjK2pBOe"
   ],
   "C1": [
     "AaB3Xke6IqdfylE4c2oF",
@@ -755,10 +766,10 @@
   ],
   "counts": {
     "A": 302,
-    "E": 41,
-    "B1": 128,
-    "B2": 57,
-    "B3": 41,
+    "E": 46,
+    "B1": 131,
+    "B2": 59,
+    "B3": 42,
     "C1": 27,
     "C2": 39,
     "C3": 17,

@@ -2566,5 +2566,93 @@
 "file": "src/injection/pi.ts",
 "line": 223,
 "msg": "Refactor this function to not always return the same value."
+},
+{
+"id": "AaCFANODz18_BjK2pBOa",
+"rule": "jssecurity:S8707",
+"sev": "MAJOR",
+"file": "scripts/e2e/probe-lib/mcp-report.mjs",
+"line": 99,
+"msg": "A path canonicalized from CLI-controlled data must be validated before use."
+},
+{
+"id": "AaCFANODz18_BjK2pBOZ",
+"rule": "jssecurity:S8707",
+"sev": "MAJOR",
+"file": "scripts/e2e/probe-lib/mcp-report.mjs",
+"line": 100,
+"msg": "A path canonicalized from CLI-controlled data must be validated before use."
+},
+{
+"id": "AaCFANNFz18_BjK2pBOV",
+"rule": "javascript:S3516",
+"sev": "BLOCKER",
+"file": "scripts/e2e/probe-lib/process.mjs",
+"line": 44,
+"msg": "Refactor this function to not always return the same value."
+},
+{
+"id": "AaCFANNFz18_BjK2pBOW",
+"rule": "javascript:S4036",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/process.mjs",
+"line": 59,
+"msg": "Make sure the \"PATH\" variable only contains fixed, unwriteable directories."
+},
+{
+"id": "AaCFANNFz18_BjK2pBOX",
+"rule": "javascript:S4036",
+"sev": "MINOR",
+"file": "scripts/e2e/probe-lib/process.mjs",
+"line": 75,
+"msg": "Make sure the \"PATH\" variable only contains fixed, unwriteable directories."
+},
+{
+"id": "AaCFANNFz18_BjK2pBOY",
+"rule": "javascript:S3516",
+"sev": "BLOCKER",
+"file": "scripts/e2e/probe-lib/process.mjs",
+"line": 104,
+"msg": "Refactor this function to not always return the same value."
+},
+{
+"id": "AaCFANRiz18_BjK2pBOb",
+"rule": "javascript:S7784",
+"sev": "MINOR",
+"file": "scripts/fixtures/fixture-coverage.mjs",
+"line": 476,
+"msg": "Prefer `structuredClone(…)` over `JSON.parse(JSON.stringify(…))` to create a deep clone."
+},
+{
+"id": "AaCFANVkz18_BjK2pBOf",
+"rule": "typescript:S3516",
+"sev": "BLOCKER",
+"file": "src/capture-command.ts",
+"line": 107,
+"msg": "Refactor this function to not always return the same value."
+},
+{
+"id": "AaCFANUFz18_BjK2pBOc",
+"rule": "typescript:S6551",
+"sev": "MINOR",
+"file": "src/fixture/replay-evaluate.ts",
+"line": 22,
+"msg": "'row.session_id ?? ''' will use Object's default stringification format ('[object Object]') when stringified."
+},
+{
+"id": "AaCFANUaz18_BjK2pBOd",
+"rule": "typescript:S4036",
+"sev": "MINOR",
+"file": "src/fixture/replay-report.ts",
+"line": 67,
+"msg": "Make sure the \"PATH\" variable only contains fixed, unwriteable directories."
+},
+{
+"id": "AaCFANVEz18_BjK2pBOe",
+"rule": "typescript:S3516",
+"sev": "BLOCKER",
+"file": "src/injection/pi.ts",
+"line": 223,
+"msg": "Refactor this function to not always return the same value."
 }
 ]

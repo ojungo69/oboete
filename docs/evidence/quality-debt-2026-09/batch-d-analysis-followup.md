@@ -1,10 +1,12 @@
 # Batch D analysis follow-up
 
 PR #185 analysis of `ebe687dcf99103cf3965649b969bb0f2bb4d5d62` reported eleven Sonar issues
-on moved code, two Codacy file-length issues and two CodeQL filesystem-race alerts. Each was
-compared with its source and its pre-extraction body at `d724d5df`; new IDs are not assumed to
-mean new behavior. The Sonar/Codacy inventory gains thirteen native IDs without dropping any,
-for 734 total (321 Sonar, 413 Codacy). These are PR observations, not another main baseline.
+on moved code, two Codacy file-length issues and two CodeQL filesystem-race alerts; Sonar's
+separately gated push-branch scan also reports the same eleven source findings with distinct
+native IDs. Each is compared with its source and its pre-extraction body at `d724d5df`; the
+branch-to-PR mapping matches rule, component, line, source hash and message. The Sonar/Codacy
+inventory gains twenty-four native IDs without dropping any, for 745 total (332 Sonar, 413
+Codacy). These are PR/push-branch observations, not another main baseline.
 
 | Finding group | Source-backed disposition |
 |---|---|
@@ -33,11 +35,12 @@ unallocated and PL/SQL exclusion priority remains intact. ESLint passes. No new 
 
 The measured engine is unchanged: SHA-256
 `97bd89dd1771dadc77ca8052491f565c38131c123ef4c28b8ef981185d739761`.
-The record CLI changes are outside the packed engine. The thirteen current-PR rows were then
-resolved individually: all 22 Sonar transition/comment calls returned HTTP 200 and the two
-Codacy ignores returned HTTP 204 after account verification returned 200. Sonar's current PR
-issue search now returns zero and its Quality Gate is OK; Codacy's cached PR summary awaits
-the next analysis. CodeQL #158/#159 are individually dismissed as `used in tests` with their
-source-specific reasons. [HTTP receipts](batch-d-pr-alert-responses.json) record these actions.
-Original Batch F bulk rows were not applied: main still reports Sonar 15 / Codacy 38, and the
-734-row planned ledger has 56 unconfirmed rows. Actual runtime acceptance remains outstanding.
+The record CLI changes are outside the packed engine. The current-PR and matching push-branch
+rows were resolved individually: 22 Sonar transition/comment calls per analysis context return
+HTTP 200; the two Codacy ignores returned HTTP 204 after account verification returned 200.
+Sonar's PR and branch issue searches return zero and both Quality Gates are OK. Codacy's next
+analysis at `c8fb5d7c` confirms new issues 0 and `isUpToStandards: true`. CodeQL #158/#159 are
+individually dismissed as `used in tests` with source-specific reasons. [HTTP receipts and
+branch-to-PR ID mapping](batch-d-pr-alert-responses.json) record these actions. Original Batch F
+bulk rows were not applied: main still reports Sonar 15 / Codacy 38, and the 745-row planned
+ledger has 56 unconfirmed rows. Actual runtime acceptance remains outstanding.

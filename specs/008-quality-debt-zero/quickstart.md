@@ -180,7 +180,7 @@ node scripts/quality-debt-record.mjs --check --planned   # between batches: ever
 node scripts/quality-debt-record.mjs --check             # batch F: every planned state is confirmed by the service
 ```
 
-Expected: `--check --planned` exits 0 once every batch has merged; `--check` exits 0 only at the end of F with `734 ids: 0 missing, 0 duplicate, 0 open, 0 unconfirmed, 0 resolved-without-reason`. A random sample of 20 rows traces to a PR, a service comment, or a configuration line.
+Expected: `--check --planned` exits 0 once every batch has merged; `--check` exits 0 only at the end of F with `745 ids: 0 missing, 0 duplicate, 0 open, 0 unconfirmed, 0 resolved-without-reason`. A random sample of 20 rows traces to a PR, a service comment, or a configuration line.
 
 ## Live inventory coverage (after each merge's analyses)
 
