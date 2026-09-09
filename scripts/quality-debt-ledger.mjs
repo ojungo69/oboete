@@ -35,7 +35,7 @@ export function resolvedWithoutReason(row) {
 /** Rules whose findings are read one by one (research R6); a fixed or resolved row of one needs a verdict. */
 export function securityPopulation(row) {
   if (row.service === 'codacy') return row.rule === 'shellcheck_SC2024' || row.rule.startsWith('Semgrep_');
-  return row.rule.endsWith('S8786');
+  return ['S8786', 'S4036', 'S8707'].includes(row.rule.split(':').at(-1));
 }
 
 export function indexLedger(ledger) {

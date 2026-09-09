@@ -1,0 +1,195 @@
+{
+  "sonar_codacy": [
+    {
+      "service": "sonar",
+      "id": "AaCFAMP8z18_BjK2pBK8",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:06.069Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMP8z18_BjK2pBK8",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:07.709Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMP8z18_BjK2pBK7",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:09.872Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMP8z18_BjK2pBK7",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:10.888Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK3",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:12.141Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK3",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:13.958Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK4",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:16.429Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK4",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:18.048Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK5",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:21.587Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK5",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:23.367Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK6",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:25.330Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK6",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:27.563Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMTgz18_BjK2pBK9",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:29.592Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMTgz18_BjK2pBK9",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:31.812Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMXmz18_BjK2pBLB",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:34.302Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMXmz18_BjK2pBLB",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:35.944Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMWfz18_BjK2pBK-",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:40.651Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMWfz18_BjK2pBK-",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:42.099Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMWuz18_BjK2pBK_",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:44.803Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMWuz18_BjK2pBK_",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:46.537Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMXQz18_BjK2pBLA",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:48.538Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMXQz18_BjK2pBLA",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:50.519Z"
+    },
+    {
+      "service": "codacy",
+      "id": "account",
+      "action": "verify",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:51.283Z"
+    },
+    {
+      "service": "codacy",
+      "id": "48b2a00cb7eb3b5e6344415870d01661",
+      "action": "ignore",
+      "http_status": 204,
+      "at": "2026-09-09T07:27:52.616Z"
+    },
+    {
+      "service": "codacy",
+      "id": "f24df26860d01b16c092756092dba6ce",
+      "action": "ignore",
+      "http_status": 204,
+      "at": "2026-09-09T07:27:52.902Z"
+    }
+  ],
+  "codeql": [
+    {
+      "number": 158,
+      "dismissed_at": "2026-09-09T07:29:07Z",
+      "dismissed_reason": "used in tests",
+      "dismissed_comment": "Local test harness only: unchanged from probes/codex.mjs:412-413, writing operator-owned scratch CODEX_HOME; racing that directory already requires authority to replace its files, with no cross-user or product entrypoint.",
+      "html_url": "https://github.com/ojungo69/oboete/security/code-scanning/158"
+    },
+    {
+      "number": 159,
+      "dismissed_at": "2026-09-09T07:29:08Z",
+      "dismissed_reason": "used in tests",
+      "dismissed_comment": "Local test harness only: unchanged from probe-lib/agents.mjs:184-185, initializing an operator-owned fresh repo; racing it already requires authority to replace its files, with no cross-user or product entrypoint.",
+      "html_url": "https://github.com/ojungo69/oboete/security/code-scanning/159"
+    }
+  ]
+}

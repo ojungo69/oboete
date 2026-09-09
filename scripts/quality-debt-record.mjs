@@ -70,7 +70,7 @@ const mechanicalRules = new Set(['S1066', 'S1854', 'S1874', 'S1940', 'S1994', 'S
 function sonarBatch({ rule, file }) {
   if (rule.startsWith('plsql:')) return 'A';
   const number = rule.split(':').at(-1);
-  if (number === 'S8786') return 'E';
+  if (securityPopulation({ service: 'sonar', rule })) return 'E';
   if (number === 'S3776' || number === 'S107') return structuralBatch(file);
   if (!mechanicalRules.has(number)) return undefined;
   if (file.startsWith('scripts/')) return 'B1';

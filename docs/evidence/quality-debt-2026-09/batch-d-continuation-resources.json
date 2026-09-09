@@ -1,0 +1,349 @@
+{
+  "runs": [
+    {
+      "revision": "base",
+      "sha": "72bcb23b18feec02858d12c41443be1b45ffaa01",
+      "engine_sha256": "eb915d496e907e3d529950fe63dccf0b6ff038a0869aa05711464bdf80f1c1a1",
+      "command": [
+        "scripts/measure-cold-start.mjs"
+      ],
+      "started_at": "2026-09-09T07:33:52.996372+00:00",
+      "finished_at": "2026-09-09T07:34:47.986070+00:00",
+      "exit_code": 0
+    },
+    {
+      "revision": "base",
+      "sha": "72bcb23b18feec02858d12c41443be1b45ffaa01",
+      "engine_sha256": "eb915d496e907e3d529950fe63dccf0b6ff038a0869aa05711464bdf80f1c1a1",
+      "command": [
+        "dist/oboete.mjs",
+        "fixture",
+        "replay",
+        "test/fixtures/events-1000.jsonl",
+        "--json"
+      ],
+      "started_at": "2026-09-09T07:34:47.986271+00:00",
+      "finished_at": "2026-09-09T07:38:58.710288+00:00",
+      "exit_code": 1
+    },
+    {
+      "revision": "candidate",
+      "sha": "ebe687dcf99103cf3965649b969bb0f2bb4d5d62",
+      "engine_sha256": "97bd89dd1771dadc77ca8052491f565c38131c123ef4c28b8ef981185d739761",
+      "command": [
+        "scripts/measure-cold-start.mjs"
+      ],
+      "started_at": "2026-09-09T07:38:58.713003+00:00",
+      "finished_at": "2026-09-09T07:39:54.721347+00:00",
+      "exit_code": 0
+    },
+    {
+      "revision": "candidate",
+      "sha": "ebe687dcf99103cf3965649b969bb0f2bb4d5d62",
+      "engine_sha256": "97bd89dd1771dadc77ca8052491f565c38131c123ef4c28b8ef981185d739761",
+      "command": [
+        "dist/oboete.mjs",
+        "fixture",
+        "replay",
+        "test/fixtures/events-1000.jsonl",
+        "--json"
+      ],
+      "started_at": "2026-09-09T07:39:54.721610+00:00",
+      "finished_at": "2026-09-09T07:44:06.233574+00:00",
+      "exit_code": 1
+    }
+  ],
+  "comparisons": [
+    {
+      "series": "`--version`",
+      "measure": "median",
+      "base_ms": 53.0,
+      "candidate_ms": 56.2,
+      "change_percent": 6.04,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "`--version`",
+      "measure": "maximum",
+      "base_ms": 58.9,
+      "candidate_ms": 63.0,
+      "change_percent": 6.96,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "hook small, DB present",
+      "measure": "median",
+      "base_ms": 169.0,
+      "candidate_ms": 174.2,
+      "change_percent": 3.08,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "hook small, DB present",
+      "measure": "maximum",
+      "base_ms": 178.9,
+      "candidate_ms": 186.0,
+      "change_percent": 3.97,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "hook clean 200 KB, DB present",
+      "measure": "median",
+      "base_ms": 176.1,
+      "candidate_ms": 179.2,
+      "change_percent": 1.76,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "hook clean 200 KB, DB present",
+      "measure": "maximum",
+      "base_ms": 243.9,
+      "candidate_ms": 190.7,
+      "change_percent": -21.81,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "hook secret-dense 200 KB, DB present",
+      "measure": "median",
+      "base_ms": 183.2,
+      "candidate_ms": 182.0,
+      "change_percent": -0.66,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "hook secret-dense 200 KB, DB present",
+      "measure": "maximum",
+      "base_ms": 203.7,
+      "candidate_ms": 203.3,
+      "change_percent": -0.2,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "hook small, DB absent (spool)",
+      "measure": "median",
+      "base_ms": 162.1,
+      "candidate_ms": 163.3,
+      "change_percent": 0.74,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "hook small, DB absent (spool)",
+      "measure": "maximum",
+      "base_ms": 171.0,
+      "candidate_ms": 172.8,
+      "change_percent": 1.05,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "claude/SessionStart",
+      "measure": "median",
+      "base_ms": 186.3368709999968,
+      "candidate_ms": 184.6785474999997,
+      "change_percent": -0.89,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "claude/SessionStart",
+      "measure": "maximum",
+      "base_ms": 195.62903799999913,
+      "candidate_ms": 191.36665599999833,
+      "change_percent": -2.18,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "claude/UserPromptSubmit",
+      "measure": "median",
+      "base_ms": 196.00205900000583,
+      "candidate_ms": 197.91927600000417,
+      "change_percent": 0.98,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "claude/UserPromptSubmit",
+      "measure": "maximum",
+      "base_ms": 212.18826099998842,
+      "candidate_ms": 221.49876399998902,
+      "change_percent": 4.39,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "codex/SessionStart",
+      "measure": "median",
+      "base_ms": 186.06695700000273,
+      "candidate_ms": 189.3026985000015,
+      "change_percent": 1.74,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "codex/SessionStart",
+      "measure": "maximum",
+      "base_ms": 192.12212200000067,
+      "candidate_ms": 206.93599600000016,
+      "change_percent": 7.71,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "codex/UserPromptSubmit",
+      "measure": "median",
+      "base_ms": 196.2874074999927,
+      "candidate_ms": 196.72815299999638,
+      "change_percent": 0.22,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "codex/UserPromptSubmit",
+      "measure": "maximum",
+      "base_ms": 234.41412600001786,
+      "candidate_ms": 210.75882200000342,
+      "change_percent": -10.09,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "grok/PostToolUse",
+      "measure": "median",
+      "base_ms": 181.62131899999804,
+      "candidate_ms": 184.51750000000175,
+      "change_percent": 1.59,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "grok/PostToolUse",
+      "measure": "maximum",
+      "base_ms": 230.0951589999895,
+      "candidate_ms": 228.79432099999394,
+      "change_percent": -0.57,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "grok/PreToolUse",
+      "measure": "median",
+      "base_ms": 177.512193999999,
+      "candidate_ms": 178.86135999999533,
+      "change_percent": 0.76,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "grok/PreToolUse",
+      "measure": "maximum",
+      "base_ms": 265.6478749999951,
+      "candidate_ms": 261.92746800000896,
+      "change_percent": -1.4,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "grok/SessionStart",
+      "measure": "median",
+      "base_ms": 188.75863150000805,
+      "candidate_ms": 187.54297750000114,
+      "change_percent": -0.64,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "grok/SessionStart",
+      "measure": "maximum",
+      "base_ms": 223.5184420000005,
+      "candidate_ms": 194.58083699999952,
+      "change_percent": -12.95,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "grok/UserPromptSubmit",
+      "measure": "median",
+      "base_ms": 196.73764050000318,
+      "candidate_ms": 200.5087569999887,
+      "change_percent": 1.92,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "grok/UserPromptSubmit",
+      "measure": "maximum",
+      "base_ms": 262.88750800001435,
+      "candidate_ms": 246.9583059999859,
+      "change_percent": -6.06,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "pi/input",
+      "measure": "median",
+      "base_ms": 126.7523380000057,
+      "candidate_ms": 126.41924199999994,
+      "change_percent": -0.26,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "pi/input",
+      "measure": "maximum",
+      "base_ms": 178.0794440000027,
+      "candidate_ms": 154.62939400000323,
+      "change_percent": -13.17,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "pi/session_start",
+      "measure": "median",
+      "base_ms": 120.73887700000341,
+      "candidate_ms": 121.91750499999034,
+      "change_percent": 0.98,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "pi/session_start",
+      "measure": "maximum",
+      "base_ms": 130.8381640000007,
+      "candidate_ms": 129.01038199997856,
+      "change_percent": -1.4,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "session-start ready",
+      "measure": "maximum",
+      "base_ms": 223.5184420000005,
+      "candidate_ms": 206.93599600000016,
+      "change_percent": -7.42,
+      "under_budget": true,
+      "within_regression_bound": true
+    },
+    {
+      "series": "session-start pending",
+      "measure": "maximum",
+      "base_ms": 1203.0534519999928,
+      "candidate_ms": 1204.7630920000083,
+      "change_percent": 0.14,
+      "under_budget": true,
+      "within_regression_bound": true
+    }
+  ],
+  "timing_comparison_pass": true,
+  "replay_acceptance_pass": false,
+  "comparison_criterion": "Medians differ by at most 15%; maxima do not exceed the base maximum by more than 15% and remain within the fixed budget."
+}

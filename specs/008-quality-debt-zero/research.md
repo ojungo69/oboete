@@ -173,7 +173,7 @@ All eighteen files now have their identified independent concerns separated. Thi
 | `src/injection/inject.ts` | 657 → 419 | split → `fixed` | Pi command parsing, storage opening and CLI execution moved to `injection/pi.ts`; the shared hook delivery/validation path stays. |
 | `src/injection/pack.ts` | 602 → 470 | split → `fixed` | Pure framing and item rendering moved to `injection/pack-format.ts`; selection, privacy checks, budget and ledger remain together. |
 
-Two new files remain over 500 and have also been read under FR-016. They are not silently excluded or assigned invented service IDs: record any native IDs the next analysis reports before final confirmation.
+Two new files remain over 500 and have also been read under FR-016. They are not excluded. PR #185 analysis of `ebe687dc` reported native IDs `f24df26860d01b16c092756092dba6ce` (source) and `48b2a00cb7eb3b5e6344415870d01661` (test); T043e adds both to the inventory and ledger before final confirmation.
 
 | New file | NLOC | Decision / concern |
 |---|---:|---|

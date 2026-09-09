@@ -1,0 +1,1112 @@
+{
+  "provenance": {
+    "source_sha": "ebe687dcf99103cf3965649b969bb0f2bb4d5d62",
+    "tarball_sha256": "709cd13c2cb51903a492a3aed7856497a4ef126a4b1ce75708f4f15e468fad5e",
+    "engine_sha256": "97bd89dd1771dadc77ca8052491f565c38131c123ef4c28b8ef981185d739761",
+    "run_dir": "<isolated-home>/qd-d-final-20260909.yZSAmp"
+  },
+  "partial": true,
+  "required_total_pairs": 12,
+  "setup_exit": 0,
+  "runner_exit": 1,
+  "pairs": {
+    "runId": "2026-09-09T07-09-53-170Z",
+    "started_at": "2026-09-09T07:09:53.170Z",
+    "finished_at": "2026-09-09T07:14:07.836Z",
+    "requested_pairs": 6,
+    "total_pairs": 12,
+    "summary": "6 of 6 requested pairs pass (partial run; SC-001 needs all 12)",
+    "results": [
+      {
+        "agents": {
+          "seed": "claude",
+          "receive": "codex"
+        },
+        "elapsed_ms": 41416,
+        "status": "pass",
+        "missing_facts": [],
+        "degraded_marker": false,
+        "search_attempts": 1
+      },
+      {
+        "agents": {
+          "seed": "claude",
+          "receive": "pi"
+        },
+        "elapsed_ms": 28482,
+        "status": "pass",
+        "missing_facts": [],
+        "degraded_marker": false,
+        "search_attempts": 1
+      },
+      {
+        "agents": {
+          "seed": "codex",
+          "receive": "claude"
+        },
+        "elapsed_ms": 40996,
+        "status": "pass",
+        "missing_facts": [],
+        "degraded_marker": false,
+        "search_attempts": 1
+      },
+      {
+        "agents": {
+          "seed": "codex",
+          "receive": "pi"
+        },
+        "elapsed_ms": 66112,
+        "status": "pass",
+        "missing_facts": [],
+        "degraded_marker": false,
+        "search_attempts": 1
+      },
+      {
+        "agents": {
+          "seed": "pi",
+          "receive": "claude"
+        },
+        "elapsed_ms": 39515,
+        "status": "pass",
+        "missing_facts": [],
+        "degraded_marker": false,
+        "search_attempts": 1
+      },
+      {
+        "agents": {
+          "seed": "pi",
+          "receive": "codex"
+        },
+        "elapsed_ms": 38141,
+        "status": "pass",
+        "missing_facts": [],
+        "degraded_marker": false,
+        "search_attempts": 1
+      }
+    ]
+  },
+  "lifecycle": {
+    "runId": "2026-09-09T07-14-07-876Z",
+    "started_at": "2026-09-09T07:14:07.876Z",
+    "finished_at": "2026-09-09T07:18:21.546Z",
+    "requested_agents": [
+      "claude",
+      "codex"
+    ],
+    "total_checks": 8,
+    "summary": "8 of 8 lifecycle checks pass.",
+    "results": [
+      {
+        "agent": "claude",
+        "check": "resume",
+        "elapsed_ms": 4638,
+        "status": "pass",
+        "assertions": [
+          {
+            "assertion": "S2 records one SessionStart source=startup",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 emits one startup pack through claude:SessionStart",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 startup pack includes S1's repository summary",
+            "pass": true,
+            "expected": [
+              "m_62c12ebe64ded5271d33799d"
+            ],
+            "actual": [
+              "m_62c12ebe64ded5271d33799d"
+            ]
+          },
+          {
+            "assertion": "resume keeps the same oboete session and conversation",
+            "pass": true,
+            "expected": {
+              "id": "d46c5c68-7dd6-43f9-951c-5e3a2c07db52",
+              "conversationId": "d46c5c68-7dd6-43f9-951c-5e3a2c07db52"
+            },
+            "actual": {
+              "id": "d46c5c68-7dd6-43f9-951c-5e3a2c07db52",
+              "conversationId": "d46c5c68-7dd6-43f9-951c-5e3a2c07db52"
+            }
+          },
+          {
+            "assertion": "resume leaves context_epoch unchanged",
+            "pass": true,
+            "expected": 0,
+            "actual": 0
+          },
+          {
+            "assertion": "Claude records one SessionStart source=resume",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "resume records one prompt on the resumed session",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "resume adds no session-start injection",
+            "pass": true,
+            "expected": [
+              "18b4a53f-01d3-4ac4-8777-f4e51726561f:emitted:bab8de150189f863660885385a460e66d594399754a3d73ce32711c287a9b3a3:0"
+            ],
+            "actual": [
+              "18b4a53f-01d3-4ac4-8777-f4e51726561f:emitted:bab8de150189f863660885385a460e66d594399754a3d73ce32711c287a9b3a3:0"
+            ]
+          }
+        ]
+      },
+      {
+        "agent": "claude",
+        "check": "compact",
+        "elapsed_ms": 81449,
+        "status": "pass",
+        "assertions": [
+          {
+            "assertion": "S2 records one SessionStart source=startup",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 emits one startup pack through claude:SessionStart",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 startup pack includes S1's repository summary",
+            "pass": true,
+            "expected": [
+              "m_62c12ebe64ded5271d33799d"
+            ],
+            "actual": [
+              "m_62c12ebe64ded5271d33799d"
+            ]
+          },
+          {
+            "assertion": "compaction advances context_epoch exactly once",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "one compaction event is recorded",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "one SessionStart source=compact is recorded",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "compaction emits one new-epoch session-start pack through claude:SessionStart",
+            "pass": true,
+            "expected": [
+              {
+                "channel": "claude:SessionStart",
+                "state": "emitted",
+                "contextEpoch": 1
+              }
+            ],
+            "actual": [
+              {
+                "channel": "claude:SessionStart",
+                "state": "emitted",
+                "contextEpoch": 1
+              }
+            ]
+          },
+          {
+            "assertion": "the compact session-start pack includes repository memory",
+            "pass": true,
+            "expected": [
+              "m_088a2debdad4f1f099b12f8e",
+              "m_14955d30b1d938e1f6e353bd",
+              "m_5bbf3096a27d4f3e7017c936",
+              "m_62c12ebe64ded5271d33799d",
+              "m_64f900264d4c46c6de22226e",
+              "m_c629a5649f133d00cc0b446a",
+              "m_d9ea5f8933ee8b15a3f0d66c"
+            ],
+            "actual": [
+              "m_62c12ebe64ded5271d33799d"
+            ]
+          },
+          {
+            "assertion": "no event captured before compaction is lost",
+            "pass": true,
+            "expected": [],
+            "actual": []
+          }
+        ]
+      },
+      {
+        "agent": "claude",
+        "check": "fork",
+        "elapsed_ms": 10181,
+        "status": "pass",
+        "assertions": [
+          {
+            "assertion": "S2 records one SessionStart source=startup",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 emits one startup pack through claude:SessionStart",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 startup pack includes S1's repository summary",
+            "pass": true,
+            "expected": [
+              "m_62c12ebe64ded5271d33799d"
+            ],
+            "actual": [
+              "m_62c12ebe64ded5271d33799d"
+            ]
+          },
+          {
+            "assertion": "fork creates a separate root conversation",
+            "pass": true,
+            "expected": "new session whose conversation_id equals its id and differs from the parent",
+            "actual": {
+              "id": "9e9e9ea6-b67e-40bf-8d0d-962d4cf8f56d",
+              "conversationId": "9e9e9ea6-b67e-40bf-8d0d-962d4cf8f56d"
+            }
+          },
+          {
+            "assertion": "fork keeps the parent repository identity",
+            "pass": true,
+            "expected": "442861ca1006b4dc",
+            "actual": "442861ca1006b4dc"
+          },
+          {
+            "assertion": "fork includes a memory from the parent repository",
+            "pass": true,
+            "expected": [
+              "m_088a2debdad4f1f099b12f8e",
+              "m_14955d30b1d938e1f6e353bd",
+              "m_5bbf3096a27d4f3e7017c936",
+              "m_62c12ebe64ded5271d33799d",
+              "m_64f900264d4c46c6de22226e",
+              "m_c629a5649f133d00cc0b446a",
+              "m_c9eb579c34230874cdc76431",
+              "m_d1599108336e9eb82ac79457",
+              "m_d9ea5f8933ee8b15a3f0d66c"
+            ],
+            "actual": [
+              "m_62c12ebe64ded5271d33799d",
+              "m_088a2debdad4f1f099b12f8e"
+            ]
+          },
+          {
+            "assertion": "fork adds no injection to the parent conversation",
+            "pass": true,
+            "expected": [
+              "18b4a53f-01d3-4ac4-8777-f4e51726561f:emitted:bab8de150189f863660885385a460e66d594399754a3d73ce32711c287a9b3a3:0",
+              "562c1deb-536a-4560-94b9-07fd21c02c5f:emitted:93a15a54766d4c25ef51369da4f6e35bbe983fef3b7566a66ea7373df5eaef9f:0",
+              "7d8d6a43-d67a-4c0c-af99-d2539a45f377:emitted:36c251bb8efc077aa329cde4b75a1faf6c2f5729660e42775771e4df74ac0aee:0",
+              "8046d432-aae8-4fbe-a897-87f35ccaf001:emitted:a40d0b763304081025725eb59f5bd13944ec0454cc432d8f93b2de7be6826dfe:0",
+              "f006de7a-1774-4c0b-8f51-af7847f182e0:emitted:487d5659ca641045a0de2f8671903c4c60dc1990908ccb5e412594b952275090:0"
+            ],
+            "actual": [
+              "18b4a53f-01d3-4ac4-8777-f4e51726561f:emitted:bab8de150189f863660885385a460e66d594399754a3d73ce32711c287a9b3a3:0",
+              "562c1deb-536a-4560-94b9-07fd21c02c5f:emitted:93a15a54766d4c25ef51369da4f6e35bbe983fef3b7566a66ea7373df5eaef9f:0",
+              "7d8d6a43-d67a-4c0c-af99-d2539a45f377:emitted:36c251bb8efc077aa329cde4b75a1faf6c2f5729660e42775771e4df74ac0aee:0",
+              "8046d432-aae8-4fbe-a897-87f35ccaf001:emitted:a40d0b763304081025725eb59f5bd13944ec0454cc432d8f93b2de7be6826dfe:0",
+              "f006de7a-1774-4c0b-8f51-af7847f182e0:emitted:487d5659ca641045a0de2f8671903c4c60dc1990908ccb5e412594b952275090:0"
+            ]
+          },
+          {
+            "assertion": "Claude fork records one SessionStart source=fork",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "Claude fork emits no SessionStart pack",
+            "pass": true,
+            "expected": 0,
+            "actual": 0
+          }
+        ]
+      },
+      {
+        "agent": "claude",
+        "check": "clear",
+        "elapsed_ms": 14486,
+        "status": "pass",
+        "assertions": [
+          {
+            "assertion": "S2 records one SessionStart source=startup",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 emits one startup pack through claude:SessionStart",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 startup pack includes S1's repository summary",
+            "pass": true,
+            "expected": [
+              "m_62c12ebe64ded5271d33799d"
+            ],
+            "actual": [
+              "m_62c12ebe64ded5271d33799d"
+            ]
+          },
+          {
+            "assertion": "Claude clear stays in the parent repository",
+            "pass": true,
+            "expected": "442861ca1006b4dc",
+            "actual": "442861ca1006b4dc"
+          },
+          {
+            "assertion": "Claude clear records one SessionStart source=clear",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "claude clear emits one session-start pack through claude:SessionStart",
+            "pass": true,
+            "expected": [
+              {
+                "channel": "claude:SessionStart",
+                "state": "emitted"
+              }
+            ],
+            "actual": [
+              {
+                "channel": "claude:SessionStart",
+                "state": "emitted"
+              }
+            ]
+          },
+          {
+            "assertion": "clear includes a memory from the parent repository",
+            "pass": true,
+            "expected": [
+              "m_088a2debdad4f1f099b12f8e",
+              "m_0e1ad21347d5f2e015f5f091",
+              "m_14955d30b1d938e1f6e353bd",
+              "m_5bbf3096a27d4f3e7017c936",
+              "m_62c12ebe64ded5271d33799d",
+              "m_64f900264d4c46c6de22226e",
+              "m_c629a5649f133d00cc0b446a",
+              "m_c9eb579c34230874cdc76431",
+              "m_d1599108336e9eb82ac79457",
+              "m_d9ea5f8933ee8b15a3f0d66c"
+            ],
+            "actual": [
+              "m_0e1ad21347d5f2e015f5f091"
+            ]
+          }
+        ]
+      },
+      {
+        "agent": "codex",
+        "check": "resume",
+        "elapsed_ms": 8276,
+        "status": "pass",
+        "assertions": [
+          {
+            "assertion": "S2 records one SessionStart source=startup",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 emits one startup pack through codex:SessionStart",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 startup pack includes S1's repository summary",
+            "pass": true,
+            "expected": [
+              "m_b6b06d7b88c3ca3e76b6a717"
+            ],
+            "actual": [
+              "m_b6b06d7b88c3ca3e76b6a717"
+            ]
+          },
+          {
+            "assertion": "resume keeps the same oboete session and conversation",
+            "pass": true,
+            "expected": {
+              "id": "ebe3561e-f677-472e-8d60-a5e994adc622",
+              "conversationId": "ebe3561e-f677-472e-8d60-a5e994adc622"
+            },
+            "actual": {
+              "id": "ebe3561e-f677-472e-8d60-a5e994adc622",
+              "conversationId": "ebe3561e-f677-472e-8d60-a5e994adc622"
+            }
+          },
+          {
+            "assertion": "resume leaves context_epoch unchanged",
+            "pass": true,
+            "expected": 0,
+            "actual": 0
+          },
+          {
+            "assertion": "Codex production hooks omit SessionStart source=resume",
+            "pass": true,
+            "expected": 0,
+            "actual": 0
+          },
+          {
+            "assertion": "resume records one prompt on the resumed session",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "resume adds no session-start injection",
+            "pass": true,
+            "expected": [
+              "781024c3-c2f6-496d-8a1b-a091d93ffaec:emitted:43a4d726e150aabc49f681b036217000a6e14f44d250b601c3735319c3c219d2:0"
+            ],
+            "actual": [
+              "781024c3-c2f6-496d-8a1b-a091d93ffaec:emitted:43a4d726e150aabc49f681b036217000a6e14f44d250b601c3735319c3c219d2:0"
+            ]
+          }
+        ]
+      },
+      {
+        "agent": "codex",
+        "check": "compact",
+        "elapsed_ms": 30772,
+        "status": "pass",
+        "assertions": [
+          {
+            "assertion": "S2 records one SessionStart source=startup",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 emits one startup pack through codex:SessionStart",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 startup pack includes S1's repository summary",
+            "pass": true,
+            "expected": [
+              "m_b6b06d7b88c3ca3e76b6a717"
+            ],
+            "actual": [
+              "m_b6b06d7b88c3ca3e76b6a717"
+            ]
+          },
+          {
+            "assertion": "compaction advances context_epoch exactly once",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "one compaction event is recorded",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "one SessionStart source=compact is recorded",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "the compact SessionStart precedes the next prompt (lazy hook, run 2026-09-05T06-02-58-033Z)",
+            "pass": true,
+            "expected": "SessionStart captured_at < next prompt captured_at",
+            "actual": {
+              "sessionStart": 1788938249985,
+              "prompt": 1788938250167
+            }
+          },
+          {
+            "assertion": "compaction emits one new-epoch session-start pack through codex:SessionStart",
+            "pass": true,
+            "expected": [
+              {
+                "channel": "codex:SessionStart",
+                "state": "emitted",
+                "contextEpoch": 1
+              }
+            ],
+            "actual": [
+              {
+                "channel": "codex:SessionStart",
+                "state": "emitted",
+                "contextEpoch": 1
+              }
+            ]
+          },
+          {
+            "assertion": "the compact session-start pack includes repository memory",
+            "pass": true,
+            "expected": [
+              "m_0ddb7bcd7a00ee164bcdd89d",
+              "m_0edd844cfcf2511dd9b06e15",
+              "m_6d6ae88fc48c8b5fd7f03e81",
+              "m_b6b06d7b88c3ca3e76b6a717"
+            ],
+            "actual": [
+              "m_b6b06d7b88c3ca3e76b6a717"
+            ]
+          },
+          {
+            "assertion": "no event captured before compaction is lost",
+            "pass": true,
+            "expected": [],
+            "actual": []
+          }
+        ]
+      },
+      {
+        "agent": "codex",
+        "check": "fork",
+        "elapsed_ms": 18253,
+        "status": "pass",
+        "assertions": [
+          {
+            "assertion": "S2 records one SessionStart source=startup",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 emits one startup pack through codex:SessionStart",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 startup pack includes S1's repository summary",
+            "pass": true,
+            "expected": [
+              "m_b6b06d7b88c3ca3e76b6a717"
+            ],
+            "actual": [
+              "m_b6b06d7b88c3ca3e76b6a717"
+            ]
+          },
+          {
+            "assertion": "fork creates a separate root conversation",
+            "pass": true,
+            "expected": "new session whose conversation_id equals its id and differs from the parent",
+            "actual": {
+              "id": "52be1aa5-c49b-46af-8ccd-e0cdf031bf67",
+              "conversationId": "52be1aa5-c49b-46af-8ccd-e0cdf031bf67"
+            }
+          },
+          {
+            "assertion": "fork keeps the parent repository identity",
+            "pass": true,
+            "expected": "442861ca1006b4dc",
+            "actual": "442861ca1006b4dc"
+          },
+          {
+            "assertion": "fork includes a memory from the parent repository",
+            "pass": true,
+            "expected": [
+              "m_0ddb7bcd7a00ee164bcdd89d",
+              "m_0edd844cfcf2511dd9b06e15",
+              "m_6d6ae88fc48c8b5fd7f03e81",
+              "m_94d3a4e5d8c67a1d4decd977",
+              "m_b6b06d7b88c3ca3e76b6a717"
+            ],
+            "actual": [
+              "m_94d3a4e5d8c67a1d4decd977",
+              "m_b6b06d7b88c3ca3e76b6a717",
+              "m_0ddb7bcd7a00ee164bcdd89d"
+            ]
+          },
+          {
+            "assertion": "fork adds no injection to the parent conversation",
+            "pass": true,
+            "expected": [
+              "0274f260-dfd0-4be1-a032-9c16d8fbfa29:emitted:bb03a775e3f2282b8668fcda7673f59b519397eec8e850a55fd22f3cfb91d195:0",
+              "28d680f6-ebd9-48e6-bfac-066d229d64f4:emitted:43a4d726e150aabc49f681b036217000a6e14f44d250b601c3735319c3c219d2:0",
+              "781024c3-c2f6-496d-8a1b-a091d93ffaec:emitted:43a4d726e150aabc49f681b036217000a6e14f44d250b601c3735319c3c219d2:0",
+              "9c3b95f4-e44a-4650-a581-23716fe4cc90:emitted:ddbe042a3ff0c362d1c6bda05833165d21ee18cab3029652e0d5660ec8096f30:0",
+              "be043045-f04a-4014-891a-6c8e434a1a7a:emitted:e9927d4d1d39105df12e8b3d4594ddc3e975892945d2f09287fa06cb55533702:0",
+              "cbeb24f6-5896-4466-b7c6-9918d6552c13:emitted:623bec46700c17a19c5e03eabcf2b0b01cf6f636c168f49d56944b41047891c1:0"
+            ],
+            "actual": [
+              "0274f260-dfd0-4be1-a032-9c16d8fbfa29:emitted:bb03a775e3f2282b8668fcda7673f59b519397eec8e850a55fd22f3cfb91d195:0",
+              "28d680f6-ebd9-48e6-bfac-066d229d64f4:emitted:43a4d726e150aabc49f681b036217000a6e14f44d250b601c3735319c3c219d2:0",
+              "781024c3-c2f6-496d-8a1b-a091d93ffaec:emitted:43a4d726e150aabc49f681b036217000a6e14f44d250b601c3735319c3c219d2:0",
+              "9c3b95f4-e44a-4650-a581-23716fe4cc90:emitted:ddbe042a3ff0c362d1c6bda05833165d21ee18cab3029652e0d5660ec8096f30:0",
+              "be043045-f04a-4014-891a-6c8e434a1a7a:emitted:e9927d4d1d39105df12e8b3d4594ddc3e975892945d2f09287fa06cb55533702:0",
+              "cbeb24f6-5896-4466-b7c6-9918d6552c13:emitted:623bec46700c17a19c5e03eabcf2b0b01cf6f636c168f49d56944b41047891c1:0"
+            ]
+          }
+        ]
+      },
+      {
+        "agent": "codex",
+        "check": "clear",
+        "elapsed_ms": 26806,
+        "status": "pass",
+        "assertions": [
+          {
+            "assertion": "S2 records one SessionStart source=startup",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 emits one startup pack through codex:SessionStart",
+            "pass": true,
+            "expected": 1,
+            "actual": 1
+          },
+          {
+            "assertion": "S2 startup pack includes S1's repository summary",
+            "pass": true,
+            "expected": [
+              "m_b6b06d7b88c3ca3e76b6a717"
+            ],
+            "actual": [
+              "m_b6b06d7b88c3ca3e76b6a717"
+            ]
+          },
+          {
+            "assertion": "Codex /new creates a fresh root conversation in the same repository",
+            "pass": true,
+            "expected": "new root in the parent repository",
+            "actual": {
+              "id": "94b567b6-517f-4b3e-a0a5-0f11dab7bdc2",
+              "conversationId": "94b567b6-517f-4b3e-a0a5-0f11dab7bdc2",
+              "repoId": "442861ca1006b4dc"
+            }
+          },
+          {
+            "assertion": "Codex /new creates no oboete session or session_start before the recall prompt is submitted (A18 detection at the first turn)",
+            "pass": true,
+            "expected": {
+              "sessions": 0,
+              "sessionStarts": 0
+            },
+            "actual": {
+              "sessions": 0,
+              "sessionStarts": 0
+            }
+          },
+          {
+            "assertion": "Codex /new records exactly one SessionStart source=startup on the child",
+            "pass": true,
+            "expected": [
+              "startup"
+            ],
+            "actual": [
+              "startup"
+            ]
+          },
+          {
+            "assertion": "Codex /new SessionStart source=startup precedes the child's prompt (lazy hook, run 2026-09-05T07-03-44-495Z)",
+            "pass": true,
+            "expected": "SessionStart captured_at < child prompt captured_at",
+            "actual": {
+              "sessionStart": 1788938291322,
+              "prompt": 1788938291534
+            }
+          },
+          {
+            "assertion": "Codex /new leaves the parent conversation's injections unchanged",
+            "pass": true,
+            "expected": [
+              "0274f260-dfd0-4be1-a032-9c16d8fbfa29:emitted:bb03a775e3f2282b8668fcda7673f59b519397eec8e850a55fd22f3cfb91d195:0",
+              "28d680f6-ebd9-48e6-bfac-066d229d64f4:emitted:43a4d726e150aabc49f681b036217000a6e14f44d250b601c3735319c3c219d2:0",
+              "781024c3-c2f6-496d-8a1b-a091d93ffaec:emitted:43a4d726e150aabc49f681b036217000a6e14f44d250b601c3735319c3c219d2:0",
+              "9951d7ef-e368-46a4-97dd-e223bbc556e9:emitted:b7c2f206c55cad0329bcd254c32d43f7d38125fa64464f2ba45c0cb9f584485e:0",
+              "9c3b95f4-e44a-4650-a581-23716fe4cc90:emitted:ddbe042a3ff0c362d1c6bda05833165d21ee18cab3029652e0d5660ec8096f30:0",
+              "be043045-f04a-4014-891a-6c8e434a1a7a:emitted:e9927d4d1d39105df12e8b3d4594ddc3e975892945d2f09287fa06cb55533702:0",
+              "cbeb24f6-5896-4466-b7c6-9918d6552c13:emitted:623bec46700c17a19c5e03eabcf2b0b01cf6f636c168f49d56944b41047891c1:0"
+            ],
+            "actual": [
+              "0274f260-dfd0-4be1-a032-9c16d8fbfa29:emitted:bb03a775e3f2282b8668fcda7673f59b519397eec8e850a55fd22f3cfb91d195:0",
+              "28d680f6-ebd9-48e6-bfac-066d229d64f4:emitted:43a4d726e150aabc49f681b036217000a6e14f44d250b601c3735319c3c219d2:0",
+              "781024c3-c2f6-496d-8a1b-a091d93ffaec:emitted:43a4d726e150aabc49f681b036217000a6e14f44d250b601c3735319c3c219d2:0",
+              "9951d7ef-e368-46a4-97dd-e223bbc556e9:emitted:b7c2f206c55cad0329bcd254c32d43f7d38125fa64464f2ba45c0cb9f584485e:0",
+              "9c3b95f4-e44a-4650-a581-23716fe4cc90:emitted:ddbe042a3ff0c362d1c6bda05833165d21ee18cab3029652e0d5660ec8096f30:0",
+              "be043045-f04a-4014-891a-6c8e434a1a7a:emitted:e9927d4d1d39105df12e8b3d4594ddc3e975892945d2f09287fa06cb55533702:0",
+              "cbeb24f6-5896-4466-b7c6-9918d6552c13:emitted:623bec46700c17a19c5e03eabcf2b0b01cf6f636c168f49d56944b41047891c1:0"
+            ]
+          },
+          {
+            "assertion": "Codex parent stays active because /new fires no SessionEnd (run 2026-09-05T07-03-44-495Z)",
+            "pass": true,
+            "expected": "active",
+            "actual": "active"
+          },
+          {
+            "assertion": "codex clear emits one session-start pack through codex:SessionStart",
+            "pass": true,
+            "expected": [
+              {
+                "channel": "codex:SessionStart",
+                "state": "emitted"
+              }
+            ],
+            "actual": [
+              {
+                "channel": "codex:SessionStart",
+                "state": "emitted"
+              }
+            ]
+          },
+          {
+            "assertion": "clear includes a memory from the parent repository",
+            "pass": true,
+            "expected": [
+              "m_0ddb7bcd7a00ee164bcdd89d",
+              "m_0edd844cfcf2511dd9b06e15",
+              "m_411e60abedb416801a2b6d06",
+              "m_6d6ae88fc48c8b5fd7f03e81",
+              "m_94d3a4e5d8c67a1d4decd977",
+              "m_b6b06d7b88c3ca3e76b6a717"
+            ],
+            "actual": [
+              "m_411e60abedb416801a2b6d06"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "mcp": {
+    "runId": "2026-09-09T07-18-21-589Z",
+    "started_at": "2026-09-09T07:18:21.589Z",
+    "finished_at": "2026-09-09T07:19:07.483Z",
+    "summary": "3 of 3 agents pass",
+    "exit_code": 0,
+    "agents": [
+      {
+        "agent": "claude",
+        "status": "pass",
+        "protocolVersion": "2025-11-25",
+        "toolName": "mcp__oboete_probe__search",
+        "frames": 7,
+        "reason": "protocolVersion=2025-11-25; notifications/initialized; tools/list search,timeline,get; search memories=0"
+      },
+      {
+        "agent": "codex",
+        "status": "pass",
+        "protocolVersion": "2025-06-18",
+        "toolName": "mcp__oboete_probe__search",
+        "frames": 7,
+        "reason": "protocolVersion=2025-06-18; notifications/initialized; tools/list search,timeline,get; search memories=0"
+      },
+      {
+        "agent": "pi",
+        "status": "pass",
+        "protocolVersion": null,
+        "toolName": "oboete_search",
+        "frames": 0,
+        "reason": "oboete_search memories=3"
+      }
+    ],
+    "stdio": {
+      "status": "pass",
+      "frames": 4,
+      "reason": "stdio repo rejection and missing get"
+    }
+  },
+  "probes": {
+    "runId": "2026-09-09T07-19-07-524Z",
+    "env": {
+      "date": "2026-09-09T07:19:07.525Z",
+      "claude": "2.1.266 (Claude Code)",
+      "codex": "codex-cli 0.153.4",
+      "grok": "grok 1.0.22 (8f40483ca2a5) [alpha]",
+      "pi": "0.84.4",
+      "node": "v24.20.0"
+    },
+    "results": [
+      {
+        "id": "pi-error-surface",
+        "status": "fail",
+        "elapsed_ms": 4804,
+        "evidence": [
+          "exit=0 elapsed_s=4.8 continued=true text=\"DONE\"",
+          "stderr hits=Extension error (<run>/pi-error-surface/piagent/extensions/oboete-probe.ts): probe throw at before_agent_start",
+          "stdout error types=none stdout hits=none",
+          "session jsonl types=[session,model_change,thinking_level_change,message,message] throw records=none",
+          "piagent logs with throw=none",
+          "~/.pi/agent added=none changed=none throw logs=none",
+          "durable=no durable record (stderr/in-memory only unless a path is named)",
+          "tmp tree files=auth.json,extensions,extensions/oboete-probe.ts,models-store.json,sessions,sessions/2026-09-09T07-19-08-038Z_01a08508-e606-72b3-a022-a39040761e00.jsonl,settings.json"
+        ]
+      },
+      {
+        "id": "claude-postcompact-payload",
+        "status": "fail",
+        "elapsed_ms": 391318,
+        "evidence": [
+          "big.txt_bytes=810527",
+          "auto exit=0 elapsed_s=75.7 PostCompact=1 PreCompact=1 usage={\"input_tokens\":6,\"cache_creation_input_tokens\":230719,\"cache_read_input_tokens\":41350,\"output_tokens\":2219,\"output_tokens_details\":{\"thinking_tokens\":116},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":230719,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"not_available\",\"iterations\":[{\"input_tokens\":2,\"output_tokens\":5,\"cache_read_input_tokens\":12766,\"cache_creation_input_tokens\":113798,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":113798},\"type\":\"message\"}],\"speed\":\"standard\"}",
+          "auto seq=SessionStart:startup@2026-09-09T07:19:13.000Z | UserPromptSubmit@2026-09-09T07:19:15.492Z | PreToolUse:Read@2026-09-09T07:19:21.433Z | PostToolUse:Read@2026-09-09T07:19:21.603Z | PreToolUse:Read@2026-09-09T07:19:22.447Z | PostToolUse:Read@2026-09-09T07:19:22.621Z | PreToolUse:Read@2026-09-09T07:19:23.516Z | PostToolUse:Read@2026-09-09T07:19:23.700Z | PreToolUse:Read@2026-09-09T07:19:24.585Z | PostToolUse:Read@2026-09-09T07:19:24.756Z | PreToolUse:Read@2026-09-09T07:19:25.599Z | PostToolUse:Read@2026-09-09T07:19:25.772Z | PreToolUse:Read@2026-09-09T07:19:26.663Z | PostToolUse:Read@2026-09-09T07:19:26.835Z | PreToolUse:Read@2026-09-09T07:19:27.693Z | PostToolUse:Read@2026-09-09T07:19:27.863Z | PreToolUse:Read@2026-09-09T07:19:32.020Z | PostToolUse:Read@2026-09-09T07:19:32.174Z | PreToolUse:Read@2026-09-09T07:19:33.076Z | PostToolUse:Read@2026-09-09T07:19:33.230Z | PreToolUse:Read@2026-09-09T07:19:34.024Z | PostToolUse:Read@2026-09-09T07:19:34.180Z | PreToolUse:Read@2026-09-09T07:19:35.060Z | PostToolUse:Read@2026-09-09T07:19:35.218Z | PreToolUse:Read@2026-09-09T07:19:36.064Z | PostToolUse:Read@2026-09-09T07:19:36.232Z | PreToolUse:Read@2026-09-09T07:19:37.145Z | PostToolUse:Read@2026-09-09T07:19:37.307Z | PreToolUse:Read@2026-09-09T07:19:38.098Z | PostToolUse:Read@2026-09-09T07:19:38.257Z | PreCompact:auto@2026-09-09T07:19:38.440Z | SessionStart:compact@2026-09-09T07:20:24.926Z | PostCompact:auto@2026-09-09T07:20:25.120Z",
+          "auto PreCompact keys=[session_id,transcript_path,cwd,prompt_id,hook_event_name,trigger,custom_instructions] trigger=auto compact_summary=absent",
+          "auto PostCompact keys=[session_id,transcript_path,cwd,prompt_id,hook_event_name,trigger,compact_summary] trigger=auto compact_summary=len=8748",
+          "tui PostCompact=0 PreCompact=2 error=none pane_chars=1115",
+          "tui seq=SessionStart:startup@2026-09-09T07:20:30.876Z | UserPromptSubmit@2026-09-09T07:20:33.557Z | PreCompact:manual@2026-09-09T07:20:37.173Z | PreCompact:manual@2026-09-09T07:23:40.308Z",
+          "tui_pane=──────────────────────────────────────────────────────────────────────────────────────────────── ❯ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents /rc active ",
+          "tui PreCompact keys=[session_id,transcript_path,cwd,scratchpad_dir,prompt_id,hook_event_name,trigger,custom_instructions] trigger=manual compact_summary=absent",
+          "tui PreCompact keys=[session_id,transcript_path,cwd,scratchpad_dir,prompt_id,hook_event_name,trigger,custom_instructions] trigger=manual compact_summary=absent",
+          "(a) n=1 candidates=[] ok=false note=single observation; candidate keys = [] values=[{}]",
+          "(b) auto=false injection SessionStart:compact idx 31 BEFORE PostCompact idx 32 (at 2026-09-09T07:20:24.926Z vs 2026-09-09T07:20:25.120Z)",
+          "(b) tui=null no PostCompact"
+        ]
+      },
+      {
+        "id": "codex-session-start-sources",
+        "status": "fail",
+        "elapsed_ms": 81895,
+        "evidence": [
+          "A_startup sources=[startup] session=01a0850e-f3ee-75c1-b477-9a0ac2a4b28f exit=0",
+          "B_resume sources=[resume] session=01a0850e-f3ee-75c1-b477-9a0ac2a4b28f same_session_id=true exit=0",
+          "C_compact sources=[startup] events=SessionStart>UserPromptSubmit>PreToolUse>PostToolUse>Stop>SessionEnd",
+          "C_timeline=[{\"event\":\"SessionStart\",\"at\":\"2026-09-09T07:26:05.885Z\",\"source\":\"startup\",\"trigger\":null,\"turn_id\":null,\"session_id\":\"01a0850f-3c40-7531-b3fb-1e94e9bbcee2\",\"keys\":[\"session_id\",\"transcript_path\",\"cwd\",\"hook_event_name\",\"model\",\"permission_mode\",\"source\"]},{\"event\":\"UserPromptSubmit\",\"at\":\"2026-09-09T07:26:05.911Z\",\"source\":null,\"trigger\":null,\"turn_id\":\"01a0850f-3c54-7023-af13-b92412dc187b\",\"session_id\":\"01a0850f-3c40-7531-b3fb-1e94e9bbcee2\",\"keys\":[\"session_id\",\"turn_id\",\"transcript_path\",\"cwd\",\"hook_event_name\",\"model\",\"permission_mode\",\"prompt\"]}]",
+          "D_tui sources=[startup] clear_session_ids=[] seed_session=01a0850f-6251-7a93-a124-b55b490b8051",
+          "D_new_session_id=no-clear-event",
+          "D_tui_blocked=TUI /new produced no extra SessionStart (sources=[startup]); pane=7-447e8a07d968)\n\n⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.\n\n⚠ The cloudflare-api MCP server is not logged in. Run `codex mcp login cloudflare-api`.\n\n⚠ MCP startup incomplete (failed: cloudflare-api)\n\n\n› Ask Codex to do anything\n\n  gpt-6-astra default · <run>/codex-session-start-sources/d/repo\n",
+          "observed_sources=[startup,resume]",
+          "manual: CODEX_HOME=<tmp hooks.json> tmux `codex --sandbox danger-full-access --ask-for-approval never` in the throwaway repo; wait for composer (›); send a short turn; /compact; /new (expect SessionStart source=clear); /quit. Record events.jsonl labels and pane text."
+        ]
+      },
+      {
+        "id": "codex-postcompact-payload",
+        "status": "fail",
+        "elapsed_ms": 45867,
+        "evidence": [
+          "C PreCompact n=0 keys=[]",
+          "C PostCompact n=0 keys=[] summary=[] identity={\"ok\":false,\"candidates\":[],\"values\":[],\"n\":0,\"note\":\"no observations\"}",
+          "C timeline=[{\"event\":\"SessionStart\",\"at\":\"2026-09-09T07:27:09.479Z\",\"source\":\"startup\",\"trigger\":null,\"turn_id\":null,\"session_id\":\"01a08510-33f4-70e1-b4ec-5c7ade51bb65\",\"keys\":[\"session_id\",\"transcript_path\",\"cwd\",\"hook_event_name\",\"model\",\"permission_mode\",\"source\"]},{\"event\":\"UserPromptSubmit\",\"at\":\"2026-09-09T07:27:09.505Z\",\"source\":null,\"trigger\":null,\"turn_id\":\"01a08510-340a-79b0-ab9b-ed85d7f09206\",\"session_id\":\"01a08510-33f4-70e1-b4ec-5c7ade51bb65\",\"keys\":[\"session_id\",\"turn_id\",\"transcript_path\",\"cwd\",\"hook_event_name\",\"model\",\"permission_mode\",\"prompt\"]}]",
+          "C order_b=false no PostCompact",
+          "D PreCompact n=2 keys=[session_id|turn_id|transcript_path|cwd|hook_event_name|model|trigger ; session_id|turn_id|transcript_path|cwd|hook_event_name|model|trigger]",
+          "D PostCompact n=2 keys=[session_id|turn_id|transcript_path|cwd|hook_event_name|model|trigger ; session_id|turn_id|transcript_path|cwd|hook_event_name|model|trigger] summary=[{\"field\":null,\"length\":0},{\"field\":null,\"length\":0}] identity={\"ok\":false,\"candidates\":[],\"values\":[{},{}],\"n\":2,\"note\":\"no candidate\"}",
+          "D timeline=[{\"event\":\"SessionStart\",\"at\":\"2026-09-09T07:27:28.236Z\",\"source\":\"startup\",\"trigger\":null,\"turn_id\":null,\"session_id\":\"01a08510-78e0-74d2-8e8c-24743b97ad27\",\"keys\":[\"session_id\",\"transcript_path\",\"cwd\",\"hook_event_name\",\"model\",\"permission_mode\",\"source\"]},{\"event\":\"UserPromptSubmit\",\"at\":\"2026-09-09T07:27:28.263Z\",\"source\":null,\"trigger\":null,\"turn_id\":\"01a08510-843b-7713-a8ea-b2935b12bef3\",\"session_id\":\"01a08510-78e0-74d2-8e8c-24743b97ad27\",\"keys\":[\"session_id\",\"turn_id\",\"transcript_path\",\"cwd\",\"hook_event_name\",\"model\",\"permission_mode\",\"prompt\"]},{\"event\":\"PreCompact\",\"at\":\"2026-09-09T07:27:29.749Z\",\"source\":null,\"trigger\":\"manual\",\"turn_id\":\"01a08510-8da8-7f23-b9a4-298a2469a1b8\",\"session_id\":\"01a08510-78e0-74d2-8e8c-24743b97ad27\",\"keys\":[\"session_id\",\"turn_id\",\"transcript_path\",\"cwd\",\"hook_event_name\",\"model\",\"trigger\"]},{\"event\":\"PostCompact\",\"at\":\"2026-09-09T07:27:42.184Z\",\"source\":null,\"trigger\":\"manual\",\"turn_id\":\"01a08510-8da8-7f23-b9a4-298a2469a1b8\",\"session_id\":\"01a08510-78e0-74d2-8e8c-24743b97ad27\",\"keys\":[\"session_id\",\"turn_id\",\"transcript_path\",\"cwd\",\"hook_event_name\",\"model\",\"trigger\"]},{\"event\":\"PreCompact\",\"at\":\"2026-09-09T07:27:44.029Z\",\"source\":null,\"trigger\":\"manual\",\"turn_id\":\"01a08510-c3fb-7773-8626-a524a721726c\",\"session_id\":\"01a08510-78e0-74d2-8e8c-24743b97ad27\",\"keys\":[\"session_id\",\"turn_id\",\"transcript_path\",\"cwd\",\"hook_event_name\",\"model\",\"trigger\"]},{\"event\":\"PostCompact\",\"at\":\"2026-09-09T07:27:49.731Z\",\"source\":null,\"trigger\":\"manual\",\"turn_id\":\"01a08510-c3fb-7773-8626-a524a721726c\",\"session_id\":\"01a08510-78e0-74d2-8e8c-24743b97ad27\",\"keys\":[\"session_id\",\"turn_id\",\"transcript_path\",\"cwd\",\"hook_event_name\",\"model\",\"trigger\"]}]",
+          "summary_field=null summary_length=0",
+          "pass_a=false candidates=[] values=[{},{}] note=no candidate",
+          "pass_b=false no SessionStart source=compact after last PostCompact; no UserPromptSubmit after last PostCompact"
+        ]
+      },
+      {
+        "id": "codex-mcp-legacy-client",
+        "status": "pass",
+        "elapsed_ms": 26123,
+        "evidence": [
+          "protocolVersion=2025-06-18",
+          "methods_in=[initialize,notifications/initialized,tools/list,tools/call]",
+          "tools/list=true",
+          "tools/call=true",
+          "PreToolUse_tool_name=[mcp__oboete_probe__search]",
+          "echoed_dummy=true",
+          "frames=7 exit=0 elapsed_s=18.3"
+        ]
+      }
+    ]
+  },
+  "doctor": {
+    "exit_code": 0,
+    "items": [
+      {
+        "item": "config",
+        "status": "healthy",
+        "reason": "Configuration at <isolated-home>/candidate-homes/oboete/config.toml loaded (mode 0o600).",
+        "consequence": "",
+        "recovery": ""
+      },
+      {
+        "item": "paused",
+        "status": "healthy",
+        "reason": "Not paused.",
+        "consequence": "",
+        "recovery": ""
+      },
+      {
+        "item": "storage",
+        "status": "healthy",
+        "reason": "`<isolated-home>/candidate-homes/oboete/memory.db` opened; PRAGMA quick_check returned ok; 109 memories.",
+        "consequence": "",
+        "recovery": ""
+      },
+      {
+        "item": "fts",
+        "status": "healthy",
+        "reason": "Full-text search is available (lexical in M1).",
+        "consequence": "",
+        "recovery": ""
+      },
+      {
+        "item": "migration",
+        "status": "healthy",
+        "reason": "The schema is at version 3, the latest this bundle knows.",
+        "consequence": "",
+        "recovery": ""
+      },
+      {
+        "item": "worker",
+        "status": "healthy",
+        "reason": "The worker process 3683334 is alive (heartbeat 0 seconds ago).",
+        "consequence": "",
+        "recovery": ""
+      },
+      {
+        "item": "spool",
+        "status": "healthy",
+        "reason": "Spool is writable and empty.",
+        "consequence": "",
+        "recovery": ""
+      },
+      {
+        "item": "provider",
+        "status": "healthy",
+        "reason": "Provider workers-ai answered with model @cf/zai-org/glm-4.7-flash.",
+        "consequence": "",
+        "recovery": ""
+      },
+      {
+        "item": "allowance",
+        "status": "healthy",
+        "reason": "Estimated 149 of 150 calls remaining today (2026-09-09); resets at 2026-09-10T00:00:00.000Z.",
+        "consequence": "",
+        "recovery": ""
+      },
+      {
+        "item": "catalog",
+        "status": "unverified",
+        "reason": "The cached catalog is stale; the worker refreshes it on the next batch.",
+        "consequence": "The configured model has not been checked against the provider list this run.",
+        "recovery": "`oboete observe` fetches the catalog on the first batch."
+      },
+      {
+        "item": "agent:claude",
+        "status": "healthy",
+        "reason": "The hook fired and the event was stored (5848 milliseconds); trust: n/a.",
+        "consequence": "",
+        "recovery": ""
+      },
+      {
+        "item": "native-memory:claude",
+        "status": "warning",
+        "reason": "claude: its own memory feature (claude_auto_memory) is enabled. oboete neither reads it nor changes it; the two run side by side.",
+        "consequence": "Both systems record memory independently.",
+        "recovery": "No action is required; doctor does not change that setting."
+      },
+      {
+        "item": "agent:codex",
+        "status": "healthy",
+        "reason": "The hook fired and the event was stored (9276 milliseconds); trust: trusted.",
+        "consequence": "",
+        "recovery": ""
+      },
+      {
+        "item": "agent:grok",
+        "status": "healthy",
+        "reason": "The hook fired and the event was stored (2786 milliseconds); trust: wired.",
+        "consequence": "",
+        "recovery": ""
+      },
+      {
+        "item": "agent:pi",
+        "status": "healthy",
+        "reason": "The hook fired and the event was stored (7491 milliseconds); trust: wired.",
+        "consequence": "",
+        "recovery": ""
+      },
+      {
+        "item": "unrecognized-agents",
+        "status": "healthy",
+        "reason": "No invocation from an unrecognized agent.",
+        "consequence": "",
+        "recovery": ""
+      },
+      {
+        "item": "pi",
+        "status": "healthy",
+        "reason": "No Pi diagnostics.",
+        "consequence": "",
+        "recovery": ""
+      }
+    ]
+  },
+  "source_config_mtimes": [
+    {
+      "file": ".oboete/config.toml",
+      "exists": true,
+      "mtime": "2026-09-06T08:42:39.610404+00:00",
+      "predates_run": true
+    },
+    {
+      "file": ".claude/settings.json",
+      "exists": true,
+      "mtime": "2026-09-06T08:43:03.792719+00:00",
+      "predates_run": true
+    },
+    {
+      "file": ".claude.json",
+      "exists": true,
+      "mtime": "2026-09-09T05:03:34.668613+00:00",
+      "predates_run": true
+    },
+    {
+      "file": ".codex/config.toml",
+      "exists": true,
+      "mtime": "2026-09-08T19:47:37.714630+00:00",
+      "predates_run": true
+    },
+    {
+      "file": ".codex/hooks.json",
+      "exists": true,
+      "mtime": "2026-09-06T08:42:40.891054+00:00",
+      "predates_run": true
+    },
+    {
+      "file": ".grok/config.toml",
+      "exists": true,
+      "mtime": "2026-09-07T05:57:10.763237+00:00",
+      "predates_run": true
+    },
+    {
+      "file": ".grok/hooks/oboete.json",
+      "exists": true,
+      "mtime": "2026-09-06T08:42:40.899193+00:00",
+      "predates_run": true
+    },
+    {
+      "file": ".pi/agent/extensions/oboete.js",
+      "exists": true,
+      "mtime": "2026-09-06T08:45:30.476203+00:00",
+      "predates_run": true
+    }
+  ]
+}

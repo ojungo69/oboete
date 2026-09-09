@@ -50,7 +50,12 @@ The injection component's Grok review completed, but the full continuation's Gro
 not: it returned progress only, then HTTP 402 usage-balance exhaustion. That is not a review pass.
 
 The [provider diagnostic](batch-d-provider-diagnostic.md) used the unchanged earlier bundle;
-it is not acceptance for this continuation. T032, T039 and T041 remain open. Grok's dedicated
-dogfood account also returned usage-balance exhaustion after a successful earlier preflight.
-A run of the six Claude/Codex/Pi pairs can provide partial evidence but cannot meet the required
-twelve-pair condition. No service resolution, tool setting or daily installation was changed.
+it is not acceptance for this continuation. T032, T039 and T041 remain open.
+[Candidate dogfood](batch-d-continuation-dogfood.md) subsequently passed all six available
+Claude/Codex/Pi pairs, all eight lifecycle checks and all three MCP clients; four native probes
+fail. Grok's usage-balance exhaustion prevents the required twelve-pair run.
+[Fresh resource comparisons](batch-d-continuation-resources.md) meet all timing/RSS bounds and
+all 32 timing comparisons, while both replays still fail SC-009 at 7/40 recall.
+[Analysis follow-up](batch-d-analysis-followup.md) records thirteen additional native service
+IDs and their individual dispositions, bringing the inventory to 734; the initial source-check
+counts above are retained as historical evidence. No tool setting or daily installation changed.

@@ -4930,5 +4930,27 @@
 "line": 1,
 "msg": "File scripts/e2e/probes/claude.mjs has 539 non-comment lines of code",
 "text": "import fs from \"node:fs\";"
+},
+{
+"id": "48b2a00cb7eb3b5e6344415870d01661",
+"tool": "Lizard",
+"pattern": "Lizard_file-nloc-medium",
+"cat": "Complexity",
+"sev": "Warning",
+"file": "scripts/e2e/isolated-lifecycle.test.mjs",
+"line": 1,
+"msg": "File scripts/e2e/isolated-lifecycle.test.mjs has 638 non-comment lines of code",
+"text": "import assert from \"node:assert/strict\";"
+},
+{
+"id": "f24df26860d01b16c092756092dba6ce",
+"tool": "Lizard",
+"pattern": "Lizard_file-nloc-medium",
+"cat": "Complexity",
+"sev": "Warning",
+"file": "scripts/e2e/probe-lib/isolated-lifecycle.mjs",
+"line": 1,
+"msg": "File scripts/e2e/probe-lib/isolated-lifecycle.mjs has 724 non-comment lines of code",
+"text": "import fs from \"node:fs\";"
 }
 ]
