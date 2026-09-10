@@ -1,0 +1,29 @@
+specs/009-memory-core/contracts/migration.md
+  s_ce84c7de7d1c09::t_983d1a401db50d 79-84
+src/db/queries.ts
+  s_ce84c7de7d1c09::t_1996ded7548a2d 8,76
+src/db/statements.ts
+  s_ce84c7de7d1c09::t_e93ae1f88c0bbe 1-14
+src/transfer-merge.ts
+  s_ce84c7de7d1c09::t_c0327dd2f650ec 5,88-89,92,130,133,135,161,181,207,213,220,234,242,248,263,265,271,274,277,289,307,318-319,341,345-353,367-374,383-387,390,392-396
+src/transfer-plan.ts
+  s_ce84c7de7d1c09::t_92fcf542b255c5 234
+test/unit/migration-native-integrity.test.ts
+  s_ce84c7de7d1c09::t_c69813d10f9074 16,86-138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "97bbe88284696ad5459a820b5db32bd96c4b2d1f",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
