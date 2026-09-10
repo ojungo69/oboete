@@ -1,12 +1,16 @@
+import { grantVisibility } from '../../src/db/queries.js';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { appendFileSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { Worker } from 'node:worker_threads';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 
 import type { SecretLintCoreConfig } from '@secretlint/types';
+import { secretLintProfiler } from '@secretlint/profiler';
 
 import {
   MAX_REPO_SECRET_PATHS,
@@ -15,9 +19,13 @@ import {
   loadRepoRules,
 } from '../../src/config.js';
 import { openDatabase } from '../../src/db/open.js';
+import { resolveRepoIdentity } from '../../src/repo-identity.js';
+import { chooseWork } from '../../src/work.js';
 import { PACK_FOOTER, PACK_HEADER, packHash, stripRecognizedPacks } from '../../src/injection/recognize.js';
 import { credentialValues } from '../../src/log.js';
-import { DIRECTIVE_PHRASES } from '../../src/observer/classify.js';
+import { DIRECTIVE_PHRASES, sessionSummary } from '../../src/observer/classify.js';
+import { filterReadOutput } from '../../src/privacy/provenance.js';
+import { claimLease } from '../../src/worker/lease.js';
 import { promoteSensitivity, reclassifyImportedRow, strictest } from '../../src/privacy/classify.js';
 import {
   detectInWorker,
@@ -34,6 +42,7 @@ import type { Destination, Sensitivity } from '../../src/privacy/egress.js';
 import { WALL_CLOCK_IS_MEASURED, withTempHome } from '../helpers/home.js';
 import {
   NOW,
+  DAY,
   captureEndedSession,
   catalogResponse,
   cleanEnv,
@@ -49,6 +58,23 @@ import {
 } from '../helpers/observe.js';
 
 type CorpusLine = { id: string; kind: string; text: string; secret: string | null };
+
+test('repeated secret checks retain no library profiling records while still applying the rules', async () => {
+  const sample = corpus.find((row) => row.secret !== null);
+  assert.ok(sample?.secret);
+  for (let i = 0; i < 10; i++) {
+    const result = await detectSync({ text: sample.text,
+      fields: [`safe fixture ${i}`], paths: [], repoRoot: null, secretPaths: [], credentialValues: [] });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.sensitivity, 'secret');
+      assert.equal(result.text.includes(sample.secret), false);
+    }
+  }
+  await nextTurn();
+  assert.equal((await secretLintProfiler.getEntries()).length, 0);
+  assert.equal((await secretLintProfiler.getMeasures()).length, 0);
+});
 
 // The corpus is the SC-005 fixture: it is data, so the test reads it instead of restating it.
 const corpus: CorpusLine[] = readFileSync(resolve(process.cwd(), 'test/corpus/secrets.jsonl'), 'utf8')
@@ -650,6 +676,7 @@ function seedMemory(
     memory.pinned === true ? 1 : null,
     NOW - 2_000,
   );
+  grantVisibility(db, memory.id, { audience: 'project', repoId: memory.repoId }, 'migration', NOW);
 }
 
 function storedEvents(fixture: Fixture, nativeSessionId: string, kind: string): { content: string | null; payload: Record<string, unknown>; id: string }[] {
@@ -832,12 +859,18 @@ test('SC-005/SC-006: the outbound body of a mixed session carries the eligible r
     const eligiblePrompt = 'Add a retry to the uploader.';
     const eligibleAnswer = 'The uploader now retries three times.';
 
-    const common = eventBase('s-mixed');
+    const common = { ...eventBase('s-mixed'), cwd: fixture.home };
     await fixture.capture('SessionStart', { ...common, source: 'startup' });
     const repoId = repoIdOf(fixture);
     fixture.withDb((db) => {
       ensureRepo(db, 'repo-other');
       seedMemory(db, { id: 'm_eligible', repoId, title: 'Uploader retry count', body: 'The uploader retry count was one.' });
+      db.prepare(`INSERT INTO memory_sources (memory_id, raw_event_id, capture_root, source_paths_json)
+        VALUES ('m_eligible', 'retained-uploader-source', ?, '[]')`).run(fixture.home);
+      seedMemory(db, {
+        id: 'm_unprovenanced', repoId, title: 'Uploader retry history',
+        body: 'UNPROVENANCED the uploader retry history has no retained origin.',
+      });
       seedMemory(db, {
         id: 'm_local',
         repoId,
@@ -909,6 +942,7 @@ test('SC-005/SC-006: the outbound body of a mixed session carries the eligible r
     assert.equal(providerBody.includes('PRIVATEMARKER'), false);
     assert.equal(providerBody.includes('secrets/aws.json'), false);
     assert.equal(providerBody.includes('LOCALONLYMEMORY'), false);
+    assert.equal(providerBody.includes('UNPROVENANCED'), false);
     assert.equal(providerBody.includes('OTHERREPO'), false);
 
     const body = observerInputOf(providerBody);
@@ -929,6 +963,126 @@ type ProducedUnderAgent = {
   decisions: Record<string, unknown>[];
 };
 
+test('derived nearby knowledge retains inherited paths before any provider send', async () => {
+  await withFixture(async (fixture) => {
+    fixture.env = cleanEnv(fixture.home, { OBOETE_CF_API_TOKEN: 'worker-test-token', OBOETE_CF_ACCOUNT_ID: 'worker-test-account' });
+    writeConfig(fixture, 'workers-ai', fixture.env);
+    const common = { ...eventBase('derived-context'), cwd: fixture.home };
+    await fixture.capture('SessionStart', { ...common, source: 'startup' });
+    await fixture.capture('UserPromptSubmit', { ...common, prompt_id: 'p1', prompt: 'Explain the uploader retry policy.' });
+    const sourceId = eventId(fixture, 'Explain the uploader retry policy.');
+    fixture.withDb((db) => {
+      const repoId = repoIdOf(fixture);
+      seedMemory(db, { id: 'm-derived', repoId, title: 'Uploader retry policy', body: 'Derived protected detail 9713.' });
+      seedMemory(db, { id: 'm-ancestor', repoId, title: 'Internal constraint', body: 'Protected earlier context.' });
+      db.exec("UPDATE memories SET provenance_complete = 1 WHERE id IN ('m-derived', 'm-ancestor')");
+      db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, capture_root, source_paths_json) VALUES ('m-derived', ?, ?, '[]')")
+        .run(sourceId, fixture.home);
+      db.exec("INSERT INTO memory_sources (memory_id, source_memory_id, context_only) VALUES ('m-derived', 'm-ancestor', 1)");
+      for (const id of ['m-derived', 'm-ancestor']) db.prepare(`INSERT INTO memory_sources
+        (memory_id, capture_root, source_paths_json, context_only) VALUES (?, ?, '["protected/ancestor.ts"]', 1)`)
+        .run(id, fixture.home);
+    });
+    await fixture.capture('SessionEnd', { ...common, reason: 'normal' });
+    writeFileSync(join(fixture.home, '.oboete.toml'), '[privacy]\nsecret_paths = ["protected/**"]\n');
+    const bodies: string[] = [];
+    await runObserveForFixture(fixture, { fetch: (async (url, init) => {
+      if (String(url).includes('/ai/models/search')) return catalogResponse();
+      bodies.push(String(init?.body ?? ''));
+      return workersResponse(providerOutput(sourceId));
+    }) as typeof fetch });
+    assert.ok(bodies.length > 0, 'the benign captured prompt still reaches the selected provider');
+    for (const body of bodies) assert.doesNotMatch(body, /Derived protected detail 9713/);
+  });
+});
+
+test('a session summary inherits privacy from every learned title it copies', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    const common = { ...eventBase('learned-summary'), cwd: fixture.home };
+    await fixture.capture('SessionStart', { ...common, source: 'startup' });
+    await fixture.capture('UserPromptSubmit', { ...common, prompt_id: 'p1', prompt: 'Review the release checklist.' });
+    await fixture.capture('SessionEnd', { ...common, reason: 'normal' });
+    const { db } = openDatabase({ path: fixture.paths.db, timeoutMs: 1000 });
+    try {
+      const session = db.prepare('SELECT s.id, s.repo_id, b.id AS binding_id FROM sessions s JOIN work_bindings b ON b.session_id = s.id').get()!;
+      seedMemory(db, { id: 'm-learned-protected', repoId: String(session.repo_id), title: 'Protected learned marker 9013', body: 'A prior release decision.' });
+      db.prepare('UPDATE memories SET source_session_id = ?, provenance_complete = 1 WHERE id = ?').run(session.id, 'm-learned-protected');
+      db.prepare(`INSERT INTO memory_sources (memory_id, capture_root, source_paths_json, context_only)
+        VALUES ('m-learned-protected', ?, '["protected/learned.ts"]', 1)`).run(fixture.home);
+      db.exec("UPDATE raw_events SET processing_state = 'processed'; UPDATE sessions SET summary_state = 'pending'");
+      writeFileSync(join(fixture.home, '.oboete.toml'), '[privacy]\nsecret_paths = ["protected/**"]\n');
+      const location = { repoId: String(session.repo_id), bindingId: String(session.binding_id), home: fixture.home, history: true };
+      assert.deepEqual((await filterReadOutput(db, location, [{ id: 'm-learned-protected', title: 'Protected learned marker 9013' }], [])).memories, []);
+      const token = claimLease(db, { pid: 1, now: NOW });
+      assert.ok(token);
+      const summary = sessionSummary(db, token, String(session.id), NOW);
+      assert.ok(summary.memoryId);
+      const body = String(db.prepare('SELECT body FROM memories WHERE id = ?').get(summary.memoryId)?.body);
+      assert.match(body, /Protected learned marker 9013/);
+      const shown = await filterReadOutput(db, location, [{ id: summary.memoryId, body }], []);
+      assert.deepEqual(shown.memories, []);
+    } finally { db.close(); }
+  });
+});
+
+for (const [projectGrant, protectedPath] of [[true, false], [false, false], [true, true]] as const) {
+  test(`observer reuses removed-origin knowledge only with its project grant and retained rules: ${projectGrant}/${protectedPath}`, async () => {
+    await withFixture(async (fixture) => {
+      const git = (...args: string[]) => {
+        const result = spawnSync('git', ['-C', fixture.home, '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false', ...args], { encoding: 'utf8' });
+        assert.equal(result.status, 0, result.stderr);
+      };
+      git('init', '--quiet');
+      git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '--allow-empty', '-m', 'Fixture');
+      const oldRoot = join(fixture.home, 'old-worktree');
+      git('worktree', 'add', '--quiet', '-b', 'old-work', oldRoot);
+      const oldIdentity = resolveRepoIdentity(oldRoot);
+      fixture.env = cleanEnv(fixture.home, { OBOETE_CF_API_TOKEN: 'worker-test-token', OBOETE_CF_ACCOUNT_ID: 'worker-test-account' });
+      writeConfig(fixture, 'workers-ai', fixture.env);
+      const common = { ...eventBase('adopted-context'), cwd: fixture.home };
+      await fixture.capture('SessionStart', { ...common, source: 'startup' });
+      await fixture.capture('UserPromptSubmit', { ...common, prompt_id: 'p1', prompt: 'Explain the adopted release policy.' });
+      const sourceId = eventId(fixture, 'Explain the adopted release policy.');
+      fixture.withDb((db) => {
+        const repoId = repoIdOf(fixture);
+        assert.equal(repoId, oldIdentity.id);
+        db.prepare(`INSERT INTO work_contexts (id, repo_id, local_key, root, repo_secret_paths_json, created_at, last_seen_at)
+          VALUES ('old-context', ?, ?, ?, '["protected/**"]', 1, 1)`).run(repoId, oldIdentity.worktreeKey, oldRoot);
+        db.prepare(`INSERT INTO work_items (id, repo_id, origin_context_id, created_at, updated_at)
+          VALUES ('old-work', ?, 'old-context', 1, 1)`).run(repoId);
+        const source = db.prepare(`SELECT r.session_id, b.context_id FROM raw_events r
+          JOIN work_bindings b ON b.id = r.work_binding_id WHERE r.id = ?`).get(sourceId)!;
+        db.prepare(`INSERT INTO work_bindings (id, session_id, context_id, work_id, created_at, closed_at, reason)
+          VALUES ('late-binding', ?, ?, NULL, ?, ?, 'late_source')`)
+          .run(source.session_id, source.context_id, NOW - DAY - 100, NOW - DAY - 50);
+        const chosen = chooseWork(db, { repoId, contextKey: resolveRepoIdentity(fixture.home).worktreeKey,
+          bindingId: 'late-binding', workId: 'old-work', now: NOW });
+        assert.equal(chosen?.reason, 'late_source', 'a historical choice retains its historical binding reason');
+        db.prepare('UPDATE raw_events SET work_binding_id = ?, captured_at = ? WHERE id = ?')
+          .run('late-binding', NOW - DAY - 75, sourceId);
+        seedMemory(db, { id: 'm-adopted', repoId, title: 'Adopted release policy', body: 'Adopted release detail 6284.' });
+        if (!projectGrant) db.prepare('DELETE FROM memory_visibility WHERE memory_id = ?').run('m-adopted');
+        grantVisibility(db, 'm-adopted', { audience: 'work', repoId, workId: 'old-work' }, 'observer', NOW);
+        db.exec("UPDATE memories SET provenance_complete = 1 WHERE id = 'm-adopted'");
+        db.prepare(`INSERT INTO memory_sources (memory_id, capture_root, source_paths_json, source_context_id, context_only)
+          VALUES ('m-adopted', ?, ?, 'old-context', 1)`)
+          .run(oldRoot, JSON.stringify([protectedPath ? 'protected/rules.ts' : 'src/rules.ts']));
+      });
+      git('worktree', 'remove', '--force', oldRoot);
+      await fixture.capture('SessionEnd', { ...common, reason: 'normal' });
+      const bodies: string[] = [];
+      await runObserveForFixture(fixture, { fetch: (async (url, init) => {
+        if (String(url).includes('/ai/models/search')) return catalogResponse();
+        bodies.push(String(init?.body ?? ''));
+        return workersResponse(providerOutput(sourceId));
+      }) as typeof fetch });
+      assert.ok(bodies.length > 0);
+      assert.equal(bodies.some((body) => body.includes('Adopted release detail 6284')), projectGrant && !protectedPath);
+    });
+  });
+}
+
 /** The same session, produced by one agent, then injected into a fresh Claude session. */
 async function produceUnderAgent(agent: 'claude' | 'grok'): Promise<ProducedUnderAgent> {
   let produced: ProducedUnderAgent | null = null;
@@ -939,6 +1093,14 @@ async function produceUnderAgent(agent: 'claude' | 'grok'): Promise<ProducedUnde
       prompts: ['Add a retry to the uploader.', 'Document the retry count in README.md.'],
       tools: [{ id: 't1', path: 'src/uploader.ts', text: 'retries = 1' }],
       assistant: 'The uploader now retries three times.',
+    });
+    // This comparison varies only the producer; keep the newly persisted work identity fixed too.
+    fixture.withDb((db) => {
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM work_items').get()?.n, 1);
+      db.exec(`BEGIN; PRAGMA defer_foreign_keys = ON;
+        UPDATE work_items SET id = 'agent-neutral-work';
+        UPDATE work_bindings SET work_id = 'agent-neutral-work'; COMMIT;`);
+      assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
     });
     if (agent === 'grok') {
       // Only the producing agent changes; every byte of content stays.
@@ -1122,7 +1284,7 @@ test('quarantine: imported memories reach no pack before the worker classifies t
         [
           { id: 'm_import_clean', review_state: 'unreviewed', sensitivity: 'local_only', deleted: false },
           { id: 'm_import_directive', review_state: 'imported', sensitivity: 'secret', deleted: true },
-          { id: 'm_import_private', review_state: 'unreviewed', sensitivity: 'local_only', deleted: false },
+          { id: 'm_import_private', review_state: 'imported', sensitivity: 'local_only', deleted: true },
           { id: 'm_import_secret', review_state: 'imported', sensitivity: 'secret', deleted: true },
         ],
       );
@@ -1130,7 +1292,11 @@ test('quarantine: imported memories reach no pack before the worker classifies t
       const tombstone = rows.find((row) => row.id === 'm_import_secret');
       assertNoSecretRun(String(tombstone?.body), secret.secret ?? '', secret.id);
       // FR-019: a released row stores what the detector left, not what was imported.
-      assert.equal(rows.find((row) => row.id === 'm_import_private')?.body, 'IMPORTEDPRIVATE keep this  end.');
+      const sanitized = db.prepare("SELECT id, body, review_state FROM memories WHERE title = ? AND deleted_at IS NULL")
+        .get('Imported note with a private span');
+      assert.equal(sanitized?.body, 'IMPORTEDPRIVATE keep this  end.');
+      assert.equal(sanitized?.review_state, 'unreviewed');
+      assert.notEqual(sanitized?.id, 'm_import_private', 'sanitized material has a new identity');
     });
 
     const after = (await fixture.capture('SessionStart', { ...eventBase('s-after'), source: 'startup' })).stdout ?? '';

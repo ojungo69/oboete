@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { PRESET_CATALOG } from '../../src/config.js';
 import { openDatabase } from '../../src/db/open.js';
 import { claimLease } from '../../src/worker/lease.js';
-import { isStorageError } from '../../src/worker/observe.js';
+import { isStorageError, runObserve } from '../../src/worker/observe.js';
 import {
   DAY,
   NOW,
@@ -46,6 +46,14 @@ test('a constraint violation is a worker error, not unavailable storage', () => 
   assert.equal(isStorageError(Object.assign(new Error('no space'), { code: 'ENOSPC' })), true);
 });
 
+test('explicit reprocessing rejects missing, malformed and unknown options without echoing input', async () => {
+  for (const args of [['--reprocess-source'], ['--reprocess-source', '../private-file'], ['--unexpected']]) {
+    let error = '';
+    assert.equal(await runObserve(args, { writeError: (text) => { error += text; } }), 2);
+    assert.equal(error, 'Usage: oboete observe [--reprocess-source <source-id>]\n');
+  }
+});
+
 test('no preset applies one fallback batch, writes a degraded session summary, releases, and checkpoints', async () => {
   await withFixture(async (fixture) => {
     writeConfig(fixture, 'none');
@@ -69,7 +77,7 @@ test('no preset applies one fallback batch, writes a degraded session summary, r
       assert.ok(Number(db.prepare('SELECT COUNT(*) AS n FROM memories').get()?.n) > 1);
       const summary = db.prepare("SELECT degraded_reason FROM memories WHERE type = 'session_summary'").get();
       assert.equal(summary?.degraded_reason, 'no_provider');
-      assert.equal(db.prepare('SELECT summary_state FROM sessions').get()?.summary_state, 'done');
+      assert.equal(db.prepare('SELECT summary_state FROM sessions').get()?.summary_state, 'pending');
       assert.equal(db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token, null);
       assert.equal(db.prepare("SELECT citations_ok FROM memories WHERE type = 'change'").get()?.citations_ok, 0);
       const wal = db.prepare('PRAGMA wal_checkpoint(PASSIVE)').get();
@@ -406,6 +414,10 @@ test('a live foreign lease makes observe exit without changing queued work', asy
       const token = claimLease(held, { pid: 999, now: NOW });
       if (token === null) assert.fail('expected the foreign lease');
       assert.equal(await runObserveForFixture(fixture), 0);
+      let error = '';
+      assert.equal(await runObserveForFixture(fixture, { writeError: (text) => { error += text; } },
+        ['--reprocess-source', eventId(fixture, 'Queued work remains untouched.')]), 1);
+      assert.match(error, /Another worker is running/);
       const state = held.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get();
       assert.equal(state?.owner_token, token);
       assert.equal(held.prepare('SELECT COUNT(*) AS n FROM observation_batches').get()?.n, 0);
@@ -414,6 +426,34 @@ test('a live foreign lease makes observe exit without changing queued work', asy
     } finally {
       held.close();
     }
+  });
+});
+
+test('explicit reprocessing reports a lost lease separately from an invalid source', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    await captureEndedSession(fixture, { sessionId: 'reprocess-takeover', prompts: ['Keep the retry decision.'] });
+    const id = eventId(fixture, 'Keep the retry decision.');
+    let other: string | null = null;
+    let message = '';
+    const result = await runObserveForFixture(fixture, {
+      now: () => {
+        fixture.withDb((db) => {
+          const owner = db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token;
+          if (other === null && owner !== null) other = claimLease(db, { pid: 999, now: NOW + 60_000 });
+        });
+        return other === null ? NOW : NOW + 60_000;
+      },
+      writeError: (text) => { message += text; },
+    }, ['--reprocess-source', id]);
+    assert.ok(other);
+    assert.equal(result, 1);
+    assert.match(message, /Another worker/);
+    assert.doesNotMatch(message, /not found/);
+    fixture.withDb((db) => {
+      assert.equal(db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token, other);
+      assert.equal(db.prepare('SELECT processing_state FROM raw_events WHERE id = ?').get(id)?.processing_state, 'pending');
+    });
   });
 });
 
@@ -517,6 +557,25 @@ test('maxRunMs releases the lease and leaves pending work for the next hook', as
   });
 });
 
+test('a worker stops between session summaries when its run budget expires', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    for (const sessionId of ['summary-one', 'summary-two', 'summary-three']) {
+      await captureEndedSession(fixture, { sessionId, prompts: ['Retain this session progress.'] });
+    }
+    fixture.withDb((db) => db.exec("UPDATE raw_events SET processing_state = 'processed'"));
+    const now = () => fixture.withDb((db) => db.prepare("SELECT 1 FROM memories WHERE type = 'session_summary' LIMIT 1").get())
+      === undefined ? NOW : NOW + 2;
+    assert.equal(await runObserveForFixture(fixture, { now, maxRunMs: 1 }), 0);
+    fixture.withDb((db) => {
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE summary_state = 'done'").get()?.n, 1);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE summary_state = 'pending'").get()?.n, 2);
+      assert.equal(db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token, null);
+    });
+    assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /reason=max_run/);
+  });
+});
+
 test('a session of lifecycle rows only is no queued work and the run ends empty', async () => {
   await withFixture(async (fixture) => {
     writeConfig(fixture, 'none');
@@ -556,7 +615,7 @@ test('a prompt of non-ASCII blanks is no queued work and the run ends empty', as
   });
 });
 
-test('the loop purges expired terminal rows and folds Pi done acknowledgements', async () => {
+test('the loop purges expired processed rows and folds Pi done acknowledgements', async () => {
   await withFixture(async (fixture) => {
     writeConfig(fixture, 'none');
     await fixture.capture('SessionStart', { ...eventBase('purge-session'), source: 'startup' });
@@ -572,9 +631,10 @@ test('the loop purges expired terminal rows and folds Pi done acknowledgements',
       ).run(session.repo_id, session.id, NOW - 1);
       db.prepare(
         `INSERT INTO raw_events
-           (id, repo_id, session_id, kind, content, sensitivity, classification_state, captured_at, expires_at, batch_id)
-         VALUES ('expired-event', ?, ?, 'prompt', 'expired body', 'local_only', 'done', ?, ?, 'expired-batch')`,
-      ).run(session.repo_id, session.id, NOW - 2 * DAY, NOW - 1);
+           (id, repo_id, session_id, kind, content, sensitivity, classification_state, captured_at, expires_at,
+            batch_id, processing_state, processed_at)
+         VALUES ('expired-event', ?, ?, 'prompt', 'expired body', 'local_only', 'done', ?, ?, 'expired-batch', 'processed', ?)`,
+      ).run(session.repo_id, session.id, NOW - 40 * DAY, NOW - 1, NOW - 30 * DAY - 1);
     });
     mkdirSync(fixture.paths.piAck, { recursive: true });
     const done = join(fixture.paths.piAck, 'finished.done');

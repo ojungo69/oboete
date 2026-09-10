@@ -3,6 +3,9 @@ import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { openDatabase } from '../../src/db/open.js';
+import { grantVisibility, memoryVisibility, type NearbyCandidate } from '../../src/db/queries.js';
+import { sha256Hex, sha256Json } from '../../src/hash.js';
+import { memoryContexts } from '../../src/privacy/source-context.js';
 import {
   observerOutputSchema,
   type Observation,
@@ -12,6 +15,7 @@ import { oboetePaths } from '../../src/paths.js';
 import { cjkBigrams } from '../../src/retrieval/fts.js';
 import { claimLease } from '../../src/worker/lease.js';
 import { withTempHome } from './home.js';
+import { seedWorkBinding } from './work.js';
 
 export const NOW = 1_757_000_000_000;
 const DAY = 24 * 60 * 60 * 1000;
@@ -103,11 +107,12 @@ export function seedEvent(
 ): void {
   capturedCounter += 1;
   const sessionId = seed.sessionId ?? 'sess1';
+  const workBindingId = seedWorkBinding(db, sessionId);
   db.prepare(
     `INSERT INTO raw_events
        (id, repo_id, session_id, turn_id, agent, kind, content, payload_json, sensitivity,
-        classification_state, captured_at, expires_at)
-     VALUES (?, ?, ?, ?, 'claude', ?, ?, ?, ?, ?, ?, ?)`,
+        classification_state, captured_at, expires_at, work_binding_id)
+     VALUES (?, ?, ?, ?, 'claude', ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     seed.id,
     REPO_ID,
@@ -120,6 +125,7 @@ export function seedEvent(
     seed.state ?? 'done',
     NOW - DAY + capturedCounter,
     NOW + 7 * DAY,
+    workBindingId,
   );
 }
 
@@ -131,8 +137,8 @@ export function seedBatch(
   db.prepare(
     `INSERT INTO observation_batches
        (id, repo_id, session_id, through_event_id, destination, trigger, state, owner_token,
-        provider_attempts, degraded_reason, claimed_at)
-     VALUES (?, ?, ?, ?, ?, 'session_end', ?, 'worker', 1, ?, ?)`,
+        provider_attempts, degraded_reason, claimed_at, work_binding_id)
+     VALUES (?, ?, ?, ?, ?, 'session_end', ?, ?, 1, ?, ?, ?)`,
   ).run(
     id,
     REPO_ID,
@@ -140,8 +146,10 @@ export function seedBatch(
     `through-${id}`,
     options.destination ?? 'remote_observer',
     options.state ?? 'running',
+    db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token ?? 'worker',
     options.degraded ?? null,
     NOW - 1000,
+    seedWorkBinding(db, options.sessionId ?? 'sess1'),
   );
 }
 
@@ -160,8 +168,8 @@ export function seedMemory(
   db.prepare(
     `INSERT INTO memories
        (id, repo_id, type, title, body, concepts, cjk_bigrams, material_hash, content_hash,
-        sensitivity, review_state, valid_from, valid_to, superseded_by, deleted_at, created_at)
-     VALUES (?, ?, 'discovery', ?, ?, '[]', ?, ?, ?, ?, 'unreviewed', ?, ?, ?, ?, ?)`,
+        sensitivity, review_state, valid_from, valid_to, superseded_by, deleted_at, created_at, source_captured_at)
+     VALUES (?, ?, 'discovery', ?, ?, '[]', ?, ?, ?, ?, 'unreviewed', ?, ?, ?, ?, ?, ?)`,
   ).run(
     seed.id,
     REPO_ID,
@@ -176,12 +184,15 @@ export function seedMemory(
     seed.supersededBy ?? null,
     seed.deleted === true ? NOW - DAY : null,
     NOW - DAY,
+    NOW - DAY,
   );
+  grantVisibility(db, seed.id, { audience: 'project', repoId: REPO_ID }, 'migration', NOW);
 }
 
 export function observation(overrides: Partial<Observation> = {}): Observation {
   return {
     type: 'discovery',
+    visibility: 'project',
     title: 'The uploader retries three times',
     body: 'The uploader retries three times before it gives up.',
     concepts: ['gotcha'],
@@ -193,9 +204,19 @@ export function observation(overrides: Partial<Observation> = {}): Observation {
 }
 
 export function output(...observations: Observation[]): ObserverOutput {
-  return observerOutputSchema.parse({ observations });
+  return observerOutputSchema.parse({ observations, checkpoint: { decision: 'unchanged',
+    source_event_ids: [...new Set(observations.flatMap((item) => item.source_event_ids))].slice(0, 50),
+    reason: 'This fixture changes ordinary knowledge only.' } });
 }
 
 export function memoryRow(db: DatabaseSync, id: string): Record<string, unknown> | undefined {
   return db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+}
+
+export function nearbySnapshot(db: DatabaseSync, id: string): NearbyCandidate {
+  const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(id);
+  assert.ok(row);
+  const candidate = { ...row, deleted: row.deleted_at !== null } as unknown as NearbyCandidate;
+  return { ...candidate, privacy_stamp: sha256Hex(JSON.stringify(memoryContexts(db, candidate))),
+    visibility_stamp: sha256Json(memoryVisibility(db, id)) };
 }

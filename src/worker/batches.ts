@@ -22,10 +22,24 @@ import { assertLease, transactionImmediate } from './lease.js';
 export const RECLAIM_AFTER_MS = 120_000;
 /** R6: a row this close to `expires_at` is batched now so purge cannot delete it unread. */
 export const RETENTION_HORIZON_MS = 24 * 60 * 60 * 1000;
+/** Deferred sources wait between bounded worker runs, never in a resident retry loop. */
+export const DUE_SOURCE_SQL = `(processing_state = 'pending' OR (processing_state = 'waiting'
+  AND retry_after <= ? AND NOT EXISTS (
+    SELECT 1 FROM observation_batch_sources prior
+    JOIN observation_batches attempt ON attempt.id = prior.batch_id
+    WHERE prior.raw_event_id = raw_events.id AND attempt.owner_token = ?
+  )))`;
+export const RESOLVED_WORK_SQL = `work_binding_id IN (SELECT id FROM work_bindings WHERE work_id IS NOT NULL)`;
 /** FR-010: a batch every ten turns during a session. */
 export const TEN_TURNS = 10;
-/** One classification run stays bounded; the loop continues until the queue is empty. */
-const CLASSIFY_LIMIT = 500;
+const BATCH_SOURCE_LIMIT = 50;
+/** Bound payload allocation independently of event count; one accepted source always fits alone. */
+const SOURCE_PAGE_BYTES = 2 * 1024 * 1024;
+
+/** The same bounded schedule applies to admission failures and rejected provider output. */
+export function sourceRetryAt(now: number, attempts: number): number {
+  return now + Math.min(24 * 60 * 60_000, 5 * 60_000 * 2 ** Math.min(attempts, 9));
+}
 
 export type BatchDestination = 'remote_observer' | 'local_observer' | 'fallback';
 export type BatchTrigger = 'ten_turns' | 'session_end' | 'retention';
@@ -49,6 +63,16 @@ export type RawEventRow = {
   expires_at: number | null;
   batch_id: string | null;
   via_spool: number | null;
+  /** Absent only on old-schema/read-only request fixtures. */
+  processing_state?: 'pending' | 'waiting' | 'processed' | 'excluded' | 'legacy_unknown';
+  processing_offset?: number;
+  processing_hash?: string | null;
+  processing_attempts?: number;
+  has_processing_history?: number;
+  advanced_by_owner?: number;
+  retry_after?: number | null;
+  source_bytes?: number;
+  work_binding_id?: string | null;
 };
 
 export type BatchRow = {
@@ -61,6 +85,7 @@ export type BatchRow = {
   state: BatchState;
   owner_token: string | null;
   claimed_at: number | null;
+  work_binding_id?: string | null;
 };
 
 export type SessionRow = {
@@ -113,6 +138,34 @@ export const BLANK_CODE_POINTS: readonly number[] = [
   0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
 ];
 export const BLANK_CHARACTERS_SQL = `char(${BLANK_CODE_POINTS.join(', ')})`;
+
+const STORED_CONTENT_SQL = `TRIM(COALESCE(content, ''), ${BLANK_CHARACTERS_SQL}) <> ''`;
+const TOOL_CONTENT_SQL = `(kind = 'tool_call' AND CASE WHEN json_valid(payload_json) THEN (
+  (json_type(payload_json, '$.input.command') = 'text' AND TRIM(json_extract(payload_json, '$.input.command'), ${BLANK_CHARACTERS_SQL}) <> '') OR
+  (json_type(payload_json, '$.input.text') = 'text' AND TRIM(json_extract(payload_json, '$.input.text'), ${BLANK_CHARACTERS_SQL}) <> '') OR
+  (json_type(payload_json, '$.input.paths') = 'array' AND EXISTS (SELECT 1 FROM json_each(payload_json, '$.input.paths')
+    WHERE type = 'text' AND TRIM(value, ${BLANK_CHARACTERS_SQL}) <> ''))
+) ELSE 0 END)`;
+export const SUMMARIZABLE_ROW_SQL = `(kind IN (${SUMMARIZABLE_KINDS_SQL})
+  AND classification_state IS NOT 'failed' AND sensitivity <> 'secret'
+  AND (${STORED_CONTENT_SQL} OR ${TOOL_CONTENT_SQL}))`;
+
+/** Scheduling needs only metadata and size; source eligibility is checked by the shared SQL. */
+export const SOURCE_METADATA_COLUMNS = `id, repo_id, session_id, turn_id, kind, sensitivity, work_binding_id,
+  classification_state, captured_at, expires_at, processing_state, processing_offset, retry_after,
+  COALESCE(length(CAST(content AS BLOB)), 0) + COALESCE(length(CAST(payload_json AS BLOB)), 0) AS source_bytes`;
+
+function sourcePage(rows: Iterable<RawEventRow>): RawEventRow[] {
+  const page: RawEventRow[] = [];
+  let bytes = 0;
+  for (const row of rows) {
+    if (page.length > 0 && bytes + (row.source_bytes ?? 0) > SOURCE_PAGE_BYTES) break;
+    page.push(row);
+    bytes += row.source_bytes ?? 0;
+    if (page.length === BATCH_SOURCE_LIMIT) break;
+  }
+  return page;
+}
 
 const DESTINATION_ORDER: readonly BatchDestination[] = [
   'remote_observer',
@@ -189,17 +242,18 @@ export function isSummarizableRow(row: RawEventRow): boolean {
   if ((row.content ?? '').trim() !== '') return true;
   // A tool call whose only content is its command, its text or its paths still describes work
   // (events.ts isSummarizable joins exactly those three fields).
-  return `${toolInputText(row)}${toolPaths(row).join('')}`.trim() !== '';
+  return row.kind === 'tool_call' && `${toolInputText(row)}${toolPaths(row).join('')}`.trim() !== '';
 }
 
 // ---------------------------------------------------------------------------
 // Worker-side classification (FR-017, A7)
 // ---------------------------------------------------------------------------
 
-const CLASSIFY_CANDIDATES = `SELECT * FROM raw_events
+const CLASSIFY_CANDIDATES = `SELECT ${SOURCE_METADATA_COLUMNS} FROM raw_events
   WHERE batch_id IS NULL AND sensitivity = 'local_only'
+    AND ${DUE_SOURCE_SQL}
     AND classification_state IN ('pending', 'done')
-    AND TRIM(COALESCE(content, '')) <> ''
+    AND ${SUMMARIZABLE_ROW_SQL}
   ORDER BY captured_at, id LIMIT ?`;
 
 type ClassificationUpdate = { id: string; sensitivity: Sensitivity; content: string | null };
@@ -238,9 +292,36 @@ function storeClassificationUpdates(
       `UPDATE raw_events SET sensitivity = ?, classification_state = 'done', content = COALESCE(?, content)
          WHERE id = ?`,
     );
-    for (const row of updates) update.run(row.sensitivity, row.content, row.id);
+    for (const row of updates) {
+      update.run(row.sensitivity, row.content, row.id);
+      if (row.sensitivity === 'secret') excludeSecretSource(db, row.id, now);
+    }
     return false;
   });
+}
+
+/** New secret findings close source processing and quarantine derived text before any reader can use it. */
+export function excludeSecretSource(db: DatabaseSync, id: string, now: number): void {
+  db.prepare(`UPDATE raw_events SET sensitivity = 'secret', content = NULL, payload_json = NULL,
+    processing_state = 'excluded', processed_at = ?, retry_after = NULL
+    WHERE id = ?`).run(now, id);
+  db.prepare(`UPDATE memory_sources SET evidence = NULL, capture_root = NULL, source_paths_json = NULL, citation_value = NULL
+    WHERE memory_id IN (SELECT memory_id FROM memory_sources WHERE raw_event_id = ?)`)
+    .run(id);
+  // Reuse the existing quarantine detector pass to redact derived memories. Setting the strictest
+  // sensitivity in this transaction also protects readers while that asynchronous pass runs.
+  db.prepare(`UPDATE memories SET sensitivity = 'secret', review_state = 'imported'
+    WHERE id IN (SELECT memory_id FROM memory_sources WHERE raw_event_id = ?)
+      OR (type = 'session_summary' AND work_id IS NULL AND source_session_id = (SELECT session_id FROM raw_events WHERE id = ?))`)
+    .run(id, id);
+  db.prepare(`UPDATE sessions SET summary_state = 'pending', summary_updated_at = NULL
+    WHERE id = (SELECT session_id FROM raw_events WHERE id = ?)`)
+    .run(id);
+  db.prepare(`INSERT INTO diagnostics
+    (id, kind, severity, message_code, details_json, count, first_seen_at, last_seen_at)
+    VALUES (?, 'source_exclusion', 'info', 'secret', ?, 1, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET last_seen_at = excluded.last_seen_at`)
+    .run(`source-exclusion:${id}`, JSON.stringify({ source_id: id }), now, now);
 }
 
 /**
@@ -258,9 +339,6 @@ export async function classifyPending(
   let promoted = 0;
   let secret = 0;
   let failed = 0;
-  // A row the detector could not read keeps its state, so it would be selected again forever;
-  // this set is what ends the loop instead.
-  const seen = new Set<string>();
 
   function countClassifications(updates: { sensitivity: Sensitivity }[]): void {
     for (const row of updates) {
@@ -276,7 +354,6 @@ export async function classifyPending(
     updates: ClassificationUpdate[],
   ): Promise<void> {
     for (const row of rows) {
-      seen.add(row.id);
       const content = row.content ?? '';
       const result = await detect(content);
       // FR-017: the outbound request carries the normalized tool input as well as `content`, so a
@@ -294,11 +371,10 @@ export async function classifyPending(
     }
   }
 
-  for (;;) {
-    const rows = asRawEventRows(db.prepare(CLASSIFY_CANDIDATES).all(CLASSIFY_LIMIT)).filter(
-      (row) => !seen.has(row.id),
-    );
-    if (rows.length === 0) break;
+  const page = sourcePage(asRawEventRows(db.prepare(CLASSIFY_CANDIDATES).all(now, token, BATCH_SOURCE_LIMIT)));
+  if (page.length > 0) {
+    const read = db.prepare('SELECT * FROM raw_events WHERE id = ?');
+    const rows = page.map((row) => read.get(row.id) as unknown as RawEventRow);
 
     // The detector is async and may run in a worker thread, so it never runs inside a transaction.
     const updates: ClassificationUpdate[] = [];
@@ -308,7 +384,6 @@ export async function classifyPending(
     if (lost) return { examined, promoted, secret, failed, leaseLost: true };
 
     countClassifications(updates);
-    if (rows.length < CLASSIFY_LIMIT) break;
   }
 
   return { examined, promoted, secret, failed, leaseLost: false };
@@ -326,15 +401,11 @@ function destinationFor(
   rules: DestinationRules,
   preset: ProviderPreset['egress'],
   row: RawEventRow,
-  now: number,
 ): BatchDestination | null {
   // The fallback runs on this machine, so it may carry whatever a local summarizer may carry.
   const localClasses = isAllowed(rules, 'local_observer', row.sensitivity, true);
   // A7: a partial row contributes metadata to the rule-based fallback and never text to a provider.
   if (row.classification_state === 'partial') return localClasses ? 'fallback' : null;
-  // R6 retention: a row already past `expires_at` is forced into a fallback batch, because waiting
-  // for a provider that may be exhausted or unreachable would lose it to purge unread.
-  if (row.expires_at !== null && row.expires_at <= now) return localClasses ? 'fallback' : null;
   if (preset === 'remote' && isAllowed(rules, 'remote_observer', row.sensitivity, true)) {
     return 'remote_observer';
   }
@@ -344,17 +415,114 @@ function destinationFor(
   return localClasses ? 'fallback' : null;
 }
 
-function triggerFor(session: SessionRow, rows: RawEventRow[], now: number): BatchTrigger | null {
-  // contracts/observer.md: session end is the definitive batch of a session, so it wins.
-  if (session.status === 'ended') return 'session_end';
-  // R6: a row past `expires_at` in a pending batch is forced out before purge deletes it.
-  if (rows.some((row) => row.expires_at !== null && row.expires_at <= now + RETENTION_HORIZON_MS)) {
-    return 'retention';
+function triggerFor(session: SessionRow, rows: Iterable<RawEventRow>, now: number) {
+  if (session.status === 'ended') return 'session_end' as const;
+  const turns = new Set<string>();
+  for (const row of rows) {
+    if (row.processing_state === 'waiting' || row.has_processing_history === 1 ||
+      (row.expires_at !== null && row.expires_at <= now + RETENTION_HORIZON_MS)) return 'retention' as const;
+    if (row.turn_id !== null) turns.add(row.turn_id);
+    if (turns.size >= TEN_TURNS) return 'ten_turns' as const;
   }
-  // FR-010 "after every 10 turns": the turns that still carry unbatched rows are the ones this
-  // batch would summarize, which needs no stored marker and cannot fire twice for the same turns.
-  const turns = new Set(rows.map((row) => row.turn_id).filter((id): id is string => id !== null));
-  return turns.size >= TEN_TURNS ? 'ten_turns' : null;
+  return null;
+}
+
+/** Keyset pages bound memory even when metadata or a single turn fills many storage pages. */
+function* dueSessionRows(db: DatabaseSync, sessionId: string, repoId: string, workBindingId: string | null, now: number, token: string) {
+  const read = db.prepare(`WITH due AS (SELECT ${SOURCE_METADATA_COLUMNS}, EXISTS (SELECT 1 FROM observation_batch_sources s
+      WHERE s.raw_event_id = raw_events.id) AS has_processing_history,
+      EXISTS (SELECT 1 FROM observation_batch_sources s JOIN observation_batches b ON b.id = s.batch_id
+        WHERE s.raw_event_id = raw_events.id AND b.owner_token = ? AND s.outcome = 'processed') AS advanced_by_owner
+    FROM raw_events WHERE session_id = ? AND repo_id = ? AND work_binding_id IS ?
+      AND batch_id IS NULL AND ${DUE_SOURCE_SQL}
+      AND ${SUMMARIZABLE_ROW_SQL})
+    SELECT * FROM due WHERE (? IS NULL OR (advanced_by_owner, COALESCE(captured_at, 0), id) > (?, ?, ?))
+    ORDER BY advanced_by_owner, COALESCE(captured_at, 0), id LIMIT ?`);
+  let after: RawEventRow | undefined;
+  for (;;) {
+    const rows = asRawEventRows(read.all(token, sessionId, repoId, workBindingId, now, token,
+      after?.id ?? null, after?.advanced_by_owner ?? 0, after?.captured_at ?? 0, after?.id ?? '', BATCH_SOURCE_LIMIT));
+    if (rows.length === 0) return;
+    after = rows.at(-1)!;
+    yield* rows;
+  }
+}
+
+/** One shared eligibility check for batching and quiet worker release. No raw bodies are loaded. */
+function nextBatchCohort(db: DatabaseSync, token: string, now: number) {
+  const sessions = db.prepare(`SELECT session_id, repo_id, work_binding_id FROM raw_events
+    WHERE batch_id IS NULL AND ${DUE_SOURCE_SQL} AND ${SUMMARIZABLE_ROW_SQL}
+      AND ${RESOLVED_WORK_SQL}
+    GROUP BY session_id, repo_id, work_binding_id ORDER BY MIN(EXISTS (SELECT 1 FROM observation_batch_sources s
+      JOIN observation_batches b ON b.id = s.batch_id WHERE s.raw_event_id = raw_events.id
+        AND b.owner_token = ? AND s.outcome = 'processed')), MIN(COALESCE(captured_at, 0)), session_id`);
+  const priorCohort = db.prepare(`SELECT 1 FROM observation_batches b JOIN raw_events r ON r.id = b.through_event_id
+    WHERE b.session_id = ? AND b.repo_id = ? AND b.work_binding_id IS ?
+      AND (COALESCE(r.captured_at, 0), r.id) >= (?, ?) LIMIT 1`);
+  for (const candidate of sessions.iterate(now, token, token)) {
+    const sessionId = String(candidate.session_id);
+    const storedSession = readSession(db, sessionId);
+    if (storedSession === null) continue;
+    const repoId = String(candidate.repo_id);
+    const workBindingId = candidate.work_binding_id as string | null;
+    const session = { ...storedSession, repo_id: repoId };
+    const rows = sourcePage(dueSessionRows(db, sessionId, repoId, workBindingId, now, token));
+    if (rows.length === 0) continue;
+    const first = rows[0];
+    const trigger = session.status === 'ended' ? 'session_end' as const
+      : db.prepare('SELECT 1 FROM work_bindings WHERE id = ? AND closed_at IS NOT NULL').get(workBindingId) !== undefined
+        || priorCohort.get(sessionId, repoId, workBindingId, first.captured_at ?? 0, first.id) !== undefined ? 'retention' as const
+      : triggerFor(session, dueSessionRows(db, sessionId, repoId, workBindingId, now, token), now);
+    if (trigger === null) continue;
+    // This existing high-water mark lets a triggered ten-turn cohort drain across bounded pages.
+    const through = db.prepare(`SELECT id FROM raw_events WHERE session_id = ? AND repo_id = ?
+      AND work_binding_id IS ? AND batch_id IS NULL AND ${DUE_SOURCE_SQL}
+      ORDER BY COALESCE(captured_at, 0) DESC, id DESC LIMIT 1`).get(sessionId, repoId, workBindingId, now, token);
+    return { session, rows, trigger, workBindingId, throughEventId: String(through!.id) };
+  }
+  return null;
+}
+
+export function hasBatchableSources(db: DatabaseSync, token: string, now: number): boolean {
+  return nextBatchCohort(db, token, now) !== null;
+}
+
+/** Reclaiming an old attempt never reuses its destination authorization for a different preset. */
+export function reconcilePendingDestinations(
+  db: DatabaseSync,
+  token: string,
+  now: number,
+  preset: ProviderPreset['egress'],
+): { requeued: number; leaseLost: boolean } {
+  const rules = loadDestinationRules(db);
+  return transactionImmediate(db, () => {
+    if (!assertLease(db, token, now)) {
+      db.exec('ROLLBACK');
+      return { requeued: 0, leaseLost: true };
+    }
+    let requeued = 0;
+    const pending = db.prepare("SELECT id, destination, work_binding_id FROM observation_batches WHERE state = 'pending'").all();
+    const readRows = db.prepare(`SELECT ${SOURCE_METADATA_COLUMNS} FROM raw_events WHERE batch_id = ? LIMIT ?`);
+    const release = db.prepare(`UPDATE raw_events SET batch_id = NULL,
+      processing_state = CASE WHEN ${RESOLVED_WORK_SQL} THEN 'pending' ELSE 'waiting' END, retry_after = NULL
+      WHERE batch_id = ? AND processing_state IN ('pending', 'waiting')`);
+    const finish = db.prepare(`UPDATE observation_batches SET state = 'fallback',
+      completed_at = ?, degraded_reason = ? WHERE id = ?`);
+    const receipt = db.prepare(`UPDATE observation_batch_sources SET outcome = 'deferred',
+      reason = ?, recorded_at = ? WHERE batch_id = ? AND outcome = 'assigned'`);
+    for (const batch of pending) {
+      const rows = asRawEventRows(readRows.all(batch.id, BATCH_SOURCE_LIMIT + 1));
+      const oversized = rows.length > BATCH_SOURCE_LIMIT || sourcePage(rows).length < rows.length;
+      const selectionRequired = db.prepare('SELECT 1 FROM work_bindings WHERE id = ? AND work_id IS NOT NULL')
+        .get(batch.work_binding_id) === undefined || rows.some((row) => row.work_binding_id !== batch.work_binding_id);
+      if (!selectionRequired && !oversized && !rows.some((row) => destinationFor(rules, preset, row) !== batch.destination)) continue;
+      release.run(batch.id);
+      finish.run(now, oversized || selectionRequired ? 'rule_based' : 'consent_changed', batch.id);
+      receipt.run(selectionRequired ? 'work_selection_required' : oversized ? 'request_page_limit' : 'destination_changed', now, batch.id);
+      requeued += 1;
+    }
+    return { requeued, leaseLost: false };
+  });
 }
 
 function readSession(db: DatabaseSync, sessionId: string): SessionRow | null {
@@ -365,22 +533,6 @@ function readSession(db: DatabaseSync, sessionId: string): SessionRow | null {
     )
     .get(sessionId);
   return row === undefined ? null : (row as unknown as SessionRow);
-}
-
-/**
- * R6 retention: rows past `expires_at` that sit in a batch nobody ran are detached so this run
- * puts them into a fallback batch, which purge may then delete. A provider batch left with no rows
- * would summarize nothing, so it goes with them.
- */
-function detachExpiredPendingRows(db: DatabaseSync, now: number): void {
-  db.prepare(
-    `UPDATE raw_events SET batch_id = NULL WHERE expires_at <= ? AND batch_id IN (
-       SELECT id FROM observation_batches WHERE state = 'pending' AND destination <> 'fallback')`,
-  ).run(now);
-  db.prepare(
-    `DELETE FROM observation_batches WHERE state = 'pending' AND destination <> 'fallback'
-       AND NOT EXISTS (SELECT 1 FROM raw_events r WHERE r.batch_id = observation_batches.id)`,
-  ).run();
 }
 
 /**
@@ -395,6 +547,7 @@ export function createBatches(
   options: { preset: ProviderPreset['egress'] },
 ): { created: BatchRow[]; leaseLost: boolean } {
   const rules = loadDestinationRules(db);
+  const cohort = nextBatchCohort(db, token, now);
 
   return transactionImmediate(db, () => {
     if (!assertLease(db, token, now)) {
@@ -402,104 +555,84 @@ export function createBatches(
       return { created: [], leaseLost: true };
     }
 
-    detachExpiredPendingRows(db, now);
-
     const created: BatchRow[] = [];
-    const sessionIds = db
-      .prepare('SELECT DISTINCT session_id FROM raw_events WHERE batch_id IS NULL ORDER BY session_id')
-      .all()
-      .map((row) => String(row.session_id));
+    if (cohort === null) return { created, leaseLost: false };
+    const { session, trigger, throughEventId: throughId } = cohort;
+    const sessionId = session.id;
+    const rows = cohort.rows;
 
-    function createSessionBatches(sessionId: string): void {
-      const rows = asRawEventRows(
-        db
-          .prepare(
-            'SELECT * FROM raw_events WHERE session_id = ? AND batch_id IS NULL ORDER BY captured_at, id',
-          )
-          .all(sessionId),
-      ).filter(isSummarizableRow);
-      if (rows.length === 0) return;
+    const byDestination = new Map<BatchDestination, RawEventRow[]>();
 
-      const session = readSession(db, sessionId);
-      if (session === null) return;
-      const trigger = triggerFor(session, rows, now);
-      if (trigger === null) return;
+    const taken = db.prepare(
+      `SELECT 1 AS present FROM observation_batches
+       WHERE session_id = ? AND through_event_id = ? AND destination = ?`,
+    );
 
-      // The newest row of the round; both batches of the round carry it, which is what makes them
-      // one range in two destinations (data-model.md UNIQUE (session_id, through_event_id, destination)).
-      const throughEventId = rows.at(-1)!.id;
+    function createDestinationBatch(
+      destination: BatchDestination, session: SessionRow, trigger: BatchTrigger,
+    ): void {
+      const list = byDestination.get(destination);
+      // A batch is created only if it would carry at least one row.
+      if (list === undefined || list.length === 0) return;
 
-      const byDestination = new Map<BatchDestination, RawEventRow[]>();
-      for (const row of rows) {
-        const destination = destinationFor(rules, options.preset, row, now);
-        if (destination === null) continue;
-        const list = byDestination.get(destination) ?? [];
-        list.push(row);
-        byDestination.set(destination, list);
-      }
+      const id = randomUUID();
+      // data-model.md UNIQUE (session_id, through_event_id, destination). An earlier round can
+      // already own that key. Each retry records a new attempt without changing the old
+      // destination or membership history.
+      const through =
+        taken.get(sessionId, throughId, destination) === undefined
+          ? throughId
+          : `${throughId}:${id}`;
 
-      const taken = db.prepare(
-        `SELECT 1 AS present FROM observation_batches
-         WHERE session_id = ? AND through_event_id = ? AND destination = ?`,
+      const batch: BatchRow = {
+        id,
+        repo_id: session.repo_id,
+        session_id: sessionId,
+        through_event_id: through,
+        destination,
+        trigger,
+        state: 'pending',
+        owner_token: token,
+        claimed_at: now,
+        work_binding_id: cohort!.workBindingId,
+      };
+      db.prepare(
+        `INSERT INTO observation_batches
+           (id, repo_id, session_id, through_event_id, destination, trigger, state, owner_token,
+            provider_attempts, claimed_at, work_binding_id)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?)`,
+      ).run(
+        batch.id,
+        batch.repo_id,
+        batch.session_id,
+        batch.through_event_id,
+        batch.destination,
+        batch.trigger,
+        token,
+        now,
+        batch.work_binding_id ?? null,
       );
-
-      function createDestinationBatch(
-        destination: BatchDestination, session: SessionRow, trigger: BatchTrigger,
-      ): void {
-        const list = byDestination.get(destination);
-        // A batch is created only if it would carry at least one row.
-        if (list === undefined || list.length === 0) return;
-
-        const id = randomUUID();
-        // data-model.md UNIQUE (session_id, through_event_id, destination). An earlier round can
-        // already own that key: rows detached from a pending provider batch past `expires_at` are
-        // batched again, and the fallback batch of the first round may still be there. Those are
-        // different rows, so the second round carries its own key rather than failing the run.
-        const through =
-          taken.get(sessionId, throughEventId, destination) === undefined
-            ? throughEventId
-            : `${throughEventId}:${id}`;
-
-        const batch: BatchRow = {
-          id,
-          repo_id: session.repo_id,
-          session_id: sessionId,
-          through_event_id: through,
-          destination,
-          trigger,
-          state: 'pending',
-          owner_token: token,
-          claimed_at: now,
-        };
-        db.prepare(
-          `INSERT INTO observation_batches
-             (id, repo_id, session_id, through_event_id, destination, trigger, state, owner_token,
-              provider_attempts, claimed_at)
-           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?)`,
-        ).run(
-          batch.id,
-          batch.repo_id,
-          batch.session_id,
-          batch.through_event_id,
-          batch.destination,
-          batch.trigger,
-          token,
-          now,
-        );
-        const claim = db.prepare('UPDATE raw_events SET batch_id = ? WHERE id = ? AND batch_id IS NULL');
-        for (const row of list) claim.run(batch.id, row.id);
-        created.push(batch);
+      const claim = db.prepare('UPDATE raw_events SET batch_id = ? WHERE id = ? AND batch_id IS NULL');
+      const membership = db.prepare(`INSERT INTO observation_batch_sources
+        (batch_id, raw_event_id, turn_id, outcome, recorded_at) VALUES (?, ?, ?, 'assigned', ?)`);
+      for (const row of list) {
+        claim.run(batch.id, row.id);
+        membership.run(batch.id, row.id, row.turn_id, now);
       }
-
-      for (const destination of DESTINATION_ORDER) {
-        createDestinationBatch(destination, session, trigger);
-      }
+      created.push(batch);
+      byDestination.delete(destination);
     }
 
-    for (const sessionId of sessionIds) {
-      createSessionBatches(sessionId);
+    for (const row of rows) {
+      const destination = destinationFor(rules, options.preset, row);
+      if (destination === null) continue;
+      const list = byDestination.get(destination) ?? [];
+      list.push(row);
+      byDestination.set(destination, list);
     }
-
+    for (const destination of DESTINATION_ORDER) {
+      createDestinationBatch(destination, session, trigger);
+    }
     return { created, leaseLost: false };
   });
 }
@@ -545,7 +678,7 @@ export function stripPartial(row: RawEventRow): RawEventRow {
 export function loadBatchInput(db: DatabaseSync, batchId: string): BatchInput | null {
   const batchRow = db
     .prepare(
-      `SELECT id, repo_id, session_id, through_event_id, destination, trigger, state, owner_token, claimed_at
+      `SELECT id, repo_id, session_id, through_event_id, destination, trigger, state, owner_token, claimed_at, work_binding_id
        FROM observation_batches WHERE id = ?`,
     )
     .get(batchId);
@@ -557,12 +690,16 @@ export function loadBatchInput(db: DatabaseSync, batchId: string): BatchInput | 
 
   const turns = db
     .prepare(
-      'SELECT id, ordinal, started_at, ended_at FROM turns WHERE session_id = ? ORDER BY ordinal',
+      `SELECT id, ordinal, started_at, ended_at FROM turns WHERE session_id = ?
+        AND id IN (SELECT turn_id FROM raw_events WHERE batch_id = ?) ORDER BY ordinal`,
     )
-    .all(batch.session_id) as unknown as TurnRow[];
+    .all(batch.session_id, batchId) as unknown as TurnRow[];
 
   const rows = asRawEventRows(
-    db.prepare('SELECT * FROM raw_events WHERE batch_id = ? ORDER BY captured_at, id').all(batchId),
+    db.prepare(`SELECT * FROM raw_events r WHERE batch_id = ? ORDER BY
+      EXISTS (SELECT 1 FROM observation_batch_sources s JOIN observation_batches b ON b.id = s.batch_id
+        WHERE s.raw_event_id = r.id AND b.owner_token = ? AND s.outcome = 'processed'),
+      captured_at, id`).all(batchId, batch.owner_token),
   ).map(stripPartial);
 
   return { batch, rows, session, turns };

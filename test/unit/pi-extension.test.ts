@@ -260,6 +260,7 @@ test('the first before_agent_start injects at session start, later ones per prom
     cwd: process.cwd(),
     session_id: SESSION,
     prompt: 'fix the parser',
+    prompt_id: envelope(calls[1]).prompt_id,
   });
 
   start.deliver('oboete memory context\n- one\nend of oboete memory context');
@@ -276,6 +277,7 @@ test('the first before_agent_start injects at session start, later ones per prom
   const prompt = calls.at(-1) as Call;
   assert.deepEqual(prompt.args, [BUNDLE, 'inject', '--agent', 'pi', '--kind', 'prompt']);
   assert.equal(JSON.parse(prompt.stdin[0]).prompt, 'now run it');
+  assert.equal(JSON.parse(prompt.stdin[0]).prompt_id, envelope(calls.at(-2) as Call).prompt_id);
   prompt.deliver('');
   assert.equal(await second, undefined, 'an empty pack adds no message to the turn');
 });
@@ -401,4 +403,3 @@ test('the built extension can reach nothing but a child process', () => {
     assert.equal(text.includes(forbidden), false, `the extension must not contain ${forbidden}`);
   }
 });
-

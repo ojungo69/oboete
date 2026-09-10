@@ -3,6 +3,7 @@
 // FR-045, A15), src/injection/deferred.ts, test/contracts/grok/*.json (R13 probes 2026-09-03).
 // No seam: every case is the real hook sequence through dist/oboete.mjs with GROK_SESSION_ID set.
 import assert from 'node:assert/strict';
+import { grantVisibility } from '../src/db/queries.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -13,6 +14,7 @@ import { openDatabase } from '../src/db/open.js';
 import { resolveRepoIdentity } from '../src/repo-identity.js';
 import { claimLease } from '../src/worker/lease.js';
 import { purgeExpiredEvents } from '../src/worker/purge.js';
+import { seedWorkBinding } from './helpers/work.js';
 import { fixture, rows, scenario, SELECTOR, spawnEngine, type Place } from './helpers/fault.js';
 
 type Json = Record<string, unknown>;
@@ -41,7 +43,7 @@ function payload(place: Place, file: string, key: string, patch: Json = {}): Jso
   return { ...body, ...patch };
 }
 
-/** An ended session with a summary memory, so a Grok turn has exactly one pack item to deliver. */
+/** One current work checkpoint, so a Grok turn has exactly one pack item to deliver. */
 function seed(place: Place): void {
   const identity = resolveRepoIdentity(place.repo);
   const db = openDatabase({ path: place.db, timeoutMs: 5_000 }).db;
@@ -62,6 +64,16 @@ function seed(place: Place): void {
        VALUES ('s-previous', ?, 'grok', 'previous-native', 's-previous', 'grok-4',
          ?, ?, 'ended', 1, 'm-summary', 'done')`,
     ).run(identity.id, NOW - 10_000, NOW - 1_000);
+    seedWorkBinding(db, 's-previous');
+    const contextId = `fixture-context:${identity.id}`;
+    const workId = `fixture-work:${identity.id}`;
+    grantVisibility(db, 'm-summary', { audience: 'work', repoId: identity.id, workId }, 'observer', NOW);
+    db.prepare("UPDATE work_contexts SET local_key = ?, root = ?, repo_secret_paths_json = '[]' WHERE id = ?")
+      .run(identity.worktreeKey, identity.root, contextId);
+    db.prepare("UPDATE memories SET work_id = ?, provenance_complete = 1 WHERE id = 'm-summary'").run(workId);
+    db.prepare("UPDATE work_items SET current_checkpoint_memory_id = 'm-summary' WHERE id = ?").run(workId);
+    db.prepare("INSERT INTO memory_sources (memory_id, capture_root, source_paths_json, source_context_id) VALUES ('m-summary', ?, '[]', ?)")
+      .run(identity.root, contextId);
   } finally {
     db.close();
   }

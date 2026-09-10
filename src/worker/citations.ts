@@ -68,7 +68,7 @@ export async function updateBatchCitations(
     const citations = db
       .prepare(
         `SELECT citation_kind, citation_value FROM memory_sources
-         WHERE memory_id = ? AND citation_kind IS NOT NULL AND citation_value IS NOT NULL`,
+         WHERE memory_id = ? AND context_only = 0 AND citation_kind IS NOT NULL AND citation_value IS NOT NULL`,
       )
       .all(memoryId);
     const paths = citations.flatMap((row) =>

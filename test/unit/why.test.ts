@@ -1,3 +1,4 @@
+import { grantVisibility } from '../../src/db/queries.js';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -89,6 +90,7 @@ function insertMemory(db: DatabaseSync, seed: { id: string; title: string; body:
        content_hash, sensitivity, review_state, created_at)
      VALUES (?, ?, 'discovery', ?, ?, '', ?, ?, 'eligible', 'unreviewed', ?)`,
   ).run(seed.id, REPO, seed.title, seed.body, `material_${seed.id}`, `content_${seed.id}`, NOW);
+  grantVisibility(db, seed.id, { audience: 'project', repoId: REPO }, 'migration', NOW);
 }
 
 function item(partial: LedgerItem): LedgerItem {
@@ -259,7 +261,7 @@ test('why lists included and omitted items with trim and stale notes', async () 
       assert.match(result.stdout, /included:/);
       assert.match(result.stdout, /1\. Pinned note — It is pinned, so it is always included\./);
       assert.match(result.stdout, /2\. Matched note — It matched the prompt\./);
-      assert.match(result.stdout, /^ {4}session summary — It is the summary of the previous session\.$/m);
+      assert.match(result.stdout, /^ {4}session summary — It records progress at the time of this pack\.$/m);
       assert.doesNotMatch(result.stdout, /null\./);
       assert.match(result.stdout, /omitted:/);
       assert.match(
@@ -438,4 +440,137 @@ test('why prints an empty-session line when no pack was built', async () => {
       assert.equal(result.stdout, `No injection was built for session ${SESSION}.\n`);
     },
   );
+});
+
+test('why reports incomplete source processing without exposing source or provider text', async () => {
+  await withSeeded((db) => {
+    db.prepare(`INSERT INTO raw_events
+      (id, repo_id, session_id, turn_id, kind, content, sensitivity, classification_state,
+       processing_state, processing_offset, retry_after, captured_at)
+      VALUES ('source-waiting', ?, ?, ?, 'prompt', 'SOURCE_BODY_MUST_NOT_APPEAR', 'eligible', 'done', 'waiting', 100, ?, ?)`)
+      .run(REPO, SESSION, TURN, NOW + 300_000, NOW);
+    db.prepare(`INSERT INTO observation_batches
+      (id, repo_id, session_id, through_event_id, destination, state, completed_at)
+      VALUES ('source-attempt', ?, ?, 'source-waiting', 'remote_observer', 'applied', ?)`)
+      .run(REPO, SESSION, NOW);
+    db.prepare(`INSERT INTO observation_batch_sources
+      (batch_id, raw_event_id, outcome, reason, recorded_at, portion_start, portion_end, source_total)
+      VALUES ('source-attempt', 'source-waiting', 'uncovered', 'unaccounted', ?, 100, 200, 300)`).run(NOW);
+  }, async () => {
+    const result = await run(runWhy, [SESSION, '--json']);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.generation.sources[0].state, 'waiting');
+    assert.equal(parsed.generation.sources[0].offset, 100);
+    assert.equal(parsed.generation.sources[0].total, 300);
+    assert.equal(parsed.generation.sources[0].reason, 'unaccounted');
+    assert.equal(result.stdout.includes('SOURCE_BODY_MUST_NOT_APPEAR'), false);
+    const human = await run(runWhy, [SESSION]);
+    assert.doesNotMatch(human.stdout, /SOURCE_BODY_MUST_NOT_APPEAR/);
+    assert.match(human.stdout, /source-waiting.*waiting.*unaccounted/);
+    const unrelated = await run(runWhy, [SESSION, '--turn', '7', '--json']);
+    assert.deepEqual(JSON.parse(unrelated.stdout).generation.sources, []);
+  });
+});
+
+test('why follows source evidence to later-session delivery without foreign data or response bodies', async () => {
+  await withSeeded((db) => {
+    db.prepare(`INSERT INTO raw_events (id, repo_id, session_id, turn_id, kind, content, classification_state, processing_state)
+      VALUES ('source-chain', ?, ?, ?, 'prompt', 'SOURCE_CHAIN_BODY', 'done', 'processed')`).run(REPO, SESSION, TURN);
+    db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id) VALUES ('m_hit', 'source-chain'), ('m_budget', 'source-chain')").run();
+    db.prepare("UPDATE memory_sources SET context_only = 1 WHERE memory_id = 'm_budget'").run();
+    insertSession(db, { id: 'later-session', agent: 'grok', native: 'later-native' });
+    const id = createInjection(db, injectionRow({ sessionId: 'later-session', conversationId: 'later-session',
+      kind: 'grok_deferred', state: 'attempted', id: 'later-delivery' }));
+    planItems(db, { id, conversationId: 'later-session', epoch: 0 }, [item({ sourceKind: 'memory', memoryId: 'm_hit', rawEventId: null,
+      decision: 'planned', reason: null, rank: 1, stale: 0 })]);
+    db.exec(`PRAGMA ignore_check_constraints = ON;
+      UPDATE injection_items SET reason = 'UNKNOWN_REASON_PAYLOAD' WHERE injection_id = 'later-delivery';
+      PRAGMA ignore_check_constraints = OFF;`);
+    db.prepare("INSERT INTO repos (id, identity_kind, normalized_identity) VALUES ('foreign-repo', 'common_dir', '/foreign')").run();
+    const foreign = createInjection(db, injectionRow({ id: 'foreign-delivery', repoId: 'foreign-repo',
+      sessionId: 'later-session', conversationId: 'foreign-conversation' }));
+    planItems(db, { id: foreign, conversationId: 'foreign-conversation', epoch: 0 }, [item({ sourceKind: 'memory', memoryId: 'm_hit', rawEventId: null,
+      decision: 'planned', reason: null, rank: 1, stale: 0 })]);
+  }, async () => {
+    const output = await run(runWhy, [SESSION, '--json']);
+    const source = JSON.parse(output.stdout).generation.sources.find((row: { id: string }) => row.id === 'source-chain');
+    assert.deepEqual(source.memoryIds, ['m_hit']);
+    assert.deepEqual(source.deliveries.map((row: { injectionId: string; sessionId: string; state: string; reason: string }) =>
+      [row.injectionId, row.sessionId, row.state, row.reason]), [['later-delivery', 'later-session', 'attempted', 'other']]);
+    const human = await run(runWhy, [SESSION]);
+    assert.match(human.stdout, /later-delivery.*attempted/);
+    for (const text of [output.stdout, human.stdout]) assert.doesNotMatch(text,
+      /SOURCE_CHAIN_BODY|UNKNOWN_REASON_PAYLOAD|MATCHED_BODY_MUST_NOT_APPEAR|foreign-delivery|m_budget/);
+  });
+});
+
+test('why bounds source, memory and delivery chains and states when results are truncated', async () => {
+  await withSeeded((db) => {
+    const source = db.prepare(`INSERT INTO raw_events (id, repo_id, session_id, kind, content, classification_state, processing_state)
+      VALUES (?, ?, ?, 'prompt', 'BOUNDED_SOURCE_BODY', 'done', 'processed')`);
+    for (let i = 0; i < 101; i++) source.run(`source-${String(i).padStart(3, '0')}`, REPO, SESSION);
+    for (let i = 0; i < 21; i++) {
+      const memoryId = `chain-memory-${i}`;
+      insertMemory(db, { id: memoryId, title: 'Retained note', body: 'BOUNDED_MEMORY_BODY' });
+      db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id) VALUES (?, 'source-000')").run(memoryId);
+      const id = createInjection(db, injectionRow({ id: `chain-delivery-${i}` }));
+      planItems(db, { id, conversationId: SESSION, epoch: 0 }, [item({ sourceKind: 'memory', memoryId, rawEventId: null,
+        decision: 'planned', reason: null, rank: 1, stale: 0 })]);
+    }
+  }, async () => {
+    const result = await run(runWhy, [SESSION, '--json']);
+    const generation = JSON.parse(result.stdout).generation;
+    assert.equal(generation.sources.length, 100);
+    assert.equal(generation.truncated, true);
+    const source = generation.sources.find((row: { id: string }) => row.id === 'source-000');
+    assert.equal(source.memoryIds.length, 20);
+    assert.equal(source.memoriesTruncated, true);
+    assert.equal(source.deliveries.length, 20);
+    assert.equal(source.deliveriesTruncated, true);
+    assert.doesNotMatch(result.stdout, /BOUNDED_SOURCE_BODY|BOUNDED_MEMORY_BODY/);
+  });
+});
+
+test('why retains processing receipts and reports unavailable raw material after expiry', async () => {
+  await withSeeded((db) => {
+    db.prepare(`INSERT INTO observation_batches
+      (id, repo_id, session_id, through_event_id, destination, state, completed_at)
+      VALUES ('expired-attempt', ?, ?, 'source-expired', 'remote_observer', 'applied', ?)`)
+      .run(REPO, SESSION, NOW);
+    db.prepare(`INSERT INTO observation_batch_sources
+      (batch_id, raw_event_id, turn_id, outcome, reason, recorded_at, portion_start, portion_end, source_total, historical_actions_json)
+      VALUES ('expired-attempt', 'source-expired', ?, 'processed', 'historical_delete', ?, 0, 200, 200, ?)`)
+      .run(TURN, NOW, JSON.stringify([{ decision: 'delete', target: 'm_previous', reason: 'capture_time_order' }]));
+  }, async () => {
+    const result = await run(runWhy, [SESSION, '--json']);
+    const source = JSON.parse(result.stdout).generation.sources.find((source: { id: string }) => source.id === 'source-expired');
+    assert.ok(source, 'retained receipts remain visible without a raw row');
+    assert.equal(source.state, 'unavailable');
+    assert.equal(source.outcome, 'processed');
+    assert.equal(source.total, 200);
+    assert.deepEqual(source.historicalActions, [{ decision: 'delete', target: 'm_previous', reason: 'capture_time_order' }]);
+    const human = await run(runWhy, [SESSION]);
+    assert.match(human.stdout, /source-expired.*unavailable/);
+    assert.match(human.stdout, /Historical delete for m_previous/);
+    const sameTurn = await run(runWhy, [SESSION, '--turn', '1', '--json']);
+    assert.equal(JSON.parse(sameTurn.stdout).generation.sources[0].id, 'source-expired');
+    const otherTurn = await run(runWhy, [SESSION, '--turn', '7', '--json']);
+    assert.deepEqual(JSON.parse(otherTurn.stdout).generation.sources, []);
+  });
+});
+
+test('why identifies unavailable membership from older attempts without inventing source ids', async () => {
+  await withSeeded((db) => {
+    db.prepare(`INSERT INTO observation_batches
+      (id, repo_id, session_id, through_event_id, destination, state, completed_at)
+      VALUES ('legacy-attempt', ?, ?, 'lost-old-end', 'fallback', 'fallback', ?)`)
+      .run(REPO, SESSION, NOW);
+  }, async () => {
+    const result = await run(runWhy, [SESSION, '--json']);
+    const generation = JSON.parse(result.stdout).generation;
+    assert.equal(generation.legacyUnavailable, true);
+    assert.deepEqual(generation.sources, []);
+    const human = await run(runWhy, [SESSION]);
+    assert.match(human.stdout, /Original source membership is unavailable/);
+  });
 });

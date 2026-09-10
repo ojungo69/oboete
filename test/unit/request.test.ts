@@ -1,3 +1,4 @@
+import { grantVisibility } from '../../src/db/queries.js';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
@@ -19,6 +20,7 @@ import {
 } from '../../src/worker/batches.js';
 import { claimLease } from '../../src/worker/lease.js';
 import { withTempHome } from '../helpers/home.js';
+import { seedWorkBinding } from '../helpers/work.js';
 
 const NOW = 1_757_000_000_000;
 const DAY = 24 * 60 * 60 * 1000;
@@ -75,8 +77,8 @@ function seedEvent(
   db.prepare(
     `INSERT INTO raw_events
        (id, repo_id, session_id, turn_id, agent, kind, content, payload_json, sensitivity,
-        classification_state, captured_at, expires_at)
-     VALUES (?, ?, 'sess1', ?, 'claude', ?, ?, ?, ?, ?, ?, ?)`,
+        classification_state, captured_at, expires_at, work_binding_id)
+     VALUES (?, ?, 'sess1', ?, 'claude', ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     seed.id,
     REPO_ID,
@@ -88,6 +90,7 @@ function seedEvent(
     seed.state ?? 'done',
     NOW - DAY + capturedCounter,
     NOW + 7 * DAY,
+    seedWorkBinding(db, 'sess1'),
   );
 }
 
@@ -113,6 +116,7 @@ function seedMemory(
     seed.deleted === true ? NOW - DAY : null,
     NOW - DAY,
   );
+  grantVisibility(db, seed.id, { audience: 'project', repoId: REPO_ID }, 'migration', NOW);
 }
 
 /** Ten turns of mixed sensitivity, with a marker word per class so the body can be searched. */
@@ -300,9 +304,9 @@ test('the outbound body of a mixed batch carries the eligible rows and nothing e
     assert.equal(built.input.language_hint, 'en');
     assert.deepEqual(
       built.input.session.turns.map((turn) => turn.ordinal),
-      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+      [1, 2, 3, 4, 10, 11, 12],
     );
-    assert.equal(built.input.free_summaries.last_assistant_message, 'The uploader now retries three times.');
+    assert.deepEqual(built.input.free_summaries, {});
   });
 });
 
@@ -356,6 +360,9 @@ test('a Japanese batch is labelled ja and an oversized batch is excerpted', asyn
     // FR-015: the input is bounded to 12,000 characters and the excerpting is recorded.
     assert.equal(built.excerpted, true);
     assert.ok(JSON.stringify(built.input).length <= 12_000);
+    assert.equal(built.coverage.find((row) => row.rowId === 'j2')?.state, 'omitted');
+    assert.equal(built.coverage.find((row) => row.rowId === 'j1')?.state, 'full');
+    assert.equal(built.coverage.length, 10, 'omitted sources remain part of the coverage record');
   });
 });
 
@@ -373,4 +380,47 @@ test('the consent gate refuses a stored hash that no longer describes the config
     consent: { hash: consentHash(consentTuple(live, env)), accepted_at: NOW },
   });
   assert.equal(consentMatches(changed, env), false);
+});
+
+test('oversized sources page without losing escaped text or splitting surrogate pairs', async () => {
+  await withOpened((db) => {
+    seedRepoAndSession(db, 1);
+    const text = `FIRST ${'quoted "text" \\ line\n😀 '.repeat(2_000)} LAST`;
+    seedEvent(db, { id: 'large', kind: 'last_assistant_message', content: text });
+    const rows = db.prepare('SELECT * FROM raw_events').all() as unknown as RawEventRow[];
+    const session = db.prepare('SELECT * FROM sessions').get() as unknown as SessionRow;
+    const original = JSON.stringify({ captured_at: rows[0].captured_at, id: 'large', kind: 'last_assistant_message', text });
+    const chunks: string[] = [];
+    let offset = 0;
+    for (let page = 0; offset < original.length && page < 30; page += 1) {
+      const built = build(db, 'remote_observer', rows, session, []);
+      assert.ok(JSON.stringify(built.input).length <= 12_000);
+      assert.deepEqual(built.input.free_summaries, {}, 'a summary cannot bypass source coverage');
+      const portion = built.coverage[0];
+      assert.equal(portion.start, offset);
+      assert.ok(portion.end > offset, 'every page makes bounded progress');
+      assert.equal(portion.total, original.length);
+      assert.equal(portion.text, original.slice(portion.start, portion.end));
+      assert.equal(/[\uD800-\uDBFF]$/u.test(portion.text), false);
+      chunks.push(portion.text);
+      offset = portion.end;
+      Object.assign(rows[0], { processing_offset: offset, processing_hash: portion.sourceHash });
+    }
+    assert.equal(chunks.join(''), original);
+    assert.ok(chunks.length > 1);
+  });
+});
+
+test('a full event waits for the next page instead of losing its tail', async () => {
+  await withOpened((db) => {
+    seedRepoAndSession(db, 1);
+    seedEvent(db, { id: 'first', kind: 'prompt', content: 'first '.repeat(1_200) });
+    seedEvent(db, { id: 'second', kind: 'prompt', content: 'second '.repeat(1_000) });
+    seedEvent(db, { id: 'third', kind: 'prompt', content: 'a later small source' });
+    const built = buildFromEveryRow(db, 'remote_observer');
+    assert.deepEqual(built.input.events.map((event) => event.id), ['first']);
+    assert.equal(built.input.events[0].text, 'first '.repeat(1_200));
+    assert.equal(built.coverage[1].state, 'omitted');
+    assert.equal(built.coverage[2].state, 'omitted');
+  });
 });

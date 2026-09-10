@@ -234,6 +234,11 @@ export function eventId(event: NormalizedEvent, turnOrdinal?: number): string {
   return sha256Json(eventIdKey(event, turnOrdinal));
 }
 
+/** Version-1 event keys remain readable; new accepted IDs separate identical native IDs in different repositories. */
+export function repositoryEventId(repoId: string, legacyEventId: string): string {
+  return sha256Json(['repo-v1', repoId, legacyEventId]);
+}
+
 export type ConversationDecision = 'reuse_root' | 'new_root';
 
 // Per session-start source, either a fixed decision or "whichever the native session id says".

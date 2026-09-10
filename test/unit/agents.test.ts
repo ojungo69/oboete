@@ -1224,6 +1224,7 @@ type JsonSchema = {
   enum?: unknown[];
   maxLength?: number;
   properties?: Record<string, JsonSchema>;
+  items?: JsonSchema;
 };
 
 /**
@@ -1253,9 +1254,8 @@ function sampleOf(schema: JsonSchema, path: string, texts: Map<string, string>):
       return 1;
     case 'boolean':
       return true;
-    // The declared paths travel as `contentForDetector.paths`, not as text.
     case 'array':
-      return [];
+      return schema.items === undefined ? [] : [sampleOf(schema.items, `${path}[]`, texts)];
     case 'object': {
       const sample: Record<string, unknown> = {};
       for (const [name, property] of Object.entries(schema.properties ?? {})) {
@@ -1305,13 +1305,14 @@ test('every text field writes its redacted value back where it came from', () =>
     tool_call_id: 'call-1',
     tool_name_native: 'Bash',
     tool_name: 'bash',
-    input: { paths: [], command: 'echo one', text: 'two' },
+    input: { paths: ['src/example.ts'], command: 'echo one', text: 'two' },
   };
 
   for (const field of textFields(event)) field.write(`[REDACTED] ${field.read()}`);
 
   assert.equal(event.input.command, '[REDACTED] echo one');
   assert.equal(event.input.text, '[REDACTED] two');
+  assert.deepEqual(event.input.paths, ['[REDACTED] src/example.ts']);
 });
 
 test('a mixed Codex patch is an edit and preserves all file paths and line counts', () => {

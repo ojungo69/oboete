@@ -17,7 +17,7 @@ import {
   injectForHook,
   type HookContext,
 } from '../../src/injection/inject.js';
-import { whyReport } from '../../src/injection/ledger.js';
+import { sessionStartAttempted, whyReport } from '../../src/injection/ledger.js';
 import { NOW, insertMemory, insertSession, scope, seedSummary, stdoutOf, withFixture, type Fixture } from '../helpers/inject-fixture.js';
 import { detectSync } from '../../src/privacy/detect.js';
 import { oboetePaths } from '../../src/paths.js';
@@ -80,7 +80,6 @@ function context(
     sessionCreated?: boolean;
     epoch?: number;
     remainingBudget?: () => number;
-    sleep?: (milliseconds: number) => void;
     db?: DatabaseSync;
   },
 ): HookContext {
@@ -105,7 +104,6 @@ function context(
     sessionCreated: input.sessionCreated ?? false,
     secretPaths: [],
     remainingBudget: input.remainingBudget ?? (() => 1_300),
-    sleep: input.sleep,
   };
 }
 
@@ -139,7 +137,9 @@ test('Claude injects plain session-start and prompt packs and confirms their ite
       }),
     );
     assert.ok(prompt.includes('SQLite busy timeout'));
-    assert.ok(whyReport(fixture.db, 's-claude', scope(fixture)).flatMap((row) => row.items).every((item) => item.decision === 'included'));
+    const items = whyReport(fixture.db, 's-claude', scope(fixture)).flatMap((row) => row.items);
+    assert.ok(items.every((item) => item.decision === 'included' || item.reason === 'duplicate_in_conversation'));
+    assert.equal(items.filter((item) => item.memoryId === 'm-summary' && item.decision === 'included').length, 1);
     assert.equal(
       fixture.db.prepare('SELECT last_injected_at FROM memories WHERE id = ?').get('m-prompt')?.last_injected_at,
       NOW,
@@ -287,6 +287,75 @@ test('Codex carries the new epoch session-start pack on the first prompt after a
       }),
     );
     assert.equal(startPacks().length, 2);
+  });
+});
+
+test('a first Codex pack cannot be printed after privacy changes while building its second pack', async () => {
+  await withFixture(async (fixture) => {
+    seedSummary(fixture);
+    insertSession(fixture, { id: 'codex-two-packs', agent: 'codex' });
+    insertMemory(fixture, { id: 'long-proof', title: 'SQLite busy timeout', body: 'SQLite busy timeout tuning evidence.' });
+    fixture.db.prepare('UPDATE memories SET provenance_complete = 1 WHERE id = ?').run('long-proof');
+    fixture.db.prepare(`INSERT INTO memory_sources (memory_id, capture_root, source_paths_json, source_context_id)
+      VALUES ('long-proof', ?, ?, ?)`).run(fixture.repo, JSON.stringify(['a'.repeat(70_000)]), `fixture-context:${fixture.identity.id}`);
+    const input = context(fixture, { agent: 'codex', eventName: 'UserPromptSubmit', sessionId: 'codex-two-packs' });
+    const previous = process.env.OBOETE_OPENROUTER_API_KEY;
+    let changed = false;
+    input.detect = async (candidate) => {
+      if (fixture.db.prepare("SELECT 1 FROM injections WHERE session_id = 'codex-two-packs' AND kind = 'session_start'").get()) {
+        process.env.OBOETE_OPENROUTER_API_KEY = 'previous database migration';
+        changed = true;
+      }
+      return detectSync(candidate);
+    };
+    try {
+      const result = await injectForHook(input);
+      assert.equal(changed, true, 'the source check of the second pack reaches the async race');
+      assert.doesNotMatch(result, /previous database migration/);
+      assert.equal(fixture.db.prepare(`SELECT COUNT(*) AS n FROM injection_items ii JOIN injections i ON i.id = ii.injection_id
+        WHERE i.session_id = 'codex-two-packs' AND ii.memory_id = 'm-summary' AND ii.decision = 'included'`).get()?.n, 0,
+      'an unprinted first pack cannot leave a delivered-memory receipt');
+    } finally {
+      if (previous === undefined) delete process.env.OBOETE_OPENROUTER_API_KEY;
+      else process.env.OBOETE_OPENROUTER_API_KEY = previous;
+    }
+  });
+});
+
+test('Codex cancels an unprinted first pack after a second-pack exception and can retry it', async () => {
+  await withFixture(async (fixture) => {
+    seedSummary(fixture);
+    insertSession(fixture, { id: 'codex-pair-error', agent: 'codex' });
+    insertMemory(fixture, { id: 'error-proof', title: 'SQLite busy timeout', body: 'SQLite busy timeout evidence.' });
+    fixture.db.prepare('UPDATE memories SET provenance_complete = 1 WHERE id = ?').run('error-proof');
+    fixture.db.prepare(`INSERT INTO memory_sources (memory_id, capture_root, source_paths_json, source_context_id)
+      VALUES ('error-proof', ?, ?, ?)`).run(fixture.repo, JSON.stringify(['a'.repeat(70_000)]), `fixture-context:${fixture.identity.id}`);
+    const input = context(fixture, { agent: 'codex', eventName: 'UserPromptSubmit', sessionId: 'codex-pair-error' });
+    let rejected = false;
+    input.detect = async () => { rejected = true; throw new Error('second_pack_failed'); };
+    assert.equal(await injectForHook(input), '');
+    assert.equal(rejected, true);
+    const starts = () => fixture.db.prepare(`SELECT state, degraded_reason FROM injections
+      WHERE session_id = 'codex-pair-error' AND kind = 'session_start' ORDER BY rowid`).all();
+    assert.equal(starts()[0].state, 'omitted');
+    assert.equal(starts()[0].degraded_reason, 'not_delivered');
+    assert.equal(fixture.db.prepare(`SELECT COUNT(*) AS n FROM injection_items ii JOIN injections i ON i.id = ii.injection_id
+      WHERE i.session_id = 'codex-pair-error' AND ii.decision IN ('planned', 'included')`).get()?.n, 0);
+    input.detect = (candidate) => detectSync(candidate);
+    assert.match(await injectForHook(input), /previous database migration/);
+    assert.deepEqual(starts().map((row) => row.state), ['omitted', 'emitted']);
+  });
+});
+
+test('ordinary empty or legacy start omissions still suppress repeated start attempts', async () => {
+  await withFixture(async (fixture) => {
+    insertSession(fixture, { id: 'empty-start', agent: 'codex' });
+    assert.equal(await injectForHook(context(fixture, { agent: 'codex', eventName: 'SessionStart', sessionId: 'empty-start' })), '');
+    assert.equal(sessionStartAttempted(fixture.db, 'empty-start', 0), true);
+    fixture.db.exec("UPDATE injections SET degraded_reason = NULL WHERE session_id = 'empty-start'");
+    assert.equal(sessionStartAttempted(fixture.db, 'empty-start', 0), true);
+    fixture.db.exec("UPDATE injections SET degraded_reason = 'not_delivered' WHERE session_id = 'empty-start'");
+    assert.equal(sessionStartAttempted(fixture.db, 'empty-start', 0), false);
   });
 });
 
@@ -441,7 +510,7 @@ test('Grok retries a denied attempt and confirms a failed execution', async () =
   });
 });
 
-test('only session start polls a pending summary and stops after one second', async () => {
+test('pending work activity is immediately available at session start and prompt retrieval never waits', async () => {
   await withFixture(async (fixture) => {
     insertSession(fixture, {
       id: 's-pending',
@@ -456,23 +525,20 @@ test('only session start polls a pending summary and stops after one second', as
        VALUES ('e-prompt', ?, 's-pending', 'claude', 'prompt', ?, '{}',
          'local_only', 'done', ?, ?)`,
     ).run(fixture.identity.id, '直近の生の活動です。', NOW - 1_000, NOW + 10_000);
+    fixture.db.prepare('UPDATE raw_events SET work_binding_id = ? WHERE id = ?').run('fixture-binding:s-pending', 'e-prompt');
+    fixture.db.prepare('UPDATE raw_events SET payload_json = ? WHERE id = ?')
+      .run(JSON.stringify({ capture_root: fixture.identity.root, source_paths: [] }), 'e-prompt');
     insertSession(fixture, { id: 's-wait', agent: 'claude' });
 
-    let elapsed = 0;
     const start = await injectForHook(
       context(fixture, {
         agent: 'claude',
         eventName: 'SessionStart',
         sessionId: 's-wait',
-        remainingBudget: () => 1_300 - elapsed,
-        sleep: (milliseconds) => {
-          elapsed += milliseconds;
-        },
       }),
     );
-    assert.ok(elapsed <= 1_000, `waited ${elapsed} ms`);
     assert.ok(start.includes('直近の生の活動です。'));
-    assert.match(start, /summary.*not finished/i);
+    assert.match(start, /selected work is still waiting to be processed/i);
 
     insertSession(fixture, { id: 's-no-wait', agent: 'claude' });
     insertMemory(fixture, {
@@ -480,7 +546,6 @@ test('only session start polls a pending summary and stops after one second', as
       title: 'Prompt does not wait',
       body: 'Prompt retrieval runs immediately.',
     });
-    let promptSleeps = 0;
     const prompt = await injectForHook(
       context(fixture, {
         agent: 'claude',
@@ -493,13 +558,9 @@ test('only session start polls a pending summary and stops after one second', as
           fixture.repo,
           'Prompt does not wait',
         ),
-        sleep: () => {
-          promptSleeps += 1;
-        },
       }),
     );
     assert.ok(prompt.includes('Prompt does not wait'));
-    assert.equal(promptSleeps, 0);
   });
 });
 

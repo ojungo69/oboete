@@ -5,6 +5,7 @@ import {
   copyFileSync,
   existsSync,
   readFileSync,
+  realpathSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -65,7 +66,13 @@ function expectedToolResultId(payload: Json, repo: string, output: string): stri
     output,
     is_error: false,
   };
-  return createHash('sha256').update(JSON.stringify(eventIdKey(event)), 'utf8').digest('hex');
+  const legacy = createHash('sha256').update(JSON.stringify(eventIdKey(event)), 'utf8').digest('hex');
+  return expectedRepositoryEventId(repo, legacy);
+}
+
+function expectedRepositoryEventId(repo: string, legacy: string): string {
+  const repoId = createHash('sha256').update(realpathSync(repo)).digest('hex').slice(0, 16);
+  return createHash('sha256').update(JSON.stringify(['repo-v1', repoId, legacy])).digest('hex');
 }
 
 function everythingWritten(paths: OboetePaths): string {
@@ -439,6 +446,21 @@ test('an event name this build does not capture stores nothing', async () => {
   });
 });
 
+test('a malformed partial detector result keeps only failed metadata', async () => {
+  await withCapture(async (context) => {
+    const prefix = JSON.stringify({ session_id: 'malformed-fields', cwd: context.repo, tool_name: 'Read',
+      tool_input: { file_path: 'unclassified-path.ts', content: 'UNCLASSIFIED_PREFIX' } });
+    await context.capture('claude', 'PreToolUse', {}, { text: prefix.slice(0, -3), truncated: true, deps: {
+      detect: async () => ({ ok: true, text: '', texts: ['UNCLASSIFIED_PREFIX'], redactions: [],
+        sensitivity: 'local_only', privateRemoved: 0, pathRule: null }),
+    } });
+    const row = context.all('SELECT content, classification_state, payload_json FROM raw_events')[0];
+    assert.equal(row.classification_state, 'failed');
+    assert.equal(row.content, null);
+    assert.doesNotMatch(String(row.payload_json), /UNCLASSIFIED_PREFIX|unclassified-path/);
+  });
+});
+
 test('a payload above the read bound becomes one partial row (A7, A14)', async () => {
   await withCapture(async (context) => {
     const line = corpusLine('openai-api-key');
@@ -539,7 +561,8 @@ test('two Grok session starts of one session get one id per turn ordinal (R7)', 
       source: 'resume',
     };
     const idAt = (ordinal: number): string =>
-      createHash('sha256').update(JSON.stringify(eventIdKey(event, ordinal)), 'utf8').digest('hex');
+      expectedRepositoryEventId(context.repo,
+        createHash('sha256').update(JSON.stringify(eventIdKey(event, ordinal)), 'utf8').digest('hex'));
 
     for (const ordinal of [1, 2, 3, 4, 5]) {
       await context.capture('grok', 'UserPromptSubmit', { ...base, prompt: `question ${ordinal}` });
@@ -734,19 +757,22 @@ test('the spool path recovers the row the direct path would have written', async
         assert.equal(recovered.inserted, 1);
         const spooledRow = recovered.rows[0] as Json;
 
-        // The two rows differ in exactly two columns, both by design: `session_id` is a fresh uuid
-        // per installation (conventions "Identifiers"), and `via_spool` records the path the row
-        // took (data-model.md raw_events).
+        // Session and work binding IDs are installation-local UUIDs; via_spool records the path.
         assert.equal(spooledRow.via_spool, 1);
         assert.equal(directRow.via_spool, 0);
         assert.notEqual(spooledRow.session_id, directRow.session_id);
+        assert.notEqual(spooledRow.work_binding_id, directRow.work_binding_id);
         const columns = Object.keys(directRow).filter(
-          (name) => name !== 'session_id' && name !== 'via_spool',
+          (name) => !['session_id', 'via_spool', 'work_binding_id'].includes(name),
         );
         assert.ok(columns.includes('id') && columns.includes('payload_json'));
         for (const column of columns) {
           assert.deepEqual(spooledRow[column], directRow[column], `column ${column}`);
         }
+        const workContext = `SELECT c.repo_id, c.local_key, w.purpose, b.reason
+          FROM work_bindings b JOIN work_contexts c ON c.id = b.context_id
+          JOIN work_items w ON w.id = b.work_id`;
+        assert.deepEqual(spooled.all(workContext), direct.all(workContext));
 
         const sessions = spooled.all('SELECT native_session_id, agent FROM sessions');
         assert.equal(sessions.length, 1);
@@ -773,6 +799,7 @@ test('a recovered prompt opens the next turn, and later events attach to it (FR-
       { ...base, prompt_id: 'p3', prompt: 'three' },
       {
         deps: {
+          now: () => NOW + 1,
           detect: async (input) => {
             elapsed = INJECTION_DEADLINE_MS - SPOOL_RESERVE_MS + 10;
             return detectSync(input);

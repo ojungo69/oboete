@@ -15,12 +15,22 @@ export type Memory = {
   body: string | null;
   sensitivity: string;
   review_state: string;
-  degraded_reason: string | null;
-  source_session_id: string | null;
+  degraded_reason?: string | null;
+  source_session_id?: string | null;
   pinned_at: number | null;
   created_at: number | null;
   citations_ok: number | null;
-  sources: Source[];
+  sources?: Source[];
+  can_adopt?: boolean;
+};
+
+export type SharingProposal = {
+  id: string;
+  candidate_title: string;
+  candidate_body: string;
+  origin_memory_id: string;
+  origin_work_id: string;
+  state: 'pending' | 'approved' | 'rejected';
 };
 
 export type SearchHit = {
@@ -83,13 +93,18 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new Error(
       response.status === 401
         ? 'This page needs the address printed by `oboete view`, including its token.'
-        : `The viewer could not complete the request (${response.status}).`,
+        : response.status === 404 ? 'This memory or proposal is no longer available. Refresh the page before trying again.'
+          : `The viewer could not complete the request (${response.status}).`,
     );
   }
   return (await response.json()) as T;
 }
 
 export const api = {
+  sharing: () => call<{ proposals: SharingProposal[]; hasMore: boolean }>('/api/sharing'),
+  decideSharing: (id: string, decision: 'approve' | 'reject') =>
+    call(`/api/sharing/${encodeURIComponent(id)}/${decision}`, { method: 'POST' }),
+  adopt: (id: string) => call(`/api/memories/${encodeURIComponent(id)}/adopt`, { method: 'POST' }),
   memories: () => call<{ repository: string; memories: Memory[] }>('/api/memories'),
   sessions: () => call<{ sessions: Session[] }>('/api/sessions'),
   search: (query: string) =>

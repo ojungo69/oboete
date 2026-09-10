@@ -174,6 +174,12 @@ const repoRulesSchema = z.strictObject({
     .prefault({}),
 });
 
+/** Capture/spool provenance may retain only the same bounded repository rules accepted live. */
+export function repoSecretPaths(value: unknown): string[] | null {
+  const parsed = repoRulesSchema.safeParse({ privacy: { secret_paths: value } });
+  return value === undefined || !parsed.success ? null : parsed.data.privacy.secret_paths;
+}
+
 export class ConfigError extends Error {
   readonly code: 'config_malformed' | 'config_credentials';
 

@@ -1,16 +1,19 @@
+import { grantVisibility } from '../../src/db/queries.js';
 import assert from 'node:assert/strict';
-import { mkdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { Readable } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 import { test } from 'node:test';
 
 import { contentHash, materialHash, memoryIdFor } from '../../src/db/identity.js';
 import { openDatabase } from '../../src/db/open.js';
-import { LEXICAL_NOTE } from '../../src/memories-cli.js';
+import { LEXICAL_NOTE, runGet, runSearch, runTimeline } from '../../src/memories-cli.js';
 import { MCP_TOOLS, runMcp, type McpRuntime } from '../../src/mcp.js';
 import { oboetePaths } from '../../src/paths.js';
 import { resolveRepoIdentity, type RepoIdentity } from '../../src/repo-identity.js';
+import { seedWorkBinding } from '../helpers/work.js';
 import { cjkBigrams } from '../../src/retrieval/fts.js';
 import { withTempHome } from '../helpers/home.js';
 
@@ -45,6 +48,7 @@ function insertMemory(
     content,
     seed.sensitivity ?? 'eligible',
   );
+  grantVisibility(db, id, { audience: 'project', repoId: seed.repoId }, 'migration', 1);
   return id;
 }
 
@@ -59,13 +63,15 @@ async function serve(
   const status = await runMcp([], {
     cwd,
     input: Readable.from([`${lines.join('\n')}\n`]),
+    ...overrides,
     writeOut: (text) => {
       stdout += text;
+      overrides.writeOut?.(text);
     },
     writeError: (text) => {
       stderr += text;
+      overrides.writeError?.(text);
     },
-    ...overrides,
   });
   const frames = stdout
     .split('\n')
@@ -132,23 +138,216 @@ test('an unknown protocol version gets the latest legacy version the server impl
   });
 });
 
-test('tools/list returns the three tools of contracts/mcp.md with their input schemas', async () => {
+test('tools/list returns memory and scoped work tools with their input schemas', async () => {
   await withFixture(async ({ repo }) => {
     const { frames } = await serve(repo, [request(2, 'tools/list')]);
     assert.deepEqual(frames[0], { jsonrpc: '2.0', id: 2, result: { tools: MCP_TOOLS } });
     assert.deepEqual(
       MCP_TOOLS.map((tool) => tool.name),
-      ['search', 'timeline', 'get'],
+      ['search', 'timeline', 'get', 'work_status', 'work_choose', 'sharing_status'],
     );
     assert.deepEqual(MCP_TOOLS[0].inputSchema, {
       type: 'object',
       properties: {
+        binding: { type: 'string', minLength: 1, maxLength: 128, description: 'An exact current-worktree binding ID' },
+        history: { type: 'boolean', default: false, description: 'Deliberately include retained historical memories and checkpoints' },
         query: { type: 'string' },
         limit: { type: 'integer', minimum: 1, maximum: 50, default: 10 },
       },
       required: ['query'],
     });
     assert.deepEqual(MCP_TOOLS[2].inputSchema.required, ['id']);
+  });
+});
+
+test('MCP sharing status is read-only and model-generated confirmation cannot approve a proposal', async () => {
+  await withFixture(async ({ repo, db }) => {
+    const result = await serve(repo, [call(1, 'sharing_status', {}),
+      call(2, 'sharing_status', { confirmed: true }), call(3, 'sharing_update', { id: 'proposal', decision: 'approve', confirmed: true })]);
+    assert.deepEqual((result.frames[0].result as { structuredContent: unknown }).structuredContent, { proposals: [], hasMore: false });
+    assert.equal((result.frames[1].error as { code: number }).code, -32602);
+    assert.equal((result.frames[2].error as { code: number }).code, -32602);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sharing_proposals').get()?.n, 0);
+    assert.deepEqual(MCP_TOOLS.find((tool) => tool.name === 'sharing_status')?.annotations,
+      { readOnlyHint: true, idempotentHint: true, openWorldHint: false });
+  });
+});
+
+test('work MCP choices are scoped, persist selection and refuse a repeated new-work choice token', async () => {
+  await withFixture(async ({ repo, identity, db, home }) => {
+    db.prepare(`INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, status)
+      VALUES ('work-session', ?, 'codex', 'native-work', 'work-session', 'active')`).run(identity.id);
+    const binding = seedWorkBinding(db, 'work-session');
+    db.prepare('UPDATE work_contexts SET local_key = ?, root = ?').run(identity.worktreeKey, repo);
+    db.prepare('UPDATE work_bindings SET work_id = NULL, candidates_json = ? WHERE id = ?')
+      .run(JSON.stringify([`fixture-work:${identity.id}`]), binding);
+    const { frames } = await serve(repo, [
+      call(1, 'work_status', {}),
+      call(2, 'work_choose', { binding, work: 'new' }),
+      call(3, 'work_choose', { binding, work: 'new' }),
+      call(4, 'work_status', {}),
+    ]);
+    const before = frames[0].result as { structuredContent: { bindings: { id: string; work_id: string | null }[] } };
+    assert.equal(before.structuredContent.bindings[0].id, binding);
+    assert.equal(before.structuredContent.bindings[0].work_id, null);
+    assert.equal((frames[1].result as { isError?: boolean }).isError, undefined);
+    assert.equal((frames[2].result as { isError?: boolean }).isError, true);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM work_items').get()?.n, 2);
+    const current = String(db.prepare('SELECT id FROM work_bindings WHERE closed_at IS NULL').get()?.id);
+    assert.notEqual(current, binding);
+    const foreign = join(home, 'other-work-root');
+    mkdirSync(foreign);
+    const denied = await serve(foreign, [
+      call(5, 'work_choose', { binding: current, work: `fixture-work:${identity.id}` }),
+      call(6, 'work_choose', { binding: 'missing', work: 'new' }),
+      call(7, 'work_choose', { binding: current, source: 'source', work: 'new' }),
+    ]);
+    assert.deepEqual(denied.frames[0].result, denied.frames[1].result);
+    assert.equal((denied.frames[2].error as { code: number }).code, -32602);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM work_items').get()?.n, 2);
+  });
+});
+
+test('CLI and MCP require an exact binding for ambiguous progress and keep historical inspection explicit', async () => {
+  await withFixture(async ({ repo, identity, db }) => {
+    db.prepare(`INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, status)
+      VALUES ('reader-session', ?, 'codex', 'native-reader', 'reader-session', 'active')`).run(identity.id);
+    const binding = seedWorkBinding(db, 'reader-session');
+    const firstWork = `fixture-work:${identity.id}`;
+    db.prepare('UPDATE work_contexts SET local_key = ?, root = ?').run(identity.worktreeKey, repo);
+    db.prepare(`INSERT INTO work_items (id, repo_id, origin_context_id, purpose, created_at, updated_at)
+      VALUES ('second-work', ?, ?, 'Second investigation', 1, 1)`).run(identity.id, `fixture-context:${identity.id}`);
+    const ids = [firstWork, 'second-work', null].map((workId, index) => {
+      const id = insertMemory(db, { repoId: identity.id, title: `Progress ${index}`, body: `Checkpoint state ${index}.` });
+      db.prepare("UPDATE memories SET type = 'session_summary', work_id = ?, source_session_id = 'reader-session' WHERE id = ?")
+        .run(workId, id);
+      if (workId !== null) {
+        db.prepare('UPDATE work_items SET current_checkpoint_memory_id = ? WHERE id = ?').run(id, workId);
+        db.prepare('UPDATE memories SET provenance_complete = 1 WHERE id = ?').run(id);
+        db.prepare(`INSERT INTO memory_sources (memory_id, capture_root, source_paths_json, source_context_id)
+          VALUES (?, ?, '[]', ?)`).run(id, repo, `fixture-context:${identity.id}`);
+      }
+      return id;
+    });
+    const { frames } = await serve(repo, [
+      call(1, 'search', { query: 'Progress' }),
+      call(2, 'get', { id: ids[0] }),
+      call(3, 'get', { id: ids[0], binding }),
+      call(4, 'get', { id: ids[1], binding }),
+      call(5, 'get', { id: ids[2], history: true }),
+      call(6, 'search', { query: 'Progress', binding }),
+      call(7, 'timeline', { binding }),
+      call(8, 'get', { id: ids[0], binding: 'foreign-binding' }),
+    ]);
+    const results = frames.map((frame) => frame.result as { isError?: boolean; structuredContent?: { id?: string;
+      memories?: { id: string }[]; sessions?: { memory_ids: string[] }[]; selection?: { choices: unknown[] } } });
+    assert.deepEqual(results[0].structuredContent?.memories, []);
+    assert.equal(results[0].structuredContent?.selection?.choices.length, 2);
+    assert.equal(results[1].isError, true);
+    assert.equal(results[2].structuredContent?.id, ids[0]);
+    assert.equal(results[3].isError, true);
+    assert.equal(results[4].structuredContent?.id, ids[2]);
+    assert.deepEqual(results[5].structuredContent?.memories?.map((item) => item.id), [ids[0]]);
+    assert.deepEqual(results[6].structuredContent?.sessions?.[0].memory_ids, [ids[0]]);
+    assert.equal(results[7].isError, true);
+
+    for (const [command, args, status, expected] of [
+      [runSearch, ['Progress', '--json'], 0, '"memories":[]'],
+      [runGet, [ids[0], '--json'], 1, 'memory_not_found'],
+      [runGet, [ids[0], '--json', '--binding', binding], 0, ids[0]],
+      [runGet, [ids[1], '--json', '--binding', binding], 1, 'memory_not_found'],
+      [runGet, [ids[2], '--json', '--history'], 0, ids[2]],
+      [runTimeline, ['--json', '--binding', binding], 0, ids[0]],
+    ] as const) {
+      let stdout = '';
+      assert.equal(await command([...args], { cwd: repo, writeOut: (text) => { stdout += text; }, writeError: () => {} }), status);
+      assert.ok(stdout.includes(expected), stdout);
+      if (command === runTimeline) assert.ok(!stdout.includes(ids[1]) && !stdout.includes(ids[2]), stdout);
+    }
+    db.prepare("UPDATE memories SET sensitivity = 'secret' WHERE id = ?").run(ids[2]);
+    const secret = await serve(repo, [call(9, 'get', { id: ids[2], history: true })]);
+    assert.equal((secret.frames[0].result as { isError: boolean }).isError, true);
+  });
+});
+
+test('CLI and every MCP reader apply current path policy before formatting body or source fields', async () => {
+  await withFixture(async ({ repo, identity, db }) => {
+    db.prepare(`INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, status)
+      VALUES ('private-reader', ?, 'codex', 'private-reader', 'private-reader', 'active')`).run(identity.id);
+    const binding = seedWorkBinding(db, 'private-reader');
+    const workId = `fixture-work:${identity.id}`;
+    const contextId = `fixture-context:${identity.id}`;
+    db.prepare('UPDATE work_contexts SET local_key = ?, root = ?').run(identity.worktreeKey, repo);
+    const id = insertMemory(db, { repoId: identity.id, title: 'Protected upload status', body: 'The protected deployment details remain outstanding.' });
+    db.prepare(`UPDATE memories SET type = 'session_summary', work_id = ?, source_session_id = 'private-reader',
+      provenance_complete = 1 WHERE id = ?`).run(workId, id);
+    db.prepare('UPDATE work_items SET current_checkpoint_memory_id = ?').run(id);
+    db.prepare(`INSERT INTO memory_sources (memory_id, capture_root, source_paths_json, source_context_id)
+      VALUES (?, ?, '["protected/upload.ts"]', ?)`).run(id, repo, contextId);
+    const before = await serve(repo, [call(1, 'get', { id, binding })]);
+    assert.match(before.stdout, /protected deployment details/);
+    writeFileSync(join(repo, '.oboete.toml'), '[privacy]\nsecret_paths = ["protected/**"]\n');
+    const after = await serve(repo, [call(1, 'get', { id, binding }), call(2, 'get', { id, history: true }),
+      call(3, 'search', { query: 'Protected', binding }), call(4, 'timeline', { binding }), call(5, 'work_status', { all: true })]);
+    assert.doesNotMatch(after.stdout, /Protected upload status|protected deployment details|protected\/upload/);
+    const status = spawnSync(process.execPath, [join(process.cwd(), 'dist/oboete.mjs'), 'work', 'status', '--json'],
+      { cwd: repo, env: process.env, encoding: 'utf8' });
+    assert.equal(status.status, 0, status.stderr);
+    assert.doesNotMatch(status.stdout, /Protected upload status|protected deployment details|protected\/upload/);
+    for (const [command, args] of [[runSearch, ['Protected', '--json']], [runGet, [id, '--json']], [runTimeline, ['--json']]] as const) {
+      let output = '';
+      await command([...args], { cwd: repo, writeOut: (text) => { output += text; }, writeError: () => {} });
+      assert.doesNotMatch(output, /Protected upload status|protected deployment details|protected\/upload/);
+    }
+    let historical = '';
+    await runGet([id, '--history', '--json'], { cwd: repo, writeOut: (text) => { historical += text; }, writeError: () => {} });
+    assert.match(historical, /protected deployment details/, 'explicit local history remains an inspection surface');
+  });
+});
+
+test('work and selection metadata cannot expose a value that becomes a configured credential', async () => {
+  await withFixture(async ({ repo, identity, db }) => {
+    db.prepare(`INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, status)
+      VALUES ('metadata-session', ?, 'codex', 'metadata-native', 'metadata-session', 'active')`).run(identity.id);
+    seedWorkBinding(db, 'metadata-session');
+    db.prepare('UPDATE work_contexts SET local_key = ?, root = ?').run(identity.worktreeKey, repo);
+    const privatePurpose = 'A formerly ordinary purpose becomes a credential';
+    db.prepare(`INSERT INTO work_items (id, repo_id, origin_context_id, purpose, created_at, updated_at)
+      VALUES ('private-purpose', ?, ?, ?, 1, 1)`).run(identity.id, `fixture-context:${identity.id}`, privatePurpose);
+    const before = process.env.OBOETE_OPENROUTER_API_KEY;
+    try {
+      process.env.OBOETE_OPENROUTER_API_KEY = privatePurpose;
+      const result = await serve(repo, [call(1, 'work_status', { all: true }), call(2, 'search', { query: 'missing' }), call(3, 'timeline', {})]);
+      assert.ok(!result.stdout.includes(privatePurpose));
+      assert.ok(result.stdout.includes('private-purpose'), 'opaque choices remain usable');
+      let output = '';
+      await runSearch(['missing', '--json'], { cwd: repo, writeOut: (text) => { output += text; }, writeError: () => {} });
+      assert.ok(!output.includes(privatePurpose));
+    } finally {
+      if (before === undefined) delete process.env.OBOETE_OPENROUTER_API_KEY;
+      else process.env.OBOETE_OPENROUTER_API_KEY = before;
+    }
+  });
+});
+
+test('a running MCP refuses an old worktree generation after its directory is recreated', async () => {
+  await withFixture(async ({ repo, identity, db }) => {
+    db.prepare(`INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, status)
+      VALUES ('long-lived', ?, 'codex', 'long-lived-native', 'long-lived', 'active')`).run(identity.id);
+    const binding = seedWorkBinding(db, 'long-lived');
+    db.prepare('UPDATE work_contexts SET local_key = ?, root = ?').run(identity.worktreeKey, repo);
+    const input = new PassThrough();
+    let ready!: () => void;
+    const first = new Promise<void>((resolve) => { ready = resolve; });
+    const running = serve(repo, [], { input, writeOut: (text) => { if (JSON.parse(text).id === 1) ready(); } });
+    input.write(`${call(1, 'work_status', {})}\n`);
+    await first;
+    rmSync(repo, { recursive: true });
+    mkdirSync(repo);
+    input.end(`${call(2, 'work_choose', { binding, work: 'new' })}\n`);
+    const result = await running;
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM work_items').get()?.n, 1);
+    assert.ok(result.frames[1].error !== undefined || (result.frames[1].result as { isError?: boolean })?.isError === true);
   });
 });
 

@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn, type spawn } from 'node:child_process';
 import { readdirSync } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
+import { parseArgs } from 'node:util';
 
 import {
   PRESET_CATALOG,
@@ -23,12 +24,15 @@ import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from '.
 import { detectSync, type DetectorInput, type DetectorResult } from '../privacy/detect.js';
 import {
   classifyPending,
+  DUE_SOURCE_SQL,
+  SUMMARIZABLE_ROW_SQL,
   createBatches,
+  hasBatchableSources,
   isSummarizableRow,
   reclaimStale,
-  BLANK_CHARACTERS_SQL,
-  SUMMARIZABLE_KINDS_SQL,
+  reconcilePendingDestinations,
   type BatchRow,
+  type RawEventRow,
 } from './batches.js';
 import { updateBatchCitations } from './citations.js';
 import { reclassifyImported } from './imported.js';
@@ -60,6 +64,7 @@ export type ObserveDeps = {
   maxRunMs: number;
   /** Test seam for the A11 crash window after a response and before its fenced apply. */
   applyHook: () => void | Promise<void>;
+  writeError: (text: string) => void;
 };
 
 type Counts = {
@@ -163,7 +168,7 @@ function liveConsentOk(paths: OboetePaths, env: NodeJS.ProcessEnv, startedHash: 
 
 
 
-function pendingSummaries(db: DatabaseSync): string[] {
+function pendingSummaries(db: DatabaseSync, token: string, now: number): string[] {
   return db
     .prepare(
       `SELECT id FROM sessions s
@@ -172,38 +177,26 @@ function pendingSummaries(db: DatabaseSync): string[] {
            SELECT 1 FROM observation_batches b
            WHERE b.session_id = s.id AND b.state NOT IN ('applied', 'fallback')
          )
+         AND NOT EXISTS (SELECT 1 FROM raw_events WHERE session_id = s.id AND batch_id IS NULL
+           AND ${DUE_SOURCE_SQL} AND ${SUMMARIZABLE_ROW_SQL})
+         AND (s.summary_updated_at IS NULL OR EXISTS (
+           SELECT 1 FROM observation_batches b
+           WHERE b.session_id = s.id AND b.completed_at > s.summary_updated_at
+         ))
        ORDER BY ended_at, id`,
     )
-    .all()
+    .all(now, token)
     .map((row) => String(row.id));
 }
 
-// `isSummarizableRow` over the unbatched rows, in SQL: a pass asks whether one exists instead of
-// reading every unbatched row (FR-002, the worker runs beside the hooks). The one part SQL cannot
-// see is a tool call's input, which lives in `payload_json`, so only content-less tool calls are
-// read back — the rest of the rule is the indexed test below.
-const UNBATCHED_WITH_CONTENT = `SELECT 1 AS work FROM raw_events
-   WHERE batch_id IS NULL AND kind IN (${SUMMARIZABLE_KINDS_SQL})
-     AND classification_state IS NOT 'failed' AND sensitivity <> 'secret'
-     AND TRIM(COALESCE(content, ''), ${BLANK_CHARACTERS_SQL}) <> '' LIMIT 1`;
-const UNBATCHED_EMPTY_TOOL_CALLS = `SELECT kind, content, payload_json, classification_state, sensitivity
-   FROM raw_events
-   WHERE batch_id IS NULL AND kind = 'tool_call'
-     AND classification_state IS NOT 'failed' AND sensitivity <> 'secret'
-     AND TRIM(COALESCE(content, ''), ${BLANK_CHARACTERS_SQL}) = ''`;
-
-function queueIsEmpty(db: DatabaseSync, paths: OboetePaths): boolean {
+function queueIsEmpty(db: DatabaseSync, paths: OboetePaths, token: string, now: number): boolean {
   if (
     db.prepare("SELECT 1 AS work FROM observation_batches WHERE state IN ('pending', 'running') LIMIT 1").get() !==
     undefined
   ) {
     return false;
   }
-  if (db.prepare(UNBATCHED_WITH_CONTENT).get() !== undefined) return false;
-  const toolCalls = db
-    .prepare(UNBATCHED_EMPTY_TOOL_CALLS)
-    .all() as unknown as Parameters<typeof isSummarizableRow>[0][];
-  if (toolCalls.some(isSummarizableRow)) return false;
+  if (hasBatchableSources(db, token, now)) return false;
   try {
     if (
       readdirSync(paths.spool, { withFileTypes: true }).some(
@@ -215,10 +208,7 @@ function queueIsEmpty(db: DatabaseSync, paths: OboetePaths): boolean {
   } catch {
     // R6: a missing spool directory contains no queued entry.
   }
-  return (
-    db.prepare("SELECT 1 AS work FROM sessions WHERE status = 'ended' AND summary_state = 'pending' LIMIT 1").get() ===
-    undefined
-  );
+  return pendingSummaries(db, token, now).length === 0;
 }
 
 function logEnd(paths: OboetePaths, result: Counts, exit: number, reason: string): number {
@@ -240,7 +230,7 @@ function releaseForExit(
   releaseWithPending: boolean,
 ): 'released' | 'kept' | 'lost' {
   return releaseLease(db, token, () => {
-    const empty = releaseWithPending || queueIsEmpty(db, paths);
+    const empty = releaseWithPending || queueIsEmpty(db, paths, token, now);
     if (empty) runtimeStateSet(db, 'last_run', JSON.stringify({ at: now, reason, ...result }), now);
     return empty;
   });
@@ -256,6 +246,7 @@ function observeDependencies(overrides: Partial<ObserveDeps>): ObserveDeps {
     heartbeatMs: overrides.heartbeatMs ?? DEFAULT_HEARTBEAT_MS,
     maxRunMs: overrides.maxRunMs ?? DEFAULT_MAX_RUN_MS,
     applyHook: overrides.applyHook ?? (() => undefined),
+    writeError: overrides.writeError ?? ((text) => { process.stderr.write(text); }),
   };
 }
 
@@ -350,6 +341,7 @@ function recordBatchResult(
   batchResult: BatchResult,
 ): { leaseLost: boolean; usedFallback: boolean } {
   if (batchResult.state === 'lease_lost') return { leaseLost: true, usedFallback: false };
+  if (batchResult.state === 'requeued') return { leaseLost: false, usedFallback: false };
   result.batches += 1;
   result[batchResult.state] += 1;
   return {
@@ -371,18 +363,29 @@ function emptyCounts(): Counts {
   };
 }
 
-async function observeLifecycle(overrides: Partial<ObserveDeps>): Promise<number> {
+async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource?: string): Promise<number> {
   const deps = observeDependencies(overrides);
   const paths = oboetePaths(resolveHome(deps.env));
-  if (isPaused(paths)) return 0;
+  if (isPaused(paths)) {
+    if (reprocessSource === undefined) return 0;
+    deps.writeError('Oboete is paused. Resume it before requesting source reprocessing.\n');
+    return 1;
+  }
 
   const result = emptyCounts();
   const db = openObserveDatabase(paths);
   if (db === null) return 3;
 
   const startedAt = deps.now();
+  const deadline = startedAt + Math.max(0, deps.maxRunMs);
   const claim = claimObserveLease(db, paths, result, startedAt);
-  if (!claim.ok) return claim.exit;
+  if (!claim.ok) {
+    if (reprocessSource !== undefined && claim.exit === 0) {
+      deps.writeError('Another worker is running. Retry this reprocessing command after it finishes.\n');
+      return 1;
+    }
+    return claim.exit;
+  }
   const token = claim.token;
 
   let leaseLost = false;
@@ -434,7 +437,8 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>): Promise<number
       result.classified += classified.examined;
       if (classified.leaseLost || leaseLost) return true;
 
-      const reclassified = await retryBusy(() => reclassifyImported(db, token, deps.now, detect));
+      const reclassified = await retryBusy(() => reclassifyImported(db, token, deps.now, deps.detect,
+        { home: paths.home, env: deps.env, deadline }));
       result.reclassified += reclassified.examined;
       if (reclassified.leaseLost || leaseLost) return true;
 
@@ -444,6 +448,10 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>): Promise<number
     async function maintainQueue(): Promise<boolean> {
       const reclaimed = await retryBusy(() => reclaimStale(db, token, deps.now()));
       if (reclaimed.leaseLost || leaseLost) return true;
+
+      const reconciled = await retryBusy(() =>
+        reconcilePendingDestinations(db, token, deps.now(), presetEntry?.egress ?? 'none'));
+      if (reconciled.leaseLost || leaseLost) return true;
 
       const purged = await retryBusy(() => purgeExpiredEvents(db, token, deps.now()));
       result.purged += purged.deleted;
@@ -538,7 +546,7 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>): Promise<number
     async function processPendingBatches(): Promise<void> {
       const batches = pendingBatches(db);
       for (const batch of batches) {
-        if (leaseLost) break;
+        if (leaseLost || deps.now() >= deadline) break;
         await processPendingBatch(batch);
       }
     }
@@ -562,7 +570,8 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>): Promise<number
     }
 
     async function summarizePendingSessions(): Promise<void> {
-      for (const sessionId of pendingSummaries(db)) {
+      for (const sessionId of pendingSummaries(db, token, deps.now())) {
+        if (leaseLost || deps.now() >= deadline) break;
         if (await summarizeSession(sessionId)) break;
       }
     }
@@ -599,10 +608,10 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>): Promise<number
       await processPendingBatches();
       if (leaseLost) return true;
 
-      await summarizePendingSessions();
+      if (deps.now() < deadline) await summarizePendingSessions();
       if (leaseLost) return true;
 
-      if (yieldAfterPass || deps.now() - startedAt >= Math.max(0, deps.maxRunMs)) {
+      if (yieldAfterPass || deps.now() >= deadline) {
         endReason = yieldAfterPass ? 'batch_error' : 'max_run';
         yieldAfterPass = true;
         return true;
@@ -627,7 +636,7 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>): Promise<number
 
     async function runPasses(): Promise<void> {
       for (;;) {
-        if (deps.now() - startedAt >= Math.max(0, deps.maxRunMs)) {
+        if (deps.now() >= deadline) {
           yieldAfterPass = true;
           endReason = 'max_run';
           break;
@@ -652,21 +661,32 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>): Promise<number
     const consentOk = (): boolean => liveConsentOk(paths, deps.env, startedConsentHash);
     const providerState = new Map<string, DegradedReason | null>();
     const ancestorCache = createAncestorCache();
-    const detect = (text: string) =>
-      deps.detect({
+    const detect = async (text: string) => {
+      try { return await deps.detect({
         text,
         paths: [],
         repoRoot: null,
-        secretPaths: config.privacy.secret_paths,
+        secretPaths: loadConfig(paths).privacy.secret_paths,
         credentialValues: credentialValues(deps.env),
-      });
+      }); } catch { return { ok: false, reason: 'detector_error' } as const; }
+    };
 
     await runPasses();
     await finishLeaseRun();
   }
 
   try {
-    await observeClaimedLease(db, token);
+    const queued = reprocessSource === undefined ? 'queued' : requeueSource(db, token, reprocessSource, deps.now());
+    if (queued === 'queued') await observeClaimedLease(db, token);
+    else {
+      const lost = queued === 'lease_lost';
+      deps.writeError(lost ? 'Another worker took over. Retry this reprocessing command after it finishes.\n'
+        : queued === 'work_selection_required' ? 'Choose the source work first with oboete work choose-source <source-id> <work-id|new>.\n'
+        : 'The source was not found or is not a complete, non-secret capture.\n');
+      if (!lost) releaseLease(db, token, () => true);
+      exit = lost ? 1 : 2;
+      endReason = queued;
+    }
   } catch (error) {
     recordRunFailure(error, db, token);
   } finally {
@@ -685,5 +705,41 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>): Promise<number
 
 /** Detached `oboete observe`: one bounded worker run, never a resident service (FR-009). */
 export async function runObserve(argv: string[], overrides: Partial<ObserveDeps> = {}): Promise<number> {
-  return await observeLifecycle(overrides);
+  let reprocessSource: string | undefined;
+  try {
+    const { values } = parseArgs({ args: argv, allowPositionals: false, strict: true,
+      options: { 'reprocess-source': { type: 'string' } } });
+    reprocessSource = values['reprocess-source'];
+    if (reprocessSource !== undefined && !/^[a-zA-Z0-9:_-]{1,200}$/u.test(reprocessSource)) throw new Error('invalid_source');
+  } catch {
+    (overrides.writeError ?? ((text: string) => { process.stderr.write(text); }))(
+      'Usage: oboete observe [--reprocess-source <source-id>]\n');
+    return 2;
+  }
+  return await observeLifecycle(overrides, reprocessSource);
+}
+
+/** Historical processing starts only when the user names a surviving source explicitly. */
+function requeueSource(db: DatabaseSync, token: string, id: string, now: number): 'queued' | 'invalid_source' | 'lease_lost' | 'work_selection_required' {
+  return transactionImmediate(db, () => {
+    if (!assertLease(db, token, now)) {
+      db.exec('ROLLBACK');
+      return 'lease_lost';
+    }
+    const stored = db.prepare('SELECT * FROM raw_events WHERE id = ?').get(id);
+    if (stored === undefined) return 'invalid_source';
+    const row = stored as unknown as RawEventRow;
+    if (!isSummarizableRow(row) || row.classification_state === 'partial' || row.processing_state === 'excluded') return 'invalid_source';
+    if (db.prepare('SELECT 1 FROM work_bindings WHERE id = ? AND work_id IS NOT NULL')
+      .get(row.work_binding_id ?? null) === undefined) return 'work_selection_required';
+    const batch = row.batch_id === null ? undefined
+      : db.prepare('SELECT state FROM observation_batches WHERE id = ?').get(row.batch_id);
+    if (batch?.state === 'pending' || batch?.state === 'running') return 'queued';
+    // An explicit request is itself due now, even before the automatic ten-turn trigger.
+    db.prepare(`UPDATE raw_events SET processing_state = 'waiting', processing_offset = 0,
+      processing_hash = NULL, processed_at = NULL, retry_after = ?, processing_attempts = 0, batch_id = NULL WHERE id = ?`).run(now, id);
+    db.prepare('UPDATE memory_sources SET source_processed_at = NULL WHERE raw_event_id = ?').run(id);
+    db.prepare("UPDATE sessions SET summary_state = 'pending', summary_updated_at = NULL WHERE id = ?").run(row.session_id);
+    return 'queued';
+  });
 }

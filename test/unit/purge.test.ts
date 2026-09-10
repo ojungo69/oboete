@@ -56,13 +56,14 @@ function insertEvent(
     kind?: string;
     content?: string | null;
     payload?: unknown;
+    processedAt?: number;
   },
 ): void {
   db.prepare(
     `INSERT INTO raw_events
        (id, repo_id, session_id, kind, content, payload_json, sensitivity, classification_state,
-        captured_at, expires_at, batch_id)
-     VALUES (?, 'repo1', 'sess1', ?, ?, ?, ?, ?, 1, ?, ?)`,
+        captured_at, expires_at, batch_id, processing_state, processed_at)
+     VALUES (?, 'repo1', 'sess1', ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
   ).run(
     row.id,
     row.kind ?? 'prompt',
@@ -72,6 +73,8 @@ function insertEvent(
     row.classification ?? 'done',
     row.expiresAt,
     row.batchId,
+    row.processedAt === undefined ? 'pending' : 'processed',
+    row.processedAt ?? null,
   );
 }
 
@@ -82,7 +85,7 @@ function eventIds(db: DatabaseSync): string[] {
     .map((row) => String(row.id));
 }
 
-test('expired row in an applied batch is deleted; pending and non-expired applied survive', async () => {
+test('expired processed source is deleted; pending and non-expired processed sources survive', async () => {
   await withOpened((db) => {
     const now = 1_757_000_000_000;
     const token = claimLease(db, { pid: 1, now });
@@ -90,9 +93,9 @@ test('expired row in an applied batch is deleted; pending and non-expired applie
     seedGraph(db);
     insertBatch(db, 'b-applied', 'applied');
     insertBatch(db, 'b-pending', 'pending');
-    insertEvent(db, { id: 'e-applied-expired', expiresAt: now, batchId: 'b-applied' });
+    insertEvent(db, { id: 'e-applied-expired', expiresAt: now, batchId: 'b-applied', processedAt: now - 30 * 86400000 });
     insertEvent(db, { id: 'e-pending-expired', expiresAt: now, batchId: 'b-pending' });
-    insertEvent(db, { id: 'e-applied-fresh', expiresAt: now + 1, batchId: 'b-applied' });
+    insertEvent(db, { id: 'e-applied-fresh', expiresAt: now + 1, batchId: 'b-applied', processedAt: now - 30 * 86400000 + 1 });
 
     const result = purgeExpiredEvents(db, token, now);
     assert.equal(result.leaseLost, false);
@@ -168,7 +171,7 @@ test('with limit 2 and 5 deletable rows the function reports deleted 5', async (
     seedGraph(db);
     insertBatch(db, 'b-applied', 'applied');
     for (const id of ['e1', 'e2', 'e3', 'e4', 'e5']) {
-      insertEvent(db, { id, expiresAt: now, batchId: 'b-applied' });
+      insertEvent(db, { id, expiresAt: now, batchId: 'b-applied', processedAt: now - 30 * 86400000 });
     }
 
     const result = purgeExpiredEvents(db, token, now, { limit: 2 });
@@ -185,7 +188,7 @@ test('with a foreign token nothing is deleted and leaseLost is true', async () =
     if (token === null) assert.fail('expected a lease token');
     seedGraph(db);
     insertBatch(db, 'b-applied', 'applied');
-    insertEvent(db, { id: 'e-applied-expired', expiresAt: now, batchId: 'b-applied' });
+    insertEvent(db, { id: 'e-applied-expired', expiresAt: now, batchId: 'b-applied', processedAt: now - 30 * 86400000 });
 
     const result = purgeExpiredEvents(db, 'foreign-token', now);
     assert.equal(result.deleted, 0);

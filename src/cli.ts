@@ -15,6 +15,8 @@ const knownCommands = [
   'timeline',
   'get',
   'why',
+  'work',
+  'share',
   'pin',
   'unpin',
   'delete',
@@ -38,6 +40,8 @@ const commands: Record<string, () => Promise<(argv: string[]) => Promise<number>
   timeline: () => import('./memories-cli.js').then((module) => module.runTimeline),
   get: () => import('./memories-cli.js').then((module) => module.runGet),
   why: () => import('./why.js').then((module) => module.runWhy),
+  work: () => import('./work-cli.js').then((module) => module.runWork),
+  share: () => import('./memories-cli.js').then((module) => module.runShare),
   pin: () => import('./memories-cli.js').then((module) => module.runPin),
   unpin: () => import('./memories-cli.js').then((module) => module.runUnpin),
   delete: () => import('./memories-cli.js').then((module) => module.runDelete),
@@ -66,7 +70,22 @@ function silenceSqliteExperimentalWarning(): void {
 }
 
 function usage(): string {
-  return `Usage: oboete <command> [options]\n\nCommands: ${knownCommands.join(', ')}.\n`;
+  return `Usage: oboete <command> [options]\n\nCommands: ${knownCommands.join(', ')}.\n\n` +
+    'Memory reads: search, get, timeline accept --binding <binding-id> and --history.\n' +
+    'Reprocess retained source: oboete observe --reprocess-source <source-id>\n' +
+    'Use oboete why <session-id> to inspect source IDs and processing outcomes.\n' +
+    'Work: oboete work status [--all] [--json]\n' +
+    '      oboete work choose <binding-id> <work-id|new>\n' +
+    '      oboete work choose-source <source-id> <work-id|new>\n' +
+    '      oboete work complete <work-id>\n' +
+    'Sharing: oboete share status | approve <proposal-id> | reject <proposal-id> | adopt <memory-id> [--binding <binding-id>] [--json]\n' +
+    'Export: oboete export [file|-] [--format 1|2]\n' +
+    'Import: oboete import [file|-] [--dry-run|--apply] [--json]\n' +
+    '        oboete import promote <migration-record-id> --map-work <source-work>=<local-work> [--json]\n' +
+    '        Native mappings: --map-repo <source>=<repo> [--map-work <source>=<work>]\n' +
+    '        Claude-mem: --from claude-mem --map-project <exact-name>=<repo>\n' +
+    '        Use --map-project-hash <sha256>=<repo> for a private project name.\n' +
+    '        Optional context: --map-context <repo>=<context>. Native v2 and Claude-mem default to preview; v1 defaults to apply.\n';
 }
 
 async function main(argv: string[]): Promise<number> {

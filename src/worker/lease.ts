@@ -2,17 +2,9 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { isBusyError } from '../db/open.js';
+import { stale } from './lease-clock.js';
 
-export const STALE_AFTER_MS = 6_000;
-export const FUTURE_SKEW_MS = 60_000;
-
-export function stale(heartbeatAt: unknown, now: number): boolean {
-  let ts: number;
-  if (typeof heartbeatAt === 'number') ts = heartbeatAt;
-  else if (typeof heartbeatAt === 'bigint') ts = Number(heartbeatAt);
-  else ts = Number.NaN;
-  return !Number.isFinite(ts) || now - ts > STALE_AFTER_MS || ts - now > FUTURE_SKEW_MS;
-}
+export { STALE_AFTER_MS, FUTURE_SKEW_MS, stale } from './lease-clock.js';
 
 function leaseRow(db: DatabaseSync): Record<string, unknown> | undefined {
   return db.prepare('SELECT owner_token, heartbeat_at FROM worker_lease WHERE id = 1').get();

@@ -232,7 +232,11 @@ export function textFields(event: NormalizedEvent): TextField[] {
     case 'last_assistant_message':
       return [{ read: () => event.text, write: (value) => (event.text = value), content: true }];
     case 'tool_call': {
-      const fields: TextField[] = [];
+      const fields: TextField[] = event.input.paths.map((_path, index) => ({
+        read: () => event.input.paths[index],
+        write: (value) => { event.input.paths[index] = value; },
+        content: false,
+      }));
       if (event.input.command !== undefined) {
         fields.push({
           read: () => event.input.command ?? '',

@@ -3,10 +3,15 @@ import { createRequire } from 'node:module';
 import type * as Sqlite from 'node:sqlite';
 
 import { sha256Hex } from '../hash.js';
+import { stale } from '../worker/lease-clock.js';
 
 import sql0001 from './migrations/0001_core.sql';
 import sql0002 from './migrations/0002_memory_search.sql';
 import sql0003 from './migrations/0003_operations.sql';
+import sql0004 from './migrations/0004_memory_processing.sql';
+import sql0005 from './migrations/0005_work_continuity.sql';
+import sql0006 from './migrations/0006_memory_visibility.sql';
+import sql0007 from './migrations/0007_migration_records.sql';
 
 type DatabaseSync = Sqlite.DatabaseSync;
 
@@ -22,16 +27,20 @@ function loadSqlite(): typeof Sqlite {
 }
 
 export const MIGRATIONS: {
-  version: 1 | 2 | 3;
-  name: '0001_core' | '0002_memory_search' | '0003_operations';
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  name: '0001_core' | '0002_memory_search' | '0003_operations' | '0004_memory_processing' | '0005_work_continuity' | '0006_memory_visibility' | '0007_migration_records';
   sql: string;
 }[] = [
   { version: 1, name: '0001_core', sql: sql0001 },
   { version: 2, name: '0002_memory_search', sql: sql0002 },
   { version: 3, name: '0003_operations', sql: sql0003 },
+  { version: 4, name: '0004_memory_processing', sql: sql0004 },
+  { version: 5, name: '0005_work_continuity', sql: sql0005 },
+  { version: 6, name: '0006_memory_visibility', sql: sql0006 },
+  { version: 7, name: '0007_migration_records', sql: sql0007 },
 ];
 
-export const LATEST_SCHEMA_VERSION = 3;
+export const LATEST_SCHEMA_VERSION = 7;
 
 export type OpenedDatabase = {
   db: DatabaseSync;
@@ -67,6 +76,15 @@ export class SchemaAheadError extends Error {
   }
 }
 
+export class MigrationBusyError extends Error {
+  readonly code = 'MIGRATION_BUSY';
+  readonly errcode = 5;
+  constructor() {
+    super('An active worker must finish before the database migration can run.');
+    this.name = 'MigrationBusyError';
+  }
+}
+
 export function sqliteErrorInfo(error: unknown): {
   message: string;
   errcode?: number;
@@ -93,9 +111,10 @@ export function openDatabase(options: {
   path: string;
   timeoutMs: number;
   hook?: boolean;
+  readOnly?: boolean;
 }): OpenedDatabase {
   const hook = options.hook === true;
-  if (hook && !existsSync(options.path)) {
+  if ((hook || options.readOnly === true) && !existsSync(options.path)) {
     throw new DatabaseMissingError(`Database file does not exist: ${options.path}`);
   }
 
@@ -140,6 +159,14 @@ function rollbackIfNeeded(db: DatabaseSync): void {
   }
 }
 
+/** Runs under the migration's write lock, before the new schema is visible to an old worker. */
+function fenceOldWorker(db: DatabaseSync): void {
+  const lease = db.prepare('SELECT owner_token, heartbeat_at FROM worker_lease WHERE id = 1').get();
+  if (lease === undefined || lease.owner_token === null) return;
+  if (!stale(lease.heartbeat_at, Date.now())) throw new MigrationBusyError();
+  db.prepare('UPDATE worker_lease SET owner_token = NULL, pid = NULL WHERE id = 1').run();
+}
+
 function migrate(db: DatabaseSync): number {
   let userVersion = readUserVersion(db);
   if (userVersion > LATEST_SCHEMA_VERSION) {
@@ -165,6 +192,8 @@ function migrate(db: DatabaseSync): number {
         continue;
       }
 
+      if (userVersion > 0) fenceOldWorker(db);
+
       db.exec(migration.sql);
       db.prepare(
         'INSERT INTO schema_migrations(version, name, sha256, applied_at) VALUES (?, ?, ?, ?)',
@@ -189,14 +218,23 @@ function openConfiguredDatabase(
   options: Parameters<typeof openDatabase>[0],
   hook: boolean,
 ): OpenedDatabase {
-  const db = new (loadSqlite().DatabaseSync)(options.path, { timeout: options.timeoutMs });
+  const db = new (loadSqlite().DatabaseSync)(options.path, {
+    timeout: options.timeoutMs, readOnly: options.readOnly === true,
+  });
   try {
+    if (options.readOnly === true) {
+      const schemaVersion = readUserVersion(db);
+      if (schemaVersion > LATEST_SCHEMA_VERSION) throw new SchemaAheadError(schemaVersion);
+      verifyAppliedHashes(db);
+      return { db, schemaVersion, schemaBehind: schemaVersion < LATEST_SCHEMA_VERSION };
+    }
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('PRAGMA foreign_keys = ON');
     db.exec('PRAGMA synchronous = NORMAL');
     if (hook) {
       db.exec('PRAGMA wal_autocheckpoint = 0');
       const schemaVersion = readUserVersion(db);
+      if (schemaVersion > LATEST_SCHEMA_VERSION) throw new SchemaAheadError(schemaVersion);
       return {
         db,
         schemaVersion,

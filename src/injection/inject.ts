@@ -3,11 +3,11 @@
 import type { DatabaseSync } from 'node:sqlite';
 
 import type { OboeteConfig } from '../config.js';
-import { latestSessionState } from '../db/queries.js';
 import type { AgentName, NormalizedEvent } from '../events.js';
 import { appendLogQuietly, errorCode } from '../log.js';
 import type { OboetePaths } from '../paths.js';
-import { detectSync } from '../privacy/detect.js';
+import { detectSync, type DetectorInput, type DetectorResult } from '../privacy/detect.js';
+import { injectionPrivacy, type PrivacyLocation } from '../privacy/provenance.js';
 import { DIRECTIVE_PHRASES } from '../observer/classify.js';
 import { transactionImmediate } from '../worker/lease.js';
 import { CHANNEL_CAPS } from './budget.js';
@@ -19,16 +19,15 @@ import {
   storePending,
   type PackValidation,
 } from './deferred.js';
-import { confirmDelivery, sessionStartAttempted } from './ledger.js';
+import { cancelUndelivered, confirmDelivery, sessionStartAttempted } from './ledger.js';
 import {
   buildPromptPack,
   buildSessionStartPack,
   markInjectedMemories,
+  workGuardValid,
   type BuiltPack,
   type PackChannelInput,
 } from './pack.js';
-
-const SUMMARY_POLL_MS = 50;
 
 export type HookContext = {
   agent: AgentName;
@@ -37,6 +36,7 @@ export type HookContext = {
   sessionId: string;
   conversationId: string;
   turnId?: string | null;
+  workPromptId?: string | null;
   epoch: number;
   repoId: string;
   repoIdentityDisplay: string;
@@ -50,15 +50,12 @@ export type HookContext = {
   sessionCreated?: boolean;
   /** The combined global and repository path rules already read by capture. */
   secretPaths?: readonly string[];
+  /** The hook's existing isolated detector, used when retained metadata is too costly inline. */
+  detect?: (input: DetectorInput, cutoffMs: number) => Promise<DetectorResult>;
   /** Remaining milliseconds in this hook's absolute budget. */
   remainingBudget(): number;
-  /** Test clock seam; production uses a blocking sleep because the callback in pack.ts is sync. */
-  sleep?: (milliseconds: number) => void;
 };
 
-export function sleep(milliseconds: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
-}
 
 export function indexUnavailable(context: Pick<HookContext, 'agent' | 'eventName' | 'paths'>): string {
   appendLogQuietly(context.paths.hookLog, 'warn', 'injection unavailable', {
@@ -69,14 +66,47 @@ export function indexUnavailable(context: Pick<HookContext, 'agent' | 'eventName
   return '';
 }
 
-function detectorFor(context: HookContext): PackValidation['detect'] {
-  return async (text) => {
+async function detectPart(context: HookContext, input: DetectorInput): Promise<DetectorResult> {
+  if (context.remainingBudget() <= 0) return { ok: false, reason: 'deadline' };
+  const pathSize = input.paths.reduce((total, path) => total + path.length + (input.repoRoot?.length ?? 0), 0);
+  const ruleSize = input.secretPaths.reduce((total, rule) => total + rule.length + 1, 0);
+  const textSize = (input.fields ?? []).reduce((total, field) => total + field.length, input.text.length);
+  // The glob matcher sweeps each path for every rule token, including its relative variant.
+  if (textSize > 65_536 || 2 * pathSize * ruleSize > 5_000_000) {
+    // One expensive source must leave time for other candidates and worker termination.
+    const cutoffMs = Math.min(200, Math.floor(context.remainingBudget() - 100));
+    if (cutoffMs <= 0) return { ok: false, reason: 'deadline' };
+    return context.detect?.(input, cutoffMs) ?? { ok: false, reason: 'deadline' };
+  }
+  return detectSync(input);
+}
+
+function detectorFor(context: HookContext, prepared?: () => ReturnType<typeof injectionPrivacy> | undefined): PackValidation['detect'] {
+  return async (text, source) => {
     if (context.remainingBudget() <= 0) return true;
-    const result = await detectSync({
+    if (context.db === undefined) return true;
+    const snapshot = prepared?.();
+    const policy = snapshot === undefined
+      ? injectionPrivacy(context.db, privacyLocation(context), source === undefined ? [] : [source], process.env, context.remainingBudget)
+      : snapshot;
+    if (policy === null) return true;
+    const sources = source === undefined ? [] : policy.sources.filter((row) =>
+      row.reference.memoryId === source.memoryId && row.reference.rawEventId === source.rawEventId);
+    if (source !== undefined && sources.length !== 1) return true;
+    for (const row of sources) {
+      if (row.policies === null || row.policies.length === 0 || row.policies.some((part) => part === null)) return true;
+      for (const part of row.policies) {
+        const checked = await detectPart(context, { ...part!.detector, text,
+          fields: [...(row.memory !== undefined ? [String(row.memory.title ?? ''), String(row.memory.body ?? '')]
+            : [String(row.raw?.content ?? '')]), ...part!.detector.paths] });
+        if (!checked.ok || checked.sensitivity === 'secret' || checked.privateRemoved > 0) return true;
+      }
+    }
+    // Every source policy includes the current home/repository rules as well as its origin.
+    if (sources.length > 0) return context.remainingBudget() <= 0;
+    const result = await detectPart(context, {
+      ...policy.base.detector,
       text,
-      paths: [],
-      repoRoot: context.repoRoot,
-      secretPaths: [...(context.secretPaths ?? context.config.privacy.secret_paths)],
     });
     return (
       !result.ok ||
@@ -88,27 +118,13 @@ function detectorFor(context: HookContext): PackValidation['detect'] {
   };
 }
 
-function validationFor(context: HookContext): PackValidation {
-  return { detect: detectorFor(context), directives: DIRECTIVE_PHRASES };
+function privacyLocation(context: HookContext): PrivacyLocation {
+  const binding = context.db?.prepare('SELECT id FROM work_bindings WHERE session_id = ? AND closed_at IS NULL').get(context.sessionId);
+  return { repoId: context.repoId, bindingId: typeof binding?.id === 'string' ? binding.id : null, home: context.paths.home };
 }
 
-function waitForSummary(context: HookContext, waitMs: number): 'ready' | 'pending' | 'none' {
-  const db = context.db;
-  if (db === undefined) return 'none';
-  const pause = context.sleep ?? sleep;
-  let waited = 0;
-
-  for (;;) {
-    const state = latestSessionState(db, context.repoId)?.summaryState;
-    if (state === 'done') return 'ready';
-    if (state !== 'pending') return 'none';
-
-    const remaining = Math.min(waitMs - waited, Math.floor(context.remainingBudget()));
-    if (remaining <= 0) return 'pending';
-    const interval = Math.min(SUMMARY_POLL_MS, remaining);
-    pause(interval);
-    waited += interval;
-  }
+function validationFor(context: HookContext): PackValidation {
+  return { detect: detectorFor(context), directives: DIRECTIVE_PHRASES };
 }
 
 function packInput(
@@ -116,6 +132,7 @@ function packInput(
   channel: string,
   validation: PackValidation,
 ): PackChannelInput {
+  let prepared: ReturnType<typeof injectionPrivacy> | undefined;
   return {
     agent: context.agent,
     repoId: context.repoId,
@@ -123,13 +140,20 @@ function packInput(
     sessionId: context.sessionId,
     conversationId: context.conversationId,
     turnId: context.turnId ?? null,
+    workPromptId: context.workPromptId,
     epoch: context.epoch,
     model: context.model,
     channelCap: CHANNEL_CAPS[context.agent],
     contextFraction: context.config.injection.context_fraction,
     channel,
     now: context.event.captured_at,
-    detect: validation.detect,
+    detect: detectorFor(context, () => prepared),
+    privacyGuard: (sources) => {
+      if (context.db === undefined) return null;
+      const location = privacyLocation(context);
+      prepared = injectionPrivacy(context.db, location, sources, process.env, context.remainingBudget);
+      return prepared === null ? null : { ...location, sources, stamp: prepared.stamp };
+    },
     directives: validation.directives,
     repoRoot: context.repoRoot,
     remainingBudget: context.remainingBudget,
@@ -147,7 +171,6 @@ async function startPack(
   return buildSessionStartPack(db, {
     ...packInput(context, channel, validation),
     state: pending ? 'pending' : 'built',
-    waitForSummary: (waitMs) => waitForSummary(context, waitMs),
   });
 }
 
@@ -157,6 +180,7 @@ async function promptPack(
   prompt: string,
   validation: PackValidation,
   pending = false,
+  priorPack?: BuiltPack,
 ): Promise<BuiltPack | null> {
   const db = context.db;
   if (db === undefined) return null;
@@ -165,6 +189,8 @@ async function promptPack(
     state: pending ? 'pending' : 'built',
     prompt,
     threshold: context.config.injection.threshold,
+    excludeMemoryIds: priorPack?.items.filter((item) => item.decision === 'planned' && item.memoryId !== null)
+      .map((item) => item.memoryId!),
   });
 }
 
@@ -293,25 +319,26 @@ async function injectCodex(context: HookContext, validation: PackValidation): Pr
   // PostCompact): the first prompt of an epoch that has no session-start pack in the ledger carries it.
   if (db !== undefined && !sessionStartAttempted(db, context.conversationId, context.epoch)) {
     const start = await startPack(context, 'codex:UserPromptSubmit', validation);
-    // Delivery is immediate; confirming before prompt retrieval keeps a matching pinned or summary
-    // memory from appearing twice in the one additionalContext value (FR-026).
-    if (start !== null) {
-      confirm(db, start, context.event.captured_at);
-      packs.push(start);
-    }
+    if (start !== null) packs.push(start);
   }
-  const prompt = await promptPack(
-    context,
-    'codex:UserPromptSubmit',
-    context.event.text,
-    validation,
-  );
-  if (prompt !== null && db !== undefined) {
-    confirm(db, prompt, context.event.captured_at);
-    packs.push(prompt);
+  const first = packs[0];
+  const cancelFirst = () => {
+    if (db === undefined || first === undefined) return;
+    transactionImmediate(db, () => cancelUndelivered(db, first.injectionId));
+  };
+  let prompt: BuiltPack | null;
+  try {
+    prompt = await promptPack(context, 'codex:UserPromptSubmit', context.event.text, validation, false, first);
+  } catch (error) {
+    try { cancelFirst(); } catch { /* Preserve the original hook failure when storage cannot record cancellation. */ }
+    throw error;
   }
-  const text = packs.map((pack) => pack.text).join('\n');
-  return text === '' ? '' : envelope('UserPromptSubmit', text);
+  if (db !== undefined && first?.workGuard !== undefined && !workGuardValid(db, first.workGuard, context.remainingBudget)) {
+    cancelFirst();
+    packs.length = 0;
+  }
+  if (prompt !== null) packs.push(prompt);
+  return immediate(context, packs, 'UserPromptSubmit');
 }
 
 async function deferPack(
@@ -329,6 +356,7 @@ async function deferPack(
     pack,
     now: context.event.captured_at,
     validation,
+    remainingBudget: context.remainingBudget,
   });
 }
 
@@ -355,6 +383,7 @@ function grokOnToolCall(context: HookContext, db: DatabaseSync, toolCallId: stri
     conversationId: context.conversationId,
     toolCallId,
     now: context.event.captured_at,
+    remainingBudget: context.remainingBudget,
   });
   return text === null ? '' : envelope('PreToolUse', text);
 }
@@ -371,6 +400,7 @@ function grokOnToolResult(
     toolCallId,
     exitCode: isError ? 1 : 0,
     now: context.event.captured_at,
+    remainingBudget: context.remainingBudget,
   });
   if (delivered.status === 'emitted') markLatestDeferred(context);
   return delivered.text === null ? '' : envelope('PostToolUse', delivered.text);
@@ -388,6 +418,7 @@ function grokOnToolFailure(
     toolCallId,
     kind,
     now: context.event.captured_at,
+    remainingBudget: context.remainingBudget,
   });
   if (state === 'emitted') markLatestDeferred(context);
 }

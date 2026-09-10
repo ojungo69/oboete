@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { observerOutputSchema } from '../../src/observer/contract.js';
+import { MAX_OBSERVATIONS, observationSchema } from '../../src/observer/contract.js';
 import {
   fallbackObserve,
   firstLine,
@@ -208,7 +208,7 @@ test('fallback emits deterministic agent-neutral records for two turns', () => {
     assert.ok(observation.source_event_ids.every((id) => inputIds.has(id)));
   }
   assert.deepEqual(result.suppressed, []);
-  observerOutputSchema.parse({ observations: result.observations });
+  observationSchema.array().max(MAX_OBSERVATIONS).parse(result.observations);
 });
 
 test('text boundary helpers preserve the selected input text', () => {
@@ -240,7 +240,7 @@ test('a fallback decision derives its title and body from trimmed text', () => {
     result.observations[0]?.body,
     'Keep the stable row id. The FTS lookup depends on it.',
   );
-  observerOutputSchema.parse({ observations: result.observations });
+  observationSchema.array().max(MAX_OBSERVATIONS).parse(result.observations);
 });
 
 test('a 60-call change keeps 40 record lines and reports 20 omitted calls', () => {
@@ -338,7 +338,7 @@ test('a matching tombstone suppresses content while an active match becomes noop
     target: 'active-memory',
     reason: 'rule:decision',
   });
-  observerOutputSchema.parse({ observations: active.observations });
+  observationSchema.array().max(MAX_OBSERVATIONS).parse(active.observations);
 });
 
 test('a same-tool retry without call ids counts as a call without a failure', () => {

@@ -13,6 +13,7 @@ const MAX_RESPONSE_CHARS = 1024 * 1024;
 
 const INPUT: ObserverInput = {
   repo_ref: 'repo_1234',
+  checkpoint_context: { state: 'none' },
   session: {
     started_at: 1_757_000_000_000,
     turns: [{ ordinal: 1, started_at: 1_757_000_000_000, ended_at: null }],
@@ -25,9 +26,11 @@ const INPUT: ObserverInput = {
 
 function output(sourceEventId = 'e1'): ObserverOutput {
   return {
+    checkpoint: { decision: 'unchanged', source_event_ids: [sourceEventId], reason: '作業の進捗に変更はありません。' },
     observations: [
       {
         type: 'bugfix',
+        visibility: 'project',
         title: '不具合を修正した',
         body: '共有経路の条件を修正した。',
         concepts: ['problem-solution'],

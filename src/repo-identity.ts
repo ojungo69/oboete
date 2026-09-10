@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import type { SpawnSyncOptionsWithStringEncoding, SpawnSyncReturns } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { sha256Hex } from './hash.js';
@@ -10,6 +10,7 @@ export type RepoIdentity = {
   identityKind: 'remote' | 'common_dir';
   normalizedIdentity: string;
   root: string;
+  worktreeKey: string | null;
 };
 
 // A hook must return within 300 ms (FR-002), so git gets a slice of it: one call may take
@@ -103,6 +104,14 @@ function normalizeRemote(url: string): string | null {
   return `${host}${port}${absolutePath}`;
 }
 
+/** Transfer metadata must already be normalized before it can create a remote repository. */
+export function isCanonicalRemoteIdentity(value: string): boolean {
+  if (/[\s\p{C}?#]/u.test(value) || value.split('/')[0].includes('@')) return false;
+  if (value.startsWith('/')) return normalizeRemote(`file://${value}`) === value;
+  // The original scheme is intentionally absent; either common scheme can preserve a custom port.
+  return ['ssh://', 'https://'].some((scheme) => normalizeRemote(`${scheme}${value}`) === value);
+}
+
 function realpath(path: string): string {
   try {
     return realpathSync(path);
@@ -115,6 +124,7 @@ function identity(
   identityKind: RepoIdentity['identityKind'],
   normalizedIdentity: string,
   root: string,
+  worktreeKey: string | null,
 ): RepoIdentity {
   return {
     // data-model.md repos: first 16 hex of sha256 over the normalized identity.
@@ -122,7 +132,17 @@ function identity(
     identityKind,
     normalizedIdentity,
     root,
+    worktreeKey,
   };
+}
+
+function directoryGeneration(path: string): string | null {
+  try {
+    const canonical = realpathSync(path);
+    const metadata = statSync(canonical, { bigint: true });
+    if (!metadata.isDirectory() || metadata.ino === 0n || metadata.birthtimeNs <= 0n) return null;
+    return `fs1:${sha256Hex(JSON.stringify([canonical, String(metadata.dev), String(metadata.ino), String(metadata.birthtimeNs)]))}`;
+  } catch { return null; }
 }
 
 /**
@@ -144,19 +164,20 @@ export function resolveRepoIdentity(
     return remaining < 1 ? null : git(spawn, cwd, args, Math.min(GIT_TIMEOUT_MS, remaining));
   };
 
-  // One call for both locations: the repository root and the git common directory, in that order.
-  const [top, common] = (run(['rev-parse', '--show-toplevel', '--git-common-dir']) ?? '').split('\n');
+  // The per-worktree Git directory distinguishes linked checkouts without another hook process.
+  const [top, common, gitDir] = (run(['rev-parse', '--show-toplevel', '--git-common-dir', '--absolute-git-dir']) ?? '').split('\n');
   const root = top === undefined || top === '' ? cwd : top;
+  const worktreeKey = directoryGeneration(gitDir === undefined || gitDir === '' ? root : resolve(cwd, gitDir));
 
   // A repository with an origin costs this one call; only a repository without one pays for the
   // listing, which is rare enough to keep the common case at two calls inside the budget.
   const url = run(['remote', 'get-url', 'origin']) ?? otherRemoteUrl(run);
   const normalized = url === null ? null : normalizeRemote(url);
-  if (normalized !== null) return identity('remote', normalized, root);
+  if (normalized !== null) return identity('remote', normalized, root, worktreeKey);
 
   // ponytail: without a usable remote the identity is this machine's path, so the same repository
   // on another machine gets another id; `oboete import --map-repo` maps the two.
-  return identity('common_dir', realpath(common === undefined ? cwd : resolve(cwd, common)), root);
+  return identity('common_dir', realpath(common === undefined ? cwd : resolve(cwd, common)), root, worktreeKey);
 }
 
 /** The first remote of a repository that has no `origin`. */

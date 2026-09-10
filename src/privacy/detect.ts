@@ -2,11 +2,15 @@ import { Worker, parentPort, workerData } from 'node:worker_threads';
 import { isAbsolute, relative, resolve } from 'node:path';
 
 import { lintSource } from '@secretlint/core';
+import { secretLintProfiler } from '@secretlint/profiler';
 import { rules as recommendedRules } from '@secretlint/secretlint-rule-preset-recommend';
 import type { SecretLintCoreConfig } from '@secretlint/types';
 
 import { credentialValues } from '../log.js';
 import { testFault } from '../testing/faults.js';
+
+// Library profiling retains marks across every check; the engine never consumes them.
+secretLintProfiler.setEnabled(false);
 
 const FILTER_COMMENTS_RULE = '@secretlint/secretlint-rule-filter-comments';
 const AWS_RULE = '@secretlint/secretlint-rule-aws';
@@ -261,7 +265,7 @@ export function matchSecretPath(
 
   const candidates = [withForwardSlashes(pathValue)];
   if (repoRoot !== null) {
-    const inside = relative(resolve(repoRoot), resolve(pathValue));
+    const inside = relative(resolve(repoRoot), resolve(repoRoot, pathValue));
     // A path outside the repository has no repository-relative form to compare.
     if (inside !== '' && !inside.startsWith('..') && !isAbsolute(inside)) {
       candidates.push(withForwardSlashes(inside));

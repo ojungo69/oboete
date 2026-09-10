@@ -33,7 +33,7 @@ import {
 
 const EVENT = 'PostToolUse';
 const TOOL_OUTPUT = 'oboete probe repository\nsecond line\n';
-// Bound the recovery harness: a recovered mid-session row remains queued work (FR-009).
+// Bound the recovery harness: a recovered mid-session row remains accepted (FR-009).
 // After SessionEnd, a second observe must exit naturally with 0 or 1 (contracts/cli.md:15),
 // a session_end batch covering the recovered row, and run end reason=empty.
 const OBSERVE_MS = 2_000;
@@ -83,7 +83,7 @@ function assertRecovered(t: TestContext, place: Place, recovered: SpawnResult): 
   t.diagnostic(
     `observe status=${recovered.status} signal=${recovered.signal} elapsed=${recovered.elapsedMs.toFixed(1)} ms`,
   );
-  // The recovered row is queued work, so this run may still be up at the harness bound (signal, status null).
+  // An active session below the automatic trigger may release while its accepted row stays pending.
   assert.ok(recovered.status === null || recovered.status === 0 || recovered.status === 1, `observe exited ${recovered.status}`);
   const stored = rows(place, 'SELECT id, via_spool FROM raw_events');
   assert.equal(
@@ -112,12 +112,15 @@ function assertRecovered(t: TestContext, place: Place, recovered: SpawnResult): 
   assert.equal(ended.signal, null, 'observe must exit on its own, not be killed by the harness bound');
   assert.ok(ended.status === 0 || ended.status === 1, `observe exited ${ended.status}: ${ended.stderr}`);
   const covered = rows(place,
-    `SELECT r.id, b.trigger FROM raw_events r
-     JOIN observation_batches b ON b.id = r.batch_id WHERE r.via_spool = 1`,
+    `SELECT r.id, r.processing_state, b.trigger, receipt.outcome FROM raw_events r
+     JOIN observation_batch_sources receipt ON receipt.raw_event_id = r.id
+     JOIN observation_batches b ON b.id = receipt.batch_id WHERE r.via_spool = 1`,
   );
   assert.equal(covered.length, stored.length);
   assert.equal(covered[0]?.id, stored[0]?.id);
   assert.equal(covered[0]?.trigger, 'session_end');
+  assert.equal(covered[0]?.processing_state, 'waiting');
+  assert.equal(covered[0]?.outcome, 'deferred');
   assert.match(observeLog(place), /run end .*reason=empty/);
 }
 

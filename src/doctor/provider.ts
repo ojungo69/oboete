@@ -45,6 +45,7 @@ const PROVIDER_PROBE_TIMEOUT_MS = 30_000;
 
 const PROVIDER_PROBE_INPUT: ObserverInput = {
   repo_ref: 'doctor',
+  checkpoint_context: { state: 'none' },
   session: {
     started_at: 1_757_000_000_000,
     turns: [{ ordinal: 1, started_at: 1_757_000_000_000, ended_at: null }],
@@ -56,9 +57,9 @@ const PROVIDER_PROBE_INPUT: ObserverInput = {
 };
 
 const FALLBACK_CONSEQUENCE =
-  'Summaries fall back to rule-based until the provider answers.';
+  'Temporary guidance is available while source processing waits for the provider.';
 const ALLOWANCE_CONSEQUENCE =
-  'Summaries come from the fallback until the allowance resets; no call is retried.';
+  'Source processing waits for the allowance to reset; later worker runs retry due sources.';
 
 export async function providerItem(input: {
   config: OboeteConfig | null;

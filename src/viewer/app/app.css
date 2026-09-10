@@ -26,15 +26,15 @@ body {
 }
 .sessions > button.current, .session.current > button { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
 .turns { margin: 4px 0 8px 18px; padding: 0 0 0 12px; font-size: 13px; color: var(--muted); }
-.memories { padding: 16px 24px; overflow-y: auto; }
+.memories { padding: 16px 24px; overflow-y: auto; min-width: 0; }
 .search { display: block; margin-bottom: 12px; font-size: 13px; color: var(--muted); }
 .search input { display: block; width: 100%; margin-top: 4px; padding: 8px 10px; font: inherit; border: 1px solid var(--line); border-radius: 6px; }
 .card { background: white; border: 1px solid var(--line); border-left-width: 4px; border-radius: 8px; padding: 12px 14px; margin: 0 0 12px; }
 .card.sensitivity-private, .card.sensitivity-local_only { border-left-color: #b45309; }
 .card.sensitivity-eligible { border-left-color: #15803d; }
 .card header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
-.card h3 { margin: 0; font-size: 16px; }
-.body { white-space: pre-wrap; margin: 8px 0; }
+.card h3 { margin: 0; font-size: 16px; overflow-wrap: anywhere; }
+.body { white-space: pre-wrap; margin: 8px 0; overflow-wrap: anywhere; }
 .degraded { margin: 4px 0; padding: 6px 8px; background: #fff7ed; border-radius: 4px; font-size: 13px; }
 .sources { margin: 4px 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
 .badges { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -43,11 +43,17 @@ body {
 .badge.stale { background: #fee2e2; }
 .badge.review { background: #f3e8ff; }
 .card footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 8px; font-size: 13px; }
-.actions { display: flex; gap: 6px; }
-.actions button { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: white; cursor: pointer; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; border: 0; padding: 0; margin: 0; min-width: 0; }
+.actions button { font: inherit; min-height: 44px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: white; cursor: pointer; }
+.actions button:disabled { cursor: default; color: var(--muted); }
+button:focus-visible, summary:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.sharing-card { border-left-color: var(--accent); }
+.sharing-card details { font-size: 13px; overflow-wrap: anywhere; }
+.action-error { color: var(--danger); }
 .actions button.danger { border-color: var(--danger); color: var(--danger); }
 .hits { padding-left: 20px; }
 .ledger section { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; background: white; }
 .ledger h4 { margin: 0 0 4px; font-size: 14px; }
 .ledger ul { margin: 4px 0; padding-left: 18px; font-size: 13px; }
 @media (max-width: 800px) { .columns { grid-template-columns: 1fr; } .sessions { border-right: 0; border-bottom: 1px solid var(--line); } }
+@media (max-width: 560px) { .card header, .card footer { flex-direction: column; align-items: flex-start; } }

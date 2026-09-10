@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { grantVisibility } from '../../src/db/queries.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
@@ -10,6 +11,7 @@ import {
   listMemories,
   markInjected,
   memorySources,
+  memoryTitlesForSession,
   memoriesForSession,
   memoryScope,
   nearbyCandidates,
@@ -94,6 +96,7 @@ function expectedInScope(destination: string, override?: string[]): MemorySeed[]
   return MEMORY_SEEDS.filter(
     (seed) =>
       seed.repoId === REPO_A &&
+      seed.type !== 'session_summary' &&
       seed.lifecycle === 'active' &&
       seed.reviewState !== 'imported' &&
       allowed.includes(seed.sensitivity),
@@ -187,6 +190,7 @@ function seed(db: DatabaseSync): void {
       memory.lifecycle === 'deleted' ? memory.createdAt + 1 : null,
       memory.createdAt,
     );
+    grantVisibility(db, memory.id, { audience: 'project', repoId: memory.repoId }, 'migration', memory.createdAt);
   }
 
   for (const pin of PINS) {
@@ -433,7 +437,7 @@ test('timeline carries the sessions of the repository with their turns and in-sc
     );
     assert.equal(done?.agent, 'claude');
     assert.equal(done?.summary_state, 'done');
-    assert.deepEqual(done?.memory_ids, ['m_a_summary_done', 'm_a_eligible_unreviewed_active']);
+    assert.deepEqual(done?.memory_ids, ['m_a_eligible_unreviewed_active']);
 
     assert.deepEqual(
       timeline(db, REPO_A, { sessionId: 's_a_done', limit: 10 }).map((session) => session.id),
@@ -450,15 +454,15 @@ test('memoriesForSession stays inside the scope', async () => {
 
     assert.deepEqual(
       memoriesForSession(db, 's_a_done', scope).map((row) => row.id),
-      ['m_a_summary_done', 'm_a_eligible_unreviewed_active'],
+      ['m_a_eligible_unreviewed_active'],
     );
     assert.deepEqual(memoriesForSession(db, 's_a_active', scope), []);
   });
 });
 
-test('memoriesForSession joins both paths to the session and returns each memory once', async () => {
+test('memoriesForSession joins both historical paths and returns each memory once', async () => {
   await withSeededDatabase((db) => {
-    const scope = memoryScope(db, { repoId: REPO_A, destination: 'injection' });
+    const scope = memoryScope(db, { repoId: REPO_A, destination: 'injection', history: true });
     // m_a_summary_done already cites a raw event of s_a_done, so both paths now name it.
     db.prepare("UPDATE memories SET source_session_id = 's_a_done' WHERE id IN (?, ?)").run(
       'm_a_summary_done',
@@ -469,6 +473,24 @@ test('memoriesForSession joins both paths to the session and returns each memory
       memoriesForSession(db, 's_a_done', scope).map((row) => row.id),
       ['m_a_summary_done', 'm_a_private_reviewed_active', 'm_a_eligible_unreviewed_active'],
     );
+  });
+});
+
+test('summary sensitivity covers all counted memories beyond the displayed title limit', async () => {
+  await withSeededDatabase((db) => {
+    db.prepare(`INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, status)
+      VALUES ('summary-limit', ?, 'claude', 'summary-limit', 'summary-limit', 'ended')`).run(REPO_A);
+    for (let index = 0; index < 13; index += 1) {
+      db.prepare(`INSERT INTO memories (id, repo_id, source_session_id, type, title, body, content_hash, sensitivity, created_at)
+        VALUES (?, ?, 'summary-limit', 'discovery', ?, 'Supporting knowledge.', ?, ?, ?)`)
+        .run(`limit-${index}`, REPO_A, `Heading ${index}`, `limit-${index}`, index === 0 ? 'private' : 'eligible', index + 1);
+      grantVisibility(db, `limit-${index}`, { audience: 'project', repoId: REPO_A }, 'migration', index + 1);
+    }
+    const result = memoryTitlesForSession(db, 'summary-limit', memoryScope(db, { repoId: REPO_A, destination: 'injection' }), 10);
+    assert.equal(result.items.length, 10);
+    assert.equal(result.total, 13);
+    assert.ok(!result.items.includes('Heading 0'));
+    assert.equal(result.sensitivity, 'private');
   });
 });
 
@@ -548,7 +570,7 @@ test('timeline keeps session-linked memories and citations after raw events expi
   await withSeededDatabase((db) => {
     db.prepare("UPDATE memories SET source_session_id = 's_a_done' WHERE id = 'm_a_summary_done'").run();
     db.prepare("DELETE FROM raw_events WHERE id = 'e_a_done_1'").run();
-    const [session] = timeline(db, REPO_A, { sessionId: 's_a_done', limit: 1 });
+    const [session] = timeline(db, REPO_A, { sessionId: 's_a_done', limit: 1, history: true });
     assert.deepEqual(session.memory_ids, ['m_a_summary_done']);
     assert.deepEqual(session.turns.map((turn) => ({ id: turn.id, memory_ids: turn.memory_ids })), [
       { id: 't_a_done_1', memory_ids: [] },

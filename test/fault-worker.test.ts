@@ -2,6 +2,7 @@
 // injection", spec.md User Story 2 scenario 2, contracts/agents.md (A11, A16, FR-024, session-start
 // pack), FR-002, FR-003, R6. Engine defects stay failing for T063.
 import assert from 'node:assert/strict';
+import { grantVisibility } from '../src/db/queries.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, statSync, writeFileSync } from 'node:fs';
@@ -222,6 +223,7 @@ function seedMemory(place: Place): void {
          'The upload path retries once after a failure.', '', 'mh-fault-worker', 'ch-fault-worker',
          'eligible', 'unreviewed', ?, 0, ?)`,
     ).run(repo.id, Date.now(), Date.now());
+    grantVisibility(db, 'm-fault-worker', { audience: 'project', repoId: repo.id }, 'migration', Date.now());
   });
 }
 
@@ -321,9 +323,11 @@ function firstSummarizableId(place: Place): string {
 
 function observerOutput(eventId: string): unknown {
   return {
+    checkpoint: { decision: 'unchanged', source_event_ids: [eventId], reason: 'No work progress changed.' },
     observations: [
       {
         type: 'discovery',
+        visibility: 'project',
         title: 'Retry behavior',
         body: 'The upload path retries after a failure.',
         concepts: ['how-it-works'],

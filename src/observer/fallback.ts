@@ -41,7 +41,7 @@ export type FallbackInput = {
 };
 
 export type SuppressedObservation = { title: string; content_hash: string; target: string };
-export type FallbackOutput = ObserverOutput & { suppressed: SuppressedObservation[] };
+export type FallbackOutput = Pick<ObserverOutput, 'observations'> & { suppressed: SuppressedObservation[] };
 
 type Rule = 'change' | 'bugfix' | 'discovery' | 'decision';
 
@@ -93,6 +93,7 @@ function observation(
 ): Observation {
   return trimObservation({
     type,
+    visibility: 'work',
     title,
     body,
     concepts,

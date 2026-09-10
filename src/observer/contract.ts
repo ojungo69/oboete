@@ -34,8 +34,6 @@ export const MAX_REASON = 200;
 export const MAX_INPUT_CHARS = 12_000;
 /** A nearby memory is context, so its body enters the input as a stub (contracts/observer.md). */
 export const MAX_NEARBY_BODY = 500;
-/** A prompt is never dropped and never shortened below this (contracts/observer.md "Input"). */
-export const MIN_PROMPT_TEXT = 200;
 export const DISPLAY_PATH_TAIL = 60;
 
 const observationTypeSchema = z.enum(OBSERVATION_TYPES);
@@ -56,9 +54,44 @@ const commitIdSchema = z
   .max(MAX_CITATION_LENGTH)
   .regex(/^[0-9a-f]{7,64}$/);
 
+const checkpointContextSchema = z.discriminatedUnion('state', [
+  z.object({ state: z.literal('none') }).strict(),
+  z.object({ state: z.literal('withheld') }).strict(),
+  z.object({ state: z.literal('provided'), id: z.string(), title: z.string().max(MAX_TITLE),
+    body: z.string().max(MAX_BODY) }).strict(),
+]);
+
+const checkpointSources = z.array(z.string()).min(1).max(MAX_SOURCE_EVENT_IDS);
+const checkpointReason = z.string().min(1).max(MAX_REASON).refine((text) => text.trim() !== '');
+const checkpointItems = z.array(z.string().min(1).max(500)).max(20);
+const checkpointChoiceSchema = z.discriminatedUnion('decision', [
+  z.object({ decision: z.literal('unchanged'), source_event_ids: checkpointSources, reason: checkpointReason }).strict(),
+  z.object({ decision: z.literal('replace'), purpose: z.string().min(1).max(MAX_TITLE),
+    constraints: checkpointItems, decisions: checkpointItems, outstanding: checkpointItems,
+    source_event_ids: checkpointSources, reason: checkpointReason }).strict(),
+]);
+export type CheckpointChoice = z.infer<typeof checkpointChoiceSchema>;
+
+/** One canonical display form; checkpoints are never silently trimmed or parsed back from text. */
+export function checkpointText(choice: Extract<CheckpointChoice, { decision: 'replace' }>) {
+  const japanese = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(choice.purpose);
+  const headings = japanese ? ['目的', '制約', '決定', '未完了'] : ['Purpose', 'Constraints', 'Decisions', 'Outstanding'];
+  const list = (items: string[]) => items.length === 0 ? (japanese ? '記録なし' : 'None recorded.')
+    : items.map((item) => `- ${item}`).join('\n');
+  return { title: choice.purpose, body: [
+    `${headings[0]}\n${choice.purpose}`, `${headings[1]}\n${list(choice.constraints)}`,
+    `${headings[2]}\n${list(choice.decisions)}`, `${headings[3]}\n${list(choice.outstanding)}`,
+  ].join('\n\n') };
+}
+
+export const checkpointSchema = checkpointChoiceSchema.refine((choice) => choice.decision === 'unchanged'
+  || (choice.purpose.trim() !== '' && checkpointText(choice).body.length <= MAX_BODY),
+{ message: 'checkpoint must fit completely' });
+
 export const observerInputSchema = z
   .object({
     repo_ref: z.string(),
+    checkpoint_context: checkpointContextSchema,
     session: z
       .object({
         started_at: z.number(),
@@ -78,6 +111,12 @@ export const observerInputSchema = z
         .object({
           id: z.string(),
           kind: observerEventKindSchema,
+          captured_at: z.number().nullable().optional(),
+          fragment: z.object({
+            format: z.literal('event-json-v1'), source_hash: z.string(),
+            start: z.number().int().nonnegative(), end: z.number().int().positive(),
+            total: z.number().int().positive(), text: z.string(),
+          }).strict().optional(),
           text: z.string().optional(),
           tool_name: z.string().optional(),
           input: z.unknown().optional(),
@@ -101,6 +140,7 @@ export const observerInputSchema = z
           title: z.string(),
           body: z.string(),
           deleted: z.boolean(),
+          captured_at: z.number().nullable().optional(),
         })
         .strict(),
     ),
@@ -111,6 +151,7 @@ export const observerInputSchema = z
 export const observationSchema = z
   .object({
     type: observationTypeSchema,
+    visibility: z.enum(['work', 'project', 'personal_proposal']),
     title: z.string().min(1).max(MAX_TITLE),
     body: z.string().max(MAX_BODY),
     concepts: z
@@ -140,6 +181,7 @@ export const observationSchema = z
 export const observerOutputSchema = z
   .object({
     observations: z.array(observationSchema).max(MAX_OBSERVATIONS),
+    checkpoint: checkpointSchema,
   })
   .strict();
 
@@ -169,7 +211,7 @@ const rawObservationSchema = observationSchema.extend({
 });
 
 const rawOutputSchema = z
-  .object({ observations: z.array(rawObservationSchema).max(MAX_OBSERVATIONS) })
+  .object({ observations: z.array(rawObservationSchema).max(MAX_OBSERVATIONS), checkpoint: checkpointSchema })
   .strict();
 
 type RawObservation = z.infer<typeof rawObservationSchema>;
@@ -182,19 +224,6 @@ export type Observation = z.infer<typeof observationSchema>;
 export type ObservationType = z.infer<typeof observationTypeSchema>;
 export type Decision = z.infer<typeof decisionSchema>;
 
-const TOOL_EVENT_KINDS = new Set([
-  'tool_call',
-  'tool_result',
-  'tool_failure',
-]);
-
-function serializedSize(value: unknown): number {
-  return JSON.stringify(value).length;
-}
-
-function isToolEventKind(kind: ObserverInput['events'][number]['kind']): boolean {
-  return TOOL_EVENT_KINDS.has(kind);
-}
 
 function normalizeClassification(observation: Observation, nearbyIds: Set<string>): Observation {
   let { decision, target } = observation.classification;
@@ -236,7 +265,7 @@ function foreignSourceDetail(observations: Observation[], eventIds: Set<string>)
 }
 
 type ParsedObserverOutput =
-  | { ok: true; observations: Observation[] }
+  | { ok: true; output: ObserverOutput }
   | { ok: false; reason: 'unusable_output'; detail: string };
 
 function parseObserverOutput(raw: unknown): ParsedObserverOutput {
@@ -253,6 +282,7 @@ function parseObserverOutput(raw: unknown): ParsedObserverOutput {
   // type, an unknown key, an empty source_event_ids, more than 20 observations).
   const parsed = observerOutputSchema.safeParse({
     observations: received.data.observations.map(trimObservation),
+    checkpoint: received.data.checkpoint,
   });
   if (!parsed.success) {
     return {
@@ -261,12 +291,12 @@ function parseObserverOutput(raw: unknown): ParsedObserverOutput {
       detail: z.prettifyError(parsed.error),
     };
   }
-  return { ok: true, observations: parsed.data.observations };
+  return { ok: true, output: parsed.data };
 }
 
 export function validateObserverOutput(
   raw: unknown,
-  input: Pick<ObserverInput, 'events' | 'nearby'>,
+  input: Pick<ObserverInput, 'events' | 'nearby'> & Partial<Pick<ObserverInput, 'checkpoint_context'>>,
 ):
   | { ok: true; output: ObserverOutput }
   | { ok: false; reason: 'unusable_output'; detail: string } {
@@ -274,7 +304,7 @@ export function validateObserverOutput(
   if (!parsed.ok) return parsed;
 
   const eventIds = new Set(input.events.map((event) => event.id));
-  const detail = foreignSourceDetail(parsed.observations, eventIds);
+  const detail = foreignSourceDetail(parsed.output.observations, eventIds);
   if (detail !== null) {
     return {
       ok: false,
@@ -283,12 +313,18 @@ export function validateObserverOutput(
     };
   }
 
+  const checkpoint = parsed.output.checkpoint;
+  if (checkpoint.source_event_ids.some((id) => !eventIds.has(id))
+    || (input.checkpoint_context?.state === 'withheld' && checkpoint.decision !== 'unchanged')) {
+    return { ok: false, reason: 'unusable_output', detail: 'checkpoint context or source was not admitted' };
+  }
+
   const nearbyIds = new Set(input.nearby.map((row) => row.id));
-  const observations = parsed.observations.map((observation) =>
+  const observations = parsed.output.observations.map((observation) =>
     normalizeClassification(observation, nearbyIds),
   );
 
-  return { ok: true, output: { observations } };
+  return { ok: true, output: { observations, checkpoint } };
 }
 
 function trimBody(body: string): string {
@@ -352,165 +388,4 @@ export function trimObservation(observation: RawObservation): Observation {
       commits: commitCitations(observation.citations.commits),
     },
   };
-}
-
-function truncateFromEnd(
-  root: ObserverInput,
-  value: string | undefined,
-  assign: (next: string) => void,
-  floor = 0,
-): boolean {
-  if (value === undefined || value.length <= floor) return false;
-  if (serializedSize(root) <= MAX_INPUT_CHARS) return false;
-  let current = value;
-  let changed = false;
-  while (current.length > floor && serializedSize(root) > MAX_INPUT_CHARS) {
-    const over = serializedSize(root) - MAX_INPUT_CHARS;
-    current = current.slice(0, Math.max(floor, current.length - Math.max(1, over)));
-    assign(current);
-    changed = true;
-  }
-  return changed;
-}
-
-/**
- * Nothing above kept the input under MAX_INPUT_CHARS, so the cap is applied without preference:
- * the nearby titles, then the nearby rows, then the turn list, and last the event texts below
- * MIN_PROMPT_TEXT and the events themselves, oldest first. FR-015 is a cap and not a preference,
- * and an input over it reaches the provider whole.
- */
-function lastResort(next: ObserverInput): boolean {
-  const overBudget = (): boolean => serializedSize(next) > MAX_INPUT_CHARS;
-  let cut = false;
-  for (const row of next.nearby) {
-    if (!overBudget()) return cut;
-    cut =
-      truncateFromEnd(next, row.title, (value) => {
-        row.title = value;
-      }) || cut;
-  }
-  while (overBudget() && next.nearby.length > 0) {
-    next.nearby.pop();
-    cut = true;
-  }
-  // Halved rather than dropped one by one: every check re-serializes the whole input.
-  while (overBudget() && next.session.turns.length > 0) {
-    next.session.turns.splice(0, Math.ceil(next.session.turns.length / 2));
-    cut = true;
-  }
-  for (const event of next.events) {
-    if (!overBudget()) return cut;
-    cut =
-      truncateFromEnd(next, event.text, (value) => {
-        event.text = value;
-      }) || cut;
-  }
-  while (overBudget() && next.events.length > 0) {
-    next.events.shift();
-    cut = true;
-  }
-  return cut;
-}
-
-function removeToolEvents(next: ObserverInput, overBudget: () => boolean): boolean {
-  let excerpted = false;
-  // Verbatim tool material is the cheapest thing to lose, oldest first.
-  while (overBudget()) {
-    const index = next.events.findIndex((event) => isToolEventKind(event.kind));
-    if (index === -1) break;
-    next.events.splice(index, 1);
-    excerpted = true;
-  }
-  return excerpted;
-}
-
-function truncateNearby(next: ObserverInput, overBudget: () => boolean): boolean {
-  let excerpted = false;
-  // A nearby memory is context from another session. Its body is capped and then cut, but the row
-  // stays so that `classification.target` can still name it.
-  for (const row of next.nearby) {
-    if (row.body.length <= MAX_NEARBY_BODY) continue;
-    row.body = row.body.slice(0, MAX_NEARBY_BODY);
-    excerpted = true;
-  }
-  for (const row of next.nearby) {
-    if (!overBudget()) break;
-    excerpted =
-      truncateFromEnd(next, row.body, (value) => {
-        row.body = value;
-      }) || excerpted;
-  }
-  return excerpted;
-}
-
-function truncateEventTexts(
-  next: ObserverInput,
-  events: ObserverInput['events'],
-  overBudget: () => boolean,
-): boolean {
-  let excerpted = false;
-  for (const event of events) {
-    if (!overBudget()) break;
-    excerpted =
-      truncateFromEnd(
-        next,
-        event.text,
-        (value) => {
-          event.text = value;
-        },
-        event.kind === 'prompt' ? MIN_PROMPT_TEXT : 0,
-      ) || excerpted;
-  }
-  return excerpted;
-}
-
-function truncateFreeSummaries(next: ObserverInput): boolean {
-  let excerpted = false;
-  // The free summaries are the highest thing in the keep order, so they are cut last of all.
-  excerpted =
-    truncateFromEnd(next, next.free_summaries.compaction_summary, (value) => {
-      next.free_summaries.compaction_summary = value;
-    }) || excerpted;
-  excerpted =
-    truncateFromEnd(next, next.free_summaries.last_assistant_message, (value) => {
-      next.free_summaries.last_assistant_message = value;
-    }) || excerpted;
-  return excerpted;
-}
-
-/**
- * FR-015: the input is cut to MAX_INPUT_CHARS. contracts/observer.md ("Input") states the keep
- * order - free summaries first, then prompts, then tool inputs and outputs by recency - so the cut
- * runs the other way round: tool events, then the nearby memories, then the prompts (shortened, not
- * dropped, never below MIN_PROMPT_TEXT) and the free summaries last. When even that leaves the
- * input over the cap, `lastResort` spends the remaining preferences.
- */
-export function excerptInput(
-  input: ObserverInput,
-): { input: ObserverInput; excerpted: boolean } {
-  if (serializedSize(input) <= MAX_INPUT_CHARS) {
-    return { input, excerpted: false };
-  }
-
-  const next = structuredClone(input);
-  let excerpted = false;
-  const overBudget = (): boolean => serializedSize(next) > MAX_INPUT_CHARS;
-
-  excerpted = removeToolEvents(next, overBudget) || excerpted;
-
-  if (overBudget()) {
-    excerpted = truncateNearby(next, overBudget) || excerpted;
-  }
-
-  // The session's own words next, and a prompt keeps at least MIN_PROMPT_TEXT characters.
-  const byKeepOrder = [
-    ...next.events.filter((event) => event.kind !== 'prompt'),
-    ...next.events.filter((event) => event.kind === 'prompt'),
-  ];
-  excerpted = truncateEventTexts(next, byKeepOrder, overBudget) || excerpted;
-  excerpted = truncateFreeSummaries(next) || excerpted;
-
-  if (overBudget()) excerpted = lastResort(next) || excerpted;
-
-  return { input: next, excerpted };
 }

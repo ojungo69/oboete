@@ -190,7 +190,8 @@ export function piExtension(pi: PiApi, options: PiExtensionOptions): void {
       const { text, ok } = await readChild(
         ['inject', '--agent', 'pi', '--kind', kind],
         { stdio: ['pipe', 'pipe', 'ignore'], signal },
-        JSON.stringify({ cwd: process.cwd(), session_id: sessionId, prompt }),
+        JSON.stringify({ cwd: process.cwd(), session_id: sessionId, prompt,
+          ...(promptId === undefined ? {} : { prompt_id: promptId }) }),
       );
       if (signal.aborted) {
         count('inject_timeout');
