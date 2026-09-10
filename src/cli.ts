@@ -81,7 +81,8 @@ function usage(): string {
     'Sharing: oboete share status | approve <proposal-id> | reject <proposal-id> | adopt <memory-id> [--binding <binding-id>] [--json]\n' +
     'Export: oboete export [file|-] [--format 1|2]\n' +
     'Import: oboete import [file|-] [--dry-run|--apply] [--json]\n' +
-    '        oboete import promote <migration-record-id> --map-work <source-work>=<local-work> [--json]\n' +
+    '        oboete import promote <migration-record-id> --work <local-work-id> [--json]\n' +
+    '        oboete import promote --list [--json]\n' +
     '        Native mappings: --map-repo <source>=<repo> [--map-work <source>=<work>]\n' +
     '        Claude-mem: --from claude-mem --map-project <exact-name>=<repo>\n' +
     '        Use --map-project-hash <sha256>=<repo> for a private project name.\n' +

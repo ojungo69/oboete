@@ -337,13 +337,15 @@ Receipts under `/var/tmp/oboete-009-20260909.jJ5grc/`:
 
 ## E2 — explicit migration promotion
 
-2026-09-10, `009-memory-core` at unchanged HEAD `c9a9e585`. This increment implements
-`oboete import promote <migration-record-id> --map-work <source-work>=<local-work> [--json]`
+2026-09-10, `009-memory-core`, with the second review follow-up based on unchanged HEAD `590c0a2f`.
+The current command is `oboete import promote <migration-record-id> --work <local-work-id> [--json]`
 in `src/transfer-promote.ts`, with dispatch in `src/transfer.ts` and CLI help in `src/cli.ts`.
+Use `oboete import promote --list [--json]` to discover receipts in the verified cwd repository.
 It adds no dependency or schema. T029-T032 remain unchecked.
 
 - Git identity and stored-context verification run before the immediate transaction. Inside it,
-  the context ID/repository/local key, clean held candidate, locally classified non-expired ordinary
+  the context ID/repository/local key, clean held candidate, import-created (`effect='inserted'`),
+  locally classified non-expired ordinary
   origin other than a session summary, and existing local work are rechecked. Promotion adds only
   the explicit historical work grant, a pending inferred proposal with empty source IDs, and its
   receipt pointer. Candidate hashes use the sanitized exact strings. Repetition preserves pending,
@@ -435,5 +437,60 @@ Each supported Node therefore passes 1,383 checks at this snapshot (1,336 at the
 `us5-e2-gate-driver.log`. The `/tmp/oboete-009-20260909.jJ5grc/us5-promote-*` receipts were copied
 into `/var/tmp/oboete-009-20260909.jJ5grc/` unchanged.
 
+**Whole gate for the follow-up (Claude Code, `us5-e2b-*`):** the same sequential `package.json`
+phases pass again on both Nodes after the `--work`/`--list` change and the six review fixes:
+1,203 unit/migration/scripts and 202 serial E2E/fault each, typecheck/lint/build and pack-check
+(20.703 MB). Phase exit codes: `us5-e2b-gate-summary.txt`.
+
 Still open: the remaining US5 terminal/preview/race matrix, packed CLI/RSS measurements and complete
 US5 reviews. No commit, push, daily installation, real provider or external network operation ran.
+
+**Second review follow-up (`590c0a2f`, no commit):** promotion now accepts exactly one nonblank
+`--work <local-work-id>` of at most 512 characters; the held payload already pins the historical
+origin work. The former promotion `--map-work` form is rejected. Native import mappings retain
+their existing `--map-work` form. `--list` accepts no record ID or work argument and returns at most
+100 sharing-proposal receipts, ordered by ID, plus an omitted count. JSON is `{ records, omitted }`;
+each record has only `id`, `memory`, `state`, `effect`, `promotable`, and `proposal`. Human output
+has one line per record and `N more records omitted.` when truncated. Candidate text, payload
+fields, source IDs, project names and paths never leave this listing. The row SQL and payload
+predicate are shared with promotion; listing omits only the work-argument check and uses a read-only
+connection and read transaction. Empty lists succeed without a write lock. Missing, behind, ahead
+and unverifiable contexts preserve the fixed unavailable result and never create/migrate a store.
+
+All following receipts are under `/tmp/oboete-009-20260909.jJ5grc/`, with prefix `us5-promote2-`.
+The command/list contract change is RED in `command-list-red.tap`; all 69 final promotion cases
+are GREEN in each `node24-detail.tap` / `node22-detail.tap`. `help.log` confirms actual CLI usage.
+
+| Closed finding | RED receipt | GREEN evidence |
+| --- | --- | --- |
+| Origin must be import-created | `origin-red-detail.tap`: native import converges on unchanged local content, then incorrectly promotes (exit 0). | `origin-green.tap`: refusal with all tables unchanged; final suites also cover `matched_existing`, `held_by_tombstone`, and `historical_held`. |
+| Dead proposal guard | No new RED: the existing first test already exercises `share status` and successful `share approve`. | `origin-green.tap` and both final detail TAPs; no redundant `provenance_complete` condition was added. |
+| Operational errors are not unavailable | `operational-red.tap`: swallowed busy/save errors; `operational-cli-red.tap`: actual CLI exits 1 instead of 3. | `operational-fd-green.tap`: busy reaches `isBusyError` and actual CLI first-line stderr/exit 3, with unchanged tables; final suites also verify checksum mismatch and database I/O propagation. |
+| Phantom `deleted-origin` | `deleted-origin-red.tap`: removing only the deletion guard changes exit 1 to exit 0. | `deleted-origin-green.tap`: restoring the guard refuses promotion. The fixture restores and asserts the trigger-cleared clean payload first. |
+| Phantom `secret-origin` | `secret-origin-isolated-red.tap`: removing only the sensitivity guard changes exit 1 to exit 0. | `secret-origin-isolated-green.tap`: restored guard refuses promotion. The fixture restores both 0007 receipt fields and 0005 origin review/provenance fields. |
+| Phantom `wrong-payload-kind` | `wrong-payload-kind-red.tap`: removing only the kind guard changes exit 1 to exit 0. | `wrong-payload-kind-green.tap`: restored guard refuses a complete native memory payload that passes both `nativeMemorySchema` and `migrationPayloadShape`. |
+
+`secret-origin-red.tap` retains the diagnostic showing that restoring the receipt alone still left
+the 0005 `memories_provenance_privacy` review-state guard masking the sensitivity test. The isolated
+receipt above is the effective RED. `mutation-commands.log` records each individual mutation,
+sequential build/test and restoration. The first operational GREEN attempt and initial combined
+command/CLI run retain the sandbox pipe failures; the FD and final receipts above supersede them.
+
+Verification ran in the required order: typecheck, lint, build, the specified Node 24 test glob,
+then that same Node 22 glob. All three static/build checks pass (`typecheck.log`, `lint.log`,
+`build.log`). Supplemental detail runs then used `--experimental-test-isolation=none`, sequentially,
+to obtain case-level results. No build overlapped tests.
+
+| Latest follow-up verification | Node 24.16.0 | Node 22.16.0 | Receipt names |
+| --- | --- | --- | --- |
+| Requested process-isolated migration/scope/transfer/CLI glob | 6 PASS / 2 FAIL file suites | 6 PASS / 2 FAIL file suites | `node24.tap`, `node22.tap` |
+| Same glob, case-level detail | 153 PASS / 4 FAIL | 153 PASS / 4 FAIL | `node24-detail.tap`, `node22-detail.tap` |
+| Promotion cases within the detail runs | 69 PASS / 0 FAIL | 69 PASS / 0 FAIL | `verification-summary.log` plus the detail TAPs |
+
+The four unchanged failing tests are CLI version, unknown-command usage, doctor JSON, and the
+transfer CLI/FIFO test. `sandbox.log` reproduces `spawnSync` pipe `EPERM` with empty output on both
+Nodes, while direct file descriptors receive the correct version/usage with the expected exit
+codes; `mkfifo` also reports `EPERM`. The busy regression uses a temporary stderr FD to verify the
+real CLI without weakening its expected message or exit code. The earlier parent whole-gate result
+above applies to the baseline; the parent must run the full gate for this latest diff. This delegate
+did not run E2E/fault or pack, access a network/provider, change Git state, or tick any checkbox.

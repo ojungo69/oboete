@@ -167,10 +167,15 @@ writers require separate worktrees. No deployment follows merely from an increme
   Standards/Spec and Ponytail review pass. See the D1 receipts in `quickstart.md`. This does not claim
   native transfer/sync, real-agent/model qualification, or the unfinished resident/failover amendment.
 - T031/T032 (partial E2): `import promote` now creates/reuses a pending inferred proposal from a
-  clean held candidate and explicit local work mapping, preserving local terminal decisions.
-  All 47 new tests pass on Node 24.16.0 and 22.16.0. The sandboxed delegate could not pass the whole
-  gate (`mkfifo`/`listen`/tmux `EPERM`); the parent session then passed it outside the sandbox on both
-  Nodes: 1,181 unit/migration/scripts + 202 serial E2E/fault each, plus pack-check (`us5-e2-*`).
-  See `quickstart.md` E2 and its `us5-promote-*` receipts for RED/GREEN, scoped reviews and the closed
-  expired/`session_summary` origin gap.
+  clean import-created candidate and explicit `--work <local-work-id>`, preserving local terminal
+  decisions; `--list` discovers bounded cwd-repository receipt metadata through the same predicate.
+  At HEAD `590c0a2f` plus this follow-up, all 69 promotion tests pass on Node 24.16.0 and 22.16.0;
+  typecheck/lint/build pass. The requested migration/scope/transfer/CLI glob reports 6/8 passing
+  file suites per Node; detail runs show 153 PASS / 4 FAIL, confined to unchanged CLI pipe/FIFO
+  sandbox failures. Six review findings are closed with RED/GREEN receipts in `quickstart.md` E2
+  (`us5-promote2-*`); the existing status/approve test covers the dead-proposal concern without a
+  redundant provenance guard. The parent previously passed the baseline whole gate (`us5-e2-*`:
+  1,181 unit/migration/scripts + 202 serial E2E/fault per Node, plus pack-check) and then passed the
+  whole gate again on this follow-up (`us5-e2b-*`: 1,203 + 202 per Node, pack-check 20.703 MB).
+  Earlier `us5-promote-*` receipts remain historical evidence.
   T029-T032 stay unchecked: the remaining matrix, RSS/packed checks and full reviews remain open.

@@ -1,19 +1,22 @@
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { contentHash, materialHash, memoryIdFor } from '../../src/db/identity.js';
+import { LATEST_SCHEMA_VERSION, MigrationMismatchError, isBusyError, openDatabase } from '../../src/db/open.js';
 import { grantVisibility } from '../../src/db/queries.js';
 import { sha256Json } from '../../src/hash.js';
 import { runShare } from '../../src/memories-cli.js';
 import { oboetePaths } from '../../src/paths.js';
+import { migrationPayloadShape, nativeMemorySchema } from '../../src/transfer-format.js';
 import { runExport, runImport } from '../../src/transfer.js';
 import { runObserve } from '../../src/worker/observe.js';
-import { insertSession, withFixture, type Fixture } from '../helpers/inject-fixture.js';
+import { insertMemory, insertSession, withFixture, type Fixture } from '../helpers/inject-fixture.js';
 import { cleanEnv } from '../helpers/observe.js';
 import { withTempHome } from '../helpers/home.js';
 
@@ -106,12 +109,12 @@ async function classify(fixture: Fixture) {
 
 test('native candidate promotion requires fresh human approval and preserves current work', async () => {
   await withImported(async (fixture) => {
-    const { db, recordId, memoryId, sourceWork, localWork } = fixture;
+    const { db, recordId, memoryId, localWork } = fixture;
     await classify(fixture);
     assert.equal(db.prepare('SELECT classification_state FROM migration_records WHERE id = ?').get(recordId)?.classification_state, 'clean');
     const before = snapshot(db);
     const promoted = output();
-    assert.equal(await runImport(['promote', recordId, '--map-work', `${sourceWork}=${localWork}`, '--json'], promoted.io), 0, promoted.text.error);
+    assert.equal(await runImport(['promote', recordId, '--work', localWork, '--json'], promoted.io), 0, promoted.text.error);
     const result = JSON.parse(promoted.text.out) as { id: string; state: string };
     assert.match(result.id, /^sp_[0-9a-f]{64}$/u);
     assert.deepEqual(result, { id: result.id, state: 'pending' });
@@ -126,6 +129,10 @@ test('native candidate promotion requires fresh human approval and preserves cur
     const grants = db.prepare('SELECT audience, repo_id, work_id, grant_kind FROM memory_visibility WHERE memory_id = ?').all(memoryId);
     assert.deepEqual(grants.map((grant) => ({ ...grant })), [{ audience: 'work', repo_id: fixture.identity.id, work_id: localWork, grant_kind: 'migration' }]);
     assert.equal(db.prepare('SELECT promoted_proposal_id FROM migration_records WHERE id = ?').get(recordId)?.promoted_proposal_id, result.id);
+    const listed = output();
+    assert.equal(await runImport(['promote', '--list', '--json'], listed.io), 0, listed.text.error);
+    assert.deepEqual(JSON.parse(listed.text.out), { records: [{ id: recordId, memory: memoryId, state: 'clean',
+      effect: 'inserted', promotable: true, proposal: result.id }], omitted: 0 });
     const status = output();
     assert.equal(await runShare(['status', '--json'], status.io), 0, status.text.error);
     const candidates = JSON.parse(status.text.out).proposals;
@@ -143,10 +150,46 @@ test('native candidate promotion requires fresh human approval and preserves cur
   });
 });
 
+test('a native candidate matching existing local content cannot promote or widen its scope', async () => {
+  await withFixture(async (source) => {
+    const file = await nativeFile(source);
+    await withFixture(async (target) => {
+      const { db } = target;
+      insertSession(target, { id: 'target-session', agent: 'codex' });
+      const title = 'Project preference';
+      const body = 'The team replies in Japanese.';
+      insertMemory(target, { id: 'local-memory', title, body });
+      const material = materialHash(title, body);
+      db.prepare(`UPDATE memories SET material_hash = ?, content_hash = ?, sensitivity = 'local_only',
+        review_state = 'reviewed' WHERE id = 'local-memory'`).run(material, contentHash(target.identity.id, material));
+      const local = snapshot(db, ['memories', 'memory_visibility', 'memory_sources']);
+      const imported = output();
+      assert.equal(await runImport([file.path, '--map-repo', `${source.identity.id}=${target.identity.id}`,
+        '--apply', '--json'], imported.io), 0, imported.text.error);
+      await classify(target);
+      assert.deepEqual(snapshot(db, ['memories', 'memory_visibility', 'memory_sources']), local);
+      const row = db.prepare("SELECT * FROM migration_records WHERE record_kind = 'sharing_proposal'").get()!;
+      assert.equal(row.destination_memory_id, 'local-memory');
+      assert.equal(row.effect, 'matched_existing');
+      assert.equal(row.classification_state, 'clean');
+      assert.equal(JSON.parse(String(row.payload_json)).state, 'pending');
+      const before = snapshot(db, allTables(db));
+      const cwd = process.cwd();
+      process.chdir(target.repo);
+      try {
+        const result = output();
+        assert.equal(await runImport(['promote', String(row.id), '--work', `fixture-work:${target.identity.id}`, '--json'], result.io), 1);
+        assert.deepEqual(result.text, { out: '', error: 'The migration record is unavailable in this scope.\n' });
+        assert.deepEqual(snapshot(db, allTables(db)), before);
+      } finally { process.chdir(cwd); }
+    });
+  });
+});
+
 test('repeated promotion reuses the proposal and historical work grant without writes', async () => {
   await withImported(async (fixture) => {
     await classify(fixture);
-    const args = ['promote', fixture.recordId, '--map-work', `${fixture.sourceWork}=${fixture.localWork}`, '--json'];
+    const args = ['promote', fixture.recordId, '--work', fixture.localWork, '--json'];
     const first = output();
     assert.equal(await runImport(args, first.io), 0, first.text.error);
     const before = snapshot(fixture.db, ['sharing_proposals', 'memory_visibility', 'migration_records']);
@@ -162,7 +205,7 @@ test('repeated promotion reuses the proposal and historical work grant without w
 test('promotion preserves a local rejection and never creates another pending proposal', async () => {
   await withImported(async (fixture) => {
     await classify(fixture);
-    const args = ['promote', fixture.recordId, '--map-work', `${fixture.sourceWork}=${fixture.localWork}`, '--json'];
+    const args = ['promote', fixture.recordId, '--work', fixture.localWork, '--json'];
     const first = output();
     assert.equal(await runImport(args, first.io), 0, first.text.error);
     const id = JSON.parse(first.text.out).id;
@@ -180,14 +223,14 @@ test('promotion preserves a local rejection and never creates another pending pr
 for (const approval of ['cli', 'automatic_direct'] as const) {
   test(`source ${approval} approval and its projection grant cannot approve a local promotion`, async () => {
     await withImported(async (fixture) => {
-      const { db, recordId, sourceWork, localWork } = fixture;
+      const { db, recordId, localWork } = fixture;
       await classify(fixture);
       const held = JSON.parse(String(db.prepare('SELECT payload_json FROM migration_records WHERE id = ?').get(recordId)?.payload_json));
       assert.equal(held.state, 'approved');
       assert.equal(held.decision_channel, approval);
       assert.equal(db.prepare('SELECT COUNT(*) AS n FROM memories WHERE deleted_at IS NULL').get()?.n, 2);
       const promoted = output();
-      assert.equal(await runImport(['promote', recordId, '--map-work', `${sourceWork}=${localWork}`, '--json'], promoted.io), 0, promoted.text.error);
+      assert.equal(await runImport(['promote', recordId, '--work', localWork, '--json'], promoted.io), 0, promoted.text.error);
       assert.equal(JSON.parse(promoted.text.out).state, 'pending');
       const row = db.prepare('SELECT source_event_ids_json, basis, state, decision_channel, projected_memory_id, decided_at FROM sharing_proposals').get()!;
       assert.deepEqual({ ...row }, { source_event_ids_json: '[]', basis: 'inferred', state: 'pending',
@@ -206,7 +249,25 @@ function changePayload(fixture: Imported, field: string, value: string) {
     .run(`$.${field}`, value, fixture.recordId);
 }
 
-type Selection = { id: string; source: string; work: string };
+function changeTerminalOrigin(fixture: Imported, assignment: string) {
+  const { db, recordId, memoryId } = fixture;
+  const saved = db.prepare('SELECT classification_state, payload_json FROM migration_records WHERE id = ?').get(recordId)!;
+  const origin = db.prepare('SELECT review_state, provenance_complete FROM memories WHERE id = ?').get(memoryId)!;
+  assert.equal(saved.classification_state, 'clean');
+  assert.equal(typeof saved.payload_json, 'string');
+  db.prepare(`UPDATE memories SET ${assignment} WHERE id = ?`).run(memoryId);
+  assert.equal(db.prepare('SELECT payload_json FROM migration_records WHERE id = ?').get(recordId)?.payload_json, null);
+  // 0005 also quarantines a secret origin; keep that independent guard from masking sensitivity.
+  db.prepare('UPDATE memories SET review_state = ?, provenance_complete = ? WHERE id = ?')
+    .run(origin.review_state, origin.provenance_complete, memoryId);
+  assert.deepEqual(db.prepare('SELECT review_state, provenance_complete FROM memories WHERE id = ?').get(memoryId), origin);
+  // Restore the trigger-cleared receipt so only the memory guard can reject this fixture.
+  db.prepare("UPDATE migration_records SET classification_state = 'clean', payload_json = ? WHERE id = ?")
+    .run(saved.payload_json, recordId);
+  assert.deepEqual(db.prepare('SELECT classification_state, payload_json FROM migration_records WHERE id = ?').get(recordId), saved);
+}
+
+type Selection = { id: string; work: string };
 const unavailableCases: [string, (fixture: Imported, selection: Selection) => void][] = [
   ['unclassified', () => undefined],
   ['missing', (_fixture, selection) => { selection.id = 'a'.repeat(64); }],
@@ -221,19 +282,31 @@ const unavailableCases: [string, (fixture: Imported, selection: Selection) => vo
         VALUES ('foreign-work', 'foreign-repo', 'foreign-context', 1, 1)`);
     selection.work = 'foreign-work';
   }],
-  ['mismatched-source', (_fixture, selection) => { selection.source += '-other'; }],
   ['secret-record', (fixture) => changeRecord(fixture, "classification_state = 'secret'")],
   ['not-applicable', (fixture) => changeRecord(fixture, "classification_state = 'not_applicable'")],
+  ['matched-existing', (fixture) => changeRecord(fixture, "effect = 'matched_existing'")],
+  ['held-by-tombstone', (fixture) => changeRecord(fixture, "effect = 'held_by_tombstone'")],
+  ['historical-held', (fixture) => changeRecord(fixture, "effect = 'historical_held'")],
   ['null-payload', (fixture) => changeRecord(fixture, 'payload_json = NULL')],
   ['malformed-payload', (fixture) => changeRecord(fixture, "payload_json = '{}'")],
-  ['wrong-payload-kind', (fixture) => changePayload(fixture, 'kind', 'work')],
+  ['wrong-payload-kind', (fixture) => {
+    const memory = JSON.parse(String(fixture.db.prepare("SELECT payload_json FROM migration_records WHERE record_kind = 'memory' AND destination_memory_id = ?")
+      .get(fixture.memoryId)?.payload_json));
+    const candidate = JSON.parse(String(fixture.db.prepare('SELECT payload_json FROM migration_records WHERE id = ?').get(fixture.recordId)?.payload_json));
+    // A valid memory with candidate fields isolates the kind guard from later candidate access.
+    const payload = { ...candidate, ...memory };
+    assert.equal(payload.kind, 'memory');
+    assert.equal(nativeMemorySchema.safeParse(payload).success, true);
+    assert.equal(migrationPayloadShape(payload), true);
+    fixture.db.prepare('UPDATE migration_records SET payload_json = ? WHERE id = ?').run(JSON.stringify(payload), fixture.recordId);
+  }],
   ['wrong-record-kind', (fixture) => changeRecord(fixture, "record_kind = 'memory'")],
   ['null-memory', (fixture) => changeRecord(fixture, 'destination_memory_id = NULL')],
   ['imported-origin', (fixture) => { fixture.db.prepare("UPDATE memories SET review_state = 'imported' WHERE id = ?").run(fixture.memoryId); }],
-  ['deleted-origin', (fixture) => { fixture.db.prepare('UPDATE memories SET deleted_at = 4 WHERE id = ?').run(fixture.memoryId); }],
+  ['deleted-origin', (fixture) => changeTerminalOrigin(fixture, 'deleted_at = 4')],
   ['expired-origin', (fixture) => { fixture.db.prepare('UPDATE memories SET valid_to = 4 WHERE id = ?').run(fixture.memoryId); }],
   ['summary-origin', (fixture) => { fixture.db.prepare("UPDATE memories SET type = 'session_summary' WHERE id = ?").run(fixture.memoryId); }],
-  ['secret-origin', (fixture) => { fixture.db.prepare("UPDATE memories SET sensitivity = 'secret' WHERE id = ?").run(fixture.memoryId); }],
+  ['secret-origin', (fixture) => changeTerminalOrigin(fixture, "sensitivity = 'secret'")],
   ['personal-domain', (fixture) => changeRecord(fixture, "identity_domain = 'personal_projection'")],
   ['stale-context', (fixture) => { fixture.db.exec("UPDATE work_contexts SET local_key = 'replaced-generation'"); }],
   ['overlong-title', (fixture) => changePayload(fixture, 'candidate_title', 'x'.repeat(121))],
@@ -246,35 +319,55 @@ for (const [unavailable, arrange] of unavailableCases) {
     await withImported(async (fixture) => {
       const { db, recordId } = fixture;
       if (unavailable !== 'unclassified') await classify(fixture);
-      const selection = { id: recordId, source: fixture.sourceWork, work: fixture.localWork };
+      const selection = { id: recordId, work: fixture.localWork };
       arrange(fixture, selection);
       const tables = allTables(db);
       const before = snapshot(db, tables);
+      const listed = output();
+      if (unavailable === 'wrong-repository' || unavailable === 'stale-context') {
+        assert.equal(await runImport(['promote', '--list', '--json'], listed.io), 1);
+        assert.deepEqual(listed.text, { out: '', error: 'The migration record is unavailable in this scope.\n' });
+      } else {
+        assert.equal(await runImport(['promote', '--list', '--json'], listed.io), 0, listed.text.error);
+        const row = db.prepare('SELECT destination_memory_id, classification_state, effect, promoted_proposal_id FROM migration_records WHERE id = ?').get(recordId)!;
+        const records = unavailable === 'wrong-record-kind' ? [] : [{ id: recordId, memory: row.destination_memory_id,
+          state: row.classification_state, effect: row.effect,
+          promotable: ['missing', 'malformed-id', 'unknown-work', 'wrong-work-repository'].includes(unavailable),
+          proposal: row.promoted_proposal_id }];
+        assert.deepEqual(JSON.parse(listed.text.out), { records, omitted: 0 });
+        assert.equal(listed.text.error, '');
+      }
       const result = output();
-      assert.equal(await runImport(['promote', selection.id, '--map-work', `${selection.source}=${selection.work}`, '--json'], result.io), 1);
+      assert.equal(await runImport(['promote', selection.id, '--work', selection.work, '--json'], result.io), 1);
       assert.deepEqual(result.text, { out: '', error: 'The migration record is unavailable in this scope.\n' });
       assert.deepEqual(snapshot(db, tables), before);
     });
   });
 }
 
-for (const invalid of ['no-id', 'no-map', 'duplicate-map', 'missing-equals', 'empty-source', 'empty-target',
-  'overlong-source', 'unknown-option', 'extra-positional'] as const) {
+const invalidArguments: [string, (fixture: Imported) => string[]][] = [
+  ['no-id', ({ localWork }) => ['--work', localWork]],
+  ['no-work', ({ recordId }) => [recordId]],
+  ['missing-work-value', ({ recordId }) => [recordId, '--work']],
+  ['duplicate-work', ({ recordId, localWork }) => [recordId, '--work', localWork, '--work', localWork]],
+  ['empty-work', ({ recordId }) => [recordId, '--work', '']],
+  ['blank-work', ({ recordId }) => [recordId, '--work', ' \n\t']],
+  ['overlong-work', ({ recordId }) => [recordId, '--work', 'x'.repeat(513)]],
+  ['unknown-option', ({ recordId, localWork }) => [recordId, '--work', localWork, '--unknown']],
+  ['extra-positional', ({ recordId, localWork }) => [recordId, '--work', localWork, 'extra']],
+  ['obsolete-map-work', ({ recordId }) => [recordId, '--map-work', 'source=local']],
+  ['list-with-id', ({ recordId }) => ['--list', recordId]],
+  ['list-with-work', ({ localWork }) => ['--list', '--work', localWork]],
+  ['list-extra-positional', () => ['--list', 'extra', 'extra']],
+  ['list-unknown-option', () => ['--list', '--unknown']],
+];
+for (const [invalid, args] of invalidArguments) {
   test(`invalid promotion arguments: ${invalid} exits 2 without writes`, async () => {
     await withImported(async (fixture) => {
-      const mapping = `${fixture.sourceWork}=${fixture.localWork}`;
-      const args = ['promote', ...(invalid === 'no-id' ? [] : [fixture.recordId])];
-      const malformed: Partial<Record<typeof invalid, string>> = {
-        'missing-equals': 'malformed', 'empty-source': '=work', 'empty-target': 'source=', 'overlong-source': `${'x'.repeat(513)}=work`,
-      };
-      if (invalid !== 'no-map') args.push('--map-work', malformed[invalid] ?? mapping);
-      if (invalid === 'duplicate-map') args.push('--map-work', mapping);
-      if (invalid === 'unknown-option') args.push('--unknown');
-      if (invalid === 'extra-positional') args.push('extra');
       const tables = allTables(fixture.db);
       const before = snapshot(fixture.db, tables);
       const result = output();
-      assert.equal(await runImport(args, result.io), 2);
+      assert.equal(await runImport(['promote', ...args(fixture)], result.io), 2);
       assert.equal(result.text.out, '');
       assert.match(result.text.error, /^Usage: oboete import promote /u);
       assert.deepEqual(snapshot(fixture.db, tables), before);
@@ -282,15 +375,76 @@ for (const invalid of ['no-id', 'no-map', 'duplicate-map', 'missing-equals', 'em
   });
 }
 
-test('promotion maps an opaque source work containing equals exactly', async () => {
+test('promotion needs only a local work even when its historical source contains equals', async () => {
   await withImported(async (fixture) => {
     const source = `${fixture.sourceWork}=archived`;
     fixture.db.prepare("UPDATE migration_records SET payload_json = json_set(payload_json, '$.origin_work_id', ?) WHERE id = ?")
       .run(source, fixture.recordId);
     await classify(fixture);
     const result = output();
-    assert.equal(await runImport(['promote', fixture.recordId, '--map-work', `${source}=${fixture.localWork}`, '--json'], result.io), 0, result.text.error);
+    assert.equal(await runImport(['promote', fixture.recordId, '--work', fixture.localWork, '--json'], result.io), 0, result.text.error);
     assert.equal(JSON.parse(result.text.out).state, 'pending');
+  });
+});
+
+for (const work of ['local=work=archive', 'w'.repeat(512)]) {
+  test(`promotion accepts an opaque local work of length ${work.length}`, async () => {
+    await withImported(async (fixture) => {
+      await classify(fixture);
+      fixture.db.prepare(`INSERT INTO work_items (id, repo_id, origin_context_id, created_at, updated_at)
+        SELECT ?, repo_id, origin_context_id, 1, 1 FROM work_items WHERE id = ?`).run(work, fixture.localWork);
+      const result = output();
+      assert.equal(await runImport(['promote', fixture.recordId, '--work', work, '--json'], result.io), 0, result.text.error);
+      assert.equal(fixture.db.prepare('SELECT origin_work_id FROM sharing_proposals').get()?.origin_work_id, work);
+    });
+  });
+}
+
+test('promotion list is empty without candidates and never takes a write lock', async () => {
+  await withImported(async (fixture) => {
+    fixture.db.exec('DELETE FROM migration_records');
+    const before = snapshot(fixture.db, allTables(fixture.db));
+    fixture.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const args of [[], ['--json']]) {
+        const result = output();
+        assert.equal(await runImport(['promote', '--list', ...args], result.io), 0, result.text.error);
+        assert.deepEqual(result.text, { out: args.length === 0 ? '' : '{"records":[],"omitted":0}\n', error: '' });
+      }
+    } finally { fixture.db.exec('ROLLBACK'); }
+    assert.deepEqual(snapshot(fixture.db, allTables(fixture.db)), before);
+  });
+});
+
+test('promotion list orders and bounds repository records and prints only the six allowed fields', async () => {
+  await withImported(async (fixture) => {
+    await classify(fixture);
+    const { db, memoryId } = fixture;
+    const id = (n: number) => n.toString(16).padStart(64, '0');
+    db.prepare('UPDATE migration_records SET id = ? WHERE id = ?').run(id(0), fixture.recordId);
+    const clone = db.prepare(`INSERT INTO migration_records (id, origin_key, origin_json, target_key, first_import_id,
+      record_kind, payload_hash, payload_json, destination_repo_id, destination_memory_id, identity_domain,
+      destination_context_id, destination_context_key, effect, classification_state, detail_code, promoted_proposal_id)
+      SELECT ?, ?, origin_json, target_key, first_import_id, record_kind, payload_hash, payload_json,
+      destination_repo_id, destination_memory_id, identity_domain, destination_context_id, destination_context_key,
+      effect, classification_state, detail_code, promoted_proposal_id FROM migration_records WHERE id = ?`);
+    for (let n = 104; n > 0; n -= 1) clone.run(id(n), `fixture-origin-${n}`, id(0));
+    db.exec("INSERT INTO repos (id, identity_kind, normalized_identity) VALUES ('other-repo', 'common_dir', '/PRIVATE-PROJECT')");
+    clone.run(id(105), 'foreign-origin', id(0));
+    db.prepare("UPDATE migration_records SET destination_repo_id = 'other-repo' WHERE id = ?").run(id(105));
+    const before = snapshot(db, allTables(db));
+    const records = Array.from({ length: 100 }, (_, n) => ({ id: id(n), memory: memoryId, state: 'clean',
+      effect: 'inserted', promotable: true, proposal: null }));
+    const json = output();
+    assert.equal(await runImport(['promote', '--list', '--json'], json.io), 0, json.text.error);
+    assert.deepEqual(JSON.parse(json.text.out), { records, omitted: 5 });
+    assert.equal(json.text.error, '');
+    const human = output();
+    assert.equal(await runImport(['promote', '--list'], human.io), 0, human.text.error);
+    assert.deepEqual(human.text, { error: '', out: records.map((row) =>
+      `${row.id}  memory=${row.memory}  state=clean  effect=inserted  promotable=true  proposal=null\n`).join('')
+      + '5 more records omitted.\n' });
+    assert.deepEqual(snapshot(db, allTables(db)), before);
   });
 });
 
@@ -304,7 +458,7 @@ test('promotion identity uses the exact candidate strings and local origin and w
     db.prepare(`INSERT INTO work_items (id, repo_id, origin_context_id, created_at, updated_at)
       SELECT 'vector-work', repo_id, origin_context_id, 1, 1 FROM work_items WHERE id = ?`).run(fixture.localWork);
     db.prepare("UPDATE migration_records SET destination_memory_id = 'vector-origin' WHERE id = ?").run(recordId);
-    const args = ['promote', recordId, '--map-work', `${fixture.sourceWork}=vector-work`, '--json'];
+    const args = ['promote', recordId, '--work', 'vector-work', '--json'];
     const first = output();
     assert.equal(await runImport(args, first.io), 0, first.text.error);
     assert.deepEqual(JSON.parse(first.text.out), {
@@ -323,7 +477,7 @@ test('promotion identity uses the exact candidate strings and local origin and w
 test('an approved promotion remains approved and human output reveals only its id and state', async () => {
   await withImported(async (fixture) => {
     await classify(fixture);
-    const args = ['promote', fixture.recordId, '--map-work', `${fixture.sourceWork}=${fixture.localWork}`];
+    const args = ['promote', fixture.recordId, '--work', fixture.localWork];
     const first = output();
     assert.equal(await runImport([...args, '--json'], first.io), 0, first.text.error);
     const id = JSON.parse(first.text.out).id;
@@ -345,7 +499,7 @@ for (const stricter of ['origin', 'candidate'] as const) {
       if (stricter === 'origin') fixture.db.prepare("UPDATE memories SET sensitivity = 'private' WHERE id = ?").run(fixture.memoryId);
       else fixture.db.prepare("UPDATE migration_records SET payload_json = json_set(payload_json, '$.candidate_sensitivity', 'private') WHERE id = ?").run(fixture.recordId);
       const result = output();
-      assert.equal(await runImport(['promote', fixture.recordId, '--map-work', `${fixture.sourceWork}=${fixture.localWork}`, '--json'], result.io), 0, result.text.error);
+      assert.equal(await runImport(['promote', fixture.recordId, '--work', fixture.localWork, '--json'], result.io), 0, result.text.error);
       assert.equal(fixture.db.prepare('SELECT candidate_sensitivity FROM sharing_proposals').get()?.candidate_sensitivity, 'private');
     });
   });
@@ -358,8 +512,38 @@ test('a failure saving the promotion receipt rolls back both the proposal and wo
       BEGIN SELECT RAISE(ABORT, 'fixture failure'); END`);
     const before = snapshot(fixture.db, allTables(fixture.db));
     const result = output();
-    assert.equal(await runImport(['promote', fixture.recordId, '--map-work', `${fixture.sourceWork}=${fixture.localWork}`, '--json'], result.io), 1);
-    assert.deepEqual(result.text, { out: '', error: 'The migration record is unavailable in this scope.\n' });
+    await assert.rejects(runImport(['promote', fixture.recordId, '--work', fixture.localWork, '--json'], result.io), /fixture failure/u);
+    assert.deepEqual(result.text, { out: '', error: '' });
+    assert.deepEqual(snapshot(fixture.db, allTables(fixture.db)), before);
+  });
+});
+
+test('promotion propagates SQLITE_BUSY and the CLI exits 3 without changing any table', async () => {
+  await withImported(async (fixture) => {
+    await classify(fixture);
+    const locker = openDatabase({ path: fixture.paths.db, timeoutMs: 2_000 }).db;
+    const before = snapshot(fixture.db, allTables(fixture.db));
+    const args = ['promote', fixture.recordId, '--work', fixture.localWork, '--json'];
+    try {
+      locker.exec('PRAGMA busy_timeout = 2000; BEGIN IMMEDIATE');
+      assert.equal(locker.prepare('PRAGMA busy_timeout').get()?.timeout, 2_000);
+      const errorPath = join(fixture.paths.home, 'promote.stderr');
+      const errorFd = openSync(errorPath, 'w');
+      try {
+        const cli = childProcess.spawnSync(process.execPath,
+          [fileURLToPath(new URL('../../../dist/oboete.mjs', import.meta.url)), 'import', ...args],
+          { cwd: fixture.repo, encoding: 'utf8', env: cleanEnv(fixture.paths.home), stdio: ['ignore', 'pipe', errorFd] });
+        const error = readFileSync(errorPath, 'utf8');
+        assert.equal(cli.status, 3, error);
+        assert.equal(cli.stdout, '');
+        assert.match(error, /locked|busy/u);
+        assert.notEqual(error, 'The migration record is unavailable in this scope.\n');
+        assert.equal(error.trimEnd().split('\n').length, 1);
+      } finally { closeSync(errorFd); }
+      const result = output();
+      await assert.rejects(runImport(args, result.io), isBusyError);
+      assert.deepEqual(result.text, { out: '', error: '' });
+    } finally { locker.exec('ROLLBACK'); locker.close(); }
     assert.deepEqual(snapshot(fixture.db, allTables(fixture.db)), before);
   });
 });
@@ -372,20 +556,55 @@ test('a personal projection remains ineligible as an origin after its visibility
     fixture.db.prepare('DELETE FROM memory_visibility WHERE memory_id = ?').run(projection.destination_memory_id);
     const before = snapshot(fixture.db, allTables(fixture.db));
     const result = output();
-    assert.equal(await runImport(['promote', fixture.recordId, '--map-work', `${fixture.sourceWork}=${fixture.localWork}`, '--json'], result.io), 1);
+    assert.equal(await runImport(['promote', fixture.recordId, '--work', fixture.localWork, '--json'], result.io), 1);
     assert.deepEqual(result.text, { out: '', error: 'The migration record is unavailable in this scope.\n' });
     assert.deepEqual(snapshot(fixture.db, allTables(fixture.db)), before);
   }, 'cli');
 });
 
-test('an unavailable promotion never creates a missing destination database', async () => {
-  await withTempHome(async (home) => {
-    const result = output();
-    assert.equal(await runImport(['promote', 'a'.repeat(64), '--map-work', 'source=local', '--json'], result.io), 1);
-    assert.deepEqual(result.text, { out: '', error: 'The migration record is unavailable in this scope.\n' });
-    assert.equal(existsSync(oboetePaths(home).db), false);
+for (const mode of ['promotion', 'list']) {
+  const args = (id = 'a'.repeat(64), work = 'local') =>
+    ['promote', ...(mode === 'list' ? ['--list'] : [id, '--work', work]), '--json'];
+  test(`an unavailable ${mode} never creates a missing destination database`, async () => {
+    await withTempHome(async (home) => {
+      const result = output();
+      assert.equal(await runImport(args(), result.io), 1);
+      assert.deepEqual(result.text, { out: '', error: 'The migration record is unavailable in this scope.\n' });
+      assert.equal(existsSync(oboetePaths(home).db), false);
+    });
   });
-});
+  for (const version of [LATEST_SCHEMA_VERSION - 1, LATEST_SCHEMA_VERSION + 1]) {
+    test(`${mode} leaves schema version ${version} unavailable without migration or writes`, async () => {
+      await withImported(async (fixture) => {
+        fixture.db.exec(`PRAGMA user_version = ${version}`);
+        const before = snapshot(fixture.db, allTables(fixture.db));
+        const result = output();
+        assert.equal(await runImport(args(fixture.recordId, fixture.localWork), result.io), 1);
+        assert.deepEqual(result.text, { out: '', error: 'The migration record is unavailable in this scope.\n' });
+        assert.equal(fixture.db.prepare('PRAGMA user_version').get()?.user_version, version);
+        assert.deepEqual(snapshot(fixture.db, allTables(fixture.db)), before);
+      });
+    });
+  }
+  test(`${mode} propagates a migration checksum mismatch without writes`, async () => {
+    await withImported(async (fixture) => {
+      fixture.db.exec("UPDATE schema_migrations SET sha256 = 'mismatch' WHERE version = 1");
+      const before = snapshot(fixture.db, allTables(fixture.db));
+      const result = output();
+      await assert.rejects(runImport(args(fixture.recordId, fixture.localWork), result.io), MigrationMismatchError);
+      assert.deepEqual(result.text, { out: '', error: '' });
+      assert.deepEqual(snapshot(fixture.db, allTables(fixture.db)), before);
+    });
+  });
+  test(`${mode} propagates a database I/O error`, async () => {
+    await withTempHome(async (home) => {
+      mkdirSync(oboetePaths(home).db, { recursive: true });
+      const result = output();
+      await assert.rejects(runImport(args(), result.io), /unable to open database file|disk I\/O error/u);
+      assert.deepEqual(result.text, { out: '', error: '' });
+    });
+  });
+}
 
 test('promotion leaves the database write lock free while verifying Git context', async () => {
   await withImported(async (fixture) => {
@@ -406,7 +625,7 @@ test('promotion leaves the database write lock free while verifying Git context'
     syncBuiltinESMExports();
     try {
       const result = output();
-      assert.equal(await runImport(['promote', fixture.recordId, '--map-work', `${fixture.sourceWork}=${fixture.localWork}`, '--json'], result.io), 0, result.text.error);
+      assert.equal(await runImport(['promote', fixture.recordId, '--work', fixture.localWork, '--json'], result.io), 0, result.text.error);
       assert.ok(writeAvailability.length > 0, 'the fixture must exercise Git verification');
       assert.ok(writeAvailability.every(Boolean), 'Git verification must not hold the database write lock');
     } finally {

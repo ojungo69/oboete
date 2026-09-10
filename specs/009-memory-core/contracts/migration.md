@@ -253,7 +253,7 @@ no authoritative imported raw-event IDs. Existing `share approve` supplies the f
 and privacy check. Imported `approved`, `automatic_direct`, declaration text or grant kind cannot
 create local approval. Repeated promotion is idempotent and never reverses a local rejection.
 
-The operation is `oboete import promote <migration-record-id> --map-work <source-work>=<local-work>
+The operation is `oboete import promote <migration-record-id> --work <local-work-id>
 [--json]`. Cwd supplies a verified local repository/context; the record and existing mapped work
 must belong to it. Only a locally classified origin and candidate qualify. The operation grants
 that explicit historical work association, computes the sanitized candidate hash and a local
@@ -262,6 +262,11 @@ and creates/reuses a pending inferred proposal with empty source-event IDs and n
 projection and decision time. An existing exact local rejection remains terminal. Missing,
 unclassified and wrong-scope IDs share a fixed unavailable result. Output is only the local
 proposal ID/state; `share status` provides the reviewable candidate before human approval.
+`oboete import promote --list [--json]` lists at most 100 sharing-proposal migration records in ID
+order for the same verified cwd repository, with an omitted count and only record ID, destination
+memory ID or null, classification state, effect, promotability without a work argument, and promoted
+proposal ID or null; candidate text, payload fields, source IDs, project names and paths are never
+output.
 
 ## External content projection
 

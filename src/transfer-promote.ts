@@ -1,8 +1,8 @@
-import type { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import { parseArgs } from 'node:util';
 
 import { materialHash } from './db/identity.js';
-import { openDatabase } from './db/open.js';
+import { DatabaseMissingError, SchemaAheadError, openDatabase } from './db/open.js';
 import { grantVisibility } from './db/queries.js';
 import { sha256Json } from './hash.js';
 import { oboetePaths, resolveHome } from './paths.js';
@@ -14,40 +14,41 @@ import { migrationPayloadShape, type NativeRecord } from './transfer-format.js';
 import { transactionImmediate } from './worker/lease.js';
 
 type Io = { writeOut(text: string): void | Promise<void>; writeError(text: string): void };
-type PromotionArgs = { id: string; sourceWork: string; localWork: string; json: boolean };
+type PromotionArgs = { json: boolean } & ({ list: true } | { list: false; id: string; localWork: string });
 
 function promotionArgs(argv: string[]): PromotionArgs | null {
   try {
     const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, strict: true,
-      options: { 'map-work': { type: 'string', multiple: true }, json: { type: 'boolean' } } });
-    if (positionals.length !== 1 || values['map-work']?.length !== 1) return null;
-    const entry = values['map-work'][0];
-    const split = entry.lastIndexOf('=');
-    const mapping = [entry.slice(0, split), entry.slice(split + 1)];
-    if (split < 1 || mapping.some((id) => id.trim() === '' || id.length > 512)) return null;
-    return { id: positionals[0], sourceWork: mapping[0], localWork: mapping[1], json: values.json === true };
+      options: { work: { type: 'string', multiple: true }, list: { type: 'boolean' }, json: { type: 'boolean' } } });
+    if (values.list) return positionals.length === 0 && values.work === undefined
+      ? { list: true, json: values.json === true } : null;
+    if (positionals.length !== 1 || values.work?.length !== 1) return null;
+    const localWork = values.work[0];
+    if (localWork.trim() === '' || localWork.length > 512) return null;
+    return { list: false, id: positionals[0], localWork, json: values.json === true };
   } catch { return null; }
 }
 
-function cleanCandidate(db: DatabaseSync, repoId: string, args: PromotionArgs) {
-  const row = db.prepare(`SELECT r.payload_json, m.id, m.sensitivity FROM migration_records r
-    JOIN memories m ON m.id = r.destination_memory_id AND m.repo_id = r.destination_repo_id
-    JOIN work_items w ON w.id = ? AND w.repo_id = r.destination_repo_id
-    WHERE r.id = ? AND r.destination_repo_id = ? AND r.record_kind = 'sharing_proposal'
-      AND r.classification_state = 'clean' AND r.payload_json IS NOT NULL AND r.identity_domain = 'ordinary'
+const CANDIDATE_ROWS = `SELECT r.id, r.destination_memory_id AS memory, r.classification_state AS state,
+    r.effect, r.promoted_proposal_id AS proposal, r.payload_json, m.sensitivity,
+    (r.classification_state = 'clean' AND r.payload_json IS NOT NULL AND r.identity_domain = 'ordinary'
+      AND r.effect = 'inserted'
       AND m.review_state <> 'imported' AND m.deleted_at IS NULL AND m.sensitivity <> 'secret'
       AND m.type <> 'session_summary' AND m.valid_to IS NULL
       AND NOT EXISTS (SELECT 1 FROM memory_visibility v WHERE v.memory_id = m.id AND v.audience = 'personal')
       AND NOT EXISTS (SELECT 1 FROM migration_records p
-        WHERE p.destination_memory_id = m.id AND p.identity_domain = 'personal_projection')`)
-    .get(args.localWork, args.id, repoId);
-  if (row === undefined) return null;
+        WHERE p.destination_memory_id = m.id AND p.identity_domain = 'personal_projection')) AS eligible
+    FROM migration_records r
+    LEFT JOIN memories m ON m.id = r.destination_memory_id AND m.repo_id = r.destination_repo_id
+    WHERE r.destination_repo_id = ? AND r.record_kind = 'sharing_proposal'`;
+
+function cleanCandidate(row: Record<string, SQLOutputValue> | undefined) {
+  if (row?.eligible !== 1) return null;
   const value: unknown = JSON.parse(String(row.payload_json));
   if (!migrationPayloadShape(value)) return null;
   const payload = value as NativeRecord;
-  if (payload.kind !== 'sharing_proposal' || payload.origin_work_id !== args.sourceWork
-    || payload.candidate_body.trim() === '') return null;
-  return { memoryId: String(row.id), sensitivity: row.sensitivity as Sensitivity, payload };
+  if (payload.kind !== 'sharing_proposal' || payload.candidate_body.trim() === '') return null;
+  return { memoryId: String(row.memory), sensitivity: row.sensitivity as Sensitivity, payload };
 }
 
 function promote(db: DatabaseSync, args: PromotionArgs) {
@@ -55,10 +56,20 @@ function promote(db: DatabaseSync, args: PromotionArgs) {
   const context = db.prepare('SELECT id FROM work_contexts WHERE repo_id = ? AND local_key = ?')
     .get(identity.id, identity.worktreeKey);
   if (context === undefined || verifiedRepoContext(db, identity.id, String(context.id))?.local_key !== identity.worktreeKey) return null;
-  return transactionImmediate(db, () => {
+  const execute = () => {
     if (db.prepare('SELECT 1 FROM work_contexts WHERE id = ? AND repo_id = ? AND local_key = ?')
       .get(context.id, identity.id, identity.worktreeKey) === undefined) return null;
-    const candidate = cleanCandidate(db, identity.id, args);
+    if (args.list) {
+      const total = Number(db.prepare(`SELECT COUNT(*) AS n FROM (${CANDIDATE_ROWS})`).get(identity.id)?.n ?? 0);
+      const records = db.prepare(`${CANDIDATE_ROWS} ORDER BY r.id LIMIT 100`).all(identity.id).map((row) => ({
+        id: String(row.id), memory: row.memory === null ? null : String(row.memory), state: String(row.state),
+        effect: String(row.effect), promotable: cleanCandidate(row) !== null,
+        proposal: row.proposal === null ? null : String(row.proposal),
+      }));
+      return { records, omitted: Math.max(0, total - records.length) };
+    }
+    if (db.prepare('SELECT 1 FROM work_items WHERE id = ? AND repo_id = ?').get(args.localWork, identity.id) === undefined) return null;
+    const candidate = cleanCandidate(db.prepare(`${CANDIDATE_ROWS} AND r.id = ?`).get(identity.id, args.id));
     if (candidate === null) return null;
     const { memoryId, payload } = candidate;
     const title = payload.candidate_title;
@@ -75,36 +86,48 @@ function promote(db: DatabaseSync, args: PromotionArgs) {
     db.prepare('UPDATE migration_records SET promoted_proposal_id = ? WHERE id = ?').run(id, args.id);
     const proposal = db.prepare('SELECT state FROM sharing_proposals WHERE id = ?').get(id)!;
     return { id, state: String(proposal.state) };
-  });
+  };
+  if (!args.list) return transactionImmediate(db, execute);
+  db.exec('BEGIN');
+  try { return execute(); } finally { db.exec('ROLLBACK'); }
 }
 
 export async function runImportPromote(argv: string[], io: Io): Promise<number> {
   const args = promotionArgs(argv);
   if (args === null) {
-    io.writeError('Usage: oboete import promote <migration-record-id> --map-work <source-work>=<local-work> [--json]\n');
+    io.writeError('Usage: oboete import promote <migration-record-id> --work <local-work-id> [--json]\n'
+      + '       oboete import promote --list [--json]\n');
     return 2;
   }
   let db: DatabaseSync | undefined;
   let result: ReturnType<typeof promote> = null;
   try {
-    if (/^[0-9a-f]{64}$/u.test(args.id)) {
+    if (args.list || /^[0-9a-f]{64}$/u.test(args.id)) {
       const options = { path: oboetePaths(resolveHome()).db, timeoutMs: 2_000 };
-      const checked = openDatabase({ ...options, readOnly: true });
-      checked.db.close();
-      if (!checked.schemaBehind) {
+      let opened = openDatabase({ ...options, readOnly: true });
+      db = opened.db;
+      if (!opened.schemaBehind && !args.list) {
         // 009 contracts/migration.md: unavailable promotion must not create or migrate a store.
-        const opened = openDatabase({ ...options, hook: true });
+        db.close();
+        db = undefined;
+        opened = openDatabase({ ...options, hook: true });
         db = opened.db;
-        if (!opened.schemaBehind) result = promote(db, args);
       }
+      if (!opened.schemaBehind) result = promote(db, args);
     }
-  } catch { /* 009 contracts/migration.md requires one fixed unavailable result. */ }
+  } catch (error) {
+    if (!(error instanceof DatabaseMissingError || error instanceof SchemaAheadError)) throw error;
+  }
   finally { db?.close(); }
   if (result === null) {
     io.writeError('The migration record is unavailable in this scope.\n');
     return 1;
   }
-  await io.writeOut(args.json ? `${JSON.stringify(result)}\n`
+  if (result.records !== undefined) {
+    await io.writeOut(args.json ? `${JSON.stringify(result)}\n` : result.records.map((row) =>
+      `${row.id}  memory=${row.memory}  state=${row.state}  effect=${row.effect}  promotable=${row.promotable}  proposal=${row.proposal}\n`).join('')
+      + (result.omitted > 0 ? `${result.omitted} more records omitted.\n` : ''));
+  } else await io.writeOut(args.json ? `${JSON.stringify(result)}\n`
     : `Sharing proposal ${result.id} is ${result.state}. Use oboete share status to review the candidate.\n`);
   return 0;
 }
