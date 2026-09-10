@@ -100,10 +100,14 @@ Files: `src/observer/`, `src/db/queries.ts`, `src/retrieval/`, `src/injection/`,
 Extend validated transfer with stable origin IDs, scope and provenance, retaining the old
 Oboete reader. A read-only claude-mem/export adapter previews mappings, keeps historical work
 historical, preserves tombstones and quarantines imported content for local classification.
-Do not assume a private CMEM server schema. Reuse transfer merge for encrypted snapshots;
-origin/parent revision IDs make repeats idempotent and sibling progress conflicts visible.
+Do not assume a private CMEM server schema. Encrypted snapshots reuse the transfer serializer and
+reader for validation only; origin/parent revision IDs make repeats idempotent and sibling
+progress conflicts visible.
 Clock order alone cannot resolve them. Test two local replicas before an opted-in destination.
-Use a maintained age implementation and the planned S3 client for R2 rather than bespoke crypto.
+Owner decision 2026-09-11 (research R8, `contracts/sync.md`): the 009 transport is encrypted
+bundle files in a user-chosen directory, one file per replica, built from Node `crypto` only; the
+maintained age implementation and the S3 client for R2 move to a later transport behind the same
+envelope. The migration merger is not the sync applier: sync needs its own revision-aware apply.
 
 Files: `src/transfer.ts`, `src/worker/imported.ts`, transfer/sync modules, config, CLI/MCP conflict
 controls and isolated replica tests. Read current official APIs before adding dependencies;

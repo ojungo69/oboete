@@ -193,3 +193,52 @@ and `4531b3bfbeb010a73d58cfe1b35ff675480e5b67` in table order.
 This research did not inspect a user store, CMEM account or provider. It establishes only
 the public portable export contract at the pinned revision. It does not establish direct SQLite
 migration, private CMEM state or deletion transport through this format.
+
+## R8. Device sync: file bundles with Node `crypto` only
+
+**Decision** (owner, 2026-09-11): US6 in 009 syncs through encrypted bundle files in a directory the
+user chooses, so any file-sync tool (iCloud Drive, Dropbox, Syncthing, a USB stick) moves them. No
+dependency is added; the envelope is built from Node `crypto` primitives. Cloudflare R2 remains a
+later transport behind the same envelope. This supersedes the plan D sentence that named a
+maintained age implementation and an S3 client; that earlier research
+(`/var/tmp/oboete-009-20260909.jJ5grc/sync-api-research.md`, 2026-09-10, age-encryption 0.3.1 and
+aws4fetch 1.0.20) stays valid for the R2 day and its revision/snapshot identity rules are reused as
+written in `contracts/sync.md`.
+
+Why file bundles first: the developer already runs a file-sync tool between the machines in
+question; a directory needs no account, credential, endpoint, jurisdiction or cost class in the
+consent tuple, and "no network" becomes a property the tests can enforce rather than a promise. Why
+one file per replica: file-sync tools have no compare-and-swap, so a single shared object would need
+the conditional-PUT protocol the R2 research designed; when each replica writes only its own bundle,
+concurrent writers never touch the same file and readers merge revisions locally.
+
+Why Node `crypto` and not `age-encryption`: the only primitives needed are a CSPRNG, HKDF-SHA-256,
+AES-256-GCM with AAD, SHA-256 and constant-time comparison, all present in Node 22.16/24.16. The
+chunked construction copies age's payload layer (64 KiB chunks, 11-byte counter plus final-byte
+nonce, HKDF-derived per-file key) with AES-GCM instead of ChaCha20-Poly1305 because Node ships the
+former with hardware acceleration and the latter with the same API; there is no recipient or
+passphrase layer to reimplement, because one symmetric space key carried by the user replaces
+X25519 recipients in a one-person product. The age passphrase path would have cost ~256 MiB of
+scrypt working memory, above the engine budget.
+
+Primary sources (Node 22 API):
+[`crypto.randomBytes`](https://nodejs.org/docs/latest-v22.x/api/crypto.html#cryptorandombytessize-callback),
+[`crypto.hkdfSync`](https://nodejs.org/docs/latest-v22.x/api/crypto.html#cryptohkdfsyncdigest-ikm-salt-info-keylen),
+[`crypto.createCipheriv` with `authTagLength`](https://nodejs.org/docs/latest-v22.x/api/crypto.html#cryptocreatecipherivalgorithm-key-iv-options),
+[`cipher.setAAD`](https://nodejs.org/docs/latest-v22.x/api/crypto.html#ciphersetaadbuffer-options),
+[`cipher.getAuthTag`](https://nodejs.org/docs/latest-v22.x/api/crypto.html#ciphergetauthtag),
+[`decipher.setAuthTag`](https://nodejs.org/docs/latest-v22.x/api/crypto.html#deciphersetauthtagbuffer-encoding),
+[`crypto.timingSafeEqual`](https://nodejs.org/docs/latest-v22.x/api/crypto.html#cryptotimingsafeequala-b),
+[`crypto.hash`](https://nodejs.org/docs/latest-v22.x/api/crypto.html#cryptohashalgorithm-data-outputencoding).
+Chunk construction: [age specification, "Payload"](https://c2sp.org/age#payload) (64 KiB chunks;
+nonce = 11-byte big-endian counter + `0x01` final byte; streaming decryption must fail on a
+missing final chunk). Not used: [`crypto.scryptSync`](https://nodejs.org/docs/latest-v22.x/api/crypto.html#cryptoscryptsyncpassword-salt-keylen-options)
+(a passphrase-wrapped key export would need it with `maxmem` bounded; deferred) and
+[`crypto.generateKeyPairSync('x25519')`](https://nodejs.org/docs/latest-v22.x/api/crypto.html#cryptogeneratekeypairsynctype-options)
+/ [`crypto.diffieHellman`](https://nodejs.org/docs/latest-v22.x/api/crypto.html#cryptodiffiehellmanoptions)
+(per-device recipients; deferred with R2).
+
+What this research does not establish: that any specific file-sync tool preserves rename atomicity
+or delivers whole files (the envelope's final-chunk marker and per-bundle authentication make a
+half-delivered file a rejected file, so nothing depends on it); real two-device operation, which
+stays a separate activation; and the 0008 schema, which T034 designs from the contract.

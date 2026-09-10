@@ -191,6 +191,13 @@ writers require separate worktrees. No deployment follows merely from an increme
   (largest 374,544 KiB), counts and effects identical to the E1 baseline. Gate `us5-perf1-*` green.
   See `quickstart.md` E5. T029-T032/T043 stay unchecked pending the macOS probe and the final
   review pass.
+- T033 (US6 contract, this commit): `contracts/sync.md` and research R8 record the owner's
+  2026-09-11 transport decision (encrypted bundle files, Node `crypto` only, no dependency) as a
+  revision-log contract: envelope, identity/delivery split, control revisions, natural-key
+  aliasing, push staging fence, two-phase apply, change capture against materialized state.
+  Eight Codex contract reviews were folded in; round 8's four findings are folded in unconfirmed
+  (see the contract's "Review status"). Unchecked: the owner confirms scope at this checkpoint
+  before T034 starts, and T034 re-reviews the contract first.
 - T032 (E3 matrix, `943660a4` plus worktree): added ten focused `migration-matrix.test.ts` cases
   for preview/context/schema/WAL, mapping rollback/collisions, proposal/terminal/personal round trips
   and actual packed CLI metadata. All ten pass on Node 24.16.0 and 22.16.0. Two preview-accounting
