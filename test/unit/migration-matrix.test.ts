@@ -454,7 +454,9 @@ test('matrix C8: redacted source dependencies stay terminal after a forged plain
         payload_hash: String(receipt.payload_hash), stored_payload_hash: sha256Hex(JSON.stringify(plaintext)),
         record_kind: 'source', payload: plaintext, classification_state: 'pending' }], 'forged.jsonl', 2);
       const forged = output();
-      assert.equal(await runImport([replay, '--apply', '--map-repo', `source-repo=${target.identity.id}`], forged.io), 0, forged.text.error);
+      // A retainable payload with no memory in the file is refused outright (`orphan_origin_payload`).
+      assert.equal(await runImport([replay, '--apply', '--map-repo', `source-repo=${target.identity.id}`], forged.io), 2, forged.text.error);
+      assert.match(forged.text.error, /orphan_origin_payload/);
       assert.deepEqual(target.db.prepare('SELECT * FROM migration_records WHERE id = ?').get(receipt.id), receipt);
       assert.equal(target.db.prepare("SELECT COUNT(*) AS n FROM migration_records WHERE payload_json LIKE '%Forged unredacted evidence%'").get()?.n, 0);
     });

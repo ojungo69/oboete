@@ -29,15 +29,19 @@ function promotionArgs(argv: string[]): PromotionArgs | null {
   } catch { return null; }
 }
 
-const CANDIDATE_ROWS = `SELECT r.id, r.destination_memory_id AS memory, r.classification_state AS state,
-    r.effect, r.promoted_proposal_id AS proposal, r.payload_json, m.sensitivity,
-    (r.classification_state = 'clean' AND r.payload_json IS NOT NULL AND r.identity_domain = 'ordinary'
+const ELIGIBLE = `(r.classification_state = 'clean' AND r.payload_json IS NOT NULL AND r.identity_domain = 'ordinary'
       AND r.effect = 'inserted'
       AND m.review_state <> 'imported' AND m.deleted_at IS NULL AND m.sensitivity <> 'secret'
       AND m.type <> 'session_summary' AND m.valid_to IS NULL
       AND NOT EXISTS (SELECT 1 FROM memory_visibility v WHERE v.memory_id = m.id AND v.audience = 'personal')
       AND NOT EXISTS (SELECT 1 FROM migration_records p
-        WHERE p.destination_memory_id = m.id AND p.identity_domain = 'personal_projection')) AS eligible
+        WHERE p.destination_memory_id = m.id AND p.identity_domain = 'personal_projection'))`;
+
+// Only an eligible row's payload is read at all (Codex security review 2026-09-11 g3: a listing must not
+// hold up to 100 retained payloads for rows it will never promote).
+const CANDIDATE_ROWS = `SELECT r.id, r.destination_memory_id AS memory, r.classification_state AS state,
+    r.effect, r.promoted_proposal_id AS proposal, CASE WHEN ${ELIGIBLE} THEN r.payload_json END AS payload_json,
+    m.sensitivity, ${ELIGIBLE} AS eligible
     FROM migration_records r
     LEFT JOIN memories m ON m.id = r.destination_memory_id AND m.repo_id = r.destination_repo_id
     WHERE r.destination_repo_id = ? AND r.record_kind = 'sharing_proposal'`;
@@ -61,7 +65,7 @@ function promote(db: DatabaseSync, args: PromotionArgs) {
       .get(context.id, identity.id, identity.worktreeKey) === undefined) return null;
     if (args.list) {
       const total = Number(db.prepare(`SELECT COUNT(*) AS n FROM (${CANDIDATE_ROWS})`).get(identity.id)?.n ?? 0);
-      const records = db.prepare(`${CANDIDATE_ROWS} ORDER BY r.id LIMIT 100`).all(identity.id).map((row) => ({
+      const records = Array.from(db.prepare(`${CANDIDATE_ROWS} ORDER BY r.id LIMIT 100`).iterate(identity.id), (row) => ({
         id: String(row.id), memory: row.memory === null ? null : String(row.memory), state: String(row.state),
         effect: String(row.effect), promotable: cleanCandidate(row) !== null,
         proposal: row.proposal === null ? null : String(row.proposal),

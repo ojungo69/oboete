@@ -155,15 +155,37 @@ Origin metadata never chooses an arbitrary local memory/raw-event/session/work I
 | Identical active row | Preserve local text, scope and validity; only raise sensitivity and retain origin receipt. |
 | New active | Insert unpinned, at least `local_only`, `review_state='imported'`, with bounded quarantined provenance. |
 | Native tombstone | Resolve the correct local identity, retain hashes, apply deletion and existing evidence clearing. |
+| Redacted personal record | Its wire content hash is unverifiable (a personal hash is checked against text, an ordinary hash against repo + material), so it may only select a row already known as a personal projection: one this file inserted, a local `personal` visibility grant, or a `personal_projection` migration record. With no such match it is `historical_held`; it never inserts a tombstone row. A text-bearing personal record is verified and resolves any row with its hash, including a marker-less tombstone left by sanitation. |
 | Overlapping export | Deduplicate origin/target receipts and content without repeating effects. |
 
-Never attach unclassified evidence to a visible row.
+Never attach unclassified evidence to a visible row. A sensitivity write compares against the live
+local row, never against a value cached earlier in the same file, because the provenance trigger can
+raise a dependent memory between two records; preview counts stay cache-based so preview and apply
+report the same effects. Memory records merge in file order, except that unverifiable records
+(redacted personal) merge after every other memory, so an identity proven by a text-bearing alias
+anywhere in the file is already established when they resolve; the outcome does not depend on file
+order. After all memories are merged, dependency edges are re-keyed by local identity (content hash),
+so two origins that became one memory are one node and a parent held without a destination still
+counts. A worklist raises each child to its parents' merged sensitivity (in apply, the parent's live
+row, which the local trigger may have raised meanwhile); after each live raise the local descendants
+the trigger touched are re-read into the cache and queue. Ranks only rise, so every edge is visited at
+most once per rank step, and the edge re-keying is one indexed lookup per edge (measured linear:
+1k/2k/4k memories with and without a full chain). A parent that matched a stricter local row therefore
+makes its imported descendants at least as strict, and the local trigger cascades further. Preview
+cannot see trigger effects, so a raise or `updated` count that depends on the local trigger may appear
+only in apply. A receipt is redacted from the stricter of the identity's final merged state
+(tombstone, raised or later-aliased sensitivity, in any repository) and its live destination row, and
+a deleted secret identity classifies as `secret`.
 
 Private migration holds retain exact bounded provenance that cannot safely be attached to an
 existing visible memory, and exact foreign proposal payloads. A hash alone is not preservation.
 Holds have no FTS entry and are excluded from retrieval, packs, MCP, viewer, ordinary history,
 provider input and preview/log text. The migration operation owns them. Secret or deleted source
-content travels as hashes only; local secret classification clears held payloads too.
+content travels as hashes only; local secret classification clears held payloads too. A record whose
+identity resolved to a row in another repository (`historical_held`, no destination) keeps no payload
+either, and neither do the records nested under it: the exact text lives in that row and leaves with
+it, so nothing remains to clear later on any path (local command, later import, re-export). A later
+deletion or secret classification of a memory clears the receipts that point at it.
 
 ## Native v2 wire records
 
@@ -212,9 +234,15 @@ opposite to the checkpoint-parent relation. A personal projection is distinct fr
 its origin and has no source children or work/session/batch lineage.
 
 Separate source/proposal/origin records inherit known secret/deletion state from their required
-parent memory, origin and projected memory. They then retain only hashes and relationship/state
-metadata. Pending/private/quarantined payload is preserved by this explicit local native backup
+parent memory, origin and projected memory, read as the final merged state of that memory (cache and
+live row, see above) at receipt time. They then retain only hashes and relationship/state metadata. Pending/private/quarantined payload is preserved by this explicit local native backup
 boundary; it is not automatic model/provider egress and must not silently erase held provenance.
+One deliberate exception: a memory whose verified identity already exists as a row in another local
+repository, and every record nested under it, is stored hash-only (`identity_elsewhere`). Its text is
+the text of that row; concepts, metadata and nested historical payloads that differ from that row are
+not retained, because a retained copy would have to follow that row's later deletion or secret
+classification across imports, re-exports and local commands, and the review rounds of 2026-09-11
+showed each such linkage leaves a path. This is information loss by specification, not by accident.
 Once a stable migration origin is secret/deleted/rejected and cleared, repeats, overlapping files
 and re-exports never rehydrate its payload or downgrade the terminal classification.
 
@@ -796,6 +824,11 @@ The following references resolve in the staged source namespace, before any dest
 - A populated memory work ID resolves to a work in that memory's repository.
 - A populated source context ID resolves to a context in its parent memory's repository.
 - A populated source dependency ID resolves to a memory in its parent memory's repository.
+  A dependency source is the edge alone, matching the local dependency row: `context_only=1` and
+  every other field (event/context IDs, citation, agent, range, hash, evidence, root, paths) null.
+- A memory is at least as strict as each source dependency and checkpoint parent
+  (`eligible < local_only < private < secret`); the local provenance trigger keeps that invariant,
+  so a file that breaks it is refused, not repaired.
 - A populated supersession ID resolves to a memory.
 - A populated checkpoint parent resolves to a memory in the same repository with the same work ID.
   The work comparison treats two nulls as equal and null versus a populated ID as different.
@@ -808,6 +841,11 @@ The following references resolve in the staged source namespace, before any dest
 - A populated migration-origin memory ID resolves to a memory whose repository equals the enclosing repository ID.
   A null enclosing repository cannot match the memory's required repository ID.
 - Every populated migration-origin repository ID resolves to a repository, even without a memory target.
+- A migration origin of memory/source/visibility/proposal kind that carries a retainable payload
+  resolves to a memory (`orphan_origin_payload`): a payload with no identity could never be redacted
+  later. A hash-only trace may stand alone, and so may a payload carrying the terminal label its own
+  kind uses (memory `sensitivity`/`deleted_at`, proposal `candidate_sensitivity`/`redacted`); a label
+  from another kind counts for nothing.
 
 Terminal-parent redaction checks apply to staged source, proposal and migration-origin records as described above.
 The graph validator uses two separate Kahn traversals over scratch tables.
@@ -819,6 +857,10 @@ A cycle mixing source-dependency and checkpoint-parent edges is therefore reject
 
 ### Known validator limits
 
+- A proposal receipt follows its origin memory (`destination_memory_id`). Its projected memory's
+  terminal state is read at import time, but a later terminal change of the projection row alone
+  does not reach the receipt through `migration_clear_deleted_payload`; a change of the origin
+  memory does.
 - Supersession is not combined with the dependency graph for cycle detection.
   Its target is not required to share the source memory's repository or work.
 - A work grant or proposal origin work need not equal the memory's own work ID.
@@ -828,7 +870,6 @@ A cycle mixing source-dependency and checkpoint-parent edges is therefore reject
   Basis is not coupled to decision channel, and candidate sensitivity is not compared with projection sensitivity.
 - Historical raw-event, session, batch and purpose-source IDs are not resolved to records.
   Source hashes and range lengths are not compared with evidence, and citation kind/value pairing is not checked.
-  Source text redaction is checked against `memory_id`, not against `source_memory_id`.
 - Timestamp ordering, work state/completion-time consistency and checkpoint memory type are not checked.
   Repository identity normalization and source ID derivation from hashes are not checked in this reader.
 - Redacted memory material hashes and redacted personal content hashes are not recomputed from absent text.

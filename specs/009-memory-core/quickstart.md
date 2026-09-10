@@ -629,3 +629,62 @@ failed in its seed precondition (`capture hit its 300 ms deadline under load`) w
 measurement job was saturating the host with a near-256 MiB preview. This is the documented
 load-only seed miss, not a regression in the changed files; the phase is rerun in isolation once
 the measurement finishes and its receipt is recorded below.
+
+The isolated Node 24.16.0 serial rerun is recorded under E4 (`us5-sec-serial-v24.16.0.tap`,
+202/202, and again in every later `us5-sec*` gate).
+
+## E4 — US5 security review and fixes
+
+2026-09-11, branch `009-memory-core`, the commit after `7f37376c`. Receipts in
+`/var/tmp/oboete-009-20260909.jJ5grc/` with prefix `us5-sec`; review transcripts under
+`us5-sec-reviews/` (`arch`, `g1`…`g3` from 2026-09-10, `secrev2` resumes, `secrev3`…`secrev13`
+fresh follow-up rounds (`secrev11` was cut short by the provider's content filter and rerun as `secrev12`), `finder-reports.txt` from the `code-review` finders).
+
+Per `rules/security.md` the fixes were written by Claude Code, not delegated. Every fix followed
+RED → GREEN in `test/unit/migration-authority.test.ts` (16 cases) plus one case in
+`migration-native-integrity.test.ts` and an updated matrix C8; the RED receipts are `us5-sec-red.tap`, `us5-sec2-red.tap`,
+`us5-sec3-red.tap`, `us5-sec5-red.tap`, `us5-sec7-red.tap`, `us5-sec10-red.tap`.
+
+| Finding (source, severity) | Fix |
+| --- | --- |
+| Redacted `personal_projection` wire `content_hash` selects any ordinary memory and tombstones/blocks it (arch+g2, high) | `findExisting`: an unverifiable hash (redacted personal) only matches a row already known as a personal projection; no match → `historical_held`, never a tombstone row. Verified (text-bearing) personal hashes resolve any row, including marker-less tombstones (secrev3 medium). |
+| Cached sensitivity lets a later record lower a trigger-raised value (g2, medium) | Rank guard in the `UPDATE` write path; counts stay cache-based so preview == apply. |
+| Dependency source may carry plaintext / non-secret child of secret parent (g3, medium) | Validator rules `dependency_source_has_text` (edge only) and `dependency_sensitivity_below_parent` (all rank pairs, source and checkpoint edges). |
+| `promote --list` loads up to 100 payloads (g3, medium) | `CASE WHEN eligible THEN payload_json END` + `iterate()`. |
+| Local stricter parent, coalesced origins, trigger-raised parent, held parent, order-dependent unverified records (code-review + secrev4/secrev5, medium) | `raiseToParents`: identity-keyed worklist over `transfer_lineage`, live parent rank, trigger-descendant resync after each live raise, unverifiable records merged last. Doubling probe linear (`us5-sec7-perf-probe.log`). |
+| Receipts miss a later alias / trigger raise / cross-import or re-export terminal change (secrev5, secrev7, secrev8, secrev9, medium) | `saveOrigins` takes the stricter of the identity's final merged state and the live row; a record whose identity resolved to a row in another repository is hash-only (`identity_elsewhere`), as are records nested under it, so no held payload exists to clear later. Two intermediate designs (trigger by payload hash, then by an `identity_hash` column) were reverted after Codex rounds 5 and 6 showed each left a path. |
+| Orphan retainable origin payload (secrev10, secrev12, medium) | Validator rule `orphan_origin_payload`, terminal label read per kind exactly as `migrationPayloadRedaction` does; matrix C8's forged replay is now refused outright instead of ignored. The provenance loss for `identity_elsewhere` records is fixed as specification in the contract. |
+| Proposal receipt ignores the projected memory's terminal state (secrev12, medium, pre-existing) | `saveOrigins` folds the projected memory's final state into the proposal receipt (`finalState` helper shared with the parent memory). |
+| UNIQUE violation reported as `scratch_storage_failed` (g1 rerun, non-security) | Primary SQLite code (`& 0xff`); `duplicate_source_origin` now reachable (test added). |
+
+Reviews on the final tree: Codex `codex exec --sandbox read-only` security rounds ok:true with 0
+critical/high (`secrev6` parsing layer, `secrev12` round 8b, `secrev13` round 9 final; the raw
+`/tmp` outputs of rounds 6-9 were lost to a reboot on 2026-09-11 and are preserved as the
+transcript copies under `us5-sec-reviews/transcript-verdicts/`); `code-review high` (finders
+a/b/c/cleanup/altitude + lead) final verdict ok:true, 0 findings, repro set 168/168;
+`ponytail-review` one shrink applied; semgrep 0 findings (`us5-sec2-semgrep.json`).
+
+| Verification (`us5-sec12-*`, final tree, no concurrent build or review) | Result |
+| --- | --- |
+| typecheck / lint / build | PASS |
+| Node 24.16.0 unit/migration/scripts | 1,177 PASS |
+| Node 22.16.0 unit/migration/scripts | 1,177 PASS |
+| Node 24.16.0 serial E2E/fault | 202 PASS |
+| Node 22.16.0 serial E2E/fault | 202 PASS (`us5-sec12-serial-isolated-v22.16.0.tap`; the in-gate run lost four worker/lease cases to the 300 ms seed deadline while transcript recovery ran alongside) |
+| pack-check | PASS |
+
+Earlier gates on intermediate trees (`us5-sec`, `us5-sec2`, `us5-sec4`, `us5-sec5`, `us5-sec8`,
+`us5-sec9`) are green too; the single failures in `us5-sec` (memory-recovery, e2e-hook), `us5-sec8`
+(`remote-no-duplicate`) and `us5-sec11` (serial, both Nodes) are the documented load-only hook seed
+misses and each passed in isolation (`us5-sec-recovery-isolated-v24.tap`,
+`us5-sec-serial-isolated-v22.16.0.tap`, `us5-sec8-serial-isolated-v24.16.0.tap`,
+`us5-sec11-serial-isolated-v24.16.0.tap`, `us5-sec11-serial-isolated-v22.16.0.tap`). `us5-sec3`,
+`us5-sec6`, `us5-sec7`, `us5-sec10` and `us5-sec11` ran while the bundle was being rebuilt or
+reviewed under load and are not evidence on their own.
+
+Accepted residuals (documented in the contract): `updated`/`unchanged` counts are cache-based;
+`historical_held` records count as `unchanged`; a proposal receipt follows its origin memory, so a
+later terminal change of the projection row alone does not clear it (Known validator limits); wall
+time is dominated by scratch autocommit (E5). Codex round 9 (`secrev13/fix9.out`, 0 findings, 60
+in-memory cases) suggests widening cases #15 (proposal/visibility with memory deletion) and #16
+(other repository, deletion, alias order) as permanent regression tests; left for a later test pass.

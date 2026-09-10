@@ -7,7 +7,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { checkpointHash, contentHash, materialHash } from './db/identity.js';
 import { openDatabase, sqliteErrorInfo } from './db/open.js';
 import { sha256Hex, sha256Json } from './hash.js';
-import { EXPORT_FORMAT, MAX_FILE_BYTES, MAX_LINE_BYTES, MAX_NATIVE_LINE_BYTES,
+import { EXPORT_FORMAT, MAX_FILE_BYTES, MAX_LINE_BYTES, MAX_NATIVE_LINE_BYTES, SENSITIVITY_RANK,
   NATIVE_FORMAT, NATIVE_REVISION, CLAUDE_MEM_FORMAT, CLAUDE_MEM_REVISION, headerSchema, lineSchema, nativeHeaderSchema,
   nativeRecordSchema, migrationPayloadRedaction, migrationPayloadShape, type NativeRecord } from './transfer-format.js';
 
@@ -86,6 +86,20 @@ function referencesValid(db: DatabaseSync): void {
   invalid(`SELECT s.source_line AS sequence FROM transfer_rows s LEFT JOIN transfer_rows m ON m.kind = 'memory'
     AND m.origin = json_extract(s.data, '$.source_memory_id') WHERE s.kind = 'source'
     AND json_extract(s.data, '$.source_memory_id') IS NOT NULL AND m.origin IS NULL LIMIT 1`, 'unknown_source_dependency');
+  // A local dependency row is the edge alone (observer/provenance.ts retainGenerationPrivacy), so anything
+  // else riding on it has no local shape and would escape the parent's redaction.
+  const dependencyOnly = ['raw_event_id', 'source_context_id', 'citation_kind', 'citation_value', 'source_agent', 'portion_start',
+    'portion_end', 'source_total', 'source_hash', 'evidence', 'capture_root', 'source_paths_json']
+    .map((field) => `json_extract(s.data, '$.${field}') IS NOT NULL`).join(' OR ');
+  invalid(`SELECT s.source_line AS sequence FROM transfer_rows s WHERE s.kind = 'source'
+    AND json_extract(s.data, '$.source_memory_id') IS NOT NULL
+    AND (json_extract(s.data, '$.context_only') <> 1 OR ${dependencyOnly}) LIMIT 1`, 'dependency_source_has_text');
+  // The memories_provenance_privacy trigger keeps every descendant at least as strict as its ancestor; a
+  // file that claims otherwise describes a state the database can never hold, so it is refused, not repaired.
+  invalid(`SELECT m.source_line AS sequence FROM transfer_rows m JOIN (${LINEAGE_EDGES}) e ON e.child = m.origin
+    JOIN transfer_rows p ON p.kind = 'memory' AND p.origin = e.parent
+    WHERE m.kind = 'memory' AND ${rankSql("json_extract(m.data, '$.sensitivity')")} < ${rankSql("json_extract(p.data, '$.sensitivity')")}
+    LIMIT 1`, 'dependency_sensitivity_below_parent');
   invalid(`SELECT s.source_line AS sequence FROM transfer_rows s LEFT JOIN transfer_rows m ON m.kind = 'memory'
     AND m.origin = json_extract(s.data, '$.superseded_by') WHERE s.kind = 'memory'
     AND json_extract(s.data, '$.superseded_by') IS NOT NULL AND m.origin IS NULL LIMIT 1`, 'unknown_supersession');
@@ -151,6 +165,15 @@ function referencesValid(db: DatabaseSync): void {
   'migration_origin_target_mismatch');
   invalid(`SELECT o.source_line AS sequence FROM transfer_rows o LEFT JOIN transfer_rows r ON r.kind = 'repo' AND r.origin = o.repo_id
     WHERE o.kind = 'migration_origin' AND o.repo_id IS NOT NULL AND r.origin IS NULL LIMIT 1`, 'migration_origin_repo_mismatch');
+  // A retainable payload with no memory in this file would be stored with no identity to redact it by
+  // later; a terminal-labelled payload is never retained, so it may travel as a hash-only trace.
+  // The terminal label is the one migrationPayloadRedaction reads for that kind, nothing else.
+  invalid(`SELECT o.source_line AS sequence FROM transfer_rows o WHERE o.kind = 'migration_origin' AND o.memory_id IS NULL
+    AND json_type(o.data, '$.payload') <> 'null' AND CASE json_extract(o.data, '$.record_kind')
+      WHEN 'memory' THEN json_extract(o.data, '$.payload.sensitivity') IS NOT 'secret' AND json_extract(o.data, '$.payload.deleted_at') IS NULL
+      WHEN 'sharing_proposal' THEN json_extract(o.data, '$.payload.candidate_sensitivity') IS NOT 'secret'
+        AND json_extract(o.data, '$.payload.redacted') IS NOT 1
+      WHEN 'source' THEN 1 WHEN 'visibility' THEN 1 ELSE 0 END LIMIT 1`, 'orphan_origin_payload');
   invalid(`SELECT o.source_line AS sequence FROM transfer_rows o JOIN transfer_rows m ON m.kind = 'memory' AND m.origin = o.memory_id
     WHERE o.kind = 'migration_origin' AND json_type(o.data, '$.payload') <> 'null'
       AND (json_extract(m.data, '$.deleted_at') IS NOT NULL OR json_extract(m.data, '$.sensitivity') = 'secret') LIMIT 1`,
@@ -158,19 +181,29 @@ function referencesValid(db: DatabaseSync): void {
   acyclic(db);
 }
 
-/** Kahn's algorithm on scratch tables: bounded pages, no recursive ancestor expansion or JS graph. */
+/** child -> parent edges of the dependency graph: source dependencies and checkpoint parents. */
+const LINEAGE_EDGES = `SELECT memory_id AS child, json_extract(data, '$.source_memory_id') AS parent FROM transfer_rows
+    WHERE kind = 'source' AND json_extract(data, '$.source_memory_id') IS NOT NULL
+  UNION SELECT origin, json_extract(data, '$.checkpoint_parent_id') FROM transfer_rows
+    WHERE kind = 'memory' AND json_extract(data, '$.checkpoint_parent_id') IS NOT NULL`;
+
+export const rankSql = (expression: string): string =>
+  `CASE ${expression} ${Object.entries(SENSITIVITY_RANK).map(([name, rank]) => `WHEN '${name}' THEN ${rank}`).join(' ')} END`;
+
+/**
+ * Kahn's algorithm on scratch tables: bounded pages, no recursive ancestor expansion or JS graph.
+ * The dependency edges stay in `transfer_lineage` for the merge's sensitivity propagation.
+ */
 function acyclic(db: DatabaseSync): void {
   db.exec(`CREATE TABLE transfer_edges (from_id TEXT NOT NULL, to_id TEXT NOT NULL, PRIMARY KEY(from_id, to_id)) WITHOUT ROWID;
     CREATE INDEX transfer_edges_target ON transfer_edges(to_id);
     CREATE TABLE transfer_degree (id TEXT PRIMARY KEY, incoming INTEGER NOT NULL) STRICT;
-    CREATE INDEX transfer_degree_ready ON transfer_degree(incoming, id);`);
+    CREATE INDEX transfer_degree_ready ON transfer_degree(incoming, id);
+    CREATE TABLE transfer_lineage (child TEXT NOT NULL, parent TEXT NOT NULL, PRIMARY KEY(child, parent)) WITHOUT ROWID;
+    INSERT OR IGNORE INTO transfer_lineage ${LINEAGE_EDGES};`);
   for (const relation of ['dependencies', 'superseded_by'] as const) {
     db.exec('DELETE FROM transfer_edges; DELETE FROM transfer_degree');
-    if (relation === 'dependencies') db.exec(`INSERT OR IGNORE INTO transfer_edges
-      SELECT memory_id, json_extract(data, '$.source_memory_id') FROM transfer_rows
-        WHERE kind = 'source' AND json_extract(data, '$.source_memory_id') IS NOT NULL
-      UNION SELECT origin, json_extract(data, '$.checkpoint_parent_id') FROM transfer_rows
-        WHERE kind = 'memory' AND json_extract(data, '$.checkpoint_parent_id') IS NOT NULL`);
+    if (relation === 'dependencies') db.exec(`INSERT OR IGNORE INTO transfer_edges ${LINEAGE_EDGES}`);
     else db.exec(`INSERT OR IGNORE INTO transfer_edges SELECT origin, json_extract(data, '$.superseded_by') FROM transfer_rows
       WHERE kind = 'memory' AND json_extract(data, '$.superseded_by') IS NOT NULL`);
     db.exec(`
@@ -202,7 +235,7 @@ export async function readTransferPlan(input: AsyncIterable<Uint8Array | string>
       PRAGMA max_page_count = 131072;
       CREATE TABLE transfer_rows (sequence INTEGER PRIMARY KEY, source_line INTEGER NOT NULL, kind TEXT NOT NULL, origin TEXT NOT NULL,
         repo_id TEXT, memory_id TEXT, data TEXT NOT NULL, destination_repo_id TEXT, destination_memory_id TEXT,
-        destination_context_id TEXT, effect TEXT, UNIQUE(kind, origin)) STRICT;
+        destination_context_id TEXT, effect TEXT, content_hash TEXT, UNIQUE(kind, origin)) STRICT;
       CREATE INDEX transfer_memory ON transfer_rows(kind, memory_id);
       BEGIN IMMEDIATE`);
     const insert = db.prepare('INSERT INTO transfer_rows(sequence, source_line, kind, origin, repo_id, memory_id, data) VALUES (?, ?, ?, ?, ?, ?, ?)');
@@ -226,7 +259,8 @@ export async function readTransferPlan(input: AsyncIterable<Uint8Array | string>
         : record.kind === 'sharing_proposal' ? record.origin_memory_id : null;
       try { insert.run(++sequence, number, record.kind, record.id, repo, memory, JSON.stringify(record)); }
       catch (error) {
-        const code = sqliteErrorInfo(error).errcode;
+        // node:sqlite reports extended codes (2067 for a UNIQUE violation); the primary code is the low byte.
+        const code = (sqliteErrorInfo(error).errcode ?? 0) & 0xff;
         throw new TransferInputError(code === 13 ? 'scratch_storage_full'
           : code === 19 ? 'duplicate_source_origin' : 'scratch_storage_failed', number);
       }

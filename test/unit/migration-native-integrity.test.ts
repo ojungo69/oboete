@@ -125,12 +125,17 @@ test('native export validates its staged cross-record graph before publishing st
   });
 });
 
+test('a repeated source record identity is reported as a duplicate, not a scratch failure', async () => {
+  const a = memory({ id: 'memory-a', workId: WORK });
+  await expectNativeReject([repo(), context(), work(), a, a], 'duplicate_source_origin');
+});
+
 test('source-memory and checkpoint-parent edges share one dependency cycle check', async () => {
   const a = memory({ id: 'memory-a', workId: WORK, parentId: 'memory-b' });
   const b = memory({ id: 'memory-b', workId: WORK });
   const dependency: NativeRecord = {
     kind: 'source', id: 'dependency-b-a', memory_id: b.id, raw_event_id: null,
-    source_memory_id: a.id, source_context_id: CONTEXT, citation_kind: null,
+    source_memory_id: a.id, source_context_id: null, citation_kind: null,
     citation_value: null, source_agent: null, portion_start: null, portion_end: null,
     source_total: null, source_hash: null, evidence: null, captured_at: 1,
     source_processed_at: 1, capture_root: null, source_paths_json: null, context_only: 1,

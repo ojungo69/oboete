@@ -179,6 +179,12 @@ writers require separate worktrees. No deployment follows merely from an increme
   whole gate again on this follow-up (`us5-e2b-*`: 1,203 + 202 per Node, pack-check 20.703 MB).
   Earlier `us5-promote-*` receipts remain historical evidence.
   T029-T032 stay unchecked: the remaining matrix, RSS/packed checks and full reviews remain open.
+- T043/T031 (E4 security, this commit): the US5 security review converged after the initial
+  architecture/g1-g3 Codex pass, eight fresh Codex follow-up rounds and the `code-review` finder
+  set; eight security fixes plus one error-code fix in `transfer-merge.ts`/`transfer-plan.ts`/
+  `transfer-promote.ts` (0007 unchanged) with 16 authority cases, one integrity case and an updated
+  matrix case RED→GREEN; final tree gate `us5-sec12-*` green on both Nodes with nothing else
+  running. See `quickstart.md` E4. T029-T032/T043 stay unchecked pending E5 (RSS) and macOS.
 - T032 (E3 matrix, `943660a4` plus worktree): added ten focused `migration-matrix.test.ts` cases
   for preview/context/schema/WAL, mapping rollback/collisions, proposal/terminal/personal round trips
   and actual packed CLI metadata. All ten pass on Node 24.16.0 and 22.16.0. Two preview-accounting
