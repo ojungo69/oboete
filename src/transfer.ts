@@ -298,24 +298,37 @@ function importSummary(result: ImportResult): string {
 }
 
 /** Only identities and counts leave the private plan; exact project names remain inside it. */
-function previewMetadata(plan: TransferPlan, result: ImportResult, schema: string) {
+function previewMetadata(plan: TransferPlan, result: ImportResult, schema: string, db: DatabaseSync | undefined) {
   const counts: Record<string, number> = Object.create(null) as Record<string, number>;
   for (const row of plan.db.prepare('SELECT kind, COUNT(*) AS n FROM transfer_rows GROUP BY kind').iterate()) {
     counts[String(row.kind)] = Number(row.n);
   }
+  const projectHash = (data: unknown) => {
+    const repo = JSON.parse(String(data)) as { id: string; normalized_identity: string };
+    return sha256Hex(plan.external === undefined ? repo.id : repo.normalized_identity);
+  };
   const projects = plan.db.prepare(`SELECT data, destination_repo_id, destination_context_id
     FROM transfer_rows WHERE kind = 'repo' ORDER BY origin LIMIT 100`).all().map((row) => {
-    const repo = JSON.parse(String(row.data)) as { id: string; normalized_identity: string };
-    return { sourceHash: plan.external === undefined ? sha256Hex(repo.id) : sha256Hex(repo.normalized_identity),
-      destinationRepo: row.destination_repo_id, context: row.destination_context_id };
+    const project = { sourceHash: projectHash(row.data), destinationRepo: row.destination_repo_id, context: row.destination_context_id };
+    if (project.destinationRepo === null || project.context !== null) return project;
+    const contextCandidates = db?.prepare('SELECT id FROM work_contexts WHERE repo_id = ? ORDER BY id LIMIT 10')
+      .all(project.destinationRepo).map((candidate) => String(candidate.id)) ?? [];
+    const contextCount = Number(db?.prepare('SELECT COUNT(*) AS n FROM work_contexts WHERE repo_id = ?')
+      .get(project.destinationRepo)?.n ?? 0);
+    return { ...project, contextCandidates, contextCandidatesOmitted: Math.max(0, contextCount - contextCandidates.length) };
   });
+  const unresolved = plan.db.prepare(`SELECT data FROM transfer_rows WHERE kind = 'repo'
+    AND destination_repo_id IS NULL ORDER BY origin LIMIT 100`).all().map((row) => projectHash(row.data));
+  const unresolvedCount = Number(plan.db.prepare(`SELECT COUNT(*) AS n FROM transfer_rows
+    WHERE kind = 'repo' AND destination_repo_id IS NULL`).get()?.n ?? 0);
   const collisions = Number(plan.db.prepare(`SELECT COUNT(*) AS n FROM (
     SELECT destination_repo_id FROM transfer_rows WHERE kind = 'repo' AND destination_repo_id IS NOT NULL
     GROUP BY destination_repo_id HAVING COUNT(*) > 1)`).get()?.n ?? 0);
   return { source: { format: plan.format, revision: plan.revision, sha256: plan.sourceHash, bytes: plan.bytes,
     counts: plan.external?.counts ?? counts, queryScoped: plan.external !== undefined,
     tombstones: plan.external === undefined ? 'included' : 'unavailable' },
-    mapping: { projects, omitted: Math.max(0, (counts.repo ?? 0) - projects.length), collisions },
+    mapping: { projects, omitted: Math.max(0, (counts.repo ?? 0) - projects.length), collisions,
+      unresolved, unresolvedOmitted: Math.max(0, unresolvedCount - unresolved.length) },
     quarantine: result.inserted, excluded: counts.excluded ?? 0,
     held: Number(plan.db.prepare("SELECT COUNT(*) AS n FROM transfer_rows WHERE kind <> 'repo' AND kind <> 'memory'").get()?.n ?? 0),
     applyPossible: schema === 'ready' && result.rejected.length === 0 };
@@ -353,18 +366,22 @@ export async function runImport(argv: string[], io: Io = processIo()): Promise<n
       mapRepo: args.mapRepo, mapWork: args.mapWork, mapContext: args.mapContext,
       mapProject: args.mapProject, mapProjectHash: args.mapProjectHash });
     if (!dryRun && schema !== 'ready') result.rejected.unshift({ line: 0, reason: 'destination_schema_not_ready' });
-    const metadata = previewMetadata(plan, result, schema);
+    const metadata = previewMetadata(plan, result, schema, db);
     if (args.json) await io.writeOut(`${JSON.stringify({ ...metadata, destinationSchema: schema, ...result })}\n`);
     else {
       for (const issue of result.rejected) io.writeError(`line ${issue.line}: ${issue.reason}\n`);
       if (result.rejected.length === 0) await io.writeOut(dryRun
         ? `Dry run: ${importSummary(result)} would be written. Destination schema: ${schema}.\n`
         : `${result.duplicate ? 'Already imported' : 'Imported'}${plan.format === EXPORT_FORMAT && !args.apply ? ' (v1 implicit apply)' : ''}: ${importSummary(result)}.\n`);
-      if (plan.external !== undefined) await io.writeOut(`Source: ${plan.format}@${plan.revision}, SHA-256 ${plan.sourceHash}, ${plan.bytes} bytes.\n`
-        + `Query-scoped export; source deletion history is unavailable. ${metadata.mapping.collisions} project collisions.\n`
+      await io.writeOut(`Source: ${plan.format}@${plan.revision}, SHA-256 ${plan.sourceHash}, ${plan.bytes} bytes.\n`
+        + (plan.external === undefined ? 'Source deletion history is included. ' : 'Query-scoped export; source deletion history is unavailable. ')
+        + `${metadata.mapping.collisions} project collisions.\n`
         + `${metadata.excluded} unsupported, ${metadata.held} held records. Apply possible: ${metadata.applyPossible}.\n`
-        + metadata.mapping.projects.map((project) => `Project SHA-256 ${project.sourceHash}: ${project.destinationRepo === null ? 'mapping required' : 'mapped'}.\n`).join('')
-        + (metadata.mapping.omitted > 0 ? `${metadata.mapping.omitted} project details omitted.\n` : ''));
+        + metadata.mapping.projects.map((project) => `Project SHA-256 ${project.sourceHash}: ${project.destinationRepo === null ? 'mapping required' : 'mapped'}.\n`
+          + ('contextCandidates' in project ? project.contextCandidates.map((id) => `Context candidate ${project.destinationRepo}: ${id}.\n`).join('')
+            + (project.contextCandidatesOmitted > 0 ? `${project.contextCandidatesOmitted} context candidates omitted for ${project.destinationRepo}.\n` : '') : '')).join('')
+        + (metadata.mapping.omitted > 0 ? `${metadata.mapping.omitted} project details omitted.\n` : '')
+        + `${metadata.mapping.unresolved.length + metadata.mapping.unresolvedOmitted} unresolved projects.\n`);
     }
     return result.rejected.length > 0 ? 2 : 0;
   } catch (error) {

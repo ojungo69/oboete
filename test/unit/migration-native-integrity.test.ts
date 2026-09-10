@@ -14,22 +14,12 @@ import {
 } from '../../src/transfer-format.js';
 import { readTransferPlan, TransferInputError } from '../../src/transfer-plan.js';
 import { withFixture } from '../helpers/inject-fixture.js';
+import { output } from '../helpers/output.js';
 
 const ORIGIN = 'a'.repeat(32);
 const REPO = 'source-repo';
 const CONTEXT = 'source-context';
 const WORK = 'source-work';
-
-function output() {
-  const text = { out: '', error: '' };
-  return {
-    text,
-    io: {
-      writeOut: (value: string) => { text.out += value; },
-      writeError: (value: string) => { text.error += value; },
-    },
-  };
-}
 
 function header() {
   return { format: NATIVE_FORMAT, revision: NATIVE_REVISION, exported_at: 1, origin_id: ORIGIN };

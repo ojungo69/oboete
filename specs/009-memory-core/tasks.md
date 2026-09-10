@@ -179,3 +179,22 @@ writers require separate worktrees. No deployment follows merely from an increme
   whole gate again on this follow-up (`us5-e2b-*`: 1,203 + 202 per Node, pack-check 20.703 MB).
   Earlier `us5-promote-*` receipts remain historical evidence.
   T029-T032 stay unchecked: the remaining matrix, RSS/packed checks and full reviews remain open.
+- T032 (E3 matrix, `943660a4` plus worktree): added ten focused `migration-matrix.test.ts` cases
+  for preview/context/schema/WAL, mapping rollback/collisions, proposal/terminal/personal round trips
+  and actual packed CLI metadata. All ten pass on Node 24.16.0 and 22.16.0. Two preview-accounting
+  defects were repaired with RED evidence (`us5-matrix-a2-red.tap`, `us5-matrix-b6-duplicate-red.tap`);
+  nine existing-guard mutations also have preserved RED/restoration receipts. Typecheck/lint/build
+  pass; focused suites are 159 PASS / 1 unchanged FIFO `EPERM` failure per Node. Full Node 24
+  unit/migration/scripts is 73 PASS / 11 FAIL file suites; explicit-file diagnostics are 116 PASS /
+  27 FAIL, including subprocess/socket limitations and a 2-second timeout. `quickstart.md` E3 records
+  commands, the discarded glob-based diagnostic, review closures and the existing context-candidate
+  listing contract mismatch. No checkbox is ticked; RSS/races/full-US5 qualification remain open.
+  Follow-up (`us5-matrix2-*`) closes all four review findings: bounded context candidate IDs and
+  omission counts (closing that mismatch), the single human unresolved total, missing-destination
+  apply refusal coverage, and the shared output helper in all five tests. A1/A2 have RED evidence;
+  all ten matrix cases are GREEN on both Nodes. Typecheck/lint/build pass; requested focused runs
+  report 7 PASS / 1 FAIL file suites per Node, with case diagnostics 159 PASS / 1 unchanged FIFO
+  `EPERM` failure per Node. E3 records the receipts and reviews. The parent's whole gate (`us5-e3-*`)
+  passes 1,213 unit/migration/scripts on each Node, serial E2E/fault 202/202 on Node 22.16.0 and
+  pack-check; the Node 24.16.0 serial run hit the documented load-only seed miss (201/202) while the
+  resource measurement ran concurrently and is rerun in isolation afterwards.

@@ -10,12 +10,7 @@ import { oboetePaths } from '../../src/paths.js';
 import { exportMemories, runExport, runImport } from '../../src/transfer.js';
 import { withTempHome } from '../helpers/home.js';
 import { insertSession, withFixture } from '../helpers/inject-fixture.js';
-
-function output() {
-  const text = { out: '', error: '' };
-  return { text, io: { writeOut: (value: string) => { text.out += value; },
-    writeError: (value: string) => { text.error += value; } } };
-}
+import { output } from '../helpers/output.js';
 
 test('default native export retains exact pending candidate, source evidence and work visibility', async () => {
   await withFixture(async (fixture) => {

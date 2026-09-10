@@ -231,9 +231,9 @@ export function mergeTransferPlan(db: DatabaseSync | undefined, plan: TransferPl
   try {
     const prior = db?.prepare('SELECT mapping_hash FROM migration_imports WHERE id = ?').get(importId);
     if (prior !== undefined && prior.mapping_hash !== mappingHash) throw new TransferInputError('import_mapping_changed');
+    const resolved = mappings(plan, db, options);
     if (prior !== undefined) return { ...result, duplicate: true,
       unchanged: Number(plan.db.prepare("SELECT COUNT(*) AS n FROM transfer_rows WHERE kind = 'memory'").get()?.n ?? 0) };
-    const resolved = mappings(plan, db, options);
     if (resolved.unresolved.length > 0) return { ...result, rejected: resolved.unresolved };
     plan.db.exec(`CREATE TABLE IF NOT EXISTS transfer_targets (content_hash TEXT PRIMARY KEY, id TEXT NOT NULL,
       repo_id TEXT NOT NULL, sensitivity TEXT NOT NULL, deleted_at INTEGER, owned INTEGER NOT NULL) STRICT;

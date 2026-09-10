@@ -494,3 +494,138 @@ codes; `mkfifo` also reports `EPERM`. The busy regression uses a temporary stder
 real CLI without weakening its expected message or exit code. The earlier parent whole-gate result
 above applies to the baseline; the parent must run the full gate for this latest diff. This delegate
 did not run E2E/fault or pack, access a network/provider, change Git state, or tick any checkbox.
+
+## E3 — migration test matrix
+
+2026-09-10, branch `009-memory-core`, baseline `943660a4ef1d1ecdcfe96545e7a1156e63772c5e`.
+The ten requested T032 matrix cases live in `test/unit/migration-matrix.test.ts`. Existing migration,
+transfer and scope tests were read first; no existing suite, contract, research file or checkbox changed.
+Receipts below are in `/tmp/oboete-009-20260909.jJ5grc/`, with prefix `us5-matrix-`.
+
+| Test name | Coverage and RED receipt |
+| --- | --- |
+| `matrix A1: preview requires an explicit verified context when zero or two candidates exist` | Real temporary Git repositories share one remote identity and have distinct verified generations. Zero/two candidates stay null; explicit choices resolve; unknown/stale choices reject. `a1-red.tap` removes the ambiguity guard and selects the first context. |
+| `matrix A2: native preview bounds project and unresolved details with matching human counts` | 107 native projects produce 100 entries and 7 omissions in both outputs; unresolved hashes have the same independent bounds/counts. `a2-red.tap` shows the missing unresolved list. Expected hashes use a fixed vector or independent `node:crypto` computation. |
+| `matrix A3: preview preserves missing, behind, ahead and writer-held WAL destinations` | Actually applies migrations 0001-0006 with checksums; also checks absent, version-8 and current WAL stores with an uncommitted second writer. Source bytes, all tables, `sqlite_master` and `user_version` stay unchanged; old/ahead apply refuses. `a3-red.tap` misreports behind as ready. |
+| `matrix B4: changing mappings for the same file rejects without any table changes` | `import_mapping_changed` and full-table equality. `b4-red.tap` disables the file mapping guard. |
+| `matrix B5: an overlapping origin mapped elsewhere rolls back even after earlier records` | `origin_mapping_changed` for first/later conflicting origins, including rollback of earlier rows and the import receipt. `b5-red.tap` disables the origin mapping guard. |
+| `matrix B6: two source projects can share a destination while retaining distinct origins` | Collision count 1, successful apply, separate origins with one target key, and same-file/same-mapping JSON/human preview without writes. `b6-red.tap` removes collision accounting; `b6-duplicate-red.tap` reproduces the real duplicate-preview defect. |
+| `matrix C7: all proposal decisions round trip as private history without nested origins or grants` | Pending/approved/rejected exact proposals survive export/import/local classification. Personal projection stays ungranted and source-free. Two transfer hops keep every original key/hash once without nested envelopes. `c7-red.tap` disables inherited-origin preservation. |
+| `matrix C8: redacted source dependencies stay terminal after a forged plaintext replay` | Secret/deleted parent source fields export as null; source receipts are null and terminal. A forged same-origin payload with its parent link removed cannot rehydrate or downgrade the receipt. `c8-red.tap` replaces the insert-ignore guard. |
+| `matrix C9: revoked personal grants preserve export identity and tombstones survive reimport` | Fresh local promotion/approval creates the grant before explicit local revocation. Export still identifies the personal projection; exact and overlapping reimports keep its local tombstone. `c9-red.tap` removes the migration-record domain lookup. |
+| `matrix D10: packed migration preview and promotion print only bounded metadata` | Actual `dist/oboete.mjs` previews the frozen external fixture and native v2, lists no candidates, and refuses a bad promotion ID: exits 0/0/0/1. Both output streams exclude recognizable text, project names and paths. `d10-red.tap` exposes unhashed project identities. |
+
+Two defects were fixed with the smallest source changes:
+
+- `src/transfer.ts` now reports bounded unresolved hashes and their omitted count. Native human
+  output includes the same project/omission counts as JSON. The original defect is in `a2-red.tap`.
+- `src/transfer-merge.ts` resolves scratch mappings before the duplicate no-op return, so a repeated
+  preview no longer reports mapped projects as unresolved or loses collisions. `b6-duplicate-red.tap`
+  shows 0 collisions instead of the expected 1. Destination writes and duplicate no-op semantics are
+  unchanged; the extended B6 asserts full-table equality.
+
+The other nine cases initially passed existing code. Their RED receipts come from one temporary
+mutation at a time, with sequential build/test and byte-for-byte source restoration recorded in
+`mutations.log` and the runnable `mutations.py`. `restored-green.tap` and the post-review
+`review-green.tap` each pass all 10 cases. `c9-initial.tap` and `c9-fixture-check.tap` are setup
+diagnostics (a missing local binding and an incorrect expectation that local tombstoning clears
+stored text), not product-defect RED evidence. The test now respects local tombstone storage and
+checks that replay cannot revive it. All RED and initial receipts are retained.
+
+`code-review` Standards/Spec reviews confirmed the duplicate-metadata fix and the independent hash
+expectations; full-sentence copy and comment references were corrected. The subsequent Ponytail
+review found nothing to remove. The scoped correctness/privacy review found no output payload leak,
+destination write in preview, weakened guard or new dependency. These are local scoped reviews,
+not a whole-US5 security finalizer or network CLI review.
+
+Verification ran sequentially: `npm run typecheck`, `npm run lint`, `npm run build`, focused Node
+24.16.0, focused Node 22.16.0, and full Node 24.16.0 unit/migration/scripts. `commands.log` contains
+the exact commands; `runtime-versions.log` names both executables. The full process-isolated run
+reports file suites; a subsequent run of its 11 failing files with `--experimental-test-isolation=none`
+and explicit existing filenames provides case-level diagnostics. The first gate is retained as `first-*`;
+the unprefixed phase names below are the final source after the duplicate-preview repair.
+
+| Final verification | Result | Receipt |
+| --- | --- | --- |
+| typecheck / lint / build, Node 24.16.0 | PASS | `typecheck.log`, `lint.log`, `build.log` |
+| Focused migration/scope/transfer, Node 24.16.0 | 159 PASS / 1 FAIL; new matrix 10 PASS | `focused-node24.tap` |
+| Focused migration/scope/transfer, Node 22.16.0 | 159 PASS / 1 FAIL; new matrix 10 PASS | `focused-node22.tap` |
+| Full unit/migration/scripts, Node 24.16.0, process isolated | 73 PASS / 11 FAIL file suites | `unit-node24.tap` |
+| Diagnostics for the 11 failed files, Node 24.16.0 | 116 PASS / 27 FAIL | `unit-node24-failures-detail.tap` |
+
+The focused failure on each Node is the unchanged transfer CLI/FIFO test: `spawnSync mkfifo EPERM`.
+The packed matrix case uses temporary stdout/stderr file descriptors and all four real CLI commands
+pass. The whole-suite failures occur in unchanged CLI/trust/logs/replay/transfer/viewer/work-context/
+work-readers/DCO/tmux/pack-check tests: explicit subprocess/socket/FIFO `EPERM`, missing subprocess
+output, and the work-readers subprocess's 2-second `ETIMEDOUT`. The latter output/timeout symptoms
+are runtime limitations, not independently proven sandbox causes. The complete gate remains failed
+and requires parent-environment verification; no assertion or gate was weakened.
+
+Diagnostic command correction: the first supplementary same-process full run received literal glob
+arguments. Existing `pack-check.mjs` treats an unresolved `argv[1]` realpath as direct invocation, so
+module loading unexpectedly ran build, then `npm pack` failed with `EPERM`; it did not reach install.
+This occurred before TAP cases started, but violated the intended explicit build/test phase boundary.
+The run completed before it could be stopped. Its 1,190 PASS / 27 FAIL receipt is retained as
+`unit-node24-detail-glob-invalid.tap` and is **not accepted gate evidence**. An explicit-file one-case
+pilot (`diagnostic-argv-check.tap`, 1 PASS), then only the 11 failed files, produced no build/pack side
+effect. The saved gate driver now expands same-process glob arguments before execution.
+
+Contract mismatch left for the parent: `contracts/migration.md`, "Preview and mappings", requires
+bounded context candidate IDs. The implementation returns the chosen `context` or null, without a
+candidate list. A1 proves the requested ambiguity/explicit-mapping behavior; this job does not change
+that contract or add candidate-list UI. `protected-files.log` confirms contracts/research match HEAD.
+Scoped `speckit-verify-tasks` found T032 intentionally unchecked (`verify-tasks.log`); no completion
+markers were changed. Near-limit RSS, publication races, E2E/fault, packed installation, whole-US5
+qualification and external reviews remain outside this matrix job. No worktree commit, push, stash,
+reset, checkout or branch change, global installation, external network or real provider was used.
+
+### E3 review follow-up — four findings closed
+
+2026-09-10, same branch and HEAD, preserving the uncommitted matrix changes above. Receipts are
+in `/tmp/oboete-009-20260909.jJ5grc/` with prefix `us5-matrix2-`. The initial files are captured in
+`start.log`; `src/transfer-merge.ts`, context verification, the migration contract and every existing
+helper remain byte-identical to that snapshot.
+
+| Closed finding | Change and evidence |
+| --- | --- |
+| Missing context candidate IDs | `previewMetadata` reads the destination database only for a mapped repository whose context is null. JSON lists up to 10 stored context IDs in ID order and the remaining count; a missing store produces an empty list. Human output prints one `Context candidate <repo-id>: <context-id>.` line per ID and one omission-count line when needed. A1 checks zero/two candidates, explicit selection without candidates, 12 stored candidates bounded to 10 plus 2 omitted, absence of roots/paths, and unchanged tables. This closes the contract mismatch left above. |
+| Misleading human unresolved omissions | Human output is exactly `N unresolved projects.` for the JSON total `unresolved.length + unresolvedOmitted`. JSON fields are unchanged. A2 compares the entire summary line with that total; B6 checks the zero case. |
+| Missing negative apply case | A3 now applies to a missing destination and checks `destination_schema_not_ready`, `applied: false`, and both the database file and destination directory still absent. Existing behavior already passed this assertion before the source repair. |
+| Five duplicated output helpers | `test/helpers/output.ts` exports the original capture helper, imported by matrix/external/import/native-integrity/promote tests. `helper-review.log` confirms identical behavior, including the differently formatted native-integrity copy, and no other helper changes. |
+
+RED was recorded before implementation. `red-node24.tap` reports the failing file only;
+`red-node24-detail.tap`, using the same explicit file with `--experimental-test-isolation=none`,
+shows A1 failing for missing candidate fields and A2 failing for the old human summary, while A3
+passes (1 PASS / 2 FAIL). The initial union-property typecheck error is retained in
+`first-typecheck.log`; an `in` guard fixes it without changing the JSON shape.
+
+Final verification ran strictly in order: `npm run typecheck` → `npm run lint` → `npm run build`
+→ the requested focused Node 24.16.0 tests → the same Node 22.16.0 tests. Only afterwards, the
+same focused files ran sequentially with `--experimental-test-isolation=none` for case-level
+diagnostics. All glob arguments were expanded to existing filenames before invocation.
+`commands.log` records exact commands; `runtime-versions.log` records both executables.
+
+| Verification | Result | Receipt suffix |
+| --- | --- | --- |
+| typecheck / lint / build | PASS | `typecheck.log`, `lint.log`, `build.log` |
+| Requested focused run, Node 24.16.0 | 7 PASS / 1 FAIL file suites | `focused-node24.tap` |
+| Requested focused run, Node 22.16.0 | 7 PASS / 1 FAIL file suites | `focused-node22.tap` |
+| Focused case diagnostics, Node 24.16.0 | 159 PASS / 1 FAIL; matrix 10 PASS / 0 FAIL | `focused-node24-detail.tap` |
+| Focused case diagnostics, Node 22.16.0 | 159 PASS / 1 FAIL; matrix 10 PASS / 0 FAIL | `focused-node22-detail.tap` |
+
+Both case receipts provide GREEN evidence for A1/A2/A3 and the other seven matrix cases;
+`red-green.log` summarizes those transitions. The sole failure on each Node is the unchanged
+`test/unit/transfer.test.ts:370` FIFO setup, `spawnSync mkfifo EPERM`. The required focused gate
+remains failed; no assertion, test selection or gate was weakened. The parent runs the whole gate.
+Scoped correctness/privacy review, independent `code-review` Standards/Spec reviews (0 findings
+each), and the subsequent Ponytail review (0 findings) are recorded in `review.log`.
+`final-scope.log` checks preserved files, references, HEAD/branch and unchanged task markers.
+No checkbox was ticked; the broader US5 qualification remains outside this follow-up.
+
+**Whole gate for E3 (Claude Code, `us5-e3-*`):** the sequential `package.json` phases pass
+typecheck/lint/build, 1,213 unit/migration/scripts checks on each Node, serial E2E/fault 202/202 on
+Node 22.16.0 and pack-check. The Node 24.16.0 serial run was 201/202: `worker-kill-after-response`
+failed in its seed precondition (`capture hit its 300 ms deadline under load`) while the resource
+measurement job was saturating the host with a near-256 MiB preview. This is the documented
+load-only seed miss, not a regression in the changed files; the phase is rerun in isolation once
+the measurement finishes and its receipt is recorded below.

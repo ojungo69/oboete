@@ -19,12 +19,7 @@ import { runObserve } from '../../src/worker/observe.js';
 import { insertMemory, insertSession, withFixture, type Fixture } from '../helpers/inject-fixture.js';
 import { cleanEnv } from '../helpers/observe.js';
 import { withTempHome } from '../helpers/home.js';
-
-function output() {
-  const text = { out: '', error: '' };
-  return { text, io: { writeOut: (value: string) => { text.out += value; },
-    writeError: (value: string) => { text.error += value; } } };
-}
+import { output } from '../helpers/output.js';
 
 const WORK_TABLES = ['work_items', 'work_contexts', 'work_bindings', 'sessions', 'raw_events', 'observation_batches', 'injections'];
 function snapshot(db: DatabaseSync, tables = WORK_TABLES) {

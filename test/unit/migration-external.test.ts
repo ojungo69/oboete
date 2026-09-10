@@ -11,12 +11,7 @@ import { insertSession, withFixture } from '../helpers/inject-fixture.js';
 import { detectSync } from '../../src/privacy/detect.js';
 import { runObserve } from '../../src/worker/observe.js';
 import { cleanEnv } from '../helpers/observe.js';
-
-function output() {
-  const text = { out: '', error: '' };
-  return { text, io: { writeOut: (value: string) => { text.out += value; },
-    writeError: (value: string) => { text.error += value; } } };
-}
+import { output } from '../helpers/output.js';
 
 const sourceFixture = readFileSync('test/fixtures/migration/claude-mem-query-export-8bc631a.json', 'utf8');
 
