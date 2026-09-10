@@ -76,8 +76,12 @@ The first claude-mem adapter accepts at most 5 MiB before its bounded `JSON.pars
 Oboete operational limit, not an upstream validity rule. The upstream exporter can produce larger
 files. Official query/project shards are supported and overlapping records deduplicate; a selected
 shard cannot prove whole-store coverage. Oversize input reports unsupported size with no partial
-apply. Native near-limit and external 5 MiB peak RSS must be measured against 150 MiB before claiming
-the advertised limits; lower a limit if the implementation cannot demonstrate it.
+apply. The import/export CLI is a one-shot foreground process with its own budget: peak RSS at most
+512 MiB (owner decision 2026-09-11); the 150 MiB engine target of SC-007 applies to the hook and
+worker, which never run migration code. Native near-limit and external 5 MiB peak RSS must be
+measured against that budget before claiming the advertised limits, and the measured peaks are
+published in the "Measured resource peaks" appendix; lower a limit if the implementation cannot
+demonstrate it.
 
 ## Preview and mappings
 

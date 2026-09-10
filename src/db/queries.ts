@@ -5,6 +5,7 @@ import { searchCandidates } from '../retrieval/query.js';
 import { normalizeBm25, rrfFuse } from '../retrieval/rank.js';
 import { strictest } from '../privacy/classify.js';
 import { sha256Json } from '../hash.js';
+import { prepared } from './statements.js';
 
 export type ReviewState = 'unreviewed' | 'reviewed' | 'imported';
 export type SummaryState = 'pending' | 'done' | 'no_content';
@@ -72,7 +73,7 @@ export function grantVisibility(db: DatabaseSync, memoryId: string, grant: Visib
   const repoId = 'repoId' in grant ? grant.repoId : null;
   const workId = 'workId' in grant ? grant.workId : null;
   const proposalId = 'proposalId' in grant ? grant.proposalId : null;
-  db.prepare(`INSERT OR IGNORE INTO memory_visibility
+  prepared(db, `INSERT OR IGNORE INTO memory_visibility
     (id, memory_id, audience, repo_id, work_id, proposal_id, grant_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(`v_${sha256Json([memoryId, grant.audience, repoId, workId])}`, memoryId,
       grant.audience, repoId, workId, proposalId, kind, now);

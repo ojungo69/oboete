@@ -13,6 +13,7 @@ import {
   type NativeRecord,
 } from '../../src/transfer-format.js';
 import { readTransferPlan, TransferInputError } from '../../src/transfer-plan.js';
+import { mergeTransferPlan } from '../../src/transfer-merge.js';
 import { withFixture } from '../helpers/inject-fixture.js';
 import { output } from '../helpers/output.js';
 
@@ -80,6 +81,59 @@ async function expectNativeReject(records: NativeRecord[], reason: string): Prom
     const plan = await readTransferPlan(Readable.from([Buffer.from(text)]));
     plan.close();
   }, (error: unknown) => error instanceof TransferInputError && error.reason === reason);
+}
+
+for (const mode of ['preview', 'apply', 'missing destination'] as const) {
+  test(`a failed native merge rolls back scratch and destination writes (${mode})`, async () => {
+    await withFixture(async (fixture) => {
+      const sourceRepo = repo() as Extract<NativeRecord, { kind: 'repo' }>;
+      sourceRepo.id = sha256Hex(sourceRepo.normalized_identity).slice(0, 16);
+      const records = ['memory-a', 'memory-b'].map((id) => {
+        const row = memory({ id });
+        return { ...row, repo_id: sourceRepo.id, content_hash: contentHash(sourceRepo.id, row.material_hash) };
+      });
+      const text = [header(), sourceRepo, ...records]
+        .map((row) => JSON.stringify(row)).join('\n');
+      const plan = await readTransferPlan(Readable.from([text]));
+      const db = mode === 'missing destination' ? undefined : fixture.db;
+      const dryRun = mode !== 'apply';
+      const options = { now: 1, dryRun, mapRepo: db === undefined ? undefined : { [sourceRepo.id]: fixture.identity.id } };
+      try {
+        const before = plan.db.prepare('SELECT * FROM transfer_rows ORDER BY sequence').all();
+        plan.db.exec(`CREATE TRIGGER fail_second_merge BEFORE UPDATE OF effect ON transfer_rows
+          WHEN NEW.origin = 'memory-b' AND NEW.effect = 'inserted'
+          BEGIN SELECT RAISE(ABORT, 'merge_fault'); END`);
+        const rolledBack = () => {
+          assert.equal(plan.db.isTransaction, false);
+          assert.equal(fixture.db.isTransaction, false);
+          assert.deepEqual(plan.db.prepare('SELECT * FROM transfer_rows ORDER BY sequence').all(), before);
+          for (const table of ['memories', 'migration_imports', 'migration_records']) {
+            assert.equal(fixture.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n, 0);
+          }
+        };
+        assert.throws(() => mergeTransferPlan(db, plan, options), /merge_fault/);
+        rolledBack();
+        assert.equal(plan.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'transfer_targets'").get(), undefined);
+        plan.db.exec('DROP TRIGGER fail_second_merge');
+        if (db !== undefined && !dryRun) {
+          // A second fault after the memory loop, in the receipt stage that runs before either COMMIT.
+          db.exec(`CREATE TRIGGER fail_receipts BEFORE INSERT ON migration_records
+            BEGIN SELECT RAISE(ABORT, 'receipt_fault'); END`);
+          assert.throws(() => mergeTransferPlan(db, plan, options), /receipt_fault/);
+          rolledBack();
+          db.exec('DROP TRIGGER fail_receipts');
+        }
+        const result = mergeTransferPlan(db, plan, options);
+        assert.equal(result.inserted, 2);
+        assert.equal(result.applied, !dryRun);
+        assert.deepEqual(result.rejected, []);
+        assert.equal(plan.db.isTransaction, false);
+        assert.equal(fixture.db.isTransaction, false);
+        assert.equal(plan.db.prepare('SELECT COUNT(*) AS n FROM transfer_targets').get()?.n, 2);
+        assert.equal(fixture.db.prepare('SELECT COUNT(*) AS n FROM memories').get()?.n, dryRun ? 0 : 2);
+      } finally { plan.close(); }
+    });
+  });
 }
 
 test('native export refuses an alias of the live database reached through a symlinked parent', async () => {

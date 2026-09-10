@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { contentHash, memoryIdFor } from './db/identity.js';
 import { grantVisibility } from './db/queries.js';
+import { prepared } from './db/statements.js';
 import { sha256Hex, sha256Json } from './hash.js';
 import { verifiedRepoContext } from './privacy/source-context.js';
 import { isCanonicalRemoteIdentity } from './repo-identity.js';
@@ -84,11 +85,11 @@ const RANK_SQL = rankSql('sensitivity');
  */
 function findExisting(db: DatabaseSync | undefined, plan: TransferPlan, content: string, unverified: boolean): Existing | undefined {
   const marker = unverified ? 1 : 0;
-  return (plan.db.prepare('SELECT * FROM transfer_targets WHERE content_hash = ? AND personal >= ?').get(content, marker)
-    ?? db?.prepare(`SELECT m.id, m.repo_id, m.sensitivity, m.deleted_at, 0 AS owned FROM memories m WHERE m.content_hash = ?
+  return (prepared(plan.db, 'SELECT * FROM transfer_targets WHERE content_hash = ? AND personal >= ?').get(content, marker)
+    ?? (db === undefined ? undefined : prepared(db, `SELECT m.id, m.repo_id, m.sensitivity, m.deleted_at, 0 AS owned FROM memories m WHERE m.content_hash = ?
       AND (? = 0 OR EXISTS (SELECT 1 FROM memory_visibility v WHERE v.memory_id = m.id AND v.audience = 'personal')
         OR EXISTS (SELECT 1 FROM migration_records r WHERE r.destination_memory_id = m.id AND r.identity_domain = 'personal_projection'))`)
-      .get(content, marker)) as Existing | undefined;
+      .get(content, marker))) as Existing | undefined;
 }
 
 /** Local descendants of one identity, the same walk as the memories_provenance_privacy trigger. */
@@ -126,12 +127,12 @@ function raiseToParents(db: DatabaseSync | undefined, plan: TransferPlan): void 
   const rank = (row: Record<string, unknown> | undefined) => SENSITIVITY_RANK[row?.sensitivity as keyof typeof SENSITIVITY_RANK] ?? 0;
   const names = Object.keys(SENSITIVITY_RANK) as (keyof typeof SENSITIVITY_RANK)[];
   for (;;) {
-    const next = plan.db.prepare('SELECT hash FROM transfer_queue LIMIT 1').get();
+    const next = prepared(plan.db, 'SELECT hash FROM transfer_queue LIMIT 1').get();
     if (next === undefined) break;
     const parent = String(next.hash);
-    plan.db.prepare('DELETE FROM transfer_queue WHERE hash = ?').run(parent);
+    prepared(plan.db, 'DELETE FROM transfer_queue WHERE hash = ?').run(parent);
     const parentRank = Math.max(rank(cached.get(parent)), rank(live?.get(parent)));
-    for (const edge of plan.db.prepare('SELECT child FROM transfer_raise WHERE parent = ?').all(parent)) {
+    for (const edge of prepared(plan.db, 'SELECT child FROM transfer_raise WHERE parent = ?').all(parent)) {
       const child = String(edge.child);
       if (parentRank <= rank(cached.get(child))) continue;
       setCache.run(names[parentRank], child);
@@ -157,7 +158,7 @@ function insertMemory(db: DatabaseSync, memory: NativeMemory, repoId: string, id
   const title = withoutText ? '' : (memory.title ?? '');
   const body = withoutText ? '' : (memory.body ?? '');
   const sensitivity = SENSITIVITY_RANK[memory.sensitivity] > SENSITIVITY_RANK.local_only ? memory.sensitivity : 'local_only';
-  db.prepare(`INSERT INTO memories (id, repo_id, type, title, body, concepts, material_hash, content_hash,
+  prepared(db, `INSERT INTO memories (id, repo_id, type, title, body, concepts, material_hash, content_hash,
     sensitivity, review_state, degraded_reason, valid_from, valid_to, deleted_at, created_at,
     cjk_bigrams, source_captured_at, provenance_complete)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported', ?, ?, ?, ?, ?, ?, ?, 0)`)
@@ -177,7 +178,7 @@ function grantImported(db: DatabaseSync, plan: TransferPlan, memory: NativeMemor
   repoId: string, id: string, options: ImportOptions): void {
   if (memory.identity_domain === 'personal_projection') return;
   if (plan.format === EXPORT_FORMAT || plan.format === CLAUDE_MEM_FORMAT) grantVisibility(db, id, { audience: 'project', repoId }, 'migration', options.now);
-  for (const row of plan.db.prepare("SELECT data FROM transfer_rows WHERE kind = 'visibility' AND memory_id = ?").iterate(memory.id)) {
+  for (const row of prepared(plan.db, "SELECT data FROM transfer_rows WHERE kind = 'visibility' AND memory_id = ?").iterate(memory.id)) {
     const grant = JSON.parse(String(row.data)) as Extract<NativeRecord, { kind: 'visibility' }>;
     if (grant.audience === 'project') grantVisibility(db, id, { audience: 'project', repoId }, 'migration', options.now);
     else if (grant.audience === 'work' && grant.work_id !== null) {
@@ -203,20 +204,20 @@ function mergeMemory(db: DatabaseSync | undefined, plan: TransferPlan, row: Reco
     effect = existing.deleted_at !== null ? 'held_by_tombstone' : existing.owned === 1 ? 'inserted' : 'matched_existing';
     if (existing.deleted_at !== null) result.unchanged += 1;
     else if (memory.deleted_at !== null) {
-      if (apply) db.prepare('UPDATE memories SET deleted_at = ? WHERE id = ?').run(memory.deleted_at, existing.id);
+      if (apply) prepared(db, 'UPDATE memories SET deleted_at = ? WHERE id = ?').run(memory.deleted_at, existing.id);
       result.tombstones += 1;
       effect = 'held_by_tombstone';
     } else if (SENSITIVITY_RANK[memory.sensitivity] > SENSITIVITY_RANK[existing.sensitivity]) {
       // The write path compares against the live row, not the cache: a dependency trigger may have raised
       // it since it was cached, and a foreign label never lowers local sensitivity.
-      if (apply) db.prepare(`UPDATE memories SET sensitivity = ? WHERE id = ? AND ${RANK_SQL} < ?`)
+      if (apply) prepared(db, `UPDATE memories SET sensitivity = ? WHERE id = ? AND ${RANK_SQL} < ?`)
         .run(memory.sensitivity, existing.id, SENSITIVITY_RANK[memory.sensitivity]);
       result.updated += 1;
     } else result.unchanged += 1;
   } else if (unverified) {
     // With no real personal projection to hold, an unverifiable hash stays history: never a new tombstone row.
     result.unchanged += 1;
-    plan.db.prepare("UPDATE transfer_rows SET destination_memory_id = NULL, effect = 'historical_held' WHERE sequence = ?")
+    prepared(plan.db, "UPDATE transfer_rows SET destination_memory_id = NULL, effect = 'historical_held' WHERE sequence = ?")
       .run(Number(row.sequence));
     return;
   } else {
@@ -230,7 +231,7 @@ function mergeMemory(db: DatabaseSync | undefined, plan: TransferPlan, row: Reco
   const sensitivity = existing === undefined ? (SENSITIVITY_RANK[memory.sensitivity] > SENSITIVITY_RANK.local_only ? memory.sensitivity : 'local_only')
     : SENSITIVITY_RANK[memory.sensitivity] > SENSITIVITY_RANK[existing.sensitivity] ? memory.sensitivity : existing.sensitivity;
   const deletedAt = existing?.deleted_at ?? memory.deleted_at;
-  plan.db.prepare(`INSERT OR REPLACE INTO transfer_targets (content_hash, id, repo_id, sensitivity, deleted_at, owned, personal)
+  prepared(plan.db, `INSERT OR REPLACE INTO transfer_targets (content_hash, id, repo_id, sensitivity, deleted_at, owned, personal)
     VALUES (?, ?, ?, ?, ?, ?, ?)`).run(content, destinationId, existing?.repo_id ?? repoId, sensitivity, deletedAt, existing?.owned ?? 1, personal);
   if (apply && existing?.owned === 1 && deletedAt === null && sensitivity !== 'secret') {
     grantImported(db, plan, memory, repoId, destinationId, options);
@@ -238,13 +239,13 @@ function mergeMemory(db: DatabaseSync | undefined, plan: TransferPlan, row: Reco
   // A source-free personal identity is global. A foreign-repo duplicate keeps history only; its identity
   // still carries the final matched state to the receipt and to dependants.
   const privateTarget = memory.identity_domain === 'personal_projection' && existing !== undefined && existing.repo_id !== repoId;
-  plan.db.prepare('UPDATE transfer_rows SET destination_memory_id = ?, effect = ?, content_hash = ? WHERE sequence = ?')
+  prepared(plan.db, 'UPDATE transfer_rows SET destination_memory_id = ?, effect = ?, content_hash = ? WHERE sequence = ?')
     .run(privateTarget ? null : destinationId, privateTarget ? 'historical_held' : effect, content, Number(row.sequence));
 }
 
 function insertSource(db: DatabaseSync, id: string, source: NativeSource): void {
   // Native source identifiers and roots are retained in the private receipt, never local lineage.
-  db.prepare(`INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, citation_value,
+  prepared(db, `INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, citation_value,
     source_agent, portion_start, portion_end, source_total, source_hash, evidence, captured_at,
     source_processed_at, context_only) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(id, source.citation_kind, source.citation_value, source.source_agent, source.portion_start,
@@ -259,21 +260,21 @@ const rankOf = (row: Record<string, unknown> | undefined) => SENSITIVITY_RANK[ro
 function finalState(db: DatabaseSync, plan: TransferPlan, row: Record<string, unknown> | undefined): FinalState | undefined {
   if (row === undefined) return undefined;
   const cache = typeof row.content_hash === 'string'
-    ? plan.db.prepare('SELECT deleted_at, sensitivity FROM transfer_targets WHERE content_hash = ?').get(row.content_hash) : undefined;
+    ? prepared(plan.db, 'SELECT deleted_at, sensitivity FROM transfer_targets WHERE content_hash = ?').get(row.content_hash) : undefined;
   const live = typeof row.destination_memory_id === 'string'
-    ? db.prepare('SELECT deleted_at, sensitivity FROM memories WHERE id = ?').get(row.destination_memory_id) : undefined;
+    ? prepared(db, 'SELECT deleted_at, sensitivity FROM memories WHERE id = ?').get(row.destination_memory_id) : undefined;
   const strictest = rankOf(cache) >= rankOf(live) ? cache : live;
   return strictest && { deleted_at: cache?.deleted_at ?? live?.deleted_at ?? null, sensitivity: strictest.sensitivity };
 }
 
 function saveOrigins(db: DatabaseSync, plan: TransferPlan, importId: string, apply: boolean): void {
-  const insert = db.prepare(`INSERT OR IGNORE INTO migration_records (id, origin_key, origin_json, target_key, first_import_id,
+  const insert = prepared(db, `INSERT OR IGNORE INTO migration_records (id, origin_key, origin_json, target_key, first_import_id,
     record_kind, payload_hash, payload_json, destination_repo_id, destination_memory_id, destination_context_id,
     effect, classification_state, detail_code, identity_domain, destination_context_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-  for (const row of plan.db.prepare("SELECT * FROM transfer_rows WHERE kind <> 'repo' ORDER BY sequence").iterate()) {
+  for (const row of prepared(plan.db, "SELECT * FROM transfer_rows WHERE kind <> 'repo' ORDER BY sequence").iterate()) {
     const record = JSON.parse(String(row.data)) as NativeRecord | ClaudeMemNormalizedRecord;
     const memory = row.kind === 'memory' ? row : row.memory_id === null ? undefined
-      : plan.db.prepare("SELECT * FROM transfer_rows WHERE kind = 'memory' AND origin = ?").get(row.memory_id);
+      : prepared(plan.db, "SELECT * FROM transfer_rows WHERE kind = 'memory' AND origin = ?").get(row.memory_id);
     const repoId = typeof memory?.destination_repo_id === 'string' ? memory.destination_repo_id
       : typeof row.destination_repo_id === 'string' ? row.destination_repo_id : null;
     const memoryId = typeof memory?.destination_memory_id === 'string' ? memory.destination_memory_id : null;
@@ -285,7 +286,7 @@ function saveOrigins(db: DatabaseSync, plan: TransferPlan, importId: string, app
     // even with no destination) and the live destination row (which the local trigger may have raised)
     // decides the receipt; a proposal also inherits from its projected memory.
     const projected = record.kind === 'sharing_proposal' && record.projected_memory_id !== null
-      ? plan.db.prepare("SELECT * FROM transfer_rows WHERE kind = 'memory' AND origin = ?").get(record.projected_memory_id) : undefined;
+      ? prepared(plan.db, "SELECT * FROM transfer_rows WHERE kind = 'memory' AND origin = ?").get(record.projected_memory_id) : undefined;
     const target = [memory, projected].map((row) => finalState(db, plan, row)).reduce((top, state) =>
       state === undefined ? top : top === undefined ? state : {
         deleted_at: top.deleted_at ?? state.deleted_at,
@@ -303,7 +304,7 @@ function saveOrigins(db: DatabaseSync, plan: TransferPlan, importId: string, app
     const withoutPayload = redacted || origin.payload === null || elsewhere;
     const detail = redacted || origin.payload === null ? 'source_redacted' : 'identity_elsewhere';
     const targetKey = repoId === null ? 'unresolved' : `repo:${repoId}`;
-    const prior = db.prepare('SELECT target_key, payload_hash FROM migration_records WHERE origin_key = ?').get(origin.key);
+    const prior = prepared(db, 'SELECT target_key, payload_hash FROM migration_records WHERE origin_key = ?').get(origin.key);
     if (prior !== undefined && (prior.target_key !== targetKey || prior.payload_hash !== origin.payloadHash)) {
       throw new TransferInputError('origin_mapping_changed', Number(row.source_line));
     }
@@ -314,8 +315,8 @@ function saveOrigins(db: DatabaseSync, plan: TransferPlan, importId: string, app
       inherited ? record.record_kind : record.kind, origin.payloadHash, withoutPayload ? null : origin.payload,
       repoId, memoryId, contextId, effect, secret ? 'secret' : withoutPayload ? 'not_applicable' : 'pending',
       withoutPayload ? detail : 'classification_pending', identityDomain,
-      contextId === null ? null : db.prepare('SELECT local_key FROM work_contexts WHERE id = ?').get(contextId)?.local_key ?? null);
-    if (withoutPayload) db.prepare(`UPDATE migration_records SET payload_json = NULL,
+      contextId === null ? null : prepared(db, 'SELECT local_key FROM work_contexts WHERE id = ?').get(contextId)?.local_key ?? null);
+    if (withoutPayload) prepared(db, `UPDATE migration_records SET payload_json = NULL,
       classification_state = CASE WHEN classification_state = 'secret' OR ? THEN 'secret' ELSE 'not_applicable' END,
       detail_code = ? WHERE id = ?`).run(secret ? 1 : 0, detail, recordId);
     if (inserted.changes > 0 && record.kind === 'source' && effect === 'inserted' && memoryId !== null && !redacted
@@ -337,12 +338,19 @@ export function mergeTransferPlan(db: DatabaseSync | undefined, plan: TransferPl
   if (apply) db.exec('BEGIN IMMEDIATE');
   else db?.exec('BEGIN');
   try {
+    plan.db.exec('BEGIN');
     const prior = db?.prepare('SELECT mapping_hash FROM migration_imports WHERE id = ?').get(importId);
     if (prior !== undefined && prior.mapping_hash !== mappingHash) throw new TransferInputError('import_mapping_changed');
     const resolved = mappings(plan, db, options);
-    if (prior !== undefined) return { ...result, duplicate: true,
-      unchanged: Number(plan.db.prepare("SELECT COUNT(*) AS n FROM transfer_rows WHERE kind = 'memory'").get()?.n ?? 0) };
-    if (resolved.unresolved.length > 0) return { ...result, rejected: resolved.unresolved };
+    if (prior !== undefined) {
+      plan.db.exec('COMMIT');
+      return { ...result, duplicate: true,
+        unchanged: Number(plan.db.prepare("SELECT COUNT(*) AS n FROM transfer_rows WHERE kind = 'memory'").get()?.n ?? 0) };
+    }
+    if (resolved.unresolved.length > 0) {
+      plan.db.exec('COMMIT');
+      return { ...result, rejected: resolved.unresolved };
+    }
     plan.db.exec(`CREATE TABLE IF NOT EXISTS transfer_targets (content_hash TEXT PRIMARY KEY, id TEXT NOT NULL,
       repo_id TEXT NOT NULL, sensitivity TEXT NOT NULL, deleted_at INTEGER, owned INTEGER NOT NULL, personal INTEGER NOT NULL) STRICT;
       DELETE FROM transfer_targets`);
@@ -356,10 +364,14 @@ export function mergeTransferPlan(db: DatabaseSync | undefined, plan: TransferPl
     }
     // Unverifiable (redacted personal) records go last so a verified alias anywhere in the file has
     // already established the identity they may hold: the outcome does not depend on file order.
-    for (const row of plan.db.prepare(`SELECT * FROM transfer_rows WHERE kind = 'memory' ORDER BY
-      (json_extract(data, '$.identity_domain') = 'personal_projection'
-        AND (json_extract(data, '$.deleted_at') IS NOT NULL OR json_extract(data, '$.sensitivity') = 'secret')), sequence`).iterate()) {
-      mergeMemory(db, plan, row, options, result);
+    // Two passes in rowid order; `+kind` keeps the planner off the (kind, memory_id) index so each
+    // pass is a plain scan with no sorter instead of an index search plus a TEMP B-TREE ORDER BY.
+    const memories = plan.db.prepare(`SELECT * FROM transfer_rows WHERE +kind = 'memory'
+      AND (CASE WHEN json_extract(data, '$.identity_domain') = 'personal_projection'
+        AND (json_extract(data, '$.deleted_at') IS NOT NULL OR json_extract(data, '$.sensitivity') = 'secret')
+        THEN 1 ELSE 0 END) = ? ORDER BY sequence`);
+    for (const unverified of [0, 1]) {
+      for (const row of memories.iterate(unverified)) mergeMemory(db, plan, row, options, result);
     }
     raiseToParents(apply ? db : undefined, plan);
     if (apply) {
@@ -368,9 +380,18 @@ export function mergeTransferPlan(db: DatabaseSync | undefined, plan: TransferPl
         .run(importId, plan.format, plan.revision, plan.sourceHash, plan.exportedAt, mapping,
           mappingHash, JSON.stringify(result), options.now);
       saveOrigins(db, plan, importId, true);
+    } else if (db !== undefined) saveOrigins(db, plan, importId, false);
+    // The scratch is disposable: commit it before the destination so a destination failure never
+    // leaves a scratch transaction open across the rollback.
+    plan.db.exec('COMMIT');
+    if (apply) {
       db.exec('COMMIT');
       result.applied = true;
-    } else if (db !== undefined) saveOrigins(db, plan, importId, false);
+    }
     return result;
-  } finally { if (db?.isTransaction) db.exec('ROLLBACK'); }
+  } finally {
+    // A scratch rollback failure must not replace the merge error being thrown; the scratch is disposable.
+    try { if (plan.db.isTransaction) plan.db.exec('ROLLBACK'); } catch { /* reported through the merge error */ }
+    if (db?.isTransaction) db.exec('ROLLBACK');
+  }
 }

@@ -231,7 +231,7 @@ export async function readTransferPlan(input: AsyncIterable<Uint8Array | string>
   let db: DatabaseSync | undefined;
   try {
     db = openDatabase({ path: join(directory, 'plan.db'), timeoutMs: 2_000 }).db;
-    db.exec(`PRAGMA journal_mode = DELETE; PRAGMA cache_size = -2048; PRAGMA temp_store = FILE;
+    db.exec(`PRAGMA journal_mode = DELETE; PRAGMA synchronous = OFF; PRAGMA cache_size = -2048; PRAGMA temp_store = FILE;
       PRAGMA max_page_count = 131072;
       CREATE TABLE transfer_rows (sequence INTEGER PRIMARY KEY, source_line INTEGER NOT NULL, kind TEXT NOT NULL, origin TEXT NOT NULL,
         repo_id TEXT, memory_id TEXT, data TEXT NOT NULL, destination_repo_id TEXT, destination_memory_id TEXT,
