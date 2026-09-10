@@ -688,3 +688,59 @@ later terminal change of the projection row alone does not clear it (Known valid
 time is dominated by scratch autocommit (E5). Codex round 9 (`secrev13/fix9.out`, 0 findings, 60
 in-memory cases) suggests widening cases #15 (proposal/visibility with memory deletion) and #16
 (other repository, deletion, alias order) as permanent regression tests; left for a later test pass.
+
+## E5 — import wall time and RSS (commit `97bbe882`)
+
+2026-09-11. The E1 measurement at `590c0a2f` (`us5-rss/us5-rss-report.md`) showed the near-limit
+import spending 98.9 % of sampled time in the per-memory scratch merge: the private SQLite plan
+ran every `transfer_targets`/`transfer_rows` write as its own autocommit statement under
+`journal_mode = DELETE`, so each paid a journal create, fsync and delete. Codex
+(`task-mtvzonzs-xg4byp`, worktree `009-rss`) wrapped the scratch writes in one transaction and set
+`synchronous = OFF` on the scratch; that cut wall time by 94–98 % but doubled peak RSS. The cause,
+isolated with seven packed-CLI variants (`us5-rss2/experiments/README.md`), was not the
+transaction: the merge prepared about ten statements per record inside loops, and the faster run
+accumulated millions of native `StatementSync` objects before garbage collection released them.
+`src/db/statements.ts` caches one prepared statement per (database, SQL); `insertSource` and
+`grantVisibility` use it too (`code-review` finding), and the memory loop scans the scratch in
+rowid order instead of sorting it.
+
+Receipts: `/var/tmp/oboete-009-20260909.jJ5grc/us5-rss3/` (`prepare.log`, `pack-receipt.json`,
+`results.json`, `us5-rss2-report.md` as written by the harness, `runs/`, `profiles/`), same
+generators, inputs (byte-identical, SHA-256 checked) and methodology as E1: packed tarball
+installed offline into a private prefix, `/usr/bin/time -v` around the CLI only, isolated home per
+run, sequential runs, Node 24.16.0. Counts, effects and destination table counts match the E1
+baseline for every pair.
+
+| Run (Node 24.16.0, packed CLI) | Input | E1 RSS KiB | E5 RSS KiB | E1 wall s | E5 wall s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| case1-near preview | 1,000,000 lines, 256 MiB − 1 | 202,532 | 192,640 | 2,987.31 | 28.16 |
+| case1-near apply | same | 304,276 | 181,232 | 3,227.97 | 108.03 |
+| case2-valid preview | 4 MiB high-cardinality lists | 232,712 | 224,872 | 0.69 | 0.95 |
+| case2-valid apply | same | 226,276 | 239,744 | 0.70 | 1.41 |
+| case2-mixed preview | 4 MiB mixed lists | 359,120 | 360,176 | 1.06 | 1.18 |
+| case2-mixed apply | same | 373,068 | 374,544 | 1.26 | 1.46 |
+| case4 external preview | claude-mem 5 MiB | 147,108 | 129,228 | 12.49 | 0.59 |
+| case4 external apply | same | 201,588 | 131,832 | 16.29 | 0.99 |
+| case3 nested origins preview | 255 MiB receipts | 143,044 | 144,192 | 8.22 | 6.70 |
+| case3 nested origins apply | same | 145,640 | 146,420 | 9.53 | 9.11 |
+| 100k-memory profile preview | 65 MiB | 166,292 | 141,484 | 736.53 | 6.58 |
+
+Every run is below the 512 MiB import/export CLI budget the contract now states; the largest is
+case2-mixed apply at 374,544 KiB (the 4 MiB high-cardinality input), unchanged from E1 and not
+investigated by this work. Scratch peak grows with the transaction (case1-near 857 MB against
+664 MB, the rollback journal now covering the whole merge) and is recorded next to RSS; it lives in
+the private temporary directory, not in memory. The two `case2` walls are noise at the 1 s scale.
+
+Unpatched 100k-memory apply on the old tree for the missing E1 apply number: 200,328 KiB in
+13:19.60 (`us5-rss2/experiments/590base-apply.time`); the same input now applies in 0:25.85 at
+145,640 KiB.
+
+Reviews: `/code-review high` on the perf diff, 6 findings (3 confirmed, 3 plausible), all
+applied: statement cache moved to `src/db`, `insertSource`/`grantVisibility` cached, `+kind` scan
+instead of a re-sorted two-pass query, scratch ROLLBACK guarded so it cannot mask the merge error,
+rollback test extended with a receipt-stage fault, scratch journal size documented. `ponytail-review`
+two shrinks applied. Gate `us5-perf1-*`: typecheck/lint/build, both Nodes 1,180 unit/migration/
+script checks, Node 24 serial 202/202, Node 22 serial 201/202 in-gate (`db-missing`, the 300 ms seed
+deadline while the Codex contract review ran alongside) and 202/202 isolated
+(`us5-perf1-serial-isolated-v22.16.0.tap`), pack-check 20.7 MB.
+

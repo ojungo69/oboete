@@ -859,6 +859,22 @@ Duplicate edges are collapsed, and ready nodes are processed in pages of at most
 Self-edges and cycles in either graph yield `source_lineage_cycle`.
 A cycle mixing source-dependency and checkpoint-parent edges is therefore rejected.
 
+### Measured resource peaks
+
+Node 24.16.0, packed CLI installed offline, `/usr/bin/time -v` maximum resident set size, one
+isolated home per run, commit `97bbe882` (quickstart E5, receipts `us5-rss3/`). Budget: 512 MiB.
+
+| Input | Preview | Apply |
+| --- | ---: | ---: |
+| Native 1,000,000 lines at 256 MiB − 1 | 192,640 KiB, 28 s | 181,232 KiB, 108 s |
+| Native 4 MiB high-cardinality lists (valid / mixed) | 224,872 / 360,176 KiB | 239,744 / 374,544 KiB |
+| Native 255 MiB nested migration origins | 144,192 KiB | 146,420 KiB |
+| claude-mem query export at 5 MiB | 129,228 KiB, 0.6 s | 131,832 KiB, 1.0 s |
+
+The scratch plan's on-disk peak (rollback journal included) reaches 857 MB for the 256 MiB input;
+it is bounded by the 512 MiB page ceiling plus the journal and lives in the private temporary
+directory.
+
 ### Known validator limits
 
 - A proposal receipt follows its origin memory (`destination_memory_id`). Its projected memory's

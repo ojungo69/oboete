@@ -184,7 +184,13 @@ writers require separate worktrees. No deployment follows merely from an increme
   set; eight security fixes plus one error-code fix in `transfer-merge.ts`/`transfer-plan.ts`/
   `transfer-promote.ts` (0007 unchanged) with 16 authority cases, one integrity case and an updated
   matrix case RED→GREEN; final tree gate `us5-sec12-*` green on both Nodes with nothing else
-  running. See `quickstart.md` E4. T029-T032/T043 stay unchecked pending E5 (RSS) and macOS.
+  running. See `quickstart.md` E4.
+- T032/T043 (E5 wall time and RSS, `97bbe882`): the scratch merge runs in one transaction with a
+  per-database prepared-statement cache; near-limit import 3,228 s → 108 s apply, 2,987 s → 28 s
+  preview, every packed-CLI run below the 512 MiB import/export budget the contract now states
+  (largest 374,544 KiB), counts and effects identical to the E1 baseline. Gate `us5-perf1-*` green.
+  See `quickstart.md` E5. T029-T032/T043 stay unchecked pending the macOS probe and the final
+  review pass.
 - T032 (E3 matrix, `943660a4` plus worktree): added ten focused `migration-matrix.test.ts` cases
   for preview/context/schema/WAL, mapping rollback/collisions, proposal/terminal/personal round trips
   and actual packed CLI metadata. All ten pass on Node 24.16.0 and 22.16.0. Two preview-accounting
