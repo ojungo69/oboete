@@ -1,0 +1,19 @@
+specs/009-memory-core/HANDOFF-claude-code.md
+  s_ce84c7de7d1c09::t_557a40602e1989 3-4,8-15,17-20,24-53,57-82,89-91
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "4808abe0de4f481ca3ccd751704cfcd9e9456ced",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
