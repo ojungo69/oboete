@@ -6,9 +6,9 @@
 ## 最初に行うこと
 
 1. `/home/jura/projects/free-mem-wt/009-memory-core` で作業する。branch は `009-memory-core`。
-   この文書の commit の直下が `0e92d4b4` (macOS runbook)、`849fde57` (US5 security 修正)、
-   `7f37376c` (E3 matrix)、`943660a4` (import promote)、`590c0a2f` (A–E2 checkpoint)。
-   origin/main に対して 21 commit 先行、遅れ 0。branch は未 push、PR は未作成。
+   直近の commit: `04bd7ac6` (sync 契約)、`b2e9e931` (E5 docs)、`97bbe882` (perf)、`4257eeee`
+   (前回 handoff)、`0e92d4b4` (macOS runbook)、`849fde57` (US5 security 修正)、`7f37376c`、
+   `943660a4`、`590c0a2f`。
 2. `git status --short` で作業ツリーが clean か確認する。
 3. [spec](spec.md)、[plan](plan.md)、[tasks](tasks.md)、[migration contract](contracts/migration.md)、
    [quickstart](quickstart.md) (E1〜E4 が US5 の証拠) を読む。owner 判断はメモリ
@@ -38,32 +38,29 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
   (cache 基準の件数、`historical_held` は unchanged 扱い、proposal receipt は origin memory 追従、
   Codex 第 9 巡が提案した #15/#16 の追加ケース)。
 
-## 進行中: E5 (RSS / wall time)
+## 完了: E5 (RSS / wall time) と T033 (sync 契約)
 
-- Codex job `task-mtvzonzs-xg4byp` を `/home/jura/projects/free-mem-wt/009-rss` (849fde57 を
-  detached checkout) で起動済み (2026-09-11 05:38 JST)。内容: `mergeTransferPlan` の plan.db 書き込みを
-  1 transaction で囲む、scratch に `PRAGMA synchronous = OFF`、既存テスト全緑、
-  `/var/tmp/oboete-009-20260909.jJ5grc/us5-rss/` と同じ手順で再計測 (出力は
-  `/tmp/oboete-009-20260909.jJ5grc/us5-rss2/`。**/tmp は再起動で消えるので読んだら即 /var/tmp に
-  コピーする**)。プロンプトは `/var/tmp/oboete-009-20260909.jJ5grc/scratch/us5-perf-task.txt`。
-- 回収手順: `cd ~/projects/free-mem-wt/009-rss` で `codex-companion.mjs status --json` →
-  `result`。diff を 009-memory-core に持ち込む前に `/code-review` → `ponytail-review`、
-  perf 変更は security 対象外だが scratch 以外の PRAGMA を触っていないことを確認する。
-- その後 `contracts/migration.md` の RSS 予算文を「import/export CLI 512 MiB、hook/worker 150 MiB」に
-  変え、実測 peak を appendix に載せ、quickstart に E5 節を書く。
+- E5 (`97bbe882` + `b2e9e931`): scratch merge を 1 transaction + prepared statement cache
+  (`src/db/statements.ts`)。near-limit apply 3,228 s / 304 MiB → 108 s / 181 MiB。全 run が
+  import/export CLI 予算 512 MiB 以下。receipt は `us5-rss3/`、切り分けは
+  `us5-rss2/experiments/README.md`。gate `us5-perf1-*` 緑。
+- T033 (`04bd7ac6`): `contracts/sync.md` + research R8。Codex 契約レビュー 8 巡を反映、第 8 巡の
+  4 件は未確認のまま折り込み (契約の "Review status")。**owner の確認待ち** (この checkpoint で
+  scope を決める: 契約どおり T034–T036 を実装するか、US6 を 009 から外して follow-up spec にするか)。
+  T034 は着手前に契約レビューを再実行する。
+- PR は `008-qd-d` (#185) を base に作成済み (branch は #185 から切ったため。#185 merge 後に main へ
+  retarget される)。マージは `pr-merge-gate` に従う。
 
 ## 再開順序と未完了事項
 
-1. **E5 を閉じて US5 を閉じる**: 上記の perf 回収 → gate (`sec-gate.sh` は
-   `/var/tmp/oboete-009-20260909.jJ5grc/scratch/`、`P=` を変えて setsid で起動。並行 build/review 禁止、
-   serial の 300 ms seed miss は単独再実行) → T029–T032 をチェック → PR を `pr-merge-gate` で開く。
-   T029 の wire appendix と `research.md` の一次資料は E4 までで contract に反映済みか再確認する。
+1. **US5 を閉じる**: PR の bot/CI 指摘を `pr-merge-gate` で処理 → T029–T032/T043 をチェック。
+   gate の再実行は `sec-gate.sh` (`/var/tmp/oboete-009-20260909.jJ5grc/scratch/`、`P=` を変えて
+   setsid で起動。並行 build/review 禁止、serial の 300 ms seed miss は単独再実行)。
 2. **macOS (T040 / SC-006)**: `docs/evidence/memory-core-2026-09/macos-runbook.md` を M1 iMac
    (remote desktop) で実行し、receipt を `/var/tmp/oboete-009-20260909.jJ5grc/macos/` に戻して
    quickstart に記録する。platform probe のみ、agent pair は対象外。
-3. **US6**: T033 まで (contracts/sync.md + research、依存追加なし) で止めて確認。transport は
-   ユーザー指定ディレクトリの暗号化 bundle file、Node `crypto` のみ。migration merger は sync の
-   現行 work 更新に流用しない。
+3. **US6**: owner 確認後に T034 (0008 + `src/sync-*.ts` + `test/unit/sync.test.ts`) から。契約の
+   Verification 一覧が受け入れ基準。migration merger は流用しない。
 4. **US7 + amendment**: T037–T039、T047 (session スコープ常駐、hook 起動、lease 所有、idle exit)、
    T048 (detected local + consented free presets、有料は自動選択しない)。
 5. **実測と最終 gate**: T020、T023–T024、T041–T045。実 agent pair・実モデル・100k events・7 日運用は
@@ -86,7 +83,7 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
 ```text
 /home/jura/projects/free-mem-wt/009-memory-core で作業してください。
 specs/009-memory-core/HANDOFF-claude-code.md と、そこで指定された spec/plan/tasks を読み、
-「進行中: E5」の Codex job を回収するところから続けてください。
+PR の状態と「完了: E5 と T033」の owner 確認結果から続けてください。
 commit/push/PR/merge はグローバルルールに従えば可。日常用インストール、実モデルやクラウドの
 activation は未許可です。
 ```
