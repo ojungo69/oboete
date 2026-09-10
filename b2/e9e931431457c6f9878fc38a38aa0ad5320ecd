@@ -1,0 +1,31 @@
+specs/009-memory-core/contracts/migration.md
+  s_4d18fca354fc0f::t_5529e498d7ecf7 862-877
+specs/009-memory-core/quickstart.md
+  s_4d18fca354fc0f::t_5529e498d7ecf7 691-746
+specs/009-memory-core/tasks.md
+  s_ce84c7de7d1c09::t_2b90c68cd25bc9 187-193
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "b2e9e931431457c6f9878fc38a38aa0ad5320ecd",
+  "prompts": {},
+  "sessions": {
+    "s_4d18fca354fc0f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08d41-d9ee-7a72-9657-515798731c40",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
