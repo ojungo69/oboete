@@ -1,0 +1,27 @@
+specs/009-memory-core/contracts/sync.md
+  s_ce84c7de7d1c09::t_67cd3365a0922c 1-19,22,25-30,34-49,51-69,96-97,99-100,315-322,353-361,366,386-401,403-415,417-419,421-429,432,434-441,454-455,457,529-530,532-533
+  s_ce84c7de7d1c09::t_322b9f4515b637 20-21,23-24,31-33,50,72-95,98,101-106,113-188,233-240,257-265,284-314,330-334,362-365,371,402,416,420,430-431,433,442-453,456,458-524,531
+  s_ce84c7de7d1c09::t_6a2cc602d39286 70-71,107-112,189-232,241-256,266-283,323-329,335-352,367-370,372-385,525-528,534-564
+specs/009-memory-core/plan.md
+  s_ce84c7de7d1c09::t_f074d14f23e517 103-105,107-110
+specs/009-memory-core/research.md
+  s_ce84c7de7d1c09::t_20c924c37c1cea 196-244
+specs/009-memory-core/tasks.md
+  s_ce84c7de7d1c09::t_8d97fbeb14e658 194-200
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "04bd7ac6254a7bef97cec0d9e8d15187b8bbb2a5",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
