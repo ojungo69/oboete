@@ -1,0 +1,68 @@
+test/unit/migration-native-integrity.test.ts
+  s_3309d77c51ef85::t_5972b90741e533 17
+test/helpers/output.ts
+  s_3309d77c51ef85::t_5972b90741e533 1-5
+test/unit/migration-external.test.ts
+  s_3309d77c51ef85::t_5972b90741e533 14
+specs/009-memory-core/tasks.md
+  s_8b36011f9d64d2::t_9641d2043c68ca 182-191
+  s_3309d77c51ef85::t_599b87d20e93cd 192-197
+  s_b712210f46d946::t_375297366e252f 198-200
+src/transfer.ts
+  s_8b36011f9d64d2::t_56dda7c9ec205c 306-309,320-323,330-331,376-378,383
+  s_3309d77c51ef85::t_5972b90741e533 301,312-318,369,380,384
+  s_3309d77c51ef85::t_98891ae658847c 381-382
+src/transfer-merge.ts
+  s_8b36011f9d64d2::t_e576c22cab2981 234
+specs/009-memory-core/quickstart.md
+  s_8b36011f9d64d2::t_a21acf6dd19d80 497-543,546-553,555-557,563,573-578
+  s_3309d77c51ef85::t_599b87d20e93cd 581-623
+  s_8b36011f9d64d2::t_9641d2043c68ca 544-545,554,558-562,564-572,579-580
+  s_b712210f46d946::t_564cc6925c3e80 624-631
+test/unit/migration-import.test.ts
+  s_3309d77c51ef85::t_5972b90741e533 13
+test/unit/migration-promote.test.ts
+  s_3309d77c51ef85::t_5972b90741e533 22
+test/unit/migration-matrix.test.ts
+  s_8b36011f9d64d2::t_70cf73791fcb0c 3,73,175-177,451,477
+  s_8b36011f9d64d2::t_46d54197de1cb9 18,485
+  s_3309d77c51ef85::t_5972b90741e533 25
+  s_8b36011f9d64d2::t_2951bd39c809b7 309-321,323-324
+  s_8b36011f9d64d2::t_c3e512afd30623 215-216,221,242
+  s_3309d77c51ef85::t_d2cd32254fa2c4 111,113-114,117-120,127-131,133-150,184-185,238,244-247,322
+  s_8b36011f9d64d2::t_118c61f7ab3450 500-503,507
+  s_8b36011f9d64d2::t_f983d9d79ec1e9 1-2,4-17,19-24,26-72,74-110,112,115-116,121-126,132,151-174,178-183,186-214,217-220,222-237,239-241,243,248-308,325-326
+  s_8b36011f9d64d2::t_8412f83ec616c7 327-450,452-476,478-484,486-499,504-506,508-555
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "7f37376ccf7deda68429f129242d21f6dcd686f9",
+  "prompts": {},
+  "sessions": {
+    "s_3309d77c51ef85": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08ba0-1c9b-72e3-a2af-81a8cc9475ca",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_8b36011f9d64d2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b67-ea6d-7642-a9cd-0f176ab4fa6c",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_b712210f46d946": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6aa0b9b6-9c3b-4cee-8f30-af6d4ffa09ea",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
