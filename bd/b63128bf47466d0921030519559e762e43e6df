@@ -1,0 +1,25 @@
+src/privacy/provenance.ts
+  s_ce84c7de7d1c09::t_b1feba871a50e5 16,269-270
+src/privacy/source-context.ts
+  s_ce84c7de7d1c09::t_4276ba502aa47d 5,33
+src/sharing.ts
+  s_ce84c7de7d1c09::t_fe83098f89004d 5,38,122
+src/worker/imported.ts
+  s_ce84c7de7d1c09::t_1a4f503aa2d403 6,140,143-144,293
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "bdb63128bf47466d0921030519559e762e43e6df",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
