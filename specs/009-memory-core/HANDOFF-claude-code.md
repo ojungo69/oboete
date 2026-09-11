@@ -70,7 +70,7 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
   cycle-break を「既適用 edge に対して head 1 本ずつ増分判定」する形なので、どの edge を落とすかが処理順(=random
   replica id)依存で、adverse fixture の実測で 6 割の run が device 間 divergence。content-key 順の処理と lossless-restore は
   入れたが cycle-break 自体は決定的にならない。完全修正は「cycle の break edge を content で正準選択する pass」か
-  「capture/apply の cycle 対称化(capture-model 変更、round8 pin の挙動が変わる)」で、いずれも設計変更。owner に go/no-go 確認中。
+  「capture/apply の cycle 対称化」で、いずれも設計変更。Codex 相談で「privacy 伝播依存なので edge 物理削除は privacy 回帰、専用 redesign(1-2週)」と確定 → owner 判断で follow-up issue #196 化、US6 は締める。
   0008 は branch 内で in-place 編集した (未リリース)。旧 0008 を適用済みの DB は作り直す。
   全件 security-owned code を Claude Code が修正し RED→GREEN で pin。round 4 で source の同一性を
   content-derived hash から保存 key (`memory_sources.sync_key`) に設計変更 (3 巡続けて同じ箇所が

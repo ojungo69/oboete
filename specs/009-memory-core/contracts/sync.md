@@ -862,7 +862,7 @@ findings, three fixed and pinned, the fourth mitigated):
   diverge — measured on ~60 % of runs of the adverse fixture, so it is a coin-flip once the
   cyclic state exists, not a rare order. Deterministic resolution needs a canonical break-edge
   choice independent of processing order, or capture and apply to withhold cyclic edges
-  symmetrically — a design change tracked as a follow-up, not closed by round eleven.
+  symmetrically — a design change tracked as a follow-up (issue #196), not closed by round eleven.
 
 ## Verification (T034–T036)
 
