@@ -1,0 +1,32 @@
+test/unit/sync-classes.test.ts
+  s_ce84c7de7d1c09::t_8a3f95dbfa9881 1-106,109-357,363-369,371-373,375-392,394-401
+  s_ce84c7de7d1c09::t_071780bd02d73d 107-108,358-362,370,374,393
+src/sync/apply.ts
+  s_ce84c7de7d1c09::t_35d1749318d155 408-418,429,443,448-461,495,524-525,527,537-539,542-547,549-550,594-596
+src/sync/publish.ts
+  s_ce84c7de7d1c09::t_7b9cc45a022c28 84-88,90,94-96,99-130
+test/unit/sync-alias.test.ts
+  s_ce84c7de7d1c09::t_1e69309312a09a 1-396
+test/unit/sync-bounds.test.ts
+  s_ce84c7de7d1c09::t_153e3495002dcb 1-525
+test/unit/sync-checkpoint.test.ts
+  s_ce84c7de7d1c09::t_c4ca25a8b01458 1-387
+test/unit/sync-flow.test.ts
+  s_ce84c7de7d1c09::t_2f03a6cc87d966 1-426
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "3546196a23ed88b4fc97138f0bfaca6b63040213",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
