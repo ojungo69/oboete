@@ -1,0 +1,25 @@
+src/sync/stage.ts
+  s_ce84c7de7d1c09::t_3c86317cb12ee5 9,16,141,192-226
+test/unit/sync-bounds.test.ts
+  s_ce84c7de7d1c09::t_318478b67e5cc7 12,246-280
+test/unit/sync-classes.test.ts
+  s_ce84c7de7d1c09::t_f8d9a33e1100e8 10,12,150,154,181-182,186,193,200-201,204,206,211-223,318-319,323,326-327,329-330,333-337,341,345,347-348,355
+test/unit/sync-flow.test.ts
+  s_ce84c7de7d1c09::t_24de18f999759c 174-176,180,201
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "01be77b77d65c04a060528192221e0cdea6cc2d3",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
