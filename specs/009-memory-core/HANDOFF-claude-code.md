@@ -55,7 +55,7 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
 
 - owner が「契約どおり実装」を選択。`src/sync/` 10 モジュール + 0008 + `oboete sync` CLI + MCP
   `sync_status` (read-only) + doctor `sync` 項目 + `sync_approvals` (承認時に記録)。
-- テストは `test/unit/sync*.test.ts` 7 ファイル 108 ケース (`test/helpers/sync.ts` 共有 fixture、
+- テストは `test/unit/sync*.test.ts` 7 ファイル 118 ケース (`test/helpers/sync.ts` 共有 fixture、
   `sync-review.test.ts` はレビュー指摘の pin)。
   重い 2 ケース (256 MiB push、180,000 行 graph) は `OBOETE_SYNC_HEAVY=1` でのみ実行
   (receipt: `/var/tmp/oboete-009-20260909.jJ5grc/us6/heavy-bounds.log`)。
@@ -64,7 +64,8 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
 - 単一ファイルのテスト実行は `/var/tmp/oboete-009-20260909.jJ5grc/scratch/test-one.mjs`
   (`TEST_ONE_SLOT=<name> node test-one.mjs test/unit/x.test.ts`、build/ を触らない)。
 - レビュー: `/code-review high` 3 巡 + finder 1 角度、Codex correctness pass (`us6/secrev1..4`。security
-  枠のプロンプトは OpenAI の cyber classifier に切られるので correctness 枠で出す) で 10 + 6 + 9 + 9 件。
+  枠のプロンプトは OpenAI の cyber classifier に切られるので correctness 枠で出す) で 10 + 6 + 9 + 9 + 14 件。
+  0008 は branch 内で in-place 編集した (未リリース)。旧 0008 を適用済みの DB は作り直す。
   全件 security-owned code を Claude Code が修正し RED→GREEN で pin。round 4 で source の同一性を
   content-derived hash から保存 key (`memory_sources.sync_key`) に設計変更 (3 巡続けて同じ箇所が
   指摘されたため)。semgrep 0、ponytail。契約の "Implementation notes" に round ごとの規則を記録。

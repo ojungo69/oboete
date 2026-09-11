@@ -12,7 +12,7 @@ import { checkpointHash, materialHash } from '../../src/db/identity.js';
 import { sha256Json } from '../../src/hash.js';
 import { oboetePaths } from '../../src/paths.js';
 import { resolveRow } from '../../src/sync/apply.js';
-import { captureLocalChanges, sourceLocalId } from '../../src/sync/capture.js';
+import { captureLocalChanges } from '../../src/sync/capture.js';
 import { initSpace, joinSpace, mapRepo, pullSpace, pushSpace, SyncError, syncPaths } from '../../src/sync/space.js';
 import { BundleRejected } from '../../src/sync/stage.js';
 import { effectiveControl, headsOf, readOrigin, readRevision, replicaOriginId, repoKeyFor, revisionsOfOrigin } from '../../src/sync/store.js';
@@ -550,7 +550,6 @@ test('a resolve that keeps the head of an aliased origin ships references aligne
     const { revision_id } = resolveRow(lo.db, canonical, other, 300);
     lo.db.exec('COMMIT');
     const successor = readRevision(lo.db, revision_id)!;
-    assert.equal(successor.payload!.memory_id, successor.natural.memory, 'the successor names the memory the way its natural key does');
     pull(hi, lo, publish(lo, dir));
     assert.deepEqual(headsOf(hi.db, canonical), [revision_id], 'the peer accepts the resolution');
   });
@@ -575,7 +574,7 @@ test('a new work whose pointer is foreign but whose checkpoints arrived with it 
   });
 });
 
-test('a source is named alike on every device: its identity hashes the parent material and the context key, not origin ids', async () => {
+test('a source is named alike on every device: the key it arrived with is the key its row keeps', async () => {
   await withReplicas(2, (replicas, dir) => {
     const [lo, hi] = [...replicas].sort((p, q) => (p.id < q.id ? -1 : 1)) as [Replica, Replica];
     insertMemory(lo.db, 'm_parent', 'Parent', 'Parent body');
@@ -585,9 +584,10 @@ test('a source is named alike on every device: its identity hashes the parent ma
     insertMemory(hi.db, 'a_parent', 'Parent', 'Parent body');
     hi.db.exec('BEGIN IMMEDIATE'); captureLocalChanges(hi.db, 5); hi.db.exec('COMMIT');
     pull(hi, lo, publish(lo, dir));
-    const rowid = String(hi.db.prepare("SELECT id FROM memory_sources WHERE memory_id = (SELECT local_id FROM sync_origins WHERE origin_id = ?)").get(`${lo.id}:m_child`)!.id);
-    const expected = readOrigin(hi.db, `${lo.id}:${sourceLocalId(lo.db, String(lo.db.prepare('SELECT id FROM memory_sources').get()!.id))}`)!;
-    assert.equal(sourceLocalId(hi.db, rowid), expected.local_id, 'the receiver recomputes the same local id');
+    const key = String(lo.db.prepare('SELECT sync_key FROM memory_sources').get()!.sync_key);
+    const landed = hi.db.prepare('SELECT sync_key FROM memory_sources WHERE memory_id = (SELECT local_id FROM sync_origins WHERE origin_id = ?)').get(`${lo.id}:m_child`)!;
+    assert.equal(landed.sync_key, key, 'the receiver keeps the key');
+    assert.equal(readOrigin(hi.db, `${lo.id}:source:${key}`)!.local_id, `source:${key}`);
     pull(hi, lo, publish(lo, dir));
     assert.equal(hi.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 1, 'a second pull finds the row instead of inserting again');
   });
@@ -794,5 +794,228 @@ test('a tombstone for a row this device never held is applied, not withheld', as
     const before = revisionCount(b.db);
     publish(b, dir);
     assert.equal(revisionCount(b.db), before, 'and B records nothing for it');
+  });
+});
+
+// Round five: the source key through the bound row, the memory a source sits under as revision
+// data, UNIQUE-tuple aliases with the index's NULL semantics, merges before any write, unbound
+// applied heads on map-repo, and keys that agree across devices.
+
+function seedRawEvent(db: DatabaseSync, id = 'raw_one'): void {
+  db.prepare(`INSERT OR IGNORE INTO sessions (id, repo_id, agent, native_session_id, conversation_id, status)
+    VALUES ('s_one', ?, 'claude', 'n_one', 'c_one', 'active')`).run(REPO);
+  db.prepare(`INSERT INTO raw_events (id, repo_id, session_id, kind, classification_state, processing_state, captured_at)
+    VALUES (?, ?, 's_one', 'prompt', 'done', 'processed', 1)`).run(id, REPO);
+}
+
+test('a tombstone for an origin that aliased onto a row with another key deletes that row', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [lo, hi] = [...replicas].sort((p, q) => (p.id < q.id ? -1 : 1)) as [Replica, Replica];
+    for (const device of [lo, hi]) { insertMemory(device.db, 'm_one', 'Title', 'Body text'); seedRawEvent(device.db); }
+    lo.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_one', 'file_read', 1, 'claude')").run();
+    hi.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_one', 'file_read', 1, 'codex')").run();
+    publish(hi, dir);
+    pull(hi, lo, publish(lo, dir));
+    assert.equal(hi.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 1, 'one row under two origins');
+    lo.db.prepare('DELETE FROM memory_sources').run();
+    const result = pull(hi, lo, publish(lo, dir));
+    assert.equal(result.withheldOnApply, 0);
+    assert.equal(hi.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 0, 'the row the canonical names is gone');
+    const before = revisionCount(hi.db);
+    publish(hi, dir);
+    assert.equal(revisionCount(hi.db), before, 'hi records nothing for it');
+  });
+});
+
+test('a source moved under another memory travels as a revision and lands under that memory', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    insertMemory(a.db, 'm_old', 'Old', 'Old body');
+    insertSource(a.db, 'm_old', 'src/a.ts');
+    pull(b, a, publish(a, dir));
+    // worker/imported.ts moves the sources of a retired memory under its replacement.
+    insertMemory(a.db, 'm_new', 'New', 'New body');
+    a.db.prepare("UPDATE memory_sources SET memory_id = 'm_new'").run();
+    a.db.prepare("UPDATE memories SET deleted_at = 9 WHERE id = 'm_old'").run();
+    const header = JSON.parse(readFileSync(publish(a, dir), 'utf8').split('\n')[0]!) as { withheld: { sources: number } };
+    assert.equal(header.withheld.sources, 0, 'the move ships');
+    pull(b, a, `${dir}/${a.id}.plain`);
+    assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 1);
+    assert.equal(b.db.prepare('SELECT memory_id FROM memory_sources').get()?.memory_id, memoryOf(b, a, 'm_new').id, 'under the new memory');
+    assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM sync_origins WHERE kind = 'source'").get()?.n, 1, 'the same origin');
+  });
+});
+
+test('two citations that differ only where the UNIQUE index has NULL stay two rows on the receiver', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    insertMemory(a.db, 'm_one', 'Title', 'Body text');
+    for (const citation of ['src/x.ts', 'src/y.ts']) {
+      const rowid = insertSource(a.db, 'm_one', citation);
+      a.db.prepare('UPDATE memory_sources SET source_hash = ?, portion_start = 0, portion_end = 10, source_total = 10 WHERE id = ?').run('2'.repeat(64), rowid);
+    }
+    pull(b, a, publish(a, dir));
+    assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 2, 'raw_event_id NULL never matches, as in the index');
+    assert.equal(conflicts(b.db), 0);
+  });
+});
+
+test('a head whose tuple collides with a row under another index replaces that row instead of failing the bundle', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    for (const device of [a, b]) { insertMemory(device.db, 'm_one', 'Title', 'Body text'); seedRawEvent(device.db); }
+    // B holds a context-only row for the raw event; A ships a hashed source for the same raw event that is also context-only.
+    b.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only) VALUES ('m_one', 'raw_one', 'file_read', 1)").run();
+    publish(b, dir);
+    a.db.prepare(`INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_hash, portion_start, portion_end, source_total)
+      VALUES ('m_one', 'raw_one', 'file_read', 1, ?, 0, 10, 10)`).run('3'.repeat(64));
+    const result = pull(b, a, publish(a, dir));
+    assert.equal(result.withheldOnApply, 0, 'no apply_failed');
+    assert.deepEqual(b.db.prepare('SELECT raw_event_id FROM memory_sources').all().map((row) => row.raw_event_id), ['raw_one'], 'one row for the raw event');
+    const origins = b.db.prepare("SELECT DISTINCT canonical_origin_id AS id FROM sync_origins WHERE kind = 'source'").all();
+    assert.equal(origins.length, 1, 'the two captures alias');
+    assert.equal(b.db.prepare('SELECT status FROM sync_conflicts WHERE id = ?').get(`sync:${String(origins[0]!.id)}`)?.status, 'open', 'and are reported as two heads');
+  });
+});
+
+test('a merge is discovered before any write: a peer\'s plaintext never lands in a row cleared by a secret marking', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [lo, hi] = [...replicas].sort((p, q) => (p.id < q.id ? -1 : 1)) as [Replica, Replica];
+    for (const device of [lo, hi]) { insertMemory(device.db, 'm_one', 'Title', 'Body text'); seedRawEvent(device.db); }
+    lo.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, citation_value, context_only) VALUES ('m_one', 'raw_one', 'file_read', 'src/lo.ts', 1)").run();
+    hi.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, citation_value, context_only) VALUES ('m_one', 'raw_one', 'file_read', 'src/hi.ts', 1)").run();
+    publish(lo, dir);
+    lo.db.prepare("UPDATE memories SET sensitivity = 'secret', title = '', body = '' WHERE id = 'm_one'").run();
+    lo.db.prepare('UPDATE memory_sources SET citation_value = NULL').run();
+    pull(lo, hi, publish(hi, dir));
+    assert.equal(lo.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 1);
+    assert.equal(lo.db.prepare('SELECT citation_value FROM memory_sources').get()?.citation_value, null, 'the row under the secret memory holds no evidence');
+    const before = revisionCount(lo.db);
+    publish(lo, dir);
+    assert.equal(revisionCount(lo.db), before, 'and nothing was invented');
+  });
+});
+
+test('map-repo re-evaluates an applied tombstone that had no row, so it reaches the row the mapping resolves', async () => {
+  await withHomes(2, (homes, shared) => {
+    const [homeA, homeB] = homes as [string, string];
+    const a = openHome(homeA);
+    const b = openHome(homeB);
+    try {
+      const pathsA = oboetePaths(homeA);
+      const pathsB = oboetePaths(homeB);
+      a.prepare("UPDATE repos SET identity_kind = 'common_dir', normalized_identity = '/work/a/.git' WHERE id = ?").run(REPO);
+      b.prepare("UPDATE repos SET identity_kind = 'common_dir', normalized_identity = '/work/b/.git' WHERE id = ?").run(REPO);
+      const { keyLine } = initSpace(a, pathsA, { directory: shared, classes: ['eligible'], now: 1 });
+      joinSpace(b, pathsB, { directory: shared, keyLine, classes: ['eligible'], now: 1 });
+      insertMemory(a, 'm_one', 'Title', 'Body text');
+      insertMemory(a, 'm_other', 'Other', 'Other body');
+      insertMemory(b, 'm_b', 'Title', 'Body text');
+      pushSpace(a, pathsA, { now: 5 });
+      a.prepare("UPDATE memories SET deleted_at = 6 WHERE id = 'm_one'").run();
+      pushSpace(a, pathsA, { now: 10 });
+      pullSpace(b, pathsB, { now: 11 });
+      const origin = readOrigin(b, `${replicaOriginId(a)}:m_one`)!;
+      assert.equal(origin.local_id, null, 'nothing to bind before the mapping');
+      mapRepo(b, pathsB, { repoKey: repoKeyFor(replicaOriginId(a), 'common_dir', '/work/a/.git'), localRepoId: REPO, now: 12 });
+      assert.equal(readOrigin(b, `${replicaOriginId(a)}:m_one`)!.local_id, 'm_b', 'the tombstone binds to the equivalent row');
+      assert.notEqual(b.prepare("SELECT deleted_at FROM memories WHERE id = 'm_b'").get()?.deleted_at, null, 'and applies');
+    } finally { a.close(); b.close(); }
+  });
+});
+
+test('the same citation under the same text in another repository has another key, so it never aliases across repositories', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    insertMemory(a.db, 'm_one', 'Title', 'Body text');
+    insertSource(a.db, 'm_one', 'src/a.ts');
+    // B holds the same text and citation in an unrelated repository.
+    b.db.prepare(`INSERT INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
+      VALUES ('repo_two', 'remote', 'github.com/example/two', '/work/two', 1, 1)`).run();
+    b.db.prepare(`INSERT INTO memories (id, repo_id, type, title, body, cjk_bigrams, material_hash, content_hash, sensitivity, review_state, created_at)
+      VALUES ('m_two', 'repo_two', 'discovery', 'Title', 'Body text', '', ?, ?, 'eligible', 'reviewed', 1)`)
+      .run(materialHash('Title', 'Body text'), sha256Json(['repo_two', materialHash('Title', 'Body text')]));
+    insertSource(b.db, 'm_two', 'src/a.ts');
+    publish(b, dir);
+    pull(b, a, publish(a, dir));
+    assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM memories').get()?.n, 2);
+    assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 2, "A's source lands under A's memory, not B's");
+    assert.equal(b.db.prepare('SELECT COUNT(DISTINCT sync_key) AS n FROM memory_sources').get()?.n, 2);
+    a.db.prepare('DELETE FROM memory_sources').run();
+    pull(b, a, publish(a, dir));
+    assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM memory_sources WHERE memory_id = 'm_two'").get()?.n, 1, "A's deletion never reaches B's row");
+  });
+});
+
+test('two identical rows under one memory get the same two keys on every device, so they alias instead of multiplying', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    for (const device of [a, b]) {
+      insertMemory(device.db, 'm_one', 'Title', 'Body text');
+      insertSource(device.db, 'm_one', 'src/a.ts');
+      insertSource(device.db, 'm_one', 'src/a.ts');
+    }
+    // b's rows sit at other rowids (three padding rows stay in front of them).
+    b.db.prepare("DELETE FROM memory_sources WHERE memory_id = 'm_one'").run();
+    insertMemory(b.db, 'm_pad', 'Pad', 'Pad body');
+    for (let i = 0; i < 3; i += 1) insertSource(b.db, 'm_pad', `pad-${i}`);
+    insertSource(b.db, 'm_one', 'src/a.ts');
+    insertSource(b.db, 'm_one', 'src/a.ts');
+    publish(b, dir);
+    pull(b, a, publish(a, dir));
+    assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM memory_sources WHERE memory_id = 'm_one'").get()?.n, 2, 'still two rows');
+    assert.equal(b.db.prepare(`SELECT COUNT(DISTINCT canonical_origin_id) AS n FROM sync_origins WHERE kind = 'source'
+      AND local_id IN (SELECT 'source:' || sync_key FROM memory_sources WHERE memory_id = 'm_one')`).get()?.n, 2, 'both keys agree across devices');
+  });
+});
+
+test('a row processed again after a merge is counted once', async () => {
+  await withReplicas(3, (replicas, dir) => {
+    const [lo, hi, c] = [...replicas].sort((p, q) => (p.id < q.id ? -1 : 1)) as [Replica, Replica, Replica];
+    insertMemory(lo.db, 'm_one', 'Title', 'Body text', { sensitivity: 'private' });
+    insertMemory(hi.db, 'm_one', 'Title', 'Body text');
+    publish(hi, dir);
+    pull(hi, lo, publish(lo, dir));
+    const result = pull(c, hi, publish(hi, dir));
+    assert.equal(result.materialized, 1, 'one row');
+    assert.equal(result.conflicts, 1, 'one report');
+  });
+});
+
+test('an origin applied without a row carries no base, so an alias later keeps the local row\'s base', async () => {
+  await withHomes(2, (homes, shared) => {
+    const [homeX, homeY] = homes as [string, string];
+    const x = openHome(homeX);
+    const y = openHome(homeY);
+    try {
+      const [lo, hi] = replicaOriginId(x) < replicaOriginId(y) ? [{ db: x, home: homeX }, { db: y, home: homeY }] : [{ db: y, home: homeY }, { db: x, home: homeX }];
+      const pathsLo = oboetePaths(lo.home);
+      const pathsHi = oboetePaths(hi.home);
+      lo.db.prepare("UPDATE repos SET identity_kind = 'common_dir', normalized_identity = '/work/lo/.git' WHERE id = ?").run(REPO);
+      hi.db.prepare("UPDATE repos SET identity_kind = 'common_dir', normalized_identity = '/work/hi/.git' WHERE id = ?").run(REPO);
+      const { keyLine } = initSpace(lo.db, pathsLo, { directory: shared, classes: ['eligible', 'private'], now: 1 });
+      joinSpace(hi.db, pathsHi, { directory: shared, keyLine, classes: ['eligible', 'private'], now: 1 });
+      insertMemory(lo.db, 'm_one', 'Title', 'Body text');
+      insertMemory(hi.db, 'm_hi', 'Title', 'Body text');
+      pushSpace(hi.db, pathsHi, { now: 5 });
+      const base = String(readOrigin(hi.db, `${replicaOriginId(hi.db)}:m_hi`)!.materialized_revision);
+      pushSpace(lo.db, pathsLo, { now: 10 });
+      pullSpace(hi.db, pathsHi, { now: 11 });
+      // lo deletes: a control-only head hi applies without a row.
+      lo.db.prepare("UPDATE memories SET deleted_at = 12 WHERE id = 'm_one'").run();
+      pushSpace(lo.db, pathsLo, { now: 12 });
+      pullSpace(hi.db, pathsHi, { now: 13 });
+      const unbound = readOrigin(hi.db, `${replicaOriginId(lo.db)}:m_one`)!;
+      assert.equal(unbound.local_id, null);
+      assert.equal(unbound.withheld_reason, null, 'applied');
+      assert.equal(unbound.materialized_revision, null, 'no row, no base');
+      mapRepo(hi.db, pathsHi, { repoKey: repoKeyFor(replicaOriginId(lo.db), 'common_dir', '/work/lo/.git'), localRepoId: REPO, now: 14 });
+      const canonical = readOrigin(hi.db, `${replicaOriginId(lo.db)}:m_one`)!;
+      assert.equal(canonical.local_id, 'm_hi');
+      assert.equal(canonical.materialized_revision, canonical.selected_head, 'the tombstone head is materialized on the row');
+      assert.notEqual(hi.db.prepare("SELECT deleted_at FROM memories WHERE id = 'm_hi'").get()?.deleted_at, null);
+      assert.ok(headsOf(hi.db, canonical.origin_id).includes(base), "hi's own head stays a sibling");
+      assert.equal(hi.db.prepare("SELECT status FROM sync_conflicts WHERE id = ?").get(`sync:${canonical.origin_id}`)?.status, 'open');
+    } finally { x.close(); y.close(); }
   });
 });

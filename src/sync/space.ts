@@ -346,9 +346,12 @@ export function mapRepo(db: DatabaseSync, paths: OboetePaths, input: { repoKey: 
   });
 }
 
-/** Withheld rows are re-evaluated exactly as a pull would materialize them, without any bundle. */
+/**
+ * Withheld rows, and every origin without a local row (an applied tombstone or floor may bind to
+ * a row the mapping resolves now), are re-evaluated exactly as a pull would materialize them.
+ */
 function reapplyWithheld(db: DatabaseSync, now: number): number {
-  const rows = prepared(db, 'SELECT DISTINCT canonical_origin_id AS id FROM sync_origins WHERE withheld_reason IS NOT NULL').all()
+  const rows = prepared(db, 'SELECT DISTINCT canonical_origin_id AS id FROM sync_origins WHERE withheld_reason IS NOT NULL OR local_id IS NULL').all()
     .map((row) => String(row.id));
   return materializeRows(db, rows, now).materialized;
 }

@@ -76,13 +76,13 @@ CREATE TABLE sync_repo_mappings (
   local_repo_id TEXT REFERENCES repos(id)
 ) STRICT;
 
--- The local approval record: what this device's user approved, so a pulled approval only keeps
 -- A source row's sync identity: assigned at its first capture (the hash of its fields then, so
 -- an identical independent capture on another device aliases), carried by the origin's natural
 -- key, never recomputed. memory_sources.id is a reusable rowid and never crosses devices.
 ALTER TABLE memory_sources ADD COLUMN sync_key TEXT;
 CREATE UNIQUE INDEX memory_sources_sync_key ON memory_sources (sync_key) WHERE sync_key IS NOT NULL;
 
+-- The local approval record: what this device's user approved, so a pulled approval only keeps
 -- a projection when it approves exactly the same candidate, projection and scope.
 CREATE TABLE sync_approvals (
   proposal_id TEXT PRIMARY KEY REFERENCES sharing_proposals(id),

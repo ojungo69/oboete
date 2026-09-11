@@ -27,23 +27,28 @@ export type CaptureResult = { revisions: number; tombstones: number };
  * on another device aliases onto the same origin. `memory_sources.id` is a reusable rowid and
  * is never used.
  */
-export function sourceLocalId(db: DatabaseSync, rowid: string): string {
-  const raw = prepared(db, `SELECT s.sync_key, s.citation_kind, s.citation_value, s.source_agent, s.portion_start, s.portion_end,
+export function sourceLocalId(db: DatabaseSync, rowid: string, resolve: Resolver): string {
+  const raw = prepared(db, `SELECT s.sync_key, s.memory_id, s.citation_kind, s.citation_value, s.source_agent, s.portion_start, s.portion_end,
     s.source_total, s.source_hash, s.captured_at, s.capture_root, s.source_paths_json, s.context_only, s.raw_event_id,
-    m.material_hash AS owner_material, p.material_hash AS parent_material, c.local_key AS context_key
-    FROM memory_sources s JOIN memories m ON m.id = s.memory_id
-    LEFT JOIN memories p ON p.id = s.source_memory_id LEFT JOIN work_contexts c ON c.id = s.source_context_id
+    p.material_hash AS parent_material, c.local_key AS context_key
+    FROM memory_sources s LEFT JOIN memories p ON p.id = s.source_memory_id LEFT JOIN work_contexts c ON c.id = s.source_context_id
     WHERE s.id = ?`).get(rowid);
   if (raw === undefined) throw new Error(`memory_sources ${rowid} vanished during capture`);
   if (raw.sync_key !== null) return `source:${String(raw.sync_key)}`;
-  const fields = [
-    raw.owner_material, raw.citation_kind, raw.citation_value, raw.source_agent, raw.portion_start, raw.portion_end, raw.source_total,
+  // The owner is named by its natural key (repository key and material, or its projection or
+  // checkpoint identity), so the same citation under the same text in two repositories differs.
+  const owner = canonicalOf(db, resolve.originOf('memory', String(raw.memory_id))).natural;
+  const base = sha256Hex(canonicalJson([
+    owner, raw.citation_kind, raw.citation_value, raw.source_agent, raw.portion_start, raw.portion_end, raw.source_total,
     raw.source_hash, raw.captured_at, raw.capture_root, raw.source_paths_json, raw.context_only, raw.raw_event_id,
     raw.parent_material ?? null, raw.context_key ?? null,
-  ];
-  // Two identical rows under one memory (nothing UNIQUE tells them apart) get distinct keys.
-  let key = sha256Hex(canonicalJson(fields));
-  while (prepared(db, 'SELECT 1 FROM memory_sources WHERE sync_key = ?').get(key) !== undefined) key = sha256Hex(canonicalJson([key, rowid]));
+  ]));
+  // Identical rows under one memory (nothing UNIQUE tells them apart) get the n-th key of that
+  // base, the same on every device that holds the same n rows.
+  let key = base;
+  for (let occurrence = 1; prepared(db, 'SELECT 1 FROM memory_sources WHERE sync_key = ?').get(key) !== undefined; occurrence += 1) {
+    key = sha256Hex(canonicalJson([base, occurrence]));
+  }
   prepared(db, 'UPDATE memory_sources SET sync_key = ? WHERE id = ?').run(key, rowid);
   return `source:${key}`;
 }
@@ -77,7 +82,7 @@ export function toOriginForm(kind: SyncKind, record: Row, originId: string, reso
 /** Payload fields that name what the natural key names: the payload follows the natural key. */
 const NATURAL_REFERENCES: Record<SyncKind, readonly [payloadField: string, naturalField: string][]> = {
   memory: [['repo_id', 'repo'], ['work_id', 'work'], ['checkpoint_parent_id', 'parent']],
-  source: [['memory_id', 'memory']],
+  source: [],
   visibility: [['memory_id', 'memory'], ['repo_id', 'repo'], ['work_id', 'work']],
   sharing_proposal: [['origin_memory_id', 'origin_memory']],
   context: [['repo_id', 'repo']],
@@ -107,7 +112,7 @@ export function naturalOf(kind: SyncKind, record: Row, originId: string, resolve
         };
       }
       return { domain: 'ordinary', repo: resolve.repoKey(String(record.repo_id)), material_hash: record.material_hash };
-    case 'source': return { memory: resolve.originOf('memory', String(record.memory_id)), key: originId.slice(originId.lastIndexOf(':') + 1) };
+    case 'source': return { key: originId.slice(originId.lastIndexOf(':') + 1) };
     case 'visibility':
       return {
         memory: resolve.originOf('memory', String(record.memory_id)), audience: record.audience,
@@ -173,7 +178,7 @@ export function captureLocalChanges(db: DatabaseSync, now: number): CaptureResul
   for (const row of contextRecords(db)) record('context', row, String(row.id));
   for (const row of workRecords(db)) record('work', row, String(row.id));
   for (const row of memoryRecords(db)) record('memory', row, String(row.id));
-  for (const row of sourceRecords(db)) record('source', row, sourceLocalId(db, String(row.id)));
+  for (const row of sourceRecords(db)) record('source', row, sourceLocalId(db, String(row.id), resolve));
   for (const row of visibilityRecords(db)) record('visibility', row, String(row.id));
   for (const row of proposalRecords(db)) record('sharing_proposal', row, String(row.id));
 

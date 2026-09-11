@@ -35,6 +35,23 @@ class Unresolved extends Error {
   constructor(readonly reason: string) { super(reason); }
 }
 
+/** The writer found its row under other origins: the groups merged before anything was written. */
+class Merged extends Error {
+  constructor() { super('merged'); }
+}
+
+/**
+ * Binds an unbound origin to the row its writer is about to write. When that row already belongs
+ * to other origins, the groups merge here, before any write, and the pass processes the merged
+ * canonical again with the combined heads and control.
+ */
+function claim(db: DatabaseSync, row: Origin, localId: string): void {
+  if (row.local_id !== null) return;
+  const siblings = originsOfRow(db, row.kind, localId);
+  bindOrigin(db, row.origin_id, localId);
+  if (siblings.length > 0) throw new Merged();
+}
+
 type Resolver = {
   replica: string;
   localOf(kind: SyncKind, originId: string): string;
@@ -168,19 +185,19 @@ function selectHead(db: DatabaseSync, row: Origin, heads: string[]): string | nu
   return descendants.length === 1 ? descendants[0]! : row.selected_head;
 }
 
-function reportConflict(db: DatabaseSync, row: Origin, heads: string[], selected: string | null, now: number, result: ApplyResult): void {
+function reportConflict(db: DatabaseSync, row: Origin, heads: string[], selected: string | null, now: number, result: ApplyResult, reported: Set<string>): void {
   const id = `sync:${row.origin_id}`;
   if (heads.length <= 1) {
     prepared(db, "UPDATE sync_conflicts SET status = 'resolved' WHERE id = ? AND status = 'open'").run(id);
     return;
   }
+  if (!reported.has(id)) { reported.add(id); result.conflicts += 1; }
   const detail = heads.map((head) => { const r = readRevision(db, head)!; return { revision: head, origin: r.origin_id, author: r.author }; });
   const repo = row.natural.repo === undefined ? null : localRepoOf(db, String(row.natural.repo));
   prepared(db, `INSERT INTO sync_conflicts (id, repo_id, content_hash, local_state_json, remote_state_json, status, created_at)
     VALUES (?, ?, NULL, ?, ?, 'open', ?) ON CONFLICT(id) DO UPDATE SET local_state_json = excluded.local_state_json,
     remote_state_json = excluded.remote_state_json, status = 'open'`)
     .run(id, repo, JSON.stringify({ origin: row.origin_id, kind: row.kind, selected }), JSON.stringify({ heads: detail }), now);
-  result.conflicts += 1;
 }
 
 type Writer = (db: DatabaseSync, row: Origin, payload: Row | null, control: Control, resolve: Resolver, now: number) => string | null;
@@ -210,6 +227,7 @@ function memoryWriter(db: DatabaseSync, row: Origin, payload: Row | null, contro
   const deletedAt = control.tombstone ? (payload.deleted_at as number | null) ?? now : null;
   const title = secret || control.tombstone ? '' : payload.title;
   const body = secret || control.tombstone ? '' : payload.body;
+  claim(db, row, localId);
   prepared(db, `INSERT INTO memories (id, repo_id, type, title, body, concepts, cjk_bigrams, material_hash, content_hash, sensitivity,
       review_state, degraded_reason, source_session_id, source_batch_id, valid_from, valid_to, superseded_by, pinned_at, pin_order,
       deleted_at, created_at, work_id, checkpoint_parent_id, provenance_complete, source_captured_at)
@@ -227,7 +245,6 @@ function memoryWriter(db: DatabaseSync, row: Origin, payload: Row | null, contro
       payload.valid_to as number | null, supersededBy, payload.pinned_at as number | null, payload.pin_order as number | null,
       deletedAt, payload.created_at as number | null, workId, parentId, payload.provenance_complete as number | null,
       payload.source_captured_at as number | null);
-  if (row.local_id === null) bindOrigin(db, row.origin_id, localId);
   return localId;
 }
 
@@ -251,66 +268,90 @@ function approvedProjection(db: DatabaseSync, projectionHash: string): boolean {
   return prepared(db, 'SELECT 1 FROM sync_approvals WHERE projection_hash = ?').get(projectionHash) !== undefined;
 }
 
-type SourceRow = { id: number; sync_key: string | null };
+type SourceRow = { id: number; memory_id: string; sync_key: string | null };
+
+function sourceRow(row: Row | undefined): SourceRow | null {
+  return row === undefined ? null : { id: Number(row.id), memory_id: String(row.memory_id), sync_key: row.sync_key === null ? null : String(row.sync_key) };
+}
 
 function sourceByKey(db: DatabaseSync, key: string): SourceRow | null {
-  const row = prepared(db, 'SELECT id, sync_key FROM memory_sources WHERE sync_key = ?').get(key);
-  return row === undefined ? null : { id: Number(row.id), sync_key: String(row.sync_key) };
+  return sourceRow(prepared(db, 'SELECT id, memory_id, sync_key FROM memory_sources WHERE sync_key = ?').get(key));
 }
 
 /**
- * The row an independent capture of the same citation left: one lookup per UNIQUE index of
- * memory_sources (0004 portion, 0005 context edge / context raw event), each with the index's
- * own partial condition, so NULL members never match, as in the index.
+ * The rows under `memory` that share a UNIQUE tuple with the payload: one lookup per UNIQUE index
+ * of memory_sources (0004 portion, 0005 context edge / context raw event), each with the index's
+ * own partial condition and `=` on every member, so NULL members never match, as in the index.
  */
-function sourceByTuple(db: DatabaseSync, memory: string, payload: Row, sourceMemory: string | null): SourceRow | null {
-  const found = (sql: string, ...args: (string | number | null)[]): SourceRow | null => {
-    const row = prepared(db, `SELECT id, sync_key FROM memory_sources WHERE memory_id = ? AND ${sql}`).get(memory, ...args);
-    return row === undefined ? null : { id: Number(row.id), sync_key: row.sync_key === null ? null : String(row.sync_key) };
-  };
+function sourcesByTuple(db: DatabaseSync, memory: string, payload: Row, sourceMemory: string | null): SourceRow[] {
+  const found = (sql: string, ...args: (string | number | null)[]): SourceRow[] =>
+    prepared(db, `SELECT id, memory_id, sync_key FROM memory_sources WHERE memory_id = ? AND ${sql}`).all(memory, ...args).map((row) => sourceRow(row)!);
+  const rows: SourceRow[] = [];
   if (payload.source_hash !== null) {
-    return found('raw_event_id IS ? AND source_hash = ? AND portion_start IS ? AND portion_end IS ?', payload.raw_event_id as string | null,
-      payload.source_hash as string, payload.portion_start as number | null, payload.portion_end as number | null);
+    rows.push(...found('raw_event_id = ? AND source_hash = ? AND portion_start = ? AND portion_end = ?', payload.raw_event_id as string | null,
+      payload.source_hash as string, payload.portion_start as number | null, payload.portion_end as number | null));
   }
-  if (payload.context_only !== 1) return null;
-  return (sourceMemory === null ? null : found('context_only = 1 AND source_memory_id = ?', sourceMemory))
-    ?? (payload.raw_event_id === null ? null : found('context_only = 1 AND raw_event_id = ?', payload.raw_event_id as string));
+  if (payload.context_only === 1) {
+    if (sourceMemory !== null) rows.push(...found('context_only = 1 AND source_memory_id = ?', sourceMemory));
+    if (payload.raw_event_id !== null) rows.push(...found('context_only = 1 AND raw_event_id = ?', payload.raw_event_id as string));
+  }
+  return rows.filter((candidate, index) => rows.findIndex((other) => other.id === candidate.id) === index);
 }
+
+const SOURCE_FIELDS = ['raw_event_id', 'citation_kind', 'citation_value', 'source_agent', 'portion_start', 'portion_end', 'source_total',
+  'source_hash', 'evidence', 'captured_at', 'source_processed_at', 'capture_root', 'source_paths_json', 'source_context_id', 'context_only',
+  'source_memory_id'] as const;
+/** What the wire drops for a source under a deleted or secret memory (transfer-records.ts): never written into such a row. */
+const REDACTED_SOURCE_FIELDS = new Set(['citation_value', 'source_agent', 'evidence', 'capture_root', 'source_paths_json']);
 
 function sourceWriter(db: DatabaseSync, row: Origin, payload: Row | null, control: Control, resolve: Resolver, now: number): string | null {
   void now;
-  const key = String(row.natural.key);
-  const bind = (localId: string): string => { if (row.local_id !== localId) bindOrigin(db, row.origin_id, localId); return localId; };
-  const byKey = sourceByKey(db, key);
+  // A bound origin names its row by the row's key (a tuple alias keeps the row's own key); an
+  // unbound one by the key it arrived with.
+  const key = row.local_id === null ? String(row.natural.key) : row.local_id.slice('source:'.length);
+  const bound = sourceByKey(db, key);
   if (control.tombstone) {
-    if (byKey !== null) prepared(db, 'DELETE FROM memory_sources WHERE id = ?').run(byKey.id);
+    if (bound !== null) prepared(db, 'DELETE FROM memory_sources WHERE id = ?').run(bound.id);
     // Applied whether or not a row was there; a row captured again later keeps this origin.
-    return bind(`source:${key}`);
+    claim(db, row, `source:${key}`);
+    return `source:${key}`;
   }
-  if (payload === null) return byKey === null ? null : bind(`source:${key}`);
-  const memory = resolve.localOf('memory', String(row.natural.memory));
+  if (payload === null) {
+    if (bound === null) return null;
+    claim(db, row, `source:${key}`);
+    return `source:${key}`;
+  }
+  const memory = resolve.localOf('memory', String(payload.memory_id));
   const sourceMemory = payload.source_memory_id === null ? null : resolve.localOf('memory', String(payload.source_memory_id));
   const sourceContext = payload.source_context_id === null ? null : resolve.localOf('context', String(payload.source_context_id));
+  if (sourceMemory === memory) throw new Unresolved('unresolved_reference');
   // A dependency edge may name a personal projection of another repository; only the context is owned.
   if (sourceContext !== null && repoOf(db, 'work_contexts', sourceContext) !== repoOf(db, 'memories', memory)) throw new Unresolved('repo_mismatch');
-  const existing = byKey ?? sourceByTuple(db, memory, payload, sourceMemory);
-  const values = [payload.raw_event_id as string | null, payload.citation_kind as string | null, payload.citation_value as string | null,
-    payload.source_agent as string | null, payload.portion_start as number | null, payload.portion_end as number | null,
-    payload.source_total as number | null, payload.source_hash as string | null, payload.evidence as string | null,
-    payload.captured_at as number | null, payload.source_processed_at as number | null, payload.capture_root as string | null,
-    payload.source_paths_json as string | null, sourceContext, payload.context_only as number, sourceMemory];
+  const tuples = sourcesByTuple(db, memory, payload, sourceMemory);
+  const existing = bound ?? tuples[0] ?? null;
+  const localId = `source:${existing?.sync_key ?? key}`;
+  claim(db, row, localId);
+  // Another row holding one of the head's UNIQUE tuples is the row this head replaces; its own
+  // origin records a tombstone in the closing pass.
+  for (const other of tuples) if (existing === null || other.id !== existing.id) prepared(db, 'DELETE FROM memory_sources WHERE id = ?').run(other.id);
+  // A row under a deleted or secret memory holds no evidence on this device either, whatever a head carries.
+  const owner = prepared(db, 'SELECT deleted_at, sensitivity FROM memories WHERE id = ?').get(memory);
+  const redacted = owner === undefined || owner.deleted_at !== null || owner.sensitivity === 'secret';
+  const values = SOURCE_FIELDS.map((field) => {
+    if (redacted && REDACTED_SOURCE_FIELDS.has(field)) return null;
+    if (field === 'source_context_id') return sourceContext;
+    if (field === 'source_memory_id') return sourceMemory;
+    return payload[field] as string | number | null;
+  });
   if (existing === null) {
-    prepared(db, `INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, citation_value, source_agent, portion_start, portion_end,
-        source_total, source_hash, evidence, captured_at, source_processed_at, capture_root, source_paths_json, source_context_id,
-        context_only, source_memory_id, sync_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(memory, ...values, key);
-    return bind(`source:${key}`);
+    prepared(db, `INSERT INTO memory_sources (${SOURCE_FIELDS.join(', ')}, memory_id, sync_key) VALUES (${SOURCE_FIELDS.map(() => '?').join(', ')}, ?, ?)`)
+      .run(...values, memory, key);
+  } else {
+    // The fields, and the memory the row sits under, follow the head; the row keeps its own key.
+    prepared(db, `UPDATE memory_sources SET ${SOURCE_FIELDS.map((field) => `${field} = ?`).join(', ')}, memory_id = ?, sync_key = COALESCE(sync_key, ?) WHERE id = ?`)
+      .run(...values, memory, key, existing.id);
   }
-  // The row keeps its own key and the memory this device holds it under; the fields follow the head.
-  prepared(db, `UPDATE memory_sources SET raw_event_id = ?, citation_kind = ?, citation_value = ?, source_agent = ?, portion_start = ?,
-      portion_end = ?, source_total = ?, source_hash = ?, evidence = ?, captured_at = ?, source_processed_at = ?, capture_root = ?,
-      source_paths_json = ?, source_context_id = ?, context_only = ?, source_memory_id = ?, sync_key = COALESCE(sync_key, ?) WHERE id = ?`)
-    .run(...values, key, existing.id);
-  return bind(`source:${existing.sync_key ?? key}`);
+  return localId;
 }
 
 function contextWriter(db: DatabaseSync, row: Origin, payload: Row | null, control: Control, resolve: Resolver, now: number): string | null {
@@ -319,12 +360,12 @@ function contextWriter(db: DatabaseSync, row: Origin, payload: Row | null, contr
   const repo = resolve.repo(String(payload.repo_id));
   const localId = row.local_id ?? (prepared(db, 'SELECT id FROM work_contexts WHERE repo_id = ? AND local_key = ?')
     .get(repo, String(payload.local_key))?.id as string | undefined) ?? randomUUID();
+  claim(db, row, localId);
   prepared(db, `INSERT INTO work_contexts (id, repo_id, local_key, root, repo_secret_paths_json, created_at, last_seen_at)
     VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET root = excluded.root,
     repo_secret_paths_json = excluded.repo_secret_paths_json, last_seen_at = MAX(work_contexts.last_seen_at, excluded.last_seen_at)`)
     .run(localId, repo, String(payload.local_key), (payload.root as string | null) ?? '', payload.repo_secret_paths_json as string | null,
       payload.created_at as number, payload.last_seen_at as number);
-  if (row.local_id === null) bindOrigin(db, row.origin_id, localId);
   return localId;
 }
 
@@ -338,6 +379,7 @@ function workWriter(db: DatabaseSync, row: Origin, payload: Row | null, control:
   const context = resolve.localOf('context', String(payload.origin_context_id));
   if (repoOf(db, 'work_contexts', context) !== repo) throw new Unresolved('repo_mismatch');
   const localId = row.local_id ?? randomUUID();
+  claim(db, row, localId);
   const sensitivity = stricter(payload.purpose_sensitivity as Sensitivity, control.sensitivity_floor);
   prepared(db, `INSERT INTO work_items (id, repo_id, origin_context_id, purpose, purpose_source_event_id, purpose_sensitivity, state,
       created_at, updated_at, completed_at, current_checkpoint_memory_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
@@ -347,7 +389,6 @@ function workWriter(db: DatabaseSync, row: Origin, payload: Row | null, control:
     .run(localId, repo, context, sensitivity === 'secret' ? null : payload.purpose as string | null,
       payload.purpose_source_event_id as string | null, sensitivity, payload.state as string, payload.created_at as number,
       payload.updated_at as number, payload.completed_at as number | null);
-  if (row.local_id === null) bindOrigin(db, row.origin_id, localId);
   return localId;
 }
 
@@ -368,11 +409,14 @@ function visibilityWriter(db: DatabaseSync, row: Origin, payload: Row | null, co
   } else if (repoOf(db, 'memories', memory) !== repo || (work !== null && repoOf(db, 'work_items', work) !== repo)) throw new Unresolved('repo_mismatch');
   const grant = payload.audience === 'work' ? { audience: 'work' as const, repoId: repo!, workId: work! }
     : payload.audience === 'project' ? { audience: 'project' as const, repoId: repo! } : { audience: 'personal' as const, proposalId: proposal! };
+  // The scope is UNIQUE (0006), so the row the grant lands on may predate sync under another id.
+  const scoped = (): string | undefined => prepared(db, 'SELECT id FROM memory_visibility WHERE memory_id = ? AND audience = ? AND repo_id IS ? AND work_id IS ?')
+    .get(memory, String(payload.audience), repo, work)?.id as string | undefined;
+  const held = scoped();
+  if (held !== undefined) { claim(db, row, held); return held; }
   grantVisibility(db, memory, grant, payload.grant_kind as 'migration' | 'observer' | 'explicit_adoption' | 'proposal_approval', payload.created_at as number);
-  // The scope is UNIQUE (0006), so the row the grant landed on may predate sync under another id.
-  const localId = String(prepared(db, 'SELECT id FROM memory_visibility WHERE memory_id = ? AND audience = ? AND repo_id IS ? AND work_id IS ?')
-    .get(memory, String(payload.audience), repo, work)!.id);
-  if (row.local_id !== localId) bindOrigin(db, row.origin_id, localId);
+  const localId = scoped()!;
+  claim(db, row, localId);
   return localId;
 }
 
@@ -395,6 +439,7 @@ function proposalWriter(db: DatabaseSync, row: Origin, payload: Row | null, cont
   const work = resolve.localOf('work', String(payload.origin_work_id));
   if (repoOf(db, 'memories', memory) !== repo || repoOf(db, 'work_items', work) !== repo) throw new Unresolved('repo_mismatch');
   const localId = row.local_id ?? aliasTarget(db, 'sharing_proposal', row.natural) ?? randomUUID();
+  claim(db, row, localId);
   const sensitivity = stricter(payload.candidate_sensitivity as Sensitivity, control.sensitivity_floor);
   const redacted = payload.redacted === true || sensitivity === 'secret';
   // An approval binds only to what this device's user approved (candidate hash and projection;
@@ -417,7 +462,6 @@ function proposalWriter(db: DatabaseSync, row: Origin, payload: Row | null, cont
       payload.candidate_material_hash as string, sensitivity, redacted ? '[]' : payload.source_event_ids_json as string,
       payload.basis as string, state, state === 'pending' ? null : payload.decision_channel as string | null, projected,
       payload.created_at as number, state === 'pending' ? null : payload.decided_at as number | null);
-  if (row.local_id === null) bindOrigin(db, row.origin_id, localId);
   return localId;
 }
 
@@ -427,11 +471,10 @@ const WRITERS: Record<SyncKind, Writer> = {
 };
 
 /** What the capture pass would record for this row now: the materialized state after corrections. */
-function materializedState(db: DatabaseSync, row: Origin, localId: string, resolve: Resolver): string | null {
+function materializedState(db: DatabaseSync, row: Origin, localId: string, resolve: Resolver, repoKeys = registerLocalRepos(db, resolve.replica)): string | null {
   const record = localRecord(db, row.kind, localId);
   if (record === null) return null;
   const originOf = (kind: SyncKind, id: string): string => originsOfRow(db, kind, id)[0]?.canonical_origin_id ?? `${resolve.replica}:${id}`;
-  const repoKeys = registerLocalRepos(db, resolve.replica);
   const captureResolver = { originOf, repoKey: (id: string) => repoKeys.get(id) ?? resolve.replica };
   const payload = alignToNatural(row.kind, toOriginForm(row.kind, record, row.origin_id, captureResolver), canonicalOf(db, row.origin_id).natural);
   return stateHash(payloadHash(payload), controlOf(row.kind, record));
@@ -554,6 +597,17 @@ function resolverFor(db: DatabaseSync, replica: string): Resolver {
 export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now: number): ApplyResult {
   const result: ApplyResult = { stored: 0, filled: 0, materialized: 0, withheldOnApply: 0, conflicts: 0 };
   const resolve = resolverFor(db, replicaOriginId(db));
+  const repoKeys = registerLocalRepos(db, resolve.replica);
+  const stateOf = (row: Origin, localId: string): string | null => materializedState(db, row, localId, resolve, repoKeys);
+  // The base of a row is what the caller's capture saw; an alias since may have put it under
+  // another natural key, so its hash is realigned to the canonical natural key from the row as it
+  // is, never carried from another origin. A cascade during the pass (a floor raised through a
+  // parent) is then a difference the closing capture records, never something absorbed into the base.
+  const realign = (row: Origin): void => {
+    if (row.local_id === null) return;
+    const state = stateOf(row, row.local_id);
+    if (state !== null && state !== row.materialized_hash) setSelectedHead(db, row.origin_id, row.selected_head, row.materialized_revision, state);
+  };
   // An origin that was identity-only may alias onto a local row now (a repository was mapped, a
   // row was created since): bind every such origin before anything is written, so the control
   // of every origin of a row applies to it, then work on the canonical rows that remain. One
@@ -569,18 +623,16 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
   }
   const canonicalIds = [...new Set(rowIds.map((id) => readOrigin(db, id)!.canonical_origin_id))];
   const rows = canonicalIds.map((id) => readOrigin(db, id)!).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
-  // The base of every row is what the caller's capture saw; an alias since may have put it under
-  // another natural key, so its hash is realigned now, before any write or trigger touches the row.
-  // A cascade during the pass (a floor raised through a parent) is then a difference the closing
-  // capture records, never something absorbed into the base.
-  for (const row of rows) {
-    if (row.local_id === null) continue;
-    const state = materializedState(db, row, row.local_id, resolve);
-    if (state !== null && state !== row.materialized_hash) setSelectedHead(db, row.origin_id, row.selected_head, row.materialized_revision, state);
-  }
+  for (const row of rows) realign(row);
   const pending = new Set(rows.map((row) => row.origin_id));
+  const counted = new Set<string>();
+  const reported = new Set<string>();
+  // A merge made the canonical inherit a base under another origin's natural key: realign it and
+  // process it (again) with the combined heads and control.
   const requeue = (canonical: string): void => {
-    if (!rows.some((other) => other.origin_id === canonical)) rows.push(readOrigin(db, canonical)!);
+    const row = readOrigin(db, canonical)!;
+    if (!rows.some((other) => other.origin_id === canonical)) rows.push(row);
+    realign(row);
     pending.add(canonical);
   };
   const workRows: Origin[] = [];
@@ -606,33 +658,25 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
       // row may still hold). The bookkeeping below still runs (a sibling may have arrived).
       const terminal = control.tombstone || control.sensitivity_floor === 'secret';
       const materialized = row.local_id !== null && selected !== null && !terminal
-        && materializedState(db, row, row.local_id, resolve) === stateHash(revision?.payload_hash ?? null, control);
-      const groupBefore = new Set(row.local_id === null ? [row.origin_id] : originsOfRow(db, row.kind, row.local_id).map((member) => member.origin_id));
+        && stateOf(row, row.local_id) === stateHash(revision?.payload_hash ?? null, control);
       try {
         const localId = materialized ? row.local_id : WRITERS[row.kind](db, row, payload, control, resolve, now);
         pending.delete(row.origin_id);
         progress = true;
         const after = readOrigin(db, row.origin_id)!;
-        // The writer found the row under other origins (an independent capture, a row created
-        // earlier in this pass): the group merged, so its canonical is processed again with the
-        // combined heads and control, and nothing is recorded on an origin that is not canonical.
-        if (localId !== null && originsOfRow(db, after.kind, localId).some((member) => !groupBefore.has(member.origin_id))) {
-          requeue(after.canonical_origin_id);
-          continue;
-        }
         const fallback = stateHash(revision?.payload_hash ?? null, control);
-        const state = localId === null ? fallback : materializedState(db, after, localId, resolve) ?? fallback;
+        const state = localId === null ? fallback : stateOf(after, localId) ?? fallback;
         // A head is fully applied when its payload was written, when it never had one (control
         // revision) or when a terminal control erased it; only a withheld payload keeps the last
-        // materialized revision as the base for local changes.
-        const applied = payload !== null || revision?.payload_hash === null || control.tombstone || control.sensitivity_floor === 'secret';
-        const materializedRevision = applied ? selected : after.materialized_revision ?? selected;
+        // materialized revision as the base for local changes. An origin without a row has no base.
+        const applied = payload !== null || revision?.payload_hash === null || terminal;
+        const materializedRevision = localId === null ? null : applied ? selected : after.materialized_revision ?? selected;
         setSelectedHead(db, row.origin_id, selected, materializedRevision, state);
         // An applied head is never withheld, even one that had nothing to write (a tombstone or a
         // control for a row this device never held).
         if (applied || localId !== null) prepared(db, 'UPDATE sync_origins SET withheld_reason = NULL WHERE origin_id = ?').run(row.origin_id);
-        reportConflict(db, after, heads, selected, now, result);
-        result.materialized += 1;
+        reportConflict(db, after, heads, selected, now, result, reported);
+        if (!counted.has(row.origin_id)) { counted.add(row.origin_id); result.materialized += 1; }
         if (row.kind === 'work') workRows.push(after);
         if (row.kind === 'memory' && localId !== null) {
           if (control.tombstone) sweepCheckpoint(db, after, now);
@@ -644,11 +688,19 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
           if (owner !== undefined) raiseTargets.add(String(owner.memory_id));
         }
       } catch (error) {
+        if (error instanceof Merged) {
+          // The writer's row belongs to other origins: the groups merged before anything was
+          // written, and the merged canonical is processed with the combined heads and control.
+          pending.delete(row.origin_id);
+          progress = true;
+          requeue(readOrigin(db, row.origin_id)!.canonical_origin_id);
+          continue;
+        }
         if (!(error instanceof Unresolved)) throw error;
         prepared(db, 'UPDATE sync_origins SET withheld_reason = ? WHERE origin_id = ?').run(error.reason, row.origin_id);
-        // The base stays where it was (realigned at the start of the pass).
+        // The base stays where it was (realigned when the pass, or the merge, put the row here).
         setSelectedHead(db, row.origin_id, selected, row.materialized_revision, row.materialized_hash);
-        reportConflict(db, row, heads, selected, now, result);
+        reportConflict(db, row, heads, selected, now, result, reported);
       }
     }
   }
@@ -662,7 +714,7 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
     const outcome = advanceWorkCheckpoint(db, current, current.selected_head, work.materialized_revision);
     if (outcome === 'advanced') {
       // The pointer moved after the row's state was taken: refresh it so the closing pass records no phantom edit.
-      const state = materializedState(db, current, current.local_id, resolve);
+      const state = stateOf(current, current.local_id);
       if (state !== null) setSelectedHead(db, current.origin_id, current.selected_head, current.materialized_revision, state);
     } else if (outcome === 'foreign') {
       // The pointer names another work's checkpoint: the row is not this work's record. Undo the
@@ -696,7 +748,7 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
       const kept = work.materialized_revision;
       setSelectedHead(db, current.origin_id, kept, kept, work.materialized_hash);
       const heads = headsOf(db, current.origin_id);
-      reportConflict(db, current, heads.length > 1 ? heads : [...new Set([current.selected_head, kept ?? current.selected_head])], kept, now, result);
+      reportConflict(db, current, heads.length > 1 ? heads : [...new Set([current.selected_head, kept ?? current.selected_head])], kept, now, result, reported);
     }
   }
   captureLocalChanges(db, now);
