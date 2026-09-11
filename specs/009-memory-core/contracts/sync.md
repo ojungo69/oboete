@@ -551,6 +551,37 @@ allow-listed by the config credential guard; the fence names `src/sync/status.ts
 sync module `doctor` and MCP import. The 0008 schema adds `sync_approvals` (proposal id,
 candidate hash, projection hash, scope, approved at), written by every local approval.
 
+Review rounds on the implementation (2026-09-11: a Codex read-only probe, `/code-review high`,
+and the verification tests themselves) fixed the following and pinned each with a test; where
+the text above says less, this paragraph is the rule:
+
+- staging rejects a payload that is not the record its identity describes, exactly as the native
+  reader does: a memory or candidate whose text does not hash to its material hash
+  (`material_hash_mismatch`, `candidate_hash_mismatch`), text on a deleted or secret memory
+  (`redacted_memory_text`), and a natural key the payload does not derive (`natural_mismatch`).
+  Text and candidate are identity, never edited in place, so a revision that swaps a proposal's
+  candidate is malformed and its bundle is rejected before anything is stored;
+- repository ownership is verified on apply with local rows, as migration verifies it: a memory,
+  source, work, grant or proposal whose repository differs from its parent's, and a work pointer
+  that does not name a checkpoint of that work, are withheld (`repo_mismatch` in `sync status`),
+  never written; the rest of the bundle applies;
+- an approval binds when the candidate hash and the projection's content hash equal the local
+  record (the grant scope is fixed by the 0006 CHECK); a pulled grant binds to the row its scope
+  resolves to, which may be a `v_migration:<id>` row from before sync;
+- a head whose payload was never shipped or was erased by a terminal control is fully applied and
+  becomes the materialized base, so the next local change is its successor;
+- a pulled checkpoint's `content_hash` is `checkpointHash(repo, work, parent, material)`;
+- a proposal that arrived withheld aliases onto the local equivalent once its repository is
+  mapped; a source that changed a field in place replaces the row its old origin left behind;
+- Pull step 7 covers every failure: an unexpected apply error is reported as
+  `apply_failed:<sqlite result code | error class>` for that bundle and the others proceed;
+- a push whose snapshot cannot be built or exceeds 256 MiB fails as `publish_failed` /
+  `plaintext_too_large` with no file in the space directory, the staging directory empty and the
+  connection outside any transaction; `init`/`join` record the directory as an absolute path;
+- the per-origin revision bound counts a re-sent log once (stored plus new revisions);
+- `--republish` after `map-repo` keeps `snapshot_id` when no line changed (Verification bullet
+  amended).
+
 ## Verification (T034–T036)
 
 `test/unit/sync.test.ts` with three isolated homes and one shared temporary directory:
@@ -656,9 +687,12 @@ candidate hash, projection hash, scope, approved at), written by every local app
 - secret after sync: A publishes an `eligible` memory, B pulls it, A marks it secret (which also
   sets `review_state = 'imported'`), A pushes, B pulls: B's copy loses its text and becomes secret;
   same for `eligible` → `private` with `private` unselected on A: B raises without new text;
-- approval binding: A approves candidate C0, B pulls the approval, A's later revision of the same
-  proposal carries candidate C1 with a matching projection: B stores it `pending`, no projection;
-  B re-publishes A's revision verbatim; a local approval already present on B stays bound to C0;
+- approval binding: A approves candidate C0, B pulls the approval and, holding a record for C0,
+  keeps the projection; a device without the record holds the decision `pending`, re-publishes
+  A's revision verbatim and adds no revision of its own; an approval whose projection differs
+  from the record does not bind; A's later revision that swaps the candidate for C1 contradicts
+  the origin's natural key and its bundle is rejected at staging (`natural_mismatch`), so B's
+  approval stays bound to C0;
 - withheld closure: unprocessed sources, live quarantined memories, unselected classes, and the
   works that reference them are absent as payloads, present as control revisions where they were
   ever published, and counted; no dangling reference in any bundle;
