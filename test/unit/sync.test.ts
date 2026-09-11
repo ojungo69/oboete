@@ -19,6 +19,7 @@ import { captureLocalChanges } from '../../src/sync/capture.js';
 import { BundleError, CHUNK_BYTES, decryptBundle, encryptBundle, keyId, PREFIX_BYTES, TAG_BYTES } from '../../src/sync/envelope.js';
 import { canonicalJson, payloadHash, revisionId, snapshotId } from '../../src/sync/identity.js';
 import { buildSnapshot } from '../../src/sync/publish.js';
+import { runSync } from '../../src/sync-cli.js';
 import {
   initSpace, joinSpace, leaveSpace, pullSpace, pushSpace, showKey, SyncError, syncStatus, withSpaceLock,
 } from '../../src/sync/space.js';
@@ -609,5 +610,59 @@ test('a commit by another connection at any push window restarts the push and sh
         assert.equal(memoryOf({ db: b, home: homeB, id: replicaOriginId(b) }, { db: a, home: homeA, id: replicaOriginId(a) }, 'm_one').sensitivity, 'secret');
       } finally { other.close(); }
     } finally { a.close(); b.close(); }
+  });
+});
+
+// --- CLI surface (T036) ---
+
+function fakeIo(tty: boolean, secret = ''): { io: Parameters<typeof runSync>[1]; out: string[]; err: string[] } {
+  const out: string[] = [];
+  const err: string[] = [];
+  return { out, err, io: { out: (text) => { out.push(text); }, err: (text) => { err.push(text); }, isTty: () => tty, readSecret: async () => secret } };
+}
+
+test('oboete sync commands: init, key show on a terminal only, join by typed key, push, pull, status, resolve, leave', async () => {
+  await withHomes(2, async (homes, shared) => {
+    const [homeA, homeB] = homes as [string, string];
+    const pathsA = oboetePaths(homeA);
+    const pathsB = oboetePaths(homeB);
+    openHome(homeA).close();
+    openHome(homeB).close();
+    const init = fakeIo(false);
+    assert.equal(await runSync(['init', shared, '--json'], init.io, pathsA, 1), 0);
+    const spaceId = (JSON.parse(init.out[0]!) as { space_id: string }).space_id;
+    const hidden = fakeIo(false);
+    assert.equal(await runSync(['key', 'show'], hidden.io, pathsA, 1), 2);
+    assert.equal(hidden.out.length, 0);
+    const shown = fakeIo(true);
+    assert.equal(await runSync(['key', 'show'], shown.io, pathsA, 1), 0);
+    const line = shown.out[0]!.trim();
+    assert.equal(await runSync(['join', shared, '--json'], fakeIo(false, line).io, pathsB, 1), 2, 'join needs a terminal');
+    const joined = fakeIo(true, line);
+    assert.equal(await runSync(['join', shared, '--json'], joined.io, pathsB, 1), 0);
+    assert.equal((JSON.parse(joined.out[0]!) as { space_id: string }).space_id, spaceId);
+    const a = openHome(homeA);
+    insertMemory(a, 'm_one', 'Title', 'Body text');
+    a.close();
+    const push = fakeIo(false);
+    assert.equal(await runSync(['push', '--json'], push.io, pathsA, 10), 0);
+    assert.equal((JSON.parse(push.out[0]!) as { outcome: string }).outcome, 'published');
+    const pull = fakeIo(false);
+    assert.equal(await runSync(['pull', '--json'], pull.io, pathsB, 20), 0);
+    assert.equal((JSON.parse(pull.out[0]!) as { bundles: { outcome: string }[] }).bundles[0]!.outcome, 'applied');
+    const status = fakeIo(false);
+    assert.equal(await runSync(['status', '--json'], status.io, pathsB, 21), 0);
+    assert.equal((JSON.parse(status.out[0]!) as { replicas: unknown[] }).replicas.length, 1);
+    assert.equal(await runSync(['resolve', 'x'], fakeIo(false).io, pathsB, 22), 2, '--keep is required');
+    const unknown = fakeIo(false);
+    assert.equal(await runSync(['resolve', 'x', '--keep', 'y', '--json'], unknown.io, pathsB, 22), 1);
+    assert.equal((JSON.parse(unknown.err[0]!) as { error: string }).error, 'unknown_origin');
+    const leave = fakeIo(false);
+    assert.equal(await runSync(['leave', '--json'], leave.io, pathsB, 30), 0);
+    const gone = fakeIo(false);
+    assert.equal(await runSync(['status', '--json'], gone.io, pathsB, 31), 0);
+    assert.equal((JSON.parse(gone.out[0]!) as { configured: boolean }).configured, false);
+    const notConfigured = fakeIo(false);
+    assert.equal(await runSync(['push'], notConfigured.io, pathsB, 32), 1);
   });
 });

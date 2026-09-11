@@ -16,6 +16,7 @@ const knownCommands = [
   'get',
   'why',
   'work',
+  'sync',
   'share',
   'pin',
   'unpin',
@@ -41,6 +42,7 @@ const commands: Record<string, () => Promise<(argv: string[]) => Promise<number>
   get: () => import('./memories-cli.js').then((module) => module.runGet),
   why: () => import('./why.js').then((module) => module.runWhy),
   work: () => import('./work-cli.js').then((module) => module.runWork),
+  sync: () => import('./sync-cli.js').then((module) => module.runSync),
   share: () => import('./memories-cli.js').then((module) => module.runShare),
   pin: () => import('./memories-cli.js').then((module) => module.runPin),
   unpin: () => import('./memories-cli.js').then((module) => module.runUnpin),
@@ -78,6 +80,7 @@ function usage(): string {
     '      oboete work choose <binding-id> <work-id|new>\n' +
     '      oboete work choose-source <source-id> <work-id|new>\n' +
     '      oboete work complete <work-id>\n' +
+    'Sync: oboete sync init <dir> | join <dir> | key show | push | pull | status | resolve <origin> --keep <rev> | map-repo <key> <repo> | leave\n' +
     'Sharing: oboete share status | approve <proposal-id> | reject <proposal-id> | adopt <memory-id> [--binding <binding-id>] [--json]\n' +
     'Export: oboete export [file|-] [--format 1|2]\n' +
     'Import: oboete import [file|-] [--dry-run|--apply] [--json]\n' +
