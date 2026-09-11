@@ -276,7 +276,12 @@ export function captureLocalChanges(db: DatabaseSync, now: number): CaptureResul
   for (const row of contextRecords(db)) record('context', row, String(row.id));
   for (const row of workRecords(db)) record('work', row, String(row.id));
   for (const row of memoryRecords(db)) record('memory', row, String(row.id));
-  for (const row of sourceRecords(db)) record('source', row, sourceLocalId(db, String(row.id), resolve));
+  // Materialize the source ids before the loop: sourceLocalId writes memory_sources, and reading
+  // each row by id keeps that write from disturbing an open scan over the same table.
+  for (const id of prepared(db, 'SELECT id FROM memory_sources ORDER BY id').all().map((row) => String(row.id))) {
+    const source = [...sourceRecords(db, Number(id))][0];
+    if (source !== undefined) record('source', source, sourceLocalId(db, id, resolve));
+  }
   for (const row of visibilityRecords(db)) record('visibility', row, String(row.id));
   for (const row of proposalRecords(db)) record('sharing_proposal', row, String(row.id));
 

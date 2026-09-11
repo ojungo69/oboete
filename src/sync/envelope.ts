@@ -18,6 +18,11 @@ const UNIT_BYTES = CHUNK_BYTES + TAG_BYTES;
 const KEY_ID_INFO = 'oboete-sync-key-id/1';
 const CHUNK_KEY_INFO = 'oboete-sync-bundle/1';
 
+/** writeSync may write fewer bytes than asked; loop so the whole buffer reaches the file. */
+export function writeFully(fd: number, data: Buffer, offset = 0, length: number = data.length - offset): void {
+  for (let written = 0; written < length; ) written += writeSync(fd, data, offset + written, length - written);
+}
+
 export type BundleErrorCode = 'oversize' | 'truncated' | 'bad_magic' | 'key_mismatch' | 'authentication_failed' | 'plaintext_too_large';
 
 export class BundleError extends Error {
@@ -66,7 +71,7 @@ export function encryptBundle(spaceKey: Uint8Array, plaintextPath: string, ciphe
     const output = openSync(ciphertextPath, 'w', 0o600);
     const digest = createHash('sha256');
     let size = 0;
-    const emit = (bytes: Buffer): void => { writeSync(output, bytes); digest.update(bytes); size += bytes.length; };
+    const emit = (bytes: Buffer): void => { writeFully(output, bytes); digest.update(bytes); size += bytes.length; };
     try {
       emit(prefix);
       let remaining = total;
@@ -125,7 +130,7 @@ export function decryptBundle(
         try {
           chunk = Buffer.concat([decipher.update(unit.subarray(0, unit.length - TAG_BYTES)), decipher.final()]);
         } catch { throw new BundleError('authentication_failed'); }
-        writeSync(output, chunk);
+        writeFully(output, chunk);
         plaintextBytes += chunk.length;
         counter += 1;
       }

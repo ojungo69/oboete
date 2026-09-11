@@ -3,12 +3,13 @@
 // and the reference closure allow it. Security-owned: this is where secret, quarantined and
 // unselected text is kept off the wire; control revisions always travel.
 import { createHash } from 'node:crypto';
-import { closeSync, openSync, readSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, openSync, readSync, rmSync } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { prepared } from '../db/statements.js';
 import { compareCodeUnits } from '../hash.js';
 import { BOUNDS, ENTITY_REFERENCES, type Control } from './format.js';
+import { writeFully } from './envelope.js';
 import { canonicalJson, snapshotId, SNAPSHOT_FORMAT, type Sensitivity, type SyncKind } from './identity.js';
 import { effectiveControl, headsOf, readOrigin, replicaOriginId, revisionFromRow, type Origin, type Revision, type Row } from './store.js';
 
@@ -38,7 +39,9 @@ function unfinishedSources(db: DatabaseSync, memoryLocalId: string): boolean {
 /** The content filter's own class rule per kind; sources, grants and contexts follow the closure. */
 function passesClassRule(db: DatabaseSync, head: Head, classes: readonly Sensitivity[], control: Control): boolean {
   const payload = head.revision.payload;
-  if (payload === null || control.tombstone) return false;
+  // Fail closed on a secret floor for every kind (the memory/work/proposal rules also exclude it
+  // via `raised`; sources, grants and contexts never carry one today, but never ship one if they do).
+  if (payload === null || control.tombstone || control.sensitivity_floor === 'secret') return false;
   switch (head.kind) {
     case 'memory':
       return payload.deleted_at === null && payload.review_state !== 'imported'
@@ -157,7 +160,7 @@ export function buildSnapshot(db: DatabaseSync, options: PublishOptions): Publis
     const text = `${canonicalJson(line)}\n`;
     const buffer = Buffer.from(text, 'utf8');
     if (buffer.length > BOUNDS.lineBytes) throw new PublishError('line_too_long');
-    writeSync(body, buffer);
+    writeFully(body, buffer);
     digest.update(buffer);
     bytes += buffer.length;
   };
@@ -200,7 +203,7 @@ export function buildSnapshot(db: DatabaseSync, options: PublishOptions): Publis
 function concatenate(target: string, header: string, bodyPath: string): void {
   const output = openSync(target, 'w', 0o600);
   try {
-    writeSync(output, header);
+    writeFully(output, Buffer.from(header));
     // The body was just written by this process; a streamed copy keeps RSS flat for large stores.
     const input = openSync(bodyPath, 'r');
     try {
@@ -208,7 +211,7 @@ function concatenate(target: string, header: string, bodyPath: string): void {
       for (;;) {
         const read = readSync(input, chunk, 0, chunk.length, null);
         if (read === 0) break;
-        writeSync(output, chunk, 0, read);
+        writeFully(output, chunk, 0, read);
       }
     } finally { closeSync(input); }
   } finally { closeSync(output); }
