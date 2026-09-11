@@ -6,7 +6,6 @@ import { parseArgs } from 'node:util';
 import { openDatabase } from './db/open.js';
 import { oboetePaths, resolveHome, type OboetePaths } from './paths.js';
 import { ResolveError } from './sync/apply.js';
-import type { Sensitivity } from './sync/identity.js';
 import { initSpace, joinSpace, leaveSpace, mapRepo, pullSpace, pushSpace, resolveRow, showKey, withSpaceLock } from './sync/space.js';
 import { loadSyncConfig, SyncError, syncStatus } from './sync/status.js';
 
@@ -49,8 +48,8 @@ function processIo(): Io {
   };
 }
 
-function classesOf(value: string | undefined): Sensitivity[] {
-  return (value ?? 'eligible,local_only,private').split(',').map((part) => part.trim()).filter((part) => part !== '') as Sensitivity[];
+function classesOf(value: string | undefined): string[] {
+  return (value ?? 'eligible,local_only,private').split(',').map((part) => part.trim()).filter((part) => part !== '');
 }
 
 function report(io: Io, json: boolean, value: unknown, text: string): void {
@@ -162,6 +161,7 @@ function describe(error: SyncError): string {
     case 'invalid_key_line': return 'That is not a valid key line.';
     case 'key_missing': return 'The space key file is missing.';
     case 'key_permissions': return 'The space key file must be readable by the owner only.';
+    case 'invalid_classes': return 'Classes must be a non-empty list drawn from eligible, local_only and private; secret is never selectable.';
     case 'plaintext_too_large': return `This device's snapshot is ${String(error.detail.bytes)} bytes, over the 256 MiB bundle bound; nothing was written.`;
     default: return `Sync failed: ${error.code}.`;
   }

@@ -518,6 +518,10 @@ test('oboete sync commands: init, key show on a terminal only, join by typed key
     const pathsB = oboetePaths(homeB);
     openHome(homeA).close();
     openHome(homeB).close();
+    const bad = fakeIo(false);
+    assert.equal(await runSync(['init', shared, '--classes', 'eligible,foo', '--json'], bad.io, pathsA, 1), 1);
+    assert.equal((JSON.parse(bad.err[0]!) as { error: string }).error, 'invalid_classes');
+    assert.equal(existsSync(join(homeA, 'config.toml')) && readFileSync(join(homeA, 'config.toml'), 'utf8').includes('[sync]'), false, 'nothing was configured');
     const init = fakeIo(false);
     assert.equal(await runSync(['init', shared, '--json'], init.io, pathsA, 1), 0);
     const spaceId = (JSON.parse(init.out[0]!) as { space_id: string }).space_id;

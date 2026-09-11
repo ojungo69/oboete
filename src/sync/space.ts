@@ -20,7 +20,7 @@ import { applyStaged, materializeRows, resolveRow, type ApplyResult } from './ap
 import { captureLocalChanges } from './capture.js';
 import { BundleError, decryptBundle, encryptBundle, keyId, MAX_CIPHERTEXT_BYTES } from './envelope.js';
 import { BOUNDS } from './format.js';
-import { canonicalJson, type Sensitivity } from './identity.js';
+import { canonicalJson } from './identity.js';
 import { buildSnapshot, type Withheld } from './publish.js';
 import { BundleRejected, stageBundle } from './stage.js';
 import { consentDrift, consentHashOf, loadSyncConfig, SyncError } from './status.js';
@@ -99,7 +99,7 @@ function directoryOutsideHome(directory: string, paths: OboetePaths): string {
 }
 
 /** `oboete sync init <dir>`: a new space and key; nothing is written to `<dir>` until the first push. */
-export function initSpace(db: DatabaseSync, paths: OboetePaths, input: { directory: string; classes: Sensitivity[]; now: number }): { spaceId: string; keyLine: string } {
+export function initSpace(db: DatabaseSync, paths: OboetePaths, input: { directory: string; classes: readonly string[]; now: number }): { spaceId: string; keyLine: string } {
   assertNoSpace(db, paths);
   const realpath = directoryOutsideHome(input.directory, paths);
   const spaceId = randomBytes(16).toString('hex');
@@ -112,7 +112,7 @@ export function initSpace(db: DatabaseSync, paths: OboetePaths, input: { directo
 }
 
 /** `oboete sync join <dir>`: the key line typed on a TTY (never an argument, variable or file). */
-export function joinSpace(db: DatabaseSync, paths: OboetePaths, input: { directory: string; keyLine: string; classes: Sensitivity[]; now: number }): { spaceId: string } {
+export function joinSpace(db: DatabaseSync, paths: OboetePaths, input: { directory: string; keyLine: string; classes: readonly string[]; now: number }): { spaceId: string } {
   assertNoSpace(db, paths);
   const realpath = directoryOutsideHome(input.directory, paths);
   const { spaceId, key } = parseKeyLine(input.keyLine);
@@ -123,8 +123,10 @@ export function joinSpace(db: DatabaseSync, paths: OboetePaths, input: { directo
   return { spaceId };
 }
 
-function classesOf(classes: Sensitivity[]): SyncConfig['classes'] {
-  const selected = [...new Set(classes)].filter((value): value is 'eligible' | 'local_only' | 'private' => value !== 'secret');
+const SELECTABLE = ['eligible', 'local_only', 'private'] as const;
+
+function classesOf(classes: readonly string[]): SyncConfig['classes'] {
+  const selected = [...new Set(classes)].filter((value): value is (typeof SELECTABLE)[number] => (SELECTABLE as readonly string[]).includes(value));
   if (selected.length !== classes.length || selected.length === 0) throw new SyncError('invalid_classes');
   return selected;
 }
