@@ -216,12 +216,15 @@ export function storeRevision(db: DatabaseSync, revision: Revision, receivedFrom
   if (readRevision(db, revision.revision_id) !== undefined) return false;
   const count = Number(prepared(db, 'SELECT COUNT(*) AS n FROM sync_revisions WHERE origin_id = ?').get(revision.origin_id)?.n ?? 0);
   if (count >= BOUNDS.revisionsPerOrigin) throw new SyncStoreError('revisions_per_origin', revision.origin_id);
-  // A source revision's tuple: its payload's, the one it arrived with, or its first parent's (a
-  // control revision names the row its parent named).
+  // A source revision's tuple: its payload's, the one it arrived with, or, for a control-only
+  // revision, its first parent's (it names the row its parent named). A revision whose payload
+  // is withheld has no tuple until the payload arrives (storePayload).
   let tuple = revision.tuple ?? null;
   if (revision.kind === 'source') {
     if (revision.payload !== null) tuple = sourceTupleOf(revision.payload);
-    if (tuple === null) for (const parent of revision.parents) { tuple = readRevision(db, parent)?.tuple ?? null; if (tuple !== null) break; }
+    if (tuple === null && revision.payload_hash === null) {
+      for (const parent of revision.parents) { tuple = readRevision(db, parent)?.tuple ?? null; if (tuple !== null) break; }
+    }
   }
   prepared(db, `INSERT INTO sync_revisions (revision_id, origin_id, kind, author, parents_json, control_json, natural_json,
     payload_hash, payload_json, tuple_json, received_from, stored_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -236,8 +239,9 @@ export function storeRevision(db: DatabaseSync, revision: Revision, receivedFrom
 
 /** Fills a payload for a stored identity-only revision (the caller has verified its hash). */
 export function storePayload(db: DatabaseSync, revisionIdValue: string, payload: Row): void {
-  prepared(db, 'UPDATE sync_revisions SET payload_json = ? WHERE revision_id = ? AND payload_json IS NULL')
-    .run(canonicalJson(payload), revisionIdValue);
+  const kind = prepared(db, 'SELECT kind FROM sync_revisions WHERE revision_id = ?').get(revisionIdValue)?.kind;
+  prepared(db, 'UPDATE sync_revisions SET payload_json = ?, tuple_json = COALESCE(?, tuple_json) WHERE revision_id = ? AND payload_json IS NULL')
+    .run(canonicalJson(payload), kind === 'source' ? canonicalJson(sourceTupleOf(payload)) : null, revisionIdValue);
 }
 
 /** Erases stored payload bytes of every revision of every origin aliased to a row. */

@@ -63,8 +63,8 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
   注記に列挙)。契約は "Implementation notes" に amend 4 点を記録。
 - 単一ファイルのテスト実行は `/var/tmp/oboete-009-20260909.jJ5grc/scratch/test-one.mjs`
   (`TEST_ONE_SLOT=<name> node test-one.mjs test/unit/x.test.ts`、build/ を触らない)。
-- レビュー: `/code-review high` 3 巡 + finder 1 角度、Codex correctness pass (`us6/secrev1..9`。security
-  枠のプロンプトは OpenAI の cyber classifier に切られるので correctness 枠で出す) で 10 + 6 + 9 + 9 + 14 + 11 + 17 + 16 + 20 件。
+- レビュー: `/code-review high` 3 巡 + finder 1 角度、Codex correctness pass (`us6/secrev1..10`。security
+  枠のプロンプトは OpenAI の cyber classifier に切られるので correctness 枠で出す) で 10 + 6 + 9 + 9 + 14 + 11 + 17 + 16 + 20 + 12 件。
   0008 は branch 内で in-place 編集した (未リリース)。旧 0008 を適用済みの DB は作り直す。
   全件 security-owned code を Claude Code が修正し RED→GREEN で pin。round 4 で source の同一性を
   content-derived hash から保存 key (`memory_sources.sync_key`) に設計変更 (3 巡続けて同じ箇所が
@@ -73,7 +73,10 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
   復活可能な状態)、tuple と lineage を同一性として運び、parking の穴を塞いだ。round 9 でその閉包を閉じた
   (writer でも key は memory ごと、retirement は frontier 全部、tuple は revision ごと、pass 外の held 行、
   lineage 結合は全行 store 後、source の head 選択は revision id で決定的、tuple を奪われた退避行は
-  `sync_parked` に置いて merge しない)。semgrep 0、ponytail。契約の "Implementation notes" に round ごとの規則を記録。
+  merge しない)。round 10 でその閉包を閉じた (withheld payload の fill で tuple を運ぶ、lineage 結合は
+  同一 local memory の中だけ、terminal 削除は pass 後の sweep で全 holder に届く、resolution は残す head の
+  tuple を持つ、retirement は union 前に rebind、pass の退避は pass 内だけで永続化しない = round 9 で入れた
+  `sync_parked` テーブルは撤去)。semgrep 0、ponytail。契約の "Implementation notes" に round ごとの規則を記録。
   gate は `scratch/gate-us6.sh` (`P=us6-gate1`)。
 
 ## 再開順序と未完了事項

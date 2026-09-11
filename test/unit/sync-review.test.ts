@@ -1087,14 +1087,21 @@ test('a bound source whose row another head replaced in the pass is a tombstone 
     a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_one' WHERE raw_event_id = 'raw_two'").run();
     const result = pull(b, a, publish(a, dir));
     assert.equal(result.withheldOnApply, 0);
-    assert.deepEqual(b.db.prepare('SELECT raw_event_id, source_agent FROM memory_sources').all().map((row) => ({ ...row })), [{ raw_event_id: 'raw_one', source_agent: survivor }],
-      "the surviving row is A's raw_two row, never overwritten by B's edit of the retired one");
-    for (const origin of b.db.prepare("SELECT origin_id FROM sync_origins WHERE kind = 'source'").all()) {
-      for (const head of headsOf(b.db, String(origin.origin_id))) {
-        const revision = readRevision(b.db, head)!;
-        if (revision.control.tombstone) assert.ok(revision.parents.length > 0, 'a tombstone descends from the last materialized revision');
-      }
+    // The move onto the retired tuple names the deletion as a parent, so the two are one group:
+    // B's concurrent edit of the retired row and A's move resolve to one head, never a silent
+    // overwrite; A's row, or B's edit, is the row, and both devices agree.
+    const rowsB = b.db.prepare('SELECT raw_event_id, source_agent FROM memory_sources').all().map((row) => ({ ...row }));
+    assert.equal(rowsB.length, 1, 'one row');
+    assert.equal(rowsB[0]!.raw_event_id, 'raw_one');
+    assert.ok([survivor, 'codex'].includes(String(rowsB[0]!.source_agent)));
+    for (const origin of b.db.prepare("SELECT DISTINCT canonical_origin_id AS id FROM sync_origins WHERE kind = 'source'").all()) {
+      const heads = headsOf(b.db, String(origin.id));
+      assert.equal(heads.length, 1, 'one head per group');
+      const revision = readRevision(b.db, heads[0]!)!;
+      if (revision.control.tombstone) assert.ok(revision.parents.length > 0, 'a tombstone descends from the last materialized revision');
     }
+    pull(a, b, publish(b, dir));
+    assert.deepEqual(a.db.prepare('SELECT raw_event_id, source_agent FROM memory_sources').all().map((row) => ({ ...row })), rowsB, 'A converges on the same row');
   });
 });
 
@@ -1606,8 +1613,10 @@ test('a re-creation chain names every retired tombstone, so a new peer keeps the
     a.db.prepare('DELETE FROM memory_sources').run(); publish(a, dir);
     ctxSource(a.db, 'm_one', 'raw_one', 'a');
     const final = publish(a, dir);
-    const revival = readRevision(a.db, headsOf(a.db, `${a.id}:source:${keyOf(a.db, 'a')}`)[0]!)!;
-    assert.equal(revival.parents.length, 2, "the revival names its own tombstone and b's");
+    const groupA = readOrigin(a.db, `${a.id}:source:${keyOf(a.db, 'a')}`)!.canonical_origin_id;
+    assert.equal(sourceGroups(a.db).length, 1, 'the retired groups joined the re-creation');
+    assert.equal(headsOf(a.db, groupA).length, 1, 'the revival is the only head: every tombstone of the tuple is superseded');
+    assert.equal(readRevision(a.db, headsOf(a.db, groupA)[0]!)!.control.tombstone, false);
     const result = pull(b, a, final);
     assert.equal(result.withheldOnApply, 0);
     assert.deepEqual(sourceRows(b.db), ['m_one/raw_one/null/a'], 'the peer keeps the live re-creation');
@@ -1628,7 +1637,7 @@ test('a re-creation whose retired tombstone already has a child still names the 
     // A fresh re-creation under the original tuple, with other fields.
     ctxSource(a.db, 'm_one', 'raw_one', 'c');
     const final = publish(a, dir);
-    const created = readRevision(a.db, headsOf(a.db, `${a.id}:source:${keyOf(a.db, 'c')}`)[0]!)!;
+    const created = readRevision(a.db, headsOf(a.db, readOrigin(a.db, `${a.id}:source:${keyOf(a.db, 'c')}`)!.canonical_origin_id)[0]!)!;
     assert.ok(created.parents.length >= 1, 'the re-creation names the retired tombstone of its tuple');
     pull(b, a, final);
     assert.deepEqual(sourceRows(b.db), ['m_one/raw_one/null/c']);
@@ -1773,7 +1782,7 @@ test('a revival inserted by an origin that was already bound re-runs late bindin
   });
 });
 
-test('a parked row whose tuple another head took while its own head waited comes back where its head says, not merged into the taker', async () => {
+test('a head that wants the tuple of a parked row whose own head is blocked waits, so nothing is merged or lost', async () => {
   await withReplicas(2, (replicas, dir) => {
     const [a, b] = replicas as [Replica, Replica];
     for (const device of [a, b]) { insertMemory(device.db, 'm_one', 'Title', 'Body text'); for (const raw of ['raw_one', 'raw_two', 'raw_three', 'raw_five']) seedRawEvent(device.db, raw); }
@@ -1794,18 +1803,18 @@ test('a parked row whose tuple another head took while its own head waited comes
     a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_three', source_memory_id = 'm_q' WHERE source_agent = 'x'").run();
     a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_one' WHERE source_agent = 'y'").run();
     a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_two' WHERE raw_event_id = 'raw_five'").run();
-    pull(b, a, publish(a, dir, ['eligible']));
+    const waited = pull(b, a, publish(a, dir, ['eligible']));
     assert.equal(authoredSources(b.db, b), 0, 'the closing capture records nothing the user did not do');
-    assert.deepEqual(sourceRows(b.db), ['m_one/raw_one/null/x', 'm_one/raw_two/null/w0'], "Y waits aside: X's row is not evaluable yet and W took raw_two");
+    // Y waits on X's row (not evaluable yet); W waits on Y's parked row (blocked): all three rows as they were.
+    assert.equal(waited.withheldOnApply, 2);
+    assert.deepEqual(sourceRows(b.db), ['m_one/raw_five/null/w0', 'm_one/raw_one/null/x', 'm_one/raw_two/null/y']);
     assert.equal(sourceGroups(b.db).length, 3, 'no group joined another');
-    assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM sync_parked').get()?.n, 1);
     capture(b, 250);
-    assert.equal(authoredSources(b.db, b), 0, 'the row set aside is not a deletion');
-    // The private memory arrives: X moves away, Y takes raw_one, W keeps raw_two: as on A.
+    assert.equal(authoredSources(b.db, b), 0);
+    // The private memory arrives: X moves away, Y takes raw_one, W takes raw_two: as on A.
     const landed = pull(b, a, publish(a, dir));
     assert.equal(landed.withheldOnApply, 0);
     assert.deepEqual(sourceRows(b.db), ['m_one/raw_one/null/y', `m_one/raw_three/${String(memoryOf(b, a, 'm_q').id)}/x`, 'm_one/raw_two/null/w0']);
-    assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM sync_parked').get()?.n, 0);
     assert.equal(authoredSources(b.db, b), 0);
   });
 });
@@ -1975,5 +1984,211 @@ test('a deletion authored under the old origin of a re-created source reaches th
     b.db.prepare('DELETE FROM memory_sources').run();
     pull(a, b, publish(b, dir));
     assert.deepEqual(sourceRows(a.db), [], "B's deletion reaches A");
+  });
+});
+
+function forgeBundleR10(path: string, edit: (line: Line) => Line, extra: Line[] = []): string {
+  const [header, ...rest] = readFileSync(path, 'utf8').split('\n').filter((line) => line !== '').map((line) => JSON.parse(line) as Line);
+  const lines = [...rest.map((line) => (line.kind === 'repo' ? line : edit(line))), ...extra];
+  const digest = createHash('sha256');
+  const body = lines.map((line) => `${canonicalJson(line)}\n`);
+  for (const text of body) digest.update(Buffer.from(text, 'utf8'));
+  const full: Line = { ...header!, revision_lines: lines.filter((line) => line.kind !== 'repo').length, heads: lines.filter((line) => line.head === true).length,
+    revisions_sha256: digest.digest('hex') };
+  full.snapshot_id = snapshotId(String(full.space_id), String(full.replica_origin_id), String(full.revisions_sha256));
+  const forged = `${path}.forged`;
+  writeFileSync(forged, `${canonicalJson(full)}\n${body.join('')}`);
+  return forged;
+}
+
+
+// Round ten.
+
+test('a payload filled after it was withheld brings its tuple, so a later deletion names the right citation', async () => {
+  await withReplicas(3, (replicas, dir) => {
+    const [a, b, c] = replicas as [Replica, Replica, Replica];
+    for (const device of [a, b, c]) { insertMemory(device.db, 'm_one', 'Title', 'Body text', { sensitivity: 'private' }); seedRawEvent(device.db); seedRawEvent(device.db, 'raw_two'); }
+    ctxSource(a.db, 'm_one', 'raw_one', 'a');
+    pull(b, a, publish(a, dir, ['private']));
+    a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_two'").run();
+    // The move ships identity-only while the 'private' class is not selected, then with its payload.
+    pull(b, a, publish(a, dir, ['eligible']));
+    assert.deepEqual(sourceRows(b.db), ['m_one/raw_one/null/a'], 'the row waits for the payload');
+    pull(b, a, publish(a, dir, ['private']));
+    assert.deepEqual(sourceRows(b.db), ['m_one/raw_two/null/a'], 'the filled payload moves the row');
+    b.db.prepare('DELETE FROM memory_sources').run();
+    const tombstone = publish(b, dir, ['private']);
+    // C captured both citations on its own: the deletion names raw_two, the tuple the filled payload held.
+    ctxSource(c.db, 'm_one', 'raw_one', 'c1');
+    ctxSource(c.db, 'm_one', 'raw_two', 'c2');
+    publish(c, dir);
+    pull(c, b, tombstone);
+    assert.deepEqual(sourceRows(c.db), ['m_one/raw_one/null/c1'], 'raw_two is deleted, raw_one stays');
+  });
+});
+
+test('a lineage link between sources under memories this device keeps in different repositories joins nothing', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, d] = replicas as [Replica, Replica];
+    for (const device of [a, d]) { secondRepo(device.db); insertMemory(device.db, 'm_one', 'Title', 'Body text'); memoryInRepo2(device.db, 'm_two', 'Title', 'Body text'); seedRawEvent(device.db); }
+    ctxSource(a.db, 'm_one', 'raw_one', 'x');
+    ctxSource(a.db, 'm_two', 'raw_one', 'y');
+    pull(d, a, publish(a, dir));
+    assert.equal(sourceRows(d.db).length, 2);
+    const originX = `${a.id}:source:${keyOf(a.db, 'x')}`;
+    const originY = `${a.id}:source:${keyOf(a.db, 'y')}`;
+    // A device that maps both repositories onto one would resolve the two rows as one source and
+    // publish a resolution naming both heads; here it is forged onto A's own bundle.
+    const path = publish(a, dir);
+    const headX = headsOf(a.db, originX)[0]!;
+    const headY = headsOf(a.db, originY)[0]!;
+    const lineX = readFileSync(path, 'utf8').split('\n').filter((line) => line !== '').map((line) => JSON.parse(line) as Line).find((line) => line.revision_id === headX)!;
+    const merged: Line = { origin_id: originX, kind: 'source', author: a.id, parents: [headX, headY].sort(), control: lineX.control, natural: lineX.natural,
+      payload_hash: lineX.payload_hash };
+    const extra: Line = { ...merged, revision_id: revisionId(merged as unknown as Parameters<typeof revisionId>[0]), payload: lineX.payload, head: true };
+    const result = pull(d, a, forgeBundleR10(path, (line) => (line.revision_id === headX || line.revision_id === headY ? { ...line, head: false } : line), [extra]));
+    assert.equal(result.withheldOnApply, 0);
+    assert.deepEqual(sourceRows(d.db), ['m_one/raw_one/null/x', 'm_two/raw_one/null/y'], 'both rows stay: the memories are different rows here');
+    assert.equal(sourceGroups(d.db).length, 2);
+  });
+});
+
+test('a head without payload of an origin the alias by key rejected does not claim the row of another memory', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    for (const device of [a, b]) { secondRepo(device.db); seedRawEvent(device.db); }
+    // A's memory is private and never shipped; B's memory of the same material (another repository) has the same source fields: the same key.
+    insertMemory(a.db, 'm_one', 'Title', 'Body text', { sensitivity: 'private' });
+    memoryInRepo2(b.db, 'm_two', 'Title', 'Body text');
+    ctxSource(a.db, 'm_one', 'raw_one', 'a');
+    ctxSource(b.db, 'm_two', 'raw_one', 'a');
+    publish(b, dir);
+    pull(b, a, publish(a, dir, ['eligible']));
+    assert.equal(keyOf(a.db, 'a'), keyOf(b.db, 'a'), 'same key');
+    const origin = readOrigin(b.db, `${a.id}:source:${keyOf(a.db, 'a')}`)!;
+    assert.equal(origin.local_id, null, "A's origin stays unbound: its memory is not here");
+    a.db.prepare('DELETE FROM memory_sources').run();
+    pull(b, a, publish(a, dir, ['eligible']));
+    assert.deepEqual(sourceRows(b.db), ['m_two/raw_one/null/a'], "A's deletion does not reach B's row");
+  });
+});
+
+test('a resolution carries the tuple of the head it keeps, not of its first parent', async () => {
+  await withReplicas(3, (replicas, dir) => {
+    const [a, b, c] = replicas as [Replica, Replica, Replica];
+    for (const device of [a, b, c]) { insertMemory(device.db, 'm_one', 'Title', 'Body text'); seedRawEvent(device.db); seedRawEvent(device.db, 'raw_two'); }
+    ctxSource(a.db, 'm_one', 'raw_one', 'a');
+    pull(b, a, publish(a, dir));
+    const origin = `${a.id}:source:${keyOf(a.db, 'a')}`;
+    // A deletes at raw_one; B moves to raw_two and deletes: two tombstone heads with different tuples, equivalent to the merge.
+    a.db.prepare('DELETE FROM memory_sources').run();
+    b.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_two'").run();
+    publish(b, dir);
+    b.db.prepare('DELETE FROM memory_sources').run();
+    pull(a, b, publish(b, dir));
+    const heads = headsOf(a.db, origin);
+    assert.equal(heads.length, 2, 'two equivalent tombstones stay side by side');
+    const keep = heads[1]!;
+    const kept = readRevision(a.db, keep)!.tuple!;
+    a.db.exec('BEGIN IMMEDIATE');
+    const { revision_id } = resolveRow(a.db, origin, keep, 300);
+    a.db.exec('COMMIT');
+    assert.deepEqual(readRevision(a.db, revision_id)!.tuple, kept, 'the resolution names the kept tuple');
+    // A fresh device holding both citations loses the one the kept head named.
+    ctxSource(c.db, 'm_one', 'raw_one', 'c1');
+    ctxSource(c.db, 'm_one', 'raw_two', 'c2');
+    publish(c, dir);
+    pull(c, a, publish(a, dir));
+    assert.deepEqual(sourceRows(c.db), [kept.raw_event_id === 'raw_one' ? 'm_one/raw_two/null/c2' : 'm_one/raw_one/null/c1']);
+  });
+});
+
+test('a tombstone without a row whose tuple a row the pass cannot evaluate holds waits instead of applying to nothing', async () => {
+  await withReplicas(3, (replicas, dir) => {
+    const [a, b, c] = replicas as [Replica, Replica, Replica];
+    for (const device of [a, b, c]) { insertMemory(device.db, 'm_one', 'Title', 'Body text', { sensitivity: 'private' }); seedRawEvent(device.db); seedRawEvent(device.db, 'raw_two'); }
+    ctxSource(b.db, 'm_one', 'raw_one', 'b');
+    pull(c, b, publish(b, dir, ['private']));
+    // B moves the row, but ships it identity-only (the 'private' class is not selected): C cannot evaluate the row.
+    b.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_two'").run();
+    pull(c, b, publish(b, dir, ['eligible']));
+    assert.deepEqual(sourceRows(c.db), ['m_one/raw_one/null/b']);
+    // A captured and deleted the raw_one citation on its own (its memory is eligible so the tombstone ships).
+    insertMemory(a.db, 'm_two', 'Other', 'Other body');
+    a.db.prepare('DELETE FROM memory_sources').run();
+    a.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_one', 'file_read', 1, 'a')").run();
+    publish(a, dir, ['private']);
+    a.db.prepare('DELETE FROM memory_sources').run();
+    const tombstone = publish(a, dir, ['private']);
+    const waited = pull(c, a, tombstone);
+    assert.equal(waited.withheldOnApply, 1, 'the deletion waits for the row it may name');
+    assert.deepEqual(c.db.prepare("SELECT withheld_reason FROM sync_origins WHERE withheld_reason IS NOT NULL AND kind = 'source'").all().map((row) => row.withheld_reason), ['tuple_held']);
+    assert.deepEqual(sourceRows(c.db), ['m_one/raw_one/null/b'], 'the row is still there');
+    // The payload arrives: B's row moves away; A's deletion then names nothing here and is done.
+    pull(c, b, publish(b, dir, ['private']));
+    assert.deepEqual(sourceRows(c.db), ['m_one/raw_two/null/b'], 'the row moved');
+    const again = pull(c, a, tombstone);
+    assert.equal(again.withheldOnApply, 0, 'the tombstone applies to nothing and stops waiting');
+    assert.deepEqual(sourceRows(c.db), ['m_one/raw_two/null/b']);
+  });
+});
+
+test('a deletion whose tuple grew before it reaches every row holding a part of it', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    for (const device of [a, b]) { insertMemory(device.db, 'm_one', 'Title', 'Body text'); insertMemory(device.db, 'm_z', 'Zed', 'Zed body'); seedRawEvent(device.db); }
+    ctxSource(a.db, 'm_one', 'raw_one', 'a');
+    pull(b, a, publish(a, dir));
+    ctxSource(b.db, 'm_one', null, 'b', 'm_z');
+    publish(b, dir);
+    // A adds the dependency to its source, then deletes it: B sees only the tombstone, whose tuple holds both parts.
+    a.db.prepare("UPDATE memory_sources SET source_memory_id = 'm_z'").run();
+    publish(a, dir);
+    a.db.prepare('DELETE FROM memory_sources').run();
+    const result = pull(b, a, publish(a, dir));
+    assert.equal(result.withheldOnApply, 0);
+    assert.deepEqual(sourceRows(b.db), [], "B's row that cites m_z is the same source: it goes too");
+    for (const group of sourceGroups(b.db)) assert.equal(headsOf(b.db, group).length, 1);
+  });
+});
+
+test('re-creations of one tuple keep one group, so their parents never outgrow the bound', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    for (const device of [a, b]) { insertMemory(device.db, 'm_one', 'Title', 'Body text'); seedRawEvent(device.db); }
+    let path = '';
+    for (let i = 0; i < 6; i += 1) {
+      ctxSource(a.db, 'm_one', 'raw_one', `agent${i}`);
+      path = publish(a, dir);
+      assert.equal(sourceGroups(a.db).length, 1, `one group after re-creation ${i}`);
+      const head = headsOf(a.db, sourceGroups(a.db)[0]!);
+      assert.equal(head.length, 1);
+      assert.ok(readRevision(a.db, head[0]!)!.parents.length <= 2, 'a re-creation names the frontier, not every retired origin');
+      if (i < 5) { a.db.prepare('DELETE FROM memory_sources').run(); publish(a, dir); }
+    }
+    pull(b, a, path);
+    assert.deepEqual(sourceRows(b.db), ['m_one/raw_one/null/agent5'], 'a fresh peer keeps the live re-creation');
+  });
+});
+
+test('a re-creation whose retirement union changes the canonical records nothing on the next capture', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    // The origin that sorts first becomes canonical of a union: the tombstone's author must sort before the re-creator.
+    const [first, second] = (replicas as [Replica, Replica]).sort((x, y) => (x.id < y.id ? -1 : 1)) as [Replica, Replica];
+    for (const device of [first, second]) { insertMemory(device.db, 'm_one', 'Title', 'Body text'); seedRawEvent(device.db); }
+    ctxSource(first.db, 'm_one', 'raw_one', 'a');
+    publish(first, dir);
+    first.db.prepare('DELETE FROM memory_sources').run();
+    pull(second, first, publish(first, dir));
+    assert.deepEqual(sourceRows(second.db), []);
+    // The re-creation with other fields: a new origin that unions with the retired one, whose id sorts first.
+    ctxSource(second.db, 'm_one', 'raw_one', 'b');
+    capture(second, 200);
+    assert.equal(sourceGroups(second.db).length, 1);
+    const settled = revisionCount(second.db);
+    capture(second, 300);
+    assert.equal(revisionCount(second.db), settled, 'a change-free capture records nothing');
+    assert.equal(headsOf(second.db, sourceGroups(second.db)[0]!).length, 1, 'one head, no phantom sibling');
+    assert.equal(authoredSources(second.db, second), 1);
   });
 });

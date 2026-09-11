@@ -12,7 +12,7 @@ import {
 import { BOUNDS, ENTITY_REFERENCES, type Control } from './format.js';
 import { canonicalJson, payloadHash, revisionId, type Sensitivity, type SyncKind } from './identity.js';
 import {
-  canonicalOf, createOrigin, effectiveControl, headsOf, originsOfRow, readOrigin, readRevision, registerLocalRepos,
+  bindOrigin, canonicalOf, createOrigin, effectiveControl, headsOf, originsOfRow, readOrigin, readRevision, registerLocalRepos,
   replicaOriginId, setSelectedHead, sourceTupleOf, stateHash, storeRevision, unionOrigins, type Origin, type Revision,
 } from './store.js';
 
@@ -51,7 +51,7 @@ export function sourceLocalId(db: DatabaseSync, rowid: string, resolve: Resolver
   const content = [memory?.material_hash ?? memory?.content_hash ?? null, SOURCE_FIELDS.map((field) => record[field] ?? null)];
   for (let ordinal = 0; ; ordinal += 1) {
     const key = sha256Json([content, ordinal]);
-    if (prepared(db, 'SELECT 1 FROM memory_sources WHERE sync_key = ? UNION ALL SELECT 1 FROM sync_parked WHERE sync_key = ?').get(key, key) !== undefined) continue;
+    if (prepared(db, 'SELECT 1 FROM memory_sources WHERE sync_key = ?').get(key) !== undefined) continue;
     // A key whose origin names another memory (the same material elsewhere), or whose own origin
     // moved onto another row, is not this row's: the origin the key would find is not its own.
     const held = readOrigin(db, resolve.originOf('source', `source:${key}`));
@@ -233,20 +233,33 @@ export function captureLocalChanges(db: DatabaseSync, now: number): CaptureResul
     const natural = naturalOf(kind, row, originId, resolve);
     let origin = readOrigin(db, originId);
     if (origin === undefined) origin = createOrigin(db, { origin_id: originId, kind, local_id: localId, natural });
-    const canonical = canonicalOf(db, origin.origin_id);
-    const payload = alignToNatural(kind, toOriginForm(kind, row, originId, resolve), canonical.natural);
+    let canonical = canonicalOf(db, origin.origin_id);
+    let payload = alignToNatural(kind, toOriginForm(kind, row, originId, resolve), canonical.natural);
     const control = controlOf(kind, row);
-    const hash = payloadHash(payload);
-    const state = stateHash(hash, control);
+    let hash = payloadHash(payload);
+    let state = stateHash(hash, control);
     if (canonical.materialized_hash === state) return;
     let parents = canonical.materialized_revision === null ? [] : [canonical.materialized_revision];
     // A source that is new, or comes back after its own deletion, names the deletions of the
-    // groups that held its tuples: their revival, recorded once for every device.
+    // groups that held its tuples: their revival, recorded once for every device. The retired
+    // groups join this row's group (their origins rebound onto the row: a retired origin still
+    // names the row it lost), and the canonical that results carries the revision.
     const base = canonical.materialized_revision === null ? undefined : readRevision(db, canonical.materialized_revision);
-    if (kind === 'source' && (parents.length === 0 || base?.control.tombstone === true)) {
-      const retired = retiredSources(db, String(row.memory_id), canonical.origin_id, sourceTupleOf(payload), replica, now, result);
-      parents = [...new Set([...parents, ...retired])].slice(0, BOUNDS.parentsPerRevision);
-      for (const head of retired) unionOrigins(db, canonical.origin_id, readRevision(db, head)!.origin_id);
+    const tuple = kind === 'source' ? sourceTupleOf(payload) : null;
+    const moved = base !== undefined && !base.control.tombstone && canonicalJson(base.tuple ?? null) !== canonicalJson(tuple);
+    if (kind === 'source' && (parents.length === 0 || base?.control.tombstone === true || moved)) {
+      const retired = retiredSources(db, String(row.memory_id), canonical.origin_id, tuple!, replica, now, result);
+      for (const head of retired) {
+        const group = canonicalOf(db, readRevision(db, head)!.origin_id);
+        if (group.local_id !== null && group.local_id !== localId) for (const member of originsOfRow(db, 'source', group.local_id)) bindOrigin(db, member.origin_id, localId);
+        unionOrigins(db, canonical.origin_id, group.origin_id);
+      }
+      canonical = canonicalOf(db, origin.origin_id);
+      payload = alignToNatural(kind, toOriginForm(kind, row, canonical.origin_id, resolve), canonical.natural);
+      hash = payloadHash(payload);
+      state = stateHash(hash, control);
+      if (canonical.materialized_hash === state) return;
+      parents = [...new Set([...(canonical.materialized_revision === null ? [] : [canonical.materialized_revision]), ...retired])].slice(0, BOUNDS.parentsPerRevision);
     }
     const revision: Revision = {
       revision_id: '', origin_id: canonical.origin_id, kind, author: replica, parents, control,
@@ -264,10 +277,8 @@ export function captureLocalChanges(db: DatabaseSync, now: number): CaptureResul
   for (const row of visibilityRecords(db)) record('visibility', row, String(row.id));
   for (const row of proposalRecords(db)) record('sharing_proposal', row, String(row.id));
 
-  // Rows that vanished (sources and grants are physically deleted) become tombstones once; a
-  // source row a pass set aside is not gone.
-  for (const stored of prepared(db, `SELECT * FROM sync_origins WHERE local_id IS NOT NULL AND origin_id = canonical_origin_id
-      AND NOT EXISTS (SELECT 1 FROM sync_parked WHERE 'source:' || sync_key = sync_origins.local_id)`).all()) {
+  // Rows that vanished (sources and grants are physically deleted) become tombstones once.
+  for (const stored of prepared(db, `SELECT * FROM sync_origins WHERE local_id IS NOT NULL AND origin_id = canonical_origin_id`).all()) {
     const origin: Origin = { ...stored, natural: JSON.parse(String(stored.natural_json)) as Row } as unknown as Origin;
     const key = `${String(stored.kind)} ${String(stored.local_id)}`;
     if (seen.has(key)) continue;

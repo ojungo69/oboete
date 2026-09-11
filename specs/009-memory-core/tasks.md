@@ -197,7 +197,7 @@ writers require separate worktrees. No deployment follows merely from an increme
   store, capture, publish, stage, apply, space, status), `oboete sync` (init/join/key show/
   push/pull/status/resolve/map-repo/leave, exit codes 0–4), MCP `sync_status` (read-only),
   `oboete doctor` `sync` item, and the local approval record written by every approval. Tests:
-  `test/unit/sync*.test.ts` (seven files, 168 cases; the bounds file gates its 256 MiB push and
+  `test/unit/sync*.test.ts` (seven files, 176 cases; the bounds file gates its 256 MiB push and
   180,000-line graphs behind `OBOETE_SYNC_HEAVY=1`; `sync-review.test.ts` pins every review
   finding). Writing the verification list found and fixed seven
   apply/publish defects (phantom work successor, resolution successor chain check, checkpoint
@@ -207,7 +207,7 @@ writers require separate worktrees. No deployment follows merely from an increme
   (`revisions_sha256` scope, `sync.key_id` allow-list, `status.ts` as the one module doctor and
   MCP import) plus the `--republish` delivery-identity bullet. Review rounds (`/code-review high`
   three times plus one finder angle, Codex correctness passes, receipts under
-  `/var/tmp/oboete-009-20260909.jJ5grc/us6/`) found 10 + 6 + 9 + 9 + 14 + 11 + 17 + 16 + 20 defects, each fixed in
+  `/var/tmp/oboete-009-20260909.jJ5grc/us6/`) found 10 + 6 + 9 + 9 + 14 + 11 + 17 + 16 + 20 + 12 defects, each fixed in
   security-owned code by Claude Code and pinned RED→GREEN in `sync-review.test.ts`; round four
   replaced the content-derived source identity with a stored key (`memory_sources.sync_key`) and
   made write-time aliases re-enter the pass; round five closed the holes that redesign opened
@@ -219,7 +219,10 @@ writers require separate worktrees. No deployment follows merely from an increme
   tuple and lineage as sameness, and closed the parking holes; round nine closed that closure
   (per-memory key in the writer, retirement frontier, tuple per revision, held rows outside the
   pass, lineage join after store, deterministic source selection, rows set aside instead of
-  merged into a taker). The contract's "Implementation notes" record the
+  merged into a taker); round ten closed round nine (tuple filled with a withheld payload,
+  lineage join only within one local memory, terminal deletions reaching every holder through a
+  post-pass sweep, resolutions carrying the kept head's tuple, retirement rebinding before union,
+  and the transient park held only within a pass). The contract's "Implementation notes" record the
   rules per round. 0008 was edited in place: a
   database that applied an earlier 0008 of this branch must be recreated (nothing released).
   The full gate is recorded below when it completes.

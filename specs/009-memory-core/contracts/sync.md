@@ -549,10 +549,9 @@ several origins may map to one local id, and the row's selected head, `materiali
 `materialized_revision` live on its canonical origin), `sync_revisions` (revision_id,
 origin_id, kind, author, parents JSON, control JSON, payload_hash, payload JSON or null,
 received-from replica, and for a source revision `tuple_json`, its UNIQUE tuple, see "Envelope
-and lines"), `sync_repo_mappings` (repo key ↔ local repo id), `sync_parked` (a source row a pass
-set aside because another head took its tuple while its own head waited: key, memory, the row as
-it was), and the local approval record's candidate hash/projection/scope columns. No trigger is
-added to the tracked tables, and one column (`memory_sources.sync_key`, the row's identity). Heads are derived
+and lines"), `sync_repo_mappings` (repo key ↔ local repo id), and the local approval record's
+candidate hash/projection/scope columns. No trigger is added to the tracked tables, and one
+column (`memory_sources.sync_key`, the row's identity). Heads are derived
 (`revisions with no stored child`),
 not stored. `sync_conflicts` (0003) is reused as the conflict report. 0001–0007 tables are
 otherwise untouched.
@@ -814,6 +813,33 @@ findings, the closure of round eight's sameness rules):
   free (the round-eight restore-merge is gone);
 - a store bound reached by a local capture under the space lock (`revisions_per_origin`) is a
   `SyncError`, not a crash.
+
+Round ten (2026-09-12, Codex correctness pass + `/code-review high` on round nine; twelve
+findings, the closure of round nine):
+
+- a source revision keeps a tuple only from its own payload, or, for a control-only revision
+  (`payload_hash` null), its first parent's; a revision whose payload is withheld on the wire
+  (`payload_hash` set, payload null) waits for the payload and takes its tuple when the payload
+  is filled (`storePayload` writes `tuple_json`), so a later deletion never names a stale tuple;
+- a parent link joins two source groups only where both memories resolve to one local row (two
+  repositories a device keeps apart stay apart, and the link is read again if the mapping
+  changes); the join runs after every line of the bundle is stored;
+- a source head with no payload, and a source tombstone, name their row only through a bound
+  origin: an unbound origin whose key a row of another memory holds claims nothing;
+- a terminal source head reaches every local row holding a part of its tuple (a post-pass sweep
+  joins the holders into the terminal origin, whatever order the heads were written in, and a
+  bound origin's own row absorbs them); a holder the pass cannot evaluate makes the deletion
+  wait (`tuple_held`); when the holder later moves away, the deletion applies to nothing and
+  stops waiting;
+- a resolution carries the tuple of the head it keeps, not of its first parent (`resolveRow`
+  and the automatic sibling resolution pass it through);
+- a re-creation rebinds every retired group's origins onto the row before it unions them, and
+  re-reads the canonical the union produced before recording its revision, so the groups stay
+  one and the next unchanged capture records no phantom sibling; a move onto a retired tuple
+  names the retirement too;
+- the transient park a pass makes to let heads exchange tuples is held only for the pass and
+  restored before it returns (no state persists between pulls): a head whose tuple a parked row
+  whose own head is blocked holds waits, so nothing is merged into a taker or read as a deletion.
 
 ## Verification (T034–T036)
 

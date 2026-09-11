@@ -62,15 +62,6 @@ CREATE TABLE sync_revisions (
 ) STRICT;
 CREATE INDEX sync_revisions_origin ON sync_revisions(origin_id);
 
--- A source row a pass set aside: its own head could not be applied yet and another head took its
--- UNIQUE tuple, so the row waits here as it was (the log never made the two the same) until a
--- pass can apply its head or put it back.
-CREATE TABLE sync_parked (
-  sync_key TEXT PRIMARY KEY,
-  memory_id TEXT NOT NULL,
-  row_json TEXT NOT NULL CHECK (json_valid(row_json))
-) STRICT;
-
 CREATE TABLE sync_revision_parents (
   child TEXT NOT NULL REFERENCES sync_revisions(revision_id),
   parent TEXT NOT NULL,
