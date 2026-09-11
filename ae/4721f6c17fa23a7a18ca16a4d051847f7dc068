@@ -1,0 +1,19 @@
+test/unit/migration-matrix.test.ts
+  s_ce84c7de7d1c09::t_14e19e5e064f3e 58,110,116,126,130,139,145,233,267,282,299,303,311,320,373,409,445,473,486,500,507
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "ae4721f6c17fa23a7a18ca16a4d051847f7dc068",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
