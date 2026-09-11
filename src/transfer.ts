@@ -19,6 +19,7 @@ import { EXPORT_FORMAT, MAX_LINE_BYTES, MAX_FILE_BYTES, type ImportResult, type 
 import { readTransferPlan, TransferInputError, type TransferPlan } from './transfer-plan.js';
 import { mergeTransferPlan } from './transfer-merge.js';
 import { runImportPromote } from './transfer-promote.js';
+import { contextRecords, memoryRecords, proposalRecords, sourceRecords, visibilityRecords, workRecords } from './transfer-records.js';
 import { NATIVE_FORMAT, NATIVE_REVISION, MAX_NATIVE_LINE_BYTES, nativeRecordSchema } from './transfer-format.js';
 export { EXPORT_FORMAT } from './transfer-format.js';
 
@@ -91,41 +92,13 @@ function exportNative(db: DatabaseSync, write: (line: string) => void, now: numb
     emit({ kind: 'repo', ...row });
   }
   const counts = { memories: 0, tombstones: 0 };
-  const personal = db.prepare(`SELECT 1 FROM memory_visibility WHERE memory_id = ? AND audience = 'personal'
-    UNION SELECT 1 FROM migration_records WHERE destination_memory_id = ? AND identity_domain = 'personal_projection' LIMIT 1`);
-  for (const row of db.prepare(`SELECT ${MEMORY_COLUMNS}, work_id, checkpoint_parent_id,
-    provenance_complete, source_captured_at FROM memories ORDER BY created_at, id`).iterate()) {
-    const withoutText = row.deleted_at !== null || row.sensitivity === 'secret';
-    emit({ kind: 'memory', ...row, identity_domain: personal.get(row.id, row.id) ? 'personal_projection' : 'ordinary',
-      title: withoutText ? '' : row.title, body: withoutText ? '' : row.body,
-      concepts: withoutText ? '[]' : row.concepts, source_agent: null });
-    if (row.deleted_at === null) counts.memories += 1;
+  for (const record of memoryRecords(db)) {
+    emit(record);
+    if (record.deleted_at === null) counts.memories += 1;
     else counts.tombstones += 1;
   }
-  for (const row of db.prepare(`SELECT s.*, m.deleted_at AS parent_deleted_at, m.sensitivity AS parent_sensitivity
-    FROM memory_sources s JOIN memories m ON m.id = s.memory_id ORDER BY s.id`).iterate()) {
-    const { parent_deleted_at, parent_sensitivity, ...source } = row;
-    const redacted = parent_deleted_at !== null || parent_sensitivity === 'secret';
-    emit({ kind: 'source', ...source, id: String(row.id), evidence: redacted ? null : row.evidence,
-      citation_value: redacted ? null : row.citation_value, source_agent: redacted ? null : row.source_agent,
-      capture_root: redacted ? null : row.capture_root, source_paths_json: redacted ? null : row.source_paths_json });
-  }
-  for (const row of db.prepare('SELECT * FROM work_contexts ORDER BY id').iterate()) emit({ kind: 'context', ...row, redacted: false });
-  for (const row of db.prepare('SELECT * FROM work_items ORDER BY id').iterate()) {
-    const redacted = row.purpose_sensitivity === 'secret';
-    emit({ kind: 'work', ...row, purpose: redacted ? null : row.purpose, redacted });
-  }
-  for (const row of db.prepare('SELECT * FROM memory_visibility ORDER BY id').iterate()) emit({ kind: 'visibility', ...row });
-  for (const row of db.prepare(`SELECT p.*, m.deleted_at AS origin_deleted_at, m.sensitivity AS origin_sensitivity,
-    projected.deleted_at AS projection_deleted_at, projected.sensitivity AS projection_sensitivity
-    FROM sharing_proposals p JOIN memories m ON m.id = p.origin_memory_id
-    LEFT JOIN memories projected ON projected.id = p.projected_memory_id ORDER BY p.id`).iterate()) {
-    const { origin_deleted_at, origin_sensitivity, projection_deleted_at, projection_sensitivity, ...proposal } = row;
-    const redacted = origin_deleted_at !== null || origin_sensitivity === 'secret' || row.candidate_sensitivity === 'secret'
-      || projection_deleted_at !== null || projection_sensitivity === 'secret';
-    emit({ kind: 'sharing_proposal', ...proposal, redacted,
-      candidate_title: redacted ? '' : row.candidate_title, candidate_body: redacted ? '' : row.candidate_body,
-        source_event_ids_json: redacted ? '[]' : row.source_event_ids_json });
+  for (const records of [sourceRecords, contextRecords, workRecords, visibilityRecords, proposalRecords]) {
+    for (const record of records(db)) emit(record);
   }
   for (const row of db.prepare(`SELECT r.*, m.deleted_at AS parent_deleted_at, m.sensitivity AS parent_sensitivity
     FROM migration_records r LEFT JOIN memories m ON m.id = r.destination_memory_id ORDER BY r.id`).iterate()) {

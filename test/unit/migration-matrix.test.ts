@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { contentHash, materialHash, memoryIdFor } from '../../src/db/identity.js';
-import { MIGRATIONS, openDatabase } from '../../src/db/open.js';
+import { LATEST_SCHEMA_VERSION, MIGRATIONS, openDatabase } from '../../src/db/open.js';
 import { grantVisibility } from '../../src/db/queries.js';
 import { sha256Hex, sha256Json } from '../../src/hash.js';
 import { oboetePaths } from '../../src/paths.js';
@@ -216,9 +216,9 @@ test('matrix A3: preview preserves missing, behind, ahead and writer-held WAL de
             assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map((row) => row.version), [1, 2, 3, 4, 5, 6]);
             assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name = 'migration_records'").get(), undefined);
           } else db = openDatabase({ path: oboetePaths(target).db, timeoutMs: 2_000 }).db;
-          if (schema === 'ahead') db.exec('PRAGMA user_version = 8');
+          if (schema === 'ahead') db.exec(`PRAGMA user_version = ${LATEST_SCHEMA_VERSION + 1}`);
           if (schema === 'ready') {
-            assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 7);
+            assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, LATEST_SCHEMA_VERSION);
             assert.equal(db.prepare('PRAGMA journal_mode').get()?.journal_mode, 'wal');
             writer = openDatabase({ path: oboetePaths(target).db, timeoutMs: 2_000 }).db;
             writer.exec("BEGIN IMMEDIATE; INSERT INTO runtime_state (key, value_json, updated_at) VALUES ('uncommitted-writer', '1', 1)");

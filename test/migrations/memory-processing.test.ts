@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
-import { MIGRATIONS, SchemaAheadError, openDatabase } from '../../src/db/open.js';
+import { LATEST_SCHEMA_VERSION, MIGRATIONS, SchemaAheadError, openDatabase } from '../../src/db/open.js';
 import { assertLease, releaseLease } from '../../src/worker/lease.js';
 import { memoryScope, listMemories } from '../../src/db/queries.js';
 import { withTempHome } from '../helpers/home.js';
@@ -33,7 +33,7 @@ test('version-6 upgrade preserves local data and creates one stable public repli
     const opened = openDatabase({ path, timeoutMs: 1000 });
     const origin = opened.db.prepare('SELECT origin_id FROM replica_identity WHERE id = 1').get()?.origin_id;
     try {
-      assert.equal(opened.schemaVersion, 7);
+      assert.equal(opened.schemaVersion, LATEST_SCHEMA_VERSION);
       assert.deepEqual(opened.db.prepare('SELECT * FROM schema_migrations WHERE version <= 6 ORDER BY version').all(), migrations);
       assert.deepEqual(opened.db.prepare('SELECT * FROM repos').all(), repos);
       assert.match(String(origin), /^[0-9a-f]{32}$/u);
@@ -68,7 +68,7 @@ test('version-3 upgrade preserves evidence and leaves historical terminal source
 
     const opened = openDatabase({ path, timeoutMs: 1000 });
     try {
-      assert.equal(opened.schemaVersion, 7);
+      assert.equal(opened.schemaVersion, LATEST_SCHEMA_VERSION);
       assert.deepEqual(opened.db.prepare('SELECT * FROM schema_migrations WHERE version <= 3 ORDER BY version').all(), hashes);
       assert.deepEqual(opened.db.prepare(
         'SELECT id, content, processing_state, processed_at, expires_at FROM raw_events ORDER BY id',
@@ -99,7 +99,7 @@ test('migration waits for a live old worker and can continue after it releases i
       assert.throws(upgrade, /worker.*migration/i);
       assert.equal(old.prepare('PRAGMA user_version').get()?.user_version, 3);
       assert.equal(releaseLease(old, 'old-worker', () => true), 'released');
-      assert.equal(upgrade().schemaVersion, 7);
+      assert.equal(upgrade().schemaVersion, LATEST_SCHEMA_VERSION);
     } finally {
       for (const db of handles) db.close();
     }
@@ -114,7 +114,7 @@ test('migration fences a stale old worker before publishing the new schema', asy
       .run(Date.now() - 60_000);
     const opened = openDatabase({ path, timeoutMs: 1000 });
     try {
-      assert.equal(opened.schemaVersion, 7);
+      assert.equal(opened.schemaVersion, LATEST_SCHEMA_VERSION);
       assert.equal(assertLease(old, 'old-worker', Date.now()), false,
         'an old worker cannot run its pre-migration purge or apply after the schema changes');
     } finally {
@@ -157,7 +157,7 @@ test('version-4 upgrade holds unknown work and fences the old worker without reb
     releaseLease(old, 'old-v4', () => true);
     const opened = openDatabase({ path, timeoutMs: 1000 });
     try {
-      assert.equal(opened.schemaVersion, 7);
+      assert.equal(opened.schemaVersion, LATEST_SCHEMA_VERSION);
       assert.deepEqual(opened.db.prepare('SELECT * FROM schema_migrations WHERE version <= 4 ORDER BY version').all(), checksums);
       assert.deepEqual({ ...opened.db.prepare('SELECT id, native_session_id, last_captured_at FROM sessions').get() },
         { id: 's', native_session_id: 'original-native', last_captured_at: 100 });

@@ -12,6 +12,7 @@ import sql0004 from './migrations/0004_memory_processing.sql';
 import sql0005 from './migrations/0005_work_continuity.sql';
 import sql0006 from './migrations/0006_memory_visibility.sql';
 import sql0007 from './migrations/0007_migration_records.sql';
+import sql0008 from './migrations/0008_sync.sql';
 
 type DatabaseSync = Sqlite.DatabaseSync;
 
@@ -27,8 +28,8 @@ function loadSqlite(): typeof Sqlite {
 }
 
 export const MIGRATIONS: {
-  version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
-  name: '0001_core' | '0002_memory_search' | '0003_operations' | '0004_memory_processing' | '0005_work_continuity' | '0006_memory_visibility' | '0007_migration_records';
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+  name: '0001_core' | '0002_memory_search' | '0003_operations' | '0004_memory_processing' | '0005_work_continuity' | '0006_memory_visibility' | '0007_migration_records' | '0008_sync';
   sql: string;
 }[] = [
   { version: 1, name: '0001_core', sql: sql0001 },
@@ -38,9 +39,10 @@ export const MIGRATIONS: {
   { version: 5, name: '0005_work_continuity', sql: sql0005 },
   { version: 6, name: '0006_memory_visibility', sql: sql0006 },
   { version: 7, name: '0007_migration_records', sql: sql0007 },
+  { version: 8, name: '0008_sync', sql: sql0008 },
 ];
 
-export const LATEST_SCHEMA_VERSION = 7;
+export const LATEST_SCHEMA_VERSION = 8;
 
 export type OpenedDatabase = {
   db: DatabaseSync;
