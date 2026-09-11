@@ -744,3 +744,36 @@ script checks, Node 24 serial 202/202, Node 22 serial 201/202 in-gate (`db-missi
 deadline while the Codex contract review ran alongside) and 202/202 isolated
 (`us5-perf1-serial-isolated-v22.16.0.tap`), pack-check 20.7 MB.
 
+
+## E6 — device sync (US6, T034–T036)
+
+Two devices share one directory the user names (a mounted drive, a synced folder); nothing else
+is contacted. On the first device:
+
+```
+oboete sync init /mnt/shared --classes eligible,local_only   # prints the space id
+oboete sync key show                                          # terminal only: the one key line
+oboete sync push
+```
+
+On the next device `oboete sync join /mnt/shared` asks for the key line on the terminal (it is
+never an argument), then `oboete sync pull` / `push`. `oboete sync status` (also the MCP
+`sync_status` tool and the `sync` line of `oboete doctor`) reads local state only; `resolve
+<origin> --keep <revision | checkpoint origin>` closes a conflict; `map-repo` binds a repository
+known only by path on the other device; `leave` removes the key, cursors and this device's bundle.
+Exit codes: 0 ok, 1 nothing to do or a rejected bundle, 2 usage, 3 consent mismatch, 4 busy.
+
+What travels: a per-replica revision log (identity lines for every revision, payloads for the
+selected classes, control revisions for tombstones and sensitivity floors) inside an AES-256-GCM
+bundle keyed from the space key (HKDF per bundle). Secret memories, deleted rows and quarantined
+imports never carry text; a pulled approval keeps a projection only when it matches the local
+approval record. The contract is `contracts/sync.md` (v10 plus "Implementation notes").
+
+Evidence: `test/unit/sync*.test.ts`, 75 cases (identity, envelope tamper matrix, capture, replica
+round trips, checkpoint forks and resolutions, natural-key aliases and `map-repo`, publish classes
+and the reference closure, relay and push races, bounds and rejections). `OBOETE_SYNC_HEAVY=1`
+adds the 256 MiB push round trip (82 s) and the 180,000-line chain / fan-out / merge-DAG staging
+(~50 s each, RSS flat): the contract's 1,000,000-line chain would take ~270 s at the measured
+3,700 lines/s, so the heavy gate runs the largest size under 60 s. Writing the verification list
+found seven apply/publish defects and one CLI input gap, all fixed before review (tasks.md,
+T034–T036 note).

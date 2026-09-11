@@ -51,6 +51,20 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
 - PR は `008-qd-d` (#185) を base に作成済み (branch は #185 から切ったため。#185 merge 後に main へ
   retarget される)。マージは `pr-merge-gate` に従う。
 
+## 完了: US6 (T034–T036、2026-09-11)
+
+- owner が「契約どおり実装」を選択。`src/sync/` 10 モジュール + 0008 + `oboete sync` CLI + MCP
+  `sync_status` (read-only) + doctor `sync` 項目 + `sync_approvals` (承認時に記録)。
+- テストは `test/unit/sync*.test.ts` 6 ファイル 75 ケース (`test/helpers/sync.ts` 共有 fixture)。
+  重い 2 ケース (256 MiB push、180,000 行 graph) は `OBOETE_SYNC_HEAVY=1` でのみ実行
+  (receipt: `/var/tmp/oboete-009-20260909.jJ5grc/us6/heavy-bounds.log`)。
+- 検証一覧を書く過程で apply/publish の欠陥 7 件 + CLI 入力 1 件を修正 (tasks.md の T034–T036
+  注記に列挙)。契約は "Implementation notes" に amend 4 点を記録。
+- 単一ファイルのテスト実行は `/var/tmp/oboete-009-20260909.jJ5grc/scratch/test-one.mjs`
+  (`TEST_ONE_SLOT=<name> node test-one.mjs test/unit/x.test.ts`、build/ を触らない)。
+- レビュー: semgrep 0、Codex security `us6/secrev1`、`/code-review high`、ponytail。gate は
+  `scratch/gate-us6.sh` (`P=us6-gate1`)。
+
 ## 再開順序と未完了事項
 
 1. **US5 を閉じる**: PR の bot/CI 指摘を `pr-merge-gate` で処理 → T029–T032/T043 をチェック。
@@ -59,8 +73,7 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
 2. **macOS (T040 / SC-006)**: `docs/evidence/memory-core-2026-09/macos-runbook.md` を M1 iMac
    (remote desktop) で実行し、receipt を `/var/tmp/oboete-009-20260909.jJ5grc/macos/` に戻して
    quickstart に記録する。platform probe のみ、agent pair は対象外。
-3. **US6**: owner 確認後に T034 (0008 + `src/sync-*.ts` + `test/unit/sync.test.ts`) から。契約の
-   Verification 一覧が受け入れ基準。migration merger は流用しない。
+3. **US6**: 実装済み (上記)。残りは PR #190 の bot/CI 指摘処理と merge (#185 の後)。
 4. **US7 + amendment**: T037–T039、T047 (session スコープ常駐、hook 起動、lease 所有、idle exit)、
    T048 (detected local + consented free presets、有料は自動選択しない)。
 5. **実測と最終 gate**: T020、T023–T024、T041–T045。実 agent pair・実モデル・100k events・7 日運用は

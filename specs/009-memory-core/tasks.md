@@ -191,6 +191,21 @@ writers require separate worktrees. No deployment follows merely from an increme
   (largest 374,544 KiB), counts and effects identical to the E1 baseline. Gate `us5-perf1-*` green.
   See `quickstart.md` E5. T029-T032/T043 stay unchecked pending the macOS probe and the final
   review pass.
+- T034–T036 (US6, `4317d3ea`…`4b426a1c`): the owner chose "implement per the contract" on
+  2026-09-11. Schema 0008 (`sync_spaces`, `sync_cursors`, `sync_origins`, `sync_revisions` +
+  parents, `sync_repo_mappings`, `sync_approvals`), `src/sync/` (identity, envelope, format,
+  store, capture, publish, stage, apply, space, status), `oboete sync` (init/join/key show/
+  push/pull/status/resolve/map-repo/leave, exit codes 0–4), MCP `sync_status` (read-only),
+  `oboete doctor` `sync` item, and the local approval record written by every approval. Tests:
+  `test/unit/sync*.test.ts` (75 cases; the bounds file gates its 256 MiB push and 180,000-line
+  graphs behind `OBOETE_SYNC_HEAVY=1`). Writing the verification list found and fixed seven
+  apply/publish defects (phantom work successor, resolution successor chain check, checkpoint
+  tombstone on arrival, alias resolve payload id, context promoted past the closure, late-child
+  raise, approval bound to candidate only) and one CLI input gap (unknown class names). Three
+  contract sentences were amended and recorded in the contract's "Implementation notes"
+  (`revisions_sha256` scope, `sync.key_id` allow-list, `status.ts` as the one module doctor and
+  MCP import) plus the `--republish` delivery-identity bullet. Reviews and the full gate are
+  recorded below when they complete.
 - T033 (US6 contract, this commit): `contracts/sync.md` and research R8 record the owner's
   2026-09-11 transport decision (encrypted bundle files, Node `crypto` only, no dependency) as a
   revision-log contract: envelope, identity/delivery split, control revisions, natural-key
