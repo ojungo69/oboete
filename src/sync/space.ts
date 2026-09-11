@@ -336,6 +336,8 @@ export function mapRepo(db: DatabaseSync, paths: OboetePaths, input: { repoKey: 
     if (prepared(db, 'SELECT 1 FROM sync_repo_mappings WHERE repo_key = ?').get(input.repoKey) === undefined) throw new SyncError('unknown_repo_key');
     db.exec('BEGIN IMMEDIATE');
     try {
+      // Local changes first: the mapping lets withheld origins alias onto rows this device may have edited.
+      captureLocalChanges(db, input.now);
       prepared(db, 'UPDATE sync_repo_mappings SET local_repo_id = ? WHERE repo_key = ?').run(input.localRepoId, input.repoKey);
       const reapplied = reapplyWithheld(db, input.now);
       db.exec('COMMIT');

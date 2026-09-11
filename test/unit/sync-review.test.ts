@@ -11,10 +11,11 @@ import { test } from 'node:test';
 import { checkpointHash, materialHash } from '../../src/db/identity.js';
 import { sha256Json } from '../../src/hash.js';
 import { oboetePaths } from '../../src/paths.js';
-import { captureLocalChanges } from '../../src/sync/capture.js';
+import { resolveRow } from '../../src/sync/apply.js';
+import { captureLocalChanges, sourceLocalId } from '../../src/sync/capture.js';
 import { initSpace, joinSpace, mapRepo, pullSpace, pushSpace, SyncError, syncPaths } from '../../src/sync/space.js';
 import { BundleRejected } from '../../src/sync/stage.js';
-import { headsOf, readOrigin, readRevision, replicaOriginId, repoKeyFor, revisionsOfOrigin } from '../../src/sync/store.js';
+import { effectiveControl, headsOf, readOrigin, readRevision, replicaOriginId, repoKeyFor, revisionsOfOrigin } from '../../src/sync/store.js';
 import {
   insertMemory, insertSource, memoryOf, openHome, publish, pull, REPO, revisionCount, withHomes, withReplicas, type Replica,
 } from '../helpers/sync.js';
@@ -24,6 +25,20 @@ function seedWork(db: DatabaseSync, work = 'w_one', context = 'ctx_one', repo = 
     .run(context, repo, context);
   db.prepare(`INSERT INTO work_items (id, repo_id, origin_context_id, purpose, purpose_sensitivity, state, created_at, updated_at)
     VALUES (?, ?, ?, 'Ship US6', 'eligible', 'active', 1, 1)`).run(work, repo, context);
+}
+
+function seedProposal(db: DatabaseSync, id: string, memory: string): void {
+  db.prepare(`INSERT INTO sharing_proposals (id, origin_memory_id, origin_repo_id, origin_work_id, candidate_title, candidate_body,
+    candidate_material_hash, candidate_sensitivity, source_event_ids_json, basis, state, created_at)
+    VALUES (?, ?, ?, 'w_one', 'Candidate', 'Candidate body', ?, 'eligible', '[]', 'inferred', 'pending', 1)`)
+    .run(id, memory, REPO, materialHash('Candidate', 'Candidate body'));
+}
+
+function seedCheckpoint(db: DatabaseSync, id: string, work: string, title: string): void {
+  const material = materialHash(title, `${title} body`);
+  db.prepare(`INSERT INTO memories (id, repo_id, type, title, body, concepts, cjk_bigrams, material_hash, content_hash, sensitivity,
+    review_state, created_at, work_id, checkpoint_parent_id) VALUES (?, ?, 'session_summary', ?, ?, '[]', '', ?, ?, 'eligible', 'reviewed', 1, ?, NULL)`)
+    .run(id, REPO, title, `${title} body`, material, checkpointHash(REPO, work, null, material), work);
 }
 
 function conflicts(db: DatabaseSync): number {
@@ -401,5 +416,180 @@ test('a work whose pointer names another work\'s checkpoint is withheld whole, n
       'the row is exactly what it was');
     publish(b, dir);
     assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM sync_revisions WHERE origin_id = ? AND author = ?").get(origin.origin_id, b.id)?.n, 0, 'no partial application is authored');
+  });
+});
+
+test('an in-place change of a context-only source keyed by its raw event replaces the row on the receiver', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    insertMemory(a.db, 'm_one', 'Title', 'Body text');
+    a.db.prepare(`INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, status)
+      VALUES ('s_one', ?, 'claude', 'n_one', 'c_one', 'active')`).run(REPO);
+    a.db.prepare(`INSERT INTO raw_events (id, repo_id, session_id, kind, classification_state, processing_state, captured_at)
+      VALUES ('raw_one', ?, 's_one', 'prompt', 'done', 'processed', 1)`).run(REPO);
+    a.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_one', 'file_read', 1, NULL)").run();
+    const rowid = String(a.db.prepare('SELECT id FROM memory_sources').get()?.id);
+    const localId = (): string => sourceLocalId(a.db, rowid);
+    // The adverse order: the origin the change creates sorts before the origin it retires, so the
+    // receiver inserts the new row before the old origin's tombstone deletes the old one.
+    const retired = localId();
+    for (let i = 0; localId() <= retired; i += 1) a.db.prepare('UPDATE memory_sources SET source_agent = ? WHERE id = ?').run(`agent-${i}`, rowid);
+    pull(b, a, publish(a, dir));
+    a.db.prepare("UPDATE memory_sources SET source_agent = NULL WHERE memory_id = 'm_one'").run();
+    const result = pull(b, a, publish(a, dir));
+    assert.equal(result.withheldOnApply, 0);
+    assert.deepEqual(b.db.prepare('SELECT raw_event_id, source_agent FROM memory_sources').all().map((row) => ({ ...row })),
+      [{ raw_event_id: 'raw_one', source_agent: null }]);
+  });
+});
+
+// Round three of the correctness review: the released-projection text check, the late alias as a
+// pre-pass, capture before map-repo binds, the kept head aligned on resolve, a referenced foreign
+// work, and a device-independent source identity.
+
+test('a successor released from a projection still has to hash to the projection text: other text is rejected', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    const identity = sha256Json(['personal-projection-v1', 'Candidate', 'Candidate body']);
+    seedWork(b.db);
+    insertMemory(b.db, 'm_origin', 'Origin', 'Origin body');
+    seedProposal(b.db, 'p_one', 'm_origin');
+    insertMemory(b.db, 'm_proj', 'Candidate', 'Candidate body', { content: identity });
+    b.db.prepare(`INSERT INTO memory_visibility (id, memory_id, audience, repo_id, work_id, proposal_id, grant_kind, created_at)
+      VALUES ('v', 'm_proj', 'personal', NULL, NULL, 'p_one', 'proposal_approval', 2)`).run();
+    b.db.prepare(`INSERT INTO sync_approvals (proposal_id, candidate_hash, projection_hash, scope_json, approved_at) VALUES ('p_one', ?, ?, '{"audience":"personal"}', 2)`)
+      .run(materialHash('Candidate', 'Candidate body'), identity);
+    // A holds B's projection origin withheld; a peer then authors a successor under an ordinary identity with other text.
+    pull(a, b, publish(b, dir));
+    a.db.prepare(`INSERT INTO memories (id, repo_id, type, title, body, cjk_bigrams, material_hash, content_hash, sensitivity, review_state, created_at)
+      VALUES ('m_evil', ?, 'discovery', 'Evil', 'Evil body', '', ?, ?, 'eligible', 'reviewed', 1)`).run(REPO, materialHash('Evil', 'Evil body'), identity);
+    a.db.prepare("UPDATE sync_origins SET local_id = 'm_evil', withheld_reason = NULL, materialized_revision = selected_head, materialized_hash = 'x' WHERE origin_id = ?")
+      .run(`${b.id}:m_proj`);
+    assert.throws(() => pull(b, a, publish(a, dir)), (error: unknown) => error instanceof BundleRejected && error.code === 'personal_identity_mismatch');
+    assert.equal(b.db.prepare("SELECT title FROM memories WHERE id = 'm_proj'").get()?.title, 'Candidate', 'the approved projection text is unchanged');
+  });
+});
+
+test('a source whose writer withholds after the late alias is not bound, so no local tombstone deletes the peer row', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    // A path-identified repository B cannot map: A's parent memory is identity-only on B.
+    a.db.prepare(`INSERT INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
+      VALUES ('repo_two', 'common_dir', '/work/two/.git', '/work/two', 1, 1)`).run();
+    insertMemory(a.db, 'm_child', 'Child', 'Child body');
+    a.db.prepare(`INSERT INTO memories (id, repo_id, type, title, body, cjk_bigrams, material_hash, content_hash, sensitivity, review_state, created_at)
+      VALUES ('m_parent', 'repo_two', 'discovery', 'Parent', 'Parent body', '', ?, ?, 'eligible', 'reviewed', 1)`)
+      .run(materialHash('Parent', 'Parent body'), sha256Json(['repo_two', materialHash('Parent', 'Parent body')]));
+    a.db.prepare("INSERT INTO memory_sources (memory_id, citation_kind, source_memory_id, context_only) VALUES ('m_child', 'file_read', 'm_parent', 1)").run();
+    pull(b, a, publish(a, dir));
+    const source = b.db.prepare("SELECT local_id, withheld_reason FROM sync_origins WHERE kind = 'source'").get()!;
+    assert.equal(source.local_id, null, 'a withheld source stays unbound');
+    assert.equal(source.withheld_reason, 'unresolved_reference');
+    assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM sync_revisions WHERE kind = 'source' AND author = ?").get(b.id)?.n, 0, 'B authors nothing for it');
+    pull(a, b, publish(b, dir));
+    assert.equal(a.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 1, 'A keeps its own source row');
+  });
+});
+
+test('map-repo captures local changes before the mapping lets a withheld origin alias onto an edited row', async () => {
+  await withHomes(2, (homes, shared) => {
+    const [homeA, homeB] = homes as [string, string];
+    const a = openHome(homeA);
+    const b = openHome(homeB);
+    try {
+      const pathsA = oboetePaths(homeA);
+      const pathsB = oboetePaths(homeB);
+      a.prepare("UPDATE repos SET identity_kind = 'common_dir', normalized_identity = '/work/a/.git' WHERE id = ?").run(REPO);
+      b.prepare("UPDATE repos SET identity_kind = 'common_dir', normalized_identity = '/work/b/.git' WHERE id = ?").run(REPO);
+      const { keyLine } = initSpace(a, pathsA, { directory: shared, classes: ['eligible'], now: 1 });
+      joinSpace(b, pathsB, { directory: shared, keyLine, classes: ['eligible'], now: 1 });
+      insertMemory(a, 'm_one', 'Title', 'Body text');
+      pushSpace(a, pathsA, { now: 10 });
+      pullSpace(b, pathsB, { now: 11 });
+      // B marks the same material secret after its last sync command: nothing has captured it yet.
+      insertMemory(b, 'm_b', 'Title', 'Body text', { sensitivity: 'secret' });
+      b.prepare("UPDATE memories SET title = '', body = '' WHERE id = 'm_b'").run();
+      mapRepo(b, pathsB, { repoKey: repoKeyFor(replicaOriginId(a), 'common_dir', '/work/a/.git'), localRepoId: REPO, now: 12 });
+      assert.equal(readOrigin(b, `${replicaOriginId(a)}:m_one`)!.local_id, 'm_b', 'the origin aliases onto the local row');
+      assert.deepEqual({ ...b.prepare("SELECT sensitivity, body FROM memories WHERE id = 'm_b'").get()! }, { sensitivity: 'secret', body: '' },
+        'the row already terminal on this device keeps that state');
+    } finally { a.close(); b.close(); }
+  });
+});
+
+test('an origin that aliases late onto a row already written in the same pass still applies its control', async () => {
+  await withReplicas(3, (replicas, dir) => {
+    const [lo, hi, c] = [...replicas].sort((p, q) => (p.id < q.id ? -1 : 1)) as [Replica, Replica, Replica];
+    insertMemory(lo.db, 'm_one', 'Title', 'Body text');
+    insertMemory(hi.db, 'm_one', 'Title', 'Body text', { sensitivity: 'private' });
+    publish(hi, dir);
+    pull(hi, lo, publish(lo, dir));
+    assert.equal(hi.db.prepare("SELECT sensitivity FROM memories WHERE id = 'm_one'").get()?.sensitivity, 'private');
+    // c receives both origins in one bundle: the smaller (lo) is written first, hi aliases onto it afterwards.
+    pull(c, hi, publish(hi, dir));
+    const local = readOrigin(c.db, `${lo.id}:m_one`)!.local_id!;
+    assert.equal(effectiveControl(c.db, `${lo.id}:m_one`).sensitivity_floor, 'private');
+    assert.equal(c.db.prepare('SELECT sensitivity FROM memories WHERE id = ?').get(local)?.sensitivity, 'private', 'the floor of the aliased origin reaches the row');
+  });
+});
+
+test('a resolve that keeps the head of an aliased origin ships references aligned to the canonical natural key', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [lo, hi] = [...replicas].sort((p, q) => (p.id < q.id ? -1 : 1)) as [Replica, Replica];
+    for (const device of [lo, hi]) {
+      insertMemory(device.db, 'm_one', 'Title', 'Body text');
+      insertSource(device.db, 'm_one', 'src/a.ts');
+      device.db.exec('BEGIN IMMEDIATE'); captureLocalChanges(device.db, 5); device.db.exec('COMMIT');
+    }
+    pull(hi, lo, publish(lo, dir));
+    pull(lo, hi, publish(hi, dir));
+    const canonical = String(lo.db.prepare("SELECT origin_id FROM sync_origins WHERE kind = 'source' AND origin_id = canonical_origin_id").get()!.origin_id);
+    const heads = headsOf(lo.db, canonical);
+    assert.equal(heads.length, 2, 'one head under each origin');
+    const other = heads.find((head) => readRevision(lo.db, head)!.origin_id !== canonical)!;
+    lo.db.exec('BEGIN IMMEDIATE');
+    const { revision_id } = resolveRow(lo.db, canonical, other, 300);
+    lo.db.exec('COMMIT');
+    const successor = readRevision(lo.db, revision_id)!;
+    assert.equal(successor.payload!.memory_id, successor.natural.memory, 'the successor names the memory the way its natural key does');
+    pull(hi, lo, publish(lo, dir));
+    assert.deepEqual(headsOf(hi.db, canonical), [revision_id], 'the peer accepts the resolution');
+  });
+});
+
+test('a new work whose pointer is foreign but whose checkpoints arrived with it is withheld without a local revision', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    seedWork(a.db, 'w_one', 'ctx_one');
+    seedWork(a.db, 'w_two', 'ctx_two');
+    seedCheckpoint(a.db, 'm_c1', 'w_one', 'One');
+    seedCheckpoint(a.db, 'm_c2', 'w_two', 'Two');
+    a.db.prepare("UPDATE work_items SET current_checkpoint_memory_id = 'm_c1' WHERE id = 'w_one'").run();
+    a.db.prepare("UPDATE work_items SET state = 'completed', completed_at = 20, current_checkpoint_memory_id = 'm_c1' WHERE id = 'w_two'").run();
+    pull(b, a, publish(a, dir));
+    const origin = readOrigin(b.db, `${a.id}:w_two`)!;
+    assert.equal(origin.withheld_reason, 'repo_mismatch');
+    assert.ok(origin.local_id, 'the row stays because its checkpoint references it');
+    publish(b, dir);
+    assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM sync_revisions WHERE origin_id = ? AND author = ?').get(origin.origin_id, b.id)?.n, 0,
+      'the closing pass records nothing for it');
+  });
+});
+
+test('a source is named alike on every device: its identity hashes the parent material and the context key, not origin ids', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [lo, hi] = [...replicas].sort((p, q) => (p.id < q.id ? -1 : 1)) as [Replica, Replica];
+    insertMemory(lo.db, 'm_parent', 'Parent', 'Parent body');
+    insertMemory(lo.db, 'm_child', 'Child', 'Child body');
+    lo.db.prepare("INSERT INTO memory_sources (memory_id, citation_kind, source_memory_id, context_only) VALUES ('m_child', 'file_read', 'm_parent', 1)").run();
+    // hi already holds the parent under its own id, so on hi the parent memory has two origins and hi's sorts first.
+    insertMemory(hi.db, 'a_parent', 'Parent', 'Parent body');
+    hi.db.exec('BEGIN IMMEDIATE'); captureLocalChanges(hi.db, 5); hi.db.exec('COMMIT');
+    pull(hi, lo, publish(lo, dir));
+    const rowid = String(hi.db.prepare("SELECT id FROM memory_sources WHERE memory_id = (SELECT local_id FROM sync_origins WHERE origin_id = ?)").get(`${lo.id}:m_child`)!.id);
+    const expected = readOrigin(hi.db, `${lo.id}:${sourceLocalId(lo.db, String(lo.db.prepare('SELECT id FROM memory_sources').get()!.id))}`)!;
+    assert.equal(sourceLocalId(hi.db, rowid), expected.local_id, 'the receiver recomputes the same local id');
+    pull(hi, lo, publish(lo, dir));
+    assert.equal(hi.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 1, 'a second pull finds the row instead of inserting again');
   });
 });

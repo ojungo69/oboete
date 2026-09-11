@@ -211,9 +211,12 @@ function checkPayloadIntegrity(line: RevisionLine): void {
     if (absentText) {
       if (payload.title !== '' || payload.body !== '' || (payload.concepts ?? '[]') !== '[]') reject('redacted_memory_text');
     } else if (materialHash(String(payload.title ?? ''), String(payload.body ?? '')) !== payload.material_hash) reject('material_hash_mismatch');
-    if (payload.identity_domain === 'personal_projection') {
+    // A projection's text is its identity, whether the payload or the origin's natural key says so.
+    const projection = payload.identity_domain === 'personal_projection' ? payload.content_hash
+      : line.natural.domain === 'personal_projection' ? line.natural.projection_hash : null;
+    if (projection !== null) {
       if (payload.work_id !== null || payload.checkpoint_parent_id !== null) reject('personal_source_lineage');
-      if (!absentText && sha256Json(['personal-projection-v1', payload.title, payload.body]) !== payload.content_hash) reject('personal_identity_mismatch');
+      if (!absentText && sha256Json(['personal-projection-v1', payload.title, payload.body]) !== projection) reject('personal_identity_mismatch');
     }
   }
   if (line.kind === 'sharing_proposal' && payload.redacted !== true && payload.candidate_sensitivity !== 'secret'

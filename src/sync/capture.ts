@@ -18,17 +18,23 @@ import {
 
 export type CaptureResult = { revisions: number; tombstones: number };
 
-/** The local identifier of a source row: never the reusable rowid (contracts/sync.md). */
-export function sourceLocalId(db: DatabaseSync, rowid: string, originOf: (kind: SyncKind, localId: string) => string): string {
-  const raw = prepared(db, `SELECT memory_id, citation_kind, citation_value, source_agent, portion_start, portion_end, source_total,
-    source_hash, captured_at, capture_root, source_paths_json, context_only, source_memory_id, source_context_id
-    FROM memory_sources WHERE id = ?`).get(rowid);
+/**
+ * The local identifier of a source row: never the reusable rowid (contracts/sync.md). Its
+ * references are named by device-independent identities (the parent's material hash, the
+ * context's local key), so the same source hashes alike on every replica and stays put when the
+ * origins those rows are known by change.
+ */
+export function sourceLocalId(db: DatabaseSync, rowid: string): string {
+  const raw = prepared(db, `SELECT s.memory_id, s.citation_kind, s.citation_value, s.source_agent, s.portion_start, s.portion_end,
+    s.source_total, s.source_hash, s.captured_at, s.capture_root, s.source_paths_json, s.context_only,
+    p.material_hash AS parent_material, c.local_key AS context_key
+    FROM memory_sources s LEFT JOIN memories p ON p.id = s.source_memory_id LEFT JOIN work_contexts c ON c.id = s.source_context_id
+    WHERE s.id = ?`).get(rowid);
   if (raw === undefined) throw new Error(`memory_sources ${rowid} vanished during capture`);
   const hash = sha256Hex(canonicalJson([
     raw.citation_kind, raw.citation_value, raw.source_agent, raw.portion_start, raw.portion_end, raw.source_total,
     raw.source_hash, raw.captured_at, raw.capture_root, raw.source_paths_json, raw.context_only,
-    raw.source_memory_id === null ? null : originOf('memory', String(raw.source_memory_id)),
-    raw.source_context_id === null ? null : originOf('context', String(raw.source_context_id)),
+    raw.parent_material ?? null, raw.context_key ?? null,
   ]));
   return `source:${String(raw.memory_id)}:${hash}`;
 }
@@ -158,7 +164,7 @@ export function captureLocalChanges(db: DatabaseSync, now: number): CaptureResul
   for (const row of contextRecords(db)) record('context', row, String(row.id));
   for (const row of workRecords(db)) record('work', row, String(row.id));
   for (const row of memoryRecords(db)) record('memory', row, String(row.id));
-  for (const row of sourceRecords(db)) record('source', row, sourceLocalId(db, String(row.id), resolve.originOf));
+  for (const row of sourceRecords(db)) record('source', row, sourceLocalId(db, String(row.id)));
   for (const row of visibilityRecords(db)) record('visibility', row, String(row.id));
   for (const row of proposalRecords(db)) record('sharing_proposal', row, String(row.id));
 

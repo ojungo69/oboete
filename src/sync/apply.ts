@@ -86,7 +86,9 @@ function aliasTarget(db: DatabaseSync, kind: SyncKind, natural: Row): string | n
     }
     case 'source': {
       const memory = local(natural.memory);
-      return memory === null ? null : `source:${memory}:${String(natural.source_hash)}`;
+      if (memory === null) return null;
+      const localId = `source:${memory}:${String(natural.source_hash)}`;
+      return findSourceRow(db, memory, localId) === null ? null : localId;
     }
     case 'visibility': {
       const memory = local(natural.memory);
@@ -234,10 +236,17 @@ function memoryWriter(db: DatabaseSync, row: Origin, payload: Row | null, contro
   return localId;
 }
 
+const RANK_SQL = "CASE %c WHEN 'eligible' THEN 0 WHEN 'local_only' THEN 1 WHEN 'private' THEN 2 ELSE 3 END";
+
+/** Raises one row's sensitivity column to `floor` when it ranks lower; `set` adds the columns a `secret` floor clears. */
+function raiseFloor(db: DatabaseSync, table: string, column: string, localId: string, floor: Sensitivity, set = ''): void {
+  const cleared = floor === 'secret' && set !== '' ? `, ${set}` : '';
+  prepared(db, `UPDATE ${table} SET ${column} = ?${cleared} WHERE id = ? AND ${RANK_SQL.replace('%c', column)} < ?`).run(floor, localId, RANK[floor]);
+}
+
 function applyControlToMemory(db: DatabaseSync, localId: string, control: Control, now: number): void {
   if (control.tombstone) prepared(db, 'UPDATE memories SET deleted_at = COALESCE(deleted_at, ?) WHERE id = ?').run(now, localId);
-  prepared(db, `UPDATE memories SET sensitivity = ? WHERE id = ? AND CASE sensitivity WHEN 'eligible' THEN 0 WHEN 'local_only' THEN 1
-    WHEN 'private' THEN 2 ELSE 3 END < ?`).run(control.sensitivity_floor, localId, RANK[control.sensitivity_floor]);
+  raiseFloor(db, 'memories', 'sensitivity', localId, control.sensitivity_floor);
   if (control.sensitivity_floor === 'secret' || control.tombstone) {
     prepared(db, "UPDATE memories SET title = '', body = '', concepts = '[]', cjk_bigrams = '' WHERE id = ?").run(localId);
   }
@@ -252,7 +261,7 @@ function sourceWriter(db: DatabaseSync, row: Origin, payload: Row | null, contro
   const memory = row.natural.memory === undefined ? null : resolve.localOf('memory', String(row.natural.memory));
   if (memory === null) throw new Unresolved('unresolved_reference');
   const localId = `source:${memory}:${String(row.natural.source_hash)}`;
-  const existing = findSourceRow(db, memory, localId, resolve);
+  const existing = findSourceRow(db, memory, localId);
   if (control.tombstone) {
     if (existing !== null) prepared(db, 'DELETE FROM memory_sources WHERE id = ?').run(existing);
     return localId;
@@ -264,10 +273,16 @@ function sourceWriter(db: DatabaseSync, row: Origin, payload: Row | null, contro
   if (sourceContext !== null && repoOf(db, 'work_contexts', sourceContext) !== repoOf(db, 'memories', memory)) throw new Unresolved('repo_mismatch');
   if (existing !== null) prepared(db, 'DELETE FROM memory_sources WHERE id = ?').run(existing);
   // The same citation may already sit under another origin (an in-place field change made a new
-  // origin): the row it left behind is replaced, and its old origin records a tombstone. `=` keeps
-  // NULL members apart, exactly as the UNIQUE index does.
-  prepared(db, 'DELETE FROM memory_sources WHERE memory_id = ? AND raw_event_id = ? AND source_hash = ? AND portion_start = ? AND portion_end = ?')
+  // origin): the row it left behind is replaced, and its old origin records a tombstone. One
+  // DELETE per UNIQUE index of memory_sources (0004 portion, 0005 context edge / context raw
+  // event), each with the index's own partial condition; `=` keeps NULL members apart as the
+  // indexes do.
+  prepared(db, `DELETE FROM memory_sources WHERE memory_id = ? AND raw_event_id = ? AND source_hash = ? AND portion_start = ? AND portion_end = ?`)
     .run(memory, payload.raw_event_id as string | null, payload.source_hash as string | null, payload.portion_start as number | null, payload.portion_end as number | null);
+  if (payload.context_only === 1) {
+    prepared(db, 'DELETE FROM memory_sources WHERE memory_id = ? AND context_only = 1 AND source_memory_id = ?').run(memory, sourceMemory);
+    prepared(db, 'DELETE FROM memory_sources WHERE memory_id = ? AND context_only = 1 AND raw_event_id = ?').run(memory, payload.raw_event_id as string | null);
+  }
   prepared(db, `INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, citation_value, source_agent, portion_start, portion_end,
       source_total, source_hash, evidence, captured_at, source_processed_at, capture_root, source_paths_json, source_context_id,
       context_only, source_memory_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -280,10 +295,9 @@ function sourceWriter(db: DatabaseSync, row: Origin, payload: Row | null, contro
   return localId;
 }
 
-function findSourceRow(db: DatabaseSync, memory: string, localId: string, resolve: Resolver): number | null {
-  const originOf = (kind: SyncKind, id: string): string => originsOfRow(db, kind, id)[0]?.canonical_origin_id ?? `${resolve.replica}:${id}`;
+function findSourceRow(db: DatabaseSync, memory: string, localId: string): number | null {
   for (const row of prepared(db, 'SELECT id FROM memory_sources WHERE memory_id = ?').iterate(memory)) {
-    if (sourceLocalId(db, String(row.id), originOf) === localId) return Number(row.id);
+    if (sourceLocalId(db, String(row.id)) === localId) return Number(row.id);
   }
   return null;
 }
@@ -306,11 +320,7 @@ function contextWriter(db: DatabaseSync, row: Origin, payload: Row | null, contr
 function workWriter(db: DatabaseSync, row: Origin, payload: Row | null, control: Control, resolve: Resolver, now: number): string | null {
   void now;
   if (payload === null) {
-    if (row.local_id !== null) {
-      prepared(db, `UPDATE work_items SET purpose_sensitivity = ?, purpose = CASE WHEN ? = 'secret' THEN NULL ELSE purpose END WHERE id = ?
-        AND CASE purpose_sensitivity WHEN 'eligible' THEN 0 WHEN 'local_only' THEN 1 WHEN 'private' THEN 2 ELSE 3 END < ?`)
-        .run(control.sensitivity_floor, control.sensitivity_floor, row.local_id, RANK[control.sensitivity_floor]);
-    }
+    if (row.local_id !== null) raiseFloor(db, 'work_items', 'purpose_sensitivity', row.local_id, control.sensitivity_floor, 'purpose = NULL');
     return row.local_id;
   }
   const repo = resolve.repo(String(payload.repo_id));
@@ -364,10 +374,8 @@ function proposalWriter(db: DatabaseSync, row: Origin, payload: Row | null, cont
   void now;
   if (payload === null) {
     if (row.local_id !== null) {
-      prepared(db, `UPDATE sharing_proposals SET candidate_sensitivity = ?, candidate_title = CASE WHEN ? = 'secret' THEN '' ELSE candidate_title END,
-        candidate_body = CASE WHEN ? = 'secret' THEN '' ELSE candidate_body END, source_event_ids_json = CASE WHEN ? = 'secret' THEN '[]' ELSE source_event_ids_json END
-        WHERE id = ? AND CASE candidate_sensitivity WHEN 'eligible' THEN 0 WHEN 'local_only' THEN 1 WHEN 'private' THEN 2 ELSE 3 END < ?`)
-        .run(control.sensitivity_floor, control.sensitivity_floor, control.sensitivity_floor, control.sensitivity_floor, row.local_id, RANK[control.sensitivity_floor]);
+      raiseFloor(db, 'sharing_proposals', 'candidate_sensitivity', row.local_id, control.sensitivity_floor,
+        "candidate_title = '', candidate_body = '', source_event_ids_json = '[]'");
     }
     return row.local_id;
   }
@@ -409,7 +417,7 @@ const WRITERS: Record<SyncKind, Writer> = {
 
 /** What the capture pass would record for this row now: the materialized state after corrections. */
 function materializedState(db: DatabaseSync, row: Origin, localId: string, resolve: Resolver): string | null {
-  const record = localRecord(db, row.kind, localId, resolve);
+  const record = localRecord(db, row.kind, localId);
   if (record === null) return null;
   const originOf = (kind: SyncKind, id: string): string => originsOfRow(db, kind, id)[0]?.canonical_origin_id ?? `${resolve.replica}:${id}`;
   const repoKeys = registerLocalRepos(db, resolve.replica);
@@ -422,7 +430,7 @@ function repoOf(db: DatabaseSync, table: 'memories' | 'work_items' | 'work_conte
   return (prepared(db, `SELECT repo_id FROM ${table} WHERE id = ?`).get(localId)?.repo_id as string | undefined) ?? null;
 }
 
-function localRecord(db: DatabaseSync, kind: SyncKind, localId: string, resolve: Resolver): Row | null {
+function localRecord(db: DatabaseSync, kind: SyncKind, localId: string): Row | null {
   const one = (records: Iterable<Row>): Row | null => { for (const record of records) return record; return null; };
   switch (kind) {
     case 'memory': return one(memoryRecords(db, localId));
@@ -432,7 +440,7 @@ function localRecord(db: DatabaseSync, kind: SyncKind, localId: string, resolve:
     case 'sharing_proposal': return one(proposalRecords(db, localId));
     case 'source': {
       const memory = localId.split(':')[1]!;
-      const rowid = findSourceRow(db, memory, localId, resolve);
+      const rowid = findSourceRow(db, memory, localId);
       return rowid === null ? null : one(sourceRecords(db, rowid));
     }
   }
@@ -529,11 +537,24 @@ function resolverFor(db: DatabaseSync, replica: string): Resolver {
  * Phase two for a set of local rows (canonical origin ids): selected head, effective control,
  * writer, materialized state, conflict report, checkpoint and lineage rules, then the closing
  * change pass. Shared by pull and by `map-repo`, which re-evaluates withheld rows without a bundle.
+ * The caller captures local changes before any origin is bound to a local row: once an alias joins
+ * two origins the row hashes under the canonical natural key, and a capture in between would mint
+ * a revision for a change nobody made.
  */
 export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now: number): ApplyResult {
   const result: ApplyResult = { stored: 0, filled: 0, materialized: 0, withheldOnApply: 0, conflicts: 0 };
   const resolve = resolverFor(db, replicaOriginId(db));
-  const rows = rowIds.map((id) => readOrigin(db, id)!).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
+  // An origin that was identity-only may alias onto a local row now (a repository was mapped, a
+  // row was created since): bind every such origin before anything is written, so the control
+  // of every origin of a row applies to it, then work on the canonical rows that remain.
+  for (const id of rowIds) {
+    const origin = readOrigin(db, id)!;
+    if (origin.local_id !== null) continue;
+    const target = aliasTarget(db, origin.kind, origin.natural);
+    if (target !== null) bindOrigin(db, origin.origin_id, target);
+  }
+  const canonicalIds = [...new Set(rowIds.map((id) => readOrigin(db, id)!.canonical_origin_id))];
+  const rows = canonicalIds.map((id) => readOrigin(db, id)!).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
   const pending = new Set(rows.map((row) => row.origin_id));
   const workRows: Origin[] = [];
   const workBefore = new Map<string, Row | null>();
@@ -543,23 +564,7 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
     progress = false;
     for (const stale of rows) {
       if (!pending.has(stale.origin_id)) continue;
-      let row = readOrigin(db, stale.origin_id)!;
-      // A row that was identity-only may alias onto a local row now (a repository was mapped):
-      // bind first, so the control of every origin of that row applies before anything is written.
-      if (row.local_id === null) {
-        const target = aliasTarget(db, row.kind, row.natural);
-        if (target !== null) {
-          bindOrigin(db, row.origin_id, target);
-          row = readOrigin(db, row.origin_id)!;
-          if (row.canonical_origin_id !== row.origin_id) {
-            pending.delete(row.origin_id);
-            const canonical = readOrigin(db, row.canonical_origin_id)!;
-            if (!rows.some((other) => other.origin_id === canonical.origin_id)) { rows.push(canonical); pending.add(canonical.origin_id); }
-            progress = true;
-            continue;
-          }
-        }
-      }
+      const row = readOrigin(db, stale.origin_id)!;
       if (row.kind === 'work') workBefore.set(row.origin_id, row.local_id === null ? null : { ...prepared(db, 'SELECT * FROM work_items WHERE id = ?').get(row.local_id)! });
       const heads = headsOf(db, row.origin_id);
       if (heads.length > BOUNDS.headsPerOrigin) throw new BundleRejected('heads_per_row', row.origin_id);
@@ -594,7 +599,10 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
       } catch (error) {
         if (!(error instanceof Unresolved)) throw error;
         prepared(db, 'UPDATE sync_origins SET withheld_reason = ? WHERE origin_id = ?').run(error.reason, row.origin_id);
-        setSelectedHead(db, row.origin_id, selected, row.materialized_revision, row.materialized_hash);
+        // The base stays where it was; its hash is taken from the row as it is now (an alias may
+        // have moved this origin under a natural key the old hash was not aligned to).
+        const base = row.local_id === null ? row.materialized_hash : materializedState(db, row, row.local_id, resolve) ?? row.materialized_hash;
+        setSelectedHead(db, row.origin_id, selected, row.materialized_revision, base);
         reportConflict(db, row, heads, selected, now, result);
       }
     }
@@ -619,6 +627,13 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
         if (prepared(db, 'SELECT 1 FROM memories WHERE work_id = ? LIMIT 1').get(current.local_id) === undefined) {
           prepared(db, 'DELETE FROM work_items WHERE id = ?').run(current.local_id);
           prepared(db, 'UPDATE sync_origins SET local_id = NULL WHERE origin_id = ?').run(current.origin_id);
+        } else {
+          // Its checkpoints arrived with it, so the row stays; the written state is its base and
+          // the closing pass records nothing for it.
+          prepared(db, 'UPDATE sync_origins SET withheld_reason = ? WHERE origin_id = ?').run('repo_mismatch', current.origin_id);
+          result.materialized -= 1;
+          result.withheldOnApply += 1;
+          continue;
         }
       } else {
         prepared(db, `UPDATE work_items SET purpose = ?, purpose_source_event_id = ?, purpose_sensitivity = ?, state = ?, updated_at = ?,
@@ -678,9 +693,10 @@ export function resolveRow(db: DatabaseSync, originId: string, keep: string, now
   let payloadHashValue: string | null;
   const kept = readRevision(db, keep);
   if (kept !== undefined && heads.includes(keep)) {
-    // The kept head may belong to an aliased origin: the successor's payload names the canonical one.
-    payload = kept.payload === null || kept.payload.id === row.origin_id ? kept.payload : { ...kept.payload, id: row.origin_id };
-    payloadHashValue = payload === null ? null : payload === kept.payload ? kept.payload_hash : payloadHash(payload);
+    // The kept head may belong to an aliased origin: the successor names the canonical origin and
+    // its references the way the canonical natural key does.
+    payload = kept.payload === null ? null : alignToNatural(row.kind, { ...kept.payload, id: row.origin_id }, row.natural);
+    payloadHashValue = payload === null ? null : payloadHash(payload);
   } else if (row.kind === 'work' && row.local_id !== null) {
     const checkpoint = readOrigin(db, keep);
     const checkpointLocal = checkpoint?.kind === 'memory' ? canonicalOf(db, keep).local_id : null;
@@ -689,7 +705,7 @@ export function resolveRow(db: DatabaseSync, originId: string, keep: string, now
     prepared(db, 'UPDATE work_items SET current_checkpoint_memory_id = ?, updated_at = ? WHERE id = ?').run(checkpointLocal, now, row.local_id);
     const repoKeys = registerLocalRepos(db, replica);
     const originOf = (kind: SyncKind, id: string): string => originsOfRow(db, kind, id)[0]?.canonical_origin_id ?? `${replica}:${id}`;
-    const record = localRecord(db, 'work', row.local_id, { replica, localOf: () => '', repo: () => '' })!;
+    const record = localRecord(db, 'work', row.local_id)!;
     payload = alignToNatural('work', toOriginForm('work', record, row.origin_id, { originOf, repoKey: (id) => repoKeys.get(id)! }), row.natural);
     payloadHashValue = payloadHash(payload);
   } else throw new ResolveError('unknown_head');

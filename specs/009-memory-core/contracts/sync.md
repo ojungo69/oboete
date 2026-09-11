@@ -605,6 +605,32 @@ Round two (2026-09-11, Codex correctness pass + `/code-review high` on the round
 - a work whose pointer names another work's checkpoint is withheld whole (`repo_mismatch`): the
   row is restored to what it was, and the closing pass records nothing for it.
 
+Round three (2026-09-11, `/code-review high` on the round-two fixes):
+
+- a line whose natural key is a personal projection must hash to the projection text whatever
+  identity domain its payload claims (`personal_identity_mismatch`), so a successor "released"
+  from a projection cannot carry other text onto the approved row;
+- the late alias is a pre-pass: every origin of the pass that can bind to a local row binds
+  before any row is written, then the canonical rows are materialized, so an origin that joins a
+  row already written in the same pass still applies its heads and control. A source origin binds
+  only to a row that exists (never to a synthesized id), and a writer that withholds leaves the
+  origin unbound, so the closing pass authors no tombstone for a row that was never there;
+- local changes are captured before anything binds: `map-repo` captures at the start of its
+  transaction exactly as a pull and a resolve do, so a row edited since the last sync command
+  carries its own revision before a released origin aliases onto it. A capture between the alias
+  and the materialization would mint a revision for a change nobody made (the row then hashes
+  under the canonical natural key);
+- when a writer withholds, the materialized base hash is recomputed from the local row as it is,
+  aligned to the canonical natural key, never carried from the previous canonical;
+- a resolve that keeps the head of an aliased origin ships the successor's references aligned to
+  the canonical natural key, so the peers accept it;
+- a new work whose pointer is foreign but whose checkpoints arrived with it stays (its rows
+  reference it) and is withheld with the written state as its base, so the closing pass records
+  nothing for it;
+- a source's local identity hashes device-independent references (the parent's material hash,
+  the context's local key), never origin ids, so every replica names the same source alike
+  whatever its origin set is.
+
 ## Verification (T034–T036)
 
 `test/unit/sync.test.ts` with three isolated homes and one shared temporary directory:
