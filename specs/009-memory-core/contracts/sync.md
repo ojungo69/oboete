@@ -582,6 +582,29 @@ the text above says less, this paragraph is the rule:
 - `--republish` after `map-repo` keeps `snapshot_id` when no line changed (Verification bullet
   amended).
 
+Round two (2026-09-11, Codex correctness pass + `/code-review high` on the round-one fixes):
+
+- a revision names its references (repository key, memory, work, parent) the way its natural key
+  does, on every replica (`alignToNatural` in capture, materialized state and resolve): the
+  natural key is frozen when the origin is created, while the canonical origin or the mapped
+  repository a reference resolves to can change later, so without this a peer would reject a
+  legitimate bundle as `natural_mismatch` after an alias flip or a `map-repo`. The reader derives
+  the natural key from the payload with the sender's own function; a projection released to an
+  ordinary row keeps its origin and is checked by its content hash alone;
+- a personal projection's text must hash to its identity (`personal_identity_mismatch`) and it
+  carries no work lineage (`personal_source_lineage`), as the native reader checks;
+- the source replacement on an in-place field change matches only a real UNIQUE tuple (NULL
+  members never match, as in the index), so context-only and citation rows stay distinct; a
+  dependency edge (`source_memory_id`) may name a personal projection of another repository and is
+  not an ownership violation; only `source_context_id` is owned;
+- a row released by `map-repo` aliases onto its local row before its control is read, so a row
+  already terminal on this device keeps that state ("a later alias onto a row that is already
+  terminal inherits that terminal state");
+- a control revision without payload applies its floor to an existing work or proposal (purpose
+  and candidate text dropped at `secret`);
+- a work whose pointer names another work's checkpoint is withheld whole (`repo_mismatch`): the
+  row is restored to what it was, and the closing pass records nothing for it.
+
 ## Verification (T034–T036)
 
 `test/unit/sync.test.ts` with three isolated homes and one shared temporary directory:
