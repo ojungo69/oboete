@@ -1,0 +1,23 @@
+src/sync-cli.ts
+  s_ce84c7de7d1c09::t_2d6be10ce77524 51-52,164
+src/sync/space.ts
+  s_ce84c7de7d1c09::t_cd5d638aa45df9 23,102,115,126-129
+test/unit/sync.test.ts
+  s_ce84c7de7d1c09::t_05327109b4755d 521-524
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "4b426a1ce76cc9811a3e3cdb54da511c9f5d85dd",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
