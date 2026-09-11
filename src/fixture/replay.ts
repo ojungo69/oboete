@@ -41,6 +41,7 @@ class ReplayFailure extends Error {
 }
 
 type WaitOptions = { timeoutMs: number; now: () => number; sleep: (ms: number) => Promise<void> };
+const waitOptions = (timeoutMs: number): WaitOptions => ({ timeoutMs, now: Date.now, sleep });
 
 export type Agent = (typeof AGENTS)[number];
 type SizeTag = 'at_bound' | 'above_bound';
@@ -364,7 +365,7 @@ function startObserve(bundle: string, cwd: string, env: NodeJS.ProcessEnv): Obse
 /** Claims only a free/stale lease; an acquisition timeout cannot displace a live worker. */
 export async function holdLease(
   dbPath: string,
-  options: WaitOptions = { timeoutMs: 5_000, now: Date.now, sleep },
+  options: WaitOptions = waitOptions(5_000),
 ): Promise<string | null> {
   const deadline = options.now() + options.timeoutMs;
   do {
@@ -406,7 +407,7 @@ export function replayTargetsSettled(
 export async function waitForReplaySettlement(
   dbPath: string, repoId: string, sessionIds: readonly string[],
   worker: Pick<ObserveProc, 'pid' | 'running' | 'status'>,
-  options: WaitOptions = { timeoutMs: WORKER_SETTLE_MS, now: Date.now, sleep },
+  options: WaitOptions = waitOptions(WORKER_SETTLE_MS),
 ): Promise<void> {
   const deadline = options.now() + options.timeoutMs;
   do {
