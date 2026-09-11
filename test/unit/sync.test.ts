@@ -214,7 +214,7 @@ test('the change pass gives every row an origin and one revision, then records n
     assert.deepEqual(headsOf(db, memoryOrigin), [stored[0]!.revision_id]);
     assert.equal(readOrigin(db, memoryOrigin)?.selected_head, stored[0]!.revision_id);
     const source = db.prepare("SELECT origin_id, local_id FROM sync_origins WHERE kind = 'source'").get()!;
-    assert.match(String(source.local_id), /^source:m_one:[0-9a-f]{64}$/u);
+    assert.match(String(source.local_id), /^source:[0-9a-f]{64}$/u);
     assert.equal(String(source.origin_id), `${replica}:${String(source.local_id)}`);
     assert.equal(revisions(db, String(source.origin_id))[0]!.natural.memory, memoryOrigin);
     db.exec('BEGIN IMMEDIATE');

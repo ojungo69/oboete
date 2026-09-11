@@ -24,7 +24,8 @@ export function* memoryRecords(db: DatabaseSync, only?: string): Generator<Row> 
 export function* sourceRecords(db: DatabaseSync, only?: number): Generator<Row> {
   for (const row of db.prepare(`SELECT s.*, m.deleted_at AS parent_deleted_at, m.sensitivity AS parent_sensitivity
     FROM memory_sources s JOIN memories m ON m.id = s.memory_id WHERE ? IS NULL OR s.id = ? ORDER BY s.id`).iterate(only ?? null, only ?? null)) {
-    const { parent_deleted_at, parent_sensitivity, ...source } = row;
+    const { parent_deleted_at, parent_sensitivity, sync_key, ...source } = row;
+    void sync_key;
     const redacted = parent_deleted_at !== null || parent_sensitivity === 'secret';
     yield { kind: 'source', ...source, id: String(row.id), evidence: redacted ? null : row.evidence,
       citation_value: redacted ? null : row.citation_value, source_agent: redacted ? null : row.source_agent,

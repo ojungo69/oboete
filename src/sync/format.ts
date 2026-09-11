@@ -41,7 +41,7 @@ export const naturalSchemas = {
       parent: originIdSchema.nullable(), material_hash: hex64,
     }),
   ]),
-  source: z.strictObject({ memory: originIdSchema, source_hash: hex64 }),
+  source: z.strictObject({ memory: originIdSchema, key: hex64 }),
   visibility: z.strictObject({
     memory: originIdSchema, audience: z.enum(['work', 'project', 'personal']),
     repo: repoKeySchema.nullable(), work: originIdSchema.nullable(),

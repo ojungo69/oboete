@@ -146,8 +146,13 @@ export function bindOrigin(db: DatabaseSync, originId: string, localId: string):
     if (group === canonical) continue;
     const previous = readOrigin(db, group)!;
     prepared(db, 'UPDATE sync_origins SET canonical_origin_id = ? WHERE canonical_origin_id = ?').run(canonical, group);
-    if (previous.selected_head !== null && readOrigin(db, canonical)!.selected_head === null) {
-      setSelectedHead(db, canonical, previous.selected_head, previous.materialized_revision, previous.materialized_hash);
+    // The canonical keeps what it has and inherits what it lacks: a selected head from a group that
+    // had one, and, independently, the materialized base of the row (the group that was applied to
+    // the row carries it; an origin that only arrived has a head but no base).
+    const current = readOrigin(db, canonical)!;
+    if (current.selected_head === null || (current.materialized_revision === null && previous.materialized_revision !== null)) {
+      setSelectedHead(db, canonical, current.selected_head ?? previous.selected_head,
+        current.materialized_revision ?? previous.materialized_revision, current.materialized_hash ?? previous.materialized_hash);
     }
     setSelectedHead(db, group, null, null, null);
   }

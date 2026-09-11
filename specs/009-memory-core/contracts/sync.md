@@ -133,8 +133,8 @@ origin. It never contains a local id or a sender-side hash that embeds one: memo
 same material) or `{domain: "personal_projection", projection_hash}` (repository-independent, as
 `memories.content_hash` is globally unique and personal hashes carry no repository) or, for a
 checkpoint, `{domain: "checkpoint", repo, work: <work origin>, parent: <memory origin or null>,
-material_hash}`; source `{memory: <memory origin>, source_hash: <SHA-256 of the canonical source
-fields>}`; visibility `{memory: <memory origin>, audience, repo, work: <work origin or null>}`
+material_hash}`; source `{memory: <memory origin>, key: <the row's sync key, see below>}`;
+visibility `{memory: <memory origin>, audience, repo, work: <work origin or null>}`
 (the scope tuple `memory_visibility` enforces UNIQUE, so a migration-created `v_migration:…` grant
 and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{candidate:
 <candidate identity hash>, origin_memory: <origin>}`; context `{repo, local_key}`; work
@@ -143,9 +143,15 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
 - `origin_id` is `<creating replica origin_id>:<local identifier>`; only the creating replica
   allocates one, but any replica may create later revisions (successors) of any origin it knows.
   Kinds: `memory`, `source`, `visibility`, `sharing_proposal`, `work`, `context`. For a `source`
-  the local identifier is `source:<memory local id>:<SHA-256 of the canonical source fields>`
-  (sources are immutable evidence; `memory_sources.id` is a reusable rowid and is never used); for
-  the other kinds it is the row's own id. Repositories are not revisioned: a `repo` line has only
+  the local identifier is `source:<sync key>`: the key is stored on the row
+  (`memory_sources.sync_key`, 0008) at its first capture, as the SHA-256 of the row's fields at
+  that moment named by device-independent identities (the owning and parent memories' material,
+  the context's local key), so an identical independent capture on another device aliases onto
+  the same origin; it is never recomputed, so an in-place field change, a redaction and a move
+  under another memory are revisions of the same origin (`memory_sources.id` is a reusable rowid
+  and is never used). A received source keeps the key it arrived with; one that lands on a local
+  row through a UNIQUE tuple of `memory_sources` keeps that row's key, and the two origins alias.
+  For the other kinds the local identifier is the row's own id. Repositories are not revisioned: a `repo` line has only
   `kind`, `origin_id` and its identity fields, and a bundle carries every repo line its payloads
   reference (see "Repository identity").
 - `revision_id` = SHA-256 over canonical JSON `["oboete-record-revision/1", origin_id, kind,
@@ -572,7 +578,8 @@ the text above says less, this paragraph is the rule:
   becomes the materialized base, so the next local change is its successor;
 - a pulled checkpoint's `content_hash` is `checkpointHash(repo, work, parent, material)`;
 - a proposal that arrived withheld aliases onto the local equivalent once its repository is
-  mapped; a source that changed a field in place replaces the row its old origin left behind;
+  mapped; a source that changed a field in place is a revision of the same origin (round four;
+  rounds one to three carried a content-derived source identity, since replaced);
 - Pull step 7 covers every failure: an unexpected apply error is reported as
   `apply_failed:<sqlite result code | error class>` for that bundle and the others proceed;
 - a push whose snapshot cannot be built or exceeds 256 MiB fails as `publish_failed` /
@@ -593,10 +600,10 @@ Round two (2026-09-11, Codex correctness pass + `/code-review high` on the round
   ordinary row keeps its origin and is checked by its content hash alone;
 - a personal projection's text must hash to its identity (`personal_identity_mismatch`) and it
   carries no work lineage (`personal_source_lineage`), as the native reader checks;
-- the source replacement on an in-place field change matches only a real UNIQUE tuple (NULL
-  members never match, as in the index), so context-only and citation rows stay distinct; a
-  dependency edge (`source_memory_id`) may name a personal projection of another repository and is
-  not an ownership violation; only `source_context_id` is owned;
+- a received source lands on the local row that shares a real UNIQUE tuple with it (NULL members
+  never match, as in the index), so context-only and citation rows stay distinct; a dependency
+  edge (`source_memory_id`) may name a personal projection of another repository and is not an
+  ownership violation; only `source_context_id` is owned;
 - a row released by `map-repo` aliases onto its local row before its control is read, so a row
   already terminal on this device keeps that state ("a later alias onto a row that is already
   terminal inherits that terminal state");
@@ -627,9 +634,30 @@ Round three (2026-09-11, `/code-review high` on the round-two fixes):
 - a new work whose pointer is foreign but whose checkpoints arrived with it stays (its rows
   reference it) and is withheld with the written state as its base, so the closing pass records
   nothing for it;
-- a source's local identity hashes device-independent references (the parent's material hash,
-  the context's local key), never origin ids, so every replica names the same source alike
-  whatever its origin set is.
+- a source's local identity is its stored sync key (round four; round three hashed
+  device-independent references on every capture, which redaction on the wire and identical
+  parents still broke).
+
+Round four (2026-09-11, Codex correctness pass + a `/code-review` finder on the round-three fixes):
+
+- a source's identity is a key stored on the row at its first capture, never recomputed (see
+  "Envelope and lines"): no identity churn on in-place edits, redaction or a parent's secret
+  marking, no phantom origins on the receiver, and a tombstone for a source or memory this device
+  never held is applied (its origin binds to the identity it would have), never left withheld;
+- an alias a writer discovers (an independent capture of the same identity, a row another origin
+  created earlier in the same pass) re-enters the pass: the merged group's canonical is processed
+  again with the combined heads and control, and nothing is recorded on an origin that is no
+  longer canonical. The pre-pass binding runs to a fixpoint, so a chain (checkpoint parents)
+  resolves in any order;
+- the materialized base is realigned to the canonical natural key at the start of the pass, before
+  any write or trigger, and kept when a writer withholds; a floor raised through a parent during
+  the pass is therefore a difference the closing capture records, never absorbed into the base;
+- a row that already shows the selected head under the effective control is not written again
+  (the log is re-sent with every snapshot, and a device's own row may hold more than the wire form
+  of its head); a terminal control is always applied;
+- when a canonical changes to an origin that only arrived (it sorts first), the local row's
+  materialized base moves with it independently of the selected head, so the next local edit is
+  a successor of that base.
 
 ## Verification (T034–T036)
 
