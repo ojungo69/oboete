@@ -133,9 +133,8 @@ origin. It never contains a local id or a sender-side hash that embeds one: memo
 same material) or `{domain: "personal_projection", projection_hash}` (repository-independent, as
 `memories.content_hash` is globally unique and personal hashes carry no repository) or, for a
 checkpoint, `{domain: "checkpoint", repo, work: <work origin>, parent: <memory origin or null>,
-material_hash}`; source `{key: <the row's sync key, see below>}` (the memory a source sits
-under is revision data: `memory_id` in its payload, so a move under another memory is a
-revision of the same origin); visibility `{memory: <memory origin>, audience, repo, work: <work origin or null>}`
+material_hash}`; source `{memory: <memory origin>, key: <the row's sync key, see below>}`;
+visibility `{memory: <memory origin>, audience, repo, work: <work origin or null>}`
 (the scope tuple `memory_visibility` enforces UNIQUE, so a migration-created `v_migration:…` grant
 and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{candidate:
 <candidate identity hash>, origin_memory: <origin>}`; context `{repo, local_key}`; work
@@ -145,17 +144,18 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
   allocates one, but any replica may create later revisions (successors) of any origin it knows.
   Kinds: `memory`, `source`, `visibility`, `sharing_proposal`, `work`, `context`. For a `source`
   the local identifier is `source:<sync key>`: the key is stored on the row
-  (`memory_sources.sync_key`, 0008) at its first capture, as the SHA-256 of the row's fields at
-  that moment named by device-independent identities (the owning memory's natural key, the
-  parent memory's material, the context's local key; the n-th identical row under one memory
-  gets the n-th key of that hash), so an identical independent capture on another device aliases
-  onto the same origin and the same citation under the same text in another repository does not;
-  it is never recomputed, so an in-place field change, a redaction and a move under another
-  memory are revisions of the same origin (`memory_sources.id` is a reusable rowid and is never
-  used). A received source keeps the key it arrived with; one that lands on a local row through a
-  UNIQUE tuple of `memory_sources` keeps that row's key, and the two origins alias; a bound origin
-  always names its row by the row's key. For the other kinds the local identifier is the row's
-  own id. Repositories are not revisioned: a `repo` line has only
+  (`memory_sources.sync_key`, 0008) at its first capture and never recomputed, so an in-place
+  field change and a redaction are revisions of the same origin (`memory_sources.id` is a
+  reusable rowid and is never used). The key is this device's naming only: the SHA-256 of the
+  row's fields and the local id of the memory it sits under (the n-th identical row under one
+  memory gets the n-th key of that hash), so a row deleted and inserted again identically takes
+  the key, and the origin, it had; keys are never expected to agree between devices. Independent
+  captures of one citation alias through a UNIQUE tuple of `memory_sources` (a received source
+  that lands on a local row through one keeps that row's key, and the two origins alias) or not
+  at all (identical flat rows captured independently stay distinct rows). A bound origin always
+  names its row by the row's key. A row moved under another memory is a new source there (new
+  key, new origin) and the old origin records a tombstone: the natural key names the memory a
+  source belongs to. For the other kinds the local identifier is the row's own id. Repositories are not revisioned: a `repo` line has only
   `kind`, `origin_id` and its identity fields, and a bundle carries every repo line its payloads
   reference (see "Repository identity").
 - `revision_id` = SHA-256 over canonical JSON `["oboete-record-revision/1", origin_id, kind,
@@ -667,9 +667,9 @@ Round five (2026-09-11, Codex correctness pass + `/code-review high` on round fo
 
 - a bound source origin names its row by the row's key (`local_id`), not by the key it arrived
   with, in every branch (tombstone, control-only, payload), so a tombstone reaches a row a tuple
-  alias gave another key; the memory a source sits under is revision data (`memory_id`), applied
-  by the writer, so a move under another memory ships and lands (the natural key is the key
-  alone); a source whose dependency edge names its own memory is withheld;
+  alias gave another key; (round five shipped the memory a source sits under as revision data;
+  round six returned it to the natural key, a move being a new source, because a payload
+  reference that is not pinned to the natural key changes with every alias flip of the memory);
 - a received source is matched against every UNIQUE tuple of `memory_sources` it carries, with
   `=` on each member (NULL never matches, as in the index); the first match is the row it lands
   on and any other row holding one of its tuples is the row it replaces (that row's origin
@@ -684,6 +684,24 @@ Round five (2026-09-11, Codex correctness pass + `/code-review high` on round fo
 - an origin applied without a row (a tombstone or floor for a row this device never held) has
   no materialized base, and `map-repo` re-evaluates every origin without a row, so the mapping
   binds it to the row it resolves to and applies it.
+
+Round six (2026-09-11, Codex correctness pass + `/code-review high` on round five):
+
+- a source's key is this device's naming (fields and the owning memory's local id, ordinal for
+  identical rows) and the natural key names the memory again: a move is a new source plus a
+  tombstone, an alias flip of the memory is not a change of its sources, and a deleted and
+  re-inserted row keeps its origin (see "Envelope and lines");
+- a head whose UNIQUE tuple another origin's row holds never deletes that row: when that
+  origin is still to be processed in the pass (it may move or die) the head waits and is retried
+  after it (`tuple_held` until then); when it is settled, an unbound head aliases onto the row
+  and a bound head is withheld; a bound origin whose row is gone writes nothing and the closing
+  pass records its tombstone as a successor of its last materialized revision;
+- an origin that stopped being canonical during the pass is processed as its canonical, never
+  written or counted; rows are counted once by local row; origins without a row that alias onto
+  a row the pass created bind after it and their merged canonical is processed;
+- a dependency edge is a context-only edge to another memory (`invalid_source_edge` at staging),
+  and one that would close a cycle through the edges this device holds is withheld
+  (`lineage_cycle`).
 
 ## Verification (T034–T036)
 

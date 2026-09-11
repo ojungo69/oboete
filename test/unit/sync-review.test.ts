@@ -537,7 +537,8 @@ test('a resolve that keeps the head of an aliased origin ships references aligne
     const [lo, hi] = [...replicas].sort((p, q) => (p.id < q.id ? -1 : 1)) as [Replica, Replica];
     for (const device of [lo, hi]) {
       insertMemory(device.db, 'm_one', 'Title', 'Body text');
-      insertSource(device.db, 'm_one', 'src/a.ts');
+      const rowid = insertSource(device.db, 'm_one', 'src/a.ts');
+      device.db.prepare('UPDATE memory_sources SET source_hash = ?, portion_start = 0, portion_end = 10, source_total = 10 WHERE id = ?').run('4'.repeat(64), rowid);
       device.db.exec('BEGIN IMMEDIATE'); captureLocalChanges(device.db, 5); device.db.exec('COMMIT');
     }
     pull(hi, lo, publish(lo, dir));
@@ -549,7 +550,6 @@ test('a resolve that keeps the head of an aliased origin ships references aligne
     lo.db.exec('BEGIN IMMEDIATE');
     const { revision_id } = resolveRow(lo.db, canonical, other, 300);
     lo.db.exec('COMMIT');
-    const successor = readRevision(lo.db, revision_id)!;
     pull(hi, lo, publish(lo, dir));
     assert.deepEqual(headsOf(hi.db, canonical), [revision_id], 'the peer accepts the resolution');
   });
@@ -827,7 +827,7 @@ test('a tombstone for an origin that aliased onto a row with another key deletes
   });
 });
 
-test('a source moved under another memory travels as a revision and lands under that memory', async () => {
+test('a source moved under another memory is a new source there, and the old one ships a tombstone', async () => {
   await withReplicas(2, (replicas, dir) => {
     const [a, b] = replicas as [Replica, Replica];
     insertMemory(a.db, 'm_old', 'Old', 'Old body');
@@ -842,7 +842,9 @@ test('a source moved under another memory travels as a revision and lands under 
     pull(b, a, `${dir}/${a.id}.plain`);
     assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 1);
     assert.equal(b.db.prepare('SELECT memory_id FROM memory_sources').get()?.memory_id, memoryOf(b, a, 'm_new').id, 'under the new memory');
-    assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM sync_origins WHERE kind = 'source'").get()?.n, 1, 'the same origin');
+    const origins = b.db.prepare("SELECT origin_id FROM sync_origins WHERE kind = 'source'").all().map((row) => String(row.origin_id));
+    assert.equal(origins.length, 2, 'the old origin and the new one');
+    assert.equal(origins.filter((origin) => headsOf(b.db, origin).some((head) => readRevision(b.db, head)!.control.tombstone)).length, 1, 'the old one is tombstoned');
   });
 });
 
@@ -947,28 +949,6 @@ test('the same citation under the same text in another repository has another ke
   });
 });
 
-test('two identical rows under one memory get the same two keys on every device, so they alias instead of multiplying', async () => {
-  await withReplicas(2, (replicas, dir) => {
-    const [a, b] = replicas as [Replica, Replica];
-    for (const device of [a, b]) {
-      insertMemory(device.db, 'm_one', 'Title', 'Body text');
-      insertSource(device.db, 'm_one', 'src/a.ts');
-      insertSource(device.db, 'm_one', 'src/a.ts');
-    }
-    // b's rows sit at other rowids (three padding rows stay in front of them).
-    b.db.prepare("DELETE FROM memory_sources WHERE memory_id = 'm_one'").run();
-    insertMemory(b.db, 'm_pad', 'Pad', 'Pad body');
-    for (let i = 0; i < 3; i += 1) insertSource(b.db, 'm_pad', `pad-${i}`);
-    insertSource(b.db, 'm_one', 'src/a.ts');
-    insertSource(b.db, 'm_one', 'src/a.ts');
-    publish(b, dir);
-    pull(b, a, publish(a, dir));
-    assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM memory_sources WHERE memory_id = 'm_one'").get()?.n, 2, 'still two rows');
-    assert.equal(b.db.prepare(`SELECT COUNT(DISTINCT canonical_origin_id) AS n FROM sync_origins WHERE kind = 'source'
-      AND local_id IN (SELECT 'source:' || sync_key FROM memory_sources WHERE memory_id = 'm_one')`).get()?.n, 2, 'both keys agree across devices');
-  });
-});
-
 test('a row processed again after a merge is counted once', async () => {
   await withReplicas(3, (replicas, dir) => {
     const [lo, hi, c] = [...replicas].sort((p, q) => (p.id < q.id ? -1 : 1)) as [Replica, Replica, Replica];
@@ -1017,5 +997,175 @@ test('an origin applied without a row carries no base, so an alias later keeps t
       assert.ok(headsOf(hi.db, canonical.origin_id).includes(base), "hi's own head stays a sibling");
       assert.equal(hi.db.prepare("SELECT status FROM sync_conflicts WHERE id = ?").get(`sync:${canonical.origin_id}`)?.status, 'open');
     } finally { x.close(); y.close(); }
+  });
+});
+
+// Round six: a head whose tuple another origin's row holds waits for that origin, a bound row
+// that vanished in the pass is a tombstone, a memory alias flip is not a source change, an origin
+// that stopped being canonical is not processed, a malformed edge is rejected, a row created in
+// the pass is an alias target, and lineage stays acyclic.
+
+test('a re-created source whose tuple the old origin still holds lands after the old origin dies, in any order', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    insertMemory(a.db, 'm_one', 'Title', 'Body text');
+    seedRawEvent(a.db);
+    // worker/imported.ts deletes and re-inserts the context row: a new origin holding the old tuple.
+    a.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_one', 'file_read', 1, 'claude')").run();
+    pull(b, a, publish(a, dir));
+    const retired = String(a.db.prepare('SELECT sync_key FROM memory_sources').get()!.sync_key);
+    a.db.prepare('DELETE FROM memory_sources').run();
+    // The adverse order: the new origin sorts before the retired one, so its head is processed first.
+    let agent = 'agent-0';
+    for (let i = 0; ; i += 1, agent = `agent-${i}`) {
+      a.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_one', 'file_read', 1, ?)").run(agent);
+      a.db.exec('BEGIN IMMEDIATE'); captureLocalChanges(a.db, 10 + i); a.db.exec('COMMIT');
+      if (String(a.db.prepare('SELECT sync_key FROM memory_sources').get()!.sync_key) < retired) break;
+      a.db.prepare('DELETE FROM memory_sources').run();
+    }
+    const result = pull(b, a, publish(a, dir));
+    assert.equal(result.withheldOnApply, 0);
+    assert.deepEqual(b.db.prepare('SELECT raw_event_id, source_agent FROM memory_sources').all().map((row) => ({ ...row })), [{ raw_event_id: 'raw_one', source_agent: agent }]);
+    const live = b.db.prepare("SELECT DISTINCT canonical_origin_id AS id FROM sync_origins WHERE kind = 'source'").all()
+      .filter((row) => headsOf(b.db, String(row.id)).some((head) => !readRevision(b.db, head)!.control.tombstone));
+    assert.equal(live.length, 1, 'the new origin is the only live one, never merged with a retired one');
+    assert.equal(conflicts(b.db), 0);
+  });
+});
+
+test('a bound source whose row another head replaced in the pass is a tombstone with a parent, not an overwrite of the other row', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    insertMemory(a.db, 'm_one', 'Title', 'Body text');
+    seedRawEvent(a.db, 'raw_one');
+    seedRawEvent(a.db, 'raw_two');
+    a.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_one', 'file_read', 1, 'x')").run();
+    a.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_two', 'file_read', 1, 'y')").run();
+    pull(b, a, publish(a, dir));
+    // A retires the raw_one row and points the raw_two row at raw_one; B edited the raw_one row meanwhile.
+    // The adverse order: the raw_two row's origin sorts first, so its head takes the tuple before the retired one dies.
+    const keys = a.db.prepare('SELECT raw_event_id, sync_key FROM memory_sources').all();
+    const [one, two] = [keys.find((row) => row.raw_event_id === 'raw_one')!, keys.find((row) => row.raw_event_id === 'raw_two')!];
+    if (String(two.sync_key) > String(one.sync_key)) {
+      // Swap the roles so the row whose key sorts first is the one that takes the other's tuple.
+      a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_tmp' WHERE raw_event_id = 'raw_one'").run();
+      a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_one' WHERE raw_event_id = 'raw_two'").run();
+      a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_two' WHERE raw_event_id = 'raw_tmp'").run();
+      b.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_tmp' WHERE raw_event_id = 'raw_one'").run();
+      b.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_one' WHERE raw_event_id = 'raw_two'").run();
+      b.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_two' WHERE raw_event_id = 'raw_tmp'").run();
+      pull(b, a, publish(a, dir));
+    }
+    const survivor = String(a.db.prepare("SELECT source_agent FROM memory_sources WHERE raw_event_id = 'raw_two'").get()!.source_agent);
+    b.db.prepare("UPDATE memory_sources SET source_agent = 'codex' WHERE raw_event_id = 'raw_one'").run();
+    a.db.prepare("DELETE FROM memory_sources WHERE raw_event_id = 'raw_one'").run();
+    a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_one' WHERE raw_event_id = 'raw_two'").run();
+    const result = pull(b, a, publish(a, dir));
+    assert.equal(result.withheldOnApply, 0);
+    assert.deepEqual(b.db.prepare('SELECT raw_event_id, source_agent FROM memory_sources').all().map((row) => ({ ...row })), [{ raw_event_id: 'raw_one', source_agent: survivor }],
+      "the surviving row is A's raw_two row, never overwritten by B's edit of the retired one");
+    for (const origin of b.db.prepare("SELECT origin_id FROM sync_origins WHERE kind = 'source'").all()) {
+      for (const head of headsOf(b.db, String(origin.origin_id))) {
+        const revision = readRevision(b.db, head)!;
+        if (revision.control.tombstone) assert.ok(revision.parents.length > 0, 'a tombstone descends from the last materialized revision');
+      }
+    }
+  });
+});
+
+test('a memory alias flip is not a change of the sources under it', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [lo, hi] = [...replicas].sort((p, q) => (p.id < q.id ? -1 : 1)) as [Replica, Replica];
+    insertMemory(hi.db, 'm_one', 'Title', 'Body text');
+    insertSource(hi.db, 'm_one', 'src/a.ts');
+    publish(hi, dir);
+    insertMemory(lo.db, 'm_one', 'Title', 'Body text');
+    // hi pulls lo's memory-only bundle: lo's origin sorts first and becomes canonical for the row.
+    pull(hi, lo, publish(lo, dir));
+    assert.equal(readOrigin(hi.db, `${hi.id}:m_one`)!.canonical_origin_id, `${lo.id}:m_one`);
+    const before = revisionCount(hi.db);
+    publish(hi, dir);
+    assert.equal(revisionCount(hi.db), before, 'no phantom source revision');
+    assert.equal(hi.db.prepare("SELECT COUNT(*) AS n FROM sync_revisions WHERE kind = 'source'").get()?.n, 1);
+  });
+});
+
+test('an origin that stopped being canonical during the pass is neither written nor counted', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [lo, hi] = [...replicas].sort((p, q) => (p.id < q.id ? -1 : 1)) as [Replica, Replica];
+    for (const device of [lo, hi]) { insertMemory(device.db, 'm_one', 'Title', 'Body text'); seedRawEvent(device.db); }
+    lo.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_one', 'file_read', 1, 'claude')").run();
+    hi.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_one', 'file_read', 1, 'codex')").run();
+    pull(lo, hi, publish(hi, dir));
+    // hi pulls lo: lo's origins claim hi's rows and become canonical while hi's own origins are still pending.
+    const result = pull(hi, lo, publish(lo, dir));
+    assert.equal(result.materialized, 2, 'one memory and one source');
+    const stale = hi.db.prepare("SELECT selected_head, materialized_hash FROM sync_origins WHERE origin_id <> canonical_origin_id").all();
+    assert.ok(stale.length > 0);
+    assert.ok(stale.every((origin) => origin.selected_head === null && origin.materialized_hash === null), 'nothing recorded on a non-canonical origin');
+  });
+});
+
+test('a dependency edge that is not context-only, or that names its own memory, is rejected before apply', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    insertMemory(a.db, 'm_one', 'Title', 'Body text');
+    insertMemory(a.db, 'm_two', 'Other', 'Other body');
+    // A row the 0005 CHECK forbids, as a foreign writer could ship it.
+    a.db.exec('PRAGMA ignore_check_constraints = ON');
+    a.db.prepare("INSERT INTO memory_sources (memory_id, citation_kind, source_memory_id, context_only) VALUES ('m_one', 'file_read', 'm_two', 0)").run();
+    a.db.exec('PRAGMA ignore_check_constraints = OFF');
+    assert.throws(() => pull(b, a, publish(a, dir)), (error: unknown) => error instanceof BundleRejected && error.code === 'invalid_source_edge');
+    assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 0);
+  });
+});
+
+test('a terminal origin applied without a row aliases onto the row another origin creates in the same map-repo', async () => {
+  await withHomes(3, (homes, shared) => {
+    const [homeA, homeB, homeC] = homes as [string, string, string];
+    const a = openHome(homeA);
+    const b = openHome(homeB);
+    const c = openHome(homeC);
+    try {
+      const [pathsA, pathsB, pathsC] = [oboetePaths(homeA), oboetePaths(homeB), oboetePaths(homeC)];
+      a.prepare("UPDATE repos SET identity_kind = 'common_dir', normalized_identity = '/work/a/.git' WHERE id = ?").run(REPO);
+      b.prepare("UPDATE repos SET identity_kind = 'common_dir', normalized_identity = '/work/b/.git' WHERE id = ?").run(REPO);
+      const { keyLine } = initSpace(a, pathsA, { directory: shared, classes: ['eligible'], now: 1 });
+      joinSpace(b, pathsB, { directory: shared, keyLine, classes: ['eligible'], now: 1 });
+      joinSpace(c, pathsC, { directory: shared, keyLine, classes: ['eligible'], now: 1 });
+      insertMemory(a, 'm_one', 'Title', 'Body text');
+      insertMemory(a, 'm_two', 'Other', 'Other body');
+      insertMemory(b, 'm_one', 'Title', 'Body text');
+      pushSpace(a, pathsA, { now: 5 });
+      a.prepare("UPDATE memories SET deleted_at = 6 WHERE id = 'm_one'").run();
+      pushSpace(a, pathsA, { now: 7 });
+      pushSpace(b, pathsB, { now: 8 });
+      pullSpace(c, pathsC, { now: 9 });
+      mapRepo(c, pathsC, { repoKey: repoKeyFor(replicaOriginId(a), 'common_dir', '/work/a/.git'), localRepoId: REPO, now: 10 });
+      mapRepo(c, pathsC, { repoKey: repoKeyFor(replicaOriginId(b), 'common_dir', '/work/b/.git'), localRepoId: REPO, now: 11 });
+      const rows = c.prepare("SELECT deleted_at FROM memories WHERE material_hash = ?").all(materialHash('Title', 'Body text'));
+      assert.equal(rows.length, 1, "B's row and A's tombstone are one row");
+      assert.notEqual(rows[0]!.deleted_at, null, "A's tombstone reached the row B's payload created");
+      assert.equal(readOrigin(c, `${replicaOriginId(a)}:m_one`)!.local_id, readOrigin(c, `${replicaOriginId(b)}:m_one`)!.local_id);
+    } finally { a.close(); b.close(); c.close(); }
+  });
+});
+
+test('a dependency edge that would close a cycle on this device is withheld', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    for (const device of [a, b]) {
+      insertMemory(device.db, 'm_c', 'C', 'C body');
+      insertMemory(device.db, 'm_d', 'D', 'D body');
+    }
+    // B: d depends on c. A: c depends on d. Each is acyclic alone.
+    b.db.prepare("INSERT INTO memory_sources (memory_id, citation_kind, source_memory_id, context_only) VALUES ('m_d', 'file_read', 'm_c', 1)").run();
+    a.db.prepare("INSERT INTO memory_sources (memory_id, citation_kind, source_memory_id, context_only) VALUES ('m_c', 'file_read', 'm_d', 1)").run();
+    publish(b, dir);
+    const result = pull(b, a, publish(a, dir));
+    assert.equal(result.withheldOnApply, 1);
+    const withheld = b.db.prepare("SELECT withheld_reason FROM sync_origins WHERE kind = 'source' AND withheld_reason IS NOT NULL").get();
+    assert.equal(withheld?.withheld_reason, 'lineage_cycle');
+    assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 1, "A's edge is not written");
   });
 });

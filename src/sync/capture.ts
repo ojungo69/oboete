@@ -19,32 +19,30 @@ import {
 export type CaptureResult = { revisions: number; tombstones: number };
 
 /**
- * The local identifier of a source row is `source:<sync_key>` (contracts/sync.md): the key is
- * stored on the row at its first capture and never recomputed, so in-place field changes,
- * redaction and a move under another memory are revisions of the same origin. The key is the
- * hash of the row's fields at that moment, named by device-independent identities (the owning
- * and parent memories' material, the context's local key), so an identical independent capture
- * on another device aliases onto the same origin. `memory_sources.id` is a reusable rowid and
- * is never used.
+ * The local identifier of a source row is `source:<sync_key>` (contracts/sync.md): a key stored
+ * on the row at its first capture and never recomputed, so in-place field changes and redaction
+ * are revisions of the same origin. The key is the hash of the row's fields and the local id of
+ * the memory it sits under (the n-th identical row under one memory gets the n-th key of that
+ * hash), so a row deleted and inserted again identically on this device takes the key, and the
+ * origin, it had; it is this device's naming only, never expected to agree with another device's
+ * (independent captures of one citation alias through a UNIQUE tuple of `memory_sources`, or not
+ * at all). A row moved under another memory is a new source (new key, new origin): the origin's
+ * natural key names the memory the source belongs to, and the old origin records a tombstone in
+ * the closing pass. `memory_sources.id` is a reusable rowid and is never used.
  */
 export function sourceLocalId(db: DatabaseSync, rowid: string, resolve: Resolver): string {
-  const raw = prepared(db, `SELECT s.sync_key, s.memory_id, s.citation_kind, s.citation_value, s.source_agent, s.portion_start, s.portion_end,
-    s.source_total, s.source_hash, s.captured_at, s.capture_root, s.source_paths_json, s.context_only, s.raw_event_id,
-    p.material_hash AS parent_material, c.local_key AS context_key
-    FROM memory_sources s LEFT JOIN memories p ON p.id = s.source_memory_id LEFT JOIN work_contexts c ON c.id = s.source_context_id
-    WHERE s.id = ?`).get(rowid);
+  const raw = prepared(db, `SELECT sync_key, memory_id, raw_event_id, citation_kind, citation_value, source_agent, portion_start, portion_end,
+    source_total, source_hash, captured_at, capture_root, source_paths_json, source_context_id, context_only, source_memory_id
+    FROM memory_sources WHERE id = ?`).get(rowid);
   if (raw === undefined) throw new Error(`memory_sources ${rowid} vanished during capture`);
-  if (raw.sync_key !== null) return `source:${String(raw.sync_key)}`;
-  // The owner is named by its natural key (repository key and material, or its projection or
-  // checkpoint identity), so the same citation under the same text in two repositories differs.
-  const owner = canonicalOf(db, resolve.originOf('memory', String(raw.memory_id))).natural;
-  const base = sha256Hex(canonicalJson([
-    owner, raw.citation_kind, raw.citation_value, raw.source_agent, raw.portion_start, raw.portion_end, raw.source_total,
-    raw.source_hash, raw.captured_at, raw.capture_root, raw.source_paths_json, raw.context_only, raw.raw_event_id,
-    raw.parent_material ?? null, raw.context_key ?? null,
-  ]));
-  // Identical rows under one memory (nothing UNIQUE tells them apart) get the n-th key of that
-  // base, the same on every device that holds the same n rows.
+  if (raw.sync_key !== null) {
+    const origin = readOrigin(db, resolve.originOf('source', `source:${String(raw.sync_key)}`));
+    const owner = origin === undefined ? undefined : canonicalOf(db, String(origin.natural.memory)).local_id;
+    if (owner === undefined || owner === String(raw.memory_id)) return `source:${String(raw.sync_key)}`;
+  }
+  const { sync_key, ...fields } = raw;
+  void sync_key;
+  const base = sha256Hex(canonicalJson(fields));
   let key = base;
   for (let occurrence = 1; prepared(db, 'SELECT 1 FROM memory_sources WHERE sync_key = ?').get(key) !== undefined; occurrence += 1) {
     key = sha256Hex(canonicalJson([base, occurrence]));
@@ -82,7 +80,7 @@ export function toOriginForm(kind: SyncKind, record: Row, originId: string, reso
 /** Payload fields that name what the natural key names: the payload follows the natural key. */
 const NATURAL_REFERENCES: Record<SyncKind, readonly [payloadField: string, naturalField: string][]> = {
   memory: [['repo_id', 'repo'], ['work_id', 'work'], ['checkpoint_parent_id', 'parent']],
-  source: [],
+  source: [['memory_id', 'memory']],
   visibility: [['memory_id', 'memory'], ['repo_id', 'repo'], ['work_id', 'work']],
   sharing_proposal: [['origin_memory_id', 'origin_memory']],
   context: [['repo_id', 'repo']],
@@ -112,7 +110,7 @@ export function naturalOf(kind: SyncKind, record: Row, originId: string, resolve
         };
       }
       return { domain: 'ordinary', repo: resolve.repoKey(String(record.repo_id)), material_hash: record.material_hash };
-    case 'source': return { key: originId.slice(originId.lastIndexOf(':') + 1) };
+    case 'source': return { memory: resolve.originOf('memory', String(record.memory_id)), key: originId.slice(originId.lastIndexOf(':') + 1) };
     case 'visibility':
       return {
         memory: resolve.originOf('memory', String(record.memory_id)), audience: record.audience,

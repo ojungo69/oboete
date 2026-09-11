@@ -217,8 +217,7 @@ test('the change pass gives every row an origin and one revision, then records n
     assert.match(String(source.local_id), /^source:[0-9a-f]{64}$/u);
     assert.equal(String(source.origin_id), `${replica}:${String(source.local_id)}`);
     const sourceRevision = revisions(db, String(source.origin_id))[0]!;
-    assert.deepEqual(sourceRevision.natural, { key: String(source.local_id).slice('source:'.length) }, 'a source is named by its key alone');
-    assert.equal(sourceRevision.payload?.memory_id, memoryOrigin, 'the memory it sits under is revision data');
+    assert.deepEqual(sourceRevision.natural, { memory: memoryOrigin, key: String(source.local_id).slice('source:'.length) }, 'a source is named by its memory and its key');
     db.exec('BEGIN IMMEDIATE');
     assert.deepEqual(captureLocalChanges(db, 11), { revisions: 0, tombstones: 0 });
     db.exec('COMMIT');

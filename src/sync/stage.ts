@@ -219,6 +219,10 @@ function checkPayloadIntegrity(line: RevisionLine): void {
       if (!absentText && sha256Json(['personal-projection-v1', payload.title, payload.body]) !== projection) reject('personal_identity_mismatch');
     }
   }
+  // A dependency edge is a context-only edge to another memory (the 0005 CHECK).
+  if (line.kind === 'source' && payload.source_memory_id !== null && (payload.context_only !== 1 || payload.source_memory_id === payload.memory_id)) {
+    reject('invalid_source_edge');
+  }
   if (line.kind === 'sharing_proposal' && payload.redacted !== true && payload.candidate_sensitivity !== 'secret'
     && line.control.sensitivity_floor !== 'secret'
     && materialHash(String(payload.candidate_title), String(payload.candidate_body)) !== payload.candidate_material_hash) reject('candidate_hash_mismatch');
