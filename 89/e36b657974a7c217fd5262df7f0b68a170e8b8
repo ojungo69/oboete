@@ -1,0 +1,31 @@
+src/sync/apply.ts
+  s_5ab5797dc469b5::t_bf1d19352af719 12,446-448,462-463,883-887,920-925,932,936-937,1027,1038-1045,1054-1064
+specs/009-memory-core/HANDOFF-claude-code.md
+  s_5ab5797dc469b5::t_2ed4b9c7564bea 67-73
+specs/009-memory-core/tasks.md
+  s_5ab5797dc469b5::t_5133671e75ed75 200,210-214
+specs/009-memory-core/contracts/sync.md
+  s_5ab5797dc469b5::t_9f40514a998570 844-866
+src/sync/store.ts
+  s_5ab5797dc469b5::t_e6627cd3906272 243-247,249-262
+test/unit/sync-review.test.ts
+  s_5ab5797dc469b5::t_7438868042ae17 2195-2260
+src/sync/capture.ts
+  s_5ab5797dc469b5::t_d404e1652e8e51 251-253,265
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "89e36b657974a7c217fd5262df7f0b68a170e8b8",
+  "prompts": {},
+  "sessions": {
+    "s_5ab5797dc469b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44ceb1b9-68f7-4bf5-8646-52149920dd27",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
