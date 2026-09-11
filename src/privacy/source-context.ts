@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { NearbyCandidate } from '../db/queries.js';
 import { payloadOf, toolPaths, type RawEventRow } from '../worker/batches.js';
 import { resolveRepoIdentity } from '../repo-identity.js';
+import { compareCodeUnits } from '../hash.js';
 
 type PrivacyContext = { root: string; paths: string[]; contextId: string | null };
 const MAX_PRIVACY_BYTES = 2 * 1024 * 1024;
@@ -29,7 +30,7 @@ export function canonicalContexts(contexts: SourceContext[]): PrivacyContext[] |
     if (context.root === null || context.root === '' || context.paths === null) return null;
     const key = JSON.stringify([context.root, context.contextId]);
     const prior = roots.get(key);
-    roots.set(key, { root: context.root, contextId: context.contextId, paths: [...new Set([...(prior?.paths ?? []), ...context.paths])].sort() });
+    roots.set(key, { root: context.root, contextId: context.contextId, paths: [...new Set([...(prior?.paths ?? []), ...context.paths])].sort(compareCodeUnits) });
     if (roots.size > 50) return null;
   }
   const result = [...roots].sort(([left], [right]) => left.localeCompare(right))

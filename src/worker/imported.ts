@@ -3,7 +3,7 @@ import { posix, win32 } from 'node:path';
 
 import { contentHash, materialHash, memoryIdFor } from '../db/identity.js';
 import { grantVisibility, type MemoryRow } from '../db/queries.js';
-import { sha256Hex, sha256Json } from '../hash.js';
+import { compareCodeUnits, sha256Hex, sha256Json } from '../hash.js';
 import { rejectsDirectives } from '../observer/classify.js';
 import type { DetectorInput, DetectorResult } from '../privacy/detect.js';
 import { readSourcePrivacy, type SourceContext } from '../privacy/provenance.js';
@@ -137,11 +137,11 @@ function fieldsOf(value: unknown) {
       originalPaths.push(value);
       sanitizedPaths.push(value);
     }
-    originalPaths.sort();
+    originalPaths.sort(compareCodeUnits);
     return true;
   };
-  if (!addPaths([...paths].sort())) return null;
-  return { fields, names: [...names].sort().join('\n'), paths: originalPaths, sanitizedPaths, addPaths,
+  if (!addPaths([...paths].sort(compareCodeUnits))) return null;
+  return { fields, names: [...names].sort(compareCodeUnits).join('\n'), paths: originalPaths, sanitizedPaths, addPaths,
     unanchoredPaths: [...absolutePaths].filter((path) => !anchoredPaths.has(path)),
     immutableChanged: (texts: string[]) => references.some((reference) => !reference.mutable && texts[reference.index] !== fields[reference.index]),
     directive: references.some((reference) => rejectsDirectives(fields[reference.index]) !== null),
@@ -290,7 +290,7 @@ async function classifyUnit(db: DatabaseSync, unit: Unit, token: string, now: ()
     || !sameSanitized || sanitized === undefined)) return false;
   if (!secret) fields.replace(sanitized!);
   if (!secret && payloads.some((payload) => payload !== null && !migrationPayloadShape(payload))) return false;
-  const proof = policy.contexts?.map((context) => ({ ...context, paths: [...new Set(fields.sanitizedPaths)].sort() })) ?? null;
+  const proof = policy.contexts?.map((context) => ({ ...context, paths: [...new Set(fields.sanitizedPaths)].sort(compareCodeUnits) })) ?? null;
   const checkedPolicy = policy;
   return transactionImmediate(db, () => {
     if (!assertLease(db, token, now())) { db.exec('ROLLBACK'); return true; }

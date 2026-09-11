@@ -2,7 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { materialHash, memoryIdFor } from './db/identity.js';
 import { getMemory, grantVisibility, memoryScope, type VisibilityGrant } from './db/queries.js';
-import { sha256Json } from './hash.js';
+import { compareCodeUnits, sha256Json } from './hash.js';
 import type { ApplyInput, ApplyResult } from './observer/apply.js';
 import { batchWork } from './observer/checkpoint.js';
 import type { Observation } from './observer/contract.js';
@@ -35,7 +35,7 @@ function declaration(row: RawEventRow): { title: string; body: string } | null {
     || payloadOf(row)?.input_source !== 'user') return null;
   const text = row.content ?? '';
   if (/[\r\n\u2028\u2029]/u.test(text)) return null;
-  const matched = /^(Personal preference:|個人設定[:：])[ \t]*([^\r\n]+)$/u.exec(text);
+  const matched = /^(Personal preference:|個人設定[:：])[ \t]*([^ \t\r\n][^\r\n]*)$/u.exec(text);
   const body = matched?.[2].trim();
   if (body === undefined || body === '' || body.length > 500) return null;
   return { title: matched![1].startsWith('個人設定') ? '個人設定' : 'Personal preference', body };
@@ -119,7 +119,7 @@ export function recordObservationSharing(db: DatabaseSync, input: ApplyInput, ap
     const body = automatic ? direct.body : observation.body;
     if (body.trim() === '' || body.length > 2_000) continue;
     const material = materialHash(title, body);
-    const id = `sp_${sha256Json(['sharing-proposal-v1', item.memoryId, sourceIds.sort(), title, body])}`;
+    const id = `sp_${sha256Json(['sharing-proposal-v1', item.memoryId, sourceIds.sort(compareCodeUnits), title, body])}`;
     const sensitivity = strictest(origin.sensitivity as Sensitivity, ...rows.map((row) => row!.sensitivity));
     db.prepare(`INSERT OR IGNORE INTO sharing_proposals (id, origin_memory_id, origin_repo_id, origin_work_id,
       candidate_title, candidate_body, candidate_material_hash, candidate_sensitivity, source_event_ids_json,

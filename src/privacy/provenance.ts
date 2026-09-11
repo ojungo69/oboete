@@ -13,6 +13,7 @@ import { readWorkSelection } from '../work.js';
 import { isAllowed, loadDestinationRules, type Sensitivity } from './egress.js';
 import { detectSync } from './detect.js';
 import type { RawEventRow } from '../worker/batches.js';
+import { compareCodeUnits } from '../hash.js';
 
 export type PrivacyLocation = { repoId: string; bindingId: string | null; home?: string;
   repoRoot?: string; contextKey?: string | null; workId?: string | null; history?: boolean };
@@ -265,8 +266,8 @@ export function readSourcePrivacy(db: DatabaseSync, location: PrivacyLocation, c
       }
     }
   }
-  detector.secretPaths = [...new Set(detector.secretPaths)].sort();
-  detector.paths = [...new Set(detector.paths)].sort();
+  detector.secretPaths = [...new Set(detector.secretPaths)].sort(compareCodeUnits);
+  detector.paths = [...new Set(detector.paths)].sort(compareCodeUnits);
   const selection = location.bindingId === null && location.repoRoot !== undefined
     ? readWorkSelection(db, { repoId: location.repoId, contextKey: location.contextKey ?? null }) : null;
   return { detector, stamp: contentHash(JSON.stringify([detector, rules, context, origin, binding, selection])) };
