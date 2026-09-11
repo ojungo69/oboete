@@ -1,0 +1,29 @@
+specs/009-memory-core/contracts/sync.md
+  s_ce84c7de7d1c09::t_f35b8ab495f5f1 608-633
+src/sync/apply.ts
+  s_ce84c7de7d1c09::t_f7b363abfb5de7 89-91,239-246,249,264,276-280,282-285,298,300,323,377-378,420,433,443,540-542,547-557,567,602-605,630-636,696-699,708
+src/sync/capture.ts
+  s_ce84c7de7d1c09::t_62fcc7a093c04f 21-32,37,167
+src/sync/space.ts
+  s_ce84c7de7d1c09::t_c91792653a7483 339-340
+src/sync/stage.ts
+  s_ce84c7de7d1c09::t_ef7bbaf23243de 214-217,219
+test/unit/sync-review.test.ts
+  s_ce84c7de7d1c09::t_6a2107bcc70330 14-15,18,30-43,421-595
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "676b0d0ba4566a027e29dd4067497723005541f2",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
