@@ -1,0 +1,39 @@
+specs/009-memory-core/HANDOFF-claude-code.md
+  s_5ab5797dc469b5::t_25af1fa25f2e50 66-67,73-76
+specs/009-memory-core/contracts/sync.md
+  s_5ab5797dc469b5::t_a7fddddd0f3866 129-132,164-170,551-555,784-817
+specs/009-memory-core/tasks.md
+  s_5ab5797dc469b5::t_8ecdd6ecf7789d 200,210,219-222
+src/db/migrations/0008_sync.sql
+  s_5ab5797dc469b5::t_4f2f82dffbe4c3 39,57-59,65-73
+src/sync/apply.ts
+  s_5ab5797dc469b5::t_fe5c289f6b813a 15,20-22,115-117,154,158-168,182,198,203-210,252,398,401-415,446-451,464-467,469,472-475,477-485,491-492,500,767-803,805-806,809-810,812,825-845,853-860,862,879-880,901-902,904,908-926,961,964-967,969-973,975,977,1096
+src/sync/capture.ts
+  s_5ab5797dc469b5::t_474066bb2ceea3 16,54-62,101-106,108,112-125,243-249,267-270
+src/sync/publish.ts
+  s_5ab5797dc469b5::t_f00db16e7b950a 182-184
+src/sync/space.ts
+  s_5ab5797dc469b5::t_40f5a5ceac24f7 27,166-170
+src/sync/store.ts
+  s_5ab5797dc469b5::t_1a9fbd9d253fee 24-25,140-155,189,203-213,219-225,227,230
+test/unit/sync-bounds.test.ts
+  s_5ab5797dc469b5::t_b004709fab28fc 495-514
+test/unit/sync-review.test.ts
+  s_5ab5797dc469b5::t_1a1d8013510fc0 13,1353,1365-1366,1368-1369,1501,1526-1979
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "5ddada5deeffbddd5ed6995ddd342b4008a82115",
+  "prompts": {},
+  "sessions": {
+    "s_5ab5797dc469b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44ceb1b9-68f7-4bf5-8646-52149920dd27",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
