@@ -318,6 +318,7 @@ export function pullSpace(db: DatabaseSync, paths: OboetePaths, input: { now: nu
         if (error instanceof BundleError || error instanceof BundleRejected) {
           result.bundles.push({ replica: sender, outcome: 'rejected', reason: error.code });
         } else if (error instanceof SyncError) throw error;
+        else if (isBusyError(error)) throw new SyncError('busy');
         else result.bundles.push({ replica: sender, outcome: 'rejected', reason: `apply_failed:${errorLabel(error)}` });
       } finally { rmSync(plain, { force: true }); rmSync(scratch, { force: true }); }
     }
