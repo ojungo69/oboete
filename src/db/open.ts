@@ -22,7 +22,7 @@ type DatabaseSync = Sqlite.DatabaseSync;
  * filter, and R6 keeps the hook's stderr for the count of unstored events.
  */
 let sqlite: typeof Sqlite | null = null;
-function loadSqlite(): typeof Sqlite {
+export function loadSqlite(): typeof Sqlite {
   sqlite ??= createRequire(import.meta.url)('node:sqlite') as typeof Sqlite;
   return sqlite;
 }

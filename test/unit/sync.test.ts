@@ -13,9 +13,12 @@ import { openDatabase } from '../../src/db/open.js';
 import { grantVisibility } from '../../src/db/queries.js';
 import { sha256Hex } from '../../src/hash.js';
 import { oboetePaths } from '../../src/paths.js';
+import { applyStaged, resolveRow, type ApplyResult } from '../../src/sync/apply.js';
 import { captureLocalChanges } from '../../src/sync/capture.js';
 import { BundleError, CHUNK_BYTES, decryptBundle, encryptBundle, keyId, PREFIX_BYTES, TAG_BYTES } from '../../src/sync/envelope.js';
 import { canonicalJson, payloadHash, revisionId, snapshotId } from '../../src/sync/identity.js';
+import { buildSnapshot } from '../../src/sync/publish.js';
+import { stageBundle } from '../../src/sync/stage.js';
 import {
   effectiveControl, headsOf, readOrigin, readRevision, replicaOriginId, revisionsOfOrigin, type Revision,
 } from '../../src/sync/store.js';
@@ -300,5 +303,169 @@ test('a physically deleted source or grant becomes a tombstone revision once', a
     assert.deepEqual(captureLocalChanges(db, 21), { revisions: 0, tombstones: 0 });
     db.exec('COMMIT');
     assert.ok(replica);
+  });
+});
+
+// --- Publish and apply between replicas (contracts/sync.md "Merge rules", "Verification") ---
+
+type Replica = { db: DatabaseSync; home: string; id: string };
+
+async function withReplicas(count: number, fn: (replicas: Replica[], dir: string) => void | Promise<void>): Promise<void> {
+  const replicas: Replica[] = [];
+  const open = async (index: number): Promise<void> => {
+    if (index === count) {
+      await withTempHome(async (dir) => {
+        try { await fn(replicas, dir); } finally { for (const replica of replicas) if (replica.db.isOpen) replica.db.close(); }
+      });
+      return;
+    }
+    await withTempHome(async (home) => {
+      const opened = openDatabase({ path: oboetePaths(home).db, timeoutMs: 1000 });
+      opened.db.prepare(`INSERT INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
+        VALUES (?, 'remote', ?, '/work/sync', 1, 1)`).run(REPO, REMOTE);
+      replicas.push({ db: opened.db, home, id: replicaOriginId(opened.db) });
+      await open(index + 1);
+    });
+  };
+  await open(0);
+}
+
+const SPACE = 'd'.repeat(32);
+
+/** Push: capture then build the plaintext; returns the file path (no encryption in these tests). */
+function publish(replica: Replica, dir: string, classes: readonly ('eligible' | 'local_only' | 'private')[] = ['eligible', 'local_only', 'private']): string {
+  replica.db.exec('BEGIN IMMEDIATE');
+  captureLocalChanges(replica.db, 100);
+  replica.db.exec('COMMIT');
+  const path = join(dir, `${replica.id}.plain`);
+  buildSnapshot(replica.db, { spaceId: SPACE, classes, now: 100, outputPath: path });
+  return path;
+}
+
+/** Pull one plaintext bundle from `from` into `into`. */
+function pull(into: Replica, from: Replica, path: string, now = 200): ApplyResult {
+  const staged = stageBundle(into.db, { plaintextPath: path, scratchPath: `${path}.${into.id}.scratch`, spaceId: SPACE, senderOriginId: from.id });
+  try {
+    into.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = applyStaged(into.db, staged, { senderOriginId: from.id, now });
+      into.db.exec('COMMIT');
+      return result;
+    } catch (error) { into.db.exec('ROLLBACK'); throw error; }
+  } finally { staged.close(); }
+}
+
+/** The local row an origin maps to on a device (local ids differ between devices). */
+function memoryOf(replica: Replica, creator: Replica, localIdOnCreator: string): Record<string, unknown> {
+  const local = readOrigin(replica.db, `${creator.id}:${localIdOnCreator}`)?.local_id;
+  assert.ok(local, `origin ${creator.id}:${localIdOnCreator} has a row on ${replica.id}`);
+  return replica.db.prepare('SELECT * FROM memories WHERE id = ?').get(local)!;
+}
+
+function revisionCount(db: DatabaseSync): number {
+  return Number(db.prepare('SELECT COUNT(*) AS n FROM sync_revisions').get()?.n);
+}
+
+test('a memory with its source and grant round-trips A→B and a change-free B→A adds no revision', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    insertMemory(a.db, 'm_one', 'Title', 'Body text');
+    insertSource(a.db, 'm_one', 'src/a.ts');
+    grantVisibility(a.db, 'm_one', { audience: 'project', repoId: REPO }, 'observer', 1);
+    const bundle = publish(a, dir);
+    const result = pull(b, a, bundle);
+    assert.equal(result.stored, 3);
+    assert.equal(result.withheldOnApply, 0);
+    const copy = memoryOf(b, a, 'm_one');
+    assert.equal(copy.title, 'Title');
+    assert.equal(copy.body, 'Body text');
+    assert.equal(copy.repo_id, REPO);
+    assert.equal(copy.content_hash, memoryOf(a, a, 'm_one').content_hash);
+    assert.equal(b.db.prepare('SELECT citation_value FROM memory_sources WHERE memory_id = ?').get(copy.id as string)?.citation_value, 'src/a.ts');
+    assert.equal(b.db.prepare('SELECT audience FROM memory_visibility WHERE memory_id = ?').get(copy.id as string)?.audience, 'project');
+    // B republishes what it received; A learns nothing new.
+    const before = revisionCount(a.db);
+    const back = pull(a, b, publish(b, dir));
+    assert.equal(back.stored, 0);
+    assert.equal(revisionCount(a.db), before);
+    assert.equal(revisionCount(b.db), 3);
+    assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM sync_conflicts WHERE status = 'open'").get()?.n, 0);
+  });
+});
+
+test('a deletion and a secret marking travel as control and erase the copy without resurrection', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    insertMemory(a.db, 'm_one', 'Title', 'Body text');
+    insertMemory(a.db, 'm_two', 'Other', 'Second body');
+    pull(b, a, publish(a, dir));
+    assert.equal(memoryOf(b, a, 'm_two').body, 'Second body');
+    // B's bundle from before it learns of the deletion: a stale delivery with live payloads.
+    const stale = publish(b, dir);
+    a.db.prepare('UPDATE memories SET deleted_at = 50 WHERE id = ?').run('m_one');
+    a.db.prepare("UPDATE memories SET sensitivity = 'secret' WHERE id = ?").run('m_two');
+    pull(b, a, publish(a, dir));
+    assert.notEqual(memoryOf(b, a, 'm_one').deleted_at, null);
+    assert.equal(memoryOf(b, a, 'm_two').sensitivity, 'secret');
+    assert.equal(memoryOf(b, a, 'm_two').body, '');
+    assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM sync_revisions WHERE payload_json IS NOT NULL AND origin_id = ?").get(`${a.id}:m_two`)?.n, 0);
+    // The stale bundle never undeletes or lowers on A, and B's fresh bundle does not either.
+    pull(a, b, stale);
+    assert.notEqual(memoryOf(a, a, 'm_one').deleted_at, null);
+    assert.equal(memoryOf(a, a, 'm_two').sensitivity, 'secret');
+    assert.equal(memoryOf(a, a, 'm_two').body, '');
+    pull(a, b, publish(b, dir));
+    assert.notEqual(memoryOf(a, a, 'm_one').deleted_at, null);
+    assert.equal(a.db.prepare("SELECT COUNT(*) AS n FROM sync_conflicts WHERE status = 'open'").get()?.n, 0);
+  });
+});
+
+test('independent edits on both devices are siblings reported on both, and one resolve converges them', async () => {
+  await withReplicas(3, (replicas, dir) => {
+    const [a, b, c] = replicas as [Replica, Replica, Replica];
+    insertMemory(a.db, 'm_one', 'Title', 'Body text');
+    pull(b, a, publish(a, dir));
+    a.db.prepare('UPDATE memories SET pinned_at = 5, pin_order = 1 WHERE id = ?').run('m_one');
+    b.db.prepare('UPDATE memories SET valid_to = 9 WHERE id = ?').run(memoryOf(b, a, 'm_one').id as string);
+    const fromA = publish(a, dir);
+    const fromB = publish(b, dir);
+    pull(b, a, fromA);
+    pull(a, b, fromB);
+    const origin = `${a.id}:m_one`;
+    for (const replica of [a, b]) {
+      assert.equal(headsOf(replica.db, origin).length, 2, `${replica === a ? 'A' : 'B'} sees two heads`);
+      assert.equal(replica.db.prepare("SELECT status FROM sync_conflicts WHERE id = ?").get(`sync:${origin}`)?.status, 'open');
+    }
+    // Each device keeps its own line as the effective row until a human resolves.
+    assert.equal(memoryOf(a, a, 'm_one').pinned_at, 5);
+    assert.equal(memoryOf(b, a, 'm_one').valid_to, 9);
+    // C joins from B's bundle alone and sees the same two heads.
+    pull(c, b, publish(b, dir));
+    assert.equal(headsOf(c.db, origin).length, 2);
+    assert.equal(c.db.prepare("SELECT status FROM sync_conflicts WHERE id = ?").get(`sync:${origin}`)?.status, 'open');
+    // One resolve on A (keep B's line) converges every device through any relay.
+    const keep = headsOf(a.db, origin).find((head) => readRevision(a.db, head)!.author === b.id)!;
+    a.db.exec('BEGIN IMMEDIATE');
+    const { revision_id } = resolveRow(a.db, origin, keep, 300);
+    a.db.exec('COMMIT');
+    assert.deepEqual(headsOf(a.db, origin), [revision_id]);
+    assert.equal(readRevision(a.db, revision_id)!.parents.length, 2);
+    assert.equal(memoryOf(a, a, 'm_one').valid_to, 9);
+    assert.equal(memoryOf(a, a, 'm_one').pinned_at, null);
+    assert.equal(a.db.prepare("SELECT status FROM sync_conflicts WHERE id = ?").get(`sync:${origin}`)?.status, 'resolved');
+    const resolved = publish(a, dir);
+    pull(c, a, resolved);
+    pull(b, c, publish(c, dir));
+    for (const replica of [b, c]) {
+      assert.deepEqual(headsOf(replica.db, origin), [revision_id]);
+      assert.equal(memoryOf(replica, a, 'm_one').valid_to, 9);
+      assert.equal(memoryOf(replica, a, 'm_one').pinned_at, null);
+      assert.equal(replica.db.prepare("SELECT status FROM sync_conflicts WHERE id = ?").get(`sync:${origin}`)?.status, 'resolved');
+    }
+    // A local edit after the resolution descends from it: no new conflict anywhere.
+    b.db.prepare('UPDATE memories SET pinned_at = 7, pin_order = 1 WHERE id = ?').run(memoryOf(b, a, 'm_one').id as string);
+    pull(a, b, publish(b, dir));
+    assert.equal(headsOf(a.db, origin).length, 1);
+    assert.equal(memoryOf(a, a, 'm_one').pinned_at, 7);
   });
 });

@@ -10,10 +10,10 @@ const MEMORY_COLUMNS = `id, repo_id, type, title, body, concepts, material_hash,
 
 export type Row = Record<string, unknown>;
 
-export function* memoryRecords(db: DatabaseSync): Generator<Row> {
+export function* memoryRecords(db: DatabaseSync, only?: string): Generator<Row> {
   const personal = db.prepare(`SELECT 1 FROM memory_visibility WHERE memory_id = ? AND audience = 'personal'
     UNION SELECT 1 FROM migration_records WHERE destination_memory_id = ? AND identity_domain = 'personal_projection' LIMIT 1`);
-  for (const row of db.prepare(`SELECT ${MEMORY_COLUMNS} FROM memories ORDER BY created_at, id`).iterate()) {
+  for (const row of db.prepare(`SELECT ${MEMORY_COLUMNS} FROM memories WHERE ? IS NULL OR id = ? ORDER BY created_at, id`).iterate(only ?? null, only ?? null)) {
     const withoutText = row.deleted_at !== null || row.sensitivity === 'secret';
     yield { kind: 'memory', ...row, identity_domain: personal.get(row.id, row.id) ? 'personal_projection' : 'ordinary',
       title: withoutText ? '' : row.title, body: withoutText ? '' : row.body,
@@ -21,9 +21,9 @@ export function* memoryRecords(db: DatabaseSync): Generator<Row> {
   }
 }
 
-export function* sourceRecords(db: DatabaseSync): Generator<Row> {
+export function* sourceRecords(db: DatabaseSync, only?: number): Generator<Row> {
   for (const row of db.prepare(`SELECT s.*, m.deleted_at AS parent_deleted_at, m.sensitivity AS parent_sensitivity
-    FROM memory_sources s JOIN memories m ON m.id = s.memory_id ORDER BY s.id`).iterate()) {
+    FROM memory_sources s JOIN memories m ON m.id = s.memory_id WHERE ? IS NULL OR s.id = ? ORDER BY s.id`).iterate(only ?? null, only ?? null)) {
     const { parent_deleted_at, parent_sensitivity, ...source } = row;
     const redacted = parent_deleted_at !== null || parent_sensitivity === 'secret';
     yield { kind: 'source', ...source, id: String(row.id), evidence: redacted ? null : row.evidence,
@@ -32,26 +32,26 @@ export function* sourceRecords(db: DatabaseSync): Generator<Row> {
   }
 }
 
-export function* contextRecords(db: DatabaseSync): Generator<Row> {
-  for (const row of db.prepare('SELECT * FROM work_contexts ORDER BY id').iterate()) yield { kind: 'context', ...row, redacted: false };
+export function* contextRecords(db: DatabaseSync, only?: string): Generator<Row> {
+  for (const row of db.prepare('SELECT * FROM work_contexts WHERE ? IS NULL OR id = ? ORDER BY id').iterate(only ?? null, only ?? null)) yield { kind: 'context', ...row, redacted: false };
 }
 
-export function* workRecords(db: DatabaseSync): Generator<Row> {
-  for (const row of db.prepare('SELECT * FROM work_items ORDER BY id').iterate()) {
+export function* workRecords(db: DatabaseSync, only?: string): Generator<Row> {
+  for (const row of db.prepare('SELECT * FROM work_items WHERE ? IS NULL OR id = ? ORDER BY id').iterate(only ?? null, only ?? null)) {
     const redacted = row.purpose_sensitivity === 'secret';
     yield { kind: 'work', ...row, purpose: redacted ? null : row.purpose, redacted };
   }
 }
 
-export function* visibilityRecords(db: DatabaseSync): Generator<Row> {
-  for (const row of db.prepare('SELECT * FROM memory_visibility ORDER BY id').iterate()) yield { kind: 'visibility', ...row };
+export function* visibilityRecords(db: DatabaseSync, only?: string): Generator<Row> {
+  for (const row of db.prepare('SELECT * FROM memory_visibility WHERE ? IS NULL OR id = ? ORDER BY id').iterate(only ?? null, only ?? null)) yield { kind: 'visibility', ...row };
 }
 
-export function* proposalRecords(db: DatabaseSync): Generator<Row> {
+export function* proposalRecords(db: DatabaseSync, only?: string): Generator<Row> {
   for (const row of db.prepare(`SELECT p.*, m.deleted_at AS origin_deleted_at, m.sensitivity AS origin_sensitivity,
     projected.deleted_at AS projection_deleted_at, projected.sensitivity AS projection_sensitivity
     FROM sharing_proposals p JOIN memories m ON m.id = p.origin_memory_id
-    LEFT JOIN memories projected ON projected.id = p.projected_memory_id ORDER BY p.id`).iterate()) {
+    LEFT JOIN memories projected ON projected.id = p.projected_memory_id WHERE ? IS NULL OR p.id = ? ORDER BY p.id`).iterate(only ?? null, only ?? null)) {
     const { origin_deleted_at, origin_sensitivity, projection_deleted_at, projection_sensitivity, ...proposal } = row;
     const redacted = origin_deleted_at !== null || origin_sensitivity === 'secret' || row.candidate_sensitivity === 'secret'
       || projection_deleted_at !== null || projection_sensitivity === 'secret';
