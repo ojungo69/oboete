@@ -13,7 +13,7 @@ import { oboetePaths } from '../../src/paths.js';
 import { captureLocalChanges } from '../../src/sync/capture.js';
 import type { Sensitivity } from '../../src/sync/identity.js';
 import { buildSnapshot } from '../../src/sync/publish.js';
-import { initSpace, joinSpace, mapRepo, pullSpace, pushSpace } from '../../src/sync/space.js';
+import { initSpace, joinSpace, loadSyncConfig, mapRepo, pullSpace, pushSpace, spaceDirectory } from '../../src/sync/space.js';
 import { canonicalOf, effectiveControl, headsOf, readOrigin, readRevision, replicaOriginId, repoKeyFor } from '../../src/sync/store.js';
 import {
   insertMemory, memoryOf, openHome, publish, pull, REPO, revisionCount, SPACE, withHomes, withReplicas, type Replica,
@@ -393,7 +393,7 @@ test('delivery identity: widening the classes and newly holding a payload change
   });
 });
 
-test('delivery identity: map-repo applies the withheld payloads without a pull and --republish ships them', async () => {
+test('delivery identity: map-repo applies the withheld payloads without a pull and --republish rewrites the same delivery', async () => {
   await withHomes(2, (homes, shared) => {
     const [homeA, homeB] = homes as [string, string];
     const a = openHome(homeA);
@@ -420,7 +420,14 @@ test('delivery identity: map-repo applies the withheld payloads without a pull a
       assert.equal(mapRepo(b, pathsB, { repoKey: key, localRepoId: REPO, now: 13 }).reapplied, 1);
       assert.equal(readOrigin(b, `${originA}:m_one`)!.withheld_reason, null);
       assert.equal(b.prepare('SELECT body, repo_id FROM memories').get()?.body, 'Body text');
-      assert.equal(pushSpace(b, pathsB, { now: 14, republish: true }).outcome, 'published');
+      // The mapping changes how this replica reads, not what it publishes: the same lines give the
+      // same snapshot_id, and --republish still rewrites the file under a new salt.
+      const bundle = join(spaceDirectory(shared, loadSyncConfig(pathsB)!.space_id), `${replicaOriginId(b)}.osb`);
+      const bytesBefore = readFileSync(bundle);
+      const republished = pushSpace(b, pathsB, { now: 14, republish: true });
+      assert.equal(republished.outcome, 'published');
+      assert.equal(republished.snapshotId, published.snapshotId);
+      assert.notDeepEqual(readFileSync(bundle), bytesBefore, 'the bundle was rewritten');
     } finally { a.close(); b.close(); }
   });
 });

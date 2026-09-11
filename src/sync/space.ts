@@ -206,7 +206,13 @@ export function pushSpace(db: DatabaseSync, paths: OboetePaths, input: { now: nu
           && sha256File(published) === String(stored.published_sha256);
         const unchanged = input.republish !== true && String(stored.last_pushed_snapshot_id) === snapshot.snapshotId && intact;
         // Step 3: encrypt in the private staging directory unless nothing would be written.
-        const encrypted = unchanged ? null : encryptBundle(key, plain, cipher);
+        let encrypted: ReturnType<typeof encryptBundle> | null = null;
+        if (!unchanged) {
+          try { encrypted = encryptBundle(key, plain, cipher); } catch (error) {
+            if (error instanceof BundleError && error.code === 'plaintext_too_large') { cleanup(); throw new SyncError('plaintext_too_large', { bytes: snapshot.bytes }); }
+            throw error;
+          }
+        }
         input.probe?.('after_encrypt');
         // Step 4: re-check under the writer lock, then publish and record together.
         db.exec('BEGIN IMMEDIATE');

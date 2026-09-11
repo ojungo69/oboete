@@ -15,7 +15,9 @@ not approve, and the migration merger (`transfer-merge.ts`) is never used to app
 
 - Nothing runs unless a sync space is configured, its consent tuple matches and a human runs
   `oboete sync push` or `oboete sync pull`. No hook, capture, injection, observer worker, doctor or
-  MCP path imports the sync module or performs sync I/O. There is no background scheduler in 009.
+  MCP path imports the sync transport (`src/sync/space.ts` and what it pulls in) or performs sync
+  I/O; `doctor` and MCP read only `src/sync/status.ts`, which queries `config.toml` and the local
+  tables. There is no background scheduler in 009.
 - Sync performs no network operation. The only I/O is file I/O below one directory the user named.
 - Text of a secret memory never leaves the machine (native export rule). Unprocessed captures and
   live quarantined rows are not exported; see "What a replica publishes".
@@ -47,7 +49,8 @@ not approve, and the migration merger (`transfer-merge.ts`) is never used to app
 - Key rotation is a new space. There is no re-encryption in place and no per-device recipient
   list; a lost or leaked key means the user creates a new space and re-pushes from a trusted device.
 - `config.toml` stores: directory (as given and as `realpath` at consent time), `space_id`,
-  `key_id`, selected sensitivity classes. Nothing else.
+  `key_id`, selected sensitivity classes. Nothing else. `key_id` is a public HKDF output, so the
+  credential guard of `oboete config` allow-lists `sync.key_id` (`KNOWN_KEY_PATHS`).
 
 ## Bundle envelope: `oboete-sync-bundle/1`
 
@@ -100,8 +103,9 @@ Header (`oboete-sync-snapshot/1`), fixed-size fields only:
 
 - `replica_origin_id` must equal the file name's `hex32`; `space_id` must equal the directory's.
 - `revision_lines` bounds the rest of the plaintext before parsing (line count and total bytes
-  are both checked); `revisions_sha256` is the SHA-256 of the exact bytes of all revision lines and
-  must match the bytes actually read. Everything is inside the ciphertext, so all of it is
+  are both checked); `revisions_sha256` is the SHA-256 of the exact bytes of every body line
+  (`repo` lines and revision lines, each with its trailing newline, in file order) and must match
+  the bytes actually read. Everything is inside the ciphertext, so all of it is
   authenticated.
 - `snapshot_id` = SHA-256 over canonical JSON `["oboete-sync-snapshot/1", space_id,
   replica_origin_id, revisions_sha256]`: it identifies the exact delivery (which revisions, which
@@ -540,6 +544,13 @@ cross-origin parent links only once the reader aliases the origins, bounds heads
 row, lets `resolve` name a checkpoint memory, and fixes the filter's evaluation order. T034
 closes every finding with a test in the list below.
 
+Implementation notes (T034–T036, 2026-09-11): the text above was amended in three places while
+the code was written, each recorded here rather than silently: `revisions_sha256` covers the
+`repo` lines as well as the revision lines (the reader hashes every body line); `sync.key_id` is
+allow-listed by the config credential guard; the fence names `src/sync/status.ts` as the one
+sync module `doctor` and MCP import. The 0008 schema adds `sync_approvals` (proposal id,
+candidate hash, projection hash, scope, approved at), written by every local approval.
+
 ## Verification (T034–T036)
 
 `test/unit/sync.test.ts` with three isolated homes and one shared temporary directory:
@@ -561,8 +572,9 @@ closes every finding with a test in the list below.
 - push race: a commit by a second connection during staging, and one between the end of staging
   and `BEGIN IMMEDIATE`, each make `data_version` differ and the push restart; the bundle never
   contains the row the concurrent commit made secret; a commit attempted during step 4 waits;
-- delivery identity: widening the consent classes, `--republish` after `map-repo`, and a payload
-  newly held all change `snapshot_id`; a pull that brings a payload for a known null-payload
+- delivery identity: widening the consent classes and a payload newly held change `snapshot_id`;
+  `--republish` after `map-repo` rewrites the file under a new salt with the same `snapshot_id`
+  when no line changed (a mapping changes how this replica reads, not what it publishes); a pull that brings a payload for a known null-payload
   revision fills it in unless the origin has a secret floor or tombstone;
 - checkpoint resolve: work forks C1/C2 from C0, C1 selected, `resolve --keep` C2: selected head,
   `current_checkpoint_memory_id` and the conflict row change together and no new conflict opens;

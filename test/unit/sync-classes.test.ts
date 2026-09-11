@@ -296,6 +296,50 @@ test('unprocessed sources, quarantine and unselected classes withhold payloads, 
     assert.deepEqual(withheldOf(released), { ...NOTHING_WITHHELD, memories: 2 });
     assert.notEqual(headLine(released, `${a.id}:w_ref`).payload, null);
     assertNoDanglingReferences(released);
+
+    // Selecting the private class ships the private memory itself; the quarantined one stays withheld.
+    const widened = bundleOf(publish(a, dir, ['eligible', 'local_only', 'private']));
+    assert.deepEqual(withheldOf(widened), { ...NOTHING_WITHHELD, memories: 1 });
+    assert.equal((headLine(widened, `${a.id}:m_priv`).payload as Line).body, 'Private body');
+    assert.equal(headLine(widened, `${a.id}:m_quar`).payload, null);
+  });
+});
+
+test('a pulled approval whose projection differs from the local record does not bind', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    const classes = ['eligible', 'local_only'] as const;
+    insertContext(a.db, 'ctx');
+    insertWork(a.db, 'w_one', 'ctx');
+    const origin = insertMemory(a.db, 'm_origin', 'Origin', 'Origin body');
+    a.db.prepare(`INSERT INTO sharing_proposals (id, origin_memory_id, origin_repo_id, origin_work_id, candidate_title,
+      candidate_body, candidate_material_hash, candidate_sensitivity, source_event_ids_json, basis, state, created_at)
+      VALUES ('p_one', 'm_origin', ?, 'w_one', 'Candidate zero', 'Body zero', ?, 'eligible', '[]', 'inferred', 'pending', 1)`)
+      .run(REPO, origin.material);
+    pull(b, a, publish(a, dir, classes));
+    const onB = readOrigin(b.db, `${a.id}:p_one`)!.local_id!;
+    // B approved candidate C0 with projection P0; A approved the same candidate but projects it as P1.
+    const p0 = insertMemory(a.db, 'm_p0', 'Candidate zero', 'Body zero');
+    b.db.prepare(`INSERT INTO sync_approvals (proposal_id, candidate_hash, projection_hash, scope_json, approved_at)
+      VALUES (?, ?, ?, '{"audience":"personal"}', 5)`).run(onB, origin.material, p0.content);
+    insertMemory(a.db, 'm_p1', 'Candidate zero', 'Body zero variant');
+    a.db.prepare(`UPDATE sharing_proposals SET state = 'approved', decision_channel = 'cli', projected_memory_id = 'm_p1',
+      decided_at = 2 WHERE id = 'p_one'`).run();
+    pull(b, a, publish(a, dir, classes));
+    assert.deepEqual({ ...b.db.prepare('SELECT state, projected_memory_id FROM sharing_proposals').get() },
+      { state: 'pending', projected_memory_id: null }, 'a different projection does not bind');
+
+    // The approved projection binds; the personal grant (the only scope a proposal grant can carry,
+    // 0006 CHECK) is written once the proposal is approved here.
+    a.db.prepare("UPDATE sharing_proposals SET projected_memory_id = 'm_p0', decided_at = 3 WHERE id = 'p_one'").run();
+    a.db.prepare(`INSERT INTO memory_visibility (id, memory_id, audience, repo_id, work_id, proposal_id, grant_kind, created_at)
+      VALUES ('v_pers', 'm_p0', 'personal', NULL, NULL, 'p_one', 'proposal_approval', 4)`).run();
+    pull(b, a, publish(a, dir, classes));
+    assert.deepEqual({ ...b.db.prepare('SELECT state, projected_memory_id FROM sharing_proposals').get() },
+      { state: 'approved', projected_memory_id: memoryOf(b, a, 'm_p0').id }, 'the matching projection binds');
+    const projection = memoryOf(b, a, 'm_p0').id as string;
+    assert.deepEqual(b.db.prepare('SELECT audience, proposal_id FROM memory_visibility WHERE memory_id = ?').all(projection)
+      .map((row) => ({ ...row })), [{ audience: 'personal', proposal_id: onB }]);
   });
 });
 

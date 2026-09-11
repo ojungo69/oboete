@@ -343,11 +343,15 @@ function proposalWriter(db: DatabaseSync, row: Origin, payload: Row | null, cont
   const localId = row.local_id ?? randomUUID();
   const sensitivity = stricter(payload.candidate_sensitivity as Sensitivity, control.sensitivity_floor);
   const redacted = payload.redacted === true || sensitivity === 'secret';
-  // An approval binds only to what this device's user approved; otherwise the decision is visible as pending.
-  const approvedHere = payload.state === 'approved' && locallyApproved(db, localId)
-    && prepared(db, 'SELECT 1 FROM sync_approvals WHERE proposal_id = ? AND candidate_hash = ?').get(localId, String(payload.candidate_material_hash)) !== undefined;
+  // An approval binds only to what this device's user approved (candidate hash and projection;
+  // the grant's scope is checked by the visibility writer); otherwise the decision is visible as pending.
+  const candidate = payload.state === 'approved' && payload.projected_memory_id !== null ? resolveLocal(db, 'memory', String(payload.projected_memory_id)) : null;
+  const projectionHash = candidate === null ? null : String(prepared(db, 'SELECT content_hash FROM memories WHERE id = ?').get(candidate)?.content_hash ?? '');
+  const record = prepared(db, 'SELECT candidate_hash, projection_hash FROM sync_approvals WHERE proposal_id = ?').get(localId);
+  const approvedHere = payload.state === 'approved' && record !== undefined && String(record.candidate_hash) === String(payload.candidate_material_hash)
+    && (record.projection_hash ?? null) === projectionHash;
   const state = payload.state === 'approved' && !approvedHere ? 'pending' : payload.state as string;
-  const projected = state === 'approved' && payload.projected_memory_id !== null ? resolve.localOf('memory', String(payload.projected_memory_id)) : null;
+  const projected = state === 'approved' ? candidate : null;
   prepared(db, `INSERT INTO sharing_proposals (id, origin_memory_id, origin_repo_id, origin_work_id, candidate_title, candidate_body,
       candidate_material_hash, candidate_sensitivity, source_event_ids_json, basis, state, decision_channel, projected_memory_id, created_at, decided_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

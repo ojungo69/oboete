@@ -12,18 +12,20 @@ import type { DatabaseSync } from 'node:sqlite';
 import { loadSqlite, openDatabase } from '../../src/db/open.js';
 import { oboetePaths } from '../../src/paths.js';
 import { applyStaged, resolveRow, type ApplyResult } from '../../src/sync/apply.js';
+import { captureLocalChanges } from '../../src/sync/capture.js';
 import { BundleError, decryptBundle, encryptBundle, MAX_CIPHERTEXT_BYTES, MAX_PLAINTEXT_BYTES } from '../../src/sync/envelope.js';
 import { BOUNDS } from '../../src/sync/format.js';
 import { canonicalJson, payloadHash, revisionId, snapshotId, SNAPSHOT_FORMAT, type SyncKind } from '../../src/sync/identity.js';
 import {
   initSpace, joinSpace, pullSpace, pushSpace, readKey, spaceDirectory, SyncError, syncPaths, withSpaceLock,
 } from '../../src/sync/space.js';
+import { buildSnapshot } from '../../src/sync/publish.js';
 import { BundleRejected, stageBundle } from '../../src/sync/stage.js';
 import {
   canonicalOf, effectiveControl, headsOf, originsOfRow, readOrigin, readRevision, replicaOriginId, repoKeyFor, type Row,
 } from '../../src/sync/store.js';
 import {
-  insertMemory, memoryOf, openHome, publish, pull, REMOTE, revisionCount, SPACE, withHomes, withReplicas,
+  insertMemory, memoryOf, openHome, publish, pull, REMOTE, REPO, revisionCount, SPACE, withHomes, withReplicas,
 } from '../helpers/sync.js';
 
 const SENDER = 'a'.repeat(32);
@@ -521,5 +523,64 @@ test('a 256 MiB plaintext round-trips to exactly the ciphertext bound',
       assert.equal(decryptBundle(key, cipher, out).plaintextBytes, MAX_PLAINTEXT_BYTES);
       assert.equal(statSync(out).size, MAX_PLAINTEXT_BYTES);
       for (const path of [plain, cipher, out]) rmSync(path, { force: true });
+    });
+  });
+
+test('a push at exactly 256 MiB of plaintext round-trips through the space, and one byte more writes nothing',
+  { skip: process.env.OBOETE_SYNC_HEAVY === undefined && 'set OBOETE_SYNC_HEAVY=1' }, async () => {
+    await withHomes(2, (homes, shared) => {
+      const [homeA, homeB] = homes as [string, string];
+      const a = openHome(homeA);
+      const b = openHome(homeB);
+      try {
+        const pathsA = oboetePaths(homeA);
+        const pathsB = oboetePaths(homeB);
+        const { keyLine, spaceId } = initSpace(a, pathsA, { directory: shared, classes: ['eligible'], now: 1 });
+        joinSpace(b, pathsB, { directory: shared, keyLine, classes: ['eligible'], now: 1 });
+        const BODY = 65_000;
+        const insert = a.prepare(`INSERT INTO memories (id, repo_id, type, title, body, cjk_bigrams, material_hash, content_hash, sensitivity,
+          review_state, created_at) VALUES (?, ?, 'discovery', ?, ?, '', ?, ?, 'eligible', 'reviewed', 1)`);
+        const add = (index: number, body: string): void => {
+          const material = createHash('sha256').update(`m${index}`).digest('hex');
+          insert.run(`m_${index.toString().padStart(6, '0')}`, REPO, `Memory ${index}`, body, material, createHash('sha256').update(`c${index}`).digest('hex'));
+        };
+        // Measured with the clock the push will use: `produced_at` is part of the header.
+        const measure = (): number => {
+          a.exec('BEGIN IMMEDIATE'); captureLocalChanges(a, 10); a.exec('COMMIT');
+          const out = join(homeA, 'measure.plain');
+          const bytes = buildSnapshot(a, { spaceId, classes: ['eligible'], now: 10, outputPath: out }).bytes;
+          rmSync(out, { force: true });
+          return bytes;
+        };
+        // Every memory line has the same size apart from its body, so the last body is sized to land on the bound.
+        for (let index = 0; index < 4_000; index += 1) add(index, 'x'.repeat(BODY));
+        const before = measure();
+        add(4_000, 'x'.repeat(1_000));
+        const perLine = measure() - before - 1_000;
+        const remaining = MAX_PLAINTEXT_BYTES - measure();
+        let index = 4_001;
+        for (let left = remaining; left > 0; index += 1) {
+          const body = Math.min(BODY, left - perLine);
+          add(index, 'x'.repeat(body));
+          left -= body + perLine;
+        }
+        assert.equal(measure(), MAX_PLAINTEXT_BYTES, 'the plaintext sits exactly on the bound');
+        const pushed = pushSpace(a, pathsA, { now: 10 });
+        assert.equal(pushed.outcome, 'published');
+        assert.equal(pushed.bytes, MAX_PLAINTEXT_BYTES);
+        const bundle = join(spaceDirectory(shared, spaceId), `${replicaOriginId(a)}.osb`);
+        assert.equal(statSync(bundle).size, MAX_CIPHERTEXT_BYTES);
+        const pulled = pullSpace(b, pathsB, { now: 11 });
+        assert.equal(pulled.bundles[0]!.outcome, 'applied');
+        assert.equal(b.prepare('SELECT COUNT(*) AS n FROM memories').get()?.n, index);
+        assert.equal(b.prepare('SELECT SUM(LENGTH(body)) AS n FROM memories').get()?.n, a.prepare('SELECT SUM(LENGTH(body)) AS n FROM memories').get()?.n);
+        // One byte more: the push fails before anything reaches the space directory.
+        a.prepare("UPDATE memories SET body = body || 'y' WHERE id = 'm_000000'").run();
+        const bytesBefore = statSync(bundle);
+        assert.throws(() => pushSpace(a, pathsA, { now: 12 }), (error: unknown) => error instanceof SyncError && error.code === 'plaintext_too_large');
+        assert.deepEqual(readdirSync(spaceDirectory(shared, spaceId)), [`${replicaOriginId(a)}.osb`]);
+        assert.equal(statSync(bundle).mtimeMs, bytesBefore.mtimeMs);
+        assert.deepEqual(readdirSync(syncPaths(pathsA).staging), [], 'the staging directory is clean');
+      } finally { a.close(); b.close(); }
     });
   });

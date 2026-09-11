@@ -81,10 +81,10 @@ source store, duplicating effects, reviving tombstones or activating historical 
 Independent test: disconnected replicas converge idempotently, propagate deletion and expose
 incompatible progress conflicts without clock-only overwrites.
 
-- [ ] T033 [US6] Pin encryption/transport APIs and record envelope/revision contracts in `specs/009-memory-core/research.md` and `contracts/sync.md` before adding dependencies.
-- [ ] T034 [US6] Add stable replica/revision identity and merge/conflict behavior using `src/transfer.ts`, `src/db/migrations/` and `test/unit/sync.test.ts`.
-- [ ] T035 [US6] Implement opted-in encrypted push/pull and destination consent in sync operations, `src/config.ts` and `src/setup/consent.ts`.
-- [ ] T036 [US6] Expose conflict choices through CLI/MCP and verify interruption, tampering, deletion and repeated transfers in `test/unit/sync.test.ts`.
+- [x] T033 [US6] Pin encryption/transport APIs and record envelope/revision contracts in `specs/009-memory-core/research.md` and `contracts/sync.md` before adding dependencies.
+- [x] T034 [US6] Add stable replica/revision identity and merge/conflict behavior using `src/transfer.ts`, `src/db/migrations/` and `test/unit/sync.test.ts`.
+- [x] T035 [US6] Implement opted-in encrypted push/pull and destination consent in sync operations, `src/config.ts` and `src/setup/consent.ts`.
+- [x] T036 [US6] Expose conflict choices through CLI/MCP and verify interruption, tampering, deletion and repeated transfers in `test/unit/sync.test.ts`.
 
 ## Phase 9: US7 — Choose model and cost (P2)
 
