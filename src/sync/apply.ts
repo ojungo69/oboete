@@ -1055,7 +1055,7 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
   // gone and which is not in this bundle: those canonicals are swept too, not only this pass's.
   let joined = false;
   const terminalRows = new Map(rows.filter((row) => row.kind === 'source').map((row) => [row.origin_id, row]));
-  if (insertedAny || pass.inserted || created) {
+  if (insertedAny || pass.inserted) {
     for (const stored of prepared(db, `SELECT origin_id FROM sync_origins WHERE kind = 'source' AND origin_id = canonical_origin_id
         AND local_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memory_sources WHERE 'source:' || sync_key = sync_origins.local_id)`).all()) {
       if (!terminalRows.has(String(stored.origin_id))) terminalRows.set(String(stored.origin_id), readOrigin(db, String(stored.origin_id))!);

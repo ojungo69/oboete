@@ -11,13 +11,13 @@ import { test } from 'node:test';
 
 import { checkpointHash, materialHash } from '../../src/db/identity.js';
 import { sha256Hex, sha256Json } from '../../src/hash.js';
-import { canonicalJson, revisionId, snapshotId } from '../../src/sync/identity.js';
+import { canonicalJson, payloadHash, revisionId, snapshotId } from '../../src/sync/identity.js';
 import { oboetePaths } from '../../src/paths.js';
 import { ResolveError, resolveRow } from '../../src/sync/apply.js';
 import { captureLocalChanges } from '../../src/sync/capture.js';
 import { initSpace, joinSpace, mapRepo, pullSpace, pushSpace, SyncError, syncPaths } from '../../src/sync/space.js';
 import { BundleRejected } from '../../src/sync/stage.js';
-import { effectiveControl, headsOf, readOrigin, readRevision, replicaOriginId, repoKeyFor, revisionsOfOrigin } from '../../src/sync/store.js';
+import { createOrigin, effectiveControl, headsOf, readOrigin, readRevision, replicaOriginId, repoKeyFor, revisionsOfOrigin, sourceTupleOf, storePayload, storeRevision, type Revision } from '../../src/sync/store.js';
 import {
   insertMemory, insertSource, memoryOf, openHome, publish, pull, REPO, revisionCount, withHomes, withReplicas, type Replica,
 } from '../helpers/sync.js';
@@ -2256,5 +2256,39 @@ test('a deletion whose dependency member cannot resolve still reaches a row matc
     // The deletion's tuple has raw_new and the (unresolved) dep E; H shares the raw_new member, so it goes.
     assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM memory_sources WHERE raw_event_id = 'raw_new'").get()?.n, 0, "H is deleted by the raw-event member");
     void result;
+  });
+});
+
+// US6 round twelve (Codex correctness + /code-review high on round eleven): storePayload backfills
+// a control-only descendant's inherited-null tuple, but the traversal matched any payload-withheld
+// source child, so a move-revision (payload_hash set, own payload still withheld) was stamped with
+// its parent's OLD tuple and could not recover its own tuple when its payload arrived. It must
+// match only control-only descendants (payload_hash IS NULL), as storeRevision's inheritance does.
+test('storePayload does not stamp a withheld move-revision with its parent tuple', async () => {
+  await withReplicas(1, (replicas) => {
+    const [a] = replicas as [Replica];
+    const db = a.db;
+    const natural = { memory: 'm1', key: 'k0' };
+    const control = { tombstone: false, sensitivity_floor: 'eligible' as const };
+    createOrigin(db, { origin_id: 'o1', kind: 'source', local_id: null, natural });
+    const r0Payload = { raw_event_id: 'raw_one', source_hash: null, portion_start: null, portion_end: null, context_only: 1, source_memory_id: null };
+    const r1Payload = { ...r0Payload, raw_event_id: 'raw_two' };
+    const mk = (parents: string[], payload: typeof r0Payload): Revision => {
+      const rev: Revision = { revision_id: '', origin_id: 'o1', kind: 'source', author: 'auth', parents, control, natural, payload_hash: payloadHash(payload), payload: null };
+      rev.revision_id = revisionId(rev);
+      return rev;
+    };
+    const r0 = mk([], r0Payload);
+    storeRevision(db, r0, null, 1);
+    const r1 = mk([r0.revision_id], r1Payload); // a move to raw_two, its own payload still withheld
+    storeRevision(db, r1, null, 1);
+    assert.equal(readRevision(db, r1.revision_id)!.tuple, null, 'the withheld move-revision has no tuple yet');
+    storePayload(db, r0.revision_id, r0Payload); // r0's payload arrives and fills r0's tuple
+    assert.equal(readRevision(db, r1.revision_id)!.tuple, null, 'the move-revision still waits for its own payload');
+    // A genuine control-only tombstone child DOES inherit its parent tuple, so the fix is not over-broad.
+    const tomb: Revision = { revision_id: '', origin_id: 'o1', kind: 'source', author: 'auth', parents: [r0.revision_id], control: { tombstone: true, sensitivity_floor: 'eligible' }, natural, payload_hash: null, payload: null };
+    tomb.revision_id = revisionId(tomb);
+    storeRevision(db, tomb, null, 1);
+    assert.deepEqual(readRevision(db, tomb.revision_id)!.tuple, sourceTupleOf(r0Payload), 'the tombstone inherits its parent tuple');
   });
 });

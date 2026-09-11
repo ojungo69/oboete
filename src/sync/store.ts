@@ -253,7 +253,7 @@ export function storePayload(db: DatabaseSync, revisionIdValue: string, payload:
     const next: string[] = [];
     for (const parent of frontier) {
       for (const child of prepared(db, `SELECT c.revision_id FROM sync_revision_parents p JOIN sync_revisions c ON c.revision_id = p.child
-        WHERE p.parent = ? AND c.kind = 'source' AND c.payload_json IS NULL AND c.tuple_json IS NULL`).all(parent)) {
+        WHERE p.parent = ? AND c.kind = 'source' AND c.payload_hash IS NULL AND c.payload_json IS NULL AND c.tuple_json IS NULL`).all(parent)) {
         prepared(db, 'UPDATE sync_revisions SET tuple_json = ? WHERE revision_id = ?').run(tuple, String(child.revision_id));
         next.push(String(child.revision_id));
       }

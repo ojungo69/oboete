@@ -864,6 +864,20 @@ findings, three fixed and pinned, the fourth mitigated):
   choice independent of processing order, or capture and apply to withhold cyclic edges
   symmetrically — a design change tracked as a follow-up (issue #196), not closed by round eleven.
 
+Round twelve (2026-09-12, Codex correctness pass + `/code-review high` on round eleven; three
+findings):
+
+- `storePayload` backfills a control-only descendant's inherited-null tuple when the parent's
+  payload arrives, but the traversal matched any payload-withheld source child, so a move-revision
+  (payload_hash set, its own payload still withheld) was stamped with its parent's old tuple and
+  could not recover its own tuple; the traversal now matches only control-only descendants
+  (`payload_hash IS NULL`), as `storeRevision`'s inheritance already does (fixed, pinned);
+- two narrower source-identity edges are tracked as a follow-up (issue #197), not closed here: a
+  capture that moves onto a retired tuple can, at the 64-parent bound, silently drop a required
+  retirement head (63+ concurrent same-tuple tombstones — a full fix needs bounded intermediate
+  merge revisions); and the stored-terminal sweep scans only bound canonicals, so an unbound
+  cross-memory-key tombstone does not reach a matching source a later bundle brings.
+
 ## Verification (T034–T036)
 
 `test/unit/sync.test.ts` with three isolated homes and one shared temporary directory:
