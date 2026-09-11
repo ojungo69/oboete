@@ -1,0 +1,21 @@
+test/helpers/sync.ts
+  s_ce84c7de7d1c09::t_a2e595874f835a 1-124
+test/unit/sync.test.ts
+  s_ce84c7de7d1c09::t_7391fd1dea8dcd 15,24,26-28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "dcc08a42245e894f8a186b1c161bd27b903600cc",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
