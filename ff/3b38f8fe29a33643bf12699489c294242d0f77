@@ -1,0 +1,28 @@
+specs/009-memory-core/contracts/sync.md
+  s_dcd044e6cd095e::t_77ae4cff04c97a 199-201,213-221,223,225,228-233,235-242,264-270,286-288,319-323,364-383,385-391,395-396,410-412,419-420
+  s_ce84c7de7d1c09::t_425c64a01b7ea1 98,171-172,194-198,460-464,476,489,500-502,512-513,516-525,553-556,561-564,566-570,584-586,596-604,625-626
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "ff3b38f8fe29a33643bf12699489c294242d0f77",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_dcd044e6cd095e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08efe-1ef3-7d20-a8da-63516b24072a",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
