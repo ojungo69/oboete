@@ -1,0 +1,19 @@
+specs/009-memory-core/contracts/sync.md
+  s_ce84c7de7d1c09::t_575ceb8d857ccd 554-584,690-695
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "da2c4b1de5cdfa2e6a90f7f6ab82e3208b9b306d",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
