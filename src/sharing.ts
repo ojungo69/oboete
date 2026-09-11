@@ -152,23 +152,27 @@ async function checkedProposal(db: DatabaseSync, location: PrivacyLocation, prop
 
 export async function sharingStatus(db: DatabaseSync, location: PrivacyLocation) {
   const candidates = db.prepare(`SELECT * FROM sharing_proposals WHERE origin_repo_id = ?
-    ORDER BY state = 'pending' DESC, created_at DESC, id LIMIT 51`)
-    .all(location.repoId) as unknown as Proposal[];
+    ORDER BY state = 'pending' DESC, created_at DESC, id`);
   const proposals = [];
   const guards = [];
-  for (const candidate of candidates.slice(0, 50)) {
+  let hasMore = false;
+  for (const candidate of candidates.iterate(location.repoId) as unknown as Iterable<Proposal>) {
     const sourceLocation = approvalLocation(location, candidate);
     const references = [{ memoryId: candidate.origin_memory_id, rawEventId: null }];
     const initial = injectionPrivacy(db, sourceLocation, references);
     if (initial !== null && await checkedProposal(db, location, candidate, detectSync) !== null) {
+      if (proposals.length === 50) {
+        hasMore = true;
+        break;
+      }
       proposals.push(candidate);
       guards.push({ candidate, sourceLocation, references, stamp: initial.stamp });
     }
   }
   if (guards.some(({ candidate, sourceLocation, references, stamp }) =>
     JSON.stringify(readProposal(db, location.repoId, candidate.id)) !== JSON.stringify(candidate)
-    || injectionPrivacy(db, sourceLocation, references)?.stamp !== stamp)) return { proposals: [], hasMore: candidates.length > 50 };
-  return { proposals, hasMore: candidates.length > 50 };
+    || injectionPrivacy(db, sourceLocation, references)?.stamp !== stamp)) return { proposals: [], hasMore };
+  return { proposals, hasMore };
 }
 
 export async function decideSharing(db: DatabaseSync, location: PrivacyLocation,

@@ -123,7 +123,9 @@ export function bindCapturedWork(db: DatabaseSync, input: CaptureWorkInput): { b
     WHERE id = ? AND state = 'active' AND purpose IS NULL AND purpose_source_event_id IS NULL
       AND NOT EXISTS (SELECT 1 FROM raw_events WHERE work_binding_id = ? AND kind NOT IN ('session_start', 'probe'))`)
     .get(current.work_id, current.id) !== undefined;
-  if (current?.context_id === contextId && (declaration === null || emptyWork)) {
+  if (current?.context_id === contextId && (declaration === null || emptyWork)
+    && (current.work_id === null || db.prepare(`SELECT 1 FROM work_items WHERE id = ? AND state = 'active'`)
+      .get(current.work_id) !== undefined)) {
     if (current.work_id !== null && purpose !== null) {
       db.prepare(`UPDATE work_items SET purpose = ?, purpose_source_event_id = ?, purpose_sensitivity = ?, updated_at = ?
         WHERE id = ? AND purpose IS NULL AND purpose_source_event_id IS NULL`)

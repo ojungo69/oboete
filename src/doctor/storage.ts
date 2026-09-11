@@ -347,22 +347,23 @@ export function generationItem(db: DatabaseSync | null, integrityFailed: boolean
   if (db === null) return dbUnread('generation', integrityFailed,
     'The database is unavailable, so source processing could not be verified.',
     'Generation progress is unknown.', '`oboete doctor` after storage is repaired.');
-  const counts = { pending: 0, waiting: 0, processed: 0, legacy_unknown: 0, excluded: 0, partial: 0, recovered: 0 };
+  const counts = { pending: 0, waiting: 0, parked: 0, processed: 0, legacy_unknown: 0, excluded: 0, partial: 0, recovered: 0 };
   const rows = db.prepare(`SELECT ${SOURCE_METADATA_COLUMNS}, EXISTS (
     SELECT 1 FROM observation_batch_sources s WHERE s.raw_event_id = raw_events.id
       AND s.outcome IN ('deferred', 'rejected', 'uncovered') AND s.reason IS NOT 'not_sent'
   ) AS previously_deferred FROM raw_events WHERE processing_state = 'excluded' OR ${SUMMARIZABLE_ROW_SQL}`);
   for (const stored of rows.iterate()) {
     const row = stored as unknown as RawEventRow;
-    counts[row.processing_state ?? 'pending'] += 1;
+    if (row.processing_state === 'waiting' && row.retry_after === null) counts.parked += 1;
+    else counts[row.processing_state ?? 'pending'] += 1;
     if (row.classification_state === 'partial') counts.partial += 1;
     if (row.processing_state === 'processed' && stored.previously_deferred === 1) counts.recovered += 1;
   }
   const reason = `Retained sources: ${counts.pending} pending; ${counts.waiting} waiting; ` +
-    `${counts.partial} incomplete captures; ${counts.legacy_unknown} legacy sources held; ` +
+    `${counts.parked} parked; ${counts.partial} incomplete captures; ${counts.legacy_unknown} legacy sources held; ` +
     `${counts.excluded} privacy exclusions; ${counts.processed} processed (${counts.recovered} recovered).`;
   const describe = counts.waiting > 0 || counts.partial > 0 ? degraded
-    : counts.pending > 0 || counts.legacy_unknown > 0 ? warning : null;
+    : counts.pending > 0 || counts.legacy_unknown > 0 || counts.parked > 0 ? warning : null;
   if (describe === null) return healthy('generation', reason);
   return describe('generation', reason,
     'Temporary guidance may be available while accepted information is still unprocessed.',

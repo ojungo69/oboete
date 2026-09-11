@@ -21,7 +21,7 @@ import { LATEST_SCHEMA_VERSION, openDatabase } from '../../src/db/open.js';
 import { runDoctor, type DoctorDeps, type DoctorItem } from '../../src/doctor.js';
 import { probeReason } from '../../src/doctor/agents.js';
 import { allowanceItem, catalogItems, providerItem } from '../../src/doctor/provider.js';
-import { ftsItem, migrationItem, openStorage, spoolItem, workerItem } from '../../src/doctor/storage.js';
+import { ftsItem, generationItem, migrationItem, openStorage, spoolItem, workerItem } from '../../src/doctor/storage.js';
 import { ensureDirectories, oboetePaths, type OboetePaths } from '../../src/paths.js';
 import type { VersionSpawn } from '../../src/setup/detect.js';
 import { removeJsonHandlers } from '../../src/setup/managed-block.js';
@@ -839,6 +839,32 @@ test('a fresh worker heartbeat reports the process and elapsed seconds', async (
       item: 'worker', status: 'healthy', reason: 'The worker process 1234 is alive (heartbeat 2 seconds ago).',
       consequence: '', recovery: '',
     });
+  });
+});
+
+test('a parked work-selection source warns until it has a retry time', async () => {
+  await withItemDatabase((db) => {
+    db.prepare(
+      "INSERT INTO repos (id, identity_kind, normalized_identity) VALUES ('doctor-generation', 'common_dir', 'doctor-generation')",
+    ).run();
+    db.prepare(
+      `INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, status)
+       VALUES ('doctor-generation', 'doctor-generation', 'claude', 'native-generation', 'conversation-generation', 'active')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO raw_events
+        (id, repo_id, session_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at, processing_state, retry_after)
+       VALUES ('parked-generation', 'doctor-generation', 'doctor-generation', 'claude', 'prompt', 'accepted source', 'local_only', 'done', ?, ?, 'waiting', NULL)`,
+    ).run(ITEM_NOW, ITEM_NOW + 86_400_000);
+
+    const parked = generationItem(db, false);
+    assert.equal(parked.status, 'warning');
+    assert.match(parked.reason, /0 waiting; 1 parked;/);
+
+    db.prepare("UPDATE raw_events SET retry_after = ? WHERE id = 'parked-generation'").run(ITEM_NOW + 1);
+    const retrying = generationItem(db, false);
+    assert.equal(retrying.status, 'degraded');
+    assert.match(retrying.reason, /1 waiting; 0 parked;/);
   });
 });
 

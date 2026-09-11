@@ -293,6 +293,31 @@ test('older pending proposals remain reachable after fifty newer decisions', asy
   });
 });
 
+test('older pending proposal remains reachable when fifty newer pending origins are deleted', async () => {
+  await withFixture(async (fixture) => {
+    const { db, identity } = fixture;
+    const { input, token, location } = sharingInput(fixture, { source: 'rpc' });
+    await applyObservations(db, token, input);
+    const pendingId = String(db.prepare("SELECT id FROM sharing_proposals WHERE state = 'pending'").get()?.id);
+    const workId = `fixture-work:${identity.id}`;
+    for (let index = 0; index < 50; index++) {
+      const originId = `deleted-origin-${index}`;
+      const body = `Preference ${index}.`;
+      memory(db, originId, identity.id, body);
+      db.prepare('UPDATE memories SET title = ? WHERE id = ?').run('Personal preference', originId);
+      grantVisibility(db, originId, { audience: 'work', repoId: identity.id, workId }, 'observer', NOW);
+      db.prepare(`INSERT INTO sharing_proposals (id, origin_memory_id, origin_repo_id, origin_work_id,
+        candidate_title, candidate_body, candidate_material_hash, candidate_sensitivity, source_event_ids_json,
+        basis, state, created_at) VALUES (?, ?, ?, ?, 'Personal preference', ?, ?, 'eligible', '[]', 'inferred', 'pending', ?)`)
+        .run(`deleted-proposal-${index}`, originId, identity.id, workId, body, materialHash('Personal preference', body), NOW + index + 1);
+      db.prepare('UPDATE memories SET deleted_at = ? WHERE id = ?').run(NOW, originId);
+    }
+    const status = await sharingStatus(db, location);
+    assert.deepEqual(status.proposals.map((candidate) => candidate.id), [pendingId]);
+    assert.equal(status.hasMore, false);
+  });
+});
+
 for (const statements of [['Use FOO.', 'use foo.'], ['Use  tabs.', 'Use tabs.'], ['Use Ａ.', 'Use A.']] as const) {
   test(`personal approval preserves distinct exact strings: ${JSON.stringify(statements)}`, async () => {
     await withFixture(async (fixture) => {
