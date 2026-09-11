@@ -149,6 +149,8 @@ function validateBody(db: DatabaseSync, staged: Staged, reader: Generator<Buffer
     try { insertLine.run(line.revision_id, line.origin_id, line.kind, line.head ? 1 : 0, bytes.toString('utf8')); }
     catch { throw new BundleRejected('duplicate_revision', line.revision_id); }
     insertOrigin.run(line.origin_id, line.kind, JSON.stringify(line.natural));
+    // A source's natural key names its memory: that reference must resolve even for a control-only line.
+    if (line.kind === 'source') insertRef.run(line.revision_id, 'memory', 'memory', String(line.natural.memory));
     for (const parent of line.parents) insertParent.run(line.revision_id, parent);
     if (line.head) heads += 1;
   }

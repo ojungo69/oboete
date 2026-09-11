@@ -146,16 +146,15 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
   the local identifier is `source:<sync key>`: the key is stored on the row
   (`memory_sources.sync_key`, 0008) at its first capture and never recomputed, so an in-place
   field change and a redaction are revisions of the same origin (`memory_sources.id` is a
-  reusable rowid and is never used). The key is this device's naming only: the SHA-256 of the
-  row's fields and the local id of the memory it sits under (the n-th identical row under one
-  memory gets the n-th key of that hash), so a row deleted and inserted again identically takes
-  the key, and the origin, it had; keys are never expected to agree between devices. Independent
-  captures of one citation alias through a UNIQUE tuple of `memory_sources` (a received source
-  that lands on a local row through one keeps that row's key, and the two origins alias) or not
-  at all (identical flat rows captured independently stay distinct rows). A bound origin always
-  names its row by the row's key. A row moved under another memory is a new source there (new
-  key, new origin) and the old origin records a tombstone: the natural key names the memory a
-  source belongs to. For the other kinds the local identifier is the row's own id. Repositories are not revisioned: a `repo` line has only
+  reusable rowid and is never used). The key is random (32 bytes, hex), drawn when the row is
+  first captured: it names nothing about the row, so keys never agree between devices and a
+  row deleted and inserted again is a new source (the old origin records a tombstone), as is a
+  row moved under another memory (the natural key names the memory a source belongs to).
+  Sameness across devices comes only from the UNIQUE tuples of `memory_sources`: a received
+  head whose tuple a local row of another origin holds is that row's source, the two origins
+  alias there and the row keeps its own key (a bound origin always names its row by the row's
+  key); rows that share no tuple stay distinct, however alike. For the other kinds the local
+  identifier is the row's own id. Repositories are not revisioned: a `repo` line has only
   `kind`, `origin_id` and its identity fields, and a bundle carries every repo line its payloads
   reference (see "Repository identity").
 - `revision_id` = SHA-256 over canonical JSON `["oboete-record-revision/1", origin_id, kind,
@@ -703,6 +702,32 @@ Round six (2026-09-11, Codex correctness pass + `/code-review high` on round fiv
   and one that would close a cycle through the edges this device holds is withheld
   (`lineage_cycle`).
 
+Round seven (2026-09-11, Codex correctness pass + `/code-review high` on round six):
+
+- a source's key is random, drawn at the row's first capture (round six derived it from the
+  row's fields and the owning memory's local id with an ordinal, which still aliased rows across
+  unmapped repositories, reused a tombstoned origin when a row moved back, and changed the
+  origin of a received row on an identical re-insert): a deleted and re-inserted row is a new
+  source and a move is a new source, and sameness across devices comes only from the UNIQUE
+  tuples (see "Envelope and lines");
+- the tuple wait (`tuple_held`) is gone: before the pass, a bound source head that leaves its
+  row's UNIQUE tuple, or that is a tombstone, parks its row (deleted, kept aside), so heads that
+  exchange tuples in one pass both land and nothing waits on anything; a head whose tuple a row
+  of another origin holds aliases there (an unbound origin binds to the row, a bound one moves
+  with its group onto it) and the merged group's heads decide; a parked row whose head was not
+  written back (withheld, or moved by a merge) is restored as it was;
+- a tombstone or floor for a source row this device never held applies without binding: no
+  local id, no materialized base, no row counted, so the origin still binds late to a row
+  created afterwards with its tuple;
+- every origin without a row is re-evaluated at the start of a pass and after every sweep, to
+  a fixpoint (a row the pass creates may be the one it aliases onto), whatever its withheld
+  reason; `map-repo` re-applies the withheld origins and leaves the binding to the pass;
+- the cycle check walks reachable memories once each (no depth cutoff), so it terminates on a
+  store that already holds a cycle and finds a cycle however long the way round;
+- `resolve` reports a kept head its writer cannot apply as a coded failure (the writer's
+  withheld reason, or `merged`) instead of a stack trace, and the staged reference closure
+  includes the memory a source's natural key names.
+
 ## Verification (T034–T036)
 
 `test/unit/sync.test.ts` with three isolated homes and one shared temporary directory:
@@ -797,7 +822,7 @@ Round six (2026-09-11, Codex correctness pass + `/code-review high` on round fiv
 - pull crash: a process killed after rows were updated and before the cursor was recorded leaves
   the database at the previous state (single transaction) and the next pull re-applies the bundle;
 - lock: two pushes for one space, one gets `busy`; a push killed mid-way leaves no lock behind;
-- sources: a re-inserted identical source keeps its origin; a removed source ships a tombstone; a
+- sources: a re-inserted identical source is a new source (the old origin ships a tombstone); a removed source ships a tombstone; a
   memory with a source whose raw event is `classification_state = 'done'` and
   `processing_state = 'waiting'` is withheld with its sources and the works that reference it; a
   summary whose raw event was purged ships with its evidence-less source rows;

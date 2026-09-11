@@ -200,8 +200,12 @@ function reportConflict(db: DatabaseSync, row: Origin, heads: string[], selected
     .run(id, repo, JSON.stringify({ origin: row.origin_id, kind: row.kind, selected }), JSON.stringify({ heads: detail }), now);
 }
 
-/** What a writer may ask about the pass it runs in: which canonical origins are still to be processed. */
-type Pass = { pending: ReadonlySet<string> };
+/**
+ * What a writer may ask about the pass it runs in: which canonical origins are still to be
+ * processed, and the source rows the pass parked (deleted so their heads can take other rows'
+ * UNIQUE tuples), by key, to be written back or restored before the pass ends.
+ */
+type Pass = { pending: ReadonlySet<string>; parked: Map<string, Row> };
 
 type Writer = (db: DatabaseSync, row: Origin, payload: Row | null, control: Control, resolve: Resolver, now: number, pass: Pass) => string | null;
 
@@ -307,15 +311,31 @@ const SOURCE_FIELDS = ['raw_event_id', 'citation_kind', 'citation_value', 'sourc
 /** What the wire drops for a source under a deleted or secret memory (transfer-records.ts): never written into such a row. */
 const REDACTED_SOURCE_FIELDS = new Set(['citation_value', 'source_agent', 'evidence', 'capture_root', 'source_paths_json']);
 
-/** True when `from` reaches `to` through the dependency and checkpoint edges this device holds. */
+/** True when `from` reaches `to` through the dependency and checkpoint edges this device holds (UNION stops on a revisit). */
 function reachesMemory(db: DatabaseSync, from: string, to: string): boolean {
-  return prepared(db, `WITH RECURSIVE reach(id, depth) AS (
-      SELECT ?, 0
-      UNION SELECT next.id, reach.depth + 1 FROM reach JOIN (
+  return prepared(db, `WITH RECURSIVE reach(id) AS (
+      SELECT ?
+      UNION SELECT next.id FROM reach JOIN (
         SELECT memory_id AS id, source_memory_id AS parent FROM memory_sources WHERE source_memory_id IS NOT NULL
         UNION ALL SELECT id, checkpoint_parent_id FROM memories WHERE checkpoint_parent_id IS NOT NULL) next
-      ON next.parent = reach.id WHERE reach.depth < 4096)
+      ON next.parent = reach.id)
     SELECT 1 FROM reach WHERE id = ? LIMIT 1`).get(from, to) !== undefined;
+}
+
+/** The UNIQUE-tuple members of a source head, resolved on this device, as the row would hold them. */
+function sourceTuple(payload: Row, sourceMemory: string | null): string {
+  return canonicalJson([payload.raw_event_id, payload.source_hash, payload.portion_start, payload.portion_end, payload.context_only, sourceMemory]);
+}
+
+/**
+ * Moves a bound origin (and the origins that share its row) onto another row: the head of the
+ * origin found the same source under another origin's row, so the groups merge there.
+ */
+function rebind(db: DatabaseSync, row: Origin, localId: string): never {
+  const previous = row.local_id;
+  bindOrigin(db, row.origin_id, localId);
+  if (previous !== null) prepared(db, 'UPDATE sync_origins SET local_id = ? WHERE canonical_origin_id = ? AND local_id = ?').run(localId, readOrigin(db, row.origin_id)!.canonical_origin_id, previous);
+  throw new Merged();
 }
 
 function sourceWriter(db: DatabaseSync, row: Origin, payload: Row | null, control: Control, resolve: Resolver, now: number, pass: Pass): string | null {
@@ -324,14 +344,15 @@ function sourceWriter(db: DatabaseSync, row: Origin, payload: Row | null, contro
   // unbound one by the key it arrived with.
   const key = row.local_id === null ? String(row.natural.key) : row.local_id.slice('source:'.length);
   const bound = sourceByKey(db, key);
-  // A bound origin whose row is gone (another head took its tuple, this device deleted it) has
-  // vanished: nothing is written, and the closing pass records its tombstone.
-  if (row.local_id !== null && bound === null) return null;
+  const parked = pass.parked.has(key);
+  // A bound origin whose row is gone (this device deleted it) has vanished: nothing is written,
+  // and the closing pass records its tombstone. A row the pass parked is written back below.
+  if (row.local_id !== null && bound === null && !parked) return null;
   if (control.tombstone) {
     if (bound !== null) prepared(db, 'DELETE FROM memory_sources WHERE id = ?').run(bound.id);
-    // Applied whether or not a row was there; a row captured again later keeps this origin.
-    claim(db, row, `source:${key}`);
-    return `source:${key}`;
+    pass.parked.delete(key);
+    // Applied; an origin that never had a row here stays without one.
+    return row.local_id;
   }
   if (payload === null) {
     if (bound === null) return null;
@@ -345,18 +366,19 @@ function sourceWriter(db: DatabaseSync, row: Origin, payload: Row | null, contro
   // owned. Lineage stays acyclic on this device: an edge that would reach back is withheld.
   if (sourceContext !== null && repoOf(db, 'work_contexts', sourceContext) !== repoOf(db, 'memories', memory)) throw new Unresolved('repo_mismatch');
   if (sourceMemory !== null && (sourceMemory === memory || reachesMemory(db, memory, sourceMemory))) throw new Unresolved('lineage_cycle');
-  // Rows of other origins that hold one of the head's UNIQUE tuples. A live one is the same
-  // source captured independently (the origins alias) or a row whose own head is still to be
-  // processed in this pass (it may move or die): the head waits and is retried after it.
-  const tuples = sourcesByTuple(db, memory, payload, sourceMemory).filter((other) => other.id !== bound?.id);
-  const held = tuples.find((other) => {
-    const canonical = originsOfRow(db, 'source', `source:${String(other.sync_key)}`)[0]?.canonical_origin_id;
-    return canonical !== undefined && pass.pending.has(canonical) && canonical !== row.canonical_origin_id;
-  });
-  if (held !== undefined || (bound !== null && tuples.length > 0)) throw new Unresolved('tuple_held');
-  const existing = bound ?? tuples[0] ?? null;
+  // A row of another origin that holds one of the head's UNIQUE tuples is the same source: the
+  // origins alias there and the merged group's heads decide (a pending origin whose head leaves
+  // its tuple has parked its row before the pass, so it never stands in the way).
+  const holder = sourcesByTuple(db, memory, payload, sourceMemory).find((other) => other.id !== bound?.id);
+  if (holder !== undefined) {
+    const target = `source:${String(holder.sync_key)}`;
+    if (row.local_id !== null) { pass.parked.delete(key); rebind(db, row, target); }
+    claim(db, row, target);
+  }
+  const existing = bound ?? holder ?? null;
   const localId = `source:${existing?.sync_key ?? key}`;
   claim(db, row, localId);
+  pass.parked.delete(key);
   // A row under a deleted or secret memory holds no evidence on this device either, whatever a head carries.
   const owner = prepared(db, 'SELECT deleted_at, sensitivity FROM memories WHERE id = ?').get(memory);
   const redacted = owner === undefined || owner.deleted_at !== null || owner.sensitivity === 'secret';
@@ -631,52 +653,62 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
     const state = stateOf(row, row.local_id);
     if (state !== null && state !== row.materialized_hash) setSelectedHead(db, row.origin_id, row.selected_head, row.materialized_revision, state);
   };
-  // An origin that was identity-only may alias onto a local row now (a repository was mapped, a
-  // row was created since): bind every such origin before anything is written, so the control
-  // of every origin of a row applies to it, then work on the canonical rows that remain. One
-  // binding can make the next resolvable (a checkpoint's parent), so this runs to a fixpoint.
-  for (let bound = true; bound;) {
-    bound = false;
-    for (const id of rowIds) {
-      const origin = readOrigin(db, id)!;
-      if (origin.local_id !== null) continue;
-      const target = aliasTarget(db, origin.kind, origin.natural);
-      if (target !== null) { bindOrigin(db, origin.origin_id, target); bound = true; }
-    }
-  }
-  const canonicalIds = [...new Set(rowIds.map((id) => readOrigin(db, id)!.canonical_origin_id))];
-  const rows = canonicalIds.map((id) => readOrigin(db, id)!).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
-  for (const row of rows) realign(row);
-  const pending = new Set(rows.map((row) => row.origin_id));
+  const rows: Origin[] = [];
+  const pending = new Set<string>();
   const counted = new Set<string>();
   const reported = new Set<string>();
-  // A merge made the canonical inherit a base under another origin's natural key: realign it and
-  // process it (again) with the combined heads and control.
+  // A canonical row enters (or re-enters, after a merge made it inherit a base under another
+  // origin's natural key) the pass: realigned, then processed with its combined heads and control.
   const requeue = (canonical: string): void => {
     const row = readOrigin(db, canonical)!;
     if (!rows.some((other) => other.origin_id === canonical)) rows.push(row);
     realign(row);
     pending.add(canonical);
   };
-  // Origins without a row that alias onto one now (a repository was mapped, a row was created
-  // since, or by this pass) bind and their merged canonical is processed again; true when any did.
+  // Every origin without a row that aliases onto one now (a repository was mapped, a row was
+  // created since or by this pass) binds, so the control of every origin of a row applies to it,
+  // and its merged canonical is processed. One binding can make the next resolvable (a
+  // checkpoint's parent), so callers run this to a fixpoint. True when any origin bound.
+  // ponytail: scans every unbound origin of the store per sweep; index by natural key if it shows.
   const bindLate = (): boolean => {
     let bound = false;
-    for (const id of rowIds) {
-      const origin = readOrigin(db, id)!;
+    for (const stored of prepared(db, 'SELECT origin_id FROM sync_origins WHERE local_id IS NULL ORDER BY origin_id').all()) {
+      const origin = readOrigin(db, String(stored.origin_id))!;
       if (origin.local_id !== null) continue;
       const target = aliasTarget(db, origin.kind, origin.natural);
       if (target === null) continue;
       bindOrigin(db, origin.origin_id, target);
-      requeue(readOrigin(db, id)!.canonical_origin_id);
+      requeue(readOrigin(db, origin.origin_id)!.canonical_origin_id);
       bound = true;
     }
     return bound;
   };
+  while (bindLate()) { /* to a fixpoint */ }
+  for (const id of [...new Set(rowIds.map((id) => readOrigin(db, id)!.canonical_origin_id))]) requeue(id);
+  rows.sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
   const workRows: Origin[] = [];
   const workBefore = new Map<string, Row | null>();
   const raiseTargets = new Set<string>();
-  const pass: Pass = { pending };
+  const pass: Pass = { pending, parked: new Map() };
+  // A source head that leaves its row's UNIQUE tuple parks the row first (deleted, kept here), so
+  // heads that exchange tuples in one pass never wait on each other; what is not written back is
+  // restored after the pass.
+  for (const row of rows) {
+    if (row.kind !== 'source' || row.local_id === null) continue;
+    const key = row.local_id.slice('source:'.length);
+    const record = prepared(db, 'SELECT * FROM memory_sources WHERE sync_key = ?').get(key);
+    if (record === undefined) continue;
+    const selected = selectHead(db, row, headsOf(db, row.origin_id));
+    const payload = selected === null ? null : readRevision(db, selected)?.payload ?? null;
+    if (!effectiveControl(db, row.origin_id).tombstone) {
+      if (payload === null) continue;
+      let sourceMemory: string | null;
+      try { sourceMemory = payload.source_memory_id === null ? null : resolve.localOf('memory', String(payload.source_memory_id)); } catch { continue; }
+      if (sourceTuple(payload, sourceMemory) === sourceTuple(record, record.source_memory_id === null ? null : String(record.source_memory_id))) continue;
+    }
+    prepared(db, 'DELETE FROM memory_sources WHERE id = ?').run(Number(record.id));
+    pass.parked.set(key, record);
+  }
   let progress = true;
   while (progress && pending.size > 0) {
     progress = false;
@@ -744,10 +776,17 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
         reportConflict(db, row, heads, selected, now, result, reported);
       }
     }
-    // A row this pass created may be the row an origin processed without one aliases onto.
-    if (pending.size === 0 && bindLate()) progress = true;
+    // A row this pass created may be the row an origin without one aliases onto.
+    if (bindLate()) progress = true;
   }
   result.withheldOnApply = pending.size;
+  // A parked row whose head was not written (withheld, or a merge moved its origin) comes back as it was.
+  for (const [key, record] of pass.parked) {
+    if (prepared(db, 'SELECT 1 FROM memory_sources WHERE sync_key = ?').get(key) !== undefined) continue;
+    const columns = Object.keys(record).filter((column) => column !== 'id');
+    prepared(db, `INSERT INTO memory_sources (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`)
+      .run(...columns.map((column) => record[column] as string | number | null));
+  }
   // Lineage inheritance runs once every edge of this pass exists: a child written before its
   // source row (or a source arriving for a stored memory) is raised here, not by the trigger.
   for (const localId of raiseTargets) raiseToParents(db, localId);
@@ -856,7 +895,13 @@ export function resolveRow(db: DatabaseSync, originId: string, keep: string, now
   revision.revision_id = revisionId(revision);
   storeRevision(db, revision, null, now);
   const resolve = resolverFor(db, replica);
-  const localId = WRITERS[row.kind](db, readOrigin(db, row.origin_id)!, payload, control, resolve, now, { pending: new Set() });
+  let localId: string | null;
+  try { localId = WRITERS[row.kind](db, readOrigin(db, row.origin_id)!, payload, control, resolve, now, { pending: new Set(), parked: new Map() }); }
+  catch (error) {
+    if (error instanceof Unresolved) throw new ResolveError(error.reason);
+    if (error instanceof Merged) throw new ResolveError('merged');
+    throw error;
+  }
   const after = readOrigin(db, row.origin_id)!;
   const state = localId === null ? stateHash(payloadHashValue, control) : materializedState(db, after, localId, resolve) ?? stateHash(payloadHashValue, control);
   setSelectedHead(db, row.origin_id, revision.revision_id, revision.revision_id, state);

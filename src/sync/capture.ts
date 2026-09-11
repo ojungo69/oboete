@@ -2,15 +2,15 @@
 // tables that gives every row an origin, converts it to a revision payload in origin form and
 // records a new revision authored by this replica wherever the row's canonical state differs
 // from what was last materialized. Nothing outside sync is instrumented. Security-owned.
+import { randomBytes } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { prepared } from '../db/statements.js';
-import { sha256Hex } from '../hash.js';
 import {
   contextRecords, memoryRecords, proposalRecords, sourceRecords, visibilityRecords, workRecords, type Row,
 } from '../transfer-records.js';
 import { ENTITY_REFERENCES, type Control } from './format.js';
-import { canonicalJson, payloadHash, revisionId, type Sensitivity, type SyncKind } from './identity.js';
+import { payloadHash, revisionId, type Sensitivity, type SyncKind } from './identity.js';
 import {
   canonicalOf, createOrigin, effectiveControl, originsOfRow, readOrigin, registerLocalRepos, replicaOriginId,
   setSelectedHead, stateHash, storeRevision, type Origin, type Revision,
@@ -19,34 +19,26 @@ import {
 export type CaptureResult = { revisions: number; tombstones: number };
 
 /**
- * The local identifier of a source row is `source:<sync_key>` (contracts/sync.md): a key stored
- * on the row at its first capture and never recomputed, so in-place field changes and redaction
- * are revisions of the same origin. The key is the hash of the row's fields and the local id of
- * the memory it sits under (the n-th identical row under one memory gets the n-th key of that
- * hash), so a row deleted and inserted again identically on this device takes the key, and the
- * origin, it had; it is this device's naming only, never expected to agree with another device's
- * (independent captures of one citation alias through a UNIQUE tuple of `memory_sources`, or not
- * at all). A row moved under another memory is a new source (new key, new origin): the origin's
- * natural key names the memory the source belongs to, and the old origin records a tombstone in
- * the closing pass. `memory_sources.id` is a reusable rowid and is never used.
+ * The local identifier of a source row is `source:<sync_key>` (contracts/sync.md): a random key
+ * stored on the row at its first capture and never recomputed, so in-place field changes and
+ * redaction are revisions of the same origin, and no two rows anywhere share a key (a row
+ * deleted and inserted again is a new source; the same citation captured independently on two
+ * devices is one source only through a UNIQUE tuple of `memory_sources`). A row moved under
+ * another memory is a new source too (new key, new origin): the origin's natural key names the
+ * memory the source belongs to, and the old origin records a tombstone in the closing pass.
+ * `memory_sources.id` is a reusable rowid and is never used.
  */
 export function sourceLocalId(db: DatabaseSync, rowid: string, resolve: Resolver): string {
-  const raw = prepared(db, `SELECT sync_key, memory_id, raw_event_id, citation_kind, citation_value, source_agent, portion_start, portion_end,
-    source_total, source_hash, captured_at, capture_root, source_paths_json, source_context_id, context_only, source_memory_id
-    FROM memory_sources WHERE id = ?`).get(rowid);
+  const raw = prepared(db, 'SELECT sync_key, memory_id FROM memory_sources WHERE id = ?').get(rowid);
   if (raw === undefined) throw new Error(`memory_sources ${rowid} vanished during capture`);
   if (raw.sync_key !== null) {
     const origin = readOrigin(db, resolve.originOf('source', `source:${String(raw.sync_key)}`));
-    const owner = origin === undefined ? undefined : canonicalOf(db, String(origin.natural.memory)).local_id;
-    if (owner === undefined || owner === String(raw.memory_id)) return `source:${String(raw.sync_key)}`;
+    const memory = origin === undefined ? undefined : readOrigin(db, String(origin.natural.memory));
+    // The row moved only when its origin's memory is a row this device holds and it is another row.
+    const owner = memory === undefined ? null : canonicalOf(db, memory.origin_id).local_id;
+    if (owner === null || owner === String(raw.memory_id)) return `source:${String(raw.sync_key)}`;
   }
-  const { sync_key, ...fields } = raw;
-  void sync_key;
-  const base = sha256Hex(canonicalJson(fields));
-  let key = base;
-  for (let occurrence = 1; prepared(db, 'SELECT 1 FROM memory_sources WHERE sync_key = ?').get(key) !== undefined; occurrence += 1) {
-    key = sha256Hex(canonicalJson([base, occurrence]));
-  }
+  const key = randomBytes(32).toString('hex');
   prepared(db, 'UPDATE memory_sources SET sync_key = ? WHERE id = ?').run(key, rowid);
   return `source:${key}`;
 }

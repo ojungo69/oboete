@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import { checkpointHash, materialHash } from '../../src/db/identity.js';
 import { sha256Json } from '../../src/hash.js';
 import { oboetePaths } from '../../src/paths.js';
-import { resolveRow } from '../../src/sync/apply.js';
+import { ResolveError, resolveRow } from '../../src/sync/apply.js';
 import { captureLocalChanges } from '../../src/sync/capture.js';
 import { initSpace, joinSpace, mapRepo, pullSpace, pushSpace, SyncError, syncPaths } from '../../src/sync/space.js';
 import { BundleRejected } from '../../src/sync/stage.js';
@@ -39,6 +39,13 @@ function seedCheckpoint(db: DatabaseSync, id: string, work: string, title: strin
   db.prepare(`INSERT INTO memories (id, repo_id, type, title, body, concepts, cjk_bigrams, material_hash, content_hash, sensitivity,
     review_state, created_at, work_id, checkpoint_parent_id) VALUES (?, ?, 'session_summary', ?, ?, '[]', '', ?, ?, 'eligible', 'reviewed', 1, ?, NULL)`)
     .run(id, REPO, title, `${title} body`, material, checkpointHash(REPO, work, null, material), work);
+}
+
+function seedRawEvent(db: DatabaseSync, id = 'raw_one'): void {
+  db.prepare(`INSERT OR IGNORE INTO sessions (id, repo_id, agent, native_session_id, conversation_id, status)
+    VALUES ('s_one', ?, 'claude', 'n_one', 'c_one', 'active')`).run(REPO);
+  db.prepare(`INSERT INTO raw_events (id, repo_id, session_id, kind, classification_state, processing_state, captured_at)
+    VALUES (?, ?, 's_one', 'prompt', 'done', 'processed', 1)`).run(id, REPO);
 }
 
 function conflicts(db: DatabaseSync): number {
@@ -537,8 +544,9 @@ test('a resolve that keeps the head of an aliased origin ships references aligne
     const [lo, hi] = [...replicas].sort((p, q) => (p.id < q.id ? -1 : 1)) as [Replica, Replica];
     for (const device of [lo, hi]) {
       insertMemory(device.db, 'm_one', 'Title', 'Body text');
+      seedRawEvent(device.db);
       const rowid = insertSource(device.db, 'm_one', 'src/a.ts');
-      device.db.prepare('UPDATE memory_sources SET source_hash = ?, portion_start = 0, portion_end = 10, source_total = 10 WHERE id = ?').run('4'.repeat(64), rowid);
+      device.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_one', source_hash = ?, portion_start = 0, portion_end = 10, source_total = 10 WHERE id = ?").run('4'.repeat(64), rowid);
       device.db.exec('BEGIN IMMEDIATE'); captureLocalChanges(device.db, 5); device.db.exec('COMMIT');
     }
     pull(hi, lo, publish(lo, dir));
@@ -785,8 +793,9 @@ test('a tombstone for a row this device never held is applied, not withheld', as
     a.db.prepare("UPDATE memories SET deleted_at = 5 WHERE id = 'm_gone'").run();
     // B joins after the deletions: the log carries the tombstone heads and no payload.
     pull(b, a, publish(a, dir));
-    const origin = b.db.prepare("SELECT local_id, withheld_reason FROM sync_origins WHERE kind = 'source'").get()!;
-    assert.ok(origin.local_id, 'bound to the identity it would have');
+    const origin = b.db.prepare("SELECT local_id, withheld_reason, materialized_revision FROM sync_origins WHERE kind = 'source'").get()!;
+    assert.equal(origin.local_id, null, 'no row, no binding');
+    assert.equal(origin.materialized_revision, null, 'and no base');
     assert.equal(origin.withheld_reason, null);
     assert.equal(readOrigin(b.db, `${a.id}:m_gone`)!.withheld_reason, null, 'a memory deleted before it shipped is applied too');
     assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM sync_origins WHERE withheld_reason IS NOT NULL").get()?.n, 0);
@@ -800,13 +809,6 @@ test('a tombstone for a row this device never held is applied, not withheld', as
 // Round five: the source key through the bound row, the memory a source sits under as revision
 // data, UNIQUE-tuple aliases with the index's NULL semantics, merges before any write, unbound
 // applied heads on map-repo, and keys that agree across devices.
-
-function seedRawEvent(db: DatabaseSync, id = 'raw_one'): void {
-  db.prepare(`INSERT OR IGNORE INTO sessions (id, repo_id, agent, native_session_id, conversation_id, status)
-    VALUES ('s_one', ?, 'claude', 'n_one', 'c_one', 'active')`).run(REPO);
-  db.prepare(`INSERT INTO raw_events (id, repo_id, session_id, kind, classification_state, processing_state, captured_at)
-    VALUES (?, ?, 's_one', 'prompt', 'done', 'processed', 1)`).run(id, REPO);
-}
 
 test('a tombstone for an origin that aliased onto a row with another key deletes that row', async () => {
   await withReplicas(2, (replicas, dir) => {
@@ -1043,18 +1045,16 @@ test('a bound source whose row another head replaced in the pass is a tombstone 
     a.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_two', 'file_read', 1, 'y')").run();
     pull(b, a, publish(a, dir));
     // A retires the raw_one row and points the raw_two row at raw_one; B edited the raw_one row meanwhile.
-    // The adverse order: the raw_two row's origin sorts first, so its head takes the tuple before the retired one dies.
-    const keys = a.db.prepare('SELECT raw_event_id, sync_key FROM memory_sources').all();
-    const [one, two] = [keys.find((row) => row.raw_event_id === 'raw_one')!, keys.find((row) => row.raw_event_id === 'raw_two')!];
-    if (String(two.sync_key) > String(one.sync_key)) {
-      // Swap the roles so the row whose key sorts first is the one that takes the other's tuple.
+    // The adverse order: the raw_two row's origin is processed first (origin id order), so its head
+    // takes the tuple before the retired one dies. The keys are random, so the roles are swapped on A
+    // (and pulled, as any edit) when the order comes out the other way.
+    const two = a.db.prepare("SELECT sync_key FROM memory_sources WHERE raw_event_id = 'raw_two'").get()!;
+    const first = b.db.prepare("SELECT local_id FROM sync_origins WHERE kind = 'source' ORDER BY origin_id LIMIT 1").get()!;
+    if (first.local_id !== `source:${String(two.sync_key)}`) {
       a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_tmp' WHERE raw_event_id = 'raw_one'").run();
       a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_one' WHERE raw_event_id = 'raw_two'").run();
       a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_two' WHERE raw_event_id = 'raw_tmp'").run();
-      b.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_tmp' WHERE raw_event_id = 'raw_one'").run();
-      b.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_one' WHERE raw_event_id = 'raw_two'").run();
-      b.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_two' WHERE raw_event_id = 'raw_tmp'").run();
-      pull(b, a, publish(a, dir));
+      assert.equal(pull(b, a, publish(a, dir)).conflicts, 0);
     }
     const survivor = String(a.db.prepare("SELECT source_agent FROM memory_sources WHERE raw_event_id = 'raw_two'").get()!.source_agent);
     b.db.prepare("UPDATE memory_sources SET source_agent = 'codex' WHERE raw_event_id = 'raw_one'").run();
@@ -1167,5 +1167,156 @@ test('a dependency edge that would close a cycle on this device is withheld', as
     const withheld = b.db.prepare("SELECT withheld_reason FROM sync_origins WHERE kind = 'source' AND withheld_reason IS NOT NULL").get();
     assert.equal(withheld?.withheld_reason, 'lineage_cycle');
     assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 1, "A's edge is not written");
+  });
+});
+
+// Round seven: one identity for a source (a random key; sameness only through a UNIQUE tuple),
+// heads that exchange tuples in one pass, a bound head that meets a settled row, tombstones that
+// reach rows later bundles create, resolve failures as coded errors, and a cycle that terminates.
+
+test('two heads that exchange their UNIQUE tuples in one pass both land', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    insertMemory(a.db, 'm_one', 'Title', 'Body text');
+    seedRawEvent(a.db, 'raw_one');
+    seedRawEvent(a.db, 'raw_two');
+    a.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_one', 'file_read', 1, 'x')").run();
+    a.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_two', 'file_read', 1, 'y')").run();
+    pull(b, a, publish(a, dir));
+    a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_tmp' WHERE raw_event_id = 'raw_one'").run();
+    a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_one' WHERE raw_event_id = 'raw_two'").run();
+    a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_two' WHERE raw_event_id = 'raw_tmp'").run();
+    const result = pull(b, a, publish(a, dir));
+    assert.equal(result.withheldOnApply, 0, 'neither head waits on the other');
+    assert.deepEqual(b.db.prepare('SELECT raw_event_id, source_agent FROM memory_sources ORDER BY raw_event_id').all().map((row) => ({ ...row })),
+      [{ raw_event_id: 'raw_one', source_agent: 'y' }, { raw_event_id: 'raw_two', source_agent: 'x' }]);
+    assert.equal(conflicts(b.db), 0);
+  });
+});
+
+test('a bound head whose tuple a settled row of another origin holds aliases onto that row, as the other device did', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    for (const device of [a, b]) { insertMemory(device.db, 'm_one', 'Title', 'Body text'); seedRawEvent(device.db, 'raw_one'); seedRawEvent(device.db, 'raw_two'); }
+    a.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_two', 'file_read', 1, 'a')").run();
+    pull(b, a, publish(a, dir));
+    // B captures raw_one on its own; A then points its row at raw_one.
+    b.db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, context_only, source_agent) VALUES ('m_one', 'raw_one', 'file_read', 1, 'b')").run();
+    publish(b, dir);
+    a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_one'").run();
+    const result = pull(b, a, publish(a, dir));
+    assert.equal(result.withheldOnApply, 0, 'nothing is withheld for good');
+    assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 1, 'one row for raw_one');
+    const groups = b.db.prepare("SELECT DISTINCT canonical_origin_id AS id FROM sync_origins WHERE kind = 'source' AND local_id IN (SELECT 'source:' || sync_key FROM memory_sources)").all();
+    assert.equal(groups.length, 1, 'the two origins alias');
+    pull(a, b, publish(b, dir));
+    assert.equal(a.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 1, 'and A holds one row too');
+  });
+});
+
+test('a source deleted and inserted again after its tombstone shipped is a new source that reaches the peer', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    insertMemory(a.db, 'm_one', 'Title', 'Body text');
+    const rowid = insertSource(a.db, 'm_one', 'src/a.ts');
+    pull(b, a, publish(a, dir));
+    a.db.prepare('DELETE FROM memory_sources WHERE id = ?').run(rowid);
+    pull(b, a, publish(a, dir));
+    assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 0);
+    insertSource(a.db, 'm_one', 'src/a.ts');
+    pull(b, a, publish(a, dir));
+    assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 1, 'the re-inserted row reaches B');
+    pull(a, b, publish(b, dir));
+    assert.equal(a.db.prepare('SELECT COUNT(*) AS n FROM memory_sources').get()?.n, 1, "and A's own row survives the echo of the log");
+  });
+});
+
+test('a tombstone stored from an earlier bundle reaches the row a later bundle creates, whatever the bundle order', async () => {
+  await withReplicas(3, (replicas, dir) => {
+    const [a, b, c] = replicas as [Replica, Replica, Replica];
+    insertMemory(a.db, 'm_one', 'Title', 'Body text');
+    insertMemory(a.db, 'm_other', 'Other', 'Other body');
+    publish(a, dir);
+    a.db.prepare("UPDATE memories SET deleted_at = 5 WHERE id = 'm_one'").run();
+    const fromA = publish(a, dir);
+    insertMemory(b.db, 'm_b', 'Title', 'Body text');
+    const fromB = publish(b, dir);
+    // C pulls the tombstone first (no row to bind), then the live copy.
+    pull(c, a, fromA);
+    assert.equal(readOrigin(c.db, `${a.id}:m_one`)!.local_id, null);
+    pull(c, b, fromB);
+    assert.equal(readOrigin(c.db, `${a.id}:m_one`)!.local_id, readOrigin(c.db, `${b.id}:m_b`)!.local_id, 'the tombstone binds to the row B created');
+    assert.notEqual(memoryOf(c, b, 'm_b').deleted_at, null, 'and applies');
+  });
+});
+
+test('a withheld origin does not stop late binding for the others in the same pass', async () => {
+  await withHomes(3, (homes, shared) => {
+    const [homeA, homeB, homeC] = homes as [string, string, string];
+    const a = openHome(homeA);
+    const b = openHome(homeB);
+    const c = openHome(homeC);
+    try {
+      const [pathsA, pathsB, pathsC] = [oboetePaths(homeA), oboetePaths(homeB), oboetePaths(homeC)];
+      a.prepare("UPDATE repos SET identity_kind = 'common_dir', normalized_identity = '/work/a/.git' WHERE id = ?").run(REPO);
+      b.prepare("UPDATE repos SET identity_kind = 'common_dir', normalized_identity = '/work/b/.git' WHERE id = ?").run(REPO);
+      const { keyLine } = initSpace(a, pathsA, { directory: shared, classes: ['eligible'], now: 1 });
+      joinSpace(b, pathsB, { directory: shared, keyLine, classes: ['eligible'], now: 1 });
+      joinSpace(c, pathsC, { directory: shared, keyLine, classes: ['eligible'], now: 1 });
+      // A also holds a memory in a repository C never maps: that origin stays withheld throughout.
+      a.prepare(`INSERT INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
+        VALUES ('repo_u', 'common_dir', '/work/u/.git', '/work/u', 1, 1)`).run();
+      a.prepare(`INSERT INTO memories (id, repo_id, type, title, body, cjk_bigrams, material_hash, content_hash, sensitivity, review_state, created_at)
+        VALUES ('m_u', 'repo_u', 'discovery', 'U', 'U body', '', ?, ?, 'eligible', 'reviewed', 1)`).run(materialHash('U', 'U body'), sha256Json(['repo_u', materialHash('U', 'U body')]));
+      insertMemory(a, 'm_one', 'Title', 'Body text');
+      insertMemory(a, 'm_other', 'Other', 'Other body');
+      insertMemory(b, 'm_one', 'Title', 'Body text');
+      pushSpace(a, pathsA, { now: 5 });
+      a.prepare("UPDATE memories SET deleted_at = 6 WHERE id = 'm_one'").run();
+      pushSpace(a, pathsA, { now: 7 });
+      pushSpace(b, pathsB, { now: 8 });
+      pullSpace(c, pathsC, { now: 9 });
+      mapRepo(c, pathsC, { repoKey: repoKeyFor(replicaOriginId(a), 'common_dir', '/work/a/.git'), localRepoId: REPO, now: 10 });
+      mapRepo(c, pathsC, { repoKey: repoKeyFor(replicaOriginId(b), 'common_dir', '/work/b/.git'), localRepoId: REPO, now: 11 });
+      assert.equal(readOrigin(c, `${replicaOriginId(a)}:m_u`)!.withheld_reason, 'unmapped_repo', 'the unrelated origin stays withheld');
+      const rows = c.prepare('SELECT deleted_at FROM memories WHERE material_hash = ?').all(materialHash('Title', 'Body text'));
+      assert.equal(rows.length, 1);
+      assert.notEqual(rows[0]!.deleted_at, null, "A's tombstone reached the row B's payload created");
+    } finally { a.close(); b.close(); c.close(); }
+  });
+});
+
+test('a resolve whose kept head the writer cannot apply fails with a coded error', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    for (const device of [a, b]) { insertMemory(device.db, 'm_c', 'C', 'C body'); insertMemory(device.db, 'm_d', 'D', 'D body'); }
+    b.db.prepare("INSERT INTO memory_sources (memory_id, citation_kind, source_memory_id, context_only) VALUES ('m_d', 'file_read', 'm_c', 1)").run();
+    a.db.prepare("INSERT INTO memory_sources (memory_id, citation_kind, source_memory_id, context_only) VALUES ('m_c', 'file_read', 'm_d', 1)").run();
+    publish(b, dir);
+    pull(b, a, publish(a, dir));
+    const withheld = b.db.prepare("SELECT origin_id, selected_head FROM sync_origins WHERE kind = 'source' AND withheld_reason = 'lineage_cycle'").get()!;
+    b.db.exec('BEGIN IMMEDIATE');
+    assert.throws(() => resolveRow(b.db, String(withheld.origin_id), String(withheld.selected_head), 300),
+      (error: unknown) => error instanceof ResolveError && error.code === 'lineage_cycle');
+    b.db.exec('ROLLBACK');
+  });
+});
+
+test('a dependency edge that closes a cycle deeper than any walk bound is still withheld', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    // B holds the chain m_1 -> m_0, m_2 -> m_1, ... : m_0 reaches the last memory 4097 edges away.
+    const depth = 4098;
+    for (let i = 0; i < depth; i += 1) insertMemory(b.db, `m_${i}`, `M${i}`, `Body ${i}`);
+    const edge = b.db.prepare("INSERT INTO memory_sources (memory_id, citation_kind, source_memory_id, context_only) VALUES (?, 'file_read', ?, 1)");
+    for (let i = 1; i < depth; i += 1) edge.run(`m_${i}`, `m_${i - 1}`);
+    // A, which holds only the two ends, records that m_0 depends on the last one: acyclic on A, a cycle on B.
+    insertMemory(a.db, 'm_0', 'M0', 'Body 0');
+    insertMemory(a.db, `m_${depth - 1}`, `M${depth - 1}`, `Body ${depth - 1}`);
+    a.db.prepare("INSERT INTO memory_sources (memory_id, citation_kind, source_memory_id, context_only) VALUES ('m_0', 'file_read', ?, 1)").run(`m_${depth - 1}`);
+    const result = pull(b, a, publish(a, dir));
+    assert.equal(result.withheldOnApply, 1, 'the edge that closes the cycle is withheld, however long the way round');
+    assert.deepEqual(b.db.prepare('SELECT withheld_reason FROM sync_origins WHERE withheld_reason IS NOT NULL').all().map((row) => row.withheld_reason), ['lineage_cycle']);
+    assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM memory_sources WHERE memory_id = 'm_0'").get()?.n, 0);
   });
 });

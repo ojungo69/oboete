@@ -413,7 +413,7 @@ test('a repository with an eligible work, its context and no memories ships both
 
 // --- sources: identity by content, tombstones for removed rows, purged evidence still ships ---
 
-test('a re-inserted source keeps its origin, a removed one ships a tombstone, and a purged raw event still ships', async () => {
+test('a re-inserted source is a new source, a removed one ships a tombstone, and a purged raw event still ships', async () => {
   await withReplicas(1, (replicas, dir) => {
     const [a] = replicas as [Replica];
     insertMemory(a.db, 'm_one', 'Sourced', 'Sourced body');
@@ -425,21 +425,26 @@ test('a re-inserted source keeps its origin, a removed one ships a tombstone, an
     const origin = origins.find((id) => (headLine(before, id).payload as Line).citation_value === 'src/a.ts')!;
     assert.equal(revisions(a.db, origin).length, 1);
 
-    // A row deleted and re-inserted identically is the same source: its id is its content, not its rowid.
+    // A row deleted and inserted again identically is a new source (a fresh key): the removed one
+    // ships a tombstone under its origin, the new one a first revision under a new origin.
     a.db.prepare('DELETE FROM memory_sources WHERE id = ?').run(first);
     const second = insertSource(a.db, 'm_one', 'src/a.ts');
     assert.notEqual(second, first, 'a fresh rowid');
     const reinserted = bundleOf(publish(a, dir, ['eligible']));
-    assert.deepEqual(sourceOrigins(a.db), origins, 'the re-inserted row keeps the origin it had');
-    assert.equal(revisions(a.db, origin).length, 1, 'no revision for an unchanged source');
-    assert.deepEqual(headLine(reinserted, origin).control, { tombstone: false, sensitivity_floor: 'eligible' });
+    const after = sourceOrigins(a.db);
+    assert.equal(after.length, 3, 'the old origin, the kept one, the new one');
+    const fresh = after.find((id) => !origins.includes(id))!;
+    assert.equal(revisions(a.db, fresh).length, 1);
+    assert.equal((headLine(reinserted, fresh).payload as Line).citation_value, 'src/a.ts');
+    assert.deepEqual(headLine(reinserted, origin).control, { tombstone: true, sensitivity_floor: 'eligible' });
+    assert.equal(revisions(a.db, origin).length, 2);
 
-    // A removed source ships a tombstone under the same origin; its sibling is untouched.
+    // A removed source ships a tombstone under its origin; its sibling is untouched.
     a.db.prepare('DELETE FROM memory_sources WHERE id = ?').run(second);
     const removed = bundleOf(publish(a, dir, ['eligible']));
-    assert.equal(revisions(a.db, origin).length, 2);
+    assert.equal(revisions(a.db, fresh).length, 2);
     assert.equal((headLine(removed, origins.find((id) => id !== origin)!).payload as Line).citation_value, 'src/keep.ts');
-    const tombstone = headLine(removed, origin);
+    const tombstone = headLine(removed, fresh);
     assert.deepEqual(tombstone.control, { tombstone: true, sensitivity_floor: 'eligible' });
     assert.equal(tombstone.payload, null);
     assert.equal(tombstone.payload_hash, null);
@@ -453,7 +458,7 @@ test('a re-inserted source keeps its origin, a removed one ships a tombstone, an
     const summary = bundleOf(publish(a, dir, ['eligible']));
     assert.deepEqual(withheldOf(summary), NOTHING_WITHHELD);
     assert.notEqual(headLine(summary, `${a.id}:m_sum`).payload, null);
-    const shipped = sourceOrigins(a.db).filter((id) => !origins.includes(id));
+    const shipped = sourceOrigins(a.db).filter((id) => !after.includes(id));
     assert.equal(shipped.length, 1);
     const row = headLine(summary, shipped[0]!).payload as Line;
     assert.equal(row.raw_event_id, 'e_purged', 'the dangling raw event id travels as provenance');
