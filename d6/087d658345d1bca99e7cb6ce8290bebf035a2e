@@ -1,0 +1,19 @@
+.github/dependabot.yml
+  s_b3e338ce8588e0::t_c96e79f72f2f8b 3-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "d6087d658345d1bca99e7cb6ce8290bebf035a2e",
+  "prompts": {},
+  "sessions": {
+    "s_b3e338ce8588e0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09149-4557-74a1-9e6c-ae6b94a99944",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
