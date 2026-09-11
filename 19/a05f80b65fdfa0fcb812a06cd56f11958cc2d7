@@ -1,0 +1,39 @@
+specs/009-memory-core/HANDOFF-claude-code.md
+  s_b3e338ce8588e0::t_47ad889dcccdd1 66-67,76-79
+specs/009-memory-core/contracts/sync.md
+  s_b3e338ce8588e0::t_a14bb0fb21ab1e 552-554,817-843
+specs/009-memory-core/tasks.md
+  s_5ab5797dc469b5::t_e9d9a02bf40570 200,210,222-225
+src/sync/apply.ts
+  s_5ab5797dc469b5::t_b2c4c3dfec3506 15,158-163,167-168,259-263,423,430-470,499-502,510-513,823,856,918-919,969,1015-1019,1023-1028,1034-1059,1163,1178
+src/sync/capture.ts
+  s_5ab5797dc469b5::t_9dcaefc517f9ea 15,54,236-237,239-240,244-246,248-262,280-281
+src/sync/store.ts
+  s_5ab5797dc469b5::t_fecb93d7704eeb 219-221,225-227,242-244
+test/unit/sync-review.test.ts
+  s_5ab5797dc469b5::t_b045a073904600 1090-1101,1103-1104,1616-1619,1640,1785,1806,1808-1810,1813-1814,1989-2194
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "19a05f80b65fdfa0fcb812a06cd56f11958cc2d7",
+  "prompts": {},
+  "sessions": {
+    "s_5ab5797dc469b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44ceb1b9-68f7-4bf5-8646-52149920dd27",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_b3e338ce8588e0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09149-4557-74a1-9e6c-ae6b94a99944",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
