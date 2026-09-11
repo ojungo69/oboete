@@ -30,9 +30,9 @@ export async function withStore(fn: (db: DatabaseSync, replica: string) => void 
 }
 
 export function insertMemory(db: DatabaseSync, id: string, title: string, body: string,
-  extra: { sensitivity?: string; deleted_at?: number | null; pinned_at?: number | null } = {}): { material: string; content: string } {
+  extra: { sensitivity?: string; deleted_at?: number | null; pinned_at?: number | null; content?: string } = {}): { material: string; content: string } {
   const material = sha256Hex(JSON.stringify([title.toLowerCase(), body.toLowerCase()]));
-  const content = sha256Hex(JSON.stringify([REPO, material]));
+  const content = extra.content ?? sha256Hex(JSON.stringify([REPO, material]));
   db.prepare(`INSERT INTO memories (id, repo_id, type, title, body, cjk_bigrams, material_hash, content_hash, sensitivity,
     review_state, created_at, deleted_at, pinned_at) VALUES (?, ?, 'discovery', ?, ?, '', ?, ?, ?, 'reviewed', 1, ?, ?)`)
     .run(id, REPO, title, body, material, content, extra.sensitivity ?? 'eligible', extra.deleted_at ?? null, extra.pinned_at ?? null);

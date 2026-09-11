@@ -199,7 +199,6 @@ test('foreign edit: B edits, deletes and marks secret a memory A created, and th
     for (const replica of [a, b, c]) {
       const text = readFileSync(publish(replica, dir), 'utf8');
       assert.equal(text.includes('Original body'), false, 'the erased text is never re-published');
-      assert.equal(text.includes('Original body'), false);
     }
   });
 });

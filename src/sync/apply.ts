@@ -12,7 +12,7 @@ import { checkpointHash } from '../db/identity.js';
 import { sha256Hex, sha256Json } from '../hash.js';
 import { cjkBigrams } from '../retrieval/fts.js';
 import { contextRecords, memoryRecords, proposalRecords, sourceRecords, visibilityRecords, workRecords } from '../transfer-records.js';
-import { captureLocalChanges, controlOf, sourceLocalId, toOriginForm } from './capture.js';
+import { alignToNatural, captureLocalChanges, controlOf, sourceLocalId, toOriginForm } from './capture.js';
 import { BOUNDS, type Control } from './format.js';
 import { canonicalJson, payloadHash, revisionId, type Sensitivity, type SyncKind } from './identity.js';
 import { BundleRejected, stagedLines, stagedOrigins, stagedRepos, type Staged } from './stage.js';
@@ -260,13 +260,13 @@ function sourceWriter(db: DatabaseSync, row: Origin, payload: Row | null, contro
   if (payload === null) return existing === null ? null : localId;
   const sourceMemory = payload.source_memory_id === null ? null : resolve.localOf('memory', String(payload.source_memory_id));
   const sourceContext = payload.source_context_id === null ? null : resolve.localOf('context', String(payload.source_context_id));
-  const repo = repoOf(db, 'memories', memory);
-  if ((sourceMemory !== null && repoOf(db, 'memories', sourceMemory) !== repo)
-    || (sourceContext !== null && repoOf(db, 'work_contexts', sourceContext) !== repo)) throw new Unresolved('repo_mismatch');
+  // A dependency edge may name a personal projection of another repository; only the context is owned.
+  if (sourceContext !== null && repoOf(db, 'work_contexts', sourceContext) !== repoOf(db, 'memories', memory)) throw new Unresolved('repo_mismatch');
   if (existing !== null) prepared(db, 'DELETE FROM memory_sources WHERE id = ?').run(existing);
   // The same citation may already sit under another origin (an in-place field change made a new
-  // origin): the row it left behind is replaced, and its old origin records a tombstone.
-  prepared(db, 'DELETE FROM memory_sources WHERE memory_id = ? AND raw_event_id IS ? AND source_hash IS ? AND portion_start IS ? AND portion_end IS ?')
+  // origin): the row it left behind is replaced, and its old origin records a tombstone. `=` keeps
+  // NULL members apart, exactly as the UNIQUE index does.
+  prepared(db, 'DELETE FROM memory_sources WHERE memory_id = ? AND raw_event_id = ? AND source_hash = ? AND portion_start = ? AND portion_end = ?')
     .run(memory, payload.raw_event_id as string | null, payload.source_hash as string | null, payload.portion_start as number | null, payload.portion_end as number | null);
   prepared(db, `INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, citation_value, source_agent, portion_start, portion_end,
       source_total, source_hash, evidence, captured_at, source_processed_at, capture_root, source_paths_json, source_context_id,
@@ -305,7 +305,14 @@ function contextWriter(db: DatabaseSync, row: Origin, payload: Row | null, contr
 
 function workWriter(db: DatabaseSync, row: Origin, payload: Row | null, control: Control, resolve: Resolver, now: number): string | null {
   void now;
-  if (payload === null) return row.local_id;
+  if (payload === null) {
+    if (row.local_id !== null) {
+      prepared(db, `UPDATE work_items SET purpose_sensitivity = ?, purpose = CASE WHEN ? = 'secret' THEN NULL ELSE purpose END WHERE id = ?
+        AND CASE purpose_sensitivity WHEN 'eligible' THEN 0 WHEN 'local_only' THEN 1 WHEN 'private' THEN 2 ELSE 3 END < ?`)
+        .run(control.sensitivity_floor, control.sensitivity_floor, row.local_id, RANK[control.sensitivity_floor]);
+    }
+    return row.local_id;
+  }
   const repo = resolve.repo(String(payload.repo_id));
   const context = resolve.localOf('context', String(payload.origin_context_id));
   if (repoOf(db, 'work_contexts', context) !== repo) throw new Unresolved('repo_mismatch');
@@ -355,7 +362,15 @@ function locallyApproved(db: DatabaseSync, proposalLocalId: string, scope?: Reco
 
 function proposalWriter(db: DatabaseSync, row: Origin, payload: Row | null, control: Control, resolve: Resolver, now: number): string | null {
   void now;
-  if (payload === null) return row.local_id;
+  if (payload === null) {
+    if (row.local_id !== null) {
+      prepared(db, `UPDATE sharing_proposals SET candidate_sensitivity = ?, candidate_title = CASE WHEN ? = 'secret' THEN '' ELSE candidate_title END,
+        candidate_body = CASE WHEN ? = 'secret' THEN '' ELSE candidate_body END, source_event_ids_json = CASE WHEN ? = 'secret' THEN '[]' ELSE source_event_ids_json END
+        WHERE id = ? AND CASE candidate_sensitivity WHEN 'eligible' THEN 0 WHEN 'local_only' THEN 1 WHEN 'private' THEN 2 ELSE 3 END < ?`)
+        .run(control.sensitivity_floor, control.sensitivity_floor, control.sensitivity_floor, control.sensitivity_floor, row.local_id, RANK[control.sensitivity_floor]);
+    }
+    return row.local_id;
+  }
   const memory = resolve.localOf('memory', String(payload.origin_memory_id));
   const repo = resolve.repo(String(payload.origin_repo_id));
   const work = resolve.localOf('work', String(payload.origin_work_id));
@@ -399,7 +414,7 @@ function materializedState(db: DatabaseSync, row: Origin, localId: string, resol
   const originOf = (kind: SyncKind, id: string): string => originsOfRow(db, kind, id)[0]?.canonical_origin_id ?? `${resolve.replica}:${id}`;
   const repoKeys = registerLocalRepos(db, resolve.replica);
   const captureResolver = { originOf, repoKey: (id: string) => repoKeys.get(id) ?? resolve.replica };
-  const payload = toOriginForm(row.kind, record, row.origin_id, captureResolver);
+  const payload = alignToNatural(row.kind, toOriginForm(row.kind, record, row.origin_id, captureResolver), canonicalOf(db, row.origin_id).natural);
   return stateHash(payloadHash(payload), controlOf(row.kind, record));
 }
 
@@ -454,12 +469,12 @@ function sweepCheckpoint(db: DatabaseSync, row: Origin, now: number): void {
 }
 
 /** The work's pointer follows a pulled head only when the chain reaches the local checkpoint. */
-function advanceWorkCheckpoint(db: DatabaseSync, row: Origin, selected: string, previousMaterialized: string | null): boolean {
+function advanceWorkCheckpoint(db: DatabaseSync, row: Origin, selected: string, previousMaterialized: string | null): 'advanced' | 'sibling' | 'foreign' {
   const revision = readRevision(db, selected);
-  if (revision?.payload == null || row.local_id === null) return true;
+  if (revision?.payload == null || row.local_id === null) return 'advanced';
   const target = revision.payload.current_checkpoint_memory_id === null ? null : resolveLocal(db, 'memory', String(revision.payload.current_checkpoint_memory_id));
-  if (revision.payload.current_checkpoint_memory_id !== null && target === null) return false;
-  if (target !== null && (prepared(db, 'SELECT work_id FROM memories WHERE id = ?').get(target)?.work_id ?? null) !== row.local_id) return false;
+  if (revision.payload.current_checkpoint_memory_id !== null && target === null) return 'sibling';
+  if (target !== null && (prepared(db, 'SELECT work_id FROM memories WHERE id = ?').get(target)?.work_id ?? null) !== row.local_id) return 'foreign';
   const current = prepared(db, 'SELECT current_checkpoint_memory_id FROM work_items WHERE id = ?').get(row.local_id)?.current_checkpoint_memory_id as string | null;
   const reaches = (from: string | null): boolean => {
     let cursor = from;
@@ -469,9 +484,9 @@ function advanceWorkCheckpoint(db: DatabaseSync, row: Origin, selected: string, 
     }
     return current === null;
   };
-  if (!(revision.parents.length > 1 || crossesResolution(db, previousMaterialized, selected) || reaches(target))) return false;
+  if (!(revision.parents.length > 1 || crossesResolution(db, previousMaterialized, selected) || reaches(target))) return 'sibling';
   prepared(db, 'UPDATE work_items SET current_checkpoint_memory_id = ? WHERE id = ?').run(target, row.local_id);
-  return true;
+  return 'advanced';
 }
 
 /** True when a resolution (multi-parent revision) lies strictly between the materialized revision and `head`. */
@@ -521,13 +536,31 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
   const rows = rowIds.map((id) => readOrigin(db, id)!).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
   const pending = new Set(rows.map((row) => row.origin_id));
   const workRows: Origin[] = [];
+  const workBefore = new Map<string, Row | null>();
   const raiseTargets = new Set<string>();
   let progress = true;
   while (progress && pending.size > 0) {
     progress = false;
     for (const stale of rows) {
       if (!pending.has(stale.origin_id)) continue;
-      const row = readOrigin(db, stale.origin_id)!;
+      let row = readOrigin(db, stale.origin_id)!;
+      // A row that was identity-only may alias onto a local row now (a repository was mapped):
+      // bind first, so the control of every origin of that row applies before anything is written.
+      if (row.local_id === null) {
+        const target = aliasTarget(db, row.kind, row.natural);
+        if (target !== null) {
+          bindOrigin(db, row.origin_id, target);
+          row = readOrigin(db, row.origin_id)!;
+          if (row.canonical_origin_id !== row.origin_id) {
+            pending.delete(row.origin_id);
+            const canonical = readOrigin(db, row.canonical_origin_id)!;
+            if (!rows.some((other) => other.origin_id === canonical.origin_id)) { rows.push(canonical); pending.add(canonical.origin_id); }
+            progress = true;
+            continue;
+          }
+        }
+      }
+      if (row.kind === 'work') workBefore.set(row.origin_id, row.local_id === null ? null : { ...prepared(db, 'SELECT * FROM work_items WHERE id = ?').get(row.local_id)! });
       const heads = headsOf(db, row.origin_id);
       if (heads.length > BOUNDS.headsPerOrigin) throw new BundleRejected('heads_per_row', row.origin_id);
       const selected = selectHead(db, row, heads);
@@ -573,10 +606,31 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
   for (const work of workRows) {
     const current = readOrigin(db, work.origin_id)!;
     if (current.selected_head === null || current.local_id === null) continue;
-    if (advanceWorkCheckpoint(db, current, current.selected_head, work.materialized_revision)) {
+    const outcome = advanceWorkCheckpoint(db, current, current.selected_head, work.materialized_revision);
+    if (outcome === 'advanced') {
       // The pointer moved after the row's state was taken: refresh it so the closing pass records no phantom edit.
       const state = materializedState(db, current, current.local_id, resolve);
       if (state !== null) setSelectedHead(db, current.origin_id, current.selected_head, current.materialized_revision, state);
+    } else if (outcome === 'foreign') {
+      // The pointer names another work's checkpoint: the row is not this work's record. Undo the
+      // write and withhold the row as an ownership violation.
+      const before = workBefore.get(work.origin_id) ?? null;
+      if (before === null) {
+        if (prepared(db, 'SELECT 1 FROM memories WHERE work_id = ? LIMIT 1').get(current.local_id) === undefined) {
+          prepared(db, 'DELETE FROM work_items WHERE id = ?').run(current.local_id);
+          prepared(db, 'UPDATE sync_origins SET local_id = NULL WHERE origin_id = ?').run(current.origin_id);
+        }
+      } else {
+        prepared(db, `UPDATE work_items SET purpose = ?, purpose_source_event_id = ?, purpose_sensitivity = ?, state = ?, updated_at = ?,
+          completed_at = ?, current_checkpoint_memory_id = ? WHERE id = ?`)
+          .run(before.purpose as string | null, before.purpose_source_event_id as string | null, before.purpose_sensitivity as string,
+            before.state as string, before.updated_at as number, before.completed_at as number | null,
+            before.current_checkpoint_memory_id as string | null, current.local_id);
+      }
+      prepared(db, 'UPDATE sync_origins SET withheld_reason = ? WHERE origin_id = ?').run('repo_mismatch', current.origin_id);
+      setSelectedHead(db, current.origin_id, current.selected_head, work.materialized_revision, work.materialized_hash);
+      result.materialized -= 1;
+      result.withheldOnApply += 1;
     } else {
       // A checkpoint the chain does not reach is a sibling for the pointer: keep the previous line.
       const kept = work.materialized_revision;
@@ -636,7 +690,7 @@ export function resolveRow(db: DatabaseSync, originId: string, keep: string, now
     const repoKeys = registerLocalRepos(db, replica);
     const originOf = (kind: SyncKind, id: string): string => originsOfRow(db, kind, id)[0]?.canonical_origin_id ?? `${replica}:${id}`;
     const record = localRecord(db, 'work', row.local_id, { replica, localOf: () => '', repo: () => '' })!;
-    payload = toOriginForm('work', record, row.origin_id, { originOf, repoKey: (id) => repoKeys.get(id)! });
+    payload = alignToNatural('work', toOriginForm('work', record, row.origin_id, { originOf, repoKey: (id) => repoKeys.get(id)! }), row.natural);
     payloadHashValue = payloadHash(payload);
   } else throw new ResolveError('unknown_head');
   const revision: Revision = {

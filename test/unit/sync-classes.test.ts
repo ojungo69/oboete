@@ -8,6 +8,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
 import { materialHash } from '../../src/db/identity.js';
+import { sha256Json } from '../../src/hash.js';
 import { ENTITY_REFERENCES } from '../../src/sync/format.js';
 import { BundleRejected } from '../../src/sync/stage.js';
 import type { SyncKind } from '../../src/sync/identity.js';
@@ -21,6 +22,9 @@ type Bundle = { header: Line; repos: Line[]; revisions: Line[]; text: string };
 type Counters = { works: number; memories: number; sources: number; contexts: number; proposals: number };
 
 const NOTHING_WITHHELD: Counters = { works: 0, memories: 0, sources: 0, contexts: 0, proposals: 0 };
+
+/** The identity approveProjection gives a projection (src/sharing.ts). */
+const projectionHash = (title: string, body: string): string => sha256Json(['personal-projection-v1', title, body]);
 
 /** The plaintext a push writes: the header line, then repo lines and revision lines. */
 function bundleOf(path: string): Bundle {
@@ -188,7 +192,9 @@ test('a pulled approval binds to the local record only: a new candidate lands pe
     const onB = readOrigin(b.db, `${a.id}:p_one`)!.local_id!;
 
     // B's user approves candidate C0 here: the local record stores that candidate and scope.
-    const c0 = insertMemory(a.db, 'm_c0', 'Candidate zero', 'Body zero');
+    const c0 = insertMemory(a.db, 'm_c0', 'Candidate zero', 'Body zero', { content: projectionHash('Candidate zero', 'Body zero') });
+    a.db.prepare(`INSERT INTO memory_visibility (id, memory_id, audience, repo_id, work_id, proposal_id, grant_kind, created_at)
+      VALUES ('v_c0', 'm_c0', 'personal', NULL, NULL, 'p_one', 'proposal_approval', 2)`).run();
     b.db.prepare(`INSERT INTO sync_approvals (proposal_id, candidate_hash, projection_hash, scope_json, approved_at)
       VALUES (?, ?, ?, '{"audience":"personal"}', 5)`).run(onB, candidate0, c0.content);
     a.db.prepare(`UPDATE sharing_proposals SET state = 'approved', decision_channel = 'cli',
@@ -325,12 +331,12 @@ test('a pulled approval whose projection differs from the local record does not 
     const onB = readOrigin(b.db, `${a.id}:p_one`)!.local_id!;
     // A approves with projection P1 (personal from birth: approveProjection grants in the same
     // transaction); B's user approved the same candidate but as projection P0.
-    insertMemory(a.db, 'm_p1', 'Candidate zero', 'Body zero variant');
+    insertMemory(a.db, 'm_p1', 'Candidate zero', 'Body zero variant', { content: projectionHash('Candidate zero', 'Body zero variant') });
     a.db.prepare(`INSERT INTO memory_visibility (id, memory_id, audience, repo_id, work_id, proposal_id, grant_kind, created_at)
       VALUES ('v_pers', 'm_p1', 'personal', NULL, NULL, 'p_one', 'proposal_approval', 2)`).run();
     a.db.prepare(`UPDATE sharing_proposals SET state = 'approved', decision_channel = 'cli', projected_memory_id = 'm_p1',
       decided_at = 2 WHERE id = 'p_one'`).run();
-    const p0 = insertMemory(a.db, 'm_p0', 'Candidate zero', 'Body zero');
+    const p0 = insertMemory(a.db, 'm_p0', 'Candidate zero', 'Body zero', { content: projectionHash('Candidate zero', 'Body zero') });
     a.db.prepare("UPDATE memories SET deleted_at = 1 WHERE id = 'm_p0'").run();
     b.db.prepare(`INSERT INTO sync_approvals (proposal_id, candidate_hash, projection_hash, scope_json, approved_at)
       VALUES (?, ?, ?, '{"audience":"personal"}', 5)`).run(onB, candidate0, p0.content);
@@ -342,7 +348,7 @@ test('a pulled approval whose projection differs from the local record does not 
 
     // The approved projection binds; the personal grant (the only scope a proposal grant can carry,
     // 0006 CHECK) is written once the proposal is approved here.
-    insertMemory(a.db, 'm_p0', 'Candidate zero', 'Body zero');
+    insertMemory(a.db, 'm_p0', 'Candidate zero', 'Body zero', { content: projectionHash('Candidate zero', 'Body zero') });
     a.db.prepare(`INSERT INTO memory_visibility (id, memory_id, audience, repo_id, work_id, proposal_id, grant_kind, created_at)
       VALUES ('v_pers0', 'm_p0', 'personal', NULL, NULL, 'p_one', 'proposal_approval', 4)`).run();
     a.db.prepare("UPDATE sharing_proposals SET projected_memory_id = 'm_p0', decided_at = 3 WHERE id = 'p_one'").run();

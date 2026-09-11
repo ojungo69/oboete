@@ -9,10 +9,12 @@ import type { DatabaseSync } from 'node:sqlite';
 import { materialHash } from '../db/identity.js';
 import { loadSqlite } from '../db/open.js';
 import { prepared } from '../db/statements.js';
+import { sha256Json } from '../hash.js';
 import {
   BOUNDS, headerSchema, naturalSchemas, payloadSchemas, repoLineSchema, revisionLineSchema, ENTITY_REFERENCES,
   type Header, type RevisionLine, type RepoLine,
 } from './format.js';
+import { naturalOf } from './capture.js';
 import { canonicalJson, payloadHash, revisionId, snapshotId, type SyncKind } from './identity.js';
 import { readOrigin, readRevision, type Row } from './store.js';
 
@@ -204,30 +206,24 @@ function validateBody(db: DatabaseSync, staged: Staged, reader: Generator<Buffer
 function checkPayloadIntegrity(line: RevisionLine): void {
   const payload = line.payload!;
   const reject = (code: string): never => { throw new BundleRejected(code, line.revision_id); };
-  let expected: Row;
-  switch (line.kind) {
-    case 'memory': {
-      const absentText = payload.deleted_at !== null || payload.sensitivity === 'secret' || line.control.tombstone || line.control.sensitivity_floor === 'secret';
-      if (absentText) {
-        if (payload.title !== '' || payload.body !== '' || (payload.concepts ?? '[]') !== '[]') reject('redacted_memory_text');
-      } else if (materialHash(String(payload.title ?? ''), String(payload.body ?? '')) !== payload.material_hash) reject('material_hash_mismatch');
-      if (payload.identity_domain === 'personal_projection') expected = { domain: 'personal_projection', projection_hash: payload.content_hash };
-      else if (payload.work_id !== null) {
-        expected = { domain: 'checkpoint', repo: payload.repo_id, work: payload.work_id, parent: payload.checkpoint_parent_id, material_hash: payload.material_hash };
-      } else expected = { domain: 'ordinary', repo: payload.repo_id, material_hash: payload.material_hash };
-      break;
+  if (line.kind === 'memory') {
+    const absentText = payload.deleted_at !== null || payload.sensitivity === 'secret' || line.control.tombstone || line.control.sensitivity_floor === 'secret';
+    if (absentText) {
+      if (payload.title !== '' || payload.body !== '' || (payload.concepts ?? '[]') !== '[]') reject('redacted_memory_text');
+    } else if (materialHash(String(payload.title ?? ''), String(payload.body ?? '')) !== payload.material_hash) reject('material_hash_mismatch');
+    if (payload.identity_domain === 'personal_projection') {
+      if (payload.work_id !== null || payload.checkpoint_parent_id !== null) reject('personal_source_lineage');
+      if (!absentText && sha256Json(['personal-projection-v1', payload.title, payload.body]) !== payload.content_hash) reject('personal_identity_mismatch');
     }
-    case 'sharing_proposal':
-      if (payload.redacted !== true && payload.candidate_sensitivity !== 'secret' && line.control.sensitivity_floor !== 'secret'
-        && materialHash(String(payload.candidate_title), String(payload.candidate_body)) !== payload.candidate_material_hash) reject('candidate_hash_mismatch');
-      expected = { candidate: payload.candidate_material_hash, origin_memory: payload.origin_memory_id };
-      break;
-    case 'source': expected = { memory: payload.memory_id, source_hash: line.origin_id.slice(line.origin_id.lastIndexOf(':') + 1) }; break;
-    case 'visibility': expected = { memory: payload.memory_id, audience: payload.audience, repo: payload.repo_id, work: payload.work_id }; break;
-    case 'context': expected = { repo: payload.repo_id, local_key: payload.local_key }; break;
-    case 'work': expected = { work: line.origin_id }; break;
   }
-  if (canonicalJson(expected) !== canonicalJson(line.natural)) reject('natural_mismatch');
+  if (line.kind === 'sharing_proposal' && payload.redacted !== true && payload.candidate_sensitivity !== 'secret'
+    && line.control.sensitivity_floor !== 'secret'
+    && materialHash(String(payload.candidate_title), String(payload.candidate_body)) !== payload.candidate_material_hash) reject('candidate_hash_mismatch');
+  // The payload is already in origin form, so the sender's derivation applies unchanged.
+  const derived = naturalOf(line.kind, payload, line.origin_id, { originOf: (_kind, id) => id, repoKey: (id) => id });
+  // A projection released to an ordinary row keeps its origin: its identity is still the content hash.
+  const released = line.kind === 'memory' && line.natural.domain === 'personal_projection' && derived.domain !== 'personal_projection';
+  if (released ? payload.content_hash !== line.natural.projection_hash : canonicalJson(derived) !== canonicalJson(line.natural)) reject('natural_mismatch');
 }
 
 export function stagedLines(staged: Staged, originId: string): RevisionLine[] {

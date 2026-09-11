@@ -252,11 +252,12 @@ test('a resolve that keeps the head of the other aliased origin converges too', 
 test('a personal projection maps onto the local row across repositories', async () => {
   await withReplicas(2, (replicas, dir) => {
     const [a, b] = replicas as [Replica, Replica];
-    const projection = sha256Hex('the projection both devices hold');
+    // A projection's identity is the hash of its text, so both devices hold the same wording.
+    const projection = sha256Json(['personal-projection-v1', 'Projected', 'Shared wording']);
     insertIn(a.db, REPO, 'm_proj', 'Projected', 'Shared wording', { content: projection });
     markProjection(a.db, 'm_proj');
     const other = addRepo(b.db, 'r_other', 'remote', 'example.com/other');
-    insertIn(b.db, other, 'b_proj', 'Projected here', 'Other wording', { content: projection });
+    insertIn(b.db, other, 'b_proj', 'Projected', 'Shared wording', { content: projection });
     pull(b, a, publish(a, dir));
     const origin = readOrigin(b.db, `${a.id}:m_proj`)!;
     assert.equal(origin.natural.domain, 'personal_projection');

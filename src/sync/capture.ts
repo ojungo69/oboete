@@ -59,6 +59,27 @@ export function toOriginForm(kind: SyncKind, record: Row, originId: string, reso
   return payload;
 }
 
+/** Payload fields that name what the natural key names: the payload follows the natural key. */
+const NATURAL_REFERENCES: Record<SyncKind, readonly [payloadField: string, naturalField: string][]> = {
+  memory: [['repo_id', 'repo'], ['work_id', 'work'], ['checkpoint_parent_id', 'parent']],
+  source: [['memory_id', 'memory']],
+  visibility: [['memory_id', 'memory'], ['repo_id', 'repo'], ['work_id', 'work']],
+  sharing_proposal: [['origin_memory_id', 'origin_memory']],
+  context: [['repo_id', 'repo']],
+  work: [],
+};
+
+/**
+ * A row's natural key is frozen when its origin is created, while the origins and repository
+ * keys its references resolve to can change later (an alias, a mapping). Every revision names
+ * its references the way its natural key does, so a reader can check one against the other.
+ */
+export function alignToNatural(kind: SyncKind, payload: Row, natural: Row): Row {
+  const aligned = { ...payload };
+  for (const [field, key] of NATURAL_REFERENCES[kind]) if (natural[key] !== undefined) aligned[field] = natural[key];
+  return aligned;
+}
+
 export function naturalOf(kind: SyncKind, record: Row, originId: string, resolve: Resolver): Row {
   switch (kind) {
     case 'memory':
@@ -115,11 +136,11 @@ export function captureLocalChanges(db: DatabaseSync, now: number): CaptureResul
   const record = (kind: SyncKind, row: Row, localId: string): void => {
     seen.add(`${kind} ${localId}`);
     const originId = resolve.originOf(kind, localId);
-    const payload = toOriginForm(kind, row, originId, resolve);
     const natural = naturalOf(kind, row, originId, resolve);
     let origin = readOrigin(db, originId);
     if (origin === undefined) origin = createOrigin(db, { origin_id: originId, kind, local_id: localId, natural });
     const canonical = canonicalOf(db, origin.origin_id);
+    const payload = alignToNatural(kind, toOriginForm(kind, row, originId, resolve), canonical.natural);
     const control = controlOf(kind, row);
     const hash = payloadHash(payload);
     const state = stateHash(hash, control);
