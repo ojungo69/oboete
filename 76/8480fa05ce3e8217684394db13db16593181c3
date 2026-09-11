@@ -1,0 +1,33 @@
+specs/009-memory-core/contracts/sync.md
+  s_ce84c7de7d1c09::t_5abb4607d14f8c 18-20,52-53,106-108,547-553,575-577
+specs/009-memory-core/tasks.md
+  s_ce84c7de7d1c09::t_2acc5e22850df9 84-87
+src/sync-cli.ts
+  s_ce84c7de7d1c09::t_b033b8679dbdd7 165
+src/sync/apply.ts
+  s_ce84c7de7d1c09::t_c1745427fd396a 346-352,354
+src/sync/space.ts
+  s_ce84c7de7d1c09::t_e116d54632960d 209-215
+test/unit/sync-bounds.test.ts
+  s_ce84c7de7d1c09::t_461388627ae525 15,22,28,528-586
+test/unit/sync-classes.test.ts
+  s_ce84c7de7d1c09::t_35a0a736487d25 299-342
+test/unit/sync-flow.test.ts
+  s_ce84c7de7d1c09::t_595d55c06030fe 16,396,423-430
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "768480fa05ce3e8217684394db13db16593181c3",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
