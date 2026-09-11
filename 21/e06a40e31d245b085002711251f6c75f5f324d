@@ -1,0 +1,23 @@
+specs/009-memory-core/HANDOFF-claude-code.md
+  s_ce84c7de7d1c09::t_779351b1dac3b4 54-67,76
+specs/009-memory-core/quickstart.md
+  s_ce84c7de7d1c09::t_c5dc6df7a92c4a 747-779
+specs/009-memory-core/tasks.md
+  s_ce84c7de7d1c09::t_1315d263651230 194-208
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "21e06a40e31d245b085002711251f6c75f5f324d",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
