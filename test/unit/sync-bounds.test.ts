@@ -398,7 +398,10 @@ test('a pull whose cursor write fails rolls back every row and the next pull re-
       const before = counts(b);
       // The kill lands inside step 6: rows are written, then the cursor insert never returns.
       b.exec("CREATE TRIGGER crash BEFORE INSERT ON sync_cursors BEGIN SELECT RAISE(ABORT, 'killed'); END");
-      assert.throws(() => pullSpace(b, pathsB, { now: 20 }), /killed/u);
+      // An unexpected failure is that bundle's outcome (Pull step 7), labelled by code, never by message.
+      const crashed = pullSpace(b, pathsB, { now: 20 }).bundles[0]!;
+      assert.equal(crashed.outcome, 'rejected');
+      assert.equal(crashed.reason, 'apply_failed:sqlite:1811', 'SQLITE_CONSTRAINT_TRIGGER, by extended result code');
       assert.deepEqual(counts(b), before, 'one transaction: the rows roll back with the cursor');
       assert.equal(Number(b.prepare('SELECT COUNT(*) AS n FROM sync_cursors').get()?.n), 0);
       b.exec('DROP TRIGGER crash');

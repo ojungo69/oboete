@@ -8,11 +8,11 @@ import {
   closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync,
   renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 
 import type { SyncConfig } from '../config.js';
-import { isBusyError, loadSqlite } from '../db/open.js';
+import { isBusyError, loadSqlite, sqliteErrorInfo } from '../db/open.js';
 import { prepared } from '../db/statements.js';
 import type { OboetePaths } from '../paths.js';
 import { updateConfigFile } from '../setup/consent.js';
@@ -21,7 +21,7 @@ import { captureLocalChanges } from './capture.js';
 import { BundleError, decryptBundle, encryptBundle, keyId, MAX_CIPHERTEXT_BYTES } from './envelope.js';
 import { BOUNDS } from './format.js';
 import { canonicalJson } from './identity.js';
-import { buildSnapshot, type Withheld } from './publish.js';
+import { buildSnapshot, PublishError, type Withheld } from './publish.js';
 import { BundleRejected, stageBundle } from './stage.js';
 import { consentDrift, consentHashOf, loadSyncConfig, SyncError } from './status.js';
 import { localRepoOf, replicaOriginId } from './store.js';
@@ -101,10 +101,11 @@ function directoryOutsideHome(directory: string, paths: OboetePaths): string {
 /** `oboete sync init <dir>`: a new space and key; nothing is written to `<dir>` until the first push. */
 export function initSpace(db: DatabaseSync, paths: OboetePaths, input: { directory: string; classes: readonly string[]; now: number }): { spaceId: string; keyLine: string } {
   assertNoSpace(db, paths);
-  const realpath = directoryOutsideHome(input.directory, paths);
+  const directory = resolvePath(input.directory);
+  const realpath = directoryOutsideHome(directory, paths);
   const spaceId = randomBytes(16).toString('hex');
   const key = randomBytes(32);
-  const config: SyncConfig = { directory: input.directory, directory_realpath: realpath, space_id: spaceId, key_id: keyId(key),
+  const config: SyncConfig = { directory, directory_realpath: realpath, space_id: spaceId, key_id: keyId(key),
     classes: classesOf(input.classes) };
   writeKey(paths, spaceId, key);
   recordSpace(db, paths, config, input.now);
@@ -114,9 +115,10 @@ export function initSpace(db: DatabaseSync, paths: OboetePaths, input: { directo
 /** `oboete sync join <dir>`: the key line typed on a TTY (never an argument, variable or file). */
 export function joinSpace(db: DatabaseSync, paths: OboetePaths, input: { directory: string; keyLine: string; classes: readonly string[]; now: number }): { spaceId: string } {
   assertNoSpace(db, paths);
-  const realpath = directoryOutsideHome(input.directory, paths);
+  const directory = resolvePath(input.directory);
+  const realpath = directoryOutsideHome(directory, paths);
   const { spaceId, key } = parseKeyLine(input.keyLine);
-  const config: SyncConfig = { directory: input.directory, directory_realpath: realpath, space_id: spaceId, key_id: keyId(key),
+  const config: SyncConfig = { directory, directory_realpath: realpath, space_id: spaceId, key_id: keyId(key),
     classes: classesOf(input.classes) };
   writeKey(paths, spaceId, key);
   recordSpace(db, paths, config, input.now);
@@ -188,20 +190,26 @@ export function pushSpace(db: DatabaseSync, paths: OboetePaths, input: { now: nu
     const cipher = join(staging, `${replica}.push.osb`);
     const space = spaceDirectory(config.directory, config.space_id);
     const published = join(space, `${replica}.osb`);
-    const cleanup = (): void => { rmSync(plain, { force: true }); rmSync(cipher, { force: true }); };
+    const cleanup = (): void => { for (const path of [plain, `${plain}.body`, cipher]) rmSync(path, { force: true }); };
+    const inTransaction = <T>(mode: 'BEGIN IMMEDIATE' | 'BEGIN', fn: () => T): T => {
+      db.exec(mode);
+      try { const value = fn(); db.exec('COMMIT'); return value; } catch (error) { db.exec('ROLLBACK'); throw error; }
+    };
     try {
       for (let restarts = 0; restarts < 3; restarts += 1) {
         // Step 1: change pass on this connection; D0 is read before it, inside the same transaction.
-        db.exec('BEGIN IMMEDIATE');
-        const baseline = dataVersion(db);
-        captureLocalChanges(db, input.now);
-        db.exec('COMMIT');
+        const baseline = inTransaction('BEGIN IMMEDIATE', () => { const version = dataVersion(db); captureLocalChanges(db, input.now); return version; });
         input.probe?.('after_capture');
         // Step 2: a read transaction from the same state.
-        db.exec('BEGIN');
-        if (dataVersion(db) !== baseline) { db.exec('COMMIT'); cleanup(); continue; }
-        const snapshot = buildSnapshot(db, { spaceId: config.space_id, classes: config.classes, now: input.now, outputPath: plain });
-        db.exec('COMMIT');
+        let snapshot: ReturnType<typeof buildSnapshot> | null;
+        try {
+          snapshot = inTransaction('BEGIN', () => dataVersion(db) !== baseline ? null
+            : buildSnapshot(db, { spaceId: config.space_id, classes: config.classes, now: input.now, outputPath: plain }));
+        } catch (error) {
+          if (error instanceof PublishError) { cleanup(); throw new SyncError('publish_failed', { code: error.code }); }
+          throw error;
+        }
+        if (snapshot === null) { cleanup(); continue; }
         input.probe?.('after_staging');
         const stored = prepared(db, 'SELECT last_pushed_snapshot_id, published_sha256, published_size FROM sync_spaces WHERE space_id = ?').get(config.space_id)!;
         const intact = existsSync(published) && statSync(published).size === Number(stored.published_size)
@@ -309,7 +317,8 @@ export function pullSpace(db: DatabaseSync, paths: OboetePaths, input: { now: nu
       } catch (error) {
         if (error instanceof BundleError || error instanceof BundleRejected) {
           result.bundles.push({ replica: sender, outcome: 'rejected', reason: error.code });
-        } else throw error;
+        } else if (error instanceof SyncError) throw error;
+        else result.bundles.push({ replica: sender, outcome: 'rejected', reason: `apply_failed:${errorLabel(error)}` });
       } finally { rmSync(plain, { force: true }); rmSync(scratch, { force: true }); }
     }
     return result;
@@ -342,3 +351,10 @@ function reapplyWithheld(db: DatabaseSync, now: number): number {
 }
 
 export { resolveRow };
+
+/** A stable label for an unexpected apply error: the SQLite result code or the error class, never its message (which may quote input). */
+function errorLabel(error: unknown): string {
+  const info = sqliteErrorInfo(error);
+  if (info.errcode !== undefined) return `sqlite:${String(info.errcode)}`;
+  return error instanceof Error ? error.name : 'unknown';
+}

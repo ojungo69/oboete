@@ -161,8 +161,14 @@ function validateBody(db: DatabaseSync, staged: Staged, reader: Generator<Buffer
     if (conflicting !== undefined) throw new BundleRejected('origin_identity_conflict', String(row.origin_id));
     const stored = readOrigin(db, String(row.origin_id));
     if (stored !== undefined && stored.kind !== row.kind) throw new BundleRejected('origin_kind_conflict', String(row.origin_id));
-    const count = Number(scratch.prepare('SELECT COUNT(*) AS n FROM lines WHERE origin_id = ?').get(row.origin_id)?.n ?? 0)
+    // Every snapshot re-sends the whole log, so a line already stored is not a new revision.
+    let count = Number(scratch.prepare('SELECT COUNT(*) AS n FROM lines WHERE origin_id = ?').get(row.origin_id)?.n ?? 0)
       + Number(prepared(db, 'SELECT COUNT(*) AS n FROM sync_revisions WHERE origin_id = ?').get(row.origin_id)?.n ?? 0);
+    if (count > BOUNDS.revisionsPerOrigin) {
+      for (const stored of scratch.prepare('SELECT revision_id FROM lines WHERE origin_id = ?').iterate(row.origin_id)) {
+        if (readRevision(db, String(stored.revision_id)) !== undefined) count -= 1;
+      }
+    }
     if (count > BOUNDS.revisionsPerOrigin) throw new BundleRejected('revisions_per_origin', String(row.origin_id));
   }
   // Every parent names a line here or a stored revision of the same kind.

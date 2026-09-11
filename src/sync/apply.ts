@@ -8,6 +8,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { grantVisibility } from '../db/queries.js';
 import { prepared } from '../db/statements.js';
+import { checkpointHash } from '../db/identity.js';
 import { sha256Hex, sha256Json } from '../hash.js';
 import { cjkBigrams } from '../retrieval/fts.js';
 import { contextRecords, memoryRecords, proposalRecords, sourceRecords, visibilityRecords, workRecords } from '../transfer-records.js';
@@ -196,10 +197,15 @@ function memoryWriter(db: DatabaseSync, row: Origin, payload: Row | null, contro
   const repo = resolve.repo(String(payload.repo_id));
   const personal = payload.identity_domain === 'personal_projection';
   if (personal && !approvedProjection(db, String(payload.content_hash))) throw new Unresolved('approval_missing');
-  const contentHash = personal ? String(payload.content_hash) : sha256Json([repo, String(payload.material_hash)]);
   const workId = payload.work_id === null ? null : resolve.localOf('work', String(payload.work_id));
   const parentId = payload.checkpoint_parent_id === null ? null : resolve.localOf('memory', String(payload.checkpoint_parent_id));
   const supersededBy = payload.superseded_by === null ? null : resolve.localOf('memory', String(payload.superseded_by));
+  // Repository ownership as the native reader verifies it: a row never crosses its parent's repository.
+  if (workId !== null && repoOf(db, 'work_items', workId) !== repo) throw new Unresolved('repo_mismatch');
+  if (parentId !== null && (repoOf(db, 'memories', parentId) !== repo
+    || (prepared(db, 'SELECT work_id FROM memories WHERE id = ?').get(parentId)?.work_id ?? null) !== workId)) throw new Unresolved('repo_mismatch');
+  const contentHash = personal ? String(payload.content_hash)
+    : workId !== null ? checkpointHash(repo, workId, parentId, String(payload.material_hash)) : sha256Json([repo, String(payload.material_hash)]);
   const localId = row.local_id ?? (prepared(db, 'SELECT id FROM memories WHERE content_hash = ?').get(contentHash)?.id as string | undefined)
     ?? `m_${contentHash.slice(0, 24)}`;
   const sensitivity = stricter(payload.sensitivity as Sensitivity, control.sensitivity_floor);
@@ -254,7 +260,14 @@ function sourceWriter(db: DatabaseSync, row: Origin, payload: Row | null, contro
   if (payload === null) return existing === null ? null : localId;
   const sourceMemory = payload.source_memory_id === null ? null : resolve.localOf('memory', String(payload.source_memory_id));
   const sourceContext = payload.source_context_id === null ? null : resolve.localOf('context', String(payload.source_context_id));
+  const repo = repoOf(db, 'memories', memory);
+  if ((sourceMemory !== null && repoOf(db, 'memories', sourceMemory) !== repo)
+    || (sourceContext !== null && repoOf(db, 'work_contexts', sourceContext) !== repo)) throw new Unresolved('repo_mismatch');
   if (existing !== null) prepared(db, 'DELETE FROM memory_sources WHERE id = ?').run(existing);
+  // The same citation may already sit under another origin (an in-place field change made a new
+  // origin): the row it left behind is replaced, and its old origin records a tombstone.
+  prepared(db, 'DELETE FROM memory_sources WHERE memory_id = ? AND raw_event_id IS ? AND source_hash IS ? AND portion_start IS ? AND portion_end IS ?')
+    .run(memory, payload.raw_event_id as string | null, payload.source_hash as string | null, payload.portion_start as number | null, payload.portion_end as number | null);
   prepared(db, `INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, citation_value, source_agent, portion_start, portion_end,
       source_total, source_hash, evidence, captured_at, source_processed_at, capture_root, source_paths_json, source_context_id,
       context_only, source_memory_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -295,6 +308,7 @@ function workWriter(db: DatabaseSync, row: Origin, payload: Row | null, control:
   if (payload === null) return row.local_id;
   const repo = resolve.repo(String(payload.repo_id));
   const context = resolve.localOf('context', String(payload.origin_context_id));
+  if (repoOf(db, 'work_contexts', context) !== repo) throw new Unresolved('repo_mismatch');
   const localId = row.local_id ?? randomUUID();
   const sensitivity = stricter(payload.purpose_sensitivity as Sensitivity, control.sensitivity_floor);
   prepared(db, `INSERT INTO work_items (id, repo_id, origin_context_id, purpose, purpose_source_event_id, purpose_sensitivity, state,
@@ -321,11 +335,16 @@ function visibilityWriter(db: DatabaseSync, row: Origin, payload: Row | null, co
   const work = payload.work_id === null ? null : resolve.localOf('work', String(payload.work_id));
   const proposal = payload.proposal_id === null ? null : resolve.localOf('sharing_proposal', String(payload.proposal_id));
   if (payload.audience === 'personal' && (proposal === null || !locallyApproved(db, proposal, { audience: 'personal' }))) throw new Unresolved('approval_missing');
+  if (payload.audience === 'personal') {
+    if ((prepared(db, 'SELECT projected_memory_id FROM sharing_proposals WHERE id = ?').get(proposal!)?.projected_memory_id ?? null) !== memory) throw new Unresolved('approval_missing');
+  } else if (repoOf(db, 'memories', memory) !== repo || (work !== null && repoOf(db, 'work_items', work) !== repo)) throw new Unresolved('repo_mismatch');
   const grant = payload.audience === 'work' ? { audience: 'work' as const, repoId: repo!, workId: work! }
     : payload.audience === 'project' ? { audience: 'project' as const, repoId: repo! } : { audience: 'personal' as const, proposalId: proposal! };
   grantVisibility(db, memory, grant, payload.grant_kind as 'migration' | 'observer' | 'explicit_adoption' | 'proposal_approval', payload.created_at as number);
-  const localId = row.local_id ?? `v_${sha256Json([memory, payload.audience, repo, work])}`;
-  if (row.local_id === null) bindOrigin(db, row.origin_id, localId);
+  // The scope is UNIQUE (0006), so the row the grant landed on may predate sync under another id.
+  const localId = String(prepared(db, 'SELECT id FROM memory_visibility WHERE memory_id = ? AND audience = ? AND repo_id IS ? AND work_id IS ?')
+    .get(memory, String(payload.audience), repo, work)!.id);
+  if (row.local_id !== localId) bindOrigin(db, row.origin_id, localId);
   return localId;
 }
 
@@ -340,7 +359,8 @@ function proposalWriter(db: DatabaseSync, row: Origin, payload: Row | null, cont
   const memory = resolve.localOf('memory', String(payload.origin_memory_id));
   const repo = resolve.repo(String(payload.origin_repo_id));
   const work = resolve.localOf('work', String(payload.origin_work_id));
-  const localId = row.local_id ?? randomUUID();
+  if (repoOf(db, 'memories', memory) !== repo || repoOf(db, 'work_items', work) !== repo) throw new Unresolved('repo_mismatch');
+  const localId = row.local_id ?? aliasTarget(db, 'sharing_proposal', row.natural) ?? randomUUID();
   const sensitivity = stricter(payload.candidate_sensitivity as Sensitivity, control.sensitivity_floor);
   const redacted = payload.redacted === true || sensitivity === 'secret';
   // An approval binds only to what this device's user approved (candidate hash and projection;
@@ -381,6 +401,10 @@ function materializedState(db: DatabaseSync, row: Origin, localId: string, resol
   const captureResolver = { originOf, repoKey: (id: string) => repoKeys.get(id) ?? resolve.replica };
   const payload = toOriginForm(row.kind, record, row.origin_id, captureResolver);
   return stateHash(payloadHash(payload), controlOf(row.kind, record));
+}
+
+function repoOf(db: DatabaseSync, table: 'memories' | 'work_items' | 'work_contexts', localId: string): string | null {
+  return (prepared(db, `SELECT repo_id FROM ${table} WHERE id = ?`).get(localId)?.repo_id as string | undefined) ?? null;
 }
 
 function localRecord(db: DatabaseSync, kind: SyncKind, localId: string, resolve: Resolver): Row | null {
@@ -435,6 +459,7 @@ function advanceWorkCheckpoint(db: DatabaseSync, row: Origin, selected: string, 
   if (revision?.payload == null || row.local_id === null) return true;
   const target = revision.payload.current_checkpoint_memory_id === null ? null : resolveLocal(db, 'memory', String(revision.payload.current_checkpoint_memory_id));
   if (revision.payload.current_checkpoint_memory_id !== null && target === null) return false;
+  if (target !== null && (prepared(db, 'SELECT work_id FROM memories WHERE id = ?').get(target)?.work_id ?? null) !== row.local_id) return false;
   const current = prepared(db, 'SELECT current_checkpoint_memory_id FROM work_items WHERE id = ?').get(row.local_id)?.current_checkpoint_memory_id as string | null;
   const reaches = (from: string | null): boolean => {
     let cursor = from;
@@ -517,7 +542,11 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
         const after = readOrigin(db, row.origin_id)!;
         const fallback = stateHash(revision?.payload_hash ?? null, control);
         const state = localId === null ? fallback : materializedState(db, after, localId, resolve) ?? fallback;
-        const materializedRevision = payload !== null ? selected : after.materialized_revision ?? selected;
+        // A head is fully applied when its payload was written, when it never had one (control
+        // revision) or when a terminal control erased it; only a withheld payload keeps the last
+        // materialized revision as the base for local changes.
+        const applied = payload !== null || revision?.payload_hash === null || control.tombstone || control.sensitivity_floor === 'secret';
+        const materializedRevision = applied ? selected : after.materialized_revision ?? selected;
         setSelectedHead(db, row.origin_id, selected, materializedRevision, state);
         prepared(db, 'UPDATE sync_origins SET withheld_reason = NULL WHERE origin_id = ? AND local_id IS NOT NULL').run(row.origin_id);
         reportConflict(db, after, heads, selected, now, result);
