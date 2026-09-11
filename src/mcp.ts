@@ -17,6 +17,7 @@ import {
   searchMemories,
 } from './memories-cli.js';
 import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from './paths.js';
+import { syncStatus } from './sync/status.js';
 import { resolveRepoIdentity } from './repo-identity.js';
 import { chooseSourceWork, chooseWork, readWorkSelection, workStatus } from './work.js';
 import { filterMemoryOutput, filterReadOutput, filterTimelineOutput } from './privacy/provenance.js';
@@ -97,6 +98,12 @@ export const MCP_TOOLS = [
     annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
+  {
+    name: 'sync_status',
+    description: 'Report the local device-sync state: configured space, replicas seen, open conflicts and withheld rows. Push, pull and resolve run only through the human-operated CLI.',
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
 ] as const;
 
 const MAX_TEXT = 4096;
@@ -105,6 +112,7 @@ const readArguments = { binding: z.string().min(1).max(128).optional(), history:
 
 const toolArguments = {
   sharing_status: z.strictObject({}),
+  sync_status: z.strictObject({}),
   search: z.looseObject({ ...readArguments, query: z.string().max(MAX_TEXT), limit: limitSchema.default(DEFAULT_LIMIT) }),
   timeline: z.looseObject({ ...readArguments, session: z.string().max(MAX_TEXT).optional(), limit: limitSchema.default(DEFAULT_LIMIT) }),
   get: z.looseObject({ ...readArguments, id: z.string().max(MAX_TEXT) }),
@@ -212,6 +220,10 @@ async function callTool(
         const text = status.proposals.length === 0 ? 'No sharing proposals are available in this repository.'
           : status.proposals.map((proposal) => `${proposal.id}: ${proposal.state} ${JSON.stringify(proposal.candidate_title)}: ${JSON.stringify(proposal.candidate_body)}`).join('\n');
         return textResult(text + (status.hasMore ? '\nMore proposals are available. Review these to see the next ones.' : ''), status);
+      }
+      case 'sync_status': {
+        const status = syncStatus(db, context.paths);
+        return textResult(JSON.stringify(status), status);
       }
       case 'work_status': {
         const status = workStatus(db, context, (args as z.infer<typeof toolArguments.work_status>).all);

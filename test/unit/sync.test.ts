@@ -19,6 +19,7 @@ import { captureLocalChanges } from '../../src/sync/capture.js';
 import { BundleError, CHUNK_BYTES, decryptBundle, encryptBundle, keyId, PREFIX_BYTES, TAG_BYTES } from '../../src/sync/envelope.js';
 import { canonicalJson, payloadHash, revisionId, snapshotId } from '../../src/sync/identity.js';
 import { buildSnapshot } from '../../src/sync/publish.js';
+import { syncItem } from '../../src/doctor/storage.js';
 import { runSync } from '../../src/sync-cli.js';
 import {
   initSpace, joinSpace, leaveSpace, pullSpace, pushSpace, showKey, SyncError, syncStatus, withSpaceLock,
@@ -664,5 +665,25 @@ test('oboete sync commands: init, key show on a terminal only, join by typed key
     assert.equal((JSON.parse(gone.out[0]!) as { configured: boolean }).configured, false);
     const notConfigured = fakeIo(false);
     assert.equal(await runSync(['push'], notConfigured.io, pathsB, 32), 1);
+  });
+});
+
+test('oboete doctor reports sync from local data only: unconfigured, configured, consent drift', async () => {
+  await withHomes(1, async (homes, shared) => {
+    const [home] = homes as [string];
+    const paths = oboetePaths(home);
+    const db = openHome(home);
+    try {
+      assert.deepEqual(syncItem(paths, db, false), { item: 'sync', status: 'healthy', reason: 'Sync is not configured.', consequence: '', recovery: '' });
+      const { spaceId } = initSpace(db, paths, { directory: shared, classes: ['eligible', 'local_only', 'private'], now: 1 });
+      assert.equal(syncItem(paths, db, false).reason, `Sync space ${spaceId} is configured and its consent matches.`);
+      rmSync(shared, { recursive: true, force: true });
+      assert.equal(syncItem(paths, db, false).status, 'healthy', 'the space directory is never opened');
+      updateConfigFile(paths, (root) => { (root.sync as Record<string, unknown>).classes = ['eligible']; });
+      const drifted = syncItem(paths, db, false);
+      assert.equal(drifted.status, 'warning');
+      assert.equal(drifted.reason, 'The sync consent no longer matches (classes).');
+      assert.equal(syncItem(paths, null, true).status, 'unverified');
+    } finally { db.close(); }
   });
 });

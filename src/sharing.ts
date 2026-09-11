@@ -66,6 +66,11 @@ function approveProjection(db: DatabaseSync, proposal: Proposal, sensitivity: Se
     projected_memory_id = ?, decided_at = ? WHERE id = ? AND state = 'pending'`)
     .run(channel, projectionId, now, proposal.id);
   grantVisibility(db, projectionId, { audience: 'personal', proposalId: proposal.id }, 'proposal_approval', now);
+  // The local approval record binds a pulled approval to exactly this candidate, projection and scope (contracts/sync.md).
+  db.prepare(`INSERT INTO sync_approvals (proposal_id, candidate_hash, projection_hash, scope_json, approved_at) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(proposal_id) DO UPDATE SET candidate_hash = excluded.candidate_hash, projection_hash = excluded.projection_hash,
+      scope_json = excluded.scope_json, approved_at = excluded.approved_at`)
+    .run(proposal.id, proposal.candidate_material_hash, hash, JSON.stringify({ audience: 'personal' }), now);
   return { id: proposal.id, state: 'approved', projectedMemoryId: projectionId };
 }
 

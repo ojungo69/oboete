@@ -11,10 +11,9 @@ import {
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 
-import { loadConfig, type SyncConfig } from '../config.js';
+import type { SyncConfig } from '../config.js';
 import { isBusyError, loadSqlite } from '../db/open.js';
 import { prepared } from '../db/statements.js';
-import { sha256Hex } from '../hash.js';
 import type { OboetePaths } from '../paths.js';
 import { updateConfigFile } from '../setup/consent.js';
 import { applyStaged, materializeRows, resolveRow, type ApplyResult } from './apply.js';
@@ -24,19 +23,13 @@ import { BOUNDS } from './format.js';
 import { canonicalJson, type Sensitivity } from './identity.js';
 import { buildSnapshot, type Withheld } from './publish.js';
 import { BundleRejected, stageBundle } from './stage.js';
+import { consentDrift, consentHashOf, loadSyncConfig, SyncError } from './status.js';
 import { localRepoOf, replicaOriginId } from './store.js';
+
+export { SyncError, loadSyncConfig, syncStatus, type SyncStatus } from './status.js';
 
 export const KEY_LINE_PREFIX = 'oboete-sync-key/1';
 const BUNDLE_NAME = /^([0-9a-f]{32})\.osb$/u;
-const CONSENT_TRANSPORT = 'file-bundle';
-const CONSENT_ENCRYPTION = 'aes-256-gcm+hkdf-sha256 (oboete-sync-bundle/1)';
-
-export class SyncError extends Error {
-  constructor(readonly code: string, readonly detail: Record<string, unknown> = {}) {
-    super(code);
-    this.name = 'SyncError';
-  }
-}
 
 export function syncPaths(paths: OboetePaths): { root: string; staging: string; key(spaceId: string): string; lock(spaceId: string): string } {
   const root = join(paths.home, 'sync');
@@ -78,35 +71,12 @@ export function readKey(paths: OboetePaths, spaceId: string): Buffer {
   return parseKeyLine(readFileSync(path, 'utf8')).key;
 }
 
-export function consentTupleOf(config: SyncConfig): Record<string, unknown> {
-  return {
-    transport: CONSENT_TRANSPORT, directory: config.directory, directory_realpath: config.directory_realpath,
-    space_id: config.space_id, key_id: config.key_id, encryption: CONSENT_ENCRYPTION,
-    classes: [...config.classes].sort(), network: 'no network',
-  };
-}
-
-export function consentHashOf(config: SyncConfig): string {
-  return sha256Hex(canonicalJson(consentTupleOf(config)));
-}
-
-export function loadSyncConfig(paths: OboetePaths): SyncConfig | null {
-  return loadConfig(paths).sync ?? null;
-}
-
 /** Consent check at the start of every push and pull: any drift performs no I/O. */
 function checkConsent(db: DatabaseSync, config: SyncConfig): void {
-  const stored = prepared(db, 'SELECT * FROM sync_spaces WHERE space_id = ?').get(config.space_id);
-  if (stored === undefined) throw new SyncError('space_not_configured');
   let realpath: string;
   try { realpath = realpathSync(config.directory); } catch { throw new SyncError('consent_mismatch', { changed: ['directory'] }); }
-  const current = { ...config, directory_realpath: realpath };
-  if (consentHashOf(current) === String(stored.consent_hash) && config.directory_realpath === realpath) return;
-  const changed: string[] = [];
-  if (String(stored.directory) !== config.directory || String(stored.directory_realpath) !== realpath) changed.push('directory');
-  if (String(stored.key_id) !== config.key_id) changed.push('key_id');
-  if (String(stored.classes_json) !== canonicalJson([...config.classes].sort())) changed.push('classes');
-  throw new SyncError('consent_mismatch', { changed: changed.length === 0 ? ['consent'] : changed });
+  const changed = consentDrift(db, { ...config, directory_realpath: realpath });
+  if (changed.length > 0) throw new SyncError('consent_mismatch', { changed });
 }
 
 function recordSpace(db: DatabaseSync, paths: OboetePaths, config: SyncConfig, now: number): void {
@@ -336,35 +306,6 @@ export function pullSpace(db: DatabaseSync, paths: OboetePaths, input: { now: nu
     }
     return result;
   });
-}
-
-export type SyncStatus = {
-  configured: boolean; space_id?: string; directory?: string; classes?: string[]; replicas: { replica: string; snapshot_id: string; pulled_at: number }[];
-  conflicts: { id: string; local_state: string; remote_state: string }[]; withheld_on_apply: { origin_id: string; kind: string; reason: string }[];
-  unmapped_repos: { repo_key: string; identity_kind: string; normalized_identity: string }[];
-};
-
-/** `oboete sync status`: local data only; never opens the space directory. */
-export function syncStatus(db: DatabaseSync, paths: OboetePaths): SyncStatus {
-  const config = loadSyncConfig(paths);
-  const status: SyncStatus = { configured: config !== null, replicas: [], conflicts: [], withheld_on_apply: [], unmapped_repos: [] };
-  if (config === null) return status;
-  status.space_id = config.space_id;
-  status.directory = config.directory;
-  status.classes = [...config.classes];
-  for (const row of prepared(db, 'SELECT replica_origin_id, snapshot_id, pulled_at FROM sync_cursors WHERE space_id = ? ORDER BY replica_origin_id').iterate(config.space_id)) {
-    status.replicas.push({ replica: String(row.replica_origin_id), snapshot_id: String(row.snapshot_id), pulled_at: Number(row.pulled_at) });
-  }
-  for (const row of prepared(db, "SELECT id, local_state_json, remote_state_json FROM sync_conflicts WHERE status = 'open' ORDER BY created_at, id").iterate()) {
-    status.conflicts.push({ id: String(row.id), local_state: String(row.local_state_json ?? ''), remote_state: String(row.remote_state_json ?? '') });
-  }
-  for (const row of prepared(db, 'SELECT origin_id, kind, withheld_reason FROM sync_origins WHERE withheld_reason IS NOT NULL ORDER BY origin_id').iterate()) {
-    status.withheld_on_apply.push({ origin_id: String(row.origin_id), kind: String(row.kind), reason: String(row.withheld_reason) });
-  }
-  for (const row of prepared(db, 'SELECT repo_key, identity_kind, normalized_identity FROM sync_repo_mappings WHERE local_repo_id IS NULL ORDER BY repo_key').iterate()) {
-    status.unmapped_repos.push({ repo_key: String(row.repo_key), identity_kind: String(row.identity_kind), normalized_identity: String(row.normalized_identity) });
-  }
-  return status;
 }
 
 /** `oboete sync map-repo <key> <local repo id>`: then re-evaluates withheld payloads without a pull. */

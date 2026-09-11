@@ -13,7 +13,7 @@ import { cjkBigrams } from '../retrieval/fts.js';
 import { contextRecords, memoryRecords, proposalRecords, sourceRecords, visibilityRecords, workRecords } from '../transfer-records.js';
 import { captureLocalChanges, controlOf, sourceLocalId, toOriginForm } from './capture.js';
 import { BOUNDS, type Control } from './format.js';
-import { payloadHash, revisionId, type Sensitivity, type SyncKind } from './identity.js';
+import { canonicalJson, payloadHash, revisionId, type Sensitivity, type SyncKind } from './identity.js';
 import { BundleRejected, stagedLines, stagedOrigins, stagedRepos, type Staged } from './stage.js';
 import {
   bindOrigin, canonicalOf, createOrigin, descendsFrom, effectiveControl, erasePayloads, headsOf, localRepoOf, originsOfRow,
@@ -320,7 +320,7 @@ function visibilityWriter(db: DatabaseSync, row: Origin, payload: Row | null, co
   const repo = payload.repo_id === null ? null : resolve.repo(String(payload.repo_id));
   const work = payload.work_id === null ? null : resolve.localOf('work', String(payload.work_id));
   const proposal = payload.proposal_id === null ? null : resolve.localOf('sharing_proposal', String(payload.proposal_id));
-  if (payload.audience === 'personal' && (proposal === null || !locallyApproved(db, proposal))) throw new Unresolved('approval_missing');
+  if (payload.audience === 'personal' && (proposal === null || !locallyApproved(db, proposal, { audience: 'personal' }))) throw new Unresolved('approval_missing');
   const grant = payload.audience === 'work' ? { audience: 'work' as const, repoId: repo!, workId: work! }
     : payload.audience === 'project' ? { audience: 'project' as const, repoId: repo! } : { audience: 'personal' as const, proposalId: proposal! };
   grantVisibility(db, memory, grant, payload.grant_kind as 'migration' | 'observer' | 'explicit_adoption' | 'proposal_approval', payload.created_at as number);
@@ -329,8 +329,9 @@ function visibilityWriter(db: DatabaseSync, row: Origin, payload: Row | null, co
   return localId;
 }
 
-function locallyApproved(db: DatabaseSync, proposalLocalId: string): boolean {
-  return prepared(db, 'SELECT 1 FROM sync_approvals WHERE proposal_id = ?').get(proposalLocalId) !== undefined;
+function locallyApproved(db: DatabaseSync, proposalLocalId: string, scope?: Record<string, unknown>): boolean {
+  const row = prepared(db, 'SELECT scope_json FROM sync_approvals WHERE proposal_id = ?').get(proposalLocalId);
+  return row !== undefined && (scope === undefined || canonicalJson(JSON.parse(String(row.scope_json))) === canonicalJson(scope));
 }
 
 function proposalWriter(db: DatabaseSync, row: Origin, payload: Row | null, control: Control, resolve: Resolver, now: number): string | null {

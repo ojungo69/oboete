@@ -7,10 +7,8 @@ import { openDatabase } from './db/open.js';
 import { oboetePaths, resolveHome, type OboetePaths } from './paths.js';
 import { ResolveError } from './sync/apply.js';
 import type { Sensitivity } from './sync/identity.js';
-import {
-  initSpace, joinSpace, leaveSpace, mapRepo, pullSpace, pushSpace, resolveRow, showKey, SyncError, syncStatus, withSpaceLock,
-  loadSyncConfig,
-} from './sync/space.js';
+import { initSpace, joinSpace, leaveSpace, mapRepo, pullSpace, pushSpace, resolveRow, showKey, withSpaceLock } from './sync/space.js';
+import { loadSyncConfig, SyncError, syncStatus } from './sync/status.js';
 
 const USAGE = 'Usage: oboete sync init <dir> [--classes eligible,local_only,private] [--json]\n' +
   '       oboete sync join <dir> [--classes ...] [--json]      (the key line is typed on the terminal)\n' +

@@ -144,7 +144,7 @@ test('tools/list returns memory and scoped work tools with their input schemas',
     assert.deepEqual(frames[0], { jsonrpc: '2.0', id: 2, result: { tools: MCP_TOOLS } });
     assert.deepEqual(
       MCP_TOOLS.map((tool) => tool.name),
-      ['search', 'timeline', 'get', 'work_status', 'work_choose', 'sharing_status'],
+      ['search', 'timeline', 'get', 'work_status', 'work_choose', 'sharing_status', 'sync_status'],
     );
     assert.deepEqual(MCP_TOOLS[0].inputSchema, {
       type: 'object',
@@ -169,6 +169,17 @@ test('MCP sharing status is read-only and model-generated confirmation cannot ap
     assert.equal((result.frames[2].error as { code: number }).code, -32602);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sharing_proposals').get()?.n, 0);
     assert.deepEqual(MCP_TOOLS.find((tool) => tool.name === 'sharing_status')?.annotations,
+      { readOnlyHint: true, idempotentHint: true, openWorldHint: false });
+  });
+});
+
+test('MCP sync_status is read-only local state and no MCP tool can push, pull or resolve', async () => {
+  await withFixture(async ({ repo }) => {
+    const result = await serve(repo, [call(1, 'sync_status', {}), call(2, 'sync_push', {}), call(3, 'sync_pull', {}), call(4, 'sync_resolve', { id: 'x', keep: 'y' })]);
+    assert.deepEqual((result.frames[0].result as { structuredContent: unknown }).structuredContent,
+      { configured: false, replicas: [], conflicts: [], withheld_on_apply: [], unmapped_repos: [] });
+    for (const frame of result.frames.slice(1)) assert.equal((frame.error as { code: number }).code, -32602);
+    assert.deepEqual(MCP_TOOLS.find((tool) => tool.name === 'sync_status')?.annotations,
       { readOnlyHint: true, idempotentHint: true, openWorldHint: false });
   });
 });

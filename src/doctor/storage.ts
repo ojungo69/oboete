@@ -17,8 +17,9 @@ import {
 import type { OboetePaths } from '../paths.js';
 import { describe } from '../setup/report.js';
 import { listSpool } from '../spool.js';
-import { stale } from '../worker/lease.js';
+import { consentDrift, loadSyncConfig } from '../sync/status.js';
 import { SOURCE_METADATA_COLUMNS, SUMMARIZABLE_ROW_SQL, type RawEventRow } from '../worker/batches.js';
+import { stale } from '../worker/lease.js';
 
 const DATABASE_TIMEOUT_MS = 5_000;
 const SQLITE_CORRUPT = 11;
@@ -447,4 +448,18 @@ function isReadonlyError(error: unknown): boolean {
   if (errcode === SQLITE_READONLY) return true;
   const text = `${message} ${errstr ?? ''}`;
   return /readonly|SQLITE_READONLY|attempt to write a readonly/i.test(text);
+}
+
+/** `sync`: configured/unconfigured and consent from `config.toml` and local tables only; never opens the space directory. */
+export function syncItem(paths: OboetePaths, db: DatabaseSync | null, integrityFailed: boolean): DoctorItem {
+  const config = loadSyncConfig(paths);
+  if (config === null) return healthy('sync', 'Sync is not configured.');
+  if (db === null) {
+    return dbUnread('sync', integrityFailed, 'The database is unavailable, so the sync consent was not checked.',
+      'Whether the recorded consent still matches the configuration is unknown.', 'Restore the database and run `oboete doctor` again.');
+  }
+  const changed = consentDrift(db, config);
+  if (changed.length === 0) return healthy('sync', `Sync space ${config.space_id} is configured and its consent matches.`);
+  return warning('sync', `The sync consent no longer matches (${changed.join(', ')}).`,
+    'Push and pull refuse to run until the space is set up again.', 'Run `oboete sync leave` and then `oboete sync init` or `oboete sync join` again.');
 }
