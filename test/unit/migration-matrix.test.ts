@@ -55,7 +55,7 @@ function snapshot(db: DatabaseSync) {
 
 async function exportedFile(fixture: Fixture, name = 'export.jsonl') {
   const result = output();
-  assert.equal(await runExport(['-'], result.io), 0, result.text.error);
+  assert.equal(await runExport(['-'], result.io), 0, result.text.error || result.text.out);
   const path = join(fixture.paths.home, name);
   writeFileSync(path, result.text.out);
   const records = result.text.out.trim().split('\n').slice(1).map((line) => JSON.parse(line) as NativeRecord);
@@ -107,13 +107,13 @@ test('matrix A1: preview requires an explicit verified context when zero or two 
         }
         const before = snapshot(db);
         const json = output();
-        assert.equal(await runImport([...args, '--json'], json.io), 0, json.text.error);
+        assert.equal(await runImport([...args, '--json'], json.io), 0, json.text.error || json.text.out);
         const contextCandidates = count === 0 ? [] : ['context-first', 'context-newest'];
         assert.deepEqual(JSON.parse(json.text.out).mapping.projects,
           [{ sourceHash: '9d40a5cff7158826c7f86e75c709f78e4bfa1a40a69f4932f25b9bc6a598377d', destinationRepo: repoId,
             context: null, contextCandidates, contextCandidatesOmitted: 0 }]);
         const human = output();
-        assert.equal(await runImport(args, human.io), 0, human.text.error);
+        assert.equal(await runImport(args, human.io), 0, human.text.error || human.text.out);
         assert.deepEqual(human.text.out.split('\n').filter((line) => line.startsWith('Context candidate ')),
           contextCandidates.map((id) => `Context candidate ${repoId}: ${id}.`));
         assert.doesNotMatch(human.text.out, /context candidates omitted/u);
@@ -123,11 +123,11 @@ test('matrix A1: preview requires an explicit verified context when zero or two 
       for (const id of ['context-first', 'context-newest']) {
         assert.equal(verifiedRepoContext(db, repoId, id)?.id, id);
         const explicit = output();
-        assert.equal(await runImport([...args, '--map-context', `${repoId}=${id}`, '--json'], explicit.io), 0, explicit.text.error);
+        assert.equal(await runImport([...args, '--map-context', `${repoId}=${id}`, '--json'], explicit.io), 0, explicit.text.error || explicit.text.out);
         assert.deepEqual(JSON.parse(explicit.text.out).mapping.projects,
           [{ sourceHash: '9d40a5cff7158826c7f86e75c709f78e4bfa1a40a69f4932f25b9bc6a598377d', destinationRepo: repoId, context: id }]);
         const human = output();
-        assert.equal(await runImport([...args, '--map-context', `${repoId}=${id}`], human.io), 0, human.text.error);
+        assert.equal(await runImport([...args, '--map-context', `${repoId}=${id}`], human.io), 0, human.text.error || human.text.out);
         assert.doesNotMatch(human.text.out, /Context candidate|context candidates omitted/u);
       }
       const extraIds = Array.from({ length: 10 }, (_, index) => `context-${String(index).padStart(2, '0')}`);
@@ -136,13 +136,13 @@ test('matrix A1: preview requires an explicit verified context when zero or two 
         .run(id, repoId, `unverified-${id}`, roots[0]);
       const before = snapshot(db);
       const bounded = output();
-      assert.equal(await runImport([...args, '--json'], bounded.io), 0, bounded.text.error);
+      assert.equal(await runImport([...args, '--json'], bounded.io), 0, bounded.text.error || bounded.text.out);
       const project = JSON.parse(bounded.text.out).mapping.projects[0];
       assert.equal(project.context, null);
       assert.deepEqual(project.contextCandidates, extraIds);
       assert.equal(project.contextCandidatesOmitted, 2);
       const human = output();
-      assert.equal(await runImport(args, human.io), 0, human.text.error);
+      assert.equal(await runImport(args, human.io), 0, human.text.error || human.text.out);
       assert.deepEqual(human.text.out.split('\n').filter((line) => line.startsWith('Context candidate ')),
         extraIds.map((id) => `Context candidate ${repoId}: ${id}.`));
       assert.ok(human.text.out.split('\n').includes(`2 context candidates omitted for ${repoId}.`));
@@ -230,7 +230,7 @@ test('matrix A3: preview preserves missing, behind, ahead and writer-held WAL de
         };
         const before = state();
         const preview = output();
-        assert.equal(await runImport([file, '--dry-run', '--json'], preview.io), 0, preview.text.error);
+        assert.equal(await runImport([file, '--dry-run', '--json'], preview.io), 0, preview.text.error || preview.text.out);
         assert.equal(JSON.parse(preview.text.out).destinationSchema, schema);
         assert.equal(JSON.parse(preview.text.out).applied, false);
         assert.equal(JSON.parse(preview.text.out).inserted, 1);
@@ -264,7 +264,7 @@ test('matrix B4: changing mappings for the same file rejects without any table c
     fixture.db.exec("INSERT INTO repos (id, identity_kind, normalized_identity) VALUES ('other', 'common_dir', '/other')");
     const file = nativeFile(fixture.paths.home, [repo(), memory()]);
     const first = output();
-    assert.equal(await runImport([file, '--apply', '--map-repo', `source-repo=${fixture.identity.id}`], first.io), 0, first.text.error);
+    assert.equal(await runImport([file, '--apply', '--map-repo', `source-repo=${fixture.identity.id}`], first.io), 0, first.text.error || first.text.out);
     const before = snapshot(fixture.db);
     const changed = output();
     assert.equal(await runImport([file, '--apply', '--map-repo', 'source-repo=other'], changed.io), 2);
@@ -279,7 +279,7 @@ test('matrix B5: an overlapping origin mapped elsewhere rolls back even after ea
     const shared = memory('shared');
     const first = nativeFile(fixture.paths.home, [repo(), shared], 'first.jsonl');
     const initial = output();
-    assert.equal(await runImport([first, '--apply', '--map-repo', `source-repo=${fixture.identity.id}`], initial.io), 0, initial.text.error);
+    assert.equal(await runImport([first, '--apply', '--map-repo', `source-repo=${fixture.identity.id}`], initial.io), 0, initial.text.error || initial.text.out);
     const fresh = memory('fresh');
     const second = nativeFile(fixture.paths.home, [repo(), ...(conflictFirst ? [shared, fresh] : [fresh, shared])], 'second.jsonl', 2);
     assert.notDeepEqual(readFileSync(first), readFileSync(second));
@@ -296,11 +296,11 @@ test('matrix B6: two source projects can share a destination while retaining dis
     const file = nativeFile(fixture.paths.home, [repo('one'), repo('two'), memory('one-memory', 'one'), memory('two-memory', 'two')]);
     const args = [file, '--json', '--map-repo', `one=${fixture.identity.id}`, '--map-repo', `two=${fixture.identity.id}`];
     const preview = output();
-    assert.equal(await runImport([...args, '--dry-run'], preview.io), 0, preview.text.error);
+    assert.equal(await runImport([...args, '--dry-run'], preview.io), 0, preview.text.error || preview.text.out);
     assert.equal(JSON.parse(preview.text.out).mapping.collisions, 1);
     assert.equal(fixture.db.prepare('SELECT COUNT(*) AS n FROM migration_records').get()?.n, 0);
     const applied = output();
-    assert.equal(await runImport([...args, '--apply'], applied.io), 0, applied.text.error);
+    assert.equal(await runImport([...args, '--apply'], applied.io), 0, applied.text.error || applied.text.out);
     assert.equal(JSON.parse(applied.text.out).inserted, 2);
     const origins = fixture.db.prepare('SELECT origin_key, target_key FROM migration_records ORDER BY id').all();
     assert.equal(origins.length, 2);
@@ -308,7 +308,7 @@ test('matrix B6: two source projects can share a destination while retaining dis
     assert.deepEqual(origins.map((row) => row.target_key), [`repo:${fixture.identity.id}`, `repo:${fixture.identity.id}`]);
     const before = snapshot(fixture.db);
     const repeated = output();
-    assert.equal(await runImport([...args, '--dry-run'], repeated.io), 0, repeated.text.error);
+    assert.equal(await runImport([...args, '--dry-run'], repeated.io), 0, repeated.text.error || repeated.text.out);
     const duplicate = JSON.parse(repeated.text.out);
     assert.equal(duplicate.duplicate, true);
     assert.equal(duplicate.mapping.collisions, 1);
@@ -317,7 +317,7 @@ test('matrix B6: two source projects can share a destination while retaining dis
     assert.deepEqual(duplicate.mapping.unresolved, []);
     assert.equal(duplicate.mapping.unresolvedOmitted, 0);
     const human = output();
-    assert.equal(await runImport(args.filter((arg) => arg !== '--json'), human.io), 0, human.text.error);
+    assert.equal(await runImport(args.filter((arg) => arg !== '--json'), human.io), 0, human.text.error || human.text.out);
     assert.match(human.text.out, /1 project collisions\./u);
     assert.match(human.text.out, /^0 unresolved projects\.$/mu);
     assert.doesNotMatch(human.text.out, /mapping required/u);
@@ -370,7 +370,7 @@ test('matrix C7: all proposal decisions round trip as private history without ne
     await withFixture(async (target) => {
       insertSession(target, { id: 'target-session', agent: 'codex' });
       const result = output();
-      assert.equal(await runImport([file.path, '--apply', '--map-repo', `${source.identity.id}=${target.identity.id}`], result.io), 0, result.text.error);
+      assert.equal(await runImport([file.path, '--apply', '--map-repo', `${source.identity.id}=${target.identity.id}`], result.io), 0, result.text.error || result.text.out);
       const { db } = target;
       const assertHistory = (state: 'pending' | 'clean') => {
         const held = db.prepare("SELECT payload_json, classification_state FROM migration_records WHERE record_kind = 'sharing_proposal'").all();
@@ -406,7 +406,7 @@ test('matrix C7: all proposal decisions round trip as private history without ne
       await withFixture(async (next) => {
         insertSession(next, { id: 'next-session', agent: 'codex' });
         const imported = output();
-        assert.equal(await runImport([exported.path, '--apply', '--map-repo', `${target.identity.id}=${next.identity.id}`], imported.io), 0, imported.text.error);
+        assert.equal(await runImport([exported.path, '--apply', '--map-repo', `${target.identity.id}=${next.identity.id}`], imported.io), 0, imported.text.error || imported.text.out);
         await classify(next);
         const reexported = await exportedFile(next);
         const repeated = reexported.records.filter((row) => row.kind === 'migration_origin');
@@ -442,7 +442,7 @@ test('matrix C8: redacted source dependencies stay terminal after a forged plain
     for (const field of ['evidence', 'citation_value', 'source_agent', 'capture_root', 'source_paths_json'] as const) assert.equal(record[field], null);
     await withFixture(async (target) => {
       const applied = output();
-      assert.equal(await runImport([file.path, '--apply', '--map-repo', `${source.identity.id}=${target.identity.id}`], applied.io), 0, applied.text.error);
+      assert.equal(await runImport([file.path, '--apply', '--map-repo', `${source.identity.id}=${target.identity.id}`], applied.io), 0, applied.text.error || applied.text.out);
       const receipt = target.db.prepare("SELECT * FROM migration_records WHERE record_kind = 'source'").get()!;
       const expectedState = terminal === 'secret' ? 'secret' : 'not_applicable';
       assert.equal(receipt.payload_json, null);
@@ -470,7 +470,7 @@ test('matrix C9: revoked personal grants preserve export identity and tombstones
       insertSession(target, { id: 'target-session', agent: 'codex' });
       const args = [file.path, '--apply', '--map-repo', `${source.identity.id}=${target.identity.id}`];
       const result = output();
-      assert.equal(await runImport(args, result.io), 0, result.text.error);
+      assert.equal(await runImport(args, result.io), 0, result.text.error || result.text.out);
       await classify(target);
       const { db } = target;
       const personal = db.prepare(`SELECT destination_memory_id FROM migration_records
@@ -483,7 +483,7 @@ test('matrix C9: revoked personal grants preserve export identity and tombstones
       process.chdir(target.repo);
       try {
         const promoted = output();
-        assert.equal(await runImport(['promote', String(held.id), '--work', `fixture-work:${target.identity.id}`, '--json'], promoted.io), 0, promoted.text.error);
+        assert.equal(await runImport(['promote', String(held.id), '--work', `fixture-work:${target.identity.id}`, '--json'], promoted.io), 0, promoted.text.error || promoted.text.out);
         const decision = await decideSharing(db, { repoId: target.identity.id, bindingId: 'fixture-binding:target-session', home: target.paths.home },
           { id: JSON.parse(promoted.text.out).id, decision: 'approve', channel: 'cli', now: 3_000 });
         assert.equal(decision?.projectedMemoryId, id);
@@ -497,14 +497,14 @@ test('matrix C9: revoked personal grants preserve export identity and tombstones
       db.prepare('UPDATE memories SET deleted_at = 4000 WHERE id = ?').run(id);
       const before = snapshot(db);
       const repeated = output();
-      assert.equal(await runImport(args, repeated.io), 0, repeated.text.error);
+      assert.equal(await runImport(args, repeated.io), 0, repeated.text.error || repeated.text.out);
       assert.deepEqual(snapshot(db), before);
       const overlapping = join(source.paths.home, 'overlapping.jsonl');
       const original = readFileSync(file.path, 'utf8').trim().split('\n');
       original[0] = JSON.stringify({ ...JSON.parse(original[0]), exported_at: 5_000 });
       writeFileSync(overlapping, original.join('\n') + '\n');
       const overlap = output();
-      assert.equal(await runImport([overlapping, ...args.slice(1)], overlap.io), 0, overlap.text.error);
+      assert.equal(await runImport([overlapping, ...args.slice(1)], overlap.io), 0, overlap.text.error || overlap.text.out);
       const dead = db.prepare('SELECT deleted_at, title, body FROM memories WHERE id = ?').get(id)!;
       assert.deepEqual({ ...dead }, { deleted_at: 4_000, title: 'Approved preference', body: 'Reply in Japanese.' });
       assert.equal(db.prepare('SELECT COUNT(*) AS n FROM memory_visibility WHERE memory_id = ?').get(id)?.n, 0);
