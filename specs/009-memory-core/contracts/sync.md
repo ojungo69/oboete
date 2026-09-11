@@ -95,7 +95,7 @@ are sync's own and are stated below.
 Header (`oboete-sync-snapshot/1`), fixed-size fields only:
 
 ```json
-{"format":"oboete-sync-snapshot/1","space_id":"…","replica_origin_id":"…","snapshot_id":"…","revision_lines":42,"heads":7,"revisions_sha256":"…","withheld":{"works":0,"memories":0,"sources":0},"produced_at":1760000000}
+{"format":"oboete-sync-snapshot/1","space_id":"…","replica_origin_id":"…","snapshot_id":"…","revision_lines":42,"heads":7,"revisions_sha256":"…","withheld":{"works":0,"memories":0,"sources":0,"contexts":0,"proposals":0},"produced_at":1760000000}
 ```
 
 - `replica_origin_id` must equal the file name's `hex32`; `space_id` must equal the directory's.
@@ -168,7 +168,8 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
   revision (`payload_hash: null`) references nothing, so it is valid and applicable whatever else
   the bundle withholds.
 - Every `parents` entry must name a line in the same bundle or a revision the reader already
-  stores, of the same `origin_id` and `kind`; a reference to neither, a duplicate parent, a
+  stores, of the same `kind` and of the same `origin_id` or of an origin with the same `natural`
+  (an aliased origin, see "Merge rules"); a reference to neither, a duplicate parent, a
   self-parent or a duplicate `revision_id` line rejects the bundle. A cycle cannot be built
   (ids are hashes of parents), so validation is one pass plus a bounded ancestor walk in a
   private scratch SQLite exactly as the native reader stages input.
@@ -190,9 +191,14 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
   `natural` key (for a memory: repository and `content_hash`, which `memories.content_hash`
   already enforces UNIQUE per repository) equals an existing local row created under a different
   origin (two devices captured the same material independently), `sync_origins` maps the new
-  origin to that row instead of inserting: one local row, several origins, each with its own heads
-  and selected head. Because `natural` travels on control-only revisions too, a deletion or secret
-  floor for material this replica created under its own origin aliases and applies even when the
+  origin to that row instead of inserting: one local row, several origins. A row has one head set
+  (the union across its origins), one selected head, one conflict report and one
+  `materialized_hash`, all kept on its canonical origin (the smallest origin ID mapped to it); a
+  local change or a `resolve` creates one revision under the canonical origin, and its parents
+  may be revisions of any origin aliased to the row (a line whose parent belongs to an origin
+  with a different `natural` is invalid). Because `natural` travels on control-only revisions
+  too, a deletion or secret floor for material this replica created under its own origin aliases
+  and applies even when the
   other origin was never seen with a payload. Control from any aliased origin applies to the row
   (a tombstone or floor stored under either origin deletes or raises it); a live payload under one
   origin never undeletes a row tombstoned under another. A later alias onto a row that is already
@@ -204,22 +210,36 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
   so a late payload for a superseded ancestor changes nothing visible.
   `oboete sync map-repo` re-evaluates stored revisions that were `withheld_on_apply` without any
   new pull.
-- Heads: storing revision R removes from the origin's head set every head that is an ancestor of
-  R and adds R. If R removed nothing (it descends from no current head) it is a sibling: the origin
-  is reported in `sync_conflicts` (`status = 'open'`, the head set in the state JSON,
-  `content_hash` when it applies). Heads that R neither removed nor descends from stay heads.
-- Selected head: the effective row follows one head per origin. It moves to R only when R
+- Heads: storing revision R removes from the row's head set every head that is an ancestor of
+  R and adds R. If R removed nothing (it descends from no current head) it is a sibling: the row
+  is reported in `sync_conflicts` (one row per local row, `id = 'sync:' || canonical origin ID`,
+  `status = 'open'`, the head set with each head's origin in the state JSON, `content_hash` when
+  it applies). Heads that R neither removed nor descends from stay heads. Rows that
+  `observer/checkpoint.ts` wrote before or between syncs keep their own ids; `sync status` lists
+  them with the sync rows, and a `resolve` of a work row also marks `resolved` every open
+  observer row whose JSON names that work.
+- Selected head: the effective row follows one head per local row. It moves to R only when R
   descends from the previously selected head (a local change or a remote descendant of the local
-  line); a fresh origin selects its first head; ties are never broken by time. A human moves it
+  line); a fresh row selects its first head; ties are never broken by time. A human moves it
   with `oboete sync resolve`.
-- A local change to an origin creates a revision authored by this replica whose single parent is
+- A local change to a row creates a revision authored by this replica whose single parent is
   the selected head; unresolved siblings stay unresolved. Only `oboete sync resolve` creates a
   revision with more than one parent, and it lists every current head as a parent.
+- Resolution: a revision whose parents include every current head of the row is applied as the
+  resolution wherever it arrives: it becomes the single head and the selected head, its payload
+  (for a work, including `current_checkpoint_memory_id`) applies without the checkpoint-parent
+  chain check below, and the conflict report closes. Its single-parent descendants follow the
+  ordinary rules with it as their base. A resolution that misses a head this replica holds
+  (a sibling arrived after the resolver's pull) is one more sibling, and the conflict stays open.
 - Local change capture: nothing outside sync is instrumented (no triggers, no marks; the hook and
-  worker are untouched). `sync_origins` records, for every origin ever materialized here, the
-  canonical state the replica last wrote or applied for its row (`materialized_hash`: payload hash
-  plus the control the row implies, after the local corrections an apply makes, such as a pulled
-  approval held as `pending` without a local approval record). Push and pull both begin, inside
+  worker are untouched). `sync_origins` records, for every local row ever materialized here (on
+  its canonical origin), the canonical state the replica last wrote or applied for it
+  (`materialized_hash`: payload hash plus the control the row implies). An apply writes it from
+  the state the applied revision implies plus the corrections that are not changes of content or
+  control (a pulled approval held as `pending` without a local approval record, id mapping); a
+  deletion or raise the apply itself performs (lineage inheritance, the checkpoint sweep below,
+  the 0005 trigger) is not folded in, so the closing pass sees the row differ and records the
+  control revision. Push and pull both begin, inside
   the writer lock and before anything else, with one pass that walks `sync_origins` and the
   tracked tables together: a row whose current canonical state differs from `materialized_hash`
   becomes a new revision authored by this replica (whether a command, the worker, the 0005
@@ -241,9 +261,13 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
   tombstone is a conflict, not a resurrection). Absence of an origin from a bundle never means
   deletion. For checkpoints the deletion unit is what `contracts/checkpoint.md` deletes: a
   tombstone stored for any checkpoint of a mapped work with a given `material_hash` applies to
-  every checkpoint of that work and material that arrives later, whatever its parent or origin
-  (the 0005 trigger only reaches rows that existed at deletion time, so the apply checks stored
-  tombstones by `{work, material_hash}` before creating a checkpoint row).
+  every checkpoint of that work and material, already stored or arriving later, whatever its
+  parent or origin. Storing such a tombstone deletes every stored checkpoint row of that work
+  with that `material_hash` in the same transaction (the 0005 trigger only reaches rows that
+  existed on the deleting device, so a peer sweeps the set itself; the closing pass then records
+  a tombstone revision for each swept row), and the apply checks stored tombstones by
+  `{work, material_hash}` before creating a checkpoint row, so the outcome does not depend on
+  the order bundles are read.
 - `control.sensitivity_floor` merges by rank upward only, exactly as migration does
   (`SENSITIVITY_RANK`; the raise cascades to local descendants through the 0005 trigger). The
   effective sensitivity of an origin is the maximum of its local value and every stored floor. A
@@ -259,9 +283,9 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
   "Local change capture"), so the next push carries it.
 - Work checkpoints keep their existing rule for arriving revisions: a pulled checkpoint whose
   parent is not the current local checkpoint of that work is a sibling head of the work origin,
-  not a replacement, and it is reported through the same `sync_conflicts` row `observer/
-  checkpoint.ts` writes (one open row per work, keyed by the work origin; the row names the
-  checkpoint memory IDs). `oboete sync resolve` on a work origin sets, in one transaction, the
+  not a replacement, and it is reported through the work row's `sync:` conflict row (see
+  "Heads"; the row names the checkpoint memory IDs, and the observer's own rows for that work
+  are listed beside it). `oboete sync resolve` on a work origin sets, in one transaction, the
   selected head, the work's `current_checkpoint_memory_id` to the kept head's checkpoint, and the
   conflict row to resolved; the checkpoint-parent rule is not re-applied to a human resolution.
 - Visibility grants and proposal decisions arrive as revisions of their own origin. An approval is
@@ -292,7 +316,11 @@ publishes it.
   (`raw_events.classification_state <> 'done'` or `processing_state` not in `processed`,
   `excluded`; `legacy_unknown` counts as unfinished). A source ships exactly when its memory
   ships: sources are provenance rows, with or without retained evidence, and a purged raw event
-  changes nothing. Migration receipts (`migration_records`) never ship. A foreign head's payload
+  changes nothing. A context's payload ships only when at least one payload of its repository
+  ships in the same bundle; otherwise the context ships identity-only (its `natural`
+  `{repo, local_key}` carries only hashes), so `root` and `repo_secret_paths_json` stay on the
+  device, and no `repo` line is emitted for a repository nothing was exported from. Migration
+  receipts (`migration_records`) never ship. A foreign head's payload
   ships only when the replica still holds it (not erased) and the same filter allows it.
 - Control always travels: for every origin the replica ever published, the current revision is
   shipped even when the content filter withholds the payload, as a control revision
@@ -333,31 +361,39 @@ shows them by reason.
    space gets `SQLITE_BUSY` and exits `busy`. The operating system releases the lock when the
    process dies, so there is no stale-lock state and nothing to reclaim.
 1. Recompute the consent hash; on mismatch write nothing and exit 3 with the changed fields.
-2. `BEGIN` a read transaction on the database, read `PRAGMA data_version` inside it, build the
-   revision lines as canonical JSONL into an owner-only temporary file under
-   `$OBOETE_HOME/sync/staging/` (hashing and counting as it goes; reject when header plus lines
-   exceed 256 MiB or any line exceeds the transfer line limit), then end the read transaction.
-   Encrypt the staging file to a ciphertext file in the same private staging directory and `fsync`
-   it. Nothing has touched the space directory yet, so a file-sync tool cannot carry a stale
-   ciphertext: the space directory only ever receives bytes that passed step 4.
-3. Compute `snapshot_id`. If it equals `last_pushed_snapshot_id` for this space **and** the
-   published file `<space dir>/<origin_id>.osb` exists with the recorded ciphertext SHA-256 and
-   size, stop: "unchanged", no file write. A missing, shorter or different published file is
-   re-published from the same snapshot (the file-sync tool may have lost or rolled it back);
-   `--republish` forces this even when it matches.
+   Then, on the one connection the push uses throughout, `BEGIN IMMEDIATE`, read
+   `PRAGMA data_version` first (the baseline, D0), run the change pass, `COMMIT`. SQLite bumps
+   that counter when a connection starts a transaction and finds another connection's commit
+   since its previous one, never for the connection's own commits and never inside a held
+   transaction, so every later reading that equals D0 proves no foreign commit landed since the
+   pass's snapshot.
+2. `BEGIN` a read transaction, read `PRAGMA data_version`; if it differs from D0, end it and
+   restart from step 1 (a commit landed between the pass and this snapshot). Build the revision
+   lines as canonical JSONL into an owner-only temporary file under `$OBOETE_HOME/sync/staging/`
+   (hashing and counting as it goes; reject when header plus lines exceed 256 MiB or any line
+   exceeds the transfer line limit), compute `snapshot_id`, then end the read transaction. The
+   push is a candidate for "unchanged" when `snapshot_id` equals `last_pushed_snapshot_id` for
+   this space **and** the published file `<space dir>/<origin_id>.osb` exists with the recorded
+   ciphertext SHA-256 and size, and `--republish` was not given; a missing, shorter or different
+   published file is re-published from the same snapshot (the file-sync tool may have lost or
+   rolled it back).
+3. Unless the push is a candidate for "unchanged", encrypt the staging file to a ciphertext file
+   in the same private staging directory and `fsync` it. Nothing has touched the space directory
+   yet, so a file-sync tool cannot carry a stale ciphertext: the space directory only ever
+   receives bytes that passed step 4.
 4. `BEGIN IMMEDIATE` on the database (a new snapshot plus the writer lock, so no other connection
-   can commit until this step ends) and read `PRAGMA data_version` again on the same connection.
-   SQLite bumps that counter when a connection starts a transaction and finds another
-   connection's commit since its previous one, and never inside a held transaction, which is why
-   the read transaction of step 2 was ended first. If the value differs from step 2, some commit
-   happened after the snapshot (the worker may have made a staged row secret or deleted): roll
-   back, delete the temporary file, restart from the change pass and step 2; after three restarts
-   exit `busy`. If it is
-   equal, the staged bytes are exactly the current state: copy the ciphertext into the space
+   can commit until this step ends) and read `PRAGMA data_version` again. If the value differs
+   from D0, some commit happened after the pass (the worker may have made a staged row secret or
+   deleted): roll back, delete the temporary files, restart from step 1; after three restarts
+   exit `busy`. If it is equal and the push is a candidate for "unchanged", end the transaction
+   and stop: "unchanged", no file write (the check runs before this exit, so a secret marking or
+   deletion committed during staging is never hidden behind a matching snapshot). Otherwise the
+   staged bytes are exactly the current state: copy the ciphertext into the space
    directory as `<origin_id>.osb.tmp-<random>` (a rename when the staging directory is on the same
    filesystem, otherwise a streamed copy plus `fsync`), rename it over `<origin_id>.osb`, record
    step 5 in the same transaction, `COMMIT`. The writer lock is held for the copy, the rename and
-   the record, not for staging or encryption. A tool that carries the temporary name mid-copy
+   the record, not for staging or encryption (the change pass holds it for its own short
+   transaction). A tool that carries the temporary name mid-copy
    carries current-state bytes that fail authentication until complete; readers ignore the name.
 5. `last_pushed_snapshot_id`, the ciphertext SHA-256 and size are recorded in the step 4
    transaction after the rename returns. Any failure before that leaves the previous bundle and
@@ -371,14 +407,17 @@ Push is idempotent: re-running with no local change and an intact published file
 0. Hold the same per-space lock as push.
 1. Recompute the consent hash; on mismatch read nothing and exit 3.
 2. `readdir` the space directory; keep only `<hex32>.osb` names other than the local origin ID; at
-   most 32 replicas per space, more is an error naming the count.
+   most 32 replicas per space directory, more is an error naming the count and the file names
+   that have no stored cursor (the user deletes bundles of replicas that no longer exist; mtime
+   never ranks them, see "Fence").
 3. For each bundle: `stat` size bound, check magic and key id (`key_mismatch` skips), decrypt chunk
    by chunk into a bounded owner-only plaintext staging file, and only after the final chunk
    authenticates: parse the header, verify `replica_origin_id`, `space_id`, `revision_lines`,
    `heads` and `revisions_sha256`.
 4. If `snapshot_id` equals the cursor stored for that replica, skip it.
 5. Validate every line in a private scratch SQLite: schema per kind, origin ID shape, recomputed
-   `revision_id` and `payload_hash`, parents resolvable and of the same origin and kind, no
+   `revision_id` and `payload_hash`, parents resolvable, of the same kind and of the same origin
+   or of an origin with the same `natural`, no
    duplicate line, repo lines present for every referenced repository, no entity reference to an
    origin that is neither in the bundle nor known locally, and the graph bounds below. A bundle
    with any invalid line is rejected whole.
@@ -418,8 +457,11 @@ encryption=aes-256-gcm+hkdf-sha256 (oboete-sync-bundle/1), sensitivity classes e
 
 `oboete sync init|join` shows the tuple and stores its hash. Every push/pull recomputes and compares
 it first; any difference (directory moved, key file replaced, class selection changed) performs no
-I/O and reports the changed field. Removing the space (`oboete sync leave`) deletes the key file and
-the local cursor, and leaves the directory's bundles to the user.
+I/O and reports the changed field. Removing the space (`oboete sync leave`) deletes the key file,
+the local cursors and this replica's own `<origin_id>.osb`, and leaves the other bundles to the
+user. Repository identities (hashed keys, and the plaintext `repo` line for every repository a
+shipped payload references) and identity-only context and control lines leave regardless of the
+class selection.
 
 ## Commands and health
 
@@ -431,7 +473,7 @@ the local cursor, and leaves the directory's bundles to the user.
 | `oboete sync push` / `pull` | As above. `--json` prints counts, withheld, conflicts, skipped bundles. |
 | `oboete sync status` | Local-only: space, replicas seen, cursors, open conflicts, withheld counts. |
 | `oboete sync resolve <origin_id> --keep <revision_id>` | Create a successor revision with every current head as parent whose content is the kept head; closes the conflict row. |
-| `oboete sync leave` | Remove key, cursors, consent. |
+| `oboete sync leave` | Remove key, cursors, consent and this replica's own bundle file. |
 
 MCP exposes `sync status` read-only. No MCP or agent path can push, pull or resolve.
 `oboete doctor` reports sync as configured/unconfigured and the consent state from local data only.
@@ -444,7 +486,7 @@ MCP exposes `sync status` read-only. No MCP or agent path can push, pull or reso
 | Ciphertext per bundle | 268,501,036 bytes |
 | Chunk | 65,536 bytes + 16-byte tag |
 | Header line | 65,536 bytes |
-| Replicas read per pull | 32 |
+| Replicas per space directory (pull refuses above this) | 32 |
 | Revision lines per bundle | 1,000,000 (the native line cap) |
 | Parents per revision | 64 (equal to heads per origin, so `resolve` can always cite every head) |
 | Heads per origin | 64 |
@@ -455,8 +497,9 @@ MCP exposes `sync status` read-only. No MCP or agent path can push, pull or reso
 ## Schema (0008, additive; designed in T034 from this contract)
 
 `sync_spaces` (space, directory, key id, consent hash, last pushed snapshot, published file
-hash/size), `sync_cursors` (space, replica, snapshot), `sync_origins` (origin_id ↔ kind, local id,
-selected head, `materialized_hash`; several origins may map to one local id), `sync_revisions` (revision_id,
+hash/size), `sync_cursors` (space, replica, snapshot), `sync_origins` (origin_id ↔ kind, local id;
+several origins may map to one local id, and the row's selected head and `materialized_hash` live
+on its canonical origin), `sync_revisions` (revision_id,
 origin_id, kind, author, parents JSON, control JSON, payload_hash, payload JSON or null,
 received-from replica), `sync_repo_mappings` (repo key ↔ local repo id), and the local approval
 record's candidate hash/projection/scope columns. No trigger and no column is added to the
@@ -466,14 +509,20 @@ otherwise untouched.
 
 ## Review status (T033)
 
-Eight fresh Codex read-only contract reviews on 2026-09-11 (`/var/tmp/oboete-009-20260909.jJ5grc/
-scratch/syncrev1`…`syncrev8`, prompts and verdicts) shaped this text: rounds 1–7 each found
+Nine fresh Codex read-only contract reviews on 2026-09-11 (`/var/tmp/oboete-009-20260909.jJ5grc/
+scratch/syncrev1`…`syncrev9`, prompts and verdicts) shaped this text: rounds 1–7 each found
 1–3 high findings that were folded in above (payload/identity separation, control revisions,
 natural-key aliasing, push staging fence and `data_version` re-check, two-phase apply, lineage
-inheritance, materialized-state change capture). Round 8's four findings are folded in as the
-last four rules and their verification cases; no ninth round has confirmed them. T034 starts by
-re-running this review on the contract before writing code, and closes every remaining finding
-with a test in the list below.
+inheritance, materialized-state change capture); round 8 added the proposal class gate, the
+checkpoint deletion unit and tombstones for physically deleted rows. Round 9 ran twice: Codex
+(high 2, medium 3: the `data_version` baseline now spans the change pass, the "unchanged" exit
+moved behind the step 4 check, `materialized_hash` excludes apply-side raises, resolutions
+bypass the checkpoint chain, observer conflict rows are listed and closed) and a five-lens
+adversarially verified review (`syncrev9/workflow-synthesis.json`: 42 findings, 5 survived: the
+checkpoint sweep of already stored rows, per-row heads for aliased origins, identity-only
+contexts, the per-origin head bound in the test list, the 32-replica error naming files). All
+are folded in above. T034 re-runs the Codex review once on this text before writing code and
+closes every remaining finding with a test in the list below.
 
 ## Verification (T034–T036)
 
@@ -501,14 +550,24 @@ with a test in the list below.
   revision fills it in unless the origin has a secret floor or tombstone;
 - checkpoint resolve: work forks C1/C2 from C0, C1 selected, `resolve --keep` C2: selected head,
   `current_checkpoint_memory_id` and the conflict row change together and no new conflict opens;
-  a bundle listing C2 before C1 still advances C0 to C2 without a conflict;
+  a bundle listing C2 before C1 still advances C0 to C2 without a conflict; a resolution R that
+  keeps C2 reaches a device on the C1 branch (and a third device that receives only R's
+  single-parent successor with payload): head, `current_checkpoint_memory_id` and the conflict
+  row change together; a resolution that misses a head the receiver holds stays a sibling;
 - natural-key alias: two devices capture identical material under different origins; pull maps
   the second origin to the existing row (no UNIQUE failure); a tombstone under either origin
   deletes the row on both devices; A deletes or marks secret before B ever saw A's origin, and
   B's copy still aliases through `natural` and follows; a repository identity of 16,384
-  characters round-trips through its hashed key;
+  characters round-trips through its hashed key; divergent edits across aliases (A pins and B
+  retires the same aliased row): each device shows one conflict naming all heads with their
+  origins, and a single `resolve` on either origin leaves both devices with the same payload,
+  no open conflict and no stale `materialized_hash`;
 - change-free round trip: A pushes, B pulls and pushes, A pulls: no new revision anywhere; a
-  deletion committed while a push was staging reaches the other device on the retried push;
+  deletion committed while a push was staging reaches the other device on the retried push; a
+  secret marking or deletion committed between the change pass and step 2, and one committed
+  during staging of a push that would otherwise be "unchanged", each restart the push and ship
+  their control revision; the late-child raise (below) reaches a third device as a control
+  revision, not only the local row;
 - checkpoint order: a bundle whose lines list C2, C1, C0 in that order fast-forwards a work at C0
   to C2; a joining device rebuilds the chain from heads alone;
 - work purpose: a `private` purpose with `private` unselected withholds the whole work, checkpoint
@@ -522,7 +581,9 @@ with a test in the list below.
 - proposal class: a `private` pending candidate on an `eligible` memory and work is withheld
   when `private` is unselected; its control revision ships;
 - checkpoint deletion: C0 (material X) of a work is deleted on A; C2 with the same material and
-  a different parent arrives from B: it is applied deleted;
+  a different parent arrives from B: it is applied deleted; reverse order: B already stores C2
+  when A's tombstone for C0 arrives: C2 is deleted on B and B's next push ships its tombstone; a
+  third device that pulls B before A ends with C2 deleted too;
 - physical deletion: a source row deleted by the worker and a grant revoked by adoption ship as
   tombstones on the next push; a pulled approval held `pending` on a device without the approval
   record does not become a new revision on that device's next push;
@@ -532,7 +593,15 @@ with a test in the list below.
   across repositories;
 - staging fence: the space directory receives no file before the step 4 check passes, even with a
   concurrent secret-marking commit during encryption;
-- 64 sibling heads are accepted and one `resolve` closes them;
+- 64 sibling heads are accepted and one `resolve` closes them; an origin with 65 heads is
+  rejected; a bundle from a store of 2,000 single-head origins is accepted; open observer
+  conflict rows that predate the first sync are listed by `sync status` and closed by the
+  `resolve` of their work row;
+- context payloads: a repository whose memories are all withheld ships its contexts identity-only
+  and no `repo` line; the first shipped memory of that repository brings the context payload and
+  the `repo` line;
+- pull crash: a process killed after rows were updated and before the cursor was recorded leaves
+  the database at the previous state (single transaction) and the next pull re-applies the bundle;
 - lock: two pushes for one space, one gets `busy`; a push killed mid-way leaves no lock behind;
 - sources: a re-inserted identical source keeps its origin; a removed source ships a tombstone; a
   memory with a source whose raw event is `classification_state = 'done'` and
@@ -553,8 +622,8 @@ with a test in the list below.
   ever published, and counted; no dangling reference in any bundle;
 - interrupted push (temporary file left behind is ignored), truncated and tampered bundles (every
   chunk position, tag, counter, final marker, a full-size final chunk), wrong key id, oversize
-  file, foreign file names, a bundle with more than 1,000 heads, a shipped payload whose hash
-  differs from `payload_hash`;
+  file, foreign file names, a shipped payload whose hash differs from `payload_hash`, a line
+  whose parent belongs to an origin with a different `natural`;
 - bounds: a push at 256 MiB total plaintext round-trips; one byte more is rejected before writing;
   a bundle one byte over the ciphertext bound is rejected by `stat`;
 - consent drift performs no I/O; no destination performs no I/O; `doctor` and MCP never open the
