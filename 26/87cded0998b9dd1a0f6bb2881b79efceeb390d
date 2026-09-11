@@ -1,0 +1,19 @@
+src/fixture/replay.ts
+  s_ce84c7de7d1c09::t_8a80e8361b4b70 44,368,410
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "2687cded0998b9dd1a0f6bb2881b79efceeb390d",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
