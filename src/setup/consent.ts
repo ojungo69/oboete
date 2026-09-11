@@ -99,7 +99,7 @@ export function saveProviderPreset(paths: OboetePaths, preset: string): void {
  * oboete's own file, not a foreign one, so it is re-serialized rather than spliced: keys and values
  * survive, comments and ordering do not.
  */
-function updateConfigFile(paths: OboetePaths, apply: (root: Record<string, unknown>) => void): void {
+export function updateConfigFile(paths: OboetePaths, apply: (root: Record<string, unknown>) => void): void {
   const present = existsSync(paths.config);
   const parsed: unknown = present ? parseToml(readFileSync(paths.config, 'utf8')) : {};
   const root = (typeof parsed === 'object' && parsed !== null ? parsed : {}) as Record<string, unknown>;

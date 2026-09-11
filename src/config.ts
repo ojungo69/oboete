@@ -146,11 +146,22 @@ const consentSchema = z.strictObject({
   accepted_at: z.number().int().optional(),
 });
 
+/** Device sync (contracts/sync.md "Sync space, replicas and keys"): the key itself never lives here. */
+export const syncSchema = z.strictObject({
+  directory: z.string().min(1),
+  directory_realpath: z.string().min(1),
+  space_id: z.string().regex(/^[0-9a-f]{32}$/u),
+  key_id: z.string().regex(/^[0-9a-f]{16}$/u),
+  classes: z.array(z.enum(['eligible', 'local_only', 'private'])).min(1),
+});
+export type SyncConfig = z.infer<typeof syncSchema>;
+
 export const configSchema = z.strictObject({
   observer: observerSchema.prefault({}),
   injection: injectionSchema.prefault({}),
   privacy: privacySchema.prefault({}),
   consent: consentSchema.prefault({}),
+  sync: syncSchema.optional(),
 });
 
 export type OboeteConfig = z.infer<typeof configSchema>;
@@ -212,6 +223,13 @@ const KNOWN_KEY_PATHS = new Set([
   'consent',
   'consent.hash',
   'consent.accepted_at',
+  'sync',
+  'sync.directory',
+  'sync.directory_realpath',
+  'sync.space_id',
+  // The sync key id is a public HKDF-derived identifier, never the key (contracts/sync.md).
+  'sync.key_id',
+  'sync.classes',
 ]);
 
 const CREDENTIAL_LIKE_KEY = /credential|token|key|secret/i;

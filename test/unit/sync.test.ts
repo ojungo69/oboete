@@ -2,7 +2,7 @@
 // identically are pinned before any envelope or merge code exists.
 import assert from 'node:assert/strict';
 import { createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -13,11 +13,15 @@ import { openDatabase } from '../../src/db/open.js';
 import { grantVisibility } from '../../src/db/queries.js';
 import { sha256Hex } from '../../src/hash.js';
 import { oboetePaths } from '../../src/paths.js';
+import { updateConfigFile } from '../../src/setup/consent.js';
 import { applyStaged, resolveRow, type ApplyResult } from '../../src/sync/apply.js';
 import { captureLocalChanges } from '../../src/sync/capture.js';
 import { BundleError, CHUNK_BYTES, decryptBundle, encryptBundle, keyId, PREFIX_BYTES, TAG_BYTES } from '../../src/sync/envelope.js';
 import { canonicalJson, payloadHash, revisionId, snapshotId } from '../../src/sync/identity.js';
 import { buildSnapshot } from '../../src/sync/publish.js';
+import {
+  initSpace, joinSpace, leaveSpace, pullSpace, pushSpace, showKey, SyncError, syncStatus, withSpaceLock,
+} from '../../src/sync/space.js';
 import { stageBundle } from '../../src/sync/stage.js';
 import {
   effectiveControl, headsOf, readOrigin, readRevision, replicaOriginId, revisionsOfOrigin, type Revision,
@@ -467,5 +471,143 @@ test('independent edits on both devices are siblings reported on both, and one r
     pull(a, b, publish(b, dir));
     assert.equal(headsOf(a.db, origin).length, 1);
     assert.equal(memoryOf(a, a, 'm_one').pinned_at, 7);
+  });
+});
+
+// --- Space, keys, consent, lock, push and pull over a shared directory (T035) ---
+
+async function withHomes(count: number, fn: (homes: string[], shared: string) => void | Promise<void>): Promise<void> {
+  const homes: string[] = [];
+  const open = async (index: number): Promise<void> => {
+    if (index === count) { await withTempHome((shared) => fn(homes, shared)); return; }
+    await withTempHome(async (home) => { homes.push(home); await open(index + 1); });
+  };
+  await open(0);
+}
+
+function openHome(home: string): DatabaseSync {
+  const opened = openDatabase({ path: oboetePaths(home).db, timeoutMs: 1000 });
+  opened.db.prepare(`INSERT OR IGNORE INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
+    VALUES (?, 'remote', ?, '/work/sync', 1, 1)`).run(REPO, REMOTE);
+  return opened.db;
+}
+
+test('init, join by key line, push and pull move a memory through the shared directory', async () => {
+  await withHomes(2, (homes, shared) => {
+    const [homeA, homeB] = homes as [string, string];
+    const a = openHome(homeA);
+    const b = openHome(homeB);
+    try {
+      const pathsA = oboetePaths(homeA);
+      const pathsB = oboetePaths(homeB);
+      const { spaceId, keyLine: line } = initSpace(a, pathsA, { directory: shared, classes: ['eligible', 'local_only'], now: 1 });
+      assert.match(line, /^oboete-sync-key\/1:[0-9a-f]{32}:[A-Za-z0-9_-]{43}$/u);
+      assert.equal(showKey(pathsA), line);
+      assert.equal((statSync(join(homeA, 'sync', `${spaceId}.key`)).mode & 0o777), 0o600);
+      assert.equal(existsSync(join(shared, 'oboete-sync')), false, 'init writes nothing to the directory');
+      assert.equal(joinSpace(b, pathsB, { directory: shared, keyLine: line, classes: ['eligible', 'local_only'], now: 1 }).spaceId, spaceId);
+      insertMemory(a, 'm_one', 'Title', 'Body text');
+      insertMemory(a, 'm_priv', 'Private', 'Not selected', { sensitivity: 'private' });
+      const push = pushSpace(a, pathsA, { now: 10 });
+      assert.equal(push.outcome, 'published');
+      assert.equal(push.withheld.memories, 1);
+      const bundle = join(shared, 'oboete-sync', 'v1', spaceId, `${replicaOriginId(a)}.osb`);
+      assert.ok(existsSync(bundle));
+      assert.equal(readdirSync(join(shared, 'oboete-sync', 'v1', spaceId)).length, 1, 'no temporary file left behind');
+      assert.equal(pushSpace(a, pathsA, { now: 11 }).outcome, 'unchanged');
+      assert.equal(readdirSync(join(homeA, 'sync', 'staging')).length, 0, 'staging is cleaned');
+      const pull = pullSpace(b, pathsB, { now: 20 });
+      assert.deepEqual(pull.bundles.map((entry) => entry.outcome), ['applied']);
+      const copy = b.prepare('SELECT title, body, sensitivity FROM memories ORDER BY id').all().map((row) => ({ ...row }));
+      assert.deepEqual(copy, [{ title: 'Title', body: 'Body text', sensitivity: 'eligible' }]);
+      assert.equal(readOrigin(b, `${replicaOriginId(a)}:m_priv`)?.local_id, null, 'the unselected class travels identity-only');
+      assert.deepEqual(pullSpace(b, pathsB, { now: 21 }).bundles.map((entry) => entry.outcome), ['skipped']);
+      // B pushes; A pulls; nothing new anywhere (change-free round trip) and no conflict.
+      assert.equal(pushSpace(b, pathsB, { now: 30 }).outcome, 'published');
+      assert.deepEqual(pullSpace(a, pathsA, { now: 40 }).bundles.map((entry) => entry.outcome), ['applied']);
+      assert.equal(a.prepare("SELECT COUNT(*) AS n FROM sync_conflicts WHERE status = 'open'").get()?.n, 0);
+      assert.equal(revisionCount(a), 2);
+      assert.equal(syncStatus(a, pathsA).replicas.length, 1);
+      // A tampered bundle is rejected by name and the other bundle's outcome is unaffected.
+      const bytes = readFileSync(bundle);
+      bytes[bytes.length - 3]! ^= 0x01;
+      writeFileSync(bundle, bytes);
+      assert.deepEqual(pullSpace(b, pathsB, { now: 50 }).bundles, [{ replica: replicaOriginId(a), outcome: 'rejected', reason: 'authentication_failed' }]);
+      // Consent drift performs no I/O.
+      updateConfigFile(pathsB, (root) => { (root.sync as Record<string, unknown>).classes = ['eligible']; });
+      assert.throws(() => pullSpace(b, pathsB, { now: 60 }), (error: unknown) => error instanceof SyncError && error.code === 'consent_mismatch'
+        && JSON.stringify(error.detail) === JSON.stringify({ changed: ['classes'] }));
+      updateConfigFile(pathsB, (root) => { (root.sync as Record<string, unknown>).classes = ['eligible', 'local_only']; });
+      // Leave removes the key, the cursors and this replica's own bundle only.
+      leaveSpace(b, pathsB);
+      assert.equal(existsSync(join(homeB, 'sync', `${spaceId}.key`)), false);
+      assert.equal(existsSync(join(shared, 'oboete-sync', 'v1', spaceId, `${replicaOriginId(b)}.osb`)), false);
+      assert.ok(existsSync(bundle));
+      assert.equal(syncStatus(b, pathsB).configured, false);
+    } finally { a.close(); b.close(); }
+  });
+});
+
+test('the per-space lock makes a second push or pull exit busy and leaves nothing behind', async () => {
+  await withHomes(1, (homes, shared) => {
+    const [home] = homes as [string];
+    const db = openHome(home);
+    try {
+      const paths = oboetePaths(home);
+      const { spaceId } = initSpace(db, paths, { directory: shared, classes: ['eligible'], now: 1 });
+      withSpaceLock(paths, spaceId, () => {
+        assert.throws(() => pushSpace(db, paths, { now: 2 }), (error: unknown) => error instanceof SyncError && error.code === 'busy');
+        assert.throws(() => pullSpace(db, paths, { now: 2 }), (error: unknown) => error instanceof SyncError && error.code === 'busy');
+      });
+      assert.equal(pushSpace(db, paths, { now: 3 }).outcome, 'published');
+    } finally { db.close(); }
+  });
+});
+
+test('a commit by another connection at any push window restarts the push and ships the control', async () => {
+  await withHomes(2, (homes, shared) => {
+    const [homeA, homeB] = homes as [string, string];
+    const a = openHome(homeA);
+    const b = openHome(homeB);
+    try {
+      const pathsA = oboetePaths(homeA);
+      const pathsB = oboetePaths(homeB);
+      const { keyLine: line } = initSpace(a, pathsA, { directory: shared, classes: ['eligible'], now: 1 });
+      joinSpace(b, pathsB, { directory: shared, keyLine: line, classes: ['eligible'], now: 1 });
+      insertMemory(a, 'm_one', 'Title', 'Body text');
+      assert.equal(pushSpace(a, pathsA, { now: 10 }).outcome, 'published');
+      pullSpace(b, pathsB, { now: 11 });
+      assert.equal(memoryOf({ db: b, home: homeB, id: replicaOriginId(b) }, { db: a, home: homeA, id: replicaOriginId(a) }, 'm_one').body, 'Body text');
+      const other = openDatabase({ path: pathsA.db, timeoutMs: 1000 }).db;
+      try {
+        for (const [index, step] of (['after_capture', 'after_staging', 'after_encrypt'] as const).entries()) {
+          insertMemory(a, `m_${step}`, `Title ${step}`, `Body ${step}`);
+          let fired = false;
+          const push = pushSpace(a, pathsA, { now: 20, probe: (at) => {
+            if (at !== step || fired) return;
+            fired = true;
+            other.prepare("UPDATE memories SET sensitivity = 'secret' WHERE id = ?").run(`m_${step}`);
+          } });
+          assert.equal(push.outcome, 'published', step);
+          assert.equal(push.restarts, 1, `${step} restarted once`);
+          assert.equal(push.withheld.memories, index + 1, `${step}: the secret row's payload is withheld and its control ships`);
+          pullSpace(b, pathsB, { now: 30 });
+          const copy = readOrigin(b, `${replicaOriginId(a)}:m_${step}`);
+          assert.equal(copy?.local_id, null, `${step}: no text of the secret row reached B`);
+          assert.equal(effectiveControl(b, `${replicaOriginId(a)}:m_${step}`).sensitivity_floor, 'secret', step);
+        }
+        // The "unchanged" path re-checks too: a secret marking during staging is never hidden.
+        let fired = false;
+        const push = pushSpace(a, pathsA, { now: 40, probe: (at) => {
+          if (at !== 'after_staging' || fired) return;
+          fired = true;
+          other.prepare("UPDATE memories SET sensitivity = 'secret' WHERE id = 'm_one'").run();
+        } });
+        assert.equal(push.outcome, 'published');
+        assert.equal(push.restarts, 1);
+        pullSpace(b, pathsB, { now: 50 });
+        assert.equal(memoryOf({ db: b, home: homeB, id: replicaOriginId(b) }, { db: a, home: homeA, id: replicaOriginId(a) }, 'm_one').sensitivity, 'secret');
+      } finally { other.close(); }
+    } finally { a.close(); b.close(); }
   });
 });

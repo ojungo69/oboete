@@ -405,17 +405,16 @@ function raiseToParents(db: DatabaseSync, localId: string): void {
 }
 
 /** Checkpoint deletion unit: a tombstone for {work, material} deletes every stored checkpoint of it. */
-function sweepCheckpoint(db: DatabaseSync, row: Origin, resolve: Resolver, now: number): void {
+function sweepCheckpoint(db: DatabaseSync, row: Origin, now: number): void {
   if (row.natural.domain !== 'checkpoint') return;
   const work = readOrigin(db, String(row.natural.work)) === undefined ? null : canonicalOf(db, String(row.natural.work)).local_id;
   if (work === null) return;
-  void resolve;
   prepared(db, 'UPDATE memories SET deleted_at = ? WHERE work_id = ? AND material_hash = ? AND deleted_at IS NULL')
     .run(now, work, String(row.natural.material_hash));
 }
 
 /** The work's pointer follows a pulled head only when the chain reaches the local checkpoint. */
-function advanceWorkCheckpoint(db: DatabaseSync, row: Origin, selected: string, resolve: Resolver): boolean {
+function advanceWorkCheckpoint(db: DatabaseSync, row: Origin, selected: string): boolean {
   const revision = readRevision(db, selected);
   if (revision?.payload == null || row.local_id === null) return true;
   const target = revision.payload.current_checkpoint_memory_id === null ? null : resolveLocal(db, 'memory', String(revision.payload.current_checkpoint_memory_id));
@@ -431,7 +430,6 @@ function advanceWorkCheckpoint(db: DatabaseSync, row: Origin, selected: string, 
   };
   if (!(revision.parents.length > 1 || reaches(target))) return false;
   prepared(db, 'UPDATE work_items SET current_checkpoint_memory_id = ? WHERE id = ?').run(target, row.local_id);
-  void resolve;
   return true;
 }
 
@@ -441,17 +439,8 @@ function resolveLocal(db: DatabaseSync, kind: SyncKind, originId: string): strin
   return canonicalOf(db, originId).local_id;
 }
 
-/**
- * Applies a staged bundle inside the caller's `BEGIN IMMEDIATE`. Throws `BundleRejected` when a
- * row would exceed the head bound; the caller rolls back.
- */
-export function applyStaged(db: DatabaseSync, staged: Staged, input: { senderOriginId: string; now: number }): ApplyResult {
-  const result: ApplyResult = { stored: 0, filled: 0, materialized: 0, withheldOnApply: 0, conflicts: 0 };
-  const replica = replicaOriginId(db);
-  captureLocalChanges(db, input.now);
-  applyRepoLines(db, staged, replica, input.now);
-  const touched = storeStaged(db, staged, input.senderOriginId, input.now, result);
-  const resolve: Resolver = {
+function resolverFor(db: DatabaseSync, replica: string): Resolver {
+  return {
     replica,
     localOf: (kind, originId) => {
       const local = resolveLocal(db, kind, originId);
@@ -464,7 +453,17 @@ export function applyStaged(db: DatabaseSync, staged: Staged, input: { senderOri
       return local;
     },
   };
-  const rows = [...touched].map((id) => readOrigin(db, id)!).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
+}
+
+/**
+ * Phase two for a set of local rows (canonical origin ids): selected head, effective control,
+ * writer, materialized state, conflict report, checkpoint and lineage rules, then the closing
+ * change pass. Shared by pull and by `map-repo`, which re-evaluates withheld rows without a bundle.
+ */
+export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now: number): ApplyResult {
+  const result: ApplyResult = { stored: 0, filled: 0, materialized: 0, withheldOnApply: 0, conflicts: 0 };
+  const resolve = resolverFor(db, replicaOriginId(db));
+  const rows = rowIds.map((id) => readOrigin(db, id)!).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
   const pending = new Set(rows.map((row) => row.origin_id));
   const workRows: Origin[] = [];
   let progress = true;
@@ -481,25 +480,27 @@ export function applyStaged(db: DatabaseSync, staged: Staged, input: { senderOri
       const revision = selected === null ? undefined : readRevision(db, selected);
       const payload = revision?.payload ?? null;
       try {
-        const localId = WRITERS[row.kind](db, row, payload, control, resolve, input.now);
+        const localId = WRITERS[row.kind](db, row, payload, control, resolve, now);
         pending.delete(row.origin_id);
         progress = true;
         const after = readOrigin(db, row.origin_id)!;
-        const state = localId === null ? stateHash(revision?.payload_hash ?? null, control) : materializedState(db, after, localId, resolve) ?? stateHash(revision?.payload_hash ?? null, control);
+        const fallback = stateHash(revision?.payload_hash ?? null, control);
+        const state = localId === null ? fallback : materializedState(db, after, localId, resolve) ?? fallback;
         const materializedRevision = payload !== null ? selected : after.materialized_revision ?? selected;
         setSelectedHead(db, row.origin_id, selected, materializedRevision, state);
-        reportConflict(db, after, heads, selected, input.now, result);
+        prepared(db, 'UPDATE sync_origins SET withheld_reason = NULL WHERE origin_id = ? AND local_id IS NOT NULL').run(row.origin_id);
+        reportConflict(db, after, heads, selected, now, result);
         result.materialized += 1;
         if (row.kind === 'work') workRows.push(after);
         if (row.kind === 'memory' && localId !== null) {
-          if (control.tombstone) sweepCheckpoint(db, after, resolve, input.now);
+          if (control.tombstone) sweepCheckpoint(db, after, now);
           raiseToParents(db, localId);
         }
       } catch (error) {
         if (!(error instanceof Unresolved)) throw error;
         prepared(db, 'UPDATE sync_origins SET withheld_reason = ? WHERE origin_id = ?').run(error.reason, row.origin_id);
         setSelectedHead(db, row.origin_id, selected, row.materialized_revision, row.materialized_hash);
-        reportConflict(db, row, heads, selected, input.now, result);
+        reportConflict(db, row, heads, selected, now, result);
       }
     }
   }
@@ -507,16 +508,31 @@ export function applyStaged(db: DatabaseSync, staged: Staged, input: { senderOri
   for (const work of workRows) {
     const current = readOrigin(db, work.origin_id)!;
     if (current.selected_head === null) continue;
-    if (!advanceWorkCheckpoint(db, current, current.selected_head, resolve)) {
+    if (!advanceWorkCheckpoint(db, current, current.selected_head)) {
       // A checkpoint the chain does not reach is a sibling for the pointer: keep the previous line.
-      setSelectedHead(db, current.origin_id, current.materialized_revision, current.materialized_revision, current.materialized_hash);
-      reportConflict(db, current, headsOf(db, current.origin_id).length > 1 ? headsOf(db, current.origin_id) : [current.selected_head, current.materialized_revision ?? current.selected_head], current.materialized_revision, input.now, result);
+      const kept = current.materialized_revision;
+      setSelectedHead(db, current.origin_id, kept, kept, current.materialized_hash);
+      const heads = headsOf(db, current.origin_id);
+      reportConflict(db, current, heads.length > 1 ? heads : [...new Set([current.selected_head, kept ?? current.selected_head])], kept, now, result);
     }
   }
-  captureLocalChanges(db, input.now);
+  captureLocalChanges(db, now);
   return result;
 }
 
+/**
+ * Applies a staged bundle inside the caller's `BEGIN IMMEDIATE`. Throws `BundleRejected` when a
+ * row would exceed the head bound; the caller rolls back.
+ */
+export function applyStaged(db: DatabaseSync, staged: Staged, input: { senderOriginId: string; now: number }): ApplyResult {
+  const replica = replicaOriginId(db);
+  captureLocalChanges(db, input.now);
+  applyRepoLines(db, staged, replica, input.now);
+  const stored: ApplyResult = { stored: 0, filled: 0, materialized: 0, withheldOnApply: 0, conflicts: 0 };
+  const touched = storeStaged(db, staged, input.senderOriginId, input.now, stored);
+  const result = materializeRows(db, [...touched], input.now);
+  return { ...result, stored: stored.stored, filled: stored.filled };
+}
 
 export class ResolveError extends Error {
   constructor(readonly code: string) { super(code); this.name = 'ResolveError'; }
@@ -559,11 +575,7 @@ export function resolveRow(db: DatabaseSync, originId: string, keep: string, now
   };
   revision.revision_id = revisionId(revision);
   storeRevision(db, revision, null, now);
-  const resolve: Resolver = {
-    replica,
-    localOf: (kind, id) => { const local = resolveLocal(db, kind, id); if (local === null) throw new Unresolved('unresolved_reference'); return local; },
-    repo: (key) => { const local = localRepoOf(db, key); if (local === null) throw new Unresolved('unmapped_repo'); return local; },
-  };
+  const resolve = resolverFor(db, replica);
   const localId = WRITERS[row.kind](db, readOrigin(db, row.origin_id)!, payload, control, resolve, now);
   const after = readOrigin(db, row.origin_id)!;
   const state = localId === null ? stateHash(payloadHashValue, control) : materializedState(db, after, localId, resolve) ?? stateHash(payloadHashValue, control);
