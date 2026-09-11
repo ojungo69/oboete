@@ -168,8 +168,8 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
   revision (`payload_hash: null`) references nothing, so it is valid and applicable whatever else
   the bundle withholds.
 - Every `parents` entry must name a line in the same bundle or a revision the reader already
-  stores, of the same `kind` and of the same `origin_id` or of an origin with the same `natural`
-  (an aliased origin, see "Merge rules"); a reference to neither, a duplicate parent, a
+  stores, of the same `kind` (of the same origin, or of another origin the writer had aliased to
+  the same row, see "Merge rules"); a reference to neither, a duplicate parent, a
   self-parent or a duplicate `revision_id` line rejects the bundle. A cycle cannot be built
   (ids are hashes of parents), so validation is one pass plus a bounded ancestor walk in a
   private scratch SQLite exactly as the native reader stages input.
@@ -195,8 +195,10 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
   (the union across its origins), one selected head, one conflict report and one
   `materialized_hash`, all kept on its canonical origin (the smallest origin ID mapped to it); a
   local change or a `resolve` creates one revision under the canonical origin, and its parents
-  may be revisions of any origin aliased to the row (a line whose parent belongs to an origin
-  with a different `natural` is invalid). Because `natural` travels on control-only revisions
+  may be revisions of any origin aliased to the row. A reader stores a parent link to another
+  origin as received; the link counts for the head set only once both origins map to one local
+  row here (by `natural`, or by a repository mapping that makes two `common_dir` keys one
+  repository), and until then each row keeps its own heads. Because `natural` travels on control-only revisions
   too, a deletion or secret floor for material this replica created under its own origin aliases
   and applies even when the
   other origin was never seen with a payload. Control from any aliased origin applies to the row
@@ -223,18 +225,25 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
   line); a fresh row selects its first head; ties are never broken by time. A human moves it
   with `oboete sync resolve`.
 - A local change to a row creates a revision authored by this replica whose single parent is
-  the selected head; unresolved siblings stay unresolved. Only `oboete sync resolve` creates a
-  revision with more than one parent, and it lists every current head as a parent.
-- Resolution: a revision whose parents include every current head of the row is applied as the
-  resolution wherever it arrives: it becomes the single head and the selected head, its payload
-  (for a work, including `current_checkpoint_memory_id`) applies without the checkpoint-parent
-  chain check below, and the conflict report closes. Its single-parent descendants follow the
-  ordinary rules with it as their base. A resolution that misses a head this replica holds
-  (a sibling arrived after the resolver's pull) is one more sibling, and the conflict stays open.
+  the revision the row was last materialized from (`materialized_revision`, the selected head
+  whose payload was applied or written here); when the selected head moved to a revision whose
+  payload was withheld, the local change is a sibling of it, so a conflict reports what the
+  device could not see rather than silently superseding it. Unresolved siblings stay
+  unresolved. Only `oboete sync resolve` creates a revision with more than one parent, and it
+  lists every current head as a parent.
+- Resolution: a revision with more than one parent whose parents include every current head of
+  the row is applied as the resolution wherever it arrives: it becomes the single head and the
+  selected head, its payload (for a work, including `current_checkpoint_memory_id`) applies
+  without the checkpoint-parent chain check below, and the conflict report closes. Its
+  single-parent descendants follow the ordinary rules with it as their base. A multi-parent
+  revision that misses a head this replica holds (a sibling arrived after the resolver's pull)
+  is one more sibling, and the conflict stays open. A single-parent revision is never a
+  resolution, whatever the head set.
 - Local change capture: nothing outside sync is instrumented (no triggers, no marks; the hook and
   worker are untouched). `sync_origins` records, for every local row ever materialized here (on
   its canonical origin), the canonical state the replica last wrote or applied for it
-  (`materialized_hash`: payload hash plus the control the row implies). An apply writes it from
+  (`materialized_hash`: payload hash plus the control the row implies) and the revision it came
+  from (`materialized_revision`). An apply writes it from
   the state the applied revision implies plus the corrections that are not changes of content or
   control (a pulled approval held as `pending` without a local approval record, id mapping); a
   deletion or raise the apply itself performs (lineage inheritance, the checkpoint sweep below,
@@ -304,7 +313,11 @@ or received), plus the payload of every current head that passes the filter belo
 as identity-only lines. A local change since the last push first creates the new revision, then
 publishes it.
 
-- Content filter: a memory's payload is shipped only when its effective sensitivity is in a
+- Content filter, evaluated in a fixed order: (1) candidates are the payloads that pass their
+  own class rule below (memory, work, sharing proposal; a source with its memory; a grant with
+  its memory), (2) a context is a candidate when a candidate work or source references it or a
+  candidate of its repository exists, (3) the reference closure below removes candidates until
+  nothing changes, and the survivors ship. A memory's payload is shipped only when its effective sensitivity is in a
   class the consent selected (`eligible`, `local_only`, `private`; `secret` is never selectable),
   and a work's payload only when its `purpose_sensitivity` (raised by any stored floor) is in a
   selected class, whether or not the work has a checkpoint; a sharing proposal's payload only when
@@ -416,8 +429,7 @@ Push is idempotent: re-running with no local change and an intact published file
    `heads` and `revisions_sha256`.
 4. If `snapshot_id` equals the cursor stored for that replica, skip it.
 5. Validate every line in a private scratch SQLite: schema per kind, origin ID shape, recomputed
-   `revision_id` and `payload_hash`, parents resolvable, of the same kind and of the same origin
-   or of an origin with the same `natural`, no
+   `revision_id` and `payload_hash`, parents resolvable and of the same kind, no
    duplicate line, repo lines present for every referenced repository, no entity reference to an
    origin that is neither in the bundle nor known locally, and the graph bounds below. A bundle
    with any invalid line is rejected whole.
@@ -472,7 +484,7 @@ class selection.
 | `oboete sync key show` | Print the key line (TTY only). |
 | `oboete sync push` / `pull` | As above. `--json` prints counts, withheld, conflicts, skipped bundles. |
 | `oboete sync status` | Local-only: space, replicas seen, cursors, open conflicts, withheld counts. |
-| `oboete sync resolve <origin_id> --keep <revision_id>` | Create a successor revision with every current head as parent whose content is the kept head; closes the conflict row. |
+| `oboete sync resolve <origin_id> --keep <revision_id \| checkpoint memory origin>` | Create a successor revision with every current head as parent whose content is the kept head; for a work, `--keep` may name a stored checkpoint memory of that work instead (an observer conflict candidate that no revision points at), and the successor is the work's current payload with `current_checkpoint_memory_id` set to it; closes the conflict row. |
 | `oboete sync leave` | Remove key, cursors, consent and this replica's own bundle file. |
 
 MCP exposes `sync status` read-only. No MCP or agent path can push, pull or resolve.
@@ -489,7 +501,7 @@ MCP exposes `sync status` read-only. No MCP or agent path can push, pull or reso
 | Replicas per space directory (pull refuses above this) | 32 |
 | Revision lines per bundle | 1,000,000 (the native line cap) |
 | Parents per revision | 64 (equal to heads per origin, so `resolve` can always cite every head) |
-| Heads per origin | 64 |
+| Heads per origin, and per local row after aliasing (checked inside the apply transaction) | 64 |
 | Revisions per origin | 4,096 |
 | Staging | one plaintext file per bundle, removed after apply or failure |
 | Process RSS | import/export CLI budget from `contracts/migration.md` |
@@ -498,8 +510,8 @@ MCP exposes `sync status` read-only. No MCP or agent path can push, pull or reso
 
 `sync_spaces` (space, directory, key id, consent hash, last pushed snapshot, published file
 hash/size), `sync_cursors` (space, replica, snapshot), `sync_origins` (origin_id ↔ kind, local id;
-several origins may map to one local id, and the row's selected head and `materialized_hash` live
-on its canonical origin), `sync_revisions` (revision_id,
+several origins may map to one local id, and the row's selected head, `materialized_hash` and
+`materialized_revision` live on its canonical origin), `sync_revisions` (revision_id,
 origin_id, kind, author, parents JSON, control JSON, payload_hash, payload JSON or null,
 received-from replica), `sync_repo_mappings` (repo key ↔ local repo id), and the local approval
 record's candidate hash/projection/scope columns. No trigger and no column is added to the
@@ -521,8 +533,12 @@ bypass the checkpoint chain, observer conflict rows are listed and closed) and a
 adversarially verified review (`syncrev9/workflow-synthesis.json`: 42 findings, 5 survived: the
 checkpoint sweep of already stored rows, per-row heads for aliased origins, identity-only
 contexts, the per-origin head bound in the test list, the 32-replica error naming files). All
-are folded in above. T034 re-runs the Codex review once on this text before writing code and
-closes every remaining finding with a test in the list below.
+are folded in above. Round 10 (Codex, `syncrev10`: high 1, medium 4) found the resolution rule
+matching ordinary successors and a local edit building on an unseen head; v10 restricts
+resolutions to multi-parent revisions, parents local edits on `materialized_revision`, binds
+cross-origin parent links only once the reader aliases the origins, bounds heads per local
+row, lets `resolve` name a checkpoint memory, and fixes the filter's evaluation order. T034
+closes every finding with a test in the list below.
 
 ## Verification (T034–T036)
 
@@ -594,7 +610,21 @@ closes every remaining finding with a test in the list below.
 - staging fence: the space directory receives no file before the step 4 check passes, even with a
   concurrent secret-marking commit during encryption;
 - 64 sibling heads are accepted and one `resolve` closes them; an origin with 65 heads is
-  rejected; a bundle from a store of 2,000 single-head origins is accepted; open observer
+  rejected; two aliased origins with 33 heads each are rejected as one row of 66;
+- identity-only head: A creates the first `private` checkpoint C1 of a work while B has `private`
+  unselected; B receives the work revision W1 identity-only, then completes the work: B's
+  revision is a sibling of W1 (parent: the last materialized revision), both devices report the
+  conflict, and C1 is still selected on A; the relay case with an identity-only resolution R
+  followed by a payload-carrying successor S still converges;
+- observer candidate: an observer checkpoint conflict (C1 current, C2 stored as a candidate)
+  that predates sync is resolved with `resolve <work origin> --keep <C2 origin>`: the work's
+  pointer moves to C2 and both conflict rows close;
+- mapped alias: A and B hold the same repository under different `common_dir` keys; after
+  `map-repo` on B, a `resolve` whose parents span both origins' heads validates and applies on
+  B, and on a third device only after it maps the repository too (until then each origin keeps
+  its own heads);
+- work-only repository: a repository with an `eligible` work, its context and no memories ships
+  both work and context payloads; a bundle from a store of 2,000 single-head origins is accepted; open observer
   conflict rows that predate the first sync are listed by `sync status` and closed by the
   `resolve` of their work row;
 - context payloads: a repository whose memories are all withheld ships its contexts identity-only
@@ -623,7 +653,7 @@ closes every remaining finding with a test in the list below.
 - interrupted push (temporary file left behind is ignored), truncated and tampered bundles (every
   chunk position, tag, counter, final marker, a full-size final chunk), wrong key id, oversize
   file, foreign file names, a shipped payload whose hash differs from `payload_hash`, a line
-  whose parent belongs to an origin with a different `natural`;
+  whose parent names a revision of another kind;
 - bounds: a push at 256 MiB total plaintext round-trips; one byte more is rejected before writing;
   a bundle one byte over the ciphertext bound is rejected by `stat`;
 - consent drift performs no I/O; no destination performs no I/O; `doctor` and MCP never open the
