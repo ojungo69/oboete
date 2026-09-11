@@ -405,6 +405,17 @@ function raiseToParents(db: DatabaseSync, localId: string): void {
   if (floor !== 'eligible') applyControlToMemory(db, localId, { tombstone: false, sensitivity_floor: floor }, 0);
 }
 
+/** A stored tombstone for {work, material} applies to a checkpoint of that unit arriving later under any parent or origin. */
+function checkpointSwept(db: DatabaseSync, row: Origin): boolean {
+  if (row.natural.domain !== 'checkpoint') return false;
+  for (const other of prepared(db, `SELECT canonical_origin_id FROM sync_origins WHERE kind = 'memory' AND canonical_origin_id != ?
+      AND json_extract(natural_json, '$.domain') = 'checkpoint' AND json_extract(natural_json, '$.work') = ?
+      AND json_extract(natural_json, '$.material_hash') = ?`).all(row.origin_id, String(row.natural.work), String(row.natural.material_hash))) {
+    if (effectiveControl(db, String(other.canonical_origin_id)).tombstone) return true;
+  }
+  return false;
+}
+
 /** Checkpoint deletion unit: a tombstone for {work, material} deletes every stored checkpoint of it. */
 function sweepCheckpoint(db: DatabaseSync, row: Origin, now: number): void {
   if (row.natural.domain !== 'checkpoint') return;
@@ -415,7 +426,7 @@ function sweepCheckpoint(db: DatabaseSync, row: Origin, now: number): void {
 }
 
 /** The work's pointer follows a pulled head only when the chain reaches the local checkpoint. */
-function advanceWorkCheckpoint(db: DatabaseSync, row: Origin, selected: string): boolean {
+function advanceWorkCheckpoint(db: DatabaseSync, row: Origin, selected: string, previousMaterialized: string | null): boolean {
   const revision = readRevision(db, selected);
   if (revision?.payload == null || row.local_id === null) return true;
   const target = revision.payload.current_checkpoint_memory_id === null ? null : resolveLocal(db, 'memory', String(revision.payload.current_checkpoint_memory_id));
@@ -429,9 +440,23 @@ function advanceWorkCheckpoint(db: DatabaseSync, row: Origin, selected: string):
     }
     return current === null;
   };
-  if (!(revision.parents.length > 1 || reaches(target))) return false;
+  if (!(revision.parents.length > 1 || crossesResolution(db, previousMaterialized, selected) || reaches(target))) return false;
   prepared(db, 'UPDATE work_items SET current_checkpoint_memory_id = ? WHERE id = ?').run(target, row.local_id);
   return true;
+}
+
+/** True when a resolution (multi-parent revision) lies strictly between the materialized revision and `head`. */
+function crossesResolution(db: DatabaseSync, materialized: string | null, head: string): boolean {
+  const seen = new Set<string>([head]);
+  const stack = [head];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (current === materialized) continue;
+    const parents = prepared(db, 'SELECT parent FROM sync_revision_parents WHERE child = ?').all(current).map((row) => String(row.parent));
+    if (parents.length > 1) return true;
+    for (const parent of parents) if (!seen.has(parent)) { seen.add(parent); stack.push(parent); }
+  }
+  return false;
 }
 
 function resolveLocal(db: DatabaseSync, kind: SyncKind, originId: string): string | null {
@@ -467,6 +492,7 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
   const rows = rowIds.map((id) => readOrigin(db, id)!).sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
   const pending = new Set(rows.map((row) => row.origin_id));
   const workRows: Origin[] = [];
+  const raiseTargets = new Set<string>();
   let progress = true;
   while (progress && pending.size > 0) {
     progress = false;
@@ -495,8 +521,10 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
         if (row.kind === 'work') workRows.push(after);
         if (row.kind === 'memory' && localId !== null) {
           if (control.tombstone) sweepCheckpoint(db, after, now);
-          raiseToParents(db, localId);
+          else if (checkpointSwept(db, after)) applyControlToMemory(db, localId, { tombstone: true, sensitivity_floor: control.sensitivity_floor }, now);
+          raiseTargets.add(localId);
         }
+        if (row.kind === 'source' && localId !== null) raiseTargets.add(localId.split(':')[1]!);
       } catch (error) {
         if (!(error instanceof Unresolved)) throw error;
         prepared(db, 'UPDATE sync_origins SET withheld_reason = ? WHERE origin_id = ?').run(error.reason, row.origin_id);
@@ -506,13 +534,20 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
     }
   }
   result.withheldOnApply = pending.size;
+  // Lineage inheritance runs once every edge of this pass exists: a child written before its
+  // source row (or a source arriving for a stored memory) is raised here, not by the trigger.
+  for (const localId of raiseTargets) raiseToParents(db, localId);
   for (const work of workRows) {
     const current = readOrigin(db, work.origin_id)!;
-    if (current.selected_head === null) continue;
-    if (!advanceWorkCheckpoint(db, current, current.selected_head)) {
+    if (current.selected_head === null || current.local_id === null) continue;
+    if (advanceWorkCheckpoint(db, current, current.selected_head, work.materialized_revision)) {
+      // The pointer moved after the row's state was taken: refresh it so the closing pass records no phantom edit.
+      const state = materializedState(db, current, current.local_id, resolve);
+      if (state !== null) setSelectedHead(db, current.origin_id, current.selected_head, current.materialized_revision, state);
+    } else {
       // A checkpoint the chain does not reach is a sibling for the pointer: keep the previous line.
-      const kept = current.materialized_revision;
-      setSelectedHead(db, current.origin_id, kept, kept, current.materialized_hash);
+      const kept = work.materialized_revision;
+      setSelectedHead(db, current.origin_id, kept, kept, work.materialized_hash);
       const heads = headsOf(db, current.origin_id);
       reportConflict(db, current, heads.length > 1 ? heads : [...new Set([current.selected_head, kept ?? current.selected_head])], kept, now, result);
     }
@@ -556,8 +591,9 @@ export function resolveRow(db: DatabaseSync, originId: string, keep: string, now
   let payloadHashValue: string | null;
   const kept = readRevision(db, keep);
   if (kept !== undefined && heads.includes(keep)) {
-    payload = kept.payload;
-    payloadHashValue = kept.payload_hash;
+    // The kept head may belong to an aliased origin: the successor's payload names the canonical one.
+    payload = kept.payload === null || kept.payload.id === row.origin_id ? kept.payload : { ...kept.payload, id: row.origin_id };
+    payloadHashValue = payload === null ? null : payload === kept.payload ? kept.payload_hash : payloadHash(payload);
   } else if (row.kind === 'work' && row.local_id !== null) {
     const checkpoint = readOrigin(db, keep);
     const checkpointLocal = checkpoint?.kind === 'memory' ? canonicalOf(db, keep).local_id : null;

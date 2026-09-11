@@ -81,39 +81,53 @@ export function buildSnapshot(db: DatabaseSync, options: PublishOptions): Publis
     byRow.set(head.row.origin_id, list);
     if (head.kind !== 'context' && passesClassRule(db, head, options.classes, controls.get(head.row.origin_id)!)) candidates.add(head.revision.revision_id);
   }
-  const candidateRepos = new Set<string>();
-  const referencedContexts = new Set<string>();
-  for (const head of heads) {
-    if (!candidates.has(head.revision.revision_id)) continue;
-    const payload = head.revision.payload!;
-    for (const { field, kind } of ENTITY_REFERENCES[head.kind]) {
-      const value = payload[field];
-      if (value === null || value === undefined) continue;
-      if (kind === 'repo') candidateRepos.add(String(value));
-      if (kind === 'context') referencedContexts.add(canonicalOf(String(value)) ?? String(value));
-    }
-  }
-  for (const head of heads) {
-    if (head.kind !== 'context' || head.revision.payload === null) continue;
-    if (referencedContexts.has(head.row.origin_id) || candidateRepos.has(String(head.revision.payload.repo_id))) {
-      candidates.add(head.revision.revision_id);
-    }
-  }
-  let changed = true;
-  while (changed) {
-    changed = false;
+  // A context ships only while a non-context payload of its repository (or one that references it)
+  // still ships, so the promotion is re-evaluated after every closure pass until nothing moves.
+  const promoteContexts = (): boolean => {
+    const candidateRepos = new Set<string>();
+    const referencedContexts = new Set<string>();
     for (const head of heads) {
-      if (!candidates.has(head.revision.revision_id)) continue;
+      if (head.kind === 'context' || !candidates.has(head.revision.revision_id)) continue;
       const payload = head.revision.payload!;
       for (const { field, kind } of ENTITY_REFERENCES[head.kind]) {
         const value = payload[field];
-        if (value === null || value === undefined || kind === 'repo') continue;
-        const target = canonicalOf(String(value));
-        const shipped = target !== undefined && (byRow.get(target) ?? []).some((other) => candidates.has(other.revision.revision_id));
-        if (!shipped) { candidates.delete(head.revision.revision_id); changed = true; break; }
+        if (value === null || value === undefined) continue;
+        if (kind === 'repo') candidateRepos.add(String(value));
+        if (kind === 'context') referencedContexts.add(canonicalOf(String(value)) ?? String(value));
       }
     }
-  }
+    let moved = false;
+    for (const head of heads) {
+      if (head.kind !== 'context' || head.revision.payload === null) continue;
+      const wanted = referencedContexts.has(head.row.origin_id) || candidateRepos.has(String(head.revision.payload.repo_id));
+      if (wanted !== candidates.has(head.revision.revision_id)) {
+        if (wanted) candidates.add(head.revision.revision_id); else candidates.delete(head.revision.revision_id);
+        moved = true;
+      }
+    }
+    return moved;
+  };
+  const closeReferences = (): boolean => {
+    let removed = false;
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const head of heads) {
+        if (!candidates.has(head.revision.revision_id)) continue;
+        const payload = head.revision.payload!;
+        for (const { field, kind } of ENTITY_REFERENCES[head.kind]) {
+          const value = payload[field];
+          if (value === null || value === undefined || kind === 'repo') continue;
+          const target = canonicalOf(String(value));
+          const shipped = target !== undefined && (byRow.get(target) ?? []).some((other) => candidates.has(other.revision.revision_id));
+          if (!shipped) { candidates.delete(head.revision.revision_id); changed = true; removed = true; break; }
+        }
+      }
+    }
+    return removed;
+  };
+  promoteContexts();
+  while (closeReferences() && promoteContexts()) { /* re-evaluate until the candidate set is stable */ }
 
   // Repo lines for every repository a shipped payload references.
   const repoKeys = new Set<string>();
