@@ -21,6 +21,8 @@ export type Revision = {
   natural: Row;
   payload_hash: string | null;
   payload: Row | null;
+  /** A source revision's UNIQUE-tuple members in origin form (see 0008); null for other kinds or when unknown. */
+  tuple?: Row | null;
 };
 
 export type Origin = {
@@ -33,8 +35,6 @@ export type Origin = {
   materialized_revision: string | null;
   materialized_hash: string | null;
   withheld_reason: string | null;
-  /** A source origin's UNIQUE-tuple members as its last stored payload held them (origin form); null for other kinds or without a payload. */
-  tuple: Row | null;
 };
 
 export class SyncStoreError extends Error {
@@ -89,7 +89,6 @@ function originFromRow(row: Row): Origin {
     materialized_revision: row.materialized_revision === null ? null : String(row.materialized_revision),
     materialized_hash: row.materialized_hash === null ? null : String(row.materialized_hash),
     withheld_reason: row.withheld_reason === null ? null : String(row.withheld_reason),
-    tuple: row.tuple_json === null || row.tuple_json === undefined ? null : JSON.parse(String(row.tuple_json)) as Row,
   };
 }
 
@@ -138,9 +137,22 @@ export function createOrigin(
   return readOrigin(db, input.origin_id)!;
 }
 
-/** Records the UNIQUE-tuple members a source origin's payload holds, kept when the payload is erased. */
-export function setTuple(db: DatabaseSync, originId: string, tuple: Row): void {
-  prepared(db, 'UPDATE sync_origins SET tuple_json = ? WHERE origin_id = ?').run(canonicalJson(tuple), originId);
+/**
+ * Joins the groups of two origins of one kind: onto the local row either has (both rows: the
+ * caller decides which survives and moves the other first), or by canonical id alone. A parent
+ * link between two source origins says their author saw one row (contracts/sync.md "Merge rules").
+ */
+export function unionOrigins(db: DatabaseSync, a: string, b: string): void {
+  const [left, right] = [canonicalOf(db, a), canonicalOf(db, b)];
+  if (left.origin_id === right.origin_id) return;
+  if (left.local_id !== null || right.local_id !== null) {
+    const localId = (left.local_id ?? right.local_id)!;
+    for (const origin of [left, right]) if (origin.local_id === null) bindOrigin(db, origin.origin_id, localId);
+    return;
+  }
+  const [canonical, other] = [left.origin_id, right.origin_id].sort(compareCodeUnits) as [string, string];
+  prepared(db, 'UPDATE sync_origins SET canonical_origin_id = ? WHERE canonical_origin_id = ?').run(canonical, other);
+  setSelectedHead(db, other, null, null, null);
 }
 
 /** Points an origin at a local row (after allocation or a later alias) and re-canonicalizes. */
@@ -174,6 +186,7 @@ export function revisionFromRow(row: Row): Revision {
     control: JSON.parse(String(row.control_json)) as Control, natural: JSON.parse(String(row.natural_json)) as Row,
     payload_hash: row.payload_hash === null ? null : String(row.payload_hash),
     payload: row.payload_json === null ? null : JSON.parse(String(row.payload_json)) as Row,
+    tuple: row.tuple_json === null || row.tuple_json === undefined ? null : JSON.parse(String(row.tuple_json)) as Row,
   };
 }
 
@@ -187,16 +200,34 @@ export function revisionsOfOrigin(db: DatabaseSync, originId: string): Revision[
 }
 
 /** Stores identity fields verbatim; returns false when the revision was already stored. */
+/** The UNIQUE-tuple members of a source payload, in origin form. */
+export function sourceTupleOf(payload: Row): Row {
+  return { raw_event_id: payload.raw_event_id, source_hash: payload.source_hash, portion_start: payload.portion_start,
+    portion_end: payload.portion_end, context_only: payload.context_only, source_memory_id: payload.source_memory_id };
+}
+
+/** The tuples a source group's heads hold: what a deletion or a late alias names. */
+export function headTuples(db: DatabaseSync, canonicalOriginId: string): Row[] {
+  return headsOf(db, canonicalOriginId).map((head) => readRevision(db, head)?.tuple ?? null).filter((tuple): tuple is Row => tuple !== null);
+}
+
 export function storeRevision(db: DatabaseSync, revision: Revision, receivedFrom: string | null, now: number): boolean {
   if (revision.revision_id !== revisionId(revision)) throw new SyncStoreError('revision_id_mismatch', revision.revision_id);
   if (readRevision(db, revision.revision_id) !== undefined) return false;
   const count = Number(prepared(db, 'SELECT COUNT(*) AS n FROM sync_revisions WHERE origin_id = ?').get(revision.origin_id)?.n ?? 0);
   if (count >= BOUNDS.revisionsPerOrigin) throw new SyncStoreError('revisions_per_origin', revision.origin_id);
+  // A source revision's tuple: its payload's, the one it arrived with, or its first parent's (a
+  // control revision names the row its parent named).
+  let tuple = revision.tuple ?? null;
+  if (revision.kind === 'source') {
+    if (revision.payload !== null) tuple = sourceTupleOf(revision.payload);
+    if (tuple === null) for (const parent of revision.parents) { tuple = readRevision(db, parent)?.tuple ?? null; if (tuple !== null) break; }
+  }
   prepared(db, `INSERT INTO sync_revisions (revision_id, origin_id, kind, author, parents_json, control_json, natural_json,
-    payload_hash, payload_json, received_from, stored_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    payload_hash, payload_json, tuple_json, received_from, stored_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(revision.revision_id, revision.origin_id, revision.kind, revision.author, canonicalJson(revision.parents),
       canonicalJson(revision.control), canonicalJson(revision.natural), revision.payload_hash,
-      revision.payload === null ? null : canonicalJson(revision.payload), receivedFrom, now);
+      revision.payload === null ? null : canonicalJson(revision.payload), tuple === null ? null : canonicalJson(tuple), receivedFrom, now);
   for (const parent of revision.parents) {
     prepared(db, 'INSERT INTO sync_revision_parents (child, parent) VALUES (?, ?)').run(revision.revision_id, parent);
   }

@@ -126,9 +126,10 @@ Identity fields are `origin_id`, `kind`, `revision_id`, `author`, `parents`, `co
 `natural`, `payload_hash`; they are immutable once created and are what a reader stores. `head`
 and `payload` are delivery fields, recomputed by every publisher; a source head line that ships
 no payload because its row is deleted or secret carries a third one, `tuple` (the UNIQUE-tuple
-members of `memory_sources` as the origin's last payload held them, references in origin form),
-so a reader that captured the same citation on its own still finds the row the control applies
-to. `natural` is the record's
+members of `memory_sources` as the revision's payload holds them, or its parent's for a
+control-only revision, references in origin form; every revision keeps its own, so a stale
+snapshot pulled back never rewinds it), so a reader that captured the same citation on its own
+still finds the row the control applies to. `natural` is the record's
 identity in the terms the store already uses to recognize the same record from a different
 source, so a reader can alias a control-only revision onto a row it already holds under another
 origin. It never contains a local id or a sender-side hash that embeds one: memory
@@ -160,10 +161,13 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
   from the UNIQUE tuples of `memory_sources`: a received head whose tuple a local row of another
   origin holds is that row's source (the two origins alias there and the row keeps its own key;
   a bound origin always names its row by the row's key); an origin without a row binds late by
-  the tuple its last payload held (kept on the origin, and carried by a terminal head line, so a
-  deletion reaches an independently captured row whatever the pull order) or by lineage (a
-  revision of it is a parent or a child of a revision of an origin bound here). Rows that share
-  no tuple stay distinct, however alike. For the other kinds the local identifier is the row's
+  the tuple of its heads (each revision keeps the tuple of its payload, a control revision its
+  parent's; a terminal head line carries it, so a deletion reaches an independently captured row
+  whatever the pull order, and every local row holding a part of it) or by lineage (a revision
+  of it is a parent or a child of a revision of an origin bound here; two origins already bound
+  to two rows join on one, the log said they are one source). Rows that share no tuple stay
+  distinct, however alike; a row of another memory holding the same key is another source, so a
+  tombstone of an origin that has no row here deletes nothing. For the other kinds the local identifier is the row's
   own id. Repositories are not revisioned: a `repo` line has only
   `kind`, `origin_id` and its identity fields, and a bundle carries every repo line its payloads
   reference (see "Repository identity").
@@ -544,10 +548,11 @@ hash/size), `sync_cursors` (space, replica, snapshot), `sync_origins` (origin_id
 several origins may map to one local id, and the row's selected head, `materialized_hash` and
 `materialized_revision` live on its canonical origin), `sync_revisions` (revision_id,
 origin_id, kind, author, parents JSON, control JSON, payload_hash, payload JSON or null,
-received-from replica), `sync_repo_mappings` (repo key ↔ local repo id), and the local approval
-record's candidate hash/projection/scope columns; `sync_origins.tuple_json` keeps a source
-origin's last UNIQUE tuple (see "Envelope and lines"). No trigger is added to the tracked
-tables, and one column (`memory_sources.sync_key`, the row's identity). Heads are derived
+received-from replica, and for a source revision `tuple_json`, its UNIQUE tuple, see "Envelope
+and lines"), `sync_repo_mappings` (repo key ↔ local repo id), `sync_parked` (a source row a pass
+set aside because another head took its tuple while its own head waited: key, memory, the row as
+it was), and the local approval record's candidate hash/projection/scope columns. No trigger is
+added to the tracked tables, and one column (`memory_sources.sync_key`, the row's identity). Heads are derived
 (`revisions with no stored child`),
 not stored. `sync_conflicts` (0003) is reused as the conflict report. 0001–0007 tables are
 otherwise untouched.
@@ -775,6 +780,40 @@ findings, all in the random key and the parking of round seven):
   another row's tuple merges the rows instead of failing as `merged`;
 - late binding runs to a fixpoint before the pass and again only after a sweep created rows;
   a withheld reason is cleared for every origin of an applied group.
+
+Round nine (2026-09-11, Codex correctness pass + `/code-review high` on round eight; twenty
+findings, the closure of round eight's sameness rules):
+
+- the alias by key is per memory in the writer too: a tombstone of an origin that has no row
+  here deletes nothing, and a parked row of another memory under the same key is neither dropped
+  nor taken (an unbound origin whose key another memory's row holds lands under a key of its
+  own); the key walk at capture skips a key whose origin names another memory or moved onto
+  another row, and a key a pass set aside;
+- a re-creation names every retired tombstone at the frontier of the tuple's groups (not only a
+  childless one), and unions their groups, so a chain of re-creations converges on a new peer;
+- the tuple travels per revision (`sync_revisions.tuple_json`, inherited by a control revision
+  from its parent, kept on erase): a stale snapshot pulled back cannot rewind the tuple a later
+  deletion carries;
+- a head cannot be evaluated when its row's selected head is withheld or carries no payload
+  (withheld on the wire or erased), whether or not that row is in the pass: `resolve` of a head
+  that wants such a row's tuple is refused with `tuple_held` and moves nothing; a terminal tuple
+  reaches every local row holding a part of it (the holders join first);
+- lineage joins two source origins already bound to two rows (the rows join on the row of the
+  canonical that sorts first), and the join runs once every line of the bundle is stored,
+  whichever origin's lines came first;
+- a source's heads select by revision id alone, the same on every device, and sibling heads with
+  the same payload hash and control are equivalent (no resolution is recorded), so concurrent
+  automatic resolutions converge and a change-free exchange stops growing the log;
+- a revival inserted by an origin already bound re-runs late binding (a tombstone that waited
+  for the row binds and is resolved in the same pass), and a revival whose payload is withheld
+  is not answered with a sibling tombstone;
+- a parked row whose tuple another head took while its own head waited is set aside
+  (`sync_parked`, as it was) instead of merged into the taker: its own head says where it goes,
+  the log never made the two the same source, and the capture does not read the absence as a
+  deletion; the next pass parks it again, retries its head, and puts it back once its tuple is
+  free (the round-eight restore-merge is gone);
+- a store bound reached by a local capture under the space lock (`revisions_per_origin`) is a
+  `SyncError`, not a crash.
 
 ## Verification (T034–T036)
 

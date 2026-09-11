@@ -13,7 +13,7 @@ import { BOUNDS, ENTITY_REFERENCES, type Control } from './format.js';
 import { canonicalJson, payloadHash, revisionId, type Sensitivity, type SyncKind } from './identity.js';
 import {
   canonicalOf, createOrigin, effectiveControl, headsOf, originsOfRow, readOrigin, readRevision, registerLocalRepos,
-  replicaOriginId, setSelectedHead, setTuple, stateHash, storeRevision, type Origin, type Revision,
+  replicaOriginId, setSelectedHead, sourceTupleOf, stateHash, storeRevision, unionOrigins, type Origin, type Revision,
 } from './store.js';
 
 export type CaptureResult = { revisions: number; tombstones: number };
@@ -51,16 +51,18 @@ export function sourceLocalId(db: DatabaseSync, rowid: string, resolve: Resolver
   const content = [memory?.material_hash ?? memory?.content_hash ?? null, SOURCE_FIELDS.map((field) => record[field] ?? null)];
   for (let ordinal = 0; ; ordinal += 1) {
     const key = sha256Json([content, ordinal]);
-    if (prepared(db, 'SELECT 1 FROM memory_sources WHERE sync_key = ?').get(key) !== undefined) continue;
+    if (prepared(db, 'SELECT 1 FROM memory_sources WHERE sync_key = ? UNION ALL SELECT 1 FROM sync_parked WHERE sync_key = ?').get(key, key) !== undefined) continue;
+    // A key whose origin names another memory (the same material elsewhere), or whose own origin
+    // moved onto another row, is not this row's: the origin the key would find is not its own.
+    const held = readOrigin(db, resolve.originOf('source', `source:${key}`));
+    if (held !== undefined) {
+      const memory = readOrigin(db, String(held.natural.memory));
+      const owner = memory === undefined ? null : canonicalOf(db, memory.origin_id).local_id;
+      if ((owner !== null && owner !== String(raw.memory_id)) || (held.local_id !== null && held.local_id !== `source:${key}`)) continue;
+    }
     prepared(db, 'UPDATE memory_sources SET sync_key = ? WHERE id = ?').run(key, rowid);
     return `source:${key}`;
   }
-}
-
-/** The UNIQUE-tuple members of a source payload, in origin form, as stored on its origin. */
-export function sourceTupleOf(payload: Row): Row {
-  return { raw_event_id: payload.raw_event_id, source_hash: payload.source_hash, portion_start: payload.portion_start,
-    portion_end: payload.portion_end, context_only: payload.context_only, source_memory_id: payload.source_memory_id };
 }
 
 /** The UNIQUE tuples of memory_sources a tuple record falls under (NULL members never match, as in the index). */
@@ -96,24 +98,31 @@ function recordTombstone(db: DatabaseSync, origin: Origin, replica: string, now:
 }
 
 /**
- * The tombstones of the source origins of this memory whose rows, now gone, held one of the
- * tuples a new row takes (recorded here when the closing pass has not reached them yet), except
- * those a later re-creation already named: the new origin's first revision names them as
- * parents, so the re-creation supersedes the deletions wherever they all arrive, and never
- * merges with them as a sibling.
+ * The tombstone heads of the source groups of this memory that ever held one of the tuples a
+ * row takes and whose rows are gone (recorded here when the closing pass has not reached them
+ * yet), other than the row's own group: a revision that revives or re-creates the source names
+ * them as parents, so it supersedes the deletions wherever they all arrive, never meets them as
+ * a sibling, and joins their groups on this device as it will on every other.
+ * ponytail: scans the memory's source revisions per changed row; index tuple_json if it shows.
  */
-function retiredSources(db: DatabaseSync, memory: string, tuple: Row, replica: string, now: number, result: CaptureResult): string[] {
+function retiredSources(db: DatabaseSync, memory: string, own: string, tuple: Row, replica: string, now: number, result: CaptureResult): string[] {
   const wanted = new Set(sourceTuples(tuple));
   const retired: string[] = [];
   if (wanted.size === 0) return retired;
-  for (const stored of prepared(db, `SELECT origin_id, local_id, tuple_json FROM sync_origins WHERE kind = 'source' AND tuple_json IS NOT NULL
-      AND local_id IS NOT NULL AND json_extract(natural_json, '$.memory') IN (SELECT origin_id FROM sync_origins WHERE kind = 'memory' AND local_id = ?)
-      ORDER BY origin_id`).all(memory)) {
-    if (!sourceTuples(JSON.parse(String(stored.tuple_json)) as Row).some((held) => wanted.has(held))) continue;
-    if (prepared(db, 'SELECT 1 FROM memory_sources WHERE sync_key = ?').get(String(stored.local_id).slice('source:'.length)) !== undefined) continue;
-    const tombstone = recordTombstone(db, canonicalOf(db, String(stored.origin_id)), replica, now, result);
-    if (tombstone === null || retired.includes(tombstone) || prepared(db, 'SELECT 1 FROM sync_revision_parents WHERE parent = ?').get(tombstone) !== undefined) continue;
-    retired.push(tombstone);
+  const groups = new Set<string>();
+  for (const stored of prepared(db, `SELECT o.canonical_origin_id AS canonical, r.tuple_json AS tuple FROM sync_revisions r
+      JOIN sync_origins o ON o.origin_id = r.origin_id WHERE o.kind = 'source' AND r.tuple_json IS NOT NULL
+      AND json_extract(o.natural_json, '$.memory') IN (SELECT origin_id FROM sync_origins WHERE kind = 'memory' AND local_id = ?)`).all(memory)) {
+    if (sourceTuples(JSON.parse(String(stored.tuple)) as Row).some((held) => wanted.has(held))) groups.add(String(stored.canonical));
+  }
+  for (const id of [...groups].sort()) {
+    const canonical = canonicalOf(db, id);
+    if (canonical.origin_id === own) continue;
+    if (canonical.local_id !== null && prepared(db, 'SELECT 1 FROM memory_sources WHERE sync_key = ?').get(canonical.local_id.slice('source:'.length)) !== undefined) continue;
+    if (canonical.local_id !== null) recordTombstone(db, canonical, replica, now, result);
+    for (const head of headsOf(db, canonical.origin_id)) {
+      if (readRevision(db, head)!.control.tombstone && !retired.includes(head)) retired.push(head);
+    }
   }
   return retired.slice(0, BOUNDS.parentsPerRevision);
 }
@@ -231,9 +240,13 @@ export function captureLocalChanges(db: DatabaseSync, now: number): CaptureResul
     const state = stateHash(hash, control);
     if (canonical.materialized_hash === state) return;
     let parents = canonical.materialized_revision === null ? [] : [canonical.materialized_revision];
-    if (kind === 'source') {
-      setTuple(db, canonical.origin_id, sourceTupleOf(payload));
-      if (parents.length === 0) parents = retiredSources(db, String(row.memory_id), sourceTupleOf(payload), replica, now, result);
+    // A source that is new, or comes back after its own deletion, names the deletions of the
+    // groups that held its tuples: their revival, recorded once for every device.
+    const base = canonical.materialized_revision === null ? undefined : readRevision(db, canonical.materialized_revision);
+    if (kind === 'source' && (parents.length === 0 || base?.control.tombstone === true)) {
+      const retired = retiredSources(db, String(row.memory_id), canonical.origin_id, sourceTupleOf(payload), replica, now, result);
+      parents = [...new Set([...parents, ...retired])].slice(0, BOUNDS.parentsPerRevision);
+      for (const head of retired) unionOrigins(db, canonical.origin_id, readRevision(db, head)!.origin_id);
     }
     const revision: Revision = {
       revision_id: '', origin_id: canonical.origin_id, kind, author: replica, parents, control,
@@ -251,8 +264,10 @@ export function captureLocalChanges(db: DatabaseSync, now: number): CaptureResul
   for (const row of visibilityRecords(db)) record('visibility', row, String(row.id));
   for (const row of proposalRecords(db)) record('sharing_proposal', row, String(row.id));
 
-  // Rows that vanished (sources and grants are physically deleted) become tombstones once.
-  for (const stored of prepared(db, `SELECT * FROM sync_origins WHERE local_id IS NOT NULL AND origin_id = canonical_origin_id`).all()) {
+  // Rows that vanished (sources and grants are physically deleted) become tombstones once; a
+  // source row a pass set aside is not gone.
+  for (const stored of prepared(db, `SELECT * FROM sync_origins WHERE local_id IS NOT NULL AND origin_id = canonical_origin_id
+      AND NOT EXISTS (SELECT 1 FROM sync_parked WHERE 'source:' || sync_key = sync_origins.local_id)`).all()) {
     const origin: Origin = { ...stored, natural: JSON.parse(String(stored.natural_json)) as Row } as unknown as Origin;
     const key = `${String(stored.kind)} ${String(stored.local_id)}`;
     if (seen.has(key)) continue;

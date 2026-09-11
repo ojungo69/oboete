@@ -24,7 +24,7 @@ import { canonicalJson } from './identity.js';
 import { buildSnapshot, PublishError, type Withheld } from './publish.js';
 import { BundleRejected, stageBundle } from './stage.js';
 import { consentDrift, consentHashOf, loadSyncConfig, SyncError } from './status.js';
-import { localRepoOf, replicaOriginId } from './store.js';
+import { localRepoOf, replicaOriginId, SyncStoreError } from './store.js';
 
 export { SyncError, loadSyncConfig, syncStatus, type SyncStatus } from './status.js';
 
@@ -163,7 +163,11 @@ export function withSpaceLock<T>(paths: OboetePaths, spaceId: string, fn: () => 
       if (isBusyError(error)) throw new SyncError('busy');
       throw error;
     }
-    return fn();
+    try { return fn(); } catch (error) {
+      // A store bound (revisions per origin, unknown origin) is a sync outcome, not a crash.
+      if (error instanceof SyncStoreError) throw new SyncError(error.code);
+      throw error;
+    }
   } finally { if (lock.isOpen) lock.close(); }
 }
 

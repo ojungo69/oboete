@@ -36,8 +36,7 @@ CREATE TABLE sync_origins (
   selected_head TEXT,
   materialized_revision TEXT,
   materialized_hash TEXT,
-  withheld_reason TEXT,
-  tuple_json TEXT CHECK (tuple_json IS NULL OR json_valid(tuple_json))
+  withheld_reason TEXT
 ) STRICT;
 CREATE INDEX sync_origins_local ON sync_origins(kind, local_id);
 CREATE INDEX sync_origins_natural ON sync_origins(kind, natural_json);
@@ -55,10 +54,22 @@ CREATE TABLE sync_revisions (
   natural_json TEXT NOT NULL CHECK (json_valid(natural_json)),
   payload_hash TEXT,
   payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+  -- A source revision's UNIQUE-tuple members (origin form): its payload's, or its parent's for a
+  -- control revision; kept when the payload is erased, so a deletion still names its row.
+  tuple_json TEXT CHECK (tuple_json IS NULL OR json_valid(tuple_json)),
   received_from TEXT,
   stored_at INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX sync_revisions_origin ON sync_revisions(origin_id);
+
+-- A source row a pass set aside: its own head could not be applied yet and another head took its
+-- UNIQUE tuple, so the row waits here as it was (the log never made the two the same) until a
+-- pass can apply its head or put it back.
+CREATE TABLE sync_parked (
+  sync_key TEXT PRIMARY KEY,
+  memory_id TEXT NOT NULL,
+  row_json TEXT NOT NULL CHECK (json_valid(row_json))
+) STRICT;
 
 CREATE TABLE sync_revision_parents (
   child TEXT NOT NULL REFERENCES sync_revisions(revision_id),

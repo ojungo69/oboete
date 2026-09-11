@@ -492,6 +492,26 @@ test('pull ignores an interrupted push temporary file and every foreign name in 
   });
 });
 
+test('a store bound reached by a local capture surfaces as a sync error under the space lock, not a crash', async () => {
+  await withHomes(1, (homes, shared) => {
+    const db = openHome(homes[0]!);
+    try {
+      const paths = oboetePaths(homes[0]!);
+      initSpace(db, paths, { directory: shared, classes: ['eligible'], now: 1 });
+      insertMemory(db, 'm_full', 'Title', 'Body text');
+      assert.equal(pushSpace(db, paths, { now: 2 }).outcome, 'published');
+      // The origin's log is at the bound (a device that has pulled that much of it): the next local edit cannot be recorded.
+      const origin = db.prepare("SELECT origin_id, natural_json FROM sync_origins WHERE kind = 'memory' AND local_id = 'm_full'").get()!;
+      const insert = db.prepare(`INSERT INTO sync_revisions (revision_id, origin_id, kind, author, parents_json, control_json, natural_json, payload_hash, payload_json, stored_at)
+        VALUES (?, ?, 'memory', ?, '[]', '{"sensitivity_floor":"eligible","tombstone":false}', ?, NULL, NULL, 1)`);
+      for (let i = 1; i < BOUNDS.revisionsPerOrigin; i += 1) insert.run(hex(i, 64), origin.origin_id, SENDER, origin.natural_json);
+      db.prepare("UPDATE memories SET body = 'Edited body' WHERE id = 'm_full'").run();
+      assert.throws(() => pushSpace(db, paths, { now: 3 }), (error: unknown) => error instanceof SyncError && error.code === 'revisions_per_origin');
+      assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM sync_revisions WHERE origin_id = ?').get(origin.origin_id)?.n), BOUNDS.revisionsPerOrigin, 'nothing was recorded');
+    } finally { db.close(); }
+  });
+});
+
 test('bundles rejected at the space level: key id, size, a payload hash and a parent of another kind', async () => {
   await withHomes(1, (homes, shared) => {
     const db = openHome(homes[0]!);

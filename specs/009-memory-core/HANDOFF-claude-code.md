@@ -63,14 +63,17 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
   注記に列挙)。契約は "Implementation notes" に amend 4 点を記録。
 - 単一ファイルのテスト実行は `/var/tmp/oboete-009-20260909.jJ5grc/scratch/test-one.mjs`
   (`TEST_ONE_SLOT=<name> node test-one.mjs test/unit/x.test.ts`、build/ を触らない)。
-- レビュー: `/code-review high` 3 巡 + finder 1 角度、Codex correctness pass (`us6/secrev1..8`。security
-  枠のプロンプトは OpenAI の cyber classifier に切られるので correctness 枠で出す) で 10 + 6 + 9 + 9 + 14 + 11 + 17 + 16 件。
+- レビュー: `/code-review high` 3 巡 + finder 1 角度、Codex correctness pass (`us6/secrev1..9`。security
+  枠のプロンプトは OpenAI の cyber classifier に切られるので correctness 枠で出す) で 10 + 6 + 9 + 9 + 14 + 11 + 17 + 16 + 20 件。
   0008 は branch 内で in-place 編集した (未リリース)。旧 0008 を適用済みの DB は作り直す。
   全件 security-owned code を Claude Code が修正し RED→GREEN で pin。round 4 で source の同一性を
   content-derived hash から保存 key (`memory_sources.sync_key`) に設計変更 (3 巡続けて同じ箇所が
   指摘されたため)。round 7 で key を乱数にし (device 間の同一性は UNIQUE tuple のみ)、tuple 待ちを
   pass 前の row 退避 (parking) に置き換えた。round 8 で key を内容由来に戻し (tombstone は source では
-  復活可能な状態)、tuple と lineage を同一性として運び、parking の穴を塞いだ。semgrep 0、ponytail。契約の "Implementation notes" に round ごとの規則を記録。
+  復活可能な状態)、tuple と lineage を同一性として運び、parking の穴を塞いだ。round 9 でその閉包を閉じた
+  (writer でも key は memory ごと、retirement は frontier 全部、tuple は revision ごと、pass 外の held 行、
+  lineage 結合は全行 store 後、source の head 選択は revision id で決定的、tuple を奪われた退避行は
+  `sync_parked` に置いて merge しない)。semgrep 0、ponytail。契約の "Implementation notes" に round ごとの規則を記録。
   gate は `scratch/gate-us6.sh` (`P=us6-gate1`)。
 
 ## 再開順序と未完了事項

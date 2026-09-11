@@ -179,14 +179,9 @@ export function buildSnapshot(db: DatabaseSync, options: PublishOptions): Publis
       };
       // A terminal source head ships without payload; its UNIQUE tuple still names the row it
       // applies to on a device that captured the same citation on its own.
-      if (revision.kind === 'source' && head && line.payload === null) {
-        const own = readOrigin(db, revision.origin_id)!;
-        const canonical = readOrigin(db, own.canonical_origin_id)!;
-        const control = controls.get(canonical.origin_id);
-        if (control !== undefined && (control.tombstone || control.sensitivity_floor === 'secret')) {
-          const tuple = own.tuple ?? canonical.tuple;
-          if (tuple !== null) line.tuple = tuple;
-        }
+      if (revision.kind === 'source' && head && line.payload === null && revision.tuple) {
+        const control = controls.get(readOrigin(db, revision.origin_id)!.canonical_origin_id);
+        if (control !== undefined && (control.tombstone || control.sensitivity_floor === 'secret')) line.tuple = revision.tuple;
       }
       emit(line);
     }
