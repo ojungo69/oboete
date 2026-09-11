@@ -1,0 +1,49 @@
+specs/009-memory-core/HANDOFF-claude-code.md
+  s_a10e76da0afde4::t_aa67ec4d14b3ad 58-59,66-69
+  s_ce84c7de7d1c09::t_e6324a87690401 70-71
+specs/009-memory-core/tasks.md
+  s_a10e76da0afde4::t_aa67ec4d14b3ad 200-202,208-212
+  s_ce84c7de7d1c09::t_f2eae0ab4eebf7 213-215
+specs/009-memory-core/contracts/sync.md
+  s_ce84c7de7d1c09::t_90b5a2799c32dc 136-137,146-154,581-582,603-606,637-660
+src/db/migrations/0008_sync.sql
+  s_ce84c7de7d1c09::t_3bc974ef3bcf41 80-85
+src/sync/apply.ts
+  s_ce84c7de7d1c09::t_24adf7d8cb8856 15,87,254-279,282-284,286-288,290-291,296-306,308-313,453-454,559-568,572-580,582-585,603-610,612,616-622,631-633,642-645,649-650
+src/sync/capture.ts
+  s_ce84c7de7d1c09::t_7bb1fca9f0c3ab 22-28,31-35,38-41,43-48,110
+src/sync/format.ts
+  s_ce84c7de7d1c09::t_3513cfd6ebcd9b 44
+src/sync/store.ts
+  s_ce84c7de7d1c09::t_69be319bb5ba3e 149-155
+src/transfer-records.ts
+  s_ce84c7de7d1c09::t_3580d09bb44d19 27-28
+test/unit/sync-review.test.ts
+  s_ce84c7de7d1c09::t_ab46559676fa99 92,99-100,104-108,419,422-432,435-441,595-798
+test/unit/sync.test.ts
+  s_ce84c7de7d1c09::t_58a04619bb526f 217
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "5504d7f7fea72800aee2bc8ceeb298bbd319d944",
+  "prompts": {},
+  "sessions": {
+    "s_a10e76da0afde4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08fa6-c411-7f82-a2c4-96547e7d0523",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
