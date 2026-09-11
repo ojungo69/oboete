@@ -6,13 +6,14 @@ import { createHash } from 'node:crypto';
 import { closeSync, openSync, readSync, rmSync } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
 
+import { materialHash } from '../db/identity.js';
 import { loadSqlite } from '../db/open.js';
 import { prepared } from '../db/statements.js';
 import {
   BOUNDS, headerSchema, naturalSchemas, payloadSchemas, repoLineSchema, revisionLineSchema, ENTITY_REFERENCES,
   type Header, type RevisionLine, type RepoLine,
 } from './format.js';
-import { payloadHash, revisionId, snapshotId, type SyncKind } from './identity.js';
+import { canonicalJson, payloadHash, revisionId, snapshotId, type SyncKind } from './identity.js';
 import { readOrigin, readRevision, type Row } from './store.js';
 
 export class BundleRejected extends Error {
@@ -137,6 +138,7 @@ function validateBody(db: DatabaseSync, staged: Staged, reader: Generator<Buffer
       const payload = payloadSchemas[line.kind].safeParse(line.payload);
       if (!payload.success) throw new BundleRejected('invalid_payload', `${line.revision_id}: ${payload.error.issues[0]?.message ?? ''}`);
       if (line.payload.id !== line.origin_id) throw new BundleRejected('payload_id_mismatch', line.revision_id);
+      checkPayloadIntegrity(line);
       for (const { field, kind } of ENTITY_REFERENCES[line.kind]) {
         const target = line.payload[field];
         if (target !== null && target !== undefined) insertRef.run(line.revision_id, field, kind, String(target));
@@ -185,6 +187,41 @@ function validateBody(db: DatabaseSync, staged: Staged, reader: Generator<Buffer
     if (kind === undefined) throw new BundleRejected('unknown_reference', target);
     if (kind !== row.target_kind) throw new BundleRejected('reference_kind_mismatch', target);
   }
+}
+
+/**
+ * The payload must be the record its natural key and hashes describe, exactly as the native
+ * reader checks: redacted memories carry no text, a text-bearing memory or candidate hashes to
+ * its material hash, and the natural key is the one the payload derives (so a line cannot alias
+ * onto another row's identity while carrying other content).
+ */
+function checkPayloadIntegrity(line: RevisionLine): void {
+  const payload = line.payload!;
+  const reject = (code: string): never => { throw new BundleRejected(code, line.revision_id); };
+  let expected: Row;
+  switch (line.kind) {
+    case 'memory': {
+      const absentText = payload.deleted_at !== null || payload.sensitivity === 'secret' || line.control.tombstone || line.control.sensitivity_floor === 'secret';
+      if (absentText) {
+        if (payload.title !== '' || payload.body !== '' || (payload.concepts ?? '[]') !== '[]') reject('redacted_memory_text');
+      } else if (materialHash(String(payload.title ?? ''), String(payload.body ?? '')) !== payload.material_hash) reject('material_hash_mismatch');
+      if (payload.identity_domain === 'personal_projection') expected = { domain: 'personal_projection', projection_hash: payload.content_hash };
+      else if (payload.work_id !== null) {
+        expected = { domain: 'checkpoint', repo: payload.repo_id, work: payload.work_id, parent: payload.checkpoint_parent_id, material_hash: payload.material_hash };
+      } else expected = { domain: 'ordinary', repo: payload.repo_id, material_hash: payload.material_hash };
+      break;
+    }
+    case 'sharing_proposal':
+      if (payload.redacted !== true && payload.candidate_sensitivity !== 'secret' && line.control.sensitivity_floor !== 'secret'
+        && materialHash(String(payload.candidate_title), String(payload.candidate_body)) !== payload.candidate_material_hash) reject('candidate_hash_mismatch');
+      expected = { candidate: payload.candidate_material_hash, origin_memory: payload.origin_memory_id };
+      break;
+    case 'source': expected = { memory: payload.memory_id, source_hash: line.origin_id.slice(line.origin_id.lastIndexOf(':') + 1) }; break;
+    case 'visibility': expected = { memory: payload.memory_id, audience: payload.audience, repo: payload.repo_id, work: payload.work_id }; break;
+    case 'context': expected = { repo: payload.repo_id, local_key: payload.local_key }; break;
+    case 'work': expected = { work: line.origin_id }; break;
+  }
+  if (canonicalJson(expected) !== canonicalJson(line.natural)) reject('natural_mismatch');
 }
 
 export function stagedLines(staged: Staged, originId: string): RevisionLine[] {

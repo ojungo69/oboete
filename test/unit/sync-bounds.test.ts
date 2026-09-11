@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { DatabaseSync } from 'node:sqlite';
 
+import { materialHash } from '../../src/db/identity.js';
 import { loadSqlite, openDatabase } from '../../src/db/open.js';
 import { oboetePaths } from '../../src/paths.js';
 import { applyStaged, resolveRow, type ApplyResult } from '../../src/sync/apply.js';
@@ -239,6 +240,41 @@ test('every graph bound one over its value is rejected before apply, with the da
       assert.deepEqual(counts(db), before, bound.name);
       rmSync(path, { force: true });
     }
+  });
+});
+
+// --- payload integrity: a line cannot borrow another row's identity while carrying other content ---
+
+test('a payload whose text, hashes or natural key disagree is rejected before apply, so no line can alias onto a row it does not describe', async () => {
+  await withReplicas(1, ([replica], dir) => {
+    const { db, id: me } = replica!;
+    const victim = insertMemory(db, 'm_victim', 'Victim title', 'Victim body');
+    db.exec('BEGIN IMMEDIATE'); captureLocalChanges(db, 100); db.exec('COMMIT');
+    const victimOrigin = readOrigin(db, `${me}:m_victim`)!;
+    const victimHead = readRevision(db, victimOrigin.selected_head!)!;
+    const before = counts(db);
+    const foreign = `${OTHER}:m_foreign`;
+    const base: Row = { ...victimHead.payload!, id: foreign };
+    const cases: { name: string; code: string; payload: Row; natural?: Row }[] = [
+      { name: 'other text under the victim material hash', code: 'material_hash_mismatch', payload: { ...base, title: 'Unrelated', body: 'Unrelated body' } },
+      { name: 'own material hash under the victim natural key', code: 'natural_mismatch',
+        payload: { ...base, title: 'Unrelated', body: 'Unrelated body', material_hash: materialHash('Unrelated', 'Unrelated body') } },
+      { name: 'a checkpoint claiming an ordinary natural key', code: 'natural_mismatch', payload: { ...base, work_id: `${OTHER}:w_x` } },
+      { name: 'text on a deleted memory', code: 'redacted_memory_text', payload: { ...base, deleted_at: 5 } },
+      { name: 'text on a secret memory', code: 'redacted_memory_text', payload: { ...base, sensitivity: 'secret' } },
+    ];
+    for (const item of cases) {
+      const path = join(dir, `${OTHER}.integrity.plain`);
+      writeBundle(path, OTHER, (emit) => {
+        emit({ kind: 'repo', origin_id: String(base.repo_id), identity_kind: 'remote', normalized_identity: REMOTE });
+        emit(line({ origin_id: foreign, author: OTHER, parents: [victimHead.revision_id], natural: item.natural ?? victimOrigin.natural, payload: item.payload }));
+      });
+      assert.throws(() => applyBundle(db, OTHER, path), rejected(item.code), item.name);
+      assert.deepEqual(counts(db), before, item.name);
+      assert.equal(db.prepare('SELECT body FROM memories WHERE id = ?').get('m_victim')?.body, 'Victim body', item.name);
+      rmSync(path, { force: true });
+    }
+    assert.ok(victim.material);
   });
 });
 

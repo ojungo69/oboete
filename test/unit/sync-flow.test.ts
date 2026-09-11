@@ -171,12 +171,13 @@ test('foreign edit: B edits, deletes and marks secret a memory A created, and th
     pull(b, a, seed); pull(c, a, seed);
     const origin = `${a.id}:m_one`;
     const localOnB = memoryOf(b, a, 'm_one').id as string;
-    // B edits A's memory; the successor reaches A and C along A's own line.
-    b.db.prepare("UPDATE memories SET title = 'Edited', body = 'Edited body' WHERE id = ?").run(localOnB);
+    // B edits A's memory (text is immutable identity, so the edit is a pin); the successor reaches
+    // A and C along A's own line.
+    b.db.prepare('UPDATE memories SET pinned_at = 5, pin_order = 1 WHERE id = ?').run(localOnB);
     const edited = publish(b, dir);
     pull(a, b, edited); pull(c, b, edited);
     for (const replica of [a, c]) {
-      assert.equal(memoryOf(replica, a, 'm_one').body, 'Edited body');
+      assert.equal(memoryOf(replica, a, 'm_one').pinned_at, 5);
       assert.equal(headsOf(replica.db, origin).length, 1, 'a descendant of the local line is no conflict');
     }
     // B then deletes it and marks it secret; both successors reach A and C.
@@ -197,7 +198,7 @@ test('foreign edit: B edits, deletes and marks secret a memory A created, and th
     // And nothing re-publishes it: no bundle any replica writes carries either text.
     for (const replica of [a, b, c]) {
       const text = readFileSync(publish(replica, dir), 'utf8');
-      assert.equal(text.includes('Edited body'), false, 'the erased text is never re-published');
+      assert.equal(text.includes('Original body'), false, 'the erased text is never re-published');
       assert.equal(text.includes('Original body'), false);
     }
   });
