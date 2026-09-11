@@ -248,6 +248,9 @@ export function captureLocalChanges(db: DatabaseSync, now: number): CaptureResul
     const tuple = kind === 'source' ? sourceTupleOf(payload) : null;
     const moved = base !== undefined && !base.control.tombstone && canonicalJson(base.tuple ?? null) !== canonicalJson(tuple);
     if (kind === 'source' && (parents.length === 0 || base?.control.tombstone === true || moved)) {
+      // The row's own previous head is a parent whatever the union makes canonical: a move onto a
+      // retired tuple must descend from the row as it was, not only from the tombstone it revives.
+      const ownParent = canonical.materialized_revision;
       const retired = retiredSources(db, String(row.memory_id), canonical.origin_id, tuple!, replica, now, result);
       for (const head of retired) {
         const group = canonicalOf(db, readRevision(db, head)!.origin_id);
@@ -259,7 +262,7 @@ export function captureLocalChanges(db: DatabaseSync, now: number): CaptureResul
       hash = payloadHash(payload);
       state = stateHash(hash, control);
       if (canonical.materialized_hash === state) return;
-      parents = [...new Set([...(canonical.materialized_revision === null ? [] : [canonical.materialized_revision]), ...retired])].slice(0, BOUNDS.parentsPerRevision);
+      parents = [...new Set([ownParent, canonical.materialized_revision, ...retired].filter((id): id is string => id !== null))].slice(0, BOUNDS.parentsPerRevision);
     }
     const revision: Revision = {
       revision_id: '', origin_id: canonical.origin_id, kind, author: replica, parents, control,

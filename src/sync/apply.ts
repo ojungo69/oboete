@@ -9,7 +9,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { grantVisibility } from '../db/queries.js';
 import { prepared } from '../db/statements.js';
 import { checkpointHash } from '../db/identity.js';
-import { sha256Hex, sha256Json } from '../hash.js';
+import { sha256Hex, sha256Json, compareCodeUnits } from '../hash.js';
 import { cjkBigrams } from '../retrieval/fts.js';
 import { contextRecords, memoryRecords, proposalRecords, sourceRecords, visibilityRecords, workRecords } from '../transfer-records.js';
 import { SOURCE_FIELDS, alignToNatural, captureLocalChanges, controlOf, sourceTuples, toOriginForm } from './capture.js';
@@ -443,6 +443,9 @@ function parkedBlocked(db: DatabaseSync, key: string, pass: Pass, visiting: Set<
   if (target === undefined || visiting.has(key)) return false;
   visiting.add(key);
   const memory = String(pass.parked.get(key)!.memory_id);
+  // The row's own move became cyclic after it was parked (a row applied since closed the loop): it
+  // cannot leave its old tuple, so a head that wants that tuple waits instead of taking it.
+  if (target.sourceMemory !== null && (target.sourceMemory === memory || reachesMemory(db, memory, target.sourceMemory, parkedEdges(pass)))) return true;
   if (sourcesByTuple(db, memory, target.tuple, target.sourceMemory).some((holder) => pass.held.has(String(holder.sync_key)))) return true;
   return parkedHolders(memory, target.tuple, target.sourceMemory, pass).some((other) => other !== key && parkedBlocked(db, other, pass, visiting));
 }
@@ -456,8 +459,9 @@ function parkedBlocked(db: DatabaseSync, key: string, pass: Pass, visiting: Set<
 function joinTerminalHolders(db: DatabaseSync, row: Origin, memory: string, pass: Pass): 'joined' | null | 'held' {
   let joined: 'joined' | null = null;
   for (const tuple of headTuples(db, row.origin_id)) {
+    // An unresolved dependency member drops out of the match; the raw-event and portion members
+    // are still their own UNIQUE indexes, so the deletion reaches a row that shares one of them.
     const sourceMemory = tuple.source_memory_id === null ? null : resolveLocal(db, 'memory', String(tuple.source_memory_id));
-    if (tuple.source_memory_id !== null && sourceMemory === null) continue;
     const holder = joinHolders(db, memory, tuple, sourceMemory, pass, null);
     if (holder === 'held') return 'held';
     if (holder === null) continue;
@@ -876,7 +880,11 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
   // ponytail: scans every unbound origin of the store per sweep; index by natural key if it shows.
   const bindLate = (): boolean => {
     let bound = false;
-    for (const stored of prepared(db, 'SELECT origin_id FROM sync_origins WHERE local_id IS NULL ORDER BY origin_id').all()) {
+    // Bind sources in a replica-independent order (the content key of the natural key), so the
+    // order edges are applied, and thus which edge of a cycle is withheld, is the same everywhere.
+    for (const stored of prepared(db, `SELECT origin_id FROM sync_origins WHERE local_id IS NULL
+        ORDER BY CASE WHEN kind = 'source' THEN 0 ELSE 1 END,
+          CASE WHEN kind = 'source' THEN json_extract(natural_json, '$.key') END, origin_id`).all()) {
       const origin = readOrigin(db, String(stored.origin_id))!;
       if (origin.local_id !== null) continue;
       let target = aliasTarget(db, origin.kind, origin.natural, origin);
@@ -909,17 +917,24 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
   };
   for (const id of [...new Set(rowIds.map((id) => readOrigin(db, id)!.canonical_origin_id))]) requeue(id);
   while (bindLate()) { /* to a fixpoint */ }
-  rows.sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
+  // Sources are ordered by the content key of their natural key (replica-independent), so every
+  // device applies their dependency edges in the same order and withholds the same edge of a
+  // cycle: the outcome converges however the random replica ids sort.
+  const sortKey = (row: Origin): string => (row.kind === 'source' ? `0${String(row.natural.key)}` : '');
+  const orderRows = (): void => { rows.sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind) || compareCodeUnits(sortKey(a), sortKey(b))); };
+  orderRows();
   const workRows: Origin[] = [];
   const workBefore = new Map<string, Row | null>();
   const raiseTargets = new Set<string>();
   let created = false;
   let progress = true;
   const waiting = new Set<string>();
+  let insertedAny = false;
   for (;;) {
   while (progress && pending.size > 0) {
     progress = false;
-    for (const stale of rows) {
+    orderRows();
+    for (const stale of [...rows]) {
       if (!pending.has(stale.origin_id)) continue;
       const row = readOrigin(db, stale.origin_id)!;
       // An origin that stopped being canonical during the pass is processed as its canonical.
@@ -1009,23 +1024,25 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
       }
     }
     // A row this pass created may be the row an origin without one aliases onto.
-    if (created || pass.inserted) { created = false; pass.inserted = false; if (bindLate()) progress = true; }
+    if (created || pass.inserted) { insertedAny = insertedAny || pass.inserted; created = false; pass.inserted = false; if (bindLate()) progress = true; }
   }
   // A parked row whose head was not written (withheld) comes back as it was, under the redaction
   // its memory now implies. A head that wants its tuple waited on it while its own head was
   // blocked (joinHolders), so its place is free; only a head that failed for a reason that
   // appeared after that check (a row the pass bound and classified later) can have taken it,
   // and then the row joins that row (the same tuple under one memory) rather than being lost.
-  let joined = false;
   for (const [key, record] of [...pass.parked]) {
     const memory = String(record.memory_id);
     pass.parked.delete(key);
     pass.targets.delete(key);
-    const holder = sourcesByTuple(db, memory, record, record.source_memory_id === null ? null : String(record.source_memory_id))[0];
-    if (holder !== undefined) {
-      const origin = originsOfRow(db, 'source', `source:${key}`)[0];
-      moveRow(db, `source:${key}`, `source:${String(holder.sync_key)}`);
-      if (origin !== undefined) { requeue(readOrigin(db, origin.origin_id)!.canonical_origin_id); joined = true; }
+    // The row's head moved it off this tuple but could not land (withheld). If another source now
+    // holds the old tuple, the two are not the same source (the head disagrees), so the row is not
+    // merged into it and not re-inserted (the index would refuse): its origins wait, and the
+    // revision re-materializes at its own target once the head can land. Its place is normally
+    // reserved (joinHolders waits on a blocked parked row), so a holder here is a rare order where
+    // the taker landed before this row's block was known.
+    if (sourcesByTuple(db, memory, record, record.source_memory_id === null ? null : String(record.source_memory_id)).length > 0) {
+      for (const origin of originsOfRow(db, 'source', `source:${key}`)) prepared(db, 'UPDATE sync_origins SET withheld_reason = ? WHERE origin_id = ?').run('tuple_held', origin.origin_id);
       continue;
     }
     const redacted = redactedUnder(db, memory);
@@ -1034,8 +1051,17 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
   // A terminal source head reaches every row holding a part of its tuple, whatever order the pass
   // wrote the heads in (a row another head moved onto the tuple included: the merged group's heads
   // decide); a holder the pass cannot evaluate makes the deletion wait for the next pass.
-  for (const stale of rows) {
-    if (stale.kind !== 'source') continue;
+  // A row inserted this pass may match a source tombstone stored earlier whose row is already
+  // gone and which is not in this bundle: those canonicals are swept too, not only this pass's.
+  let joined = false;
+  const terminalRows = new Map(rows.filter((row) => row.kind === 'source').map((row) => [row.origin_id, row]));
+  if (insertedAny || pass.inserted || created) {
+    for (const stored of prepared(db, `SELECT origin_id FROM sync_origins WHERE kind = 'source' AND origin_id = canonical_origin_id
+        AND local_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memory_sources WHERE 'source:' || sync_key = sync_origins.local_id)`).all()) {
+      if (!terminalRows.has(String(stored.origin_id))) terminalRows.set(String(stored.origin_id), readOrigin(db, String(stored.origin_id))!);
+    }
+  }
+  for (const stale of terminalRows.values()) {
     const row = readOrigin(db, stale.origin_id)!;
     if (row.canonical_origin_id !== row.origin_id || pending.has(row.origin_id) || !effectiveControl(db, row.origin_id).tombstone) continue;
     const memory = resolveLocal(db, 'memory', String(row.natural.memory));

@@ -841,6 +841,29 @@ findings, the closure of round nine):
   restored before it returns (no state persists between pulls): a head whose tuple a parked row
   whose own head is blocked holds waits, so nothing is merged into a taker or read as a deletion.
 
+Round eleven (2026-09-12, Codex correctness pass + `/code-review high` on round ten; four
+findings, three fixed and pinned, the fourth mitigated):
+
+- a move onto a retired tuple names the row's own previous head as a parent, not only the
+  tombstone it revives, so the peer converges (capture);
+- a source tombstone that is bound but rowless from an earlier pull reaches a matching row a
+  later bundle brings, through a post-pass sweep that also scans the stored terminal groups, not
+  only this bundle's;
+- a terminal deletion whose dependency member cannot resolve still reaches a row that shares its
+  raw-event UNIQUE member (the unresolved member drops out of the match, the others stay);
+- a source's restore never merges a parked row into a holder of the row's old tuple (the head
+  moved it away, so they are not the same source): the origins wait and the revision
+  re-materializes at its own target once its head can land, and the pass now processes sources
+  content-key-first, which orders the ordinary cases. Not resolved: the cycle-break itself is
+  still decided incrementally, when a head would close a cycle against the edges already applied,
+  so which edge is dropped depends on which head lands first. When a single device physically
+  holds a mutual cross-memory context-citation cycle (an uncommon observer state; capture writes
+  the cyclic edge with no cycle guard), two devices can break the cycle at different edges and
+  diverge — measured on ~60 % of runs of the adverse fixture, so it is a coin-flip once the
+  cyclic state exists, not a rare order. Deterministic resolution needs a canonical break-edge
+  choice independent of processing order, or capture and apply to withhold cyclic edges
+  symmetrically — a design change tracked as a follow-up, not closed by round eleven.
+
 ## Verification (T034–T036)
 
 `test/unit/sync.test.ts` with three isolated homes and one shared temporary directory:

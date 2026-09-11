@@ -64,7 +64,13 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
 - 単一ファイルのテスト実行は `/var/tmp/oboete-009-20260909.jJ5grc/scratch/test-one.mjs`
   (`TEST_ONE_SLOT=<name> node test-one.mjs test/unit/x.test.ts`、build/ を触らない)。
 - レビュー: `/code-review high` 3 巡 + finder 1 角度、Codex correctness pass (`us6/secrev1..10`。security
-  枠のプロンプトは OpenAI の cyber classifier に切られるので correctness 枠で出す) で 10 + 6 + 9 + 9 + 14 + 11 + 17 + 16 + 20 + 12 件。
+  枠のプロンプトは OpenAI の cyber classifier に切られるので correctness 枠で出す) で 10 + 6 + 9 + 9 + 14 + 11 + 17 + 16 + 20 + 12 + 4 件。
+  round 11 は 4 件中 3 件(move の parent、bound tombstone の後着 sweep、未解決 dep の raw-event member)を修正・pin。
+  4 件目(相互 cross-memory context cycle を単一デバイスが物理保持した場合の source 行 loss)は未解決。
+  cycle-break を「既適用 edge に対して head 1 本ずつ増分判定」する形なので、どの edge を落とすかが処理順(=random
+  replica id)依存で、adverse fixture の実測で 6 割の run が device 間 divergence。content-key 順の処理と lossless-restore は
+  入れたが cycle-break 自体は決定的にならない。完全修正は「cycle の break edge を content で正準選択する pass」か
+  「capture/apply の cycle 対称化(capture-model 変更、round8 pin の挙動が変わる)」で、いずれも設計変更。owner に go/no-go 確認中。
   0008 は branch 内で in-place 編集した (未リリース)。旧 0008 を適用済みの DB は作り直す。
   全件 security-owned code を Claude Code が修正し RED→GREEN で pin。round 4 で source の同一性を
   content-derived hash から保存 key (`memory_sources.sync_key`) に設計変更 (3 巡続けて同じ箇所が

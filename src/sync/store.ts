@@ -240,8 +240,26 @@ export function storeRevision(db: DatabaseSync, revision: Revision, receivedFrom
 /** Fills a payload for a stored identity-only revision (the caller has verified its hash). */
 export function storePayload(db: DatabaseSync, revisionIdValue: string, payload: Row): void {
   const kind = prepared(db, 'SELECT kind FROM sync_revisions WHERE revision_id = ?').get(revisionIdValue)?.kind;
+  if (kind !== 'source') {
+    prepared(db, 'UPDATE sync_revisions SET payload_json = ? WHERE revision_id = ? AND payload_json IS NULL').run(canonicalJson(payload), revisionIdValue);
+    return;
+  }
+  const tuple = canonicalJson(sourceTupleOf(payload));
   prepared(db, 'UPDATE sync_revisions SET payload_json = ?, tuple_json = COALESCE(?, tuple_json) WHERE revision_id = ? AND payload_json IS NULL')
-    .run(canonicalJson(payload), kind === 'source' ? canonicalJson(sourceTupleOf(payload)) : null, revisionIdValue);
+    .run(canonicalJson(payload), tuple, revisionIdValue);
+  // A control-only descendant (a tombstone) that inherited a null tuple from this revision while
+  // its payload was withheld takes the tuple now, so a deletion still names the row.
+  for (let frontier = [revisionIdValue]; frontier.length > 0; ) {
+    const next: string[] = [];
+    for (const parent of frontier) {
+      for (const child of prepared(db, `SELECT c.revision_id FROM sync_revision_parents p JOIN sync_revisions c ON c.revision_id = p.child
+        WHERE p.parent = ? AND c.kind = 'source' AND c.payload_json IS NULL AND c.tuple_json IS NULL`).all(parent)) {
+        prepared(db, 'UPDATE sync_revisions SET tuple_json = ? WHERE revision_id = ?').run(tuple, String(child.revision_id));
+        next.push(String(child.revision_id));
+      }
+    }
+    frontier = next;
+  }
 }
 
 /** Erases stored payload bytes of every revision of every origin aliased to a row. */

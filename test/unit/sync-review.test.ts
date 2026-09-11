@@ -2192,3 +2192,69 @@ test('a re-creation whose retirement union changes the canonical records nothing
     assert.equal(authoredSources(second.db, second), 1);
   });
 });
+
+// Round eleven.
+
+test('a move onto a retired tuple descends from the row as it was, so the peer converges', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    for (const device of [a, b]) { insertMemory(device.db, 'm_one', 'Title', 'Body text'); seedRawEvent(device.db); seedRawEvent(device.db, 'raw_two'); }
+    ctxSource(a.db, 'm_one', 'raw_one', 'x');
+    ctxSource(a.db, 'm_one', 'raw_two', 'y');
+    pull(b, a, publish(a, dir));
+    assert.equal(sourceRows(b.db).length, 2);
+    // A deletes Y (raw_two), then moves X onto raw_two: X's new head names Y's tombstone and its own old head.
+    a.db.prepare("DELETE FROM memory_sources WHERE source_agent = 'y'").run();
+    publish(a, dir);
+    a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_two' WHERE source_agent = 'x'").run();
+    const result = pull(b, a, publish(a, dir));
+    assert.equal(result.withheldOnApply, 0);
+    assert.deepEqual(sourceRows(a.db), ['m_one/raw_two/null/x'], 'A holds one row');
+    assert.deepEqual(sourceRows(b.db), ['m_one/raw_two/null/x'], 'B converges: no stale X at raw_one, no second row');
+    assert.equal(sourceGroups(b.db).length, 1);
+    assert.equal(headsOf(b.db, sourceGroups(b.db)[0]!).length, 1);
+  });
+});
+
+test('a source tombstone bound and rowless from an earlier pull reaches a matching row a later bundle brings', async () => {
+  await withReplicas(3, (replicas, dir) => {
+    const [a, b, c] = replicas as [Replica, Replica, Replica];
+    for (const device of [a, b, c]) { insertMemory(device.db, 'm_one', 'Title', 'Body text'); seedRawEvent(device.db); }
+    ctxSource(a.db, 'm_one', 'raw_one', 'a');
+    pull(b, a, publish(a, dir));
+    a.db.prepare('DELETE FROM memory_sources').run();
+    pull(b, a, publish(a, dir));
+    assert.deepEqual(sourceRows(b.db), [], "B holds A's tombstone, its row gone");
+    // C captured the same citation with other fields, never learned A's origin, and ships it.
+    ctxSource(c.db, 'm_one', 'raw_one', 'c');
+    pull(b, c, publish(c, dir));
+    assert.deepEqual(sourceRows(b.db), [], "A's stored deletion reaches C's arriving row");
+    assert.equal(sourceGroups(b.db).length, 1, 'the two origins are one group');
+    for (const group of sourceGroups(b.db)) assert.equal(headsOf(b.db, group).length, 1);
+  });
+});
+
+test('a deletion whose dependency member cannot resolve still reaches a row matching its raw-event member', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    for (const device of [a, b]) { insertMemory(device.db, 'm_one', 'Title', 'Body text'); seedRawEvent(device.db); seedRawEvent(device.db, 'raw_new'); }
+    ctxSource(a.db, 'm_one', 'raw_old', 'r');
+    seedRawEvent(a.db, 'raw_old'); seedRawEvent(b.db, 'raw_old');
+    a.db.prepare("DELETE FROM memory_sources").run();
+    ctxSource(a.db, 'm_one', 'raw_old', 'r');
+    pull(b, a, publish(a, dir, ['eligible']));
+    // B independently captured H at raw_new under the same memory.
+    ctxSource(b.db, 'm_one', 'raw_new', 'h');
+    publish(b, dir, ['eligible']);
+    // A: a private memory E; R moves to raw_new with dep E; then R is deleted. The deletion ships,
+    // E ships identity-only (private class not selected), so E is unresolved on B.
+    insertMemory(a.db, 'm_e', 'Quiet', 'Quiet body', { sensitivity: 'private' });
+    a.db.prepare("UPDATE memory_sources SET raw_event_id = 'raw_new', source_memory_id = 'm_e' WHERE source_agent = 'r'").run();
+    publish(a, dir, ['eligible']);
+    a.db.prepare("DELETE FROM memory_sources").run();
+    const result = pull(b, a, publish(a, dir, ['eligible']));
+    // The deletion's tuple has raw_new and the (unresolved) dep E; H shares the raw_new member, so it goes.
+    assert.equal(b.db.prepare("SELECT COUNT(*) AS n FROM memory_sources WHERE raw_event_id = 'raw_new'").get()?.n, 0, "H is deleted by the raw-event member");
+    void result;
+  });
+});
