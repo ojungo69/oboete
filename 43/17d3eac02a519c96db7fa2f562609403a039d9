@@ -1,0 +1,43 @@
+src/sync/envelope.ts
+  s_ce84c7de7d1c09::t_68dc8bea3e53ed 1-135
+src/sync/format.ts
+  s_ce84c7de7d1c09::t_2cda1ef73bd30c 1-133
+src/sync/store.ts
+  s_ce84c7de7d1c09::t_87459a05e949a7 1-254
+  s_ce84c7de7d1c09::t_e8e5d34579de23 255-260
+test/unit/sync.test.ts
+  s_ce84c7de7d1c09::t_957d7af9fae05f 1-64,68,73,80,95,107,146,157,175
+  s_ce84c7de7d1c09::t_1f28ebc3198439 65-67,69-72,74-79,81-94,96-106,108-145,147-156,158-174,176-304
+src/transfer-records.ts
+  s_ce84c7de7d1c09::t_94ec094ed2be1d 1-62
+src/db/migrations/0008_sync.sql
+  s_ce84c7de7d1c09::t_b2d8b674dee1d5 1-87
+src/db/open.ts
+  s_ce84c7de7d1c09::t_f8025511e58bc1 15,31-32,42,45
+src/sync/identity.ts
+  s_ce84c7de7d1c09::t_e24a537d680537 1-50
+src/transfer.ts
+  s_ce84c7de7d1c09::t_6940b1aa3b397f 22,95-97,100-101
+test/migrations/apply.test.ts
+  s_ce84c7de7d1c09::t_03c2a00eefdf2a 13,48,50,55,92,109,115
+test/migrations/memory-processing.test.ts
+  s_ce84c7de7d1c09::t_f997fe2179e278 7,36,71,102,117,160
+test/unit/migration-matrix.test.ts
+  s_ce84c7de7d1c09::t_feccb9813b8e6a 11,219,221
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "4317d3eac02a519c96db7fa2f562609403a039d9",
+  "prompts": {},
+  "sessions": {
+    "s_ce84c7de7d1c09": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7ba2899-aaa7-42a0-bb7b-5712b974dfe6",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
