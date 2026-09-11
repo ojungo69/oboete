@@ -1,0 +1,19 @@
+specs/009-memory-core/contracts/sync.md
+  s_7afe467abf47e6::t_9ab007b757b99a 585-607
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "efebbeceb49163f68f5d79bfe8688df7a6ef4d61",
+  "prompts": {},
+  "sessions": {
+    "s_7afe467abf47e6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08f8d-07a1-7da0-8909-aa0ef9fe105c",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
