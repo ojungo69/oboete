@@ -1,0 +1,37 @@
+specs/009-memory-core/HANDOFF-claude-code.md
+  s_5ab5797dc469b5::t_691343053961c1 58,67-68
+specs/009-memory-core/contracts/sync.md
+  s_5ab5797dc469b5::t_85b839c85409bd 136-138,149-158,666-687
+specs/009-memory-core/tasks.md
+  s_5ab5797dc469b5::t_11b7c41eb9d900 200,210,213-216
+src/db/migrations/0008_sync.sql
+  s_5ab5797dc469b5::t_c11367d8171780 85
+src/sync/apply.ts
+  s_5ab5797dc469b5::t_45d3d84db1f7d0 38-54,188,194,230,271-275,278,282-284,286-289,291-296,298,301-306,309-312,314,316-322,324,327,330-345,347-352,354,363,382,412-416,418-419,442,474,600-610,626,628-631,633-635,661,668,671-673,678-679,691-698,701,703,717,751
+src/sync/capture.ts
+  s_5ab5797dc469b5::t_a9ffcc69e7166b 30-31,33-34,38-42,45-51,85,115,181
+src/sync/format.ts
+  s_5ab5797dc469b5::t_053f7469945882 44
+src/sync/space.ts
+  s_5ab5797dc469b5::t_c99faf3e3828bd 349-352,354
+test/unit/sync-review.test.ts
+  s_5ab5797dc469b5::t_06d745c6068480 15,577,587-590,799-1021
+test/unit/sync.test.ts
+  s_5ab5797dc469b5::t_755f5d9bf44cf6 219-221
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "6db7f1583e08fbf2ba83f7454afe4732e1f32c21",
+  "prompts": {},
+  "sessions": {
+    "s_5ab5797dc469b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44ceb1b9-68f7-4bf5-8646-52149920dd27",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
