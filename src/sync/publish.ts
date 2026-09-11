@@ -172,11 +172,23 @@ export function buildSnapshot(db: DatabaseSync, options: PublishOptions): Publis
       const head = headIds.has(revision.revision_id);
       revisionLines += 1;
       if (revisionLines > BOUNDS.revisionLines) throw new PublishError('too_many_lines');
-      emit({
+      const line: Row = {
         origin_id: revision.origin_id, kind: revision.kind, revision_id: revision.revision_id, author: revision.author,
         parents: revision.parents, control: revision.control, natural: revision.natural, payload_hash: revision.payload_hash,
         head, payload: head && candidates.has(revision.revision_id) ? revision.payload : null,
-      });
+      };
+      // A terminal source head ships without payload; its UNIQUE tuple still names the row it
+      // applies to on a device that captured the same citation on its own.
+      if (revision.kind === 'source' && head && line.payload === null) {
+        const own = readOrigin(db, revision.origin_id)!;
+        const canonical = readOrigin(db, own.canonical_origin_id)!;
+        const control = controls.get(canonical.origin_id);
+        if (control !== undefined && (control.tombstone || control.sensitivity_floor === 'secret')) {
+          const tuple = own.tuple ?? canonical.tuple;
+          if (tuple !== null) line.tuple = tuple;
+        }
+      }
+      emit(line);
     }
   } finally { closeSync(body); }
   const revisionsSha256 = digest.digest('hex');

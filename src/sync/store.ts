@@ -33,6 +33,8 @@ export type Origin = {
   materialized_revision: string | null;
   materialized_hash: string | null;
   withheld_reason: string | null;
+  /** A source origin's UNIQUE-tuple members as its last stored payload held them (origin form); null for other kinds or without a payload. */
+  tuple: Row | null;
 };
 
 export class SyncStoreError extends Error {
@@ -87,6 +89,7 @@ function originFromRow(row: Row): Origin {
     materialized_revision: row.materialized_revision === null ? null : String(row.materialized_revision),
     materialized_hash: row.materialized_hash === null ? null : String(row.materialized_hash),
     withheld_reason: row.withheld_reason === null ? null : String(row.withheld_reason),
+    tuple: row.tuple_json === null || row.tuple_json === undefined ? null : JSON.parse(String(row.tuple_json)) as Row,
   };
 }
 
@@ -133,6 +136,11 @@ export function createOrigin(
     setSelectedHead(db, previous.origin_id, null, null, null);
   }
   return readOrigin(db, input.origin_id)!;
+}
+
+/** Records the UNIQUE-tuple members a source origin's payload holds, kept when the payload is erased. */
+export function setTuple(db: DatabaseSync, originId: string, tuple: Row): void {
+  prepared(db, 'UPDATE sync_origins SET tuple_json = ? WHERE origin_id = ?').run(canonicalJson(tuple), originId);
 }
 
 /** Points an origin at a local row (after allocation or a later alias) and re-canonicalizes. */
@@ -248,6 +256,13 @@ export function effectiveControl(db: DatabaseSync, canonicalOriginId: string): C
       tombstone: control.tombstone || stored.tombstone,
       sensitivity_floor: RANK[stored.sensitivity_floor] > RANK[control.sensitivity_floor] ? stored.sensitivity_floor : control.sensitivity_floor,
     };
+  }
+  // A source's deletion is a state, not a fate: it holds while a head carries it, and a later
+  // revision of the row (an identical row inserted again, a row re-created under the old
+  // tuple that names the tombstone as parent) revives it. Rows of the other kinds are never
+  // physically re-created, so their tombstone is final.
+  if (control.tombstone && readOrigin(db, canonicalOriginId)?.kind === 'source') {
+    control.tombstone = headsOf(db, canonicalOriginId).some((head) => readRevision(db, head)!.control.tombstone);
   }
   return control;
 }

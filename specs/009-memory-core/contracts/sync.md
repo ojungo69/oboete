@@ -124,7 +124,11 @@ Revision line (`oboete-sync-revision/1`):
 
 Identity fields are `origin_id`, `kind`, `revision_id`, `author`, `parents`, `control`,
 `natural`, `payload_hash`; they are immutable once created and are what a reader stores. `head`
-and `payload` are delivery fields, recomputed by every publisher. `natural` is the record's
+and `payload` are delivery fields, recomputed by every publisher; a source head line that ships
+no payload because its row is deleted or secret carries a third one, `tuple` (the UNIQUE-tuple
+members of `memory_sources` as the origin's last payload held them, references in origin form),
+so a reader that captured the same citation on its own still finds the row the control applies
+to. `natural` is the record's
 identity in the terms the store already uses to recognize the same record from a different
 source, so a reader can alias a control-only revision onto a row it already holds under another
 origin. It never contains a local id or a sender-side hash that embeds one: memory
@@ -146,15 +150,21 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
   the local identifier is `source:<sync key>`: the key is stored on the row
   (`memory_sources.sync_key`, 0008) at its first capture and never recomputed, so an in-place
   field change and a redaction are revisions of the same origin (`memory_sources.id` is a
-  reusable rowid and is never used). The key is random (32 bytes, hex), drawn when the row is
-  first captured: it names nothing about the row, so keys never agree between devices and a
-  row deleted and inserted again is a new source (the old origin records a tombstone), as is a
-  row moved under another memory (the natural key names the memory a source belongs to).
-  Sameness across devices comes only from the UNIQUE tuples of `memory_sources`: a received
-  head whose tuple a local row of another origin holds is that row's source, the two origins
-  alias there and the row keeps its own key (a bound origin always names its row by the row's
-  key); rows that share no tuple stay distinct, however alike. For the other kinds the local
-  identifier is the row's own id. Repositories are not revisioned: a `repo` line has only
+  reusable rowid and is never used). The key is the SHA-256 of the row's wire fields (references
+  in origin form) and its memory's material, with an ordinal for an identical duplicate under
+  the same memory, so an identical row takes the same key: a row this device deletes and inserts
+  again finds its origin (the observer rewrites flat provenance rows on every batch and records
+  nothing), and the same row captured independently on another device aliases by natural key
+  (the key under the memory the natural key names). A row moved under another memory is a new
+  source (the natural key names the memory a source belongs to). Sameness beyond that comes
+  from the UNIQUE tuples of `memory_sources`: a received head whose tuple a local row of another
+  origin holds is that row's source (the two origins alias there and the row keeps its own key;
+  a bound origin always names its row by the row's key); an origin without a row binds late by
+  the tuple its last payload held (kept on the origin, and carried by a terminal head line, so a
+  deletion reaches an independently captured row whatever the pull order) or by lineage (a
+  revision of it is a parent or a child of a revision of an origin bound here). Rows that share
+  no tuple stay distinct, however alike. For the other kinds the local identifier is the row's
+  own id. Repositories are not revisioned: a `repo` line has only
   `kind`, `origin_id` and its identity fields, and a bundle carries every repo line its payloads
   reference (see "Repository identity").
 - `revision_id` = SHA-256 over canonical JSON `["oboete-record-revision/1", origin_id, kind,
@@ -243,7 +253,12 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
   payload was withheld, the local change is a sibling of it, so a conflict reports what the
   device could not see rather than silently superseding it. Unresolved siblings stay
   unresolved. Only `oboete sync resolve` creates a revision with more than one parent, and it
-  lists every current head as a parent.
+  lists every current head as a parent; two exceptions for sources, whose rows are provenance
+  a person never edits by hand: the siblings of a source row resolve at once, on the device
+  that sees them, to the selected head (a multi-parent successor under the canonical origin,
+  which also carries the alias that joined them to every other device), and the first revision
+  of a source re-created under a tuple whose earlier rows this device deleted names those
+  rows' tombstones as parents, so the re-creation supersedes the deletions wherever both arrive.
 - Resolution: a revision with more than one parent whose parents include every current head of
   the row is applied as the resolution wherever it arrives: it becomes the single head and the
   selected head, its payload (for a work, including `current_checkpoint_memory_id`) applies
@@ -280,8 +295,11 @@ and a `v_<hash>` grant with the same scope are one grant); sharing_proposal `{ca
   payload hash and control describe.
 - `control.tombstone` dominates: once any stored revision of an origin carries it, the effective
   row is deleted and no later live payload undeletes it (a live revision that descends from the
-  tombstone is a conflict, not a resurrection). Absence of an origin from a bundle never means
-  deletion. For checkpoints the deletion unit is what `contracts/checkpoint.md` deletes: a
+  tombstone is a conflict, not a resurrection). A source is the exception, because its rows are
+  physically deleted and re-created: its deletion holds while a head carries it, and a later
+  revision of the row (an identical row inserted again, a re-creation that names the tombstone
+  as parent) revives it; a live sibling of the tombstone still loses to it. Absence of an origin
+  from a bundle never means deletion. For checkpoints the deletion unit is what `contracts/checkpoint.md` deletes: a
   tombstone stored for any checkpoint of a mapped work with a given `material_hash` applies to
   every checkpoint of that work and material, already stored or arriving later, whatever its
   parent or origin. Storing such a tombstone deletes every stored checkpoint row of that work
@@ -527,8 +545,10 @@ several origins may map to one local id, and the row's selected head, `materiali
 `materialized_revision` live on its canonical origin), `sync_revisions` (revision_id,
 origin_id, kind, author, parents JSON, control JSON, payload_hash, payload JSON or null,
 received-from replica), `sync_repo_mappings` (repo key ↔ local repo id), and the local approval
-record's candidate hash/projection/scope columns. No trigger and no column is added to the
-tracked tables. Heads are derived (`revisions with no stored child`),
+record's candidate hash/projection/scope columns; `sync_origins.tuple_json` keeps a source
+origin's last UNIQUE tuple (see "Envelope and lines"). No trigger is added to the tracked
+tables, and one column (`memory_sources.sync_key`, the row's identity). Heads are derived
+(`revisions with no stored child`),
 not stored. `sync_conflicts` (0003) is reused as the conflict report. 0001–0007 tables are
 otherwise untouched.
 
@@ -728,6 +748,34 @@ Round seven (2026-09-11, Codex correctness pass + `/code-review high` on round s
   withheld reason, or `merged`) instead of a stack trace, and the staged reference closure
   includes the memory a source's natural key names.
 
+Round eight (2026-09-11, Codex correctness pass + `/code-review high` on round seven; sixteen
+findings, all in the random key and the parking of round seven):
+
+- a source's key is the hash of its wire fields and its memory's material again, with an ordinal
+  for identical duplicates (round seven's random key made every observer rewrite of a flat
+  provenance row a tombstone plus a new origin, and let a deletion for a row this device never
+  held depend on the pull order), and a source's deletion is a state a later revision of the row
+  revives, not a final control (round seven had to mint a new origin for every re-creation
+  because the tombstone was final; the re-creation now names the retired tombstones as parents,
+  so it supersedes them wherever both arrive); sameness is carried too: an origin keeps the
+  tuple of its last payload, a terminal head line ships it, and a lineage link to a bound
+  origin binds (see "Envelope and lines", "Merge rules");
+- the pass parks only a source row whose head it can evaluate now (references resolve, no
+  cycle through the edges it holds, the parked rows' edges included); a row whose fate it
+  cannot decide stays, and a head that wants its tuple waits on it (`tuple_held`, withheld after
+  the pass, re-evaluated by the next pull) instead of merging with a row that may still move;
+- a head whose tuples several rows of other origins hold joins them into one row (every holder's
+  origins move onto the first, the extra rows are dropped) instead of moving between them; a
+  bound origin that joins another row drops its own;
+- a parked row whose head was withheld after all comes back through the same rules as a head:
+  under the redaction its memory now implies, and, when another head took one of its tuples in
+  the pass, by joining that row rather than by an insert the index would refuse;
+- the siblings of a source resolve at once to the selected head, so a source never stays in
+  conflict and the alias travels; `resolve` of a source runs the pass, so a kept head that takes
+  another row's tuple merges the rows instead of failing as `merged`;
+- late binding runs to a fixpoint before the pass and again only after a sweep created rows;
+  a withheld reason is cleared for every origin of an applied group.
+
 ## Verification (T034–T036)
 
 `test/unit/sync.test.ts` with three isolated homes and one shared temporary directory:
@@ -822,7 +870,7 @@ Round seven (2026-09-11, Codex correctness pass + `/code-review high` on round s
 - pull crash: a process killed after rows were updated and before the cursor was recorded leaves
   the database at the previous state (single transaction) and the next pull re-applies the bundle;
 - lock: two pushes for one space, one gets `busy`; a push killed mid-way leaves no lock behind;
-- sources: a re-inserted identical source is a new source (the old origin ships a tombstone); a removed source ships a tombstone; a
+- sources: a re-inserted identical source keeps its origin (revived when a capture saw it gone); a removed source ships a tombstone; a
   memory with a source whose raw event is `classification_state = 'done'` and
   `processing_state = 'waiting'` is withheld with its sources and the works that reference it; a
   summary whose raw event was purged ships with its evidence-less source rows;

@@ -36,7 +36,8 @@ CREATE TABLE sync_origins (
   selected_head TEXT,
   materialized_revision TEXT,
   materialized_hash TEXT,
-  withheld_reason TEXT
+  withheld_reason TEXT,
+  tuple_json TEXT CHECK (tuple_json IS NULL OR json_valid(tuple_json))
 ) STRICT;
 CREATE INDEX sync_origins_local ON sync_origins(kind, local_id);
 CREATE INDEX sync_origins_natural ON sync_origins(kind, natural_json);
@@ -76,9 +77,10 @@ CREATE TABLE sync_repo_mappings (
   local_repo_id TEXT REFERENCES repos(id)
 ) STRICT;
 
--- A source row's sync identity: assigned at its first capture (the hash of its fields then, so
--- an identical independent capture on another device aliases), carried by the origin's natural
--- key, never recomputed. memory_sources.id is a reusable rowid and never crosses devices.
+-- A source row's sync identity: assigned at its first capture (the hash of its fields and its
+-- memory's material then, so an identical row, re-inserted here or captured independently on
+-- another device, takes the same key), carried by the origin's natural key, never recomputed.
+-- memory_sources.id is a reusable rowid and never crosses devices.
 ALTER TABLE memory_sources ADD COLUMN sync_key TEXT;
 CREATE UNIQUE INDEX memory_sources_sync_key ON memory_sources (sync_key) WHERE sync_key IS NOT NULL;
 

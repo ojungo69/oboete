@@ -2,31 +2,39 @@
 // tables that gives every row an origin, converts it to a revision payload in origin form and
 // records a new revision authored by this replica wherever the row's canonical state differs
 // from what was last materialized. Nothing outside sync is instrumented. Security-owned.
-import { randomBytes } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { prepared } from '../db/statements.js';
+import { sha256Json } from '../hash.js';
 import {
   contextRecords, memoryRecords, proposalRecords, sourceRecords, visibilityRecords, workRecords, type Row,
 } from '../transfer-records.js';
-import { ENTITY_REFERENCES, type Control } from './format.js';
-import { payloadHash, revisionId, type Sensitivity, type SyncKind } from './identity.js';
+import { BOUNDS, ENTITY_REFERENCES, type Control } from './format.js';
+import { canonicalJson, payloadHash, revisionId, type Sensitivity, type SyncKind } from './identity.js';
 import {
-  canonicalOf, createOrigin, effectiveControl, originsOfRow, readOrigin, registerLocalRepos, replicaOriginId,
-  setSelectedHead, stateHash, storeRevision, type Origin, type Revision,
+  canonicalOf, createOrigin, effectiveControl, headsOf, originsOfRow, readOrigin, readRevision, registerLocalRepos,
+  replicaOriginId, setSelectedHead, setTuple, stateHash, storeRevision, type Origin, type Revision,
 } from './store.js';
 
 export type CaptureResult = { revisions: number; tombstones: number };
 
+/** The wire fields of a source row, in the order the writer binds them. */
+export const SOURCE_FIELDS = ['raw_event_id', 'citation_kind', 'citation_value', 'source_agent', 'portion_start', 'portion_end', 'source_total',
+  'source_hash', 'evidence', 'captured_at', 'source_processed_at', 'capture_root', 'source_paths_json', 'source_context_id', 'context_only',
+  'source_memory_id'] as const;
+
 /**
- * The local identifier of a source row is `source:<sync_key>` (contracts/sync.md): a random key
- * stored on the row at its first capture and never recomputed, so in-place field changes and
- * redaction are revisions of the same origin, and no two rows anywhere share a key (a row
- * deleted and inserted again is a new source; the same citation captured independently on two
- * devices is one source only through a UNIQUE tuple of `memory_sources`). A row moved under
- * another memory is a new source too (new key, new origin): the origin's natural key names the
- * memory the source belongs to, and the old origin records a tombstone in the closing pass.
- * `memory_sources.id` is a reusable rowid and is never used.
+ * The local identifier of a source row is `source:<sync_key>` (contracts/sync.md): a key stored
+ * on the row at its first capture and never recomputed, so in-place field changes and redaction
+ * are revisions of the same origin. The key is the hash of the row's wire fields (references in
+ * origin form) and its memory's material, so an identical row takes the same key: one this device
+ * deletes and inserts again (the observer rewrites flat provenance rows on every batch) finds its
+ * origin, revived if a capture saw it gone, and records nothing when it is back as it was; one
+ * another device captured independently aliases by natural key. A key a live row holds (an
+ * identical duplicate) moves to the next ordinal. A row moved under another memory is a new
+ * source (new key, new origin): the origin's natural key names the memory the source belongs to,
+ * and the old origin records a tombstone in the closing pass. `memory_sources.id` is a reusable
+ * rowid and is never used.
  */
 export function sourceLocalId(db: DatabaseSync, rowid: string, resolve: Resolver): string {
   const raw = prepared(db, 'SELECT sync_key, memory_id FROM memory_sources WHERE id = ?').get(rowid);
@@ -38,9 +46,76 @@ export function sourceLocalId(db: DatabaseSync, rowid: string, resolve: Resolver
     const owner = memory === undefined ? null : canonicalOf(db, memory.origin_id).local_id;
     if (owner === null || owner === String(raw.memory_id)) return `source:${String(raw.sync_key)}`;
   }
-  const key = randomBytes(32).toString('hex');
-  prepared(db, 'UPDATE memory_sources SET sync_key = ? WHERE id = ?').run(key, rowid);
-  return `source:${key}`;
+  const record = toOriginForm('source', [...sourceRecords(db, Number(rowid))][0]!, '', resolve);
+  const memory = prepared(db, 'SELECT material_hash, content_hash FROM memories WHERE id = ?').get(String(raw.memory_id));
+  const content = [memory?.material_hash ?? memory?.content_hash ?? null, SOURCE_FIELDS.map((field) => record[field] ?? null)];
+  for (let ordinal = 0; ; ordinal += 1) {
+    const key = sha256Json([content, ordinal]);
+    if (prepared(db, 'SELECT 1 FROM memory_sources WHERE sync_key = ?').get(key) !== undefined) continue;
+    prepared(db, 'UPDATE memory_sources SET sync_key = ? WHERE id = ?').run(key, rowid);
+    return `source:${key}`;
+  }
+}
+
+/** The UNIQUE-tuple members of a source payload, in origin form, as stored on its origin. */
+export function sourceTupleOf(payload: Row): Row {
+  return { raw_event_id: payload.raw_event_id, source_hash: payload.source_hash, portion_start: payload.portion_start,
+    portion_end: payload.portion_end, context_only: payload.context_only, source_memory_id: payload.source_memory_id };
+}
+
+/** The UNIQUE tuples of memory_sources a tuple record falls under (NULL members never match, as in the index). */
+export function sourceTuples(tuple: Row): string[] {
+  const tuples: string[] = [];
+  if (tuple.source_hash !== null && tuple.raw_event_id !== null && tuple.portion_start !== null && tuple.portion_end !== null) {
+    tuples.push(canonicalJson(['portion', tuple.raw_event_id, tuple.source_hash, tuple.portion_start, tuple.portion_end]));
+  }
+  if (tuple.context_only === 1 && tuple.raw_event_id !== null) tuples.push(canonicalJson(['raw', tuple.raw_event_id]));
+  if (tuple.context_only === 1 && tuple.source_memory_id !== null) tuples.push(canonicalJson(['memory', tuple.source_memory_id]));
+  return tuples;
+}
+
+/**
+ * Records the tombstone of a bound origin whose row is gone (once: an origin already deleted, or
+ * whose base is the deletion, records nothing) and returns the revision that carries it.
+ */
+function recordTombstone(db: DatabaseSync, origin: Origin, replica: string, now: number, result: CaptureResult): string | null {
+  const control = effectiveControl(db, origin.origin_id);
+  if (control.tombstone) return headsOf(db, origin.origin_id).find((head) => readRevision(db, head)!.control.tombstone) ?? null;
+  const tombstone: Control = { tombstone: true, sensitivity_floor: control.sensitivity_floor };
+  const state = stateHash(null, tombstone);
+  if (origin.materialized_hash === state) return origin.materialized_revision;
+  const revision: Revision = {
+    revision_id: '', origin_id: origin.origin_id, kind: origin.kind, author: replica,
+    parents: origin.materialized_revision === null ? [] : [origin.materialized_revision], control: tombstone,
+    natural: origin.natural, payload_hash: null, payload: null,
+  };
+  revision.revision_id = revisionId(revision);
+  if (storeRevision(db, revision, null, now)) result.tombstones += 1;
+  setSelectedHead(db, origin.origin_id, revision.revision_id, revision.revision_id, state);
+  return revision.revision_id;
+}
+
+/**
+ * The tombstones of the source origins of this memory whose rows, now gone, held one of the
+ * tuples a new row takes (recorded here when the closing pass has not reached them yet), except
+ * those a later re-creation already named: the new origin's first revision names them as
+ * parents, so the re-creation supersedes the deletions wherever they all arrive, and never
+ * merges with them as a sibling.
+ */
+function retiredSources(db: DatabaseSync, memory: string, tuple: Row, replica: string, now: number, result: CaptureResult): string[] {
+  const wanted = new Set(sourceTuples(tuple));
+  const retired: string[] = [];
+  if (wanted.size === 0) return retired;
+  for (const stored of prepared(db, `SELECT origin_id, local_id, tuple_json FROM sync_origins WHERE kind = 'source' AND tuple_json IS NOT NULL
+      AND local_id IS NOT NULL AND json_extract(natural_json, '$.memory') IN (SELECT origin_id FROM sync_origins WHERE kind = 'memory' AND local_id = ?)
+      ORDER BY origin_id`).all(memory)) {
+    if (!sourceTuples(JSON.parse(String(stored.tuple_json)) as Row).some((held) => wanted.has(held))) continue;
+    if (prepared(db, 'SELECT 1 FROM memory_sources WHERE sync_key = ?').get(String(stored.local_id).slice('source:'.length)) !== undefined) continue;
+    const tombstone = recordTombstone(db, canonicalOf(db, String(stored.origin_id)), replica, now, result);
+    if (tombstone === null || retired.includes(tombstone) || prepared(db, 'SELECT 1 FROM sync_revision_parents WHERE parent = ?').get(tombstone) !== undefined) continue;
+    retired.push(tombstone);
+  }
+  return retired.slice(0, BOUNDS.parentsPerRevision);
 }
 
 export function controlOf(kind: SyncKind, record: Row): Control {
@@ -155,7 +230,11 @@ export function captureLocalChanges(db: DatabaseSync, now: number): CaptureResul
     const hash = payloadHash(payload);
     const state = stateHash(hash, control);
     if (canonical.materialized_hash === state) return;
-    const parents = canonical.materialized_revision === null ? [] : [canonical.materialized_revision];
+    let parents = canonical.materialized_revision === null ? [] : [canonical.materialized_revision];
+    if (kind === 'source') {
+      setTuple(db, canonical.origin_id, sourceTupleOf(payload));
+      if (parents.length === 0) parents = retiredSources(db, String(row.memory_id), sourceTupleOf(payload), replica, now, result);
+    }
     const revision: Revision = {
       revision_id: '', origin_id: canonical.origin_id, kind, author: replica, parents, control,
       natural: canonical.natural, payload_hash: hash, payload,
@@ -179,19 +258,7 @@ export function captureLocalChanges(db: DatabaseSync, now: number): CaptureResul
     if (seen.has(key)) continue;
     const others = originsOfRow(db, stored.kind as SyncKind, String(stored.local_id)).map((sibling) => `${sibling.kind} ${sibling.local_id}`);
     if (others.some((sibling) => seen.has(sibling))) continue;
-    const control = effectiveControl(db, origin.origin_id);
-    if (control.tombstone) continue;
-    const tombstone: Control = { tombstone: true, sensitivity_floor: control.sensitivity_floor };
-    const state = stateHash(null, tombstone);
-    if (origin.materialized_hash === state) continue;
-    const revision: Revision = {
-      revision_id: '', origin_id: origin.origin_id, kind: origin.kind, author: replica,
-      parents: origin.materialized_revision === null ? [] : [origin.materialized_revision], control: tombstone,
-      natural: origin.natural, payload_hash: null, payload: null,
-    };
-    revision.revision_id = revisionId(revision);
-    if (storeRevision(db, revision, null, now)) result.tombstones += 1;
-    setSelectedHead(db, origin.origin_id, revision.revision_id, revision.revision_id, state);
+    recordTombstone(db, origin, replica, now, result);
   }
   return result;
 }

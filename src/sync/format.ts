@@ -68,7 +68,14 @@ export const headerSchema = z.strictObject({
 });
 export type Header = z.infer<typeof headerSchema>;
 
-/** Identity fields plus the two delivery fields; `natural` and `payload` are checked per kind. */
+/** The UNIQUE-tuple members of a source, in origin form: what a head line without payload may still carry. */
+export const sourceTupleSchema = z.strictObject({
+  raw_event_id: z.string().min(1).max(512).nullable(), source_hash: hex64.nullable(),
+  portion_start: z.number().int().nullable(), portion_end: z.number().int().nullable(),
+  context_only: z.union([z.literal(0), z.literal(1)]), source_memory_id: originIdSchema.nullable(),
+});
+
+/** Identity fields plus the delivery fields; `natural` and `payload` are checked per kind. */
 export const revisionLineSchema = z.strictObject({
   origin_id: originIdSchema,
   kind: z.enum(SYNC_KINDS),
@@ -80,7 +87,9 @@ export const revisionLineSchema = z.strictObject({
   payload_hash: hex64.nullable(),
   head: z.boolean(),
   payload: z.record(z.string(), z.unknown()).nullable(),
+  tuple: sourceTupleSchema.optional(),
 }).refine((line) => line.payload === null || line.payload_hash !== null, { message: 'payload_without_hash' })
+  .refine((line) => line.tuple === undefined || (line.kind === 'source' && line.payload === null), { message: 'tuple_misplaced' })
   .refine((line) => new Set(line.parents).size === line.parents.length, { message: 'duplicate_parent' })
   .refine((line) => !line.parents.includes(line.revision_id), { message: 'self_parent' });
 export type RevisionLine = z.infer<typeof revisionLineSchema>;
