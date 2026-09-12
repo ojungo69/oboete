@@ -3,8 +3,9 @@
 // writers (FR-031), verify each one with a headless probe, and report wiring, probe, trust and
 // native-memory coexistence per agent (FR-032, FR-043). Nothing here is on the hook path.
 import { spawn, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -114,9 +115,19 @@ function defaults(): SetupDeps {
     },
     write: (text) => process.stdout.write(text),
     node: process.execPath,
-    // Inside dist/oboete.mjs this module is the bundle; the handlers must name that file.
-    bundle: fileURLToPath(import.meta.url),
+    // Inside dist/engine.mjs this module is the bundle, but the handlers must name the launcher
+    // next to it: that is the file that enables the compile cache before the engine is compiled
+    // (src/launcher.mjs, issue #210), and it is what `bin` and every existing install already name.
+    // Not process.argv[1] -- that is the test runner when a test imports the engine in-process.
+    // A wired path that does not exist would make every hook a silent no-op, so a dist without its
+    // launcher falls back to this file, which by construction is running.
+    bundle: launcherPath(fileURLToPath(import.meta.url)),
   };
+}
+
+function launcherPath(engine: string): string {
+  const launcher = join(dirname(engine), 'oboete.mjs');
+  return existsSync(launcher) ? launcher : engine;
 }
 
 function parseOptions(argv: string[]): Options {

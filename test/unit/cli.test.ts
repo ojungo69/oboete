@@ -10,6 +10,10 @@ import { withTempHome } from '../helpers/home.js';
 
 const root = fileURLToPath(new URL('../../..', import.meta.url));
 const bin = join(root, 'dist/oboete.mjs');
+// dist/oboete.mjs is the launcher that enables the compile cache (scripts/build.mjs, #210);
+// the dispatch and its uncaught-error handling live in the engine file it imports, and only the
+// engine can be re-evaluated per command with a query string.
+const engine = join(root, 'dist/engine.mjs');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
   version: string;
 };
@@ -89,8 +93,9 @@ for (const command of ['hook', 'capture', 'inject', 'observe']) {
       }
       process.env = { ...process.env, NODE_ENV: 'test', OBOETE_TEST_FAULT: 'pi-throw' };
       try {
-        // Import the real entry point in-process; each command gets a fresh ESM evaluation.
-        await import(`${pathToFileURL(bin).href}?uncaught=${command}`);
+        // Import the engine in-process; the query string gives each command a fresh evaluation,
+        // which importing the launcher would not (its own import of the engine carries no suffix).
+        await import(`${pathToFileURL(engine).href}?uncaught=${command}`);
         assert.equal(process.exitCode, command === 'observe' ? 3 : 0);
         assert.deepEqual(stdout, []);
         const log = oboetePaths(home).hookLog;

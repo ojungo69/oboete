@@ -279,3 +279,20 @@ writers require separate worktrees. No deployment follows merely from an increme
   passes 1,213 unit/migration/scripts on each Node, serial E2E/fault 202/202 on Node 22.16.0 and
   pack-check; the Node 24.16.0 serial run hit the documented load-only seed miss (201/202) while the
   resource measurement ran concurrently and is rerun in isolation afterwards.
+- T042 (hook cold start, issue #210): the capture hook's median moved 187.3 ms → 222.2 ms when US6
+  merged. `dist/` is now `src/launcher.mjs` copied to `dist/oboete.mjs` plus the bundle at
+  `dist/engine.mjs`, so the V8 compile cache is enabled before the bundle is compiled; interleaved
+  measurement puts the launcher build back at the pre-US6 baseline (184.5/186.9/192.6 ms against
+  218.9/217.1/214.8 ms). The `/code-review` pass on the first version found the split had also split
+  what "the bundle" means and that the installer had followed the wrong half — `oboete setup` wrote
+  `dist/engine.mjs` into every hook command, so the fix reached no install — plus a cache directory
+  trusted rather than checked after `mkdirSync`; both are fixed and pinned, and the six call sites
+  that name one of the two files are now deliberate. Two further review rounds found that the
+  launcher had no eslint rules at all (a `.mjs` under `src/` matched neither `files` list) and that
+  checking the versioned directories V8 writes inside the cache disabled the cache from the second
+  run onward wherever the umask is 002 -- silently, with every test still green; the check is now on
+  the cache directory's own traverse bits and the pin corrupts an entry to tell a live cache from a
+  dead one. Cache directory, the rejected alternatives, the
+  accepted `NODE_COMPILE_CACHE` and cache-growth costs and what the numbers do not claim are in
+  `contracts/injection-performance.md`; the pin is `test/unit/launcher.test.ts`. T042 stays
+  unchecked: the 1,000/10,000/100,000-event measurement it names is still open.

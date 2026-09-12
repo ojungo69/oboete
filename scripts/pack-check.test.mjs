@@ -41,7 +41,7 @@ test('size at the 30 MB limit passes; one byte over fails', () => {
   assert.equal(installedSizeLine(30_568_448), 'installed size: 29.152 MB (limit 30 MB)');
 });
 
-test('checkPackFiles requires the four dist files and rejects src/test/build/legacy', () => {
+test('checkPackFiles requires every dist file and rejects src/test/build/legacy', () => {
   const required = REQUIRED_PACK_FILES.map((path) => ({ path }));
   assert.deepEqual(checkPackFiles(required), { missing: [], forbidden: [], ok: true });
 
@@ -68,11 +68,11 @@ test('checkPackFiles requires the four dist files and rejects src/test/build/leg
 });
 
 for (const { name, files, message } of [
-  {
-    name: 'a missing required file',
-    files: REQUIRED_PACK_FILES.slice(1),
-    message: 'FAIL: tarball missing dist/oboete.mjs',
-  },
+  ...REQUIRED_PACK_FILES.map((path) => ({
+    name: `a missing ${path}`,
+    files: REQUIRED_PACK_FILES.filter((other) => other !== path),
+    message: `FAIL: tarball missing ${path}`,
+  })),
   {
     name: 'a forbidden top-level path',
     files: [...REQUIRED_PACK_FILES, 'src/cli.ts'],

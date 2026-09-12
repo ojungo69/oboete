@@ -8,12 +8,13 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -36,12 +37,26 @@ const { values } = parseArgs({
   strict: true,
 });
 
+// `bundle` is the file to run -- dist/oboete.mjs, the launcher, because that is what `bin` and the
+// installed hook commands name and its compile cache is part of what is being measured.
 const bundle = resolve(values.bundle ?? join(ROOT, 'dist', 'oboete.mjs'));
 const nodes = [...new Set((values.node ?? [process.execPath]).map((path) => resolve(path)))];
 
 for (const path of [bundle, ...nodes]) {
   if (!existsSync(path)) throw new Error(`not found: ${path}`);
 }
+
+// The record reports the engine's size, not the launcher's: the launcher is a couple of kilobytes,
+// most of it comment. `realpathSync` because a global install runs a symlinked bin and the engine
+// sits beside the real file; a pre-split build has no sibling and is its own engine, so this script
+// can still measure one for comparison. Resolved after the guard above, which owns the diagnostic.
+const sibling = join(dirname(realpathSync(bundle)), 'engine.mjs');
+const engine = existsSync(sibling) ? sibling : bundle;
+// The same rule the launcher applies (src/launcher.mjs): a relative or empty override is ignored.
+const cacheBase = process.env.XDG_CACHE_HOME;
+const cacheRoot = cacheBase !== undefined && isAbsolute(cacheBase) ? cacheBase : join(homedir(), '.cache');
+const compileCache = join(cacheRoot, 'oboete', 'compile');
+const cacheWarm = existsSync(compileCache) && readdirSync(compileCache).length > 0;
 
 function run(file, args, options = {}) {
   const capture = mkdtempSync(join(tmpdir(), 'oboete-command-'));
@@ -308,7 +323,8 @@ lines.push(
   `- Date: ${measuredAt}`,
   `- Node versions: ${nodeVersionsText}`,
   `- Commit: \`${commit}\``,
-  `- Bundle: \`${displayPath(bundle)}\` (${statSync(bundle).size} bytes)`,
+  `- Bundle: \`${displayPath(engine)}\` (${statSync(engine).size} bytes), run through \`${displayPath(bundle)}\``,
+  `- Compile cache: \`${displayPath(compileCache)}\`, ${cacheWarm ? 'populated' : 'empty'} before this run (issue #210: a cold cache costs the hook about 35 ms).`,
   `- Samples: ${RUNS} measured runs after ${WARM_UPS} warm-up runs per scenario`,
   `- Measurement attempts: ${attemptsText}; kept run ${kept.index} (lower 1-minute load average)`,
   '- Percentiles: linear interpolation over the 30 measured runs; status is `max <= budget`',

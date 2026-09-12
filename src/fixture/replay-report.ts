@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { hostname, type as osType, cpus, release, arch } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -33,6 +33,21 @@ export function repositoryRoot(): string {
       throw new Error('could not find repository root: no package.json above cwd or the engine bundle');
     }
     directory = parent;
+  }
+}
+
+/** The engine next to the launcher that was run. `dist/oboete.mjs` is a couple of kilobytes of
+ *  launcher (src/launcher.mjs, issue #210), most of it comment, so its size says nothing about the
+ *  build; a pre-split bundle has no sibling and is its own engine. `realpathSync` because a global
+ *  install runs a symlinked bin and the engine sits beside the real file. */
+export function enginePath(bundle: string): string {
+  try {
+    const engine = join(dirname(realpathSync(bundle)), 'engine.mjs');
+    return existsSync(engine) ? engine : bundle;
+  } catch {
+    // `fileBytes` below renders a missing file as 0 bytes rather than throwing; rendering a report
+    // is not where a vanished bundle should surface.
+    return bundle;
   }
 }
 
@@ -288,7 +303,7 @@ function setupSection(input: MeasureInput, machine: string, cpu: string): string
     `- CPU: \`${cpu}\`.`,
     `- Node: \`${process.execPath}\` (${process.version}).`,
     `- Commit: \`${gitHead(repositoryRoot())}\`.`,
-    `- Bundle: \`${input.bundle}\`, ${fileBytes(input.bundle)} bytes.`,
+    `- Bundle: \`${enginePath(input.bundle)}\`, ${fileBytes(enginePath(input.bundle))} bytes, run through \`${input.bundle}\`.`,
     `- Fixture: \`${input.fixturePath}\` (${input.lines.length} lines).`,
     `- \`OBOETE_HOME\`: \`${input.home}\`. Worker behavior uses this home's configuration; generation and delivery are scored separately below.`,
     `- Temporary git repository with one empty commit so \`HEAD\` exists. \`NODE_ENV=test\`.`,

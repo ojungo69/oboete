@@ -21,6 +21,7 @@ const NPM_TIMEOUT_MS = 10 * 60 * 1000;
 export const LIMIT_BYTES = 30 * 1024 * 1024;
 export const REQUIRED_PACK_FILES = [
   'dist/oboete.mjs',
+  'dist/engine.mjs',
   'dist/pi-extension.mjs',
   'dist/viewer/app.js',
   'dist/viewer/app.css',

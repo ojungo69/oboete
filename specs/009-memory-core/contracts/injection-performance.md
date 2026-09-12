@@ -51,3 +51,120 @@ If the second await throws, cancel the first plan best-effort before returning t
 failure. Mark caller-cancelled start packs `omitted/not_delivered` and permit their retry; ordinary
 empty/unsupported omissions still count as attempts. A cancelled plan is neither a delivered item
 nor proof that the epoch received its start pack.
+
+## Hook cold start: the engine bundle is compiled on every invocation
+
+Merging US6 (`af871c9a`) moved the capture hook's median from 187.3 ms to 222.2 ms, a third of the
+head-room under the 300 ms bound. The cost is not in the hook's own work: `dist/oboete.mjs` was a
+single-file esbuild bundle, and a hook is a cold Node process, so every invocation paid a full parse
+and compile of a file that had just grown by `src/sync/`.
+
+Node's V8 compile cache removes that cost, but a single-file bundle cannot enable it for itself --
+Node compiles the entry file before any statement in it runs. `dist/` is therefore two files:
+`dist/engine.mjs` is the bundle, and `dist/oboete.mjs` is `src/launcher.mjs` copied verbatim, a
+launcher that imports only `node:module`, `node:fs`, `node:os` and `node:path`, enables the cache,
+then imports the engine. It is a real source file rather than a string in the build script so that
+the one new piece of hook-path code is covered by the same lint the rest of the tree is, which took
+adding it to both `files` lists in `eslint.config.js` -- a `.mjs` under `src/` matched neither.
+
+Splitting `dist/` splits what "the bundle" means, and every site that names one of the two files has
+to pick deliberately. What names the program to run -- the `bin` entry, the hook commands
+`oboete setup` writes, the detector worker script, the Pi loader -- names `dist/oboete.mjs`, or the
+cache is never enabled where it matters. Existing installs already name that file, so nothing has to
+be rewritten. What reports the bundle's size -- the T068 replay record and `scripts/measure-cold-start.mjs` --
+names `dist/engine.mjs`, or the resource records would show a two-kilobyte bundle. One field cannot be
+both: the replay harness spawns its `bundle` for every hook line as well as printing its size, so it
+keeps naming the launcher and derives the engine for the size line only. That derivation goes
+through `realpathSync`, because a global install runs a symlinked `bin` and the engine sits next to
+the real file, not next to the link; where there is no sibling engine the file is its own, which
+keeps the script able to measure a pre-split build for comparison. Inside the bundle
+`import.meta.url` is now the engine, so `src/setup/setup.ts` composes the launcher path from its
+directory and falls back to itself if no launcher is there, since a wired path that does not exist
+would make every hook a silent no-op. `process.argv[1]` is not a substitute for `import.meta.url`
+here, because it is the test runner when a test imports the engine in-process
+(`test/unit/cli.test.ts`, which imports the engine for exactly that reason). The detector worker
+does still boot the launcher, since `process.argv[1]` is what names its script: it repeats the two
+directory checks and one dynamic import per worker, and it also gets the cache -- the medians below
+are whole-hook and include that worker.
+
+The cache directory is `$XDG_CACHE_HOME/oboete/compile`, or `~/.cache/oboete/compile` when that
+variable is unset or relative, created with mode 0700. It is deliberately neither of the two obvious
+alternatives. It is not under `OBOETE_HOME`, because the cache belongs to
+the build rather than to a data directory and the fault harness gives every scenario a fresh home --
+a cache under the home would be cold on each scenario and the fix would show up only in `--help`.
+It is not Node's own default either: with no argument `enableCompileCache()` uses
+`/tmp/node-compile-cache`, mode 0755 and shared by every user on the machine, and V8 does not
+authenticate cache entries, so a writable-by-others cache directory is somewhere to plant bytecode
+that the hook will execute.
+
+Creating the directory is not the same as owning it. `mkdirSync(..., { recursive: true, mode })`
+leaves an existing directory's mode and owner untouched and follows a symlink, so the launcher
+checks what it got -- `lstat`, not a symlink, this uid, the right mode -- and simply does not enable
+the cache when the answer is no. A symlink is refused rather than followed, because following one
+would let whoever planted it have Node create a directory and write a half-megabyte blob wherever it
+points.
+
+The check demands that `compile` be closed to everyone else (`mode & 0o077`), not merely unwritable,
+and the reason is where V8 actually reads. Entries live in a versioned directory that **Node**
+creates inside `compile`, at 0777 minus the umask -- 0755 on a 022 umask, 0775 on the 002 umask that
+RHEL-family user-private-group systems and many CI images use. With no traverse bit for group or
+other on `compile`, nothing outside this uid can reach that directory whatever its own mode is.
+Inspecting those children instead is the obvious move and it is wrong: it disables the cache from
+the second run onward on every 002-umask machine, silently, which is the whole regression back with
+no signal.
+
+The check stops there and says nothing about the directories above. Two rounds of this review tried
+requiring those to be unwritable by others and both times it refused real machines -- a `~/.cache`
+is 0755 nearly everywhere and 0775 wherever a 002 umask created it -- while buying very little:
+whatever an attacker puts at `compile` in place of ours is owned by them or is a symlink, and the
+check on the directory itself refuses both, fail-closed. What write access above actually buys is
+the race between that check and V8's read, and that race is accepted anyway; `homedir()` is not
+checked either, so demanding unwritable ancestors would have narrowed it rather than closed it.
+
+The one refusal that stays silent is a `compile` of this user's own left at a loose mode -- a
+restored backup, an `rsync` without `-p`, an NFS home. The hook returns to its uncached time with
+nothing saying so; `scripts/measure-cold-start.mjs` prints the directory and whether it was
+populated, and `oboete doctor` does not yet have an item for it. Correcting the mode instead would chmod the target of a planted symlink; refusing is the
+cheaper direction. What remains is the ordinary race between the check and V8's read, which needs
+write access to a directory the check just found nobody else can write to. A home that cannot hold
+the directory at all costs the cache and never the command.
+
+One thing the launcher cannot defend: `NODE_COMPILE_CACHE` in the environment wins. Node enables the
+cache at bootstrap from that variable, and a later `enableCompileCache(dir)` returns
+`{ status: 2 }` (already enabled) with the environment's directory, having written nothing to ours.
+That is accepted rather than mitigated, because an actor who can set that variable can also set
+`NODE_OPTIONS=--require ...` and run arbitrary code in the hook: environment control is already
+total, and the compile cache adds nothing to it.
+
+Measured on Node 22.16.0, `fault-grok`'s 21 hook invocations through `dist/oboete.mjs` -- the file
+the installer writes -- with the two builds interleaved in the same session so machine load cancels:
+
+| build | r1 | r2 | r3 | r4 | r5 | r6 | r7 |
+|---|---|---|---|---|---|---|---|
+| single file (`af871c9a`) | 218.9 | 217.1 | 214.8 | 220.5 | 216.7 | 211.3 | 212.4 |
+| launcher + engine | 184.5 | 186.9 | 192.6 | 183.9 | 185.7 | 180.1 | 182.0 |
+
+Medians in ms. Rounds 6 and 7 are the launcher as it ships; 4 and 5 the same with the earlier
+ownership check, 1 to 3 with none. `oboete --help` alone goes 62 ms to 44 ms warm. The launcher build sits at the pre-US6
+baseline, so compile cost accounted for the whole regression. Note what that does *not* say: the
+0008 schema still costs whatever it costs at `openDatabase`, and the cache now compensates for it
+rather than removing it. The first hook after an upgrade still finds an empty cache and pays the
+uncached ~222 ms once per version, inside the bound.
+
+Two accepted costs. The cache is unbounded -- Node keys entries on path and source hash and never
+evicts, so a directory of a few megabytes per distinct build accumulates for developers who rebuild
+often; it holds compiled code of this project and nothing from any fixture or capture, and
+`~/.cache` is where a user or CI image already expects to clear such a thing. And the test suite
+warms the developer's real `~/.cache` rather than an isolated one, because every CLI-spawning test
+inherits `HOME`: giving each scenario its own would make the cache cold in exactly the suite whose
+timing this section is about, so the suite deliberately measures the hook the way it actually runs.
+
+Pinned by `test/unit/launcher.test.ts`, which asserts the shape the speed-up depends on -- the entry
+file is `src/launcher.mjs` verbatim, executable and small; the engine is its own file; one run
+leaves an owner-only cache, the next run adds nothing to it, and a run after that rewrites an entry
+corrupted in between -- the last of those is what separates a cache being read back from one that
+was never enabled, which is invisible to every other assertion; a world-writable cache directory is
+refused, as is one merely traversable by others and one that is a symlink, while ancestors at 0755,
+0775 and even 0777 are accepted; a home that cannot hold a cache still exits 0 with no stderr; and
+`oboete setup` writes `dist/oboete.mjs` into the hook commands rather than the engine -- and not the
+timing, which belongs to the machine.

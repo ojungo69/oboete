@@ -15,8 +15,14 @@ M1 source retention and completion rules.
   `node:util` `parseArgs`, `crypto.randomUUID`, `Intl.Segmenter`, `worker_threads`. No Linux-only
   facility (no Unix sockets, `flock`, bash-only hooks); paths through `node:path` and `os.homedir()`.
 - Build: `scripts/build.mjs` (security-owned, Claude Code only). `src/cli.ts` becomes
-  `dist/oboete.mjs` (esbuild, one ESM file). Hook-path packages are bundled: `zod`, `smol-toml`,
-  `@secretlint/core`, `@secretlint/profiler`, `@secretlint/secretlint-rule-preset-recommend`. Everything else (`ai`,
+  `dist/engine.mjs` (esbuild, one ESM file), and `src/launcher.mjs` is copied verbatim to
+  `dist/oboete.mjs`, which stays the published entry point: it enables the V8 compile cache and then
+  imports the engine (issue #210; the reasoning is in `src/launcher.mjs`). Anything that names the
+  program to run -- hook commands, worker scripts -- names `dist/oboete.mjs`; anything that reports
+  the bundle's size names `dist/engine.mjs`. Inside the bundle `import.meta.url` is the engine, so
+  the launcher is `join(dirname(fileURLToPath(import.meta.url)), 'oboete.mjs')`. Hook-path packages
+  are bundled: `zod`, `smol-toml`, `@secretlint/core`, `@secretlint/profiler`,
+  `@secretlint/secretlint-rule-preset-recommend`. Everything else (`ai`,
   `@ai-sdk/*`, `workers-ai-provider`, `hono`, `@hono/node-server`, `preact`) stays external and MUST
   be loaded with a dynamic `await import('...')` inside the command that needs it, never at the top
   level of a module the hook path loads (`capture`, `events`, `privacy/*`, `agents/*`, `db/open`,
