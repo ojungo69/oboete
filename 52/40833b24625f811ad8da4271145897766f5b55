@@ -1,0 +1,20 @@
+test/unit/migration-authority.test.ts
+  s_5ab5797dc469b5::t_0f1a309c2a5b0f 263-270,273,276
+  s_5ab5797dc469b5::t_b2c95588b1ca0f 282
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "5240833b24625f811ad8da4271145897766f5b55",
+  "prompts": {},
+  "sessions": {
+    "s_5ab5797dc469b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44ceb1b9-68f7-4bf5-8646-52149920dd27",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
