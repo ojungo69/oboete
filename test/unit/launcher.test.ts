@@ -112,6 +112,8 @@ for (const mode of [0o755, 0o775, 0o777]) {
       chmodSync(join(home, '.cache'), mode);
       assert.equal(run(home).status, 0);
       assert.equal(cacheEntries(home).length, 1, 'a loose ancestor disabled the cache');
+      // Accepted, and left as it was found: the launcher does not tighten a directory it shares.
+      assert.equal(statSync(join(home, '.cache')).mode & 0o777, mode);
     });
   });
 }
@@ -130,11 +132,16 @@ test('a cache directory whose parent is a symlink is refused', async () => {
   });
 });
 
-test('the directories above the cache are left at the default mode', async () => {
+test('a cache directory this run creates is 0700 and ~/.cache is left to the umask', async () => {
   await withTempHome((home) => {
-    // ~/.cache belongs to every tool on the machine, and this may be the first thing to create it.
+    // ~/.cache belongs to every tool on the machine and this may be the first thing to create it,
+    // so it gets whatever an ordinary mkdir would give it -- which under a 077 umask is 0700 too,
+    // hence the control directory rather than a fixed mode to compare against.
+    const control = join(home, 'control');
+    mkdirSync(control);
     assert.equal(run(home).status, 0);
-    assert.notEqual(statSync(join(home, '.cache')).mode & 0o777, 0o700);
+    assert.equal(statSync(join(home, '.cache')).mode & 0o777, statSync(control).mode & 0o777);
+    assert.equal(statSync(join(home, '.cache', 'oboete')).mode & 0o777, 0o700);
     assert.equal(statSync(cacheDir(home)).mode & 0o777, 0o700);
   });
 });

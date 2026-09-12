@@ -131,14 +131,16 @@ total compromise on its own. What write access above buys is the race between th
 read, and that race is accepted anyway; `homedir()` is not checked either, so demanding unwritable
 ancestors would have narrowed it rather than closed it.
 
-`compile` is created at 0700 but the directories above it are not: on a fresh account or a container
-image the capture hook may be the first thing on the machine to create `~/.cache`, and that
-directory belongs to every tool, not to this one.
+`~/.cache` is created at whatever the umask gives it, while `oboete` and `compile` below it are
+created at 0700: on a fresh account or a container image the capture hook may be the first thing on
+the machine to create `~/.cache`, and that directory belongs to every tool, not to this one. An
+existing `~/.cache` is left exactly as found, whatever its mode.
 
 The one refusal that stays silent is a `compile` of this user's own left at a loose mode -- a
 restored backup, an `rsync` without `-p`, an NFS home. The hook returns to its uncached time with
-nothing saying so; `scripts/measure-cold-start.mjs` prints the directory and whether it was
-populated, and `oboete doctor` does not yet have an item for it. Refusing is deliberate: correcting
+nothing saying so; `scripts/measure-cold-start.mjs` prints the directory and whether it was non-empty
+-- which is a fact about the directory, not about whether the launcher accepted it -- and
+`oboete doctor` does not yet have an item for it. Refusing is deliberate: correcting
 the mode would chmod the target of whatever symlink was planted there. What remains is the ordinary
 race between the check and V8's read, which needs write access to the cache directory itself -- or
 to any directory above it, `$HOME` included, none of which is checked. A writable `$HOME` is already
@@ -182,9 +184,10 @@ often; it holds compiled code of this project and nothing from any fixture or ca
 `~/.cache` is where a user or CI image already expects to clear such a thing. And the test suite warms the
 developer's real `~/.cache`, because most CLI-spawning tests inherit `HOME`: giving each scenario its
 own would make the cache cold in exactly the suite whose timing this section is about, so those
-suites deliberately measure the hook the way it actually runs. The tests that do override `HOME`
-(`cli`, `detect`, `probe`, `codex-trust`, `doctor`, `fault-pi`) do it for agent-home detection and
-consequently run uncached, paying the compile and a discarded cache write on every spawn.
+suites deliberately measure the hook the way it actually runs. Two suites that spawn the CLI do
+override `HOME` (`cli`, `fault-pi`) and consequently run uncached, paying the compile and a
+discarded cache write on every spawn; `launcher` overrides it deliberately, since a cache directory
+is what it is testing.
 
 Pinned by `test/unit/launcher.test.ts`, which asserts the shape the speed-up depends on -- the entry
 file is `src/launcher.mjs` verbatim, executable and small; the engine is its own file; one run
@@ -192,7 +195,7 @@ leaves an owner-only cache, the next run adds nothing to it, and a run after tha
 corrupted in between -- the last of those is what separates a cache being read back from one that
 was never enabled, which is invisible to every other assertion; a world-writable cache directory is
 refused, as is one merely traversable by others, one that is a symlink and one whose parent is a
-symlink, while ancestors at 0755, 0775 and even 0777 are accepted and are left at the mode they had;
+symlink, while ancestors at 0755, 0775 and even 0777 are accepted and left at the mode they had;
 a home that cannot hold a cache still exits 0 with no stderr; and
 `oboete setup` writes `dist/oboete.mjs` into the hook commands rather than the engine -- and not the
 timing, which belongs to the machine.

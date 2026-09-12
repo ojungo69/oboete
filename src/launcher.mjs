@@ -34,9 +34,10 @@ try {
   const root = base !== undefined && isAbsolute(base) ? base : join(homedir(), '.cache');
   const parent = join(root, 'oboete');
   const cache = join(parent, 'compile');
-  // The cache directory itself is created 0700; the directories above it are not, because this may
-  // be the first thing on the machine to create `~/.cache` and that one belongs to every tool.
-  mkdirSync(parent, { recursive: true });
+  // `~/.cache` is left at whatever mode the umask gives it, because this may be the first thing on
+  // the machine to create it and that directory belongs to every tool. The two below it are ours.
+  mkdirSync(root, { recursive: true });
+  mkdirSync(parent, { recursive: true, mode: 0o700 });
   // The parent is checked before `compile` is created, not after: recursive mkdir follows a link,
   // so a link planted here would otherwise have us create `compile` in somebody else's tree and
   // write bytecode into it while every check on `compile` itself still passed -- it would be ours,
