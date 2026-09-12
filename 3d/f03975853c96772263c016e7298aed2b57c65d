@@ -1,0 +1,23 @@
+test/unit/sync.test.ts
+  s_5ab5797dc469b5::t_d07573a53f35aa 728-731
+src/sync-cli.ts
+  s_5ab5797dc469b5::t_ff310fdc5f63e8 98-103
+specs/009-memory-core/contracts/sync.md
+  s_5ab5797dc469b5::t_9e40ef63263cab 1001-1004
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "3df03975853c96772263c016e7298aed2b57c65d",
+  "prompts": {},
+  "sessions": {
+    "s_5ab5797dc469b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44ceb1b9-68f7-4bf5-8646-52149920dd27",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
