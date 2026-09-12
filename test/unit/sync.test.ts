@@ -725,6 +725,10 @@ test('oboete sync commands: init, key show on a terminal only, join by typed key
     assert.equal(await runSync(['push', '--classes', 'eligible', '--json'], overridden.io, pathsA, 22), 2);
     assert.equal(overridden.out.length, 0, 'nothing was published');
     assert.equal(await runSync(['status', '--republish', '--json'], fakeIo(false).io, pathsB, 22), 2);
+    // `key show` prints the key line itself, which is not JSON and is never meant for a machine.
+    const keyJson = fakeIo(true);
+    assert.equal(await runSync(['key', 'show', '--json'], keyJson.io, pathsA, 22), 2);
+    assert.equal(keyJson.out.length, 0, 'no key was printed');
     const unknown = fakeIo(false);
     assert.equal(await runSync(['resolve', 'x', '--keep', 'y', '--json'], unknown.io, pathsB, 22), 1);
     assert.equal((JSON.parse(unknown.err[0]!) as { error: string }).error, 'unknown_origin');

@@ -95,7 +95,12 @@ export async function runSync(argv: string[], io: Io = processIo(), paths: Oboet
     // push checks is taken over them. Accepting `--classes` on a push and ignoring it would export
     // the recorded classes against the intent the developer just typed, so it is refused instead.
     || (parsed.values.classes !== undefined && command !== 'init' && command !== 'join')
-    || (parsed.values.republish === true && command !== 'push')) {
+    || (parsed.values.republish === true && command !== 'push')
+    // `key show` prints the key line itself, which is not JSON and is never meant for a machine to
+    // read: it is shown on a terminal to be carried to the next device by hand. The usage line is
+    // the only one without `[--json]`, and the parser refuses the combination rather than printing
+    // a secret to something that asked for a parseable stream.
+    || (command === 'key' && json)) {
     io.err(USAGE);
     return 2;
   }

@@ -998,8 +998,10 @@ compensating-write design: a rollback that undoes a write another process made):
 - `--classes` is refused everywhere but `init`/`join`, and `--republish` everywhere but `push`.
   Classes are consent-bound: they are recorded once and the consent hash is taken over them, so a
   push that accepted the flag and exported the recorded set would ship exactly what the developer
-  typed the flag to withhold. Silently ignoring a flag is the failure mode; exiting 2 is not
-  (sync-cli, pinned);
+  typed the flag to withhold. Silently ignoring a flag is the failure mode; exiting 2 is not.
+  `key show --json` is refused for the same reason with a sharper edge: the command prints the key
+  line itself, which is not JSON and is meant to be read off a terminal and carried by hand, never
+  handed to something that asked for a parseable stream (sync-cli, both pinned);
 - **Machine-local repository keys are not a boundary.** Three passes over `applyRepoLines` in this
   round each closed a way to bind one and each exposed the next, which is the signal that the
   premise was wrong rather than the code. What is true: a peer knows this replica's id (a bundle is
