@@ -47,9 +47,11 @@ M1 source retention and completion rules.
   mean a fresh compile of the whole engine per spawn -- about 35 ms, measured on CI against a 300 ms
   budget. `.github/workflows/ci.yml` also runs the suite through command lines of its own that carry
   no `--import`; there the variable is set by importing the module, which every timed suite does for
-  `repositoryRoot` or `warmCompileCache`. Do not override the variable in a test;
-  `test/unit/launcher.test.ts` deletes it deliberately, because the directory the launcher picks for
-  itself is what that suite is about. A suite that times the bundle also calls
+  `repositoryRoot` or `warmCompileCache`. The helper always picks `build/compile-cache` and ignores
+  whatever the environment already said, because a directory it does not own cannot be checked well
+  enough to tell a working cache from a refused one. `test/unit/launcher.test.ts` deletes the
+  variable deliberately, because the directory the launcher picks for itself is what that suite is
+  about. A suite that times the bundle also calls
   `warmCompileCache(BUNDLE)` first, so the run that compiles the engine is never the run an
   assertion measures -- and that call asserts the shared cache is set, so losing the import fails
   the suite by name instead of by percentile.

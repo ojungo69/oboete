@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** The repository root, found by walking up to the `package.json`: the suites that spawn
@@ -37,22 +37,21 @@ export function repositoryRoot(): string {
 // `NODE_COMPILE_CACHE` wins over the launcher's own `enableCompileCache` call, the one thing
 // contracts/injection-performance.md records the launcher cannot defend against. That is why this
 // works, and why `test/unit/launcher.test.ts` deletes the variable: the directory the launcher
-// chooses for itself is exactly what that suite is about. An operator's own choice of directory is
-// left alone, but only a real one: `NODE_COMPILE_CACHE=` set to nothing, or to spaces, is how Node
-// is told to write a cache into a directory named by the empty string or by whitespace, so a value
-// that is blank once trimmed is read as unset, which is what `src/paths.ts` does with its own
-// overrides. A relative one is resolved here, once, against the directory the suite was started
-// from. Node resolves that string separately in every child, and these children are spawned in
-// temporary repositories, so handing it on unresolved would give each of them a compile cache of
-// its own: the warm-up would fill a directory no timed run ever reads, and the deadline failures
-// this file exists to prevent would come back wearing the costume of a shared cache.
-// `NODE_DISABLE_COMPILE_CACHE` is deleted rather than respected, because Node reads it during
-// child bootstrap and it wins over the directory, and a suite that measures a hook with no compile
-// cache is measuring a hook nobody runs.
-const inherited = process.env.NODE_COMPILE_CACHE?.trim();
-export const SHARED_COMPILE_CACHE = inherited
-  ? resolve(inherited)
-  : join(repositoryRoot(), 'build', 'compile-cache');
+// chooses for itself is exactly what that suite is about.
+//
+// One directory, chosen here, whatever the environment already said. An inherited value was honoured
+// for three review rounds and each one found another way for it to be accepted and still not be a
+// cache: blank or whitespace, which Node reads as a directory named by nothing; relative, which
+// every child resolves against its own temporary repository; a path Node refuses, after which the
+// launcher quietly falls back to the cache inside the warm-up's throwaway home; and a refused path
+// that happens to be non-empty, which satisfies even a check on the contents. All four end the same
+// way -- every timed child compiling the engine from source with the variable set and every
+// assertion green -- and validating an arbitrary directory well enough to tell them apart is a
+// larger job than this file has any reason to do. The suite's own `build/compile-cache` is a
+// directory it makes, owns and can check. `NODE_DISABLE_COMPILE_CACHE` is deleted rather than
+// respected, because Node reads it during child bootstrap and it wins over the directory, and a
+// suite that measures a hook with no compile cache is measuring a hook nobody runs.
+export const SHARED_COMPILE_CACHE = join(repositoryRoot(), 'build', 'compile-cache');
 delete process.env.NODE_DISABLE_COMPILE_CACHE;
 process.env.NODE_COMPILE_CACHE = SHARED_COMPILE_CACHE;
 

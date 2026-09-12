@@ -268,7 +268,11 @@ them spawns inherits it, which is the point: the first attempt set it at three s
 missed the ad-hoc one in `test/fault-pi.test.ts` and the whole unit batch. Two rounds on the
 `fault-*` suites again: 41.8, 41.6 s, under the `~/.cache` figure, so the one-directory rule costs
 the suite nothing. `test/unit/launcher.test.ts` deletes the variable instead, because the directory
-the launcher picks for itself is exactly what that suite is about.
+the launcher picks for itself is exactly what that suite is about. The helper names
+`build/compile-cache` and ignores an inherited value: three review rounds each found another way
+for one to be accepted and still not be a cache -- blank, relative, refused by Node, refused but
+non-empty -- and all four end with every timed child compiling from source while the variable is
+set and every assertion green.
 
 `--import` covers one of the three places CI runs these tests: the `engine` job's `npm test`. The
 `check` job runs the timed e2e bundle tests and the instrumented unit batch as steps of their own,
