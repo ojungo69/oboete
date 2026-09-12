@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  excerptInput,
-  MIN_PROMPT_TEXT,
   observerOutputJsonSchema,
   observerOutputSchema,
   shortenDisplayPath,
@@ -15,6 +13,7 @@ import {
 function observation(overrides: Partial<Observation> = {}): Observation {
   return {
     type: 'change',
+    visibility: 'project',
     title: 'edited src/cli.ts',
     body: 'write src/cli.ts (+12/-3)',
     concepts: ['what-changed'],
@@ -30,7 +29,7 @@ function observation(overrides: Partial<Observation> = {}): Observation {
 }
 
 function output(observations: Observation[] = [observation()]) {
-  return { observations };
+  return { observations, checkpoint: { decision: 'unchanged', source_event_ids: ['e1'], reason: 'No progress changed.' } };
 }
 
 const events: ObserverInput['events'] = [
@@ -177,61 +176,6 @@ test('shortenDisplayPath of a 200-character path is 61 characters', () => {
   assert.ok(short.endsWith(path.slice(-60)));
 });
 
-test('excerptInput keeps summaries and prompts and the newest tool events', () => {
-  const toolEvents: ObserverInput['events'] = [];
-  for (let i = 0; i < 30; i += 1) {
-    toolEvents.push({
-      id: `t${i}`,
-      kind: 'tool_result',
-      tool_name: 'read',
-      output: 'x'.repeat(900),
-    });
-  }
-  const input: ObserverInput = {
-    repo_ref: 'repo-1',
-    session: {
-      started_at: 1,
-      turns: [{ ordinal: 0, started_at: 1, ended_at: 2 }],
-    },
-    events: [
-      { id: 'p1', kind: 'prompt', text: 'first prompt' },
-      ...toolEvents.slice(0, 20),
-      { id: 'p2', kind: 'prompt', text: 'second prompt' },
-      ...toolEvents.slice(20),
-    ],
-    free_summaries: {
-      last_assistant_message: 'assistant kept',
-      compaction_summary: 'compaction kept',
-    },
-    nearby: [],
-    language_hint: 'en',
-  };
-
-  const before = JSON.stringify(input).length;
-  assert.ok(before > 25_000);
-  assert.ok(before < 40_000);
-
-  const { input: excerpted, excerpted: didExcerpt } = excerptInput(input);
-  const after = JSON.stringify(excerpted).length;
-  assert.equal(didExcerpt, true);
-  assert.ok(after <= 12_000);
-  assert.equal(excerpted.free_summaries.last_assistant_message, 'assistant kept');
-  assert.equal(excerpted.free_summaries.compaction_summary, 'compaction kept');
-
-  const ids = excerpted.events.map((event) => event.id);
-  assert.ok(ids.includes('p1'));
-  assert.ok(ids.includes('p2'));
-
-  const survivingTools = excerpted.events
-    .filter((event) => event.kind === 'tool_result')
-    .map((event) => event.id);
-  assert.ok(survivingTools.length > 0);
-  assert.ok(survivingTools.length < 30);
-  const expected = Array.from({ length: 30 }, (_, i) => `t${i}`).slice(
-    30 - survivingTools.length,
-  );
-  assert.deepEqual(survivingTools, expected);
-});
 
 test('observerOutputJsonSchema serializes and contains observations', () => {
   const encoded = JSON.stringify(observerOutputJsonSchema);
@@ -301,119 +245,10 @@ test('validateObserverOutput still refuses a structurally broken output', () => 
   assert.equal(empty.ok, false);
 });
 
-test('excerptInput bounds an oversized compaction summary and keeps the summary above the prompt', () => {
-  const prompt = 'fix the parser '.repeat(40);
-  const { input: excerpted, excerpted: didExcerpt } = excerptInput({
-    repo_ref: 'repo-1',
-    session: { started_at: 1, turns: [{ ordinal: 0, started_at: 1, ended_at: 2 }] },
-    events: [{ id: 'p1', kind: 'prompt', text: prompt }],
-    free_summaries: { compaction_summary: 's'.repeat(30_000) },
-    nearby: [],
-    language_hint: 'en',
-  });
-  assert.equal(didExcerpt, true);
-  assert.ok(JSON.stringify(excerpted).length <= 12_000);
-  // contracts/observer.md "Input": the free summaries are kept first and the prompts next, so the
-  // prompt is shortened to its floor before the summary loses anything.
-  assert.equal(prompt.length, 600);
-  assert.equal(excerpted.events[0]?.text?.length, MIN_PROMPT_TEXT);
-  assert.ok((excerpted.free_summaries.compaction_summary?.length ?? 0) > 10_000);
-});
 
-test('excerptInput bounds the nearby memories before it touches the prompts', () => {
-  const prompt = 'fix the parser';
-  const { input: excerpted, excerpted: didExcerpt } = excerptInput({
-    repo_ref: 'repo-1',
-    session: { started_at: 1, turns: [] },
-    events: [{ id: 'p1', kind: 'prompt', text: prompt }],
-    free_summaries: {},
-    nearby: Array.from({ length: 40 }, (_, index) => ({
-      id: `m${index}`,
-      type: 'decision',
-      title: `nearby ${index}`,
-      body: 'n'.repeat(2_000),
-      deleted: false,
-    })),
-    language_hint: 'en',
-  });
-  assert.equal(didExcerpt, true);
-  assert.ok(JSON.stringify(excerpted).length <= 12_000);
-  assert.equal(excerpted.nearby.length, 40);
-  for (const row of excerpted.nearby) assert.ok(row.body.length <= 500, 'a nearby body is capped');
-  assert.equal(excerpted.events[0]?.text, prompt);
-});
 
-test('excerptInput never empties a prompt', () => {
-  const { input: excerpted } = excerptInput({
-    repo_ref: 'repo-1',
-    session: { started_at: 1, turns: [] },
-    events: Array.from({ length: 6 }, (_, index) => ({
-      id: `p${index}`,
-      kind: 'prompt' as const,
-      text: 'p'.repeat(3_000),
-    })),
-    free_summaries: {},
-    nearby: [],
-    language_hint: 'en',
-  });
-  assert.equal(excerpted.events.length, 6);
-  for (const event of excerpted.events) assert.ok((event.text?.length ?? 0) >= 200);
-});
 
-test('excerptInput bounds the input even when every prompt is already at its floor', () => {
-  const { input: excerpted, excerpted: didExcerpt } = excerptInput({
-    repo_ref: 'repo-1',
-    session: { started_at: 1, turns: [] },
-    events: Array.from({ length: 100 }, (_, index) => ({
-      id: `p${index}`,
-      kind: 'prompt' as const,
-      text: 'p'.repeat(3_000),
-    })),
-    free_summaries: {},
-    nearby: [],
-    language_hint: 'en',
-  });
-  assert.equal(didExcerpt, true);
-  // FR-015 is a cap, not a preference: 100 prompts at MIN_PROMPT_TEXT would be 24,008 characters.
-  assert.ok(
-    JSON.stringify(excerpted).length <= 12_000,
-    `serialized ${JSON.stringify(excerpted).length} characters`,
-  );
-  // The oldest prompts pay for it, so the newest still carries its text.
-  assert.ok((excerpted.events.at(-1)?.text?.length ?? 0) >= MIN_PROMPT_TEXT);
-});
 
-test('excerptInput bounds oversized nearby titles and a long turn list', () => {
-  const prompt = 'fix the parser';
-  const { input: excerpted, excerpted: didExcerpt } = excerptInput({
-    repo_ref: 'repo-1',
-    session: {
-      started_at: 1,
-      turns: Array.from({ length: 2_000 }, (_, index) => ({
-        ordinal: index,
-        started_at: index,
-        ended_at: index + 1,
-      })),
-    },
-    events: [{ id: 'p1', kind: 'prompt', text: prompt }],
-    free_summaries: {},
-    nearby: Array.from({ length: 40 }, (_, index) => ({
-      id: `m${index}`,
-      type: 'decision',
-      title: 't'.repeat(2_000),
-      body: '',
-      deleted: false,
-    })),
-    language_hint: 'en',
-  });
-  assert.equal(didExcerpt, true);
-  assert.ok(
-    JSON.stringify(excerpted).length <= 12_000,
-    `serialized ${JSON.stringify(excerpted).length} characters`,
-  );
-  // Context from other sessions and the turn list go before the session's own prompt.
-  assert.equal(excerpted.events[0]?.text, prompt);
-});
 
 test('validateObserverOutput trims a long classification reason instead of refusing the batch', () => {
   const result = validateObserverOutput(

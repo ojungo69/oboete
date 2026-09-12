@@ -5,12 +5,13 @@ import { spawnSync } from 'node:child_process';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { openDatabase } from '../../src/db/open.js';
-import { memoryScope } from '../../src/db/queries.js';
+import { grantVisibility, memoryScope } from '../../src/db/queries.js';
 import type { AgentName } from '../../src/events.js';
 import { ensureDirectories, oboetePaths, type OboetePaths } from '../../src/paths.js';
 import { cjkBigrams } from '../../src/retrieval/fts.js';
 import { resolveRepoIdentity, type RepoIdentity } from '../../src/repo-identity.js';
 import { withTempHome } from './home.js';
+import { seedWorkBinding } from './work.js';
 
 export const NOW = 1_800_000_000_000;
 
@@ -22,7 +23,7 @@ export type Fixture = {
 };
 
 export const scope = (fixture: Fixture) =>
-  memoryScope(fixture.db, { repoId: fixture.identity.id, destination: 'injection' });
+  memoryScope(fixture.db, { repoId: fixture.identity.id, destination: 'injection', workId: `fixture-work:${fixture.identity.id}` });
 
 export async function withFixture(run: (fixture: Fixture) => Promise<void>): Promise<void> {
   await withTempHome(async (home) => {
@@ -78,6 +79,9 @@ export function insertSession(
     input.epoch ?? 0,
     input.summaryState ?? null,
   );
+  seedWorkBinding(fixture.db, input.id);
+  fixture.db.prepare('UPDATE work_contexts SET local_key = ?, root = ? WHERE repo_id = ?')
+    .run(fixture.identity.worktreeKey, fixture.identity.root, fixture.identity.id);
 }
 
 export function insertMemory(
@@ -101,6 +105,7 @@ export function insertMemory(
     input.pinned ? 1 : null,
     NOW - 5_000,
   );
+  grantVisibility(fixture.db, input.id, { audience: 'project', repoId: fixture.identity.id }, 'migration', NOW);
 }
 
 export function seedSummary(fixture: Fixture): void {
@@ -118,6 +123,14 @@ export function seedSummary(fixture: Fixture): void {
     summaryState: 'done',
     summaryId: 'm-summary',
   });
+  fixture.db.prepare('UPDATE memories SET work_id = ?, provenance_complete = 1 WHERE id = ?').run(`fixture-work:${fixture.identity.id}`, 'm-summary');
+  fixture.db.prepare('DELETE FROM memory_visibility WHERE memory_id = ?').run('m-summary');
+  grantVisibility(fixture.db, 'm-summary', { audience: 'work', repoId: fixture.identity.id,
+    workId: `fixture-work:${fixture.identity.id}` }, 'observer', NOW);
+  fixture.db.prepare(`INSERT INTO memory_sources (memory_id, capture_root, source_paths_json, source_context_id)
+    VALUES ('m-summary', ?, '[]', ?)`).run(fixture.identity.root, `fixture-context:${fixture.identity.id}`);
+  fixture.db.prepare('UPDATE work_items SET current_checkpoint_memory_id = ? WHERE id = ?')
+    .run('m-summary', `fixture-work:${fixture.identity.id}`);
 }
 
 export async function stdoutOf(run: () => Promise<number>): Promise<string> {

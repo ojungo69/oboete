@@ -17,7 +17,11 @@ import {
   searchMemories,
 } from './memories-cli.js';
 import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from './paths.js';
+import { syncStatus } from './sync/status.js';
 import { resolveRepoIdentity } from './repo-identity.js';
+import { chooseSourceWork, chooseWork, readWorkSelection, workStatus } from './work.js';
+import { filterMemoryOutput, filterReadOutput, filterTimelineOutput } from './privacy/provenance.js';
+import { sharingStatus } from './sharing.js';
 
 /** The legacy-era revisions this server speaks; the last one is what an unknown client gets. */
 const PROTOCOL_VERSIONS = ['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'] as const;
@@ -27,6 +31,10 @@ const MAX_LIMIT = 50;
 const DATABASE_TIMEOUT_MS = 2_000;
 
 const limitSchema = z.number().int().min(1).max(MAX_LIMIT);
+const readProperties = {
+  binding: { type: 'string', minLength: 1, maxLength: 128, description: 'An exact current-worktree binding ID' },
+  history: { type: 'boolean', default: false, description: 'Deliberately include retained historical memories and checkpoints' },
+} as const;
 
 export const MCP_TOOLS = [
   {
@@ -35,6 +43,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
+        ...readProperties,
         query: { type: 'string' },
         limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: DEFAULT_LIMIT },
       },
@@ -47,6 +56,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
+        ...readProperties,
         session: { type: 'string' },
         limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: DEFAULT_LIMIT },
       },
@@ -57,19 +67,60 @@ export const MCP_TOOLS = [
     description: 'One memory by id within the current repository',
     inputSchema: {
       type: 'object',
-      properties: { id: { type: 'string' } },
+      properties: { ...readProperties, id: { type: 'string' } },
       required: ['id'],
     },
+  },
+  {
+    name: 'work_status',
+    description: 'List work and selection bindings in the current worktree; optionally include retained work elsewhere in this repository',
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    inputSchema: { type: 'object', properties: { all: { type: 'boolean', default: false } }, additionalProperties: false },
+  },
+  {
+    name: 'work_choose',
+    description: 'Select work for an exact current-worktree binding or explicitly assign one unbound historical source',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    inputSchema: {
+      type: 'object', properties: {
+        binding: { type: 'string', minLength: 1, maxLength: 128 },
+        source: { type: 'string', minLength: 1, maxLength: 128 },
+        work: { type: 'string', minLength: 1, maxLength: 128, description: 'A work ID or new' },
+      },
+      oneOf: [{ required: ['binding', 'work'], not: { required: ['source'] } },
+        { required: ['source', 'work'], not: { required: ['binding'] } }],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'sharing_status',
+    description: 'Inspect sharing proposals originating in the current repository. Approve or reject through the human-operated CLI or viewer.',
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'sync_status',
+    description: 'Report the local device-sync state: configured space, replicas seen, open conflicts and withheld rows. Push, pull and resolve run only through the human-operated CLI.',
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
 ] as const;
 
 const MAX_TEXT = 4096;
 const MAX_LINE_CHARS = 1_048_576;
+const readArguments = { binding: z.string().min(1).max(128).optional(), history: z.boolean().default(false) };
 
 const toolArguments = {
-  search: z.looseObject({ query: z.string().max(MAX_TEXT), limit: limitSchema.default(DEFAULT_LIMIT) }),
-  timeline: z.looseObject({ session: z.string().max(MAX_TEXT).optional(), limit: limitSchema.default(DEFAULT_LIMIT) }),
-  get: z.looseObject({ id: z.string().max(MAX_TEXT) }),
+  sharing_status: z.strictObject({}),
+  sync_status: z.strictObject({}),
+  search: z.looseObject({ ...readArguments, query: z.string().max(MAX_TEXT), limit: limitSchema.default(DEFAULT_LIMIT) }),
+  timeline: z.looseObject({ ...readArguments, session: z.string().max(MAX_TEXT).optional(), limit: limitSchema.default(DEFAULT_LIMIT) }),
+  get: z.looseObject({ ...readArguments, id: z.string().max(MAX_TEXT) }),
+  work_status: z.strictObject({ all: z.boolean().default(false) }),
+  work_choose: z.union([
+    z.strictObject({ binding: z.string().min(1).max(128), work: z.string().min(1).max(128) }),
+    z.strictObject({ source: z.string().min(1).max(128), work: z.string().min(1).max(128) }),
+  ]),
 };
 
 const requestSchema = z.looseObject({
@@ -87,6 +138,7 @@ export type McpRuntime = {
 };
 
 type JsonRpcId = string | number | null;
+type McpContext = { repoId: string; contextKey: string | null; repoRoot: string; paths: OboetePaths };
 type ToolResult = {
   content: { type: 'text'; text: string }[];
   structuredContent?: unknown;
@@ -119,10 +171,10 @@ function runtimeWith(overrides: Partial<McpRuntime>): McpRuntime {
   };
 }
 
-function withDatabase<T>(paths: OboetePaths, fn: (db: DatabaseSync) => T): T {
+async function withDatabase<T>(paths: OboetePaths, fn: (db: DatabaseSync) => T | Promise<T>): Promise<T> {
   const opened = openDatabase({ path: paths.db, timeoutMs: DATABASE_TIMEOUT_MS });
   try {
-    return fn(opened.db);
+    return await fn(opened.db);
   } finally {
     opened.db.close();
   }
@@ -132,28 +184,70 @@ function textResult(text: string, structuredContent: unknown): ToolResult {
   return { content: [{ type: 'text', text }], structuredContent };
 }
 
-function callTool(
+function currentContext(context: McpContext): boolean {
+  const current = resolveRepoIdentity(context.repoRoot);
+  return current.id === context.repoId && current.root === context.repoRoot && current.worktreeKey !== null
+    && current.worktreeKey === context.contextKey;
+}
+
+async function callTool(
   name: string,
   rawArguments: unknown,
-  context: { repoId: string; paths: OboetePaths },
-): ToolResult {
+  context: McpContext,
+): Promise<ToolResult> {
   // contracts/mcp.md: the boundary is the working directory, so a `repo` argument is refused.
   if (typeof rawArguments === 'object' && rawArguments !== null && 'repo' in rawArguments) {
     throw invalidParams('the repository is derived from the working directory the server was started in; a repo argument is not accepted');
   }
-  const schema = toolArguments[name as keyof typeof toolArguments];
+  const schema = Object.hasOwn(toolArguments, name) ? toolArguments[name as keyof typeof toolArguments] : undefined;
   if (schema === undefined) throw invalidParams(`unknown tool: ${name}`);
   const parsed = schema.safeParse(rawArguments ?? {});
   if (!parsed.success) throw invalidParams(z.prettifyError(parsed.error));
-  const args = parsed.data;
+  const args: Record<string, unknown> = parsed.data;
+  const unavailable: ToolResult = { content: [{ type: 'text', text: 'The repository context changed or could not be verified. Start a new MCP session in the intended directory.' }], isError: true };
+  if (!currentContext(context)) return unavailable;
 
-  return withDatabase(context.paths, (db) => {
-    const scope = memoryScope(db, { repoId: context.repoId, destination: 'injection' });
+  const result: ToolResult = await withDatabase(context.paths, async (db) => {
+    const selection = readWorkSelection(db, { ...context,
+      bindingId: 'binding' in args && typeof args.binding === 'string' ? args.binding : undefined });
+    const scope = memoryScope(db, { repoId: context.repoId, destination: 'injection',
+      workId: selection.workId, history: 'history' in args && args.history === true });
+    const privacy = { ...context, home: context.paths.home, bindingId: selection.bindingId,
+      workId: selection.workId, history: 'history' in args && args.history === true };
     switch (name) {
+      case 'sharing_status': {
+        const status = await sharingStatus(db, privacy);
+        const text = status.proposals.length === 0 ? 'No sharing proposals are available in this repository.'
+          : status.proposals.map((proposal) => `${proposal.id}: ${proposal.state} ${JSON.stringify(proposal.candidate_title)}: ${JSON.stringify(proposal.candidate_body)}`).join('\n');
+        return textResult(text + (status.hasMore ? '\nMore proposals are available. Review these to see the next ones.' : ''), status);
+      }
+      case 'sync_status': {
+        const status = syncStatus(db, context.paths);
+        return textResult(JSON.stringify(status), status);
+      }
+      case 'work_status': {
+        const status = workStatus(db, context, (args as z.infer<typeof toolArguments.work_status>).all);
+        const checked = await filterReadOutput(db, { ...privacy, history: true },
+          status.works.flatMap((work) => work.checkpoint === null ? [] : [work.checkpoint]), status.works);
+        const visible = new Map(checked.memories.map((memory) => [memory.id, memory]));
+        const result = { ...status, works: checked.works.map((work) => ({ ...work,
+          checkpoint: work.checkpoint === null ? null : visible.get(work.checkpoint.id) ?? null })) };
+        return textResult(JSON.stringify(result), result);
+      }
+      case 'work_choose': {
+        const choice = args as z.infer<typeof toolArguments.work_choose>;
+        const selected = 'binding' in choice
+          ? chooseWork(db, { ...context, bindingId: choice.binding, workId: choice.work, now: Date.now() })
+          : chooseSourceWork(db, { ...context, root: context.repoRoot, sourceId: choice.source, workId: choice.work, now: Date.now() });
+        return selected === null ? { content: [{ type: 'text',
+          text: 'The work or binding was not found in the current scope, or the choice is no longer current.' }], isError: true }
+          : textResult('The work selection was saved.', { selection: selected });
+      }
       case 'search': {
         const search = args as z.infer<typeof toolArguments.search>;
-        const rows = searchMemories(db, { ...context, query: search.query, limit: search.limit });
-        const memories = rows.map((row) => {
+        const rows = searchMemories(db, { ...context, query: search.query, limit: search.limit,
+          workId: selection.workId, history: search.history });
+        const checked = await filterReadOutput(db, privacy, rows.map((row) => {
           const memory = getMemory(db, row.id, scope);
           return {
             ...row,
@@ -162,20 +256,25 @@ function callTool(
             ),
             stale: memory?.citations_ok === 0,
           };
-        });
+        }), selection.choices);
+        const memories = checked.memories;
+        selection.choices = checked.works;
         return memories.length === 0
-          ? textResult(`${EMPTY_REASON}\n${LEXICAL_NOTE}`, { memories, degraded: null, note: LEXICAL_NOTE })
-          : textResult(renderSearch(rows), { memories, degraded: null });
+          ? textResult(`${EMPTY_REASON}\n${LEXICAL_NOTE}`, { memories, degraded: null, note: LEXICAL_NOTE, selection })
+          : textResult(renderSearch(memories), { memories, degraded: null, selection });
       }
       case 'timeline': {
         const options = args as z.infer<typeof toolArguments.timeline>;
-        const sessions = timeline(db, context.repoId, {
+        const checked = await filterTimelineOutput(db, privacy, timeline(db, context.repoId, {
           ...(options.session === undefined ? {} : { sessionId: options.session }),
           limit: options.limit,
-        });
+          workId: selection.workId, history: options.history,
+        }), selection.choices);
+        const sessions = checked.sessions;
+        selection.choices = checked.works;
         return textResult(
           sessions.length === 0 ? 'No sessions were found in the current repository.' : renderTimeline(sessions),
-          { sessions },
+          { sessions, selection },
         );
       }
       default: {
@@ -183,21 +282,26 @@ function callTool(
         const memory = getMemory(db, id, scope);
         if (memory === null) return { content: [{ type: 'text', text: 'not found' }], isError: true };
         const sources = memorySources(db, memory.id);
+        const visible = (await filterMemoryOutput(db, privacy, [{ ...memory, sources }]))[0];
+        if (visible === undefined) {
+          return { content: [{ type: 'text', text: 'not found' }], isError: true };
+        }
         return textResult(
           `Memory ${memory.id} is a ${memory.type} titled ${JSON.stringify(memory.title ?? '(untitled)')}. ` +
             `Its body is ${JSON.stringify(memory.body ?? '')}. Its sensitivity is ${memory.sensitivity}.`,
-          { ...memory, sources },
+          visible,
         );
       }
     }
   });
+  return name === 'work_choose' || currentContext(context) ? result : unavailable;
 }
 
-function handle(
+async function handle(
   method: string,
   params: unknown,
-  context: { repoId: string; paths: OboetePaths },
-): unknown {
+  context: McpContext,
+): Promise<unknown> {
   switch (method) {
     case 'initialize': {
       const requested = (params as { protocolVersion?: unknown } | undefined)?.protocolVersion;
@@ -239,7 +343,7 @@ function respond(runtime: McpRuntime, id: JsonRpcId, body: { result: unknown } |
   runtime.writeOut(`${JSON.stringify(frame)}\n`);
 }
 
-function serveLine(line: string, runtime: McpRuntime, context: { repoId: string; paths: OboetePaths }): void {
+async function serveLine(line: string, runtime: McpRuntime, context: McpContext): Promise<void> {
   if (line.length > MAX_LINE_CHARS) {
     // ponytail: readline still buffers the oversized line; the client spawns this server, so the cost is its own.
     respond(runtime, null, { error: new RpcError(-32600, 'Invalid Request') });
@@ -261,7 +365,7 @@ function serveLine(line: string, runtime: McpRuntime, context: { repoId: string;
   const { id, method, params } = request.data;
   const notification = id === undefined;
   try {
-    const result = handle(method, params, context);
+    const result = await handle(method, params, context);
     if (!notification) respond(runtime, id, { result });
   } catch (error) {
     if (notification) return;
@@ -285,11 +389,12 @@ export async function runMcp(argv: string[], overrides: Partial<McpRuntime> = {}
   }
   const paths = oboetePaths(resolveHome());
   ensureDirectories(paths);
-  const context = { repoId: resolveRepoIdentity(runtime.cwd).id, paths };
+  const identity = resolveRepoIdentity(runtime.cwd);
+  const context = { repoId: identity.id, contextKey: identity.worktreeKey, repoRoot: identity.root, paths };
 
   for await (const line of createInterface({ input: runtime.input, crlfDelay: Number.POSITIVE_INFINITY })) {
     if (line.trim() === '') continue;
-    serveLine(line, runtime, context);
+    await serveLine(line, runtime, context);
   }
   return 0;
 }

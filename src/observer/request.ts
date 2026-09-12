@@ -4,6 +4,7 @@
 // SC-006. Security-owned (plan.md "Structure Decision"): no other module assembles a request, and
 // every field here states which rule admitted it.
 import type { NearbyCandidate } from '../db/queries.js';
+import { canonicalJson, contentHash } from '../events.js';
 import { isAllowed, type DestinationRules } from '../privacy/egress.js';
 import {
   payloadOf,
@@ -13,7 +14,10 @@ import {
   type TurnRow,
 } from '../worker/batches.js';
 import { dominantScript } from './classify.js';
-import { excerptInput, observerInputSchema, type ObserverInput } from './contract.js';
+import {
+  MAX_INPUT_CHARS, MAX_NEARBY_BODY, MAX_SOURCE_EVENT_IDS, MAX_TITLE,
+  observerInputSchema, type ObserverInput,
+} from './contract.js';
 
 /** The two destinations that produce a request; the fallback needs none (contracts/observer.md). */
 export type ObserverDestination = 'remote_observer' | 'local_observer';
@@ -29,12 +33,24 @@ export type ObserverRequestInput = {
   repoId: string;
   nearby: NearbyCandidate[];
   rules: DestinationRules;
+  checkpointContext?: ObserverInput['checkpoint_context'];
 };
 
 export type ObserverRequest = {
   input: ObserverInput;
   excerpted: boolean;
   dropped: DroppedRow[];
+  coverage: SourcePortion[];
+};
+
+export type SourcePortion = {
+  rowId: string;
+  state: 'full' | 'partial' | 'omitted';
+  start: number;
+  end: number;
+  total: number;
+  sourceHash: string;
+  text: string;
 };
 
 type ObserverEvent = ObserverInput['events'][number];
@@ -103,20 +119,18 @@ function eventFor(row: RawEventRow): ObserverEvent | null {
 
 function textOf(event: ObserverEvent): string {
   const input = event.input as { command?: string; text?: string } | undefined;
-  return [event.text, event.output, event.error, input?.command, input?.text]
+  return [event.text, event.output, event.error, event.fragment?.text, input?.command, input?.text]
     .filter((value): value is string => typeof value === 'string')
     .join('\n');
 }
 
-/** The admitted events of a request, the rows the rule table refused, and the free summaries. */
+/** Admission happens before paging, including all metadata and normalized tool input. */
 function collectObserverEvents(request: ObserverRequestInput): {
   dropped: DroppedRow[];
   events: ObserverEvent[];
-  freeSummaries: ObserverInput['free_summaries'];
 } {
   const dropped: DroppedRow[] = [];
   const events: ObserverEvent[] = [];
-  const freeSummaries: ObserverInput['free_summaries'] = {};
   for (const row of request.rows) {
     const reason = refuse(request.rules, request.destination, row, request.repoId);
     if (reason !== null) {
@@ -126,15 +140,9 @@ function collectObserverEvents(request: ObserverRequestInput): {
     if (!OBSERVER_EVENT_KINDS.has(row.kind)) continue;
     const event = eventFor(row);
     if (event === null) continue;
-    events.push(event);
-    // The summary text the agent supplies for free also fills its own field (contracts/observer.md
-    // "Input"); it is the same admitted row, so it passed the same check.
-    if (row.kind === 'last_assistant_message') {
-      freeSummaries.last_assistant_message = row.content ?? '';
-    }
-    if (row.kind === 'compaction_summary') freeSummaries.compaction_summary = row.content ?? '';
+    events.push({ ...event, captured_at: row.captured_at });
   }
-  return { dropped, events, freeSummaries };
+  return { dropped, events };
 }
 
 /** The nearby memories the destination may receive, and the candidates the rule table refused. */
@@ -158,9 +166,10 @@ function collectNearbyMemories(request: ObserverRequestInput): {
     nearby.push({
       id: candidate.id,
       type: candidate.type,
-      title: candidate.title,
-      body: candidate.body,
+      title: candidate.title.slice(0, MAX_TITLE),
+      body: candidate.body.slice(0, MAX_NEARBY_BODY),
       deleted: candidate.deleted,
+      captured_at: candidate.source_captured_at ?? null,
     });
   }
   return { dropped, nearby };
@@ -174,39 +183,86 @@ function collectNearbyMemories(request: ObserverRequestInput): {
  */
 export function buildObserverRequest(request: ObserverRequestInput): ObserverRequest {
   const admitted = collectObserverEvents(request);
-  const { events, freeSummaries } = admitted;
-
   const nearbyResult = collectNearbyMemories(request);
-  const { nearby } = nearbyResult;
-  // Same order the single pass produced: every refused row, then every refused candidate.
-  const dropped: DroppedRow[] = [...admitted.dropped, ...nearbyResult.dropped];
-
-  const admittedText = [
-    ...events.map(textOf),
-    freeSummaries.last_assistant_message ?? '',
-    freeSummaries.compaction_summary ?? '',
-  ].join('\n');
-
-  const built = observerInputSchema.parse({
-    // R10: the repository travels as its opaque id, never as the normalized identity or a path.
+  const input: ObserverInput = {
     repo_ref: request.repoId,
-    // No cwd and no agent: the producing agent is provenance only (FR-005, SC-006).
-    session: {
-      started_at: request.session.started_at ?? 0,
-      turns: request.turns.map((turn) => ({
-        ordinal: turn.ordinal,
-        started_at: turn.started_at ?? 0,
-        ended_at: turn.ended_at,
-      })),
-    },
-    events,
-    free_summaries: freeSummaries,
-    nearby,
-    // FR-014: the observer answers in the language of the content it was given.
-    language_hint: dominantScript(admittedText),
-  });
+    checkpoint_context: request.checkpointContext ?? { state: 'none' },
+    session: { started_at: request.session.started_at ?? 0, turns: [] },
+    events: [], free_summaries: {}, nearby: [], language_hint: 'other',
+  };
+  // A full prior checkpoint is mandatory context for replacement. Never clip it to fit sources.
+  if (!fits(input)) input.checkpoint_context = { state: 'withheld' };
+  const rows = new Map(request.rows.map((row) => [row.id, row]));
+  const coverage: SourcePortion[] = [];
+  let pageClosed = false;
+  for (const event of admitted.events) {
+    const text = canonicalJson(event);
+    const sourceHash = `event-json-v1:${contentHash(text)}`;
+    const row = rows.get(event.id)!;
+    const start = row.processing_hash === sourceHash ? row.processing_offset ?? 0 : 0;
+    const portion: SourcePortion = {
+      rowId: event.id, state: 'omitted', start, end: start, total: text.length, sourceHash, text: '',
+    };
+    coverage.push(portion);
+    if (pageClosed || input.events.length >= MAX_SOURCE_EVENT_IDS) continue;
+    if (start === 0 && fits({ ...input, events: [...input.events, event] })) {
+      input.events.push(event);
+      Object.assign(portion, { state: 'full', end: text.length, text });
+    } else if (input.events.length === 0) {
+      const fragment = fitFragment(input, event, text, portion);
+      if (fragment !== null) {
+        input.events.push(fragment);
+        Object.assign(portion, { state: 'partial', end: fragment.fragment!.end, text: fragment.fragment!.text });
+      }
+    }
+    if (portion.state !== 'full') pageClosed = true;
+  }
+  // Summaries already occur as covered events. Repeating them here would bypass the range cap.
+  const sentIds = new Set(input.events.map((event) => event.id));
+  const turnIds = new Set(request.rows.filter((row) => sentIds.has(row.id)).map((row) => row.turn_id));
+  for (const turn of request.turns) {
+    if (!turnIds.has(turn.id)) continue;
+    input.session.turns.push({ ordinal: turn.ordinal, started_at: turn.started_at ?? 0, ended_at: turn.ended_at });
+    if (!fits(input)) input.session.turns.pop();
+  }
+  for (const candidate of nearbyResult.nearby) {
+    input.nearby.push(candidate);
+    if (!fits(input)) input.nearby.pop();
+  }
+  input.language_hint = dominantScript(input.events.map(textOf).join('\n'));
+  return {
+    input: observerInputSchema.parse(input),
+    excerpted: coverage.some((portion) => portion.state !== 'full'),
+    dropped: [...admitted.dropped, ...nearbyResult.dropped], coverage,
+  };
+}
 
-  // FR-015: 12,000 characters, and the caller records `excerpted` on the batch row.
-  const excerpt = excerptInput(built);
-  return { input: excerpt.input, excerpted: excerpt.excerpted, dropped };
+function fits(input: ObserverInput): boolean {
+  return JSON.stringify(input).length <= MAX_INPUT_CHARS;
+}
+
+/** Only a source that cannot fit by itself is split; ranges never discard the remaining text. */
+function fitFragment(
+  input: ObserverInput, event: ObserverEvent, text: string, portion: SourcePortion,
+): ObserverEvent | null {
+  let low = portion.start + 1;
+  let high = text.length;
+  let best: ObserverEvent | null = null;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    let end = middle;
+    if (end < text.length && /[\uD800-\uDBFF]/u.test(text[end - 1]) && /[\uDC00-\uDFFF]/u.test(text[end])) end -= 1;
+    const candidate: ObserverEvent = {
+      id: event.id, kind: event.kind, captured_at: event.captured_at,
+      fragment: {
+        format: 'event-json-v1', source_hash: portion.sourceHash,
+        start: portion.start, end, total: text.length, text: text.slice(portion.start, end),
+      },
+    };
+    if (fits({ ...input, events: [candidate] })) {
+      if (end > portion.start) best = candidate;
+      low = middle + 1;
+    } else high = middle - 1;
+  }
+  return best;
 }

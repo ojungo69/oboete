@@ -1,3 +1,4 @@
+import { grantVisibility } from '../../src/db/queries.js';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
@@ -43,6 +44,7 @@ function insertMemory(
     `content_${memory.id}`,
     NOW - 1_000,
   );
+  grantVisibility(db, memory.id, { audience: 'project', repoId: REPO }, 'migration', NOW);
 }
 
 function promptInput(overrides: Partial<PromptPackInput> = {}): PromptPackInput {
@@ -686,6 +688,8 @@ test('a call without an attempt does not close the record while another call sti
     assert.equal(injectionRow(db, id).state, 'attempted');
 
     assert.deepEqual(confirmOnPostToolUse(db, { ...carrier, now: NOW + 3 }), { status: 'emitted', text: null });
+    assert.equal(db.prepare('SELECT decision FROM injection_items WHERE injection_id = ? AND memory_id = ?')
+      .get(id, 'm_1')?.decision, 'included');
     const row = injectionRow(db, id);
     assert.equal(row.state, 'emitted');
     assert.equal(row.delivery_count, 1);

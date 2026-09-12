@@ -25,10 +25,12 @@ import {
 } from './config.js';
 import { applyCompaction, type CompactionState } from './capture-compaction.js';
 import { openDatabase } from './db/open.js';
+import { findNativeSession, markSessionCaptured, nativeSessionStorage } from './db/sessions.js';
 import {
   contentHash,
   conversationPolicy,
   eventId,
+  repositoryEventId,
   type AgentName,
   type EventKind,
   type NormalizedEvent,
@@ -42,6 +44,7 @@ import { writeSpoolEntry, type SpoolEntry } from './spool.js';
 import { isLeaseFree, transactionImmediate } from './worker/lease.js';
 import type { HookContext } from './injection/inject.js';
 import { stripRecognizedPacks } from './injection/recognize.js';
+import { bindCapturedWork } from './work.js';
 
 /** The absolute budget of a capture hook, measured from process start (contracts/agents.md). */
 export const CAPTURE_DEADLINE_MS = 300;
@@ -57,7 +60,7 @@ export const ROW_BUILD_MARGIN_MS = 20;
  * cutoff to zero and store a content-less `failed` row although the database was writable.
  */
 export const DETECTOR_MIN_MS = 60;
-/** data-model raw_events: `expires_at` = captured_at + 7 days (FR-008). */
+/** Initial due-by hint and metadata expiry; accepted sources retain data until processed + 30 days. */
 export const RAW_EVENT_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 
 const BUSY_TIMEOUT_CEILING_MS = 150;
@@ -139,6 +142,7 @@ type InjectionSeed = {
   event: NormalizedEvent;
   config: OboeteConfig;
   secretPaths: string[];
+  repoSecretPaths: string[];
 };
 
 type Diagnostic = { kind: string; agent: AgentName; messageCode: string };
@@ -232,7 +236,8 @@ function metadataRow(fields: {
     capturedAt: fields.capturedAt,
     content: null,
     contentHash: null,
-    payload: fields.payload,
+    payload: (fields.classificationState ?? 'failed') === 'failed' && 'paths' in fields.payload
+      ? { ...fields.payload, paths: [] } : fields.payload,
     sensitivity: fields.sensitivity ?? 'local_only',
     classificationState: fields.classificationState ?? 'failed',
     truncated: fields.truncated ?? 0,
@@ -296,12 +301,8 @@ type SessionRow = {
   status: 'active' | 'ended';
 };
 
-function readSession(db: DatabaseSync, agent: AgentName, nativeSessionId: string): SessionRow | undefined {
-  const row = db
-    .prepare(
-      'SELECT id, conversation_id, turn_count, context_epoch, last_compaction_key, status FROM sessions WHERE agent = ? AND native_session_id = ?',
-    )
-    .get(agent, nativeSessionId);
+function readSession(db: DatabaseSync, repoId: string, agent: AgentName, nativeSessionId: string): SessionRow | undefined {
+  const row = findNativeSession(db, repoId, agent, nativeSessionId);
   if (row === undefined) return undefined;
   return {
     id: String(row.id),
@@ -329,7 +330,7 @@ function reopenSession(db: DatabaseSync, session: SessionRow): void {
 }
 
 function upsertSession(db: DatabaseSync, row: RowDraft, repoId: string): SessionRow {
-  const existing = readSession(db, row.agent, row.nativeSessionId);
+  const existing = readSession(db, repoId, row.agent, row.nativeSessionId);
   const decision = conversationPolicy({
     agent: row.agent,
     source: row.source,
@@ -338,10 +339,12 @@ function upsertSession(db: DatabaseSync, row: RowDraft, repoId: string): Session
 
   if (existing === undefined) {
     const id = randomUUID();
+    const native = nativeSessionStorage(db, row.agent, row.nativeSessionId);
     db.prepare(
-      `INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, model, started_at, status, turn_count, context_epoch)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 0, 0)`,
-    ).run(id, repoId, row.agent, row.nativeSessionId, id, row.model ?? null, row.capturedAt);
+      `INSERT INTO sessions (id, repo_id, agent, native_session_id, original_native_session_id,
+        conversation_id, model, started_at, status, turn_count, context_epoch)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, 0)`,
+    ).run(id, repoId, row.agent, native.stored, native.original, id, row.model ?? null, row.capturedAt);
     return {
       id,
       conversationId: id,
@@ -477,19 +480,20 @@ function storeRows(
     capturedAt,
   );
 
-  const seen = db.prepare('SELECT 1 AS present FROM raw_events WHERE id = ?');
+  const seen = db.prepare('SELECT 1 AS present FROM raw_events WHERE id = ? AND repo_id = ?');
   let inserted = 0;
   let trigger = false;
   for (const row of rows) {
     // The session is read before the id, because the id of an event with no per-turn value of its
     // own carries the ordinal of the turn it attaches to (R7, events.ts eventIdKey).
     const session = upsertSession(db, row, identity.id);
-    const id = row.identify(turnOrdinalOf(row, session));
+    const legacyId = row.identify(turnOrdinalOf(row, session));
+    const id = repositoryEventId(identity.id, legacyId);
     // R7: the id carries no delivery counter, so a re-delivery is recognized here and changes
     // nothing else either - no second turn, no second epoch.
-    if (seen.get(id) !== undefined) continue;
+    if (seen.get(id, identity.id) !== undefined || seen.get(legacyId, identity.id) !== undefined) continue;
 
-    storeCapturedRow(db, identity, row, session, id);
+    trigger = storeCapturedRow(db, identity, row, session, id, legacyId) || trigger;
     inserted += 1;
     trigger ||=
       BATCH_TRIGGER_KINDS.has(row.kind) ||
@@ -504,11 +508,19 @@ function storeCapturedRow(
   row: RowDraft,
   session: SessionRow,
   id: string,
-): void {
+  legacyId: string,
+): boolean {
   // Only a row this session has not seen reopens it: a re-delivered `session_end` must not.
   reopenSession(db, session);
   advanceEpoch(db, session, row, id);
   const turnId = placeInTurn(db, session, row);
+  const work = bindCapturedWork(db, {
+    repoId: identity.id, root: identity.root, contextKey: identity.worktreeKey,
+    sessionId: session.id, sourceId: id, kind: row.kind, content: row.content,
+    inputSource: row.payload.input_source, sensitivity: row.sensitivity,
+    admissible: row.classificationState === 'done', capturedAt: row.capturedAt,
+    repoSecretPaths: row.payload.source_repo_rules,
+  });
   if (row.kind === 'session_end') {
     db.prepare(
       `UPDATE sessions SET status = 'ended', ended_at = ?, summary_state = COALESCE(summary_state, 'pending') WHERE id = ?`,
@@ -518,8 +530,8 @@ function storeCapturedRow(
   db.prepare(
     `INSERT OR IGNORE INTO raw_events (
          id, repo_id, session_id, turn_id, agent, kind, content, truncated, payload_json,
-         content_hash, sensitivity, classification_state, captured_at, expires_at, via_spool)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+         content_hash, sensitivity, classification_state, captured_at, expires_at, via_spool, work_binding_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
   ).run(
     id,
     identity.id,
@@ -529,13 +541,16 @@ function storeCapturedRow(
     row.kind,
     row.content,
     row.truncated,
-    JSON.stringify(row.payload),
+    capturedPayload(identity, row, legacyId),
     row.contentHash,
     row.sensitivity,
     row.classificationState,
     row.capturedAt,
     row.capturedAt + RAW_EVENT_TTL_MS,
+    work.bindingId,
   );
+  markSessionCaptured(db, session.id, row.capturedAt);
+  return work.closedPrevious;
 }
 
 function recordDiagnostic(db: DatabaseSync, diagnostic: Diagnostic, now: number): void {
@@ -559,6 +574,11 @@ function recordDiagnostic(db: DatabaseSync, diagnostic: Diagnostic, now: number)
  * session id is a fresh one and the row carries no turn; recovery resolves both against the rows
  * that exist by then (worker/batches.ts ensureSessionRows).
  */
+function capturedPayload(identity: RepoIdentity, row: RowDraft, legacyId = row.identify()): string {
+  return JSON.stringify({ ...row.payload, capture_root: identity.root, work_context_key: identity.worktreeKey,
+    legacy_event_id: legacyId });
+}
+
 function spoolEntryFor(identity: RepoIdentity, row: RowDraft): SpoolEntry {
   const sessionId = randomUUID();
   return {
@@ -581,7 +601,7 @@ function spoolEntryFor(identity: RepoIdentity, row: RowDraft): SpoolEntry {
     row: {
       // R7: the ordinal the hook used, which on this path is none at all; recovery replays this id
       // and never recomputes it (events.ts eventIdKey).
-      id: row.identify(),
+      id: repositoryEventId(identity.id, row.identify()),
       repo_id: identity.id,
       session_id: sessionId,
       turn_id: null,
@@ -589,7 +609,7 @@ function spoolEntryFor(identity: RepoIdentity, row: RowDraft): SpoolEntry {
       kind: row.kind,
       content: row.content,
       truncated: row.truncated,
-      payload_json: JSON.stringify(row.payload),
+      payload_json: capturedPayload(identity, row),
       content_hash: row.contentHash,
       sensitivity: row.sensitivity,
       classification_state: row.classificationState,
@@ -674,7 +694,7 @@ async function injectAfterCapture(
   const session =
     db === undefined
       ? undefined
-      : readSession(db, seed.event.agent, seed.event.native_session_id);
+      : readSession(db, identity.id, seed.event.agent, seed.event.native_session_id);
   const conversationId = session?.conversationId ?? seed.event.native_session_id;
   const root = db === undefined ? null : readEpoch(db, conversationId);
   const context: HookContext = {
@@ -695,6 +715,7 @@ async function injectAfterCapture(
     db,
     sessionCreated: session !== undefined && sessionCreated,
     secretPaths: seed.secretPaths,
+    detect: deps.detect,
     remainingBudget: () => hookDeadlineMs(seed.event.agent, seed.eventName) - deps.elapsedMs(),
   };
   try {
@@ -722,6 +743,7 @@ type WriteOptions = {
 
 async function write(options: WriteOptions): Promise<CaptureOutcome> {
   const { deps, paths, identity, rows, diagnostics, injection, deadlineMs } = options;
+  if (injection !== undefined) for (const row of rows) row.payload.source_repo_rules = injection.repoSecretPaths;
   const remaining = (): number => deadlineMs - deps.elapsedMs();
   if (rows.length === 0 && diagnostics.length === 0) return { outcome: 'dropped', rows: 0 };
 
@@ -779,7 +801,7 @@ async function writeToDatabase(
   const { deps, paths, identity, rows, diagnostics, capturedAt, injection } = options;
   const sessionExisted =
     injection === undefined ||
-    readSession(db, injection.event.agent, injection.event.native_session_id) !== undefined;
+    readSession(db, identity.id, injection.event.agent, injection.event.native_session_id) !== undefined;
   // One read-then-write unit, one transaction (conventions "Database access"): a failure
   // half way through would otherwise leave rows behind that the spool then writes again
   // under the id of another turn (R7: the direct path keys by the ordinal it read).
@@ -939,17 +961,18 @@ async function captureAdapted(
     event: events.at(-1) as NormalizedEvent,
     config: settings.config,
     secretPaths: settings.secretPaths,
+    repoSecretPaths: settings.repoSecretPaths,
   };
 
   const fields = events.flatMap((event) => textFields(event));
   const detected = await runDetector(deps, {
-    fields: fields.map((field) => field.read()),
+    fields: [...fields.map((field) => field.read()), ...adapted.contentForDetector.paths],
     paths: adapted.contentForDetector.paths,
     identity,
     secretPaths: settings.secretPaths,
   }, deadlineMs);
 
-  return persistDetectedEvents(events, fields, detected, persist, identity, diagnostics, injection);
+  return persistDetectedEvents(events, fields, detected, persist, identity, diagnostics, injection, adapted.contentForDetector.paths.length);
 }
 
 function persistDetectedEvents(
@@ -960,13 +983,14 @@ function persistDetectedEvents(
   identity: RepoIdentity,
   diagnostics: Diagnostic[],
   injection: InjectionSeed,
+  pathCount: number,
 ): Promise<CaptureOutcome> {
   if (!detected.ok) {
     const rows = events.map((event) => failedEventRow(event, detected.reason));
     return persist(identity, rows, diagnostics, injection);
   }
   if (detected.pathRule === null) {
-    if (detected.texts.length !== fields.length) {
+    if (detected.texts.length !== fields.length + pathCount) {
       // The detector answered a shape this build does not understand, which is a detector failure.
       const rows = events.map((event) => failedEventRow(event, 'detector_error'));
       return persist(identity, rows, diagnostics, injection);
@@ -979,7 +1003,11 @@ function persistDetectedEvents(
 
   return persist(
     identity,
-    events.map((event) => eventRow(event, detected)),
+    events.map((event) => {
+      const row = eventRow(event, detected);
+      row.payload.source_paths = detected.pathRule === null ? detected.texts.slice(fields.length) : [];
+      return row;
+    }),
     diagnostics,
     injection,
   );
@@ -1120,17 +1148,20 @@ async function captureUnparsed(
   }
 
   const detected = await runDetector(deps, {
-    fields: [context.stdin.text],
+    fields: [context.stdin.text, ...scanned.paths],
     paths: scanned.paths,
     identity,
     secretPaths: settings.secretPaths,
   }, deadlineMs);
-  if (!detected.ok) {
-    const row = metadataRow({ ...base, payload: { ...metadata, failure_reason: detected.reason } });
+  if (!detected.ok || (detected.pathRule === null && detected.texts.length !== scanned.paths.length + 1)) {
+    const row = metadataRow({ ...base, payload: { ...metadata, failure_reason: detected.ok ? 'detector_error' : detected.reason } });
     return persistUnparsedRows(deps, paths, identity, [row], context, deadlineMs);
   }
 
   const row = partialCaptureRow(base, metadata, detected);
+  row.payload.source_paths = detected.pathRule === null ? detected.texts.slice(1) : [];
+  row.payload.paths = row.payload.source_paths;
+  row.payload.source_repo_rules = settings.repoSecretPaths;
   return persistUnparsedRows(deps, paths, identity, [row], context, deadlineMs);
 }
 
@@ -1165,15 +1196,17 @@ function partialCaptureRow(
   return row;
 }
 
-type CaptureSettings = { config: OboeteConfig; secretPaths: string[] };
+type CaptureSettings = { config: OboeteConfig; secretPaths: string[]; repoSecretPaths: string[] };
 
 /** The user configuration and repository rules, or null when either one is malformed (R4). */
 function readSettings(paths: OboetePaths, repoRoot: string): CaptureSettings | null {
   try {
     const config = loadConfig(paths);
+    const repoSecretPaths = loadRepoRules(repoRoot).secretPaths;
     return {
       config,
-      secretPaths: [...config.privacy.secret_paths, ...loadRepoRules(repoRoot).secretPaths],
+      secretPaths: [...config.privacy.secret_paths, ...repoSecretPaths],
+      repoSecretPaths,
     };
   } catch (error) {
     if (error instanceof ConfigError || error instanceof RepoConfigError) return null;

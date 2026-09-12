@@ -11,7 +11,7 @@ import { sha256Hex } from '../../src/hash.js';
 import { getMemory, memoryScope } from '../../src/db/queries.js';
 import { oboetePaths } from '../../src/paths.js';
 import { cjkBigrams } from '../../src/retrieval/fts.js';
-import { EXPORT_FORMAT, MAX_REJECTED, exportMemories, importMemories, runExport, runImport, type ImportResult } from '../../src/transfer.js';
+import { EXPORT_FORMAT, exportMemories, importMemories, runExport, runImport, type ImportResult } from '../../src/transfer.js';
 import { withTempHome } from '../helpers/home.js';
 
 const NOW = 1_800_000_000_000;
@@ -86,7 +86,7 @@ async function importInto(
 ): Promise<ImportResult> {
   const db = open(home);
   try {
-    return importMemories(db, lines.join('\n') + '\n', { now: NOW, ...options });
+    return await importMemories(db, lines.join('\n') + '\n', { now: NOW, ...options });
   } finally {
     db.close();
   }
@@ -176,7 +176,7 @@ test('a round trip into an empty installation keeps counts, tombstones, sources 
         assert.equal(row.review_state, 'imported');
         assert.equal(row.content_hash, contentHash(REMOTE.id, materialHash('Busy timeout', 'Set busy_timeout to 2000 ms.')));
         assert.equal(row.cjk_bigrams, cjkBigrams('Busy timeout Set busy_timeout to 2000 ms.'));
-        assert.equal(row.source_session_id, 's_src');
+        assert.equal(row.source_session_id, null, 'foreign lineage is retained only in migration provenance');
         const sources = targetDb.prepare('SELECT citation_kind, citation_value, source_agent FROM memory_sources WHERE memory_id = ?').all(active);
         assert.deepEqual(JSON.parse(JSON.stringify(sources)), [{ citation_kind: 'file_read', citation_value: 'src/db/open.ts', source_agent: 'codex' }]);
         const tomb = targetDb.prepare('SELECT deleted_at, body FROM memories WHERE id = ?').get(gone) as Record<string, unknown>;
@@ -186,7 +186,7 @@ test('a round trip into an empty installation keeps counts, tombstones, sources 
         const scope = memoryScope(targetDb, { repoId: REMOTE.id, destination: 'injection' });
         assert.equal(getMemory(targetDb, active, scope), null);
         // Importing the same file again changes nothing.
-        const again = importMemories(targetDb, lines.join('\n') + '\n', { now: NOW });
+        const again = await importMemories(targetDb, lines.join('\n') + '\n', { now: NOW });
         assert.equal(again.inserted, 0);
         assert.equal(again.tombstones, 0);
         assert.equal(again.unchanged, 2);
@@ -215,7 +215,7 @@ test('the sensitivity lattice never lowers a row and tombstones win in both dire
       const looser = insertMemory(targetDb, { repoId: REMOTE.id, title: 'Looser', body: 'Comes in as eligible.', sensitivity: 'private' });
       const goneThere = insertMemory(targetDb, { repoId: REMOTE.id, title: 'Gone there', body: 'Deleted at the source.' });
       const goneHere = insertMemory(targetDb, { repoId: REMOTE.id, title: 'Gone here', body: 'Deleted at the target.', deletedAt: NOW - 7 });
-      const result = importMemories(targetDb, lines.join('\n') + '\n', { now: NOW });
+      const result = await importMemories(targetDb, lines.join('\n') + '\n', { now: NOW });
       assert.deepEqual(result.rejected, []);
       const sensitivity = (id: string): unknown => targetDb.prepare('SELECT sensitivity FROM memories WHERE id = ?').get(id)?.sensitivity;
       const deleted = (id: string): unknown => targetDb.prepare('SELECT deleted_at FROM memories WHERE id = ?').get(id)?.deleted_at;
@@ -259,7 +259,7 @@ test('a hash mismatch, an oversized line, a malformed line or a bad header rejec
       // A valid line next to a rejected one is not written either: the file is applied as a whole.
       // The rejection names the physical line, so the blank line 3 counts.
       const mixed = await importInto(target, [lines[0], lines[1], '', '{not json']);
-      assert.deepEqual(mixed.rejected, [{ line: 4, reason: 'not valid JSON' }]);
+      assert.deepEqual(mixed.rejected, [{ line: 4, reason: 'invalid_json' }]);
       assert.equal(mixed.inserted, 0);
       assert.equal(mixed.applied, false);
     });
@@ -278,11 +278,11 @@ test('--map-repo moves a machine-local repository and a mapped tombstone still s
     await withTempHome(async (target) => {
       const targetDb = open(target);
       insertRepo(targetDb, { id: 'r_here', kind: 'common_dir', identity: '/home/other/work/.git' });
-      const unmapped = importMemories(targetDb, lines.join('\n') + '\n', { now: NOW });
+      const unmapped = await importMemories(targetDb, lines.join('\n') + '\n', { now: NOW });
       assert.equal(unmapped.inserted, 0);
-      assert.match(unmapped.rejected[0]?.reason ?? '', /map-repo/);
+      assert.equal(unmapped.rejected[0]?.reason, 'map_repo_required');
 
-      const mapped = importMemories(targetDb, lines.join('\n') + '\n', { now: NOW, mapRepo: { [LOCAL.id]: 'r_here' } });
+      const mapped = await importMemories(targetDb, lines.join('\n') + '\n', { now: NOW, mapRepo: { [LOCAL.id]: 'r_here' } });
       assert.deepEqual(mapped.rejected, []);
       const material = materialHash('Moved', 'Comes from a common_dir repository.');
       const moved = targetDb.prepare('SELECT id, repo_id FROM memories WHERE content_hash = ?').get(contentHash('r_here', material));
@@ -310,14 +310,13 @@ test('--dry-run reports the counts and writes nothing; the file limits are enfor
       assert.equal(dry.applied, false);
       const targetDb = open(target);
       assert.equal(targetDb.prepare('SELECT COUNT(*) AS n FROM memories').get()?.n, 0);
-      const tooBig = importMemories(targetDb, lines.join('\n') + '\n', { now: NOW, maxFileBytes: 10 });
+      const tooBig = await importMemories(targetDb, lines.join('\n') + '\n', { now: NOW, maxFileBytes: 10 });
       assert.match(tooBig.rejected[0]?.reason ?? '', /256 MB|file size/i);
       // Blank lines count toward the limit too, and a flood of bad lines stops early.
-      const padded = importMemories(targetDb, `${lines[0]}\n${' '.repeat(64)}\n`, { now: NOW, maxFileBytes: lines[0].length + 8 });
+      const padded = await importMemories(targetDb, `${lines[0]}\n${' '.repeat(64)}\n`, { now: NOW, maxFileBytes: lines[0].length + 8 });
       assert.match(padded.rejected[0]?.reason ?? '', /file size/i);
-      const flood = importMemories(targetDb, `${lines[0]}\n${'x\n'.repeat(500)}`, { now: NOW });
-      assert.equal(flood.rejected.length, MAX_REJECTED + 1);
-      assert.match(flood.rejected.at(-1)?.reason ?? '', /stopped here/);
+      const flood = await importMemories(targetDb, `${lines[0]}\n${'x\n'.repeat(500)}`, { now: NOW });
+      assert.deepEqual(flood.rejected, [{ line: 2, reason: 'invalid_json' }], 'the first fatal record stops parser work');
       targetDb.close();
     });
   });
@@ -342,12 +341,12 @@ test('oboete export and oboete import wire the module with the exit codes of con
       },
     };
     writeFileSync(file, 'stale', { mode: 0o644 });
-    assert.equal(await runExport([file], io), 0);
+    assert.equal(await runExport([file, '--format', '1'], io), 0);
     assert.match(stdout, /1 memor(y|ies)/);
     assert.equal(statSync(file).mode & 0o777, 0o600, 'an existing world-readable target becomes owner-only');
 
     stdout = '';
-    assert.equal(await runExport(['-'], io), 0);
+    assert.equal(await runExport(['-', '--format', '1'], io), 0);
     assert.equal(stdout.split('\n').filter((line) => line !== '').length, 2, 'stdout carries the file itself');
 
     await withTempHome(async (target) => {

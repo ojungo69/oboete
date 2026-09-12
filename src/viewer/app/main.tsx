@@ -3,8 +3,10 @@
 import { render } from 'preact';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 
-import { api, type Injection, type Memory, type SearchHit, type Session } from './api.js';
+import { api, type Injection, type Memory, type SearchHit, type Session, type SharingProposal } from './api.js';
 import './app.css';
+
+type SharingPage = Awaited<ReturnType<typeof api.sharing>> & { error?: string };
 
 const SENSITIVITY_LABEL: Record<string, string> = {
   eligible: 'May be sent to the summarizer',
@@ -38,6 +40,7 @@ function memoryCount(count: number): string {
 }
 
 function Provenance({ memory }: { memory: Memory }) {
+  if (memory.sources === undefined) return <p class="muted">Approved personal preference. Available across your projects.</p>;
   if (memory.sources.length === 0) return <p class="muted">Provenance: not recorded.</p>;
   return (
     <ul class="sources">
@@ -63,17 +66,24 @@ function MemoryCard({
   onError: (message: string) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const act = async (work: () => Promise<unknown>): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
     try {
       await work();
       onChanged();
     } catch (error) {
-      onError(error instanceof Error ? error.message : String(error));
-    }
+      const message = error instanceof Error ? error.message : String(error);
+      setActionError(message);
+      onError(message);
+    } finally { setBusy(false); }
   };
   const pinned = memory.pinned_at !== null;
   return (
-    <article class={`card sensitivity-${memory.sensitivity}`}>
+    <article id={`memory-${memory.id}`} class={`card sensitivity-${memory.sensitivity}`} aria-busy={busy}>
       <header>
         <h3>{memory.title || '(untitled)'}</h3>
         <div class="badges">
@@ -87,13 +97,15 @@ function MemoryCard({
         </div>
       </header>
       <p class="body">{memory.body}</p>
-      {memory.degraded_reason === null ? null : (
+      {memory.degraded_reason == null ? null : (
         <p class="degraded">{DEGRADED_LABEL[memory.degraded_reason] ?? memory.degraded_reason}</p>
       )}
       <Provenance memory={memory} />
+      {actionError === null ? null : <p class="action-error" role="alert">{actionError}</p>}
       <footer>
         <span class="muted">Created {when(memory.created_at)}</span>
-        <div class="actions">
+        <fieldset class="actions" disabled={busy} aria-label="Memory actions">
+          {memory.can_adopt ? <button type="button" onClick={() => act(() => api.adopt(memory.id))}>Share with project</button> : null}
           {memory.review_state === 'unreviewed' ? (
             <button type="button" onClick={() => act(() => api.review(memory.id))}>
               Mark as reviewed
@@ -116,10 +128,41 @@ function MemoryCard({
               Delete
             </button>
           )}
-        </div>
+        </fieldset>
       </footer>
     </article>
   );
+}
+
+function SharingCard({ proposal, onChanged }: { proposal: SharingProposal; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const decide = async (decision: 'approve' | 'reject') => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.decideSharing(proposal.id, decision);
+      onChanged();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setBusy(false); }
+  };
+  return <article class="card sharing-card" aria-busy={busy}>
+    <h3>{proposal.candidate_title}</h3>
+    <p class="body">{proposal.candidate_body}</p>
+    <details class="muted"><summary>Origin of this suggestion</summary>
+      <p>Memory <code>{proposal.origin_memory_id}</code><br />Work <code>{proposal.origin_work_id}</code></p>
+    </details>
+    <footer>
+      <span role="status">{busy ? 'Saving your decision…' : proposal.state === 'approved'
+        ? 'Shared across your projects.' : proposal.state === 'rejected' ? 'Sharing declined.' : 'Awaiting your approval.'}</span>
+      <fieldset class="actions" disabled={busy || proposal.state !== 'pending'} aria-label="Sharing decision">
+        <button type="button" onClick={() => decide('approve')}>Share across projects</button>
+        <button type="button" onClick={() => decide('reject')}>Decline</button>
+      </fieldset>
+    </footer>
+    {error === null ? null : <p class="action-error" role="alert">{error}</p>}
+  </article>;
 }
 
 function SearchResults({ hits, note }: { hits: SearchHit[]; note: string }) {
@@ -213,6 +256,7 @@ function MemoryPane(props: {
   ledger: Injection[] | null;
   session: Session | null;
   shown: Memory[];
+  sharing: SharingPage;
   onChanged: () => void;
   onError: (message: string) => void;
 }) {
@@ -235,6 +279,14 @@ function MemoryPane(props: {
           <Ledger injections={ledger} />
         </section>
       )}
+      <section aria-labelledby="sharing-title">
+        <h2 id="sharing-title">Personal preferences to share</h2>
+        <p class="muted">Approve only the statement shown here to make it available across your projects.</p>
+        {props.sharing.error !== undefined ? <p class="error" role="alert">Could not load sharing proposals. {props.sharing.error}</p>
+          : props.sharing.proposals.length === 0 ? <p class="muted">No sharing proposals need your review.</p>
+            : props.sharing.proposals.map((proposal) => <SharingCard key={proposal.id} proposal={proposal} onChanged={props.onChanged} />)}
+        {props.sharing.hasMore ? <p class="muted">More proposals are available. Review these to see the next ones.</p> : null}
+      </section>
       <h2>{session === null ? 'All memories' : `Memories of session ${session.id}`}</h2>
       {shown.length === 0 ? <p class="muted">There is nothing recorded here yet.</p> : null}
       {shown.map((memory) => (
@@ -248,6 +300,7 @@ function App() {
   const [repository, setRepository] = useState('');
   const [memories, setMemories] = useState<Memory[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [sharing, setSharing] = useState<SharingPage>({ proposals: [], hasMore: false });
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<{ hits: SearchHit[]; note: string } | null>(null);
@@ -267,7 +320,14 @@ function App() {
         setSessions(sessionPage.sessions);
         setError(null);
       })
-      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
+      .catch((cause: unknown) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+      });
+    api.sharing().then((page) => { if (!cancelled) setSharing(page); })
+      .catch((cause: unknown) => {
+        if (!cancelled) setSharing({ proposals: [], hasMore: false,
+          error: cause instanceof Error ? cause.message : String(cause) });
+      });
     return () => {
       cancelled = true;
     };
@@ -322,7 +382,7 @@ function App() {
         <h1>oboete memory viewer</h1>
         <p class="muted">Repository {repository || 'unknown'}. This page is reachable only from this machine.</p>
       </header>
-      {error === null ? null : <p class="error">{error}</p>}
+      {error === null ? null : <p class="error" role="alert">{error}</p>}
       <div class="columns">
         <SessionList sessions={sessions} selected={selected} onSelect={setSelected} />
         <MemoryPane
@@ -332,6 +392,7 @@ function App() {
           ledger={ledger}
           session={session}
           shown={shown}
+          sharing={sharing}
           onChanged={refresh}
           onError={setError}
         />

@@ -5,11 +5,135 @@ import { join } from 'node:path';
 import { CAPTURE_DEADLINE_MS } from '../capture.js';
 import type { openDatabase } from '../db/open.js';
 import type { oboetePaths } from '../paths.js';
+import { isAllowed, loadDestinationRules, type Sensitivity } from '../privacy/egress.js';
 import { PENDING_BOUND_MS, READY_BOUND_MS, fileBytes, ms, pendingSentence, percentile, recallRateOf, renderReport, statusOf, timingRows, type BoundRow } from './replay-report.js';
-import type { Agent, Line, MeasureInput, RecallHit, Sample } from './replay.js';
+import type { Agent, DeliveredFactItem, Line, MeasureInput, RecallHit, RecallProbe, Sample } from './replay.js';
 
 const WORKER_RSS_BOUND_KB = 150 * 1024;
 const RECALL_BOUND = 0.9;
+
+export type FactStage = { status: 'pass' | 'fail' | 'pending' | 'partial' | 'not_run'; reason: string;
+  ids?: string[]; sources?: { id: string; total: number | null; ranges: number[][] }[] };
+export type FactTrace = RecallHit & {
+  factSeq: number; querySeq: number; availability: 'current_delivery' | 'prior_delivery' | 'missing';
+  stages: Record<'capture' | 'coverage' | 'application' | 'retention' | 'retrieval' | 'delivery' | 'answer', FactStage>;
+  firstFailure: string | null;
+};
+
+const OMISSIONS = new Set(['below_threshold', 'budget', 'duplicate_in_conversation', 'stale_path',
+  'stale_commit', 'retired', 'mmr_redundant', 'not_delivered', 'secret_detected', 'directive']);
+
+function factItems(db: ReturnType<typeof openDatabase>['db'], probe: RecallProbe, injectionIds: string[]) {
+  if (probe.conversationId === null || probe.epoch === null || injectionIds.length === 0) return [];
+  return db.prepare(`SELECT ii.injection_id AS injectionId, ii.memory_id AS memoryId, ii.raw_event_id AS rawEventId,
+    ii.decision, ii.reason, i.state, i.kind, i.delivery_count AS deliveries
+    FROM injection_items ii JOIN injections i ON i.id = ii.injection_id
+    JOIN sessions s ON s.id = i.session_id AND s.repo_id = i.repo_id
+    WHERE i.repo_id = ? AND i.conversation_id = ? AND i.context_epoch = ?
+      AND ii.conversation_id = i.conversation_id AND ii.context_epoch = i.context_epoch
+      AND i.id IN (SELECT value FROM json_each(?)) AND (
+        ii.raw_event_id IN (SELECT value FROM json_each(?)) OR EXISTS (
+          SELECT 1 FROM memories m JOIN memory_sources ms ON ms.memory_id = m.id
+          WHERE m.id = ii.memory_id AND m.repo_id = i.repo_id AND ms.context_only = 0
+            AND ms.raw_event_id IN (SELECT value FROM json_each(?))
+            AND instr(COALESCE(m.title, '') || char(10) || COALESCE(m.body, ''), ?) > 0))
+    ORDER BY i.created_at, ii.id LIMIT 100`)
+    .all(probe.repoId, probe.conversationId, probe.epoch, JSON.stringify(injectionIds),
+      JSON.stringify(probe.factSourceIds), JSON.stringify(probe.factSourceIds), probe.expect);
+}
+
+/** Called before the query as well as after the run: a pending Grok record is never prior delivery. */
+export function deliveredFactItems(
+  db: ReturnType<typeof openDatabase>['db'], probe: RecallProbe, injectionIds: string[],
+): DeliveredFactItem[] {
+  return factItems(db, probe, injectionIds).filter((row) => row.decision === 'included' && row.state === 'emitted'
+    && (row.kind !== 'grok_deferred' || Number(row.deliveries) > 0))
+    .map((row) => ({ injectionId: String(row.injectionId), memoryId: row.memoryId === null ? null : String(row.memoryId),
+      rawEventId: row.rawEventId === null ? null : String(row.rawEventId) }));
+}
+
+function sourceStages(db: ReturnType<typeof openDatabase>['db'], probe: RecallProbe): Pick<FactTrace['stages'], 'capture' | 'coverage' | 'application'> {
+  const sources = db.prepare(`SELECT id, classification_state, sensitivity, processing_state FROM raw_events
+    WHERE repo_id = ? AND session_id = ? AND id IN (SELECT value FROM json_each(?))`)
+    .all(probe.repoId, probe.sourceSessionId, JSON.stringify(probe.sourceIds));
+  const receipts = db.prepare(`SELECT r.* FROM observation_batch_sources r
+    JOIN observation_batches b ON b.id = r.batch_id
+    JOIN sessions s ON s.id = b.session_id AND s.repo_id = b.repo_id
+    WHERE b.repo_id = ? AND b.session_id = ? AND r.raw_event_id IN (SELECT value FROM json_each(?))
+    ORDER BY r.recorded_at DESC, b.rowid DESC LIMIT 500`)
+    .all(probe.repoId, probe.sourceSessionId, JSON.stringify(probe.factSourceIds));
+  const captured = sources.filter((row) => probe.factSourceIds.includes(String(row.id))
+    && row.classification_state !== 'failed' && row.sensitivity !== 'secret' && row.processing_state !== 'excluded');
+  const capture: FactStage = { status: captured.length > 0 ? 'pass' : 'fail',
+    reason: captured.length > 0 ? 'accepted' : sources.some((row) => row.sensitivity === 'secret' || row.processing_state === 'excluded')
+      ? 'excluded' : sources.some((row) => row.classification_state === 'failed') ? 'classification_failed' : 'source_missing',
+    ids: probe.sourceIds.slice(0, 50) };
+  // Retained membership proves acceptance after ordinary raw retention has elapsed.
+  if (sources.length === 0 && receipts.length > 0) { capture.status = 'pass'; capture.reason = 'retained_receipt'; }
+  const ranges = probe.factSourceIds.slice(0, 50).map((id) => {
+    const rows = receipts.filter((row) => row.raw_event_id === id);
+    const latest = rows.find((row) => typeof row.source_total === 'number');
+    const total = latest === undefined ? null : Number(latest.source_total);
+    const spans = rows.filter((row) => typeof row.source_hash === 'string' && row.source_hash !== ''
+      && row.source_hash === latest?.source_hash && row.source_total === total
+      && typeof row.portion_start === 'number' && typeof row.portion_end === 'number'
+      && row.portion_start >= 0 && row.portion_end > row.portion_start && row.portion_end <= Number(total))
+      .map((row) => [Number(row.portion_start), Number(row.portion_end)]).sort((a, b) => a[0] - b[0]);
+    const merged: number[][] = [];
+    for (const span of spans) {
+      const previous = merged.at(-1);
+      if (previous !== undefined && span[0] <= previous[1]) previous[1] = Math.max(previous[1], span[1]);
+      else merged.push(span);
+    }
+    return { id, total, ranges: merged };
+  });
+  const full = ranges.some((row) => row.total !== null && row.total > 0 && row.ranges.length === 1
+    && row.ranges[0][0] === 0 && row.ranges[0][1] === row.total);
+  const partial = ranges.some((row) => row.ranges.length > 0);
+  const coverage: FactStage = { status: full ? 'pass' : partial ? 'partial' : 'pending',
+    reason: full ? 'complete_range' : partial ? 'partial_range' : receipts.some((row) => row.reason === 'not_sent') ? 'not_sent' : 'no_range',
+    sources: ranges };
+  const latest = probe.factSourceIds.map((id) => receipts.find((row) => row.raw_event_id === id)).filter((row) => row !== undefined);
+  const processed = latest.find((row) => row.outcome === 'processed');
+  const application: FactStage = processed === undefined
+    ? { status: latest.some((row) => row.outcome === 'rejected') ? 'fail' : 'pending',
+      reason: latest.some((row) => row.reason === 'unaccounted') ? 'unaccounted'
+        : latest.some((row) => row.outcome === 'rejected') ? 'rejected'
+          : latest.some((row) => row.outcome === 'deferred') ? 'deferred'
+            : latest.some((row) => row.outcome === 'legacy_unknown') ? 'legacy_unknown' : 'unprocessed' }
+    : { status: 'pass', reason: processed.reason === 'no_memory' ? 'no_memory' : 'accounted' };
+  return { capture, coverage, application };
+}
+
+export function evaluateRecall(db: ReturnType<typeof openDatabase>['db'], probe: RecallProbe): FactTrace {
+  const rules = loadDestinationRules(db);
+  const memories = db.prepare(`SELECT DISTINCT m.id, m.deleted_at, m.valid_to, m.degraded_reason, m.sensitivity, m.review_state
+    FROM memories m JOIN memory_sources ms ON ms.memory_id = m.id WHERE m.repo_id = ? AND ms.context_only = 0
+      AND ms.raw_event_id IN (SELECT value FROM json_each(?))
+      AND instr(COALESCE(m.title, '') || char(10) || COALESCE(m.body, ''), ?) > 0 LIMIT 100`)
+    .all(probe.repoId, JSON.stringify(probe.factSourceIds), probe.expect);
+  const active = memories.filter((row) => row.deleted_at === null && row.valid_to === null && row.degraded_reason === null
+    && isAllowed(rules, 'injection', row.sensitivity as Sensitivity, true) && row.review_state !== 'imported');
+  const items = factItems(db, probe, probe.currentInjectionIds);
+  const current = probe.currentTextHit ? deliveredFactItems(db, probe, probe.currentInjectionIds) : [];
+  const prior = probe.priorDelivery;
+  const availability = current.length > 0 ? 'current_delivery' : prior.length > 0 ? 'prior_delivery' : 'missing';
+  const omission = items.find((row) => row.decision === 'omitted');
+  const retrievalPass = prior.length > 0 || items.some((row) => row.decision === 'planned' || row.decision === 'included');
+  const stages: FactTrace['stages'] = { ...sourceStages(db, probe),
+    retention: { status: active.length > 0 ? 'pass' : 'fail', reason: active.length > 0 ? 'retained_fact'
+      : memories.some((row) => row.degraded_reason !== null) ? 'temporary_only'
+        : memories.length > 0 ? 'retired_or_withheld' : 'no_linked_fact', ids: active.map((row) => String(row.id)) },
+    retrieval: { status: retrievalPass ? 'pass' : 'fail', reason: prior.length > 0 ? 'prior_delivery'
+      : retrievalPass ? 'selected' : OMISSIONS.has(String(omission?.reason)) ? String(omission?.reason) : 'no_candidate',
+      ids: [...new Set(items.map((row) => String(row.injectionId)))] },
+    delivery: { status: availability === 'missing' ? 'fail' : 'pass', reason: availability,
+      ids: [...new Set([...current, ...prior].map((row) => row.injectionId))] },
+    answer: { status: 'not_run', reason: 'receiving_agent_not_run' } };
+  const firstFailure = Object.entries(stages).find(([, stage]) => stage.status !== 'pass' && stage.status !== 'not_run')?.[0] ?? null;
+  return { id: probe.id, lang: probe.lang, query: probe.query, expect: probe.expect, factSeq: probe.factSeq,
+    querySeq: probe.querySeq, hit: availability !== 'missing', availability, stages, firstFailure };
+}
 
 export function sessionStartEvent(agent: Agent, event: string): boolean {
   return agent === 'pi' ? event === 'session_start' : event === 'SessionStart';
@@ -40,8 +164,8 @@ function bufferHas(haystack: Buffer, needle: string): boolean {
   return haystack.includes(Buffer.from(needle, 'utf8'));
 }
 
-function countQuery(db: ReturnType<typeof openDatabase>['db'], sql: string): number {
-  const row = db.prepare(sql).get() as { n?: unknown } | undefined;
+function countQuery(db: ReturnType<typeof openDatabase>['db'], sql: string, repoId: string): number {
+  const row = db.prepare(sql).get(repoId) as { n?: unknown } | undefined;
   return typeof row?.n === 'number' ? row.n : 0;
 }
 
@@ -130,24 +254,26 @@ function life(check: string, results: LifeResult[]): LifeRow {
 }
 
 /** Maps a fixture's session label to the conversation the engine actually opened for it. */
-function conversationLookup(db: ReturnType<typeof openDatabase>['db'], lines: Line[]): ConversationOf {
+function conversationLookup(db: ReturnType<typeof openDatabase>['db'], repoId: string, lines: Line[]): ConversationOf {
   const dbSessions = db
     .prepare(
-      `SELECT id AS id, agent AS agent, native_session_id AS native_session_id,
+      `SELECT id AS id, agent AS agent, COALESCE(original_native_session_id, native_session_id) AS native_session_id,
               conversation_id AS conversation_id, context_epoch AS context_epoch
-       FROM sessions`,
+       FROM sessions WHERE repo_id = ?`,
     )
-    .all() as {
+    .all(repoId) as {
     id: unknown;
     agent: unknown;
     native_session_id: unknown;
     conversation_id: unknown;
     context_epoch: unknown;
   }[];
-  const sessionByNative = new Map<string, (typeof dbSessions)[number]>();
+  const sessionByNative = new Map<string, (typeof dbSessions)[number] | null>();
   const sessionById = new Map<string, (typeof dbSessions)[number]>();
   for (const row of dbSessions) {
-    sessionByNative.set(`${String(row.agent)}\t${String(row.native_session_id)}`, row);
+    const key = `${String(row.agent)}\t${String(row.native_session_id)}`;
+    // Multiple rows inside the same repository still cannot identify the captured session.
+    sessionByNative.set(key, sessionByNative.has(key) ? null : row);
     sessionById.set(String(row.id), row);
   }
   const nativeByLabel = new Map<string, string>();
@@ -159,7 +285,7 @@ function conversationLookup(db: ReturnType<typeof openDatabase>['db'], lines: Li
     const native = nativeByLabel.get(`${agent}:${label}`);
     if (native === undefined) return undefined;
     const row = sessionByNative.get(`${agent}\t${native}`);
-    if (row === undefined) return undefined;
+    if (row === undefined || row === null) return undefined;
     const root = sessionById.get(String(row.conversation_id)) ?? row;
     return { native, conversationId: String(row.conversation_id), epoch: Number(root.context_epoch ?? 0) };
   };
@@ -254,19 +380,21 @@ function dbCounts(
 ) {
   const dbBytesAfter = fileBytes(paths.db) + fileBytes(`${paths.db}-wal`);
   const perThousand = input.lines.length === 0 ? 0 : (dbBytesAfter - input.dbBytesBefore) * (1000 / input.lines.length);
-  const rawEvents = countQuery(db, 'SELECT COUNT(*) AS n FROM raw_events');
-  const memories = countQuery(db, 'SELECT COUNT(*) AS n FROM memories');
-  const injections = countQuery(db, 'SELECT COUNT(*) AS n FROM injections');
-  const injectionItems = countQuery(db, 'SELECT COUNT(*) AS n FROM injection_items');
+  const rawEvents = countQuery(db, 'SELECT COUNT(*) AS n FROM raw_events WHERE repo_id = ?', input.repoId);
+  const memories = countQuery(db, 'SELECT COUNT(*) AS n FROM memories WHERE repo_id = ?', input.repoId);
+  const injections = countQuery(db, 'SELECT COUNT(*) AS n FROM injections WHERE repo_id = ?', input.repoId);
+  const injectionItems = countQuery(db, `SELECT COUNT(*) AS n FROM injection_items ii
+    JOIN injections i ON i.id = ii.injection_id WHERE i.repo_id = ?`, input.repoId);
   const duplicateGroups = db
     .prepare(
       `SELECT conversation_id AS conversation_id, context_epoch AS context_epoch, memory_id AS memory_id, COUNT(*) AS n
        FROM injection_items
        WHERE decision = 'included' AND memory_id IS NOT NULL
+         AND injection_id IN (SELECT id FROM injections WHERE repo_id = ?)
        GROUP BY conversation_id, context_epoch, memory_id
        HAVING n > 1`,
     )
-    .all() as { conversation_id: unknown; context_epoch: unknown; memory_id: unknown; n: unknown }[];
+    .all(input.repoId) as { conversation_id: unknown; context_epoch: unknown; memory_id: unknown; n: unknown }[];
 
   return { dbBytesAfter, perThousand, rawEvents, memories, injections, injectionItems, duplicateGroups };
 }
@@ -276,7 +404,7 @@ function lifecycleReport(
   db: ReturnType<typeof openDatabase>['db'],
   input: MeasureInput,
 ): { lifecycleRows: LifeRow[]; lifecyclePass: boolean } {
-  const conversationOf = conversationLookup(db, input.lines);
+  const conversationOf = conversationLookup(db, input.repoId, input.lines);
   const tagged = lifecycleTags(db, input.lines, conversationOf);
   const resumeLife = life(
     'resume',
@@ -307,9 +435,10 @@ function timingReport(input: MeasureInput) {
   const pending = pendingSentence(input, input.pendingSamples);
   const readyMax = maxMs(input.readySamples);
   const pendingMax = maxMs(input.pendingSamples);
-  const readyPass = input.readySamples.every((sample) => sample.ms <= READY_BOUND_MS);
+  const classified = input.startSamples.every((sample) => sample.classification !== 'unclassified');
+  const readyPass = classified && input.readySamples.every((sample) => sample.ms <= READY_BOUND_MS);
   const pendingPass =
-    input.pendingSamples.length > 0 &&
+    classified && input.pendingSamples.length > 0 &&
     pending.hits === input.pendingSamples.length &&
     input.pendingSamples.every((sample) => sample.ms <= PENDING_BOUND_MS);
   return {
@@ -340,9 +469,9 @@ function computeReport(
   const counts = dbCounts(db, paths, input);
   const packBlob = input.packs.map((pack) => pack.text).join('\n');
   const privacy = privacyChecks(db, paths, { maps: input.maps, packBlob });
-  const recall = recallTally(input);
+  const recall = recallTally(db, input);
   const lifecycle = lifecycleReport(db, input);
-  const compactionSummaries = compactionRows(db);
+  const compactionSummaries = compactionRows(db, input.repoId);
   const timing = timingReport(input);
   const workerRssKb = Math.max(input.observeRssKb, input.hookWorkerRssKb);
   const workerRuns = `observe runs: ${input.observeRuns} spawned by replay, ${input.hookWorkerRuns} hook-spawned (polled via worker_lease.pid)`;
@@ -360,37 +489,32 @@ function computeReport(
   };
 }
 
-/** Grok's last pending recall probes are settled against the session-start pack, then tallied. */
-function recallTally(input: MeasureInput): { recallJa: RecallHit[]; recallEn: RecallHit[]; misses: RecallHit[] } {
-  for (const waiting of input.grokRecallWait) {
-    const start = input.sessionStartPack.get(`grok:${waiting.session}`) ?? '';
-    input.recallHits.push({
-      id: waiting.fact.id,
-      lang: waiting.fact.lang,
-      query: waiting.fact.query,
-      expect: waiting.fact.expect,
-      hit: start.includes(waiting.fact.expect),
-    });
+/** Availability is current confirmed delivery or the fact already present before this query. */
+function recallTally(db: ReturnType<typeof openDatabase>['db'], input: MeasureInput) {
+  const recallTraces = input.recallProbes.map((probe) => evaluateRecall(db, probe));
+  const stageCounts: Record<string, Record<string, number>> = {};
+  for (const trace of recallTraces) for (const [name, stage] of Object.entries(trace.stages)) {
+    const counts = stageCounts[name] ??= {};
+    counts[stage.status] = (counts[stage.status] ?? 0) + 1;
   }
-  return {
-    recallJa: input.recallHits.filter((row) => row.lang === 'ja'),
-    recallEn: input.recallHits.filter((row) => row.lang === 'en'),
-    misses: input.recallHits.filter((row) => !row.hit),
-  };
+  return { recallTraces, stageCounts,
+    recallJa: recallTraces.filter((row) => row.lang === 'ja'),
+    recallEn: recallTraces.filter((row) => row.lang === 'en'),
+    misses: recallTraces.filter((row) => !row.hit) };
 }
 
 /** Every compaction summary the worker classified, in the order it saw them. */
-function compactionRows(db: ReturnType<typeof openDatabase>['db']) {
+function compactionRows(db: ReturnType<typeof openDatabase>['db'], repoId: string) {
   return db
     .prepare(
-      `SELECT s.agent AS agent, s.native_session_id AS native_session_id,
+      `SELECT s.agent AS agent, COALESCE(s.original_native_session_id, s.native_session_id) AS native_session_id,
               e.classification_state AS classification_state
        FROM raw_events e
        JOIN sessions s ON s.id = e.session_id
-       WHERE e.kind = 'compaction_summary'
+       WHERE e.repo_id = ? AND s.repo_id = e.repo_id AND e.kind = 'compaction_summary'
        ORDER BY s.agent, e.captured_at, e.id`,
     )
-    .all() as { agent: unknown; native_session_id: unknown; classification_state: unknown }[];
+    .all(repoId) as { agent: unknown; native_session_id: unknown; classification_state: unknown }[];
 }
 
 /** What the verdicts are computed from. */
@@ -413,7 +537,7 @@ function verdictsOf(input: MeasureInput, m: VerdictInput) {
   const sc003 = m.workerRssKb < WORKER_RSS_BOUND_KB;
   const sc005 = m.leakedSecrets.length === 0;
   const sc009 =
-    recallRateOf(input.recallHits) >= RECALL_BOUND &&
+    recallRateOf([...m.recallJa, ...m.recallEn]) >= RECALL_BOUND &&
     (m.recallJa.length === 0 || recallRateOf(m.recallJa) >= RECALL_BOUND) &&
     (m.recallEn.length === 0 || recallRateOf(m.recallEn) >= RECALL_BOUND);
   const sc010 = m.duplicateGroups.length === 0;
@@ -470,13 +594,13 @@ function timingBounds(
     {
       sc: 'injection',
       measured: `p99 ${ms(injectionP99)} ms; ${(injectionUnder * 100).toFixed(1)}% ≤ ${READY_BOUND_MS} ms (n=${injectionValues.length}); worst ${injectionTiming.worstGroup}`,
-      bound: `every (agent, event) group passes: every injection hook ≤ ${READY_BOUND_MS} ms (previous summary ready)`,
+      bound: `every (agent, event) group passes: every injection hook ≤ ${READY_BOUND_MS} ms (ready or non-injecting native start)`,
       status: statusOf(injectionPass),
     },
     {
       sc: 'session start',
       measured: `ready max ${ms(readyMax)} ms (n=${input.readySamples.length}); pending max ${ms(pendingMax)} ms (n=${input.pendingSamples.length}), ${pending.text}`,
-      bound: `ready ≤ ${READY_BOUND_MS} ms; pending n > 0, every pack carries summary_pending and every sample ≤ ${PENDING_BOUND_MS} ms (INJECTION_DEADLINE_MS: 300 ms budget + 1 s summary wait)`,
+      bound: `ready ≤ ${READY_BOUND_MS} ms; pending n > 0, every pack carries summary_pending and every sample ≤ ${PENDING_BOUND_MS} ms (session-start deadline)`,
       status: statusOf(readyPass && pendingPass),
     },
     {
@@ -500,7 +624,7 @@ function leakBounds(input: MeasureInput, computed: ReportComputed): BoundRow[] {
     },
     {
       sc: 'SC-009',
-      measured: `ja ${(recallRateOf(recallJa) * 100).toFixed(1)}% (${recallJa.filter((row) => row.hit).length}/${recallJa.length}); en ${(recallRateOf(recallEn) * 100).toFixed(1)}% (${recallEn.filter((row) => row.hit).length}/${recallEn.length}); overall ${(recallRateOf(input.recallHits) * 100).toFixed(1)}% (${input.recallHits.filter((row) => row.hit).length}/${input.recallHits.length})`,
+      measured: `ja ${(recallRateOf(recallJa) * 100).toFixed(1)}% (${recallJa.filter((row) => row.hit).length}/${recallJa.length}); en ${(recallRateOf(recallEn) * 100).toFixed(1)}% (${recallEn.filter((row) => row.hit).length}/${recallEn.length}); overall ${(recallRateOf([...recallJa, ...recallEn]) * 100).toFixed(1)}% (${[...recallJa, ...recallEn].filter((row) => row.hit).length}/${(recallJa.length + recallEn.length)})`,
       bound: '≥ 90% ja, en, and overall',
       status: statusOf(sc009),
     },

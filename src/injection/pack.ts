@@ -2,10 +2,10 @@
 // and "Pack format (all agents)", FR-021, FR-024, FR-025, FR-026, FR-028, FR-029, FR-044).
 // Hook path: no heavy import, no network, no file read beyond the staleness check.
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 
 import {
-  latestSessionState,
-  latestSessionSummary,
+  currentWorkCheckpoint,
   markInjected,
   memoryScope,
   pinnedMemories,
@@ -13,10 +13,13 @@ import {
 } from '../db/queries.js';
 import type { AgentName } from '../events.js';
 import { DEGRADED_PRECEDENCE, rejectsDirectives } from '../observer/classify.js';
+import { isAllowed, loadDestinationRules, type Sensitivity } from '../privacy/egress.js';
+import { injectionPrivacyValid, workPurposeSources, type InjectionPrivacyGuard, type SourceReference } from '../privacy/provenance.js';
 import { isCjk } from '../retrieval/fts.js';
 import { searchCandidates } from '../retrieval/query.js';
 import { rankCandidates } from '../retrieval/rank.js';
-import { payloadOf, toolInputOf } from '../worker/batches.js';
+import { payloadOf, toolInputOf, SUMMARIZABLE_ROW_SQL } from '../worker/batches.js';
+import { capturedPromptReady, readWorkSelection } from '../work.js';
 import { transactionImmediate } from '../worker/lease.js';
 import { charBudget } from './budget.js';
 import {
@@ -38,9 +41,6 @@ import {
 import { checkPaths, repositoryHead } from './staleness.js';
 
 
-/** Amendment A2: session start waits at most one second for a pending summary, then degrades. */
-const SUMMARY_WAIT_MS = 1_000;
-
 /** data-model.md memories.last_injected_at: a memory not injected for 90 days is retired. */
 const RETIREMENT_MS = 90 * 24 * 60 * 60 * 1_000;
 
@@ -48,7 +48,7 @@ const RAW_ACTIVITY_LIMIT = 6;
 const PROMPT_EXCERPT = 200;
 
 /** True when the finished text contains a secret. The caller supplies privacy/detect.ts (FR-018). */
-export type SecretDetector = (text: string) => boolean | Promise<boolean>;
+export type SecretDetector = (text: string, source?: SourceReference) => boolean | Promise<boolean>;
 
 export type PackChannelInput = {
   agent: AgentName;
@@ -58,6 +58,8 @@ export type PackChannelInput = {
   sessionId: string;
   conversationId: string;
   turnId?: string | null;
+  /** Pi's classified current prompt; null withholds work progress after a missing/failed capture. */
+  workPromptId?: string | null;
   epoch: number;
   model: string | undefined;
   channelCap: number | null;
@@ -65,6 +67,7 @@ export type PackChannelInput = {
   channel: string;
   now: number;
   detect: SecretDetector;
+  privacyGuard?: (sources: SourceReference[]) => InjectionPrivacyGuard | null;
   directives: readonly string[];
   repoRoot: string;
   /** What is left of the hook's deadline; the pack's one git call stays inside it (FR-002). */
@@ -73,11 +76,11 @@ export type PackChannelInput = {
   state?: Extract<InjectionState, 'built' | 'pending'>;
 };
 
-export type SessionStartInput = PackChannelInput & {
-  waitForSummary: (waitMs: number) => 'ready' | 'pending' | 'none';
-};
+export type SessionStartInput = PackChannelInput;
 
-export type PromptPackInput = PackChannelInput & { prompt: string; threshold?: number };
+export type PromptPackInput = PackChannelInput & { prompt: string; threshold?: number;
+  /** Memory IDs in the earlier pack of this same response, still awaiting delivery. */
+  excludeMemoryIds?: readonly string[] };
 
 export type BuiltPack = {
   injectionId: string;
@@ -87,7 +90,18 @@ export type BuiltPack = {
   degraded: DegradedReason | null;
   charBudget: number;
   charsUsed: number;
+  choices?: string[];
+  workGuard?: WorkGuard;
 };
+
+export type WorkGuard = Pick<PackChannelInput, 'repoId' | 'repoRoot' | 'sessionId' | 'workPromptId'> & {
+  snapshot: string; privacy?: InjectionPrivacyGuard;
+};
+
+export function workGuardValid(db: DatabaseSync, guard: WorkGuard, remainingBudget?: () => number): boolean {
+  return createHash('sha256').update(workSnapshot(workProgress(db, guard))).digest('hex') === guard.snapshot
+    && (guard.privacy === undefined || injectionPrivacyValid(db, guard.privacy, remainingBudget));
+}
 
 function scriptOf(text: string): 'en' | 'cjk' {
   for (const character of text) {
@@ -103,7 +117,7 @@ function citationsOf(db: DatabaseSync, ids: readonly string[]): Map<string, Cita
     .prepare(
       `SELECT memory_id, citation_kind, citation_value FROM memory_sources
        WHERE memory_id IN (${ids.map(() => '?').join(', ')})
-         AND citation_kind IS NOT NULL AND citation_value IS NOT NULL
+         AND context_only = 0 AND citation_kind IS NOT NULL AND citation_value IS NOT NULL
        ORDER BY id`,
     )
     .all(...(ids as SQLInputValue[]));
@@ -157,26 +171,31 @@ function activityLine(row: Record<string, SQLOutputValue>): string {
 }
 
 /**
- * The most recent prompts and tool calls of the session whose summary is still pending. Secret,
+ * The most recent pending prompts and tool calls of the selected work. Secret,
  * partial and failed rows and every tool result stay out (contracts/agents.md injection policy).
  */
-function latestRawActivity(db: DatabaseSync, sessionId: string): ActivityRow[] {
+function latestRawActivity(db: DatabaseSync, repoId: string, workId: string): ActivityRow[] {
+  const rules = loadDestinationRules(db);
+  const allowed = ['eligible', 'local_only', 'private'].filter((sensitivity) =>
+    isAllowed(rules, 'injection', sensitivity as Sensitivity, true));
+  if (allowed.length === 0) return [];
   const rows = db
     .prepare(
-      `SELECT id, kind, content, payload_json FROM raw_events
-       WHERE session_id = ? AND kind IN ('prompt', 'tool_call')
-         AND classification_state = 'done' AND sensitivity <> 'secret'
-         AND content IS NOT NULL AND content <> ''
-       ORDER BY captured_at DESC, id DESC LIMIT ?`,
+      `SELECT e.id, kind, content, payload_json FROM raw_events e JOIN work_bindings b ON b.id = e.work_binding_id
+       WHERE e.repo_id = ? AND b.work_id = ? AND kind IN ('prompt', 'tool_call')
+         AND classification_state = 'done' AND sensitivity IN (${allowed.map(() => '?').join(', ')})
+         AND processing_state <> 'processed'
+         AND ${SUMMARIZABLE_ROW_SQL}
+       ORDER BY captured_at DESC, e.id DESC LIMIT ?`,
     )
-    .all(sessionId, RAW_ACTIVITY_LIMIT);
+    .all(repoId, workId, ...allowed, RAW_ACTIVITY_LIMIT);
   return rows
     .toReversed()
     .map((row) => ({ rawEventId: String(row.id), line: activityLine(row) }))
     .filter((activity) => activity.line !== '');
 }
 
-function memoryOf(row: MemoryRow, label: 'summary' | 'pinned', reason: ItemReason): PackMemory {
+function memoryOf(row: MemoryRow, label: 'work checkpoint' | 'pinned', reason: ItemReason): PackMemory {
   return {
     id: row.id,
     title: row.title ?? '',
@@ -188,6 +207,8 @@ function memoryOf(row: MemoryRow, label: 'summary' | 'pinned', reason: ItemReaso
   };
 }
 
+type ChoiceLine = string | { text: string; fallback: string; rawEventId: string };
+
 type Assembly = {
   kind: InjectionKind;
   memories: PackMemory[];
@@ -196,6 +217,8 @@ type Assembly = {
   degraded: DegradedReason | null;
   budgetChars: number;
   directives: readonly string[];
+  selectionSnapshot: string;
+  choices: ChoiceLine[];
 };
 
 function omittedItem(memoryId: string, reason: ItemReason): LedgerItem {
@@ -276,8 +299,9 @@ function writeInjection(
   assembly: Assembly,
   items: PackItem[],
   text: string,
-): string {
+): string | null {
   return transactionImmediate(db, () => {
+    if (workSnapshot(workProgress(db, input)) !== assembly.selectionSnapshot) return null;
     const id = createInjection(db, {
       repoId: input.repoId,
       sessionId: input.sessionId,
@@ -360,18 +384,42 @@ async function assemble(
   const items = packItems(db, input, assembly);
 
   const degraded = assembly.degraded;
+  // IDs/framing are engine metadata; displayed purposes retain their actual source proof.
+  const plannedChoices: ChoiceLine[] = [];
+  const reservedChoices: string[] = [];
+  for (const line of assembly.choices) {
+    const reserved = typeof line === 'string' ? line : line.text.length >= line.fallback.length ? line.text : line.fallback;
+    const candidate = [...reservedChoices, reserved];
+    if (renderPack({ repositoryLine, blocks: [candidate], degraded }).length > assembly.budgetChars) break;
+    plannedChoices.push(line);
+    reservedChoices.push(reserved);
+  }
   const kept = withinBudget(items, {
     budgetChars: assembly.budgetChars,
-    used: renderPack({ repositoryLine, blocks: [], degraded }).length,
+    used: renderPack({ repositoryLine, blocks: [reservedChoices], degraded }).length,
   });
 
-  let text = renderPack({ repositoryLine, blocks: kept.map((item) => item.lines), degraded });
+  const references = [...kept.map(({ memoryId, rawEventId }) => ({ memoryId, rawEventId })),
+    ...plannedChoices.flatMap((line) => typeof line === 'string' ? [] : [{ memoryId: null, rawEventId: line.rawEventId }])];
+  const privacy = input.privacyGuard?.([...new Map(references.map((source) => [JSON.stringify(source), source])).values()]);
+  if (privacy === null) return recordOmitted(db, input, assembly, items, 'index_unavailable');
+  const choices: string[] = [];
+  for (const line of plannedChoices) choices.push(typeof line === 'string' ? line
+    : await input.detect(line.text, { memoryId: null, rawEventId: line.rawEventId }) ? line.fallback : line.text);
+  for (const item of kept) {
+    if (await input.detect(item.lines.join('\n'), { memoryId: item.memoryId, rawEventId: item.rawEventId })) omit(item, 'secret_detected');
+  }
+  const allowed = kept.filter((item) => item.decision !== 'omitted');
+  kept.length = 0;
+  kept.push(...allowed);
+
+  let text = renderPack({ repositoryLine, blocks: [choices, ...kept.map((item) => item.lines)], degraded });
 
   // FR-018: the finished pack is scanned as a whole; a hit drops the item that carries it and the
   // pack is rendered again. A pack with a detector hit is never emitted.
-  if (kept.length > 0 && (await input.detect(text))) {
+  if ((kept.length > 0 || choices.length > 0) && (await input.detect(text))) {
     const survivors = await dropDetected(kept, (text) => input.detect(text));
-    text = renderPack({ repositoryLine, blocks: survivors.map((item) => item.lines), degraded });
+    text = renderPack({ repositoryLine, blocks: [choices, ...survivors.map((item) => item.lines)], degraded });
     kept.length = 0;
     kept.push(...survivors);
     if (await input.detect(text)) {
@@ -384,11 +432,15 @@ async function assemble(
     return recordOmitted(db, input, assembly, items, 'index_unavailable');
   }
 
-  if (kept.length === 0) return recordOmitted(db, input, assembly, items, 'empty');
+  if (kept.length === 0 && choices.length === 0) return recordOmitted(db, input, assembly, items, 'empty');
+  if (privacy !== undefined && !injectionPrivacyValid(db, privacy, input.remainingBudget)) {
+    return recordOmitted(db, input, assembly, items, 'index_unavailable');
+  }
 
   // docs/dev/conventions.md: the record and the rows it accounts for are one write unit, so no
   // reader ever finds a pack whose items are missing.
   const injectionId = writeInjection(db, input, assembly, items, text);
+  if (injectionId === null) return recordOmitted(db, input, assembly, items, 'index_unavailable');
 
   return {
     injectionId,
@@ -398,6 +450,11 @@ async function assemble(
     degraded,
     charBudget: assembly.budgetChars,
     charsUsed: text.length,
+    choices,
+    workGuard: { repoId: input.repoId, repoRoot: input.repoRoot, sessionId: input.sessionId,
+      workPromptId: input.workPromptId,
+      snapshot: createHash('sha256').update(assembly.selectionSnapshot).digest('hex'),
+      ...(privacy === undefined ? {} : { privacy }) },
   };
 }
 
@@ -433,22 +490,51 @@ function recordOmitted(
   return null;
 }
 
-/**
- * FR-024 with A2: the previous session decides what a session-start pack carries. While its
- * summary is pending the pack waits at most one second and falls back to that session's recent
- * raw activity; an older session's summary never stands in for it.
- */
-function previousSession(
-  db: DatabaseSync,
-  input: SessionStartInput,
-): { summary: MemoryRow | null; activity: ActivityRow[]; degraded: DegradedReason | null } {
-  const state = latestSessionState(db, input.repoId);
-  const outcome = state?.summaryState === 'pending' ? input.waitForSummary(SUMMARY_WAIT_MS) : 'ready';
-  const summary = latestSessionSummary(db, input.repoId);
-  if (outcome === 'pending' && state !== null) {
-    return { summary: null, activity: latestRawActivity(db, state.sessionId), degraded: 'summary_pending' };
-  }
-  return { summary, activity: [], degraded: null };
+/** The exact native binding, including its root, is authoritative even when other sessions end. */
+function workProgress(db: DatabaseSync, input: Pick<PackChannelInput, 'repoId' | 'repoRoot' | 'sessionId' | 'workPromptId'>) {
+  const bound = db.prepare(`SELECT b.id, c.local_key FROM work_bindings b JOIN work_contexts c ON c.id = b.context_id
+    JOIN sessions s ON s.id = b.session_id WHERE b.session_id = ? AND b.closed_at IS NULL
+      AND s.repo_id = ? AND c.repo_id = ? AND c.root = ?`)
+    .get(input.sessionId, input.repoId, input.repoId, input.repoRoot);
+  const ready = input.workPromptId === undefined || (input.workPromptId !== null
+    && capturedPromptReady(db, input.repoId, input.sessionId, input.workPromptId));
+  const selection = bound === undefined || !ready ? null : readWorkSelection(db, {
+    repoId: input.repoId, contextKey: String(bound.local_key), bindingId: String(bound.id),
+  });
+  const workId = selection?.state === 'active' ? selection.workId : null;
+  const scope = memoryScope(db, { repoId: input.repoId, destination: 'injection', workId });
+  return { selection, purposes: workPurposeSources(db, input.repoId, selection?.choices ?? []),
+    summary: workId == null ? null : currentWorkCheckpoint(db, workId, scope),
+    activity: workId == null ? [] : latestRawActivity(db, input.repoId, workId), policy: scope,
+    knowledgePolicy: { ...scope, where: `${scope.where} AND m.type <> 'session_summary'` } };
+}
+
+function workSnapshot(progress: ReturnType<typeof workProgress>): string {
+  const m = progress.summary;
+  // Delivery counters and the worker's citation cache do not change the checkpoint's meaning or privacy.
+  const summary = m === null ? null : [m.id, m.work_id, m.checkpoint_parent_id, m.title, m.body,
+    m.content_hash, m.sensitivity, m.review_state, m.valid_from, m.valid_to, m.deleted_at,
+    m.provenance_complete, m.degraded_reason];
+  // New activity can supply Grok's delivery carrier. The privacy guard rechecks the exact source
+  // bodies already in this pack; unrelated appended activity does not invalidate those bodies.
+  return JSON.stringify({ selection: progress.selection, purposes: progress.purposes, policy: progress.policy, summary });
+}
+
+function choiceLines(progress: ReturnType<typeof workProgress>, directives: readonly string[]): ChoiceLine[] {
+  const { selection, purposes } = progress;
+  if (selection === null || selection.workId !== null || selection.bindingId === null) return [];
+  return [
+    '> Select which work to continue before using its progress.',
+    `> Binding: ${canonicalLine(selection.bindingId)}`,
+    ...selection.choices.map((choice, index) => {
+      const fallback = `> Work ${canonicalLine(choice.id)}: Untitled work`;
+      const rawEventId = purposes[index]?.rawEventId;
+      if (choice.purpose === null || rawEventId == null || rejectsDirectives(choice.purpose, directives) !== null) return fallback;
+      return { text: `> Work ${canonicalLine(choice.id)}: ${canonicalLine(choice.purpose)}`, fallback, rawEventId };
+    }),
+    '> Use work_choose with this binding and the chosen work ID, or oboete work choose <binding-id> <work-id|new>.',
+    ...(selection.hasMore ? ['> Additional choices are available through work status.'] : []),
+  ];
 }
 
 export async function buildSessionStartPack(
@@ -458,22 +544,21 @@ export async function buildSessionStartPack(
   // FR-024 with A12: one session-start pack per conversation and epoch, so a resume adds nothing.
   if (sessionStartEmitted(db, input.conversationId, input.epoch)) return null;
 
-  const scope = memoryScope(db, { repoId: input.repoId, destination: 'injection' });
-  const previous = previousSession(db, input);
-  let degraded: DegradedReason | null = previous.degraded;
+  const previous = workProgress(db, input);
+  let degraded: DegradedReason | null = previous.activity.length > 0 ? 'summary_pending' : null;
   const summary = previous.summary;
 
   const delivered = alreadyIncluded(db, input.conversationId, input.epoch);
   const omitted: LedgerItem[] = [];
   const memories: PackMemory[] = [];
   if (summary !== null && !delivered.has(summary.id)) {
-    memories.push(memoryOf(summary, 'summary', 'summary'));
+    memories.push(memoryOf(summary, 'work checkpoint', 'summary'));
   } else if (summary !== null) {
     omitted.push(omittedItem(summary.id, 'duplicate_in_conversation'));
   }
 
   // FR-024: pinned memories follow the summary and are trimmed in pin order.
-  for (const pinned of pinnedMemories(db, scope)) {
+  for (const pinned of pinnedMemories(db, previous.knowledgePolicy)) {
     if (pinned.id === summary?.id) continue;
     if (delivered.has(pinned.id)) {
       omitted.push(omittedItem(pinned.id, 'duplicate_in_conversation'));
@@ -503,6 +588,8 @@ export async function buildSessionStartPack(
     degraded,
     budgetChars: budget.chars,
     directives: input.directives,
+    selectionSnapshot: workSnapshot(previous),
+    choices: choiceLines(previous, input.directives),
   });
 }
 
@@ -519,9 +606,10 @@ export async function buildPromptPack(
   });
   if (budget.blocked) return null;
 
-  const scope = memoryScope(db, { repoId: input.repoId, destination: 'injection' });
-  const found = searchCandidates(db, { text: input.prompt, scope });
+  const previous = workProgress(db, input);
+  const found = searchCandidates(db, { text: input.prompt, scope: previous.knowledgePolicy });
   const delivered = alreadyIncluded(db, input.conversationId, input.epoch);
+  const selected = new Set([...delivered, ...(input.excludeMemoryIds ?? [])]);
   const injectedAt = lastInjectedAt(
     db,
     found.rows.map((row) => row.id),
@@ -529,7 +617,7 @@ export async function buildPromptPack(
 
   const omitted: LedgerItem[] = [];
   const candidates = found.rows.filter((row) => {
-    if (delivered.has(row.id)) {
+    if (selected.has(row.id)) {
       omitted.push(omittedItem(row.id, 'duplicate_in_conversation'));
       return false;
     }
@@ -548,10 +636,13 @@ export async function buildPromptPack(
     budgetChars: budget.chars,
   });
   for (const item of ranked.omitted) omitted.push(omittedItem(item.id, item.reason));
+  const summary = previous.summary;
+  const checkpoints = summary === null || selected.has(summary.id) ? [] : [memoryOf(summary, 'work checkpoint', 'summary')];
+  if (summary !== null && selected.has(summary.id)) omitted.push(omittedItem(summary.id, 'duplicate_in_conversation'));
 
   return assemble(db, input, {
     kind: 'prompt',
-    memories: ranked.included.map((row, index) => ({
+    memories: [...checkpoints, ...ranked.included.map((row, index): PackMemory => ({
       id: row.id,
       title: row.title,
       body: row.body,
@@ -561,14 +652,17 @@ export async function buildPromptPack(
       scoreBm25: row.score_bm25,
       scoreRrf: row.score_rrf,
       scoreMmr: row.score_mmr,
-    })),
-    activity: [],
+    }))],
+    activity: previous.activity,
     omitted,
     degraded:
-      batchReasonOf(db, ranked.included.map((row) => row.id)) ??
+      (previous.activity.length > 0 ? 'summary_pending' : null) ??
+      batchReasonOf(db, [...checkpoints, ...ranked.included].map((row) => row.id)) ??
       (budget.windowUnknown ? 'window_unknown' : null),
     budgetChars: budget.chars,
     directives: input.directives,
+    selectionSnapshot: workSnapshot(previous),
+    choices: choiceLines(previous, input.directives),
   });
 }
 

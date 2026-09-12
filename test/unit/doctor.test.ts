@@ -17,11 +17,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
 import { PRESET_CATALOG, configSchema, consentHash, consentTuple } from '../../src/config.js';
-import { openDatabase } from '../../src/db/open.js';
+import { LATEST_SCHEMA_VERSION, openDatabase } from '../../src/db/open.js';
 import { runDoctor, type DoctorDeps, type DoctorItem } from '../../src/doctor.js';
 import { probeReason } from '../../src/doctor/agents.js';
 import { allowanceItem, catalogItems, providerItem } from '../../src/doctor/provider.js';
-import { ftsItem, migrationItem, openStorage, spoolItem, workerItem } from '../../src/doctor/storage.js';
+import { ftsItem, generationItem, migrationItem, openStorage, spoolItem, workerItem } from '../../src/doctor/storage.js';
 import { ensureDirectories, oboetePaths, type OboetePaths } from '../../src/paths.js';
 import type { VersionSpawn } from '../../src/setup/detect.js';
 import { removeJsonHandlers } from '../../src/setup/managed-block.js';
@@ -123,9 +123,11 @@ function storingSpawn(dbPath: string): typeof spawn {
 
 function observerOutput(): unknown {
   return {
+    checkpoint: { decision: 'unchanged', source_event_ids: ['e1'], reason: 'This is a connectivity probe.' },
     observations: [
       {
         type: 'bugfix',
+        visibility: 'project',
         title: 'Doctor probe',
         body: 'The provider answered the doctor probe.',
         concepts: ['problem-solution'],
@@ -447,7 +449,7 @@ test('an unreachable provider degrades provider and an answering fetch restores 
     const broken = await context.doctor(['--json', '--probe-provider']);
     assert.equal(broken, 1, context.output);
     const failed = context.item('provider');
-    assertBroken(failed, 'degraded', 'Provider request failed', 'rule-based', 'network|host');
+    assertBroken(failed, 'degraded', 'Provider request failed', 'Temporary guidance', 'network|host');
     assert.match(failed.reason, /^Provider request failed.*\.$/);
 
     context.fetch = answeringFetch();
@@ -484,7 +486,7 @@ test('an exhausted allowance degrades and advancing now past reset_at restores i
 
     const broken = await context.doctor();
     assert.equal(broken, 1, context.output);
-    assertBroken(context.item('allowance'), 'degraded', 'exhaust', 'fallback', 'reset');
+    assertBroken(context.item('allowance'), 'degraded', 'exhaust', 'later worker runs', 'reset');
 
     context.now = resetAt + 1;
     const restored = await context.doctor();
@@ -788,22 +790,23 @@ test('missing storage explains spooling without creating a database', async () =
 
 test('a newer database schema is diagnosed without migrating it', async () => {
   await withItemDatabase((db, paths) => {
-    db.exec('PRAGMA user_version = 4');
+    const futureVersion = LATEST_SCHEMA_VERSION + 1;
+    db.exec(`PRAGMA user_version = ${futureVersion}`);
     assert.deepEqual(openStorage(paths), {
       item: {
         item: 'storage', status: 'healthy',
         reason: `\`${paths.db}\` opened; the schema is newer than this bundle knows.`,
         consequence: '', recovery: '',
       },
-      db: null, schemaVersion: 4, schemaAhead: true, integrityFailed: false,
+      db: null, schemaVersion: futureVersion, schemaAhead: true, integrityFailed: false,
     });
-    assert.deepEqual(migrationItem(4, true, false), {
+    assert.deepEqual(migrationItem(futureVersion, true, false), {
       item: 'migration', status: 'degraded',
-      reason: 'The database schema is version 4, newer than this bundle knows; upgrade oboete.',
+      reason: `The database schema is version ${futureVersion}, newer than this bundle knows; upgrade oboete.`,
       consequence: 'This version of oboete cannot migrate or write this database.',
-      recovery: 'Upgrade oboete to a version that knows schema version 4.',
+      recovery: `Upgrade oboete to a version that knows schema version ${futureVersion}.`,
     });
-    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 4);
+    assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, futureVersion);
   });
 });
 
@@ -836,6 +839,32 @@ test('a fresh worker heartbeat reports the process and elapsed seconds', async (
       item: 'worker', status: 'healthy', reason: 'The worker process 1234 is alive (heartbeat 2 seconds ago).',
       consequence: '', recovery: '',
     });
+  });
+});
+
+test('a parked work-selection source warns until it has a retry time', async () => {
+  await withItemDatabase((db) => {
+    db.prepare(
+      "INSERT INTO repos (id, identity_kind, normalized_identity) VALUES ('doctor-generation', 'common_dir', 'doctor-generation')",
+    ).run();
+    db.prepare(
+      `INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, status)
+       VALUES ('doctor-generation', 'doctor-generation', 'claude', 'native-generation', 'conversation-generation', 'active')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO raw_events
+        (id, repo_id, session_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at, processing_state, retry_after)
+       VALUES ('parked-generation', 'doctor-generation', 'doctor-generation', 'claude', 'prompt', 'accepted source', 'local_only', 'done', ?, ?, 'waiting', NULL)`,
+    ).run(ITEM_NOW, ITEM_NOW + 86_400_000);
+
+    const parked = generationItem(db, false);
+    assert.equal(parked.status, 'warning');
+    assert.match(parked.reason, /0 waiting; 1 parked;/);
+
+    db.prepare("UPDATE raw_events SET retry_after = ? WHERE id = 'parked-generation'").run(ITEM_NOW + 1);
+    const retrying = generationItem(db, false);
+    assert.equal(retrying.status, 'degraded');
+    assert.match(retrying.reason, /1 waiting; 0 parked;/);
   });
 });
 
@@ -927,7 +956,7 @@ test('changed provider consent stops a doctor probe before reserving allowance',
       options: itemOptions, now: ITEM_NOW,
     }), {
       item: 'provider', status: 'degraded', reason: 'Observer consent changed before reservation.',
-      consequence: 'Summaries fall back to rule-based until the provider answers.',
+      consequence: 'Temporary guidance is available while source processing waits for the provider.',
       recovery: '`oboete setup --accept-egress`',
     });
     assert.equal(db.prepare('SELECT count(*) AS n FROM provider_usage').get()?.n, 0);
@@ -949,13 +978,13 @@ for (const [name, calls, exhaustedAt, reason] of [
         options: itemOptions, now: ITEM_NOW,
       }), {
         item: 'provider', status: 'degraded', reason,
-        consequence: 'Summaries fall back to rule-based until the provider answers.',
+        consequence: 'Temporary guidance is available while source processing waits for the provider.',
         recovery: 'Wait for the reset at 2026-09-07T00:00:00.000Z or choose another preset with `oboete setup --provider`.',
       });
       assert.deepEqual(allowanceItem(config, db, false, ITEM_NOW), {
         item: 'allowance', status: 'degraded',
         reason: exhaustedAt === null ? 'The daily cap of 150 calls is used up.' : 'The provider reported exhaustion today.',
-        consequence: 'Summaries come from the fallback until the allowance resets; no call is retried.',
+        consequence: 'Source processing waits for the allowance to reset; later worker runs retry due sources.',
         recovery: 'Wait for the reset at 2026-09-07T00:00:00.000Z or switch preset with `oboete setup --provider`.',
       });
       assert.deepEqual(
@@ -983,7 +1012,7 @@ test('a rejected provider credential consumes one probe and recommends checking 
     });
     assert.deepEqual(item, {
       item: 'provider', status: 'degraded', reason: 'Provider request failed with HTTP 401.',
-      consequence: 'Summaries fall back to rule-based until the provider answers.',
+      consequence: 'Temporary guidance is available while source processing waits for the provider.',
       recovery: 'Check the credentials for this preset and run `oboete doctor --probe-provider` again.',
     });
     assert.equal(requests, 1);

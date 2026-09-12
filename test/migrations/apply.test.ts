@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DatabaseMissingError,
   isBusyError,
+  LATEST_SCHEMA_VERSION,
   MIGRATIONS,
   MigrationMismatchError,
   openDatabase,
@@ -44,14 +45,14 @@ test('empty database applies all migrations', (t) => {
   const opened = openDatabase({ path: dbPath, timeoutMs: 1000 });
   t.after(() => closeQuietly(opened.db));
 
-  assert.equal(opened.schemaVersion, 3);
+  assert.equal(opened.schemaVersion, LATEST_SCHEMA_VERSION);
   assert.equal(opened.schemaBehind, false);
-  assert.equal(opened.db.prepare('PRAGMA user_version').get()?.user_version, 3);
+  assert.equal(opened.db.prepare('PRAGMA user_version').get()?.user_version, 8);
 
   const rows = opened.db
     .prepare('SELECT version, name, sha256 FROM schema_migrations ORDER BY version')
     .all();
-  assert.equal(rows.length, 3);
+  assert.equal(rows.length, MIGRATIONS.length);
   for (const [i, migration] of MIGRATIONS.entries()) {
     assert.equal(rows[i]?.version, migration.version);
     assert.equal(rows[i]?.name, migration.name);
@@ -88,7 +89,7 @@ test('reopen applies nothing', (t) => {
   assert.deepEqual(again, snapshot);
 });
 
-test('previous version upgrades to 3 and keeps version-1 applied_at', (t) => {
+test('previous version upgrades to 8 and keeps version-1 applied_at', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oboete-mig-'));
   const dbPath = path.join(dir, 'memory.db');
   t.after(() => {
@@ -105,13 +106,13 @@ test('previous version upgrades to 3 and keeps version-1 applied_at', (t) => {
 
   const opened = openDatabase({ path: dbPath, timeoutMs: 1000 });
   t.after(() => closeQuietly(opened.db));
-  assert.equal(opened.schemaVersion, 3);
+  assert.equal(opened.schemaVersion, LATEST_SCHEMA_VERSION);
 
   const versions = opened.db
     .prepare('SELECT version FROM schema_migrations ORDER BY version')
     .all()
     .map((row) => row.version);
-  assert.deepEqual(versions, [1, 2, 3]);
+  assert.deepEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8]);
   assert.equal(
     opened.db.prepare('SELECT applied_at FROM schema_migrations WHERE version = 1').get()
       ?.applied_at,

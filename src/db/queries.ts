@@ -3,6 +3,9 @@ import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
 import type { Destination, Sensitivity } from '../privacy/egress.js';
 import { searchCandidates } from '../retrieval/query.js';
 import { normalizeBm25, rrfFuse } from '../retrieval/rank.js';
+import { strictest } from '../privacy/classify.js';
+import { sha256Json } from '../hash.js';
+import { prepared } from './statements.js';
 
 export type ReviewState = 'unreviewed' | 'reviewed' | 'imported';
 export type SummaryState = 'pending' | 'done' | 'no_content';
@@ -23,6 +26,10 @@ export type MemoryRow = {
   degraded_reason: string | null;
   source_session_id: string | null;
   source_batch_id: string | null;
+  source_captured_at?: number | null;
+  work_id?: string | null;
+  checkpoint_parent_id?: string | null;
+  provenance_complete?: number | null;
   valid_from: number | null;
   valid_to: number | null;
   superseded_by: string | null;
@@ -44,6 +51,44 @@ export type MemorySourceRow = {
 
 /** A `WHERE` fragment over the alias `m` plus its parameters, in that order. */
 export type MemoryScope = { repoId: string; where: string; params: SQLInputValue[] };
+
+/** One audience predicate for readers and observer context; lifecycle/egress is added by callers. */
+export function visibilityScope(input: { repoId: string; workId?: string | null; personal?: boolean }) {
+  return { where: `EXISTS (SELECT 1 FROM memory_visibility v
+    LEFT JOIN sharing_proposals p ON p.id = v.proposal_id WHERE v.memory_id = m.id AND (
+      (v.audience = 'project' AND v.repo_id = ? AND m.repo_id = v.repo_id)
+      OR (v.audience = 'work' AND v.repo_id = ? AND m.repo_id = v.repo_id AND v.work_id = ?
+        AND EXISTS (SELECT 1 FROM work_items w WHERE w.id = v.work_id AND w.repo_id = v.repo_id))
+      ${input.personal === false ? '' : "OR (v.audience = 'personal' AND p.state = 'approved' AND p.projected_memory_id = m.id AND p.candidate_material_hash = m.material_hash AND p.candidate_title = m.title AND p.candidate_body = m.body)"}))`,
+  params: [input.repoId, input.repoId, input.workId ?? null] as SQLInputValue[] };
+}
+
+export type VisibilityGrant =
+  | { audience: 'work'; repoId: string; workId: string }
+  | { audience: 'project'; repoId: string }
+  | { audience: 'personal'; proposalId: string };
+
+export function grantVisibility(db: DatabaseSync, memoryId: string, grant: VisibilityGrant,
+  kind: 'migration' | 'observer' | 'explicit_adoption' | 'proposal_approval', now: number): void {
+  const repoId = 'repoId' in grant ? grant.repoId : null;
+  const workId = 'workId' in grant ? grant.workId : null;
+  const proposalId = 'proposalId' in grant ? grant.proposalId : null;
+  prepared(db, `INSERT OR IGNORE INTO memory_visibility
+    (id, memory_id, audience, repo_id, work_id, proposal_id, grant_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(`v_${sha256Json([memoryId, grant.audience, repoId, workId])}`, memoryId,
+      grant.audience, repoId, workId, proposalId, kind, now);
+}
+
+/** Included in prepared/final read and generation stamps, without loading any source body. */
+export function memoryVisibility(db: DatabaseSync, memoryId: string) {
+  return db.prepare(`SELECT v.*, p.state, p.projected_memory_id
+    FROM memory_visibility v LEFT JOIN sharing_proposals p ON p.id = v.proposal_id
+    WHERE v.memory_id = ? ORDER BY v.id`).all(memoryId);
+}
+
+export function visibilityUnchanged(db: DatabaseSync, candidate: Pick<NearbyCandidate, 'id' | 'visibility_stamp'>): boolean {
+  return candidate.visibility_stamp !== undefined && candidate.visibility_stamp === sha256Json(memoryVisibility(db, candidate.id));
+}
 
 export type TimelineTurn = {
   id: string;
@@ -98,7 +143,7 @@ export type SessionState = {
  */
 export function memoryScope(
   db: DatabaseSync,
-  input: { repoId: string; destination: Destination },
+  input: { repoId: string; destination: Destination; workId?: string | null; history?: boolean },
 ): MemoryScope {
   if (input.destination === 'sync') {
     // Synchronization is M2 (plan.md "Constitution Check" V); refusing beats a silent wider scope.
@@ -119,16 +164,25 @@ export function memoryScope(
     // rule for the observer path.
     .filter((sensitivity) => sensitivity !== 'secret');
 
+  const visibility = visibilityScope(input);
   const conditions = [
-    'm.repo_id = ?', // FR-044: the same repository is the only scope in M1.
+    visibility.where,
+    '(m.work_id IS NULL OR (m.work_id = ? AND m.repo_id = ?))',
     'm.deleted_at IS NULL', // FR-035: a tombstone never surfaces again.
-    'm.valid_to IS NULL', // data-model "memories": a superseded row never surfaces.
+    ...(input.history === true ? [] : ['m.valid_to IS NULL']),
     "m.review_state <> 'imported'", // R12 "Export/import": imported rows stay quarantined.
     // Fails closed: with no allowed sensitivity the fragment matches no row at all.
     allowed.length === 0 ? '0' : `m.sensitivity IN (${allowed.map(() => '?').join(', ')})`,
   ];
 
-  return { repoId: input.repoId, where: `(${conditions.join(' AND ')})`, params: [input.repoId, ...allowed] };
+  const params: SQLInputValue[] = [...visibility.params, input.workId ?? null, input.repoId, ...allowed];
+  if (input.history !== true) {
+    conditions.push(input.workId == null ? "m.type <> 'session_summary'"
+      : `(m.type <> 'session_summary' OR (m.work_id = ? AND m.id = (
+        SELECT current_checkpoint_memory_id FROM work_items WHERE id = ? AND repo_id = ? AND state = 'active')))`);
+    if (input.workId != null) params.push(input.workId, input.workId, input.repoId);
+  }
+  return { repoId: input.repoId, where: `(${conditions.join(' AND ')})`, params };
 }
 
 /** Null for a missing id and for one outside the scope alike (contracts/cli.md, contracts/mcp.md). */
@@ -139,11 +193,19 @@ export function getMemory(db: DatabaseSync, id: string, scope: MemoryScope): Mem
   return row === undefined ? null : asMemoryRows([row])[0];
 }
 
+/** Only the selected work's published checkpoint can represent its current progress. */
+export function currentWorkCheckpoint(db: DatabaseSync, workId: string, scope: MemoryScope): MemoryRow | null {
+  const row = db.prepare(`SELECT m.* FROM work_items w JOIN memories m ON m.id = w.current_checkpoint_memory_id
+    WHERE w.id = ? AND w.repo_id = ? AND m.work_id = w.id AND ${scope.where}`)
+    .get(workId, scope.repoId, ...scope.params);
+  return row === undefined ? null : asMemoryRows([row])[0];
+}
+
 export function memorySources(db: DatabaseSync, id: string): MemorySourceRow[] {
   return db
     .prepare(
       `SELECT raw_event_id, citation_kind, citation_value, source_agent
-       FROM memory_sources WHERE memory_id = ? ORDER BY id`,
+       FROM memory_sources WHERE memory_id = ? AND context_only = 0 ORDER BY id`,
     )
     .all(id) as unknown as MemorySourceRow[];
 }
@@ -209,15 +271,15 @@ export function pinnedMemories(db: DatabaseSync, scope: MemoryScope): MemoryRow[
 }
 
 /**
- * The session summary a fresh session injects (FR-024). A summary that is secret, deleted or
- * superseded is filtered out by the injection scope, so the next older one is used instead.
+ * Legacy history inspection only. Active progress is resolved through the work pointer.
  */
-export function latestSessionSummary(db: DatabaseSync, repoId: string): MemoryRow | null {
-  const scope = memoryScope(db, { repoId, destination: 'injection' });
+export function latestSessionSummary(db: DatabaseSync, repoId: string, workId?: string): MemoryRow | null {
+  const scope = memoryScope(db, { repoId, workId, destination: 'injection', history: true });
   const row = db
     .prepare(
-      `SELECT m.* FROM sessions s JOIN memories m ON m.id = s.latest_summary_memory_id
-       WHERE ${scope.where} AND s.repo_id = ? AND s.status = 'ended' AND s.summary_state = 'done'
+      `SELECT m.*, s.summary_degraded_reason AS degraded_reason
+       FROM sessions s JOIN memories m ON m.id = s.latest_summary_memory_id
+       WHERE ${scope.where} AND m.valid_to IS NULL AND s.repo_id = ? AND s.status = 'ended' AND s.summary_state = 'done'
        ORDER BY s.ended_at DESC, s.id DESC LIMIT 1`,
     )
     .get(...scope.params, repoId);
@@ -251,7 +313,7 @@ function timelineMemories(
       `SELECT ms.memory_id, ms.raw_event_id, ms.citation_kind, ms.citation_value,
               ms.source_agent, e.session_id AS event_session_id, e.turn_id
        FROM memory_sources ms LEFT JOIN raw_events e ON e.id = ms.raw_event_id
-       WHERE ms.memory_id IN (${memories.map(() => '?').join(', ')}) ORDER BY ms.id`,
+       WHERE ms.context_only = 0 AND ms.memory_id IN (${memories.map(() => '?').join(', ')}) ORDER BY ms.id`,
     )
     .all(...memories.map((memory) => memory.id));
   const sources = new Map<string, MemorySourceRow[]>();
@@ -295,9 +357,9 @@ function timelineMemories(
 export function timeline(
   db: DatabaseSync,
   repoId: string,
-  options: { sessionId?: string; limit: number },
+  options: { sessionId?: string; limit: number; workId?: string | null; history?: boolean },
 ): TimelineSession[] {
-  const scope = memoryScope(db, { repoId, destination: 'injection' });
+  const scope = memoryScope(db, { repoId, destination: 'injection', workId: options.workId, history: options.history });
   const sessionFilter = options.sessionId === undefined ? '' : 'AND s.id = ?';
   const sessionParams: SQLInputValue[] =
     options.sessionId === undefined
@@ -352,6 +414,10 @@ export function timeline(
 }
 
 /** The memories a session produced, including after raw-event expiry (FR-008, data-model "raw_events"). */
+const SESSION_MEMORY_IDS_SQL = `SELECT s.id FROM memories s WHERE s.source_session_id = ?
+  UNION ALL SELECT ms.memory_id FROM memory_sources ms JOIN raw_events e ON e.id = ms.raw_event_id
+    WHERE e.session_id = ? AND ms.context_only = 0`;
+
 export function memoriesForSession(
   db: DatabaseSync,
   sessionId: string,
@@ -363,15 +429,25 @@ export function memoriesForSession(
   return asMemoryRows(
     db
       .prepare(
-        `SELECT m.* FROM memories m WHERE ${scope.where} AND m.id IN (
-           SELECT s.id FROM memories s WHERE s.source_session_id = ?
-           UNION ALL
-           SELECT ms.memory_id FROM memory_sources ms JOIN raw_events e ON e.id = ms.raw_event_id
-            WHERE e.session_id = ?)
+        `SELECT m.* FROM memories m WHERE ${scope.where} AND m.id IN (${SESSION_MEMORY_IDS_SQL})
          ORDER BY m.created_at DESC, m.id DESC`,
       )
       .all(...scope.params, sessionId, sessionId),
   );
+}
+
+/** Summary headings and a total, without allocating every linked memory body. */
+export function memoryTitlesForSession(db: DatabaseSync, sessionId: string, scope: MemoryScope, limit: number) {
+  const rows = db.prepare(`SELECT m.id, m.title, COUNT(*) OVER () AS total,
+    MAX(CASE WHEN m.sensitivity = 'local_only' THEN m.sensitivity END) OVER () AS source_local,
+    MAX(CASE WHEN m.sensitivity = 'private' THEN m.sensitivity END) OVER () AS source_private,
+    MAX(CASE WHEN m.sensitivity = 'secret' THEN m.sensitivity END) OVER () AS source_secret FROM memories m
+    WHERE ${scope.where} AND m.type <> 'session_summary' AND COALESCE(m.title, '') <> ''
+      AND m.id IN (${SESSION_MEMORY_IDS_SQL}) ORDER BY m.created_at DESC, m.id DESC LIMIT ?`)
+    .all(...scope.params, sessionId, sessionId, limit);
+  return { items: rows.map((row) => String(row.title)), memoryIds: rows.map((row) => String(row.id)), total: Number(rows[0]?.total ?? 0),
+    sensitivity: strictest('eligible', ...rows.slice(0, 1).flatMap((row) =>
+      [row.source_local, row.source_private, row.source_secret].filter((value): value is Sensitivity => typeof value === 'string'))) };
 }
 
 /** Records delivery for the 90-day retirement (data-model "memories"). */
@@ -402,6 +478,15 @@ export type NearbyCandidate = {
   content_hash: string;
   deleted: boolean;
   sensitivity: Sensitivity;
+  review_state?: ReviewState;
+  source_captured_at?: number | null;
+  valid_to?: number | null;
+  work_id?: string | null;
+  checkpoint_parent_id?: string | null;
+  provenance_complete?: number | null;
+  material_hash?: string | null;
+  privacy_stamp?: string;
+  visibility_stamp?: string;
 };
 
 /**
@@ -413,13 +498,15 @@ export type NearbyCandidate = {
  */
 export function nearbyCandidates(
   db: DatabaseSync,
-  input: { repoId: string; text: string; limit?: number },
+  input: { repoId: string; workId?: string | null; text: string; limit?: number },
 ): NearbyCandidate[] {
   const limit = input.limit ?? 8;
+  const visibility = visibilityScope({ ...input, personal: false });
   const found = searchCandidates(db, {
     text: input.text,
     // R12 quarantine: an imported row the worker has not classified is offered to no summarizer.
-    scope: { where: "m.repo_id = ? AND m.review_state <> 'imported'", params: [input.repoId] },
+    scope: { where: `${visibility.where} AND m.review_state <> 'imported' AND m.type <> 'session_summary'
+      AND NOT EXISTS (SELECT 1 FROM memory_visibility personal WHERE personal.memory_id = m.id AND personal.audience = 'personal')`, params: visibility.params },
     limit,
   });
   const ranked = rrfFuse(normalizeBm25(normalizeBm25(found.rows, 'scoreTrigram'), 'scoreCjk'))
@@ -430,7 +517,8 @@ export function nearbyCandidates(
   const byId = new Map<string, NearbyCandidate>();
   const rows = db
     .prepare(
-      `SELECT m.id, m.repo_id, m.type, m.title, m.body, m.content_hash, m.sensitivity, m.deleted_at
+      `SELECT m.id, m.repo_id, m.type, m.title, m.body, m.content_hash, m.sensitivity, m.review_state, m.deleted_at, m.source_captured_at, m.valid_to,
+        m.work_id, m.checkpoint_parent_id, m.provenance_complete, m.material_hash
        FROM memories m WHERE m.id IN (${ranked.map(() => '?').join(', ')})`,
     )
     .all(...ranked.map((row) => row.id));
@@ -443,7 +531,15 @@ export function nearbyCandidates(
       body: typeof row.body === 'string' ? row.body : '',
       content_hash: String(row.content_hash),
       deleted: row.deleted_at !== null,
+      valid_to: typeof row.valid_to === 'number' ? row.valid_to : null,
       sensitivity: row.sensitivity as Sensitivity,
+      review_state: row.review_state as ReviewState,
+      source_captured_at: typeof row.source_captured_at === 'number' ? row.source_captured_at : null,
+      visibility_stamp: sha256Json(memoryVisibility(db, String(row.id))),
+      work_id: typeof row.work_id === 'string' ? row.work_id : null,
+      checkpoint_parent_id: typeof row.checkpoint_parent_id === 'string' ? row.checkpoint_parent_id : null,
+      provenance_complete: typeof row.provenance_complete === 'number' ? row.provenance_complete : null,
+      material_hash: typeof row.material_hash === 'string' ? row.material_hash : null,
     });
   }
   // The search decided the order; the second query only fills the columns it does not return.

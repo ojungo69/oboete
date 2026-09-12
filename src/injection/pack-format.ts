@@ -8,7 +8,7 @@ import { PACK_FOOTER as FOOTER, PACK_HEADER as HEADER } from './recognize.js';
  */
 export const DEGRADED_SENTENCES: Record<DegradedReason, string> = {
   summary_pending:
-    'The summary of the previous session is not finished yet, so these are its most recent raw notes.',
+    'Some information for the selected work is still waiting to be processed. Its checkpoint and recent activity may be incomplete.',
   index_unavailable: 'The memory index could not be read this time, so some notes are missing.',
   empty: 'There is nothing recorded for this repository yet.',
   window_unknown:
@@ -114,7 +114,7 @@ export type PackMemory = {
   id: string;
   title: string;
   body: string;
-  label: 'summary' | 'pinned' | 'related';
+  label: 'summary' | 'work checkpoint' | 'pinned' | 'related';
   reason: ItemReason | null;
   rank: number | null;
   scoreBm25?: number | null;
@@ -143,7 +143,7 @@ export function memoryItem(
       ? `> session summary (${relativeTime(memory.createdAt ?? context.now, context.now)}):`
       : `> ${memory.label}: ${canonicalLine(memory.title)}${note}`;
   return {
-    sourceKind: memory.label === 'summary' ? 'session_summary' : 'memory',
+    sourceKind: memory.label === 'summary' || memory.label === 'work checkpoint' ? 'session_summary' : 'memory',
     memoryId: memory.id,
     rawEventId: null,
     decision: 'planned',

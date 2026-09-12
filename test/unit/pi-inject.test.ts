@@ -1,11 +1,53 @@
 import assert from 'node:assert/strict';
+import { grantVisibility } from '../../src/db/queries.js';
+import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { test } from 'node:test';
 
 import { runInject } from '../../src/injection/pi.js';
 import { oboetePaths } from '../../src/paths.js';
 import { withTempHome } from '../helpers/home.js';
+import { withCapture } from '../helpers/capture.js';
+import { openDatabase } from '../../src/db/open.js';
+import { detectSync } from '../../src/privacy/detect.js';
 import { NOW, insertMemory, insertSession, seedSummary, stdoutOf, withFixture } from '../helpers/inject-fixture.js';
+
+for (const captured of ['before', 'during', 'missing', 'failed', 'secret', 'old-input'] as const) {
+  test(`Pi waits for its current prompt before choosing progress: ${captured}`, async () => {
+    await withCapture(async (context) => {
+      const envelope = { cwd: context.repo, session_id: 'pi-race' };
+      await context.capture('pi', 'session_start', { ...envelope, event: 'session_start', payload: { reason: 'startup' } });
+      await context.capture('pi', 'input', { ...envelope, event: 'input', prompt_id: randomUUID(),
+        payload: { text: 'Finish the original upload.', source: 'interactive' } });
+      const db = openDatabase({ path: context.paths.db, timeoutMs: 1000 }).db;
+      const origin = db.prepare('SELECT s.repo_id, b.work_id FROM sessions s JOIN work_bindings b ON b.session_id = s.id').get()!;
+      db.prepare(`INSERT INTO memories (id, repo_id, type, title, body, content_hash, sensitivity, pinned_at)
+        VALUES ('pi-knowledge', ?, 'discovery', 'Project upload policy', 'Use the existing upload helper.', 'pi-knowledge', 'eligible', 1)`).run(origin.repo_id);
+      grantVisibility(db, 'pi-knowledge', { audience: 'project', repoId: String(origin.repo_id) }, 'migration', NOW);
+      db.close();
+      const promptId = randomUUID();
+      const prompt = 'New task: Verify the replacement work.';
+      const capture = async () => {
+        await context.capture('pi', 'input', { ...envelope, event: 'input', prompt_id: promptId,
+          payload: { text: prompt, source: 'interactive' } }, captured === 'failed'
+          ? { deps: { detect: async () => ({ ok: false, reason: 'detector_error' }) } }
+          : captured === 'secret' ? { deps: { detect: (input) => detectSync({ ...input, credentialValues: [prompt] }) } } : {});
+      };
+      if (captured === 'before' || captured === 'failed' || captured === 'secret') await capture();
+      const pending = captured === 'during' ? sleep(10).then(capture) : Promise.resolve();
+      const output = await stdoutOf(() => runInject(['--agent', 'pi', '--kind', 'start'], {
+        readStdin: () => JSON.stringify({ ...envelope, prompt, ...(captured === 'old-input' ? {} : { prompt_id: promptId }), model: 'gpt-5.6-luna' }),
+        now: () => NOW, elapsedMs: () => captured === 'missing' || captured === 'failed' || captured === 'secret' ? 1130 : 0,
+      }));
+      await pending;
+      assert.match(output, /Use the existing upload helper/);
+      assert.doesNotMatch(output, /Finish the original upload/);
+      if (captured === 'before' || captured === 'during') assert.match(output, /Verify the replacement work/);
+      else assert.doesNotMatch(output, /Verify the replacement work|Hidden purpose/);
+    });
+  });
+}
 
 test('Pi start and prompt run through the strict inject child', async () => {
   await withFixture(async (fixture) => {
@@ -25,7 +67,6 @@ test('Pi start and prompt run through the strict inject child', async () => {
       readStdin: () => JSON.stringify(body),
       now: () => NOW,
       elapsedMs: () => 0,
-      sleep: () => {},
     });
 
     const start = await stdoutOf(() =>

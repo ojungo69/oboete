@@ -17,6 +17,8 @@ import {
 import type { OboetePaths } from '../paths.js';
 import { describe } from '../setup/report.js';
 import { listSpool } from '../spool.js';
+import { consentDrift, loadSyncConfig } from '../sync/status.js';
+import { SOURCE_METADATA_COLUMNS, SUMMARIZABLE_ROW_SQL, type RawEventRow } from '../worker/batches.js';
 import { stale } from '../worker/lease.js';
 
 const DATABASE_TIMEOUT_MS = 5_000;
@@ -341,6 +343,34 @@ export function workerItem(
   }
 }
 
+/** Provider connectivity cannot prove that retained source material has actually been processed. */
+export function generationItem(db: DatabaseSync | null, integrityFailed: boolean): DoctorItem {
+  if (db === null) return dbUnread('generation', integrityFailed,
+    'The database is unavailable, so source processing could not be verified.',
+    'Generation progress is unknown.', '`oboete doctor` after storage is repaired.');
+  const counts = { pending: 0, waiting: 0, parked: 0, processed: 0, legacy_unknown: 0, excluded: 0, partial: 0, recovered: 0 };
+  const rows = db.prepare(`SELECT ${SOURCE_METADATA_COLUMNS}, EXISTS (
+    SELECT 1 FROM observation_batch_sources s WHERE s.raw_event_id = raw_events.id
+      AND s.outcome IN ('deferred', 'rejected', 'uncovered') AND s.reason IS NOT 'not_sent'
+  ) AS previously_deferred FROM raw_events WHERE processing_state = 'excluded' OR ${SUMMARIZABLE_ROW_SQL}`);
+  for (const stored of rows.iterate()) {
+    const row = stored as unknown as RawEventRow;
+    if (row.processing_state === 'waiting' && row.retry_after === null) counts.parked += 1;
+    else counts[row.processing_state ?? 'pending'] += 1;
+    if (row.classification_state === 'partial') counts.partial += 1;
+    if (row.processing_state === 'processed' && stored.previously_deferred === 1) counts.recovered += 1;
+  }
+  const reason = `Retained sources: ${counts.pending} pending; ${counts.waiting} waiting; ` +
+    `${counts.parked} parked; ${counts.partial} incomplete captures; ${counts.legacy_unknown} legacy sources held; ` +
+    `${counts.excluded} privacy exclusions; ${counts.processed} processed (${counts.recovered} recovered).`;
+  const describe = counts.waiting > 0 || counts.partial > 0 ? degraded
+    : counts.pending > 0 || counts.legacy_unknown > 0 || counts.parked > 0 ? warning : null;
+  if (describe === null) return healthy('generation', reason);
+  return describe('generation', reason,
+    'Temporary guidance may be available while accepted information is still unprocessed.',
+    '`oboete observe` processes due work; `oboete why <session-id>` explains source outcomes. Incomplete captures need the original complete input; legacy sources require explicit reprocessing.');
+}
+
 export function spoolItem(paths: OboetePaths): DoctorItem {
   const probe = join(paths.spool, `.doctor-${process.pid}-${randomUUID()}`);
   let writable = true;
@@ -418,4 +448,18 @@ function isReadonlyError(error: unknown): boolean {
   if (errcode === SQLITE_READONLY) return true;
   const text = `${message} ${errstr ?? ''}`;
   return /readonly|SQLITE_READONLY|attempt to write a readonly/i.test(text);
+}
+
+/** `sync`: configured/unconfigured and consent from `config.toml` and local tables only; never opens the space directory. */
+export function syncItem(paths: OboetePaths, db: DatabaseSync | null, integrityFailed: boolean): DoctorItem {
+  const config = loadSyncConfig(paths);
+  if (config === null) return healthy('sync', 'Sync is not configured.');
+  if (db === null) {
+    return dbUnread('sync', integrityFailed, 'The database is unavailable, so the sync consent was not checked.',
+      'Whether the recorded consent still matches the configuration is unknown.', 'Restore the database and run `oboete doctor` again.');
+  }
+  const changed = consentDrift(db, config);
+  if (changed.length === 0) return healthy('sync', `Sync space ${config.space_id} is configured and its consent matches.`);
+  return warning('sync', `The sync consent no longer matches (${changed.join(', ')}).`,
+    'Push and pull refuse to run until the space is set up again.', 'Run `oboete sync leave` and then `oboete sync init` or `oboete sync join` again.');
 }

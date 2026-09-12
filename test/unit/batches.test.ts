@@ -15,6 +15,7 @@ import {
 } from '../../src/worker/batches.js';
 import { claimLease } from '../../src/worker/lease.js';
 import { withTempHome } from '../helpers/home.js';
+import { seedWorkBinding } from '../helpers/work.js';
 
 const NOW = 1_757_000_000_000;
 const DAY = 24 * 60 * 60 * 1000;
@@ -96,8 +97,8 @@ function seedEvent(db: DatabaseSync, seed: EventSeed): void {
   db.prepare(
     `INSERT INTO raw_events
        (id, repo_id, session_id, turn_id, agent, kind, content, payload_json, sensitivity,
-        classification_state, captured_at, expires_at, batch_id)
-     VALUES (?, 'repo1', ?, ?, 'claude', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        classification_state, captured_at, expires_at, batch_id, work_binding_id)
+     VALUES (?, 'repo1', ?, ?, 'claude', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     seed.id,
     sessionId,
@@ -110,6 +111,7 @@ function seedEvent(db: DatabaseSync, seed: EventSeed): void {
     seed.capturedAt ?? NOW - DAY + capturedCounter,
     seed.expiresAt ?? NOW + 7 * DAY,
     seed.batchId ?? null,
+    seedWorkBinding(db, sessionId),
   );
 }
 
@@ -207,6 +209,22 @@ test('a remote preset splits a mixed session into disjoint remote and fallback b
   });
 });
 
+test('batch allocation and classification bound payload bytes independently of source count', async () => {
+  await withOpened(async (db, _home, token) => {
+    seedRepo(db);
+    seedSession(db, 'sess1', { status: 'ended' });
+    const content = 'A'.repeat(800_000);
+    for (let index = 0; index < 8; index += 1) seedEvent(db, { id: `large-${index}`, content, sensitivity: 'local_only' });
+    let scanned = 0;
+    await classifyPending(db, token, NOW, async (text) => { scanned += Buffer.byteLength(text); return await fakeDetect(text); });
+    assert.ok(scanned > 0 && scanned <= 2 * 1024 * 1024, `classified ${scanned} bytes in one page`);
+    const created = createBatches(db, token, NOW, { preset: 'remote' });
+    const bytes = Number(db.prepare('SELECT SUM(length(CAST(content AS BLOB))) AS n FROM raw_events WHERE batch_id IS NOT NULL').get()?.n);
+    assert.ok(created.created.length > 0);
+    assert.ok(bytes <= 2 * 1024 * 1024, `claimed ${bytes} bytes in one page`);
+  });
+});
+
 test('a local preset batches the non-secret rows and leaves the partial row to the fallback', async () => {
   await withOpened((db, _home, token) => {
     seedMixedSession(db);
@@ -264,7 +282,10 @@ test('an ended session is batched at session end and an expiring row forces a re
     seedSession(db, 'quiet1', { turns: 2, turnCount: 2 });
     seedEvent(db, { id: 'z1', sessionId: 'quiet1', turn: 1 });
 
-    const created = createBatches(db, token, NOW, { preset: 'none' }).created;
+    const created = [
+      ...createBatches(db, token, NOW, { preset: 'none' }).created,
+      ...createBatches(db, token, NOW, { preset: 'none' }).created,
+    ];
     const bySession = new Map(created.map((batch) => [batch.session_id, batch.trigger]));
     assert.equal(bySession.get('ended1'), 'session_end');
     assert.equal(bySession.get('live1'), 'retention');
@@ -274,7 +295,7 @@ test('an ended session is batched at session end and an expiring row forces a re
   });
 });
 
-test('an expired row in a pending provider batch is forced into a fallback batch', async () => {
+test('capture-time expiry does not replace pending generation with fallback', async () => {
   await withOpened((db, _home, token) => {
     seedRepo(db);
     seedSession(db, 'sess1', { turns: 1, turnCount: 1 });
@@ -287,8 +308,9 @@ test('an expired row in a pending provider batch is forced into a fallback batch
     createBatches(db, token, NOW, { preset: 'remote' });
 
     const batches = batchRows(db);
-    assert.deepEqual(batches.map((batch) => batch.destination), ['fallback']);
-    assert.equal(batches[0].trigger, 'retention');
+    assert.deepEqual(batches.map((batch) => batch.destination), ['remote_observer']);
+    assert.equal(batches[0].id, 'b-stuck');
+    assert.equal(batches[0].trigger, 'ten_turns');
     assert.deepEqual(rowsOfBatch(db, batches[0].id), ['p1']);
   });
 });
@@ -297,30 +319,26 @@ test('a second round over the same range does not collide with a finished batch'
   await withOpened((db, _home, token) => {
     seedRepo(db);
     seedSession(db, 'sess1', { turns: 1, turnCount: 1 });
-    // The fallback batch of the first round is finished, and the provider batch of the same range
-    // is still pending, so its expired row is detached and batched again (R6 retention).
+    // A due source receives a new attempt without overwriting the previous attempt's identity.
     db.prepare(
       `INSERT INTO observation_batches (id, repo_id, session_id, through_event_id, destination, trigger, state, owner_token, provider_attempts, claimed_at)
-       VALUES ('b-done', 'repo1', 'sess1', 'p1', 'fallback', 'retention', 'fallback', ?, 0, ?)`,
+       VALUES ('b-done', 'repo1', 'sess1', 'p1', 'remote_observer', 'retention', 'fallback', ?, 0, ?)`,
     ).run(token, NOW - DAY);
-    db.prepare(
-      `INSERT INTO observation_batches (id, repo_id, session_id, through_event_id, destination, trigger, state, owner_token, provider_attempts, claimed_at)
-       VALUES ('b-stuck', 'repo1', 'sess1', 'p1', 'remote_observer', 'ten_turns', 'pending', ?, 0, ?)`,
-    ).run(token, NOW - DAY);
-    seedEvent(db, { id: 'p1', turn: 1, batchId: 'b-stuck', expiresAt: NOW - 1 });
+    seedEvent(db, { id: 'p1', turn: 1, expiresAt: NOW - 1 });
+    db.prepare("UPDATE raw_events SET processing_state = 'waiting', retry_after = ? WHERE id = 'p1'").run(NOW - 1);
 
     const result = createBatches(db, token, NOW, { preset: 'remote' });
 
     assert.equal(result.leaseLost, false);
     assert.equal(result.created.length, 1);
     const created = result.created[0];
-    assert.equal(created.destination, 'fallback');
+    assert.equal(created.destination, 'remote_observer');
     assert.deepEqual(rowsOfBatch(db, created.id), ['p1']);
     assert.notEqual(created.through_event_id, 'p1', 'the second round carries its own key');
     assert.deepEqual(
       batchRows(db).map((batch) => batch.id).sort(),
       ['b-done', created.id].sort(),
-      'the empty provider batch is gone and the finished one is untouched',
+      'the finished attempt is untouched',
     );
   });
 });
@@ -481,7 +499,7 @@ test('the batch input keeps the row order and strips a partial row to its metada
     const input = loadBatchInput(db, batch.id);
     if (input === null) assert.fail('expected the batch to load');
     assert.equal(input.session.id, 'sess1');
-    assert.equal(input.turns.length, 12);
+    assert.equal(input.turns.length, 10);
     assert.deepEqual(
       input.rows.map((row) => row.id),
       [
@@ -500,6 +518,45 @@ test('the batch input keeps the row order and strips a partial row to its metada
     const partial = input.rows.find((row) => row.id === 'e07-partial');
     assert.equal(partial?.content, null);
     assert.equal(partial?.payload_json, JSON.stringify({ tool_name: 'read', input: { paths: ['src/a.ts'] } }));
+  });
+});
+
+test('one creation transaction claims at most fifty sources and skips metadata before testing ten turns', async () => {
+  await withOpened((db, _home, token) => {
+    seedRepo(db);
+    seedSession(db, 'sess1', { turns: 10 });
+    for (let index = 0; index < 120; index += 1) {
+      seedEvent(db, { id: `metadata-${index}`, kind: 'turn_end', content: null });
+    }
+    for (let index = 0; index < 70; index += 1) {
+      seedEvent(db, { id: `source-${index}`, turn: index < 61 ? 1 : index - 59 });
+    }
+    createBatches(db, token, NOW, { preset: 'local' });
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM raw_events WHERE batch_id IS NOT NULL').get()?.n, 50);
+    // The remaining nine turns are the tail of an already-triggered cohort, even though fewer
+    // than ten distinct turns remain after the first page completes.
+    db.exec("UPDATE raw_events SET processing_state = 'processed' WHERE batch_id IS NOT NULL");
+    db.exec("UPDATE observation_batches SET state = 'applied'");
+    createBatches(db, token, NOW + 1, { preset: 'local' });
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM raw_events WHERE batch_id IS NOT NULL').get()?.n, 70);
+  });
+});
+
+test('a large partially processed source cannot hide a fresh source before the page cap', async () => {
+  await withOpened((db, _home, token) => {
+    seedRepo(db);
+    seedSession(db, 'sess1', { status: 'ended' });
+    seedEvent(db, { id: 'old-partial', content: 'x'.repeat(2 * 1024 * 1024 + 1), capturedAt: NOW - 100 });
+    const first = createBatches(db, token, NOW, { preset: 'local' }).created[0];
+    assert.ok(first);
+    db.prepare("UPDATE observation_batches SET state = 'applied' WHERE id = ?").run(first.id);
+    db.prepare("UPDATE observation_batch_sources SET outcome = 'processed' WHERE batch_id = ?").run(first.id);
+    db.exec("UPDATE raw_events SET batch_id = NULL, processing_offset = 100 WHERE id = 'old-partial'");
+    seedEvent(db, { id: 'fresh-source', content: 'New independent upload evidence.', capturedAt: NOW - 1 });
+    const next = createBatches(db, token, NOW + 1, { preset: 'local' }).created[0];
+    assert.ok(next);
+    assert.deepEqual(db.prepare('SELECT id FROM raw_events WHERE batch_id = ?').all(next.id).map((row) => row.id), ['fresh-source']);
+    assert.equal(db.prepare("SELECT batch_id FROM raw_events WHERE id = 'old-partial'").get()?.batch_id, null);
   });
 });
 

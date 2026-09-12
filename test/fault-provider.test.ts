@@ -297,9 +297,11 @@ function openAiBody(
 
 function observation(sourceEventId: string, language: 'en' | 'ja' = 'en'): ObserverOutput {
   return {
+    checkpoint: { decision: 'unchanged', source_event_ids: [sourceEventId], reason: 'No progress changed.' },
     observations: [
       {
         type: 'discovery',
+        visibility: 'project',
         title: language === 'ja' ? '再試行の仕組み' : ENGLISH_TITLE,
         body:
           language === 'ja'
@@ -316,9 +318,11 @@ function observation(sourceEventId: string, language: 'en' | 'ja' = 'en'): Obser
 
 function fallbackDecision(sourceEventId: string, text: string): ObserverOutput {
   return {
+    checkpoint: { decision: 'unchanged', source_event_ids: [sourceEventId], reason: 'No progress changed.' },
     observations: [
       {
         type: 'decision',
+        visibility: 'work',
         title: text,
         body: text,
         concepts: ['why-it-exists'],

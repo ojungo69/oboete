@@ -3,94 +3,27 @@
 // as hashes), an imported row can only raise a sensitivity and never lowers one, a tombstone wins
 // in both directions, and every active imported row is quarantined as `local_only` /
 // `review_state = imported` until the worker classifies it. Nothing here is on the hook path.
-import { chmodSync, createReadStream, statSync, writeFileSync } from 'node:fs';
+import { closeSync, createReadStream, existsSync, mkdtempSync, openSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { once } from 'node:events';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { parseArgs } from 'node:util';
-import { z } from 'zod';
+import { Readable } from 'node:stream';
 
-import { contentHash, materialHash, memoryIdFor } from './db/identity.js';
-import { openDatabase } from './db/open.js';
+import { DatabaseMissingError, SchemaAheadError, openDatabase } from './db/open.js';
 import { sha256Hex } from './hash.js';
 import { ensureDirectories, oboetePaths, resolveHome } from './paths.js';
-import { cjkBigrams } from './retrieval/fts.js';
 
-export const EXPORT_FORMAT = 'oboete-export/1';
-const MAX_LINE_BYTES = 64 * 1024;
-const MAX_FILE_BYTES = 256 * 1024 * 1024;
-/** Every rejection rolls the import back, so listing more than this many helps nobody. */
-export const MAX_REJECTED = 100;
+import { EXPORT_FORMAT, MAX_LINE_BYTES, MAX_FILE_BYTES, type ImportResult, type ImportOptions } from './transfer-format.js';
+import { readTransferPlan, TransferInputError, type TransferPlan } from './transfer-plan.js';
+import { mergeTransferPlan } from './transfer-merge.js';
+import { runImportPromote } from './transfer-promote.js';
+import { contextRecords, memoryRecords, proposalRecords, sourceRecords, visibilityRecords, workRecords } from './transfer-records.js';
+import { NATIVE_FORMAT, NATIVE_REVISION, MAX_NATIVE_LINE_BYTES, nativeRecordSchema } from './transfer-format.js';
+export { EXPORT_FORMAT } from './transfer-format.js';
 
-/** data-model "memories": the stricter class wins on every merge. */
-const SENSITIVITY_RANK = { eligible: 0, local_only: 1, private: 2, secret: 3 } as const;
-type Sensitivity = keyof typeof SENSITIVITY_RANK;
-
-const hash64 = z.string().regex(/^[0-9a-f]{64}$/u);
-const timestamp = z.number().int().nonnegative();
-
-const headerSchema = z.looseObject({
-  format: z.literal(EXPORT_FORMAT),
-  exported_at: timestamp.optional(),
-  repos: z.array(
-    z.looseObject({
-      id: z.string().min(1),
-      identity_kind: z.enum(['remote', 'common_dir']),
-      normalized_identity: z.string().min(1),
-    }),
-  ),
-});
-
-const sourceSchema = z.looseObject({
-  citation_kind: z.enum(['file_read', 'file_modified', 'commit']).nullable(),
-  citation_value: z.string().nullable(),
-  source_agent: z.string().nullable(),
-});
-
-const lineSchema = z.looseObject({
-  id: z.string().min(1),
-  repo_id: z.string().min(1),
-  type: z.enum([
-    'bugfix', 'feature', 'refactor', 'change', 'discovery', 'decision',
-    'security_alert', 'security_note', 'session_summary',
-  ]),
-  title: z.string().nullable(),
-  body: z.string().nullable(),
-  concepts: z.string().nullable(),
-  material_hash: hash64,
-  content_hash: hash64,
-  sensitivity: z.enum(['eligible', 'local_only', 'private', 'secret']),
-  review_state: z.enum(['unreviewed', 'reviewed', 'imported']),
-  degraded_reason: z.string().nullable(),
-  source_session_id: z.string().nullable(),
-  source_batch_id: z.string().nullable(),
-  source_agent: z.string().nullable(),
-  valid_from: timestamp.nullable(),
-  valid_to: timestamp.nullable(),
-  superseded_by: z.string().nullable(),
-  pinned_at: timestamp.nullable(),
-  pin_order: z.number().int().nullable(),
-  deleted_at: timestamp.nullable(),
-  created_at: timestamp.nullable(),
-  sources: z.array(sourceSchema),
-});
-type ExportLine = z.infer<typeof lineSchema>;
-
-export type ImportResult = {
-  /** False on a dry run and when any line was rejected: then nothing was written. */
-  applied: boolean;
-  inserted: number;
-  updated: number;
-  tombstones: number;
-  unchanged: number;
-  rejected: { line: number; reason: string }[];
-};
-
-export type ImportOptions = {
-  now: number;
-  dryRun?: boolean;
-  /** `--map-repo old=current`: a machine-local repository of another installation onto one here. */
-  mapRepo?: Record<string, string>;
-  maxFileBytes?: number;
-};
+export type { ImportResult, ImportOptions } from './transfer-format.js';
 
 const MEMORY_COLUMNS = `id, repo_id, type, title, body, concepts, material_hash, content_hash, sensitivity,
   review_state, degraded_reason, source_session_id, source_batch_id, valid_from, valid_to,
@@ -102,25 +35,35 @@ export function exportMemories(
   write: (line: string) => void,
   now: number,
 ): { memories: number; tombstones: number } {
-  const repos = db
-    .prepare('SELECT id, identity_kind, normalized_identity FROM repos ORDER BY id')
-    .all()
-    .map((row) => ({
+  const repos = [];
+  let repoBytes = 0;
+  for (const row of db.prepare('SELECT id, identity_kind, normalized_identity FROM repos ORDER BY id').iterate()) {
+    const repo = {
       id: String(row.id),
       identity_kind: String(row.identity_kind),
       normalized_identity: String(row.normalized_identity),
-    }));
+    };
+    repoBytes += Buffer.byteLength(JSON.stringify(repo)) + 1;
+    if (repoBytes > MAX_LINE_BYTES) throw new Rejection('export_header_too_large');
+    repos.push(repo);
+  }
   write(JSON.stringify({ format: EXPORT_FORMAT, exported_at: now, repos }));
 
   const sourcesOf = db.prepare(
-    'SELECT citation_kind, citation_value, source_agent FROM memory_sources WHERE memory_id = ? ORDER BY id',
+    'SELECT citation_kind, citation_value, source_agent FROM memory_sources WHERE memory_id = ? AND context_only = 0 ORDER BY id',
   );
   const counts = { memories: 0, tombstones: 0 };
-  for (const row of db.prepare(`SELECT ${MEMORY_COLUMNS} FROM memories ORDER BY created_at, id`).all()) {
-    const sources = sourcesOf.all(String(row.id));
+  for (const row of db.prepare(`SELECT ${MEMORY_COLUMNS} FROM memories ORDER BY created_at, id`).iterate()) {
     // Tombstones and secret rows travel as hashes: identical content is still recognized on the
     // other side (FR-035, FR-020) and no secret text leaves this machine.
     const withoutText = row.deleted_at !== null || row.sensitivity === 'secret';
+    const sources = [];
+    let sourceBytes = 0;
+    if (!withoutText) for (const source of sourcesOf.iterate(String(row.id))) {
+      sourceBytes += Buffer.byteLength(JSON.stringify(source)) + 1;
+      if (sourceBytes > MAX_LINE_BYTES) throw new Rejection('export_record_too_large');
+      sources.push(source);
+    }
     write(
       JSON.stringify({
         ...row,
@@ -137,336 +80,61 @@ export function exportMemories(
   return counts;
 }
 
-function stricter(a: Sensitivity, b: Sensitivity): Sensitivity {
-  return SENSITIVITY_RANK[a] >= SENSITIVITY_RANK[b] ? a : b;
+function exportNative(db: DatabaseSync, write: (line: string) => void, now: number) {
+  const emit = (record: unknown): void => {
+    if (!nativeRecordSchema.safeParse(record).success) throw new Rejection('invalid_export_record');
+    write(JSON.stringify(record));
+  };
+  const originId = db.prepare('SELECT origin_id FROM replica_identity WHERE id = 1').get()?.origin_id;
+  if (typeof originId !== 'string') throw new Rejection('missing_origin_identity');
+  write(JSON.stringify({ format: NATIVE_FORMAT, revision: NATIVE_REVISION, origin_id: originId, exported_at: now }));
+  for (const row of db.prepare('SELECT id, identity_kind, normalized_identity FROM repos ORDER BY id').iterate()) {
+    emit({ kind: 'repo', ...row });
+  }
+  const counts = { memories: 0, tombstones: 0 };
+  for (const record of memoryRecords(db)) {
+    emit(record);
+    if (record.deleted_at === null) counts.memories += 1;
+    else counts.tombstones += 1;
+  }
+  for (const records of [sourceRecords, contextRecords, workRecords, visibilityRecords, proposalRecords]) {
+    for (const record of records(db)) emit(record);
+  }
+  for (const row of db.prepare(`SELECT r.*, m.deleted_at AS parent_deleted_at, m.sensitivity AS parent_sensitivity
+    FROM migration_records r LEFT JOIN memories m ON m.id = r.destination_memory_id ORDER BY r.id`).iterate()) {
+    const redacted = row.parent_deleted_at !== null || row.parent_sensitivity === 'secret'
+      || row.classification_state === 'secret' || row.payload_json === null;
+    const payload = redacted ? null : JSON.parse(String(row.payload_json)) as Record<string, unknown>;
+    emit({ kind: 'migration_origin', id: row.origin_key, origin_json: row.origin_json, payload_hash: row.payload_hash,
+      stored_payload_hash: payload === null ? null : sha256Hex(JSON.stringify(payload)), payload,
+      record_kind: row.record_kind, repo_id: row.destination_repo_id, memory_id: row.destination_memory_id,
+      classification_state: row.classification_state });
+  }
+  return counts;
 }
 
 class Rejection extends Error {}
 
-type ExistingRow = { id: string; sensitivity: Sensitivity; deleted_at: number | null };
-
-/** The title and body a line carries, refused when they do not match what the line claims. */
-function checkedText(line: ExportLine): { title: string; body: string } {
-  const title = line.title ?? '';
-  const body = line.body ?? '';
-  const hasText = title !== '' || body !== '';
-  if (hasText && materialHash(title, body) !== line.material_hash) {
-    throw new Rejection('material_hash does not match the title and body');
-  }
-  // A secret row travels as its hashes only (FR-020): text under that label is not ours to store.
-  if (line.sensitivity === 'secret' && (hasText || line.sources.length > 0 || (line.concepts ?? '[]') !== '[]')) {
-    throw new Rejection('a secret row must carry no title, body, concepts or sources');
-  }
-  return { title, body };
-}
-
-/** Applies a line whose content is already here: a tombstone, a stricter label, or nothing. */
-function applyToExisting(
-  db: DatabaseSync,
-  line: ExportLine,
-  existing: ExistingRow,
-  counts: ImportResult,
-): void {
-  if (existing.deleted_at !== null) {
-    // FR-035: a deleted memory never comes back, whatever the file says.
-    counts.unchanged += 1;
-    return;
-  }
-  if (line.deleted_at !== null) {
-    db.prepare('UPDATE memories SET deleted_at = ? WHERE id = ?').run(line.deleted_at, existing.id);
-    counts.tombstones += 1;
-    return;
-  }
-  const merged = stricter(existing.sensitivity, line.sensitivity);
-  if (merged !== existing.sensitivity) {
-    db.prepare('UPDATE memories SET sensitivity = ? WHERE id = ?').run(merged, existing.id);
-    counts.updated += 1;
-  } else {
-    counts.unchanged += 1;
-  }
-}
-
-/**
- * Applies one validated line inside the import transaction. Throws Rejection for a line the file
- * cannot carry (hash mismatch, unknown repository), which rolls the whole import back.
- */
-function applyLine(
-  db: DatabaseSync,
-  line: ExportLine,
-  repoOf: (fileRepoId: string) => string | null,
-  counts: ImportResult,
-): void {
-  const repoId = repoOf(line.repo_id);
-  if (repoId === null) {
-    throw new Rejection(
-      `repository ${line.repo_id} is not known here; map it with --map-repo ${line.repo_id}=<local repository id>`,
-    );
-  }
-  const { title, body } = checkedText(line);
-  // Identity is recomputed here from the local repository and never taken from the file.
-  const content = contentHash(repoId, line.material_hash);
-  const id = memoryIdFor(content);
-  const existing = db
-    .prepare('SELECT id, sensitivity, deleted_at FROM memories WHERE content_hash = ?')
-    .get(content) as ExistingRow | undefined;
-  const tombstone = line.deleted_at !== null;
-
-  if (existing !== undefined) {
-    applyToExisting(db, line, existing, counts);
-    return;
-  }
-
-  insertImported(db, line, { id, repoId, content, title, body, tombstone });
-  if (tombstone) counts.tombstones += 1;
-  else counts.inserted += 1;
-}
-
-/** The row and its citations, as they land on a first import. */
-function insertImported(db: DatabaseSync, line: ExportLine, row: ImportedRow): void {
-  // R12: an active row lands quarantined; a tombstone keeps only its hashes and its time.
-  const sensitivity = row.tombstone
-    ? line.sensitivity
-    : stricter('local_only', line.sensitivity);
-  db.prepare(
-    `INSERT INTO memories (${MEMORY_COLUMNS}, cjk_bigrams)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
-  ).run(...memoryValues(line, row, sensitivity));
-  insertSources(db, row.id, line.sources);
-}
-
-/** The identity and text an imported row carries, all recomputed locally. */
-type ImportedRow = {
-  id: string;
-  repoId: string;
-  content: string;
-  title: string;
-  body: string;
-  tombstone: boolean;
-};
-
-/** The memories row in MEMORY_COLUMNS order, with cjk_bigrams last. */
-function memoryValues(
-  line: ExportLine,
-  row: ImportedRow,
-  sensitivity: ExportLine['sensitivity'],
-): (string | number | null)[] {
-  const { id, repoId, content, title, body, tombstone } = row;
-  return [
-    id,
-    repoId,
-    line.type,
-    tombstone ? '' : title,
-    tombstone ? '' : body,
-    line.concepts,
-    line.material_hash,
-    content,
-    sensitivity,
-    line.degraded_reason,
-    line.source_session_id,
-    line.source_batch_id,
-    line.valid_from,
-    line.valid_to,
-    tombstone ? null : line.pinned_at,
-    tombstone ? null : line.pin_order,
-    line.deleted_at,
-    line.created_at,
-    tombstone ? '' : cjkBigrams(`${title} ${body}`),
-  ];
-}
-
-/** The citations of one imported memory. */
-function insertSources(db: DatabaseSync, id: string, sources: ExportLine['sources']): void {
-  const insertSource = db.prepare(
-    `INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, citation_value, source_agent)
-     VALUES (?, NULL, ?, ?, ?)`,
-  );
-  for (const source of sources) {
-    insertSource.run(id, source.citation_kind, source.citation_value, source.source_agent);
-  }
-}
-
-/** One physical line as JSON, or the reason it cannot be read. */
-function parseImportLine(line: string, size: number): { value: unknown } | { reason: string } {
-  if (size > MAX_LINE_BYTES + 1) return { reason: `line exceeds ${MAX_LINE_BYTES / 1024} KB` };
+/** The in-process test/embedding seam shares the streaming CLI planner and merge. */
+export async function importMemories(db: DatabaseSync, source: string, options: ImportOptions): Promise<ImportResult> {
+  let plan: TransferPlan | undefined;
   try {
-    return { value: JSON.parse(line) };
-  } catch {
-    return { reason: 'not valid JSON' };
-  }
-}
-
-type FileRepo = { identity_kind: string; normalized_identity: string };
-
-/**
- * The file's repository id to a local one, or null when the developer must say which repository
- * here it is. A remote identity means the same repository on every machine, so it is adopted; a
- * machine-local one needs `--map-repo`.
- */
-function repoResolver(state: {
-  db: DatabaseSync;
-  now: number;
-  mapRepo: Map<string, string>;
-  localRepos: Set<string>;
-  fileRepos: Map<string, FileRepo>;
-}): (fileRepoId: string) => string | null {
-  return (fileRepoId: string): string | null => {
-    const mapped = state.mapRepo.get(fileRepoId);
-    if (mapped !== undefined) return state.localRepos.has(mapped) ? mapped : null;
-    if (state.localRepos.has(fileRepoId)) return fileRepoId;
-    const known = state.fileRepos.get(fileRepoId);
-    if (known?.identity_kind !== 'remote') return null;
-    if (sha256Hex(known.normalized_identity).slice(0, 16) !== fileRepoId) return null;
-    state.db
-      .prepare(
-        `INSERT INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
-       VALUES (?, 'remote', ?, ?, ?, ?)`,
-      )
-      .run(fileRepoId, known.normalized_identity, known.normalized_identity, state.now, state.now);
-    state.localRepos.add(fileRepoId);
-    return fileRepoId;
-  };
-}
-
-type ImportRun = {
-  db: DatabaseSync;
-  result: ImportResult;
-  maxFileBytes: number;
-  reject: (line: number, reason: string) => void;
-  repoOf: (fileRepoId: string) => string | null;
-  fileRepos: Map<string, FileRepo>;
-};
-
-/** The reason the reader must stop at this line, or null to keep reading. */
-function stopReason(run: ImportRun, bytes: number): string | null {
-  if (bytes > run.maxFileBytes) {
-    return `file size exceeds ${Math.floor(run.maxFileBytes / (1024 * 1024))} MB; the import stopped here`;
-  }
-  if (run.result.rejected.length >= MAX_REJECTED) {
-    return `more than ${MAX_REJECTED} lines were rejected; the import stopped here`;
-  }
-  return null;
-}
-
-/** Applies one memory line, turning a rejection into a recorded reason. */
-function applyMemoryLine(run: ImportRun, value: unknown, number: number): void {
-  const memory = lineSchema.safeParse(value);
-  if (!memory.success) {
-    run.reject(number, z.prettifyError(memory.error).split('\n')[0] ?? 'invalid line');
-    return;
-  }
-  try {
-    applyLine(run.db, memory.data, run.repoOf, run.result);
+    if (Buffer.byteLength(source) > (options.maxFileBytes ?? MAX_FILE_BYTES)) throw new TransferInputError('file size exceeds the import limit');
+    plan = await readTransferPlan(Readable.from([Buffer.from(source)]), options.from);
+    return mergeTransferPlan(db, plan, options);
   } catch (error) {
-    if (!(error instanceof Rejection)) throw error;
-    run.reject(number, error.message);
-  }
+    if (!(error instanceof TransferInputError)) throw error;
+    return { applied: false, inserted: 0, updated: 0, tombstones: 0, unchanged: 0,
+      rejected: [{ line: error.line, reason: error.reason }] };
+  } finally { plan?.close(); }
 }
 
-/** The first non-blank line is the export header; it names the repositories the file carries. */
-function readHeader(run: ImportRun, value: unknown, number: number): boolean {
-  const header = headerSchema.safeParse(value);
-  if (!header.success) {
-    run.reject(number, `the first line must be an ${EXPORT_FORMAT} header`);
-    return false;
-  }
-  for (const repo of header.data.repos) run.fileRepos.set(repo.id, repo);
-  return true;
-}
-
-/** Reads the file's lines into the open transaction; returns whether a header was seen. */
-function readExportLines(run: ImportRun, source: string): boolean {
-  let number = 0;
-  let bytes = 0;
-  let headerSeen = false;
-  for (const raw of source.split('\n')) {
-    // The physical source line, so a rejection names the line the developer sees in the file.
-    number += 1;
-    const size = Buffer.byteLength(raw, 'utf8') + 1;
-    bytes += size;
-    const stop = stopReason(run, bytes);
-    if (stop !== null) {
-      run.reject(number, stop);
-      break;
-    }
-    const line = raw.replace(/\r$/u, '');
-    if (line.trim() === '') continue;
-    const parsed = parseImportLine(line, size);
-    if ('reason' in parsed) {
-      run.reject(number, parsed.reason);
-      continue;
-    }
-    if (!headerSeen) {
-      if (!readHeader(run, parsed.value, number)) break;
-      headerSeen = true;
-      continue;
-    }
-    applyMemoryLine(run, parsed.value, number);
-  }
-  return headerSeen;
-}
-
-/**
- * Reads `oboete-export/1` text and applies it as one unit: a rejected line, or `--dry-run`, rolls
- * everything back, so the database is either fully imported or untouched. The caller bounds the
- * text (runImport reads at most MAX_FILE_BYTES before opening the database).
- */
-export function importMemories(db: DatabaseSync, source: string, options: ImportOptions): ImportResult {
-  const result: ImportResult = { applied: false, inserted: 0, updated: 0, tombstones: 0, unchanged: 0, rejected: [] };
-  const reject = (line: number, reason: string): void => {
-    result.rejected.push({ line, reason });
-  };
-  const mapRepo = new Map(Object.entries(options.mapRepo ?? {}));
-  const localRepos = new Set(db.prepare('SELECT id FROM repos').all().map((row) => String(row.id)));
-  const fileRepos = new Map<string, FileRepo>();
-  const run: ImportRun = {
-    db,
-    result,
-    maxFileBytes: options.maxFileBytes ?? MAX_FILE_BYTES,
-    reject,
-    repoOf: repoResolver({ db, now: options.now, mapRepo, localRepos, fileRepos }),
-    fileRepos,
-  };
-
-  for (const [old, current] of mapRepo) {
-    if (!localRepos.has(current)) reject(0, `--map-repo ${old}=${current}: no repository ${current} here`);
-  }
-
-  db.exec('BEGIN IMMEDIATE');
-  let committed = false;
-  try {
-    const headerSeen = readExportLines(run, source);
-    if (!headerSeen && result.rejected.length === 0) reject(0, `the file is empty; expected an ${EXPORT_FORMAT} header`);
-    if (result.rejected.length > 0) {
-      // The file is applied as a whole: a rejected line means none of it was written.
-      result.inserted = result.updated = result.tombstones = result.unchanged = 0;
-    } else if (options.dryRun !== true) {
-      db.exec('COMMIT');
-      committed = true;
-      result.applied = true;
-    }
-  } finally {
-    if (!committed && db.isTransaction) db.exec('ROLLBACK');
-  }
-  return result;
-}
-
-type Io = { writeOut(text: string): void; writeError(text: string): void };
+type Io = { writeOut(text: string): void | Promise<void>; writeError(text: string): void };
 
 function processIo(): Io {
-  return { writeOut: (t) => process.stdout.write(t), writeError: (t) => process.stderr.write(t) };
-}
-
-/** The whole stream as one string, or null once it exceeds `limit` bytes (reading stops there). */
-async function readBounded(input: NodeJS.ReadableStream, limit: number): Promise<string | null> {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of input) {
-    const buffer = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
-    bytes += buffer.length;
-    if (bytes > limit) return null;
-    chunks.push(buffer);
-  }
-  return Buffer.concat(chunks).toString('utf8');
+  return { writeOut: async (text) => {
+    if (!process.stdout.write(text)) await once(process.stdout, 'drain');
+  }, writeError: (t) => { process.stderr.write(t); } };
 }
 
 function withDatabase<T>(fn: (db: DatabaseSync) => T | Promise<T>): Promise<T> {
@@ -482,107 +150,215 @@ function plural(count: number, noun: string, plural = `${noun}s`): string {
   return `${count} ${count === 1 ? noun : plural}`;
 }
 
+function assertExportTarget(target: string): void {
+  if (target === '-') return;
+  const physical = (path: string) => existsSync(path) ? realpathSync(path)
+    : existsSync(dirname(path)) ? join(realpathSync(dirname(path)), basename(path)) : resolve(path);
+  const output = physical(resolve(target));
+  const database = physical(oboetePaths(resolveHome()).db);
+  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+    const path = `${database}${suffix}`;
+    if (output === path) throw new Rejection('export_target_is_database');
+    if (existsSync(output) && existsSync(path)) {
+      const destination = statSync(output);
+      const source = statSync(path);
+      if (destination.dev === source.dev && destination.ino === source.ino) throw new Rejection('export_target_is_database');
+    }
+  }
+}
+
 /** `oboete export [file|-]`: the file, or stdout for `-` and when no file is named. */
 export async function runExport(argv: string[], io: Io = processIo()): Promise<number> {
   let target: string;
+  let format: '1' | '2';
   try {
-    const { positionals } = parseArgs({ args: argv, allowPositionals: true, strict: true, options: {} });
+    const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, strict: true,
+      options: { format: { type: 'string' } } });
     if (positionals.length > 1) throw new Error('export takes at most one file argument.');
+    if (values.format !== undefined && values.format !== '1' && values.format !== '2') throw new Error('unsupported_export_format');
+    format = values.format ?? '2';
     target = positionals[0] ?? '-';
+    assertExportTarget(target);
   } catch (error) {
     io.writeError(`${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
   }
   return await withDatabase(async (db) => {
-    if (target === '-') {
-      const counts = exportMemories(db, (line) => io.writeOut(`${line}\n`), Date.now());
-      io.writeError(`Exported ${plural(counts.memories, 'memory', 'memories')} and ${plural(counts.tombstones, 'tombstone')}.\n`);
+    const directory = mkdtempSync(join(target === '-' ? tmpdir() : dirname(resolve(target)), '.oboete-export-'));
+    const temporary = join(directory, 'memories.jsonl');
+    let descriptor: number | null = null;
+    try {
+      descriptor = openSync(temporary, 'wx', 0o600);
+      let bytes = 0;
+      const write = (line: string): void => {
+        const size = Buffer.byteLength(line, 'utf8');
+        bytes += size + 1;
+        if (size > (format === '1' ? MAX_LINE_BYTES : MAX_NATIVE_LINE_BYTES)) throw new Rejection('export_record_too_large');
+        if (bytes > MAX_FILE_BYTES) throw new Rejection('export_file_too_large');
+        writeFileSync(descriptor!, `${line}\n`);
+      };
+      const version = db.prepare('PRAGMA data_version').get()?.data_version;
+      db.exec('BEGIN');
+      let counts;
+      try { counts = (format === '1' ? exportMemories : exportNative)(db, write, Date.now()); }
+      finally { db.exec('ROLLBACK'); }
+      closeSync(descriptor);
+      descriptor = null;
+      if (format === '2') {
+        try {
+          const validation = await readTransferPlan(createReadStream(temporary));
+          validation.close();
+        } catch { throw new Rejection('invalid_export_graph'); }
+      }
+      if (db.prepare('PRAGMA data_version').get()?.data_version !== version) throw new Rejection('export_changed_retry');
+      assertExportTarget(target);
+      if (target === '-') {
+        for await (const chunk of createReadStream(temporary, { encoding: 'utf8' })) await io.writeOut(chunk);
+        io.writeError(`Exported ${plural(counts.memories, 'memory', 'memories')} and ${plural(counts.tombstones, 'tombstone')}.\n`);
+      } else {
+        renameSync(temporary, resolve(target));
+        await io.writeOut(`Exported ${plural(counts.memories, 'memory', 'memories')} and ${plural(counts.tombstones, 'tombstone')} to ${target}.\n`);
+      }
       return 0;
+    } catch (error) {
+      io.writeError(`${error instanceof Rejection ? error.message : 'export_failed'}\n`);
+      return 2;
+    } finally {
+      if (descriptor !== null) closeSync(descriptor);
+      rmSync(directory, { recursive: true, force: true });
     }
-    const lines: string[] = [];
-    const counts = exportMemories(db, (line) => lines.push(line), Date.now());
-    // The file carries private and local-only text: owner-only whether it is new or reused
-    // (`mode` only applies when writeFileSync creates the file).
-    writeFileSync(target, `${lines.join('\n')}\n`, { mode: 0o600 });
-    chmodSync(target, 0o600);
-    io.writeOut(`Exported ${plural(counts.memories, 'memory', 'memories')} and ${plural(counts.tombstones, 'tombstone')} to ${target}.\n`);
-    return 0;
   });
 }
 
-type ImportArgs = { file: string; dryRun: boolean; mapRepo: Record<string, string> };
+type ImportArgs = { file: string; dryRun: boolean; apply: boolean; json: boolean;
+  mapRepo: Record<string, string>; mapWork: Record<string, string>; mapContext: Record<string, string>;
+  from?: 'claude-mem'; mapProject: Record<string, string>; mapProjectHash: Record<string, string> };
 
-/** The parsed `import` arguments, or the message that says why they are not usable. */
 function importArgs(argv: string[]): ImportArgs | { error: string } {
-  const mapRepo: Record<string, string> = {};
   try {
-    const { values, positionals } = parseArgs({
-      args: argv,
-      allowPositionals: true,
-      strict: true,
-      options: { 'dry-run': { type: 'boolean' }, 'map-repo': { type: 'string', multiple: true } },
-    });
-    if (positionals.length > 1) throw new Error('import takes at most one file argument.');
-    for (const mapping of values['map-repo'] ?? []) {
-      const [old, current, ...rest] = mapping.split('=');
-      if (!old || !current || rest.length > 0) throw new Error('--map-repo takes <old-id>=<current-id>.');
-      mapRepo[old] = current;
-    }
-    return { file: positionals[0] ?? '-', dryRun: values['dry-run'] === true, mapRepo };
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) };
-  }
-}
-
-/**
- * The file's text, or the message that says why it cannot be imported. Every input is read to a
- * bounded string before the database is opened: a slow pipe or a file that grows after the size
- * check never holds the write lock, and the bound applies to what was read.
- */
-async function importSource(file: string, io: Io): Promise<string | number> {
-  const overSize = `exceeds ${MAX_FILE_BYTES / (1024 * 1024)} MB; nothing was imported.`;
-  if (file !== '-') {
-    try {
-      if (statSync(file).size > MAX_FILE_BYTES) {
-        io.writeError(`${file} ${overSize}\n`);
-        return 2;
+    const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, strict: true,
+      options: { 'dry-run': { type: 'boolean' }, apply: { type: 'boolean' }, json: { type: 'boolean' },
+        'map-repo': { type: 'string', multiple: true }, 'map-work': { type: 'string', multiple: true },
+        'map-context': { type: 'string', multiple: true }, from: { type: 'string' },
+        'map-project': { type: 'string', multiple: true }, 'map-project-hash': { type: 'string', multiple: true } } });
+    if (positionals.length > 1 || (values.apply && values['dry-run'])) throw new Error('invalid_import_arguments');
+    if (values.from !== undefined && values.from !== 'claude-mem') throw new Error('unsupported_source_format');
+    if (values.from === 'claude-mem' ? values['map-repo'] !== undefined || values['map-work'] !== undefined
+      : values['map-project'] !== undefined || values['map-project-hash'] !== undefined) throw new Error('invalid_mapping_format');
+    const mapping = (entries: string[] | undefined, limit = 512): Record<string, string> => {
+      const result: Record<string, string> = Object.create(null) as Record<string, string>;
+      if ((entries?.length ?? 0) > 1000) throw new Error('too_many_mappings');
+      for (const entry of entries ?? []) {
+        const split = entry.lastIndexOf('=');
+        const old = entry.slice(0, split);
+        const current = entry.slice(split + 1);
+        if (split < 1 || old.length > limit || current === '' || current.length > 512 || Object.hasOwn(result, old)) {
+          throw new Error('invalid_import_mapping');
+        }
+        result[old] = current;
       }
-    } catch {
-      io.writeError(`${file} could not be read.\n`);
-      return 2;
-    }
-  }
-  const source = await readBounded(file === '-' ? process.stdin : createReadStream(file), MAX_FILE_BYTES);
-  if (source === null) {
-    io.writeError(`${file === '-' ? 'standard input' : file} ${overSize}\n`);
-    return 2;
-  }
-  return source;
+      return result;
+    };
+    return { file: positionals[0] ?? '-', dryRun: values['dry-run'] === true, apply: values.apply === true,
+      json: values.json === true, mapRepo: mapping(values['map-repo']), mapWork: mapping(values['map-work']),
+      mapContext: mapping(values['map-context']), from: values.from,
+      mapProject: mapping(values['map-project'], 16_384), mapProjectHash: mapping(values['map-project-hash']) };
+  } catch { return { error: 'invalid_import_arguments_or_mapping' }; }
 }
 
-/** The one line `import` prints for a result that was applied or would be. */
 function importSummary(result: ImportResult): string {
   return `${plural(result.inserted, 'memory', 'memories')} added, ${result.updated} raised in sensitivity, ${plural(result.tombstones, 'tombstone')} applied, ${result.unchanged} unchanged`;
 }
 
-/** `oboete import [file|-] [--dry-run] [--map-repo <old>=<current>]`: exit 2 on an invalid file. */
-export async function runImport(argv: string[], io: Io = processIo()): Promise<number> {
-  const args = importArgs(argv);
-  if ('error' in args) {
-    io.writeError(`${args.error}\n`);
-    return 2;
+/** Only identities and counts leave the private plan; exact project names remain inside it. */
+function previewMetadata(plan: TransferPlan, result: ImportResult, schema: string, db: DatabaseSync | undefined) {
+  const counts: Record<string, number> = Object.create(null) as Record<string, number>;
+  for (const row of plan.db.prepare('SELECT kind, COUNT(*) AS n FROM transfer_rows GROUP BY kind').iterate()) {
+    counts[String(row.kind)] = Number(row.n);
   }
-  const source = await importSource(args.file, io);
-  if (typeof source !== 'string') return source;
-  return await withDatabase(async (db) => {
-    const result = importMemories(db, source, { now: Date.now(), dryRun: args.dryRun, mapRepo: args.mapRepo });
-    for (const item of result.rejected) io.writeError(`line ${item.line}: ${item.reason}\n`);
-    if (result.rejected.length > 0) {
-      io.writeError(`Nothing was imported: ${plural(result.rejected.length, 'line')} rejected.\n`);
-      return 2;
-    }
-    const summary = importSummary(result);
-    io.writeOut(args.dryRun ? `Dry run: ${summary} would be written.\n` : `Imported: ${summary}.\n`);
-    return 0;
+  const projectHash = (data: unknown) => {
+    const repo = JSON.parse(String(data)) as { id: string; normalized_identity: string };
+    return sha256Hex(plan.external === undefined ? repo.id : repo.normalized_identity);
+  };
+  const projects = plan.db.prepare(`SELECT data, destination_repo_id, destination_context_id
+    FROM transfer_rows WHERE kind = 'repo' ORDER BY origin LIMIT 100`).all().map((row) => {
+    const project = { sourceHash: projectHash(row.data), destinationRepo: row.destination_repo_id, context: row.destination_context_id };
+    if (project.destinationRepo === null || project.context !== null) return project;
+    const contextCandidates = db?.prepare('SELECT id FROM work_contexts WHERE repo_id = ? ORDER BY id LIMIT 10')
+      .all(project.destinationRepo).map((candidate) => String(candidate.id)) ?? [];
+    const contextCount = Number(db?.prepare('SELECT COUNT(*) AS n FROM work_contexts WHERE repo_id = ?')
+      .get(project.destinationRepo)?.n ?? 0);
+    return { ...project, contextCandidates, contextCandidatesOmitted: Math.max(0, contextCount - contextCandidates.length) };
   });
+  const unresolved = plan.db.prepare(`SELECT data FROM transfer_rows WHERE kind = 'repo'
+    AND destination_repo_id IS NULL ORDER BY origin LIMIT 100`).all().map((row) => projectHash(row.data));
+  const unresolvedCount = Number(plan.db.prepare(`SELECT COUNT(*) AS n FROM transfer_rows
+    WHERE kind = 'repo' AND destination_repo_id IS NULL`).get()?.n ?? 0);
+  const collisions = Number(plan.db.prepare(`SELECT COUNT(*) AS n FROM (
+    SELECT destination_repo_id FROM transfer_rows WHERE kind = 'repo' AND destination_repo_id IS NOT NULL
+    GROUP BY destination_repo_id HAVING COUNT(*) > 1)`).get()?.n ?? 0);
+  return { source: { format: plan.format, revision: plan.revision, sha256: plan.sourceHash, bytes: plan.bytes,
+    counts: plan.external?.counts ?? counts, queryScoped: plan.external !== undefined,
+    tombstones: plan.external === undefined ? 'included' : 'unavailable' },
+    mapping: { projects, omitted: Math.max(0, (counts.repo ?? 0) - projects.length), collisions,
+      unresolved, unresolvedOmitted: Math.max(0, unresolvedCount - unresolved.length) },
+    quarantine: result.inserted, excluded: counts.excluded ?? 0,
+    held: Number(plan.db.prepare("SELECT COUNT(*) AS n FROM transfer_rows WHERE kind <> 'repo' AND kind <> 'memory'").get()?.n ?? 0),
+    applyPossible: schema === 'ready' && result.rejected.length === 0 };
+}
+
+/** Input is staged before any destination open; previews never create or migrate that store. */
+export async function runImport(argv: string[], io: Io = processIo()): Promise<number> {
+  if (argv[0] === 'promote') return runImportPromote(argv.slice(1), io);
+  const args = importArgs(argv);
+  if ('error' in args) { io.writeError(`${args.error}\n`); return 2; }
+  let plan: TransferPlan | undefined;
+  let db: DatabaseSync | undefined;
+  try {
+    plan = await readTransferPlan(args.file === '-' ? process.stdin : createReadStream(args.file), args.from);
+    const dryRun = args.dryRun || (plan.format !== EXPORT_FORMAT && !args.apply);
+    const paths = oboetePaths(resolveHome());
+    let schema: 'ready' | 'missing' | 'behind' | 'ahead' = 'ready';
+    if (dryRun || plan.format !== EXPORT_FORMAT) {
+      try {
+        const opened = openDatabase({ path: paths.db, timeoutMs: 2_000, readOnly: true });
+        db = opened.db;
+        if (opened.schemaBehind) { schema = 'behind'; db.close(); db = undefined; }
+      } catch (error) {
+        if (error instanceof DatabaseMissingError) schema = 'missing';
+        else if (error instanceof SchemaAheadError) schema = 'ahead';
+        else throw error;
+      }
+    }
+    if (!dryRun && schema === 'ready') {
+      db?.close();
+      ensureDirectories(paths);
+      db = openDatabase({ path: paths.db, timeoutMs: 2_000 }).db;
+    }
+    const result = mergeTransferPlan(db, plan, { now: Date.now(), dryRun,
+      mapRepo: args.mapRepo, mapWork: args.mapWork, mapContext: args.mapContext,
+      mapProject: args.mapProject, mapProjectHash: args.mapProjectHash });
+    if (!dryRun && schema !== 'ready') result.rejected.unshift({ line: 0, reason: 'destination_schema_not_ready' });
+    const metadata = previewMetadata(plan, result, schema, db);
+    if (args.json) await io.writeOut(`${JSON.stringify({ ...metadata, destinationSchema: schema, ...result })}\n`);
+    else {
+      for (const issue of result.rejected) io.writeError(`line ${issue.line}: ${issue.reason}\n`);
+      if (result.rejected.length === 0) await io.writeOut(dryRun
+        ? `Dry run: ${importSummary(result)} would be written. Destination schema: ${schema}.\n`
+        : `${result.duplicate ? 'Already imported' : 'Imported'}${plan.format === EXPORT_FORMAT && !args.apply ? ' (v1 implicit apply)' : ''}: ${importSummary(result)}.\n`);
+      await io.writeOut(`Source: ${plan.format}@${plan.revision}, SHA-256 ${plan.sourceHash}, ${plan.bytes} bytes.\n`
+        + (plan.external === undefined ? 'Source deletion history is included. ' : 'Query-scoped export; source deletion history is unavailable. ')
+        + `${metadata.mapping.collisions} project collisions.\n`
+        + `${metadata.excluded} unsupported, ${metadata.held} held records. Apply possible: ${metadata.applyPossible}.\n`
+        + metadata.mapping.projects.map((project) => `Project SHA-256 ${project.sourceHash}: ${project.destinationRepo === null ? 'mapping required' : 'mapped'}.\n`
+          + ('contextCandidates' in project ? project.contextCandidates.map((id) => `Context candidate ${project.destinationRepo}: ${id}.\n`).join('')
+            + (project.contextCandidatesOmitted > 0 ? `${project.contextCandidatesOmitted} context candidates omitted for ${project.destinationRepo}.\n` : '') : '')).join('')
+        + (metadata.mapping.omitted > 0 ? `${metadata.mapping.omitted} project details omitted.\n` : '')
+        + `${metadata.mapping.unresolved.length + metadata.mapping.unresolvedOmitted} unresolved projects.\n`);
+    }
+    return result.rejected.length > 0 ? 2 : 0;
+  } catch (error) {
+    io.writeError(`${error instanceof TransferInputError ? `line ${error.line}: ${error.reason}` : 'import_failed'}\n`);
+    return 2;
+  } finally { db?.close(); plan?.close(); }
 }

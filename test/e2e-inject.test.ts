@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { grantVisibility } from '../src/db/queries.js';
 import { spawn, spawnSync } from 'node:child_process';
 import {
   closeSync,
@@ -19,6 +20,7 @@ import { openDatabase } from '../src/db/open.js';
 import { oboetePaths, type OboetePaths } from '../src/paths.js';
 import { cjkBigrams } from '../src/retrieval/fts.js';
 import { resolveRepoIdentity } from '../src/repo-identity.js';
+import { seedWorkBinding } from './helpers/work.js';
 
 type Json = Record<string, unknown>;
 
@@ -62,6 +64,16 @@ function fixture(): Fixture {
      VALUES ('s-previous', ?, 'claude', 'previous-native', 's-previous', 'claude-opus-5[1m]',
        ?, ?, 'ended', 1, 'm-summary', 'done')`,
   ).run(identity.id, NOW - 10_000, NOW - 1_000);
+  seedWorkBinding(db, 's-previous');
+  const contextId = `fixture-context:${identity.id}`;
+  const workId = `fixture-work:${identity.id}`;
+  grantVisibility(db, 'm-summary', { audience: 'work', repoId: identity.id, workId }, 'observer', NOW);
+  db.prepare("UPDATE work_contexts SET local_key = ?, root = ?, repo_secret_paths_json = '[]' WHERE id = ?")
+    .run(identity.worktreeKey, identity.root, contextId);
+  db.prepare("UPDATE memories SET work_id = ?, provenance_complete = 1 WHERE id = 'm-summary'").run(workId);
+  db.prepare("UPDATE work_items SET current_checkpoint_memory_id = 'm-summary' WHERE id = ?").run(workId);
+  db.prepare("INSERT INTO memory_sources (memory_id, capture_root, source_paths_json, source_context_id) VALUES ('m-summary', ?, '[]', ?)")
+    .run(identity.root, contextId);
   const title = '日本語の検索メモリ';
   const body = '予約データベースの接続設定はローカル構成にあります。';
   db.prepare(
@@ -69,6 +81,7 @@ function fixture(): Fixture {
        content_hash, sensitivity, review_state, created_at)
      VALUES ('m-ja', ?, 'discovery', ?, ?, ?, 'mj', 'cj', 'eligible', 'unreviewed', ?)`,
   ).run(identity.id, title, body, cjkBigrams(`${title} ${body}`), NOW - 1_000);
+  grantVisibility(db, 'm-ja', { audience: 'project', repoId: identity.id }, 'migration', NOW);
   db.close();
   return {
     home,

@@ -3,7 +3,8 @@
 Every implementer (Claude Code agents, Grok Build, Codex) reads this file before writing code. It
 restates the decisions from `specs/007-oboete-m1-alpha/` (plan.md, research.md, data-model.md,
 contracts/) that several modules share, so modules written in parallel agree without reading each
-other. On any conflict the specification documents win over this file.
+other. The active feature specification wins on conflict; `specs/009-memory-core/` supersedes
+M1 source retention and completion rules.
 
 ## Language, module system, build
 
@@ -15,7 +16,7 @@ other. On any conflict the specification documents win over this file.
   facility (no Unix sockets, `flock`, bash-only hooks); paths through `node:path` and `os.homedir()`.
 - Build: `scripts/build.mjs` (security-owned, Claude Code only). `src/cli.ts` becomes
   `dist/oboete.mjs` (esbuild, one ESM file). Hook-path packages are bundled: `zod`, `smol-toml`,
-  `@secretlint/core`, `@secretlint/secretlint-rule-preset-recommend`. Everything else (`ai`,
+  `@secretlint/core`, `@secretlint/profiler`, `@secretlint/secretlint-rule-preset-recommend`. Everything else (`ai`,
   `@ai-sdk/*`, `workers-ai-provider`, `hono`, `@hono/node-server`, `preact`) stays external and MUST
   be loaded with a dynamic `await import('...')` inside the command that needs it, never at the top
   level of a module the hook path loads (`capture`, `events`, `privacy/*`, `agents/*`, `db/open`,
@@ -29,8 +30,8 @@ other. On any conflict the specification documents win over this file.
 
 - `node:test` with `node:assert/strict`. Files: `test/unit/<module>.test.ts`,
   `test/migrations/*.test.ts`; shared helpers in `test/helpers/`. `npm test` compiles them to
-  `build/test/**/*.test.mjs` and runs `node --test`. Tests pass on Node 22 and 24
-  (`~/.nvm/versions/node/v22.23.1/bin/node` and `v24.16.0`).
+  `build/test/**/*.test.mjs` and runs `node --test`. Verify the declared minimum Node 22.16 and
+  Node 24; record the actual executable version with the test receipt.
 - A test that touches storage creates a fresh directory with `fs.mkdtempSync` and points
   `OBOETE_HOME` at it; the real `~/.oboete` is never used. Use `test/helpers/home.ts` (T022) once
   it exists.
@@ -66,6 +67,8 @@ other. On any conflict the specification documents win over this file.
 - A read-then-write unit is one `BEGIN IMMEDIATE` transaction. Every worker write is fenced by
   `worker_lease.owner_token` (`... WHERE owner_token = ?`; zero rows changed means the lease was
   lost) except the exhaustion signal in `provider_usage`.
+- Long summary aggregation uses a deferred read snapshot, then asserts the lease before its
+  writes. Retry the whole transaction on a busy write upgrade; capture can proceed during reads.
 - SQL is never assembled from untrusted strings; values go through parameters of `db.prepare()`.
 
 ## Sensitivity and egress (never re-implemented locally)

@@ -114,12 +114,13 @@ export async function captureEndedSession(
   fixture: Fixture,
   options: {
     sessionId: string;
+    cwd?: string;
     prompts: string[];
     assistant?: string;
     tools?: { id: string; path: string; text?: string }[];
   },
 ): Promise<void> {
-  const common = eventBase(options.sessionId);
+  const common = { ...eventBase(options.sessionId), ...(options.cwd === undefined ? {} : { cwd: options.cwd }) };
   await fixture.capture('SessionStart', { ...common, source: 'startup' });
   for (const [index, prompt] of options.prompts.entries()) {
     await fixture.capture('UserPromptSubmit', {
@@ -164,9 +165,11 @@ export function providerOutput(
   language: 'en' | 'ja' = 'en',
 ): ObserverOutput {
   return {
+    checkpoint: { decision: 'unchanged', source_event_ids: [sourceEventId], reason: 'No work progress changed.' },
     observations: [
       {
         type: 'discovery',
+        visibility: 'project',
         title: language === 'ja' ? '再試行の仕組み' : 'Retry behavior',
         body:
           language === 'ja'
@@ -220,8 +223,9 @@ export function catalogResponse(page = 1): Response {
 export function runObserveForFixture(
   fixture: Fixture,
   overrides: Partial<ObserveDeps> = {},
+  argv: string[] = [],
 ): Promise<number> {
-  return runObserve([], {
+  return runObserve(argv, {
     env: fixture.env,
     now: () => NOW,
     detect: detectSync,
@@ -230,4 +234,3 @@ export function runObserveForFixture(
     ...overrides,
   });
 }
-

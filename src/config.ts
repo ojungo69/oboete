@@ -146,11 +146,22 @@ const consentSchema = z.strictObject({
   accepted_at: z.number().int().optional(),
 });
 
+/** Device sync (contracts/sync.md "Sync space, replicas and keys"): the key itself never lives here. */
+export const syncSchema = z.strictObject({
+  directory: z.string().min(1),
+  directory_realpath: z.string().min(1),
+  space_id: z.string().regex(/^[0-9a-f]{32}$/u),
+  key_id: z.string().regex(/^[0-9a-f]{16}$/u),
+  classes: z.array(z.enum(['eligible', 'local_only', 'private'])).min(1),
+});
+export type SyncConfig = z.infer<typeof syncSchema>;
+
 export const configSchema = z.strictObject({
   observer: observerSchema.prefault({}),
   injection: injectionSchema.prefault({}),
   privacy: privacySchema.prefault({}),
   consent: consentSchema.prefault({}),
+  sync: syncSchema.optional(),
 });
 
 export type OboeteConfig = z.infer<typeof configSchema>;
@@ -173,6 +184,12 @@ const repoRulesSchema = z.strictObject({
     })
     .prefault({}),
 });
+
+/** Capture/spool provenance may retain only the same bounded repository rules accepted live. */
+export function repoSecretPaths(value: unknown): string[] | null {
+  const parsed = repoRulesSchema.safeParse({ privacy: { secret_paths: value } });
+  return value === undefined || !parsed.success ? null : parsed.data.privacy.secret_paths;
+}
 
 export class ConfigError extends Error {
   readonly code: 'config_malformed' | 'config_credentials';
@@ -206,6 +223,13 @@ const KNOWN_KEY_PATHS = new Set([
   'consent',
   'consent.hash',
   'consent.accepted_at',
+  'sync',
+  'sync.directory',
+  'sync.directory_realpath',
+  'sync.space_id',
+  // The sync key id is a public HKDF-derived identifier, never the key (contracts/sync.md).
+  'sync.key_id',
+  'sync.classes',
 ]);
 
 const CREDENTIAL_LIKE_KEY = /credential|token|key|secret/i;

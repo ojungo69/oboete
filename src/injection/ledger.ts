@@ -177,6 +177,11 @@ export function confirmDeliveryIn(db: DatabaseSync, injectionId: string, now: nu
 }
 
 /** Nothing reached the model: the pack is closed with the reason `why` will show (FR-028). */
+export function omitPlanned(db: DatabaseSync, injectionId: string, reason: ItemReason | null): void {
+  db.prepare(`UPDATE injection_items SET decision = 'omitted', reason = ?
+    WHERE injection_id = ? AND decision = 'planned'`).run(reason, injectionId);
+}
+
 export function omitInjection(
   db: DatabaseSync,
   injectionId: string,
@@ -186,6 +191,11 @@ export function omitInjection(
     reason,
     injectionId,
   );
+}
+
+export function cancelUndelivered(db: DatabaseSync, injectionId: string): void {
+  omitPlanned(db, injectionId, 'not_delivered');
+  omitInjection(db, injectionId, 'not_delivered');
 }
 
 /** The memories already delivered in this conversation and epoch (FR-026, A12). */
@@ -228,7 +238,8 @@ export function sessionStartEmitted(
  * Whether any session-start pack, omitted ones included, was built for this conversation and epoch.
  * Codex fires no SessionStart on `/new` (A18), and its `SessionStart(compact)` follows PostCompact by
  * seconds and can be lost (A21), so the first prompt of an epoch that has no pack yet carries the
- * pack; an omitted pack counts, so a repository with nothing to inject is not retried on every prompt.
+ * pack; ordinary omissions count so an empty repository is not retried on every prompt. A usable
+ * start cancelled before combined output (`not_delivered`) remains eligible for retry.
  */
 export function sessionStartAttempted(
   db: DatabaseSync,
@@ -238,7 +249,8 @@ export function sessionStartAttempted(
   const row = db
     .prepare(
       `SELECT 1 AS found FROM injections
-       WHERE conversation_id = ? AND context_epoch = ? AND kind = 'session_start' LIMIT 1`,
+       WHERE conversation_id = ? AND context_epoch = ? AND kind = 'session_start'
+         AND (state IS NOT 'omitted' OR degraded_reason IS NOT 'not_delivered') LIMIT 1`,
     )
     .get(conversationId, epoch);
   return row !== undefined;

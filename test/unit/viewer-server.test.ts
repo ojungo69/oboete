@@ -1,3 +1,5 @@
+import { grantVisibility } from '../../src/db/queries.js';
+import { seedWorkBinding } from '../helpers/work.js';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -45,6 +47,7 @@ function insertMemory(
     seed.sensitivity ?? 'eligible',
     NOW,
   );
+  grantVisibility(db, id, { audience: 'project', repoId: seed.repoId }, 'migration', NOW);
   return id;
 }
 
@@ -183,6 +186,56 @@ test('memories, sessions, search and why are read through the injection scope of
     assert.equal(after.injections[0].items[0].title, null);
   });
 });
+
+test('sharing controls require the viewer token and origin and cannot change work state', async () => {
+  await withViewer(async ({ api, db, identity, repo, viewer }) => {
+    db.prepare(`INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, status)
+      VALUES ('sharing', ?, 'claude', 'sharing', 'sharing', 'active')`).run(identity.id);
+    seedWorkBinding(db, 'sharing');
+    db.prepare('UPDATE work_contexts SET root = ?, local_key = ?').run(repo, identity.worktreeKey);
+    const memoryId = insertMemory(db, { repoId: identity.id, title: 'Preferred language', body: 'Reply in Japanese.' });
+    const workId = `fixture-work:${identity.id}`;
+    db.prepare('DELETE FROM memory_visibility WHERE memory_id = ?').run(memoryId);
+    grantVisibility(db, memoryId, { audience: 'work', repoId: identity.id, workId }, 'observer', NOW);
+    db.prepare(`INSERT INTO sharing_proposals (id, origin_memory_id, origin_repo_id, origin_work_id,
+      candidate_title, candidate_body, candidate_material_hash, candidate_sensitivity, source_event_ids_json,
+      basis, state, created_at) VALUES ('pending-share', ?, ?, ?, 'Personal preference', 'Reply in Japanese.', ?,
+      'eligible', '[]', 'inferred', 'pending', ?)`)
+      .run(memoryId, identity.id, workId, materialHash('Personal preference', 'Reply in Japanese.'), NOW);
+    const before = db.prepare('SELECT * FROM work_items').all();
+    assert.equal((await api('/api/sharing', { token: null })).status, 401);
+    assert.equal((await api('/api/sharing/pending-share/approve', { method: 'POST', token: null })).status, 401);
+    assert.equal((await api('/api/sharing/pending-share/approve', { method: 'POST', headers: { origin: 'https://foreign.invalid' } })).status, 403);
+    assert.equal(db.prepare("SELECT state FROM sharing_proposals WHERE id = 'pending-share'").get()?.state, 'pending');
+    const status = await (await api('/api/sharing')).json() as { proposals: { id: string }[] };
+    assert.deepEqual(status.proposals.map((row) => row.id), ['pending-share']);
+    assert.equal((await api(`/api/sharing/${'x'.repeat(129)}/approve`, { method: 'POST' })).status, 404);
+    const approved = await api('/api/sharing/pending-share/approve', { method: 'POST', headers: { origin: viewer.origin } });
+    assert.equal(approved.status, 200);
+    assert.equal((await api('/api/sharing/pending-share/reject', { method: 'POST' })).status, 404);
+    assert.equal((await api(`/api/memories/${memoryId}/adopt`, { method: 'POST' })).status, 200);
+    assert.deepEqual(db.prepare('SELECT * FROM work_items').all(), before);
+  });
+});
+
+test('viewer lists and mutation responses withhold memories denied by current path policy', async () => {
+  await withViewer(async ({ api, db, identity, repo }) => {
+    const id = insertMemory(db, { repoId: identity.id, title: 'Protected upload', body: 'Protected deployment details.' });
+    db.prepare(`INSERT INTO memory_sources (memory_id, citation_kind, citation_value)
+      VALUES (?, 'file_read', 'protected/upload.ts')`).run(id);
+    assert.match(await (await api('/api/memories')).text(), /Protected deployment details/);
+    writeFileSync(join(repo, '.oboete.toml'), '[privacy]\nsecret_paths = ["protected/**"]\n');
+    for (const path of ['/api/memories', '/api/search?q=Protected']) {
+      const response = await api(path);
+      assert.equal(response.status, 200);
+      assert.doesNotMatch(await response.text(), /Protected deployment details|protected\/upload/);
+    }
+    const pinned = await api(`/api/memories/${id}/pin`, { method: 'POST' });
+    assert.equal(pinned.status, 404);
+    assert.doesNotMatch(await pinned.text(), /Protected deployment details|protected\/upload/);
+  });
+});
+
 
 function injectionRow(overrides: Partial<NewInjection> & { repoId: string; sessionId: string; conversationId: string }): NewInjection {
   return {

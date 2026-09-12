@@ -10,13 +10,15 @@ import {
   timeline,
   tombstone,
   type MemoryRow,
-  type TimelineSession,
 } from './db/queries.js';
 import { openDatabase } from './db/open.js';
 import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from './paths.js';
 import { resolveRepoIdentity } from './repo-identity.js';
 import { searchCandidates } from './retrieval/query.js';
 import { rankCandidates, type RankedCandidate } from './retrieval/rank.js';
+import { readWorkSelection } from './work.js';
+import { filterMemoryOutput, filterReadOutput, filterTimelineOutput, localHistoryOutput, type PublicTimelineSession } from './privacy/provenance.js';
+import { adoptKnowledge, decideSharing, sharingStatus } from './sharing.js';
 
 const SEARCH_DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
@@ -31,6 +33,7 @@ export type MemoryCliRuntime = {
 };
 
 type CommandOptions = Record<string, { type: 'string' | 'boolean' }>;
+const READ_OPTIONS = { binding: { type: 'string' }, history: { type: 'boolean' } } as const;
 type ParsedCommand = ReturnType<typeof parseArgs>;
 type SearchRow = {
   id: string;
@@ -63,7 +66,12 @@ export function parseCommand(
   runtime: MemoryCliRuntime,
 ): ParsedCommand | null {
   try {
-    return parseArgs({ args: argv, allowPositionals: true, strict: true, options });
+    const parsed = parseArgs({ args: argv, allowPositionals: true, strict: true, options });
+    if (typeof parsed.values.binding === 'string' && (parsed.values.binding.trim() === '' || parsed.values.binding.length > 128)) {
+      invalid(runtime, '--binding must be a non-empty binding ID of at most 128 characters.');
+      return null;
+    }
+    return parsed;
   } catch (error) {
     invalid(runtime, error instanceof Error ? error.message : String(error));
     return null;
@@ -106,16 +114,16 @@ function integerOption(
   return parsed;
 }
 
-function withDatabase<T>(
+async function withDatabase<T>(
   runtime: MemoryCliRuntime,
-  fn: (db: DatabaseSync, repoId: string, paths: OboetePaths) => T,
-): T {
+  fn: (db: DatabaseSync, repoId: string, paths: OboetePaths, identity: ReturnType<typeof resolveRepoIdentity>) => T | Promise<T>,
+): Promise<T> {
   const identity = resolveRepoIdentity(runtime.cwd);
   const paths = oboetePaths(resolveHome());
   ensureDirectories(paths);
   const opened = openDatabase({ path: paths.db, timeoutMs: 2_000 });
   try {
-    return fn(opened.db, identity.id, paths);
+    return await fn(opened.db, identity.id, paths, identity);
   } finally {
     opened.db.close();
   }
@@ -166,9 +174,9 @@ export function renderSearch(rows: SearchRow[]): string {
 /** The one search every surface uses (CLI, MCP, Pi tools): injection scope, lexical ranking. */
 export function searchMemories(
   db: DatabaseSync,
-  input: { repoId: string; paths: OboetePaths; query: string; limit: number },
+  input: { repoId: string; paths: OboetePaths; query: string; limit: number; workId?: string | null; history?: boolean },
 ): SearchRow[] {
-  const scope = memoryScope(db, { repoId: input.repoId, destination: 'injection' });
+  const scope = memoryScope(db, { repoId: input.repoId, destination: 'injection', workId: input.workId, history: input.history });
   const found = searchCandidates(db, { text: input.query, scope });
   const ranked = rankCandidates(found.rows, {
     threshold: loadConfig(input.paths).injection.threshold,
@@ -206,7 +214,7 @@ export async function runSearch(
   const runtime = runtimeWith(overrides);
   const parsed = parseCommand(
     argv,
-    { limit: { type: 'string' }, json: { type: 'boolean' } },
+    { ...READ_OPTIONS, limit: { type: 'string' }, json: { type: 'boolean' } },
     runtime,
   );
   if (parsed === null) return 2;
@@ -218,15 +226,24 @@ export async function runSearch(
       : integerOption(parsed.values.limit, '--limit', 1, MAX_LIMIT, runtime);
   if (limit === null) return 2;
 
-  return withDatabase(runtime, (db, repoId, paths) => {
-    const rows = searchMemories(db, { repoId, paths, query, limit });
+  return withDatabase(runtime, async (db, repoId, paths, identity) => {
+    const selection = readWorkSelection(db, { repoId, contextKey: identity.worktreeKey,
+      bindingId: typeof parsed.values.binding === 'string' ? parsed.values.binding : undefined });
+    const candidates = searchMemories(db, { repoId, paths, query, limit, workId: selection.workId, history: parsed.values.history === true });
+    const visible = parsed.values.history === true ? { memories: localHistoryOutput(db, candidates), works: selection.choices } : await filterReadOutput(db, {
+      repoId, repoRoot: identity.root, contextKey: identity.worktreeKey, workId: selection.workId,
+      bindingId: selection.bindingId, home: paths.home,
+    }, candidates, selection.choices);
+    const rows = visible.memories;
+    selection.choices = visible.works;
+    const choices = selection.choices.length === 0 ? {} : { selection };
 
     if (parsed.values.json === true) {
       runtime.writeOut(
         `${JSON.stringify(
           rows.length === 0
-            ? { memories: rows, reason: EMPTY_REASON, note: LEXICAL_NOTE }
-            : { memories: rows },
+            ? { memories: rows, reason: EMPTY_REASON, note: LEXICAL_NOTE, ...choices }
+            : { memories: rows, ...choices },
         )}\n`,
       );
     } else if (rows.length === 0) {
@@ -234,11 +251,13 @@ export async function runSearch(
     } else {
       runtime.writeOut(`${renderSearch(rows)}\n`);
     }
+    if (parsed.values.json !== true && selection.choices.length > 0) runtime.writeOut(
+      'Select work with oboete work status and pass its current --binding ID to include progress.\n');
     return 0;
   });
 }
 
-export function renderTimeline(sessions: readonly TimelineSession[]): string {
+export function renderTimeline(sessions: readonly PublicTimelineSession[]): string {
   return sessions
     .map((session) => {
       const turns =
@@ -264,7 +283,7 @@ export function renderTimeline(sessions: readonly TimelineSession[]): string {
                     memory.title ?? '(untitled)',
                   )}. Its sensitivity is ${memory.sensitivity}. Its body is ${JSON.stringify(
                     memory.body ?? '',
-                  )}. Its sources are ${sourceText(memory.sources)}.`,
+                  )}.` + ('sources' in memory ? ` Its sources are ${sourceText(memory.sources)}.` : ''),
               )
               .join('\n');
       return `Session ${session.id} was recorded by ${session.agent} and is ${session.status}.\n${turns}\n${memories}`;
@@ -279,7 +298,7 @@ export async function runTimeline(
   const runtime = runtimeWith(overrides);
   const parsed = parseCommand(
     argv,
-    { session: { type: 'string' }, json: { type: 'boolean' } },
+    { ...READ_OPTIONS, session: { type: 'string' }, json: { type: 'boolean' } },
     runtime,
   );
   if (parsed === null) return 2;
@@ -289,13 +308,23 @@ export async function runTimeline(
     return invalid(runtime, '--session must not be empty.');
   }
 
-  return withDatabase(runtime, (db, repoId) => {
-    const sessions = timeline(db, repoId, {
+  return withDatabase(runtime, async (db, repoId, paths, identity) => {
+    const selection = readWorkSelection(db, { repoId, contextKey: identity.worktreeKey,
+      bindingId: typeof parsed.values.binding === 'string' ? parsed.values.binding : undefined });
+    const candidates = timeline(db, repoId, {
       ...(typeof sessionId === 'string' ? { sessionId: sessionId.trim() } : {}),
       limit: MAX_LIMIT,
+      workId: selection.workId, history: parsed.values.history === true,
     });
+    const visible = parsed.values.history === true ? { sessions: candidates.map((session) => ({ ...session,
+      memories: localHistoryOutput(db, session.memories) })), works: selection.choices } : await filterTimelineOutput(db, {
+      repoId, repoRoot: identity.root, contextKey: identity.worktreeKey, workId: selection.workId,
+      bindingId: selection.bindingId, home: paths.home,
+    }, candidates, selection.choices);
+    const sessions = visible.sessions;
+    selection.choices = visible.works;
     if (parsed.values.json === true) {
-      runtime.writeOut(`${JSON.stringify({ sessions })}\n`);
+      runtime.writeOut(`${JSON.stringify({ sessions, ...(selection.choices.length === 0 ? {} : { selection }) })}\n`);
     } else if (sessions.length === 0) {
       runtime.writeOut('No sessions were found in the current repository.\n');
     } else {
@@ -310,18 +339,26 @@ export async function runGet(
   overrides: Partial<MemoryCliRuntime> = {},
 ): Promise<number> {
   const runtime = runtimeWith(overrides);
-  const parsed = parseCommand(argv, { json: { type: 'boolean' } }, runtime);
+  const parsed = parseCommand(argv, { ...READ_OPTIONS, json: { type: 'boolean' } }, runtime);
   if (parsed === null) return 2;
   const id = oneArgument(parsed.positionals, 'get', runtime);
   if (id === null) return 2;
   const json = parsed.values.json === true;
 
-  return withDatabase(runtime, (db, repoId) => {
-    const memory = getMemory(db, id, memoryScope(db, { repoId, destination: 'injection' }));
+  return withDatabase(runtime, async (db, repoId, paths, identity) => {
+    const selection = readWorkSelection(db, { repoId, contextKey: identity.worktreeKey,
+      bindingId: typeof parsed.values.binding === 'string' ? parsed.values.binding : undefined });
+    const memory = getMemory(db, id, memoryScope(db, { repoId, destination: 'injection',
+      workId: selection.workId, history: parsed.values.history === true }));
     if (memory === null) return notFound(runtime, id, json);
     const sources = memorySources(db, memory.id);
+    const visible = (parsed.values.history === true ? localHistoryOutput(db, [{ ...memory, sources }]) : await filterMemoryOutput(db, {
+      repoId, repoRoot: identity.root, contextKey: identity.worktreeKey, workId: selection.workId,
+      bindingId: selection.bindingId, home: paths.home,
+    }, [{ ...memory, sources }]))[0];
+    if (visible === undefined) return notFound(runtime, id, json);
     if (json) {
-      runtime.writeOut(`${JSON.stringify({ ...memory, sources })}\n`);
+      runtime.writeOut(`${JSON.stringify(visible)}\n`);
     } else {
       runtime.writeOut(
         `Memory ${memory.id} is a ${memory.type} titled ${JSON.stringify(
@@ -329,9 +366,45 @@ export async function runGet(
         )}.\n` +
           `Its body is ${JSON.stringify(memory.body ?? '')}.\n` +
           `Its sensitivity is ${memory.sensitivity}.\n` +
-          `Its sources are ${sourceText(sources)}.\n`,
+          ('sources' in visible ? `Its sources are ${sourceText(visible.sources)}.\n` : ''),
       );
     }
+    return 0;
+  });
+}
+
+export async function runShare(argv: string[], overrides: Partial<MemoryCliRuntime> = {}): Promise<number> {
+  const runtime = runtimeWith(overrides);
+  const parsed = parseCommand(argv, { json: { type: 'boolean' }, binding: { type: 'string' } }, runtime);
+  if (parsed === null) return 2;
+  const [action, ...args] = parsed.positionals;
+  if (!['status', 'approve', 'reject', 'adopt'].includes(action) || args.length !== (action === 'status' ? 0 : 1)
+    || args.some((id) => id.trim() === '' || id.length > 128) || (parsed.values.binding !== undefined && action !== 'adopt')) {
+    return invalid(runtime, 'Usage: oboete share status | approve <proposal-id> | reject <proposal-id> | adopt <memory-id> [--binding <binding-id>] [--json]');
+  }
+  return withDatabase(runtime, async (db, repoId, paths, identity) => {
+    const selection = readWorkSelection(db, { repoId, contextKey: identity.worktreeKey,
+      bindingId: typeof parsed.values.binding === 'string' ? parsed.values.binding : undefined });
+    const location = { repoId, repoRoot: identity.root, contextKey: identity.worktreeKey, home: paths.home,
+      bindingId: selection.bindingId, workId: selection.workId };
+    if (action === 'status') {
+      const status = await sharingStatus(db, location);
+      runtime.writeOut(parsed.values.json ? `${JSON.stringify(status)}\n` : status.proposals.length === 0
+        ? 'No sharing proposals are available in this repository.\n'
+        : status.proposals.map((row) => `${row.id}  ${row.state}  ${JSON.stringify(row.candidate_title)}: ${JSON.stringify(row.candidate_body)}`).join('\n') + '\n');
+      if (!parsed.values.json && status.hasMore) runtime.writeOut('More proposals are available. Review these to see the next ones.\n');
+      return 0;
+    }
+    const result = action === 'adopt'
+      ? await adoptKnowledge(db, location, args[0], runtime.now()) ? { id: args[0], audience: 'project' } : null
+      : await decideSharing(db, location, { id: args[0], decision: action as 'approve' | 'reject', channel: 'cli', now: runtime.now() });
+    if (result === null) {
+      runtime.writeError('The memory or proposal is unavailable in this scope, or the decision is no longer current.\n');
+      return 1;
+    }
+    runtime.writeOut(parsed.values.json ? `${JSON.stringify(result)}\n` : action === 'adopt'
+      ? 'This knowledge is now available throughout the project.\n'
+      : action === 'approve' ? 'This personal preference is now available across your projects.\n' : 'The sharing proposal was rejected.\n');
     return 0;
   });
 }
@@ -345,8 +418,8 @@ async function changePin(
   const parsed = parseCommand(
     argv,
     pinned
-      ? { order: { type: 'string' }, json: { type: 'boolean' } }
-      : { json: { type: 'boolean' } },
+      ? { ...READ_OPTIONS, order: { type: 'string' }, json: { type: 'boolean' } }
+      : { ...READ_OPTIONS, json: { type: 'boolean' } },
     runtime,
   );
   if (parsed === null) return 2;
@@ -360,8 +433,10 @@ async function changePin(
   const json = parsed.values.json === true;
   const pinnedAt = pinned ? runtime.now() : null;
 
-  return withDatabase(runtime, (db, repoId) => {
-    const scope = memoryScope(db, { repoId, destination: 'injection' });
+  return withDatabase(runtime, (db, repoId, _paths, identity) => {
+    const selection = readWorkSelection(db, { repoId, contextKey: identity.worktreeKey,
+      bindingId: typeof parsed.values.binding === 'string' ? parsed.values.binding : undefined });
+    const scope = memoryScope(db, { repoId, destination: 'injection', workId: selection.workId, history: parsed.values.history === true });
     if (!setPinned(db, { id, scope, pinnedAt, pinOrder: order })) {
       return notFound(runtime, id, json);
     }
@@ -398,15 +473,17 @@ export async function runDelete(
   overrides: Partial<MemoryCliRuntime> = {},
 ): Promise<number> {
   const runtime = runtimeWith(overrides);
-  const parsed = parseCommand(argv, { json: { type: 'boolean' } }, runtime);
+  const parsed = parseCommand(argv, { ...READ_OPTIONS, json: { type: 'boolean' } }, runtime);
   if (parsed === null) return 2;
   const id = oneArgument(parsed.positionals, 'delete', runtime);
   if (id === null) return 2;
   const json = parsed.values.json === true;
   const deletedAt = runtime.now();
 
-  return withDatabase(runtime, (db, repoId) => {
-    const scope = memoryScope(db, { repoId, destination: 'injection' });
+  return withDatabase(runtime, (db, repoId, _paths, identity) => {
+    const selection = readWorkSelection(db, { repoId, contextKey: identity.worktreeKey,
+      bindingId: typeof parsed.values.binding === 'string' ? parsed.values.binding : undefined });
+    const scope = memoryScope(db, { repoId, destination: 'injection', workId: selection.workId, history: parsed.values.history === true });
     if (!tombstone(db, { id, scope, deletedAt })) return notFound(runtime, id, json);
     if (json) runtime.writeOut(`${JSON.stringify({ id, action: 'deleted', deleted_at: deletedAt })}\n`);
     else runtime.writeOut(`Deleted memory ${id}.\n`);

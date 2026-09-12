@@ -2,8 +2,10 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { isBusyError } from '../db/open.js';
-import { contentHash } from '../events.js';
+import { findNativeSession, markSessionCaptured, nativeSessionStorage } from '../db/sessions.js';
+import { contentHash, repositoryEventId } from '../events.js';
 import { stripRecognizedPacks } from '../injection/recognize.js';
+import { bindCapturedWork } from '../work.js';
 import type { OboetePaths } from '../paths.js';
 import {
   listSpool,
@@ -28,8 +30,11 @@ import { assertLease, transactionImmediate } from './lease.js';
 function ensureSessionRows(
   db: DatabaseSync,
   entry: SpoolEntry,
-): { sessionId: string; turnId: string | null } {
-  db.prepare(
+): { sessionId: string; late: boolean } {
+  let session = findNativeSession(db, entry.row.repo_id, entry.session.agent, entry.session.native_session_id);
+  if (session === undefined) {
+    const native = nativeSessionStorage(db, entry.session.agent, entry.session.native_session_id);
+    db.prepare(
     `INSERT OR IGNORE INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(
@@ -42,33 +47,23 @@ function ensureSessionRows(
   );
   db.prepare(
     `INSERT OR IGNORE INTO sessions
-       (id, repo_id, agent, native_session_id, conversation_id, model, started_at, status, turn_count)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+       (id, repo_id, agent, native_session_id, original_native_session_id, conversation_id, model, started_at, status, turn_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
   ).run(
     entry.session.id,
     entry.session.repo_id,
     entry.session.agent,
-    entry.session.native_session_id,
+    native.stored,
+    native.original,
     entry.session.conversation_id,
     entry.session.model,
     entry.session.started_at,
     entry.session.status,
   );
-  const sessionId = String(
-    db
-      .prepare('SELECT id FROM sessions WHERE agent = ? AND native_session_id = ?')
-      .get(entry.session.agent, entry.session.native_session_id)?.id,
-  );
-
-  const turnId = placeRecoveredInTurn(db, sessionId, entry);
-  if (entry.row.kind === 'session_end') {
-    // Without this the recovered session would never reach the session-end trigger (FR-010).
-    db.prepare(
-      `UPDATE sessions SET status = 'ended', ended_at = COALESCE(ended_at, ?),
-         summary_state = COALESCE(summary_state, 'pending') WHERE id = ?`,
-    ).run(entry.row.captured_at, sessionId);
+    session = findNativeSession(db, entry.row.repo_id, entry.session.agent, entry.session.native_session_id)!;
   }
-  return { sessionId, turnId };
+  return { sessionId: String(session.id), late: typeof session.last_captured_at === 'number'
+    && entry.row.captured_at <= session.last_captured_at };
 }
 
 /**
@@ -152,24 +147,58 @@ export function recoverSpool(
         }
         // Recovery is idempotent (FR-003), and the parent rows carry side effects a second pass must
         // not repeat: a row that is already stored ends here, before any turn is opened.
-        if (db.prepare('SELECT 1 AS present FROM raw_events WHERE id = ?').get(entry.row.id) !== undefined) {
+        const payload = payloadOf(entry.row);
+        const legacyId = typeof payload?.legacy_event_id === 'string' ? payload.legacy_event_id : entry.row.id;
+        const scopedId = repositoryEventId(entry.row.repo_id, legacyId);
+        if (db.prepare('SELECT 1 FROM raw_events WHERE repo_id = ? AND id IN (?, ?, ?)')
+          .get(entry.row.repo_id, entry.row.id, legacyId, scopedId) !== undefined) {
           return 'skipped';
+        }
+        if (payload?.legacy_event_id !== undefined || db.prepare('SELECT 1 FROM raw_events WHERE id = ?').get(entry.row.id) !== undefined) {
+          entry.row.id = scopedId;
         }
         const parents = ensureSessionRows(db, entry);
         recognizePacksInEntry(db, entry);
+        // Older spool formats carry no context identity and remain historical/unbound.
+        const work = (typeof payload?.work_context_key === 'string' || payload?.work_context_key === null) && typeof payload.capture_root === 'string'
+          ? bindCapturedWork(db, {
+            repoId: entry.row.repo_id, root: payload.capture_root, contextKey: payload.work_context_key,
+            sessionId: parents.sessionId, sourceId: entry.row.id, kind: entry.row.kind,
+            content: entry.row.content, inputSource: payload.input_source, sensitivity: entry.row.sensitivity,
+            admissible: entry.row.classification_state === 'done', capturedAt: entry.row.captured_at,
+            recovered: true, late: parents.late,
+            repoSecretPaths: payload.source_repo_rules,
+          }) : null;
+        let turnId: string | null = null;
+        if (parents.late) {
+          // A late event may refer to an existing historical turn, but cannot open/close the live one.
+          if (typeof payload?.prompt_id === 'string') {
+            const turn = db.prepare(`SELECT turn_id FROM raw_events WHERE session_id = ? AND repo_id = ?
+              AND work_binding_id IS ? AND turn_id IS NOT NULL AND CASE WHEN json_valid(payload_json)
+                THEN json_extract(payload_json, '$.prompt_id') = ? ELSE 0 END LIMIT 1`)
+              .get(parents.sessionId, entry.row.repo_id, work?.bindingId ?? null, payload.prompt_id);
+            if (typeof turn?.turn_id === 'string') turnId = turn.turn_id;
+          }
+        } else {
+          db.prepare("UPDATE sessions SET status = 'active', ended_at = NULL, summary_state = NULL WHERE id = ? AND status = 'ended'")
+            .run(parents.sessionId);
+          turnId = placeRecoveredInTurn(db, parents.sessionId, entry);
+          if (entry.row.kind === 'session_end') db.prepare(`UPDATE sessions SET status = 'ended', ended_at = ?,
+            summary_state = COALESCE(summary_state, 'pending') WHERE id = ?`).run(entry.row.captured_at, parents.sessionId);
+        }
         const changes = Number(
           db
             .prepare(
               `INSERT OR IGNORE INTO raw_events
                  (id, repo_id, session_id, turn_id, agent, kind, content, truncated, payload_json,
-                  content_hash, sensitivity, classification_state, captured_at, expires_at, batch_id, via_spool)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1)`,
+                  content_hash, sensitivity, classification_state, captured_at, expires_at, batch_id, via_spool, work_binding_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?)`,
             )
             .run(
               entry.row.id,
               entry.row.repo_id,
               parents.sessionId,
-              parents.turnId,
+              turnId,
               entry.row.agent,
               entry.row.kind,
               entry.row.content,
@@ -180,8 +209,10 @@ export function recoverSpool(
               entry.row.classification_state,
               entry.row.captured_at,
               entry.row.expires_at,
+              work?.bindingId ?? null,
             ).changes,
         );
+        markSessionCaptured(db, parents.sessionId, entry.row.captured_at);
         return changes === 0 ? 'skipped' : 'inserted';
       });
     } catch (error) {

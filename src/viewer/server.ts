@@ -28,6 +28,9 @@ import { whyReport } from './../injection/ledger.js';
 import { LEXICAL_NOTE, searchMemories } from './../memories-cli.js';
 import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from './../paths.js';
 import { resolveRepoIdentity } from './../repo-identity.js';
+import { filterMemoryOutput, filterTimelineOutput, type PrivacyLocation } from './../privacy/provenance.js';
+import { readWorkSelection } from './../work.js';
+import { adoptKnowledge, decideSharing, knowledgeForAdoption, sharingStatus } from './../sharing.js';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 const DATABASE_TIMEOUT_MS = 2_000;
@@ -118,10 +121,13 @@ export async function startViewer(options: ViewerOptions): Promise<ViewerHandle>
   const { streamSSE } = await import('hono/streaming');
   const { serve } = await import('@hono/node-server');
 
-  const withDatabase = <T>(fn: (db: DatabaseSync, scope: MemoryScope) => T): T => {
+  const withDatabase = async <T>(fn: (db: DatabaseSync, scope: MemoryScope, privacy: PrivacyLocation) => T | Promise<T>): Promise<T> => {
     const opened = openDatabase({ path: paths.db, timeoutMs: DATABASE_TIMEOUT_MS });
     try {
-      return fn(opened.db, memoryScope(opened.db, { repoId: identity.id, destination: 'injection' }));
+      const selection = readWorkSelection(opened.db, { repoId: identity.id, contextKey: identity.worktreeKey });
+      return await fn(opened.db, memoryScope(opened.db, { repoId: identity.id, destination: 'injection', workId: selection.workId }),
+        { repoId: identity.id, repoRoot: identity.root, contextKey: identity.worktreeKey,
+          bindingId: selection.bindingId, workId: selection.workId, home: paths.home });
     } finally {
       opened.db.close();
     }
@@ -162,33 +168,51 @@ export async function startViewer(options: ViewerOptions): Promise<ViewerHandle>
 
   app.get('/', (c) => c.html(pageHtml()));
 
+  app.get('/api/sharing', (c) => withDatabase(async (db, _scope, privacy) => c.json(await sharingStatus(db, privacy))));
+  for (const decision of ['approve', 'reject'] as const) app.post(`/api/sharing/:id/${decision}`, (c) =>
+    withDatabase(async (db, _scope, privacy) => {
+      const id = c.req.param('id');
+      const result = id.length > 128 ? null : await decideSharing(db, privacy, { id, decision, channel: 'viewer', now: now() });
+      return result === null ? c.json({ error: 'proposal_unavailable' }, 404) : c.json(result);
+    }));
+  app.post('/api/memories/:id/adopt', (c) => withDatabase(async (db, _scope, privacy) => {
+    const id = c.req.param('id');
+    if (id.length > 128 || !await adoptKnowledge(db, privacy, id, now())) return c.json({ error: 'memory_not_found' }, 404);
+    return c.json({ id, audience: 'project' });
+  }));
+
   app.get('/api/memories', (c) =>
-    withDatabase((db, scope) =>
+    withDatabase(async (db, scope, privacy) =>
       c.json({
         repository: identity.normalizedIdentity,
-        memories: listMemories(db, scope, { limit: LIST_LIMIT }).map((memory) => ({
+        memories: await filterMemoryOutput(db, privacy, listMemories(db, scope, { limit: LIST_LIMIT }).map((memory) => ({
           ...memory,
+          can_adopt: knowledgeForAdoption(db, privacy, memory.id) !== null && db.prepare(`SELECT 1 FROM memory_visibility
+            WHERE memory_id = ? AND audience = 'project' AND repo_id = ?`).get(memory.id, identity.id) === undefined,
           sources: memorySources(db, memory.id),
-        })),
+        }))),
       }),
     ),
   );
   app.get('/api/search', (c) => {
     const query = c.req.query('q')?.trim() ?? '';
     if (query === '') return c.json({ memories: [], note: LEXICAL_NOTE });
-    return withDatabase((db) =>
+    return withDatabase(async (db, _scope, privacy) =>
       c.json({
-        memories: searchMemories(db, { ...searchContext(paths), query, limit: SEARCH_LIMIT }),
+        memories: await filterMemoryOutput(db, privacy, searchMemories(db, { ...searchContext(paths),
+          query, limit: SEARCH_LIMIT, workId: privacy.workId })),
         note: LEXICAL_NOTE,
       }),
     );
   });
   app.get('/api/sessions', (c) =>
-    withDatabase((db) => c.json({ sessions: timeline(db, identity.id, { limit: SEARCH_LIMIT }) })),
+    withDatabase(async (db, _scope, privacy) => c.json({ sessions: (await filterTimelineOutput(db, privacy,
+      timeline(db, identity.id, { limit: SEARCH_LIMIT, workId: privacy.workId }))).sessions })),
   );
   app.get('/api/sessions/:id', (c) =>
-    withDatabase((db) =>
-      c.json({ sessions: timeline(db, identity.id, { sessionId: c.req.param('id'), limit: 1 }) }),
+    withDatabase(async (db, _scope, privacy) =>
+      c.json({ sessions: (await filterTimelineOutput(db, privacy, timeline(db, identity.id, {
+        sessionId: c.req.param('id'), limit: 1, workId: privacy.workId }))).sessions }),
     ),
   );
   app.get('/api/sessions/:id/why', (c) =>
@@ -197,13 +221,16 @@ export async function startViewer(options: ViewerOptions): Promise<ViewerHandle>
 
   const mutate = (
     fn: (db: DatabaseSync, scope: MemoryScope, id: string) => boolean,
-  ): ((c: { req: { param(name: 'id'): string }; json: (body: unknown, status?: 200 | 404) => Response }) => Response) =>
+  ): ((c: { req: { param(name: 'id'): string }; json: (body: unknown, status?: 200 | 404) => Response }) => Promise<Response>) =>
     (c) =>
-      withDatabase((db, scope) => {
+      withDatabase(async (db, scope, privacy) => {
         const id = c.req.param('id');
+        const before = getMemory(db, id, scope);
+        if (before === null || (await filterMemoryOutput(db, privacy, [before])).length === 0) return c.json({ error: 'memory_not_found', id }, 404);
         if (!fn(db, scope, id)) return c.json({ error: 'memory_not_found', id }, 404);
         const memory = getMemory(db, id, scope);
-        return c.json({ memory: memory === null ? null : { ...memory, sources: memorySources(db, id) } });
+        const visible = await filterMemoryOutput(db, privacy, memory === null ? [] : [{ ...memory, sources: memorySources(db, id) }]);
+        return c.json({ memory: visible[0] ?? null });
       });
   app.post('/api/memories/:id/review', mutate((db, scope, id) => setReviewed(db, { id, scope })));
   app.post('/api/memories/:id/pin', mutate((db, scope, id) => {

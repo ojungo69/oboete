@@ -10,9 +10,7 @@ import type { ReportComputed } from './replay-evaluate.js';
 import type { MeasureInput, RecallHit, Sample } from './replay.js';
 
 export const READY_BOUND_MS = 300;
-// spec.md US2 AC-3 / FR-024 bound the summary *wait* at 1 s; the hook's own deadline is the engine's
-// INJECTION_DEADLINE_MS (the 300 ms ready budget plus that wait), and inject.ts caps the wait at the
-// remaining budget, so the pending path is judged on wall time against 1300 ms.
+// Current-work capture and privacy checks share the session-start 1300 ms deadline.
 export const PENDING_BOUND_MS = INJECTION_DEADLINE_MS;
 
 export const HEADING = '## Fixture replay (T068)';
@@ -138,16 +136,14 @@ export function statusOf(pass: boolean): 'pass' | 'fail' {
   return pass ? 'pass' : 'fail';
 }
 
-/** A2: a start taken while the previous summary was pending must say so in its own pack. */
+/** A pending sample must carry the sentence in the pack belonging to its persisted injection. */
 export function pendingSentence(
-  input: { packs: { seq: number; text: string }[]; sessionStartPack: Map<string, string> },
+  input: { packs: { seq: number; text: string; injectionIds: string[] }[] },
   samples: Sample[],
 ): { hits: number; text: string } {
   const hits = samples.filter((sample) => {
-    const pack =
-      input.packs.find((entry) => entry.seq === sample.seq)?.text ??
-      input.sessionStartPack.get(`${sample.agent}:${sample.session}`) ??
-      '';
+    const pack = sample.injectionId === undefined ? '' :
+      input.packs.find((entry) => entry.injectionIds.includes(sample.injectionId!))?.text ?? '';
     return pack.includes(SUMMARY_PENDING);
   }).length;
   return { hits, text: `${hits}/${samples.length} packs carry summary_pending` };
@@ -225,9 +221,10 @@ function recallTables(computed: ReportComputed, bounds: BoundRow[]) {
     misses.length === 0
       ? 'None.'
       : mdTable(
-          ['fact id', 'lang', 'query'],
-          [false, false, false],
-          misses.map((row) => [row.id, row.lang, row.query]),
+          ['fact id', 'lang', 'query', 'first failure', 'reason'],
+          [false, false, false, false, false],
+          misses.map((row) => [row.id, row.lang, mdCell(row.query), row.firstFailure ?? 'none',
+            row.firstFailure === null ? 'none' : row.stages[row.firstFailure as keyof typeof row.stages].reason]),
         );
   const scTable = mdTable(
     ['SC', 'Measured', 'Bound', 'Status'],
@@ -293,9 +290,9 @@ function setupSection(input: MeasureInput, machine: string, cpu: string): string
     `- Commit: \`${gitHead(repositoryRoot())}\`.`,
     `- Bundle: \`${input.bundle}\`, ${fileBytes(input.bundle)} bytes.`,
     `- Fixture: \`${input.fixturePath}\` (${input.lines.length} lines).`,
-    `- \`OBOETE_HOME\`: \`${input.home}\`. Config file absent (schema default preset \`workers-ai\`); child environment has no provider credentials, so summaries are rule-based (\`no_provider\`).`,
+    `- \`OBOETE_HOME\`: \`${input.home}\`. Worker behavior uses this home's configuration; generation and delivery are scored separately below.`,
     `- Temporary git repository with one empty commit so \`HEAD\` exists. \`NODE_ENV=test\`.`,
-    `- Worker RSS: Linux \`/proc/<pid>/status\` \`VmHWM\`, polled every 50 ms on replay's \`observe\` children and, from before the first hook through the final flush, hook-spawned workers found via \`worker_lease.pid\` using one read connection. The lease poll excludes replay's own pid and observe children; a busy read is skipped. A replay-owned \`worker_lease\` token is held across every \`SessionEnd\`/\`session_shutdown\` and the pending windows; hooks can still spawn workers while the lease is free.`,
+    `- Worker RSS: Linux \`/proc/<pid>/status\` \`VmHWM\`, polled every 50 ms. Replay holds a fenced lease during capture and starts its own worker only when ended targets can drain; the child must exit before measurement. Automatic native-agent spawning is a separate qualification.`,
     '',
     'Commands executed:',
     '',
@@ -326,7 +323,7 @@ function hookTimingSection(
     '',
     '### Injection hooks',
     '',
-    `Classified by \`hookDeadlineMs(agent, event) === INJECTION_DEADLINE_MS\` (Claude/Codex \`SessionStart\`/\`UserPromptSubmit\`, Grok \`SessionStart\`/\`UserPromptSubmit\`/\`PreToolUse\`/\`PostToolUse\`, Pi \`inject\` for \`session_start\`/\`input\`). Every (agent, event) group must pass: every sample ≤ ${READY_BOUND_MS} ms, with no 99% allowance. The per-agent pending session-start sample is excluded here and reported only in the session-start table at ${PENDING_BOUND_MS} ms. Session-start events that ran while the lease was held for another agent's pending window are also omitted (they are not the ready path). Pi capture of those events stays in the capture table; the inject child is measured here.`,
+    `Every (agent, event) group must pass: every ordinary injection and ready start is bounded by ${READY_BOUND_MS} ms. Pending session-start samples are classified by their exact persisted injection and evaluated below at ${PENDING_BOUND_MS} ms. Pi capture and explicit injection are measured separately.`,
     '',
     injectionTable,
     '',
@@ -336,7 +333,7 @@ function hookTimingSection(
     '',
     '### Session-start wait',
     '',
-    `Ready path: previous session summarized (bound ${READY_BOUND_MS} ms). Pending path: one sample per agent whose hold window opens, with the lease kept held from that agent's last session end preceding its own last session start through that start (and Pi \`inject --kind start\`) so the hook cannot spawn a worker and the pack must take the pending path (bound ${PENDING_BOUND_MS} ms = the engine's INJECTION_DEADLINE_MS: the 300 ms ready budget plus the 1 s summary wait of FR-024; inject.ts caps the wait at the remaining budget). Passing requires at least one sample and the summary-pending sentence in every sample's pack. The lease hold is what makes the pending path deterministic.`,
+    `Ready and pending are read from the injection created by that start. Missing or ambiguous injection records invalidate timing evidence. Pending requires the summary-pending sentence in its correlated printed pack and wall time ≤ ${PENDING_BOUND_MS} ms; ready is bounded by ${READY_BOUND_MS} ms.`,
     '',
     waitTable,
     '',
@@ -401,7 +398,13 @@ function recallSection(
   return [
     '### SC-009 fact recall',
     '',
-    `Japanese ${(recallRateOf(recallJa) * 100).toFixed(1)}% (${recallJa.filter((row) => row.hit).length}/${recallJa.length}); English ${(recallRateOf(recallEn) * 100).toFixed(1)}% (${recallEn.filter((row) => row.hit).length}/${recallEn.length}); overall ${(recallRateOf(input.recallHits) * 100).toFixed(1)}% (${input.recallHits.filter((row) => row.hit).length}/${input.recallHits.length}). Bound ≥ 90%. Summaries are rule-based (\`preset\` default with no credentials).`,
+    `Japanese ${(recallRateOf(recallJa) * 100).toFixed(1)}% (${recallJa.filter((row) => row.hit).length}/${recallJa.length}); English ${(recallRateOf(recallEn) * 100).toFixed(1)}% (${recallEn.filter((row) => row.hit).length}/${recallEn.length}); overall ${(recallRateOf([...recallJa, ...recallEn]) * 100).toFixed(1)}% (${[...recallJa, ...recallEn].filter((row) => row.hit).length}/${(recallJa.length + recallEn.length)}). Bound ≥ 90%. Availability counts a confirmed current delivery or a confirmed prior delivery in the same conversation and epoch. Receiving-agent answer quality is not measured here.`,
+    '',
+    'Stages (fixture replay never runs a receiving agent):',
+    '',
+    mdTable(['stage', 'pass', 'fail', 'pending', 'partial', 'not run'], [false, true, true, true, true, true],
+      Object.entries(computed.stageCounts).map(([name, counts]) => [name, ...['pass', 'fail', 'pending', 'partial', 'not_run']
+        .map((status) => String(counts[status] ?? 0))])),
     '',
     'Misses:',
     '',
@@ -498,6 +501,8 @@ function reportJson(
   } = computed;
   return {
     startedAt: input.startedAt,
+    repoId: input.repoId,
+    startSamples: input.startSamples,
     lines: input.lines.length,
     ...timingJson(input, computed),
     secrets: { leaked: leakedSecrets, negativesUnredacted },
@@ -505,9 +510,15 @@ function reportJson(
     recall: {
       ja: recallRateOf(recallJa),
       en: recallRateOf(recallEn),
-      overall: recallRateOf(input.recallHits),
+      overall: recallRateOf([...recallJa, ...recallEn]),
       misses: misses.map((row) => ({ id: row.id, query: row.query })),
       pass: sc009,
+      currentDelivery: computed.recallTraces.filter((row) => row.availability === 'current_delivery').length,
+      priorDelivery: computed.recallTraces.filter((row) => row.availability === 'prior_delivery').length,
+      stageCounts: computed.stageCounts,
+      probes: computed.recallTraces.map((trace) => ({ id: trace.id, lang: trace.lang, query: trace.query,
+        factSeq: trace.factSeq, querySeq: trace.querySeq, hit: trace.hit, availability: trace.availability,
+        stages: trace.stages, firstFailure: trace.firstFailure })),
     },
     duplicates: { groups: duplicateGroups.length, rawEvents, lines: input.lines.length, pass: sc010 },
     hooks: { n: input.hookCount, failures: input.hookFailures.length, pass: hooksPass },

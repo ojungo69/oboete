@@ -11,13 +11,16 @@ import { transactionImmediate } from '../worker/lease.js';
 import { runtimeStateGet, runtimeStateSet } from '../worker/purge.js';
 import {
   confirmDeliveryIn,
+  cancelUndelivered,
   omitInjection,
+  omitPlanned,
   parseAttempts,
   type DegradedReason,
   type ItemReason,
   type WhyAttempt,
 } from './ledger.js';
-import type { BuiltPack, SecretDetector } from './pack.js';
+import { workGuardValid, type BuiltPack, type SecretDetector, type WorkGuard } from './pack.js';
+import { injectionPrivacy } from '../privacy/provenance.js';
 import { hasControlCharacter, renderPack, type PackItem } from './pack-format.js';
 
 /**
@@ -30,6 +33,7 @@ type PendingPack = {
   degraded: DegradedReason | null;
   blocks: { memoryId: string | null; rawEventId: string | null; lines: string[] }[];
   text: string;
+  workGuard?: WorkGuard;
 };
 
 // ponytail: one row per conversation, deleted on delivery and at Stop; a conversation that never
@@ -60,6 +64,19 @@ function writePending(
 
 function clearPending(db: DatabaseSync, conversationId: string): void {
   db.prepare('DELETE FROM runtime_state WHERE key = ?').run(packKey(conversationId));
+}
+
+/** Stored text must still belong to the current selection when a delayed tool hook prints it. */
+function currentPending(db: DatabaseSync, conversationId: string, remainingBudget?: () => number): PendingPack | null {
+  const pending = readPending(db, conversationId);
+  if (pending?.workGuard !== undefined && !workGuardValid(db, pending.workGuard, remainingBudget)) {
+    const record = db.prepare('SELECT attempts_json FROM injections WHERE id = ?').get(pending.injectionId);
+    if (parseAttempts(record?.attempts_json).some((attempt) => attempt.delivery === 'pending')) return null;
+    cancelUndelivered(db, pending.injectionId);
+    clearPending(db, conversationId);
+    return null;
+  }
+  return pending;
 }
 
 type InjectionRecord = Record<string, SQLOutputValue>;
@@ -113,13 +130,6 @@ function omitItem(
     `UPDATE injection_items SET decision = 'omitted', reason = ?
      WHERE injection_id = ? AND decision = 'planned' AND memory_id IS ? AND raw_event_id IS ?`,
   ).run(reason, injectionId, item.memoryId, item.rawEventId);
-}
-
-function omitPlanned(db: DatabaseSync, injectionId: string, reason: ItemReason | null): void {
-  db.prepare(
-    `UPDATE injection_items SET decision = 'omitted', reason = ?
-     WHERE injection_id = ? AND decision = 'planned'`,
-  ).run(reason, injectionId);
 }
 
 /**
@@ -244,6 +254,9 @@ function planMerge(db: DatabaseSync, input: StorePendingInput): MergePlan | null
   const budget = Number(live.char_budget ?? input.pack.charBudget);
 
   const blocks = [...previous.blocks];
+  if (input.pack.choices?.length && !blocks.some((block) => block.memoryId === null && block.rawEventId === null)) {
+    blocks.unshift({ memoryId: null, rawEventId: null, lines: input.pack.choices });
+  }
   const used = renderPack({
     repositoryLine: previous.repositoryLine,
     blocks: blocks.map((block) => block.lines),
@@ -272,6 +285,7 @@ export type StorePendingInput = {
   now: number;
   /** contracts/agents.md: the finished pack is validated as a whole before it is emitted. */
   validation: PackValidation;
+  remainingBudget?: () => number;
 };
 
 /** No live record: this is the pack pack.ts validated as a whole when it built it. */
@@ -284,13 +298,14 @@ function storeFirstPending(db: DatabaseSync, input: StorePendingInput): string {
       injectionId: input.pack.injectionId,
       repositoryLine: input.pack.repositoryLine,
       degraded: input.pack.degraded,
-      blocks: input.pack.items
+      workGuard: input.pack.workGuard,
+      blocks: [...(input.pack.choices?.length ? [{ memoryId: null, rawEventId: null, lines: input.pack.choices }] : []), ...input.pack.items
         .filter((item) => item.decision === 'planned')
         .map((item) => ({
           memoryId: item.memoryId,
           rawEventId: item.rawEventId,
           lines: item.lines,
-        })),
+        }))],
       text: input.pack.text,
     },
     input.now,
@@ -319,6 +334,15 @@ function refusePending(
 
 /** The merged pack replaces the live record's text under the same id. */
 function mergePending(db: DatabaseSync, input: StorePendingInput, plan: MergePlan): string {
+  const workGuard = input.pack.workGuard;
+  const previous = readPending(db, input.conversationId)?.workGuard?.privacy;
+  if (workGuard?.privacy !== undefined && previous !== undefined) {
+    const sources = [...new Map([...previous.sources, ...workGuard.privacy.sources]
+      .map((source) => [JSON.stringify(source), source])).values()];
+    const policy = injectionPrivacy(db, workGuard.privacy, sources, process.env, input.remainingBudget);
+    if (policy === null) return refusePending(db, input, plan, 'secret_detected');
+    workGuard.privacy = { ...workGuard.privacy, sources, stamp: policy.stamp };
+  }
   // The omissions are written on the new pack's own rows, so the live record's planned row for
   // the same memory keeps standing: it is the copy that is rendered and delivered (FR-026).
   for (const omission of plan.omissions) {
@@ -342,10 +366,19 @@ function mergePending(db: DatabaseSync, input: StorePendingInput, plan: MergePla
       degraded: plan.degraded,
       blocks: plan.blocks,
       text: plan.text,
+      workGuard,
     },
     input.now,
   );
   return plan.liveId;
+}
+
+/** Freeze text already carried by a tool call, so its eventual receipt describes that exact text. */
+function preserveCarrier(db: DatabaseSync, input: StorePendingInput): string | null {
+  const live = liveRecord(db, input.conversationId, input.pack.injectionId);
+  if (live === null || !parseAttempts(live.attempts_json).some((attempt) => attempt.delivery === 'pending')) return null;
+  cancelUndelivered(db, input.pack.injectionId);
+  return String(live.id);
 }
 
 /**
@@ -356,11 +389,23 @@ function mergePending(db: DatabaseSync, input: StorePendingInput, plan: MergePla
  * text it already passed. Returns the id of the record that now holds the pack.
  */
 export async function storePending(db: DatabaseSync, input: StorePendingInput): Promise<string> {
+  const carried = transactionImmediate(db, () => {
+    currentPending(db, input.conversationId, input.remainingBudget);
+    return preserveCarrier(db, input);
+  });
+  if (carried !== null) return carried;
   const validated = planMerge(db, input);
   const rejection =
     validated === null ? null : await packRejection(validated.text, input.validation);
 
   return transactionImmediate(db, () => {
+    const carried = preserveCarrier(db, input);
+    if (carried !== null) return carried;
+    currentPending(db, input.conversationId, input.remainingBudget);
+    if (input.pack.workGuard !== undefined && !workGuardValid(db, input.pack.workGuard, input.remainingBudget)) {
+      cancelUndelivered(db, input.pack.injectionId);
+      return input.pack.injectionId;
+    }
     const plan = planMerge(db, input);
     if (plan === null) return storeFirstPending(db, input);
 
@@ -384,13 +429,15 @@ export async function storePending(db: DatabaseSync, input: StorePendingInput): 
  */
 export function attachOnPreToolUse(
   db: DatabaseSync,
-  input: { conversationId: string; toolCallId: string; now: number },
+  input: { conversationId: string; toolCallId: string; now: number; remainingBudget?: () => number },
 ): string | null {
   return transactionImmediate(db, () => {
     const live = liveRecord(db, input.conversationId);
     if (live === null) return null;
-    const pending = readPending(db, input.conversationId);
+    const pending = currentPending(db, input.conversationId, input.remainingBudget);
     if (pending === null) return null;
+
+    omitUnrendered(db, String(live.id), pending.blocks);
 
     const attempts = parseAttempts(live.attempts_json);
     if (!attempts.some((attempt) => attempt.tool_call_id === input.toolCallId)) {
@@ -425,7 +472,7 @@ export type DeferredDelivery = {
  */
 export function confirmOnPostToolUse(
   db: DatabaseSync,
-  input: { conversationId: string; toolCallId: string; exitCode?: number; now: number },
+  input: { conversationId: string; toolCallId: string; exitCode?: number; now: number; remainingBudget?: () => number },
 ): DeferredDelivery {
   // The R13 probe: a failed shell call arrives here with its exit code, and the context was
   // delivered all the same.
@@ -445,6 +492,7 @@ export function markFailure(
     toolCallId: string;
     kind: 'PostToolUseFailure' | 'PermissionDenied';
     now: number;
+    remainingBudget?: () => number;
   },
 ): 'emitted' | 'attempted' | 'omitted' | 'none' {
   if (input.kind === 'PostToolUseFailure') {
@@ -484,6 +532,7 @@ function deliver(
     toolCallId: string;
     execution: 'ran' | 'failed';
     now: number;
+    remainingBudget?: () => number;
   },
 ): DeferredDelivery {
   return transactionImmediate(db, () => {
@@ -492,9 +541,9 @@ function deliver(
 
     const injectionId = String(record.id);
     const emitted = record.state === 'emitted';
-    const pending = readPending(db, input.conversationId);
     const attempts = parseAttempts(record.attempts_json);
     const attempt = attempts.find((entry) => entry.tool_call_id === input.toolCallId);
+    const pending = attempt === undefined && !emitted ? currentPending(db, input.conversationId, input.remainingBudget) : readPending(db, input.conversationId);
     let text: string | null = null;
 
     if (attempt?.delivery === 'delivered') {
@@ -541,7 +590,7 @@ function deliver(
     );
     if (emitted) return { status: 'already', text: null };
 
-    omitUnrendered(db, injectionId, pending?.blocks ?? []);
+    if (attempt === undefined) omitUnrendered(db, injectionId, pending?.blocks ?? []);
     confirmDeliveryIn(db, injectionId, input.now);
     clearPending(db, input.conversationId);
     return { status: 'emitted', text };

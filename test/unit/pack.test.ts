@@ -1,3 +1,4 @@
+import { grantVisibility } from '../../src/db/queries.js';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,6 +27,7 @@ import { DEGRADED_SENTENCES } from '../../src/injection/pack-format.js';
 import { oboetePaths } from '../../src/paths.js';
 import { cjkBigrams } from '../../src/retrieval/fts.js';
 import { withTempHome } from '../helpers/home.js';
+import { seedWorkBinding } from '../helpers/work.js';
 
 const NOW = 1_700_000_000_000;
 const HOUR = 3_600_000;
@@ -87,6 +89,7 @@ function insertMemory(db: DatabaseSync, seed: MemorySeed): void {
     seed.lastInjectedAt ?? null,
     seed.createdAt ?? NOW - DAY,
   );
+  grantVisibility(db, seed.id, { audience: 'project', repoId: REPO }, 'migration', NOW);
   for (const citation of seed.citations ?? []) {
     db.prepare(
       `INSERT INTO memory_sources (memory_id, raw_event_id, citation_kind, citation_value, source_agent)
@@ -145,7 +148,6 @@ function packInput(overrides: Partial<PackInput> = {}): PackInput {
     detect: fakeDetector,
     directives: DIRECTIVES,
     repoRoot: '/nonexistent-repository-root',
-    waitForSummary: () => 'none' as const,
     prompt: '',
     ...overrides,
   };
@@ -183,6 +185,10 @@ function seedReadySession(db: DatabaseSync): void {
     summaryId: 'm_summary',
   });
   insertSession(db, { id: 's_now', conversationId: 'c1', status: 'active' });
+  seedWorkBinding(db, 's_now');
+  db.prepare('UPDATE work_contexts SET root = ?').run('/nonexistent-repository-root');
+  db.prepare('UPDATE memories SET work_id = ? WHERE id = ?').run(`fixture-work:${REPO}`, 'm_summary');
+  db.prepare('UPDATE work_items SET current_checkpoint_memory_id = ?').run('m_summary');
 }
 
 test('a session-start pack renders the documented lines and nothing else', async () => {
@@ -201,28 +207,17 @@ test('a session-start pack renders the documented lines and nothing else', async
       pinOrder: 2,
     });
 
-    let waited = 0;
     const pack = await buildSessionStartPack(
       db,
-      packInput({
-        waitForSummary: () => {
-          waited += 1;
-          return 'none' as const;
-        },
-      }),
+      packInput(),
     );
 
     assert.notEqual(pack, null);
-    assert.equal(waited, 0, 'a ready summary is never waited for');
     const lines = pack!.text.split('\n');
-    const relative = /^> session summary \((.+)\):$/.exec(lines[2]);
-    assert.notEqual(relative, null, `line 3 was ${lines[2]}`);
-    assert.match(relative![1], /^(just now|yesterday|\d+ (minute|hour|day)s? ago)$/);
-
     assert.deepEqual(lines, [
       'oboete memory context',
       '> repository: example.test/one',
-      `> session summary (${relative![1]}):`,
+      '> work checkpoint: Previous session',
       '> The database work landed.',
       '> pinned: Build command',
       '> Run npm run build before the tests.',
@@ -342,7 +337,7 @@ test('a stale path and a stale commit are marked on the item and noted in the pa
   });
 });
 
-test('a pending summary waits once and then injects the latest raw activity', async () => {
+test('pending selected work injects its latest raw activity without waiting for generation', async () => {
   await withDb(async (db) => {
     // An older session that was summarised: the previous session still decides (FR-024).
     insertMemory(db, {
@@ -368,6 +363,10 @@ test('a pending summary waits once and then injects the latest raw activity', as
       summaryState: 'pending',
     });
     insertSession(db, { id: 's_now', conversationId: 'c1', status: 'active' });
+
+    seedWorkBinding(db, 's_now');
+    const previousBinding = seedWorkBinding(db, 's_prev');
+    db.prepare('UPDATE work_contexts SET root = ?').run('/nonexistent-repository-root');
 
     const events = [
       {
@@ -423,21 +422,14 @@ test('a pending summary waits once and then injects the latest raw activity', as
         NOW + DAY,
       );
     }
+    db.prepare('UPDATE raw_events SET work_binding_id = ? WHERE session_id = ?').run(previousBinding, 's_prev');
 
-    let waited = 0;
     const pack = await buildSessionStartPack(
       db,
-      packInput({
-        waitForSummary: (waitMs: number) => {
-          waited += 1;
-          assert.equal(waitMs, 1_000, 'amendment A2 bounds the wait at one second');
-          return 'pending' as const;
-        },
-      }),
+      packInput(),
     );
 
     assert.notEqual(pack, null);
-    assert.equal(waited, 1);
     assert.ok(pack!.text.includes(DEGRADED_SENTENCES.summary_pending), pack!.text);
     assert.equal(
       pack!.text.includes('The older work landed.'),

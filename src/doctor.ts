@@ -15,7 +15,7 @@ import {
 import { isBusyError, sqliteErrorInfo } from './db/open.js';
 import { agentItems, piItem, unrecognizedItem } from './doctor/agents.js';
 import { allowanceItem, catalogItems, providerItem } from './doctor/provider.js';
-import { ftsItem, migrationItem, openStorage, spoolItem, workerItem } from './doctor/storage.js';
+import { ftsItem, generationItem, migrationItem, openStorage, spoolItem, syncItem, workerItem } from './doctor/storage.js';
 import { appendLog, errorCode } from './log.js';
 import { LEXICAL_NOTE } from './memories-cli.js';
 import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from './paths.js';
@@ -112,7 +112,9 @@ export async function runDoctor(argv: string[], overrides: Partial<DoctorDeps> =
         migrationItem(storage.schemaVersion, storage.schemaAhead, integrityFailed),
       ),
       guardItem('worker', () => workerItem(db, now, integrityFailed)),
+      guardItem('generation', () => generationItem(db, integrityFailed)),
       guardItem('spool', () => spoolItem(paths)),
+      guardItem('sync', () => syncItem(paths, db, integrityFailed)),
       await guardItemAsync('provider', () =>
         providerItem({ config, paths, db, integrityFailed, deps, options, now }),
       ),

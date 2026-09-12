@@ -17,12 +17,15 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
 
 import { INJECTION_DEADLINE_MS, hookDeadlineMs } from '../capture.js';
-import { openDatabase } from '../db/open.js';
-import { measure, nativeSessionId, sessionStartEvent } from './replay-evaluate.js';
+import { isBusyError, openDatabase } from '../db/open.js';
+import { deliveredFactItems, measure, nativeSessionId, sessionStartEvent } from './replay-evaluate.js';
 import { HEADING, fileBytes, repositoryRoot } from './replay-report.js';
 import { childEnvironment } from '../log.js';
 import { ensureDirectories, oboetePaths } from '../paths.js';
-import { isLeaseFree } from '../worker/lease.js';
+import { claimLease, heartbeat, releaseLease } from '../worker/lease.js';
+import { SUMMARIZABLE_ROW_SQL } from '../worker/batches.js';
+import { resolveRepoIdentity } from '../repo-identity.js';
+import { stripRecognizedPacks } from '../injection/recognize.js';
 
 const ROOT_PH = '__OBOETE_REPLAY_ROOT__';
 const FILL_ALPHABET = 'The quick brown fox jumps over the lazy dog. ';
@@ -31,11 +34,26 @@ const ABOVE_ONE = 1_048_577;
 const ABOVE_TWO = 2_097_152;
 const SESSION_END = new Set(['SessionEnd', 'session_shutdown']);
 const AGENTS = ['claude', 'codex', 'grok', 'pi'] as const;
-const LEASE_TOKEN = 't068-replay';
+const WORKER_SETTLE_MS = 5 * 60_000;
+
+class ReplayFailure extends Error {
+  constructor(readonly exit: 1 | 3, reason: string) { super(`replay invalid: ${reason}`); }
+}
+
+type WaitOptions = { timeoutMs: number; now: () => number; sleep: (ms: number) => Promise<void> };
+const waitOptions = (timeoutMs: number): WaitOptions => ({ timeoutMs, now: Date.now, sleep });
 
 export type Agent = (typeof AGENTS)[number];
 type SizeTag = 'at_bound' | 'above_bound';
 type Fact = { id: string; lang: 'ja' | 'en'; query: string; expect: string };
+type CapturedFact = Fact & { seq: number; sourceSessionId: string | null; sourceIds: string[]; factSourceIds: string[] };
+export type DeliveredFactItem = { injectionId: string; memoryId: string | null; rawEventId: string | null };
+export type RecallProbe = Fact & {
+  factSeq: number; querySeq: number; repoId: string; sourceSessionId: string | null;
+  sourceIds: string[]; factSourceIds: string[]; sessionId: string | null;
+  conversationId: string | null; epoch: number | null; priorInjectionIds: string[];
+  priorDelivery: DeliveredFactItem[]; currentInjectionIds: string[]; currentTextHit: boolean;
+};
 type Tags = {
   secret?: string;
   directive?: number;
@@ -60,7 +78,10 @@ type Spawned = {
   stderr: string;
   elapsedMs: number;
 };
-export type Sample = { agent: Agent; event: string; seq: number; session: string; ms: number };
+export type Sample = { agent: Agent; event: string; seq: number; session: string; ms: number; injectionId?: string };
+export type InjectionSnapshot = { id: string; state: string | null; degradedReason: string | null; hash: string | null };
+export type StartSample = Sample & { classification: 'ready' | 'pending' | 'unclassified'; state: string | null; degradedReason: string | null };
+type ReplayPack = { seq: number; agent: Agent; session: string; event: string; text: string; injectionIds: string[] };
 type SizeRow = {
   seq: number;
   agent: Agent;
@@ -299,6 +320,7 @@ type ObserveProc = {
   running: () => boolean;
   status: () => number | null;
   exited: Promise<number | null>;
+  stop: () => Promise<void>;
 };
 
 function startObserve(bundle: string, cwd: string, env: NodeJS.ProcessEnv): ObserveProc {
@@ -330,81 +352,81 @@ function startObserve(bundle: string, cwd: string, env: NodeJS.ProcessEnv): Obse
     running: () => running,
     status: () => status,
     exited,
+    stop: async () => {
+      if (!running) return;
+      child.kill('SIGTERM');
+      await Promise.race([exited, sleep(1_000)]);
+      if (running) child.kill('SIGKILL');
+      await exited;
+    },
   };
 }
 
-async function waitLeaseFree(dbPath: string, timeoutMs: number): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+/** Claims only a free/stale lease; an acquisition timeout cannot displace a live worker. */
+export async function holdLease(
+  dbPath: string,
+  options: WaitOptions = waitOptions(5_000),
+): Promise<string | null> {
+  const deadline = options.now() + options.timeoutMs;
+  do {
     try {
-      const opened = openDatabase({ path: dbPath, timeoutMs: 200, hook: true });
+      const { db } = openDatabase({ path: dbPath, timeoutMs: 200, hook: true });
       try {
-        if (isLeaseFree(opened.db, Date.now())) return;
-      } finally {
-        opened.db.close();
-      }
-    } catch {
-      // The hook still holds the write lock, or the worker has not released it.
-    }
-    await sleep(50);
-  }
+        const token = claimLease(db, { pid: process.pid, now: options.now() });
+        if (token !== null) return token;
+      } finally { db.close(); }
+    } catch (error) { if (!isBusyError(error)) throw new ReplayFailure(3, 'storage_error'); }
+    if (options.now() >= deadline) return null;
+    await options.sleep(Math.min(50, deadline - options.now()));
+  } while (options.now() <= deadline);
+  return null;
 }
 
-function runLeaseSql(dbPath: string, sql: string, params: (string | number | null)[]): void {
-  const deadline = Date.now() + 5_000;
-  let lastError: unknown;
-  while (Date.now() < deadline) {
+export function releaseHeldLease(dbPath: string, token: string): 'released' | 'kept' | 'lost' {
+  const { db } = openDatabase({ path: dbPath, timeoutMs: 2_000, hook: true });
+  try { return releaseLease(db, token, () => true); }
+  finally { db.close(); }
+}
+
+/** A current degraded summary settles this invocation without claiming successful generation. */
+export function replayTargetsSettled(
+  db: ReturnType<typeof openDatabase>['db'], repoId: string, sessionIds: readonly string[],
+): boolean {
+  const target = db.prepare(`SELECT 1 FROM sessions s WHERE s.id = ? AND s.repo_id = ? AND s.status = 'ended'
+    AND NOT EXISTS (SELECT 1 FROM observation_batches b WHERE b.session_id = s.id AND b.state IN ('pending', 'running'))
+    AND NOT EXISTS (SELECT 1 FROM observation_batch_sources bs JOIN observation_batches b ON b.id = bs.batch_id
+      WHERE b.session_id = s.id AND bs.outcome = 'assigned')
+    AND NOT EXISTS (SELECT 1 FROM raw_events WHERE session_id = s.id AND batch_id IS NULL
+      AND processing_state = 'pending' AND ${SUMMARIZABLE_ROW_SQL})
+    AND (s.summary_state = 'no_content' OR (s.summary_updated_at IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM observation_batches b
+        WHERE b.session_id = s.id AND b.completed_at > s.summary_updated_at)))`);
+  return sessionIds.every((id) => target.get(id, repoId) !== undefined);
+}
+
+export async function waitForReplaySettlement(
+  dbPath: string, repoId: string, sessionIds: readonly string[],
+  worker: Pick<ObserveProc, 'pid' | 'running' | 'status'>,
+  options: WaitOptions = waitOptions(WORKER_SETTLE_MS),
+): Promise<void> {
+  const deadline = options.now() + options.timeoutMs;
+  do {
+    if (worker.status() === 3) throw new ReplayFailure(3, 'worker_storage_error');
+    if (!worker.running() && worker.status() !== 0 && worker.status() !== 1) throw new ReplayFailure(1, 'worker_failed');
     try {
-      const opened = openDatabase({ path: dbPath, timeoutMs: 500, hook: true });
+      const { db } = openDatabase({ path: dbPath, timeoutMs: 200, hook: true });
       try {
-        opened.db.prepare(sql).run(...params);
-        return;
-      } finally {
-        opened.db.close();
-      }
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error('lease update failed');
+        const owner = db.prepare('SELECT pid FROM worker_lease WHERE id = 1').get()?.pid;
+        if (!worker.running() && owner !== worker.pid && replayTargetsSettled(db, repoId, sessionIds)) return;
+      } finally { db.close(); }
+    } catch (error) { if (!isBusyError(error)) throw new ReplayFailure(3, 'storage_error'); }
+    if (options.now() >= deadline) throw new ReplayFailure(1, 'worker_settle_timeout');
+    await options.sleep(Math.min(50, deadline - options.now()));
+  } while (options.now() <= deadline);
+  throw new ReplayFailure(1, 'worker_settle_timeout');
 }
 
-function holdLease(dbPath: string): void {
-  const now = Date.now();
-  runLeaseSql(
-    dbPath,
-    'UPDATE worker_lease SET owner_token = ?, pid = ?, started_at = ?, heartbeat_at = ? WHERE id = 1',
-    [LEASE_TOKEN, process.pid, now, now],
-  );
-}
-
-function releaseHeldLease(dbPath: string): void {
-  runLeaseSql(
-    dbPath,
-    'UPDATE worker_lease SET owner_token = NULL, pid = NULL, started_at = NULL, heartbeat_at = NULL WHERE id = 1',
-    [],
-  );
-}
-
-function endedPendingCount(dbPath: string): number | null {
-  try {
-    const opened = openDatabase({ path: dbPath, timeoutMs: 200, hook: true });
-    try {
-      const row = opened.db
-        .prepare(
-          `SELECT COUNT(*) AS n FROM sessions WHERE status = 'ended' AND summary_state = 'pending'`,
-        )
-        .get() as { n?: unknown } | undefined;
-      return typeof row?.n === 'number' ? row.n : 0;
-    } finally {
-      opened.db.close();
-    }
-  } catch {
-    return null;
-  }
-}
-
-function startInjectionCount(dbPath: string, agent: Agent, nativeId: string): number {
+function startInjectionCount(dbPath: string, repoId: string, agent: Agent, nativeId: string): number {
   try {
     const opened = openDatabase({ path: dbPath, timeoutMs: 2_000, hook: true });
     try {
@@ -412,10 +434,10 @@ function startInjectionCount(dbPath: string, agent: Agent, nativeId: string): nu
         .prepare(
           `SELECT COUNT(*) AS n FROM injections i
            JOIN sessions s ON s.id = i.session_id
-           WHERE s.agent = ? AND s.native_session_id = ?
+           WHERE s.repo_id = ? AND s.agent = ? AND COALESCE(s.original_native_session_id, s.native_session_id) = ?
              AND i.kind IN ('session_start', 'grok_deferred') AND i.state <> 'omitted'`,
         )
-        .get(agent, nativeId) as { n?: unknown } | undefined;
+        .get(repoId, agent, nativeId) as { n?: unknown } | undefined;
       return typeof row?.n === 'number' ? row.n : 0;
     } finally {
       opened.db.close();
@@ -425,6 +447,46 @@ function startInjectionCount(dbPath: string, agent: Agent, nativeId: string): nu
   }
 }
 
+export function replaySession(dbPath: string, repoId: string, agent: Agent, nativeId: string): {
+  id: string; conversationId: string; epoch: number;
+} | undefined {
+  const { db } = openDatabase({ path: dbPath, timeoutMs: 2_000, hook: true });
+  try {
+    const rows = db.prepare(`SELECT s.id, s.conversation_id, COALESCE(root.context_epoch, s.context_epoch) AS epoch
+      FROM sessions s LEFT JOIN sessions root ON root.id = s.conversation_id AND root.repo_id = s.repo_id
+      WHERE s.repo_id = ? AND s.agent = ? AND COALESCE(s.original_native_session_id, s.native_session_id) = ? LIMIT 2`)
+      .all(repoId, agent, nativeId);
+    if (rows.length > 1) throw new ReplayFailure(1, 'ambiguous_session');
+    const row = rows[0];
+    return row === undefined ? undefined : { id: String(row.id), conversationId: String(row.conversation_id), epoch: Number(row.epoch) };
+  } finally { db.close(); }
+}
+
+function injectionSnapshot(run: ReplayRun, agent: Agent, nativeId: string): InjectionSnapshot[] {
+  const session = replaySession(run.paths.db, run.repoId, agent, nativeId);
+  if (session === undefined) return [];
+  const { db } = openDatabase({ path: run.paths.db, timeoutMs: 2_000, hook: true });
+  try {
+    return db.prepare(`SELECT id, state, degraded_reason AS degradedReason, pack_hash AS hash FROM injections
+      WHERE repo_id = ? AND conversation_id = ? AND context_epoch = ? ORDER BY created_at, id`)
+      .all(run.repoId, session.conversationId, session.epoch) as InjectionSnapshot[];
+  } finally { db.close(); }
+}
+
+export function classifyStartSample(sample: Sample, rows: InjectionSnapshot[]): StartSample {
+  if (rows.length !== 1) return { ...sample, classification: 'unclassified', state: null, degradedReason: null };
+  const row = rows[0];
+  return { ...sample, injectionId: row.id, state: row.state, degradedReason: row.degradedReason,
+    classification: row.degradedReason === 'summary_pending' ? 'pending' : 'ready' };
+}
+
+export function startInjectionExpected(line: Line): boolean {
+  if (!sessionStartEvent(line.agent, line.event) || line.tags?.lifecycle === 'resume') return false;
+  const source = line.payload !== null && typeof line.payload === 'object'
+    ? (line.payload as { source?: unknown }).source : undefined;
+  return !((line.agent === 'claude' || line.agent === 'codex') && source === 'resume')
+    && !(line.agent === 'claude' && source === 'fork');
+}
 
 function loadAverage(): string {
   try {
@@ -629,6 +691,7 @@ export function replayHome(values: ReplayPlan['values']): { home: string; create
 type ReplayRun = {
   bundle: string;
   repo: string;
+  repoId: string;
   home: string;
   envBase: NodeJS.ProcessEnv;
   paths: ReturnType<typeof oboetePaths>;
@@ -637,17 +700,16 @@ type ReplayRun = {
   lastStartSeq: ReturnType<typeof lastSessions>['lastStartSeq'];
   holdFromSeq: ReturnType<typeof lastSessions>['holdFromSeq'];
   pendingHold: Set<Agent>;
-  pendingSessions: Set<string>;
   captureSamples: Sample[];
   injectionSamples: Sample[];
   readySamples: Sample[];
   pendingSamples: Sample[];
+  startSamples: StartSample[];
   sizeRows: SizeRow[];
-  packs: { seq: number; agent: Agent; session: string; event: string; text: string }[];
-  sessionStartPack: Map<string, string>;
-  factsById: Map<string, Fact>;
-  recallHits: RecallHit[];
-  grokRecallWait: { seq: number; session: string; fact: Fact }[];
+  packs: ReplayPack[];
+  factsById: Map<string, CapturedFact>;
+  recallProbes: RecallProbe[];
+  grokRecallWait: { session: string; probe: RecallProbe }[];
   hookFailures: HookFailure[];
   resumeChecks: ResumeCheck[];
   hookCount: number;
@@ -657,14 +719,17 @@ type ReplayRun = {
   hookWorkerPids: Set<number>;
   observePids: Set<number>;
   storageFailed: boolean;
-  leaseHeld: boolean;
+  leaseToken: string | null;
+  leaseFailure: ReplayFailure | null;
+  endedTargets: Set<string>;
+  fixtureSessions: Set<string>;
   liveObserve: ObserveProc | undefined;
 };
 
 /** Everything a replay accumulates while it runs, empty before its first hook. */
 function emptyTables(): Omit<
   ReplayRun,
-  'bundle' | 'repo' | 'home' | 'envBase' | 'paths' | 'lines' | 'maps' | 'lastStartSeq' | 'holdFromSeq' | 'pendingSessions'
+  'bundle' | 'repo' | 'home' | 'envBase' | 'paths' | 'lines' | 'maps' | 'lastStartSeq' | 'holdFromSeq'
 > {
   return {
     pendingHold: new Set<Agent>(),
@@ -672,11 +737,11 @@ function emptyTables(): Omit<
     injectionSamples: [],
     readySamples: [],
     pendingSamples: [],
+    startSamples: [],
     sizeRows: [],
     packs: [],
-    sessionStartPack: new Map<string, string>(),
-    factsById: new Map<string, Fact>(),
-    recallHits: [],
+    factsById: new Map<string, CapturedFact>(),
+    recallProbes: [],
     grokRecallWait: [],
     hookFailures: [],
     resumeChecks: [],
@@ -687,7 +752,11 @@ function emptyTables(): Omit<
     hookWorkerPids: new Set<number>(),
     observePids: new Set<number>(),
     storageFailed: false,
-    leaseHeld: false,
+    repoId: '',
+    leaseToken: null,
+    leaseFailure: null,
+    endedTargets: new Set<string>(),
+    fixtureSessions: new Set<string>(),
     liveObserve: undefined,
   };
 }
@@ -704,11 +773,6 @@ function createRun(input: {
   sessionWindows: ReturnType<typeof lastSessions>;
 }): ReplayRun {
   const { lastStartSeq, holdFromSeq } = input.sessionWindows;
-  const pendingSessions = new Set<string>();
-  for (const agent of AGENTS) {
-    const start = input.lines.find((line) => line.agent === agent && line.seq === lastStartSeq[agent]);
-    if (start !== undefined) pendingSessions.add(`${agent}:${start.session}`);
-  }
   const run: ReplayRun = {
     bundle: input.bundle,
     repo: input.repo,
@@ -719,13 +783,13 @@ function createRun(input: {
     maps: input.maps,
     lastStartSeq,
     holdFromSeq,
-    pendingSessions,
     ...emptyTables(),
   };
   // Every fact the fixture plants, indexed before the first hook so recall can look one up.
   for (const line of input.lines) {
     const fact = line.tags?.fact;
-    if (fact !== undefined) run.factsById.set(fact.id, fact);
+    if (fact !== undefined) run.factsById.set(fact.id, { ...fact, seq: line.seq,
+      sourceSessionId: null, sourceIds: [], factSourceIds: [] });
   }
   return run;
 }
@@ -734,14 +798,13 @@ function createRun(input: {
 function recordPack(run: ReplayRun, line: Line, stdout: string): void {
   const text = packText(stdout);
   if (text.trim() === '') return;
-  run.packs.push({ seq: line.seq, agent: line.agent, session: line.session, event: line.event, text });
-  const key = `${line.agent}:${line.session}`;
-  if (
-    sessionStartEvent(line.agent, line.event) ||
-    (line.agent === 'grok' && line.event === 'PreToolUse' && !run.sessionStartPack.has(key))
-  ) {
-    run.sessionStartPack.set(key, text);
-  }
+  const { db } = openDatabase({ path: run.paths.db, timeoutMs: 2_000, hook: true });
+  let hashes: string[];
+  try { hashes = stripRecognizedPacks(db, text).hashes; } finally { db.close(); }
+  const injectionIds = injectionSnapshot(run, line.agent, nativeSessionId(line.agent, line.payload))
+    .filter((row) => row.hash !== null && hashes.includes(row.hash)).map((row) => row.id);
+  run.packs.push({ seq: line.seq, agent: line.agent, session: line.session, event: line.event, text, injectionIds });
+
 }
 
 /** Counts the hook and keeps the ones that broke the contract. */
@@ -757,15 +820,49 @@ function recordHook(run: ReplayRun, line: Line, spawned: Spawned, eventLabel: st
   });
 }
 
-/** Did the pack this line asked for carry the fact the fixture planted earlier? */
-function checkRecall(run: ReplayRun, line: Line, pack: string): void {
-  const id = line.tags?.recall;
-  if (id === undefined) return;
-  const fact = run.factsById.get(id);
+function factSourceRows(run: ReplayRun, agent: Agent, nativeId: string) {
+  const session = replaySession(run.paths.db, run.repoId, agent, nativeId);
+  if (session === undefined) return [];
+  const { db } = openDatabase({ path: run.paths.db, timeoutMs: 2_000, hook: true });
+  try {
+    return db.prepare('SELECT id, content, payload_json FROM raw_events WHERE repo_id = ? AND session_id = ?')
+      .all(run.repoId, session.id);
+  } finally { db.close(); }
+}
+
+function recordFact(run: ReplayRun, line: Line, nativeId: string, before: Set<string>): void {
+  const fact = line.tags?.fact === undefined ? undefined : run.factsById.get(line.tags.fact.id);
   if (fact === undefined) return;
-  const start = run.sessionStartPack.get(`${line.agent}:${line.session}`) ?? '';
-  const hit = pack.includes(fact.expect) || start.includes(fact.expect);
-  run.recallHits.push({ id: fact.id, lang: fact.lang, query: fact.query, expect: fact.expect, hit });
+  const rows = factSourceRows(run, line.agent, nativeId).filter((row) => !before.has(String(row.id)));
+  fact.sourceSessionId = replaySession(run.paths.db, run.repoId, line.agent, nativeId)?.id ?? null;
+  fact.sourceIds = rows.map((row) => String(row.id));
+  fact.factSourceIds = rows.filter((row) => {
+    const texts = [String(row.content ?? '')];
+    try {
+      JSON.parse(String(row.payload_json), (_key, value: unknown) => {
+        if (typeof value === 'string') texts.push(value);
+        return value;
+      });
+    } catch { /* Partial or rejected payloads may retain no fact-bearing text. */ }
+    return texts.some((text) => text.includes(fact.expect));
+  }).map((row) => String(row.id));
+}
+
+function recallBefore(run: ReplayRun, line: Line, nativeId: string, priorIds: string[]): RecallProbe | undefined {
+  const fact = line.tags?.recall === undefined ? undefined : run.factsById.get(line.tags.recall);
+  if (fact === undefined) return undefined;
+  const session = replaySession(run.paths.db, run.repoId, line.agent, nativeId);
+  const probe: RecallProbe = { id: fact.id, lang: fact.lang, query: fact.query, expect: fact.expect,
+    factSeq: fact.seq, querySeq: line.seq, repoId: run.repoId, sourceSessionId: fact.sourceSessionId,
+    sourceIds: fact.sourceIds, factSourceIds: fact.factSourceIds, sessionId: session?.id ?? null,
+    conversationId: session?.conversationId ?? null, epoch: session?.epoch ?? null,
+    priorInjectionIds: priorIds, priorDelivery: [], currentInjectionIds: [], currentTextHit: false };
+  const printed = run.packs.filter((pack) => pack.seq < line.seq && pack.text.includes(fact.expect))
+    .flatMap((pack) => pack.injectionIds);
+  const { db } = openDatabase({ path: run.paths.db, timeoutMs: 2_000, hook: true });
+  try { probe.priorDelivery = deliveredFactItems(db, probe, priorIds.filter((id) => printed.includes(id))); }
+  finally { db.close(); }
+  return probe;
 }
 
 /** The live observe run's high-water mark; SC-003 is measured over every run of it. */
@@ -785,35 +882,24 @@ function startWorker(run: ReplayRun): void {
   void run.liveObserve.exited.then(() => harvestRss(run));
 }
 
-/** Waits for every ended session to have a summary, restarting the worker while it waits. */
-async function waitEndedSummaries(run: ReplayRun, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    harvestRss(run);
-    const pending = endedPendingCount(run.paths.db);
-    if (pending === 0) return;
-    startWorker(run);
-    await sleep(50);
-  }
-}
-
-/** Holds the lease so the hook spawns no worker of its own. */
+/** The replay holds ownership through capture and refreshes it while child hooks run. */
 async function ensureLeaseHeld(run: ReplayRun): Promise<void> {
-  if (run.leaseHeld) {
-    holdLease(run.paths.db);
-    return;
+  if (run.leaseFailure !== null) throw run.leaseFailure;
+  if (run.leaseToken === null) {
+    run.leaseToken = await holdLease(run.paths.db);
+    if (run.leaseToken === null) throw new ReplayFailure(1, 'lease_acquire_timeout');
   }
-  // A previous observe may still be looping on an active session's unbatched rows (up to 20 min).
-  // Steal after a short wait so SessionEnd is not blocked on that idle loop.
-  await waitLeaseFree(run.paths.db, 500);
-  holdLease(run.paths.db);
-  run.leaseHeld = true;
+  const { db } = openDatabase({ path: run.paths.db, timeoutMs: 2_000, hook: true });
+  try {
+    if (!heartbeat(db, run.leaseToken, Date.now())) throw new ReplayFailure(1, 'lease_lost');
+  } finally { db.close(); }
 }
 
 function dropLease(run: ReplayRun): void {
-  if (!run.leaseHeld) return;
-  releaseHeldLease(run.paths.db);
-  run.leaseHeld = false;
+  if (run.leaseToken === null) return;
+  const token = run.leaseToken;
+  run.leaseToken = null;
+  if (releaseHeldLease(run.paths.db, token) !== 'released') throw new ReplayFailure(1, 'lease_lost');
 }
 
 /**
@@ -866,11 +952,13 @@ function piInjectInput(run: ReplayRun, payload: unknown): string {
     session_id?: unknown;
     model?: unknown;
     payload?: { text?: unknown };
+    prompt_id?: unknown;
   };
   return JSON.stringify({
     cwd: typeof envelope.cwd === 'string' ? envelope.cwd : run.repo,
     session_id: typeof envelope.session_id === 'string' ? envelope.session_id : nativeSessionId('pi', payload),
     prompt: typeof envelope.payload?.text === 'string' ? envelope.payload.text : undefined,
+    prompt_id: typeof envelope.prompt_id === 'string' ? envelope.prompt_id : undefined,
     model: typeof envelope.model === 'string' ? envelope.model : undefined,
   });
 }
@@ -880,7 +968,6 @@ async function injectPiLine(
   run: ReplayRun,
   line: Line,
   payload: unknown,
-  seen: { isPendingStart: boolean; holdActive: boolean },
 ): Promise<Spawned> {
   const kind = line.event === 'session_start' ? 'start' : 'prompt';
   const injectInput = piInjectInput(run, payload);
@@ -901,14 +988,7 @@ async function injectPiLine(
     ms: injected.elapsedMs,
   };
   recordPack(run, line, injected.stdout);
-  if (line.event !== 'session_start') {
-    run.injectionSamples.push(injectSample);
-  } else if (seen.isPendingStart && seen.holdActive) {
-    run.pendingSamples.push(injectSample);
-  } else if (!seen.holdActive) {
-    run.injectionSamples.push(injectSample);
-    if (line.seq > 1) run.readySamples.push(injectSample);
-  }
+  if (line.event !== 'session_start') run.injectionSamples.push(injectSample);
   return injected;
 }
 
@@ -918,7 +998,7 @@ function recordResume(
   line: Line,
   seen: { nativeId: string; resumeBefore: number; hooked: Spawned; injected: Spawned | undefined },
 ): void {
-  const after = startInjectionCount(run.paths.db, line.agent, seen.nativeId);
+  const after = startInjectionCount(run.paths.db, run.repoId, line.agent, seen.nativeId);
   const printed =
     packText(seen.hooked.stdout).trim() !== '' ||
     (seen.injected !== undefined && packText(seen.injected.stdout).trim() !== '');
@@ -933,39 +1013,33 @@ function recordResume(
   });
 }
 
-/** Grok's pack arrives on the next tool call, so its recall checks are settled there. */
-function settleGrokRecall(run: ReplayRun, line: Line, key: string, hooked: Spawned): void {
-  if (line.agent !== 'grok' || line.event !== 'PreToolUse') return;
-  const waiting = run.grokRecallWait.filter((item) => item.session === line.session);
-  if (waiting.length === 0) return;
-  const pack = packText(hooked.stdout);
-  const start = run.sessionStartPack.get(key) ?? '';
-  for (const item of waiting) {
-    run.recallHits.push({
-      id: item.fact.id,
-      lang: item.fact.lang,
-      query: item.fact.query,
-      expect: item.fact.expect,
-      hit: pack.includes(item.fact.expect) || start.includes(item.fact.expect),
-    });
+/** Keep a Grok query open until its correlated carrier prints; final ledger state proves delivery. */
+function settleGrokRecall(run: ReplayRun, line: Line): void {
+  if (line.agent !== 'grok' || (line.event !== 'PreToolUse' && line.event !== 'PostToolUse')) return;
+  const packs = run.packs.filter((pack) => pack.seq === line.seq);
+  if (packs.length === 0) return;
+  for (const waiting of run.grokRecallWait.filter((item) => item.session === line.session)) {
+    waiting.probe.currentInjectionIds = [...new Set([...waiting.probe.currentInjectionIds,
+      ...packs.flatMap((pack) => pack.injectionIds)])];
+    waiting.probe.currentTextHit ||= packs.some((pack) => pack.text.includes(waiting.probe.expect));
   }
   run.grokRecallWait = run.grokRecallWait.filter((item) => item.session !== line.session);
 }
 
-/** A line tagged with a fact id asks whether that fact came back in this turn's pack. */
-function openRecall(run: ReplayRun, line: Line, hooked: Spawned): void {
-  if (line.tags?.recall === undefined) return;
-  if (line.agent === 'grok') {
-    const fact = run.factsById.get(line.tags.recall);
-    if (fact !== undefined) run.grokRecallWait.push({ seq: line.seq, session: line.session, fact });
-    return;
-  }
-  const pack =
-    run.packs
-      .filter((entry) => entry.agent === line.agent && entry.session === line.session && entry.seq >= line.seq)
-      .map((entry) => entry.text)
-      .join('\n') || packText(hooked.stdout);
-  checkRecall(run, line, pack);
+function openRecall(run: ReplayRun, line: Line, nativeId: string, probe: RecallProbe | undefined): void {
+  if (probe === undefined) return;
+  const session = replaySession(run.paths.db, run.repoId, line.agent, nativeId);
+  if (probe.conversationId !== session?.conversationId || probe.epoch !== session?.epoch) probe.priorDelivery = [];
+  probe.sessionId = session?.id ?? null;
+  probe.conversationId = session?.conversationId ?? null;
+  probe.epoch = session?.epoch ?? null;
+  probe.currentInjectionIds = injectionSnapshot(run, line.agent, nativeId)
+    .filter((row) => !probe.priorInjectionIds.includes(row.id)).map((row) => row.id);
+  const packs = run.packs.filter((pack) => pack.seq === line.seq);
+  probe.currentInjectionIds = [...new Set([...probe.currentInjectionIds, ...packs.flatMap((pack) => pack.injectionIds)])];
+  probe.currentTextHit = packs.some((pack) => pack.text.includes(probe.expect));
+  run.recallProbes.push(probe);
+  if (line.agent === 'grok') run.grokRecallWait.push({ session: line.session, probe });
 }
 
 /** How the engine classified the size-tagged event it just stored, read back for the size table. */
@@ -1027,12 +1101,12 @@ async function runHookLine(
   run: ReplayRun,
   line: Line,
   payload: unknown,
-  kind: { injection: boolean; isPendingStart: boolean },
-): Promise<{ hooked: Spawned; holdActive: boolean }> {
+  injection: boolean,
+): Promise<Spawned> {
   const input = JSON.stringify(payload);
   const { args, extra } = hookArgs({ ...line, payload });
   const env = replayEnv(run.home, extra);
-  const timeoutMs = kind.injection ? 15_000 : 10_000;
+  const timeoutMs = injection ? 15_000 : 10_000;
   const hooked = await runChild(run.bundle, args, input, run.repo, env, timeoutMs);
   recordHook(run, line, hooked, line.event);
   const sample: Sample = {
@@ -1042,32 +1116,12 @@ async function runHookLine(
     session: line.session,
     ms: hooked.elapsedMs,
   };
-  const holdActive = run.pendingHold.size > 0;
-  if (kind.injection && !(sessionStartEvent(line.agent, line.event) && holdActive)) {
-    run.injectionSamples.push(sample);
-  } else if (!kind.injection) {
-    run.captureSamples.push(sample);
-  }
+  if (!injection) run.captureSamples.push(sample);
+  else if (!sessionStartEvent(line.agent, line.event)) run.injectionSamples.push(sample);
   recordPack(run, line, hooked.stdout);
-
-  if (sessionStartEvent(line.agent, line.event) && line.agent !== 'pi') {
-    if (kind.isPendingStart && holdActive) run.pendingSamples.push(sample);
-    else if (line.seq > 1 && !holdActive) run.readySamples.push(sample);
-  }
-  return { hooked, holdActive };
+  return hooked;
 }
 
-/** A session end, and every line while a hold is open, runs under replay's own lease. */
-async function holdForLine(run: ReplayRun, line: Line): Promise<number | null> {
-  if (!SESSION_END.has(line.event) && run.pendingHold.size === 0) return null;
-  try {
-    await ensureLeaseHeld(run);
-    return null;
-  } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    return 3;
-  }
-}
 
 /**
  * One fixture line: the hook, the Pi injection it also drives, and the checks its tags ask
@@ -1075,8 +1129,6 @@ async function holdForLine(run: ReplayRun, line: Line): Promise<number | null> {
  */
 async function replayLine(run: ReplayRun, line: Line): Promise<number | null> {
   if (line.seq % 100 === 0) process.stderr.write(`replay ${line.seq}/${run.lines.length}\n`);
-  const key = `${line.agent}:${line.session}`;
-  const isPendingStart = run.pendingSessions.has(key) && sessionStartEvent(line.agent, line.event);
   const injection = isInjectionHook(line.agent, line.event);
 
   const expanded = expandLine(run, line);
@@ -1086,51 +1138,81 @@ async function replayLine(run: ReplayRun, line: Line): Promise<number | null> {
   const nativeId = nativeSessionId(line.agent, payload);
   let resumeBefore = 0;
   if (line.tags?.lifecycle === 'resume') {
-    resumeBefore = startInjectionCount(run.paths.db, line.agent, nativeId);
+    resumeBefore = startInjectionCount(run.paths.db, run.repoId, line.agent, nativeId);
   }
 
-  const held = await holdForLine(run, line);
-  if (held !== null) return held;
+  await ensureLeaseHeld(run);
 
-  const { hooked, holdActive } = await runHookLine(run, line, payload, { injection, isPendingStart });
+  const beforeIds = new Set(sessionStartEvent(line.agent, line.event) || line.tags?.recall !== undefined
+    ? injectionSnapshot(run, line.agent, nativeId).map((row) => row.id) : []);
+  const factBefore = new Set(line.tags?.fact === undefined ? [] : factSourceRows(run, line.agent, nativeId).map((row) => String(row.id)));
+  const probe = recallBefore(run, line, nativeId, [...beforeIds]);
+  const hooked = await runHookLine(run, line, payload, injection);
 
   const injected = isPiInjectEvent(line)
-    ? await injectPiLine(run, line, payload, { isPendingStart, holdActive })
+    ? await injectPiLine(run, line, payload)
     : undefined;
 
+  if (sessionStartEvent(line.agent, line.event)) {
+    const session = replaySession(run.paths.db, run.repoId, line.agent, nativeId);
+    if (session === undefined) throw new ReplayFailure(1, 'missing_started_session');
+    run.fixtureSessions.add(session.id);
+  }
+  if (startInjectionExpected(line)) {
+    const rows = injectionSnapshot(run, line.agent, nativeId).filter((row) => !beforeIds.has(row.id));
+    const sample = classifyStartSample({ agent: line.agent, event: line.event, seq: line.seq,
+      session: line.session, ms: (injected ?? hooked).elapsedMs }, rows);
+    run.startSamples.push(sample);
+    if (sample.classification === 'pending') run.pendingSamples.push(sample);
+    if (sample.classification === 'ready') {
+      run.readySamples.push(sample);
+      run.injectionSamples.push(sample);
+    }
+  } else if (sessionStartEvent(line.agent, line.event)) {
+    run.injectionSamples.push({ agent: line.agent, event: line.event, seq: line.seq,
+      session: line.session, ms: (injected ?? hooked).elapsedMs });
+  }
   if (line.tags?.lifecycle === 'resume') {
     recordResume(run, line, { nativeId, resumeBefore, hooked, injected });
   }
-  settleGrokRecall(run, line, key, hooked);
-  openRecall(run, line, hooked);
+  recordFact(run, line, nativeId, factBefore);
+  settleGrokRecall(run, line);
+  openRecall(run, line, nativeId, probe);
 
   if (line.tags?.size !== undefined) recordSize(run, line, line.tags.size, fillSize, hooked);
+  if (SESSION_END.has(line.event)) {
+    const ended = replaySession(run.paths.db, run.repoId, line.agent, nativeId);
+    if (ended === undefined) throw new ReplayFailure(1, 'missing_ended_session');
+    run.endedTargets.add(ended.id);
+  }
   await settleObserve(run, line);
   return null;
 }
 
-/** Runs the worker now and waits for the summaries the ended sessions are owed. */
+/** Drain ended targets only when no still-active fixture session needs a later end event. */
 async function observeNow(run: ReplayRun): Promise<void> {
+  if (run.endedTargets.size === 0) return;
+  const { db } = openDatabase({ path: run.paths.db, timeoutMs: 2_000, hook: true });
+  try {
+    const active = db.prepare(`SELECT DISTINCT session_id FROM raw_events WHERE batch_id IS NULL AND processing_state = 'pending'
+      AND ${SUMMARIZABLE_ROW_SQL} AND session_id IN (SELECT id FROM sessions WHERE status = 'active')`).all();
+    if (active.some((row) => !run.fixtureSessions.has(String(row.session_id)))) throw new ReplayFailure(1, 'foreign_active_sources');
+    if (active.length > 0) return;
+  } finally { db.close(); }
   dropLease(run);
   startWorker(run);
-  await waitEndedSummaries(run, 45_000);
+  if (run.liveObserve === undefined) throw new ReplayFailure(1, 'worker_missing');
+  await waitForReplaySettlement(run.paths.db, run.repoId, [...run.endedTargets], run.liveObserve);
+  harvestRss(run);
+  run.endedTargets.clear();
+  await ensureLeaseHeld(run);
 }
 
-/**
- * The last worker run: every ended session is owed a summary, and a run still going gets five more
- * seconds under a held lease so its high-water mark is measured before the report is written.
- */
 async function settleWorker(run: ReplayRun): Promise<void> {
+  if (run.leaseFailure !== null) throw run.leaseFailure;
+  await observeNow(run);
+  if (run.endedTargets.size > 0) throw new ReplayFailure(1, 'active_sources_unsettled');
   dropLease(run);
-  startWorker(run);
-  await waitEndedSummaries(run, 60_000);
-  harvestRss(run);
-  if (run.liveObserve?.running() !== true) return;
-  holdLease(run.paths.db);
-  const stop = Date.now() + 5_000;
-  while (Date.now() < stop && run.liveObserve.running()) await sleep(50);
-  harvestRss(run);
-  releaseHeldLease(run.paths.db);
 }
 
 /** The database is created once, before the first hook; the hook itself never migrates. */
@@ -1213,6 +1295,7 @@ export async function runFixture(argv: string[]): Promise<number> {
   let workerPoll: ReturnType<typeof setInterval> | undefined;
   try {
     initRepo(run.repo);
+    run.repoId = resolveRepoIdentity(run.repo).id;
     mkdirSync(home, { recursive: true, mode: 0o700 });
     ensureDirectories(run.paths);
     const created = createDatabase(run);
@@ -1220,7 +1303,16 @@ export async function runFixture(argv: string[]): Promise<number> {
     const dbBytesBefore = fileBytes(run.paths.db) + fileBytes(`${run.paths.db}-wal`);
     workerPollDb = openDatabase({ path: run.paths.db, timeoutMs: 0, hook: true }).db;
     const workerPid = workerPollDb.prepare('SELECT pid FROM worker_lease WHERE id = 1');
-    workerPoll = setInterval(() => pollHookWorker(run, workerPid), 50);
+    let heartbeatAt = 0;
+    workerPoll = setInterval(() => {
+      pollHookWorker(run, workerPid);
+      if (run.leaseToken === null || run.leaseFailure !== null || workerPollDb === undefined) return;
+      if (Date.now() - heartbeatAt < 1_000) return;
+      try {
+        if (!heartbeat(workerPollDb, run.leaseToken, Date.now())) run.leaseFailure = new ReplayFailure(1, 'lease_lost');
+        heartbeatAt = Date.now();
+      } catch (error) { if (!isBusyError(error)) run.leaseFailure = new ReplayFailure(3, 'storage_error'); }
+    }, 50);
     return await driveRun(run, workerPoll, {
       values,
       outPath,
@@ -1229,8 +1321,16 @@ export async function runFixture(argv: string[]): Promise<number> {
       loadAtStart,
       dbBytesBefore,
     });
+  } catch (error) {
+    const failure = error instanceof ReplayFailure ? error : new ReplayFailure(3, 'storage_error');
+    process.stderr.write(`${failure.message}\n`);
+    return failure.exit;
   } finally {
     clearInterval(workerPoll);
+    await run.liveObserve?.stop();
+    if (run.leaseToken !== null) {
+      try { dropLease(run); } catch { /* A successor owns its lease; cleanup must leave it intact. */ }
+    }
     workerPollDb?.close();
     cleanupReplay({ home, repo: run.repo, keep, createdHome });
   }
@@ -1262,6 +1362,7 @@ async function driveRun(
 
   await settleWorker(run);
   clearInterval(workerPoll);
+  if (run.leaseFailure !== null) throw run.leaseFailure;
 
   if (run.storageFailed) {
     process.stderr.write('observe reported unusable storage\n');
@@ -1274,16 +1375,16 @@ async function driveRun(
 }
 
 export type MeasureInput = {
+    repoId: string;
     lines: Line[];
     captureSamples: Sample[];
     injectionSamples: Sample[];
     readySamples: Sample[];
     pendingSamples: Sample[];
+    startSamples: StartSample[];
     sizeRows: SizeRow[];
-    packs: { seq: number; agent: Agent; session: string; event: string; text: string }[];
-    sessionStartPack: Map<string, string>;
-    recallHits: RecallHit[];
-    grokRecallWait: { seq: number; session: string; fact: Fact }[];
+    packs: ReplayPack[];
+      recallProbes: RecallProbe[];
     hookFailures: HookFailure[];
     hookCount: number;
     resumeChecks: ResumeCheck[];

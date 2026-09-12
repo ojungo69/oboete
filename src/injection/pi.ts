@@ -1,22 +1,26 @@
 // Pi's bounded injection command (T046); failures keep the agent-facing exit contract.
 import { randomUUID } from 'node:crypto';
+import { bindCapturedWork, capturedPromptReady } from '../work.js';
 import { readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import type { DatabaseSync } from 'node:sqlite';
 import { parseArgs } from 'node:util';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { z } from 'zod';
 
 import { isPaused, loadConfig, loadRepoRules } from '../config.js';
 import { openDatabase } from '../db/open.js';
+import { findNativeSession, nativeSessionStorage } from '../db/sessions.js';
 import type { NormalizedEvent } from '../events.js';
 import { appendLogQuietly, errorCode } from '../log.js';
 import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from '../paths.js';
 import { resolveRepoIdentity, type RepoIdentity } from '../repo-identity.js';
+import { detectInWorker, type DetectorInput, type DetectorResult } from '../privacy/detect.js';
 import { transactionImmediate } from '../worker/lease.js';
-import { indexUnavailable, injectPi, sleep, type HookContext } from './inject.js';
+import { indexUnavailable, injectPi, type HookContext } from './inject.js';
 
-/** Pi's bounded child gets 300 ms, plus A2's one-second wait at session start. */
+/** Pi's bounded child reserves time for packing after the current-prompt capture barrier. */
 const PI_INJECTION_DEADLINE_MS = 300;
 
 const PI_SESSION_START_DEADLINE_MS = 1_300;
@@ -25,13 +29,14 @@ export type InjectRuntime = {
   readStdin(): string;
   now(): number;
   elapsedMs(): number;
-  sleep(milliseconds: number): void;
+  detect(input: DetectorInput, cutoffMs: number): Promise<DetectorResult>;
 };
 
 export const piInjectInputSchema = z.strictObject({
   cwd: z.string().min(1),
   session_id: z.string().min(1),
   prompt: z.string().optional(),
+  prompt_id: z.uuid().optional(),
   model: z.string().min(1).optional(),
 });
 
@@ -40,7 +45,7 @@ function defaultRuntime(): InjectRuntime {
     readStdin: () => readFileSync(0, 'utf8'),
     now: () => Date.now(),
     elapsedMs: () => performance.now(),
-    sleep,
+    detect: (input, cutoffMs) => detectInWorker(input, { cutoffMs, workerScript: process.argv[1] ?? '' }),
   };
 }
 
@@ -49,12 +54,7 @@ function sessionForPi(
   input: { nativeSessionId: string; identity: RepoIdentity; model: string | undefined; now: number },
 ): { sessionId: string; conversationId: string; epoch: number; model: string | undefined; turnId: string | null } {
   return transactionImmediate(db, () => {
-    let row = db
-      .prepare(
-        `SELECT id, conversation_id, model FROM sessions
-         WHERE agent = 'pi' AND native_session_id = ?`,
-      )
-      .get(input.nativeSessionId);
+    let row = findNativeSession(db, input.identity.id, 'pi', input.nativeSessionId);
     if (row === undefined) {
       db.prepare(
         `INSERT INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
@@ -70,11 +70,12 @@ function sessionForPi(
         input.now,
       );
       const id = randomUUID();
+      const native = nativeSessionStorage(db, 'pi', input.nativeSessionId);
       db.prepare(
-        `INSERT INTO sessions (id, repo_id, agent, native_session_id, conversation_id, model,
+        `INSERT INTO sessions (id, repo_id, agent, native_session_id, original_native_session_id, conversation_id, model,
            started_at, status, turn_count, context_epoch)
-         VALUES (?, ?, 'pi', ?, ?, ?, ?, 'active', 0, 0)`,
-      ).run(id, input.identity.id, input.nativeSessionId, id, input.model ?? null, input.now);
+         VALUES (?, ?, 'pi', ?, ?, ?, ?, ?, 'active', 0, 0)`,
+      ).run(id, input.identity.id, native.stored, native.original, id, input.model ?? null, input.now);
       row = { id, conversation_id: id, model: input.model ?? null };
     } else if (input.model !== undefined && row.model === null) {
       db.prepare('UPDATE sessions SET model = ? WHERE id = ?').run(input.model, row.id);
@@ -82,6 +83,9 @@ function sessionForPi(
     }
 
     const sessionId = String(row.id);
+    bindCapturedWork(db, { repoId: input.identity.id, root: input.identity.root, contextKey: input.identity.worktreeKey,
+      sessionId, sourceId: '', kind: 'session_start', content: null, inputSource: undefined,
+      sensitivity: 'local_only', admissible: false, capturedAt: input.now });
     const conversationId = String(row.conversation_id);
     const root = db.prepare('SELECT context_epoch FROM sessions WHERE id = ?').get(conversationId);
     const turn = db
@@ -165,7 +169,6 @@ function piHookContext(input: {
   db: DatabaseSync;
   secretPaths: HookContext['secretPaths'];
   remainingBudget: HookContext['remainingBudget'];
-  sleep: HookContext['sleep'];
   now: number;
 }): HookContext {
   const { session, identity } = input;
@@ -188,7 +191,6 @@ function piHookContext(input: {
     sessionCreated: false,
     secretPaths: input.secretPaths,
     remainingBudget: input.remainingBudget,
-    sleep: input.sleep,
   };
 }
 
@@ -202,17 +204,27 @@ async function writePiInjection(input: {
   db: DatabaseSync;
   secretPaths: HookContext['secretPaths'];
   remainingBudget: HookContext['remainingBudget'];
-  sleep: HookContext['sleep'];
+  detect: InjectRuntime['detect'];
   now: number;
 }): Promise<void> {
-  const session = sessionForPi(input.db, {
+  const sessionInput = {
     nativeSessionId: input.input.session_id,
     identity: input.identity,
     model: input.input.model,
     now: input.now,
-  });
+  };
+  let session = sessionForPi(input.db, sessionInput);
+  let workPromptId = input.input.prompt_id ?? (input.kind === 'prompt' || input.input.prompt ? null : undefined);
+  if (typeof workPromptId === 'string') {
+    const deadline = performance.now() + Math.max(0, input.remainingBudget() - 150);
+    while (!capturedPromptReady(input.db, input.identity.id, session.sessionId, workPromptId)) {
+      if (performance.now() >= deadline || input.remainingBudget() <= 150) { workPromptId = null; break; }
+      await sleep(5);
+    }
+    session = sessionForPi(input.db, sessionInput);
+  }
   const text = await injectPi(
-    piHookContext({ ...input, session }),
+    { ...piHookContext({ ...input, session }), workPromptId, detect: input.detect },
     input.kind,
     input.input.prompt ?? '',
   );
@@ -256,7 +268,7 @@ export async function runInject(
         db: opened.db,
         secretPaths,
         remainingBudget,
-        sleep: live.sleep,
+        detect: live.detect,
         now: live.now(),
       });
     } finally {

@@ -23,6 +23,11 @@ export function contentHash(repoId: string, material: string): string {
   return sha256Json([repoId, material]);
 }
 
+/** A revision keeps an immutable parent even when work returns to an earlier material state. */
+export function checkpointHash(repoId: string, workId: string, parentId: string | null, material: string): string {
+  return sha256Json(['work-checkpoint-v1', repoId, workId, parentId, material]);
+}
+
 /** `memories.id` = `'m_' + content_hash.slice(0, 24)` (docs/dev/conventions.md). */
 export function memoryIdFor(hash: string): string {
   return `m_${hash.slice(0, 24)}`;

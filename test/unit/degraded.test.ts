@@ -1,3 +1,4 @@
+import { grantVisibility } from '../../src/db/queries.js';
 import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
@@ -26,6 +27,7 @@ import { oboetePaths } from '../../src/paths.js';
 import { cjkBigrams } from '../../src/retrieval/fts.js';
 import { claimLease } from '../../src/worker/lease.js';
 import { withTempHome } from '../helpers/home.js';
+import { seedWorkBinding } from '../helpers/work.js';
 import {
   NOW as OBSERVE_NOW,
   captureEndedSession,
@@ -39,7 +41,7 @@ const NOW = 1_700_000_000_000;
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const REPO = 'r1';
-const scope = (db: DatabaseSync) => memoryScope(db, { repoId: REPO, destination: 'injection' });
+const scope = (db: DatabaseSync) => memoryScope(db, { repoId: REPO, destination: 'injection', workId: `fixture-work:${REPO}` });
 const IDENTITY = 'example.test/one';
 const SUMMARY_REPO = 'a1b2c3d4e5f60718';
 
@@ -62,7 +64,6 @@ function packInput(overrides: Partial<PackInput> = {}): PackInput {
     detect: () => false,
     directives: [],
     repoRoot: '/nonexistent-repository-root',
-    waitForSummary: () => 'none' as const,
     prompt: '',
     ...overrides,
   };
@@ -105,6 +106,7 @@ function insertMemory(
     seed.pinOrder ?? null,
     seed.createdAt ?? NOW - DAY,
   );
+  grantVisibility(db, seed.id, { audience: 'project', repoId: REPO }, 'migration', NOW);
 }
 
 function insertSession(
@@ -133,6 +135,8 @@ function insertSession(
     session.summaryId ?? null,
     session.summaryState ?? null,
   );
+  seedWorkBinding(db, session.id);
+  db.prepare('UPDATE work_contexts SET root = ?').run('/nonexistent-repository-root');
 }
 
 function insertPromptEvent(db: DatabaseSync, sessionId: string, content: string): void {
@@ -149,6 +153,7 @@ function insertPromptEvent(db: DatabaseSync, sessionId: string, content: string)
     NOW - HOUR,
     NOW + DAY,
   );
+  db.prepare('UPDATE raw_events SET work_binding_id = ? WHERE id = ?').run(`fixture-binding:${sessionId}`, `e_${sessionId}`);
 }
 
 function seedReadySession(
@@ -172,6 +177,8 @@ function seedReadySession(
     summaryId: 'm_summary',
   });
   insertSession(db, { id: 's_now', conversationId: 'c1', status: 'active' });
+  db.prepare('UPDATE memories SET work_id = ? WHERE id = ?').run(`fixture-work:${REPO}`, 'm_summary');
+  db.prepare('UPDATE work_items SET current_checkpoint_memory_id = ?').run('m_summary');
 }
 
 async function withDb(fn: (db: DatabaseSync) => Promise<void>): Promise<void> {
@@ -222,7 +229,7 @@ function seedSummaryFixture(
         classification_state, captured_at, expires_at)
      VALUES (?, ?, ?, ?, 'claude', 'prompt', ?, NULL, 'eligible', 'done', ?, ?)`,
   ).run(`${sessionId}-p1`, SUMMARY_REPO, sessionId, `${sessionId}-t1`, prompt, NOW - DAY, NOW + 7 * DAY);
-  for (const batch of batches) {
+  for (const [index, batch] of batches.entries()) {
     db.prepare(
       `INSERT INTO observation_batches
          (id, repo_id, session_id, through_event_id, destination, trigger, state, owner_token,
@@ -238,6 +245,17 @@ function seedSummaryFixture(
       batch.degraded,
       NOW - 1_000,
     );
+    const sourceId = `${sessionId}-p${index + 1}`;
+    if (index > 0) {
+      db.prepare(`INSERT INTO raw_events
+        (id, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at)
+        SELECT ?, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at
+        FROM raw_events WHERE id = ?`).run(sourceId, `${sessionId}-p1`);
+    }
+    db.prepare('UPDATE raw_events SET batch_id = ?, processing_state = ?, processed_at = ? WHERE id = ?')
+      .run(batch.id, batch.degraded === null ? 'processed' : 'waiting', batch.degraded === null ? NOW : null, sourceId);
+    db.prepare(`INSERT INTO observation_batch_sources (batch_id, raw_event_id, outcome, reason, recorded_at)
+      VALUES (?, ?, ?, ?, ?)`).run(batch.id, sourceId, batch.degraded === null ? 'processed' : 'deferred', batch.degraded, NOW);
   }
 }
 
@@ -246,7 +264,7 @@ function summaryDegraded(db: DatabaseSync, memoryId: string): string | null {
   return (row?.degraded_reason as string | null | undefined) ?? null;
 }
 
-test('session summary degraded_reason is the most severe batch reason; NULL only when every batch was applied from a provider', async () => {
+test('session summary reflects unresolved source outcomes and complete processing clears degradation', async () => {
   await withOpened((db, token) => {
     seedSummaryFixture(db, 'sess-severe', 'Record the mixed fallback reasons.', [
       { id: 'b-rules', degraded: 'rule_based' },
@@ -254,7 +272,7 @@ test('session summary degraded_reason is the most severe batch reason; NULL only
       { id: 'b-exhaust', degraded: 'provider_exhausted' },
     ]);
     const result = sessionSummary(db, token, 'sess-severe', NOW);
-    assert.equal(result.state, 'done');
+    assert.equal(result.state, 'waiting');
     if (result.memoryId === null) assert.fail('expected a summary memory');
     assert.equal(summaryDegraded(db, result.memoryId), 'provider_exhausted');
   });
@@ -276,13 +294,13 @@ test('session summary degraded_reason is the most severe batch reason; NULL only
       { id: 'b-none', degraded: 'no_provider' },
     ]);
     const result = sessionSummary(db, token, 'sess-mixed', NOW);
-    assert.equal(result.state, 'done');
+    assert.equal(result.state, 'waiting');
     if (result.memoryId === null) assert.fail('expected a summary memory');
     assert.equal(summaryDegraded(db, result.memoryId), 'no_provider');
   });
 });
 
-test('a pending previous summary puts summary_pending on the session-start pack; a summary that becomes ready does not', async () => {
+test('pending work activity carries summary_pending; a current checkpoint without pending activity does not', async () => {
   await withDb(async (db) => {
     insertSession(db, {
       id: 's_prev',
@@ -296,7 +314,7 @@ test('a pending previous summary puts summary_pending on the session-start pack;
 
     const pack = await buildSessionStartPack(
       db,
-      packInput({ waitForSummary: () => 'pending' }),
+      packInput(),
     );
     assert.notEqual(pack, null);
     assert.ok(pack!.text.includes(`> degraded: ${DEGRADED_SENTENCES.summary_pending}`), pack!.text);
@@ -320,17 +338,9 @@ test('a pending previous summary puts summary_pending on the session-start pack;
     });
     insertSession(db, { id: 's_now', conversationId: 'c1', status: 'active' });
 
-    const pack = await buildSessionStartPack(
-      db,
-      packInput({
-        waitForSummary: () => {
-          db.prepare(
-            "UPDATE sessions SET summary_state = 'done', latest_summary_memory_id = 'm_summary' WHERE id = 's_prev'",
-          ).run();
-          return 'ready';
-        },
-      }),
-    );
+    db.prepare('UPDATE memories SET work_id = ? WHERE id = ?').run(`fixture-work:${REPO}`, 'm_summary');
+    db.prepare('UPDATE work_items SET current_checkpoint_memory_id = ?').run('m_summary');
+    const pack = await buildSessionStartPack(db, packInput());
     assert.notEqual(pack, null);
     assert.equal(pack!.text.includes('> degraded:'), false, pack!.text);
     assert.equal(whyReport(db, 's_now', scope(db))[0].degradedReason, null);
@@ -366,7 +376,7 @@ test('session-start and prompt packs carry the most severe batch reason; summary
 
     const pack = await buildSessionStartPack(
       db,
-      packInput({ waitForSummary: () => 'pending' }),
+      packInput(),
     );
     assert.notEqual(pack, null);
     assert.ok(pack!.text.includes(`> degraded: ${DEGRADED_SENTENCES.summary_pending}`), pack!.text);

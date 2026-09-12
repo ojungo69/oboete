@@ -1,22 +1,23 @@
 import type { DatabaseSync } from 'node:sqlite';
 
 import { contentHash, materialHash, memoryIdFor, normalizeForIdentity } from '../db/identity.js';
-import { memoriesForSession, memoryScope } from '../db/queries.js';
+import { grantVisibility, memoryTitlesForSession, memoryScope } from '../db/queries.js';
+import { sha256Json } from '../hash.js';
+import { canonicalContexts, memoryContexts, sourceContext } from '../privacy/source-context.js';
+import type { Sensitivity } from '../privacy/egress.js';
 import { strictest } from '../privacy/classify.js';
 import { cjkBigrams } from '../retrieval/fts.js';
 import {
-  isSummarizableRow,
-  payloadOf,
-  stripPartial,
-  toolPaths,
+  BLANK_CHARACTERS_SQL,
+  SUMMARIZABLE_ROW_SQL,
   type RawEventRow,
 } from '../worker/batches.js';
-import { assertLease, transactionImmediate } from '../worker/lease.js';
+import { assertLease } from '../worker/lease.js';
 import {
   MAX_BODY,
+  DISPLAY_PATH_TAIL,
   MAX_SOURCE_EVENT_IDS,
   MAX_TITLE,
-  shortenDisplayPath,
   type ObserverInput,
   type ObserverOutput,
 } from './contract.js';
@@ -71,13 +72,14 @@ export function dominantScript(text: string): 'ja' | 'en' | 'other' {
 export function checkLanguage(input: ObserverInput, output: ObserverOutput): 'ok' | 'mismatch' {
   // Without a dominant script in the input there is nothing to compare the answer against.
   if (input.language_hint === 'other') return 'ok';
-  for (const observation of output.observations) {
-    for (const text of [observation.title, observation.body]) {
+  const fields = output.observations.flatMap((observation) => [observation.title, observation.body]);
+  if (output.checkpoint.decision === 'replace') fields.push(output.checkpoint.purpose,
+    ...output.checkpoint.constraints, ...output.checkpoint.decisions, ...output.checkpoint.outstanding);
+  for (const text of fields) {
       const script = dominantScript(text);
       // A field of paths or numbers says nothing about the language it was written in.
       if (script === 'other') continue;
       if (script !== input.language_hint) return 'mismatch';
-    }
   }
   return 'ok';
 }
@@ -193,15 +195,12 @@ export type SummaryResult = {
   memoryId: string | null;
 };
 
-function toolNameOf(row: RawEventRow): string {
-  const name = payloadOf(row)?.tool_name;
-  return typeof name === 'string' ? name : '';
-}
+type SummaryList = { items: string[]; total: number };
 
 /** A list line under the trim order: display paths shortened, then cut from the end. */
-function listLine(label: string, items: string[], cap: number): string {
-  const kept = items.slice(0, cap);
-  const omitted = items.length - kept.length;
+function listLine(label: string, list: SummaryList, cap: number): string {
+  const kept = list.items.slice(0, cap);
+  const omitted = list.total - kept.length;
   const text = omitted > 0 ? [...kept, `... (+${omitted} omitted)`].join(', ') : kept.join(', ');
   return `${label}: ${text}`.trimEnd();
 }
@@ -213,9 +212,9 @@ function listLine(label: string, items: string[], cap: number): string {
  */
 function summaryBody(parts: {
   request: string;
-  investigated: string[];
-  learned: string[];
-  completed: string[];
+  investigated: SummaryList;
+  learned: SummaryList;
+  completed: SummaryList;
   nextSteps: string;
 }): string {
   const compose = (request: string, cap: number): string =>
@@ -267,58 +266,48 @@ type SessionSummaryRecord = SessionSummaryText & {
   degraded: DegradedReason | null;
   sessionId: string;
   now: number;
+  generationPending: boolean;
+  sensitivity: Sensitivity;
 };
 
-function summarizableRows(db: DatabaseSync, sessionId: string): RawEventRow[] {
-  return (
-    db
-      .prepare('SELECT * FROM raw_events WHERE session_id = ? ORDER BY captured_at, id').all(sessionId) as unknown as RawEventRow[]
-  )
-    // A7: this summary is injected at the next session start, so a partial row reaches it as the
-    // tool name and the paths only, exactly as it reaches a batch.
-    .map(stripPartial)
-    .filter(isSummarizableRow);
-}
+// A partial capture contributes only tool paths, never its truncated body or input text.
+const SUMMARY_SOURCE_SQL = `${SUMMARIZABLE_ROW_SQL} AND (classification_state IS NOT 'partial' OR
+  (kind = 'tool_call' AND CASE WHEN json_valid(payload_json) THEN
+    json_type(payload_json, '$.input.paths') = 'array' AND EXISTS (
+      SELECT 1 FROM json_each(payload_json, '$.input.paths') WHERE type = 'text'
+        AND TRIM(value, ${BLANK_CHARACTERS_SQL}) <> '') ELSE 0 END))`;
 
-function recordToolActivity(
-  row: RawEventRow,
-  investigated: string[],
-  modified: Map<string, number>,
-): void {
-  if (row.kind !== 'tool_call') return;
-  const tool = toolNameOf(row);
-  for (const path of toolPaths(row)) {
-    const display = shortenDisplayPath(path);
-    if (READ_TOOLS.has(tool) && !investigated.includes(display)) investigated.push(display);
-    if (WRITE_TOOLS.has(tool)) modified.set(display, (modified.get(display) ?? 0) + 1);
-  }
-}
-
-function sessionActivity(rows: RawEventRow[]): {
-  investigated: string[];
-  modified: Map<string, number>;
-} {
-  const investigated: string[] = [];
-  const modified = new Map<string, number>();
-  for (const row of rows) {
-    recordToolActivity(row, investigated, modified);
-  }
-  return { investigated, modified };
+function sessionActivity(db: DatabaseSync, sessionId: string, tools: ReadonlySet<string>, counted: boolean): SummaryList {
+  const rows = db.prepare(`WITH paths AS (
+    SELECT r.id, r.captured_at,
+      CASE WHEN length(p.value) <= ${DISPLAY_PATH_TAIL} THEN p.value
+        ELSE '…' || substr(p.value, -${DISPLAY_PATH_TAIL}) END AS display
+    FROM (SELECT * FROM raw_events WHERE session_id = ? AND ${SUMMARY_SOURCE_SQL}) r,
+      json_each(CASE WHEN json_valid(r.payload_json) THEN r.payload_json ELSE '{}' END, '$.input.paths') p
+    WHERE r.kind = 'tool_call' AND p.type = 'text'
+      AND json_extract(r.payload_json, '$.tool_name') IN (${[...tools].map(() => '?').join(', ')})
+  ) SELECT display, COUNT(*) AS n, COUNT(*) OVER () AS total FROM paths GROUP BY display
+    ORDER BY MIN(captured_at), MIN(id), display LIMIT ?`).all(sessionId, ...tools, MAX_LIST);
+  return { items: rows.map((row) => counted ? `${String(row.display)} (${Number(row.n)})` : String(row.display)),
+    total: Number(rows[0]?.total ?? 0) };
 }
 
 function sessionSummaryText(
   db: DatabaseSync,
   sessionId: string,
   repoId: string,
-  rows: RawEventRow[],
-): SessionSummaryText {
-  const prompts = rows.filter((row) => row.kind === 'prompt' && (row.content ?? '').trim() !== '');
-  const firstPrompt = withoutDirectiveLines(prompts[0]?.content ?? rows[0].content ?? '');
-  const { investigated, modified } = sessionActivity(rows);
-
-  const learned = memoriesForSession(db, sessionId, memoryScope(db, { repoId, destination: 'injection' }))
-    .map((memory) => memory.title ?? '')
-    .filter((title) => title !== '');
+  firstSourceId: string,
+  workId: string | null,
+): SessionSummaryText & { learnedSensitivity: Sensitivity; learnedMemoryIds: string[] } {
+  const prompts = `SELECT content FROM raw_events WHERE session_id = ? AND ${SUMMARY_SOURCE_SQL}
+    AND kind = 'prompt' AND classification_state IS NOT 'partial'
+    AND TRIM(COALESCE(content, ''), ${BLANK_CHARACTERS_SQL}) <> ''`;
+  const first = db.prepare(`${prompts} ORDER BY captured_at, id LIMIT 1`).get(sessionId)
+    ?? db.prepare("SELECT CASE WHEN classification_state = 'partial' THEN NULL ELSE content END AS content FROM raw_events WHERE id = ?").get(firstSourceId);
+  const firstPrompt = withoutDirectiveLines(String(first?.content ?? ''));
+  const investigated = sessionActivity(db, sessionId, READ_TOOLS, false);
+  const completed = sessionActivity(db, sessionId, WRITE_TOOLS, true);
+  const learned = memoryTitlesForSession(db, sessionId, memoryScope(db, { repoId, workId, destination: 'injection' }), MAX_LEARNED);
 
   // The last turn the session never finished is what it was about to do next.
   const openTurn = db
@@ -329,24 +318,30 @@ function sessionSummaryText(
   const nextPrompt =
     openTurn === undefined
       ? ''
-      : withoutDirectiveLines(prompts.findLast((row) => row.turn_id === openTurn.id)?.content ?? '');
+      : withoutDirectiveLines(String(db.prepare(`${prompts} AND turn_id = ? ORDER BY captured_at DESC, id DESC LIMIT 1`)
+        .get(sessionId, openTurn.id)?.content ?? ''));
 
   const title = firstPrompt.slice(0, MAX_TITLE);
   const body = summaryBody({
     request: firstPrompt.slice(0, REQUEST_CHARS),
     investigated,
     learned,
-    completed: [...modified.entries()].map(([path, count]) => `${path} (${count})`),
+    completed,
     nextSteps: nextPrompt.slice(0, NEXT_STEPS_CHARS),
   });
-  return { title, body };
+  return { title, body, learnedSensitivity: learned.sensitivity, learnedMemoryIds: learned.memoryIds };
 }
 
 function degradedReasonForSession(db: DatabaseSync, sessionId: string): DegradedReason | null {
-  // contracts/observer.md: the most severe reason among the session's batches, NULL only when
-  // every batch was applied from a provider.
+  // Only the latest outcome of still-unprocessed sources degrades current generation. A failed
+  // historical attempt cannot keep a successfully recovered session degraded forever.
   const reasons = new Set(db
-    .prepare('SELECT degraded_reason FROM observation_batches WHERE session_id = ?')
+    .prepare(`SELECT DISTINCT b.degraded_reason FROM observation_batches b
+      JOIN observation_batch_sources bs ON bs.batch_id = b.id
+      JOIN raw_events r ON r.id = bs.raw_event_id
+      WHERE b.session_id = ? AND r.processing_state <> 'processed'
+        AND bs.recorded_at = (SELECT MAX(latest.recorded_at) FROM observation_batch_sources latest
+          WHERE latest.raw_event_id = r.id)`)
     .all(sessionId)
     .map((row) => row.degraded_reason)
     .filter((reason): reason is DegradedReason =>
@@ -357,9 +352,9 @@ function degradedReasonForSession(db: DatabaseSync, sessionId: string): Degraded
 
 function insertSessionSummary(
   db: DatabaseSync,
-  rows: RawEventRow[],
   summary: SessionSummaryRecord,
 ): void {
+  retirePreviousSummary(db, summary.sessionId, summary.memoryId, summary.now);
   db.prepare(INSERT_MEMORY).run(
     summary.memoryId,
     summary.repoId,
@@ -370,21 +365,62 @@ function insertSessionSummary(
     cjkBigrams(`${summary.title} ${summary.body}`),
     summary.material,
     summary.content,
-    strictest(rows[0].sensitivity, ...rows.map((row) => row.sensitivity)),
+    summary.sensitivity,
     summary.degraded,
     summary.sessionId,
     null,
     summary.now,
     summary.now,
   );
-  const insertSource = db.prepare(INSERT_SOURCE);
-  for (const row of rows.slice(0, MAX_SOURCE_EVENT_IDS)) {
-    insertSource.run(summary.memoryId, row.id, null, null, row.agent);
-  }
-  db.prepare("UPDATE sessions SET summary_state = 'done', latest_summary_memory_id = ? WHERE id = ?").run(
+  db.prepare('UPDATE sessions SET summary_state = ?, latest_summary_memory_id = ?, summary_updated_at = ?, summary_degraded_reason = ? WHERE id = ?').run(
+    summary.generationPending ? 'pending' : 'done',
     summary.memoryId,
+    summary.now,
+    summary.degraded,
     summary.sessionId,
   );
+}
+
+function retainSummarySources(db: DatabaseSync, repoId: string, memoryId: string, rows: RawEventRow[],
+  workId: string | null, learnedMemoryIds: string[], now: number): void {
+  const memory = db.prepare('SELECT id, work_id, provenance_complete FROM memories WHERE id = ?').get(memoryId)!;
+  const hadSources = db.prepare('SELECT 1 FROM memory_sources WHERE memory_id = ? LIMIT 1').get(memoryId) !== undefined;
+  const prior = hadSources ? memoryContexts(db, memory as unknown as { id: string; work_id: string | null; provenance_complete: number | null }) : [];
+  const contexts = rows.map((row) => sourceContext(db, row));
+  const inherited = learnedMemoryIds.map((id) => {
+    const source = db.prepare('SELECT id, work_id, provenance_complete FROM memories WHERE id = ? AND repo_id = ?').get(id, repoId);
+    return source === undefined ? null : memoryContexts(db, source as unknown as { id: string; work_id: string | null; provenance_complete: number | null });
+  });
+  const complete = prior === null || workId === null || inherited.some((source) => source === null) ? null
+    : canonicalContexts([...prior, ...contexts, ...inherited.flatMap((source) => source ?? [])]);
+  const dependency = db.prepare('INSERT OR IGNORE INTO memory_sources (memory_id, source_memory_id, context_only) VALUES (?, ?, 1)');
+  for (const id of learnedMemoryIds) dependency.run(memoryId, id);
+  const insert = db.prepare(`INSERT INTO memory_sources (memory_id, raw_event_id, source_agent, capture_root,
+    source_paths_json, source_context_id, captured_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS
+      (SELECT 1 FROM memory_sources WHERE memory_id = ? AND raw_event_id = ? AND context_only = 0)`);
+  for (const [index, row] of rows.entries()) {
+    const context = contexts[index];
+    insert.run(memoryId, row.id, row.agent, context.root, context.paths === null ? null : JSON.stringify(context.paths),
+      context.contextId, row.captured_at, memoryId, row.id);
+  }
+  db.prepare(`DELETE FROM memory_sources WHERE memory_id = ? AND raw_event_id IS NULL
+    AND source_memory_id IS NULL AND citation_kind IS NULL`).run(memoryId);
+  const flat = db.prepare(`INSERT INTO memory_sources (memory_id, capture_root, source_paths_json, source_context_id, context_only)
+    VALUES (?, ?, ?, ?, 1)`);
+  for (const context of complete ?? []) flat.run(memoryId, context.root, JSON.stringify(context.paths), context.contextId);
+  db.prepare('UPDATE memories SET provenance_complete = ? WHERE id = ?').run(complete === null ? 0 : 1, memoryId);
+  if (workId !== null && complete !== null) grantVisibility(db, memoryId, { audience: 'work', repoId, workId }, 'observer', now);
+}
+
+function retirePreviousSummary(db: DatabaseSync, sessionId: string, replacement: string | null, now: number): void {
+  const previous = db.prepare('SELECT latest_summary_memory_id FROM sessions WHERE id = ?').get(sessionId)
+    ?.latest_summary_memory_id;
+  if (typeof previous !== 'string' || previous === replacement) return;
+  // Equal summary text can be shared by another session; its current view must remain intact.
+  if (db.prepare('SELECT 1 FROM sessions WHERE latest_summary_memory_id = ? AND id <> ? LIMIT 1')
+    .get(previous, sessionId) !== undefined) return;
+  db.prepare("UPDATE memories SET valid_to = ?, superseded_by = ? WHERE id = ? AND type = 'session_summary' AND deleted_at IS NULL")
+    .run(now, replacement, previous);
 }
 
 function unfinishedBatchCount(db: DatabaseSync, sessionId: string): number {
@@ -402,16 +438,29 @@ function finishWithExistingSummary(
   db: DatabaseSync,
   sessionId: string,
   content: string,
+  state: Pick<SessionSummaryRecord, 'generationPending' | 'degraded' | 'now' | 'sensitivity'>,
 ): SummaryResult | null {
-  const existing = db.prepare('SELECT id, deleted_at FROM memories WHERE content_hash = ?').get(content);
+  const existing = db.prepare('SELECT id, deleted_at, sensitivity FROM memories WHERE content_hash = ?').get(content);
   if (existing === undefined) return null;
-  // FR-035: a deleted summary of identical content is not re-created; the session is still done.
+  // FR-035: a deleted summary of identical content is not re-created.
   const keep = existing.deleted_at === null ? String(existing.id) : null;
-  db.prepare("UPDATE sessions SET summary_state = 'done', latest_summary_memory_id = ? WHERE id = ?").run(
+  retirePreviousSummary(db, sessionId, keep, state.now);
+  db.prepare('UPDATE sessions SET summary_state = ?, latest_summary_memory_id = ?, summary_updated_at = ?, summary_degraded_reason = ? WHERE id = ?').run(
+    state.generationPending ? 'pending' : 'done',
     keep,
+    state.now,
+    state.degraded,
     sessionId,
   );
-  return { state: 'done', memoryId: keep };
+  if (keep !== null) {
+    db.prepare('UPDATE memories SET sensitivity = ? WHERE id = ?')
+      .run(strictest(state.sensitivity, existing.sensitivity as Sensitivity), keep);
+    db.prepare("UPDATE memories SET valid_to = NULL, superseded_by = NULL WHERE id = ? AND type = 'session_summary' AND deleted_at IS NULL")
+      .run(keep);
+    db.prepare("UPDATE memories SET degraded_reason = ? WHERE id = ? AND type = 'session_summary' AND source_session_id = ?")
+      .run(state.degraded, keep, sessionId);
+  }
+  return { state: state.generationPending ? 'waiting' : 'done', memoryId: keep };
 }
 
 function summarizeSession(
@@ -420,11 +469,6 @@ function summarizeSession(
   sessionId: string,
   now: number,
 ): SummaryResult {
-  if (!assertLease(db, token, now)) {
-    db.exec('ROLLBACK');
-    return { state: 'lease_lost', memoryId: null };
-  }
-
   const session = db
     .prepare('SELECT id, repo_id, status, summary_state FROM sessions WHERE id = ?')
     .get(sessionId);
@@ -437,23 +481,58 @@ function summarizeSession(
   const unfinished = unfinishedBatchCount(db, sessionId);
   if (unfinished > 0) return { state: 'waiting', memoryId: null };
 
-  const rows = summarizableRows(db, sessionId);
+  const rows = db.prepare(`SELECT id, agent, repo_id, session_id, kind, payload_json, work_binding_id, captured_at
+    FROM raw_events WHERE session_id = ? AND ${SUMMARY_SOURCE_SQL}
+    ORDER BY captured_at, id LIMIT ?`).all(sessionId, MAX_SOURCE_EVENT_IDS) as unknown as RawEventRow[];
   if (rows.length === 0) {
+    if (!assertLease(db, token, now)) {
+      db.exec('ROLLBACK');
+      return { state: 'lease_lost', memoryId: null };
+    }
     // The spec edge case: nothing is produced and nothing is sent.
-    db.prepare("UPDATE sessions SET summary_state = 'no_content' WHERE id = ?").run(sessionId);
+    db.prepare("UPDATE sessions SET summary_state = 'no_content', latest_summary_memory_id = NULL, summary_degraded_reason = NULL, summary_updated_at = ? WHERE id = ?")
+      .run(now, sessionId);
     return { state: 'no_content', memoryId: null };
   }
 
-  const { title, body } = sessionSummaryText(db, sessionId, repoId, rows);
-  const degraded = degradedReasonForSession(db, sessionId);
+  const provenance = db.prepare(`SELECT COUNT(*) AS sources, COUNT(DISTINCT w.id) AS works, MIN(w.id) AS work_id,
+    MAX(CASE WHEN w.id IS NULL THEN 1 ELSE 0 END) AS missing FROM raw_events r
+    LEFT JOIN work_bindings b ON b.id = r.work_binding_id AND b.session_id = r.session_id
+    LEFT JOIN work_contexts c ON c.id = b.context_id AND c.repo_id = r.repo_id
+    LEFT JOIN work_items w ON w.id = b.work_id AND w.repo_id = r.repo_id AND w.repo_id = ? AND c.id IS NOT NULL
+    WHERE r.session_id = ? AND ${SUMMARY_SOURCE_SQL}`).get(repoId, sessionId)!;
+  const workId = provenance.works === 1 && provenance.missing === 0 && Number(provenance.sources) <= MAX_SOURCE_EVENT_IDS
+    ? String(provenance.work_id) : null;
+  const { title, body, learnedSensitivity, learnedMemoryIds } = sessionSummaryText(db, sessionId, repoId, rows[0].id, workId);
+  const sourceState = db.prepare(`SELECT MAX(processing_state <> 'processed') AS pending,
+    MAX(CASE sensitivity WHEN 'private' THEN 2 WHEN 'local_only' THEN 1 ELSE 0 END) AS sensitivity
+    FROM raw_events WHERE session_id = ? AND ${SUMMARY_SOURCE_SQL}`).get(sessionId)!;
+  const generationPending = sourceState.pending === 1;
+  const sensitivity = strictest(learnedSensitivity, (['eligible', 'local_only', 'private'] as const)[Number(sourceState.sensitivity)]);
+  const degraded = generationPending ? degradedReasonForSession(db, sessionId) ?? 'unusable_output' : null;
   const material = materialHash(title, body);
-  const content = contentHash(repoId, material);
+  const content = workId === null ? contentHash(repoId, material) : sha256Json(['work-session-summary-v1', repoId, workId, material]);
   const memoryId = memoryIdFor(content);
 
-  const existing = finishWithExistingSummary(db, sessionId, content);
-  if (existing !== null) return existing;
+  if (!assertLease(db, token, now)) {
+    db.exec('ROLLBACK');
+    return { state: 'lease_lost', memoryId: null };
+  }
 
-  insertSessionSummary(db, rows, {
+  const existing = finishWithExistingSummary(db, sessionId, content, { generationPending, degraded, now, sensitivity });
+  if (existing !== null) {
+    if (existing.memoryId !== null) retainSummarySources(db, repoId, existing.memoryId, rows, workId, learnedMemoryIds, now);
+    return existing;
+  }
+  const legacyTombstone = db.prepare('SELECT 1 FROM memories WHERE content_hash = ? AND deleted_at IS NOT NULL')
+    .get(contentHash(repoId, material));
+  if (legacyTombstone !== undefined) {
+    db.prepare("UPDATE sessions SET summary_state = ?, latest_summary_memory_id = NULL, summary_updated_at = ? WHERE id = ?")
+      .run(generationPending ? 'pending' : 'done', now, sessionId);
+    return { state: generationPending ? 'waiting' : 'done', memoryId: null };
+  }
+
+  insertSessionSummary(db, {
     memoryId,
     repoId,
     title,
@@ -463,8 +542,11 @@ function summarizeSession(
     degraded,
     sessionId,
     now,
+    generationPending,
+    sensitivity,
   });
-  return { state: 'done', memoryId };
+  retainSummarySources(db, repoId, memoryId, rows, workId, learnedMemoryIds, now);
+  return { state: generationPending ? 'waiting' : 'done', memoryId };
 }
 
 /**
@@ -478,5 +560,15 @@ export function sessionSummary(
   sessionId: string,
   now: number,
 ): SummaryResult {
-  return transactionImmediate(db, () => summarizeSession(db, token, sessionId, now));
+  // Aggregate under a read snapshot. A concurrent capture makes the later write upgrade fail
+  // with SQLITE_BUSY and retry, instead of blocking hook writes during a long read.
+  db.exec('BEGIN');
+  try {
+    const result = summarizeSession(db, token, sessionId, now);
+    if (db.isTransaction) db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    if (db.isTransaction) db.exec('ROLLBACK');
+    throw error;
+  }
 }

@@ -1,3 +1,4 @@
+import { grantVisibility } from '../../src/db/queries.js';
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -21,9 +22,12 @@ import { oboetePaths } from '../../src/paths.js';
 import type { DetectorResult } from '../../src/privacy/detect.js';
 import { resolveRepoIdentity, type RepoIdentity } from '../../src/repo-identity.js';
 import { cjkBigrams } from '../../src/retrieval/fts.js';
-import type { RawEventRow } from '../../src/worker/batches.js';
+import type { RawEventRow, SessionRow } from '../../src/worker/batches.js';
+import { buildObserverRequest } from '../../src/observer/request.js';
+import { loadDestinationRules } from '../../src/privacy/egress.js';
 import { claimLease } from '../../src/worker/lease.js';
 import { withTempHome } from '../helpers/home.js';
+import { seedWorkBinding } from '../helpers/work.js';
 
 const NOW = 1_800_000_000_000;
 
@@ -69,6 +73,7 @@ function insertMemory(db: DatabaseSync, seed: MemorySeed): string {
     seed.sensitivity ?? 'eligible',
     seed.deletedAt ?? null,
   );
+  grantVisibility(db, id, { audience: 'project', repoId: seed.repoId }, 'migration', NOW);
   return id;
 }
 
@@ -207,6 +212,7 @@ test('get includes provenance but exits 1 outside the repository and for a tombs
     assert.deepEqual(record.sources.map((source) => source.citation_value), ['src/example.ts']);
     assert.deepEqual(Object.keys(record).sort(), [
       'body',
+      'checkpoint_parent_id',
       'citations_head',
       'citations_ok',
       'cjk_bigrams',
@@ -220,10 +226,12 @@ test('get includes provenance but exits 1 outside the repository and for a tombs
       'material_hash',
       'pin_order',
       'pinned_at',
+      'provenance_complete',
       'repo_id',
       'review_state',
       'sensitivity',
       'source_batch_id',
+      'source_captured_at',
       'source_session_id',
       'sources',
       'superseded_by',
@@ -231,6 +239,7 @@ test('get includes provenance but exits 1 outside the repository and for a tombs
       'type',
       'valid_from',
       'valid_to',
+      'work_id',
     ]);
 
     for (const id of [outside, deleted]) {
@@ -277,11 +286,15 @@ test('timeline filters sessions to the current repository and optional session i
        VALUES ('event-current', ?, 'session-current', 'turn-current', 'codex', 'prompt',
                'timeline prompt', 'eligible', 'done', 1, ?)`,
     ).run(identity.id, NOW + 1_000);
+    opened.db.prepare('UPDATE raw_events SET payload_json = ? WHERE id = ?')
+      .run(JSON.stringify({ capture_root: repo, source_paths: [] }), 'event-current');
     opened.db.prepare(
       `INSERT INTO memory_sources
          (memory_id, raw_event_id, citation_kind, citation_value, source_agent)
        VALUES (?, 'event-current', 'file_read', 'src/timeline.ts', 'codex')`,
     ).run(memoryId);
+    opened.db.prepare('UPDATE memory_sources SET capture_root = ?, source_paths_json = ? WHERE memory_id = ?')
+      .run(repo, '[]', memoryId);
     opened.db.close();
 
     const result = await run(runTimeline, ['--session', 'session-current', '--json'], repo);
@@ -500,10 +513,21 @@ test('delete keeps a tombstone and observer writes cannot recreate it under anot
 
     const token = claimLease(checked.db, { pid: 1, now: NOW + 1 });
     if (token === null) assert.fail('expected the observer lease');
+    const binding = seedWorkBinding(checked.db, 'session-1');
+    checked.db.prepare("UPDATE observation_batches SET owner_token = ?, work_binding_id = ? WHERE id = 'batch-1'").run(token, binding);
+    checked.db.prepare("UPDATE raw_events SET work_binding_id = ? WHERE id = 'event-1'").run(binding);
+    const rows = checked.db.prepare('SELECT * FROM raw_events').all() as unknown as RawEventRow[];
+    const request = buildObserverRequest({ rows, repoId: identity.id, destination: 'remote_observer', nearby: [], turns: [],
+      session: checked.db.prepare("SELECT * FROM sessions WHERE id = 'session-1'").get() as unknown as SessionRow,
+      rules: loadDestinationRules(checked.db) });
+    checked.db.prepare("UPDATE raw_events SET batch_id = 'batch-1', processing_hash = ? WHERE id = 'event-1'")
+      .run(request.coverage[0].sourceHash);
     const output: ObserverOutput = {
+      checkpoint: { decision: 'unchanged', source_event_ids: ['event-1'], reason: 'No progress changed.' },
       observations: [
         {
           type: 'feature',
+          visibility: 'project',
           title,
           body,
           concepts: ['what-changed'],
@@ -515,6 +539,7 @@ test('delete keeps a tombstone and observer writes cannot recreate it under anot
     };
     const result = await applyObservations(checked.db, token, {
       batchId: 'batch-1',
+      coverage: request.coverage,
       repoId: identity.id,
       sessionId: 'session-1',
       output,
