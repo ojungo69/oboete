@@ -1,0 +1,31 @@
+specs/009-memory-core/contracts/sync.md
+  s_5ab5797dc469b5::t_21e71cf0686439 538,897-900,912-913
+src/sync-cli.ts
+  s_5ab5797dc469b5::t_9515aabd920a0c 164
+src/sync/format.ts
+  s_5ab5797dc469b5::t_59e75ab01b8767 16
+src/sync/space.ts
+  s_5ab5797dc469b5::t_6bee5f2f428f93 165
+src/sync/stage.ts
+  s_5ab5797dc469b5::t_f6dbc4251339f2 112,125-128
+test/unit/sync-bounds.test.ts
+  s_5ab5797dc469b5::t_35c213eae5d613 223-230,254-267
+test/unit/sync.test.ts
+  s_5ab5797dc469b5::t_4916a5eafa7e36 476-477
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "6fd447760aa9989d5f944906c4d851dc82fe901b",
+  "prompts": {},
+  "sessions": {
+    "s_5ab5797dc469b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44ceb1b9-68f7-4bf5-8646-52149920dd27",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
