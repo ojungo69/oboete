@@ -3,28 +3,17 @@
 // contracts/cli.md (`hook`), plan.md "Delivery order" step 1 (replay skeleton).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
-import { fileURLToPath } from 'node:url';
 
 import { openDatabase } from '../src/db/open.js';
 
-import { SHARED_COMPILE_CACHE } from './helpers/compile-cache.js';
+import { repositoryRoot } from './helpers/compile-cache.js';
 
 type Json = Record<string, unknown>;
-
-function repositoryRoot(): string {
-  let directory = fileURLToPath(new URL('.', import.meta.url));
-  for (;;) {
-    if (existsSync(join(directory, 'package.json'))) return directory;
-    const parent = dirname(directory);
-    assert.notEqual(parent, directory, 'the repository root must contain package.json');
-    directory = parent;
-  }
-}
 
 const ROOT = repositoryRoot();
 const BUNDLE = join(ROOT, 'dist', 'oboete.mjs');
@@ -68,7 +57,6 @@ function runHook(
     encoding: 'utf8',
     env: {
       ...process.env,
-      NODE_COMPILE_CACHE: SHARED_COMPILE_CACHE,
       OBOETE_HOME: place.home,
       ...environment,
     },

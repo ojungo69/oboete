@@ -87,6 +87,10 @@ const walk = (dir) => {
   }
 };
 if (existsSync(join(root, 'test'))) walk(join(root, 'test'));
+// One helper is an entry point of its own: `package.json` loads it into the test runner with
+// `--import`, so it has to exist as a file rather than only inside the bundles that import it.
+const runnerImport = join(root, 'test/helpers/compile-cache.ts');
+if (existsSync(runnerImport)) tests.push(runnerImport);
 
 if (tests.length > 0) {
   await build({

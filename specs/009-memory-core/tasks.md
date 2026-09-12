@@ -304,9 +304,11 @@ writers require separate worktrees. No deployment follows merely from an increme
   and explicitly defers, so it is `$OBOETE_HOME/cache/compile` and the launcher resolves the home the
   way `src/paths.ts` does. That left every test spawning on a cold cache -- 6 % on the fault suites
   locally, and on CI a jump from a 215 ms median to 246 ms over 48 hook invocations that failed
-  `fault-storage` and `e2e-hook` on both runs -- so the three harnesses that spawn the CLI under a
-  bound now share one `NODE_COMPILE_CACHE` (`test/helpers/compile-cache.ts`), which puts the suites
-  back at 41.8 s. The medians were re-measured interleaved and still show the same ~36 ms. The same round wrapped the launcher's own `import` of the engine: the split put a
+  `fault-storage` and `e2e-hook` on both runs -- so both `node --test` runs load
+  `test/helpers/compile-cache.ts` with `--import` and every test and every CLI it spawns shares one
+  `NODE_COMPILE_CACHE`, which puts the suites back at 41.8 s. Wiring three spawn sites instead of
+  the runner was not enough: the unit batch is what leaves the cache warm for the timed suites, and
+  without it the first serial spawn still spent its whole budget compiling. The medians were re-measured interleaved and still show the same ~36 ms. The same round wrapped the launcher's own `import` of the engine: the split put a
   failure ahead of the handler in `src/cli.ts` that gives `hook`, `capture` and `inject` their
   contracted exit 0, so a missing engine printed a Node stack over an agent's session; the launcher
   now repeats that handler for those three commands and rethrows for every other. Cache directory, the rejected alternatives, the

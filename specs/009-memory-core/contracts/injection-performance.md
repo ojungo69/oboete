@@ -242,20 +242,29 @@ the home -- about 6 %. CI turned the same cost into a failure. Over the 48 `took
 of a full `engine (24.x)` run the median went from 215.4 and 212.1 ms on the commit before the move
 to 246.3 and 251.8 ms on the commit that made it -- +35 ms, which is the compile -- and on a runner
 already sitting at ~215 ms against a 300 ms budget that was enough to fail `fault-storage`
-`readonly` and `e2e-hook.test.ts:142` on both duplicate runs. Those spawns had been sharing the
-runner's own `~/.cache/oboete/compile` without anyone saying so, because `test/helpers/fault.ts`
-overrides `OBOETE_HOME` for each test and leaves `HOME` alone.
+`readonly` and `e2e-hook.test.ts:142` on both duplicate runs. What had been keeping them warm is
+recorded a paragraph up -- the suite inherits `HOME` -- but the size of it was not: `test/helpers/fault.ts`
+overrides `OBOETE_HOME` for each test and leaves `HOME` alone, so every spawn had been reading the
+runner's own `~/.cache/oboete/compile`.
 
 A cold cache per test is the harness's artefact and not the product's: a real installation's cache
-outlives its invocations, so the way to measure the hook as it runs is to share one. Every spawn in
-`childEnv`, `test/e2e-hook.test.ts` and `test/e2e-inject.test.ts` now points at the one
-`build/compile-cache` that `test/helpers/compile-cache.ts` names, through `NODE_COMPILE_CACHE` --
-the variable this document records the launcher cannot defend against, put to the use it is for.
-Three rounds again: 41.8, 41.6 s, at or under the `~/.cache` figure, so the one-directory rule costs
+outlives its invocations, so the way to measure the hook as it runs is to share one.
+`package.json` loads `test/helpers/compile-cache.ts` into both `node --test` runs with `--import`,
+and it sets `NODE_COMPILE_CACHE` to one `build/compile-cache` -- the variable this document records
+the launcher cannot defend against, put to the use it is for. Every test file and every CLI any of
+them spawns inherits it, which is the point: the first attempt set it at three spawn sites and
+missed the ad-hoc one in `test/fault-pi.test.ts` and the whole unit batch. Two rounds on the
+`fault-*` suites again: 41.8, 41.6 s, under the `~/.cache` figure, so the one-directory rule costs
 the suite nothing. `test/unit/launcher.test.ts` deletes the variable instead, because the directory
-the launcher picks for itself is exactly what that suite is about. The unit batch still spawns cold;
-nothing in it asserts a time bound today, and when something does the answer is to give it the same
-directory, not to move the cache back outside the home.
+the launcher picks for itself is exactly what that suite is about.
+
+Missing the unit batch is what the second CI round cost. It spawns the bundle a few dozen times and
+had been leaving the runner's cache warm for the timed suites that run after it, so with only the
+three sites wired the first spawn of the serial batch paid the whole compile: `e2e-hook.test.ts:110`
+took 299.1 and 304.9 ms on the two duplicate runs and stored a partial row with a null `content`,
+which is what a capture that runs out of its 300 ms does. The medians over the 48 invocations had
+already come back to 219.4 and 223.3 ms from 246.3 and 251.8; the failure was the one spawn no
+warm-up preceded.
 
 Splitting one file into two put a new failure ahead of everything the engine does about its own:
 the import. An engine that is missing or unreadable now throws in the launcher, above the handler

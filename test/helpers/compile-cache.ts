@@ -2,7 +2,9 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-function repositoryRoot(): string {
+/** The repository root, found by walking up to the `package.json`: the three suites that spawn
+ *  `dist/oboete.mjs` all need it, and this is the file all three already import. */
+export function repositoryRoot(): string {
   let directory = fileURLToPath(new URL('.', import.meta.url));
   for (;;) {
     if (existsSync(join(directory, 'package.json'))) return directory;
@@ -22,10 +24,10 @@ function repositoryRoot(): string {
  * cache is an artefact of the harness and not of the product: a real installation's cache persists
  * between invocations, so sharing one directory is what measures the hook the way it actually runs.
  *
- * Used by the suites that spawn the CLI under a time bound: `test/helpers/fault.ts` (every
- * `fault-*` suite), `test/e2e-hook.test.ts` and `test/e2e-inject.test.ts`. The unit batch spawns
- * cold, which costs it the same 35 ms per spawn and is bounded by nothing it asserts; give it this
- * directory too if that ever stops being true.
+ * Setting the variable rather than passing it per spawn is what reaches every one of them: the unit
+ * batch, the ad-hoc spawn in `test/fault-pi.test.ts`, and anything added later, without each having
+ * to remember. A test file that imports this module for any reason gets it too, which is what makes
+ * a single file run straight from `node --test` measure the same hook as the suite does.
  *
  * `NODE_COMPILE_CACHE` wins over the launcher's own `enableCompileCache` call, which is the one
  * thing contracts/injection-performance.md records the launcher cannot defend against. That is why
@@ -37,3 +39,13 @@ function repositoryRoot(): string {
  * cache moved under the data directory.
  */
 export const SHARED_COMPILE_CACHE = join(repositoryRoot(), 'build', 'compile-cache');
+
+// `package.json` loads this file into the test runner itself with `--import`, so the variable is in
+// the environment every test file and every CLI it spawns inherits -- including the unit batch,
+// which spawns the bundle a few dozen times and is what used to leave the runner's cache warm for
+// the timed suites that run after it. Without that the first spawn of the serial batch pays the
+// whole compile and lands on the 300 ms budget: `e2e-hook.test.ts:110` failed that way on CI, with
+// a partial row and a null `content`, on both duplicate runs. `??=` so an operator who points the
+// variable somewhere else keeps it, and so the suites below that set it explicitly -- for a single
+// file run straight from `node --test` -- agree rather than fight.
+process.env.NODE_COMPILE_CACHE ??= SHARED_COMPILE_CACHE;

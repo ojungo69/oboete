@@ -41,10 +41,12 @@ M1 source retention and completion rules.
 - A test that touches storage creates a fresh directory with `fs.mkdtempSync` and points
   `OBOETE_HOME` at it; the real `~/.oboete` is never used. Use `test/helpers/home.ts` (T022) once
   it exists.
-- A test that spawns the CLI under a time bound also sets `NODE_COMPILE_CACHE` to
-  `test/helpers/compile-cache.ts`'s directory. The launcher's own cache lives in `OBOETE_HOME`, so a
-  fresh home per test means a fresh compile of the whole engine per spawn -- about 35 ms, measured on
-  CI against a 300 ms budget. Sharing one cache measures the hook the way an installed one runs.
+- Both `node --test` runs load `test/helpers/compile-cache.ts` with `--import`, which points
+  `NODE_COMPILE_CACHE` at one `build/compile-cache` for every test and everything it spawns. The
+  launcher's own cache lives in `OBOETE_HOME`, so a fresh home per test would otherwise mean a fresh
+  compile of the whole engine per spawn -- about 35 ms, measured on CI against a 300 ms budget.
+  Do not override the variable in a test; `test/unit/launcher.test.ts` deletes it deliberately,
+  because the directory the launcher picks for itself is what that suite is about.
 - Red first: write the failing test, run it, confirm it fails for the right reason, then implement.
   A test never recomputes its expected value through the code path it checks.
 

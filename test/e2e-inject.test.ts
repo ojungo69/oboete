@@ -3,7 +3,6 @@ import { grantVisibility } from '../src/db/queries.js';
 import { spawn, spawnSync } from 'node:child_process';
 import {
   closeSync,
-  existsSync,
   mkdtempSync,
   openSync,
   readFileSync,
@@ -11,10 +10,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { test, type TestContext } from 'node:test';
-import { fileURLToPath } from 'node:url';
 
 import { openDatabase } from '../src/db/open.js';
 import { oboetePaths, type OboetePaths } from '../src/paths.js';
@@ -22,19 +20,9 @@ import { cjkBigrams } from '../src/retrieval/fts.js';
 import { resolveRepoIdentity } from '../src/repo-identity.js';
 import { seedWorkBinding } from './helpers/work.js';
 
-import { SHARED_COMPILE_CACHE } from './helpers/compile-cache.js';
+import { repositoryRoot } from './helpers/compile-cache.js';
 
 type Json = Record<string, unknown>;
-
-function repositoryRoot(): string {
-  let directory = fileURLToPath(new URL('.', import.meta.url));
-  for (;;) {
-    if (existsSync(join(directory, 'package.json'))) return directory;
-    const parent = dirname(directory);
-    assert.notEqual(parent, directory);
-    directory = parent;
-  }
-}
 
 const ROOT = repositoryRoot();
 const BUNDLE = join(ROOT, 'dist', 'oboete.mjs');
@@ -117,7 +105,6 @@ async function run(
     cwd: place.repo,
     env: {
       ...process.env,
-      NODE_COMPILE_CACHE: SHARED_COMPILE_CACHE,
       OBOETE_HOME: place.home,
       ...environment,
     },
