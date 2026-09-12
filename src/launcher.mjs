@@ -11,22 +11,32 @@
 // V8 does not authenticate cache entries, so a directory somebody else can write to is a place to
 // plant bytecode that this process will execute.
 import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
-import { enableCompileCache } from 'node:module';
+// A namespace import, because a named one is resolved when the module is linked, before any
+// statement here runs and outside the reach of the try below: on a Node older than 22.1, where
+// `enableCompileCache` does not exist, that is a SyntaxError and a non-zero exit for every command,
+// including the hook that is contracted to exit 0 whatever happens (FR-002). `engines` only warns.
+import * as nodeModule from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-/** True when `path` is a real directory of this user's and nobody else has any of `denied`'s bits.
- *  `mkdirSync` leaves an existing directory's mode and owner alone and follows a symlink, so what
- *  came back is checked rather than assumed. Refusing beats correcting: a chmod would land on the
- *  target of a planted symlink. */
-function ours(path, denied) {
+/** True when `path` is a real directory belonging to this user. Nothing is asked of its mode: one
+ *  left loose by an older version or a restored backup is still the user's own, and refusing it
+ *  would turn the cache off for them without a word. `mkdirSync` leaves an existing directory's
+ *  mode and owner alone and follows a symlink, so what came back is checked rather than assumed;
+ *  refusing beats correcting, since a chmod would land on the target of a planted symlink.
+ *  Windows has neither uid nor mode bits, so there the first two checks are the whole test. */
+function ours(path) {
   const found = lstatSync(path);
   if (found.isSymbolicLink() || !found.isDirectory()) return false;
   const uid = process.getuid?.();
-  // Windows has neither, so the symlink and directory checks above are the whole test there.
-  if (uid === undefined) return true;
-  return found.uid === uid && (found.mode & denied) === 0;
+  return uid === undefined || found.uid === uid;
+}
+
+/** True when `path` is ours and nobody else can even enter it. */
+function oursAndClosed(path) {
+  const uid = process.getuid?.();
+  return ours(path) && (uid === undefined || (lstatSync(path).mode & 0o077) === 0);
 }
 
 try {
@@ -43,12 +53,12 @@ try {
   // write bytecode into it while every check on `compile` itself still passed -- it would be ours,
   // 0700 and a real directory. It only has to be ours and not a link; nothing above it is checked,
   // because a symlink there is the user's own arrangement and replacing it needs write on $HOME.
-  if (ours(parent, 0)) {
+  if (ours(parent)) {
     mkdirSync(cache, { recursive: true, mode: 0o700 });
     // `compile` must be closed to everyone else, not merely unwritable: V8 reads its entries from
     // a versioned directory Node creates inside at 0777 minus the umask, group-writable wherever
     // the umask is 002, and denying the traverse bit puts that out of reach whatever its own mode.
-    if (ours(cache, 0o077)) enableCompileCache(cache);
+    if (oursAndClosed(cache)) nodeModule.enableCompileCache?.(cache);
   }
 } catch {
   // No cache, same behaviour. A read-only home costs the cache and never the command.

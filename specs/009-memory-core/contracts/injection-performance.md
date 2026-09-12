@@ -154,6 +154,15 @@ it: no cliff on the first run after an upgrade, no cache to grow, and no directo
 It is the better answer to the same problem and a much larger change to security-owned bundle
 composition; the launcher is what closes the regression now, and the split stays available.
 
+Two more residues, both stated rather than fixed. The launcher imports `node:module` as a namespace
+and calls `enableCompileCache` optionally, because a named import is resolved when the module is
+linked -- before any statement runs and outside the reach of the surrounding `try` -- so on a Node
+older than 22.1 a named import would be a `SyntaxError` and a non-zero exit for every command,
+including the hook that is contracted to exit 0 whatever happens. `engines` only warns. And on
+Windows there is no uid and no mode, so the checks reduce to "a real directory, not a symlink":
+`%USERPROFILE%\.cache\oboete\compile`, or an `XDG_CACHE_HOME` override, is trusted on the strength
+of its path alone.
+
 One thing the launcher cannot defend: `NODE_COMPILE_CACHE` in the environment wins. Node enables the
 cache at bootstrap from that variable, and a later `enableCompileCache(dir)` returns
 `{ status: 2 }` (already enabled) with the environment's directory, having written nothing to ours.
@@ -195,7 +204,9 @@ leaves an owner-only cache, the next run adds nothing to it, and a run after tha
 corrupted in between -- the last of those is what separates a cache being read back from one that
 was never enabled, which is invisible to every other assertion; a world-writable cache directory is
 refused, as is one merely traversable by others, one that is a symlink and one whose parent is a
-symlink, while ancestors at 0755, 0775 and even 0777 are accepted and left at the mode they had;
+symlink, while ancestors at 0755, 0775 and even 0777 are accepted and left at the mode they had; the
+one branch with no test is the parent's owner, because an unprivileged process cannot create a
+directory that belongs to somebody else and a test that cannot fail is worse than none;
 a home that cannot hold a cache still exits 0 with no stderr; and
 `oboete setup` writes `dist/oboete.mjs` into the hook commands rather than the engine -- and not the
 timing, which belongs to the machine.

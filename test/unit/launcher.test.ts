@@ -70,7 +70,8 @@ test('a run fills an owner-only compile cache and the next run reads it back', a
     assert.equal(run(home).status, 0);
     assert.equal(statSync(cacheDir(home)).mode & 0o777, 0o700, 'the compile cache is owner-only');
     const first = cacheEntries(home);
-    assert.equal(first.length, 1, 'one cache entry after one run');
+    // Not an exact count: how many modules one command compiles is the engine's business.
+    assert.ok(first.length >= 1, 'the compile cache is empty after a run');
     assert.equal(run(home).status, 0);
     assert.deepEqual(cacheEntries(home), first, 'the second run rewrote the entry');
     // Unchanged is what a cache that was read back looks like -- and also what one that was never
