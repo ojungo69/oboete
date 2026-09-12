@@ -56,7 +56,14 @@ const engine = existsSync(sibling) ? sibling : bundle;
 const cacheBase = process.env.XDG_CACHE_HOME;
 const cacheRoot = cacheBase !== undefined && isAbsolute(cacheBase) ? cacheBase : join(homedir(), '.cache');
 const compileCache = join(cacheRoot, 'oboete', 'compile');
-const cacheWarm = existsSync(compileCache) && readdirSync(compileCache).length > 0;
+// readdirSync throws when the path is a file or unreadable, and this line only labels a record.
+const cacheWarm = (() => {
+  try {
+    return readdirSync(compileCache).length > 0;
+  } catch {
+    return false;
+  }
+})();
 
 function run(file, args, options = {}) {
   const capture = mkdtempSync(join(tmpdir(), 'oboete-command-'));

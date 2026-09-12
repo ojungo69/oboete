@@ -10,10 +10,11 @@
 // Node's own default of /tmp/node-compile-cache, which is shared by every user on the machine.
 // V8 does not authenticate cache entries, so a directory somebody else can write to is a place to
 // plant bytecode that this process will execute.
-import { lstatSync, mkdirSync } from 'node:fs';
+import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { enableCompileCache } from 'node:module';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /** True when `path` is a directory of this user's that nobody else can even enter. `mkdirSync`
  *  leaves an existing directory's mode and owner alone and follows a symlink, so what came back is
@@ -45,4 +46,9 @@ try {
   // No cache, same behaviour. A read-only home costs the cache and never the command.
 }
 
-await import('./engine.mjs');
+// Through this file's real path, not a bare './engine.mjs': a global install runs the bin symlink
+// npm creates, and under --preserve-symlinks-main `import.meta.url` is that symlink, so a relative
+// specifier would look for the engine beside the link and every invocation would fail with
+// ERR_MODULE_NOT_FOUND.
+const here = realpathSync(fileURLToPath(import.meta.url));
+await import(pathToFileURL(join(dirname(here), 'engine.mjs')).href);

@@ -65,7 +65,10 @@ Node compiles the entry file before any statement in it runs. `dist/` is therefo
 launcher that imports only `node:module`, `node:fs`, `node:os` and `node:path`, enables the cache,
 then imports the engine. It is a real source file rather than a string in the build script so that
 the one new piece of hook-path code is covered by the same lint the rest of the tree is, which took
-adding it to both `files` lists in `eslint.config.js` -- a `.mjs` under `src/` matched neither.
+adding it to both `files` lists in `eslint.config.js` -- a `.mjs` under `src/` matched neither. It
+imports the engine through its own real path rather than as `./engine.mjs`, because a global install
+runs the bin symlink npm creates and `--preserve-symlinks-main` makes `import.meta.url` that link,
+under which a relative specifier looks for the engine beside the link and every invocation fails.
 
 Splitting `dist/` splits what "the bundle" means, and every site that names one of the two files has
 to pick deliberately. What names the program to run -- the `bin` entry, the hook commands
@@ -124,10 +127,12 @@ checked either, so demanding unwritable ancestors would have narrowed it rather 
 The one refusal that stays silent is a `compile` of this user's own left at a loose mode -- a
 restored backup, an `rsync` without `-p`, an NFS home. The hook returns to its uncached time with
 nothing saying so; `scripts/measure-cold-start.mjs` prints the directory and whether it was
-populated, and `oboete doctor` does not yet have an item for it. Correcting the mode instead would chmod the target of a planted symlink; refusing is the
-cheaper direction. What remains is the ordinary race between the check and V8's read, which needs
-write access to a directory the check just found nobody else can write to. A home that cannot hold
-the directory at all costs the cache and never the command.
+populated, and `oboete doctor` does not yet have an item for it. Refusing is deliberate: correcting
+the mode would chmod the target of whatever symlink was planted there. What remains is the ordinary
+race between the check and V8's read, which needs write access to the cache directory itself -- or
+to any directory above it, `$HOME` included, none of which is checked. A writable `$HOME` is already
+total compromise, so this is the accepted residue rather than a hole the ancestor rule would have
+closed. A home that cannot hold the directory at all costs the cache and never the command.
 
 One thing the launcher cannot defend: `NODE_COMPILE_CACHE` in the environment wins. Node enables the
 cache at bootstrap from that variable, and a later `enableCompileCache(dir)` returns
@@ -145,11 +150,13 @@ the installer writes -- with the two builds interleaved in the same session so m
 | launcher + engine | 184.5 | 186.9 | 192.6 | 183.9 | 185.7 | 180.1 | 182.0 |
 
 Medians in ms. Rounds 6 and 7 are the launcher as it ships; 4 and 5 the same with the earlier
-ownership check, 1 to 3 with none. `oboete --help` alone goes 62 ms to 44 ms warm. The launcher build sits at the pre-US6
-baseline, so compile cost accounted for the whole regression. Note what that does *not* say: the
-0008 schema still costs whatever it costs at `openDatabase`, and the cache now compensates for it
-rather than removing it. The first hook after an upgrade still finds an empty cache and pays the
-uncached ~222 ms once per version, inside the bound.
+ownership check, 1 to 3 with none. `oboete --help` alone goes 62 ms to 44 ms warm.
+
+The launcher build sits at the pre-US6 baseline, so compile cost accounted for the whole
+regression. Note what that does *not* say: the 0008 schema still costs whatever it costs at
+`openDatabase`, and the cache now compensates for it rather than removing it. The first hook after
+an upgrade still finds an empty cache and pays the uncached ~222 ms once per version, inside the
+bound.
 
 Two accepted costs. The cache is unbounded -- Node keys entries on path and source hash and never
 evicts, so a directory of a few megabytes per distinct build accumulates for developers who rebuild

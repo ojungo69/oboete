@@ -124,6 +124,20 @@ test('a cache directory that is a symlink is refused', async () => {
   });
 });
 
+test('the engine is found through a bin symlink even with --preserve-symlinks-main', async () => {
+  await withTempHome((home) => {
+    // A global install runs the symlink npm puts in its bin directory. Under that flag
+    // `import.meta.url` is the link, so a relative import would look for the engine beside it.
+    const link = join(home, 'oboete');
+    symlinkSync(bin, link);
+    const result = spawnSync(process.execPath, ['--preserve-symlinks-main', link, '--version'], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: home, OBOETE_HOME: join(home, '.oboete') },
+    });
+    assert.equal(result.status, 0, result.stderr);
+  });
+});
+
 test('a home that cannot hold a cache costs the cache, not the command', async () => {
   await withTempHome((home) => {
     // A regular file where a directory would have to be: mkdir fails with ENOTDIR for every uid,
