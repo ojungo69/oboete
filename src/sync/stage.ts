@@ -109,7 +109,7 @@ export function stageBundle(
 function validateBody(db: DatabaseSync, staged: Staged, reader: Generator<Buffer>): void {
   const { header, scratch } = staged;
   const digest = createHash('sha256');
-  let bodyLines = 0;
+  let repoLines = 0;
   let revisionLines = 0;
   let heads = 0;
   const insertLine = scratch.prepare('INSERT INTO lines (revision_id, origin_id, kind, head, line_json) VALUES (?, ?, ?, ?, ?)');
@@ -120,12 +120,12 @@ function validateBody(db: DatabaseSync, staged: Staged, reader: Generator<Buffer
   for (const bytes of reader) {
     digest.update(bytes);
     digest.update('\n');
-    // Every body line (repo lines included) counts against the parsing bound, so a bundle cannot
-    // fill the plaintext with repo records that bypass the revision-line cap.
-    bodyLines += 1;
-    if (bodyLines > BOUNDS.revisionLines) throw new BundleRejected('body_lines_exceeded');
     const value = parseJson(bytes, 'line_not_json');
     if (value !== null && typeof value === 'object' && (value as Row).kind === 'repo') {
+      // Repo lines carry their own cap: the header only declares `revision_lines`, so without one a
+      // bundle could fill the plaintext with repo records that no bound counts.
+      repoLines += 1;
+      if (repoLines > BOUNDS.repoLines) throw new BundleRejected('repo_lines_exceeded');
       const repo = repoLineSchema.safeParse(value);
       if (!repo.success) throw new BundleRejected('invalid_repo_line', repo.error.issues[0]?.message ?? null);
       try { insertRepo.run(repo.data.origin_id, repo.data.identity_kind, repo.data.normalized_identity); }

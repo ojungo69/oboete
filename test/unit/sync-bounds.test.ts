@@ -221,6 +221,14 @@ test('every graph bound one over its value is rejected before apply, with the da
         },
       },
       {
+        name: 'repo lines', code: 'repo_lines_exceeded',
+        write: (path) => writeBundle(path, SENDER, (emit) => {
+          for (let i = 0; i <= BOUNDS.repoLines; i += 1) {
+            emit({ kind: 'repo', origin_id: `${SENDER}:common_dir:${hex(i, 64)}`, identity_kind: 'common_dir', normalized_identity: `/r/${String(i)}` });
+          }
+        }),
+      },
+      {
         name: 'revisions per origin', code: 'revisions_per_origin',
         write: (path) => writeBundle(path, SENDER, (emit) => {
           let parent: string[] = [];
@@ -240,6 +248,20 @@ test('every graph bound one over its value is rejected before apply, with the da
       assert.deepEqual(counts(db), before, bound.name);
       rmSync(path, { force: true });
     }
+  });
+});
+
+test('a bundle carrying exactly the repo-line cap is applied, so the bound never refuses a legal bundle', async () => {
+  await withReplicas(1, ([replica], dir) => {
+    const { db } = replica!;
+    const path = join(dir, `${SENDER}.repo-lines-at-cap.plain`);
+    writeBundle(path, SENDER, (emit) => {
+      for (let i = 0; i < BOUNDS.repoLines; i += 1) {
+        emit({ kind: 'repo', origin_id: `${SENDER}:common_dir:${hex(i, 64)}`, identity_kind: 'common_dir', normalized_identity: `/r/${String(i)}` });
+      }
+    });
+    assert.doesNotThrow(() => applyBundle(db, SENDER, path));
+    rmSync(path, { force: true });
   });
 });
 

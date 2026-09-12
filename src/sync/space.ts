@@ -162,7 +162,7 @@ function classesOf(classes: readonly string[]): SyncConfig['classes'] {
 export function showKey(paths: OboetePaths): string {
   const config = loadSyncConfig(paths);
   if (config === null) throw new SyncError('space_not_configured');
-  return keyLine(config.space_id, readKey(paths, config.space_id));
+  return keyLine(config.space_id, loadVerifiedKey(paths, config));
 }
 
 /** `oboete sync leave`: key, cursors, consent and this replica's own bundle file. */

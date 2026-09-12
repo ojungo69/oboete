@@ -535,6 +535,7 @@ MCP exposes `sync status` read-only. No MCP or agent path can push, pull or reso
 | Header line | 65,536 bytes |
 | Replicas per space directory (pull refuses above this) | 32 |
 | Revision lines per bundle | 1,000,000 (the native line cap) |
+| Repo lines per bundle | 4,096 (one line per distinct repository key; the header declares only `revision_lines`, so this bound is counted while parsing) |
 | Parents per revision | 64 (equal to heads per origin, so `resolve` can always cite every head) |
 | Heads per origin, and per local row after aliasing (checked inside the apply transaction) | 64 |
 | Revisions per origin | 4,096 |
@@ -893,9 +894,10 @@ already tracked as #196/#197):
 - the stage pass rejects a bundle that reuses a stored origin id with a different natural key: an
   origin's natural is its immutable identity, and a rebind would write a new payload onto the old
   local row without updating its material/content identity (stage, pinned);
-- every body line, `repo` lines included, counts against the parsing bound, so a bundle cannot fill
-  the plaintext with repo records that bypass the revision-line cap (stage; the 1 M bound is not
-  unit-tested);
+- `repo` lines carry their own 4,096-line cap, so a bundle cannot fill the plaintext with repo
+  records that no bound counts. A shared counter would have been wrong: the header schema admits
+  `revision_lines` up to exactly 1,000,000, so counting repo lines against that cap would reject a
+  bundle the header declares legal (stage, pinned in both directions — at the cap and over it);
 - the key file is verified against the consented key id before any bundle I/O, so a key swapped for
   another syntactically valid key never encrypts an unreadable push or rejects every peer
   (space, pinned);
@@ -907,6 +909,8 @@ already tracked as #196/#197):
 - context promotion repeats `passesClassRule`'s fail-closed guard, so a secret-floored or
   tombstoned context is never shipped even when a shipped payload references it (publish;
   defense-in-depth — the state does not arise from the honest path today).
+- `sync key show` verifies the key file too, so a swapped key is never carried to the next device,
+  and the CLI names the condition instead of printing the bare code (space/CLI, pinned);
 - Not closed here (added to #197): even with the hash validated, a peer can still author a revision
   whose payload names the recipient's own correct `common_dir` key (learnable from the recipient's
   published repo lines), so it lands in the recipient's local repository; distinguishing a peer's

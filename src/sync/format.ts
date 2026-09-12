@@ -13,6 +13,7 @@ export const BOUNDS = {
   headerBytes: 65_536,
   lineBytes: 4 * 1024 * 1024,
   revisionLines: 1_000_000,
+  repoLines: 4_096,
   parentsPerRevision: 64,
   headsPerOrigin: 64,
   revisionsPerOrigin: 4_096,

@@ -161,6 +161,7 @@ function describe(error: SyncError): string {
     case 'invalid_key_line': return 'That is not a valid key line.';
     case 'key_missing': return 'The space key file is missing.';
     case 'key_permissions': return 'The space key file must be readable by the owner only.';
+    case 'key_mismatch': return 'The space key file does not match the key this space was set up with. Restore the original key, or run `oboete sync leave` and join the space again.';
     case 'publish_failed': return `This device's snapshot could not be built (${String(error.detail.code)}); nothing was written.`;
     case 'invalid_classes': return 'Classes must be a non-empty list drawn from eligible, local_only and private; secret is never selectable.';
     case 'plaintext_too_large': return `This device's snapshot is ${String(error.detail.bytes)} bytes, over the 256 MiB bundle bound; nothing was written.`;

@@ -473,6 +473,8 @@ test('a key file swapped for a different valid key is rejected before any bundle
       const isMismatch = (error: unknown): boolean => error instanceof SyncError && error.code === 'key_mismatch';
       assert.throws(() => pushSpace(a, pathsA, { now: 20 }), isMismatch);
       assert.throws(() => pullSpace(a, pathsA, { now: 21 }), isMismatch);
+      // `key show` carries the key to the next device, so it must refuse a swapped one too.
+      assert.throws(() => showKey(pathsA), isMismatch);
     } finally { a.close(); b.close(); }
   });
 });
