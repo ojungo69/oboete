@@ -34,7 +34,7 @@ import {
 } from '../observer/reservation.js';
 import type { OboetePaths } from '../paths.js';
 import { credentialGuidance } from '../setup/consent.js';
-import { describe } from '../setup/setup.js';
+import { describe } from '../setup/report.js';
 import { transactionImmediate } from '../worker/lease.js';
 
 /**

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { redactValue } from "./agents.mjs";
+import {
+  redactValue,
+} from "./agent-events.mjs";
 
 const id = "2026-09-03T12-35-03-000Z";
 const forms = [

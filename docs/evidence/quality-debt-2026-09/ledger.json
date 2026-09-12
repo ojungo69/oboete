@@ -4954,5 +4954,320 @@
   "state": "fixed",
   "where": "#173",
   "confirmed": "67242108a7bfcfeaecda9a92f8ad3c8b0f3cd43f"
+ },
+ {
+  "service": "codacy",
+  "id": "161d5b6e6a57ae5ac63a3683a0271135",
+  "state": "fixed",
+  "where": "#185"
+ },
+ {
+  "service": "codacy",
+  "id": "6d0b78f8fc02642841c96cb14a549f20",
+  "state": "fixed",
+  "where": "#185"
+ },
+ {
+  "service": "codacy",
+  "id": "f347b941757ef85eff4d9e526869252e",
+  "state": "resolved",
+  "reason": "AcceptedUse",
+  "where": "single cohesive module after batch, citation and import-maintenance extraction: one bounded leased run owns queue passes, heartbeat, retry, summary completion and release (568 NLOC; 13.6% over 500)"
+ },
+ {
+  "service": "codacy",
+  "id": "d7031b338e6f7512b5fd5ed4a6257f17",
+  "state": "resolved",
+  "reason": "AcceptedUse",
+  "where": "single cohesive module after completed-run evaluation and report extraction: one stateful execution driver shares ReplayRun across fixture parsing, hook/worker startup, lease/pending windows, sample accumulation and cleanup (1143 NLOC; 128.6% over 500)"
+ },
+ {
+  "service": "codacy",
+  "id": "e4b6c81044d927678dcb047c885e9def",
+  "state": "resolved",
+  "reason": "AcceptedUse",
+  "where": "single cohesive module after wire assertions and reporting moved out: client registration, execution and cleanup form one transaction whose restoration is coupled to the commands it starts (546 NLOC; 9.2% over 500)"
+ },
+ {
+  "service": "codacy",
+  "id": "4d7c78512df37e8e9cd84c05be7b5457",
+  "state": "fixed",
+  "where": "#185"
+ },
+ {
+  "service": "codacy",
+  "id": "4bc93ee6ffd7581f439e52f96c13e4fb",
+  "state": "fixed",
+  "where": "#185"
+ },
+ {
+  "service": "codacy",
+  "id": "dbc89550977f0b36857c5f7f82d33f26",
+  "state": "fixed",
+  "where": "#185"
+ },
+ {
+  "service": "codacy",
+  "id": "7f441e27985b09cd86bb7ef37794fe8",
+  "state": "fixed",
+  "where": "#185"
+ },
+ {
+  "service": "codacy",
+  "id": "ed0feeaa35efccb803dbcc520496b603",
+  "state": "resolved",
+  "reason": "AcceptedUse",
+  "where": "single cohesive module after process/CLI and compaction-state extraction: one capture transaction shares the adapted/redacted draft, absolute deadline, turn/epoch decision and store-or-spool outcome (999 NLOC; 99.8% over 500)"
+ },
+ {
+  "service": "codacy",
+  "id": "7d9b63ea2aafe102e6476a3d93c9c9db",
+  "state": "fixed",
+  "where": "#185"
+ },
+ {
+  "service": "codacy",
+  "id": "102ad9e090737747988c737fdb66bd3b",
+  "state": "fixed",
+  "where": "#185"
+ },
+ {
+  "service": "codacy",
+  "id": "fae407241cd282592ae2df6f14985e91",
+  "state": "resolved",
+  "reason": "AcceptedUse",
+  "where": "single cohesive module after coverage validation and fixed corpus inputs moved out: one ordered emitter shares seeded clock/random state, session sequence and payload builders (1344 NLOC; 168.8% over 500)"
+ },
+ {
+  "service": "codacy",
+  "id": "13aac59837310b6e3f9466c6ec244d79",
+  "state": "fixed",
+  "where": "#185"
+ },
+ {
+  "service": "codacy",
+  "id": "e5c566331a7a4187809f6a4b25baaced",
+  "state": "fixed",
+  "where": "#185"
+ },
+ {
+  "service": "codacy",
+  "id": "925f06752f2e4d955e5cbd1226a388ba",
+  "state": "fixed",
+  "where": "#185"
+ },
+ {
+  "service": "codacy",
+  "id": "6c7d15e7863e4975dd4b61c93e5a93b1",
+  "state": "fixed",
+  "where": "#185"
+ },
+ {
+  "service": "codacy",
+  "id": "16267458dd41ebb61fa3aec7549291cc",
+  "state": "fixed",
+  "where": "#185"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFAMP8z18_BjK2pBK8",
+  "state": "resolved",
+  "where": "The unchanged local MCP harness writes the fixed report.json basename in the operator-selected, path.resolve-canonicalized --out directory; no agent-derived path or cross-user privilege enters this operation.",
+  "transition": "falsepositive",
+  "verdict": "controller: operator CLI/PATH; validation: fixed basename or argv, no agent-derived path/command; sink: local report write or subprocess; effect: ordinary operator-authorized filesystem/process access, no additional authority; not applicable.",
+  "confirmed": "HTTP 200 PR #185 2026-09-09T07:27:07.710Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFAMP8z18_BjK2pBK7",
+  "state": "resolved",
+  "where": "The unchanged local MCP harness writes the fixed report.md basename in the operator-selected, path.resolve-canonicalized --out directory; no agent-derived path or cross-user privilege enters this operation.",
+  "transition": "falsepositive",
+  "verdict": "controller: operator CLI/PATH; validation: fixed basename or argv, no agent-derived path/command; sink: local report write or subprocess; effect: ordinary operator-authorized filesystem/process access, no additional authority; not applicable.",
+  "confirmed": "HTTP 200 PR #185 2026-09-09T07:27:10.889Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFAMJqz18_BjK2pBK3",
+  "state": "resolved",
+  "where": "childEnv returns env from two exits, but the early exit skips the loop that deletes credential-named keys, so the two returned objects differ; the function does not always return the same value.",
+  "transition": "falsepositive",
+  "confirmed": "HTTP 200 PR #185 2026-09-09T07:27:13.959Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFAMJqz18_BjK2pBK4",
+  "state": "resolved",
+  "where": "The unchanged operator-run harness resolves fixed git argv through the operator PATH without a shell or agent-controlled executable/path input, so replacing a PATH executable requires authority already sufficient to execute code as that user.",
+  "transition": "falsepositive",
+  "verdict": "controller: operator CLI/PATH; validation: fixed basename or argv, no agent-derived path/command; sink: local report write or subprocess; effect: ordinary operator-authorized filesystem/process access, no additional authority; not applicable.",
+  "confirmed": "HTTP 200 PR #185 2026-09-09T07:27:18.049Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFAMJqz18_BjK2pBK5",
+  "state": "resolved",
+  "where": "The unchanged operator-run harness resolves fixed timeout argv through the operator PATH without a shell or agent-controlled executable/path input, so replacing a PATH executable requires authority already sufficient to execute code as that user.",
+  "transition": "falsepositive",
+  "verdict": "controller: operator CLI/PATH; validation: fixed basename or argv, no agent-derived path/command; sink: local report write or subprocess; effect: ordinary operator-authorized filesystem/process access, no additional authority; not applicable.",
+  "confirmed": "HTTP 200 PR #185 2026-09-09T07:27:23.367Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFAMJqz18_BjK2pBK6",
+  "state": "resolved",
+  "where": "waitUntil returns last from two exits, but last holds the first truthy result or the final falsy value at the deadline; the function does not always return the same value.",
+  "transition": "falsepositive",
+  "confirmed": "HTTP 200 PR #185 2026-09-09T07:27:27.563Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFAMTgz18_BjK2pBK9",
+  "state": "resolved",
+  "where": "The discarded JSON.parse(JSON.stringify(event)) is a serialisability check for the exact call that writes the JSONL line; structuredClone accepts values JSON.stringify rejects (BigInt) and drops nothing, so it would not catch the same inputs.",
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 PR #185 2026-09-09T07:27:31.813Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFAMXmz18_BjK2pBLB",
+  "state": "resolved",
+  "where": "runHook and runCapture consume this numeric return; returning undefined or a failure code would violate their specified always-zero CLI exit contract.",
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 PR #185 2026-09-09T07:27:35.944Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFAMWfz18_BjK2pBK-",
+  "state": "resolved",
+  "where": "String(row.session_id ?? '') is the intended coercion of whatever a Grok fixture payload carries as session_id (a number is a valid key for GROK_SESSION_ID and the resume lookup); a string-only guard would change that key",
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 PR #185 2026-09-09T07:27:42.100Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFAMWuz18_BjK2pBK_",
+  "state": "resolved",
+  "where": "The unchanged fixture reporter resolves fixed git argv through the operator PATH only to display its revision, with no fixture-selected command/path or authority beyond that already held by an actor who can replace a PATH executable.",
+  "transition": "falsepositive",
+  "verdict": "controller: operator CLI/PATH; validation: fixed basename or argv, no agent-derived path/command; sink: local report write or subprocess; effect: ordinary operator-authorized filesystem/process access, no additional authority; not applicable.",
+  "confirmed": "HTTP 200 PR #185 2026-09-09T07:27:46.537Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFAMXQz18_BjK2pBLA",
+  "state": "resolved",
+  "where": "runInject implements the agent-facing always-zero CLI contract: paused, missing-storage, successful delivery and logged failure all return zero so the calling agent is never blocked. Changing the numeric return would change that public contract; the body is unchanged from injection/inject.ts.",
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 PR #185 2026-09-09T07:27:50.519Z"
+ },
+ {
+  "service": "codacy",
+  "id": "48b2a00cb7eb3b5e6344415870d01661",
+  "state": "resolved",
+  "reason": "AcceptedUse",
+  "where": "single cohesive module: tests and simulator of the lifecycle execution state machine; independent state-evaluation, agent-preparation and reporting tests already moved to their own files (638 NLOC; 27.6% over 500)",
+  "confirmed": "HTTP 204 PR #185 2026-09-09T07:27:52.616Z"
+ },
+ {
+  "service": "codacy",
+  "id": "f24df26860d01b16c092756092dba6ce",
+  "state": "resolved",
+  "reason": "AcceptedUse",
+  "where": "single cohesive module: one lifecycle execution state machine couples parent seed, before/after snapshots, event barriers and teardown across resume, compact, fork and clear; reporting, state evaluation and process preparation are separate (724 NLOC; 44.8% over 500)",
+  "confirmed": "HTTP 204 PR #185 2026-09-09T07:27:52.902Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFANODz18_BjK2pBOa",
+  "state": "resolved",
+  "where": "The unchanged local MCP harness writes the fixed report.json basename in the operator-selected, path.resolve-canonicalized --out directory; no agent-derived path or cross-user privilege enters this operation.",
+  "transition": "falsepositive",
+  "verdict": "controller: operator CLI/PATH; validation: fixed basename or argv, no agent-derived path/command; sink: local report write or subprocess; effect: ordinary operator-authorized filesystem/process access, no additional authority; not applicable.",
+  "confirmed": "HTTP 200 branch 008-qd-d 2026-09-09T07:59:52.679Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFANODz18_BjK2pBOZ",
+  "state": "resolved",
+  "where": "The unchanged local MCP harness writes the fixed report.md basename in the operator-selected, path.resolve-canonicalized --out directory; no agent-derived path or cross-user privilege enters this operation.",
+  "transition": "falsepositive",
+  "verdict": "controller: operator CLI/PATH; validation: fixed basename or argv, no agent-derived path/command; sink: local report write or subprocess; effect: ordinary operator-authorized filesystem/process access, no additional authority; not applicable.",
+  "confirmed": "HTTP 200 branch 008-qd-d 2026-09-09T07:59:58.392Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFANNFz18_BjK2pBOV",
+  "state": "resolved",
+  "where": "childEnv returns env from two exits, but the early exit skips the loop that deletes credential-named keys, so the two returned objects differ; the function does not always return the same value.",
+  "transition": "falsepositive",
+  "confirmed": "HTTP 200 branch 008-qd-d 2026-09-09T08:00:02.020Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFANNFz18_BjK2pBOW",
+  "state": "resolved",
+  "where": "The unchanged operator-run harness resolves fixed git argv through the operator PATH without a shell or agent-controlled executable/path input, so replacing a PATH executable requires authority already sufficient to execute code as that user.",
+  "transition": "falsepositive",
+  "verdict": "controller: operator CLI/PATH; validation: fixed basename or argv, no agent-derived path/command; sink: local report write or subprocess; effect: ordinary operator-authorized filesystem/process access, no additional authority; not applicable.",
+  "confirmed": "HTTP 200 branch 008-qd-d 2026-09-09T08:00:06.317Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFANNFz18_BjK2pBOX",
+  "state": "resolved",
+  "where": "The unchanged operator-run harness resolves fixed timeout argv through the operator PATH without a shell or agent-controlled executable/path input, so replacing a PATH executable requires authority already sufficient to execute code as that user.",
+  "transition": "falsepositive",
+  "verdict": "controller: operator CLI/PATH; validation: fixed basename or argv, no agent-derived path/command; sink: local report write or subprocess; effect: ordinary operator-authorized filesystem/process access, no additional authority; not applicable.",
+  "confirmed": "HTTP 200 branch 008-qd-d 2026-09-09T08:00:09.969Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFANNFz18_BjK2pBOY",
+  "state": "resolved",
+  "where": "waitUntil returns last from two exits, but last holds the first truthy result or the final falsy value at the deadline; the function does not always return the same value.",
+  "transition": "falsepositive",
+  "confirmed": "HTTP 200 branch 008-qd-d 2026-09-09T08:00:12.678Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFANRiz18_BjK2pBOb",
+  "state": "resolved",
+  "where": "The discarded JSON.parse(JSON.stringify(event)) is a serialisability check for the exact call that writes the JSONL line; structuredClone accepts values JSON.stringify rejects (BigInt) and drops nothing, so it would not catch the same inputs.",
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 branch 008-qd-d 2026-09-09T08:00:15.621Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFANVkz18_BjK2pBOf",
+  "state": "resolved",
+  "where": "runHook and runCapture consume this numeric return; returning undefined or a failure code would violate their specified always-zero CLI exit contract.",
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 branch 008-qd-d 2026-09-09T08:00:20.034Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFANUFz18_BjK2pBOc",
+  "state": "resolved",
+  "where": "String(row.session_id ?? '') is the intended coercion of whatever a Grok fixture payload carries as session_id (a number is a valid key for GROK_SESSION_ID and the resume lookup); a string-only guard would change that key",
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 branch 008-qd-d 2026-09-09T08:00:26.218Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFANUaz18_BjK2pBOd",
+  "state": "resolved",
+  "where": "The unchanged fixture reporter resolves fixed git argv through the operator PATH only to display its revision, with no fixture-selected command/path or authority beyond that already held by an actor who can replace a PATH executable.",
+  "transition": "falsepositive",
+  "verdict": "controller: operator CLI/PATH; validation: fixed basename or argv, no agent-derived path/command; sink: local report write or subprocess; effect: ordinary operator-authorized filesystem/process access, no additional authority; not applicable.",
+  "confirmed": "HTTP 200 branch 008-qd-d 2026-09-09T08:00:29.109Z"
+ },
+ {
+  "service": "sonar",
+  "id": "AaCFANVEz18_BjK2pBOe",
+  "state": "resolved",
+  "where": "runInject implements the agent-facing always-zero CLI contract: paused, missing-storage, successful delivery and logged failure all return zero so the calling agent is never blocked. Changing the numeric return would change that public contract; the body is unchanged from injection/inject.ts.",
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 branch 008-qd-d 2026-09-09T08:00:32.082Z"
  }
 ]

@@ -14,7 +14,7 @@ import {
   type NewInjection,
   type WhyAttempt,
 } from '../../src/injection/ledger.js';
-import { DEGRADED_SENTENCES } from '../../src/injection/pack.js';
+import { DEGRADED_SENTENCES } from '../../src/injection/pack-format.js';
 import type { MemoryCliRuntime } from '../../src/memories-cli.js';
 import { oboetePaths } from '../../src/paths.js';
 import { resolveRepoIdentity } from '../../src/repo-identity.js';

@@ -1,0 +1,3218 @@
+{
+  "startedAt": "2026-09-08T18:36:55.813Z",
+  "lines": 1051,
+  "capture": {
+    "n": 717,
+    "p99": 222.7081204800053,
+    "under": 1,
+    "pass": true
+  },
+  "injection": {
+    "n": 418,
+    "samples": [
+      {
+        "agent": "claude",
+        "event": "SessionStart",
+        "seq": 1,
+        "session": "claude-01",
+        "ms": 188.77190800000002
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 2,
+        "session": "claude-01",
+        "ms": 191.93563400000005
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 6,
+        "session": "claude-01",
+        "ms": 196.26085599999988
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 10,
+        "session": "claude-01",
+        "ms": 195.77492899999993
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 14,
+        "session": "claude-01",
+        "ms": 201.5167919999999
+      },
+      {
+        "agent": "codex",
+        "event": "SessionStart",
+        "seq": 19,
+        "session": "codex-01",
+        "ms": 197.14350099999956
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 20,
+        "session": "codex-01",
+        "ms": 210.0294300000005
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 24,
+        "session": "codex-01",
+        "ms": 205.43188700000064
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 28,
+        "session": "codex-01",
+        "ms": 212.67388199999914
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 32,
+        "session": "codex-01",
+        "ms": 207.88869200000045
+      },
+      {
+        "agent": "grok",
+        "event": "SessionStart",
+        "seq": 37,
+        "session": "grok-01",
+        "ms": 196.24719799999912
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 38,
+        "session": "grok-01",
+        "ms": 210.8928990000004
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 39,
+        "session": "grok-01",
+        "ms": 178.09260699999868
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 40,
+        "session": "grok-01",
+        "ms": 204.13361199999963
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 42,
+        "session": "grok-01",
+        "ms": 200.0578370000003
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 43,
+        "session": "grok-01",
+        "ms": 195.4426739999999
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 44,
+        "session": "grok-01",
+        "ms": 193.92485400000078
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 46,
+        "session": "grok-01",
+        "ms": 210.46669799999836
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 47,
+        "session": "grok-01",
+        "ms": 196.29908699999942
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 48,
+        "session": "grok-01",
+        "ms": 190.40770900000098
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 50,
+        "session": "grok-01",
+        "ms": 225.08026000000064
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 51,
+        "session": "grok-01",
+        "ms": 208.7217639999999
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 52,
+        "session": "grok-01",
+        "ms": 212.394773
+      },
+      {
+        "agent": "pi",
+        "event": "session_start",
+        "seq": 55,
+        "session": "pi-01",
+        "ms": 130.45629299999928
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 56,
+        "session": "pi-01",
+        "ms": 137.89645599999858
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 59,
+        "session": "pi-01",
+        "ms": 134.73248199999944
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 62,
+        "session": "pi-01",
+        "ms": 128.11359200000152
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 65,
+        "session": "pi-01",
+        "ms": 130.9257719999987
+      },
+      {
+        "agent": "claude",
+        "event": "SessionStart",
+        "seq": 69,
+        "session": "claude-02",
+        "ms": 198.72532900000078
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 70,
+        "session": "claude-02",
+        "ms": 211.13557800000126
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 74,
+        "session": "claude-02",
+        "ms": 201.5245649999997
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 78,
+        "session": "claude-02",
+        "ms": 210.994794000002
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 82,
+        "session": "claude-02",
+        "ms": 207.5894339999977
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 86,
+        "session": "claude-02",
+        "ms": 211.53164599999945
+      },
+      {
+        "agent": "claude",
+        "event": "SessionStart",
+        "seq": 91,
+        "session": "claude-03",
+        "ms": 200.58042399999977
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 92,
+        "session": "claude-03",
+        "ms": 200.02068800000052
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 96,
+        "session": "claude-03",
+        "ms": 209.1200540000027
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 100,
+        "session": "claude-03",
+        "ms": 206.02134499999738
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 104,
+        "session": "claude-03",
+        "ms": 214.37108799999987
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 108,
+        "session": "claude-03",
+        "ms": 207.58933999999863
+      },
+      {
+        "agent": "codex",
+        "event": "SessionStart",
+        "seq": 113,
+        "session": "codex-02",
+        "ms": 197.62746799999877
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 114,
+        "session": "codex-02",
+        "ms": 206.49451500000214
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 118,
+        "session": "codex-02",
+        "ms": 200.03112300000066
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 122,
+        "session": "codex-02",
+        "ms": 209.87837500000023
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 126,
+        "session": "codex-02",
+        "ms": 209.45314299999882
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 130,
+        "session": "codex-02",
+        "ms": 216.6114379999999
+      },
+      {
+        "agent": "codex",
+        "event": "SessionStart",
+        "seq": 135,
+        "session": "codex-03",
+        "ms": 217.01164900000003
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 136,
+        "session": "codex-03",
+        "ms": 200.07227200000125
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 140,
+        "session": "codex-03",
+        "ms": 206.5807879999993
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 144,
+        "session": "codex-03",
+        "ms": 209.87154600000213
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 148,
+        "session": "codex-03",
+        "ms": 209.99946199999977
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 152,
+        "session": "codex-03",
+        "ms": 199.05967699999746
+      },
+      {
+        "agent": "grok",
+        "event": "SessionStart",
+        "seq": 157,
+        "session": "grok-02",
+        "ms": 214.89482600000338
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 158,
+        "session": "grok-02",
+        "ms": 252.73006699999678
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 159,
+        "session": "grok-02",
+        "ms": 199.66093499999988
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 160,
+        "session": "grok-02",
+        "ms": 219.49609899999632
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 162,
+        "session": "grok-02",
+        "ms": 221.28534000000218
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 163,
+        "session": "grok-02",
+        "ms": 186.68563300000096
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 164,
+        "session": "grok-02",
+        "ms": 198.81174500000634
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 166,
+        "session": "grok-02",
+        "ms": 221.20615999999427
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 167,
+        "session": "grok-02",
+        "ms": 191.2064670000036
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 168,
+        "session": "grok-02",
+        "ms": 197.78438599999936
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 170,
+        "session": "grok-02",
+        "ms": 210.92992799999774
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 171,
+        "session": "grok-02",
+        "ms": 193.71899599999597
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 172,
+        "session": "grok-02",
+        "ms": 192.33181099999638
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 174,
+        "session": "grok-02",
+        "ms": 206.00549799999862
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 175,
+        "session": "grok-02",
+        "ms": 179.47067400000378
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 176,
+        "session": "grok-02",
+        "ms": 194.779935999999
+      },
+      {
+        "agent": "grok",
+        "event": "SessionStart",
+        "seq": 179,
+        "session": "grok-03",
+        "ms": 195.2351320000016
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 180,
+        "session": "grok-03",
+        "ms": 211.53525100000115
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 181,
+        "session": "grok-03",
+        "ms": 178.69645899999887
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 182,
+        "session": "grok-03",
+        "ms": 191.6504780000032
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 184,
+        "session": "grok-03",
+        "ms": 201.1167340000029
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 185,
+        "session": "grok-03",
+        "ms": 180.62341899999592
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 186,
+        "session": "grok-03",
+        "ms": 191.02353500000027
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 188,
+        "session": "grok-03",
+        "ms": 211.36821299999428
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 189,
+        "session": "grok-03",
+        "ms": 201.58641499999794
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 190,
+        "session": "grok-03",
+        "ms": 213.4383069999967
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 192,
+        "session": "grok-03",
+        "ms": 277.5000099999961
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 193,
+        "session": "grok-03",
+        "ms": 263.11415999999736
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 194,
+        "session": "grok-03",
+        "ms": 243.24440799999866
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 196,
+        "session": "grok-03",
+        "ms": 215.2719950000028
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 197,
+        "session": "grok-03",
+        "ms": 189.0107300000018
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 198,
+        "session": "grok-03",
+        "ms": 195.75656300000264
+      },
+      {
+        "agent": "pi",
+        "event": "session_start",
+        "seq": 201,
+        "session": "pi-02",
+        "ms": 124.45827799999824
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 202,
+        "session": "pi-02",
+        "ms": 144.13002499999857
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 205,
+        "session": "pi-02",
+        "ms": 131.30331800000567
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 208,
+        "session": "pi-02",
+        "ms": 130.59397000000172
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 211,
+        "session": "pi-02",
+        "ms": 138.98033700000087
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 214,
+        "session": "pi-02",
+        "ms": 129.52053099999466
+      },
+      {
+        "agent": "pi",
+        "event": "session_start",
+        "seq": 218,
+        "session": "pi-03",
+        "ms": 129.48724399999628
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 219,
+        "session": "pi-03",
+        "ms": 129.36279900000227
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 222,
+        "session": "pi-03",
+        "ms": 134.92472599999746
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 225,
+        "session": "pi-03",
+        "ms": 144.44820099999924
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 228,
+        "session": "pi-03",
+        "ms": 143.04911900000297
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 231,
+        "session": "pi-03",
+        "ms": 155.7211599999937
+      },
+      {
+        "agent": "claude",
+        "event": "SessionStart",
+        "seq": 235,
+        "session": "claude-04",
+        "ms": 201.37740900000063
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 236,
+        "session": "claude-04",
+        "ms": 233.74550200000522
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 240,
+        "session": "claude-04",
+        "ms": 201.0034169999999
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 244,
+        "session": "claude-04",
+        "ms": 209.78929999999673
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 248,
+        "session": "claude-04",
+        "ms": 188.55483899999672
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 252,
+        "session": "claude-04",
+        "ms": 202.69309500000236
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 256,
+        "session": "claude-04",
+        "ms": 208.68364400000428
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 260,
+        "session": "claude-04",
+        "ms": 200.85225699999864
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 264,
+        "session": "claude-04",
+        "ms": 193.08208000000013
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 268,
+        "session": "claude-04",
+        "ms": 206.36042300000554
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 272,
+        "session": "claude-04",
+        "ms": 204.89599199999793
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 276,
+        "session": "claude-04",
+        "ms": 206.67165000000386
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 280,
+        "session": "claude-04",
+        "ms": 214.72540299999673
+      },
+      {
+        "agent": "claude",
+        "event": "SessionStart",
+        "seq": 285,
+        "session": "claude-05",
+        "ms": 200.8810189999931
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 286,
+        "session": "claude-05",
+        "ms": 217.14935200000764
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 290,
+        "session": "claude-05",
+        "ms": 212.19623400000273
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 294,
+        "session": "claude-05",
+        "ms": 202.39937199999986
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 298,
+        "session": "claude-05",
+        "ms": 213.5146720000048
+      },
+      {
+        "agent": "codex",
+        "event": "SessionStart",
+        "seq": 303,
+        "session": "codex-04",
+        "ms": 193.27122700000473
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 304,
+        "session": "codex-04",
+        "ms": 236.23585399999865
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 308,
+        "session": "codex-04",
+        "ms": 218.72791000000143
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 312,
+        "session": "codex-04",
+        "ms": 219.7135569999955
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 316,
+        "session": "codex-04",
+        "ms": 206.2081429999962
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 320,
+        "session": "codex-04",
+        "ms": 223.72235799999908
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 324,
+        "session": "codex-04",
+        "ms": 238.1994970000087
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 328,
+        "session": "codex-04",
+        "ms": 210.71173199999612
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 332,
+        "session": "codex-04",
+        "ms": 194.69433699999354
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 336,
+        "session": "codex-04",
+        "ms": 192.45217999999295
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 340,
+        "session": "codex-04",
+        "ms": 217.15246399999887
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 344,
+        "session": "codex-04",
+        "ms": 210.04141700000037
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 348,
+        "session": "codex-04",
+        "ms": 212.64004100000602
+      },
+      {
+        "agent": "codex",
+        "event": "SessionStart",
+        "seq": 353,
+        "session": "codex-05",
+        "ms": 204.43367800000124
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 354,
+        "session": "codex-05",
+        "ms": 202.68173100000422
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 358,
+        "session": "codex-05",
+        "ms": 215.58490399998846
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 362,
+        "session": "codex-05",
+        "ms": 207.85053300000436
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 366,
+        "session": "codex-05",
+        "ms": 212.20797499999753
+      },
+      {
+        "agent": "grok",
+        "event": "SessionStart",
+        "seq": 371,
+        "session": "grok-04",
+        "ms": 193.98926999999094
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 372,
+        "session": "grok-04",
+        "ms": 213.93335900000238
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 373,
+        "session": "grok-04",
+        "ms": 177.57363899999473
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 374,
+        "session": "grok-04",
+        "ms": 197.99631499999668
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 376,
+        "session": "grok-04",
+        "ms": 230.34493799999473
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 377,
+        "session": "grok-04",
+        "ms": 201.45612399998936
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 378,
+        "session": "grok-04",
+        "ms": 196.88225000000966
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 380,
+        "session": "grok-04",
+        "ms": 208.13439399999334
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 381,
+        "session": "grok-04",
+        "ms": 186.85166500000923
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 382,
+        "session": "grok-04",
+        "ms": 199.31381800000963
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 384,
+        "session": "grok-04",
+        "ms": 209.14180700000725
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 385,
+        "session": "grok-04",
+        "ms": 201.11191900000267
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 386,
+        "session": "grok-04",
+        "ms": 193.68415099999402
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 388,
+        "session": "grok-04",
+        "ms": 194.39568600000348
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 389,
+        "session": "grok-04",
+        "ms": 176.52046800000244
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 390,
+        "session": "grok-04",
+        "ms": 204.57419400000072
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 392,
+        "session": "grok-04",
+        "ms": 198.79821900000388
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 393,
+        "session": "grok-04",
+        "ms": 188.06518100001267
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 394,
+        "session": "grok-04",
+        "ms": 190.9922910000023
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 396,
+        "session": "grok-04",
+        "ms": 198.1695550000004
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 397,
+        "session": "grok-04",
+        "ms": 176.91019300000335
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 398,
+        "session": "grok-04",
+        "ms": 189.8543570000038
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 400,
+        "session": "grok-04",
+        "ms": 228.06010000000242
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 401,
+        "session": "grok-04",
+        "ms": 213.95807900000364
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 402,
+        "session": "grok-04",
+        "ms": 218.21800300000177
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 404,
+        "session": "grok-04",
+        "ms": 223.12257500000123
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 405,
+        "session": "grok-04",
+        "ms": 205.20023899999796
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 406,
+        "session": "grok-04",
+        "ms": 213.33008900001005
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 408,
+        "session": "grok-04",
+        "ms": 213.66085500000918
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 409,
+        "session": "grok-04",
+        "ms": 209.88628999999491
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 410,
+        "session": "grok-04",
+        "ms": 207.5575850000023
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 412,
+        "session": "grok-04",
+        "ms": 208.3835770000005
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 413,
+        "session": "grok-04",
+        "ms": 182.6794549999904
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 414,
+        "session": "grok-04",
+        "ms": 205.89390700000513
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 416,
+        "session": "grok-04",
+        "ms": 211.43676600001345
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 417,
+        "session": "grok-04",
+        "ms": 190.65600000000268
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 418,
+        "session": "grok-04",
+        "ms": 197.68954700000177
+      },
+      {
+        "agent": "grok",
+        "event": "SessionStart",
+        "seq": 421,
+        "session": "grok-05",
+        "ms": 213.05143099999987
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 422,
+        "session": "grok-05",
+        "ms": 214.93405399999756
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 423,
+        "session": "grok-05",
+        "ms": 180.08240699999442
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 424,
+        "session": "grok-05",
+        "ms": 190.0309750000015
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 426,
+        "session": "grok-05",
+        "ms": 226.33604300000297
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 427,
+        "session": "grok-05",
+        "ms": 192.7625609999959
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 428,
+        "session": "grok-05",
+        "ms": 207.59856600000057
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 430,
+        "session": "grok-05",
+        "ms": 224.31950199999847
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 431,
+        "session": "grok-05",
+        "ms": 205.29882900000666
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 432,
+        "session": "grok-05",
+        "ms": 200.6060129999969
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 434,
+        "session": "grok-05",
+        "ms": 211.37117399999988
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 435,
+        "session": "grok-05",
+        "ms": 193.18558800000756
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 436,
+        "session": "grok-05",
+        "ms": 203.43524000000616
+      },
+      {
+        "agent": "pi",
+        "event": "session_start",
+        "seq": 439,
+        "session": "pi-04",
+        "ms": 127.72215299999516
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 440,
+        "session": "pi-04",
+        "ms": 136.38475199999812
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 443,
+        "session": "pi-04",
+        "ms": 132.8468140000041
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 446,
+        "session": "pi-04",
+        "ms": 114.10797899999307
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 449,
+        "session": "pi-04",
+        "ms": 133.47982500000217
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 452,
+        "session": "pi-04",
+        "ms": 134.82657299999846
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 455,
+        "session": "pi-04",
+        "ms": 127.89187599999423
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 458,
+        "session": "pi-04",
+        "ms": 126.0951209999912
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 461,
+        "session": "pi-04",
+        "ms": 135.28594200000225
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 464,
+        "session": "pi-04",
+        "ms": 115.85453699999198
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 467,
+        "session": "pi-04",
+        "ms": 129.04601799999364
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 470,
+        "session": "pi-04",
+        "ms": 129.94299399999727
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 473,
+        "session": "pi-04",
+        "ms": 131.09506700000202
+      },
+      {
+        "agent": "pi",
+        "event": "session_start",
+        "seq": 477,
+        "session": "pi-05",
+        "ms": 133.1872449999937
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 478,
+        "session": "pi-05",
+        "ms": 133.02527699999337
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 481,
+        "session": "pi-05",
+        "ms": 136.21862899999542
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 484,
+        "session": "pi-05",
+        "ms": 130.38478300000133
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 487,
+        "session": "pi-05",
+        "ms": 131.71479300000647
+      },
+      {
+        "agent": "claude",
+        "event": "SessionStart",
+        "seq": 491,
+        "session": "claude-06",
+        "ms": 191.01956200000132
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 492,
+        "session": "claude-06",
+        "ms": 202.14878799999133
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 496,
+        "session": "claude-06",
+        "ms": 211.22811699999147
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 500,
+        "session": "claude-06",
+        "ms": 205.04412999999477
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 504,
+        "session": "claude-06",
+        "ms": 222.87024600000586
+      },
+      {
+        "agent": "codex",
+        "event": "SessionStart",
+        "seq": 509,
+        "session": "codex-06",
+        "ms": 199.36806399999477
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 510,
+        "session": "codex-06",
+        "ms": 208.45099199999822
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 514,
+        "session": "codex-06",
+        "ms": 214.31719300000987
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 518,
+        "session": "codex-06",
+        "ms": 206.4576839999936
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 522,
+        "session": "codex-06",
+        "ms": 225.1737310000026
+      },
+      {
+        "agent": "grok",
+        "event": "SessionStart",
+        "seq": 527,
+        "session": "grok-06",
+        "ms": 296.3738799999992
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 528,
+        "session": "grok-06",
+        "ms": 462.1021839999885
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 529,
+        "session": "grok-06",
+        "ms": 262.861665000004
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 532,
+        "session": "grok-06",
+        "ms": 315.43159500000183
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 533,
+        "session": "grok-06",
+        "ms": 344.49110899999505
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 534,
+        "session": "grok-06",
+        "ms": 217.34325899998657
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 536,
+        "session": "grok-06",
+        "ms": 215.2174720000039
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 537,
+        "session": "grok-06",
+        "ms": 191.14871200000925
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 540,
+        "session": "grok-06",
+        "ms": 210.33290899998974
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 541,
+        "session": "grok-06",
+        "ms": 182.12031299999217
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 542,
+        "session": "grok-06",
+        "ms": 190.38121300000057
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 544,
+        "session": "grok-06",
+        "ms": 204.24453600001289
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 545,
+        "session": "grok-06",
+        "ms": 192.2513340000005
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 546,
+        "session": "grok-06",
+        "ms": 188.69808100000955
+      },
+      {
+        "agent": "pi",
+        "event": "session_start",
+        "seq": 549,
+        "session": "pi-06",
+        "ms": 126.69300199999998
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 550,
+        "session": "pi-06",
+        "ms": 157.69132299999183
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 553,
+        "session": "pi-06",
+        "ms": 138.64955600000394
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 556,
+        "session": "pi-06",
+        "ms": 135.269941999999
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 559,
+        "session": "pi-06",
+        "ms": 136.915737000003
+      },
+      {
+        "agent": "claude",
+        "event": "SessionStart",
+        "seq": 563,
+        "session": "claude-07",
+        "ms": 190.95592900000338
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 564,
+        "session": "claude-07",
+        "ms": 201.41331599999103
+      },
+      {
+        "agent": "claude",
+        "event": "SessionStart",
+        "seq": 568,
+        "session": "claude-07",
+        "ms": 185.06418800001848
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 569,
+        "session": "claude-07",
+        "ms": 212.25097399999504
+      },
+      {
+        "agent": "claude",
+        "event": "SessionStart",
+        "seq": 573,
+        "session": "claude-07",
+        "ms": 192.66140599999926
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 575,
+        "session": "claude-07",
+        "ms": 205.29282599998987
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 579,
+        "session": "claude-07",
+        "ms": 216.37368300001253
+      },
+      {
+        "agent": "claude",
+        "event": "SessionStart",
+        "seq": 583,
+        "session": "claude-08",
+        "ms": 181.51694200001657
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 584,
+        "session": "claude-08",
+        "ms": 214.70401899999706
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 588,
+        "session": "claude-08",
+        "ms": 211.65484599999036
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 592,
+        "session": "claude-08",
+        "ms": 225.40747899998678
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 596,
+        "session": "claude-08",
+        "ms": 204.6826810000057
+      },
+      {
+        "agent": "claude",
+        "event": "SessionStart",
+        "seq": 602,
+        "session": "claude-09",
+        "ms": 221.94293499999912
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 603,
+        "session": "claude-09",
+        "ms": 221.76505799998995
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 607,
+        "session": "claude-09",
+        "ms": 231.18906699999934
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 611,
+        "session": "claude-09",
+        "ms": 213.8875859999971
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 615,
+        "session": "claude-09",
+        "ms": 222.60161800001515
+      },
+      {
+        "agent": "codex",
+        "event": "SessionStart",
+        "seq": 620,
+        "session": "codex-07",
+        "ms": 194.0997900000075
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 621,
+        "session": "codex-07",
+        "ms": 197.99380600001314
+      },
+      {
+        "agent": "codex",
+        "event": "SessionStart",
+        "seq": 625,
+        "session": "codex-07",
+        "ms": 176.91633199999342
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 626,
+        "session": "codex-07",
+        "ms": 212.54769899998792
+      },
+      {
+        "agent": "codex",
+        "event": "SessionStart",
+        "seq": 631,
+        "session": "codex-07",
+        "ms": 189.268670999998
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 632,
+        "session": "codex-07",
+        "ms": 202.58484599998337
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 636,
+        "session": "codex-07",
+        "ms": 206.63193999999203
+      },
+      {
+        "agent": "codex",
+        "event": "SessionStart",
+        "seq": 640,
+        "session": "codex-08",
+        "ms": 189.5798899999936
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 641,
+        "session": "codex-08",
+        "ms": 204.6983889999974
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 645,
+        "session": "codex-08",
+        "ms": 226.8604789999954
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 649,
+        "session": "codex-08",
+        "ms": 230.13483799999813
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 653,
+        "session": "codex-08",
+        "ms": 211.96135599998524
+      },
+      {
+        "agent": "grok",
+        "event": "SessionStart",
+        "seq": 659,
+        "session": "grok-07",
+        "ms": 188.26184600000852
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 660,
+        "session": "grok-07",
+        "ms": 201.32047100001364
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 661,
+        "session": "grok-07",
+        "ms": 177.0606980000157
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 662,
+        "session": "grok-07",
+        "ms": 221.14224400001694
+      },
+      {
+        "agent": "grok",
+        "event": "SessionStart",
+        "seq": 664,
+        "session": "grok-07",
+        "ms": 180.49018900000374
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 665,
+        "session": "grok-07",
+        "ms": 210.27062599998317
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 666,
+        "session": "grok-07",
+        "ms": 192.6383710000082
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 667,
+        "session": "grok-07",
+        "ms": 185.7140650000074
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 671,
+        "session": "grok-07",
+        "ms": 204.77295399998548
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 672,
+        "session": "grok-07",
+        "ms": 189.78979299997445
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 673,
+        "session": "grok-07",
+        "ms": 193.15210100001423
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 675,
+        "session": "grok-07",
+        "ms": 206.51878799998667
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 676,
+        "session": "grok-07",
+        "ms": 182.10588699998334
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 677,
+        "session": "grok-07",
+        "ms": 188.05874700000277
+      },
+      {
+        "agent": "grok",
+        "event": "SessionStart",
+        "seq": 679,
+        "session": "grok-08",
+        "ms": 204.31916800001636
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 680,
+        "session": "grok-08",
+        "ms": 233.16880899999524
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 681,
+        "session": "grok-08",
+        "ms": 192.51070499999332
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 682,
+        "session": "grok-08",
+        "ms": 218.00720299998648
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 684,
+        "session": "grok-08",
+        "ms": 218.94338800001424
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 685,
+        "session": "grok-08",
+        "ms": 201.99331799999345
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 686,
+        "session": "grok-08",
+        "ms": 192.7889290000021
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 688,
+        "session": "grok-08",
+        "ms": 237.94052299999748
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 689,
+        "session": "grok-08",
+        "ms": 196.6886929999746
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 690,
+        "session": "grok-08",
+        "ms": 194.82497700001113
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 692,
+        "session": "grok-08",
+        "ms": 203.97621299998718
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 693,
+        "session": "grok-08",
+        "ms": 205.41404299999704
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 694,
+        "session": "grok-08",
+        "ms": 188.2522230000177
+      },
+      {
+        "agent": "grok",
+        "event": "SessionStart",
+        "seq": 697,
+        "session": "grok-09",
+        "ms": 201.95522800000617
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 698,
+        "session": "grok-09",
+        "ms": 220.19370000000345
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 699,
+        "session": "grok-09",
+        "ms": 199.2922939999844
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 700,
+        "session": "grok-09",
+        "ms": 198.99093600001652
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 702,
+        "session": "grok-09",
+        "ms": 216.60089699999662
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 703,
+        "session": "grok-09",
+        "ms": 181.253521000006
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 704,
+        "session": "grok-09",
+        "ms": 196.76149999999325
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 706,
+        "session": "grok-09",
+        "ms": 200.33767000000807
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 707,
+        "session": "grok-09",
+        "ms": 186.96046099998057
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 708,
+        "session": "grok-09",
+        "ms": 186.5746719999879
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 710,
+        "session": "grok-09",
+        "ms": 223.88204300001962
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 711,
+        "session": "grok-09",
+        "ms": 194.11840000000666
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 712,
+        "session": "grok-09",
+        "ms": 193.9614569999976
+      },
+      {
+        "agent": "pi",
+        "event": "session_start",
+        "seq": 716,
+        "session": "pi-07",
+        "ms": 131.23841900000116
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 717,
+        "session": "pi-07",
+        "ms": 144.26127700001234
+      },
+      {
+        "agent": "pi",
+        "event": "session_start",
+        "seq": 720,
+        "session": "pi-07",
+        "ms": 118.6275500000047
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 721,
+        "session": "pi-07",
+        "ms": 150.92595400000573
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 725,
+        "session": "pi-07",
+        "ms": 131.90173199999845
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 728,
+        "session": "pi-07",
+        "ms": 133.5002969999914
+      },
+      {
+        "agent": "pi",
+        "event": "session_start",
+        "seq": 732,
+        "session": "pi-08",
+        "ms": 134.87099199998192
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 733,
+        "session": "pi-08",
+        "ms": 133.8748889999988
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 736,
+        "session": "pi-08",
+        "ms": 149.6422190000012
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 739,
+        "session": "pi-08",
+        "ms": 127.65418599999975
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 742,
+        "session": "pi-08",
+        "ms": 131.65824200000498
+      },
+      {
+        "agent": "pi",
+        "event": "session_start",
+        "seq": 746,
+        "session": "pi-09",
+        "ms": 148.13093300000764
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 747,
+        "session": "pi-09",
+        "ms": 133.6182259999914
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 750,
+        "session": "pi-09",
+        "ms": 146.41514199998346
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 753,
+        "session": "pi-09",
+        "ms": 133.1608680000063
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 756,
+        "session": "pi-09",
+        "ms": 154.06111899999087
+      },
+      {
+        "agent": "claude",
+        "event": "SessionStart",
+        "seq": 760,
+        "session": "claude-10",
+        "ms": 201.48219099998823
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 761,
+        "session": "claude-10",
+        "ms": 197.3980379999848
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 763,
+        "session": "claude-10",
+        "ms": 213.2280080000055
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 767,
+        "session": "claude-10",
+        "ms": 215.42925899999682
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 771,
+        "session": "claude-10",
+        "ms": 210.91293900000164
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 777,
+        "session": "grok-10",
+        "ms": 178.53502499999013
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 779,
+        "session": "grok-10",
+        "ms": 210.25035899999784
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 780,
+        "session": "grok-10",
+        "ms": 184.3519339999766
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 781,
+        "session": "grok-10",
+        "ms": 190.13634199998342
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 783,
+        "session": "grok-10",
+        "ms": 207.21207300000242
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 784,
+        "session": "grok-10",
+        "ms": 191.33072499997797
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 785,
+        "session": "grok-10",
+        "ms": 197.43160599999828
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 787,
+        "session": "grok-10",
+        "ms": 203.91977599999518
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 788,
+        "session": "grok-10",
+        "ms": 186.0337040000013
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 789,
+        "session": "grok-10",
+        "ms": 185.54486100000213
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 793,
+        "session": "codex-09",
+        "ms": 183.56827299998258
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 795,
+        "session": "codex-09",
+        "ms": 236.37009699997725
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 799,
+        "session": "codex-09",
+        "ms": 209.96762700000545
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 803,
+        "session": "codex-09",
+        "ms": 206.23511899998994
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 811,
+        "session": "pi-10",
+        "ms": 132.97083100001328
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 814,
+        "session": "pi-10",
+        "ms": 139.6132660000003
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 817,
+        "session": "pi-10",
+        "ms": 128.66734799998812
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 822,
+        "session": "claude-11",
+        "ms": 203.29993300000206
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 826,
+        "session": "claude-11",
+        "ms": 211.21948199998587
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 830,
+        "session": "claude-11",
+        "ms": 218.02016700000968
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 834,
+        "session": "claude-11",
+        "ms": 212.54297900001984
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 838,
+        "session": "claude-11",
+        "ms": 215.92970600002445
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 842,
+        "session": "claude-11",
+        "ms": 207.00484199999482
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 846,
+        "session": "claude-11",
+        "ms": 221.10272500000428
+      },
+      {
+        "agent": "claude",
+        "event": "UserPromptSubmit",
+        "seq": 850,
+        "session": "claude-11",
+        "ms": 203.96700499998406
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 856,
+        "session": "codex-10",
+        "ms": 219.19597699999576
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 860,
+        "session": "codex-10",
+        "ms": 212.46260100000654
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 864,
+        "session": "codex-10",
+        "ms": 209.17821400001412
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 868,
+        "session": "codex-10",
+        "ms": 211.59773899998982
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 872,
+        "session": "codex-10",
+        "ms": 217.53575300000375
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 878,
+        "session": "codex-11",
+        "ms": 241.17525899998145
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 882,
+        "session": "codex-11",
+        "ms": 239.01668099997914
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 886,
+        "session": "codex-11",
+        "ms": 209.489757000003
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 890,
+        "session": "codex-11",
+        "ms": 204.31043099999079
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 894,
+        "session": "codex-11",
+        "ms": 209.4051819999877
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 898,
+        "session": "codex-11",
+        "ms": 212.72211800000514
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 902,
+        "session": "codex-11",
+        "ms": 193.27798600000096
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 906,
+        "session": "codex-11",
+        "ms": 200.54419300000882
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 910,
+        "session": "codex-11",
+        "ms": 205.03096499998355
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 914,
+        "session": "codex-11",
+        "ms": 208.97744099999545
+      },
+      {
+        "agent": "codex",
+        "event": "UserPromptSubmit",
+        "seq": 918,
+        "session": "codex-11",
+        "ms": 194.13715999998385
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 924,
+        "session": "grok-11",
+        "ms": 218.83459199999925
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 925,
+        "session": "grok-11",
+        "ms": 184.19669299997622
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 926,
+        "session": "grok-11",
+        "ms": 194.29531700001098
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 928,
+        "session": "grok-11",
+        "ms": 218.20074000000022
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 929,
+        "session": "grok-11",
+        "ms": 194.50691100000404
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 930,
+        "session": "grok-11",
+        "ms": 193.38547800001106
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 932,
+        "session": "grok-11",
+        "ms": 215.19470299998648
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 933,
+        "session": "grok-11",
+        "ms": 201.86864299999434
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 934,
+        "session": "grok-11",
+        "ms": 192.87945800001035
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 936,
+        "session": "grok-11",
+        "ms": 213.59569300001021
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 937,
+        "session": "grok-11",
+        "ms": 187.20541799999774
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 938,
+        "session": "grok-11",
+        "ms": 196.2962300000072
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 940,
+        "session": "grok-11",
+        "ms": 202.8749329999846
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 941,
+        "session": "grok-11",
+        "ms": 179.95804900000803
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 942,
+        "session": "grok-11",
+        "ms": 192.31157599997823
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 944,
+        "session": "grok-11",
+        "ms": 208.98639400000684
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 945,
+        "session": "grok-11",
+        "ms": 192.99951999998302
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 946,
+        "session": "grok-11",
+        "ms": 191.3589750000101
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 948,
+        "session": "grok-11",
+        "ms": 209.7194989999989
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 949,
+        "session": "grok-11",
+        "ms": 192.27549999998882
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 950,
+        "session": "grok-11",
+        "ms": 192.5815120000043
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 952,
+        "session": "grok-11",
+        "ms": 193.0047429999977
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 953,
+        "session": "grok-11",
+        "ms": 187.11688899999717
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 954,
+        "session": "grok-11",
+        "ms": 193.19971699998132
+      },
+      {
+        "agent": "grok",
+        "event": "UserPromptSubmit",
+        "seq": 956,
+        "session": "grok-11",
+        "ms": 213.30672799999593
+      },
+      {
+        "agent": "grok",
+        "event": "PreToolUse",
+        "seq": 957,
+        "session": "grok-11",
+        "ms": 183.9212899999984
+      },
+      {
+        "agent": "grok",
+        "event": "PostToolUse",
+        "seq": 958,
+        "session": "grok-11",
+        "ms": 199.56815199999255
+      },
+      {
+        "agent": "pi",
+        "event": "session_start",
+        "seq": 961,
+        "session": "pi-11",
+        "ms": 129.48449799997616
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 962,
+        "session": "pi-11",
+        "ms": 136.06901199999265
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 965,
+        "session": "pi-11",
+        "ms": 134.24868399999104
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 968,
+        "session": "pi-11",
+        "ms": 145.0713289999985
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 971,
+        "session": "pi-11",
+        "ms": 136.5922309999878
+      },
+      {
+        "agent": "pi",
+        "event": "session_start",
+        "seq": 975,
+        "session": "pi-12",
+        "ms": 129.2953189999971
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 976,
+        "session": "pi-12",
+        "ms": 139.22591300000204
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 979,
+        "session": "pi-12",
+        "ms": 136.57211500001722
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 982,
+        "session": "pi-12",
+        "ms": 134.62691500000074
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 985,
+        "session": "pi-12",
+        "ms": 160.94586499998695
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 988,
+        "session": "pi-12",
+        "ms": 143.48038500000257
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 991,
+        "session": "pi-12",
+        "ms": 140.94713899999624
+      },
+      {
+        "agent": "pi",
+        "event": "session_start",
+        "seq": 995,
+        "session": "pi-13",
+        "ms": 133.33668199999374
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 996,
+        "session": "pi-13",
+        "ms": 148.04016400000546
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 999,
+        "session": "pi-13",
+        "ms": 141.37885900001856
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1002,
+        "session": "pi-13",
+        "ms": 135.26480000000447
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1005,
+        "session": "pi-13",
+        "ms": 143.9610260000045
+      },
+      {
+        "agent": "pi",
+        "event": "session_start",
+        "seq": 1009,
+        "session": "pi-14",
+        "ms": 127.08630900000571
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1010,
+        "session": "pi-14",
+        "ms": 133.14836200000718
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1013,
+        "session": "pi-14",
+        "ms": 134.9286049999937
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1016,
+        "session": "pi-14",
+        "ms": 128.53704300001846
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1019,
+        "session": "pi-14",
+        "ms": 139.27050700000837
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1022,
+        "session": "pi-14",
+        "ms": 136.30053099998622
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1027,
+        "session": "pi-15",
+        "ms": 135.1930730000022
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1030,
+        "session": "pi-15",
+        "ms": 125.54723299999023
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1033,
+        "session": "pi-15",
+        "ms": 135.88889400000335
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1036,
+        "session": "pi-15",
+        "ms": 135.75077300000703
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1039,
+        "session": "pi-15",
+        "ms": 136.64820299998973
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1042,
+        "session": "pi-15",
+        "ms": 134.7209359999979
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1045,
+        "session": "pi-15",
+        "ms": 137.454756000021
+      },
+      {
+        "agent": "pi",
+        "event": "input",
+        "seq": 1048,
+        "session": "pi-15",
+        "ms": 145.5413520000002
+      }
+    ]
+  },
+  "sessionStart": {
+    "ready": {
+      "n": 45,
+      "max": 296.3738799999992,
+      "pass": true
+    },
+    "pending": {
+      "n": 4,
+      "max": 1211.6754939999955,
+      "summaryPending": 4,
+      "pass": true
+    }
+  },
+  "worker": {
+    "observeRuns": 43,
+    "hookWorkerRuns": 42,
+    "hookWorkerRssKb": 88620,
+    "rssKb": 116380,
+    "pass": true
+  },
+  "growth": {
+    "before": 221184,
+    "after": 3985488,
+    "perThousand": 3581640.342530923,
+    "rawEvents": 1322,
+    "memories": 87,
+    "injections": 292,
+    "injectionItems": 5464
+  },
+  "secrets": {
+    "leaked": [],
+    "negativesUnredacted": 0
+  },
+  "directives": {
+    "leaked": 0,
+    "rawRows": 64
+  },
+  "recall": {
+    "ja": 0.2,
+    "en": 0.15,
+    "overall": 0.175,
+    "misses": [
+      {
+        "id": "f-ja-08",
+        "query": "ビューア本文の色トークン名は？"
+      },
+      {
+        "id": "f-ja-12",
+        "query": "日本語パックのバケット名は？"
+      },
+      {
+        "id": "f-ja-16",
+        "query": "形態素フォールバックのライブラリと版は？"
+      },
+      {
+        "id": "f-ja-20",
+        "query": "日本語ターン予算のキー名は？"
+      },
+      {
+        "id": "f-en-01",
+        "query": "Which port does the sidecar listen on?"
+      },
+      {
+        "id": "f-en-05",
+        "query": "Where is the compaction epoch key computed?"
+      },
+      {
+        "id": "f-en-09",
+        "query": "What is the pack cache hostname?"
+      },
+      {
+        "id": "f-en-13",
+        "query": "Which bucket holds English packs?"
+      },
+      {
+        "id": "f-en-17",
+        "query": "Which library version does fallback packing use?"
+      },
+      {
+        "id": "f-ja-05",
+        "query": "検出器タイムアウトのログコードは？"
+      },
+      {
+        "id": "f-ja-09",
+        "query": "日本語 dogfood のログイン名は？"
+      },
+      {
+        "id": "f-ja-13",
+        "query": "正規化修正のコミットはどれ？"
+      },
+      {
+        "id": "f-ja-17",
+        "query": "セッション要約の最短間隔は何秒？"
+      },
+      {
+        "id": "f-en-06",
+        "query": "What error code is a stalled Pi child?"
+      },
+      {
+        "id": "f-en-10",
+        "query": "What is the viewer accent token name?"
+      },
+      {
+        "id": "f-en-14",
+        "query": "Which commit is the injection ledger fix?"
+      },
+      {
+        "id": "f-en-18",
+        "query": "What is the next English-side migration file?"
+      },
+      {
+        "id": "f-ja-06",
+        "query": "次に入れるマイグレーションのファイル名は？"
+      },
+      {
+        "id": "f-ja-10",
+        "query": "全角英数の正規化はどのファイル？"
+      },
+      {
+        "id": "f-ja-14",
+        "query": "日本語ヒントの環境変数名は？"
+      },
+      {
+        "id": "f-ja-18",
+        "query": "replay 作業ブランチ名は？"
+      },
+      {
+        "id": "f-en-07",
+        "query": "Which branch should the replay harness land on?"
+      },
+      {
+        "id": "f-en-11",
+        "query": "What is the English dogfood login name?"
+      },
+      {
+        "id": "f-en-15",
+        "query": "Which env var enables English retrieval traces?"
+      },
+      {
+        "id": "f-en-19",
+        "query": "What is the English turn budget key?"
+      },
+      {
+        "id": "f-ja-07",
+        "query": "社内 memory ホストの名前は？"
+      },
+      {
+        "id": "f-ja-11",
+        "query": "無料枠のリセット日はいつ？"
+      },
+      {
+        "id": "f-ja-15",
+        "query": "日本語 compact のキュー名は？"
+      },
+      {
+        "id": "f-ja-19",
+        "query": "鍵ローテは月のいつ？"
+      },
+      {
+        "id": "f-en-08",
+        "query": "How many seconds is the spool reclaim interval?"
+      },
+      {
+        "id": "f-en-12",
+        "query": "When is the next catalog freeze?"
+      },
+      {
+        "id": "f-en-16",
+        "query": "What is the English observer queue name?"
+      },
+      {
+        "id": "f-en-20",
+        "query": "Which model alias do Grok fixture sessions pin?"
+      }
+    ],
+    "pass": false
+  },
+  "duplicates": {
+    "groups": 0,
+    "rawEvents": 1322,
+    "lines": 1051,
+    "pass": true
+  },
+  "hooks": {
+    "n": 1143,
+    "failures": 0,
+    "pass": true
+  },
+  "lifecycle": [
+    {
+      "check": "fork",
+      "n": 3,
+      "pass": true,
+      "offenders": []
+    },
+    {
+      "check": "resume",
+      "n": 4,
+      "pass": true,
+      "offenders": []
+    },
+    {
+      "check": "compact",
+      "n": 4,
+      "pass": true,
+      "offenders": []
+    },
+    {
+      "check": "clear",
+      "n": 4,
+      "pass": true,
+      "offenders": []
+    }
+  ],
+  "bounds": [
+    {
+      "sc": "SC-002",
+      "measured": "p99 222.7 ms; 100.0% ≤ 300 ms (n=717)",
+      "bound": "p99 ≤ 300 ms and ≥99% of capture events ≤ 300 ms",
+      "status": "pass"
+    },
+    {
+      "sc": "injection",
+      "measured": "p99 275.1 ms; 99.3% ≤ 300 ms (n=418); worst grok/UserPromptSubmit p99 375.6 ms",
+      "bound": "every (agent, event) group passes: every injection hook ≤ 300 ms (previous summary ready)",
+      "status": "fail"
+    },
+    {
+      "sc": "session start",
+      "measured": "ready max 296.4 ms (n=45); pending max 1211.7 ms (n=4), 4/4 packs carry summary_pending",
+      "bound": "ready ≤ 300 ms; pending n > 0, every pack carries summary_pending and every sample ≤ 1300 ms (INJECTION_DEADLINE_MS: 300 ms budget + 1 s summary wait)",
+      "status": "pass"
+    },
+    {
+      "sc": "SC-003",
+      "measured": "max VmHWM 116380 kB (113.7 MB); observe runs: 43 spawned by replay, 42 hook-spawned (polled via worker_lease.pid); growth 3581640 bytes / 1,000 events",
+      "bound": "< 150 MB worker peak RSS; growth recorded",
+      "status": "pass"
+    },
+    {
+      "sc": "SC-005",
+      "measured": "0 secret ids in db/wal/spool/logs/packs",
+      "bound": "zero secret corpus values in db, wal, spool, logs, packs",
+      "status": "pass"
+    },
+    {
+      "sc": "SC-009",
+      "measured": "ja 20.0% (4/20); en 15.0% (3/20); overall 17.5% (7/40)",
+      "bound": "≥ 90% ja, en, and overall",
+      "status": "fail"
+    },
+    {
+      "sc": "SC-010",
+      "measured": "0 duplicate included (conversation_id, context_epoch, memory_id) groups; raw_events.id=1322 vs lines piped=1051",
+      "bound": "zero duplicate included memories per (conversation, epoch)",
+      "status": "pass"
+    },
+    {
+      "sc": "lifecycle",
+      "measured": "fork/resume/compact/clear all pass",
+      "bound": "every tagged sequence matches contracts/agents.md",
+      "status": "pass"
+    },
+    {
+      "sc": "directives",
+      "measured": "0 directive phrases in memories/packs",
+      "bound": "zero corpus directive phrases in memories and packs (FR-021)",
+      "status": "pass"
+    },
+    {
+      "sc": "hooks",
+      "measured": "all 1143 capture/injection hooks exited 0",
+      "bound": "all hooks exit 0",
+      "status": "pass"
+    }
+  ],
+  "failed": true
+}

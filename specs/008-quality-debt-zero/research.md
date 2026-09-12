@@ -74,7 +74,7 @@ POST /api/issues/add_comment    issue=<key>&text=<reason>
 
 Codacy counts after this batch: 397 − 287 = 110 (the 287: 4 in the excluded trees, 30 SQL, 44 Lizard on tests, 200 Opengrep on tests and harness, 8 MD024, 1 Stylelint), all in `src/` and non-harness `scripts/`, all handled by code or by per-issue verdict. The `.markdownlint.json` row needs no account action: Codacy read the file on the pull request's first analysis without the "Use configuration file" switch (R3's reading of the docs was wrong for markdownlint; the switch stays relevant only for tools whose file Codacy does not pick up on its own).
 
-**All 31 file-length findings** of the 2026-09-07 inventory (FR-016; NLOC from the Codacy inventory; decisions confirmed by reading at the post-C state). The 2026-09-08 refresh added four more — `scripts/e2e/probes/pi.mjs`, `src/observer/classify.ts`, `src/observer/llm.ts`, `src/setup/setup.ts`, the last three grown past 500 NLOC by C1 and C2 — which T036 reads and adds to the R7 table with their decision:
+**All 31 file-length findings** of the 2026-09-07 inventory (FR-016; NLOC from the Codacy inventory; decisions confirmed by reading at the post-C state). The 2026-09-08 refresh added four more — `scripts/e2e/probes/pi.mjs`, `src/observer/classify.ts`, `src/observer/llm.ts`, `src/setup/setup.ts`, the last three grown past 500 NLOC by C1 and C2 — and the 2026-09-09 read of the live search added a fifth, `scripts/e2e/probes/claude.mjs`, grown from 478 to 539 by C4. T036 read all of them and the R7 table carries the decision for each:
 
 | File | NLOC | Decision | Reason |
 |---|---|---|---|
@@ -97,7 +97,7 @@ Codacy counts after this batch: 397 − 287 = 110 (the 287: 4 in the excluded tr
 | `test/unit/queries.test.ts` | 515 | excluded | unit test file |
 | `test/unit/cli-memories.test.ts` | 502 | excluded | unit test file |
 | `scripts/e2e/isolated-user.test.mjs` | 1556 | resolved — won't fix | harness test file: one scenario list; stays measured by lizard (not under `test/`) and its 6 long functions are fixed in C4 |
-| the 13 source and harness files, plus the 4 added on 2026-09-08 | — | see R7 table | split at a seam or won't fix as a single cohesive module |
+| the 13 source and harness files, plus the 4 added on 2026-09-08 and 1 on 2026-09-09 | — | see R7 table | 6 split (`fixed`), 12 `resolved` |
 
 ## R5. Mechanical rewrites: batching and safety
 
@@ -146,22 +146,41 @@ Codacy counts after this batch: 397 − 287 = 110 (the 287: 4 in the excluded tr
 
 **Harness verification for C4 and D** (FR-017): the harness executes the `oboete` found on `PATH`, and the agents' hook and MCP entries carry the **absolute path of the bundle that `oboete setup` wrote**, so installing a candidate into another prefix and prepending it to `PATH` proves nothing on its own (the hooks would still run the daily install's bundle), and `oboete --version` prints the same package version for every candidate. The candidate run therefore: (1) packs the candidate SHA (`npm run build && npm pack`, memory `npm-pack-ships-stale-dist`) and records `sha256sum` of the tarball and of `dist/oboete.mjs` inside it; (2) installs it into `~oboete-dogfood/candidate` (a prefix the daily cron never uses); (3) runs `oboete setup --agents claude,codex,grok,pi --provider workers-ai --yes` from that prefix **with the real account `HOME` kept** (`sudo -u oboete-dogfood -H`; `isolated-user.mjs` refuses to run when `HOME` is not the account's home, and the agents' logins and oboete's consent record live in the real configuration directories) and the five configuration variables the harness and `oboete setup` both honour (`src/setup/detect.ts:216`, `isolated-user.mjs:758`) pointed at candidate-only copies: `OBOETE_HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`, `PI_CODING_AGENT_DIR`, each a `cp -a` of the daily directory (`~/.oboete`, `~/.claude`, `~/.codex`, `~/.grok`, `~/.pi/agent`) taken before the run, so the copies carry the logins and the consent tuple that `--yes` needs and the hook and MCP entries `oboete setup` writes into them reference `~oboete-dogfood/candidate/.../dist/oboete.mjs`; (4) checks, by reading each agent's configuration in the copies, that every `oboete` hook command and MCP entry points at the candidate bundle, that none references the daily install, and that the bundle's `sha256sum` equals the one recorded in step 1; (5) runs `isolated-user.mjs --daily --pairs all` with the same five variables and `PATH`, and `--lifecycle --agents claude,codex` when lifecycle or TUI code changed; (6) records the candidate SHA, the two hashes, the run id, the `12 of 12` line, and the doctor table in the PR body. The daily cron's install, home, and agent configurations are not modified: the copies are deleted after the run and the real directories are never written under a candidate variable. Trust: the candidate is this project's own branch, reviewed (codex-review, ponytail-review, bot triage) before the run, exactly like the `main` the daily cron executes after the merge; the `oboete-dogfood` account holds only the dogfood provider keys (`OBOETE_<PRESET>_API_KEY`), its own agent logins, and dogfood data, none of which is shared with the developer account, so a candidate run exposes nothing the daily run does not already expose. The repository accepts no external contributions.
 
-**Source and harness files over 500 NLOC and the seam decision rule** (FR-016; the 18 excluded files and `isolated-user.test.mjs` are in the R4 table; provisional, confirmed by reading in the implementation phase). The table below is the 2026-09-07 inventory's twelve files; T036 reads and adds a row for each of the four the 2026-09-08 refresh reported — `scripts/e2e/probes/pi.mjs`, `src/observer/classify.ts`, `src/observer/llm.ts`, `src/setup/setup.ts` — before batch D implements anything:
+**Source and harness file-length decisions** (FR-016). The R4 table records the eighteen excluded files; the table below records the other eighteen frozen findings. The left-hand NLOC is the post-C measurement used by T036, and the right-hand value is the integrated continuation measured with Lizard 1.24.0 on 2026-09-09.
 
-| File | NLOC | Provisional decision | Seam |
+FR-016 is unchanged: independently testable concerns move when they can do so without a runtime cycle. Whether the finding closes is measured afterwards. The continuation removes the earlier requirement that one extraction must bring a file under 500; it also removes file size and an earlier timing outlier as reasons to retain an independent concern. The engine is one esbuild ESM bundle, so these source modules do not add runtime filesystem module loads. Internal callers follow moved definitions, with type-only reverse references where necessary.
+
+All eighteen files now have their identified independent concerns separated. Thirteen original findings are planned `fixed #185`; five residual files remain `resolved` / `AcceptedUse` because the code left behind is one cohesive driver. Their reasons describe that remaining code, not the cost of further splits. The harness helpers remain in `probe-lib/`: every module discovered under `probes/` must still export `probes[]`.
+
+| File | NLOC before → after | Decision | Extracted concern / residual reason |
 |---|---|---|---|
-| `src/worker/observe.ts` | 941 | split | provider call / retry (`providerCall`, request shaping) vs. batch loop and lease |
-| `src/capture.ts` | 1063 | split | hook payload normalisation vs. store-or-spool write path |
-| `src/fixture/replay.ts` | 1697 | split | timing table and report rendering vs. lifecycle driver |
-| `src/injection/inject.ts` | 586 | won't fix | one concern (pack assembly); 17 % over threshold |
-| `src/injection/pack.ts` | 560 | won't fix | one concern (selection and rendering); 12 % over |
-| `src/worker/batches.ts` | 536 | won't fix | one concern (batch state machine); 7 % over |
-| `scripts/e2e/isolated-user.mjs` | 1852 | split | lifecycle TUI (`startLifecycleTui`) vs. run orchestration vs. report |
-| `scripts/fixtures/generate-1000-events.mjs` | 1627 | split | embedded data tables → JSON files, generator stays |
-| `scripts/e2e/probe-lib/agents.mjs` | 873 | won't fix | one concern (agent launch table), per-agent split would duplicate the shared launcher |
-| `scripts/e2e/mcp-clients.mjs` | 803 | won't fix | one concern (MCP client probes) |
-| `scripts/e2e/probes/grok.mjs` | 744 | won't fix | one probe suite |
-| `scripts/e2e/probes/codex.mjs` | 683 | won't fix | one probe suite |
+| `src/worker/batches.ts` | 570 → 411 | split → `fixed` | Spool recovery moved to `worker/spool-recovery.ts`; classification and batch creation stay. |
+| `src/setup/setup.ts` | 508 → 472 | split → `fixed` | Shared setup/doctor display helpers moved to `setup/report.ts`. |
+| `src/observer/classify.ts` | 648 → 374 | split → `fixed` | Observation apply moved to `observer/apply.ts`; the batch worker and direct tests import it there. Shared SQL constants and directive checks stay in `classify.ts`, without a runtime reverse import. |
+| `src/observer/llm.ts` | 595 → 483 | split → `fixed` | API error classification moved to `observer/llm-errors.ts`; prompt builders and provider calls stay. |
+| `scripts/e2e/probes/pi.mjs` | 566 → 467 | split → `fixed` | Error-log evidence moved to `probe-lib/pi-errors.mjs`; imports now follow the shared process/frame modules. |
+| `scripts/e2e/probes/claude.mjs` | 539 → 454 | split → `fixed` | TUI compaction driver moved to `probe-lib/claude-tui.mjs`; imports now follow the shared process/frame modules. |
+| `src/capture.ts` | 1182 → 999 | split → `resolved` | Process/CLI adapter moved to `capture-command.ts` and the pure compaction epoch state machine to `capture-compaction.ts`. The residual is the single capture transaction: one adapted/redacted draft, absolute deadline, turn/epoch decision and store-or-spool outcome; transaction tests enter through `captureEvent`; the three direct epoch-state tests follow their module. 99.8% over. |
+| `src/worker/observe.ts` | 1105 → 568 | split → `resolved` | Provider/fallback application, citation maintenance and imported-memory maintenance moved to `worker/observe-batch.ts`, `worker/citations.ts`, and `worker/imported.ts`. The residual owns one bounded leased run: queue passes, heartbeat, retry, summary completion and release. 13.6% over. |
+| `src/fixture/replay.ts` | 2106 → 1143 | split → `resolved` | Completed-run evaluation moved to `fixture/replay-evaluate.ts`, serialization to `fixture/replay-report.ts`. The residual is one stateful execution driver: fixture parsing, hook/worker startup, lease/pending windows, sample accumulation and cleanup share `ReplayRun`. 128.6% over. |
+| `scripts/e2e/isolated-user.mjs` | 1952 → 423 | split → `fixed` | Agent preparation, lifecycle state evaluation, lifecycle execution and lifecycle reporting moved to `probe-lib/isolated-agent.mjs`, `isolated-lifecycle-state.mjs`, `isolated-lifecycle.mjs`, and `isolated-lifecycle-report.mjs`. The entrypoint retains pair orchestration. |
+| `scripts/e2e/isolated-user.test.mjs` | 1636 → 214 | split → `fixed` | Agent, lifecycle-state, lifecycle-execution and lifecycle-report tests now follow their subjects; shared test setup moved once to `isolated-user.test-support.mjs`. Existing assertions remain. |
+| `scripts/fixtures/generate-1000-events.mjs` | 1817 → 1344 | split → `resolved` | Coverage validation and shared fixed corpus inputs moved to `fixtures/fixture-coverage.mjs`. The residual is the ordered emitter: its seeded clock/random state, session sequence and payload builders generate one deterministic stream. 168.8% over. |
+| `scripts/e2e/probe-lib/agents.mjs` | 899 → 334 | split → `fixed` | Process execution/environment handling moved to `process.mjs`; frame/evidence decoding moved to `agent-events.mjs`. The original owns agent home setup, launchers and their shared completion prompt. |
+| `scripts/e2e/mcp-clients.mjs` | 840 → 546 | split → `resolved` | Wire assertions moved to `probe-lib/mcp-assertions.mjs`, reporting to `probe-lib/mcp-report.mjs`. The residual is the registration/run/cleanup transaction for the client probe, with restoration coupled to the commands it starts. 9.2% over. |
+| `scripts/e2e/probes/grok.mjs` | 800 → 285 | split → `fixed` | Lifecycle and MCP probe descriptors moved to `probe-lib/grok-lifecycle.mjs` and `grok-mcp.mjs`; IDs and descriptor order remain. |
+| `scripts/e2e/probes/codex.mjs` | 746 → 183 | split → `fixed` | Lifecycle and MCP probe descriptors moved to `probe-lib/codex-lifecycle.mjs` and `codex-mcp.mjs`; IDs and descriptor order remain. |
+| `src/injection/inject.ts` | 657 → 419 | split → `fixed` | Pi command parsing, storage opening and CLI execution moved to `injection/pi.ts`; the shared hook delivery/validation path stays. |
+| `src/injection/pack.ts` | 602 → 470 | split → `fixed` | Pure framing and item rendering moved to `injection/pack-format.ts`; selection, privacy checks, budget and ledger remain together. |
+
+Two new files remain over 500 and have also been read under FR-016. They are not excluded. PR #185 analysis of `ebe687dc` reported native IDs `f24df26860d01b16c092756092dba6ce` (source) and `48b2a00cb7eb3b5e6344415870d01661` (test); T043e adds both to the inventory and ledger before final confirmation.
+
+| New file | NLOC | Decision / concern |
+|---|---:|---|
+| `scripts/e2e/probe-lib/isolated-lifecycle.mjs` | 724 | `AcceptedUse`: one lifecycle execution state machine; its parent-seed, before/after snapshots, event barriers and teardown order are coupled across resume/compact/fork/clear. Reporting, state evaluation and process preparation are already separate. 44.8% over. |
+| `scripts/e2e/isolated-lifecycle.test.mjs` | 638 | `AcceptedUse`: one test suite and simulator for that lifecycle execution state machine; tests of independent state evaluation, agent preparation and reporting have moved out. 27.6% over. |
+
+All other extracted source modules are below 500, including `fixture-coverage.mjs` at 491, `replay-evaluate.ts` at 489 and `replay-report.ts` at 490. The resource/dogfood requirements above still apply; structural completion does not waive a runtime miss.
 
 ## R8. Delegation and gating
 

@@ -17,13 +17,8 @@ import {
   type ItemReason,
   type WhyAttempt,
 } from './ledger.js';
-import {
-  hasControlCharacter,
-  renderPack,
-  type BuiltPack,
-  type PackItem,
-  type SecretDetector,
-} from './pack.js';
+import type { BuiltPack, SecretDetector } from './pack.js';
+import { hasControlCharacter, renderPack, type PackItem } from './pack-format.js';
 
 /**
  * The rendered pack of the pending record. `injections` stores the hash, not the text, so the text

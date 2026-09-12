@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as agents from "./probe-lib/agents.mjs";
+import { redactValue } from "./probe-lib/agent-events.mjs";
+import { AGENT_OUTAGE_RE, binVersion } from "./probe-lib/process.mjs";
 import { tmux } from "./probe-lib/tmux.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -53,11 +55,11 @@ function runIdNow() {
 function envBlock() {
   return {
     date: new Date().toISOString(),
-    claude: agents.binVersion("claude"),
-    codex: agents.binVersion("codex"),
-    grok: agents.binVersion("grok"),
-    pi: agents.binVersion("pi"),
-    node: agents.binVersion("node"),
+    claude: binVersion("claude"),
+    codex: binVersion("codex"),
+    grok: binVersion("grok"),
+    pi: binVersion("pi"),
+    node: binVersion("node"),
   };
 }
 
@@ -84,7 +86,7 @@ function markdownSection(runId, env, results) {
   }
   md += "\n";
   for (const r of results) {
-    const ev = (r.evidence || []).map((s) => pipe(agents.redactValue(String(s), null))).join("; ");
+    const ev = (r.evidence || []).map((s) => pipe(redactValue(String(s), null))).join("; ");
     md += `- **${r.id}**: ${ev}\n`;
   }
   md += "\n";
@@ -138,7 +140,7 @@ export function blockAgentApiFailure(dir, result) {
     } finally {
       closeProbeFile(fd);
     }
-    const line = text.split(/\r?\n/).find((value) => agents.AGENT_OUTAGE_RE.test(value));
+    const line = text.split(/\r?\n/).find((value) => AGENT_OUTAGE_RE.test(value));
     if (!line) continue;
     result.status = "blocked";
     result.evidence = [...(result.evidence || []), `agent API error: ${line.trim().slice(0, 200)} (${path.relative(dir, file)})`];
@@ -255,7 +257,7 @@ async function main() {
     ctx.log(result.status, (result.evidence || []).join("; ").slice(0, 200));
     fs.writeFileSync(
       path.join(runRoot, "report.json"),
-      JSON.stringify(agents.redactValue({ env, runId, results }, null), null, 2) + "\n",
+      JSON.stringify(redactValue({ env, runId, results }, null), null, 2) + "\n",
     );
   }
 

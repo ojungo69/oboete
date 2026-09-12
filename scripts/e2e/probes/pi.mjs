@@ -2,16 +2,30 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  toolUsePrompt,
+} from "../probe-lib/agents.mjs";
+import {
   binVersion,
+} from "../probe-lib/process.mjs";
+import {
   compactionIdentity,
   finalText,
   named,
   redactValue,
   shapeProbe,
-  toolUsePrompt,
   topKeys,
   writeFixture,
-} from "../probe-lib/agents.mjs";
+} from "../probe-lib/agent-events.mjs";
+import {
+  durableErrorPath,
+  findErrorLogs,
+  findRealErrorLogs,
+  hasNodeModules,
+  piErrorEvidence,
+  searchLines,
+  sessionErrorRecords,
+  stdoutErrorTypes,
+} from "../probe-lib/pi-errors.mjs";
 
 const ROW_SHAPES = "Native tool payload shapes for read/write/edit/bash on all four agents";
 const ROW_OVER = "Hook runner behaviour when the hook exits with unread stdin above 1 MB";
@@ -116,20 +130,6 @@ function sessionFileOf(r) {
   return files[0] || null;
 }
 
-function sessionJsonlPaths(tree) {
-  const dir = path.join(tree, "sessions");
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl")).map((f) => path.join(dir, f));
-}
-
-function entryPath(root, e) {
-  return path.join(e.parentPath ?? e.path ?? root, e.name);
-}
-
-function hasNodeModules(p) {
-  return String(p).split(path.sep).includes("node_modules");
-}
-
 function parentDepth(root, parent) {
   const rel = path.relative(root, parent);
   if (!rel || rel === ".") return 0;
@@ -209,13 +209,6 @@ function nextAfter(events, compactAt, names) {
   return best;
 }
 
-function searchLines(text, re) {
-  return (text || "")
-    .split("\n")
-    .filter((l) => re.test(l))
-    .slice(0, 20);
-}
-
 async function launchCompact(ctx, dir, extPath) {
   fs.mkdirSync(dir, { recursive: true });
   const repo = path.join(dir, "repo");
@@ -280,111 +273,6 @@ function compactionEvidence(r1, r2, data) {
     `probe_compact_called=${named(events, "probe_compact_called").length} complete=${named(events, "probe_compact_complete").length} error=${JSON.stringify(named(events, "probe_compact_error").map((e) => e.stdin))}`,
     `getContextUsage=${JSON.stringify(lastUsage)}`,
     `DONE r1=${/\bDONE\b/.test(finalText("pi", r1, r1.events))} r2=${r2 ? /\bDONE\b/.test(finalText("pi", r2, r2.events)) : "n/a"}`,
-  ];
-}
-
-function stdoutErrorTypes(stdout) {
-  const stdoutTypes = [];
-  for (const line of (stdout || "").split("\n")) {
-    try {
-      const o = JSON.parse(line);
-      if (o && /error/i.test(String(o.type || ""))) stdoutTypes.push(o.type);
-    } catch {
-      /* skip */
-    }
-  }
-  return stdoutTypes;
-}
-
-function sessionErrorRecords(tree, throwRe) {
-  const sessionTypes = [];
-  const durable = [];
-  for (const f of sessionJsonlPaths(tree)) {
-    const body = fs.readFileSync(f, "utf8");
-    for (const line of body.split("\n").filter(Boolean)) {
-      try {
-        sessionTypes.push(JSON.parse(line).type);
-      } catch {
-        /* skip */
-      }
-    }
-    const hits = searchLines(body, throwRe);
-    if (hits.length) durable.push({ path: f, hits });
-  }
-  return { sessionTypes, durable };
-}
-
-function findErrorLogs(root, skipLog, throwRe) {
-  if (!fs.existsSync(root)) return [];
-  let ents;
-  try {
-    ents = fs.readdirSync(root, { recursive: true, withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const out = [];
-  for (const e of ents) {
-    if (!e.isFile()) continue;
-    const fp = entryPath(root, e);
-    if (hasNodeModules(fp)) continue;
-    if (!/\.(log|txt|jsonl)$/i.test(e.name) || skipLog.has(e.name)) continue;
-    const body = fs.readFileSync(fp, "utf8");
-    if (throwRe.test(body)) out.push({ path: fp, hits: searchLines(body, throwRe) });
-  }
-  return out;
-}
-
-function findRealErrorLogs(real, afterReal, throwRe) {
-  const realLogs = [];
-  for (const e of afterReal.entries || []) {
-    if (e.dir || !/\.(log|txt)$/i.test(e.path)) continue;
-    const p = path.join(real, e.path);
-    try {
-      if (fs.existsSync(p) && throwRe.test(fs.readFileSync(p, "utf8"))) realLogs.push(p);
-    } catch {
-      /* unreadable */
-    }
-  }
-  return realLogs;
-}
-
-function durableErrorPath(durable, tmpLogs, realLogs) {
-  let durableNamed;
-  if (durable[0]) {
-    durableNamed = durable[0].path + " :: " + durable[0].hits[0];
-  } else if (tmpLogs[0]) {
-    durableNamed = tmpLogs[0].path + " :: " + tmpLogs[0].hits[0];
-  } else {
-    durableNamed = realLogs[0] || null;
-  }
-  return durableNamed;
-}
-
-function piErrorEvidence(options) {
-  const {
-    r,
-    continued,
-    text,
-    stderrHits,
-    stdoutTypes,
-    stdoutHits,
-    sessionTypes,
-    durable,
-    tmpLogs,
-    realDiff,
-    realLogs,
-    durableNamed,
-    tmpDiff,
-  } = options;
-  return [
-    `exit=${r.exitCode} elapsed_s=${(r.elapsedMs / 1000).toFixed(1)} continued=${continued} text=${JSON.stringify(text).slice(0, 200)}`,
-    `stderr hits=${stderrHits.length ? stderrHits.slice(0, 5).join(" | ") : "none"}`,
-    `stdout error types=${stdoutTypes.join(",") || "none"} stdout hits=${stdoutHits.length ? stdoutHits.slice(0, 3).join(" | ") : "none"}`,
-    `session jsonl types=[${sessionTypes.join(",")}] throw records=${durable.length ? JSON.stringify(redactValue(durable, r.repo)).slice(0, 500) : "none"}`,
-    `piagent logs with throw=${tmpLogs.length ? JSON.stringify(redactValue(tmpLogs, r.repo)).slice(0, 400) : "none"}`,
-    `~/.pi/agent added=${realDiff.added.join(",") || "none"} changed=${realDiff.changed.join(",") || "none"} throw logs=${realLogs.join(",") || "none"}`,
-    `durable=${durableNamed || "no durable record"} (stderr/in-memory only unless a path is named)`,
-    `tmp tree files=${(tmpDiff.entries || []).map((e) => e.path).slice(0, 40).join(",")}`,
   ];
 }
 

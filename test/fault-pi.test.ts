@@ -1,7 +1,7 @@
 // Pi half of the User Story 2 failure matrix (spec User Story 2 scenario 4, FR-007, A8, R12):
 // the detached capture child stays contained, a hung child is recorded for doctor, a Pi that cannot
 // spawn is named by setup's probe, and the extension's own failure counters land in diagnostics.
-// Seam: only pi-throw (src/capture.ts runCapture); everything else is the real child or CLI.
+// Seam: only pi-throw (src/capture-command.ts runCapture); everything else is the real child or CLI.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';

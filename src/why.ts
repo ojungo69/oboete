@@ -8,7 +8,7 @@ import {
   type WhyInjection,
   type WhyItem,
 } from './injection/ledger.js';
-import { DEGRADED_SENTENCES } from './injection/pack.js';
+import { DEGRADED_SENTENCES } from './injection/pack-format.js';
 import {
   invalid,
   oneArgument,

@@ -10,10 +10,8 @@ import {
   assertRepoRejected,
   assertToolsCallSearch,
   assertToolsList,
-  buildReportRow,
-  exitCodeFor,
   extractToolName,
-} from "./mcp-clients.mjs";
+} from "./mcp-assertions.mjs";
 
 function entry(dir, frame) {
   return { dir, at: "2026-09-06T00:00:00.000Z", frame };
@@ -162,40 +160,6 @@ test("assertGetMissing detects a tool-level isError", () => {
   });
   assert.equal(assertGetMissing(frame).ok, true);
   assert.equal(assertGetMissing(entry("out", { jsonrpc: "2.0", id: 2, result: { content: [{ type: "text", text: "not found" }] } })).ok, false);
-});
-
-test("buildReportRow writes the report contract", () => {
-  assert.deepEqual(
-    buildReportRow({
-      agent: "claude",
-      status: "pass",
-      protocolVersion: "2025-11-25",
-      toolName: "mcp__oboete_probe__search",
-      frames: 7,
-      reason: "ok",
-    }),
-    {
-      agent: "claude",
-      status: "pass",
-      protocolVersion: "2025-11-25",
-      toolName: "mcp__oboete_probe__search",
-      frames: 7,
-      reason: "ok",
-    },
-  );
-  assert.throws(() => buildReportRow({ agent: "claude", status: "skipped" }), /invalid status/);
-});
-
-test("exit-code rule: fail is non-zero, blocked is zero", () => {
-  const pass = [buildReportRow({ agent: "claude", status: "pass" })];
-  const fail = [buildReportRow({ agent: "claude", status: "fail", reason: "no frames" })];
-  const blocked = [buildReportRow({ agent: "grok", status: "blocked", reason: "HTTP 402" })];
-  assert.equal(exitCodeFor(pass), 0);
-  assert.notEqual(exitCodeFor(fail), 0);
-  assert.equal(exitCodeFor(blocked), 0);
-  assert.equal(exitCodeFor([...pass, ...blocked]), 0);
-  assert.notEqual(exitCodeFor([...pass, ...fail]), 0);
-  assert.notEqual(exitCodeFor(pass, "fail"), 0);
 });
 
 test("extractToolName reads Claude/Grok PreToolUse names and falls back to unknown", () => {

@@ -1,0 +1,452 @@
+{
+  "sonar_codacy": [
+    {
+      "service": "sonar",
+      "id": "AaCFAMP8z18_BjK2pBK8",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:06.069Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMP8z18_BjK2pBK8",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:07.709Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMP8z18_BjK2pBK7",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:09.872Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMP8z18_BjK2pBK7",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:10.888Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK3",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:12.141Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK3",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:13.958Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK4",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:16.429Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK4",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:18.048Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK5",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:21.587Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK5",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:23.367Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK6",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:25.330Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMJqz18_BjK2pBK6",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:27.563Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMTgz18_BjK2pBK9",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:29.592Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMTgz18_BjK2pBK9",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:31.812Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMXmz18_BjK2pBLB",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:34.302Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMXmz18_BjK2pBLB",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:35.944Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMWfz18_BjK2pBK-",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:40.651Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMWfz18_BjK2pBK-",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:42.099Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMWuz18_BjK2pBK_",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:44.803Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMWuz18_BjK2pBK_",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:46.537Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMXQz18_BjK2pBLA",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:48.538Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFAMXQz18_BjK2pBLA",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:50.519Z"
+    },
+    {
+      "service": "codacy",
+      "id": "account",
+      "action": "verify",
+      "http_status": 200,
+      "at": "2026-09-09T07:27:51.283Z"
+    },
+    {
+      "service": "codacy",
+      "id": "48b2a00cb7eb3b5e6344415870d01661",
+      "action": "ignore",
+      "http_status": 204,
+      "at": "2026-09-09T07:27:52.616Z"
+    },
+    {
+      "service": "codacy",
+      "id": "f24df26860d01b16c092756092dba6ce",
+      "action": "ignore",
+      "http_status": 204,
+      "at": "2026-09-09T07:27:52.902Z"
+    }
+  ],
+  "codeql": [
+    {
+      "number": 158,
+      "dismissed_at": "2026-09-09T07:29:07Z",
+      "dismissed_reason": "used in tests",
+      "dismissed_comment": "Local test harness only: unchanged from probes/codex.mjs:412-413, writing operator-owned scratch CODEX_HOME; racing that directory already requires authority to replace its files, with no cross-user or product entrypoint.",
+      "html_url": "https://github.com/ojungo69/oboete/security/code-scanning/158"
+    },
+    {
+      "number": 159,
+      "dismissed_at": "2026-09-09T07:29:08Z",
+      "dismissed_reason": "used in tests",
+      "dismissed_comment": "Local test harness only: unchanged from probe-lib/agents.mjs:184-185, initializing an operator-owned fresh repo; racing it already requires authority to replace its files, with no cross-user or product entrypoint.",
+      "html_url": "https://github.com/ojungo69/oboete/security/code-scanning/159"
+    }
+  ],
+  "sonar_branch": [
+    {
+      "service": "sonar",
+      "id": "AaCFANODz18_BjK2pBOa",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:59:50.720Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANODz18_BjK2pBOa",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:59:52.679Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANODz18_BjK2pBOZ",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T07:59:54.874Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANODz18_BjK2pBOZ",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T07:59:58.392Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANNFz18_BjK2pBOV",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:00.096Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANNFz18_BjK2pBOV",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:02.019Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANNFz18_BjK2pBOW",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:03.963Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANNFz18_BjK2pBOW",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:06.316Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANNFz18_BjK2pBOX",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:08.060Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANNFz18_BjK2pBOX",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:09.969Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANNFz18_BjK2pBOY",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:11.721Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANNFz18_BjK2pBOY",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:12.678Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANRiz18_BjK2pBOb",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:14.031Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANRiz18_BjK2pBOb",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:15.620Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANVkz18_BjK2pBOf",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:17.895Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANVkz18_BjK2pBOf",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:20.034Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANUFz18_BjK2pBOc",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:24.255Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANUFz18_BjK2pBOc",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:26.218Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANUaz18_BjK2pBOd",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:27.574Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANUaz18_BjK2pBOd",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:29.109Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANVEz18_BjK2pBOe",
+      "action": "do_transition",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:31.410Z"
+    },
+    {
+      "service": "sonar",
+      "id": "AaCFANVEz18_BjK2pBOe",
+      "action": "add_comment",
+      "http_status": 200,
+      "at": "2026-09-09T08:00:32.081Z"
+    }
+  ],
+  "sonar_id_parity": [
+    {
+      "branch_id": "AaCFANODz18_BjK2pBOa",
+      "pr_id": "AaCFAMP8z18_BjK2pBK8",
+      "rule": "jssecurity:S8707",
+      "file": "scripts/e2e/probe-lib/mcp-report.mjs",
+      "line": 99,
+      "same_source_hash": true,
+      "same_message": true
+    },
+    {
+      "branch_id": "AaCFANODz18_BjK2pBOZ",
+      "pr_id": "AaCFAMP8z18_BjK2pBK7",
+      "rule": "jssecurity:S8707",
+      "file": "scripts/e2e/probe-lib/mcp-report.mjs",
+      "line": 100,
+      "same_source_hash": true,
+      "same_message": true
+    },
+    {
+      "branch_id": "AaCFANNFz18_BjK2pBOV",
+      "pr_id": "AaCFAMJqz18_BjK2pBK3",
+      "rule": "javascript:S3516",
+      "file": "scripts/e2e/probe-lib/process.mjs",
+      "line": 44,
+      "same_source_hash": true,
+      "same_message": true
+    },
+    {
+      "branch_id": "AaCFANNFz18_BjK2pBOW",
+      "pr_id": "AaCFAMJqz18_BjK2pBK4",
+      "rule": "javascript:S4036",
+      "file": "scripts/e2e/probe-lib/process.mjs",
+      "line": 59,
+      "same_source_hash": true,
+      "same_message": true
+    },
+    {
+      "branch_id": "AaCFANNFz18_BjK2pBOX",
+      "pr_id": "AaCFAMJqz18_BjK2pBK5",
+      "rule": "javascript:S4036",
+      "file": "scripts/e2e/probe-lib/process.mjs",
+      "line": 75,
+      "same_source_hash": true,
+      "same_message": true
+    },
+    {
+      "branch_id": "AaCFANNFz18_BjK2pBOY",
+      "pr_id": "AaCFAMJqz18_BjK2pBK6",
+      "rule": "javascript:S3516",
+      "file": "scripts/e2e/probe-lib/process.mjs",
+      "line": 104,
+      "same_source_hash": true,
+      "same_message": true
+    },
+    {
+      "branch_id": "AaCFANRiz18_BjK2pBOb",
+      "pr_id": "AaCFAMTgz18_BjK2pBK9",
+      "rule": "javascript:S7784",
+      "file": "scripts/fixtures/fixture-coverage.mjs",
+      "line": 476,
+      "same_source_hash": true,
+      "same_message": true
+    },
+    {
+      "branch_id": "AaCFANVkz18_BjK2pBOf",
+      "pr_id": "AaCFAMXmz18_BjK2pBLB",
+      "rule": "typescript:S3516",
+      "file": "src/capture-command.ts",
+      "line": 107,
+      "same_source_hash": true,
+      "same_message": true
+    },
+    {
+      "branch_id": "AaCFANUFz18_BjK2pBOc",
+      "pr_id": "AaCFAMWfz18_BjK2pBK-",
+      "rule": "typescript:S6551",
+      "file": "src/fixture/replay-evaluate.ts",
+      "line": 22,
+      "same_source_hash": true,
+      "same_message": true
+    },
+    {
+      "branch_id": "AaCFANUaz18_BjK2pBOd",
+      "pr_id": "AaCFAMWuz18_BjK2pBK_",
+      "rule": "typescript:S4036",
+      "file": "src/fixture/replay-report.ts",
+      "line": 67,
+      "same_source_hash": true,
+      "same_message": true
+    },
+    {
+      "branch_id": "AaCFANVEz18_BjK2pBOe",
+      "pr_id": "AaCFAMXQz18_BjK2pBLA",
+      "rule": "typescript:S3516",
+      "file": "src/injection/pi.ts",
+      "line": 223,
+      "same_source_hash": true,
+      "same_message": true
+    }
+  ]
+}

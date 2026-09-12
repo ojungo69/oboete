@@ -30,10 +30,10 @@ const knownCommands = [
 const commands: Record<string, () => Promise<(argv: string[]) => Promise<number>>> = {
   setup: () => import('./setup/setup.js').then((module) => module.runSetup),
   doctor: () => import('./doctor.js').then((module) => module.runDoctor),
-  hook: () => import('./capture.js').then((module) => module.runHook),
-  capture: () => import('./capture.js').then((module) => module.runCapture),
+  hook: () => import('./capture-command.js').then((module) => module.runHook),
+  capture: () => import('./capture-command.js').then((module) => module.runCapture),
   observe: () => import('./worker/observe.js').then((module) => module.runObserve),
-  inject: () => import('./injection/inject.js').then((module) => module.runInject),
+  inject: () => import('./injection/pi.js').then((module) => module.runInject),
   search: () => import('./memories-cli.js').then((module) => module.runSearch),
   timeline: () => import('./memories-cli.js').then((module) => module.runTimeline),
   get: () => import('./memories-cli.js').then((module) => module.runGet),

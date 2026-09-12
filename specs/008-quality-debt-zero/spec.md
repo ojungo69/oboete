@@ -140,7 +140,7 @@ The maintainer wants the cleanup delivered as a series of pull requests, each sm
 - **FR-013**: Complexity findings where a split would harm readability MAY be resolved as "won't fix" on the service, with the reason stated; they MUST NOT be left open.
 - **FR-014**: The feature MUST NOT add features, change M2-scoped behaviour, or edit the gate definitions.
 - **FR-015**: Function-length findings MUST be fixed in code in both `src/` and `scripts/`, in the same pull requests as the cognitive-complexity refactors for the same module, under the same behaviour-preservation rules as FR-007.
-- **FR-016**: File-length findings MUST be decided per file: split when the file holds two or more independently testable concerns that can move without a circular dependency; otherwise resolved on the service as "won't fix" with the reason "single cohesive module". The plan MUST list the decision for each of the 35 files (31 in the 2026-09-07 inventory and 4 added on 2026-09-08).
+- **FR-016**: File-length findings MUST be decided per file: split when the file holds two or more independently testable concerns that can move without a circular dependency; otherwise resolved on the service as "won't fix" with the reason "single cohesive module". The plan MUST list the decision for each of the 38 files (31 in the 2026-09-07 inventory, 4 added on 2026-09-08, and 3 added on 2026-09-09, including the two lifecycle modules reported on PR #185).
 - **FR-017**: Complexity and function-length findings in the `scripts/e2e` harness MUST be fixed to the same standard as `src/`; a pull request that refactors the harness MUST pass the harness's own test files and one isolated dogfood run before merge.
 
 ### Key Entities

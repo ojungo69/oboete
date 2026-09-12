@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { PreconditionError } from "./agents.mjs";
+import {
+  PreconditionError,
+} from "./process.mjs";
 import { TMUX_SOCKET, readyTui, settleTui, tmux, tmuxSession, tuiQuit, tuiSubmit } from "./tmux.mjs";
 
 const hasTmux = spawnSync("tmux", ["-V"], { encoding: "utf8" }).status === 0;

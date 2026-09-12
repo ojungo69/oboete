@@ -82,6 +82,8 @@ for (const [service, id, rule, file, state, required] of [
   ['codacy', codacyHarnessId, 'shellcheck_SC2024', 'scripts/e2e/dogfood.sh', 'fixed', true],
   ['sonar', 's-regexp', 'typescript:S8786', 'src/worker/observe.ts', 'resolved', true],
   ['sonar', 's-regexp', 'javascript:S8786', 'scripts/e2e/probe.mjs', 'fixed', true],
+  ['sonar', 's-regexp', 'typescript:S4036', 'src/fixture/replay-report.ts', 'resolved', true],
+  ['sonar', 's-regexp', 'jssecurity:S8707', 'scripts/e2e/probe-lib/mcp-report.mjs', 'resolved', true],
   ['codacy', codacyHarnessId, 'Semgrep_fs', 'scripts/e2e/probe.mjs', 'excluded', false],
   ['sonar', 's-worker', 'typescript:S3776', 'src/worker/observe.ts', 'fixed', false],
   ['codacy', codacyViewerId, 'Lizard_nloc-medium', 'src/viewer/app/main.tsx', 'fixed', false],
@@ -177,6 +179,8 @@ test('--allocate gives exclusions priority and respects worker and viewer owners
 const sonarCases = [
   ['plsql:S8786', 'scripts/query.sql', 'A'],
   ['javascript:S8786', 'scripts/check.mjs', 'E'],
+  ['typescript:S4036', 'src/fixture/replay-report.ts', 'E'],
+  ['jssecurity:S8707', 'scripts/e2e/probe-lib/mcp-report.mjs', 'E'],
   ['javascript:S3776', 'scripts/check.mjs', 'C4'],
   ['javascript:S107', 'scripts/check.mjs', 'C4'],
   ['typescript:S3776', 'src/observer/run.ts', 'C1'],
