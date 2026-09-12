@@ -918,6 +918,10 @@ already tracked as #196/#197):
   config is one `leave` cannot reach, a config without the row reports `space_exists` to `init` and
   `key_missing` to `push`. The config-write failure is pinned; the compensating delete on a failed
   `COMMIT` is not unit-reachable without a seam in the commit itself;
+- a header rejection closes the bundle it opened. Everything before `validateBody` runs while the
+  line reader is suspended at its `yield`, and a suspended generator never runs its `finally`, so
+  the seven header rejections leaked a descriptor each — and `pull` walks up to
+  `BOUNDS.replicasPerSpace` bundles catching every rejection (stage, pinned by descriptor count);
 - `leave` removes the row and the `[sync]` section together, after the idempotent file removals: as
   long as the config still names the space `leave` can be run again, where dropping the row first
   left a config `init`/`join` refuse and `push`/`pull` cannot serve (space, pinned);

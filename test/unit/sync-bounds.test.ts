@@ -263,6 +263,36 @@ test('a bundle carrying exactly the repo-line cap is applied, so the bound never
   });
 });
 
+test('a rejected header closes the bundle it opened, so a pull over many bad bundles leaks no descriptors', async () => {
+  await withReplicas(1, ([replica], dir) => {
+    const { db } = replica!;
+    // Every one of these is rejected while the line reader is suspended on its first `yield`.
+    const bad: [string, (path: string) => void][] = [
+      ['empty', (path) => writeFileSync(path, '')],
+      ['header_too_long', (path) => writeFileSync(path, `${'x'.repeat(BOUNDS.headerBytes + 1)}\n`)],
+      ['header_not_json', (path) => writeFileSync(path, 'not json\n')],
+      ['invalid_header', (path) => writeFileSync(path, '{"format":"oboete-sync-snapshot/1"}\n')],
+      ['replica_mismatch', (path) => writeBundle(path, OTHER, () => undefined)],
+      ['space_mismatch', (path) => writeBundle(path, SENDER, () => undefined, { space_id: 'f'.repeat(32) })],
+    ];
+    const open = (): number => readdirSync(`/proc/${String(process.pid)}/fd`).length;
+    for (const [name, write] of bad) { // warm up: the first rejection of each shape may open other state.
+      const path = join(dir, `${SENDER}.leak-${name}.plain`);
+      write(path);
+      assert.throws(() => applyBundle(db, SENDER, path), (error: unknown) => error instanceof BundleRejected, name);
+    }
+    const before = open();
+    for (let round = 0; round < 3; round += 1) {
+      for (const [name, write] of bad) {
+        const path = join(dir, `${SENDER}.leak-${name}.plain`);
+        write(path);
+        assert.throws(() => applyBundle(db, SENDER, path), (error: unknown) => error instanceof BundleRejected, name);
+      }
+    }
+    assert.equal(open(), before, 'every rejected bundle closed the descriptor it opened');
+  });
+});
+
 // --- payload integrity: a line cannot borrow another row's identity while carrying other content ---
 
 test('a payload whose text, hashes or natural key disagree is rejected before apply, so no line can alias onto a row it does not describe', async () => {

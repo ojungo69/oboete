@@ -73,6 +73,24 @@ export function stageBundle(
   input: { plaintextPath: string; scratchPath: string; spaceId: string; senderOriginId: string },
 ): Staged {
   const reader = lines(input.plaintextPath);
+  // Everything up to `validateBody` runs while `reader` is suspended at its `yield`, and a
+  // suspended generator never runs its `finally` — not even when it is collected — so a rejection
+  // here has to close it by hand. `pullSpace` walks up to `BOUNDS.replicasPerSpace` bundles and
+  // catches each rejection, so one leaked descriptor per rejected bundle adds up within one pull.
+  // Below `validateBody` the `for…of` owns the generator and closes it on any path.
+  let staged: Staged;
+  try { staged = stageHeader(reader, input); } catch (error) { reader.return(undefined); throw error; }
+  try {
+    validateBody(db, staged, reader);
+    return staged;
+  } catch (error) {
+    staged.close();
+    throw error;
+  }
+}
+
+/** The header and the empty scratch database it forces, before a single body line is read. */
+function stageHeader(reader: Generator<Buffer>, input: { plaintextPath: string; scratchPath: string; spaceId: string; senderOriginId: string }): Staged {
   const first = reader.next();
   if (first.done) throw new BundleRejected('empty_bundle');
   if (first.value.length > BOUNDS.headerBytes) throw new BundleRejected('header_too_long');
@@ -93,17 +111,10 @@ export function stageBundle(
     CREATE TABLE origins (origin_id TEXT PRIMARY KEY, kind TEXT NOT NULL, natural_json TEXT NOT NULL) STRICT;
     CREATE TABLE repos (repo_key TEXT PRIMARY KEY, identity_kind TEXT NOT NULL, normalized_identity TEXT NOT NULL) STRICT;
     CREATE TABLE refs (revision_id TEXT NOT NULL, field TEXT NOT NULL, target_kind TEXT NOT NULL, target TEXT NOT NULL) STRICT;`);
-  const staged: Staged = {
+  return {
     header, scratch, scratchPath: input.scratchPath,
     close() { if (scratch.isOpen) scratch.close(); rmSync(input.scratchPath, { force: true }); },
   };
-  try {
-    validateBody(db, staged, reader);
-    return staged;
-  } catch (error) {
-    staged.close();
-    throw error;
-  }
 }
 
 function validateBody(db: DatabaseSync, staged: Staged, reader: Generator<Buffer>): void {
