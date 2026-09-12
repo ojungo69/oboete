@@ -1,0 +1,39 @@
+docs/dev/conventions.md
+  s_5ab5797dc469b5::t_2e4828ddb6be38 44-47,55-59
+specs/008-quality-debt-zero/quickstart.md
+  s_5ab5797dc469b5::t_9328122a906f09 170
+specs/008-quality-debt-zero/research.md
+  s_5ab5797dc469b5::t_dba49479941ac6 147
+specs/009-memory-core/contracts/injection-performance.md
+  s_5ab5797dc469b5::t_d2f6843ab5073a 103-107,169-177,237-258,265-269,274-276,287-288
+specs/009-memory-core/tasks.md
+  s_5ab5797dc469b5::t_be6fd1dc2fdf32 305-309
+src/launcher.mjs
+  s_5ab5797dc469b5::t_4107a38e778352 74-80
+test/e2e-hook.test.ts
+  s_5ab5797dc469b5::t_e279caf99f2d63 15-16,69-74
+test/e2e-inject.test.ts
+  s_5ab5797dc469b5::t_2140dd927b8838 25-26,118-123
+test/helpers/compile-cache.ts
+  s_5ab5797dc469b5::t_d41e5256507859 1-39
+test/helpers/fault.ts
+  s_5ab5797dc469b5::t_1ca1637d52151d 26-27,110
+test/unit/launcher.test.ts
+  s_5ab5797dc469b5::t_564f747e370eda 3,5,9-10,29,119-140,142,266-284,287
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "a577e39caef7cec9d6dd2bac60e3dcbc35929c21",
+  "prompts": {},
+  "sessions": {
+    "s_5ab5797dc469b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44ceb1b9-68f7-4bf5-8646-52149920dd27",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
