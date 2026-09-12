@@ -196,9 +196,10 @@ of its path alone.
 One thing the launcher cannot defend: `NODE_COMPILE_CACHE` in the environment wins. Node enables the
 cache at bootstrap from that variable, and a later `enableCompileCache(dir)` returns
 `{ status: 2 }` (already enabled) with the environment's directory, having written nothing to ours.
-That is accepted rather than mitigated, because an actor who can set that variable can also set
-`NODE_OPTIONS=--require ...` and run arbitrary code in the hook: environment control is already
-total, and the compile cache adds nothing to it.
+`NODE_DISABLE_COMPILE_CACHE` wins the same way and in the other direction: set anywhere above the
+hook, there is no cache at all and the 35 ms comes back. Both are accepted rather than mitigated,
+because an actor who can set either can also set `NODE_OPTIONS=--require ...` and run arbitrary code
+in the hook: environment control is already total, and the compile cache adds nothing to it.
 
 Measured on Node 22.16.0, `fault-grok`'s 21 hook invocations through `dist/oboete.mjs` -- the file
 the installer writes -- with the two builds interleaved in the same session so machine load cancels:
@@ -251,7 +252,10 @@ A cold cache per test is the harness's artefact and not the product's: a real in
 outlives its invocations, so the way to measure the hook as it runs is to share one.
 `package.json` loads `test/helpers/compile-cache.ts` into both `node --test` runs with `--import`,
 and it sets `NODE_COMPILE_CACHE` to one `build/compile-cache` -- the variable this document records
-the launcher cannot defend against, put to the use it is for. Every test file and every CLI any of
+the launcher cannot defend against, put to the use it is for -- and deletes
+`NODE_DISABLE_COMPILE_CACHE`, which a developer's shell can carry and which would otherwise win
+during child bootstrap and leave the timed suites measuring a hook nobody runs (with the flag set
+and the deletion removed, every spawn is 217-229 ms against 189-193). Every test file and every CLI any of
 them spawns inherits it, which is the point: the first attempt set it at three spawn sites and
 missed the ad-hoc one in `test/fault-pi.test.ts` and the whole unit batch. Two rounds on the
 `fault-*` suites again: 41.8, 41.6 s, under the `~/.cache` figure, so the one-directory rule costs

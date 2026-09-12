@@ -35,8 +35,11 @@ export function repositoryRoot(): string {
 // `NODE_COMPILE_CACHE` wins over the launcher's own `enableCompileCache` call, the one thing
 // contracts/injection-performance.md records the launcher cannot defend against. That is why this
 // works, and why `test/unit/launcher.test.ts` deletes the variable: the directory the launcher
-// chooses for itself is exactly what that suite is about. `??=` leaves an operator's own choice
-// alone.
+// chooses for itself is exactly what that suite is about. `??=` leaves an operator's own choice of
+// directory alone; `NODE_DISABLE_COMPILE_CACHE` is deleted rather than respected, because Node
+// reads it during child bootstrap and it wins over the directory, and a suite that measures a hook
+// with no compile cache is measuring a hook nobody runs.
+delete process.env.NODE_DISABLE_COMPILE_CACHE;
 process.env.NODE_COMPILE_CACHE ??= join(repositoryRoot(), 'build', 'compile-cache');
 
 /**
