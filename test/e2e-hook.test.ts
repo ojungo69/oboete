@@ -11,12 +11,13 @@ import { test, type TestContext } from 'node:test';
 
 import { openDatabase } from '../src/db/open.js';
 
-import { repositoryRoot } from './helpers/compile-cache.js';
+import { repositoryRoot, warmCompileCache } from './helpers/compile-cache.js';
 
 type Json = Record<string, unknown>;
 
 const ROOT = repositoryRoot();
 const BUNDLE = join(ROOT, 'dist', 'oboete.mjs');
+warmCompileCache(BUNDLE);
 // A capture hook is budgeted at 300 ms (FR-002). The number is reported on every run; the hard
 // assertion is looser because a shared machine adds process start time this test cannot control.
 const BUDGET_MS = 300;

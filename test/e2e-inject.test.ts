@@ -20,12 +20,13 @@ import { cjkBigrams } from '../src/retrieval/fts.js';
 import { resolveRepoIdentity } from '../src/repo-identity.js';
 import { seedWorkBinding } from './helpers/work.js';
 
-import { repositoryRoot } from './helpers/compile-cache.js';
+import { repositoryRoot, warmCompileCache } from './helpers/compile-cache.js';
 
 type Json = Record<string, unknown>;
 
 const ROOT = repositoryRoot();
 const BUNDLE = join(ROOT, 'dist', 'oboete.mjs');
+warmCompileCache(BUNDLE);
 const NOW = 1_800_000_000_000;
 const HARD_LIMIT_MS = 1_300;
 

@@ -264,7 +264,13 @@ three sites wired the first spawn of the serial batch paid the whole compile: `e
 took 299.1 and 304.9 ms on the two duplicate runs and stored a partial row with a null `content`,
 which is what a capture that runs out of its 300 ms does. The medians over the 48 invocations had
 already come back to 219.4 and 223.3 ms from 246.3 and 251.8; the failure was the one spawn no
-warm-up preceded.
+warm-up preceded. `.github/workflows/ci.yml` runs the e2e bundle tests as a step of their own --
+alone and uninstrumented, which is what makes their numbers worth reading -- so there the first
+spawn finds an empty cache whatever the runner did before it: 231.0 ms against 161.5 for the next
+one, and 260.4 against 195.7 on the run after that -- both passed, both within 40 ms of the budget
+for no reason a reader of the number would guess. `test/e2e-hook.test.ts` and `test/e2e-inject.test.ts` therefore spend
+one throwaway run before their first timed one, which is where an installed oboete pays it too --
+once, at install.
 
 Splitting one file into two put a new failure ahead of everything the engine does about its own:
 the import. An engine that is missing or unreadable now throws in the launcher, above the handler

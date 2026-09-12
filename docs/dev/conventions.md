@@ -46,7 +46,9 @@ M1 source retention and completion rules.
   launcher's own cache lives in `OBOETE_HOME`, so a fresh home per test would otherwise mean a fresh
   compile of the whole engine per spawn -- about 35 ms, measured on CI against a 300 ms budget.
   Do not override the variable in a test; `test/unit/launcher.test.ts` deletes it deliberately,
-  because the directory the launcher picks for itself is what that suite is about.
+  because the directory the launcher picks for itself is what that suite is about. A suite that
+  times the bundle also calls `warmCompileCache(BUNDLE)` first, so the run that compiles the engine
+  is never the run an assertion measures.
 - Red first: write the failing test, run it, confirm it fails for the right reason, then implement.
   A test never recomputes its expected value through the code path it checks.
 

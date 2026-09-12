@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,3 +50,22 @@ export const SHARED_COMPILE_CACHE = join(repositoryRoot(), 'build', 'compile-cac
 // variable somewhere else keeps it, and so the suites below that set it explicitly -- for a single
 // file run straight from `node --test` -- agree rather than fight.
 process.env.NODE_COMPILE_CACHE ??= SHARED_COMPILE_CACHE;
+
+let warmed = false;
+
+/**
+ * One throwaway run of `bundle`, so the first *timed* one is not the one that compiles the engine.
+ *
+ * `npm test` warms this cache in the unit batch, but `.github/workflows/ci.yml` runs the e2e
+ * bundle tests as a step of their own -- alone and uninstrumented, which is what makes their
+ * numbers worth reading -- and there the first spawn finds an empty cache. Measured on that step:
+ * 231.0 ms against 161.5 ms for the next one, and the same spawn on a busier runner took 299.1 and
+ * 304.9 ms and stored a partial row, which is a capture that ran out of its 300 ms. An installed
+ * oboete compiles once at install and never again, so paying it here rather than inside an
+ * assertion is what makes the suite measure the hook an agent actually invokes.
+ */
+export function warmCompileCache(bundle: string): void {
+  if (warmed) return;
+  warmed = true;
+  spawnSync(process.execPath, [bundle, '--version'], { encoding: 'utf8' });
+}
