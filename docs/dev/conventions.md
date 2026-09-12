@@ -41,14 +41,18 @@ M1 source retention and completion rules.
 - A test that touches storage creates a fresh directory with `fs.mkdtempSync` and points
   `OBOETE_HOME` at it; the real `~/.oboete` is never used. Use `test/helpers/home.ts` (T022) once
   it exists.
-- Both `node --test` runs load `test/helpers/compile-cache.ts` with `--import`, which points
-  `NODE_COMPILE_CACHE` at one `build/compile-cache` for every test and everything it spawns. The
-  launcher's own cache lives in `OBOETE_HOME`, so a fresh home per test would otherwise mean a fresh
-  compile of the whole engine per spawn -- about 35 ms, measured on CI against a 300 ms budget.
-  Do not override the variable in a test; `test/unit/launcher.test.ts` deletes it deliberately,
-  because the directory the launcher picks for itself is what that suite is about. A suite that
-  times the bundle also calls `warmCompileCache(BUNDLE)` first, so the run that compiles the engine
-  is never the run an assertion measures.
+- Both `node --test` runs in `package.json` load `test/helpers/compile-cache.ts` with `--import`,
+  which points `NODE_COMPILE_CACHE` at one `build/compile-cache` for every test and everything it
+  spawns. The launcher's own cache lives in `OBOETE_HOME`, so a fresh home per test would otherwise
+  mean a fresh compile of the whole engine per spawn -- about 35 ms, measured on CI against a 300 ms
+  budget. `.github/workflows/ci.yml` also runs the suite through command lines of its own that carry
+  no `--import`; there the variable is set by importing the module, which every timed suite does for
+  `repositoryRoot` or `warmCompileCache`. Do not override the variable in a test;
+  `test/unit/launcher.test.ts` deletes it deliberately, because the directory the launcher picks for
+  itself is what that suite is about. A suite that times the bundle also calls
+  `warmCompileCache(BUNDLE)` first, so the run that compiles the engine is never the run an
+  assertion measures -- and that call asserts the shared cache is set, so losing the import fails
+  the suite by name instead of by percentile.
 - Red first: write the failing test, run it, confirm it fails for the right reason, then implement.
   A test never recomputes its expected value through the code path it checks.
 

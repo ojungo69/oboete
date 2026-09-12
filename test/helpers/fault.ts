@@ -13,18 +13,18 @@ import {
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
-import { fileURLToPath } from 'node:url';
 
 import { CAPTURE_DEADLINE_MS } from '../../src/capture.js';
 import { PRESET_CATALOG } from '../../src/config.js';
 import { openDatabase } from '../../src/db/open.js';
 import { oboetePaths } from '../../src/paths.js';
 
-// Imported for its one side effect: every CLI this file spawns inherits the shared compile cache.
-import './compile-cache.js';
+// Every CLI this file spawns inherits the shared compile cache, which this module sets as it loads.
+// Taking `repositoryRoot` from it rather than keeping a copy is what keeps that import load-bearing.
+import { repositoryRoot } from './compile-cache.js';
 
 export type Place = {
   home: string;
@@ -53,16 +53,6 @@ export type SpawnEngineOptions = {
 };
 
 type ScenarioFn = (t: TestContext) => void | Promise<void>;
-
-function repositoryRoot(): string {
-  let directory = fileURLToPath(new URL('.', import.meta.url));
-  for (;;) {
-    if (existsSync(join(directory, 'package.json'))) return directory;
-    const parent = dirname(directory);
-    assert.notEqual(parent, directory, 'the repository root must contain package.json');
-    directory = parent;
-  }
-}
 
 export const ROOT = repositoryRoot();
 export const BUNDLE = join(ROOT, 'dist', 'oboete.mjs');

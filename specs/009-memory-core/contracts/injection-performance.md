@@ -163,7 +163,7 @@ The one refusal that stays silent is a `compile` of this user's own left at a lo
 restored backup, an `rsync` without `-p`, an NFS home. The hook returns to its uncached time with
 nothing saying so; `scripts/measure-cold-start.mjs` prints the directory and whether it was non-empty
 -- which is a fact about the directory, not about whether the launcher accepted it -- and
-`oboete doctor` does not yet have an item for it. Refusing is deliberate: correcting
+`oboete doctor` does not yet have an item for it (issue #218). Refusing is deliberate: correcting
 the mode would chmod the target of whatever symlink was planted there. What remains is the ordinary
 race between the check and V8's read, which needs write access to the cache directory itself -- or
 to a directory above it. Above `compile` is `~/.oboete/cache`, then `~/.oboete`, then `$HOME`. The
@@ -180,7 +180,8 @@ still not the answer: that is the requirement this review put on twice, and both
 cache off on every machine that already had a loose one (`test/unit/launcher.test.ts` pins that
 shape at 0775). What closes it is a `cache` nobody else can write, which is the 0700 one the
 launcher makes when it is absent; a loose one that arrived some other way is a `doctor` item, the
-same as a loose data directory, and until `doctor` has that item this is the accepted residue. A home that cannot hold the directory at
+same as a loose data directory, and until `doctor` has that item (issue #218) this is the
+accepted residue. A home that cannot hold the directory at
 all costs the cache and never the command.
 
 The alternative this does not take is making the hook path its own, smaller entry point. The tree is
@@ -228,7 +229,8 @@ a busier machine (both arms sit about 18 ms higher than above, which is why they
 | single file (`af871c9a`) | 236.9 | 234.4 | 234.3 | 238.6 | 237.3 |
 | launcher + engine, cache under the home | 201.1 | 201.6 | 199.6 | 198.9 | 197.5 |
 
-The gap is the same ~36 ms. A cold first invocation per scenario is a cost the median absorbs.
+The gap is 35.8 ms at the median, against about 31 in the table above -- the launcher gains more on
+the busier machine, not less. A cold first invocation per scenario is a cost the median absorbs.
 
 The launcher build sits at the pre-US6 baseline, so compile cost accounted for the whole
 regression. Note what that does *not* say: the 0008 schema still costs whatever it costs at
@@ -267,6 +269,18 @@ missed the ad-hoc one in `test/fault-pi.test.ts` and the whole unit batch. Two r
 `fault-*` suites again: 41.8, 41.6 s, under the `~/.cache` figure, so the one-directory rule costs
 the suite nothing. `test/unit/launcher.test.ts` deletes the variable instead, because the directory
 the launcher picks for itself is exactly what that suite is about.
+
+`--import` covers one of the three places CI runs these tests: the `engine` job's `npm test`. The
+`check` job runs the timed e2e bundle tests and the instrumented unit batch as steps of their own,
+each with its own `node --test` command line and no `--import`, so what sets the variable there is
+the module import itself -- `test/e2e-hook.test.ts` and `test/e2e-inject.test.ts` take
+`repositoryRoot` and `warmCompileCache` from that file, and `test/helpers/fault.ts` takes
+`repositoryRoot`. The unit batch imports none of it and runs cold there, which costs nothing: it
+runs under `NODE_V8_COVERAGE`, where `WALL_CLOCK_IS_MEASURED` is false and no assertion reads a
+time. What keeps the arrangement honest is `warmCompileCache`, which asserts the variable is the
+directory the module chose: a suite that loses the import fails by name rather than by percentile,
+which is the third time on this branch that an invisible cache state would otherwise have been paid
+for in a red round.
 
 Missing the unit batch is what the second CI round cost. It spawns the bundle a few dozen times and
 had been leaving the runner's cache warm for the timed suites that run after it, so with only the
