@@ -1,0 +1,21 @@
+specs/009-memory-core/contracts/injection-performance.md
+  s_5ab5797dc469b5::t_bd4e77eaf176ad 199-202,255-258
+test/helpers/compile-cache.ts
+  s_5ab5797dc469b5::t_a0ed73370ef4bc 38-42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "e5a5412857151fe8a13953dad802c8d96ddc1281",
+  "prompts": {},
+  "sessions": {
+    "s_5ab5797dc469b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44ceb1b9-68f7-4bf5-8646-52149920dd27",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
