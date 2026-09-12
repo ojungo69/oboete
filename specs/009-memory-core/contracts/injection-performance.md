@@ -123,6 +123,13 @@ inside somebody else's tree and write half a megabyte of bytecode there while ev
 *before* `compile` is created, so a refusal leaves nothing behind at all. No mode is required of it:
 `compile`'s own traverse bits already decide who can reach the entries.
 
+That last sentence is a test, not a preference. Twice while writing this fix a mode requirement went
+onto the `oboete` directory, and both times every other pin stayed green while the cache went off on
+every machine that already had one: the launcher creates that directory itself at 0700, which passes
+any mode check at any umask, so only a directory left behind by an earlier release -- made by a
+recursive `mkdir` that carried no mode, hence 0777 minus the umask -- ever fails one. The pin makes
+that directory at 0775 and asserts the run still fills a cache.
+
 Nothing above that is checked. Two rounds of this review tried requiring the rest of the ancestors
 to be unwritable by others and both times it refused real machines -- a `~/.cache` is 0755 nearly
 everywhere and 0775 wherever a 002 umask created it -- while buying very little: a symlink at

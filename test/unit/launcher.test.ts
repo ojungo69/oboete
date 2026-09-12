@@ -119,6 +119,21 @@ for (const mode of [0o755, 0o775, 0o777]) {
   });
 }
 
+test('a cache directory left loose by an older version is still accepted', async () => {
+  await withTempHome((home) => {
+    // What an earlier release left behind: it made ~/.cache/oboete with a recursive mkdir that
+    // carried no mode, so the directory is 0777 minus the umask. Asking it for a mode now refuses
+    // it and turns the cache off without a word, on exactly the machines where it already worked.
+    // Nothing else here would notice: the launcher makes the directory itself at 0700, which
+    // passes any mode check at any umask, so every other pin stays green (issue #210, twice).
+    mkdirSync(join(home, '.cache', 'oboete'), { recursive: true });
+    chmodSync(join(home, '.cache', 'oboete'), 0o775);
+    assert.equal(run(home).status, 0);
+    assert.ok(cacheEntries(home).length >= 1, 'a loose cache directory disabled the cache');
+    assert.equal(statSync(join(home, '.cache', 'oboete')).mode & 0o777, 0o775, 'it was tightened');
+  });
+});
+
 test('a cache directory whose parent is a symlink is refused', async () => {
   await withTempHome((home) => {
     // Recursive mkdir follows a link, so a link here would have the launcher create `compile` in
