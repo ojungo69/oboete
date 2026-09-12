@@ -61,14 +61,16 @@ const real = realpathSync(bundle);
 const sibling = join(dirname(real), 'engine.mjs');
 const engine = sibling !== real && existsSync(sibling) ? sibling : undefined;
 const beside = engine === undefined ? '' : `, beside \`${displayPath(engine)}\` (${bytes(engine)} bytes)`;
-// The same rule the launcher applies (src/launcher.mjs), which is the one src/paths.ts applies:
-// OBOETE_HOME if it names anything, anchored to the home directory when it is relative.
-const override = process.env.OBOETE_HOME?.trim();
-const dataHome = !override
-  ? join(homedir(), '.oboete')
-  : isAbsolute(override)
-    ? resolve(override)
-    : resolve(homedir(), override);
+/** The same rule the launcher applies (src/launcher.mjs), which is the one src/paths.ts applies:
+ *  OBOETE_HOME if it names anything, anchored to the home directory when it is relative. Written
+ *  with returns rather than nested conditionals, as the launcher writes it. */
+function oboeteHome() {
+  const override = process.env.OBOETE_HOME?.trim();
+  if (!override) return join(homedir(), '.oboete');
+  return isAbsolute(override) ? resolve(override) : resolve(homedir(), override);
+}
+
+const dataHome = oboeteHome();
 const compileCache = join(dataHome, 'cache', 'compile');
 let cacheWarm = false;
 try {

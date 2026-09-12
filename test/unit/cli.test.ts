@@ -18,6 +18,9 @@ const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
   version: string;
 };
 
+// Called inside `withTempHome`, always: the launcher makes `cache/compile` inside whatever
+// `OBOETE_HOME` names before it hands over to the engine, so a spawn without one leaves that
+// directory in the developer's own `~/.oboete` -- the one thing the suite is not allowed to touch.
 function run(args: string[]) {
   const env = { ...process.env };
   delete env.FORCE_COLOR;
@@ -25,18 +28,22 @@ function run(args: string[]) {
   return spawnSync(process.execPath, [bin, ...args], { encoding: 'utf8', env });
 }
 
-test('--version prints the package version', () => {
-  const result = run(['--version']);
-  assert.equal(result.status, 0);
-  assert.equal(result.stdout.trim(), pkg.version);
+test('--version prints the package version', async () => {
+  await withTempHome(() => {
+    const result = run(['--version']);
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout.trim(), pkg.version);
+  });
 });
 
-test('unknown command exits 2 and prints usage to stderr', () => {
-  for (const name of ['not-a-command', 'constructor', '__proto__', 'toString']) {
-    const result = run([name]);
-    assert.equal(result.status, 2, name);
-    assert.match(result.stderr, /Usage: oboete/, name);
-  }
+test('unknown command exits 2 and prints usage to stderr', async () => {
+  await withTempHome(() => {
+    for (const name of ['not-a-command', 'constructor', '__proto__', 'toString']) {
+      const result = run([name]);
+      assert.equal(result.status, 2, name);
+      assert.match(result.stderr, /Usage: oboete/, name);
+    }
+  });
 });
 
 test('oboete doctor prints a report', async () => {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** The repository root, found by walking up to the `package.json`: the suites that spawn
@@ -41,13 +41,18 @@ export function repositoryRoot(): string {
 // left alone, but only a real one: `NODE_COMPILE_CACHE=` set to nothing, or to spaces, is how Node
 // is told to write a cache into a directory named by the empty string or by whitespace, so a value
 // that is blank once trimmed is read as unset, which is what `src/paths.ts` does with its own
-// overrides. Only that much is copied: a relative value keeps Node's meaning for it and lands
-// beside the working directory, because it is the operator's own instruction to this process and
-// not a path the repository resolves. `NODE_DISABLE_COMPILE_CACHE` is deleted rather than respected, because
-// Node reads it during child bootstrap and it wins over the directory, and a suite that measures a
-// hook with no compile cache is measuring a hook nobody runs.
-export const SHARED_COMPILE_CACHE =
-  process.env.NODE_COMPILE_CACHE?.trim() || join(repositoryRoot(), 'build', 'compile-cache');
+// overrides. A relative one is resolved here, once, against the directory the suite was started
+// from. Node resolves that string separately in every child, and these children are spawned in
+// temporary repositories, so handing it on unresolved would give each of them a compile cache of
+// its own: the warm-up would fill a directory no timed run ever reads, and the deadline failures
+// this file exists to prevent would come back wearing the costume of a shared cache.
+// `NODE_DISABLE_COMPILE_CACHE` is deleted rather than respected, because Node reads it during
+// child bootstrap and it wins over the directory, and a suite that measures a hook with no compile
+// cache is measuring a hook nobody runs.
+const inherited = process.env.NODE_COMPILE_CACHE?.trim();
+export const SHARED_COMPILE_CACHE = inherited
+  ? resolve(inherited)
+  : join(repositoryRoot(), 'build', 'compile-cache');
 delete process.env.NODE_DISABLE_COMPILE_CACHE;
 process.env.NODE_COMPILE_CACHE = SHARED_COMPILE_CACHE;
 
