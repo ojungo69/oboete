@@ -87,6 +87,18 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
   `sync_parked` テーブルは撤去)。semgrep 0、ponytail。契約の "Implementation notes" に round ごとの規則を記録。
   gate は `scratch/gate-us6.sh` (`P=us6-gate1`)。
 
+  round 11-13 は PR #190 の bot 指摘 (CodeRabbit / Greptile / Codex connector) の triage。
+  round 13 は `src/sync/` の敵対的 hardening 12 件を全部 Claude Code 自身が修正して pin した:
+  peer が名乗る `common_dir` key は hash 検証のうえ必ず未 map (明示 `map-repo` 待ち)、`resolve --keep`
+  は payload を withheld された head を拒否、stage は保存済み origin の natural 変更を拒否、`repo` 行に
+  専用の 4,096 行上限 (受信側と送信側の両方)、key file は consent した key id に照合してから bundle I/O
+  (`key show` も同じ)、`init`/`join` は row と config を一緒に書いて失敗時は両方と key を撤去、`leave` は
+  space lock 下、context promotion は `passesClassRule` の fail-closed を繰り返す、`init`/`join` は
+  consent tuple を表示、`status` の listing は 200 件 + `totals`。収束系の残件は #196/#197、
+  `src/sync/` 以外の指摘は #199 (limit-then-filter 4 箇所) / #200 (doctor・work・why) / #201
+  (detector 失敗で止まる再分類キュー) に follow-up 化。DCO は sign-off が最終段落に無いと落ちるので
+  push 前に `node scripts/dco-check.mjs origin/main HEAD` を回すこと。
+
 ## 再開順序と未完了事項
 
 1. **US5 を閉じる**: PR の bot/CI 指摘を `pr-merge-gate` で処理 → T029–T032/T043 をチェック。
@@ -95,7 +107,10 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
 2. **macOS (T040 / SC-006)**: `docs/evidence/memory-core-2026-09/macos-runbook.md` を M1 iMac
    (remote desktop) で実行し、receipt を `/var/tmp/oboete-009-20260909.jJ5grc/macos/` に戻して
    quickstart に記録する。platform probe のみ、agent pair は対象外。
-3. **US6**: 実装済み (上記)。残りは PR #190 の bot/CI 指摘処理と merge (#185 の後)。
+3. **US6**: 実装済み (上記)。#185 は 2026-09-12 03:18 に merge 済み。PR #190 は round 13 まで
+   triage 完了、review thread は全 resolve、required check (check / secrets / CodeQL /
+   SonarCloud / semgrep-cloud-platform/scan / dco) は green。残りは最終 head での bot 再レビュー
+   確認 → `pr-merge-gatekeeper` → merge。
 4. **US7 + amendment**: T037–T039、T047 (session スコープ常駐、hook 起動、lease 所有、idle exit)、
    T048 (detected local + consented free presets、有料は自動選択しない)。
 5. **実測と最終 gate**: T020、T023–T024、T041–T045。実 agent pair・実モデル・100k events・7 日運用は
