@@ -34,10 +34,7 @@ function ours(path, denied) {
 
 /** The directory holding the cache is asked for no particular mode: one left loose by an older
  *  version or a restored backup is still the user's own, and refusing it would turn the cache off
- *  without a word. The cache itself must be closed to everyone else rather than merely unwritable,
- *  because V8 reads its entries from a versioned directory Node creates inside at 0777 minus the
- *  umask -- group-writable wherever the umask is 002 -- and denying the traverse bit on the parent
- *  is what puts that out of reach whatever its own mode. */
+ *  without a word. What `CLOSED` is for is at its call site below. */
 const ANY_MODE = 0;
 const CLOSED = 0o077;
 
