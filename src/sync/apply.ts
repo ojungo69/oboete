@@ -59,7 +59,18 @@ type Resolver = {
   repo(key: string): string;
 };
 
-/** Repository lines: canonical remotes resolve everywhere; foreign paths wait for `map-repo`. */
+/**
+ * Repository lines: canonical remotes resolve everywhere; a path stays unmapped here.
+ *
+ * Unmapped is not unreachable. A peer knows this replica's id (a bundle is named for it) and its
+ * machine-local paths (`publish` emits both in this device's own repo lines), so it can author a
+ * revision naming `${replica}:common_dir:${sha256(path)}`. The line below records that key without
+ * a local repository, but `registerLocalRepos` binds the same key to the real row the moment the
+ * developer opens that path, and `stage` accepts a reference to any key already mapped. Rejecting
+ * the line does not close it: the bundle stays in the shared directory and the next pull after the
+ * path is opened takes the mapped path instead. What bounds a peer here is the space key, not this
+ * pass. Gating that binding on consent is issue #205, and contracts/sync.md says so.
+ */
 function applyRepoLines(db: DatabaseSync, staged: Staged, now: number): void {
   for (const repo of stagedRepos(staged)) {
     const existing = prepared(db, 'SELECT local_repo_id FROM sync_repo_mappings WHERE repo_key = ?').get(repo.origin_id);
@@ -99,9 +110,8 @@ function applyRepoLines(db: DatabaseSync, staged: Staged, now: number): void {
         localRepoId = row?.id == null ? null : String(row.id);
       }
     }
-    // A machine-local path binds to a local repository only through an explicit `map-repo` on this
-    // device; a bundle never resolves one on its own, not even one naming this replica's prefix
-    // (a bundle file is named for the replica, so the prefix is public).
+    // A path is recorded, never resolved here — including one under this replica's own prefix,
+    // which `registerLocalRepos` may bind later (see the header, and issue #205).
     prepared(db, `INSERT INTO sync_repo_mappings (repo_key, identity_kind, normalized_identity, local_repo_id) VALUES (?, ?, ?, ?)
       ON CONFLICT(repo_key) DO UPDATE SET local_repo_id = COALESCE(sync_repo_mappings.local_repo_id, excluded.local_repo_id)`)
       .run(repo.origin_id, repo.identity_kind, repo.normalized_identity, localRepoId);

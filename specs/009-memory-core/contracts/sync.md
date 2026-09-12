@@ -884,10 +884,10 @@ pushed head; a bundle from an in-space peer is untrusted input. Eight adversaria
 findings on `src/sync/`, all fixed; three re-surfaced convergence findings are the residuals
 already tracked as #196/#197):
 
-- a bundle never binds a machine-local (`common_dir`) repository on its own: `applyRepoLines`
-  validates a `common_dir` key's hash against its normalized identity (rejecting a peer that names
-  this replica's prefix with a bogus hash to steer revisions into a local repository) and no longer
-  auto-maps an unmapped key by identity — the key waits for `map-repo` (apply, pinned);
+- a repo line never binds a machine-local (`common_dir`) repository: `applyRepoLines` validates the
+  key's hash against its normalized identity and records the key with no local repository, where it
+  used to resolve one by identity (apply, pinned). This bounds the repo line, not the peer — see
+  "Machine-local repository keys are not a boundary" below;
 - `resolve --keep` refuses a head whose payload the publisher withheld (hash present, payload null):
   the successor would carry null content, so peers that hold the content recapture it and the
   resolution does not converge (apply, pinned);
@@ -1000,6 +1000,22 @@ compensating-write design: a rollback that undoes a write another process made):
   push that accepted the flag and exported the recorded set would ship exactly what the developer
   typed the flag to withhold. Silently ignoring a flag is the failure mode; exiting 2 is not
   (sync-cli, pinned);
+- **Machine-local repository keys are not a boundary.** Three passes over `applyRepoLines` in this
+  round each closed a way to bind one and each exposed the next, which is the signal that the
+  premise was wrong rather than the code. What is true: a peer knows this replica's id (a bundle is
+  named for it) and this device's machine-local paths, because `publish` emits both in this device's
+  own repo lines. It can therefore author a revision naming `${replica}:common_dir:${sha256(path)}`.
+  `applyRepoLines` records that key unmapped, but `registerLocalRepos` binds the same key to the
+  real row the moment the developer opens that path, and `stage` accepts a reference to any key
+  already mapped — with or without a repo line. Rejecting the line does not close it either: the
+  bundle stays in the shared directory, and the next pull after the path is opened takes the mapped
+  path instead. So a peer inside the space can attach a memory to a machine-local repository of this
+  device without `map-repo`, and **the space key is what bounds that, not this pass**. Gating the
+  binding on consent — withhold such an origin with its own reason, show it in `status`, bind on an
+  explicit accept — is issue #205, deliberately not attempted mid-round: it touches the withholding
+  semantics that took nine rounds to settle. What the three passes did close is real and pinned: a
+  `remote:` line can no longer create a `repos` row under the id this device will later compute for
+  a path, and no key may misstate the identity it displays;
 - streaming the publish side's origins the way the apply side now streams them is tracked as a
   follow-up (issue #204), not closed here: `buildSnapshot`'s in-memory maps are the shape to
   change, the data is this device's own rather than peer-supplied, and the 1,000,000-line RSS

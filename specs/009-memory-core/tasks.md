@@ -231,7 +231,11 @@ writers require separate worktrees. No deployment follows merely from an increme
   yet hold the identity, the peer's line creates the row under the very id the device will compute
   when the developer opens that path, so `applyRepoLines` now requires a canonical remote identity,
   checks every key's hash whichever replica minted it, and `registerLocalRepos` records the kind its
-  key was built from — with the publish-side RSS measurement filed as #204); round four
+  key was built from. That third pass also settled what the
+  three passes could not: a machine-local repository key is not a boundary at all — a peer knows
+  this replica's id and this device's paths because `publish` emits both, and the mapping binds on
+  the developer's next open — so the contract now states the space key as the boundary and the
+  consent gate is issue #205, with the publish-side RSS measurement as #204); round four
   replaced the content-derived source identity with a stored key (`memory_sources.sync_key`) and
   made write-time aliases re-enter the pass; round five closed the holes that redesign opened
   (bound-row lookups, tuple matching, claim-before-write); round six settled the source key as

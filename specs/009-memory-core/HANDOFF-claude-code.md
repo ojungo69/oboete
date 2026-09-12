@@ -89,7 +89,7 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
 
   round 11-14 は PR #190 の bot 指摘 (CodeRabbit / Greptile / Codex connector) の triage。
   round 13 は `src/sync/` の敵対的 hardening 18 件を全部 Claude Code 自身が修正して pin した:
-  peer が名乗る `common_dir` key は hash 検証のうえ必ず未 map (明示 `map-repo` 待ち)、`resolve --keep`
+  peer が名乗る `common_dir` key は hash 検証のうえ未 map で記録 (ただし後述のとおりこれは境界ではない)、`resolve --keep`
   は payload を withheld された head を拒否、stage は保存済み origin の natural 変更を拒否、`repo` 行に
   専用の 4,096 行上限 (受信側と送信側の両方)、key file は consent した key id に照合してから bundle I/O
   (`key show` も同じ)、`init`/`join` は失敗時に row と key を撤去、`leave` は space lock 下、
@@ -120,7 +120,18 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
   key の hash は minted した replica を問わず全件検証する(`status` が見せる identity を信じて
   `map-repo` するため)、`registerLocalRepos` は mapping の kind を **key から** 決める
   (row の kind をそのまま書くと、non-canonical な remote row が「common_dir key + remote 宣言」に
-  なり、全 peer がその device の bundle を恒久的に拒否する)。publish 側の RSS 計測は #204 に follow-up 化 (peer 由来ではなく自機データ、`buildSnapshot` の
+  なり、全 peer がその device の bundle を恒久的に拒否する)。
+
+  **そのうえで判明した設計上の事実 (#205)**: `applyRepoLines` を 1 ラウンドで 3 回直し、そのたびに
+  隣の穴が出た = 前提のほうが誤っていた。実際にはこうなっている — peer は replica id (bundle 名) も
+  この device の machine-local path (`publish` が自分の repo 行として両方出す) も知っているので、
+  `${replica}:common_dir:${sha256(path)}` を名乗る revision を書ける。repo 行は未 map で記録されるが、
+  開発者がそのパスを開いた瞬間に `registerLocalRepos` が同じ key を実 row に bind し、`stage` は
+  「既に map 済みの key」への参照を repo 行なしで通す。行を拒否しても閉じない (bundle は共有
+  ディレクトリに残り、パスを開いた後の次の pull で map 済み経路に入る)。つまり **space key が境界で
+  あって、この pass ではない**。consent で bind を止める設計 (専用 reason で withhold → `status` に
+  出す → 明示 accept で bind) は #205。9 ラウンドかけて安定させた withheld 意味論に触るため、
+  ラウンドの途中ではやらない。publish 側の RSS 計測は #204 に follow-up 化 (peer 由来ではなく自機データ、`buildSnapshot` の
   map 構造ごとの変更になるため)。設計の教訓: **補償書き込みは「自分が書いたものだけ」を戻す**。
   順序を決めるときは各文の失敗点ごとに「その状態からユーザーが `leave`/`init` だけで回復できるか」を
   表にする — 回復できない向き (ここでは row があって config が無い) を作らない側に倒す。
