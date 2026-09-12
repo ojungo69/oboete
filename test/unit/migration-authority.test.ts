@@ -260,20 +260,26 @@ test('a parent raised by the local trigger after it was visited still raises its
   await withFixture(async (fixture) => {
     // The worklist pops the smallest hash first: make p's identity sort before x's so p is visited
     // before x raises q (and, through the local edge, p).
-    const xText = Array.from({ length: 64 }, (_, i) => `X-text-${i}`).find((text) => contentOf(fixture, text) > contentOf(fixture, 'P-text'))!;
-    for (const [id, text] of [['p', 'P-text'], ['q', 'Q-text'], ['x', xText]]) {
+    // Two texts ordered by content hash so the worklist visits p before x raises q (it pops the
+    // smallest hash first). Take both from a hash-sorted pool so p < x holds on every fixture,
+    // instead of searching for one x above a fixed p (which finds nothing when the fixture's random
+    // identity puts P-text's hash above all candidates).
+    const pool = Array.from({ length: 8 }, (_, i) => `PX-text-${i}`)
+      .sort((a, b) => { const ha = contentOf(fixture, a), hb = contentOf(fixture, b); return ha < hb ? -1 : ha > hb ? 1 : 0; });
+    const pText = pool[0]!, xText = pool[pool.length - 1]!;
+    for (const [id, text, sensitivity] of [['p', pText, 'local_only'], ['q', 'Q-text', 'local_only'], ['x', xText, 'secret']] as const) {
       insertMemory(fixture, { id, title: text, body: text });
       fixture.db.prepare("UPDATE memories SET material_hash = ?, content_hash = ?, sensitivity = ? WHERE id = ?")
-        .run(materialOf(text), contentOf(fixture, text), id === 'x' ? 'secret' : 'local_only', id);
+        .run(materialOf(text), contentOf(fixture, text), sensitivity, id);
     }
     fixture.db.prepare("INSERT INTO memory_sources (memory_id, source_memory_id, context_only) VALUES ('p', 'q', 1)").run();
-    const records = [ordinaryRecord(fixture, 'c', 'C-text', 'local_only'), ordinaryRecord(fixture, 'p', 'P-text', 'local_only'),
+    const records = [ordinaryRecord(fixture, 'c', 'C-text', 'local_only'), ordinaryRecord(fixture, 'p', pText, 'local_only'),
       ordinaryRecord(fixture, 'q', 'Q-text', 'local_only'), ordinaryRecord(fixture, 'x', xText, 'local_only'),
       { ...dependencyDefaults, id: 's1', memory_id: 'c', source_memory_id: 'p' },
       { ...dependencyDefaults, id: 's2', memory_id: 'q', source_memory_id: 'x' }];
     const result = await importMemories(fixture.db, file(fixture, records), { now: 10 });
     assert.deepEqual(result.rejected, []);
-    assert.deepEqual(fixture.db.prepare("SELECT title, sensitivity FROM memories WHERE title IN ('C-text', 'P-text', 'Q-text') ORDER BY title").all()
+    assert.deepEqual(fixture.db.prepare("SELECT sensitivity FROM memories WHERE title IN (?, 'C-text', 'Q-text')").all(pText)
       .map((r) => r.sensitivity), ['secret', 'secret', 'secret']);
   });
 });
