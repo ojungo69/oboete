@@ -20,24 +20,26 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-/** True when `path` is a real directory belonging to this user. Nothing is asked of its mode: one
- *  left loose by an older version or a restored backup is still the user's own, and refusing it
- *  would turn the cache off for them without a word. `mkdirSync` leaves an existing directory's
- *  mode and owner alone and follows a symlink, so what came back is checked rather than assumed;
- *  refusing beats correcting, since a chmod would land on the target of a planted symlink.
- *  Windows has neither uid nor mode bits, so there the first two checks are the whole test. */
-function ours(path) {
+/** True when `path` is a real directory belonging to this user, with none of `denied`'s bits set
+ *  for anyone else. `mkdirSync` leaves an existing directory's mode and owner alone and follows a
+ *  symlink, so what came back is checked rather than assumed, and one observation decides all of
+ *  it. Refusing beats correcting: a chmod would land on the target of a planted symlink. Windows
+ *  has neither uid nor mode bits, so there the first two checks are the whole test. */
+function ours(path, denied) {
   const found = lstatSync(path);
   if (found.isSymbolicLink() || !found.isDirectory()) return false;
   const uid = process.getuid?.();
-  return uid === undefined || found.uid === uid;
+  return uid === undefined || (found.uid === uid && (found.mode & denied) === 0);
 }
 
-/** True when `path` is ours and nobody else can even enter it. */
-function oursAndClosed(path) {
-  const uid = process.getuid?.();
-  return ours(path) && (uid === undefined || (lstatSync(path).mode & 0o077) === 0);
-}
+/** The directory holding the cache is asked for no particular mode: one left loose by an older
+ *  version or a restored backup is still the user's own, and refusing it would turn the cache off
+ *  without a word. The cache itself must be closed to everyone else rather than merely unwritable,
+ *  because V8 reads its entries from a versioned directory Node creates inside at 0777 minus the
+ *  umask -- group-writable wherever the umask is 002 -- and denying the traverse bit on the parent
+ *  is what puts that out of reach whatever its own mode. */
+const ANY_MODE = 0;
+const CLOSED = 0o077;
 
 try {
   const base = process.env.XDG_CACHE_HOME;
@@ -53,12 +55,12 @@ try {
   // write bytecode into it while every check on `compile` itself still passed -- it would be ours,
   // 0700 and a real directory. It only has to be ours and not a link; nothing above it is checked,
   // because a symlink there is the user's own arrangement and replacing it needs write on $HOME.
-  if (ours(parent)) {
+  if (ours(parent, ANY_MODE)) {
     mkdirSync(cache, { recursive: true, mode: 0o700 });
     // `compile` must be closed to everyone else, not merely unwritable: V8 reads its entries from
     // a versioned directory Node creates inside at 0777 minus the umask, group-writable wherever
     // the umask is 002, and denying the traverse bit puts that out of reach whatever its own mode.
-    if (oursAndClosed(cache)) nodeModule.enableCompileCache?.(cache);
+    if (ours(cache, CLOSED)) nodeModule.enableCompileCache?.(cache);
   }
 } catch {
   // No cache, same behaviour. A read-only home costs the cache and never the command.
