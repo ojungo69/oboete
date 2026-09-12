@@ -45,6 +45,12 @@ approval before implementation starts (task 0).
 - **Reviewer changes**: honest list of hook-path packages; Pi artifact shape; compiled tests; lint.
 - **Gate (R13)**: the real bundle's cold start is measured on 22.16 and 24.x after the minimal
   skeleton exists; budget 100 ms for process start, bundle load, and detector init.
+- **Superseded in part (issue #210)**: the one ESM file is `dist/engine.mjs` now, and
+  `dist/oboete.mjs` is `src/launcher.mjs` copied verbatim -- a small entry point that turns the V8
+  compile cache on and then imports the engine, which a single file cannot do for itself because
+  Node compiles an entry file before any statement in it runs. Everything else here still holds, and
+  `dist/oboete.mjs` is still what `bin` and the hook commands name. Current statement:
+  `specs/009-memory-core/contracts/injection-performance.md`.
 
 ## R3. Observer client and presets
 
