@@ -420,6 +420,15 @@ test('init, join by key line, push and pull move a memory through the shared dir
       assert.equal(a.prepare("SELECT COUNT(*) AS n FROM sync_conflicts WHERE status = 'open'").get()?.n, 0);
       assert.equal(revisionCount(a), 2);
       assert.equal(syncStatus(a, pathsA).replicas.length, 1);
+      // A peer's bundle can leave very many origins unmapped, so `status` lists a bounded sample and
+      // reports the real count: it must never materialize the whole set into one JSON document.
+      for (let i = 0; i < 250; i += 1) {
+        a.prepare('INSERT INTO sync_repo_mappings (repo_key, identity_kind, normalized_identity, local_repo_id) VALUES (?, ?, ?, NULL)')
+          .run(`${replicaOriginId(b)}:common_dir:${String(i).padStart(64, '0')}`, 'common_dir', `/peer/${String(i)}`);
+      }
+      const bounded = syncStatus(a, pathsA);
+      assert.equal(bounded.unmapped_repos.length, 200);
+      assert.equal(bounded.totals.unmapped_repos, 250);
       // A tampered bundle is rejected by name and the other bundle's outcome is unaffected.
       const bytes = readFileSync(bundle);
       bytes[bytes.length - 3]! ^= 0x01;

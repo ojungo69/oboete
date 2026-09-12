@@ -132,7 +132,7 @@ export async function runSync(argv: string[], io: Io = processIo(), paths: Oboet
         const status = syncStatus(db, paths);
         report(io, json, status, status.configured
           ? `Space ${status.space_id} in ${status.directory} (classes: ${status.classes!.join(', ')}); ${status.replicas.length} other replicas seen; `
-            + `${status.conflicts.length} open conflicts; ${status.withheld_on_apply.length} withheld on apply; ${status.unmapped_repos.length} unmapped repositories.\n`
+            + `${status.totals.conflicts} open conflicts; ${status.totals.withheld_on_apply} withheld on apply; ${status.totals.unmapped_repos} unmapped repositories.\n`
           : 'Sync is not configured.\n');
         return 0;
       }

@@ -177,7 +177,7 @@ test('MCP sync_status is read-only local state and no MCP tool can push, pull or
   await withFixture(async ({ repo }) => {
     const result = await serve(repo, [call(1, 'sync_status', {}), call(2, 'sync_push', {}), call(3, 'sync_pull', {}), call(4, 'sync_resolve', { id: 'x', keep: 'y' })]);
     assert.deepEqual((result.frames[0].result as { structuredContent: unknown }).structuredContent,
-      { configured: false, replicas: [], conflicts: [], withheld_on_apply: [], unmapped_repos: [] });
+      { configured: false, replicas: [], conflicts: [], withheld_on_apply: [], unmapped_repos: [], totals: { conflicts: 0, withheld_on_apply: 0, unmapped_repos: 0 } });
     for (const frame of result.frames.slice(1)) assert.equal((frame.error as { code: number }).code, -32602);
     assert.deepEqual(MCP_TOOLS.find((tool) => tool.name === 'sync_status')?.annotations,
       { readOnlyHint: true, idempotentHint: true, openWorldHint: false });

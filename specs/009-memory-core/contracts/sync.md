@@ -518,7 +518,7 @@ class selection.
 | `oboete sync join <dir>` | Join; key typed on a TTY with echo off; consent. |
 | `oboete sync key show` | Print the key line (TTY only). |
 | `oboete sync push` / `pull` | As above. `--json` prints counts, withheld, conflicts, skipped bundles. |
-| `oboete sync status` | Local-only: space, replicas seen, cursors, open conflicts, withheld counts. |
+| `oboete sync status` | Local-only: space, replicas seen, cursors, open conflicts, withheld counts. Conflicts, withheld origins and unmapped repositories are listed 200 at a time with the full count in `totals`. |
 | `oboete sync resolve <origin_id> --keep <revision_id \| checkpoint memory origin>` | Create a successor revision with every current head as parent whose content is the kept head; for a work, `--keep` may name a stored checkpoint memory of that work instead (an observer conflict candidate that no revision points at), and the successor is the work's current payload with `current_checkpoint_memory_id` set to it; closes the conflict row. |
 | `oboete sync leave` | Remove key, cursors, consent and this replica's own bundle file. |
 
@@ -909,6 +909,10 @@ already tracked as #196/#197):
 - context promotion repeats `passesClassRule`'s fail-closed guard, so a secret-floored or
   tombstoned context is never shipped even when a shipped payload references it (publish;
   defense-in-depth — the state does not arise from the honest path today).
+- `sync status` lists at most 200 open conflicts, withheld origins and unmapped repositories and
+  reports the true count of each in `totals`: one pull can leave very many origins withheld or
+  unmapped, and the CLI and the MCP tool would otherwise materialize and serialize the whole set
+  (status/CLI, pinned);
 - `init` and `join` print the consent tuple the space just recorded the hash of — directory and
   realpath, space, key id, encryption, the sensitivity classes exported, "no network" — as the
   Consent section above already required. Without `--classes` the default selection includes
