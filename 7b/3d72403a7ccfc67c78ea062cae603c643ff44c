@@ -1,0 +1,19 @@
+test/unit/privacy.test.ts
+  s_5ab5797dc469b5::t_ef1bd0c3e09a0e 411-415,417-423,429-441
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "7b3d72403a7ccfc67c78ea062cae603c643ff44c",
+  "prompts": {},
+  "sessions": {
+    "s_5ab5797dc469b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44ceb1b9-68f7-4bf5-8646-52149920dd27",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
