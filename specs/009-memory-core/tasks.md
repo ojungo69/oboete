@@ -207,17 +207,20 @@ writers require separate worktrees. No deployment follows merely from an increme
   (`revisions_sha256` scope, `sync.key_id` allow-list, `status.ts` as the one module doctor and
   MCP import) plus the `--republish` delivery-identity bullet. Review rounds (`/code-review high`
   three times plus one finder angle, Codex correctness passes, receipts under
-  `/var/tmp/oboete-009-20260909.jJ5grc/us6/`) found 10 + 6 + 9 + 9 + 14 + 11 + 17 + 16 + 20 + 12 + 4 + 3 + 12 defects, fixed in
+  `/var/tmp/oboete-009-20260909.jJ5grc/us6/`) found 10 + 6 + 9 + 9 + 14 + 11 + 17 + 16 + 20 + 12 + 4 + 3 + 18 defects, fixed in
   security-owned code by Claude Code and pinned RED→GREEN in `sync-review.test.ts` (round eleven
   fixed and pinned three of its four; its fourth, a mutual cross-memory context cycle held on one
   device, is not resolved — the cycle-break is order-dependent and two devices can diverge, tracked
   as a follow-up design change, issue #196; round twelve fixed and pinned one of three — a
   `storePayload` tuple-backfill drift — and tracked the two narrower source-identity edges as
   issue #197); round thirteen triaged the PR bot findings — eight adversarial-hardening defects in
-  `src/sync/` plus four found while closing them (a repo-line bound that regressed the legal
-  boundary, the consent tuple the CLI never showed, unbounded `status` listings, and the repo bound
-  missing on the publishing side), all fixed and pinned, with the three re-surfaced convergence
-  findings left on #196/#197 and the non-sync findings filed as #199/#200/#201); round four
+  `src/sync/` plus ten found while closing them — a repo-line bound that regressed the legal
+  boundary, the consent tuple the CLI never showed, unbounded `status` listings, the repo bound
+  missing on the publishing side, `leave` wedging on a failed config write, the `init` singleton
+  race, a peer-plantable temporary name turning a published push into a reported failure, the
+  apply pass materializing every staged origin, and a descriptor leaked by each of the seven
+  header rejections — all fixed and pinned, with the three re-surfaced convergence findings left
+  on #196/#197 and the non-sync findings filed as #199/#200/#201/#202); round four
   replaced the content-derived source identity with a stored key (`memory_sources.sync_key`) and
   made write-time aliases re-enter the pass; round five closed the holes that redesign opened
   (bound-row lookups, tuple matching, claim-before-write); round six settled the source key as

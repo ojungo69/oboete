@@ -88,15 +88,20 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
   gate は `scratch/gate-us6.sh` (`P=us6-gate1`)。
 
   round 11-13 は PR #190 の bot 指摘 (CodeRabbit / Greptile / Codex connector) の triage。
-  round 13 は `src/sync/` の敵対的 hardening 12 件を全部 Claude Code 自身が修正して pin した:
+  round 13 は `src/sync/` の敵対的 hardening 18 件を全部 Claude Code 自身が修正して pin した:
   peer が名乗る `common_dir` key は hash 検証のうえ必ず未 map (明示 `map-repo` 待ち)、`resolve --keep`
   は payload を withheld された head を拒否、stage は保存済み origin の natural 変更を拒否、`repo` 行に
   専用の 4,096 行上限 (受信側と送信側の両方)、key file は consent した key id に照合してから bundle I/O
   (`key show` も同じ)、`init`/`join` は row と config を一緒に書いて失敗時は両方と key を撤去、`leave` は
-  space lock 下、context promotion は `passesClassRule` の fail-closed を繰り返す、`init`/`join` は
-  consent tuple を表示、`status` の listing は 200 件 + `totals`。収束系の残件は #196/#197、
-  `src/sync/` 以外の指摘は #199 (limit-then-filter 4 箇所) / #200 (doctor・work・why) / #201
-  (detector 失敗で止まる再分類キュー) に follow-up 化。DCO は sign-off が最終段落に無いと落ちるので
+  space lock 下 (かつ row と config は最後に一緒に消す = 失敗しても leave を再実行できる)、
+  context promotion は `passesClassRule` の fail-closed を繰り返す、`init`/`join` は consent tuple を
+  表示し singleton 検査を write txn 内でもう一度回す、`status` の listing は 200 件 + `totals`、
+  push 後の tmp 掃除は消せない entry で失敗しない、apply は staged origin を streaming で読む、
+  header 拒否は開いた fd を必ず閉じる。収束系の残件は #196/#197、`src/sync/` 以外の指摘は
+  #199 (limit-then-filter 4 箇所) / #200 (doctor・work・why) / #201 (detector 失敗で止まる再分類
+  キュー) / #202 (tool_call を欠く tool_result が memory を injection から永久に外す) に follow-up 化。
+  CodeRabbit は **1 時間に 1 レビュー**なので、レビューループ中は push をまとめてから 1 回だけ投げる
+  (2026-09-12 に 7 回投げて rate limit に当てた)。DCO は sign-off が最終段落に無いと落ちるので
   push 前に `node scripts/dco-check.mjs origin/main HEAD` を回すこと。
 
 ## 再開順序と未完了事項
