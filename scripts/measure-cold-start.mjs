@@ -46,6 +46,11 @@ for (const path of [bundle, ...nodes]) {
   if (!existsSync(path)) throw new Error(`not found: ${path}`);
 }
 
+/** The one place this script reads a size, so the record's two numbers come from one call site that
+ *  runs after the guard above. `--bundle` is a developer's own argument to a measurement script that
+ *  spawns whatever it names a hundred times over; reading its size is the least of what it does. */
+const bytes = (path) => statSync(path).size;
+
 // The launcher is a couple of kilobytes, most of it comment, and the engine beside it is what the
 // timings paid to compile -- so the record names both. It does not fold one into the other: a
 // `--bundle` naming a single-file build that happens to share a directory with an unrelated engine
@@ -55,6 +60,7 @@ for (const path of [bundle, ...nodes]) {
 const real = realpathSync(bundle);
 const sibling = join(dirname(real), 'engine.mjs');
 const engine = sibling !== real && existsSync(sibling) ? sibling : undefined;
+const beside = engine === undefined ? '' : `, beside \`${displayPath(engine)}\` (${bytes(engine)} bytes)`;
 // The same rule the launcher applies (src/launcher.mjs): a relative or empty override is ignored.
 const cacheBase = process.env.XDG_CACHE_HOME;
 const cacheRoot = cacheBase !== undefined && isAbsolute(cacheBase) ? cacheBase : join(homedir(), '.cache');
@@ -341,9 +347,7 @@ lines.push(
   `- Date: ${measuredAt}`,
   `- Node versions: ${nodeVersionsText}`,
   `- Commit: \`${commit}\``,
-  `- Bundle: \`${displayPath(bundle)}\` (${statSync(bundle).size} bytes)${
-    engine === undefined ? '' : `, beside \`${displayPath(engine)}\` (${statSync(engine).size} bytes)`
-  }`,
+  `- Bundle: \`${displayPath(bundle)}\` (${bytes(bundle)} bytes)${beside}`,
   `- Compile cache: \`${displayPath(compileCache)}\`, ${cacheWarm ? 'non-empty' : 'empty'} before this run. This is what the directory held, not what the launcher did with it: Node keys entries by version, architecture and uid, and the launcher refuses the directory outright unless it is a real directory of this user's that nobody else can enter, so a non-empty directory means neither that the Node measured here found its own entries nor that any cache was enabled (issue #210: a cold cache costs the hook about 35 ms).`,
   `- Samples: ${RUNS} measured runs after ${WARM_UPS} warm-up runs per scenario`,
   `- Measurement attempts: ${attemptsText}; kept run ${kept.index} (lower 1-minute load average)`,

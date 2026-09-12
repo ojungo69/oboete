@@ -19,7 +19,7 @@ M1 source retention and completion rules.
   `dist/oboete.mjs`, which stays the published entry point: it enables the V8 compile cache and then
   imports the engine (issue #210; the reasoning is in `src/launcher.mjs`). Anything that names the
   program to run -- hook commands, worker scripts -- names `dist/oboete.mjs`; anything that reports
-  the bundle's size names `dist/engine.mjs`. Inside the bundle `import.meta.url` is the engine, so
+  on the build names both files, each with its own size, rather than folding one into the other. Inside the bundle `import.meta.url` is the engine, so
   the launcher is `join(dirname(fileURLToPath(import.meta.url)), 'oboete.mjs')`. Hook-path packages
   are bundled: `zod`, `smol-toml`, `@secretlint/core`, `@secretlint/profiler`,
   `@secretlint/secretlint-rule-preset-recommend`. Everything else (`ai`,

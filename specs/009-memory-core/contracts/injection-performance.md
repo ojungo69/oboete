@@ -74,13 +74,17 @@ Splitting `dist/` splits what "the bundle" means, and every site that names one 
 to pick deliberately. What names the program to run -- the `bin` entry, the hook commands
 `oboete setup` writes, the detector worker script, the Pi loader -- names `dist/oboete.mjs`, or the
 cache is never enabled where it matters. Existing installs already name that file, so nothing has to
-be rewritten. What reports the bundle's size -- the T068 replay record and `scripts/measure-cold-start.mjs` --
-names `dist/engine.mjs`, or the resource records would show a two-kilobyte bundle. One field cannot be
-both: the replay harness spawns its `bundle` for every hook line as well as printing its size, so it
-keeps naming the launcher and derives the engine for the size line only. That derivation goes
-through `realpathSync`, because a global install runs a symlinked `bin` and the engine sits next to
-the real file, not next to the link; where there is no sibling engine the file is its own, which
-keeps the script able to measure a pre-split build for comparison. Inside the bundle
+be rewritten. What reports on the build -- the T068 replay record and `scripts/measure-cold-start.mjs` -- names
+both files rather than choosing between them. Each prints the file it ran with that file's own size
+and, when an `engine.mjs` that is not that same file sits beside it, names that separately with its
+own size. Reporting the sibling's bytes under the heading of the file that ran is right for
+`dist/oboete.mjs` and wrong for anything else: a `--bundle` naming a single-file build that happens
+to share a directory with an unrelated engine -- a baseline copied into `dist/` for a comparison --
+would carry the split engine's two megabytes against its own timings, and the receipt would describe
+two artefacts as one. The sibling is found through `realpathSync`, because a global install runs a
+symlinked `bin` and the engine sits next to the real file, not next to the link; a pre-split build
+simply has no second half to report, which keeps the script able to measure one for comparison.
+Inside the bundle
 `import.meta.url` is now the engine, so `src/setup/setup.ts` composes the launcher path from its
 directory and falls back to itself if no launcher is there, since a wired path that does not exist
 would make every hook a silent no-op. `process.argv[1]` is not a substitute for `import.meta.url`
