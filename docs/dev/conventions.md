@@ -47,8 +47,10 @@ M1 source retention and completion rules.
 ## Data directory and files
 
 - `OBOETE_HOME`, else `~/.oboete`. Inside: `config.toml`, `memory.db` (plus `-wal` and `-shm`),
-  `spool/`, `spool/pi-ack/`, `logs/hook.log`, `logs/observe.log`, and the `paused` marker file.
-  `src/paths.ts` (T022) is the only module that composes these paths.
+  `spool/`, `spool/pi-ack/`, `logs/hook.log`, `logs/observe.log`, `cache/compile/`, and the `paused`
+  marker file. `src/paths.ts` (T022) composes all of them but one: `cache/compile/` is the launcher's,
+  and `src/launcher.mjs` resolves the home a second time because importing the engine is the cost it
+  exists to avoid. The two rules are the same rule and a test pins them together.
 - Repository path rules live in `.oboete.toml` at the repository root (same TOML parser).
 
 ## Identifiers, hashes, time

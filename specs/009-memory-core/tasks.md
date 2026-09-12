@@ -299,7 +299,15 @@ writers require separate worktrees. No deployment follows merely from an increme
   which is resolved when the module is linked, before any statement runs and outside the reach of
   the surrounding `try`, so on a Node older than 22.1 it was a `SyntaxError` and a non-zero exit for
   every command including the hook contracted to exit 0 whatever happens; it is a namespace import
-  and an optional call now. Cache directory, the rejected alternatives, the
+  and an optional call now. A last round moved the cache itself: `$XDG_CACHE_HOME/oboete/compile`
+  writes outside the tree `OBOETE_HOME` bounds, which `CONSTITUTION.md` Principle VI does not allow
+  and explicitly defers, so it is `$OBOETE_HOME/cache/compile` and the launcher resolves the home the
+  way `src/paths.ts` does. That costs the fault suites about 6 % (each test's temporary home starts
+  on a cold cache) and nothing in the medians, which were re-measured interleaved and still show the
+  same ~36 ms. The same round wrapped the launcher's own `import` of the engine: the split put a
+  failure ahead of the handler in `src/cli.ts` that gives `hook`, `capture` and `inject` their
+  contracted exit 0, so a missing engine printed a Node stack over an agent's session; the launcher
+  now repeats that handler for those three commands and rethrows for every other. Cache directory, the rejected alternatives, the
   accepted `NODE_COMPILE_CACHE` and cache-growth costs and what the numbers do not claim are in
   `contracts/injection-performance.md`; the pin is `test/unit/launcher.test.ts`. T042 stays
   unchecked: the 1,000/10,000/100,000-event measurement it names is still open.
