@@ -93,11 +93,11 @@ function checkConsent(db: DatabaseSync, config: SyncConfig): void {
 }
 
 function recordSpace(db: DatabaseSync, paths: OboetePaths, config: SyncConfig, now: number): void {
-  // The database row and the config file are written together, and neither survives alone: the row
-  // is rolled back and the `[sync]` section removed if any step fails. Either would wedge the space
-  // on its own — a row without the config is one `leave` cannot reach (it reads the config) while
-  // `assertNoSpace` keeps blocking re-init, and a config without the row leaves `init`/`join`
-  // reporting `space_exists` while `push`/`pull` report `key_missing`.
+  // The database row and the config file are written together, and the row must never outlive a
+  // failure alone: a row without the config is one `leave` cannot reach (it reads the config) while
+  // `assertNoSpace` keeps blocking re-init. A config without the row is the recoverable direction —
+  // `init`/`join` report `space_exists` and `leave` clears it — so that is the way this unwinds.
+  let wroteConfig = false;
   db.exec('BEGIN IMMEDIATE');
   try {
     // Re-checked here, not only at the command's start: two `init`/`join` processes can both pass
@@ -109,12 +109,17 @@ function recordSpace(db: DatabaseSync, paths: OboetePaths, config: SyncConfig, n
       .run(config.space_id, config.directory, config.directory_realpath, config.key_id, canonicalJson([...config.classes].sort(compareCodeUnits)),
         consentHashOf(config), now);
     updateConfigFile(paths, (root) => { root.sync = { ...config }; });
+    wroteConfig = true;
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
-    // Best effort: the config write may itself be what failed, in which case there is nothing to
-    // undo and a second attempt fails the same way. The original error is the one worth reporting.
-    try { updateConfigFile(paths, (root) => { delete root.sync; }); } catch { /* nothing was written */ }
+    // Only what this invocation wrote is undone. The loser of an `init` race fails `assertNoSpace`
+    // above, before touching the config, and must not delete the `[sync]` section the winner just
+    // wrote — that would leave the winner's row and key with no config naming them.
+    if (wroteConfig) {
+      // Best effort: the original error is the one worth reporting.
+      try { updateConfigFile(paths, (root) => { delete root.sync; }); } catch { /* the config write is itself what failed */ }
+    }
     throw error;
   }
 }
@@ -187,16 +192,17 @@ export function leaveSpace(db: DatabaseSync, paths: OboetePaths): void {
     const own = join(spaceDirectory(config.directory, config.space_id), `${replicaOriginId(db)}.osb`);
     rmSync(own, { force: true });
     rmSync(syncPaths(paths).key(config.space_id), { force: true });
-    // The row and the config go last, and together. Every removal above is idempotent, so as long
-    // as the config still names the space `leave` can simply be run again; dropping the row first
-    // would strand a config that `init`/`join` refuse and `push`/`pull` cannot serve.
+    // The rows go last and the config after them, never inside the same transaction: a COMMIT that
+    // failed with the config already deleted would roll the row back and leave a space no `leave`
+    // can reach. This order can only stop with the config naming a space whose rows are gone, and
+    // every step here is idempotent, so `leave` run again walks that state to the end.
     db.exec('BEGIN IMMEDIATE');
     try {
       prepared(db, 'DELETE FROM sync_cursors WHERE space_id = ?').run(config.space_id);
       prepared(db, 'DELETE FROM sync_spaces WHERE space_id = ?').run(config.space_id);
-      updateConfigFile(paths, (root) => { delete root.sync; });
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
+    updateConfigFile(paths, (root) => { delete root.sync; });
   });
 }
 

@@ -913,21 +913,24 @@ already tracked as #196/#197):
   (`too_many_repo_lines`) rather than encrypting a bundle every peer would reject with
   `repo_lines_exceeded`: a bound the receiver enforces is enforced by the sender too (publish,
   pinned);
-- `init`/`join` remove the `[sync]` config section as well as the row and the key when recording the
-  space fails at any step. Either half alone wedges the space from one side — a row without the
-  config is one `leave` cannot reach, a config without the row reports `space_exists` to `init` and
-  `key_missing` to `push`. The config-write failure is pinned; the compensating delete on a failed
-  `COMMIT` is not unit-reachable without a seam in the commit itself;
+- `init`/`join` roll the space row back and remove the key when recording the space fails at any
+  step, and remove the `[sync]` section only when this invocation is the one that wrote it. A row
+  without the config wedges the space — `leave` reads the config and cannot reach it while
+  `assertNoSpace` keeps blocking re-init — so that state is never produced; a config without the row
+  is the recoverable direction (`init` reports `space_exists`, `leave` clears it). The config-write
+  failure is pinned, and so is the `init` race: see round fourteen, which corrected the compensating
+  delete this round introduced;
 - a header rejection closes the bundle it opened. Everything before `validateBody` runs while the
   line reader is suspended at its `yield`, and a suspended generator never runs its `finally`, so
   the seven header rejections leaked a descriptor each — and `pull` walks up to
   `BOUNDS.replicasPerSpace` bundles catching every rejection (stage, pinned by descriptor count);
-- `leave` removes the row and the `[sync]` section together, after the idempotent file removals: as
-  long as the config still names the space `leave` can be run again, where dropping the row first
-  left a config `init`/`join` refuse and `push`/`pull` cannot serve (space, pinned);
+- `leave` removes the row and the `[sync]` section last, after the idempotent file removals, so a
+  failure part-way leaves a state `leave` can simply be run over again (space, pinned). Round
+  fourteen corrected the order this round introduced: the two are no longer written in one
+  transaction;
 - the singleton check runs again inside `recordSpace`'s write transaction: two `init`/`join`
   processes can both pass the check at the command's start, and their distinct `space_id` primary
-  keys would let both rows commit while the config names one (space; the race is not unit-reachable);
+  keys would let both rows commit while the config names one (space, pinned in round fourteen);
 - the post-push sweep of this replica's leftover temporary names never turns a published bundle into
   a reported failure: every device may write the space directory and the replica id is public in the
   bundle names, so a peer can plant an entry under that prefix that will not remove (space, pinned);
@@ -950,6 +953,40 @@ already tracked as #196/#197):
   published repo lines), so it lands in the recipient's local repository; distinguishing a peer's
   edge from the owner's needs the revision's repo key to match its author's prefix or an explicit
   map-repo.
+
+Round fourteen (2026-09-12, PR bot triage on the round-thirteen head — CodeRabbit and the Codex
+connector. Two of the five findings are regressions round thirteen introduced, both in the same
+compensating-write design: a rollback that undoes a write another process made):
+
+- the compensating `delete root.sync` in `recordSpace` fires only when this invocation wrote the
+  config. The loser of an `init` race fails the in-transaction `assertNoSpace` before writing
+  anything, and deleting the section there deleted the *winner's* config, leaving the winner's row
+  and key with no config naming them — the one state the compensation exists to prevent (space,
+  pinned: the winner's `init` is run from the loser's `BEGIN IMMEDIATE`);
+- `leave` commits the row deletions first and writes the config after, never both in one
+  transaction. Inside one, a `COMMIT` that failed after the config was already deleted rolled the
+  row back under a config that was gone — again a space `leave` cannot reach. The order that
+  remains can only stop with the config naming a space whose rows are gone, which the next `leave`
+  walks to the end (space, pinned: the existing config-write-failure test now asserts the row is
+  already gone);
+- `applyRepoLines` resolves a `remote:` key only against a repository this device already calls
+  remote. `repos.normalized_identity` is unique across both identity kinds, so a peer that learned
+  this device's `common_dir` path could send it under a `remote:` key: the hash checks out, the
+  `INSERT OR IGNORE` collides with the local row, and the unqualified lookup handed the forged key
+  that local repository — the same auto-mapping the `common_dir` prefix check refuses, reached by
+  the other branch. A repo line whose declared `identity_kind` disagrees with its own key prefix is
+  rejected outright, since the mapping row records the declared kind while the branches read the
+  prefix (apply, both pinned);
+- `--classes` is refused everywhere but `init`/`join`, and `--republish` everywhere but `push`.
+  Classes are consent-bound: they are recorded once and the consent hash is taken over them, so a
+  push that accepted the flag and exported the recorded set would ship exactly what the developer
+  typed the flag to withhold. Silently ignoring a flag is the failure mode; exiting 2 is not
+  (sync-cli, pinned);
+- streaming the publish side's origins the way the apply side now streams them is tracked as a
+  follow-up (issue #204), not closed here: `buildSnapshot`'s in-memory maps are the shape to
+  change, the data is this device's own rather than peer-supplied, and the 1,000,000-line RSS
+  measurement in "Verification" covers stage and apply only.
+
 
 ## Verification (T034–T036)
 

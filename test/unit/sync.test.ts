@@ -21,6 +21,7 @@ import { runSync } from '../../src/sync-cli.js';
 import {
   initSpace, joinSpace, keyLine, leaveSpace, pullSpace, pushSpace, showKey, spaceDirectory, SyncError, syncStatus, withSpaceLock,
 } from '../../src/sync/space.js';
+import { loadSyncConfig } from '../../src/sync/status.js';
 import { effectiveControl, headsOf, readOrigin, readRevision, replicaOriginId } from '../../src/sync/store.js';
 import {
   insertMemory, insertSource, memoryOf, openHome, publish, pull, REMOTE, REPO, revisionCount, revisions, withHomes, withReplicas, withStore,
@@ -512,6 +513,42 @@ test('a failed config write during init rolls back the space row and removes the
   });
 });
 
+test('an init that loses the race to another process leaves the winner\'s space untouched', async () => {
+  await withHomes(1, (homes, shared) => {
+    const [home] = homes as [string];
+    const db = openHome(home);
+    try {
+      const paths = oboetePaths(home);
+      let winner = '';
+      // The two `init` processes both pass the early check; the winner commits while the loser is
+      // between that check and its own write lock. `BEGIN IMMEDIATE` is the last thing the loser
+      // does before re-checking, so the winner is run from there, on its own connection.
+      const racing = new Proxy(db, { get(target, property) {
+        if (property === 'exec') {
+          return (sql: string): void => {
+            if (sql === 'BEGIN IMMEDIATE' && winner === '') {
+              const other = openHome(home);
+              try { winner = initSpace(other, paths, { directory: shared, classes: ['eligible'], now: 1 }).spaceId; } finally { other.close(); }
+            }
+            target.exec(sql);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? (value as (...rest: unknown[]) => unknown).bind(target) : value;
+      } });
+      assert.throws(() => initSpace(racing, paths, { directory: shared, classes: ['local_only'], now: 2 }),
+        (error: unknown) => error instanceof SyncError && error.code === 'space_exists');
+      // The loser wrote no config of its own, so it must delete none: the winner's row, key and
+      // `[sync]` section are what this device now has, and `key show` reads all three together.
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sync_spaces').get()?.n, 1, 'only the winner has a row');
+      assert.equal(loadSyncConfig(paths)?.space_id, winner, 'the winner keeps its config');
+      assert.deepEqual(loadSyncConfig(paths)?.classes, ['eligible'], 'the loser overwrote nothing');
+      assert.ok(showKey(paths).startsWith('oboete-sync-key/1:'));
+      assert.equal(readdirSync(join(home, 'sync')).filter((name) => name.endsWith('.key')).length, 1, 'the loser removed its own key only');
+    } finally { db.close(); }
+  });
+});
+
 test('leave runs under the space lock, so a concurrent push cannot race it', async () => {
   await withHomes(1, (homes, shared) => {
     const [home] = homes as [string];
@@ -528,7 +565,7 @@ test('leave runs under the space lock, so a concurrent push cannot race it', asy
   });
 });
 
-test('a leave whose config write fails keeps the row, so leave can simply be run again', async () => {
+test('a leave whose config write fails has already dropped the row, so leave can simply be run again', async () => {
   await withHomes(1, (homes, shared) => {
     const [home] = homes as [string];
     const db = openHome(home);
@@ -539,9 +576,12 @@ test('a leave whose config write fails keeps the row, so leave can simply be run
       const blocker = `${paths.config}.oboete-tmp-${process.pid}`;
       writeFileSync(blocker, 'x');
       assert.throws(() => leaveSpace(db, paths));
-      // The row survives with the config, so the space is still reachable and `leave` is retryable.
-      // Dropping the row first would leave a config `init` refuses and `push` cannot serve.
-      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sync_spaces').get()?.n, 1, 'the row waits for the config');
+      // The config outlives the row, never the other way round: the rows commit first and the
+      // config write follows, so a failure here leaves a config naming a space whose rows are gone
+      // — a state `leave` walks to the end on the next run. Deleting the config inside the
+      // transaction would instead let a failed COMMIT restore the row under a config already gone,
+      // and that space no `leave` could reach (it reads the config) while `init` kept refusing.
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sync_spaces').get()?.n, 0, 'the row is already gone');
       assert.equal(syncStatus(db, paths).configured, true);
       rmSync(blocker, { force: true });
       leaveSpace(db, paths);
@@ -678,6 +718,13 @@ test('oboete sync commands: init, key show on a terminal only, join by typed key
     assert.equal(await runSync(['status', '--json'], status.io, pathsB, 21), 0);
     assert.equal((JSON.parse(status.out[0]!) as { replicas: unknown[] }).replicas.length, 1);
     assert.equal(await runSync(['resolve', 'x'], fakeIo(false).io, pathsB, 22), 2, '--keep is required');
+    // Classes are recorded once, at `init`/`join`, and the consent hash is taken over them. A push
+    // that accepted `--classes` and exported the recorded set instead would ship exactly what the
+    // developer typed the flag to withhold, so every subcommand but those two refuses it.
+    const overridden = fakeIo(false);
+    assert.equal(await runSync(['push', '--classes', 'eligible', '--json'], overridden.io, pathsA, 22), 2);
+    assert.equal(overridden.out.length, 0, 'nothing was published');
+    assert.equal(await runSync(['status', '--republish', '--json'], fakeIo(false).io, pathsB, 22), 2);
     const unknown = fakeIo(false);
     assert.equal(await runSync(['resolve', 'x', '--keep', 'y', '--json'], unknown.io, pathsB, 22), 1);
     assert.equal((JSON.parse(unknown.err[0]!) as { error: string }).error, 'unknown_origin');

@@ -87,19 +87,34 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
   `sync_parked` テーブルは撤去)。semgrep 0、ponytail。契約の "Implementation notes" に round ごとの規則を記録。
   gate は `scratch/gate-us6.sh` (`P=us6-gate1`)。
 
-  round 11-13 は PR #190 の bot 指摘 (CodeRabbit / Greptile / Codex connector) の triage。
+  round 11-14 は PR #190 の bot 指摘 (CodeRabbit / Greptile / Codex connector) の triage。
   round 13 は `src/sync/` の敵対的 hardening 18 件を全部 Claude Code 自身が修正して pin した:
   peer が名乗る `common_dir` key は hash 検証のうえ必ず未 map (明示 `map-repo` 待ち)、`resolve --keep`
   は payload を withheld された head を拒否、stage は保存済み origin の natural 変更を拒否、`repo` 行に
   専用の 4,096 行上限 (受信側と送信側の両方)、key file は consent した key id に照合してから bundle I/O
-  (`key show` も同じ)、`init`/`join` は row と config を一緒に書いて失敗時は両方と key を撤去、`leave` は
-  space lock 下 (かつ row と config は最後に一緒に消す = 失敗しても leave を再実行できる)、
+  (`key show` も同じ)、`init`/`join` は失敗時に row と key を撤去、`leave` は space lock 下、
   context promotion は `passesClassRule` の fail-closed を繰り返す、`init`/`join` は consent tuple を
   表示し singleton 検査を write txn 内でもう一度回す、`status` の listing は 200 件 + `totals`、
   push 後の tmp 掃除は消せない entry で失敗しない、apply は staged origin を streaming で読む、
   header 拒否は開いた fd を必ず閉じる。収束系の残件は #196/#197、`src/sync/` 以外の指摘は
   #199 (limit-then-filter 4 箇所) / #200 (doctor・work・why) / #201 (detector 失敗で止まる再分類
   キュー) / #202 (tool_call を欠く tool_result が memory を injection から永久に外す) に follow-up 化。
+
+  round 14 は round 13 の head に対する bot 指摘 5 件。**うち 2 件は round 13 自身が入れた退行**で、
+  どちらも同じ「補償書き込み」設計 — 他プロセスが書いたものを自分の rollback が消す形 — だった:
+  `recordSpace` の catch が `init` race に負けた側でも `[sync]` を消し、**勝った側の config** を
+  削除していた (row と key だけが残る = `leave` が到達できない唯一の状態)。修正は「この呼び出しが
+  実際に書いたときだけ消す」フラグ。`leave` は row 削除と config 削除を 1 トランザクションに入れて
+  いたため、COMMIT が失敗すると row が戻って config だけ消えた状態になっていた。修正は順序で:
+  row を先に commit し、config はその後に消す (この向きなら「config はあるが row が無い」状態にしか
+  ならず、`leave` を再実行すれば最後まで進む)。残り 3 件は、この device が既に持つ `common_dir` path を
+  `remote:` key に偽装した bundle が `INSERT OR IGNORE` の衝突経由で local repo に bind されていた点
+  (lookup を `identity_kind = 'remote'` で限定 + key prefix と宣言 kind の不一致は拒否)、および
+  `--classes` が `init`/`join` 以外でも受理されて黙って無視されていた点 (consent 由来なので exit 2)。
+  publish 側の RSS 計測は #204 に follow-up 化 (peer 由来ではなく自機データ、`buildSnapshot` の
+  map 構造ごとの変更になるため)。設計の教訓: **補償書き込みは「自分が書いたものだけ」を戻す**。
+  順序を決めるときは各文の失敗点ごとに「その状態からユーザーが `leave`/`init` だけで回復できるか」を
+  表にする — 回復できない向き (ここでは row があって config が無い) を作らない側に倒す。
   CodeRabbit は **1 時間に 1 レビュー**なので、レビューループ中は push をまとめてから 1 回だけ投げる
   (2026-09-12 に 7 回投げて rate limit に当てた)。DCO は sign-off が最終段落に無いと落ちるので
   push 前に `node scripts/dco-check.mjs origin/main HEAD` を回すこと。
@@ -112,7 +127,7 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
 2. **macOS (T040 / SC-006)**: `docs/evidence/memory-core-2026-09/macos-runbook.md` を M1 iMac
    (remote desktop) で実行し、receipt を `/var/tmp/oboete-009-20260909.jJ5grc/macos/` に戻して
    quickstart に記録する。platform probe のみ、agent pair は対象外。
-3. **US6**: 実装済み (上記)。#185 は 2026-09-12 03:18 に merge 済み。PR #190 は round 13 まで
+3. **US6**: 実装済み (上記)。#185 は 2026-09-12 03:18 に merge 済み。PR #190 は round 14 まで
    triage 完了、review thread は全 resolve、required check (check / secrets / CodeQL /
    SonarCloud / semgrep-cloud-platform/scan / dco) は green。残りは最終 head での bot 再レビュー
    確認 → `pr-merge-gatekeeper` → merge。

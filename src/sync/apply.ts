@@ -63,13 +63,25 @@ function applyRepoLines(db: DatabaseSync, staged: Staged, replica: string, now: 
   for (const repo of stagedRepos(staged)) {
     const existing = prepared(db, 'SELECT local_repo_id FROM sync_repo_mappings WHERE repo_key = ?').get(repo.origin_id);
     if (existing?.local_repo_id != null) continue;
+    // The declared kind is what the mapping row records, and the key prefix is what the branches
+    // below read: a line whose two disagree would file a `remote:` key as `common_dir`, or the
+    // reverse, and every later reader of the mapping would answer with the wrong one.
+    if (repo.identity_kind !== (repo.origin_id.startsWith('remote:') ? 'remote' : 'common_dir')) {
+      throw new BundleRejected('repo_key_mismatch', repo.origin_id);
+    }
     let localRepoId: string | null = null;
     if (repo.origin_id.startsWith('remote:')) {
       if (`remote:${sha256Hex(repo.normalized_identity)}` !== repo.origin_id) throw new BundleRejected('repo_key_mismatch', repo.origin_id);
       const id = sha256Hex(repo.normalized_identity).slice(0, 16);
       prepared(db, `INSERT OR IGNORE INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
         VALUES (?, 'remote', ?, ?, ?, ?)`).run(id, repo.normalized_identity, repo.normalized_identity, now, now);
-      localRepoId = String(prepared(db, 'SELECT id FROM repos WHERE normalized_identity = ?').get(repo.normalized_identity)!.id);
+      // `normalized_identity` is unique across both kinds, so a peer that learned this device's
+      // `common_dir` path could send it under a `remote:` key: the hash checks out, the insert is
+      // ignored against the local row already holding that identity, and an unqualified lookup
+      // would hand the forged key that local repository without an explicit `map-repo`. Only a row
+      // this side already calls remote resolves one; anything else waits for `map-repo` unmapped.
+      const row = prepared(db, `SELECT id FROM repos WHERE normalized_identity = ? AND identity_kind = 'remote'`).get(repo.normalized_identity);
+      localRepoId = row?.id == null ? null : String(row.id);
     } else if (repo.origin_id.startsWith(`${replica}:common_dir:`)) {
       // A machine-local path binds to a local repository only through an explicit `map-repo` on
       // this device; a bundle never resolves one on its own. A peer that learns this replica's id

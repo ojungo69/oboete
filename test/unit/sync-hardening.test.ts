@@ -78,6 +78,50 @@ test('a common_dir repo key whose hash does not match its normalized identity is
   });
 });
 
+test('a remote repo key over a local path this device already holds resolves to no repository', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    // The `common_dir` prefix check refuses a peer that names B's own replica id, so the same peer
+    // sends B's path under a `remote:` key instead: the hash matches, and `normalized_identity` is
+    // unique across both kinds, so B's insert is ignored against the row it already has. Binding
+    // the forged key to that row would steer A's revisions into B's local repository unasked.
+    const path = '/work/victim/project';
+    b.db.prepare(`INSERT INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
+      VALUES ('cd_b', 'common_dir', ?, '/work/victim', 1, 1)`).run(path);
+    insertMemory(a.db, 'm_one', 'First', 'First body');
+    const published = publish(a, dir);
+    const key = `remote:${createHash('sha256').update(path).digest('hex')}`;
+    const { header, lines } = bundleLines(published);
+    const memory = lines.find((line) => line.origin_id === `${a.id}:m_one`)!;
+    (memory.payload as Line).repo_id = key;
+    (memory.natural as Line).repo = key;
+    const repoLine: Line = { kind: 'repo', origin_id: key, identity_kind: 'remote', normalized_identity: path };
+    pull(b, a, writeBundle(`${published}.forgedremote`, header, [repoLine, reseal(memory)]));
+    const mapping = b.db.prepare('SELECT local_repo_id FROM sync_repo_mappings WHERE repo_key = ?').get(key);
+    assert.equal(mapping?.local_repo_id ?? null, null, 'the forged key waits for an explicit map-repo');
+    assert.equal(b.db.prepare('SELECT identity_kind FROM repos WHERE normalized_identity = ?').get(path)?.identity_kind, 'common_dir',
+      'B\'s own repository was not relabelled');
+  });
+});
+
+test('a repo line whose declared kind disagrees with its key prefix is rejected', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    // The branch below reads the key prefix while the mapping row records the declared kind, so a
+    // line that disagrees would file a remote key as machine-local (and be read back as one).
+    const path = 'https://example.invalid/one.git';
+    const key = `remote:${createHash('sha256').update(path).digest('hex')}`;
+    insertMemory(a.db, 'm_one', 'First', 'First body');
+    const { header, lines } = bundleLines(publish(a, dir));
+    const memory = lines.find((line) => line.origin_id === `${a.id}:m_one`)!;
+    (memory.payload as Line).repo_id = key;
+    (memory.natural as Line).repo = key;
+    const repoLine: Line = { kind: 'repo', origin_id: key, identity_kind: 'common_dir', normalized_identity: path };
+    const forged = writeBundle(`${dir}/kindmismatch.osb.json`, header, [repoLine, reseal(memory)]);
+    assert.throws(() => pull(b, a, forged), (error: unknown) => error instanceof BundleRejected && error.code === 'repo_key_mismatch');
+  });
+});
+
 test('resolve --keep refuses a head whose payload the publisher withheld', async () => {
   await withReplicas(2, (replicas, dir) => {
     const [a, b] = replicas as [Replica, Replica];

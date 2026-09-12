@@ -90,7 +90,12 @@ export async function runSync(argv: string[], io: Io = processIo(), paths: Oboet
   const [command, ...args] = parsed.positionals;
   const arity: Record<string, number> = { init: 1, join: 1, key: 1, push: 0, pull: 0, status: 0, resolve: 1, 'map-repo': 2, leave: 0 };
   if (command === undefined || arity[command] === undefined || args.length !== arity[command] || (command === 'key' && args[0] !== 'show')
-    || (command === 'resolve') !== (typeof parsed.values.keep === 'string') || args.some((arg) => arg.length > 4_096)) {
+    || (command === 'resolve') !== (typeof parsed.values.keep === 'string') || args.some((arg) => arg.length > 4_096)
+    // Classes are consent-bound: they are recorded once, at `init`/`join`, and the consent hash a
+    // push checks is taken over them. Accepting `--classes` on a push and ignoring it would export
+    // the recorded classes against the intent the developer just typed, so it is refused instead.
+    || (parsed.values.classes !== undefined && command !== 'init' && command !== 'join')
+    || (parsed.values.republish === true && command !== 'push')) {
     io.err(USAGE);
     return 2;
   }
