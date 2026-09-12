@@ -1,0 +1,25 @@
+sonar-project.properties
+  s_5ab5797dc469b5::t_1f755094860a0a 16-26
+specs/007-oboete-m1-alpha/contracts/cli.md
+  s_5ab5797dc469b5::t_f047745aa9d519 3
+specs/007-oboete-m1-alpha/research.md
+  s_5ab5797dc469b5::t_dbe41fb35bc2a6 48-53
+specs/008-quality-debt-zero/quickstart.md
+  s_5ab5797dc469b5::t_6efc60d6d41ef4 51-52,94,166
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "20918db00e19db6d34dc2466150f66eedbd2f6ee",
+  "prompts": {},
+  "sessions": {
+    "s_5ab5797dc469b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44ceb1b9-68f7-4bf5-8646-52149920dd27",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
