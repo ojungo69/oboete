@@ -65,16 +65,16 @@ function consentReport(paths: OboetePaths, done: string): { value: Record<string
   const config = loadSyncConfig(paths);
   if (config === null) throw new SyncError('space_not_configured');
   const tuple = consentTupleOf(config);
-  const text = ['A push exports memories of the sensitivity classes below to this directory, encrypted:',
-    `  Directory: ${String(tuple.directory)} (${String(tuple.directory_realpath)})`,
-    `  Space: ${String(tuple.space_id)}`,
-    `  Key: ${String(tuple.key_id)}`,
-    `  Encryption: ${String(tuple.encryption)}`,
-    `  Sensitivity classes exported: ${(tuple.classes as string[]).join(', ')}`,
-    `  Network: ${String(tuple.network)}`,
+  const text = `${['A push exports memories of the sensitivity classes below to this directory, encrypted:',
+    `  Directory: ${tuple.directory} (${tuple.directory_realpath})`,
+    `  Space: ${tuple.space_id}`,
+    `  Key: ${tuple.key_id}`,
+    `  Encryption: ${tuple.encryption}`,
+    `  Sensitivity classes exported: ${tuple.classes.join(', ')}`,
+    `  Network: ${tuple.network}`,
     'Nothing has left this machine yet; `oboete sync leave` undoes the space before the first push.',
     done,
-  ].map((line) => `${line}\n`).join('');
+  ].join('\n')}\n`;
   return { value: { space_id: tuple.space_id, consent: tuple }, text };
 }
 

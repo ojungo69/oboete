@@ -20,7 +20,13 @@ export class SyncError extends Error {
   }
 }
 
-export function consentTupleOf(config: SyncConfig): Record<string, unknown> {
+/** The values consent is bound to, as `init` and `join` show them and `consentHashOf` hashes them. */
+export type ConsentTuple = {
+  transport: string; directory: string; directory_realpath: string; space_id: string; key_id: string;
+  encryption: string; classes: string[]; network: string;
+};
+
+export function consentTupleOf(config: SyncConfig): ConsentTuple {
   return {
     transport: CONSENT_TRANSPORT, directory: config.directory, directory_realpath: config.directory_realpath,
     space_id: config.space_id, key_id: config.key_id, encryption: CONSENT_ENCRYPTION,

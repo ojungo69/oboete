@@ -196,6 +196,16 @@ test('a bundle from a store of 2,000 single-head origins is accepted', async () 
 
 // --- Graph bounds: one over the value in "Bounds" is rejected before apply ---
 
+/** A bundle of `count` distinct `common_dir` repo lines and nothing else. */
+function writeRepoLines(path: string, count: number): string {
+  writeBundle(path, SENDER, (emit) => {
+    for (let i = 0; i < count; i += 1) {
+      emit({ kind: 'repo', origin_id: `${SENDER}:common_dir:${hex(i, 64)}`, identity_kind: 'common_dir', normalized_identity: `/r/${String(i)}` });
+    }
+  });
+  return path;
+}
+
 test('every graph bound one over its value is rejected before apply, with the database unchanged', async () => {
   await withReplicas(1, ([replica], dir) => {
     const { db } = replica!;
@@ -220,14 +230,7 @@ test('every graph bound one over its value is rejected before apply, with the da
           writeBundle(path, SENDER, (emit) => { emit(line({ origin_id: `${SENDER}:m_p`, parents, natural: ordinary(3) })); });
         },
       },
-      {
-        name: 'repo lines', code: 'repo_lines_exceeded',
-        write: (path) => writeBundle(path, SENDER, (emit) => {
-          for (let i = 0; i <= BOUNDS.repoLines; i += 1) {
-            emit({ kind: 'repo', origin_id: `${SENDER}:common_dir:${hex(i, 64)}`, identity_kind: 'common_dir', normalized_identity: `/r/${String(i)}` });
-          }
-        }),
-      },
+      { name: 'repo lines', code: 'repo_lines_exceeded', write: (path) => writeRepoLines(path, BOUNDS.repoLines + 1) },
       {
         name: 'revisions per origin', code: 'revisions_per_origin',
         write: (path) => writeBundle(path, SENDER, (emit) => {
@@ -254,12 +257,7 @@ test('every graph bound one over its value is rejected before apply, with the da
 test('a bundle carrying exactly the repo-line cap is applied, so the bound never refuses a legal bundle', async () => {
   await withReplicas(1, ([replica], dir) => {
     const { db } = replica!;
-    const path = join(dir, `${SENDER}.repo-lines-at-cap.plain`);
-    writeBundle(path, SENDER, (emit) => {
-      for (let i = 0; i < BOUNDS.repoLines; i += 1) {
-        emit({ kind: 'repo', origin_id: `${SENDER}:common_dir:${hex(i, 64)}`, identity_kind: 'common_dir', normalized_identity: `/r/${String(i)}` });
-      }
-    });
+    const path = writeRepoLines(join(dir, `${SENDER}.repo-lines-at-cap.plain`), BOUNDS.repoLines);
     assert.doesNotThrow(() => applyBundle(db, SENDER, path));
     rmSync(path, { force: true });
   });
