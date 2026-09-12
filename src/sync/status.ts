@@ -6,7 +6,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { loadConfig, type SyncConfig } from '../config.js';
 import { prepared } from '../db/statements.js';
-import { sha256Hex } from '../hash.js';
+import { compareCodeUnits, sha256Hex } from '../hash.js';
 import type { OboetePaths } from '../paths.js';
 import { canonicalJson } from './identity.js';
 
@@ -24,7 +24,7 @@ export function consentTupleOf(config: SyncConfig): Record<string, unknown> {
   return {
     transport: CONSENT_TRANSPORT, directory: config.directory, directory_realpath: config.directory_realpath,
     space_id: config.space_id, key_id: config.key_id, encryption: CONSENT_ENCRYPTION,
-    classes: [...config.classes].sort(), network: 'no network',
+    classes: [...config.classes].sort(compareCodeUnits), network: 'no network',
   };
 }
 
@@ -44,7 +44,7 @@ export function consentDrift(db: DatabaseSync, config: SyncConfig): string[] {
   const changed: string[] = [];
   if (String(stored.directory) !== config.directory || String(stored.directory_realpath) !== config.directory_realpath) changed.push('directory');
   if (String(stored.key_id) !== config.key_id) changed.push('key_id');
-  if (String(stored.classes_json) !== canonicalJson([...config.classes].sort())) changed.push('classes');
+  if (String(stored.classes_json) !== canonicalJson([...config.classes].sort(compareCodeUnits))) changed.push('classes');
   return changed.length === 0 ? ['consent'] : changed;
 }
 

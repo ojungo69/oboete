@@ -697,7 +697,7 @@ function repoOf(db: DatabaseSync, table: 'memories' | 'work_items' | 'work_conte
 }
 
 function localRecord(db: DatabaseSync, kind: SyncKind, localId: string): Row | null {
-  const one = (records: Iterable<Row>): Row | null => { for (const record of records) return record; return null; };
+  const one = (records: Iterable<Row>): Row | null => { const [first] = records; return first ?? null; };
   switch (kind) {
     case 'memory': return one(memoryRecords(db, localId));
     case 'context': return one(contextRecords(db, localId));
@@ -844,7 +844,7 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
     const record = prepared(db, 'SELECT * FROM memory_sources WHERE sync_key = ?').get(key);
     if (record === undefined) return;
     const heads = headsOf(db, row.origin_id);
-    const selected = heads.length > 1 ? [...heads].sort()[0]! : selectHead(db, row, heads);
+    const selected = heads.length > 1 ? [...heads].sort(compareCodeUnits)[0]! : selectHead(db, row, heads);
     const payload = selected === null ? null : readRevision(db, selected)?.payload ?? null;
     if (!effectiveControl(db, row.origin_id).tombstone) {
       let refs: SourceRefs;
@@ -943,7 +943,7 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
       const heads = headsOf(db, row.origin_id);
       if (heads.length > BOUNDS.headsPerOrigin) throw new BundleRejected('heads_per_row', row.origin_id);
       // A source's heads select by revision id alone, the same on every device.
-      const selected = row.kind === 'source' && heads.length > 1 ? [...heads].sort()[0]! : selectHead(db, row, heads);
+      const selected = row.kind === 'source' && heads.length > 1 ? [...heads].sort(compareCodeUnits)[0]! : selectHead(db, row, heads);
       const control = effectiveControl(db, row.origin_id);
       if (control.tombstone || control.sensitivity_floor === 'secret') erasePayloads(db, row.origin_id);
       const revision = selected === null ? undefined : readRevision(db, selected);

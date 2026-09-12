@@ -5,7 +5,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 
 import { prepared } from '../db/statements.js';
-import { sha256Json } from '../hash.js';
+import { compareCodeUnits, sha256Json } from '../hash.js';
 import {
   contextRecords, memoryRecords, proposalRecords, sourceRecords, visibilityRecords, workRecords, type Row,
 } from '../transfer-records.js';
@@ -115,7 +115,7 @@ function retiredSources(db: DatabaseSync, memory: string, own: string, tuple: Ro
       AND json_extract(o.natural_json, '$.memory') IN (SELECT origin_id FROM sync_origins WHERE kind = 'memory' AND local_id = ?)`).all(memory)) {
     if (sourceTuples(JSON.parse(String(stored.tuple)) as Row).some((held) => wanted.has(held))) groups.add(String(stored.canonical));
   }
-  for (const id of [...groups].sort()) {
+  for (const id of [...groups].sort(compareCodeUnits)) {
     const canonical = canonicalOf(db, id);
     if (canonical.origin_id === own) continue;
     if (canonical.local_id !== null && prepared(db, 'SELECT 1 FROM memory_sources WHERE sync_key = ?').get(canonical.local_id.slice('source:'.length)) !== undefined) continue;

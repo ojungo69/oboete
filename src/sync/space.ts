@@ -15,6 +15,7 @@ import type { SyncConfig } from '../config.js';
 import { isBusyError, loadSqlite, sqliteErrorInfo } from '../db/open.js';
 import { prepared } from '../db/statements.js';
 import type { OboetePaths } from '../paths.js';
+import { compareCodeUnits } from '../hash.js';
 import { updateConfigFile } from '../setup/consent.js';
 import { applyStaged, materializeRows, resolveRow, type ApplyResult } from './apply.js';
 import { captureLocalChanges } from './capture.js';
@@ -82,7 +83,7 @@ function checkConsent(db: DatabaseSync, config: SyncConfig): void {
 function recordSpace(db: DatabaseSync, paths: OboetePaths, config: SyncConfig, now: number): void {
   prepared(db, `INSERT INTO sync_spaces (space_id, directory, directory_realpath, key_id, classes_json, consent_hash, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .run(config.space_id, config.directory, config.directory_realpath, config.key_id, canonicalJson([...config.classes].sort()),
+    .run(config.space_id, config.directory, config.directory_realpath, config.key_id, canonicalJson([...config.classes].sort(compareCodeUnits)),
       consentHashOf(config), now);
   updateConfigFile(paths, (root) => { root.sync = { ...config }; });
 }
@@ -285,7 +286,7 @@ export function pullSpace(db: DatabaseSync, paths: OboetePaths, input: { now: nu
     const key = readKey(paths, config.space_id);
     const replica = replicaOriginId(db);
     const space = spaceDirectory(config.directory, config.space_id);
-    const names = existsSync(space) ? readdirSync(space).filter((name) => BUNDLE_NAME.test(name) && !name.startsWith(replica)).sort() : [];
+    const names = existsSync(space) ? readdirSync(space).filter((name) => BUNDLE_NAME.test(name) && !name.startsWith(replica)).sort(compareCodeUnits) : [];
     if (names.length > BOUNDS.replicasPerSpace) {
       const unknown = names.filter((name) => prepared(db, 'SELECT 1 FROM sync_cursors WHERE space_id = ? AND replica_origin_id = ?')
         .get(config.space_id, name.slice(0, 32)) === undefined);
