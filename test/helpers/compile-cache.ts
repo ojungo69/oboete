@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,6 +56,16 @@ export const SHARED_COMPILE_CACHE = inherited
 delete process.env.NODE_DISABLE_COMPILE_CACHE;
 process.env.NODE_COMPILE_CACHE = SHARED_COMPILE_CACHE;
 
+/** True when `path` is a directory holding at least one entry. Anything else -- missing, a file,
+ *  unreadable -- is the answer this asks for, so the error is the result rather than a throw. */
+function populated(path: string): boolean {
+  try {
+    return readdirSync(path).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * One throwaway run of `bundle`, so the run that compiles the engine is never a timed one.
  *
@@ -97,6 +107,15 @@ export function warmCompileCache(bundle: string): void {
       warmed.status,
       0,
       `the compile cache warm-up failed: ${warmed.error?.message ?? warmed.stderr ?? 'no output'}`,
+    );
+    // The exit status says the run happened, not that it cached anything. Node refuses a directory
+    // it cannot use -- a regular file, an unwritable path -- without failing the process, and the
+    // launcher then falls back to the throwaway home above, which this function deletes on its way
+    // out. Every timed child would compile from source with the variable set and every assertion
+    // above it green. Only the directory's contents tell the two apart.
+    assert.ok(
+      populated(SHARED_COMPILE_CACHE),
+      `the warm-up left no entry in ${SHARED_COMPILE_CACHE}: Node did not use it as a compile cache`,
     );
   } finally {
     rmSync(home, { recursive: true, force: true });
