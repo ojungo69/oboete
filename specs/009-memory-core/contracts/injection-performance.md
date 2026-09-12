@@ -62,7 +62,8 @@ and compile of a file that had just grown by `src/sync/`.
 Node's V8 compile cache removes that cost, but a single-file bundle cannot enable it for itself --
 Node compiles the entry file before any statement in it runs. `dist/` is therefore two files:
 `dist/engine.mjs` is the bundle, and `dist/oboete.mjs` is `src/launcher.mjs` copied verbatim, a
-launcher that imports only `node:module`, `node:fs`, `node:os` and `node:path`, enables the cache,
+launcher that imports only `node:module`, `node:fs`, `node:os`, `node:path` and `node:url`, enables
+the cache,
 then imports the engine. It is a real source file rather than a string in the build script so that
 the one new piece of hook-path code is covered by the same lint the rest of the tree is, which took
 adding it to both `files` lists in `eslint.config.js` -- a `.mjs` under `src/` matched neither. It

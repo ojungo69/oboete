@@ -292,7 +292,14 @@ writers require separate worktrees. No deployment follows merely from an increme
   checking the versioned directories V8 writes inside the cache disabled the cache from the second
   run onward wherever the umask is 002 -- silently, with every test still green; the check is now on
   the cache directory's own traverse bits and the pin corrupts an entry to tell a live cache from a
-  dead one. Cache directory, the rejected alternatives, the
+  dead one. Two rounds after that found a symlink planted at the `oboete` directory: recursive
+  `mkdir` follows one, so the launcher would have created `compile` inside somebody else's tree and
+  written half a megabyte of bytecode there while every check on `compile` itself passed -- the
+  parent is checked before `compile` is created now -- and a named import of `enableCompileCache`,
+  which is resolved when the module is linked, before any statement runs and outside the reach of
+  the surrounding `try`, so on a Node older than 22.1 it was a `SyntaxError` and a non-zero exit for
+  every command including the hook contracted to exit 0 whatever happens; it is a namespace import
+  and an optional call now. Cache directory, the rejected alternatives, the
   accepted `NODE_COMPILE_CACHE` and cache-growth costs and what the numbers do not claim are in
   `contracts/injection-performance.md`; the pin is `test/unit/launcher.test.ts`. T042 stays
   unchecked: the 1,000/10,000/100,000-event measurement it names is still open.

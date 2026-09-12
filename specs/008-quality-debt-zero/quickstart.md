@@ -48,8 +48,12 @@ Expected: both loops exit 0; the candidate replay's own pass/fail is green; ever
 Harness batch (C4, D on `scripts/e2e/*`), research R7 procedure: the agents' hook and MCP entries carry the absolute bundle path written by `oboete setup`, so the candidate needs its own install **and its own configured home**. `/home/jura` is `drwxr-x---`, so the harness is exported to a directory the dogfood account can read instead of being run out of the worktree:
 
 ```bash
-npm run build && npm pack && sha256sum oboete-*.tgz \
-  && for f in oboete.mjs engine.mjs; do tar -xOzf oboete-*.tgz package/dist/$f | sha256sum | sed "s|-|dist/$f|"; done   # candidate hashes
+# One tar, not one per file: piping a missing member into sha256sum prints the hash of no bytes
+# under that file's name, and a step whose job is to identify a build must not report an identity
+# it does not have.
+d=$(mktemp -d) && npm run build && npm pack && sha256sum oboete-*.tgz \
+  && tar -xzf oboete-*.tgz -C "$d" package/dist/oboete.mjs package/dist/engine.mjs \
+  && sha256sum "$d"/package/dist/*.mjs && rm -rf "$d"   # candidate hashes
 sudo rm -rf /var/tmp/oboete-harness && sudo mkdir -p /var/tmp/oboete-harness \
   && git archive <candidate-sha> | sudo tar -x -C /var/tmp/oboete-harness && sudo chown -R oboete-dogfood: /var/tmp/oboete-harness
 # Claude keeps its user configuration at ~/.claude.json, outside ~/.claude, and reads it from $CLAUDE_CONFIG_DIR;

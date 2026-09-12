@@ -1,9 +1,12 @@
 // dist/oboete.mjs is a launcher (src/launcher.mjs) that turns the V8 compile cache on before the
 // engine bundle is compiled, issue #210. Timing is not pinned here -- that belongs to whatever load
-// the machine is under. What is pinned is everything the speed-up depends on: the entry file stays
-// small, the engine is a separate file, the cache is owner-only and is read back on the next run,
-// a directory this user does not exclusively own is refused, a home that cannot hold one costs the
-// cache and not the command, and the installer writes the launcher rather than the engine.
+// the machine is under. What is pinned is everything the speed-up depends on, in fourteen tests:
+// the entry file stays small, the engine is a separate file, the cache is owner-only and is read
+// back on the next run, a directory this user does not exclusively own -- or that anyone else can
+// enter, or that is reached through a symlink -- is refused while a loose one of the user's own is
+// not, a home that cannot hold a cache costs the cache and not the command, and the installer
+// writes the launcher rather than the engine. The contract's "Pinned by" paragraph
+// (specs/009-memory-core/contracts/injection-performance.md) is the enumeration.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
