@@ -1,0 +1,23 @@
+docs/dev/conventions.md
+  s_5ab5797dc469b5::t_a6f18f7d113e66 50-54
+specs/009-memory-core/contracts/injection-performance.md
+  s_5ab5797dc469b5::t_a69893699eedd6 271-275
+test/helpers/compile-cache.ts
+  s_5ab5797dc469b5::t_d5e4883db4aab8 5,40-54
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "976ff7f91d795c6f17753417fd014b36d3394308",
+  "prompts": {},
+  "sessions": {
+    "s_5ab5797dc469b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44ceb1b9-68f7-4bf5-8646-52149920dd27",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
