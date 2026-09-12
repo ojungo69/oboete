@@ -1,0 +1,35 @@
+docs/dev/conventions.md
+  s_5ab5797dc469b5::t_f4d62b29ffcf43 44-49
+package.json
+  s_5ab5797dc469b5::t_814261f8da3057 24
+scripts/build.mjs
+  s_5ab5797dc469b5::t_906e2dc596d95f 90-93
+specs/009-memory-core/contracts/injection-performance.md
+  s_5ab5797dc469b5::t_9f01d8ce3a0e37 245-248,251-257,259-267
+specs/009-memory-core/tasks.md
+  s_5ab5797dc469b5::t_ab46109b09a044 307-311
+test/e2e-hook.test.ts
+  s_5ab5797dc469b5::t_1b90d521a64513 6,8,14
+test/e2e-inject.test.ts
+  s_5ab5797dc469b5::t_88eeacc2add509 13,23
+test/helpers/compile-cache.ts
+  s_5ab5797dc469b5::t_7532d306b1aa48 5-7,27-30,42-51
+test/helpers/fault.ts
+  s_5ab5797dc469b5::t_4008f79a7da548 26-27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "05b47f9151567d6eb158400dbe505ecec8bf1011",
+  "prompts": {},
+  "sessions": {
+    "s_5ab5797dc469b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44ceb1b9-68f7-4bf5-8646-52149920dd27",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
