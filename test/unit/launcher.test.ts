@@ -40,13 +40,13 @@ function cacheDir(home: string): string {
 
 /** Every cache file with its mtime. A cache that is written but never read back rewrites the same
  *  file names (the key is path plus source hash), so paths alone cannot tell a hit from a miss. */
-function cacheEntries(home: string): string[] {
+function cacheEntries(home: string): { path: string; mtimeMs: number }[] {
   const entries = readdirSync(cacheDir(home), { recursive: true, withFileTypes: true });
   return entries
     .filter((entry) => entry.isFile())
     .map((entry) => join(entry.parentPath, entry.name))
-    .map((path) => `${path} ${statSync(path).mtimeMs}`)
-    .sort();
+    .sort()
+    .map((path) => ({ path, mtimeMs: statSync(path).mtimeMs }));
 }
 
 test('the entry file is a launcher and the engine is the file next to it', () => {
@@ -55,8 +55,13 @@ test('the entry file is a launcher and the engine is the file next to it', () =>
   assert.ok(launcher.startsWith('#!/usr/bin/env node\n'), 'dist/oboete.mjs keeps its shebang');
   assert.equal(statSync(bin).mode & 0o777, 0o755);
   // A launcher that grew back into the program would be compiled before it could enable anything.
-  // Most of the file is the comment explaining why it exists; the code is a couple of dozen lines.
-  assert.ok(launcher.length < 4096, `the launcher is ${launcher.length} bytes`);
+  // Most of the file is the comment explaining why it exists, and a comment costs nothing to
+  // compile, so the bound is on the code: adding a paragraph must not fail the build.
+  const code = launcher
+    .split('\n')
+    .filter((line) => line.trim() !== '' && !/^\s*(\/\/|\*|\/\*)/u.test(line))
+    .join('\n');
+  assert.ok(code.length < 1536, `the launcher's code is ${code.length} bytes`);
   assert.ok(statSync(join(root, 'dist/engine.mjs')).isFile(), 'the engine is a file of its own');
 });
 
@@ -73,7 +78,7 @@ test('a run fills an owner-only compile cache and the next run reads it back', a
     // and writes the real thing again, a disabled one leaves them there. Nothing else in the suite
     // can see a launcher that quietly stops enabling the cache (issue #210 round three: the check
     // on the versioned directory inside did exactly that wherever the umask is 002).
-    const entry = first[0]?.split(' ')[0] as string;
+    const entry = first[0]?.path as string;
     writeFileSync(entry, '1234567');
     assert.equal(run(home).status, 0);
     assert.notEqual(statSync(entry).size, 7, 'the launcher stopped enabling the cache');
@@ -110,6 +115,29 @@ for (const mode of [0o755, 0o775, 0o777]) {
     });
   });
 }
+
+test('a cache directory whose parent is a symlink is refused', async () => {
+  await withTempHome((home) => {
+    // Recursive mkdir follows a link, so a link here would have the launcher create `compile` in
+    // somebody else's tree and write half a megabyte of bytecode into it, with every check on
+    // `compile` itself still passing: it would be ours, 0700 and a real directory.
+    const elsewhere = join(home, 'elsewhere');
+    mkdirSync(elsewhere);
+    mkdirSync(join(home, '.cache'));
+    symlinkSync(elsewhere, join(home, '.cache', 'oboete'));
+    assert.equal(run(home).status, 0);
+    assert.deepEqual(readdirSync(elsewhere, { recursive: true }), [], 'the launcher followed a symlink');
+  });
+});
+
+test('the directories above the cache are left at the default mode', async () => {
+  await withTempHome((home) => {
+    // ~/.cache belongs to every tool on the machine, and this may be the first thing to create it.
+    assert.equal(run(home).status, 0);
+    assert.notEqual(statSync(join(home, '.cache')).mode & 0o777, 0o700);
+    assert.equal(statSync(cacheDir(home)).mode & 0o777, 0o700);
+  });
+});
 
 test('a cache directory that is a symlink is refused', async () => {
   await withTempHome((home) => {

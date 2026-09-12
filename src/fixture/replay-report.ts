@@ -293,6 +293,7 @@ function lifecycleTables(input: MeasureInput, computed: ReportComputed) {
 
 /** The heading and how this run was set up. */
 function setupSection(input: MeasureInput, machine: string, cpu: string): string[] {
+  const engine = enginePath(input.bundle);
   return [
     HEADING,
     '',
@@ -303,7 +304,7 @@ function setupSection(input: MeasureInput, machine: string, cpu: string): string
     `- CPU: \`${cpu}\`.`,
     `- Node: \`${process.execPath}\` (${process.version}).`,
     `- Commit: \`${gitHead(repositoryRoot())}\`.`,
-    `- Bundle: \`${enginePath(input.bundle)}\`, ${fileBytes(enginePath(input.bundle))} bytes, run through \`${input.bundle}\`.`,
+    `- Bundle: \`${engine}\`, ${fileBytes(engine)} bytes, run through \`${input.bundle}\`.`,
     `- Fixture: \`${input.fixturePath}\` (${input.lines.length} lines).`,
     `- \`OBOETE_HOME\`: \`${input.home}\`. Worker behavior uses this home's configuration; generation and delivery are scored separately below.`,
     `- Temporary git repository with one empty commit so \`HEAD\` exists. \`NODE_ENV=test\`.`,

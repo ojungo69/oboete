@@ -16,32 +16,39 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-/** True when `path` is a directory of this user's that nobody else can even enter. `mkdirSync`
- *  leaves an existing directory's mode and owner alone and follows a symlink, so what came back is
- *  checked rather than assumed. Being unwritable by others is not enough: V8 reads its entries from
- *  a versioned directory that Node creates inside this one at 0777 minus the umask, group-writable
- *  wherever the umask is 002. Denying the traverse bit here puts that out of everyone else's reach
- *  whatever its own mode, which inspecting the children could not do without disabling the cache
- *  outright on those machines. Refusing beats correcting: a chmod would land on the target of a
- *  planted symlink.
- *
- *  Only this directory is checked, not the ones above it. Anything an attacker puts here in its
- *  place -- a directory of their own, a symlink -- belongs to them, and this check refuses it; what
- *  write access above buys is the race between this check and V8's read, which is accepted anyway
- *  (`homedir()` is not checked either, so demanding unwritable ancestors would only narrow it, at
- *  the price of refusing the 0775 `~/.cache` that a 002 umask leaves behind). */
-function ownedAndClosed(path, uid) {
+/** True when `path` is a real directory of this user's and nobody else has any of `denied`'s bits.
+ *  `mkdirSync` leaves an existing directory's mode and owner alone and follows a symlink, so what
+ *  came back is checked rather than assumed. Refusing beats correcting: a chmod would land on the
+ *  target of a planted symlink. */
+function ours(path, denied) {
   const found = lstatSync(path);
   if (found.isSymbolicLink() || !found.isDirectory()) return false;
-  return uid === undefined || (found.uid === uid && (found.mode & 0o077) === 0);
+  const uid = process.getuid?.();
+  // Windows has neither, so the symlink and directory checks above are the whole test there.
+  if (uid === undefined) return true;
+  return found.uid === uid && (found.mode & denied) === 0;
 }
 
 try {
   const base = process.env.XDG_CACHE_HOME;
   const root = base !== undefined && isAbsolute(base) ? base : join(homedir(), '.cache');
-  const cache = join(root, 'oboete', 'compile');
-  mkdirSync(cache, { recursive: true, mode: 0o700 });
-  if (ownedAndClosed(cache, process.getuid?.())) enableCompileCache(cache);
+  const parent = join(root, 'oboete');
+  const cache = join(parent, 'compile');
+  // The cache directory itself is created 0700; the directories above it are not, because this may
+  // be the first thing on the machine to create `~/.cache` and that one belongs to every tool.
+  mkdirSync(parent, { recursive: true });
+  // The parent is checked before `compile` is created, not after: recursive mkdir follows a link,
+  // so a link planted here would otherwise have us create `compile` in somebody else's tree and
+  // write bytecode into it while every check on `compile` itself still passed -- it would be ours,
+  // 0700 and a real directory. It only has to be ours and not a link; nothing above it is checked,
+  // because a symlink there is the user's own arrangement and replacing it needs write on $HOME.
+  if (ours(parent, 0)) {
+    mkdirSync(cache, { recursive: true, mode: 0o700 });
+    // `compile` must be closed to everyone else, not merely unwritable: V8 reads its entries from
+    // a versioned directory Node creates inside at 0777 minus the umask, group-writable wherever
+    // the umask is 002, and denying the traverse bit puts that out of reach whatever its own mode.
+    if (ours(cache, 0o077)) enableCompileCache(cache);
+  }
 } catch {
   // No cache, same behaviour. A read-only home costs the cache and never the command.
 }

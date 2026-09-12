@@ -116,13 +116,24 @@ Inspecting those children instead is the obvious move and it is wrong: it disabl
 the second run onward on every 002-umask machine, silently, which is the whole regression back with
 no signal.
 
-The check stops there and says nothing about the directories above. Two rounds of this review tried
-requiring those to be unwritable by others and both times it refused real machines -- a `~/.cache`
-is 0755 nearly everywhere and 0775 wherever a 002 umask created it -- while buying very little:
-whatever an attacker puts at `compile` in place of ours is owned by them or is a symlink, and the
-check on the directory itself refuses both, fail-closed. What write access above actually buys is
-the race between that check and V8's read, and that race is accepted anyway; `homedir()` is not
-checked either, so demanding unwritable ancestors would have narrowed it rather than closed it.
+One directory above is checked, and only for being ours and not a symlink. Recursive `mkdirSync`
+follows a link, so a link planted at the `oboete` directory would have the launcher create `compile`
+inside somebody else's tree and write half a megabyte of bytecode there while every check on
+`compile` itself passed -- it would be ours, 0700, a real directory. The parent is therefore checked
+*before* `compile` is created, so a refusal leaves nothing behind at all. No mode is required of it:
+`compile`'s own traverse bits already decide who can reach the entries.
+
+Nothing above that is checked. Two rounds of this review tried requiring the rest of the ancestors
+to be unwritable by others and both times it refused real machines -- a `~/.cache` is 0755 nearly
+everywhere and 0775 wherever a 002 umask created it -- while buying very little: a symlink at
+`~/.cache` is the user's own arrangement, and replacing one takes write access to `$HOME`, which is
+total compromise on its own. What write access above buys is the race between the check and V8's
+read, and that race is accepted anyway; `homedir()` is not checked either, so demanding unwritable
+ancestors would have narrowed it rather than closed it.
+
+`compile` is created at 0700 but the directories above it are not: on a fresh account or a container
+image the capture hook may be the first thing on the machine to create `~/.cache`, and that
+directory belongs to every tool, not to this one.
 
 The one refusal that stays silent is a `compile` of this user's own left at a loose mode -- a
 restored backup, an `rsync` without `-p`, an NFS home. The hook returns to its uncached time with
@@ -133,6 +144,13 @@ race between the check and V8's read, which needs write access to the cache dire
 to any directory above it, `$HOME` included, none of which is checked. A writable `$HOME` is already
 total compromise, so this is the accepted residue rather than a hole the ancestor rule would have
 closed. A home that cannot hold the directory at all costs the cache and never the command.
+
+The alternative this does not take is making the hook path its own, smaller entry point. The tree is
+already organised around which packages ride inside the engine, so splitting `src/cli.ts` so that
+`hook`, `capture` and `inject` compile without the rest would remove the cost rather than remember
+it: no cliff on the first run after an upgrade, no cache to grow, and no directory to have to trust.
+It is the better answer to the same problem and a much larger change to security-owned bundle
+composition; the launcher is what closes the regression now, and the split stays available.
 
 One thing the launcher cannot defend: `NODE_COMPILE_CACHE` in the environment wins. Node enables the
 cache at bootstrap from that variable, and a later `enableCompileCache(dir)` returns
@@ -161,17 +179,20 @@ bound.
 Two accepted costs. The cache is unbounded -- Node keys entries on path and source hash and never
 evicts, so a directory of a few megabytes per distinct build accumulates for developers who rebuild
 often; it holds compiled code of this project and nothing from any fixture or capture, and
-`~/.cache` is where a user or CI image already expects to clear such a thing. And the test suite
-warms the developer's real `~/.cache` rather than an isolated one, because every CLI-spawning test
-inherits `HOME`: giving each scenario its own would make the cache cold in exactly the suite whose
-timing this section is about, so the suite deliberately measures the hook the way it actually runs.
+`~/.cache` is where a user or CI image already expects to clear such a thing. And the test suite warms the
+developer's real `~/.cache`, because most CLI-spawning tests inherit `HOME`: giving each scenario its
+own would make the cache cold in exactly the suite whose timing this section is about, so those
+suites deliberately measure the hook the way it actually runs. The tests that do override `HOME`
+(`cli`, `detect`, `probe`, `codex-trust`, `doctor`, `fault-pi`) do it for agent-home detection and
+consequently run uncached, paying the compile and a discarded cache write on every spawn.
 
 Pinned by `test/unit/launcher.test.ts`, which asserts the shape the speed-up depends on -- the entry
 file is `src/launcher.mjs` verbatim, executable and small; the engine is its own file; one run
 leaves an owner-only cache, the next run adds nothing to it, and a run after that rewrites an entry
 corrupted in between -- the last of those is what separates a cache being read back from one that
 was never enabled, which is invisible to every other assertion; a world-writable cache directory is
-refused, as is one merely traversable by others and one that is a symlink, while ancestors at 0755,
-0775 and even 0777 are accepted; a home that cannot hold a cache still exits 0 with no stderr; and
+refused, as is one merely traversable by others, one that is a symlink and one whose parent is a
+symlink, while ancestors at 0755, 0775 and even 0777 are accepted and are left at the mode they had;
+a home that cannot hold a cache still exits 0 with no stderr; and
 `oboete setup` writes `dist/oboete.mjs` into the hook commands rather than the engine -- and not the
 timing, which belongs to the machine.
