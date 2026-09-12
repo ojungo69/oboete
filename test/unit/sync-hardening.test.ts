@@ -104,6 +104,48 @@ test('a remote repo key over a local path this device already holds resolves to 
   });
 });
 
+test('a remote repo key over a local path this device does not hold yet is rejected', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    // Qualifying the lookup by `identity_kind` is not enough on its own: where B has no row for the
+    // path yet, the peer's line creates one. `repos.id` is the first 16 hex of the same hash
+    // `repo-identity.ts` computes, so the planted row carries the id B will compute when the
+    // developer opens that path, `storeRows` adopts it by id (its upsert rewrites only
+    // `display_root`/`last_seen_at`), and the forged key is already mapped to it. `repoKeyFor`
+    // mints a `remote:` key only for a canonical remote identity, so requiring one here refuses
+    // the plant and costs an honest peer nothing.
+    const path = '/work/victim/project/.git';
+    const key = `remote:${createHash('sha256').update(path).digest('hex')}`;
+    insertMemory(a.db, 'm_one', 'First', 'First body');
+    const { header, lines } = bundleLines(publish(a, dir));
+    const memory = lines.find((line) => line.origin_id === `${a.id}:m_one`)!;
+    (memory.payload as Line).repo_id = key;
+    (memory.natural as Line).repo = key;
+    const repoLine: Line = { kind: 'repo', origin_id: key, identity_kind: 'remote', normalized_identity: path };
+    const forged = writeBundle(`${dir}/plantedremote.osb.json`, header, [repoLine, reseal(memory)]);
+    assert.throws(() => pull(b, a, forged), (error: unknown) => error instanceof BundleRejected && error.code === 'repo_key_mismatch');
+    assert.equal(b.db.prepare('SELECT COUNT(*) AS n FROM repos WHERE normalized_identity = ?').get(path)?.n, 0, 'no row was planted');
+  });
+});
+
+test('a repo key from a peer replica whose hash misstates its identity is rejected', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    // Neither branch below resolves a third replica's `common_dir` key, but `status` shows the
+    // operator the identity it declares and `map-repo` is run on the strength of that, so the key
+    // has to name the identity it carries whichever replica minted it.
+    const key = `${'c'.repeat(32)}:common_dir:${createHash('sha256').update('/elsewhere/real').digest('hex')}`;
+    insertMemory(a.db, 'm_one', 'First', 'First body');
+    const { header, lines } = bundleLines(publish(a, dir));
+    const memory = lines.find((line) => line.origin_id === `${a.id}:m_one`)!;
+    (memory.payload as Line).repo_id = key;
+    (memory.natural as Line).repo = key;
+    const repoLine: Line = { kind: 'repo', origin_id: key, identity_kind: 'common_dir', normalized_identity: '/work/victim/looks-like-this' };
+    const forged = writeBundle(`${dir}/foreignkey.osb.json`, header, [repoLine, reseal(memory)]);
+    assert.throws(() => pull(b, a, forged), (error: unknown) => error instanceof BundleRejected && error.code === 'repo_key_mismatch');
+  });
+});
+
 test('a repo line whose declared kind disagrees with its key prefix is rejected', async () => {
   await withReplicas(2, (replicas, dir) => {
     const [a, b] = replicas as [Replica, Replica];
@@ -119,6 +161,26 @@ test('a repo line whose declared kind disagrees with its key prefix is rejected'
     const repoLine: Line = { kind: 'repo', origin_id: key, identity_kind: 'common_dir', normalized_identity: path };
     const forged = writeBundle(`${dir}/kindmismatch.osb.json`, header, [repoLine, reseal(memory)]);
     assert.throws(() => pull(b, a, forged), (error: unknown) => error instanceof BundleRejected && error.code === 'repo_key_mismatch');
+  });
+});
+
+test('a remote repository whose identity is not a canonical remote publishes under a machine-local key', async () => {
+  await withReplicas(2, (replicas, dir) => {
+    const [a, b] = replicas as [Replica, Replica];
+    // `repoKeyFor` falls back to a `common_dir` key for a `remote` row whose identity is not a
+    // canonical remote. The mapping has to record the kind the key was built from, not the row's:
+    // a `common_dir` key declaring `remote` is a line every peer rejects — and with it this
+    // device's whole bundle, permanently.
+    const path = '/work/local/project/.git';
+    a.db.prepare(`INSERT INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
+      VALUES ('odd_a', 'remote', ?, '/work/local', 1, 1)`).run(path);
+    insertMemory(a.db, 'm_one', 'First', 'First body');
+    pull(b, a, publish(a, dir));
+    const mapping = a.db.prepare('SELECT repo_key, identity_kind FROM sync_repo_mappings WHERE local_repo_id = ?').get('odd_a')!;
+    assert.equal(String(mapping.repo_key).includes(':common_dir:'), true, 'a non-canonical identity gets a machine-local key');
+    assert.equal(mapping.identity_kind, 'common_dir', 'the mapping records the kind its key was built from');
+    assert.equal(b.db.prepare('SELECT local_repo_id FROM sync_repo_mappings WHERE repo_key = ?').get(String(mapping.repo_key))?.local_repo_id ?? null, null,
+      'the peer files it unmapped rather than rejecting the bundle');
   });
 });
 

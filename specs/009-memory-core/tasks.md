@@ -207,7 +207,7 @@ writers require separate worktrees. No deployment follows merely from an increme
   (`revisions_sha256` scope, `sync.key_id` allow-list, `status.ts` as the one module doctor and
   MCP import) plus the `--republish` delivery-identity bullet. Review rounds (`/code-review high`
   three times plus one finder angle, Codex correctness passes, receipts under
-  `/var/tmp/oboete-009-20260909.jJ5grc/us6/`) found 10 + 6 + 9 + 9 + 14 + 11 + 17 + 16 + 20 + 12 + 4 + 3 + 18 + 4 defects, fixed in
+  `/var/tmp/oboete-009-20260909.jJ5grc/us6/`) found 10 + 6 + 9 + 9 + 14 + 11 + 17 + 16 + 20 + 12 + 4 + 3 + 18 + 7 defects, fixed in
   security-owned code by Claude Code and pinned RED→GREEN in `sync-review.test.ts` (round eleven
   fixed and pinned three of its four; its fourth, a mutual cross-memory context cycle held on one
   device, is not resolved — the cycle-break is order-dependent and two devices can diverge, tracked
@@ -226,8 +226,12 @@ writers require separate worktrees. No deployment follows merely from an increme
   `init` race had just written; `leave`'s single transaction left the config deleted when the
   COMMIT failed), plus a `remote:` key forged over a local `common_dir` path this device already
   holds, a repo line whose declared kind disagreed with its key prefix, and `--classes` accepted
-  and silently ignored outside `init`/`join` — all four fixed and pinned, with the publish-side
-  RSS measurement filed as #204); round four
+  and silently ignored outside `init`/`join` — all four fixed and pinned; the `/code-review`
+  pass on that fix then found the forged-key hole was only half closed — where the device does not
+  yet hold the identity, the peer's line creates the row under the very id the device will compute
+  when the developer opens that path, so `applyRepoLines` now requires a canonical remote identity,
+  checks every key's hash whichever replica minted it, and `registerLocalRepos` records the kind its
+  key was built from — with the publish-side RSS measurement filed as #204); round four
   replaced the content-derived source identity with a stored key (`memory_sources.sync_key`) and
   made write-time aliases re-enter the pass; round five closed the holes that redesign opened
   (bound-row lookups, tuple matching, claim-before-write); round six settled the source key as

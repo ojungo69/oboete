@@ -969,14 +969,32 @@ compensating-write design: a rollback that undoes a write another process made):
   remains can only stop with the config naming a space whose rows are gone, which the next `leave`
   walks to the end (space, pinned: the existing config-write-failure test now asserts the row is
   already gone);
-- `applyRepoLines` resolves a `remote:` key only against a repository this device already calls
-  remote. `repos.normalized_identity` is unique across both identity kinds, so a peer that learned
+- `applyRepoLines` resolves a `remote:` key only for a canonical remote identity, and only against
+  a repository this device already calls remote. `repos.normalized_identity` is unique across both identity kinds, so a peer that learned
   this device's `common_dir` path could send it under a `remote:` key: the hash checks out, the
   `INSERT OR IGNORE` collides with the local row, and the unqualified lookup handed the forged key
   that local repository — the same auto-mapping the `common_dir` prefix check refuses, reached by
   the other branch. A repo line whose declared `identity_kind` disagrees with its own key prefix is
   rejected outright, since the mapping row records the declared kind while the branches read the
-  prefix (apply, both pinned);
+  prefix (apply, both pinned). Qualifying the lookup is not sufficient on its own, and a follow-up
+  review pass found the rest: where the device does *not* yet hold that identity, the peer's line
+  creates the row. `repos.id` is the first 16 hex of `sha256(normalized_identity)`, the same value
+  `repo-identity.ts` computes, so the planted row carries the id the device will compute when the
+  developer next opens that path — `storeRows` adopts it by id (its upsert rewrites only
+  `display_root` and `last_seen_at`) and the forged key is already mapped to it. `repoKeyFor` mints
+  a `remote:` key only for a canonical remote identity, so `applyRepoLines` now requires one, which
+  refuses the plant and costs an honest peer nothing. The one canonical form that is still a path —
+  a `file://` remote normalizes to a bare path — is recorded and left unmapped rather than
+  rejected, since an honest device with such a remote would otherwise have its whole bundle refused
+  by every peer (apply, pinned);
+- every repo key is checked against the identity it declares, whichever replica minted it, not only
+  the two forms this device can resolve: an unmapped key's identity is what `status` shows and what
+  `map-repo` is run on the strength of (apply, pinned);
+- `registerLocalRepos` records the mapping's `identity_kind` from the key it just built rather than
+  from the `repos` row. `repoKeyFor` falls back to a `common_dir` key for a `remote` row whose
+  identity is not canonical, and a mapping that published a `common_dir` key declaring `remote`
+  would be a line every peer running the kind/prefix check rejects — taking this device's whole
+  bundle with it, permanently (store, pinned);
 - `--classes` is refused everywhere but `init`/`join`, and `--republish` everywhere but `push`.
   Classes are consent-bound: they are recorded once and the consent hash is taken over them, so a
   push that accepted the flag and exported the recorded set would ship exactly what the developer

@@ -10,6 +10,7 @@ import { grantVisibility } from '../db/queries.js';
 import { prepared } from '../db/statements.js';
 import { checkpointHash } from '../db/identity.js';
 import { sha256Hex, sha256Json, compareCodeUnits } from '../hash.js';
+import { isCanonicalRemoteIdentity } from '../repo-identity.js';
 import { cjkBigrams } from '../retrieval/fts.js';
 import { contextRecords, memoryRecords, proposalRecords, sourceRecords, visibilityRecords, workRecords } from '../transfer-records.js';
 import { SOURCE_FIELDS, alignToNatural, captureLocalChanges, controlOf, sourceTuples, toOriginForm } from './capture.js';
@@ -59,7 +60,7 @@ type Resolver = {
 };
 
 /** Repository lines: canonical remotes resolve everywhere; foreign paths wait for `map-repo`. */
-function applyRepoLines(db: DatabaseSync, staged: Staged, replica: string, now: number): void {
+function applyRepoLines(db: DatabaseSync, staged: Staged, now: number): void {
   for (const repo of stagedRepos(staged)) {
     const existing = prepared(db, 'SELECT local_repo_id FROM sync_repo_mappings WHERE repo_key = ?').get(repo.origin_id);
     if (existing?.local_repo_id != null) continue;
@@ -69,27 +70,38 @@ function applyRepoLines(db: DatabaseSync, staged: Staged, replica: string, now: 
     if (repo.identity_kind !== (repo.origin_id.startsWith('remote:') ? 'remote' : 'common_dir')) {
       throw new BundleRejected('repo_key_mismatch', repo.origin_id);
     }
+    // Every key carries `sha256(normalized_identity)`, whichever replica minted it, so the identity
+    // a line displays is checked here rather than only for the two keys this device can resolve:
+    // `status` shows an unmapped key's identity, and `map-repo` is run on the strength of it.
+    if (!repo.origin_id.endsWith(sha256Hex(repo.normalized_identity))) throw new BundleRejected('repo_key_mismatch', repo.origin_id);
     let localRepoId: string | null = null;
     if (repo.origin_id.startsWith('remote:')) {
-      if (`remote:${sha256Hex(repo.normalized_identity)}` !== repo.origin_id) throw new BundleRejected('repo_key_mismatch', repo.origin_id);
-      const id = sha256Hex(repo.normalized_identity).slice(0, 16);
-      prepared(db, `INSERT OR IGNORE INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
-        VALUES (?, 'remote', ?, ?, ?, ?)`).run(id, repo.normalized_identity, repo.normalized_identity, now, now);
-      // `normalized_identity` is unique across both kinds, so a peer that learned this device's
-      // `common_dir` path could send it under a `remote:` key: the hash checks out, the insert is
-      // ignored against the local row already holding that identity, and an unqualified lookup
-      // would hand the forged key that local repository without an explicit `map-repo`. Only a row
-      // this side already calls remote resolves one; anything else waits for `map-repo` unmapped.
-      const row = prepared(db, `SELECT id FROM repos WHERE normalized_identity = ? AND identity_kind = 'remote'`).get(repo.normalized_identity);
-      localRepoId = row?.id == null ? null : String(row.id);
-    } else if (repo.origin_id.startsWith(`${replica}:common_dir:`)) {
-      // A machine-local path binds to a local repository only through an explicit `map-repo` on
-      // this device; a bundle never resolves one on its own. A peer that learns this replica's id
-      // (a bundle file is named for it) could otherwise name its prefix and steer revisions into a
-      // local repository. Validate the hash-derived key and leave it unmapped for `map-repo`.
-      if (`${replica}:common_dir:${sha256Hex(repo.normalized_identity)}` !== repo.origin_id) throw new BundleRejected('repo_key_mismatch', repo.origin_id);
-      localRepoId = null;
+      // `repoKeyFor` mints a `remote:` key only for a canonical remote identity, so requiring the
+      // same here costs an honest peer nothing — and without it a filesystem path is a remote
+      // identity as far as this branch is concerned. `repos.id` is the first 16 hex of that same
+      // hash (`repo-identity.ts`), so a peer could otherwise plant a row under the id this device
+      // will compute when the developer next opens that path: `storeRows` adopts it by id (the
+      // upsert rewrites only `display_root`/`last_seen_at`) and the forged key is already mapped
+      // to it. The `common_dir` prefix check refuses this; the remote branch has to as well.
+      if (!isCanonicalRemoteIdentity(repo.normalized_identity)) throw new BundleRejected('repo_key_mismatch', repo.origin_id);
+      // A `file://` remote normalizes to a bare path, which `isCanonicalRemoteIdentity` accepts, so
+      // that last path-shaped identity is treated the way every other path is: recorded, never
+      // resolved here. It is not a rejection, because an honest device with such a remote would
+      // otherwise have its whole bundle refused by every peer.
+      if (!repo.normalized_identity.startsWith('/')) {
+        const id = sha256Hex(repo.normalized_identity).slice(0, 16);
+        prepared(db, `INSERT OR IGNORE INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at)
+          VALUES (?, 'remote', ?, ?, ?, ?)`).run(id, repo.normalized_identity, repo.normalized_identity, now, now);
+        // `normalized_identity` is unique across both kinds, so the insert above is ignored when a
+        // local row already holds this identity as a `common_dir`. Only a row this side calls
+        // remote resolves the key; anything else waits, unmapped, for an explicit `map-repo`.
+        const row = prepared(db, `SELECT id FROM repos WHERE normalized_identity = ? AND identity_kind = 'remote'`).get(repo.normalized_identity);
+        localRepoId = row?.id == null ? null : String(row.id);
+      }
     }
+    // A machine-local path binds to a local repository only through an explicit `map-repo` on this
+    // device; a bundle never resolves one on its own, not even one naming this replica's prefix
+    // (a bundle file is named for the replica, so the prefix is public).
     prepared(db, `INSERT INTO sync_repo_mappings (repo_key, identity_kind, normalized_identity, local_repo_id) VALUES (?, ?, ?, ?)
       ON CONFLICT(repo_key) DO UPDATE SET local_repo_id = COALESCE(sync_repo_mappings.local_repo_id, excluded.local_repo_id)`)
       .run(repo.origin_id, repo.identity_kind, repo.normalized_identity, localRepoId);
@@ -1154,9 +1166,8 @@ export function materializeRows(db: DatabaseSync, rowIds: readonly string[], now
  * row would exceed the head bound; the caller rolls back.
  */
 export function applyStaged(db: DatabaseSync, staged: Staged, input: { senderOriginId: string; now: number }): ApplyResult {
-  const replica = replicaOriginId(db);
   captureLocalChanges(db, input.now);
-  applyRepoLines(db, staged, replica, input.now);
+  applyRepoLines(db, staged, input.now);
   const stored: ApplyResult = { stored: 0, filled: 0, materialized: 0, withheldOnApply: 0, conflicts: 0 };
   const touched = storeStaged(db, staged, input.senderOriginId, input.now, stored);
   const result = materializeRows(db, [...touched], input.now);

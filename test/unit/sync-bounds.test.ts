@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { materialHash } from '../../src/db/identity.js';
+import { sha256Hex } from '../../src/hash.js';
 import { loadSqlite, openDatabase } from '../../src/db/open.js';
 import { oboetePaths } from '../../src/paths.js';
 import { applyStaged, resolveRow, type ApplyResult } from '../../src/sync/apply.js';
@@ -200,7 +201,10 @@ test('a bundle from a store of 2,000 single-head origins is accepted', async () 
 function writeRepoLines(path: string, count: number): string {
   writeBundle(path, SENDER, (emit) => {
     for (let i = 0; i < count; i += 1) {
-      emit({ kind: 'repo', origin_id: `${SENDER}:common_dir:${hex(i, 64)}`, identity_kind: 'common_dir', normalized_identity: `/r/${String(i)}` });
+      // The hash is the one `repoKeyFor` would compute: apply rejects any key that misstates the
+      // identity it displays, so a bound test has to carry keys an honest sender could have sent.
+      const identity = `/r/${String(i)}`;
+      emit({ kind: 'repo', origin_id: `${SENDER}:common_dir:${sha256Hex(identity)}`, identity_kind: 'common_dir', normalized_identity: identity });
     }
   });
   return path;

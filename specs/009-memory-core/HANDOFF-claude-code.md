@@ -111,7 +111,16 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
   `remote:` key に偽装した bundle が `INSERT OR IGNORE` の衝突経由で local repo に bind されていた点
   (lookup を `identity_kind = 'remote'` で限定 + key prefix と宣言 kind の不一致は拒否)、および
   `--classes` が `init`/`join` 以外でも受理されて黙って無視されていた点 (consent 由来なので exit 2)。
-  publish 側の RSS 計測は #204 に follow-up 化 (peer 由来ではなく自機データ、`buildSnapshot` の
+  さらにこの修正への `/code-review` が HIGH を 1 件出した: `identity_kind = 'remote'` で lookup を
+  絞るだけでは**まだ device が持っていない identity** に対して素通りする。`repos.id` は
+  `sha256(normalized_identity)` の先頭 16 hex で `repo-identity.ts` と同じ式なので、peer は
+  「開発者が今後そのパスを開いたときに計算される id」の row を先に植えられ、`storeRows` の
+  `ON CONFLICT(id)` はそれを採用してしまう(upsert は display_root/last_seen_at しか書き換えない)。
+  対策は 3 つ: `remote:` は canonical remote identity のときだけ解決する(`repoKeyFor` と同じ述語)、
+  key の hash は minted した replica を問わず全件検証する(`status` が見せる identity を信じて
+  `map-repo` するため)、`registerLocalRepos` は mapping の kind を **key から** 決める
+  (row の kind をそのまま書くと、non-canonical な remote row が「common_dir key + remote 宣言」に
+  なり、全 peer がその device の bundle を恒久的に拒否する)。publish 側の RSS 計測は #204 に follow-up 化 (peer 由来ではなく自機データ、`buildSnapshot` の
   map 構造ごとの変更になるため)。設計の教訓: **補償書き込みは「自分が書いたものだけ」を戻す**。
   順序を決めるときは各文の失敗点ごとに「その状態からユーザーが `leave`/`init` だけで回復できるか」を
   表にする — 回復できない向き (ここでは row があって config が無い) を作らない側に倒す。

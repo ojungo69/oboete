@@ -61,9 +61,14 @@ export function registerLocalRepos(db: DatabaseSync, replica: string): Map<strin
   const keys = new Map<string, string>();
   for (const row of prepared(db, 'SELECT id, identity_kind, normalized_identity FROM repos ORDER BY id').iterate()) {
     const key = repoKeyFor(replica, String(row.identity_kind), String(row.normalized_identity));
+    // The kind recorded is the one the key was built from, not the row's: `repoKeyFor` falls back
+    // to a `common_dir` key for a `remote` row whose identity is not canonical, and a mapping that
+    // published a `common_dir` key declaring `remote` is a line every peer rejects — this device's
+    // whole bundle with it. The key is what every reader of the mapping branches on.
+    const kind = key.startsWith('remote:') ? 'remote' : 'common_dir';
     prepared(db, `INSERT INTO sync_repo_mappings (repo_key, identity_kind, normalized_identity, local_repo_id)
-      VALUES (?, ?, ?, ?) ON CONFLICT(repo_key) DO UPDATE SET local_repo_id = excluded.local_repo_id`)
-      .run(key, String(row.identity_kind), String(row.normalized_identity), String(row.id));
+      VALUES (?, ?, ?, ?) ON CONFLICT(repo_key) DO UPDATE SET identity_kind = excluded.identity_kind, local_repo_id = excluded.local_repo_id`)
+      .run(key, kind, String(row.normalized_identity), String(row.id));
     keys.set(String(row.id), key);
   }
   return keys;
