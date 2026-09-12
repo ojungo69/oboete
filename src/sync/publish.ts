@@ -102,7 +102,11 @@ export function buildSnapshot(db: DatabaseSync, options: PublishOptions): Publis
     let moved = false;
     for (const head of heads) {
       if (head.kind !== 'context' || head.revision.payload === null) continue;
-      const wanted = referencedContexts.has(head.row.origin_id) || candidateRepos.has(String(head.revision.payload.repo_id));
+      // Fail closed on a secret floor or a tombstone even when a shipped payload references the
+      // context: promotion adds candidates outside `passesClassRule`, so it repeats that guard.
+      const control = controls.get(head.row.origin_id)!;
+      const wanted = !control.tombstone && control.sensitivity_floor !== 'secret'
+        && (referencedContexts.has(head.row.origin_id) || candidateRepos.has(String(head.revision.payload.repo_id)));
       if (wanted !== candidates.has(head.revision.revision_id)) {
         if (wanted) candidates.add(head.revision.revision_id); else candidates.delete(head.revision.revision_id);
         moved = true;

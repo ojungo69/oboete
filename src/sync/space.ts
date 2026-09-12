@@ -77,6 +77,13 @@ export function readKey(paths: OboetePaths, spaceId: string): Buffer {
   } finally { closeSync(fd); }
 }
 
+/** The key file for this space, verified against the consented key id: a swapped key never runs. */
+function loadVerifiedKey(paths: OboetePaths, config: SyncConfig): Buffer {
+  const key = readKey(paths, config.space_id);
+  if (keyId(key) !== config.key_id) throw new SyncError('key_mismatch');
+  return key;
+}
+
 /** Consent check at the start of every push and pull: any drift performs no I/O. */
 function checkConsent(db: DatabaseSync, config: SyncConfig): void {
   let realpath: string;
@@ -86,11 +93,25 @@ function checkConsent(db: DatabaseSync, config: SyncConfig): void {
 }
 
 function recordSpace(db: DatabaseSync, paths: OboetePaths, config: SyncConfig, now: number): void {
-  prepared(db, `INSERT INTO sync_spaces (space_id, directory, directory_realpath, key_id, classes_json, consent_hash, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .run(config.space_id, config.directory, config.directory_realpath, config.key_id, canonicalJson([...config.classes].sort(compareCodeUnits)),
-      consentHashOf(config), now);
-  updateConfigFile(paths, (root) => { root.sync = { ...config }; });
+  // The database row and the config file are written together: if the config write fails, the row
+  // is rolled back, so `init`/`join` never leaves a `sync_spaces` row that `leave` cannot reach
+  // (it needs the config) while `assertNoSpace` keeps blocking re-init.
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    prepared(db, `INSERT INTO sync_spaces (space_id, directory, directory_realpath, key_id, classes_json, consent_hash, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(config.space_id, config.directory, config.directory_realpath, config.key_id, canonicalJson([...config.classes].sort(compareCodeUnits)),
+        consentHashOf(config), now);
+    updateConfigFile(paths, (root) => { root.sync = { ...config }; });
+    db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+
+/** Write the key then record the space, removing the key file if recording does not complete. */
+function createSpace(db: DatabaseSync, paths: OboetePaths, config: SyncConfig, key: Uint8Array, now: number): void {
+  writeKey(paths, config.space_id, key);
+  try { recordSpace(db, paths, config, now); }
+  catch (error) { rmSync(syncPaths(paths).key(config.space_id), { force: true }); throw error; }
 }
 
 function assertNoSpace(db: DatabaseSync, paths: OboetePaths): void {
@@ -113,8 +134,7 @@ export function initSpace(db: DatabaseSync, paths: OboetePaths, input: { directo
   const key = randomBytes(32);
   const config: SyncConfig = { directory, directory_realpath: realpath, space_id: spaceId, key_id: keyId(key),
     classes: classesOf(input.classes) };
-  writeKey(paths, spaceId, key);
-  recordSpace(db, paths, config, input.now);
+  createSpace(db, paths, config, key, input.now);
   return { spaceId, keyLine: keyLine(spaceId, key) };
 }
 
@@ -126,8 +146,7 @@ export function joinSpace(db: DatabaseSync, paths: OboetePaths, input: { directo
   const { spaceId, key } = parseKeyLine(input.keyLine);
   const config: SyncConfig = { directory, directory_realpath: realpath, space_id: spaceId, key_id: keyId(key),
     classes: classesOf(input.classes) };
-  writeKey(paths, spaceId, key);
-  recordSpace(db, paths, config, input.now);
+  createSpace(db, paths, config, key, input.now);
   return { spaceId };
 }
 
@@ -150,12 +169,16 @@ export function showKey(paths: OboetePaths): string {
 export function leaveSpace(db: DatabaseSync, paths: OboetePaths): void {
   const config = loadSyncConfig(paths);
   if (config === null) throw new SyncError('space_not_configured');
-  const own = join(spaceDirectory(config.directory, config.space_id), `${replicaOriginId(db)}.osb`);
-  rmSync(own, { force: true });
-  rmSync(syncPaths(paths).key(config.space_id), { force: true });
-  prepared(db, 'DELETE FROM sync_cursors WHERE space_id = ?').run(config.space_id);
-  prepared(db, 'DELETE FROM sync_spaces WHERE space_id = ?').run(config.space_id);
-  updateConfigFile(paths, (root) => { delete root.sync; });
+  // Under the same lock push and pull take, so a concurrent push cannot delete-then-republish this
+  // replica's bundle around the leave (it would restart on the data-version change and re-publish).
+  withSpaceLock(paths, config.space_id, () => {
+    const own = join(spaceDirectory(config.directory, config.space_id), `${replicaOriginId(db)}.osb`);
+    rmSync(own, { force: true });
+    rmSync(syncPaths(paths).key(config.space_id), { force: true });
+    prepared(db, 'DELETE FROM sync_cursors WHERE space_id = ?').run(config.space_id);
+    prepared(db, 'DELETE FROM sync_spaces WHERE space_id = ?').run(config.space_id);
+    updateConfigFile(paths, (root) => { delete root.sync; });
+  });
 }
 
 /** The per-space lock: `BEGIN IMMEDIATE` on a one-table SQLite file, released with the process. */
@@ -193,7 +216,7 @@ export function pushSpace(db: DatabaseSync, paths: OboetePaths, input: { now: nu
   if (config === null) throw new SyncError('space_not_configured');
   return withSpaceLock(paths, config.space_id, () => {
     checkConsent(db, config);
-    const key = readKey(paths, config.space_id);
+    const key = loadVerifiedKey(paths, config);
     const replica = replicaOriginId(db);
     const { staging } = syncPaths(paths);
     const plain = join(staging, `${replica}.push.plain`);
@@ -288,7 +311,7 @@ export function pullSpace(db: DatabaseSync, paths: OboetePaths, input: { now: nu
   if (config === null) throw new SyncError('space_not_configured');
   return withSpaceLock(paths, config.space_id, () => {
     checkConsent(db, config);
-    const key = readKey(paths, config.space_id);
+    const key = loadVerifiedKey(paths, config);
     const replica = replicaOriginId(db);
     const space = spaceDirectory(config.directory, config.space_id);
     const names = existsSync(space) ? readdirSync(space).filter((name) => BUNDLE_NAME.test(name) && !name.startsWith(replica)).sort(compareCodeUnits) : [];

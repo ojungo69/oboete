@@ -109,6 +109,7 @@ export function stageBundle(
 function validateBody(db: DatabaseSync, staged: Staged, reader: Generator<Buffer>): void {
   const { header, scratch } = staged;
   const digest = createHash('sha256');
+  let bodyLines = 0;
   let revisionLines = 0;
   let heads = 0;
   const insertLine = scratch.prepare('INSERT INTO lines (revision_id, origin_id, kind, head, line_json) VALUES (?, ?, ?, ?, ?)');
@@ -119,6 +120,10 @@ function validateBody(db: DatabaseSync, staged: Staged, reader: Generator<Buffer
   for (const bytes of reader) {
     digest.update(bytes);
     digest.update('\n');
+    // Every body line (repo lines included) counts against the parsing bound, so a bundle cannot
+    // fill the plaintext with repo records that bypass the revision-line cap.
+    bodyLines += 1;
+    if (bodyLines > BOUNDS.revisionLines) throw new BundleRejected('body_lines_exceeded');
     const value = parseJson(bytes, 'line_not_json');
     if (value !== null && typeof value === 'object' && (value as Row).kind === 'repo') {
       const repo = repoLineSchema.safeParse(value);
@@ -165,6 +170,12 @@ function validateBody(db: DatabaseSync, staged: Staged, reader: Generator<Buffer
     if (conflicting !== undefined) throw new BundleRejected('origin_identity_conflict', String(row.origin_id));
     const stored = readOrigin(db, String(row.origin_id));
     if (stored !== undefined && stored.kind !== row.kind) throw new BundleRejected('origin_kind_conflict', String(row.origin_id));
+    // An origin's natural key is its immutable identity (never rewritten once stored). A bundle
+    // that reuses a stored origin id with a different natural would bind a new payload to the old
+    // local row without updating its material/content identity, so reject the change.
+    if (stored !== undefined && canonicalJson(stored.natural) !== canonicalJson(JSON.parse(String(row.natural_json)))) {
+      throw new BundleRejected('origin_natural_conflict', String(row.origin_id));
+    }
     // Every snapshot re-sends the whole log, so a line already stored is not a new revision.
     let count = Number(scratch.prepare('SELECT COUNT(*) AS n FROM lines WHERE origin_id = ?').get(row.origin_id)?.n ?? 0)
       + Number(prepared(db, 'SELECT COUNT(*) AS n FROM sync_revisions WHERE origin_id = ?').get(row.origin_id)?.n ?? 0);

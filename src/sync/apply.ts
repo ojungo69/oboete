@@ -71,8 +71,12 @@ function applyRepoLines(db: DatabaseSync, staged: Staged, replica: string, now: 
         VALUES (?, 'remote', ?, ?, ?, ?)`).run(id, repo.normalized_identity, repo.normalized_identity, now, now);
       localRepoId = String(prepared(db, 'SELECT id FROM repos WHERE normalized_identity = ?').get(repo.normalized_identity)!.id);
     } else if (repo.origin_id.startsWith(`${replica}:common_dir:`)) {
-      const row = prepared(db, 'SELECT id FROM repos WHERE normalized_identity = ?').get(repo.normalized_identity);
-      localRepoId = row === undefined ? null : String(row.id);
+      // A machine-local path binds to a local repository only through an explicit `map-repo` on
+      // this device; a bundle never resolves one on its own. A peer that learns this replica's id
+      // (a bundle file is named for it) could otherwise name its prefix and steer revisions into a
+      // local repository. Validate the hash-derived key and leave it unmapped for `map-repo`.
+      if (`${replica}:common_dir:${sha256Hex(repo.normalized_identity)}` !== repo.origin_id) throw new BundleRejected('repo_key_mismatch', repo.origin_id);
+      localRepoId = null;
     }
     prepared(db, `INSERT INTO sync_repo_mappings (repo_key, identity_kind, normalized_identity, local_repo_id) VALUES (?, ?, ?, ?)
       ON CONFLICT(repo_key) DO UPDATE SET local_repo_id = COALESCE(sync_repo_mappings.local_repo_id, excluded.local_repo_id)`)
@@ -1168,6 +1172,10 @@ export function resolveRow(db: DatabaseSync, originId: string, keep: string, now
   let payloadHashValue: string | null;
   const kept = readRevision(db, keep);
   if (kept !== undefined && heads.includes(keep)) {
+    // A head the publisher withheld (its hash is present but its payload was not shipped) cannot be
+    // kept: the successor would carry null content and hash, so peers that hold the content leave
+    // their row untouched and recapture it, and peers without it cannot recover the chosen state.
+    if (kept.payload === null && kept.payload_hash !== null) throw new ResolveError('kept_withheld');
     // The kept head may belong to an aliased origin: the successor names the canonical origin and
     // its references the way the canonical natural key does.
     payload = kept.payload === null ? null : alignToNatural(row.kind, { ...kept.payload, id: row.origin_id }, row.natural);

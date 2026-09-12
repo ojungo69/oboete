@@ -19,7 +19,7 @@ import { canonicalJson, payloadHash, revisionId, snapshotId } from '../../src/sy
 import { syncItem } from '../../src/doctor/storage.js';
 import { runSync } from '../../src/sync-cli.js';
 import {
-  initSpace, joinSpace, leaveSpace, pullSpace, pushSpace, showKey, SyncError, syncStatus, withSpaceLock,
+  initSpace, joinSpace, keyLine, leaveSpace, pullSpace, pushSpace, showKey, SyncError, syncStatus, withSpaceLock,
 } from '../../src/sync/space.js';
 import { effectiveControl, headsOf, readOrigin, readRevision, replicaOriginId } from '../../src/sync/store.js';
 import {
@@ -452,6 +452,62 @@ test('the per-space lock makes a second push or pull exit busy and leaves nothin
         assert.throws(() => pullSpace(db, paths, { now: 2 }), (error: unknown) => error instanceof SyncError && error.code === 'busy');
       });
       assert.equal(pushSpace(db, paths, { now: 3 }).outcome, 'published');
+    } finally { db.close(); }
+  });
+});
+
+test('a key file swapped for a different valid key is rejected before any bundle I/O', async () => {
+  await withHomes(2, (homes, shared) => {
+    const [homeA, homeB] = homes as [string, string];
+    const a = openHome(homeA);
+    const b = openHome(homeB);
+    try {
+      const pathsA = oboetePaths(homeA);
+      const pathsB = oboetePaths(homeB);
+      const { spaceId, keyLine: line } = initSpace(a, pathsA, { directory: shared, classes: ['eligible'], now: 1 });
+      joinSpace(b, pathsB, { directory: shared, keyLine: line, classes: ['eligible'], now: 1 });
+      insertMemory(a, 'm_one', 'Title', 'Body text');
+      assert.equal(pushSpace(a, pathsA, { now: 10 }).outcome, 'published');
+      // Replace the key file with another syntactically valid key (same space id, different bytes).
+      writeFileSync(join(homeA, 'sync', `${spaceId}.key`), keyLine(spaceId, randomBytes(32)));
+      const isMismatch = (error: unknown): boolean => error instanceof SyncError && error.code === 'key_mismatch';
+      assert.throws(() => pushSpace(a, pathsA, { now: 20 }), isMismatch);
+      assert.throws(() => pullSpace(a, pathsA, { now: 21 }), isMismatch);
+    } finally { a.close(); b.close(); }
+  });
+});
+
+test('a failed config write during init rolls back the space row and removes the key', async () => {
+  await withHomes(1, (homes, shared) => {
+    const [home] = homes as [string];
+    const db = openHome(home);
+    try {
+      const paths = oboetePaths(home);
+      // Block the atomic config write: its exclusive (`wx`) temporary name is already taken.
+      const blocker = `${paths.config}.oboete-tmp-${process.pid}`;
+      writeFileSync(blocker, 'x');
+      assert.throws(() => initSpace(db, paths, { directory: shared, classes: ['eligible'], now: 1 }));
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sync_spaces').get()?.n, 0, 'no orphan space row');
+      assert.equal(readdirSync(join(home, 'sync')).filter((name) => name.endsWith('.key')).length, 0, 'no orphan key file');
+      // With the blocker gone, init succeeds: the space was not wedged.
+      rmSync(blocker, { force: true });
+      assert.ok(initSpace(db, paths, { directory: shared, classes: ['eligible'], now: 2 }).spaceId);
+    } finally { db.close(); }
+  });
+});
+
+test('leave runs under the space lock, so a concurrent push cannot race it', async () => {
+  await withHomes(1, (homes, shared) => {
+    const [home] = homes as [string];
+    const db = openHome(home);
+    try {
+      const paths = oboetePaths(home);
+      const { spaceId } = initSpace(db, paths, { directory: shared, classes: ['eligible'], now: 1 });
+      withSpaceLock(paths, spaceId, () => {
+        assert.throws(() => leaveSpace(db, paths), (error: unknown) => error instanceof SyncError && error.code === 'busy');
+      });
+      leaveSpace(db, paths);
+      assert.equal(syncStatus(db, paths).configured, false);
     } finally { db.close(); }
   });
 });

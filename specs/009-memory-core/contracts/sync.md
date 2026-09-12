@@ -878,6 +878,41 @@ findings):
   merge revisions); and the stored-terminal sweep scans only bound canonicals, so an unbound
   cross-memory-key tombstone does not reach a matching source a later bundle brings.
 
+Round thirteen (2026-09-12, PR bot triage — CodeRabbit, Greptile and the Codex connector on the
+pushed head; a bundle from an in-space peer is untrusted input. Eight adversarial-hardening
+findings on `src/sync/`, all fixed; three re-surfaced convergence findings are the residuals
+already tracked as #196/#197):
+
+- a bundle never binds a machine-local (`common_dir`) repository on its own: `applyRepoLines`
+  validates a `common_dir` key's hash against its normalized identity (rejecting a peer that names
+  this replica's prefix with a bogus hash to steer revisions into a local repository) and no longer
+  auto-maps an unmapped key by identity — the key waits for `map-repo` (apply, pinned);
+- `resolve --keep` refuses a head whose payload the publisher withheld (hash present, payload null):
+  the successor would carry null content, so peers that hold the content recapture it and the
+  resolution does not converge (apply, pinned);
+- the stage pass rejects a bundle that reuses a stored origin id with a different natural key: an
+  origin's natural is its immutable identity, and a rebind would write a new payload onto the old
+  local row without updating its material/content identity (stage, pinned);
+- every body line, `repo` lines included, counts against the parsing bound, so a bundle cannot fill
+  the plaintext with repo records that bypass the revision-line cap (stage; the 1 M bound is not
+  unit-tested);
+- the key file is verified against the consented key id before any bundle I/O, so a key swapped for
+  another syntactically valid key never encrypts an unreadable push or rejects every peer
+  (space, pinned);
+- `init`/`join` write the space row and the config file together and remove the key on failure, so
+  a failed config write never leaves a `sync_spaces` row that `leave` cannot reach and
+  `assertNoSpace` keeps blocking (space, pinned);
+- `leave` runs under the space lock, so a concurrent push cannot delete-then-republish this
+  replica's bundle around it (space, pinned);
+- context promotion repeats `passesClassRule`'s fail-closed guard, so a secret-floored or
+  tombstoned context is never shipped even when a shipped payload references it (publish;
+  defense-in-depth — the state does not arise from the honest path today).
+- Not closed here (added to #197): even with the hash validated, a peer can still author a revision
+  whose payload names the recipient's own correct `common_dir` key (learnable from the recipient's
+  published repo lines), so it lands in the recipient's local repository; distinguishing a peer's
+  edge from the owner's needs the revision's repo key to match its author's prefix or an explicit
+  map-repo.
+
 ## Verification (T034–T036)
 
 `test/unit/sync.test.ts` with three isolated homes and one shared temporary directory:
