@@ -78,10 +78,21 @@ export function warmCompileCache(bundle: string): void {
   // changes nothing about the warm-up and keeps the suite out of the developer's own `~/.oboete`.
   const home = mkdtempSync(join(tmpdir(), 'oboete-warm-'));
   try {
-    spawnSync(process.execPath, [bundle, '--version'], {
+    // Checked rather than fired and forgotten. A warm-up that fails leaves exactly the state this
+    // whole arrangement exists to prevent -- a timed suite compiling the engine inside its first
+    // assertion -- and it leaves it silently, because nothing downstream reads a cache's contents.
+    // The timeout is here for the other half of that: `node --test` puts no deadline on a module's
+    // top level, so a bundle that hangs would take the job's whole budget with nothing printed.
+    const warmed = spawnSync(process.execPath, [bundle, '--version'], {
       encoding: 'utf8',
       env: { ...process.env, OBOETE_HOME: home },
+      timeout: 60_000,
     });
+    assert.equal(
+      warmed.status,
+      0,
+      `the compile cache warm-up failed: ${warmed.error?.message ?? warmed.stderr ?? 'no output'}`,
+    );
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
