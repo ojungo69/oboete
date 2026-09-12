@@ -36,18 +36,23 @@ export function repositoryRoot(): string {
   }
 }
 
-/** The engine next to the launcher that was run. `dist/oboete.mjs` is a couple of kilobytes of
- *  launcher (src/launcher.mjs, issue #210), most of it comment, so its size says nothing about the
- *  build; a pre-split bundle has no sibling and is its own engine. `realpathSync` because a global
- *  install runs a symlinked bin and the engine sits beside the real file. */
-export function enginePath(bundle: string): string {
+/** The `engine.mjs` sitting beside the bundle that was run, when there is one and it is not that
+ *  bundle itself. `dist/oboete.mjs` is a couple of kilobytes of launcher (src/launcher.mjs, issue
+ *  #210), most of it comment, so its size alone says nothing about the build -- but a `--bundle`
+ *  naming a single-file build that happens to share a directory with an unrelated engine is not
+ *  that launcher, and reporting the engine's bytes against its timings would describe two
+ *  artefacts as one. Both files are named instead, and nothing is claimed about which loaded which.
+ *  `realpathSync` because a global install runs a symlinked bin and the engine sits beside the
+ *  real file. */
+export function siblingEngine(bundle: string): string | undefined {
   try {
-    const engine = join(dirname(realpathSync(bundle)), 'engine.mjs');
-    return existsSync(engine) ? engine : bundle;
+    const real = realpathSync(bundle);
+    const engine = join(dirname(real), 'engine.mjs');
+    return engine !== real && existsSync(engine) ? engine : undefined;
   } catch {
-    // `fileBytes` below renders a missing file as 0 bytes rather than throwing; rendering a report
-    // is not where a vanished bundle should surface.
-    return bundle;
+    // Rendering a report is not where a vanished bundle should surface; `fileBytes` below renders a
+    // missing file as 0 bytes rather than throwing.
+    return undefined;
   }
 }
 
@@ -293,7 +298,7 @@ function lifecycleTables(input: MeasureInput, computed: ReportComputed) {
 
 /** The heading and how this run was set up. */
 function setupSection(input: MeasureInput, machine: string, cpu: string): string[] {
-  const engine = enginePath(input.bundle);
+  const engine = siblingEngine(input.bundle);
   return [
     HEADING,
     '',
@@ -304,7 +309,9 @@ function setupSection(input: MeasureInput, machine: string, cpu: string): string
     `- CPU: \`${cpu}\`.`,
     `- Node: \`${process.execPath}\` (${process.version}).`,
     `- Commit: \`${gitHead(repositoryRoot())}\`.`,
-    `- Bundle: \`${engine}\`, ${fileBytes(engine)} bytes, run through \`${input.bundle}\`.`,
+    `- Bundle: \`${input.bundle}\`, ${fileBytes(input.bundle)} bytes${
+      engine === undefined ? '' : `, beside \`${engine}\`, ${fileBytes(engine)} bytes`
+    }.`,
     `- Fixture: \`${input.fixturePath}\` (${input.lines.length} lines).`,
     `- \`OBOETE_HOME\`: \`${input.home}\`. Worker behavior uses this home's configuration; generation and delivery are scored separately below.`,
     `- Temporary git repository with one empty commit so \`HEAD\` exists. \`NODE_ENV=test\`.`,

@@ -46,12 +46,15 @@ for (const path of [bundle, ...nodes]) {
   if (!existsSync(path)) throw new Error(`not found: ${path}`);
 }
 
-// The record reports the engine's size, not the launcher's: the launcher is a couple of kilobytes,
-// most of it comment. `realpathSync` because a global install runs a symlinked bin and the engine
-// sits beside the real file; a pre-split build has no sibling and is its own engine, so this script
-// can still measure one for comparison. Resolved after the guard above, which owns the diagnostic.
-const sibling = join(dirname(realpathSync(bundle)), 'engine.mjs');
-const engine = existsSync(sibling) ? sibling : bundle;
+// The launcher is a couple of kilobytes, most of it comment, and the engine beside it is what the
+// timings paid to compile -- so the record names both. It does not fold one into the other: a
+// `--bundle` naming a single-file build that happens to share a directory with an unrelated engine
+// would then carry that engine's bytes against its own timings. `realpathSync` because a global
+// install runs a symlinked bin and the engine sits beside the real file; a pre-split build has no
+// sibling of its own. Resolved after the guard above, which owns the diagnostic.
+const real = realpathSync(bundle);
+const sibling = join(dirname(real), 'engine.mjs');
+const engine = sibling !== real && existsSync(sibling) ? sibling : undefined;
 // The same rule the launcher applies (src/launcher.mjs): a relative or empty override is ignored.
 const cacheBase = process.env.XDG_CACHE_HOME;
 const cacheRoot = cacheBase !== undefined && isAbsolute(cacheBase) ? cacheBase : join(homedir(), '.cache');
@@ -338,7 +341,9 @@ lines.push(
   `- Date: ${measuredAt}`,
   `- Node versions: ${nodeVersionsText}`,
   `- Commit: \`${commit}\``,
-  `- Bundle: \`${displayPath(engine)}\` (${statSync(engine).size} bytes), run through \`${displayPath(bundle)}\``,
+  `- Bundle: \`${displayPath(bundle)}\` (${statSync(bundle).size} bytes)${
+    engine === undefined ? '' : `, beside \`${displayPath(engine)}\` (${statSync(engine).size} bytes)`
+  }`,
   `- Compile cache: \`${displayPath(compileCache)}\`, ${cacheWarm ? 'non-empty' : 'empty'} before this run. This is what the directory held, not what the launcher did with it: Node keys entries by version, architecture and uid, and the launcher refuses the directory outright unless it is a real directory of this user's that nobody else can enter, so a non-empty directory means neither that the Node measured here found its own entries nor that any cache was enabled (issue #210: a cold cache costs the hook about 35 ms).`,
   `- Samples: ${RUNS} measured runs after ${WARM_UPS} warm-up runs per scenario`,
   `- Measurement attempts: ${attemptsText}; kept run ${kept.index} (lower 1-minute load average)`,
