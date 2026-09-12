@@ -339,7 +339,7 @@ lines.push(
   `- Node versions: ${nodeVersionsText}`,
   `- Commit: \`${commit}\``,
   `- Bundle: \`${displayPath(engine)}\` (${statSync(engine).size} bytes), run through \`${displayPath(bundle)}\``,
-  `- Compile cache: \`${displayPath(compileCache)}\`, ${cacheWarm ? 'non-empty' : 'empty'} before this run. Node keys entries by version, architecture and uid, so a non-empty directory does not mean the Node measured here found its own (issue #210: a cold cache costs the hook about 35 ms).`,
+  `- Compile cache: \`${displayPath(compileCache)}\`, ${cacheWarm ? 'non-empty' : 'empty'} before this run. This is what the directory held, not what the launcher did with it: Node keys entries by version, architecture and uid, and the launcher refuses the directory outright unless it is a real directory of this user's that nobody else can enter, so a non-empty directory means neither that the Node measured here found its own entries nor that any cache was enabled (issue #210: a cold cache costs the hook about 35 ms).`,
   `- Samples: ${RUNS} measured runs after ${WARM_UPS} warm-up runs per scenario`,
   `- Measurement attempts: ${attemptsText}; kept run ${kept.index} (lower 1-minute load average)`,
   '- Percentiles: linear interpolation over the 30 measured runs; status is `max <= budget`',
