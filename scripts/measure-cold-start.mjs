@@ -65,6 +65,14 @@ const cacheWarm = (() => {
   }
 })();
 
+// Either of these decides the compile cache before the launcher can -- one pointing it at another
+// directory, the other switching it off -- while the record below names the directory the launcher
+// would have chosen. Every child of this script runs without them, so the run and the record
+// describe the same thing.
+const baseEnv = { ...process.env };
+delete baseEnv.NODE_COMPILE_CACHE;
+delete baseEnv.NODE_DISABLE_COMPILE_CACHE;
+
 function run(file, args, options = {}) {
   const capture = mkdtempSync(join(tmpdir(), 'oboete-command-'));
   const stdoutPath = join(capture, 'stdout');
@@ -76,6 +84,7 @@ function run(file, args, options = {}) {
     result = spawnSync(file, args, {
       encoding: 'utf8',
       timeout: 10_000,
+      env: baseEnv,
       ...options,
       stdio: ['ignore', stdout, stderr],
     });
@@ -136,6 +145,7 @@ function measuredSpawn(node, args, options) {
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
       timeout: 5_000,
+      env: baseEnv,
       ...spawnOptions,
       stdio: stdin === undefined ? ['ignore', 'pipe', 'pipe'] : [stdin, 'pipe', 'pipe'],
     });
@@ -233,7 +243,7 @@ function measureHook(node, parent, key, description, content, databasePresent) {
   mkdirSync(repo);
   run('git', ['-C', repo, 'init', '--quiet']);
 
-  const env = { ...process.env, OBOETE_HOME: home };
+  const env = { ...baseEnv, OBOETE_HOME: home };
   delete env.GROK_SESSION_ID;
   if (databasePresent) run(node, [bundle, 'observe'], { cwd: repo, env });
 
