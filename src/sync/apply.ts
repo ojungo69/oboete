@@ -180,18 +180,18 @@ function joinSourceGroups(db: DatabaseSync, a: string, b: string): void {
 /** Phase one: origins (aliased where the store recognizes them) and revisions in parents order. */
 function storeStaged(db: DatabaseSync, staged: Staged, sender: string, now: number, result: ApplyResult): Set<string> {
   const touched = new Set<string>();
-  const origins = stagedOrigins(staged);
   // Dependency order for aliasing: a checkpoint's natural names its work and parent; a source's
   // names its memory. Kinds first, then repeated passes until every natural resolves or stalls.
-  const ordered = [...origins].sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
-  for (const origin of ordered) {
+  // Streamed from the scratch table in that order, twice, rather than held as two arrays.
+  const ordered = (): Generator<{ origin_id: string; kind: SyncKind; natural: Row }> => stagedOrigins(staged, KIND_ORDER);
+  for (const origin of ordered()) {
     if (readOrigin(db, origin.origin_id) !== undefined) continue;
     const localId = aliasTarget(db, origin.kind, origin.natural);
     createOrigin(db, { origin_id: origin.origin_id, kind: origin.kind, local_id: localId, natural: origin.natural,
       withheld_reason: localId === null ? 'identity_only' : null });
   }
   const sourceParents: [string, string][] = [];
-  for (const origin of ordered) {
+  for (const origin of ordered()) {
     const lines = new Map(stagedLines(staged, origin.origin_id).map((line) => [line.revision_id, line]));
     const done = new Set<string>();
     const visit = (id: string): void => {

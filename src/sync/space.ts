@@ -100,6 +100,10 @@ function recordSpace(db: DatabaseSync, paths: OboetePaths, config: SyncConfig, n
   // reporting `space_exists` while `push`/`pull` report `key_missing`.
   db.exec('BEGIN IMMEDIATE');
   try {
+    // Re-checked here, not only at the command's start: two `init`/`join` processes can both pass
+    // the early check, and their distinct `space_id` primary keys would let both rows commit while
+    // the config names one. Inside the write lock the loser sees the winner's row.
+    assertNoSpace(db, paths);
     prepared(db, `INSERT INTO sync_spaces (space_id, directory, directory_realpath, key_id, classes_json, consent_hash, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .run(config.space_id, config.directory, config.directory_realpath, config.key_id, canonicalJson([...config.classes].sort(compareCodeUnits)),
@@ -183,9 +187,16 @@ export function leaveSpace(db: DatabaseSync, paths: OboetePaths): void {
     const own = join(spaceDirectory(config.directory, config.space_id), `${replicaOriginId(db)}.osb`);
     rmSync(own, { force: true });
     rmSync(syncPaths(paths).key(config.space_id), { force: true });
-    prepared(db, 'DELETE FROM sync_cursors WHERE space_id = ?').run(config.space_id);
-    prepared(db, 'DELETE FROM sync_spaces WHERE space_id = ?').run(config.space_id);
-    updateConfigFile(paths, (root) => { delete root.sync; });
+    // The row and the config go last, and together. Every removal above is idempotent, so as long
+    // as the config still names the space `leave` can simply be run again; dropping the row first
+    // would strand a config that `init`/`join` refuse and `push`/`pull` cannot serve.
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      prepared(db, 'DELETE FROM sync_cursors WHERE space_id = ?').run(config.space_id);
+      prepared(db, 'DELETE FROM sync_spaces WHERE space_id = ?').run(config.space_id);
+      updateConfigFile(paths, (root) => { delete root.sync; });
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
   });
 }
 
@@ -284,9 +295,13 @@ export function pushSpace(db: DatabaseSync, paths: OboetePaths, input: { now: nu
             .run(snapshot.snapshotId, encrypted!.sha256, encrypted!.size, config.space_id);
           db.exec('COMMIT');
         } catch (error) { db.exec('ROLLBACK'); throw error; }
-        // Temporary files an interrupted push left behind are this replica's to remove.
+        // Temporary files an interrupted push left behind are this replica's to remove. Every
+        // device may write this directory and the replica id is public in the bundle names, so a
+        // peer can plant an entry under this prefix that will not remove (a directory, say). The
+        // bundle is already published and committed by now: leave the entry rather than fail.
         for (const name of readdirSync(space)) {
-          if (name.startsWith(`${replica}.osb.tmp-`)) rmSync(join(space, name), { force: true });
+          if (!name.startsWith(`${replica}.osb.tmp-`)) continue;
+          try { rmSync(join(space, name), { force: true }); } catch { /* not this replica's after all */ }
         }
         return { outcome: 'published', restarts, ...snapshot };
       }

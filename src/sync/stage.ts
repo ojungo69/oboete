@@ -251,9 +251,24 @@ export function stagedLines(staged: Staged, originId: string): RevisionLine[] {
     .map((row) => revisionLineSchema.parse(JSON.parse(String(row.line_json))));
 }
 
-export function stagedOrigins(staged: Staged): { origin_id: string; kind: SyncKind; natural: Row }[] {
-  return staged.scratch.prepare('SELECT origin_id, kind, natural_json FROM origins ORDER BY origin_id').all()
-    .map((row) => ({ origin_id: String(row.origin_id), kind: row.kind as SyncKind, natural: JSON.parse(String(row.natural_json)) as Row }));
+/** SQL string literal for one of our own kind names: the ORDER BY below is built, not bound. */
+function quoteLiteral(value: string): string {
+  if (!/^[a-z_]+$/u.test(value)) throw new Error(`unexpected kind ${value}`);
+  return `'${value}'`;
+}
+
+/**
+ * The staged origins, streamed in `kinds` order and then by origin id. A near-limit bundle holds
+ * hundreds of thousands of them, and the scratch table is the disk-backed copy that exists so the
+ * apply pass never has to hold them all: reading them with `.all()` and sorting in memory would
+ * defeat that. A kind `kinds` does not name sorts first, as `Array#indexOf` returning -1 did.
+ */
+export function* stagedOrigins(staged: Staged, kinds: readonly SyncKind[]): Generator<{ origin_id: string; kind: SyncKind; natural: Row }> {
+  const rank = kinds.map((kind, index) => `WHEN ${quoteLiteral(kind)} THEN ${String(index)}`).join(' ');
+  for (const row of staged.scratch.prepare(`SELECT origin_id, kind, natural_json FROM origins
+    ORDER BY CASE kind ${rank} ELSE -1 END, origin_id`).iterate()) {
+    yield { origin_id: String(row.origin_id), kind: row.kind as SyncKind, natural: JSON.parse(String(row.natural_json)) as Row };
+  }
 }
 
 export function stagedRepos(staged: Staged): RepoLine[] {

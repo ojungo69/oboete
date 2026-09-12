@@ -2,7 +2,7 @@
 // identically are pinned before any envelope or merge code exists.
 import assert from 'node:assert/strict';
 import { createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -19,7 +19,7 @@ import { canonicalJson, payloadHash, revisionId, snapshotId } from '../../src/sy
 import { syncItem } from '../../src/doctor/storage.js';
 import { runSync } from '../../src/sync-cli.js';
 import {
-  initSpace, joinSpace, keyLine, leaveSpace, pullSpace, pushSpace, showKey, SyncError, syncStatus, withSpaceLock,
+  initSpace, joinSpace, keyLine, leaveSpace, pullSpace, pushSpace, showKey, spaceDirectory, SyncError, syncStatus, withSpaceLock,
 } from '../../src/sync/space.js';
 import { effectiveControl, headsOf, readOrigin, readRevision, replicaOriginId } from '../../src/sync/store.js';
 import {
@@ -524,6 +524,51 @@ test('leave runs under the space lock, so a concurrent push cannot race it', asy
       });
       leaveSpace(db, paths);
       assert.equal(syncStatus(db, paths).configured, false);
+    } finally { db.close(); }
+  });
+});
+
+test('a leave whose config write fails keeps the row, so leave can simply be run again', async () => {
+  await withHomes(1, (homes, shared) => {
+    const [home] = homes as [string];
+    const db = openHome(home);
+    try {
+      const paths = oboetePaths(home);
+      initSpace(db, paths, { directory: shared, classes: ['eligible'], now: 1 });
+      // Block the atomic config write: its exclusive (`wx`) temporary name is already taken.
+      const blocker = `${paths.config}.oboete-tmp-${process.pid}`;
+      writeFileSync(blocker, 'x');
+      assert.throws(() => leaveSpace(db, paths));
+      // The row survives with the config, so the space is still reachable and `leave` is retryable.
+      // Dropping the row first would leave a config `init` refuses and `push` cannot serve.
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sync_spaces').get()?.n, 1, 'the row waits for the config');
+      assert.equal(syncStatus(db, paths).configured, true);
+      rmSync(blocker, { force: true });
+      leaveSpace(db, paths);
+      assert.equal(syncStatus(db, paths).configured, false);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sync_spaces').get()?.n, 0);
+    } finally { db.close(); }
+  });
+});
+
+test('a push whose leftover temporary name another device made unremovable still reports the bundle it published', async () => {
+  await withHomes(1, (homes, shared) => {
+    const [home] = homes as [string];
+    const db = openHome(home);
+    try {
+      const paths = oboetePaths(home);
+      const { spaceId } = initSpace(db, paths, { directory: shared, classes: ['eligible'], now: 1 });
+      insertMemory(db, 'm_one', 'Title', 'Body text');
+      // Every device writes this directory and the replica id is public in the bundle names, so a
+      // peer can plant an entry under this replica's temporary prefix that `rmSync` cannot remove.
+      const space = spaceDirectory(shared, spaceId);
+      mkdirSync(space, { recursive: true });
+      const planted = join(space, `${replicaOriginId(db)}.osb.tmp-planted`);
+      mkdirSync(planted);
+      writeFileSync(join(planted, 'held'), 'x');
+      assert.equal(pushSpace(db, paths, { now: 10 }).outcome, 'published');
+      assert.ok(existsSync(join(space, `${replicaOriginId(db)}.osb`)), 'the bundle is published');
+      assert.ok(existsSync(planted), 'the entry that is not ours is left alone');
     } finally { db.close(); }
   });
 });

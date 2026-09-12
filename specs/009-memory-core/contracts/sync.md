@@ -918,6 +918,18 @@ already tracked as #196/#197):
   config is one `leave` cannot reach, a config without the row reports `space_exists` to `init` and
   `key_missing` to `push`. The config-write failure is pinned; the compensating delete on a failed
   `COMMIT` is not unit-reachable without a seam in the commit itself;
+- `leave` removes the row and the `[sync]` section together, after the idempotent file removals: as
+  long as the config still names the space `leave` can be run again, where dropping the row first
+  left a config `init`/`join` refuse and `push`/`pull` cannot serve (space, pinned);
+- the singleton check runs again inside `recordSpace`'s write transaction: two `init`/`join`
+  processes can both pass the check at the command's start, and their distinct `space_id` primary
+  keys would let both rows commit while the config names one (space; the race is not unit-reachable);
+- the post-push sweep of this replica's leftover temporary names never turns a published bundle into
+  a reported failure: every device may write the space directory and the replica id is public in the
+  bundle names, so a peer can plant an entry under that prefix that will not remove (space, pinned);
+- the apply pass streams the staged origins in dependency order out of the scratch table instead of
+  reading them all and sorting in memory: the disk-backed staging exists so a near-limit bundle's
+  hundreds of thousands of origins never have to be held at once (apply/stage);
 - `sync status` lists at most 200 open conflicts, withheld origins and unmapped repositories and
   reports the true count of each in `totals`: one pull can leave very many origins withheld or
   unmapped, and the CLI and the MCP tool would otherwise materialize and serialize the whole set
