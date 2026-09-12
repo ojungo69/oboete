@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 
 import { openDatabase } from '../src/db/open.js';
 
+import { SHARED_COMPILE_CACHE } from './helpers/compile-cache.js';
+
 type Json = Record<string, unknown>;
 
 function repositoryRoot(): string {
@@ -64,7 +66,12 @@ function runHook(
     input,
     cwd: place.repo,
     encoding: 'utf8',
-    env: { ...process.env, OBOETE_HOME: place.home, ...environment },
+    env: {
+      ...process.env,
+      NODE_COMPILE_CACHE: SHARED_COMPILE_CACHE,
+      OBOETE_HOME: place.home,
+      ...environment,
+    },
   });
   const elapsed = performance.now() - started;
 

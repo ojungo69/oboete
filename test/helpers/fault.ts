@@ -23,6 +23,8 @@ import { PRESET_CATALOG } from '../../src/config.js';
 import { openDatabase } from '../../src/db/open.js';
 import { oboetePaths } from '../../src/paths.js';
 
+import { SHARED_COMPILE_CACHE } from './compile-cache.js';
+
 export type Place = {
   home: string;
   repo: string;
@@ -105,6 +107,7 @@ export function childEnv(opts: SpawnEngineOptions): NodeJS.ProcessEnv {
   delete env.NODE_USE_ENV_PROXY;
   delete env.NODE_OPTIONS;
   env.NODE_ENV = 'test';
+  env.NODE_COMPILE_CACHE = SHARED_COMPILE_CACHE;
   env.OBOETE_HOME = opts.home;
   if (opts.extraEnv !== undefined) Object.assign(env, opts.extraEnv);
   if (opts.fault !== undefined) env.OBOETE_TEST_FAULT = opts.fault;

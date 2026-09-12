@@ -22,6 +22,8 @@ import { cjkBigrams } from '../src/retrieval/fts.js';
 import { resolveRepoIdentity } from '../src/repo-identity.js';
 import { seedWorkBinding } from './helpers/work.js';
 
+import { SHARED_COMPILE_CACHE } from './helpers/compile-cache.js';
+
 type Json = Record<string, unknown>;
 
 function repositoryRoot(): string {
@@ -113,7 +115,12 @@ async function run(
   const started = performance.now();
   const child = spawn(process.execPath, [BUNDLE, command, ...args], {
     cwd: place.repo,
-    env: { ...process.env, OBOETE_HOME: place.home, ...environment },
+    env: {
+      ...process.env,
+      NODE_COMPILE_CACHE: SHARED_COMPILE_CACHE,
+      OBOETE_HOME: place.home,
+      ...environment,
+    },
     stdio: [stdin, stdout, stderr],
   });
   closeSync(stdin);

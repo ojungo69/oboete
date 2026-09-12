@@ -70,12 +70,14 @@ try {
   // No cache, same behaviour. A read-only home costs the cache and never the command.
 }
 
-// Through this file's real path, not a bare './engine.mjs': a global install runs the bin symlink
-// npm creates, and under --preserve-symlinks-main `import.meta.url` is that symlink, so a relative
-// specifier would look for the engine beside the link and every invocation would fail with
-// ERR_MODULE_NOT_FOUND.
-const here = realpathSync(fileURLToPath(import.meta.url));
 try {
+  // Through this file's real path, not a bare './engine.mjs': a global install runs the bin symlink
+  // npm creates, and under --preserve-symlinks-main `import.meta.url` is that symlink, so a relative
+  // specifier would look for the engine beside the link and every invocation would fail with
+  // ERR_MODULE_NOT_FOUND. It is inside the try with the import it feeds because it fails in the
+  // same window: a global upgrade unlinks and recreates the package directory under a hook that is
+  // already running, and this is the first line to touch the disk afterwards.
+  const here = realpathSync(fileURLToPath(import.meta.url));
   await import(pathToFileURL(join(dirname(here), 'engine.mjs')).href);
 } catch (error) {
   // Splitting the bundle in two put a new failure between the agent and its contract: an engine

@@ -302,9 +302,11 @@ writers require separate worktrees. No deployment follows merely from an increme
   and an optional call now. A last round moved the cache itself: `$XDG_CACHE_HOME/oboete/compile`
   writes outside the tree `OBOETE_HOME` bounds, which `CONSTITUTION.md` Principle VI does not allow
   and explicitly defers, so it is `$OBOETE_HOME/cache/compile` and the launcher resolves the home the
-  way `src/paths.ts` does. That costs the fault suites about 6 % (each test's temporary home starts
-  on a cold cache) and nothing in the medians, which were re-measured interleaved and still show the
-  same ~36 ms. The same round wrapped the launcher's own `import` of the engine: the split put a
+  way `src/paths.ts` does. That left every test spawning on a cold cache -- 6 % on the fault suites
+  locally, and on CI a jump from a 215 ms median to 246 ms over 48 hook invocations that failed
+  `fault-storage` and `e2e-hook` on both runs -- so the three harnesses that spawn the CLI under a
+  bound now share one `NODE_COMPILE_CACHE` (`test/helpers/compile-cache.ts`), which puts the suites
+  back at 41.8 s. The medians were re-measured interleaved and still show the same ~36 ms. The same round wrapped the launcher's own `import` of the engine: the split put a
   failure ahead of the handler in `src/cli.ts` that gives `hook`, `capture` and `inject` their
   contracted exit 0, so a missing engine printed a Node stack over an agent's session; the launcher
   now repeats that handler for those three commands and rethrows for every other. Cache directory, the rejected alternatives, the

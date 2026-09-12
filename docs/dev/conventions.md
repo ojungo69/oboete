@@ -41,6 +41,10 @@ M1 source retention and completion rules.
 - A test that touches storage creates a fresh directory with `fs.mkdtempSync` and points
   `OBOETE_HOME` at it; the real `~/.oboete` is never used. Use `test/helpers/home.ts` (T022) once
   it exists.
+- A test that spawns the CLI under a time bound also sets `NODE_COMPILE_CACHE` to
+  `test/helpers/compile-cache.ts`'s directory. The launcher's own cache lives in `OBOETE_HOME`, so a
+  fresh home per test means a fresh compile of the whole engine per spawn -- about 35 ms, measured on
+  CI against a 300 ms budget. Sharing one cache measures the hook the way an installed one runs.
 - Red first: write the failing test, run it, confirm it fails for the right reason, then implement.
   A test never recomputes its expected value through the code path it checks.
 
@@ -48,9 +52,11 @@ M1 source retention and completion rules.
 
 - `OBOETE_HOME`, else `~/.oboete`. Inside: `config.toml`, `memory.db` (plus `-wal` and `-shm`),
   `spool/`, `spool/pi-ack/`, `logs/hook.log`, `logs/observe.log`, `cache/compile/`, and the `paused`
-  marker file. `src/paths.ts` (T022) composes all of them but one: `cache/compile/` is the launcher's,
-  and `src/launcher.mjs` resolves the home a second time because importing the engine is the cost it
-  exists to avoid. The two rules are the same rule and a test pins them together.
+  marker file. `src/paths.ts` (T022) composes all of them but two: `cache/compile/` is the
+  launcher's, and so is `logs/hook.log` on the one path where the engine will not import at all.
+  `src/launcher.mjs` resolves the home a second time because importing the engine is the cost it
+  exists to avoid. The two rules are the same rule, and `test/unit/launcher.test.ts` pins them
+  together against the real `resolveHome` over every shape `OBOETE_HOME` can take.
 - Repository path rules live in `.oboete.toml` at the repository root (same TOML parser).
 
 ## Identifiers, hashes, time

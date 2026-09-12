@@ -1,12 +1,13 @@
 // dist/oboete.mjs is a launcher (src/launcher.mjs) that turns the V8 compile cache on before the
 // engine bundle is compiled, issue #210. Timing is not pinned here -- that belongs to whatever load
-// the machine is under. What is pinned is everything the speed-up depends on, in eighteen tests:
+// the machine is under. What is pinned is everything the speed-up depends on, in twenty-five tests:
 // the entry file stays small, the engine is a separate file, the cache lives in the one data
-// directory and follows OBOETE_HOME wherever it points, it is owner-only and is read back on the
+// directory and follows OBOETE_HOME wherever it points, resolved as src/paths.ts resolves it, it is owner-only and is read back on the
 // next run, a directory this user does not exclusively own -- or that anyone else can enter, or
 // that is reached through a symlink -- is refused while a loose one of the user's own is not, a
 // home that cannot hold a cache costs the cache and not the command, an engine that cannot be
-// imported costs the three agent-invoked commands nothing and every other command everything, and
+// imported costs each of the three agent-invoked commands nothing and every other command
+// everything, and
 // the installer writes the launcher rather than the engine. The contract's "Pinned by" paragraph
 // (specs/009-memory-core/contracts/injection-performance.md) is the enumeration.
 import assert from 'node:assert/strict';
@@ -25,6 +26,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { resolveHome } from '../../src/paths.js';
 import { withTempHome } from '../helpers/home.js';
 
 const root = fileURLToPath(new URL('../../..', import.meta.url));
@@ -114,19 +116,30 @@ test('the cache follows OBOETE_HOME and leaves nothing outside it', async () => 
   });
 });
 
-test('a relative OBOETE_HOME is anchored to the home directory, as src/paths.ts anchors it', async () => {
-  await withTempHome((home) => {
-    // The launcher cannot import resolveHome -- importing the engine is the cost it exists to
-    // avoid -- so the rule is written twice and this is what keeps the second copy honest.
-    // The cwd is the repository, which is not the home directory: a rule that resolved against it
-    // would put the cache somewhere else entirely.
-    const env = { ...process.env, HOME: home, OBOETE_HOME: 'relative/home' };
-    const result = spawn(env, ['--version'], root);
-    assert.equal(result.status, 0, result.stderr);
-    const cache = join(home, 'relative', 'home', 'cache', 'compile');
-    assert.ok(cacheEntries(cache).length >= 1, 'a relative home was resolved against the cwd');
+// The launcher cannot import resolveHome -- importing the engine is the cost it exists to avoid --
+// so the rule is written twice, and every shape it can be given is put to both copies here. The
+// unset row is the one a run of the suite never reaches otherwise, and it is where the deferred
+// XDG/AppData split (CONSTITUTION.md Principle VI) will move `src/paths.ts` first.
+for (const override of [undefined, '', '   ', 'relative/home', './relative/home', 'a/../relative/home']) {
+  test(`OBOETE_HOME=${override === undefined ? '(unset)' : JSON.stringify(override)} resolves as src/paths.ts resolves it`, async () => {
+    await withTempHome((home) => {
+      // The cwd is the repository, which is not the home directory: a rule that resolved a relative
+      // override against it would put the cache somewhere else entirely.
+      const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+      if (override === undefined) delete env.OBOETE_HOME;
+      else env.OBOETE_HOME = override;
+      const result = spawn({ ...env }, ['--version'], root);
+      assert.equal(result.status, 0, result.stderr);
+      // resolveHome reads homedir(), which is $HOME on this platform, so it has to be asked the
+      // question in the environment the launcher was given rather than the one this process has.
+      const restore = process.env.HOME;
+      process.env.HOME = home;
+      const expected = join(resolveHome(env), 'cache', 'compile');
+      process.env.HOME = restore;
+      assert.ok(cacheEntries(expected).length >= 1, `the launcher did not use ${expected}`);
+    });
   });
-});
+}
 
 for (const mode of [0o777, 0o750]) {
   test(`a cache directory open to anyone else (${mode.toString(8)}) is refused`, async () => {
@@ -250,25 +263,28 @@ function withoutEngine(home: string): string {
   return copy;
 }
 
-test('an engine that will not import costs the agent-invoked commands nothing', async () => {
-  await withTempHome((home) => {
-    // Splitting one bundle into two put a new failure ahead of everything the engine does about
-    // its own: the import itself. contracts/cli.md gives `hook`, `capture` and `inject` exit 0
-    // whatever happens, so the launcher has to answer for that here rather than let Node print a
-    // stack over an agent's session.
-    const env = { ...process.env, HOME: home, OBOETE_HOME: dataHome(home) };
-    const result = spawnSync(process.execPath, [withoutEngine(home), 'hook', '--agent', 'claude'], {
-      encoding: 'utf8',
-      env,
-      input: '{}',
+for (const command of ['hook', 'capture', 'inject']) {
+  test(`an engine that will not import costs \`${command}\` nothing`, async () => {
+    await withTempHome((home) => {
+      // Splitting one bundle into two put a new failure ahead of everything the engine does about
+      // its own: the import itself. contracts/cli.md gives `hook`, `capture` and `inject` exit 0
+      // whatever happens, so the launcher has to answer for that here rather than let Node print a
+      // stack over an agent's session. All three, because they are three string literals in the
+      // launcher and a typo in one of them is invisible to a pin on another.
+      const env = { ...process.env, HOME: home, OBOETE_HOME: dataHome(home) };
+      const result = spawnSync(process.execPath, [withoutEngine(home), command, '--agent', 'claude'], {
+        encoding: 'utf8',
+        env,
+        input: '{}',
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stderr, '', 'a broken install printed over the session');
+      // Silent is not invisible: the one place a developer looks says which command and which error.
+      const log = readFileSync(join(dataHome(home), 'logs', 'hook.log'), 'utf8');
+      assert.match(log, new RegExp(`error engine unavailable command=${command} reason=ERR_MODULE_NOT_FOUND`, 'u'));
     });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stderr, '', 'a broken install printed over the session');
-    // Silent is not invisible: the one place a developer looks says which command and which error.
-    const log = readFileSync(join(dataHome(home), 'logs', 'hook.log'), 'utf8');
-    assert.match(log, /error engine unavailable command=hook reason=ERR_MODULE_NOT_FOUND/u);
   });
-});
+}
 
 test('an engine that will not import fails every other command loudly', async () => {
   await withTempHome((home) => {
