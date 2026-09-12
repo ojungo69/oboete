@@ -1,0 +1,23 @@
+specs/009-memory-core/contracts/sync.md
+  s_5ab5797dc469b5::t_a912db0ac32618 921-924
+src/sync/stage.ts
+  s_5ab5797dc469b5::t_57a22ca84fc39f 76-93,114
+test/unit/sync-bounds.test.ts
+  s_5ab5797dc469b5::t_03229ea49fa583 266-295
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "83a7a22da5213ddbb32b24d237f6eb151152f927",
+  "prompts": {},
+  "sessions": {
+    "s_5ab5797dc469b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "44ceb1b9-68f7-4bf5-8646-52149920dd27",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
