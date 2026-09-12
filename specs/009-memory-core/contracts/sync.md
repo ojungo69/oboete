@@ -909,6 +909,11 @@ already tracked as #196/#197):
 - context promotion repeats `passesClassRule`'s fail-closed guard, so a secret-floored or
   tombstoned context is never shipped even when a shipped payload references it (publish;
   defense-in-depth — the state does not arise from the honest path today).
+- `init` and `join` print the consent tuple the space just recorded the hash of — directory and
+  realpath, space, key id, encryption, the sensitivity classes exported, "no network" — as the
+  Consent section above already required. Without `--classes` the default selection includes
+  `private`, so the report is the only place the developer sees what a push will export before the
+  first push writes anything (CLI, pinned in JSON and text form);
 - `sync key show` verifies the key file too, so a swapped key is never carried to the next device,
   and the CLI names the condition instead of printing the bare code (space/CLI, pinned);
 - Not closed here (added to #197): even with the hash validated, a peer can still author a revision

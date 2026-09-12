@@ -571,12 +571,13 @@ function fakeIo(tty: boolean, secret = ''): { io: Parameters<typeof runSync>[1];
 }
 
 test('oboete sync commands: init, key show on a terminal only, join by typed key, push, pull, status, resolve, leave', async () => {
-  await withHomes(2, async (homes, shared) => {
-    const [homeA, homeB] = homes as [string, string];
+  await withHomes(3, async (homes, shared) => {
+    const [homeA, homeB, homeC] = homes as [string, string, string];
     const pathsA = oboetePaths(homeA);
     const pathsB = oboetePaths(homeB);
     openHome(homeA).close();
     openHome(homeB).close();
+    openHome(homeC).close();
     const bad = fakeIo(false);
     assert.equal(await runSync(['init', shared, '--classes', 'eligible,foo', '--json'], bad.io, pathsA, 1), 1);
     assert.equal((JSON.parse(bad.err[0]!) as { error: string }).error, 'invalid_classes');
@@ -584,6 +585,17 @@ test('oboete sync commands: init, key show on a terminal only, join by typed key
     const init = fakeIo(false);
     assert.equal(await runSync(['init', shared, '--json'], init.io, pathsA, 1), 0);
     const spaceId = (JSON.parse(init.out[0]!) as { space_id: string }).space_id;
+    // Consent is bound to this tuple, so `init` and `join` report it before the first push exports
+    // anything: without `--classes`, `private` is selected by default and must be visible.
+    const consent = (JSON.parse(init.out[0]!) as { consent: Record<string, unknown> }).consent;
+    assert.deepEqual(consent.classes, ['eligible', 'local_only', 'private']);
+    assert.equal(consent.space_id, spaceId);
+    assert.equal(consent.directory, shared);
+    const text = fakeIo(false);
+    assert.equal(await runSync(['init', shared], text.io, oboetePaths(homeC), 1), 0);
+    for (const shown of ['Sensitivity classes exported: eligible, local_only, private', 'Encryption: ', 'Network: no network']) {
+      assert.ok(text.out.join('').includes(shown), shown);
+    }
     const hidden = fakeIo(false);
     assert.equal(await runSync(['key', 'show'], hidden.io, pathsA, 1), 2);
     assert.equal(hidden.out.length, 0);

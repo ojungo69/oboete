@@ -7,7 +7,7 @@ import { openDatabase } from './db/open.js';
 import { oboetePaths, resolveHome, type OboetePaths } from './paths.js';
 import { ResolveError } from './sync/apply.js';
 import { initSpace, joinSpace, leaveSpace, mapRepo, pullSpace, pushSpace, resolveRow, showKey, withSpaceLock } from './sync/space.js';
-import { loadSyncConfig, SyncError, syncStatus } from './sync/status.js';
+import { consentTupleOf, loadSyncConfig, SyncError, syncStatus } from './sync/status.js';
 
 const USAGE = 'Usage: oboete sync init <dir> [--classes eligible,local_only,private] [--json]\n' +
   '       oboete sync join <dir> [--classes ...] [--json]      (the key line is typed on the terminal)\n' +
@@ -56,6 +56,28 @@ function report(io: Io, json: boolean, value: unknown, text: string): void {
   io.out(json ? `${JSON.stringify(value)}\n` : text);
 }
 
+/**
+ * What `init` and `join` report: the consent tuple the space just recorded the hash of, shown
+ * before any push exports anything (contracts/sync.md "Consent"). A later push or pull that finds
+ * one of these values changed performs no I/O, so the developer reads here what a push will send.
+ */
+function consentReport(paths: OboetePaths, done: string): { value: Record<string, unknown>; text: string } {
+  const config = loadSyncConfig(paths);
+  if (config === null) throw new SyncError('space_not_configured');
+  const tuple = consentTupleOf(config);
+  const text = ['A push exports memories of the sensitivity classes below to this directory, encrypted:',
+    `  Directory: ${String(tuple.directory)} (${String(tuple.directory_realpath)})`,
+    `  Space: ${String(tuple.space_id)}`,
+    `  Key: ${String(tuple.key_id)}`,
+    `  Encryption: ${String(tuple.encryption)}`,
+    `  Sensitivity classes exported: ${(tuple.classes as string[]).join(', ')}`,
+    `  Network: ${String(tuple.network)}`,
+    'Nothing has left this machine yet; `oboete sync leave` undoes the space before the first push.',
+    done,
+  ].map((line) => `${line}\n`).join('');
+  return { value: { space_id: tuple.space_id, consent: tuple }, text };
+}
+
 export async function runSync(argv: string[], io: Io = processIo(), paths: OboetePaths = oboetePaths(resolveHome()), now = Date.now()): Promise<number> {
   let parsed: ReturnType<typeof parseArgs>;
   try {
@@ -81,14 +103,16 @@ export async function runSync(argv: string[], io: Io = processIo(), paths: Oboet
     switch (command) {
       case 'init': {
         const result = initSpace(db, paths, { directory: args[0]!, classes: classesOf(parsed.values.classes as string | undefined), now });
-        report(io, json, { space_id: result.spaceId }, `Sync space ${result.spaceId} created. Run \`oboete sync key show\` on a terminal to carry the key to the next device.\n`);
+        const consent = consentReport(paths, `Sync space ${result.spaceId} created. Run \`oboete sync key show\` on a terminal to carry the key to the next device.`);
+        report(io, json, consent.value, consent.text);
         return 0;
       }
       case 'join': {
         if (!io.isTty()) { io.err('The key line is typed on a terminal; it is never accepted as an argument, variable or file.\n'); return 2; }
         const line = await io.readSecret('Key line (oboete-sync-key/1:…): ');
         const result = joinSpace(db, paths, { directory: args[0]!, keyLine: line, classes: classesOf(parsed.values.classes as string | undefined), now });
-        report(io, json, { space_id: result.spaceId }, `Joined sync space ${result.spaceId}.\n`);
+        const consent = consentReport(paths, `Joined sync space ${result.spaceId}.`);
+        report(io, json, consent.value, consent.text);
         return 0;
       }
       case 'push': {
