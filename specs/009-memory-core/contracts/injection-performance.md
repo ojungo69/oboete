@@ -273,9 +273,8 @@ the launcher picks for itself is exactly what that suite is about.
 `--import` covers one of the three places CI runs these tests: the `engine` job's `npm test`. The
 `check` job runs the timed e2e bundle tests and the instrumented unit batch as steps of their own,
 each with its own `node --test` command line and no `--import`, so what sets the variable there is
-the module import itself -- `test/e2e-hook.test.ts` and `test/e2e-inject.test.ts` take
-`repositoryRoot` and `warmCompileCache` from that file, and `test/helpers/fault.ts` takes
-`repositoryRoot`. The unit batch imports none of it and runs cold there, which costs nothing: it
+the module import itself -- `test/e2e-hook.test.ts`, `test/e2e-inject.test.ts` and
+`test/helpers/fault.ts` all take `repositoryRoot` and `warmCompileCache` from that file. The unit batch imports none of it and runs cold there, which costs nothing: it
 runs under `NODE_V8_COVERAGE`, where `WALL_CLOCK_IS_MEASURED` is false and no assertion reads a
 time. What keeps the arrangement honest is `warmCompileCache`, which asserts the variable is the
 directory the module chose: a suite that loses the import fails by name rather than by percentile,
@@ -292,9 +291,11 @@ warm-up preceded. `.github/workflows/ci.yml` runs the e2e bundle tests as a step
 alone and uninstrumented, which is what makes their numbers worth reading -- so there the first
 spawn finds an empty cache whatever the runner did before it: 231.0 ms against 161.5 for the next
 one, and 260.4 against 195.7 on the run after that -- both passed, both within 40 ms of the budget
-for no reason a reader of the number would guess. `test/e2e-hook.test.ts` and `test/e2e-inject.test.ts` therefore spend
-one throwaway run before their first timed one, which is where an installed oboete pays it too --
-once, at install. Measured on the head that added it: the first timed spawn of that step took 204.6
+for no reason a reader of the number would guess. `test/e2e-hook.test.ts`, `test/e2e-inject.test.ts` and `test/helpers/fault.ts`
+therefore spend one throwaway run before their first timed one, which is where an installed oboete
+pays it too -- once, at install. The fault suites warm through the helper rather than through
+whichever file the runner happened to load first: run alone on an empty cache, `fault-storage`'s
+first hook now takes 179.0 ms. Measured on the head that added it: the first timed spawn of that step took 204.6
 and 210.2 ms on the two duplicate runs against 203.1 and 202.5 for the second spawn, where the head
 before it had spent 260.4 against 195.7 and 211.6 against 162.5. The head after that reads 193.6
 against 201.1 on one run and 214.9 against 161.9 on the other, whose whole series is noisier -- a

@@ -24,7 +24,7 @@ import { oboetePaths } from '../../src/paths.js';
 
 // Every CLI this file spawns inherits the shared compile cache, which this module sets as it loads.
 // Taking `repositoryRoot` from it rather than keeping a copy is what keeps that import load-bearing.
-import { repositoryRoot } from './compile-cache.js';
+import { repositoryRoot, warmCompileCache } from './compile-cache.js';
 
 export type Place = {
   home: string;
@@ -56,6 +56,11 @@ type ScenarioFn = (t: TestContext) => void | Promise<void>;
 
 export const ROOT = repositoryRoot();
 export const BUNDLE = join(ROOT, 'dist', 'oboete.mjs');
+// These suites time the hook against the same 300 ms deadline the e2e ones do, and `npm test` runs
+// them in the same process group but in files of their own. Warming here rather than relying on an
+// `e2e-*` file having run first is what makes a fault suite run alone cost what it costs in the
+// batch -- and it is the call that carries the assertion on the shared cache.
+warmCompileCache(BUNDLE);
 export const SELECTOR = 'claude-or-grok';
 const CLAUDE_FIXTURE = join(ROOT, 'test', 'contracts', 'claude', 'read.json');
 

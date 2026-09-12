@@ -39,9 +39,11 @@ export function repositoryRoot(): string {
 // works, and why `test/unit/launcher.test.ts` deletes the variable: the directory the launcher
 // chooses for itself is exactly what that suite is about. An operator's own choice of directory is
 // left alone, but only a real one: `NODE_COMPILE_CACHE=` set to nothing, or to spaces, is how Node
-// is told to write a cache into a directory named by the empty string or by whitespace, and the
-// repository resolves such a value the same way `src/paths.ts` does -- trim it, and treat what is
-// left of nothing as unset. `NODE_DISABLE_COMPILE_CACHE` is deleted rather than respected, because
+// is told to write a cache into a directory named by the empty string or by whitespace, so a value
+// that is blank once trimmed is read as unset, which is what `src/paths.ts` does with its own
+// overrides. Only that much is copied: a relative value keeps Node's meaning for it and lands
+// beside the working directory, because it is the operator's own instruction to this process and
+// not a path the repository resolves. `NODE_DISABLE_COMPILE_CACHE` is deleted rather than respected, because
 // Node reads it during child bootstrap and it wins over the directory, and a suite that measures a
 // hook with no compile cache is measuring a hook nobody runs.
 export const SHARED_COMPILE_CACHE =
@@ -60,10 +62,9 @@ process.env.NODE_COMPILE_CACHE = SHARED_COMPILE_CACHE;
  * installed oboete pays that compile once, at install, and never inside a hook an agent is waiting
  * on.
  *
- * The assertion is the pin on the mechanism above it. Two of the three suites that share the cache
- * hold this module open only because they want something out of it, and a cache that is not set is
- * indistinguishable from one that is until a loaded runner turns it into a missed deadline in a
- * suite nobody changed. Failing here names the cause instead.
+ * The assertion is the pin on the mechanism above it. Every suite that times the bundle calls this
+ * function, and a cache that is not set is indistinguishable from one that is until a loaded runner
+ * turns it into a missed deadline in a suite nobody changed. Failing here names the cause instead.
  */
 export function warmCompileCache(bundle: string): void {
   assert.equal(
