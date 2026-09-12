@@ -5,7 +5,7 @@
 // the step 4 check; nothing runs unless consent matches.
 import { createHash, randomBytes } from 'node:crypto';
 import {
-  closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync,
+  closeSync, copyFileSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync,
   renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
@@ -67,9 +67,14 @@ function writeKey(paths: OboetePaths, spaceId: string, key: Uint8Array): void {
 
 export function readKey(paths: OboetePaths, spaceId: string): Buffer {
   const path = syncPaths(paths).key(spaceId);
-  if (!existsSync(path)) throw new SyncError('key_missing');
-  if ((statSync(path).mode & 0o077) !== 0) throw new SyncError('key_permissions');
-  return parseKeyLine(readFileSync(path, 'utf8')).key;
+  // Open once and check the permissions of the open descriptor, not the path: a check on the path
+  // and a later read of the path can see different files (a TOCTOU race). fstat/read share the fd.
+  let fd: number;
+  try { fd = openSync(path, 'r'); } catch { throw new SyncError('key_missing'); }
+  try {
+    if ((fstatSync(fd).mode & 0o077) !== 0) throw new SyncError('key_permissions');
+    return parseKeyLine(readFileSync(fd, 'utf8')).key;
+  } finally { closeSync(fd); }
 }
 
 /** Consent check at the start of every push and pull: any drift performs no I/O. */
