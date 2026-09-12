@@ -11,6 +11,7 @@ import { test } from 'node:test';
 
 import { checkpointHash, materialHash } from '../../src/db/identity.js';
 import { sha256Hex, sha256Json } from '../../src/hash.js';
+import { BOUNDS } from '../../src/sync/format.js';
 import { canonicalJson, payloadHash, revisionId, snapshotId } from '../../src/sync/identity.js';
 import { oboetePaths } from '../../src/paths.js';
 import { ResolveError, resolveRow } from '../../src/sync/apply.js';
@@ -251,6 +252,33 @@ test('a snapshot that cannot be built fails with a coded error, leaves the conne
         && error.detail.code === 'line_too_long');
       db.exec('BEGIN IMMEDIATE'); db.exec('COMMIT');
       assert.deepEqual(readdirSync(syncPaths(paths).staging), [], 'no plaintext is left behind');
+    } finally { db.close(); }
+  });
+});
+
+test('a snapshot naming more repositories than the receiving bound accepts is refused before it is written', async () => {
+  await withHomes(1, (homes, shared) => {
+    const [home] = homes as [string];
+    const db = openHome(home);
+    try {
+      const paths = oboetePaths(home);
+      initSpace(db, paths, { directory: shared, classes: ['eligible'], now: 1 });
+      // One memory per repository, one past the cap. Without this check the bundle would be built
+      // and encrypted, and then rejected by every peer with `repo_lines_exceeded`.
+      db.exec('BEGIN IMMEDIATE');
+      const repo = db.prepare("INSERT INTO repos (id, identity_kind, normalized_identity, display_root, created_at, last_seen_at) VALUES (?, 'remote', ?, '/w', 1, 1)");
+      const memory = db.prepare(`INSERT INTO memories (id, repo_id, type, title, body, cjk_bigrams, material_hash, content_hash, sensitivity,
+        review_state, created_at) VALUES (?, ?, 'discovery', ?, 'Body', '', ?, ?, 'eligible', 'reviewed', 1)`);
+      for (let i = 0; i <= BOUNDS.repoLines; i += 1) {
+        const key = String(i).padStart(8, '0');
+        repo.run(`r_${key}`, `git@example.com:o/r${key}.git`);
+        memory.run(`m_${key}`, `r_${key}`, `Title ${key}`, sha256Hex(`material ${key}`), sha256Hex(`content ${key}`));
+      }
+      db.exec('COMMIT');
+      assert.throws(() => pushSpace(db, paths, { now: 10 }), (error: unknown) => error instanceof SyncError && error.code === 'publish_failed'
+        && error.detail.code === 'too_many_repo_lines');
+      assert.deepEqual(readdirSync(syncPaths(paths).staging), [], 'no plaintext is left behind');
+      assert.deepEqual(readdirSync(shared), [], 'nothing was published');
     } finally { db.close(); }
   });
 });

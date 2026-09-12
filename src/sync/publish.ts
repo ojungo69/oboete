@@ -169,6 +169,9 @@ export function buildSnapshot(db: DatabaseSync, options: PublishOptions): Publis
     bytes += buffer.length;
   };
   try {
+    // The receiving side caps repo lines at BOUNDS.repoLines, so a snapshot over that bound would be
+    // rejected by every peer. Fail here instead, where the device can be told which bound it hit.
+    if (repoKeys.size > BOUNDS.repoLines) throw new PublishError('too_many_repo_lines');
     for (const key of [...repoKeys].sort(compareCodeUnits)) {
       const repo = prepared(db, 'SELECT identity_kind, normalized_identity FROM sync_repo_mappings WHERE repo_key = ?').get(key);
       if (repo === undefined) throw new PublishError('unknown_repo_key');

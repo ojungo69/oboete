@@ -500,6 +500,11 @@ test('a failed config write during init rolls back the space row and removes the
       assert.throws(() => initSpace(db, paths, { directory: shared, classes: ['eligible'], now: 1 }));
       assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sync_spaces').get()?.n, 0, 'no orphan space row');
       assert.equal(readdirSync(join(home, 'sync')).filter((name) => name.endsWith('.key')).length, 0, 'no orphan key file');
+      // The other half of the same invariant: a `[sync]` section without its row makes `init`/`join`
+      // report `space_exists` while `push`/`pull` report `key_missing`. On this path the config
+      // write is what failed, so nothing was written; the COMMIT branch relies on the compensating
+      // delete in `recordSpace`, which no unit test can reach without a seam in the commit itself.
+      assert.equal(existsSync(paths.config) && readFileSync(paths.config, 'utf8').includes('[sync]'), false, 'no orphan config section');
       // With the blocker gone, init succeeds: the space was not wedged.
       rmSync(blocker, { force: true });
       assert.ok(initSpace(db, paths, { directory: shared, classes: ['eligible'], now: 2 }).spaceId);

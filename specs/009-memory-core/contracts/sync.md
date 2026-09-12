@@ -909,6 +909,15 @@ already tracked as #196/#197):
 - context promotion repeats `passesClassRule`'s fail-closed guard, so a secret-floored or
   tombstoned context is never shipped even when a shipped payload references it (publish;
   defense-in-depth — the state does not arise from the honest path today).
+- `publish` refuses a snapshot naming more than `BOUNDS.repoLines` repositories
+  (`too_many_repo_lines`) rather than encrypting a bundle every peer would reject with
+  `repo_lines_exceeded`: a bound the receiver enforces is enforced by the sender too (publish,
+  pinned);
+- `init`/`join` remove the `[sync]` config section as well as the row and the key when recording the
+  space fails at any step. Either half alone wedges the space from one side — a row without the
+  config is one `leave` cannot reach, a config without the row reports `space_exists` to `init` and
+  `key_missing` to `push`. The config-write failure is pinned; the compensating delete on a failed
+  `COMMIT` is not unit-reachable without a seam in the commit itself;
 - `sync status` lists at most 200 open conflicts, withheld origins and unmapped repositories and
   reports the true count of each in `totals`: one pull can leave very many origins withheld or
   unmapped, and the CLI and the MCP tool would otherwise materialize and serialize the whole set

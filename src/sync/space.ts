@@ -93,9 +93,11 @@ function checkConsent(db: DatabaseSync, config: SyncConfig): void {
 }
 
 function recordSpace(db: DatabaseSync, paths: OboetePaths, config: SyncConfig, now: number): void {
-  // The database row and the config file are written together: if the config write fails, the row
-  // is rolled back, so `init`/`join` never leaves a `sync_spaces` row that `leave` cannot reach
-  // (it needs the config) while `assertNoSpace` keeps blocking re-init.
+  // The database row and the config file are written together, and neither survives alone: the row
+  // is rolled back and the `[sync]` section removed if any step fails. Either would wedge the space
+  // on its own — a row without the config is one `leave` cannot reach (it reads the config) while
+  // `assertNoSpace` keeps blocking re-init, and a config without the row leaves `init`/`join`
+  // reporting `space_exists` while `push`/`pull` report `key_missing`.
   db.exec('BEGIN IMMEDIATE');
   try {
     prepared(db, `INSERT INTO sync_spaces (space_id, directory, directory_realpath, key_id, classes_json, consent_hash, created_at)
@@ -104,7 +106,13 @@ function recordSpace(db: DatabaseSync, paths: OboetePaths, config: SyncConfig, n
         consentHashOf(config), now);
     updateConfigFile(paths, (root) => { root.sync = { ...config }; });
     db.exec('COMMIT');
-  } catch (error) { db.exec('ROLLBACK'); throw error; }
+  } catch (error) {
+    db.exec('ROLLBACK');
+    // Best effort: the config write may itself be what failed, in which case there is nothing to
+    // undo and a second attempt fails the same way. The original error is the one worth reporting.
+    try { updateConfigFile(paths, (root) => { delete root.sync; }); } catch { /* nothing was written */ }
+    throw error;
+  }
 }
 
 /** Write the key then record the space, removing the key file if recording does not complete. */
