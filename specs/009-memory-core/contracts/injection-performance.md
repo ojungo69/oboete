@@ -169,12 +169,18 @@ race between the check and V8's read, which needs write access to the cache dire
 to a directory above it. Above `compile` is `~/.oboete/cache`, then `~/.oboete`, then `$HOME`. The
 outer two settle the same way: an attacker who can write to either can already replace `memory.db`,
 `config.toml` and the hook's spool, so bytecode in the compile cache is not the escalation.
-`~/.oboete/cache` is the one in between, and it is smaller than it looks: it is checked for owner
-and for being a real directory but at any mode, so a group-writable one left behind by a restored
-backup lets someone else rename `compile` away -- and no further, because whatever takes its place
-has to be a directory this user owns with nothing granted to anyone else, and nobody else can
-produce one. Writing there costs the cache, never its contents. This is the accepted residue rather
-than a hole the ancestor rule would have closed. A home that cannot hold the directory at
+`~/.oboete/cache` is the one in between, and it is the whole of the residue. It is checked for
+owner and for being a real directory but at any mode, so a group-writable one left behind by a
+restored backup lets someone else rename `compile` away after the check has passed. That costs more
+than the cache: `enableCompileCache` records a path, nothing stats it again, and V8 opens
+`<path>/<version>/<entry>` tens of milliseconds later, when the engine compiles. Whatever stands at
+that path by then is what runs -- including a directory of somebody else's holding an entry keyed to
+the hash of a bundle they can read out of the published package. Requiring a mode of `cache` is
+still not the answer: that is the requirement this review put on twice, and both times it turned the
+cache off on every machine that already had a loose one (`test/unit/launcher.test.ts` pins that
+shape at 0775). What closes it is a `cache` nobody else can write, which is the 0700 one the
+launcher makes when it is absent; a loose one that arrived some other way is a `doctor` item, the
+same as a loose data directory, and until `doctor` has that item this is the accepted residue. A home that cannot hold the directory at
 all costs the cache and never the command.
 
 The alternative this does not take is making the hook path its own, smaller entry point. The tree is
@@ -274,7 +280,12 @@ spawn finds an empty cache whatever the runner did before it: 231.0 ms against 1
 one, and 260.4 against 195.7 on the run after that -- both passed, both within 40 ms of the budget
 for no reason a reader of the number would guess. `test/e2e-hook.test.ts` and `test/e2e-inject.test.ts` therefore spend
 one throwaway run before their first timed one, which is where an installed oboete pays it too --
-once, at install.
+once, at install. Measured on the head that added it: the first timed spawn of that step took 204.6
+and 210.2 ms on the two duplicate runs against 203.1 and 202.5 for the second spawn, where the head
+before it had spent 260.4 against 195.7 and 211.6 against 162.5. The head after that reads 193.6
+against 201.1 on one run and 214.9 against 161.9 on the other, whose whole series is noisier -- a
+419.4 ms peak where every other run sits near 300 -- so what the warm-up removes is the systematic
+cost, not the runner's variance.
 
 Splitting one file into two put a new failure ahead of everything the engine does about its own:
 the import. An engine that is missing or unreadable now throws in the launcher, above the handler
