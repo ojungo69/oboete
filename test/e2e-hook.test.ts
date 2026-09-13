@@ -56,11 +56,7 @@ function runHook(
     input,
     cwd: place.repo,
     encoding: 'utf8',
-    env: {
-      ...process.env,
-      OBOETE_HOME: place.home,
-      ...environment,
-    },
+    env: { ...process.env, OBOETE_HOME: place.home, ...environment },
   });
   const elapsed = performance.now() - started;
 

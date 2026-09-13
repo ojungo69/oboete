@@ -104,11 +104,7 @@ async function run(
   const started = performance.now();
   const child = spawn(process.execPath, [BUNDLE, command, ...args], {
     cwd: place.repo,
-    env: {
-      ...process.env,
-      OBOETE_HOME: place.home,
-      ...environment,
-    },
+    env: { ...process.env, OBOETE_HOME: place.home, ...environment },
     stdio: [stdin, stdout, stderr],
   });
   closeSync(stdin);
