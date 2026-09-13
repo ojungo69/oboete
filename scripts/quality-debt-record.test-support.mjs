@@ -14,7 +14,13 @@ export const codacyRepository = 'https://app.codacy.com/api/v3/analysis/organiza
 export const confirmArgs = ['--confirm', '--sonar-analysis', 'analysis-key', '--codacy-commit', 'commit-sha'];
 export const codacyHarnessId = 'cdcb204be8f7e0941ec2d1eca871d4';
 export const codacyViewerId = '7001b39120b60918527820572a47897';
-export const sonarOpen = (...ids) => ({ body: { issues: ids.map((key) => ({ key })), paging: { total: ids.length } } });
+export const sonarIssue = (key, fields = {}) => ({
+  key, rule: 'typescript:S3776', component: 'ojungo69_free-mem:src/fixture.ts', status: 'OPEN', ...fields,
+});
+export const codacyIssue = (issueId, fields = {}) => ({
+  issueId, patternInfo: { id: 'Lizard_nloc-medium' }, filePath: 'src/fixture.ts', ...fields,
+});
+export const sonarOpen = (...ids) => ({ body: { issues: ids.map((id) => sonarIssue(id)), paging: { total: ids.length } } });
 
 export function fixture(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'quality-debt-record-'));
@@ -118,7 +124,11 @@ export function apiStub(responses, verification = {}, expected = 'fixture-token'
       else if (String(url) === '${codacyRepository}') {
         if (headers.has('authorization') || headers.has('api-token')) throw new Error('expected anonymous request');
         response = verification.codacy;
-      } else response = responses.shift();
+      } else {
+        const queue = Array.isArray(responses) ? responses
+          : responses[new URL(url).hostname === 'sonarcloud.io' ? 'sonar' : 'codacy'];
+        response = queue.shift();
+      }
       if (!response) throw new Error('unexpected request');
       if (response.error) {
         const error = new TypeError('Invalid header: ' + (headers.get('authorization') ?? headers.get('api-token')));

@@ -5,12 +5,13 @@ import { parseArgs } from 'node:util';
 import {
   dispositionState, evidence, identity, indexLedger, isConfirmed, readJson, resolvedWithoutReason, securityPopulation,
 } from './quality-debt-ledger.mjs';
-import { applyCodacy, applySonar, confirmLedger, openCodacyIssues, openSonarIssues } from './quality-debt-services.mjs';
+import { applyCodacy, applySonar, confirmLedger, openCodacyIssues, openSonarIssues, sonarFile } from './quality-debt-services.mjs';
 
 const batches = ['A', 'E', 'B1', 'B2', 'B3', 'C1', 'C2', 'C3', 'C4', 'D'];
 const usage = 'Usage: quality-debt-record.mjs [--allocate | --check [--planned] | --check-live | --apply-sonar [--dry-run]'
   + ' | --apply-codacy [--dry-run] | --confirm --sonar-analysis <analysisKey> --codacy-commit <sha>]'
-  + '\n--check-live searches both public main issue sets and fails if either has an id outside the frozen inventory.'
+  + '\n--check-live reads both public main issue sets and the ledger; uncovered ids or findings contradicting fixed/excluded dispositions fail.'
+  + '\n--apply-sonar reads pending ids including resolved/closed issues; FIXED refuses, RESOLVED comments only, otherwise transition/comment.'
   + '\n--apply-codacy checks the current Codacy issue set before PATCHing; ids already absent are confirmed locally.'
   + '\n--confirm records the analysis key and commit SHA as labels; the caller must verify beforehand'
   + ' that both services finished analysing that revision'
@@ -169,24 +170,28 @@ function check(rows, ledger, planned) {
 
 const ruleFile = (service, rule, file) => JSON.stringify([service, rule, file]);
 
+function liveKey(service, issue) {
+  return service === 'sonar'
+    ? ruleFile(service, issue.rule, sonarFile(issue.component))
+    : ruleFile(service, issue.patternInfo.id, issue.filePath);
+}
+
 async function checkLive(rows, ledger) {
   const known = new Set(rows.map(identity));
-  // A new id can describe a finding a merged batch claimed fixed. The disposition names the old
-  // id; its rule and file come from that id's frozen inventory row, never from a ledger copy.
-  const fixedIds = new Set(ledger.filter((row) => row.state === 'fixed').map(identity));
-  const fixed = new Set(rows.filter((row) => fixedIds.has(identity(row)))
+  // Claims use the frozen inventory's rule and file, never hand-edited ledger copies.
+  const claimedIds = new Set(ledger.filter((row) => ['fixed', 'excluded'].includes(row.state)).map(identity));
+  const claims = new Set(rows.filter((row) => claimedIds.has(identity(row)))
     .map((row) => ruleFile(row.service, row.rule, row.file)));
-  const open = { sonar: await openSonarIssues(), codacy: await openCodacyIssues() };
-  const uncovered = Object.fromEntries(Object.entries(open).map(([service, ids]) => [service,
-    [...ids.keys()].filter((id) => !known.has(`${service}:${id}`))]));
-  const rekeyed = Object.fromEntries(Object.entries(uncovered).map(([service, ids]) => [service, ids.filter((id) => {
-    const issue = open[service].get(id);
-    const key = service === 'sonar'
-      ? ruleFile(service, issue.rule, issue.component?.replace(/^[^:]*:/, ''))
-      : ruleFile(service, issue.patternInfo?.id, issue.filePath);
-    return fixed.has(key);
-  })]));
-  for (const [group, findings] of Object.entries({ uncovered, 're-keyed': rekeyed })) {
+  const [sonar, codacy] = await Promise.all([openSonarIssues(), openCodacyIssues()]);
+  const uncovered = { sonar: [], codacy: [] };
+  const contradicted = { sonar: [], codacy: [] };
+  for (const [service, issues] of [['sonar', sonar], ['codacy', codacy]]) {
+    for (const [id, issue] of issues) {
+      if (!known.has(identity({ service, id }))) uncovered[service].push(id);
+      if (claims.has(liveKey(service, issue))) contradicted[service].push(id);
+    }
+  }
+  for (const [group, findings] of Object.entries({ uncovered, contradicted })) {
     for (const [service, ids] of Object.entries(findings)) {
       if (ids.length) {
         console.error(`${service} ${group} ${ids.length}: ${ids.join(', ')}`);

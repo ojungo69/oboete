@@ -11,6 +11,15 @@ import {
 
 const CODACY = 'https://app.codacy.com/api/v3/analysis/organizations/gh/ojungo69/repositories/oboete';
 const codacyIssues = `${CODACY}/issues`;
+export const SONAR_PROJECT = 'ojungo69_free-mem';
+
+export function sonarFile(component) {
+  const prefix = `${SONAR_PROJECT}:`;
+  if (typeof component !== 'string' || !component.startsWith(prefix)) {
+    throw new Error('Sonar issues search returned an invalid component');
+  }
+  return component.slice(prefix.length);
+}
 
 /** The resolved rows of one service that are still to be sent, validated; confirmed rows are `--check`'s business. */
 function pendingResolved(service, ledger, inventory) {
@@ -123,20 +132,21 @@ export async function applySonar(ledger, dryRun, inventory) {
   const rows = pendingResolved('sonar', ledger, inventory);
   if (rows.length === 0) return;
   const authorization = dryRun ? undefined : sonarAuthorization();
-  // An id the service no longer reports cannot be transitioned. Read the complete open set before
-  // recording any row; the public search also lets a dry run name its skips without a token.
-  const open = await openSonarIssues(authorization);
+  const states = await sonarIssueStates(rows.map((row) => row.id), authorization);
+  const refused = [];
   let firstCall = true;
   for (const row of rows) {
-    if (!open.has(row.id)) {
-      if (dryRun) console.log(`SKIP Sonar ${row.id}: absent from current Sonar issue search`);
-      else {
-        row.confirmed = `Absent from current Sonar issue search ${new Date().toISOString()}`;
-        writeLedger(ledger);
-      }
+    const { status, resolution } = states.get(row.id);
+    if (resolution === 'FIXED') {
+      console.log(`REFUSE Sonar ${row.id}: closed by the service as FIXED; re-disposition this row as fixed`);
+      refused.push(row.id);
       continue;
     }
-    for (const call of sonarCalls(row)) {
+    const calls = sonarCalls(row).filter((call) => status !== 'RESOLVED' || call.action === 'add_comment');
+    console.log(status === 'RESOLVED'
+      ? `RESOLVED Sonar ${row.id}: transition already applied, posting the comment`
+      : `APPLY Sonar ${row.id}: ${calls.length} call(s)`);
+    for (const call of calls) {
       const body = new URLSearchParams(call.fields);
       if (dryRun) {
         console.log(`POST https://sonarcloud.io/api/issues/${call.action} ${body}`);
@@ -148,6 +158,7 @@ export async function applySonar(ledger, dryRun, inventory) {
       writeLedger(ledger);
     }
   }
+  if (refused.length) throw new Error(`Sonar refused ${refused.length} row(s): ${refused.join(', ')}`);
 }
 
 async function codacyHeaders() {
@@ -169,6 +180,8 @@ export async function applyCodacy(ledger, dryRun, inventory) {
       continue;
     }
     if (!open.has(row.id)) {
+      // Codacy has no resolution field; its absent-id local confirmation remains deliberate.
+      delete row.transitioned;
       row.confirmed = `Absent from current Codacy issue search ${new Date().toISOString()}`;
       writeLedger(ledger);
       continue;
@@ -177,6 +190,7 @@ export async function applyCodacy(ledger, dryRun, inventory) {
     const response = await request('Codacy', `${codacyIssues}/${encodeURIComponent(row.id)}`, { method: 'PATCH', headers, body },
       (status) => `Codacy ${row.id}: PATCH returned HTTP ${status}`);
     await discardBody(response);
+    delete row.transitioned;
     row.confirmed = `HTTP ${response.status} ${new Date().toISOString()}`;
     writeLedger(ledger);
   }
@@ -184,7 +198,7 @@ export async function applyCodacy(ledger, dryRun, inventory) {
 
 // Both labels must describe the same repository state, so the Sonar analysis must be of the Codacy commit.
 async function verifySonarAnalysis(analysis, sha, authorization) {
-  const response = await request('Sonar', 'https://sonarcloud.io/api/project_analyses/search?project=ojungo69_free-mem&branch=main&ps=1',
+  const response = await request('Sonar', `https://sonarcloud.io/api/project_analyses/search?project=${SONAR_PROJECT}&branch=main&ps=1`,
     { method: 'GET', headers: { Authorization: authorization } }, (status) => `Sonar analyses search returned HTTP ${status}`);
   const latest = (await readBody('Sonar', response)).analyses?.[0];
   // Messages never carry a value taken from a response body; the quickstart shows how to look it up.
@@ -217,7 +231,7 @@ function sonarTotal(data, page, previous) {
   return total;
 }
 
-/** Adds valid service ids from one page to `open`, refusing repeats; Codacy ids are lowercase hex. */
+/** Adds ids and validated rule/file evidence from one page, refusing repeats; Codacy ids are lowercase hex. */
 function collectIds(open, items, field, service) {
   for (const item of items) {
     const id = item?.[field];
@@ -225,8 +239,15 @@ function collectIds(open, items, field, service) {
       throw new Error(`${service} issues search returned an invalid id`);
     }
     if (open.has(id)) throw new Error(`${service} issues search returned a repeated id`);
-    // Keep the search payload beside its id: coverage also compares the rule and file when a
-    // service gives a surviving finding a new id. Apply and confirmation still use only `.has`.
+    if (service === 'Sonar') {
+      if (typeof item.rule !== 'string' || !item.rule) throw new Error('Sonar issues search returned an invalid rule');
+      sonarFile(item.component);
+    } else {
+      if (typeof item.patternInfo?.id !== 'string' || !item.patternInfo.id) {
+        throw new Error('Codacy issues search returned an invalid patternInfo.id');
+      }
+      if (typeof item.filePath !== 'string' || !item.filePath) throw new Error('Codacy issues search returned an invalid filePath');
+    }
     open.set(id, item);
   }
 }
@@ -237,7 +258,7 @@ export async function openSonarIssues(authorization) {
   let total;
   for (let page = 1; ; page++) {
     const response = await request('Sonar',
-      `https://sonarcloud.io/api/issues/search?componentKeys=ojungo69_free-mem&branch=main&resolved=false&ps=500&p=${page}`,
+      `https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=main&resolved=false&ps=500&p=${page}`,
       { method: 'GET', headers }, (status) => `Sonar issues search returned HTTP ${status}`);
     const data = await readBody('Sonar', response);
     total = sonarTotal(data, page, total);
@@ -247,6 +268,34 @@ export async function openSonarIssues(authorization) {
       return open;
     }
   }
+}
+
+/** Read every pending id, including resolved and closed issues hidden by the open search. */
+export async function sonarIssueStates(ids, authorization) {
+  const states = new Map();
+  const headers = authorization === undefined ? {} : { Authorization: authorization };
+  for (let offset = 0; offset < ids.length; offset += 500) {
+    const chunk = ids.slice(offset, offset + 500);
+    const response = await request('Sonar',
+      `https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=main&issues=${encodeURIComponent(chunk.join(','))}&ps=500`,
+      { method: 'GET', headers }, (status) => `Sonar issues search returned HTTP ${status}`);
+    const data = await readBody('Sonar', response);
+    const total = sonarTotal(data, 1);
+    const found = new Map();
+    collectIds(found, data.issues, 'key', 'Sonar');
+    for (const id of chunk) {
+      const issue = found.get(id);
+      if (!issue) throw new Error(`Sonar issues search did not return ${id}`);
+      const { status, resolution } = issue;
+      if (typeof status !== 'string' || !status) throw new Error('Sonar issues search returned an invalid status');
+      if (resolution !== undefined && (typeof resolution !== 'string' || !resolution)) {
+        throw new Error('Sonar issues search returned an invalid resolution');
+      }
+      states.set(id, { status, resolution });
+    }
+    if (found.size !== total) throw new Error('Sonar issues search returned an incomplete result');
+  }
+  return states;
 }
 
 /** The total a Codacy page reports (it may omit it), checked against the earlier pages. */
@@ -314,6 +363,7 @@ function labelConfirmed(rows, open, label) {
       console.log(`${row.service} ${row.id}: still open`);
       stillOpen++;
     } else {
+      delete row.transitioned;
       row.confirmed = label;
     }
   }

@@ -193,23 +193,33 @@ Expected: `--check --planned` exits 0 once every batch has merged; `--check` exi
 node scripts/quality-debt-record.mjs --check-live
 ```
 
-This reads both services' public current-issue searches for `main`. A complete search whose IDs are
-all covered by the inventory exits 0 without output. An uncovered ID is reported with its service and
-exits 1; a failed request or incomplete/invalid page also exits 1. The mode does not read credentials
-and writes no files. It reads the ledger to report an additional `re-keyed` group for each service:
-uncovered IDs whose `(service, rule, file)` matches the frozen inventory row of a `fixed` disposition,
-whether or not that disposition is confirmed. The live rule and file come from the search payload
-(Sonar `rule` and `component` without this project's prefix; Codacy `patternInfo.id` and `filePath`).
-These IDs contradict the recorded fix; they still appear in `uncovered`, and either reported group
-sets exit 1. Empty groups are not printed. A successful coverage check can include known open issues,
-so the service-count checks above remain required for the final 0 / 0 result.
+This reads both services' public current-issue searches for `main` in parallel and reads the ledger.
+It reports `uncovered` IDs outside the frozen inventory and `contradicted` findings whose
+`(service, rule, file)` matches an inventory row with a `fixed` or `excluded` ledger disposition.
+Contradictions include covered IDs and apply whether or not the disposition is confirmed. The claim's
+rule and file come from the frozen inventory, never a ledger copy. Live comparisons use validated
+Sonar `rule` and `component` (stripping exactly `ojungo69_free-mem:`), or Codacy `patternInfo.id` and
+`filePath`; missing or invalid fields fail the search. Either non-empty group sets exit 1, and empty
+groups are not printed. No uncovered or contradicted findings means exit 0 without output; a failed
+request or incomplete/invalid page also exits 1. The mode reads no credentials and writes no files.
+Known open issues can still pass, so the service-count checks above remain required for final 0 / 0.
 
-`--apply-sonar` reads the complete open issue set for `main` before its first write. An absent pending
-resolved ID receives `Absent from current Sonar issue search <timestamp>` in `confirmed`, with no
-transition or comment call; its other fields are preserved. Present IDs keep the transition/comment
-order, `transitioned` progress and persistence after each successful call. `--apply-sonar --dry-run`
-uses the public search without credentials, prints `SKIP Sonar <id>: absent from current Sonar issue
-search` for absent IDs and previews the POSTs for present IDs; it makes no service or ledger writes.
+`--apply-sonar` reads each pending resolved ID's state on `main` before its first write, in chunks of
+at most 500 IDs and without `resolved=false`. A missing requested ID fails the run before any write.
+Both real and dry runs print one decision line per pending row:
+
+- `REFUSE Sonar <id>: closed by the service as FIXED; re-disposition this row as fixed` when the
+  resolution is `FIXED`. No transition, comment or ledger write is made for that row. The run fails
+  after processing the other rows, naming the refused count and IDs; successful earlier calls remain
+  saved. Re-disposition the row as `fixed` with the closing analysis.
+- `RESOLVED Sonar <id>: transition already applied, posting the comment` for a service `RESOLVED`
+  issue (`WONTFIX` or `FALSE-POSITIVE`). Only `add_comment` is sent, even when `transitioned` is absent.
+  Success writes `confirmed` and removes `transitioned` through the usual comment-completion path.
+- `APPLY Sonar <id>: <n> call(s)` otherwise. The usual transition/comment order and saved progress
+  apply, with each successful call persisted immediately.
+
+`--apply-sonar --dry-run` uses the public state search without credentials, prints the applicable
+POSTs after the decision lines, and makes no service or ledger writes. Refused rows still fail it.
 
 The real `--apply-codacy` mode also reads the complete current issue set before its first PATCH.
 Pending resolved IDs already absent from that set receive a local confirmation with the search

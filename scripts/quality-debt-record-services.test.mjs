@@ -5,11 +5,11 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
-  apiStub, codacyHarnessId, codacyIssues, codacyViewerId, confirmArgs, dryRunStub, evidence, fixture, publicApiStub, readCalls,
-  readLedger, run, sonarOpen, writeJson,
+  apiStub, codacyHarnessId, codacyIssue, codacyIssues, codacyViewerId, confirmArgs, dryRunStub, evidence, fixture, publicApiStub, readCalls,
+  readLedger, run, sonarIssue, sonarOpen, writeJson,
 } from './quality-debt-record.test-support.mjs';
 
-const codacyOpen = (...ids) => ({ body: { data: ids.map((issueId) => ({ issueId })), pagination: { total: ids.length } } });
+const codacyOpen = (...ids) => ({ body: { data: ids.map((id) => codacyIssue(id)), pagination: { total: ids.length } } });
 const codacyLaterId = '33333333333333333333333333333333';
 
 test('--apply-sonar --dry-run prints both calls without reading credentials or sending writes', (t) => {
@@ -19,6 +19,7 @@ test('--apply-sonar --dry-run prints both calls without reading credentials or s
   const result = run(cwd, ['--apply-sonar', '--dry-run'], publicApiStub([sonarOpen('s-regexp')]));
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, [
+    'APPLY Sonar s-regexp: 2 call(s)',
     'POST https://sonarcloud.io/api/issues/do_transition issue=s-regexp&transition=falsepositive',
     'POST https://sonarcloud.io/api/issues/add_comment issue=s-regexp&text=The+pattern+is+a+constant.', '',
   ].join('\n'));
@@ -36,7 +37,7 @@ test('--apply-sonar sends authenticated forms in order with a 200 ms pause betwe
     sonarOpen('s-worker', 's-regexp'), ...[200, 204, 200, 204].map((status) => ({ status })),
   ]));
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, '');
+  assert.equal(result.stdout, 'APPLY Sonar s-worker: 2 call(s)\nAPPLY Sonar s-regexp: 2 call(s)\n');
   const events = readFileSync(join(cwd, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const expectedForms = [
     { issue: 's-worker', transition: 'wontfix' }, { issue: 's-worker', text: 'Input is bounded & constant.' },
@@ -44,7 +45,7 @@ test('--apply-sonar sends authenticated forms in order with a 200 ms pause betwe
   ];
   assert.equal(events.length, 8);
   assert.deepEqual(events[0], {
-    url: 'https://sonarcloud.io/api/issues/search?componentKeys=ojungo69_free-mem&branch=main&resolved=false&ps=500&p=1',
+    url: 'https://sonarcloud.io/api/issues/search?componentKeys=ojungo69_free-mem&branch=main&issues=s-worker%2Cs-regexp&ps=500',
     method: 'GET', body: {}, authMatches: true, contentType: null, redirect: 'manual',
   });
   events.slice(1).forEach((event, i) => {
@@ -188,7 +189,7 @@ test('--apply-sonar resumes only the second row after its comment fails', (t) =>
   assert.equal(saved.at(-1).confirmed, undefined);
   assert.equal(text, `${JSON.stringify(saved, null, 1)}\n`);
   const events = readCalls(cwd).length;
-  const rerun = run(cwd, ['--apply-sonar'], apiStub([sonarOpen('s-later'), { status: 204 }]));
+  const rerun = run(cwd, ['--apply-sonar'], apiStub([{ body: { issues: [sonarIssue('s-later', { status: 'RESOLVED', resolution: 'WONTFIX' })], total: 1 } }, { status: 204 }]));
   assert.equal(rerun.status, 0, rerun.stderr);
   assert.deepEqual(readCalls(cwd).slice(events + 1), [{
     url: 'https://sonarcloud.io/api/issues/add_comment', method: 'POST',
@@ -215,7 +216,7 @@ test('--apply-sonar records a transition whose success body cannot be discarded'
   assert.match(result.stderr, /s-regexp: add_comment returned HTTP 429/);
   assert.match(readLedger(cwd)[2].transitioned, /^\d{4}-/);
   const events = readCalls(cwd).length;
-  const rerun = run(cwd, ['--apply-sonar'], apiStub([sonarOpen('s-regexp'), { status: 200 }]));
+  const rerun = run(cwd, ['--apply-sonar'], apiStub([{ body: { issues: [sonarIssue('s-regexp', { status: 'RESOLVED', resolution: 'WONTFIX' })], total: 1 } }, { status: 200 }]));
   assert.equal(rerun.status, 0, rerun.stderr);
   assert.equal(readCalls(cwd).slice(events).length, 2);
   assert.equal(readCalls(cwd).at(-1).url, 'https://sonarcloud.io/api/issues/add_comment');
@@ -233,12 +234,13 @@ test('--apply-sonar persists a successful transition and retries only the failed
   const saved = readLedger(cwd);
   assert.match(saved[2].transitioned, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
   assert.equal(saved[2].confirmed, undefined);
-  const preview = run(cwd, ['--apply-sonar', '--dry-run'], publicApiStub([sonarOpen('s-regexp')]));
+  const preview = run(cwd, ['--apply-sonar', '--dry-run'], publicApiStub([{ body: { issues: [sonarIssue('s-regexp', { status: 'RESOLVED', resolution: 'WONTFIX' })], total: 1 } }]));
   assert.equal(preview.status, 0, preview.stderr);
-  assert.equal(preview.stdout, 'POST https://sonarcloud.io/api/issues/add_comment issue=s-regexp&text=The+pattern+is+a+constant.\n');
+  assert.equal(preview.stdout, 'RESOLVED Sonar s-regexp: transition already applied, posting the comment\n'
+    + 'POST https://sonarcloud.io/api/issues/add_comment issue=s-regexp&text=The+pattern+is+a+constant.\n');
   assert.deepEqual(readLedger(cwd), saved);
   const events = readCalls(cwd).length;
-  const resumed = run(cwd, ['--apply-sonar'], apiStub([sonarOpen('s-regexp'), { status: 200 }]));
+  const resumed = run(cwd, ['--apply-sonar'], apiStub([{ body: { issues: [sonarIssue('s-regexp', { status: 'RESOLVED', resolution: 'WONTFIX' })], total: 1 } }, { status: 200 }]));
   assert.equal(resumed.status, 0, resumed.stderr);
   assert.deepEqual(readCalls(cwd).slice(events + 1), [{
     url: 'https://sonarcloud.io/api/issues/add_comment', method: 'POST',
