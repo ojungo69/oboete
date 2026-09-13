@@ -1,0 +1,31 @@
+scripts/e2e/probe-lib/isolated-lifecycle.mjs
+  s_a3b2da79705e65::t_b8fafeac5388b2 331-332,334-337
+scripts/e2e/probes/providers.mjs
+  s_a3b2da79705e65::t_b8fafeac5388b2 5,324,367,389
+scripts/e2e/probe-lib/grok-lifecycle.mjs
+  s_a3b2da79705e65::t_b560802746b4eb 5,156-157
+scripts/e2e/probe-lib/codex-lifecycle.mjs
+  s_a3b2da79705e65::t_b560802746b4eb 5
+  s_a3b2da79705e65::t_5e6ac8b649ad5d 109-110
+scripts/e2e/isolated-agent.test.mjs
+  s_a3b2da79705e65::t_e6151d48087e4f 16,312-325
+  s_a3b2da79705e65::t_2485195ccf9969 326-327
+scripts/e2e/probe-lib/agents.mjs
+  s_a3b2da79705e65::t_97382268d177a7 91,93-96,119-123,128-132,139-154,285,358,411,439
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "b1984c3fe27ab86c8338069305c73d8da291d34d",
+  "prompts": {},
+  "sessions": {
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
