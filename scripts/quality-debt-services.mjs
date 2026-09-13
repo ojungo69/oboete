@@ -277,7 +277,7 @@ export async function openSonarIssues(authorization) {
 
 /** Read every pending id, including resolved and closed issues hidden by the open search. */
 /** Every status the issues search may report; `applySonar` decides a row from it, so an unknown one is a refusal. */
-const sonarStatuses = ['OPEN', 'CONFIRMED', 'REOPENED', 'RESOLVED', 'CLOSED'];
+const sonarStatuses = new Set(['OPEN', 'CONFIRMED', 'REOPENED', 'RESOLVED', 'CLOSED']);
 
 export async function sonarIssueStates(ids, authorization) {
   const states = new Map();
@@ -294,7 +294,7 @@ export async function sonarIssueStates(ids, authorization) {
     for (const [id, issue] of found) {
       const { status, resolution } = issue;
       // applySonar transitions every status it does not recognise as terminal, so an unknown one is refused here.
-      if (!sonarStatuses.includes(status)) throw new Error(`Sonar issues search returned an unknown status ${JSON.stringify(status)}`);
+      if (!sonarStatuses.has(status)) throw new Error(`Sonar issues search returned an unknown status ${JSON.stringify(status)}`);
       if (resolution !== undefined && (typeof resolution !== 'string' || !resolution)) {
         throw new Error('Sonar issues search returned an invalid resolution');
       }
