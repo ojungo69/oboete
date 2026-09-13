@@ -13,10 +13,10 @@ Disposition record of feature 008 (`specs/008-quality-debt-zero/`): every SonarC
 
   | Quantity | SonarCloud | Codacy |
   |---|---|---|
-  | Live subset awaiting F's service work, at C4 (`67242108`) | 15 | 20 of the 38; the other 18 were batch D's file lengths |
+  | Live subset awaiting F's service work, at C4 (`67242108`) | 15 | 20 of the 38; the other 18 were the file lengths batch D owns — 17 allocated at that analysis, plus `16267458` appended afterwards |
   | Planned rows to send at that checkpoint | 15 `resolved` | 23 — 22 `resolved` issue rows and 1 `excluded` Stylelint row, including issue IDs absent from the live search |
   | Calls batch F made, 2026-09-13 | 10 transitions | 27 ignore calls |
-  | `resolved` rows in the ledger in all | 32 — 22 receipted 2026-09-09 by earlier batches, 10 by F | 29 — 27 by F, 2 already carrying PR #185 receipts |
+  | `resolved` rows in the ledger in all | 32 — 22 receipted by batch D on 2026-09-09, 10 by F | 29 — 27 by F, 2 receipted by batch D on 2026-09-09 |
 
   F made 10 Sonar calls where 15 were planned because D's own refactor had closed five of those
   findings; those five rows carry a `resolved` → `fixed` history entry. The Stylelint exclusion

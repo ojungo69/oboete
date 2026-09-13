@@ -200,9 +200,9 @@ The maintainer wants the cleanup delivered as a series of pull requests, each sm
   *(Clarified 2026-09-14; the original completion references used "the 2026-09-07 inventory",
   "310" SonarCloud and "397" Codacy findings; the stories, FR-001/FR-002 and SC-001/SC-002/SC-003
   now explicitly cover the final frozen inventory.)*
-  Every live finding outside it
-  is measured, attributed, and handed to the follow-up round, with the measurements and the ownership
-  table in `docs/evidence/quality-debt-2026-09.md`. Six file-length and four function-level findings
+- Every live finding outside the frozen inventory is measured, attributed, and handed to the
+  follow-up round, with the measurements and the ownership table in
+  `docs/evidence/quality-debt-2026-09.md`. Six file-length and four function-level findings
   that the batches had closed were regrown by #190 after batch D's merge; their measurements at both
   revisions are recorded rather than reopened as this feature's work.
 - The E2E harness under `scripts/e2e` is an operator-run tool that is not part of the published package. Readability rules (complexity, function length, mechanical rewrites) apply to it as to `src/`. Only rules whose premise is "untrusted input reaches this call" (for example non-literal file path on an operator-owned harness) may be scoped away from it by configuration, and the same rules keep running on `src/`.
