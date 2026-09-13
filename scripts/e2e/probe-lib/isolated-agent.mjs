@@ -158,6 +158,31 @@ function copySetupFile(source, destination, required = false) {
   copyMode(source, destination, fs.statSync(source).mode & 0o7777);
 }
 
+// A credential file is linked, never copied: the CLI rotates it, and a refresh written into a
+// copy dies with the run directory while the provider has already retired the previous token,
+// which signs the account out (issue #175). Everything the harness rewrites per leg is copied.
+function linkSetupFile(source, destination) {
+  if (!fs.existsSync(source)) return;
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.rmSync(destination, { force: true });
+  fs.symlinkSync(path.resolve(source), destination);
+  return destination;
+}
+
+// A CLI that rewrites its credential file by renaming a temporary file over the path replaces the
+// link, and the refresh is lost exactly as before. Say so loudly instead of assuming it cannot
+// happen: the run stops and names the agent, and the leg's stdout and stderr are already on disk.
+function assertCredentialsStillLinked(agent, credentials, exitCode) {
+  for (const file of credentials) {
+    if (!fs.existsSync(file)) continue;
+    if (fs.lstatSync(file).isSymbolicLink()) continue;
+    throw new PreconditionError(
+      `${agent} replaced the linked credential file ${file} with a regular file (leg exit ${exitCode}), ` +
+        "so its token refresh never reached the account; see issue #175",
+    );
+  }
+}
+
 export function prepareOboeteHome(destination, source) {
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   copySetupFile(path.join(source, "config.toml"), path.join(destination, "config.toml"), true);
@@ -184,8 +209,9 @@ function prepareClaudeAgent(config, homes, prompt, extraArgs) {
 }
 
 function prepareCodexAgent(config, homes, prompt, repo, extraArgs) {
-  for (const file of ["auth.json", "config.toml", "hooks.json"]) {
-    copySetupFile(path.join(homes.codex, file), path.join(config, file), file !== "auth.json");
+  const credentials = linkSetupFile(path.join(homes.codex, "auth.json"), path.join(config, "auth.json"));
+  for (const file of ["config.toml", "hooks.json"]) {
+    copySetupFile(path.join(homes.codex, file), path.join(config, file), true);
   }
   const configToml = path.join(config, "config.toml");
   // The TUI asks "Do you trust the contents of this directory?" for a repository it has not
@@ -214,11 +240,12 @@ function prepareCodexAgent(config, homes, prompt, repo, extraArgs) {
     ],
     env: { CODEX_HOME: config },
     config,
+    credentials: [credentials].filter(Boolean),
   };
 }
 
 function prepareGrokAgent(config, homes, prompt, repo) {
-  copySetupFile(path.join(homes.grok, "auth.json"), path.join(config, "auth.json"));
+  const credentials = linkSetupFile(path.join(homes.grok, "auth.json"), path.join(config, "auth.json"));
   copySetupFile(path.join(homes.grok, "config.toml"), path.join(config, "config.toml"), true);
   copySetupFile(
     path.join(homes.grok, "hooks", "oboete.json"),
@@ -228,11 +255,13 @@ function prepareGrokAgent(config, homes, prompt, repo) {
   return {
     argv: ["grok", "-p", prompt, "--always-approve", "--output-format", "json", "--cwd", repo],
     env: { GROK_HOME: config, ...GROK_ISOLATION_ENV },
+    credentials: [credentials].filter(Boolean),
   };
 }
 
 function preparePiAgent(config, directory, homes, prompt) {
-  for (const file of ["auth.json", "settings.json", "models-store.json"]) {
+  const credentials = linkSetupFile(path.join(homes.pi, "auth.json"), path.join(config, "auth.json"));
+  for (const file of ["settings.json", "models-store.json"]) {
     copySetupFile(path.join(homes.pi, file), path.join(config, file));
   }
   copySetupFile(
@@ -245,6 +274,7 @@ function preparePiAgent(config, directory, homes, prompt) {
   return {
     argv: ["pi", "-p", prompt, "--mode", "json", "--session-dir", sessions],
     env: { PI_CODING_AGENT_DIR: config },
+    credentials: [credentials].filter(Boolean),
   };
 }
 
@@ -283,6 +313,7 @@ export async function launchAgent(configuration
     stderrPath,
     timeoutMs: options.timeoutMs,
   });
+  assertCredentialsStillLinked(agent, prepared.credentials ?? [], proc.exitCode);
   return { ...proc, stdoutPath, stderrPath };
 }
 

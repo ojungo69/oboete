@@ -7,6 +7,8 @@ import test from "node:test";
 import {
   assertAgentOutput,
   buildFactSeedingPrompt,
+  launchAgent,
+  prepareAgent,
   requireAgentSuccess,
   resolveSourceHomes,
   retargetCodexTrust,
@@ -172,4 +174,87 @@ test("agent-exit classification is shared by every lifecycle action", () => {
     () => requireAgentSuccess({ exitCode: 1, stdout: "", stderr: "API Error: invalid request" }, "codex resume"),
     (error) => error.name === "Error" && /invalid request/.test(error.message),
   );
+});
+
+/** The account's own credential files, which the CLI rotates; the fixture stages only the rest. */
+function writeAccountCredentials(home) {
+  for (const [directory, files] of [
+    [path.join(home, ".codex"), ["auth.json"]],
+    [path.join(home, ".grok"), ["auth.json", "config.toml"]],
+    [path.join(home, ".pi", "agent"), ["auth.json", "settings.json", "models-store.json"]],
+  ]) {
+    fs.mkdirSync(directory, { recursive: true });
+    for (const file of files) fs.writeFileSync(path.join(directory, file), `{"account":"${file}"}\n`);
+  }
+  fs.mkdirSync(path.join(home, ".grok", "hooks"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".grok", "hooks", "oboete.json"), "{}\n");
+  fs.mkdirSync(path.join(home, ".pi", "agent", "extensions"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".pi", "agent", "extensions", "oboete.js"), "// extension\n");
+}
+
+test("a leg links the credential file the CLI rotates and copies everything it rewrites", (t) => {
+  const account = isolatedAccount(t);
+  writeAccountCredentials(account.home);
+  const homes = resolveSourceHomes({}, account.home);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "oboete-credentials-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  for (const [agent, copied] of [
+    ["codex", ["config.toml", "hooks.json"]],
+    ["grok", ["config.toml"]],
+    ["pi", ["settings.json", "models-store.json"]],
+  ]) {
+    const directory = path.join(root, agent);
+    const prepared = prepareAgent(agent, directory, homes, "prompt", path.join(root, "repo"));
+    const staged = path.join(directory, "agent-home", "auth.json");
+    assert.deepEqual(prepared.credentials, [staged], `${agent} reports its credential path`);
+    assert.ok(fs.lstatSync(staged).isSymbolicLink(), `${agent} links auth.json`);
+    assert.equal(fs.readlinkSync(staged), path.join(homes[agent], "auth.json"));
+    for (const file of copied) {
+      const copy = path.join(directory, "agent-home", file);
+      assert.ok(!fs.lstatSync(copy).isSymbolicLink(), `${agent} copies ${file}`);
+    }
+  }
+});
+
+test("a leg that replaces the linked credential with a regular file stops the run", async (t) => {
+  const account = isolatedAccount(t);
+  writeAccountCredentials(account.home);
+  const homes = resolveSourceHomes({}, account.home);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "oboete-credentials-pin-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const leg = (name, runTimed) => launchAgent({
+    agent: "grok",
+    directory: path.join(root, name),
+    repo: path.join(root, "repo"),
+    prompt: "prompt",
+    options: { timeoutMs: 1000 },
+    homes,
+    oboeteHome: path.join(root, "oboete-home"),
+    dependencies: { childEnv: probeChildEnv, runTimed },
+  });
+
+  // The refresh reached the account: the link is still a link, so the run carries on.
+  const kept = await leg("kept", async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+  assert.equal(kept.exitCode, 0);
+
+  // A CLI that renames a temporary file over the path leaves a regular file behind.
+  await assert.rejects(
+    leg("replaced", async (argv, options) => {
+      const staged = path.join(options.env.GROK_HOME, "auth.json");
+      fs.rmSync(staged);
+      fs.writeFileSync(staged, '{"refreshed":"lost"}\n');
+      return { exitCode: 0, stdout: "", stderr: "" };
+    }),
+    (error) => error.name === "PreconditionError" && /grok replaced the linked credential file/.test(error.message),
+  );
+
+  // A CLI that signs itself out removes the link; the account file is untouched, so the leg stands.
+  const removed = await leg("removed", async (argv, options) => {
+    fs.rmSync(path.join(options.env.GROK_HOME, "auth.json"));
+    return { exitCode: 1, stdout: "", stderr: "Not signed in." };
+  });
+  assert.equal(removed.exitCode, 1);
+  assert.ok(fs.existsSync(path.join(homes.grok, "auth.json")), "the account credential survives");
 });
