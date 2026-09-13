@@ -56,7 +56,7 @@ POST /api/issues/add_comment    issue=<key>&text=<reason>
 
 **Configuration-file toggle**: Codacy only reads a repository configuration file for a tool after "Use configuration file" is switched on for that tool on the repository's Code patterns page (docs "Configuring code patterns", 2026-09-07). The switch needs a repository admin in the UI or the account token (`PATCH …/tools/{uuid}` with `useConfigurationFile: true`). Batch A therefore has a maintainer step before its analysis can be judged, and A is complete only when the post-merge analysis shows the expected drop, not when the files merge.
 
-**Consequence**: The repository-file batch (R4) removes about 300 of the 397 Codacy findings. About 30 per-issue ignores remain (file-length "won't fix" on cohesive modules, security-flavoured findings judged not applicable, the `ci.yml` pattern hit). Those need a Codacy account API token (or the maintainer clicking each ignore). The token is a **prerequisite of batch F and of the feature's completion** (FR-002 requires 0 on the service); a list handed to the maintainer is an intermediate artefact, and the feature stays open until the actions have run and the final `main` analysis reports 0.
+**Consequence**: The repository-file batch (R4) removes about 300 of the 397 Codacy findings. About 30 per-issue ignores remain (file-length "won't fix" on cohesive modules, security-flavoured findings judged not applicable, the `ci.yml` pattern hit). Those need a Codacy account API token (or the maintainer clicking each ignore). The token is a **prerequisite of batch F and of the feature's completion** (see [FR-002](./spec.md#functional-requirements)); a list handed to the maintainer is an intermediate artefact, and the feature stays open until the actions have run and FR-002 is satisfied. *(Amended 2026-09-14; the original clauses were "FR-002 requires 0 on the service" and "the feature stays open until the actions have run and the final `main` analysis reports 0".)*
 
 ## R4. Repository-side configuration changes (the first pull request)
 
@@ -154,7 +154,7 @@ All eighteen files now have their identified independent concerns separated. Thi
 
 | File | NLOC before → after | Decision | Extracted concern / residual reason |
 |---|---|---|---|
-| `src/worker/batches.ts` | 570 → 411 | split → `fixed` | Spool recovery moved to `worker/spool-recovery.ts`; classification and batch creation stay. |
+| `src/worker/batches.ts` | 570 → 411 | split → `fixed` (regrown, see below) | Spool recovery moved to `worker/spool-recovery.ts`; classification and batch creation stay. |
 | `src/setup/setup.ts` | 508 → 472 | split → `fixed` | Shared setup/doctor display helpers moved to `setup/report.ts`. |
 | `src/observer/classify.ts` | 648 → 374 | split → `fixed` | Observation apply moved to `observer/apply.ts`; the batch worker and direct tests import it there. Shared SQL constants and directive checks stay in `classify.ts`, without a runtime reverse import. |
 | `src/observer/llm.ts` | 595 → 483 | split → `fixed` | API error classification moved to `observer/llm-errors.ts`; prompt builders and provider calls stay. |
@@ -171,7 +171,7 @@ All eighteen files now have their identified independent concerns separated. Thi
 | `scripts/e2e/probes/grok.mjs` | 800 → 285 | split → `fixed` | Lifecycle and MCP probe descriptors moved to `probe-lib/grok-lifecycle.mjs` and `grok-mcp.mjs`; IDs and descriptor order remain. |
 | `scripts/e2e/probes/codex.mjs` | 746 → 183 | split → `fixed` | Lifecycle and MCP probe descriptors moved to `probe-lib/codex-lifecycle.mjs` and `codex-mcp.mjs`; IDs and descriptor order remain. |
 | `src/injection/inject.ts` | 657 → 419 | split → `fixed` | Pi command parsing, storage opening and CLI execution moved to `injection/pi.ts`; the shared hook delivery/validation path stays. |
-| `src/injection/pack.ts` | 602 → 470 | split → `fixed` | Pure framing and item rendering moved to `injection/pack-format.ts`; selection, privacy checks, budget and ledger remain together. |
+| `src/injection/pack.ts` | 602 → 470 | split → `fixed` (regrown, see below) | Pure framing and item rendering moved to `injection/pack-format.ts`; selection, privacy checks, budget and ledger remain together. |
 
 Two new files remain over 500 and have also been read under FR-016. They are not excluded. PR #185 analysis of `ebe687dc` reported native IDs `f24df26860d01b16c092756092dba6ce` (source) and `48b2a00cb7eb3b5e6344415870d01661` (test); T043e adds both to the inventory and ledger before final confirmation.
 
@@ -192,6 +192,46 @@ All other extracted source modules are below 500, including `fixture-coverage.mj
 
 **Rationale**: `rules/coding.md` routing (Grok paused until 2026-09-12); constitution: security-related changes are not delegated; memory `codex-cannot-commit-in-linked-worktree` (this session commits).
 
+## R11. What the batches closed and PR #190 regrew (measured 2026-09-13, batch F)
+
+**Fact**: every file and function this feature brought under a bound was measured again at `main`
+(`33f8c382`) and at batch D's merge (`e27bb029`), with `pipx run lizard -l typescript`. The bounds are
+Codacy's: 500 NLOC per file (`Lizard_file-nloc-medium`), 50 NLOC per function (`Lizard_nloc-medium`).
+
+| subject | at `e27bb029` | at `33f8c382` | owner of the live finding |
+|---|---|---|---|
+| `src/worker/batches.ts` (file) | 411 | 551 | #190 |
+| `src/injection/pack.ts` (file) | 470 | 558 | #190 |
+| `src/observer/apply.ts` (file) | 282 | 533 | #190 |
+| `src/worker/observe-batch.ts` (file) | 405 | 588 | #190 |
+| `src/fixture/replay-evaluate.ts` (file) | 489 | 604 | #190 |
+| `src/fixture/replay-report.ts` (file) | 490 | 514 | #190 |
+| `assemble` (`pack.ts`) | 37 NLOC | 68 NLOC | #190 |
+| `applyPreparedObservation` | CCN 10 | CCN 24 | #190 |
+| `applyPreparedObservations` | 29 NLOC / CCN 4 | 83 NLOC / CCN 36 | #190 |
+| `applyFallback` parameters (S107) | 7 | 8 (`coverage?` added by `590c0a2f`) | #190 |
+| `captureUnparsed` (`src/capture.ts`) | 48 NLOC | 51 NLOC | #190 |
+| `buildObserverRequest` (`src/observer/request.ts`) | 25 NLOC / CCN 7 | 54 NLOC / CCN 24 | #190 |
+
+**Why line blame is not the discriminator**: `git blame` on the reported line names a batch commit for
+several of these, because the function's opening line or the file's first line is old while the body
+grew. A file-level finding always blames to whatever last touched line 1. The measurement above is the
+axis that decides ownership: a subject under the bound at `e27bb029` and over it now was regrown after
+this feature's last merge. By that axis this feature owns **no** live finding outside its frozen
+inventory; `emptyCounts` (`src/worker/observe.ts:366`) and the `src/sync/*` findings are `590c0a2f`'s
+own new code.
+
+The last two were found by `--check-live`'s `contradicted` group, not by hand: both ids are **in** the
+frozen inventory and both rows are confirmed `fixed` against the analysis of `67242108`, which was
+true when it was written -- `captureUnparsed` measured 48 NLOC at that analysis and still 48 at
+`e27bb029`, `buildObserverRequest` 25 at both. They are over the bound again only at `33f8c382`. A
+check that only looks at ids the inventory does not cover cannot see this shape at all, which is why
+the group compares dispositions rather than inventory membership.
+
+**Consequence**: the two ledger rows for `batches.ts` and `pack.ts` (`6d0b78f8…`, `7d9b63ea…`) stay
+`fixed` -- they were honest at `e27bb029` -- and their `confirmed` field records this measurement
+instead of an absence the service will never report. The live findings belong to the follow-up round.
+
 ## R10. Codacy's ESLint step has failed on every analysed commit (found 2026-09-07)
 
 **Fact**: `GET /api/v3/analysis/organizations/gh/ojungo69/repositories/oboete/commits/{sha}/logs` lists the analysis steps; on `main` (5e03d67f) and on every commit sampled back to 2026-08-16, the `ESLint` step is `error`: `codacy/codacy-eslint:9.18.10` (ESLint 8.57, legacy `.eslintrc*` only; the repository's flat `eslint.config.js` is not read, `hasConfigurationFile: false`) crashes inside `eslint-plugin-security-node` (`detect-unhandled-async-errors` on a `try … finally` without `catch`; with that rule removed, `detect-unhandled-event-errors` on an optional-chained call). The 397 Codacy findings therefore contain **no ESLint finding at all**, and the "0 new issues" gate has been judging commits without ESLint. Every other step is `success`.
@@ -203,7 +243,28 @@ All other extracted source modules are below 500, including `fixture-coverage.mj
 - **(a) Disable the 17 `security-node_*` patterns** for the repository (`PATCH …/tools/f8b29663-2cb2-498d-b923-a10c6a8c05cd` with a `patterns` array; the plugin is unmaintained and crashes on current TypeScript), let ESLint run, freeze the surfaced findings as a third inventory, and triage them as a batch **G** with the same three states: rules that cannot fit this code base (`detect-object-injection` fires on every `obj[key]`; `detect-non-literal-fs-filename` fires on a CLI whose purpose is reading operator-configured paths) become repository pattern disables with the reason, and the rest are fixed. Adds roughly 1,100 findings and several pull requests.
 - **(b) Disable the ESLint tool on Codacy** for the repository (`PATCH …/tools/{uuid}` `{"enabled": false}`), recorded with the reason that the repository's ESLint 9 flat configuration is the maintained lint standard and CI gate, that Codacy's ESLint 8 cannot read it, and that a second `.eslintrc` would drift. Codacy keeps its other 25 steps. Zero new findings; the gap becomes an explicit, recorded decision instead of a crash.
 
-Either way needs the account token (C1). Until decided, the counts in R1, plan.md, and the record are the counts **without ESLint**, and the final 0 / 0 in batch F is not written while the ESLint step reports `error`.
+Either way needs the account token (C1). Until decided, the counts in R1, plan.md, and the record are the counts **without ESLint**, and batch F's final inventory disposition and live counts are not recorded until T045 confirms an analysis log with no ESLint step. *(Amended 2026-09-13; the original text was "the final 0 / 0 in batch F is not written while the ESLint step reports `error`".)*
+
+**Applied (2026-09-13, batch F)**: decision (b) is in place, and two things about it were wrong in the
+plan above. First, `PATCH …/tools/{uuid}` `{"enabled": false}` on the repository is refused with `409
+Cannot disable a tool that is enabled by a standard` while a Codacy coding standard enables the tool,
+and the organisation's "Default coding standard" did. Editing that standard was out of the question
+(R3): three other repositories follow it. The repository now follows its own standard, **168669**
+"oboete quality-debt (ESLint 8 off)", whose tool flags and per-tool pattern sets were verified equal to
+the organisation default **168666** except for ESLint (disabled) and
+`Stylelint_scss_function-disallowed-list` (disabled, the T009 exclusion). The repository-level ESLint
+override was then cleared, so `GET …/tools` reports ESLint `isEnabled: false, isCustom: false`. A
+coding standard created with `?sourceRepository=` does **not** reproduce the repository's effective
+pattern sets -- 29 tools and 1684 patterns drifted, `Opengrep` alone from 1425 enabled patterns to 648
+-- so every set was repaired and re-diffed to zero before the standard was promoted.
+
+Second, the failing step does not suppress every finding: the live Codacy set holds **174 ESLint 8
+rows** while the step still reads `error` at `33f8c382`, so Codacy reports the partial output of a
+crashed tool. None of those rows is in the frozen inventory, which is why the inventory contains no
+ESLint finding at all. Disabling the tool is expected to drop all 174 at the next analysis; the final
+confirmation remains what this section already required -- the ESLint step **absent** from
+`GET …/commits/{sha}/logs` -- and it is verified on the first analysis of `main` after this merge.
+
 
 ## R9. Disposition record
 
@@ -213,4 +274,4 @@ Either way needs the account token (C1). Until decided, the counts in R1, plan.m
 
 **Planned versus confirmed**: a ledger row carries the end state the batch intends (`state`) and, separately, the evidence that the service agrees (`confirmed`: the SonarCloud analysis id / the Codacy commit SHA whose analysis no longer lists the id, or the HTTP response of the transition / ignore call). A row without `confirmed` is still `open` for `--check`; the final tables show `fixed ✓` / `fixed (planned)` accordingly, so a merge that has not been analysed yet or an API call that has not run cannot pass the final check. Batch F owns no ids: it is the step that runs the service calls and records confirmations for rows whose batch already merged.
 
-**Uniqueness and checks**: the final tables hold exactly one row per `(service, id)`; state history, when a finding reopened, lives in a separate "History" section. The generator (`scripts/quality-debt-record.mjs --check`) exits non-zero when any inventory id is missing from the ledger, appears twice, is still `open`, or has a `resolved` state without a reason; the inventories live at `docs/evidence/quality-debt-2026-09/*.json` and the generator reads only that path. The 0 / 0 line is written only after both services show a **successful analysis of the final `main` SHA**: SonarCloud `api/project_analyses/search?project=ojungo69_free-mem&branch=main` lists an analysis whose `revision` equals that SHA, and Codacy's commit endpoint (`GET …/repositories/oboete/commits/{sha}`) reports the analysis complete with the tools that ran; the count queries are run only after both, and the polish edits of the feature go into the last pull request so that no repository change follows the confirmed SHA.
+**Uniqueness and checks**: the final tables hold exactly one row per `(service, id)`; state history, when a finding reopened, lives in a separate "History" section. The generator (`scripts/quality-debt-record.mjs --check`) exits non-zero when any inventory id is missing from the ledger, appears twice, is still `open`, or has a `resolved` state without a reason; the inventories live at `docs/evidence/quality-debt-2026-09/*.json` and the generator reads only that path. The frozen inventory's confirmed dispositions plus each service's live count and its owner (issue #207) are recorded only after both services show a **successful analysis of the final `main` SHA**: SonarCloud `api/project_analyses/search?project=ojungo69_free-mem&branch=main` lists an analysis whose `revision` equals that SHA, and Codacy's commit endpoint (`GET …/repositories/oboete/commits/{sha}`) reports the analysis complete with the tools that ran; the count queries are run only after both, and the polish edits of the feature go into the last pull request so that no repository change follows the confirmed SHA. *(Amended 2026-09-13; the original text was "The 0 / 0 line is written only after both services show a successful analysis of the final main SHA".)*

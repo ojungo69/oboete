@@ -19,7 +19,7 @@
   them. The SonarCloud token needs read scope + issue administration (verified 2026-09-07 with
   `additionalFields=transitions`).
 - Codacy: anonymous read works for the public repository; per-issue ignores need an account API token (`CODACY_API_TOKEN`) for `npx @codacy/codacy-cloud-cli` (checkpoint C1 in the plan).
-- Inventories: `sonar-main-issues.json` and `codacy-main-issues.json` exported on 2026-09-07 (session scratchpad; copied next to the disposition record when batch A opens).
+- Inventories: the frozen 745 IDs in `sonar-main-issues.json` (332) and `codacy-main-issues.json` (413) next to the disposition record: the 2026-09-07 exports (310/397) plus 38 additions, each appended by the commit named in [data-model.md](./data-model.md#inventory-provenance). *(Clarified 2026-09-14; the original prerequisite described only the files "exported on 2026-09-07".)*
 
 ## Per-batch verification (every pull request)
 
@@ -176,7 +176,7 @@ curl -s 'https://sonarcloud.io/api/issues/search?componentKeys=ojungo69_free-mem
 curl -s -X POST 'https://app.codacy.com/api/v3/analysis/organizations/gh/ojungo69/repositories/oboete/issues/search?limit=1' -H 'content-type: application/json' -d '{}' | python3 -c 'import sys,json; d=json.load(sys.stdin); print("codacy current", d["pagination"].get("total", len(d["data"])))'
 ```
 
-Expected trajectory: Sonar 310 → ≈ 295 (A) → ≈ 95 (B) → ≈ 30 (C) → 0 (F). Codacy 397 → ≈ 112 (A) → ≈ 40 (C) → ≈ 30 (D) → 0 (F). The Quality Gate conditions on `main` stay `OK` and `coverage` stays ≥ 93.3 %.
+After batch F's final merge analysis, every frozen inventory id must be confirmed as [FR-002](./spec.md#functional-requirements) requires. Record both live counts and attribute findings outside the inventory to the follow-up round (issue #207); those counts may be nonzero under the scope amendment. The Quality Gate conditions on `main` stay `OK` and `coverage` stays ≥ 93.3 %.
 
 ## Disposition record check (every batch, and batch F)
 
@@ -185,7 +185,7 @@ node scripts/quality-debt-record.mjs --check --planned   # between batches: ever
 node scripts/quality-debt-record.mjs --check             # batch F: every planned state is confirmed by the service
 ```
 
-Expected: `--check --planned` exits 0 once every batch has merged; `--check` exits 0 only at the end of F with `745 ids: 0 missing, 0 duplicate, 0 open, 0 unconfirmed, 0 resolved-without-reason`. A random sample of 20 rows traces to a PR, a service comment, or a configuration line.
+Expected: `--check --planned` exits 0 once every batch has merged; `--check` exits 0 only at the end of F with `745 ids: 0 missing, 0 duplicate, 0 open, 0 unconfirmed, 0 resolved-without-reason, 0 unknown, 0 without-where, 0 without-verdict`. A random sample of 20 rows traces to a PR, a service comment, or a configuration line.
 
 ## Live inventory coverage (after each merge's analyses)
 
@@ -193,19 +193,91 @@ Expected: `--check --planned` exits 0 once every batch has merged; `--check` exi
 node scripts/quality-debt-record.mjs --check-live
 ```
 
-This reads both services' public current-issue searches for `main`. A complete search whose IDs are
-all covered by the inventory exits 0 without output. An uncovered ID is reported with its service and
-exits 1; a failed request or incomplete/invalid page also exits 1. The mode does not read credentials
-or the ledger and writes no files. A successful coverage check can include known open issues, so the
-service-count checks above remain required for the final 0 / 0 result.
+This validates that ledger IDs belong to the inventory and are unique before reading both services'
+public current-issue searches for `main` in parallel.
+It reports `uncovered` IDs outside the frozen inventory, `contradicted` findings matching a
+confirmed `fixed`/`excluded` ID, a confirmed `resolved` **Sonar** ID, or a `(service, rule, file)`
+triple whose inventory rows are all confirmed `fixed` or `excluded`, and `invalid` findings whose
+comparison fields cannot be read. The same confirmed ID is
+contradicted even if its code moved. Planned dispositions claim nothing; an `open`, `resolved`,
+missing or unconfirmed sibling prevents a triple claim. A confirmed `resolved` Sonar ID that comes
+back from the search has had its resolution reopened, which `resolved=false` makes meaningful; the
+same test is not applied to Codacy, whose search returns ignored issues undistinguished, nor to any
+triple, because a `resolved` row claims only its own ID. The claim's rule and file come from the frozen inventory, never a ledger copy.
+A triple match cannot distinguish a regrown finding from a new instance of the same rule in the same
+file. It deliberately reports both: either means the confirmed `fixed`/`excluded` claim that the rule
+no longer fires in that file no longer holds. Sonar can re-key issue IDs, and Codacy's content-hash
+IDs can change when a line moves, so the triple does not establish a stable finding identity across
+analyses. An exact-ID return is the stronger signal: the specific finding is back.
+Live comparisons validate Sonar `rule` and `component` (stripping exactly `ojungo69_free-mem:` and
+requiring a non-empty remainder), or Codacy `patternInfo.id` and `filePath`. Only `--check-live`
+requires those comparison fields; `--confirm` and apply modes still validate IDs but do not read
+those fields. An invalid comparison field adds `<id>: <sanitized reason>` to that service's `invalid`
+group while its ID still receives any `uncovered` or `contradicted` verdict that does not need those
+fields; other findings are still classified. Any non-empty group sets exit 1, and empty
+groups are not printed. No uncovered, contradicted or invalid findings means exit 0 without output;
+a failed request or invalid/incomplete page still exits 1. The mode reads no credentials and writes no files. Known open issues can still pass, so
+the service-count checks above remain required to record each service's live count and its owner alongside the frozen inventory's confirmed dispositions (T045; issue #207). *(Amended 2026-09-13; the original text was "the service-count checks above remain required for final 0 / 0".)*
 
-The real `--apply-codacy` mode also reads the complete current issue set before its first PATCH.
-Pending resolved IDs already absent from that set receive a local confirmation with the search
-absence and timestamp. Current IDs retain the existing reason/comment, incremental persistence and
-fail-fast handling: a refused PATCH stops later rows. `--apply-codacy --dry-run` stays offline and
-prints all planned PATCH requests; filtering against the live set happens only in the real run.
+`--apply-sonar` reads each pending resolved ID's state on `main` before its first write, in chunks of
+at most 100 IDs and without `resolved=false`. Requests are spaced by 200 ms across chunk reads and
+writes. It decides from live status and resolution, never the
+ledger's `transitioned` marker. The expected resolution is `WONTFIX` for `wontfix` (the default), or
+`FALSE-POSITIVE` for `falsepositive`. Both real and dry runs print one decision line per pending row:
 
-## Final analysis confirmation (batch F, before writing 0 / 0)
+- `REFUSE Sonar <id>: closed by the service (resolution <resolution>); re-disposition this row`
+  for a `CLOSED` issue with a known resolution (`FIXED`, `REMOVED`, `WONTFIX` or
+  `FALSE-POSITIVE`). A missing or
+  unrecognised resolution prints `(see specs/008-quality-debt-zero/quickstart.md)` instead of the
+  response value.
+- `RESOLVED Sonar <id>: transition already applied, posting the comment` for a service `RESOLVED`
+  issue whose resolution matches the ledger transition. Only `add_comment` is sent, even when
+  `transitioned` is absent. Success writes `confirmed` and removes `transitioned`.
+- `REFUSE Sonar <id>: resolved by the service (resolution <actual>, expected <expected>); re-disposition this row`
+  for a `RESOLVED` issue whose known resolution does not match. A missing or unrecognised actual
+  resolution uses the same quickstart reference in place of the response value.
+- `REFUSE Sonar <id>: the issue search does not report this id; re-disposition this row` for a
+  missing requested ID.
+- `APPLY Sonar <id>: the transition then the comment` otherwise (`OPEN`, `CONFIRMED`, `REOPENED`): transition, then
+  comment, even if a stale `transitioned` marker exists. Successful transitions write that marker
+  as a crash-safety record; each successful call is persisted immediately.
+
+A status outside `OPEN`, `CONFIRMED`, `REOPENED`, `RESOLVED` and `CLOSED` aborts before writes with a
+generic error that does not echo the response value. `status` and `resolution` were deprecated in
+SonarQube 10.4 in favour of `issueStatus`. Check whether the service dropped them before updating
+the response adapter and this decision table together.
+
+Refused rows receive no transition, comment or ledger change. Other rows are still processed, then
+one error names the refused count and IDs. An invalid or truncated search response still fails
+before any write: a page's reported total must equal the number of issues it returned.
+
+`--apply-sonar --dry-run` uses the public state search without credentials, prints the applicable
+POSTs after the decision lines, and makes no service or ledger writes. Refused rows still fail it.
+
+The real `--apply-codacy` mode PATCHes every pending `resolved` row with its existing reason and
+comment; it does not query the current-commit issue search. That search omitted four ids rewritten by
+earlier batches even though their records remained PATCHable, so only a successful HTTP response
+confirms a resolved row. Each success is persisted immediately. HTTP 404 prints
+`REFUSE Codacy <id>: the service does not hold this issue record; re-disposition this row` and leaves
+that row unconfirmed while processing later rows. One final error names the refused count and IDs.
+Any other request failure, including HTTP 401, 403 or 5xx, aborts immediately.
+`--apply-codacy --dry-run` stays offline and prints every planned PATCH request.
+
+## Record CLI regression checks
+
+```bash
+npm run typecheck
+npx eslint scripts/quality-debt-record.mjs scripts/quality-debt-services.mjs scripts/quality-debt-ledger.mjs scripts/quality-debt-record.test-support.mjs scripts/quality-debt-record.test.mjs scripts/quality-debt-record-services.test.mjs scripts/quality-debt-record-live.test.mjs scripts/quality-debt-record-confirm.test.mjs scripts/quality-debt-record-sonar.test.mjs
+node --test scripts/quality-debt-record.test.mjs scripts/quality-debt-record-services.test.mjs scripts/quality-debt-record-live.test.mjs scripts/quality-debt-record-confirm.test.mjs scripts/quality-debt-record-sonar.test.mjs
+pipx run lizard -l typescript scripts/quality-debt-record-services.test.mjs scripts/quality-debt-record.test.mjs scripts/quality-debt-record-confirm.test.mjs scripts/quality-debt-record-live.test.mjs scripts/quality-debt-record-sonar.test.mjs scripts/quality-debt-services.mjs scripts/quality-debt-record.mjs
+```
+
+Both live-test files and both implementation files must stay below 500 NLOC per file and 50 NLOC
+per function. These checks run the source CLI directly and require no build.
+
+## Final analysis confirmation (batch F, before recording the inventory disposition and live counts)
+
+(Amended 2026-09-13; the original heading read "Final analysis confirmation (batch F, before writing 0 / 0)".)
 
 ```bash
 SHA=$(git rev-parse origin/main)
@@ -216,7 +288,7 @@ curl -s "$B" | python3 -c "import sys,json; c=json.load(sys.stdin)['commit']; pr
 curl -s "$B/logs" | python3 -c "import sys,json; s={x['title']: x['status'] for x in json.load(sys.stdin)['data']['steps']}; print(s); need=['Opengrep','Lizard','markdownlint','Stylelint','ShellCheck','TSQLLint','SQLint']; bad=[t for t in need if s.get(t)!='success']; assert not bad, 'steps not successful: %s' % bad; other=[t for t,v in s.items() if v!='success' and t!='ESLint']; assert not other, 'other steps not successful: %s' % other; assert 'ESLint' not in s, 'ESLint step still runs (research R10: the tool is disabled by decision C3)'"
 ```
 
-Expected: the Sonar analysis `revision` equals the final SHA; the repository's `data.lastAnalysedCommit` is the final SHA with an `endedAnalysis` timestamp (`--confirm` re-checks exactly this and refuses with `Codacy: the last analysed commit is not <sha>` otherwise, because the issue search has no commit selector; it also requires the Sonar analysis `revision` to be the same SHA and refuses with `Sonar: analysis <key> is not of commit <sha>` otherwise; neither message repeats a value from a response, run the curl above to see it); the Codacy commit response (`{commit, quality, coverage, meta}`, shape read from the live API on 2026-09-07) has `commit.sha` equal to the SHA and an `endedAnalysis` timestamp; the analysis log lists every required step as `success` and no ESLint step at all (research R10: the tool crashed on every commit and is disabled by decision C3; a log that still shows it means the disable did not take). Every assert exits non-zero otherwise. Only then run the two count commands and record 0 / 0 with these ids. No repository edit follows this SHA: the polish tasks are part of the last pull request.
+Expected: the Sonar analysis `revision` equals the final SHA; the repository's `data.lastAnalysedCommit` is the final SHA with an `endedAnalysis` timestamp (`--confirm` re-checks exactly this and refuses with `Codacy: the last analysed commit is not <sha>` otherwise, because the issue search has no commit selector; it also requires the Sonar analysis `revision` to be the same SHA and refuses with `Sonar: analysis <key> is not of commit <sha>` otherwise; neither message repeats a value from a response, run the curl above to see it); the Codacy commit response (`{commit, quality, coverage, meta}`, shape read from the live API on 2026-09-07) has `commit.sha` equal to the SHA and an `endedAnalysis` timestamp; the analysis log lists every required step as `success` and no ESLint step at all (research R10: the tool crashed on every commit and is disabled by decision C3; a log that still shows it means the disable did not take). Every assert exits non-zero otherwise. Only then run the two count commands and record the frozen inventory's confirmed dispositions plus each service's live count and its owner (issue #207) with these analysis ids. *(Amended 2026-09-13; the original text was "Only then run the two count commands and record 0 / 0 with these ids".)* No repository edit follows this SHA: the polish tasks are part of the last pull request.
 
 ## Gate definitions unchanged (SC-006)
 

@@ -11,6 +11,16 @@ import {
 
 const CODACY = 'https://app.codacy.com/api/v3/analysis/organizations/gh/ojungo69/repositories/oboete';
 const codacyIssues = `${CODACY}/issues`;
+export const SONAR_PROJECT = 'ojungo69_free-mem';
+
+export function sonarFile(component) {
+  const prefix = `${SONAR_PROJECT}:`;
+  // A blank suffix would become a path that matches no claim, so the comparison would silently miss it.
+  if (typeof component !== 'string' || !component.startsWith(prefix) || !component.slice(prefix.length).trim()) {
+    throw new Error('Sonar issues search returned an invalid component');
+  }
+  return component.slice(prefix.length);
+}
 
 /** The resolved rows of one service that are still to be sent, validated; confirmed rows are `--check`'s business. */
 function pendingResolved(service, ledger, inventory) {
@@ -44,7 +54,7 @@ async function request(service, url, init, failure) {
     } catch (error) {
       throw new Error(`${service} request failed: ${error.name}`, { cause: error });
     }
-    if (!response.ok) throw new Error(failure(response.status));
+    if (!response.ok) throw Object.assign(new Error(failure(response.status)), { status: response.status });
     return response;
   }
   throw new Error(`${service} request refused: ${new URL(url).origin} is not the service`);
@@ -100,12 +110,11 @@ async function postSonar(call, body, authorization) {
   return response.status;
 }
 
-/** The two Sonar calls of one resolved row; the transition is skipped once the ledger says it was made. */
-function sonarCalls(row) {
-  return [
-    { action: 'do_transition', fields: { issue: row.id, transition: row.transition ?? 'wontfix' } },
-    { action: 'add_comment', fields: { issue: row.id, text: row.where } },
-  ].filter((call) => !(call.action === 'do_transition' && row.transitioned));
+/** The Sonar calls of one resolved row; an issue the service already resolved needs the comment alone. */
+function sonarCalls(row, resolved) {
+  const comment = { action: 'add_comment', fields: { issue: row.id, text: row.where } };
+  if (resolved) return [comment];
+  return [{ action: 'do_transition', fields: { issue: row.id, transition: row.transition ?? 'wontfix' } }, comment];
 }
 
 /** Records one successful Sonar call on its row: progress after the transition, completion after the comment. */
@@ -119,24 +128,56 @@ function recordSonarCall(row, call, status) {
   }
 }
 
+const sonarResolutions = new Set(['FIXED', 'REMOVED', 'WONTFIX', 'FALSE-POSITIVE']);
+let sonarRequestCount = 0;
+
+function sonarRefusal(row, state) {
+  if (!state) return 'the issue search does not report this id';
+  const resolution = sonarResolutions.has(state.resolution) ? `resolution ${state.resolution}`
+    : 'see specs/008-quality-debt-zero/quickstart.md';
+  if (state.status === 'CLOSED') return `closed by the service (${resolution})`;
+  const expected = (row.transition ?? 'wontfix') === 'falsepositive' ? 'FALSE-POSITIVE' : 'WONTFIX';
+  if (state.status === 'RESOLVED' && state.resolution !== expected) {
+    return `resolved by the service (${resolution}, expected ${expected})`;
+  }
+  return null;
+}
+
+async function applySonarCalls(row, resolved, ledger, dryRun, authorization) {
+  for (const call of sonarCalls(row, resolved)) {
+    const body = new URLSearchParams(call.fields);
+    if (dryRun) {
+      console.log(`POST https://sonarcloud.io/api/issues/${call.action} ${body}`);
+      continue;
+    }
+    if (sonarRequestCount++) await pause(200);
+    recordSonarCall(row, call, await postSonar(call, body, authorization));
+    writeLedger(ledger);
+  }
+}
+
 export async function applySonar(ledger, dryRun, inventory) {
+  sonarRequestCount = 0;
   const rows = pendingResolved('sonar', ledger, inventory);
   if (rows.length === 0) return;
   const authorization = dryRun ? undefined : sonarAuthorization();
-  let firstCall = true;
+  const states = await sonarIssueStates(rows.map((row) => row.id), authorization);
+  const refused = [];
   for (const row of rows) {
-    for (const call of sonarCalls(row)) {
-      const body = new URLSearchParams(call.fields);
-      if (dryRun) {
-        console.log(`POST https://sonarcloud.io/api/issues/${call.action} ${body}`);
-        continue;
-      }
-      if (!firstCall) await pause(200);
-      firstCall = false;
-      recordSonarCall(row, call, await postSonar(call, body, authorization));
-      writeLedger(ledger);
+    const state = states.get(row.id);
+    const reason = sonarRefusal(row, state);
+    if (reason) {
+      console.log(`REFUSE Sonar ${row.id}: ${reason}; re-disposition this row`);
+      refused.push(row.id);
+      continue;
     }
+    const resolved = state.status === 'RESOLVED';
+    console.log(resolved
+      ? `RESOLVED Sonar ${row.id}: transition already applied, posting the comment`
+      : `APPLY Sonar ${row.id}: the transition then the comment`);
+    await applySonarCalls(row, resolved, ledger, dryRun, authorization);
   }
+  if (refused.length) throw new Error(`Sonar refused ${refused.length} row(s): ${refused.join(', ')}`);
 }
 
 async function codacyHeaders() {
@@ -150,30 +191,34 @@ export async function applyCodacy(ledger, dryRun, inventory) {
   const rows = pendingResolved('codacy', ledger, inventory);
   if (rows.length === 0) return;
   const headers = dryRun ? undefined : await codacyHeaders();
-  const open = dryRun ? undefined : await openCodacyIssues();
+  const refused = [];
   for (const row of rows) {
     const body = JSON.stringify({ ignored: true, reason: row.reason, comment: row.where });
     if (dryRun) {
       console.log(`PATCH ${codacyIssues}/${encodeURIComponent(row.id)} ${body}`);
       continue;
     }
-    if (!open.has(row.id)) {
-      row.confirmed = `Absent from current Codacy issue search ${new Date().toISOString()}`;
-      writeLedger(ledger);
+    await pause(200);
+    let response;
+    try {
+      response = await request('Codacy', `${codacyIssues}/${encodeURIComponent(row.id)}`, { method: 'PATCH', headers, body },
+        (status) => `Codacy ${row.id}: PATCH returned HTTP ${status}`);
+    } catch (error) {
+      if (error.status !== 404) throw error;
+      console.log(`REFUSE Codacy ${row.id}: the service does not hold this issue record; re-disposition this row`);
+      refused.push(row.id);
       continue;
     }
-    await pause(200);
-    const response = await request('Codacy', `${codacyIssues}/${encodeURIComponent(row.id)}`, { method: 'PATCH', headers, body },
-      (status) => `Codacy ${row.id}: PATCH returned HTTP ${status}`);
     await discardBody(response);
     row.confirmed = `HTTP ${response.status} ${new Date().toISOString()}`;
     writeLedger(ledger);
   }
+  if (refused.length) throw new Error(`Codacy refused ${refused.length} row(s): ${refused.join(', ')}`);
 }
 
 // Both labels must describe the same repository state, so the Sonar analysis must be of the Codacy commit.
 async function verifySonarAnalysis(analysis, sha, authorization) {
-  const response = await request('Sonar', 'https://sonarcloud.io/api/project_analyses/search?project=ojungo69_free-mem&branch=main&ps=1',
+  const response = await request('Sonar', `https://sonarcloud.io/api/project_analyses/search?project=${SONAR_PROJECT}&branch=main&ps=1`,
     { method: 'GET', headers: { Authorization: authorization } }, (status) => `Sonar analyses search returned HTTP ${status}`);
   const latest = (await readBody('Sonar', response)).analyses?.[0];
   // Messages never carry a value taken from a response body; the quickstart shows how to look it up.
@@ -206,7 +251,7 @@ function sonarTotal(data, page, previous) {
   return total;
 }
 
-/** Adds valid service ids from one page to `open`, refusing repeats; Codacy ids are lowercase hex. */
+/** Adds validated ids from one page, refusing repeats; Codacy ids are lowercase hex. */
 function collectIds(open, items, field, service) {
   for (const item of items) {
     const id = item?.[field];
@@ -214,17 +259,17 @@ function collectIds(open, items, field, service) {
       throw new Error(`${service} issues search returned an invalid id`);
     }
     if (open.has(id)) throw new Error(`${service} issues search returned a repeated id`);
-    open.add(id);
+    open.set(id, item);
   }
 }
 
 export async function openSonarIssues(authorization) {
-  const open = new Set();
+  const open = new Map();
   const headers = authorization === undefined ? {} : { Authorization: authorization };
   let total;
   for (let page = 1; ; page++) {
     const response = await request('Sonar',
-      `https://sonarcloud.io/api/issues/search?componentKeys=ojungo69_free-mem&branch=main&resolved=false&ps=500&p=${page}`,
+      `https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=main&resolved=false&ps=500&p=${page}`,
       { method: 'GET', headers }, (status) => `Sonar issues search returned HTTP ${status}`);
     const data = await readBody('Sonar', response);
     total = sonarTotal(data, page, total);
@@ -234,6 +279,40 @@ export async function openSonarIssues(authorization) {
       return open;
     }
   }
+}
+
+/** Every status the issues search may report; `applySonar` decides a row from it, so an unknown one is a refusal. */
+const sonarStatuses = new Set(['OPEN', 'CONFIRMED', 'REOPENED', 'RESOLVED', 'CLOSED']);
+
+/** Read every pending id, including resolved and closed issues hidden by the open search. */
+export async function sonarIssueStates(ids, authorization) {
+  const states = new Map();
+  const headers = authorization === undefined ? {} : { Authorization: authorization };
+  for (let offset = 0; offset < ids.length; offset += 100) {
+    const chunk = ids.slice(offset, offset + 100);
+    if (sonarRequestCount++) await pause(200);
+    const response = await request('Sonar',
+      `https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=main&issues=${encodeURIComponent(chunk.join(','))}&ps=100`,
+      { method: 'GET', headers }, (status) => `Sonar issues search returned HTTP ${status}`);
+    const data = await readBody('Sonar', response);
+    const total = sonarTotal(data, 1);
+    const found = new Map();
+    collectIds(found, data.issues, 'key', 'Sonar');
+    for (const [id, issue] of found) {
+      const { status, resolution } = issue;
+      // applySonar transitions every status it does not recognise as terminal, so an unknown one is refused here.
+      if (!sonarStatuses.has(status)) {
+        throw new Error('Sonar issues search returned an unknown status; the service may have dropped status and resolution'
+          + ' (deprecated in SonarQube 10.4 in favour of issueStatus); see specs/008-quality-debt-zero/quickstart.md');
+      }
+      if (resolution !== undefined && (typeof resolution !== 'string' || !resolution)) {
+        throw new Error('Sonar issues search returned an invalid resolution');
+      }
+      states.set(id, { status, resolution });
+    }
+    if (found.size !== total) throw new Error('Sonar issues search returned an incomplete result');
+  }
+  return states;
 }
 
 /** The total a Codacy page reports (it may omit it), checked against the earlier pages. */
@@ -250,7 +329,7 @@ function codacyTotal(data, previous) {
 }
 
 export async function openCodacyIssues() {
-  const open = new Set();
+  const open = new Map();
   const cursors = new Set();
   const params = new URLSearchParams({ limit: '100' });
   let total;
@@ -301,6 +380,7 @@ function labelConfirmed(rows, open, label) {
       console.log(`${row.service} ${row.id}: still open`);
       stillOpen++;
     } else {
+      delete row.transitioned;
       row.confirmed = label;
     }
   }

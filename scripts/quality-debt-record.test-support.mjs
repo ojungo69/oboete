@@ -14,6 +14,13 @@ export const codacyRepository = 'https://app.codacy.com/api/v3/analysis/organiza
 export const confirmArgs = ['--confirm', '--sonar-analysis', 'analysis-key', '--codacy-commit', 'commit-sha'];
 export const codacyHarnessId = 'cdcb204be8f7e0941ec2d1eca871d4';
 export const codacyViewerId = '7001b39120b60918527820572a47897';
+export const sonarIssue = (key, fields = {}) => ({
+  key, rule: 'typescript:S3776', component: 'ojungo69_free-mem:src/fixture.ts', status: 'OPEN', ...fields,
+});
+export const codacyIssue = (issueId, fields = {}) => ({
+  issueId, patternInfo: { id: 'Lizard_nloc-medium' }, filePath: 'src/fixture.ts', ...fields,
+});
+export const sonarOpen = (...ids) => ({ body: { issues: ids.map((id) => sonarIssue(id)), paging: { total: ids.length } } });
 
 export function fixture(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'quality-debt-record-'));
@@ -59,6 +66,11 @@ export function readLedger(cwd) {
   return JSON.parse(readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8'));
 }
 
+export function evidenceText(cwd) {
+  return Object.fromEntries(['sonar-main-issues.json', 'codacy-main-issues.json', 'ledger.json', 'allocation.json']
+    .map((name) => [name, readFileSync(join(cwd, evidence, name), 'utf8')]));
+}
+
 export function readCalls(cwd) {
   const path = join(cwd, 'calls.jsonl');
   return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').map(JSON.parse) : [];
@@ -82,6 +94,12 @@ export function run(cwd, args = [], preload = '') {
 }
 
 
+function nextResponse(responses, url) {
+  const queue = Array.isArray(responses) ? responses
+    : responses[new URL(url).hostname === 'sonarcloud.io' ? 'sonar' : 'codacy'];
+  return queue.shift();
+}
+
 // expected is the credential the recorded `authMatches` is compared against. A test that writes a
 // token file of its own passes the token it wrote, so the boolean says the reader sent that exact
 // value rather than merely something other than the default fixture.
@@ -96,6 +114,7 @@ export function apiStub(responses, verification = {}, expected = 'fixture-token'
     timers.setTimeout = async (ms) => { record({ sleep: ms }); };
     syncBuiltinESMExports();
     const responses = ${JSON.stringify(responses)};
+    const nextResponse = ${nextResponse.toString()};
     const verification = ${JSON.stringify({
       sonar: { body: { analyses: [{ key: 'analysis-key', revision: 'commit-sha' }] } },
       codacy: { body: { data: { lastAnalysedCommit: { sha: 'commit-sha', endedAnalysis: '2026-09-07T00:00:00Z' } } } },
@@ -117,7 +136,7 @@ export function apiStub(responses, verification = {}, expected = 'fixture-token'
       else if (String(url) === '${codacyRepository}') {
         if (headers.has('authorization') || headers.has('api-token')) throw new Error('expected anonymous request');
         response = verification.codacy;
-      } else response = responses.shift();
+      } else response = nextResponse(responses, url);
       if (!response) throw new Error('unexpected request');
       if (response.error) {
         const error = new TypeError('Invalid header: ' + (headers.get('authorization') ?? headers.get('api-token')));
@@ -129,6 +148,19 @@ export function apiStub(responses, verification = {}, expected = 'fixture-token'
         return new Response(stream, { status: response.status ?? 200 });
       }
       return new Response(response.body === undefined ? null : JSON.stringify(response.body), { status: response.status ?? 200 });
+    };
+  `;
+}
+
+export function publicApiStub(responses) {
+  return `${apiStub(responses)}
+    os.homedir = () => { throw new Error('credentials accessed during public issue search'); };
+    syncBuiltinESMExports();
+    const publicFetch = globalThis.fetch;
+    globalThis.fetch = (url, init) => {
+      const headers = new Headers(init.headers);
+      if (headers.has('authorization') || headers.has('api-token')) throw new Error('authentication sent during public issue search');
+      return publicFetch(url, init);
     };
   `;
 }

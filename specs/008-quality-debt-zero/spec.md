@@ -8,6 +8,8 @@
 
 **Input**: User description: "Quality debt to zero on SonarCloud and Codacy for the oboete repo (ojungo69/oboete, main at 5e03d67f). Goal: SonarCloud main branch shows 0 open issues and Codacy shows 0 current issues, without weakening any gate that currently binds and without changing observable behaviour of the oboete CLI, hooks, MCP server, viewer, or worker. [...] Each finding must end in exactly one of three states, recorded where reviewers can see it: fixed in code; marked as won't fix / false positive on the tool with a one-line reason; or excluded by configuration when the rule cannot apply to the file class. Security-flavoured findings must be examined individually by reading the code. Cognitive-complexity refactors must keep the existing unit tests green and must not change the hook budgets, deadlines, or wire formats. Work lands as a series of small PRs on main, each gated the same way as PR #155, and the daily dogfood cron keeps running against main throughout. Out of scope: new features, M2 work, changes to test coverage thresholds, and any edit to the gate definitions themselves."
 
+(Scope amended 2026-09-13; the quoted Input above preserves the original request. FR-002 defines the current completion criterion; the Scope amendment below explains its rationale.)
+
 ## Starting Point
 
 M1 alpha merged to `main` at 5e03d67f (PR #155, then PR #158). Both analysis services still list findings against `main`:
@@ -32,16 +34,16 @@ The SonarCloud rule breakdown by count: cognitive complexity 58 (rated critical)
 
 ### User Story 1 - Every finding has a recorded disposition (Priority: P1)
 
-A maintainer or reviewer opens SonarCloud or Codacy for `main` and sees zero open findings. For any finding that existed on 2026-09-07 they can find out what happened to it: it was fixed in a named pull request, it was marked "won't fix" or "false positive" on the service with a one-line reason, or it was excluded by a configuration change whose scope is narrow enough to be reviewed.
+A maintainer or reviewer opens the disposition record alongside SonarCloud or Codacy for `main` and sees a confirmed disposition for every finding in the frozen 745-id inventory, with each service's live count and the owner of each remaining finding recorded. For any finding in that inventory they can find out what happened to it: it was fixed in a named pull request, it was marked "won't fix" or "false positive" on the service with a one-line reason, or it was excluded by a configuration change whose scope is narrow enough to be reviewed. *(Amended 2026-09-14; the original opening was "A maintainer or reviewer opens SonarCloud or Codacy for `main` and sees zero open findings." See FR-002 and "Scope amendment" under Assumptions.)*
 
 **Why this priority**: This is the whole feature. A backlog of unexplained findings is what the user asked to remove; a backlog of findings silently suppressed would be worse than the current state, because it would look clean while hiding real problems.
 
-**Independent Test**: Query both services for `main`: open count 0 on each. Pick ten findings at random from the 2026-09-07 inventory and trace each to a merged pull request, a service-side resolution with a reason, or a configuration exclusion with a stated file class.
+**Independent Test**: Pick ten findings at random from the frozen 745-id inventory and trace each to a merged pull request, a service-side resolution with a reason, or a configuration exclusion with a stated file class; then query both services for `main`, verify every inventory entry is confirmed as FR-002 requires, and check that each service's live count and the owner of each remaining finding are recorded. *(Amended 2026-09-13; the original text opened with "Query both services for `main`: open count 0 on each." See "Scope amendment" under Assumptions.)* *(Amended 2026-09-14; the previous amendment required "every remaining live finding is outside that inventory". Confirmed Codacy ignores and later regrowth can remain live; the record keeps their confirmation and ownership.)*
 
 **Acceptance Scenarios**:
 
-1. **Given** the 2026-09-07 inventory of 310 SonarCloud findings, **When** the feature is complete, **Then** SonarCloud lists 0 open issues on `main` and every inventory entry is either absent because the code changed, or resolved on the service with a reason.
-2. **Given** the 2026-09-07 inventory of 397 Codacy findings, **When** the feature is complete, **Then** Codacy lists 0 current issues on `main` and each inventory entry is fixed, ignored with a reason, or covered by a configuration exclusion that names the file class it applies to.
+1. **Given** the frozen inventory of 332 SonarCloud findings (310 from the 2026-09-07 baseline plus 22 additions), **When** the feature is complete, **Then** every inventory entry is confirmed as FR-002 requires, and SonarCloud's live count and the owner of each remaining finding are recorded. *(Amended 2026-09-13; the original required "SonarCloud lists 0 open issues on `main`".)* *(Amended 2026-09-14; the previous amendment required "any finding SonarCloud still lists on `main` is outside that inventory"; confirmed dispositions and live ownership now follow FR-002.)*
+2. **Given** the frozen inventory of 413 Codacy findings (397 from the 2026-09-07 baseline plus 16 additions), **When** the feature is complete, **Then** each inventory entry is confirmed as FR-002 requires, and Codacy's live count and the owner of each remaining finding are recorded. *(Amended 2026-09-13; the original required "Codacy lists 0 current issues on `main`".)* *(Amended 2026-09-14; the previous amendment required "any finding Codacy still lists on `main` is outside that inventory"; confirmed ignores and later regrowth can remain live.)*
 3. **Given** a finding that was resolved on the service rather than in code, **When** a reviewer reads the resolution, **Then** the reason is one sentence that a person unfamiliar with the session can check against the code.
 
 ---
@@ -119,14 +121,21 @@ The maintainer wants the cleanup delivered as a series of pull requests, each sm
 - Codacy and SonarCloud flag the same line for different reasons: one code change is preferred over two service-side resolutions.
 - A security-flavoured finding turns out to be real: the fix is a security change and is reviewed as one, with its own test, before the mechanical batches continue.
 - The daily dogfood run fails during the feature: the failure is treated as a possible regression from the most recent merge before the soak continues, and the evidence cron's automatic issue is used as the record.
-- Marking findings on the service requires a permission the session does not have: the disposition is recorded in the pull request or a tracking issue instead, and the service-side marking is listed for the maintainer.
+- Marking findings on the service requires a permission the session does not have: the disposition is recorded in the pull request or a tracking issue instead, and the service-side marking is listed for the maintainer. This list is an intermediate artefact; completion still requires the service action and its confirmation (FR-002; plan C1).
 
 ## Requirements *(mandatory)*
 
 ### Functional Requirements
 
-- **FR-001**: Every finding in the 2026-09-07 inventories (310 on SonarCloud, 397 on Codacy) MUST end in exactly one of three states: fixed in code, resolved on the service with a one-line reason, or excluded by a configuration change that names a file class and rule set.
-- **FR-002**: SonarCloud MUST report 0 open issues on `main`, and Codacy MUST report 0 current issues on `main`, at the end of the feature and after the next analysis of the final merge.
+- **FR-001**: Every finding in the frozen 745-id inventory (332 on SonarCloud, 413 on Codacy) MUST end in exactly one of three states: fixed in code, resolved on the service with a one-line reason, or excluded by a configuration change that names a file class and rule set.
+- **FR-002**: Every finding of the frozen 745-id inventory MUST be closed on `main` or carry a
+  disposition confirmed as the [data model defines `confirmed`](./data-model.md#disposition) for that
+  row's state, after the next analysis of the final merge; the record MUST state each service's
+  remaining live count, the pull request that owns each part, and the attribution of every live
+  finding outside the inventory to the follow-up round (#207).
+  *(Amended 2026-09-13 with SC-001 and SC-002; the original text was "SonarCloud MUST report 0 open
+  issues on `main`, and Codacy MUST report 0 current issues on `main`, at the end of the feature and
+  after the next analysis of the final merge." See "Scope amendment" under Assumptions.)*
 - **FR-003**: No gate that binds today MUST be weakened: the SonarCloud Quality Gate conditions, the coverage measurement and its threshold, CodeQL, semgrep, secret scanning, DCO, and the CI test jobs stay as they are.
 - **FR-004**: Configuration exclusions MUST be scoped to a file class (directory or extension) and MUST NOT cover the shipped `src/` tree, except for rules that are inapplicable to a whole file type (for example rules for a different database engine on SQLite migration files).
 - **FR-005**: Every security-flavoured finding (timing attack, prototype pollution, SSRF, tainted SQL, non-literal RegExp, and non-literal file path inside `src/`) MUST be examined individually with a written verdict that names the origin of the value in question.
@@ -154,12 +163,21 @@ The maintainer wants the cleanup delivered as a series of pull requests, each sm
 
 ### Measurable Outcomes
 
-- **SC-001**: SonarCloud shows 0 open issues on `main` after the final merge's analysis, down from 310.
-- **SC-002**: Codacy shows 0 current issues on `main` after the final merge's analysis, down from 397.
-- **SC-003**: 100 % of the 2026-09-07 inventory entries have a disposition in the record, and a random sample of 20 can be traced to a pull request, a service resolution with a reason, or a named exclusion.
+- **SC-001**: Every SonarCloud finding of the frozen inventory (332) is confirmed as FR-002
+  requires, and the record states the remaining live
+  count with the pull request that owns each part. *(Amended 2026-09-13; the original text was
+  "SonarCloud shows 0 open issues on `main` after the final merge's analysis, down from 310". See
+  "Scope amendment" below.)*
+- **SC-002**: The same for Codacy and its 413 frozen inventory findings, confirmed as FR-002 requires. *(Amended 2026-09-13; the original text was
+  "Codacy shows 0 current issues on `main` after the final merge's analysis, down from 397".)*
+- **SC-003**: 100 % of the frozen 745 inventory entries have a disposition in the record, and a random sample of 20 can be traced to a pull request, a service resolution with a reason, or a named exclusion.
 - **SC-004**: Every security-flavoured finding that is not excluded by file class has a written verdict (in `src/`: 6 timing-attack, 2 prototype-pollution, 1 SSRF, 2 tainted-SQL, 2 unsafe dynamic method, 3 non-literal-RegExp; plus the 2 harness `sudo` lines, the 1 `ci.yml` line, and the 13 super-linear regexes); any real one is fixed with a test.
 - **SC-005**: All existing unit, migration, and E2E harness tests pass on every merged pull request with no assertion changed; the coverage figure on `main` does not fall below the value at 5e03d67f (93.3 %).
-- **SC-006**: The SonarCloud Quality Gate conditions, CodeQL, semgrep, secret scanning, DCO, and the CI jobs are unchanged (their definitions have the same content before and after the feature).
+- **SC-006**: No SonarCloud Quality Gate condition, CodeQL, semgrep, secret-scanning, DCO, or CI job is
+  removed, relaxed, or narrowed by this feature, matching FR-003. An additive step is allowed and one
+  was added: `.github/workflows/ci.yml` gained a five-line `node --test` run of the record tests
+  (T010). *(Amended 2026-09-13; the original text required the definitions to have "the same content
+  before and after the feature", which the additive step contradicts while strengthening the gate.)*
 - **SC-007**: The daily dogfood run passes on every day the feature is in progress, or each failure is traced to a cause and recorded.
 - **SC-008**: No pull request in the series closes more than one rule family or module area, and every one passed the full merge gate before merge.
 
@@ -167,7 +185,26 @@ The maintainer wants the cleanup delivered as a series of pull requests, each sm
 
 - Service-side resolutions on SonarCloud and Codacy can be made with the credentials already available to the maintainer's tooling; if a resolution needs a permission the session lacks, the disposition is recorded in the repository and the marking is listed for the maintainer to apply.
 - The Codacy pattern set and the SonarCloud "Sonar way" profile stay as they are; the feature does not switch quality profiles, and it does not raise or lower the Codacy "new issues" threshold.
-- The SonarCloud and Codacy counts quoted above are the 2026-09-07 baseline; findings that appear during the feature because of new merges are handled in the same three states, and the end criterion is 0 on both services, not "baseline minus 707".
+- The SonarCloud and Codacy counts quoted above are the 2026-09-07 baseline. **Scope amendment
+  (2026-09-13)**: the original end criterion was 0 on both services, not "baseline minus 707", and
+  findings arriving during the feature were to be handled in the same three states. Two unrelated
+  features landed on `main` while the batches ran -- PR #190 (feature 009 memory core) and PR #211 --
+  and their findings outnumber the frozen inventory: 460 live findings are outside it -- 248 on
+  SonarCloud, every one of them in a file changed after batch D's merge, and 212 on Codacy, of which
+  174 are ESLint 8 output from a tool whose step fails on every commit (R10) and 38 are not. Keeping "0 on both services" as this feature's exit condition would
+  fold an unbounded second campaign into it and would make the exit depend on code the feature never
+  touched. The feature therefore closes against the inventory it froze: **745 IDs (332 SonarCloud, 413 Codacy)**,
+  the 707 baseline IDs plus 38 additions, each appended by the commit named in
+  [data-model.md](./data-model.md#inventory-provenance). The baseline counts
+  quoted in the stories and amendment notes remain historical; completion covers all 745 retained IDs.
+  *(Clarified 2026-09-14; the original completion references used "the 2026-09-07 inventory",
+  "310" SonarCloud and "397" Codacy findings; the stories, FR-001/FR-002 and SC-001/SC-002/SC-003
+  now explicitly cover the final frozen inventory.)*
+- Every live finding outside the frozen inventory is measured, attributed, and handed to the
+  follow-up round, with the measurements and the ownership table in
+  `docs/evidence/quality-debt-2026-09.md`. Six file-length and four function-level findings
+  that the batches had closed were regrown by #190 after batch D's merge; their measurements at both
+  revisions are recorded rather than reopened as this feature's work.
 - The E2E harness under `scripts/e2e` is an operator-run tool that is not part of the published package. Readability rules (complexity, function length, mechanical rewrites) apply to it as to `src/`. Only rules whose premise is "untrusted input reaches this call" (for example non-literal file path on an operator-owned harness) may be scoped away from it by configuration, and the same rules keep running on `src/`.
 - Mechanical rewrites and readability-preserving refactors outside the security-owned modules may be delegated to an external coding tool and are reviewed before merge; security-owned modules (injection, MCP server, viewer server, transfer, database queries) and any real security finding are handled by the maintainer's own session.
 - The daily dogfood cron on the isolated account continues against `main` unchanged and is the behavioural regression signal for hook-path refactors, alongside the existing unit and E2E suites.
