@@ -14,8 +14,10 @@ Disposition record of feature 008 (`specs/008-quality-debt-zero/`): every SonarC
 **Service calls.** Every pending `resolved` row is now recorded at its service: **10 SonarCloud
 transitions** with their comments, **23 Codacy ignores** with their reason and comment, and 4 Codacy
 rows whose ID the service no longer reports, which carry the search timestamp instead of a call result.
-Both apply modes read the complete live issue set before their first write, so an ID that has already
-gone is handled instead of failing the run on an HTTP error.
+`--apply-sonar` reads each pending row's own `status` and `resolution` before its first write and
+decides from them; `--apply-codacy` reads the complete current issue set, because Codacy exposes no
+resolution field. Either way an ID that has already gone is handled rather than met as an HTTP error
+mid-run.
 
 **Five rows were re-dispositioned, not confirmed.** The first `--apply-sonar` run stamped five rows
 "absent from the current issue search" — and a query of those IDs without the `resolved=false` filter
