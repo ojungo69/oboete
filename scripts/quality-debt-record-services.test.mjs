@@ -19,7 +19,7 @@ test('--apply-sonar --dry-run prints both calls without reading credentials or s
   const result = run(cwd, ['--apply-sonar', '--dry-run'], publicApiStub([sonarOpen('s-regexp')]));
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, [
-    'APPLY Sonar s-regexp: 2 call(s)',
+    'APPLY Sonar s-regexp: the transition then the comment',
     'POST https://sonarcloud.io/api/issues/do_transition issue=s-regexp&transition=falsepositive',
     'POST https://sonarcloud.io/api/issues/add_comment issue=s-regexp&text=The+pattern+is+a+constant.', '',
   ].join('\n'));
@@ -37,7 +37,7 @@ test('--apply-sonar sends authenticated forms in order with a 200 ms pause betwe
     sonarOpen('s-worker', 's-regexp'), ...[200, 204, 200, 204].map((status) => ({ status })),
   ]));
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, 'APPLY Sonar s-worker: 2 call(s)\nAPPLY Sonar s-regexp: 2 call(s)\n');
+  assert.equal(result.stdout, 'APPLY Sonar s-worker: the transition then the comment\nAPPLY Sonar s-regexp: the transition then the comment\n');
   const events = readFileSync(join(cwd, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const expectedForms = [
     { issue: 's-worker', transition: 'wontfix' }, { issue: 's-worker', text: 'Input is bounded & constant.' },
@@ -236,7 +236,7 @@ test('--apply-sonar persists a successful transition but follows the live state 
   assert.equal(saved[2].confirmed, undefined);
   const preview = run(cwd, ['--apply-sonar', '--dry-run'], publicApiStub([sonarOpen('s-regexp')]));
   assert.equal(preview.status, 0, preview.stderr);
-  assert.equal(preview.stdout, 'APPLY Sonar s-regexp: 2 call(s)\n'
+  assert.equal(preview.stdout, 'APPLY Sonar s-regexp: the transition then the comment\n'
     + 'POST https://sonarcloud.io/api/issues/do_transition issue=s-regexp&transition=falsepositive\n'
     + 'POST https://sonarcloud.io/api/issues/add_comment issue=s-regexp&text=The+pattern+is+a+constant.\n');
   assert.deepEqual(readLedger(cwd), saved);

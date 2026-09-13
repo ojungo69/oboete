@@ -15,12 +15,10 @@ export const SONAR_PROJECT = 'ojungo69_free-mem';
 
 export function sonarFile(component) {
   const prefix = `${SONAR_PROJECT}:`;
-  if (typeof component !== 'string' || !component.startsWith(prefix)) {
+  if (typeof component !== 'string' || !component.startsWith(prefix) || component.length === prefix.length) {
     throw new Error('Sonar issues search returned an invalid component');
   }
-  const file = component.slice(prefix.length);
-  if (!file) throw new Error('Sonar issues search returned an invalid component');
-  return file;
+  return component.slice(prefix.length);
 }
 
 /** The resolved rows of one service that are still to be sent, validated; confirmed rows are `--check`'s business. */
@@ -111,12 +109,11 @@ async function postSonar(call, body, authorization) {
   return response.status;
 }
 
-/** The two Sonar calls of one resolved row; the live issue state decides which are still needed. */
-function sonarCalls(row) {
-  return [
-    { action: 'do_transition', fields: { issue: row.id, transition: row.transition ?? 'wontfix' } },
-    { action: 'add_comment', fields: { issue: row.id, text: row.where } },
-  ];
+/** The Sonar calls of one resolved row; an issue the service already resolved needs the comment alone. */
+function sonarCalls(row, resolved) {
+  const comment = { action: 'add_comment', fields: { issue: row.id, text: row.where } };
+  if (resolved) return [comment];
+  return [{ action: 'do_transition', fields: { issue: row.id, transition: row.transition ?? 'wontfix' } }, comment];
 }
 
 /** Records one successful Sonar call on its row: progress after the transition, completion after the comment. */
@@ -156,11 +153,11 @@ export async function applySonar(ledger, dryRun, inventory) {
       refused.push(row.id);
       continue;
     }
-    const calls = sonarCalls(row).filter((call) => status !== 'RESOLVED' || call.action === 'add_comment');
-    console.log(status === 'RESOLVED'
+    const resolved = status === 'RESOLVED';
+    console.log(resolved
       ? `RESOLVED Sonar ${row.id}: transition already applied, posting the comment`
-      : `APPLY Sonar ${row.id}: ${calls.length} call(s)`);
-    for (const call of calls) {
+      : `APPLY Sonar ${row.id}: the transition then the comment`);
+    for (const call of sonarCalls(row, resolved)) {
       const body = new URLSearchParams(call.fields);
       if (dryRun) {
         console.log(`POST https://sonarcloud.io/api/issues/${call.action} ${body}`);

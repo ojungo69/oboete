@@ -221,7 +221,7 @@ ledger's `transitioned` marker. The expected resolution is `WONTFIX` for `wontfi
   for a `RESOLVED` issue whose resolution does not match.
 - `REFUSE Sonar <id>: the issue search does not report this id; re-disposition this row` for a
   missing requested ID.
-- `APPLY Sonar <id>: 2 call(s)` otherwise (`OPEN`, `CONFIRMED`, `REOPENED`): transition, then
+- `APPLY Sonar <id>: the transition then the comment` otherwise (`OPEN`, `CONFIRMED`, `REOPENED`): transition, then
   comment, even if a stale `transitioned` marker exists. Successful transitions write that marker
   as a crash-safety record; each successful call is persisted immediately.
 

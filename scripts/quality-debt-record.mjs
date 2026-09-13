@@ -170,16 +170,15 @@ function check(rows, ledger, planned) {
 
 const ruleFile = (service, rule, file) => JSON.stringify([service, rule, file]);
 
+/** The comparison reads these four fields, so it validates them the way `collectIds` validates an id. */
+function text(value, service, field) {
+  if (typeof value !== 'string' || !value) throw new Error(`${service} issues search returned an invalid ${field}`);
+  return value;
+}
+
 function liveKey(service, issue) {
-  if (service === 'sonar') {
-    if (typeof issue.rule !== 'string' || !issue.rule) throw new Error('Sonar issues search returned an invalid rule');
-    return ruleFile(service, issue.rule, sonarFile(issue.component));
-  }
-  if (typeof issue.patternInfo?.id !== 'string' || !issue.patternInfo.id) {
-    throw new Error('Codacy issues search returned an invalid patternInfo.id');
-  }
-  if (typeof issue.filePath !== 'string' || !issue.filePath) throw new Error('Codacy issues search returned an invalid filePath');
-  return ruleFile(service, issue.patternInfo.id, issue.filePath);
+  if (service === 'sonar') return ruleFile(service, text(issue.rule, 'Sonar', 'rule'), sonarFile(issue.component));
+  return ruleFile(service, text(issue.patternInfo?.id, 'Codacy', 'patternInfo.id'), text(issue.filePath, 'Codacy', 'filePath'));
 }
 
 async function checkLive(rows, ledger) {

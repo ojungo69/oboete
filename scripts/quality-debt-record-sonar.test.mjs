@@ -88,7 +88,7 @@ for (const missing of [false, true]) {
       assert.equal(result.stderr, `Sonar refused 1 row(s): ${refused.id}\n`);
       const reason = missing ? 'the issue search does not report this id' : 'closed by the service (resolution FIXED)';
       assert.ok(result.stdout.includes(`REFUSE Sonar ${refused.id}: ${reason}; re-disposition this row`));
-      assert.ok(result.stdout.includes(`APPLY Sonar ${applied.id}: 2 call(s)`));
+      assert.ok(result.stdout.includes(`APPLY Sonar ${applied.id}: the transition then the comment`));
       const calls = readCalls(cwd).filter((call) => call.url);
       assert.deepEqual(calls.slice(1).map((call) => [call.method, call.url, call.body]), [
         ['POST', 'https://sonarcloud.io/api/issues/do_transition', { issue: applied.id, transition: applied.transition ?? 'wontfix' }],
@@ -135,7 +135,7 @@ for (const status of ['OPEN', 'CONFIRMED', 'REOPENED']) {
       { status: 200 }, { status: 204 },
     ]));
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, 'APPLY Sonar s-regexp: 2 call(s)\n');
+    assert.equal(result.stdout, 'APPLY Sonar s-regexp: the transition then the comment\n');
     assert.deepEqual(readCalls(cwd).filter((call) => call.method === 'POST').map((call) => [call.url, call.body]), [
       ['https://sonarcloud.io/api/issues/do_transition', { issue: 's-regexp', transition: 'falsepositive' }],
       ['https://sonarcloud.io/api/issues/add_comment', { issue: 's-regexp', text: ledger[2].where }],
@@ -166,7 +166,7 @@ test('--apply-sonar aggregates all refusal reasons after persisting an appliable
     'REFUSE Sonar s-worker: closed by the service (resolution REMOVED); re-disposition this row',
     'REFUSE Sonar s-sql: the issue search does not report this id; re-disposition this row',
     'REFUSE Sonar s-regexp: resolved by the service (resolution WONTFIX, expected FALSE-POSITIVE); re-disposition this row',
-    'APPLY Sonar s-open: 2 call(s)', '',
+    'APPLY Sonar s-open: the transition then the comment', '',
   ].join('\n'));
   assert.equal(result.stderr, 'Sonar refused 3 row(s): s-worker, s-sql, s-regexp\n');
   assert.deepEqual(readCalls(cwd).filter((call) => call.method === 'POST').map((call) => call.body.issue), ['s-open', 's-open']);
@@ -193,7 +193,7 @@ test('--apply-sonar --dry-run prints all three decisions and only applicable POS
     'REFUSE Sonar s-worker: closed by the service (resolution FIXED); re-disposition this row',
     'RESOLVED Sonar s-sql: transition already applied, posting the comment',
     'POST https://sonarcloud.io/api/issues/add_comment issue=s-sql&text=sonar-project.properties%3A2',
-    'APPLY Sonar s-regexp: 2 call(s)',
+    'APPLY Sonar s-regexp: the transition then the comment',
     'POST https://sonarcloud.io/api/issues/do_transition issue=s-regexp&transition=falsepositive',
     'POST https://sonarcloud.io/api/issues/add_comment issue=s-regexp&text=The+pattern+is+a+constant.', '',
   ].join('\n'));
