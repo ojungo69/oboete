@@ -82,7 +82,9 @@ They are listed so the next reader does not re-investigate them:
 Every figure below was read in this session from the artefact named, not from a task note.
 
 **Ledger** (`docs/evidence/quality-debt-2026-09/ledger.json`): 745 rows — 382 `fixed`,
-302 `excluded`, 61 `resolved`; 51 carry a security verdict. The `where` fields cite nine
+302 `excluded`, 61 `resolved`; 51 carry a `verdict` field and 46 of those are security-classified by
+the repository's own `securityPopulation`. The other five are the re-dispositioned rows (S3516 three
+times, S7784, S6551), which use the field to preserve their former resolution explanations. The `where` fields cite nine
 pull requests, one per merged batch: 20 rows cite #160, 118 cite #161, 53 cite #162,
 35 cite #163, 17 cite #164, 27 cite #165, 36 cite #166, 61 cite #173 and 18 cite #185.
 That is what T012, T020, T026, T035 and T041 claim.
@@ -233,6 +235,11 @@ above. Dispositions:
   at the paths the later extractions moved them to.
 - **27 WEAK tasks** — investigated, no change needed: their product is a service state
   or a merged pull request, and the receipt for each was read directly this session.
+
+T043b's completion criterion was amended in this branch rather than left contradicted: it required
+zero unconfirmed rows before batch F opens, and the Stylelint SCSS row cannot be confirmed before the
+merge that drops it, so the criterion now names that one row as the permitted exception. Verified by
+review of PR #220.
 
 One item is genuinely open and is not a verification gap: the ledger row
 `codacy:7935279dc22d4b6af001014179ebdff1` is unconfirmed because no analysis has re-run

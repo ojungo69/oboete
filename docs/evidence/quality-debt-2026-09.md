@@ -9,7 +9,7 @@ Disposition record of feature 008 (`specs/008-quality-debt-zero/`): every SonarC
 - **Work**: session worktree `~/projects/free-mem-wt/008` on branch `008-qd-a`, batch branches `008-qd-<batch>`, each merged to `main` through its own gated pull request.
 - **Counts on `main`** (open findings, from the services' own analyses of the merge commits): baseline `5e03d67f` Sonar 310 / Codacy 397; after A (`2d2dac10`, Sonar analysis 46205843, 2026-09-07T00:06Z) Sonar 295; after E (`1816a503`, Sonar analysis a0d2c7f5, Codacy 2026-09-07T01:23Z) Sonar 279 / Codacy 108 (the Codacy count after A alone was not captured; the excluded file classes and the E fixes both landed before its next analysis); after B1 (`f874ae83`, Sonar analysis 996c72b5, Codacy 2026-09-07T02:52Z) Sonar 160 / Codacy 110 — B1 moved lines in `scripts/e2e`, so eight Lizard findings there closed under their old ids and reopened under new ones (function and file length, batch C scope); the ledger tracks inventory ids, the final count on the service is the acceptance; after C4 (`67242108`, Sonar analysis f77d7379, Codacy commit analysis ended 2026-09-08T16:33Z) Sonar 15 / Codacy 38; after D (`e27bb029`, Sonar analysis c36a88b6, Codacy commit analysis ended 2026-09-12T03:20:15Z) **Sonar 10**, the fifteen `resolved` rows batch F still had to send minus the five that D's own refactor closed. SonarCloud's `violations` history on `main` (`api/measures/search_history?metrics=violations`) is the shortest statement of what this feature did and what happened next: 15 at `ffb9514f`, **10 at `e27bb029`** (this feature's last merge), **258 at `af871c9a`** (PR #190), 258 at `33f8c382` (PR #211). The 248 findings open today are that arithmetic: 258 minus the 10 rows batch F has now sent. Those 15 Sonar findings and 20 of the 38 Codacy ones were the rows batch F had to send (15 `resolved` Sonar rows; 22 `resolved` and 1 `excluded` Codacy rows), and the other 18 Codacy findings were batch D's file lengths; batch F sent them all, and five of the Sonar rows turned out to have been closed by D's own refactor instead (see "Batch F" below).
 
-### Batch F (2026-09-13): service calls, confirmations, and the closing count
+## Batch F (2026-09-13): service calls, confirmations, and the closing count
 
 **Service calls.** Every pending `resolved` row is now recorded at its service: **10 SonarCloud
 transitions** with their comments, **23 Codacy ignores** with their reason and comment, and 4 Codacy
@@ -79,10 +79,12 @@ findings outside the frozen inventory it would fail every build — so the round
 - **SC-005** — SonarCloud's `coverage` history on `main`: 93.3 at the baseline `5e03d67f`, 93.6, 93.9,
   93.9, **93.8 at `e27bb029`** (this feature's last merge), 93.9 today. The figure never fell below the
   baseline, and no assertion was changed to keep a suite green.
-- **SC-006** — `git diff 5e03d67f..HEAD` touches three gate-adjacent files. `.github/workflows/ci.yml`
-  has one change, from batch A (`c0ed2500`), and it *adds* a test run (the record suites, at
-  `--test-concurrency=1`, into the same coverage directory); no job, condition or threshold was removed
-  or relaxed. `sonar-project.properties` and `.codacy.yml` carry batch A's file-class exclusions, which
+- **SC-006** *(criterion amended 2026-09-13 to FR-003's wording — no gate removed, relaxed or narrowed;
+  it originally required the definitions to have the same content, which the additive step below
+  contradicts while strengthening the gate)* — `git diff 5e03d67f..HEAD` touches three gate-adjacent
+  files. `.github/workflows/ci.yml` has one change, from batch A (`c0ed2500`), and it *adds* a test run
+  (the record suites, at `--test-concurrency=1`, into the same coverage directory); no job, condition or
+  threshold was removed or relaxed. `sonar-project.properties` and `.codacy.yml` carry batch A's file-class exclusions, which
   are the feature's own US4 work and are each recorded as an `excluded` row with the rule and the file
   class. The SonarCloud Quality Gate conditions, CodeQL, semgrep, secret scanning and DCO definitions
   are untouched.
