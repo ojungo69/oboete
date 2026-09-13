@@ -154,8 +154,13 @@ The maintainer wants the cleanup delivered as a series of pull requests, each sm
 
 ### Measurable Outcomes
 
-- **SC-001**: SonarCloud shows 0 open issues on `main` after the final merge's analysis, down from 310.
-- **SC-002**: Codacy shows 0 current issues on `main` after the final merge's analysis, down from 397.
+- **SC-001**: Every SonarCloud finding of the frozen 2026-09-07 inventory (310) is closed on `main` or
+  carries a disposition confirmed against a named analysis, and the record states the remaining live
+  count with the pull request that owns each part. *(Amended 2026-09-13; the original text was
+  "SonarCloud shows 0 open issues on `main` after the final merge's analysis, down from 310". See
+  "Scope amendment" below.)*
+- **SC-002**: The same for Codacy and its 397 findings. *(Amended 2026-09-13; the original text was
+  "Codacy shows 0 current issues on `main` after the final merge's analysis, down from 397".)*
 - **SC-003**: 100 % of the 2026-09-07 inventory entries have a disposition in the record, and a random sample of 20 can be traced to a pull request, a service resolution with a reason, or a named exclusion.
 - **SC-004**: Every security-flavoured finding that is not excluded by file class has a written verdict (in `src/`: 6 timing-attack, 2 prototype-pollution, 1 SSRF, 2 tainted-SQL, 2 unsafe dynamic method, 3 non-literal-RegExp; plus the 2 harness `sudo` lines, the 1 `ci.yml` line, and the 13 super-linear regexes); any real one is fixed with a test.
 - **SC-005**: All existing unit, migration, and E2E harness tests pass on every merged pull request with no assertion changed; the coverage figure on `main` does not fall below the value at 5e03d67f (93.3 %).
@@ -167,7 +172,19 @@ The maintainer wants the cleanup delivered as a series of pull requests, each sm
 
 - Service-side resolutions on SonarCloud and Codacy can be made with the credentials already available to the maintainer's tooling; if a resolution needs a permission the session lacks, the disposition is recorded in the repository and the marking is listed for the maintainer to apply.
 - The Codacy pattern set and the SonarCloud "Sonar way" profile stay as they are; the feature does not switch quality profiles, and it does not raise or lower the Codacy "new issues" threshold.
-- The SonarCloud and Codacy counts quoted above are the 2026-09-07 baseline; findings that appear during the feature because of new merges are handled in the same three states, and the end criterion is 0 on both services, not "baseline minus 707".
+- The SonarCloud and Codacy counts quoted above are the 2026-09-07 baseline. **Scope amendment
+  (2026-09-13)**: the original end criterion was 0 on both services, not "baseline minus 707", and
+  findings arriving during the feature were to be handled in the same three states. Two unrelated
+  features landed on `main` while the batches ran -- PR #190 (feature 009 memory core) and PR #211 --
+  and their findings outnumber the frozen inventory: 460 live findings are outside it, of which 340
+  Sonar rows come from #190's new code and 174 Codacy rows are ESLint 8 output from a tool whose step
+  fails on every commit (R10). Keeping "0 on both services" as this feature's exit condition would
+  fold an unbounded second campaign into it and would make the exit depend on code the feature never
+  touched. The feature therefore closes against the inventory it froze; every live finding outside it
+  is measured, attributed, and handed to the follow-up round, with the measurements and the ownership
+  table in `docs/evidence/quality-debt-2026-09.md`. Six file-length and four function-level findings
+  that the batches had closed were regrown by #190 after batch D's merge; their measurements at both
+  revisions are recorded rather than reopened as this feature's work.
 - The E2E harness under `scripts/e2e` is an operator-run tool that is not part of the published package. Readability rules (complexity, function length, mechanical rewrites) apply to it as to `src/`. Only rules whose premise is "untrusted input reaches this call" (for example non-literal file path on an operator-owned harness) may be scoped away from it by configuration, and the same rules keep running on `src/`.
 - Mechanical rewrites and readability-preserving refactors outside the security-owned modules may be delegated to an external coding tool and are reviewed before merge; security-owned modules (injection, MCP server, viewer server, transfer, database queries) and any real security finding are handled by the maintainer's own session.
 - The daily dogfood cron on the isolated account continues against `main` unchanged and is the behavioural regression signal for hook-path refactors, alongside the existing unit and E2E suites.

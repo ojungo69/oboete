@@ -154,7 +154,7 @@ All eighteen files now have their identified independent concerns separated. Thi
 
 | File | NLOC before → after | Decision | Extracted concern / residual reason |
 |---|---|---|---|
-| `src/worker/batches.ts` | 570 → 411 | split → `fixed` | Spool recovery moved to `worker/spool-recovery.ts`; classification and batch creation stay. |
+| `src/worker/batches.ts` | 570 → 411 | split → `fixed` (regrown, see below) | Spool recovery moved to `worker/spool-recovery.ts`; classification and batch creation stay. |
 | `src/setup/setup.ts` | 508 → 472 | split → `fixed` | Shared setup/doctor display helpers moved to `setup/report.ts`. |
 | `src/observer/classify.ts` | 648 → 374 | split → `fixed` | Observation apply moved to `observer/apply.ts`; the batch worker and direct tests import it there. Shared SQL constants and directive checks stay in `classify.ts`, without a runtime reverse import. |
 | `src/observer/llm.ts` | 595 → 483 | split → `fixed` | API error classification moved to `observer/llm-errors.ts`; prompt builders and provider calls stay. |
@@ -171,7 +171,7 @@ All eighteen files now have their identified independent concerns separated. Thi
 | `scripts/e2e/probes/grok.mjs` | 800 → 285 | split → `fixed` | Lifecycle and MCP probe descriptors moved to `probe-lib/grok-lifecycle.mjs` and `grok-mcp.mjs`; IDs and descriptor order remain. |
 | `scripts/e2e/probes/codex.mjs` | 746 → 183 | split → `fixed` | Lifecycle and MCP probe descriptors moved to `probe-lib/codex-lifecycle.mjs` and `codex-mcp.mjs`; IDs and descriptor order remain. |
 | `src/injection/inject.ts` | 657 → 419 | split → `fixed` | Pi command parsing, storage opening and CLI execution moved to `injection/pi.ts`; the shared hook delivery/validation path stays. |
-| `src/injection/pack.ts` | 602 → 470 | split → `fixed` | Pure framing and item rendering moved to `injection/pack-format.ts`; selection, privacy checks, budget and ledger remain together. |
+| `src/injection/pack.ts` | 602 → 470 | split → `fixed` (regrown, see below) | Pure framing and item rendering moved to `injection/pack-format.ts`; selection, privacy checks, budget and ledger remain together. |
 
 Two new files remain over 500 and have also been read under FR-016. They are not excluded. PR #185 analysis of `ebe687dc` reported native IDs `f24df26860d01b16c092756092dba6ce` (source) and `48b2a00cb7eb3b5e6344415870d01661` (test); T043e adds both to the inventory and ledger before final confirmation.
 
@@ -192,6 +192,37 @@ All other extracted source modules are below 500, including `fixture-coverage.mj
 
 **Rationale**: `rules/coding.md` routing (Grok paused until 2026-09-12); constitution: security-related changes are not delegated; memory `codex-cannot-commit-in-linked-worktree` (this session commits).
 
+## R11. What the batches closed and PR #190 regrew (measured 2026-09-13, batch F)
+
+**Fact**: every file and function this feature brought under a bound was measured again at `main`
+(`33f8c382`) and at batch D's merge (`e27bb029`), with `pipx run lizard -l typescript`. The bounds are
+Codacy's: 500 NLOC per file (`Lizard_file-nloc-medium`), 50 NLOC per function (`Lizard_nloc-medium`).
+
+| subject | at `e27bb029` | at `33f8c382` | owner of the live finding |
+|---|---|---|---|
+| `src/worker/batches.ts` (file) | 411 | 551 | #190 |
+| `src/injection/pack.ts` (file) | 470 | 558 | #190 |
+| `src/observer/apply.ts` (file) | 282 | 533 | #190 |
+| `src/worker/observe-batch.ts` (file) | 405 | 588 | #190 |
+| `src/fixture/replay-evaluate.ts` (file) | 489 | 604 | #190 |
+| `src/fixture/replay-report.ts` (file) | 490 | 514 | #190 |
+| `assemble` (`pack.ts`) | 37 NLOC | 68 NLOC | #190 |
+| `applyPreparedObservation` | CCN 10 | CCN 24 | #190 |
+| `applyPreparedObservations` | 29 NLOC / CCN 4 | 83 NLOC / CCN 36 | #190 |
+| `applyFallback` parameters (S107) | 7 | 8 (`coverage?` added by `590c0a2f`) | #190 |
+
+**Why line blame is not the discriminator**: `git blame` on the reported line names a batch commit for
+several of these, because the function's opening line or the file's first line is old while the body
+grew. A file-level finding always blames to whatever last touched line 1. The measurement above is the
+axis that decides ownership: a subject under the bound at `e27bb029` and over it now was regrown after
+this feature's last merge. By that axis this feature owns **no** live finding outside its frozen
+inventory; `emptyCounts` (`src/worker/observe.ts:366`) and the `src/sync/*` findings are `590c0a2f`'s
+own new code.
+
+**Consequence**: the two ledger rows for `batches.ts` and `pack.ts` (`6d0b78f8…`, `7d9b63ea…`) stay
+`fixed` -- they were honest at `e27bb029` -- and their `confirmed` field records this measurement
+instead of an absence the service will never report. The live findings belong to the follow-up round.
+
 ## R10. Codacy's ESLint step has failed on every analysed commit (found 2026-09-07)
 
 **Fact**: `GET /api/v3/analysis/organizations/gh/ojungo69/repositories/oboete/commits/{sha}/logs` lists the analysis steps; on `main` (5e03d67f) and on every commit sampled back to 2026-08-16, the `ESLint` step is `error`: `codacy/codacy-eslint:9.18.10` (ESLint 8.57, legacy `.eslintrc*` only; the repository's flat `eslint.config.js` is not read, `hasConfigurationFile: false`) crashes inside `eslint-plugin-security-node` (`detect-unhandled-async-errors` on a `try … finally` without `catch`; with that rule removed, `detect-unhandled-event-errors` on an optional-chained call). The 397 Codacy findings therefore contain **no ESLint finding at all**, and the "0 new issues" gate has been judging commits without ESLint. Every other step is `success`.
@@ -204,6 +235,27 @@ All other extracted source modules are below 500, including `fixture-coverage.mj
 - **(b) Disable the ESLint tool on Codacy** for the repository (`PATCH …/tools/{uuid}` `{"enabled": false}`), recorded with the reason that the repository's ESLint 9 flat configuration is the maintained lint standard and CI gate, that Codacy's ESLint 8 cannot read it, and that a second `.eslintrc` would drift. Codacy keeps its other 25 steps. Zero new findings; the gap becomes an explicit, recorded decision instead of a crash.
 
 Either way needs the account token (C1). Until decided, the counts in R1, plan.md, and the record are the counts **without ESLint**, and the final 0 / 0 in batch F is not written while the ESLint step reports `error`.
+
+**Applied (2026-09-13, batch F)**: decision (b) is in place, and two things about it were wrong in the
+plan above. First, `PATCH …/tools/{uuid}` `{"enabled": false}` on the repository is refused with `409
+Cannot disable a tool that is enabled by a standard` while a Codacy coding standard enables the tool,
+and the organisation's "Default coding standard" did. Editing that standard was out of the question
+(R3): three other repositories follow it. The repository now follows its own standard, **168669**
+"oboete quality-debt (ESLint 8 off)", whose tool flags and per-tool pattern sets were verified equal to
+the organisation default **168666** except for ESLint (disabled) and
+`Stylelint_scss_function-disallowed-list` (disabled, the T009 exclusion). The repository-level ESLint
+override was then cleared, so `GET …/tools` reports ESLint `isEnabled: false, isCustom: false`. A
+coding standard created with `?sourceRepository=` does **not** reproduce the repository's effective
+pattern sets -- 29 tools and 1684 patterns drifted, `Opengrep` alone from 1425 enabled patterns to 648
+-- so every set was repaired and re-diffed to zero before the standard was promoted.
+
+Second, the failing step does not suppress every finding: the live Codacy set holds **174 ESLint 8
+rows** while the step still reads `error` at `33f8c382`, so Codacy reports the partial output of a
+crashed tool. None of those rows is in the frozen inventory, which is why the inventory contains no
+ESLint finding at all. Disabling the tool is expected to drop all 174 at the next analysis; the final
+confirmation remains what this section already required -- the ESLint step **absent** from
+`GET …/commits/{sha}/logs` -- and it is verified on the first analysis of `main` after this merge.
+
 
 ## R9. Disposition record
 

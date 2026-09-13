@@ -2531,10 +2531,10 @@
  {
   "service": "sonar",
   "id": "AaB3XksHIqdfylE4c2su",
-  "state": "resolved",
-  "where": "The discarded JSON.parse(JSON.stringify(event)) is a serialisability check for the exact call that writes the JSONL line; structuredClone accepts values JSON.stringify rejects (BigInt) and drops nothing, so it would not catch the same inputs.",
-  "transition": "wontfix",
-  "confirmed": "Absent from current Sonar issue search 2026-09-13T13:50:33.144Z"
+  "state": "fixed",
+  "where": "#185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here",
+  "confirmed": "c36a88b6-4b7e-4237-8340-792e473849b2",
+  "verdict": "The discarded JSON.parse(JSON.stringify(event)) is a serialisability check for the exact call that writes the JSONL line; structuredClone accepts values JSON.stringify rejects (BigInt) and drops nothing, so it would not catch the same inputs."
  },
  {
   "service": "sonar",
@@ -3192,10 +3192,10 @@
  {
   "service": "sonar",
   "id": "AaB3XknlIqdfylE4c2qJ",
-  "state": "resolved",
-  "where": "childEnv returns env from two exits, but the early exit skips the loop that deletes credential-named keys, so the two returned objects differ; the function does not always return the same value.",
-  "transition": "falsepositive",
-  "confirmed": "Absent from current Sonar issue search 2026-09-13T13:50:40.607Z"
+  "state": "fixed",
+  "where": "#185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here",
+  "confirmed": "c36a88b6-4b7e-4237-8340-792e473849b2",
+  "verdict": "childEnv returns env from two exits, but the early exit skips the loop that deletes credential-named keys, so the two returned objects differ; the function does not always return the same value."
  },
  {
   "service": "sonar",
@@ -3256,10 +3256,10 @@
  {
   "service": "sonar",
   "id": "AaB3XknlIqdfylE4c2qW",
-  "state": "resolved",
-  "where": "waitUntil returns last from two exits, but last holds the first truthy result or the final falsy value at the deadline; the function does not always return the same value.",
-  "transition": "falsepositive",
-  "confirmed": "Absent from current Sonar issue search 2026-09-13T13:50:40.608Z"
+  "state": "fixed",
+  "where": "#185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here",
+  "confirmed": "c36a88b6-4b7e-4237-8340-792e473849b2",
+  "verdict": "waitUntil returns last from two exits, but last holds the first truthy result or the final falsy value at the deadline; the function does not always return the same value."
  },
  {
   "service": "sonar",
@@ -3320,10 +3320,10 @@
  {
   "service": "sonar",
   "id": "AaB3Xkl3IqdfylE4c2ps",
-  "state": "resolved",
-  "where": "runHook and runCapture consume this numeric return; returning undefined or a failure code would violate their specified always-zero CLI exit contract.",
-  "transition": "wontfix",
-  "confirmed": "Absent from current Sonar issue search 2026-09-13T13:50:40.610Z"
+  "state": "fixed",
+  "where": "#185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here",
+  "confirmed": "c36a88b6-4b7e-4237-8340-792e473849b2",
+  "verdict": "runHook and runCapture consume this numeric return; returning undefined or a failure code would violate their specified always-zero CLI exit contract."
  },
  {
   "service": "sonar",
@@ -3683,10 +3683,10 @@
  {
   "service": "sonar",
   "id": "AaB3Xkc9IqdfylE4c2nn",
-  "state": "resolved",
-  "where": "String(row.session_id ?? '') is the intended coercion of whatever a Grok fixture payload carries as session_id (a number is a valid key for GROK_SESSION_ID and the resume lookup); a string-only guard would change that key",
-  "transition": "wontfix",
-  "confirmed": "Absent from current Sonar issue search 2026-09-13T13:50:58.405Z"
+  "state": "fixed",
+  "where": "#185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here",
+  "confirmed": "c36a88b6-4b7e-4237-8340-792e473849b2",
+  "verdict": "String(row.session_id ?? '') is the intended coercion of whatever a Grok fixture payload carries as session_id (a number is a valid key for GROK_SESSION_ID and the resume lookup); a string-only guard would change that key"
  },
  {
   "service": "sonar",

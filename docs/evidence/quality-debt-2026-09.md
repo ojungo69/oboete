@@ -7,7 +7,78 @@ Disposition record of feature 008 (`specs/008-quality-debt-zero/`): every SonarC
 - **Allocation**: `quality-debt-2026-09/allocation.json`, one batch per id, computed from the plan's scope rules by `--allocate` and never edited by hand (A 302, E 46, B1 131, B2 59, B3 42, C1 27, C2 39, C3 17, C4 62, D 20). Neither refresh moves an already allocated ID. The two newly observed Sonar security rules use the existing security classifier for both allocation and mandatory verdict validation; unknown rules still remain unallocated. The 2026-09-08 rows moved no id already allocated. Two of them fall to E, which has merged: the batch does no more work, their rows are `resolved` with the reason, and batch F applies them to the service with the rest.
 - **Ledger**: `quality-debt-2026-09/ledger.json`, one row per id with its end state; `(planned)` until the service says the same thing, `✓` afterwards. A `fixed` or `excluded` row is ticked by `scripts/quality-debt-record.mjs --confirm`, which stamps it with the analysis that no longer reports the finding; a `resolved` row is ticked by `--apply-sonar` or `--apply-codacy`, which stamps it with the status of the call that posted its reason, so `--confirm` never ticks one.
 - **Work**: session worktree `~/projects/free-mem-wt/008` on branch `008-qd-a`, batch branches `008-qd-<batch>`, each merged to `main` through its own gated pull request.
-- **Counts on `main`** (open findings, from the services' own analyses of the merge commits): baseline `5e03d67f` Sonar 310 / Codacy 397; after A (`2d2dac10`, Sonar analysis 46205843, 2026-09-07T00:06Z) Sonar 295; after E (`1816a503`, Sonar analysis a0d2c7f5, Codacy 2026-09-07T01:23Z) Sonar 279 / Codacy 108 (the Codacy count after A alone was not captured; the excluded file classes and the E fixes both landed before its next analysis); after B1 (`f874ae83`, Sonar analysis 996c72b5, Codacy 2026-09-07T02:52Z) Sonar 160 / Codacy 110 — B1 moved lines in `scripts/e2e`, so eight Lizard findings there closed under their old ids and reopened under new ones (function and file length, batch C scope); the ledger tracks inventory ids, the final count on the service is the acceptance; after C4 (`67242108`, Sonar analysis f77d7379, Codacy commit analysis ended 2026-09-08T16:33Z) Sonar 15 / Codacy 38. All 15 Sonar findings and 20 of the 38 Codacy ones are rows batch F still has to send (15 `resolved` Sonar rows; 22 `resolved` and 1 `excluded` Codacy rows, three of which the service has already stopped reporting), and the other 18 Codacy findings are batch D's file lengths.
+- **Counts on `main`** (open findings, from the services' own analyses of the merge commits): baseline `5e03d67f` Sonar 310 / Codacy 397; after A (`2d2dac10`, Sonar analysis 46205843, 2026-09-07T00:06Z) Sonar 295; after E (`1816a503`, Sonar analysis a0d2c7f5, Codacy 2026-09-07T01:23Z) Sonar 279 / Codacy 108 (the Codacy count after A alone was not captured; the excluded file classes and the E fixes both landed before its next analysis); after B1 (`f874ae83`, Sonar analysis 996c72b5, Codacy 2026-09-07T02:52Z) Sonar 160 / Codacy 110 — B1 moved lines in `scripts/e2e`, so eight Lizard findings there closed under their old ids and reopened under new ones (function and file length, batch C scope); the ledger tracks inventory ids, the final count on the service is the acceptance; after C4 (`67242108`, Sonar analysis f77d7379, Codacy commit analysis ended 2026-09-08T16:33Z) Sonar 15 / Codacy 38; after D (`e27bb029`, Sonar analysis c36a88b6, Codacy commit analysis ended 2026-09-12T03:20:15Z) **Sonar 10**, the fifteen `resolved` rows batch F still had to send minus the five that D's own refactor closed. SonarCloud's `violations` history on `main` (`api/measures/search_history?metrics=violations`) is the shortest statement of what this feature did and what happened next: 15 at `ffb9514f`, **10 at `e27bb029`** (this feature's last merge), **258 at `af871c9a`** (PR #190), 258 at `33f8c382` (PR #211). The 248 findings open today are that arithmetic: 258 minus the 10 rows batch F has now sent. Those 15 Sonar findings and 20 of the 38 Codacy ones were the rows batch F had to send (15 `resolved` Sonar rows; 22 `resolved` and 1 `excluded` Codacy rows), and the other 18 Codacy findings were batch D's file lengths; batch F sent them all, and five of the Sonar rows turned out to have been closed by D's own refactor instead (see "Batch F" below).
+
+### Batch F (2026-09-13): service calls, confirmations, and the closing count
+
+**Service calls.** Every pending `resolved` row is now recorded at its service: **10 SonarCloud
+transitions** with their comments, **23 Codacy ignores** with their reason and comment, and 4 Codacy
+rows whose ID the service no longer reports, which carry the search timestamp instead of a call result.
+Both apply modes read the complete live issue set before their first write, so an ID that has already
+gone is handled instead of failing the run on an HTTP error.
+
+**Five rows were re-dispositioned, not confirmed.** The first `--apply-sonar` run stamped five rows
+"absent from the current issue search" — and a query of those IDs without the `resolved=false` filter
+returns `status: CLOSED, resolution: FIXED`: `AaB3XksH…` (`scripts/fixtures/generate-1000-events.mjs`),
+`AaB3Xknl…qJ` and `AaB3Xknl…qW` (`scripts/e2e/probe-lib/agents.mjs`), `AaB3Xkl3…` (`src/capture.ts`),
+`AaB3Xkc9…` (`src/fixture/replay.ts`). All five closed at `2026-09-12T03:20:08Z`, the analysis of
+`e27bb029`, so batch D's own refactor of the surrounding code closed them before batch F could post
+their reasons. Absence from an open-issue search means three different things — closed as fixed,
+resolved as wontfix or false positive, or never seen — and only the first two are benign. The rows are
+now `fixed` with that analysis as their confirmation, keeping the read verdict in `verdict`, and
+`--apply-sonar` reads each pending row's real `status`/`resolution` and refuses a row the service
+closed as FIXED instead of confirming it.
+
+**Confirmations.** 744 of the 745 inventory rows are confirmed. The last one is the Stylelint SCSS
+pattern (`7935279d…`), which leaves Codacy's issue set only after the next analysis runs with the
+pattern disabled. Two `fixed` rows carry a measurement instead of an absence: `6d0b78f8…`
+(`src/worker/batches.ts`) and `7d9b63ea…` (`src/injection/pack.ts`) were 411 and 470 NLOC at batch D's
+merge (`e27bb029`), under Codacy's 500 bound, and are 551 and 558 at `33f8c382`; PR #190 regrew them,
+so the service will keep reporting them and the row records that rather than claiming an absence.
+
+**Closing count on `main`** (`33f8c382`, SonarCloud analysis `b81d3bcd-dc7f-4251-b3c4-a426f3530237`,
+Codacy commit analysis ended 2026-09-13T00:22:28Z):
+
+| service | live | owned by this feature's inventory | outside it |
+|---|---|---|---|
+| SonarCloud | 248 | 0 | 248 |
+| Codacy | 240 | 28 (25 confirmed, 3 still open) | 212 |
+
+Every one of the 248 SonarCloud findings and all 38 uncovered non-ESLint Codacy findings are in files
+that changed between `e27bb029` and `33f8c382` — PR #190 (feature 009 memory core) and PR #211. **No
+live finding is in a file this feature last touched.** Of the Codacy total, 174 are ESLint 8 rows that
+the crashed tool reported (research R10); the tool is now disabled, so they are expected to go at the
+next analysis. SonarCloud re-keyed its issue IDs between the 2026-09-07 export (`AaB3Xk…`) and today
+(`AaCVHm…`), which is why no live SonarCloud ID matches an inventory row; matching by `(rule, file)`
+instead, 20 SonarCloud and 8 Codacy findings contradict a `fixed` disposition, and
+`--check-live` now reports them as a named `re-keyed` group and fails on them. The measurements of what
+this feature closed and PR #190 regrew are in research R11; the follow-up round owns all of it
+(issue #207).
+
+**SC-001 / SC-002** are met as amended (spec.md "Scope amendment"): every inventory finding is closed
+on `main` or carries a disposition confirmed against a named analysis, and the live counts above are
+recorded with the pull request that owns each part. The original "0 open issues on `main`" wording is
+not met and cannot be, because `main` received two unrelated features while the batches ran.
+
+**Configuration changes on Codacy** (T009 and T043a). Both were refused at the repository level with
+`409 Cannot disable a … that is enabled by a Coding Standard`: the organisation's "Default coding
+standard" enables the ESLint tool and the Stylelint pattern, and three other repositories follow that
+standard, so editing it was out of the question (research R3). The repository now follows its own
+standard **168669** ("oboete quality-debt (ESLint 8 off)"), whose 63 tool flags and per-tool
+enabled-pattern sets were verified equal to the organisation default **168666** except for the two
+intended differences: the ESLint tool disabled, and `Stylelint_scss_function-disallowed-list` disabled.
+The repository-level ESLint override was then cleared, so `GET …/tools` reports ESLint
+`isEnabled: false, isCustom: false, followsStandard: true`, and the repository's Stylelint set is 18
+patterns where the organisation default has 19. Two facts about the Codacy API made this expensive and
+are recorded so the next change does not repeat them: `POST /coding-standards?sourceCodingStandard=X`
+creates a **draft revision of X**, and promoting it replaces X for **every** repository that follows it
+(this briefly changed all four repositories in the organisation before being restored, with the
+original tool flags and pattern sets verified against a snapshot taken beforehand); and a standard
+seeded with `?sourceRepository=` does not reproduce the repository's effective pattern sets — 29 tools
+and 1684 patterns drifted, `Opengrep` alone from 1425 enabled patterns to 648 — so every set was
+repaired and re-diffed to zero before the standard was promoted. The final confirmation of T043a is the
+ESLint step being **absent** from `GET …/commits/{sha}/logs` for the first analysis of `main` after
+this merge; at `33f8c382` that step still reads `error`.
 
 The tables below are generated by `node scripts/quality-debt-record.mjs`; edit the ledger, not the tables.
 
@@ -15,7 +86,7 @@ The tables below are generated by `node scripts/quality-debt-record.mjs`; edit t
 
 ## SonarCloud
 
-open 0 / fixed 280 / resolved 37 / excluded 15
+open 0 / fixed 285 / resolved 32 / excluded 15
 
 | id | rule | file:line | state | where / reason |
 | --- | --- | --- | --- | --- |
@@ -58,9 +129,9 @@ open 0 / fixed 280 / resolved 37 / excluded 15
 | AaB3XkqRIqdfylE4c2rm | javascript:S6582 | scripts/e2e/probe-contracts.mjs:180 | fixed ✓ | #161 |
 | AaB3XkqRIqdfylE4c2rn | javascript:S6582 | scripts/e2e/probe-contracts.mjs:215 | fixed ✓ | #161 |
 | AaB3XkqRIqdfylE4c2ro | javascript:S6582 | scripts/e2e/probe-contracts.mjs:216 | fixed ✓ | #161 |
-| AaB3XkqRIqdfylE4c2rp | javascript:S7785 | scripts/e2e/probe-contracts.mjs:243 | resolved (planned) | A top-level await changes the exit code when main() never settles on a drained event loop (0 with the promise chain, 13 with the await); the probe runner keeps the chain so its exit code stays what dogfood.sh expects |
+| AaB3XkqRIqdfylE4c2rp | javascript:S7785 | scripts/e2e/probe-contracts.mjs:243 | resolved ✓ | A top-level await changes the exit code when main() never settles on a drained event loop (0 with the promise chain, 13 with the await); the probe runner keeps the chain so its exit code stays what dogfood.sh expects |
 | AaB3XknlIqdfylE4c2qI | javascript:S7780 | scripts/e2e/probe-lib/agents.mjs:17 | fixed ✓ | #161 |
-| AaB3XknlIqdfylE4c2qJ | javascript:S3516 | scripts/e2e/probe-lib/agents.mjs:153 | resolved (planned) | childEnv returns env from two exits, but the early exit skips the loop that deletes credential-named keys, so the two returned objects differ; the function does not always return the same value. |
+| AaB3XknlIqdfylE4c2qJ | javascript:S3516 | scripts/e2e/probe-lib/agents.mjs:153 | fixed ✓ | #185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here — childEnv returns env from two exits, but the early exit skips the loop that deletes credential-named keys, so the two returned objects differ; the function does not always return the same value. |
 | AaB3XknlIqdfylE4c2qM | javascript:S7781 | scripts/e2e/probe-lib/agents.mjs:336 | fixed ✓ | #161 |
 | AaB3XknlIqdfylE4c2qN | javascript:S7780 | scripts/e2e/probe-lib/agents.mjs:336 | fixed ✓ | #161 |
 | AaB3XknlIqdfylE4c2qO | javascript:S3358 | scripts/e2e/probe-lib/agents.mjs:356 | fixed ✓ | #161 |
@@ -71,7 +142,7 @@ open 0 / fixed 280 / resolved 37 / excluded 15
 | AaB3XknlIqdfylE4c2qT | javascript:S7744 | scripts/e2e/probe-lib/agents.mjs:644 | fixed ✓ | #161 |
 | AaB3XknlIqdfylE4c2qU | javascript:S7744 | scripts/e2e/probe-lib/agents.mjs:678 | fixed ✓ | #161 |
 | AaB3XknlIqdfylE4c2qV | javascript:S7744 | scripts/e2e/probe-lib/agents.mjs:711 | fixed ✓ | #161 |
-| AaB3XknlIqdfylE4c2qW | javascript:S3516 | scripts/e2e/probe-lib/agents.mjs:737 | resolved (planned) | waitUntil returns last from two exits, but last holds the first truthy result or the final falsy value at the deadline; the function does not always return the same value. |
+| AaB3XknlIqdfylE4c2qW | javascript:S3516 | scripts/e2e/probe-lib/agents.mjs:737 | fixed ✓ | #185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here — waitUntil returns last from two exits, but last holds the first truthy result or the final falsy value at the deadline; the function does not always return the same value. |
 | AaB3XknlIqdfylE4c2qX | javascript:S3358 | scripts/e2e/probe-lib/agents.mjs:794 | fixed ✓ | #161 |
 | AaB3XknlIqdfylE4c2qY | javascript:S7780 | scripts/e2e/probe-lib/agents.mjs:799 | fixed ✓ | #161 |
 | AaB3XknlIqdfylE4c2qZ | javascript:S6594 | scripts/e2e/probe-lib/agents.mjs:834 | fixed ✓ | #160 |
@@ -84,7 +155,7 @@ open 0 / fixed 280 / resolved 37 / excluded 15
 | AaB3XkoXIqdfylE4c2qi | javascript:S3358 | scripts/e2e/probe-lib/mcp-tee.mjs:69 | fixed ✓ | #161 |
 | AaB3Xkm9IqdfylE4c2qB | typescript:S3776 | scripts/e2e/probe-lib/pi-extension.ts:57 | fixed ✓ | #173 |
 | AaB3Xkm9IqdfylE4c2qC | typescript:S7741 | scripts/e2e/probe-lib/pi-extension.ts:62 | fixed ✓ | #161 |
-| AaB3Xkm9IqdfylE4c2qD | typescript:S6551 | scripts/e2e/probe-lib/pi-extension.ts:80 | resolved (planned) | Every typeof result has returned from an earlier branch of walk(), so this String(v) is unreachable; v can never be an object here. |
+| AaB3Xkm9IqdfylE4c2qD | typescript:S6551 | scripts/e2e/probe-lib/pi-extension.ts:80 | resolved ✓ | Every typeof result has returned from an earlier branch of walk(), so this String(v) is unreachable; v can never be an object here. |
 | AaB3Xkm9IqdfylE4c2qE | typescript:S7726 | scripts/e2e/probe-lib/pi-extension.ts:94 | fixed ✓ | #161 |
 | AaCFAMJqz18_BjK2pBK3 | javascript:S3516 | scripts/e2e/probe-lib/process.mjs:44 | resolved ✓ | childEnv returns env from two exits, but the early exit skips the loop that deletes credential-named keys, so the two returned objects differ; the function does not always return the same value. |
 | AaCFANNFz18_BjK2pBOV | javascript:S3516 | scripts/e2e/probe-lib/process.mjs:44 | resolved ✓ | childEnv returns env from two exits, but the early exit skips the loop that deletes credential-named keys, so the two returned objects differ; the function does not always return the same value. |
@@ -167,7 +238,7 @@ open 0 / fixed 280 / resolved 37 / excluded 15
 | AaB3XksHIqdfylE4c2sr | javascript:S3776 | scripts/fixtures/generate-1000-events.mjs:1360 | fixed ✓ | #173 |
 | AaB3XksHIqdfylE4c2ss | javascript:S3776 | scripts/fixtures/generate-1000-events.mjs:1397 | fixed ✓ | #173 |
 | AaB3XksHIqdfylE4c2st | javascript:S3776 | scripts/fixtures/generate-1000-events.mjs:1501 | fixed ✓ | #173 |
-| AaB3XksHIqdfylE4c2su | javascript:S7784 | scripts/fixtures/generate-1000-events.mjs:1558 | resolved (planned) | The discarded JSON.parse(JSON.stringify(event)) is a serialisability check for the exact call that writes the JSONL line; structuredClone accepts values JSON.stringify rejects (BigInt) and drops nothing, so it would not catch the same inputs. |
+| AaB3XksHIqdfylE4c2su | javascript:S7784 | scripts/fixtures/generate-1000-events.mjs:1558 | fixed ✓ | #185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here — The discarded JSON.parse(JSON.stringify(event)) is a serialisability check for the exact call that writes the JSONL line; structuredClone accepts values JSON.stringify rejects (BigInt) and drops nothing, so it would not catch the same inputs. |
 | AaB3XksHIqdfylE4c2sv | javascript:S7755 | scripts/fixtures/generate-1000-events.mjs:1622 | fixed ✓ | #161 |
 | AaB3XksZIqdfylE4c2sw | javascript:S7784 | scripts/measure-cold-start.mjs:162 | fixed ✓ | #161 |
 | AaB3XksZIqdfylE4c2sx | javascript:S6353 | scripts/measure-cold-start.mjs:180 | fixed ✓ | #161 |
@@ -199,7 +270,7 @@ open 0 / fixed 280 / resolved 37 / excluded 15
 | AaB3Xkl3IqdfylE4c2po | typescript:S107 | src/capture.ts:776 | fixed ✓ | #166 |
 | AaB3Xkl3IqdfylE4c2pq | typescript:S3776 | src/capture.ts:871 | fixed ✓ | #166 |
 | AaB3Xkl3IqdfylE4c2pr | typescript:S7755 | src/capture.ts:982 | fixed ✓ | #162 |
-| AaB3Xkl3IqdfylE4c2ps | typescript:S3516 | src/capture.ts:1226 | resolved (planned) | runHook and runCapture consume this numeric return; returning undefined or a failure code would violate their specified always-zero CLI exit contract. |
+| AaB3Xkl3IqdfylE4c2ps | typescript:S3516 | src/capture.ts:1226 | fixed ✓ | #185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here — runHook and runCapture consume this numeric return; returning undefined or a failure code would violate their specified always-zero CLI exit contract. |
 | AaB3XkjcIqdfylE4c2pF | plsql:S1192 | src/db/migrations/0001_core.sql:33 | excluded ✓ | sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL) |
 | AaB3XkjNIqdfylE4c2o- | plsql:S1192 | src/db/migrations/0002_memory_search.sql:18 | excluded ✓ | sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL) |
 | AaB3XkjNIqdfylE4c2o9 | plsql:S1192 | src/db/migrations/0002_memory_search.sql:18 | excluded ✓ | sonar-project.properties sonar.plsql.file.suffixes=pks,pkb (SQLite migrations are not PL/SQL) |
@@ -227,8 +298,8 @@ open 0 / fixed 280 / resolved 37 / excluded 15
 | AaB3XkmFIqdfylE4c2p0 | typescript:S7778 | src/doctor.ts:152 | fixed ✓ | #162 |
 | AaB3XkmFIqdfylE4c2p1 | typescript:S7778 | src/doctor.ts:153 | fixed ✓ | #162 |
 | AaB3XkmFIqdfylE4c2p2 | typescript:S3358 | src/doctor.ts:163 | fixed ✓ | #162 |
-| AaB3XkbGIqdfylE4c2nX | typescript:S6551 | src/doctor/agents.ts:245 | resolved (planned) | row.probe is a field of the setup result that oboete itself wrote to runtime_state as JSON (doctor/agents.ts lastSetupResult); the doctor prints the stored value as it is, with 'none' for an absent one, and String() is that rendering — a non-string there would be oboete's own bug, shown rather than hidden |
-| AaB3XkbGIqdfylE4c2nY | typescript:S6551 | src/doctor/agents.ts:245 | resolved (planned) | row.trust is a field of the setup result that oboete itself wrote to runtime_state as JSON (doctor/agents.ts lastSetupResult); the doctor prints the stored value as it is, with 'none' for an absent one, and String() is that rendering — a non-string there would be oboete's own bug, shown rather than hidden |
+| AaB3XkbGIqdfylE4c2nX | typescript:S6551 | src/doctor/agents.ts:245 | resolved ✓ | row.probe is a field of the setup result that oboete itself wrote to runtime_state as JSON (doctor/agents.ts lastSetupResult); the doctor prints the stored value as it is, with 'none' for an absent one, and String() is that rendering — a non-string there would be oboete's own bug, shown rather than hidden |
+| AaB3XkbGIqdfylE4c2nY | typescript:S6551 | src/doctor/agents.ts:245 | resolved ✓ | row.trust is a field of the setup result that oboete itself wrote to runtime_state as JSON (doctor/agents.ts lastSetupResult); the doctor prints the stored value as it is, with 'none' for an absent one, and String() is that rendering — a non-string there would be oboete's own bug, shown rather than hidden |
 | AaB3XkbGIqdfylE4c2nZ | typescript:S3776 | src/doctor/agents.ts:293 | fixed ✓ | #166 |
 | AaB3XkbGIqdfylE4c2na | typescript:S4624 | src/doctor/agents.ts:364 | fixed ✓ | #162 |
 | AaB3XkbGIqdfylE4c2nb | typescript:S3776 | src/doctor/agents.ts:371 | fixed ✓ | #166 |
@@ -246,7 +317,7 @@ open 0 / fixed 280 / resolved 37 / excluded 15
 | AaCFAMWuz18_BjK2pBK_ | typescript:S4036 | src/fixture/replay-report.ts:67 | resolved ✓ | The unchanged fixture reporter resolves fixed git argv through the operator PATH only to display its revision, with no fixture-selected command/path or authority beyond that already held by an actor who can replace a PATH executable. — controller: operator CLI/PATH; validation: fixed basename or argv, no agent-derived path/command; sink: local report write or subprocess; effect: ordinary operator-authorized filesystem/process access, no additional authority; not applicable. |
 | AaCFANUaz18_BjK2pBOd | typescript:S4036 | src/fixture/replay-report.ts:67 | resolved ✓ | The unchanged fixture reporter resolves fixed git argv through the operator PATH only to display its revision, with no fixture-selected command/path or authority beyond that already held by an actor who can replace a PATH executable. — controller: operator CLI/PATH; validation: fixed basename or argv, no agent-derived path/command; sink: local report write or subprocess; effect: ordinary operator-authorized filesystem/process access, no additional authority; not applicable. |
 | AaB3Xkc9IqdfylE4c2nm | typescript:S7786 | src/fixture/replay.ts:199 | fixed ✓ | #163 |
-| AaB3Xkc9IqdfylE4c2nn | typescript:S6551 | src/fixture/replay.ts:226 | resolved (planned) | String(row.session_id ?? '') is the intended coercion of whatever a Grok fixture payload carries as session_id (a number is a valid key for GROK_SESSION_ID and the resume lookup); a string-only guard would change that key |
+| AaB3Xkc9IqdfylE4c2nn | typescript:S6551 | src/fixture/replay.ts:226 | fixed ✓ | #185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here — String(row.session_id ?? '') is the intended coercion of whatever a Grok fixture payload carries as session_id (a number is a valid key for GROK_SESSION_ID and the resume lookup); a string-only guard would change that key |
 | AaB3Xkc9IqdfylE4c2no | typescript:S7781 | src/fixture/replay.ts:278 | fixed ✓ | #163 |
 | AaB3Xkc9IqdfylE4c2ns | typescript:S7781 | src/fixture/replay.ts:570 | fixed ✓ | #163 |
 | AaB3Xkc9IqdfylE4c2nt | typescript:S7780 | src/fixture/replay.ts:570 | fixed ✓ | #163 |
@@ -293,8 +364,8 @@ open 0 / fixed 280 / resolved 37 / excluded 15
 | AaB3Xke6IqdfylE4c2oJ | typescript:S1874 | src/observer/llm.ts:451 | fixed ✓ | #162 |
 | AaB3Xke6IqdfylE4c2oK | typescript:S1874 | src/observer/llm.ts:482 | fixed ✓ | #162 |
 | AaB3XkdqIqdfylE4c2n6 | typescript:S3776 | src/observer/request.ts:117 | fixed ✓ | #165 |
-| AaB3XklOIqdfylE4c2pj | typescript:S6551 | src/pi-extension.ts:262 | resolved (planned) | input.query is the argument of the Pi native tool, declared `type: 'string'` and required in the tool schema Pi enforces before the call; String() turns that declared string into one argv entry for the child CLI, which rejects an empty one |
-| AaB3XklOIqdfylE4c2pk | typescript:S6551 | src/pi-extension.ts:276 | resolved (planned) | input.id is the argument of the Pi native tool, declared `type: 'string'` and required in the tool schema Pi enforces before the call; String() turns that declared string into one argv entry for the child CLI, which rejects an empty one |
+| AaB3XklOIqdfylE4c2pj | typescript:S6551 | src/pi-extension.ts:262 | resolved ✓ | input.query is the argument of the Pi native tool, declared `type: 'string'` and required in the tool schema Pi enforces before the call; String() turns that declared string into one argv entry for the child CLI, which rejects an empty one |
+| AaB3XklOIqdfylE4c2pk | typescript:S6551 | src/pi-extension.ts:276 | resolved ✓ | input.id is the argument of the Pi native tool, declared `type: 'string'` and required in the tool schema Pi enforces before the call; String() turns that declared string into one argv entry for the child CLI, which rejects an empty one |
 | AaB3XklBIqdfylE4c2pc | typescript:S8786 | src/privacy/detect.ts:72 | fixed ✓ | #160 — agent output captured by the privacy detector, up to 1 MiB, controller: agent or the model behind it; effect: 1.4 s per 50,000 spaces after `&lt;` blew the detector deadline (fail-closed drop) — real, fixed with a regex that examines each character once |
 | AaB3XklBIqdfylE4c2pd | typescript:S3776 | src/privacy/detect.ts:111 | fixed ✓ | #164 |
 | AaB3XklBIqdfylE4c2pe | typescript:S2310 | src/privacy/detect.ts:142 | fixed ✓ | #160 |
@@ -322,7 +393,7 @@ open 0 / fixed 280 / resolved 37 / excluded 15
 | AaB3Xkb6IqdfylE4c2nh | typescript:S7780 | src/setup/shell-quote.ts:7 | fixed ✓ | #162 |
 | AaB3Xkb6IqdfylE4c2ni | typescript:S4624 | src/setup/shell-quote.ts:7 | fixed ✓ | #162 |
 | AaB3XkchIqdfylE4c2nl | typescript:S3776 | src/setup/write-codex.ts:141 | fixed ✓ | #166 |
-| AaB3XkdaIqdfylE4c2n5 | typescript:S6551 | src/testing/faults.ts:51 | resolved (planned) | input is the RequestInfo \| URL of a fetch fault injector; String() is the intended URL text of a string or URL, and a Request is never passed here |
+| AaB3XkdaIqdfylE4c2n5 | typescript:S6551 | src/testing/faults.ts:51 | resolved ✓ | input is the RequestInfo \| URL of a fetch fault injector; String() is the intended URL text of a string or URL, and a Request is never passed here |
 | AaB3XkkbIqdfylE4c2pO | typescript:S3776 | src/transfer.ts:150 | fixed ✓ | #164 |
 | AaB3XkkbIqdfylE4c2pP | typescript:S3776 | src/transfer.ts:243 | fixed ✓ | #164 |
 | AaB3XkkbIqdfylE4c2pQ | typescript:S6582 | src/transfer.ts:259 | fixed ✓ | #163 |
@@ -330,12 +401,12 @@ open 0 / fixed 280 / resolved 37 / excluded 15
 | AaB3XkkbIqdfylE4c2pS | typescript:S3776 | src/transfer.ts:399 | fixed ✓ | #164 |
 | AaB3XkkbIqdfylE4c2pT | typescript:S7737 | src/transfer.ts:399 | fixed ✓ | #163 |
 | AaB3XkhpIqdfylE4c2oj | typescript:S7744 | src/viewer/app/api.ts:80 | fixed ✓ | #163 |
-| AaB3XkhcIqdfylE4c2of | typescript:S6479 | src/viewer/app/main.tsx:40 | resolved (planned) | The memory_sources rows reach the page without their id (the same rows are the CLI and MCP output, whose shape is fixed), and the list is shown in table order and never reordered, so the position is the only identity the page has |
-| AaB3XkhcIqdfylE4c2og | typescript:S6479 | src/viewer/app/main.tsx:149 | resolved (planned) | No field of a ledger item is unique within one injection: a pack merged before the tool call carries the same memory as planned and then omitted (reparentItems), and the rows have no id on the wire; the list is shown in ledger order and never reordered, so the position is the only identity the page has |
+| AaB3XkhcIqdfylE4c2of | typescript:S6479 | src/viewer/app/main.tsx:40 | resolved ✓ | The memory_sources rows reach the page without their id (the same rows are the CLI and MCP output, whose shape is fixed), and the list is shown in table order and never reordered, so the position is the only identity the page has |
+| AaB3XkhcIqdfylE4c2og | typescript:S6479 | src/viewer/app/main.tsx:149 | resolved ✓ | No field of a ledger item is unique within one injection: a pack merged before the tool call carries the same memory as planned and then omitted (reparentItems), and the rows have no id on the wire; the list is shown in ledger order and never reordered, so the position is the only identity the page has |
 | AaB3XkhcIqdfylE4c2oh | typescript:S3358 | src/viewer/app/main.tsx:260 | fixed ✓ | #163 |
 | AaB3XkhcIqdfylE4c2oi | typescript:S6772 | src/viewer/app/main.tsx:271 | fixed ✓ | #163 |
 | AaB3Xkh3IqdfylE4c2ok | typescript:S3358 | src/viewer/server.ts:85 | fixed ✓ | #163 |
-| AaB3Xkh3IqdfylE4c2ol | typescript:S7780 | src/viewer/server.ts:139 | resolved (planned) | Hono derives the route parameter names and their types from the string literal; a String.raw template widens the route to string and c.req.param('name') becomes string \| undefined, so the literal with the escaped backslash stays |
+| AaB3Xkh3IqdfylE4c2ol | typescript:S7780 | src/viewer/server.ts:139 | resolved ✓ | Hono derives the route parameter names and their types from the string literal; a String.raw template widens the route to string and c.req.param('name') becomes string \| undefined, so the literal with the escaped backslash stays |
 | AaB3Xkh3IqdfylE4c2om | typescript:S4624 | src/viewer/server.ts:244 | fixed ✓ | #163 |
 | AaB3XkioIqdfylE4c2ox | typescript:S3776 | src/worker/batches.ts:410 | fixed ✓ | #165 |
 | AaB3XkioIqdfylE4c2oy | typescript:S3776 | src/worker/batches.ts:567 | fixed ✓ | #165 |
@@ -358,7 +429,7 @@ open 0 / fixed 97 / resolved 29 / excluded 287
 
 | id | rule | file:line | state | where / reason |
 | --- | --- | --- | --- | --- |
-| 89f699a542cc7004922db089eccd8a28 | Semgrep_generic.secrets.security.detected-sonarqube-docs-api-key.detected-sonarqube-docs-api-key | .github/workflows/ci.yml:58 | resolved (planned) | the 40-hex string is the commit SHA that pins SonarSource/sonarqube-scan-action, not a key; the token comes from secrets.SONAR_TOKEN on the next lines — action pin — not applicable |
+| 89f699a542cc7004922db089eccd8a28 | Semgrep_generic.secrets.security.detected-sonarqube-docs-api-key.detected-sonarqube-docs-api-key | .github/workflows/ci.yml:58 | resolved ✓ | the 40-hex string is the commit SHA that pins SonarSource/sonarqube-scan-action, not a key; the token comes from secrets.SONAR_TOKEN on the next lines — action pin — not applicable |
 | 2a8417ee33d621661a0d394ada046434 | markdownlint_MD024 | docs/evidence/m1-dogfood.md:313 | excluded ✓ | .markdownlint.json MD024 siblings_only (repeated headings are per-section structure) |
 | 5e065e65864febd4afce0de440bad3f5 | markdownlint_MD024 | docs/evidence/m1-dogfood.md:336 | excluded ✓ | .markdownlint.json MD024 siblings_only (repeated headings are per-section structure) |
 | 9d9b6911e166551d4b277b86859dbdce | markdownlint_MD024 | docs/evidence/m1-dogfood.md:358 | excluded ✓ | .markdownlint.json MD024 siblings_only (repeated headings are per-section structure) |
@@ -371,12 +442,12 @@ open 0 / fixed 97 / resolved 29 / excluded 287
 | af8029bf7e15f6dd7fde96da9f9fb43 | Semgrep_javascript.lang.security.audit.prototype-pollution.prototype-pollution-loop.prototype-pollution-loop | legacy/harness/continuity/old-shape-projection.ts:105 | excluded ✓ | .codacy.yml exclude_paths (legacy/**, package-lock.json, build/**, dist/**, coverage/**) |
 | b4619766029e7251d522865ebf644399 | markdownlint_MD024 | legacy/specs/001-agent-memory-core/tasks.md:85 | excluded ✓ | .codacy.yml exclude_paths (legacy/**, package-lock.json, build/**, dist/**, coverage/**) |
 | da9922607b53e56e63f2e3843799462e | Lizard_file-nloc-medium | package-lock.json:1 | excluded ✓ | .codacy.yml exclude_paths (legacy/**, package-lock.json, build/**, dist/**, coverage/**) |
-| dafdbd571c370b7fba8ce99f3564089e | Semgrep_javascript_dos_rule-non-literal-regexp | scripts/dco-check.test.mjs:105 | resolved (planned) | jobId is the test's own literal (dco) and the indent width is a number; no value from outside the test enters the RegExp — test constants — not applicable |
-| 9205cba2e3f2cf9bba1767d7cac332d | Semgrep_javascript_dos_rule-non-literal-regexp | scripts/dco-check.test.mjs:109 | resolved (planned) | jobId is the test's own literal (dco) and the indent width is a number; no value from outside the test enters the RegExp — test constants — not applicable |
+| dafdbd571c370b7fba8ce99f3564089e | Semgrep_javascript_dos_rule-non-literal-regexp | scripts/dco-check.test.mjs:105 | resolved ✓ | jobId is the test's own literal (dco) and the indent width is a number; no value from outside the test enters the RegExp — test constants — not applicable |
+| 9205cba2e3f2cf9bba1767d7cac332d | Semgrep_javascript_dos_rule-non-literal-regexp | scripts/dco-check.test.mjs:109 | resolved ✓ | jobId is the test's own literal (dco) and the indent width is a number; no value from outside the test enters the RegExp — test constants — not applicable |
 | d3b9d9cfec9a260b9bc67f7dc5bfd707 | shellcheck_SC2024 | scripts/e2e/dogfood.sh:27 | fixed ✓ | #160 — sudo cat &gt; file: the file is read as root and written as the invoking user on purpose (the report lands in that user's checkout); shellcheck directive with the reason at the line — not a defect |
 | 365aff788b569c400b4b80434ec21768 | shellcheck_SC2024 | scripts/e2e/dogfood.sh:32 | fixed ✓ | #160 — same as dogfood.sh:27 |
 | 48b2a00cb7eb3b5e6344415870d01661 | Lizard_file-nloc-medium | scripts/e2e/isolated-lifecycle.test.mjs:1 | resolved ✓ | single cohesive module: tests and simulator of the lifecycle execution state machine; independent state-evaluation, agent-preparation and reporting tests already moved to their own files (638 NLOC; 27.6% over 500) |
-| 4d7c78512df37e8e9cd84c05be7b5457 | Lizard_file-nloc-medium | scripts/e2e/isolated-user.mjs:1 | fixed (planned) | #185 |
+| 4d7c78512df37e8e9cd84c05be7b5457 | Lizard_file-nloc-medium | scripts/e2e/isolated-user.mjs:1 | fixed ✓ | #185 |
 | 2a74d12048285a3863754b93c9a0f519 | Lizard_parameter-count-medium | scripts/e2e/isolated-user.mjs:246 | fixed ✓ | #173 |
 | 11a6c751ee3ef3cc3a66a1db39e096d6 | Lizard_parameter-count-medium | scripts/e2e/isolated-user.mjs:289 | fixed ✓ | #173 |
 | ad89cee0e960004d774787070092d3d0 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/isolated-user.mjs:338 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
@@ -411,7 +482,7 @@ open 0 / fixed 97 / resolved 29 / excluded 287
 | 91f972582bf40dcbf27e35bdcea39283 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/isolated-user.mjs:1877 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | dfa839ae1107879d8febe15e7136f246 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/isolated-user.mjs:1904 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 940b261112b867d043525e6162d43310 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/isolated-user.mjs:1935 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
-| dbc89550977f0b36857c5f7f82d33f26 | Lizard_file-nloc-medium | scripts/e2e/isolated-user.test.mjs:1 | fixed (planned) | #185 |
+| dbc89550977f0b36857c5f7f82d33f26 | Lizard_file-nloc-medium | scripts/e2e/isolated-user.test.mjs:1 | fixed ✓ | #185 |
 | b0bce20c6334ec24bf9755b6d05139b7 | Lizard_nloc-medium | scripts/e2e/isolated-user.test.mjs:266 | fixed ✓ | #173 |
 | efa71f11ccd707657fe09b0a7dec335c | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/isolated-user.test.mjs:270 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 16acb3325ddc3a2814dbc8c1c0914bd4 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/isolated-user.test.mjs:274 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
@@ -444,7 +515,7 @@ open 0 / fixed 97 / resolved 29 / excluded 287
 | 99b67e40ce65b6bc3e974cf415284a19 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/isolated-user.test.mjs:1608 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 3a9735f18fc7f205178c94af815ab408 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/isolated-user.test.mjs:1616 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 99962a27ef95baab01555495da7c32e0 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/isolated-user.test.mjs:1625 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
-| e4b6c81044d927678dcb047c885e9def | Lizard_file-nloc-medium | scripts/e2e/mcp-clients.mjs:1 | resolved (planned) | single cohesive module after wire assertions and reporting moved out: client registration, execution and cleanup form one transaction whose restoration is coupled to the commands it starts (546 NLOC; 9.2% over 500) |
+| e4b6c81044d927678dcb047c885e9def | Lizard_file-nloc-medium | scripts/e2e/mcp-clients.mjs:1 | resolved ✓ | single cohesive module after wire assertions and reporting moved out: client registration, execution and cleanup form one transaction whose restoration is coupled to the commands it starts (546 NLOC; 9.2% over 500) |
 | 93cfb71afd3c14ac192f09fa5cf20c08 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/mcp-clients.mjs:240 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 97bb6e3f01aaaccaf7ecf982df4697f2 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/mcp-clients.mjs:241 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 43fce8d402763da6add56abbca377c27 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/mcp-clients.mjs:247 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
@@ -487,7 +558,7 @@ open 0 / fixed 97 / resolved 29 / excluded 287
 | 14b5d27c1e18dae59e3fc3baedbe2b90 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probe-contracts.mjs:171 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 2482c95e63adcd8fe9e665df29f0b406 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probe-contracts.mjs:187 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | a04a363ec5085ca26acc77f2d5d343e4 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probe-contracts.mjs:231 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
-| 4bc93ee6ffd7581f439e52f96c13e4fb | Lizard_file-nloc-medium | scripts/e2e/probe-lib/agents.mjs:1 | fixed (planned) | #185 |
+| 4bc93ee6ffd7581f439e52f96c13e4fb | Lizard_file-nloc-medium | scripts/e2e/probe-lib/agents.mjs:1 | fixed ✓ | #185 |
 | 92d7fd4004f5dea88760ef7d123f3481 | Semgrep_javascript_dos_rule-non-literal-regexp | scripts/e2e/probe-lib/agents.mjs:19 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 1c9a231ee05d8174e8949a9489b55843 | Semgrep_javascript_dos_rule-non-literal-regexp | scripts/e2e/probe-lib/agents.mjs:21 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | fcb11a5527e523ef935887026d4c9767 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probe-lib/agents.mjs:125 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
@@ -505,7 +576,7 @@ open 0 / fixed 97 / resolved 29 / excluded 287
 | 2f1943cff014ecec4328edd0a5a4a8ef | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probe-lib/agents.mjs:207 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 1094856d70b2b8a0b49873854303101e | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probe-lib/agents.mjs:229 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | ff27bea75dc91add354af56ca38cd47 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probe-lib/agents.mjs:230 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
-| 6d3e0f690f1fa1921d15ecb764a20cb0 | Lizard_nloc-medium | scripts/e2e/probe-lib/agents.mjs:335 | resolved (planned) | shellQuote is one return statement and Lizard measures it at 3 NLOC in the same tree; the 492 came from the reader's span, which ran past the function until batch B1 rewrote the /'/g literal below it |
+| 6d3e0f690f1fa1921d15ecb764a20cb0 | Lizard_nloc-medium | scripts/e2e/probe-lib/agents.mjs:335 | resolved ✓ | shellQuote is one return statement and Lizard measures it at 3 NLOC in the same tree; the 492 came from the reader's span, which ran past the function until batch B1 rewrote the /'/g literal below it |
 | 3536c70ee8b5825f074e7598ca528b30 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probe-lib/agents.mjs:376 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 57a3f055aa88329e48c70cd92d449762 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probe-lib/agents.mjs:542 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | ccca58cce6c8abffcf8c4e5efb9e8d49 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probe-lib/agents.mjs:557 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
@@ -540,13 +611,13 @@ open 0 / fixed 97 / resolved 29 / excluded 287
 | 2073e79ce8e93288565d20fed56e16ba | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probe-lib/trusthash.mjs:40 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | b4ed76c7d8cb2f99b19a941a7a771d5e | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probe-lib/trusthash.mjs:42 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | e833fd112e34f4a081587bf1a9e8b4e6 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probe-lib/trusthash.mjs:44 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
-| 16267458dd41ebb61fa3aec7549291cc | Lizard_file-nloc-medium | scripts/e2e/probes/claude.mjs:1 | fixed (planned) | #185 |
+| 16267458dd41ebb61fa3aec7549291cc | Lizard_file-nloc-medium | scripts/e2e/probes/claude.mjs:1 | fixed ✓ | #185 |
 | 2048c656de1414609fe2ae1ca8b4ba88 | Lizard_nloc-medium | scripts/e2e/probes/claude.mjs:153 | fixed ✓ | #173 |
 | 3c38819c4c0120be10886358bbd00451 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/claude.mjs:156 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | f3967090ee4a88da7796cb64d88ec2a3 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/claude.mjs:176 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | fa30b11d1a3332dac0ae58a345e0000b | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/claude.mjs:214 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 744cb0807e2a53d2a2d26182ea35fdd5 | Lizard_nloc-medium | scripts/e2e/probes/claude.mjs:259 | fixed ✓ | #173 |
-| 102ad9e090737747988c737fdb66bd3b | Lizard_file-nloc-medium | scripts/e2e/probes/codex.mjs:1 | fixed (planned) | #185 |
+| 102ad9e090737747988c737fdb66bd3b | Lizard_file-nloc-medium | scripts/e2e/probes/codex.mjs:1 | fixed ✓ | #185 |
 | 47ec2f419e1a3d69efb8819846fb18bb | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/codex.mjs:110 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | a610eb0854d5299a96dadcd52b35c3cd | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/codex.mjs:118 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 34e4e588dbe20c931c61c439bde15491 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/codex.mjs:122 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
@@ -558,7 +629,7 @@ open 0 / fixed 97 / resolved 29 / excluded 287
 | fd32a7c7ade1dbd5ab3e136ef90b5090 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/codex.mjs:343 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 6d9d3b2678aa8da13384925fb129116b | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/codex.mjs:652 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | ad2657776a9d175fb7b54ce0db499d35 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/codex.mjs:653 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
-| 7f441e27985b09cd86bb7ef37794fe8 | Lizard_file-nloc-medium | scripts/e2e/probes/grok.mjs:1 | fixed (planned) | #185 |
+| 7f441e27985b09cd86bb7ef37794fe8 | Lizard_file-nloc-medium | scripts/e2e/probes/grok.mjs:1 | fixed ✓ | #185 |
 | 3ef585f8eea0b8e6b2dd0ad1a8de0729 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/grok.mjs:124 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 1338b3c626cc57a0f8306d22aa8534bb | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/grok.mjs:125 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | c14b26b21fa269c4135c55bc627d6449 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/grok.mjs:130 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
@@ -570,7 +641,7 @@ open 0 / fixed 97 / resolved 29 / excluded 287
 | 1c095e585ae3ace9e0bc8535a1af331 | Lizard_nloc-medium | scripts/e2e/probes/grok.mjs:627 | fixed ✓ | #173 |
 | 8486f3aa7fe4eee69a1196ef8647fa83 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/grok.mjs:651 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | b825f821604e672d0cfbe025755c9d99 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/grok.mjs:672 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
-| 13aac59837310b6e3f9466c6ec244d79 | Lizard_file-nloc-medium | scripts/e2e/probes/pi.mjs:1 | fixed (planned) | #185 |
+| 13aac59837310b6e3f9466c6ec244d79 | Lizard_file-nloc-medium | scripts/e2e/probes/pi.mjs:1 | fixed ✓ | #185 |
 | ac2e8e8997e04cbe34502db4d8a6f835 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/pi.mjs:44 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | b502efcc50740d92e75b60da391e179 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/pi.mjs:47 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | b7ffc988267e098c96f71bab7ea979d3 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/pi.mjs:51 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
@@ -598,7 +669,7 @@ open 0 / fixed 97 / resolved 29 / excluded 287
 | 7a302cafb42a1caf43bae80fe6eefe21 | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/providers.mjs:276 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | b22e10cf8a73fc88db8a7b4537266a1f | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/providers.mjs:313 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
 | 36037336430ef0e2f0d3e8567f8bbf9b | Semgrep_javascript_pathtraversal_rule-non-literal-fs-filename | scripts/e2e/probes/providers.mjs:317 | excluded ✓ | .codacy.yml engines.opengrep.exclude_paths test/**, scripts/e2e/** (operator-run tests and harness; untrusted-input premise does not hold) |
-| fae407241cd282592ae2df6f14985e91 | Lizard_file-nloc-medium | scripts/fixtures/generate-1000-events.mjs:1 | resolved (planned) | single cohesive module after coverage validation and fixed corpus inputs moved out: one ordered emitter shares seeded clock/random state, session sequence and payload builders (1344 NLOC; 168.8% over 500) |
+| fae407241cd282592ae2df6f14985e91 | Lizard_file-nloc-medium | scripts/fixtures/generate-1000-events.mjs:1 | resolved ✓ | single cohesive module after coverage validation and fixed corpus inputs moved out: one ordered emitter shares seeded clock/random state, session sequence and payload builders (1344 NLOC; 168.8% over 500) |
 | 13b87a7ce026ee26c0659610eb01fd0f | Lizard_nloc-medium | scripts/fixtures/generate-1000-events.mjs:431 | fixed ✓ | #173 |
 | 6d3e97f7a82005437b401405e5d6bce4 | Lizard_nloc-medium | scripts/fixtures/generate-1000-events.mjs:573 | fixed ✓ | #173 |
 | 1ff4a9ad7a424c0e586783f79aa10af5 | Lizard_nloc-medium | scripts/fixtures/generate-1000-events.mjs:913 | fixed ✓ | #173 |
@@ -610,20 +681,20 @@ open 0 / fixed 97 / resolved 29 / excluded 287
 | 53fa56ddf778a0e859e1f2883640040a | Lizard_nloc-medium | src/agents/claude.ts:99 | fixed ✓ | #166 |
 | 2274afa53c8a513e266b40542e03314a | Lizard_nloc-medium | src/agents/codex.ts:96 | fixed ✓ | #166 |
 | 3967d0a7a26e3d0dbd841c3074809d67 | Lizard_nloc-medium | src/agents/grok.ts:87 | fixed ✓ | #166 |
-| 3fe04e204c3d90d84b07fc9ae40ce4b9 | Semgrep_javascript_dos_rule-non-literal-regexp | src/agents/index.ts:81 | resolved (planned) | the RegExp is built once from PATH_KEYS and JSON_VALUE, both module constants; no payload text enters the pattern — module constants — not applicable |
-| 88da1827acc65948ba0e3a47eeb7d925 | Semgrep_javascript_dos_rule-non-literal-regexp | src/agents/index.ts:81 | resolved (planned) | PATH_SCAN is built only from PATH_KEYS and JSON_VALUE, both module constants, so no payload value reaches the pattern (same finding as 3fe04e204c3d90d84b07fc9ae40ce4b9, re-issued under a new id when #162 rewrote the argument into String.raw) — no payload-controlled pattern reaches the constructor: PATH_SCAN is assembled once at module load from PATH_KEYS and JSON_VALUE, so there is nothing for a validator to stand between; the payload is the string receiver of prefix.matchAll(PATH_SCAN), and the effect is bounded because the pattern's repetitions cannot backtrack ambiguously: the two \\s* around the colon each sit between literal characters, and the one {1,4096} quantifier runs over an alternation whose branches cannot both match a character (one excludes the backslash the other requires), over a receiver readStdinBounded already caps at 262,144 bytes |
-| 77fc49747550698c069aab368599e606 | Lizard_nloc-medium | src/agents/index.ts:84 | resolved (planned) | Lizard's TypeScript reader loses this file's structure: it reports unescapeJson, a three-line function, as spanning lines 84 to 157 and reports no other function in a 356-line file that defines 24, so the 73 is a merge of every following declaration and not a function length. Same measurement on main; nothing in the file is over the limit. |
-| f5834f762e53f0596f3655477508677f | Semgrep_javascript_dos_rule-non-literal-regexp | src/agents/index.ts:322 | resolved (planned) | scanKey is called with keys.session and keys.tool, constants of the agent table; the payload is only the subject string — module constants — not applicable |
-| 8ce19ec1d6d08ef9a28d6c15a9f2f3e0 | Semgrep_javascript_dos_rule-non-literal-regexp | src/agents/index.ts:354 | resolved (planned) | scanKey is called only with AGENT_KEYS[agent].session and .tool, eight string literals in a module constant, and the payload is the subject of the match rather than part of the pattern (same finding as f5834f762e53f0596f3655477508677f, re-issued under a new id when #162 rewrote the argument into String.raw) — no payload-controlled pattern reaches the constructor: agent comes from resolveAgent, which returns 'codex', 'pi', 'grok', 'claude' or 'unknown' from fixed comparisons on the handler's selector and two environment variables, and captureEvent returns at the 'unknown' guard before the scan, so AGENT_KEYS[agent].session and .tool is a lookup in a constant table of eight string literals; the payload is prefix, the string exec runs against, and the effect is bounded because the pattern's repetitions cannot backtrack ambiguously: the two \\s* around the colon each sit between literal characters, and the one {1,4096} quantifier runs over an alternation whose branches cannot both match a character (one excludes the backslash the other requires), over a receiver readStdinBounded already caps at 262,144 bytes |
+| 3fe04e204c3d90d84b07fc9ae40ce4b9 | Semgrep_javascript_dos_rule-non-literal-regexp | src/agents/index.ts:81 | resolved ✓ | the RegExp is built once from PATH_KEYS and JSON_VALUE, both module constants; no payload text enters the pattern — module constants — not applicable |
+| 88da1827acc65948ba0e3a47eeb7d925 | Semgrep_javascript_dos_rule-non-literal-regexp | src/agents/index.ts:81 | resolved ✓ | PATH_SCAN is built only from PATH_KEYS and JSON_VALUE, both module constants, so no payload value reaches the pattern (same finding as 3fe04e204c3d90d84b07fc9ae40ce4b9, re-issued under a new id when #162 rewrote the argument into String.raw) — no payload-controlled pattern reaches the constructor: PATH_SCAN is assembled once at module load from PATH_KEYS and JSON_VALUE, so there is nothing for a validator to stand between; the payload is the string receiver of prefix.matchAll(PATH_SCAN), and the effect is bounded because the pattern's repetitions cannot backtrack ambiguously: the two \\s* around the colon each sit between literal characters, and the one {1,4096} quantifier runs over an alternation whose branches cannot both match a character (one excludes the backslash the other requires), over a receiver readStdinBounded already caps at 262,144 bytes |
+| 77fc49747550698c069aab368599e606 | Lizard_nloc-medium | src/agents/index.ts:84 | resolved ✓ | Lizard's TypeScript reader loses this file's structure: it reports unescapeJson, a three-line function, as spanning lines 84 to 157 and reports no other function in a 356-line file that defines 24, so the 73 is a merge of every following declaration and not a function length. Same measurement on main; nothing in the file is over the limit. |
+| f5834f762e53f0596f3655477508677f | Semgrep_javascript_dos_rule-non-literal-regexp | src/agents/index.ts:322 | resolved ✓ | scanKey is called with keys.session and keys.tool, constants of the agent table; the payload is only the subject string — module constants — not applicable |
+| 8ce19ec1d6d08ef9a28d6c15a9f2f3e0 | Semgrep_javascript_dos_rule-non-literal-regexp | src/agents/index.ts:354 | resolved ✓ | scanKey is called only with AGENT_KEYS[agent].session and .tool, eight string literals in a module constant, and the payload is the subject of the match rather than part of the pattern (same finding as f5834f762e53f0596f3655477508677f, re-issued under a new id when #162 rewrote the argument into String.raw) — no payload-controlled pattern reaches the constructor: agent comes from resolveAgent, which returns 'codex', 'pi', 'grok', 'claude' or 'unknown' from fixed comparisons on the handler's selector and two environment variables, and captureEvent returns at the 'unknown' guard before the scan, so AGENT_KEYS[agent].session and .tool is a lookup in a constant table of eight string literals; the payload is prefix, the string exec runs against, and the effect is bounded because the pattern's repetitions cannot backtrack ambiguously: the two \\s* around the colon each sit between literal characters, and the one {1,4096} quantifier runs over an alternation whose branches cannot both match a character (one excludes the backslash the other requires), over a receiver readStdinBounded already caps at 262,144 bytes |
 | c006fe6abea142b9e53a84d31030c021 | Lizard_nloc-medium | src/agents/pi.ts:106 | fixed ✓ | #166 |
-| 44227dfca703cd22b6549c27140b342 | Semgrep_javascript.lang.security.audit.unsafe-dynamic-method.unsafe-dynamic-method | src/agents/pi.ts:143 | resolved (planned) | PI_TOOLS[native] runs after Object.hasOwn(PI_TOOLS, native) on the line above, so a payload name can only select an own entry of the constant table — tool name from the Pi payload, guarded by hasOwn — not applicable |
-| ed0feeaa35efccb803dbcc520496b603 | Lizard_file-nloc-medium | src/capture.ts:1 | resolved (planned) | single cohesive module after process/CLI and compaction-state extraction: one capture transaction shares the adapted/redacted draft, absolute deadline, turn/epoch decision and store-or-spool outcome (999 NLOC; 99.8% over 500) |
+| 44227dfca703cd22b6549c27140b342 | Semgrep_javascript.lang.security.audit.unsafe-dynamic-method.unsafe-dynamic-method | src/agents/pi.ts:143 | resolved ✓ | PI_TOOLS[native] runs after Object.hasOwn(PI_TOOLS, native) on the line above, so a payload name can only select an own entry of the constant table — tool name from the Pi payload, guarded by hasOwn — not applicable |
+| ed0feeaa35efccb803dbcc520496b603 | Lizard_file-nloc-medium | src/capture.ts:1 | resolved ✓ | single cohesive module after process/CLI and compaction-state extraction: one capture transaction shares the adapted/redacted draft, absolute deadline, turn/epoch decision and store-or-spool outcome (999 NLOC; 99.8% over 500) |
 | 88b03f53b48660ec02a18d10af3fcae0 | Lizard_nloc-medium | src/capture.ts:531 | fixed ✓ | #166 |
 | dbb1a53f19a6df43679f5149885b330e | Lizard_nloc-medium | src/capture.ts:776 | fixed ✓ | #166 |
 | cdcb204be8f7e0941ec2d1eca871d4 | Lizard_nloc-medium | src/capture.ts:871 | fixed ✓ | #166 |
 | 77635429d1f6f5ac9a4b30db32223ad9 | Lizard_nloc-medium | src/capture.ts:1025 | fixed ✓ | #166 |
 | e8663dd2e1b2bebd385bcc8b3c6dec20 | Semgrep_javascript.lang.security.audit.unsafe-dynamic-method.unsafe-dynamic-method | src/cli.ts:94 | fixed ✓ | #160 — command name from argv, controller: the operator; `oboete constructor` reached Object.prototype and crashed with a TypeError instead of the usage — real (robustness), fixed with Object.hasOwn |
-| ef1d4ba180c1a55371892f6012cd34fc | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/config.ts:321 | resolved (planned) | token !== '' tests whether the variable is set; the operand is the empty string, not a secret — empty-string check — not applicable |
+| ef1d4ba180c1a55371892f6012cd34fc | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/config.ts:321 | resolved ✓ | token !== '' tests whether the variable is set; the operand is the empty string, not a secret — empty-string check — not applicable |
 | e2546cbfbe68687e67e8ceaf4b8c928c | TSQLLint_set-ansi | src/db/migrations/0001_core.sql:1 | excluded ✓ | .codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set) |
 | 116d180e053268fd5387962849249cb7 | TSQLLint_set-transaction-isolation-level | src/db/migrations/0001_core.sql:1 | excluded ✓ | .codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set) |
 | d1571f7137ace2897e4750e125345b7a | TSQLLint_set-quoted-identifier | src/db/migrations/0001_core.sql:1 | excluded ✓ | .codacy.yml engines.tsqllint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set) |
@@ -655,7 +726,7 @@ open 0 / fixed 97 / resolved 29 / excluded 287
 | 5aac9e0a9aeaf90eb5827ad5b98fe099 | SQLint_allIssues | src/db/migrations/0002_memory_search.sql:97 | excluded ✓ | .codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set) |
 | de0e737f6eff1acda55f7b447b8c7df5 | SQLint_allIssues | src/db/migrations/0003_operations.sql:28 | excluded ✓ | .codacy.yml engines.SQLint.exclude_paths src/db/migrations/** (SQLite migrations; SQL Server / PostgreSQL rule set) |
 | dd612e2e9fbbc8c3ec2f2594060800a8 | Lizard_nloc-medium | src/db/open.ts:91 | fixed ✓ | #166 |
-| b407b76b7f26b1de6a80423147d7d51c | Semgrep_javascript.express.security.injection.tainted-sql-string.tainted-sql-string | src/db/queries.ts:254 | resolved (planned) | only `?` placeholders are joined into the SQL; the memory ids are bound as parameters — bound parameters — not applicable |
+| b407b76b7f26b1de6a80423147d7d51c | Semgrep_javascript.express.security.injection.tainted-sql-string.tainted-sql-string | src/db/queries.ts:254 | resolved ✓ | only `?` placeholders are joined into the SQL; the memory ids are bound as parameters — bound parameters — not applicable |
 | 2128c682e98d0c083fb017cf7801d418 | Lizard_nloc-medium | src/doctor.ts:86 | fixed ✓ | #166 |
 | ced391779bf4a169a7c8df8395191c4f | Lizard_nloc-medium | src/doctor.ts:264 | fixed ✓ | #166 |
 | fd5a3f38eaf5d74f4fd9a362e0c51673 | Lizard_nloc-medium | src/doctor/agents.ts:91 | fixed ✓ | #166 |
@@ -666,48 +737,48 @@ open 0 / fixed 97 / resolved 29 / excluded 287
 | 8615949cc9064bddaccd3ab613d65fb2 | Lizard_nloc-medium | src/doctor/storage.ts:38 | fixed ✓ | #166 |
 | a7ff455628bd7793e1a0f87d9be3723d | Lizard_nloc-medium | src/doctor/storage.ts:143 | fixed ✓ | #166 |
 | 7fc74b21c7bde3f5ff9b558373a539f2 | Lizard_nloc-medium | src/events.ts:168 | fixed ✓ | #162 |
-| d7031b338e6f7512b5fd5ed4a6257f17 | Lizard_file-nloc-medium | src/fixture/replay.ts:1 | resolved (planned) | single cohesive module after completed-run evaluation and report extraction: one stateful execution driver shares ReplayRun across fixture parsing, hook/worker startup, lease/pending windows, sample accumulation and cleanup (1143 NLOC; 128.6% over 500) |
+| d7031b338e6f7512b5fd5ed4a6257f17 | Lizard_file-nloc-medium | src/fixture/replay.ts:1 | resolved ✓ | single cohesive module after completed-run evaluation and report extraction: one stateful execution driver shares ReplayRun across fixture parsing, hook/worker startup, lease/pending windows, sample accumulation and cleanup (1143 NLOC; 128.6% over 500) |
 | 51024f006140e9bc315a9218468bc848 | Lizard_nloc-medium | src/fixture/replay.ts:696 | fixed ✓ | #164 |
 | 4790455d8db963ddff6afd9f8e2df464 | Lizard_nloc-medium | src/injection/deferred.ts:203 | fixed ✓ | #164 |
 | ac8b3fbc5586f26a8d14d31393b5e185 | Lizard_nloc-medium | src/injection/deferred.ts:279 | fixed ✓ | #164 |
-| 161d5b6e6a57ae5ac63a3683a0271135 | Lizard_file-nloc-medium | src/injection/inject.ts:1 | fixed (planned) | #185 |
+| 161d5b6e6a57ae5ac63a3683a0271135 | Lizard_file-nloc-medium | src/injection/inject.ts:1 | fixed ✓ | #185 |
 | 2fa843f30085b6b69eb20803d9f42b29 | Lizard_nloc-medium | src/injection/inject.ts:360 | fixed ✓ | #164 |
 | c806aac9bc4126782a6690a61ce95445 | Lizard_nloc-medium | src/injection/inject.ts:523 | fixed ✓ | #164 |
-| 7d9b63ea2aafe102e6476a3d93c9c9db | Lizard_file-nloc-medium | src/injection/pack.ts:1 | fixed (planned) | #185 |
-| f41f371530c64b029188bab62e0d722a | Semgrep_javascript.express.security.injection.tainted-sql-string.tainted-sql-string | src/injection/pack.ts:342 | resolved (planned) | only `?` placeholders are joined into the SQL; the memory ids are bound as parameters — bound parameters — not applicable |
+| 7d9b63ea2aafe102e6476a3d93c9c9db | Lizard_file-nloc-medium | src/injection/pack.ts:1 | fixed ✓ | #185 |
+| f41f371530c64b029188bab62e0d722a | Semgrep_javascript.express.security.injection.tainted-sql-string.tainted-sql-string | src/injection/pack.ts:342 | resolved ✓ | only `?` placeholders are joined into the SQL; the memory ids are bound as parameters — bound parameters — not applicable |
 | b2c9c11e8227925bc3a297d756804448 | Lizard_nloc-medium | src/injection/pack.ts:550 | fixed ✓ | #164 |
-| 4d4300224281450a2475c8eae7f02eaa | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/injection/recognize.ts:71 | resolved (planned) | hash !== null tests whether the span was an issued pack; the operand is null, not a secret — null check — not applicable |
+| 4d4300224281450a2475c8eae7f02eaa | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/injection/recognize.ts:71 | resolved ✓ | hash !== null tests whether the span was an issued pack; the operand is null, not a secret — null check — not applicable |
 | 46e6b08df61cfa75ea028ea6572af4df | Lizard_nloc-medium | src/observer/catalog.ts:56 | fixed ✓ | #165 |
-| e5c566331a7a4187809f6a4b25baaced | Lizard_file-nloc-medium | src/observer/classify.ts:1 | fixed (planned) | #185 |
+| e5c566331a7a4187809f6a4b25baaced | Lizard_file-nloc-medium | src/observer/classify.ts:1 | fixed ✓ | #185 |
 | ed0ec10c89a6aba269a1fb49ceea2522 | Lizard_nloc-medium | src/observer/classify.ts:276 | fixed ✓ | #165 |
 | 6d2c3e2bc43d69bfb5d0699166672f79 | Lizard_nloc-medium | src/observer/classify.ts:504 | fixed ✓ | #165 |
 | ef0d4048b972a68b7161482442f6cfd2 | Lizard_nloc-medium | src/observer/contract.ts:199 | fixed ✓ | #165 |
-| 925f06752f2e4d955e5cbd1226a388ba | Lizard_file-nloc-medium | src/observer/llm.ts:1 | fixed (planned) | #185 |
+| 925f06752f2e4d955e5cbd1226a388ba | Lizard_file-nloc-medium | src/observer/llm.ts:1 | fixed ✓ | #185 |
 | 9c55aae5e3bdd0bf530eb6ec7b70eec6 | Lizard_nloc-medium | src/observer/llm.ts:110 | fixed ✓ | #165 |
 | 188840d78c29d17901a37c07a2879cbe | Lizard_nloc-medium | src/observer/request.ts:117 | fixed ✓ | #165 |
-| 1012225090f36c0cd8030d0f9a7bd8f | Semgrep_javascript_dos_rule-non-literal-regexp | src/privacy/detect.ts:140 | resolved (planned) | The class body comes from a repository .oboete.toml rule that is refused above 256 characters before it is compiled and tokenized once; the RegExp is a single character class and cannot backtrack (#160 fixed the compile-before-bound and the quadratic tokenizer) — glob from the repository's .oboete.toml (a non-operator controller) reaching compileGlob through globRuleError; the class itself is one character and cannot backtrack, but the rule was compiled before its 256-character bound was reported and the tokenizer searched the rest of the rule at every `[` (6.8 s per 1 MiB on the capture path) — real (availability), fixed: length gate before compile, linear tokenizer |
+| 1012225090f36c0cd8030d0f9a7bd8f | Semgrep_javascript_dos_rule-non-literal-regexp | src/privacy/detect.ts:140 | resolved ✓ | The class body comes from a repository .oboete.toml rule that is refused above 256 characters before it is compiled and tokenized once; the RegExp is a single character class and cannot backtrack (#160 fixed the compile-before-bound and the quadratic tokenizer) — glob from the repository's .oboete.toml (a non-operator controller) reaching compileGlob through globRuleError; the class itself is one character and cannot backtrack, but the rule was compiled before its 256-character bound was reported and the tokenizer searched the rest of the rule at every `[` (6.8 s per 1 MiB on the capture path) — real (availability), fixed: length gate before compile, linear tokenizer |
 | 6b8a3d3310884f227d775ae9b98b7136 | Lizard_nloc-medium | src/repo-identity.ts:73 | fixed ✓ | #162 |
-| 8b7418a747f9f274c583330c80f6d0f1 | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/setup/detect.ts:187 | resolved (planned) | trusted_hash === hash compares two hashes of the operator's own config files on the same machine; there is no remote party to observe the timing — local file hashes — not applicable |
+| 8b7418a747f9f274c583330c80f6d0f1 | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/setup/detect.ts:187 | resolved ✓ | trusted_hash === hash compares two hashes of the operator's own config files on the same machine; there is no remote party to observe the timing — local file hashes — not applicable |
 | 7229071f8c9bc53fbb3044e81d01d86a | Lizard_nloc-medium | src/setup/detect.ts:211 | fixed ✓ | #166 |
-| 8a6b8522689d3e902fc9868a85312760 | Semgrep_javascript.lang.security.audit.prototype-pollution.prototype-pollution-loop.prototype-pollution-loop | src/setup/managed-block.ts:168 | resolved (planned) | tableAt reads value[key] after isPlainObject and Object.hasOwn checks; nothing is assigned through the key — read-only traversal — not applicable |
-| 60d9a958fc1f01dca7c13c3848cc93e6 | Semgrep_javascript.lang.security.audit.prototype-pollution.prototype-pollution-loop.prototype-pollution-loop | src/setup/managed-block.ts:201 | resolved (planned) | the loop reads header[key] from the parsed TOML to build a path; nothing is assigned through the key, so no object can be polluted — read-only traversal — not applicable |
+| 8a6b8522689d3e902fc9868a85312760 | Semgrep_javascript.lang.security.audit.prototype-pollution.prototype-pollution-loop.prototype-pollution-loop | src/setup/managed-block.ts:168 | resolved ✓ | tableAt reads value[key] after isPlainObject and Object.hasOwn checks; nothing is assigned through the key — read-only traversal — not applicable |
+| 60d9a958fc1f01dca7c13c3848cc93e6 | Semgrep_javascript.lang.security.audit.prototype-pollution.prototype-pollution-loop.prototype-pollution-loop | src/setup/managed-block.ts:201 | resolved ✓ | the loop reads header[key] from the parsed TOML to build a path; nothing is assigned through the key, so no object can be polluted — read-only traversal — not applicable |
 | 5f95cd08281c5f3a410e055acf395f2 | Lizard_nloc-medium | src/setup/probe.ts:50 | fixed ✓ | #166 |
 | 9223ded563847f7eafa65e318dcfb35a | Lizard_nloc-medium | src/setup/probe.ts:186 | fixed ✓ | #166 |
-| 6c7d15e7863e4975dd4b61c93e5a93b1 | Lizard_file-nloc-medium | src/setup/setup.ts:1 | fixed (planned) | #185 |
+| 6c7d15e7863e4975dd4b61c93e5a93b1 | Lizard_file-nloc-medium | src/setup/setup.ts:1 | fixed ✓ | #185 |
 | 34065213795f36e210d7e7c6383938cc | Lizard_nloc-medium | src/setup/setup.ts:158 | fixed ✓ | #166 |
 | 12bfd84c920feb7513165e1963e42022 | Lizard_nloc-medium | src/transfer.ts:243 | fixed ✓ | #164 |
-| bc473f9373cc44f2a96a2777632e5a3b | Semgrep_rules_lgpl_javascript_ssrf_rule-node-ssrf | src/viewer/app/api.ts:78 | resolved (planned) | browser code: every caller passes a literal /api path with encodeURIComponent on the id, and the request goes to the page's own origin — viewer frontend, literal same-origin paths — not applicable |
+| bc473f9373cc44f2a96a2777632e5a3b | Semgrep_rules_lgpl_javascript_ssrf_rule-node-ssrf | src/viewer/app/api.ts:78 | resolved ✓ | browser code: every caller passes a literal /api path with encodeURIComponent on the id, and the request goes to the page's own origin — viewer frontend, literal same-origin paths — not applicable |
 | 7935279dc22d4b6af001014179ebdff1 | Stylelint_scss_function-disallowed-list | src/viewer/app/app.css:1 | excluded (planned) | Codacy repository setting: pattern Stylelint_scss_function-disallowed-list disabled (PATCH …/tools/1f03328a-086e-459e-bfa3-73e56f01020f with a patterns array); app.css is plain CSS and the SCSS-only rule cannot apply, every other Stylelint rule keeps running |
 | 70fb319e0568bdf82a90f8d38044f075 | Lizard_nloc-medium | src/viewer/app/main.tsx:159 | fixed ✓ | #164 |
-| 6d0b78f8fc02642841c96cb14a549f20 | Lizard_file-nloc-medium | src/worker/batches.ts:1 | fixed (planned) | #185 |
+| 6d0b78f8fc02642841c96cb14a549f20 | Lizard_file-nloc-medium | src/worker/batches.ts:1 | fixed ✓ | #185 |
 | d00d96e60329780ad296180f2e3a9c4b | Lizard_nloc-medium | src/worker/batches.ts:567 | fixed ✓ | #165 |
-| c19402d47d336de1dcbfe06a0941546e | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/worker/lease.ts:84 | resolved (planned) | same lease token as observe.ts:220, compared inside a write transaction on the local database — local lease token — not applicable |
-| f347b941757ef85eff4d9e526869252e | Lizard_file-nloc-medium | src/worker/observe.ts:1 | resolved (planned) | single cohesive module after batch, citation and import-maintenance extraction: one bounded leased run owns queue passes, heartbeat, retry, summary completion and release (568 NLOC; 13.6% over 500) |
+| c19402d47d336de1dcbfe06a0941546e | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/worker/lease.ts:84 | resolved ✓ | same lease token as observe.ts:220, compared inside a write transaction on the local database — local lease token — not applicable |
+| f347b941757ef85eff4d9e526869252e | Lizard_file-nloc-medium | src/worker/observe.ts:1 | resolved ✓ | single cohesive module after batch, citation and import-maintenance extraction: one bounded leased run owns queue passes, heartbeat, retry, summary completion and release (568 NLOC; 13.6% over 500) |
 | 2fe9cb6af3e5bc0a51b72ebeee4bcd37 | Lizard_nloc-medium | src/worker/observe.ts:166 | fixed ✓ | #165 |
-| 6bed5dd752cbea6bc7380c487d90d4d5 | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/worker/observe.ts:220 | resolved (planned) | owner_token is a randomUUID lease token compared in JavaScript against the row read from the local SQLite file (in a directory oboete creates with mode 0700); no remote party can time the comparison — local lease token — not applicable |
+| 6bed5dd752cbea6bc7380c487d90d4d5 | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/worker/observe.ts:220 | resolved ✓ | owner_token is a randomUUID lease token compared in JavaScript against the row read from the local SQLite file (in a directory oboete creates with mode 0700); no remote party can time the comparison — local lease token — not applicable |
 | ba8cb52aaf85df5e56aef6e700030d0a | Lizard_parameter-count-medium | src/worker/observe.ts:311 | fixed ✓ | #165 |
 | 99f1e25fc60fe2a8f0c836e8a50ab71f | Lizard_nloc-medium | src/worker/observe.ts:752 | fixed ✓ | #165 |
-| 9a7dcbd9763eafd49000cc2713240859 | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/worker/observe.ts:804 | resolved (planned) | token === null tests whether a lease was acquired; the operand is null, not a secret — null check — not applicable |
+| 9a7dcbd9763eafd49000cc2713240859 | Semgrep_rules_lgpl_javascript_crypto_rule-node-timing-attack | src/worker/observe.ts:804 | resolved ✓ | token === null tests whether a lease was acquired; the operand is null, not a secret — null check — not applicable |
 | 976292bf732d5c7a54d298535ba5b838 | Lizard_file-nloc-medium | test/fault-provider.test.ts:1 | excluded ✓ | .codacy.yml engines.lizard.exclude_paths test/** (linear test bodies) |
 | b2917116744bb97e405d89185671999d | Lizard_nloc-medium | test/fault-provider.test.ts:112 | excluded ✓ | .codacy.yml engines.lizard.exclude_paths test/** (linear test bodies) |
 | 82e1b1a2994d99e9707e63b4f8c6a4bd | Lizard_nloc-medium | test/fault-provider.test.ts:780 | excluded ✓ | .codacy.yml engines.lizard.exclude_paths test/** (linear test bodies) |
