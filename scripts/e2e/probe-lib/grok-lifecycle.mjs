@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { GROK_EVENTS, GROK_ISOLATION_ENV, prepareGrokHome, shellQuote } from "./agents.mjs";
+import { GROK_EVENTS, GROK_ISOLATION_ENV, credentialEntries, prepareGrokHome, settleCredentials, shellQuote } from "./agents.mjs";
 import { compactionIdentity, named, parseEvents, redactValue, saveFix, summaryOf, topKeys } from "./agent-events.mjs";
 import { agentPath } from "./process.mjs";
 import { tmuxSession } from "./tmux.mjs";
@@ -153,6 +153,8 @@ async function tuiTwoCompact(dir, { home, repo }) {
     } catch {
       /* ignore */
     }
+    // The TUI may have refreshed the token; carry it back before the next probe reuses the home.
+    settleCredentials("grok", credentialEntries("grok", home));
   }
 }
 

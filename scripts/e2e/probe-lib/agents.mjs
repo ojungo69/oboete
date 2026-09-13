@@ -88,9 +88,12 @@ export function copyMode(src, dest, mode = 0o600) {
  * but only for a leg that finishes; a leg killed at its timeout leaves the refresh behind, which is
  * the failure this exists to end. Returns the entry list for `settleCredentials`.
  */
-export function stageCredential(source, destination) {
+export function stageCredential(source, destination, required = false) {
   const target = path.resolve(source);
-  if (!fs.existsSync(target)) return [];
+  if (!fs.existsSync(target)) {
+    if (required) throw new Error(`missing credential file: ${target}`);
+    return [];
+  }
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   const entry = { staged: destination, source: target };
   // A previous leg on this directory may have renamed a file over the link; carry that refresh
@@ -113,17 +116,40 @@ function carryBackCredential({ staged, source }) {
   let handle;
   try {
     handle = fs.openSync(staged, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-  } catch {
-    return false;
+  } catch (error) {
+    // Anything else -- a descriptor limit, a permission change, an I/O error -- would be read as
+    // "nothing to carry" and the refresh discarded, so only the two expected answers are silent.
+    if (error.code === "ELOOP" || error.code === "ENOENT") return false;
+    throw error;
   }
   try {
     const text = fs.readFileSync(handle, "utf8");
     JSON.parse(text); // A half-written file must not overwrite a working credential.
-    fs.writeFileSync(source, text, { mode: 0o600 });
+    // Written beside the account file and renamed over it: a failed write must not leave the
+    // account holding a truncated credential, which is the failure this whole path prevents.
+    const pending = `${source}.carry-back-${process.pid}`;
+    fs.writeFileSync(pending, text, { mode: 0o600 });
+    fs.renameSync(pending, source);
   } finally {
     fs.closeSync(handle);
   }
   return true;
+}
+
+const ACCOUNT_CREDENTIAL = {
+  codex: ".codex/auth.json",
+  grok: ".grok/auth.json",
+  pi: ".pi/agent/auth.json",
+};
+
+/**
+ * The entry list for a staged home the probe harness built from the developer's own account (the
+ * pair harness passes the paths it staged instead, because its source homes are configurable).
+ * Copying a staged home keeps the link a link, so a copy is settled the same way.
+ */
+export function credentialEntries(agent, home) {
+  const file = ACCOUNT_CREDENTIAL[agent];
+  return file ? [{ staged: path.join(home, "auth.json"), source: path.join(HOME, file) }] : [];
 }
 
 /**
@@ -256,7 +282,7 @@ export async function seedGrokHome(runRoot) {
   if (grokSeeds.has(runRoot)) return grokSeeds.get(runRoot);
   const seed = path.join(runRoot, "_grok-seed");
   fs.mkdirSync(path.join(seed, "hooks"), { recursive: true });
-  const credentials = stageCredential(path.join(HOME, ".grok/auth.json"), path.join(seed, "auth.json"));
+  const credentials = stageCredential(path.join(HOME, ".grok/auth.json"), path.join(seed, "auth.json"), true);
   await runTimed(["grok", "inspect", "--json"], {
     cwd: seed,
     env: childEnv({ GROK_HOME: seed, GROK_CLAUDE_HOOKS_ENABLED: "0" }),
@@ -329,7 +355,7 @@ export async function codex(dir, opts = {}) {
   const repo = resolveRepo(dir, opts);
   const home = path.join(dir, "codex-home");
   fs.mkdirSync(home, { recursive: true });
-  const credentials = stageCredential(path.join(HOME, ".codex/auth.json"), path.join(home, "auth.json"));
+  const credentials = stageCredential(path.join(HOME, ".codex/auth.json"), path.join(home, "auth.json"), true);
   const { eventsPath, json } = writeHookTree(home, "codex", opts);
   const hooksPath = path.join(home, "hooks.json");
   const trust = opts.trust === true;
@@ -382,9 +408,7 @@ export function prepareGrokHome(dir, opts = {}) {
     const extra = String(opts.configToml);
     fs.writeFileSync(cfg, prev + (prev && !prev.endsWith("\n") ? "\n" : "") + extra + (extra.endsWith("\n") ? "" : "\n"));
   }
-  // copyGrokHome keeps the seed's staged link a link, so the leg reads the account's own file.
-  const credentials = [{ staged: path.join(home, "auth.json"), source: path.join(HOME, ".grok/auth.json") }];
-  return { home, repo, eventsPath, credentials };
+  return { home, repo, eventsPath, credentials: credentialEntries("grok", home) };
 }
 
 export async function grok(dir, opts = {}) {
@@ -412,7 +436,7 @@ export async function pi(dir, opts = {}) {
   fs.mkdirSync(path.join(tmp, "extensions"), { recursive: true });
   fs.mkdirSync(sessions, { recursive: true });
   const agentDir = path.join(HOME, ".pi/agent");
-  const credentials = stageCredential(path.join(agentDir, "auth.json"), path.join(tmp, "auth.json"));
+  const credentials = stageCredential(path.join(agentDir, "auth.json"), path.join(tmp, "auth.json"), true);
   for (const name of ["settings.json", "models-store.json"]) {
     const src = path.join(agentDir, name);
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(tmp, name));

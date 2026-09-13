@@ -13,6 +13,7 @@ import {
   resolveSourceHomes,
   retargetCodexTrust,
 } from "./probe-lib/isolated-agent.mjs";
+import { credentialEntries, stageCredential } from "./probe-lib/agents.mjs";
 import { startLifecycleTui } from "./probe-lib/isolated-lifecycle.mjs";
 import { childEnv as probeChildEnv } from "./probe-lib/process.mjs";
 import { isolatedAccount } from "./isolated-user.test-support.mjs";
@@ -306,6 +307,22 @@ test("a half-written credential is reported and never overwrites the account's o
     (error) => error.name === "Error" && /grok left an unreadable auth.json/.test(error.message),
   );
   assert.equal(JSON.parse(fs.readFileSync(accountFile, "utf8")).account, "auth.json");
+});
+
+test("a staged credential the harness requires is a precondition, not a silent skip", (t) => {
+  const { homes, root } = credentialFixture(t, "required");
+  const missing = path.join(root, "no-account", "auth.json");
+  assert.deepEqual(stageCredential(missing, path.join(root, "optional", "auth.json")), []);
+  assert.throws(
+    () => stageCredential(missing, path.join(root, "required", "auth.json"), true),
+    (error) => /missing credential file/.test(error.message),
+  );
+  // The probe harness derives the account path from the home it staged.
+  assert.deepEqual(credentialEntries("grok", "/run/grok-home"), [
+    { staged: "/run/grok-home/auth.json", source: path.join(os.homedir(), ".grok/auth.json") },
+  ]);
+  assert.deepEqual(credentialEntries("claude", "/run/claude-home"), []);
+  assert.ok(fs.existsSync(path.join(homes.grok, "auth.json")));
 });
 
 test("staging a leg carries back a refresh an unsettled leg left in the directory", (t) => {

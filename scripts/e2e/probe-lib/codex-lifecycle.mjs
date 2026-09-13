@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { DONE_PROMPT, shellQuote } from "./agents.mjs";
+import { DONE_PROMPT, credentialEntries, settleCredentials, shellQuote } from "./agents.mjs";
 import { compactionIdentity, eventsFile, parseEvents, redactValue, summaryOf, topKeys, truncateEvents, writeFixture } from "./agent-events.mjs";
 import { PreconditionError, agentPath, binVersion, waitUntil } from "./process.mjs";
 import { TRUST_PANE_RE, readyTui, tmux, tmuxSession, tuiCmd, tuiQuit, tuiSubmit } from "./tmux.mjs";
@@ -106,6 +106,8 @@ async function withTui(dir, { home, repo, extra = [], run }) {
       /* ignore */
     }
     tmux(["kill-session", "-t", name]);
+    // The TUI may have refreshed the token; carry it back before the next probe reuses the home.
+    settleCredentials("codex", credentialEntries("codex", home));
   }
 }
 

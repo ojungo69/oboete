@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  credentialEntries,
   seedGrokHome,
   settleCredentials,
   stageCredential,
@@ -320,7 +321,7 @@ function preparePiHome(ctx, HOME) {
   const pHome = path.join(ctx.dir, "piagent");
   const sessions = path.join(pHome, "sessions");
   fs.mkdirSync(sessions, { recursive: true });
-  const credentials = stageCredential(path.join(HOME, ".pi/agent/auth.json"), path.join(pHome, "auth.json"));
+  const credentials = stageCredential(path.join(HOME, ".pi/agent/auth.json"), path.join(pHome, "auth.json"), true);
   for (const name of ["settings.json", "models-store.json"]) {
     const src = path.join(HOME, ".pi/agent", name);
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(pHome, name));
@@ -363,7 +364,7 @@ export const probes = [
       const lastMsg = path.join(ctx.dir, "codex_lastmsg.txt");
       const cHome = path.join(ctx.dir, "codex-home");
       fs.mkdirSync(cHome, { recursive: true });
-      const codexCredentials = stageCredential(path.join(HOME, ".codex/auth.json"), path.join(cHome, "auth.json"));
+      const codexCredentials = stageCredential(path.join(HOME, ".codex/auth.json"), path.join(cHome, "auth.json"), true);
       const codex = await runTimed(
         ["codex", "exec", "--json", "--skip-git-repo-check", "--output-last-message", lastMsg, SUMMARIZE],
         {
@@ -385,7 +386,7 @@ export const probes = [
         stdoutPath: path.join(ctx.dir, "grok_out.json"),
         stderrPath: path.join(ctx.dir, "grok_err.txt"),
       });
-      settleCredentials("grok", [{ staged: path.join(gHome, "auth.json"), source: path.join(HOME, ".grok/auth.json") }]);
+      settleCredentials("grok", credentialEntries("grok", gHome));
       const grokOk = recordGrokCliResult(grok, evidence, per);
 
       const { pHome, sessions, credentials: piCredentials } = preparePiHome(ctx, HOME);

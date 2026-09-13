@@ -328,9 +328,13 @@ async function runCodexCompactLifecycle(context) {
     );
   } finally {
     saveTuiPane(directory, opened);
-    // A missing hook or incomplete turn must not be interrupted by an exit keystroke.
+    // A missing hook or incomplete turn must not be interrupted by an exit keystroke, but the
+    // credential is settled either way: a refresh this leg wrote is the only live token.
     if (after !== undefined) await closeLifecycleTui(opened, options, dependencies);
-    else opened.tui.kill();
+    else {
+      opened.tui.kill();
+      settleCredentials(opened.agent, opened.credentials);
+    }
   }
   return codexCompactResult({ agent, started, dependencies, before, after, suite, directory, opened });
 }
