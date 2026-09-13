@@ -61,7 +61,8 @@ and two of those were found only by this group: `captureUnparsed` measured 48 NL
 analysis that confirmed it and `buildObserverRequest` 25, both under the 50 bound, and both are over
 it again at `33f8c382` (51 and 54). A check that only looks at uncovered ids cannot see that shape.  The measurements of what
 this feature closed and PR #190 regrew are in research R11; the follow-up round owns all of it
-(issue #207).
+(issue #207). `--check-live` is a manual diagnostic rather than a CI gate — with 460
+findings outside the frozen inventory it would fail every build — so the round that owns them runs it.
 
 **Success criteria and their evidence.**
 
