@@ -37,10 +37,9 @@ counts are the diff of each appending commit against its parent.
 
 332 Sonar (310 plus 22 additions) + 413 Codacy (397 plus 16 additions) = the frozen 745. This table
 is the provenance record for the `specs/008-quality-debt-zero/` documents: they quote the aggregate
-rather than restate which commit contributed what, so a change to the split is an edit here. The
-task narration in `tasks.md` and `research.md`, and the batch narration in
-`docs/evidence/quality-debt-2026-09.md` and under `docs/evidence/quality-debt-2026-09/`, record what
-each task and batch did and are not provenance statements.
+rather than restate which commit contributed what, so a change to the split is an edit here.
+Everything else — the task narration in `tasks.md` and `research.md`, the batch narration under
+`docs/evidence/` — records what a task or batch did and is not a provenance statement.
 
 ### Disposition
 
