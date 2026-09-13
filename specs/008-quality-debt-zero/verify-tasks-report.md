@@ -22,9 +22,9 @@ completion marks in this file and both were parsed).
 
 | Verdict | Count |
 |---|---|
-| ✅ VERIFIED | 28 |
+| ✅ VERIFIED | 30 |
 | 🔍 PARTIAL | 1 |
-| ⚠️ WEAK | 27 |
+| ⚠️ WEAK | 25 |
 | ❌ NOT_FOUND | 0 |
 | ⏭️ SKIPPED | 0 |
 
@@ -33,7 +33,7 @@ prose, not missing work, and it was corrected in this branch.
 
 ## What "WEAK" means here
 
-27 of this feature's tasks act on **external services** (SonarCloud transitions, Codacy
+25 of this feature's tasks act on **external services** (SonarCloud transitions, Codacy
 ignores, Codacy tool and pattern configuration) or on **delivery** (open a PR, run the
 gate, merge, confirm against the post-merge analysis). Their product is a service state
 or a merged pull request, so no file in the repository is their output and the mechanical
@@ -85,7 +85,7 @@ Every figure below was read in this session from the artefact named, not from a 
 302 `excluded`, 61 `resolved`; 51 carry a `verdict` field and 46 of those are security-classified by
 the repository's own `securityPopulation`. The other five are the re-dispositioned rows (S3516 three
 times, S7784, S6551), which use the field to preserve their former resolution explanations. The `where` fields cite nine
-pull requests, one per merged batch: 20 rows cite #160, 118 cite #161, 53 cite #162,
+pull requests, one per merged batch: 19 rows cite #160, 118 cite #161, 51 cite #162,
 35 cite #163, 17 cite #164, 27 cite #165, 36 cite #166, 61 cite #173 and 18 cite #185.
 That is what T012, T020, T026, T035 and T041 claim.
 
@@ -156,7 +156,7 @@ allocation table exercise both added rules.
 | T009 | ⚠️ WEAK | Codacy pattern disabled in standard 168669; the ledger row is the one still unconfirmed |
 | T012, T020, T026, T035, T041 | ⚠️ WEAK | merged PRs #159, #161–#166, #173, #185 with per-batch confirmations |
 | T013, T015, T016, T018, T019 | ⚠️ WEAK | security verdicts; 51 ledger rows carry a `verdict` |
-| T024, T031, T039 | ⚠️ WEAK | review passes; recorded in the batch PR bodies |
+| T024, T031 | ⚠️ WEAK | review passes; recorded in the batch PR bodies |
 | T025, T034, T040 | ⚠️ WEAK | ledger appends; the row counts above are the receipt |
 | T032, T038 | ⚠️ WEAK | resource and lizard measurements in the PR bodies |
 | T037 | 🔍 PARTIAL | see above |

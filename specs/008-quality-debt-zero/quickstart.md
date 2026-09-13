@@ -210,7 +210,7 @@ those fields. An invalid comparison field adds `<id>: <sanitized reason>` to tha
 group while the other findings are still classified. Any non-empty group sets exit 1, and empty
 groups are not printed. No uncovered, contradicted or invalid findings means exit 0 without output;
 a failed request or invalid/incomplete page still exits 1. The mode reads no credentials and writes no files. Known open issues can still pass, so
-the service-count checks above remain required for final 0 / 0.
+the service-count checks above remain required to record each service's live count and its owner alongside the frozen inventory's confirmed dispositions (T045; issue #207). *(Amended 2026-09-13; the original text was "the service-count checks above remain required for final 0 / 0".)*
 
 `--apply-sonar` reads each pending resolved ID's state on `main` before its first write, in chunks of
 at most 100 IDs and without `resolved=false`. It decides from live status and resolution, never the
@@ -264,7 +264,9 @@ pipx run lizard -l typescript scripts/quality-debt-record-live.test.mjs scripts/
 Both live-test files and both implementation files must stay below 500 NLOC per file and 50 NLOC
 per function. These checks run the source CLI directly and require no build.
 
-## Final analysis confirmation (batch F, before writing 0 / 0)
+## Final analysis confirmation (batch F, before recording the inventory disposition and live counts)
+
+(Amended 2026-09-13; the original heading read "Final analysis confirmation (batch F, before writing 0 / 0)".)
 
 ```bash
 SHA=$(git rev-parse origin/main)
@@ -275,7 +277,7 @@ curl -s "$B" | python3 -c "import sys,json; c=json.load(sys.stdin)['commit']; pr
 curl -s "$B/logs" | python3 -c "import sys,json; s={x['title']: x['status'] for x in json.load(sys.stdin)['data']['steps']}; print(s); need=['Opengrep','Lizard','markdownlint','Stylelint','ShellCheck','TSQLLint','SQLint']; bad=[t for t in need if s.get(t)!='success']; assert not bad, 'steps not successful: %s' % bad; other=[t for t,v in s.items() if v!='success' and t!='ESLint']; assert not other, 'other steps not successful: %s' % other; assert 'ESLint' not in s, 'ESLint step still runs (research R10: the tool is disabled by decision C3)'"
 ```
 
-Expected: the Sonar analysis `revision` equals the final SHA; the repository's `data.lastAnalysedCommit` is the final SHA with an `endedAnalysis` timestamp (`--confirm` re-checks exactly this and refuses with `Codacy: the last analysed commit is not <sha>` otherwise, because the issue search has no commit selector; it also requires the Sonar analysis `revision` to be the same SHA and refuses with `Sonar: analysis <key> is not of commit <sha>` otherwise; neither message repeats a value from a response, run the curl above to see it); the Codacy commit response (`{commit, quality, coverage, meta}`, shape read from the live API on 2026-09-07) has `commit.sha` equal to the SHA and an `endedAnalysis` timestamp; the analysis log lists every required step as `success` and no ESLint step at all (research R10: the tool crashed on every commit and is disabled by decision C3; a log that still shows it means the disable did not take). Every assert exits non-zero otherwise. Only then run the two count commands and record 0 / 0 with these ids. No repository edit follows this SHA: the polish tasks are part of the last pull request.
+Expected: the Sonar analysis `revision` equals the final SHA; the repository's `data.lastAnalysedCommit` is the final SHA with an `endedAnalysis` timestamp (`--confirm` re-checks exactly this and refuses with `Codacy: the last analysed commit is not <sha>` otherwise, because the issue search has no commit selector; it also requires the Sonar analysis `revision` to be the same SHA and refuses with `Sonar: analysis <key> is not of commit <sha>` otherwise; neither message repeats a value from a response, run the curl above to see it); the Codacy commit response (`{commit, quality, coverage, meta}`, shape read from the live API on 2026-09-07) has `commit.sha` equal to the SHA and an `endedAnalysis` timestamp; the analysis log lists every required step as `success` and no ESLint step at all (research R10: the tool crashed on every commit and is disabled by decision C3; a log that still shows it means the disable did not take). Every assert exits non-zero otherwise. Only then run the two count commands and record the frozen inventory's confirmed dispositions plus each service's live count and its owner (issue #207) with these analysis ids. *(Amended 2026-09-13; the original text was "Only then run the two count commands and record 0 / 0 with these ids".)* No repository edit follows this SHA: the polish tasks are part of the last pull request.
 
 ## Gate definitions unchanged (SC-006)
 

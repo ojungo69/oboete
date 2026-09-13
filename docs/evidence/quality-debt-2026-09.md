@@ -104,10 +104,14 @@ findings outside the frozen inventory it would fail every build — so the round
   (configuration, `c0ed2500`), E (security verdicts), B1–B3 (#161, #162, #163), C1–C4 (#165, #166, #164,
   #173), D (#185), F (this pull request).
 
-**SC-001 / SC-002** are met as amended (spec.md "Scope amendment"): every inventory finding is closed
-on `main` or carries a disposition confirmed against a named analysis, and the live counts above are
-recorded with the pull request that owns each part. The original "0 open issues on `main`" wording is
-not met and cannot be, because `main` received two unrelated features while the batches ran.
+**SC-001 / SC-002** are met as amended (spec.md "Scope amendment") for every inventory row except
+the planned Stylelint row `codacy:7935279dc22d4b6af001014179ebdff1`, whose id leaves Codacy's issue
+set at the next analysis and whose exclusion only the post-merge analysis can confirm. Every other
+inventory finding is closed on `main` or carries a disposition confirmed against a named analysis,
+and the live counts above are recorded with the pull request that owns each part. As SC-003 records,
+plain `--check` exits 1 with `1 open, 1 unconfirmed`; SC-001 / SC-002 are final only at T045's
+post-merge confirmation. The original "0 open issues on `main`" wording is not met and cannot be,
+because `main` received two unrelated features while the batches ran.
 
 **Configuration changes on Codacy** (T009 and T043a). Both were refused at the repository level with
 `409 Cannot disable a … that is enabled by a Coding Standard`: the organisation's "Default coding
