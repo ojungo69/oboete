@@ -55,6 +55,35 @@ instead, 20 SonarCloud and 8 Codacy findings contradict a `fixed` disposition, a
 this feature closed and PR #190 regrew are in research R11; the follow-up round owns all of it
 (issue #207).
 
+**Success criteria and their evidence.**
+
+- **SC-003** — `node scripts/quality-debt-record.mjs --check` reports `745 ids: 0 missing, 0 duplicate,
+  0 resolved-without-reason, 0 unknown, 0 without-where, 0 without-verdict`, so every inventory entry
+  has a disposition and a `where`. A deterministic sample of 20 (the sorted ledger, every 37th row)
+  traces to a pull request, a service reason, or a named configuration line: `#166` ×2, `#165`, `#163`,
+  `#162`, `#161` ×2, `#173` ×2 for the `fixed` rows; `.codacy.yml` `engines.opengrep.exclude_paths`
+  ×6, `engines.tsqllint.exclude_paths` ×2 and `engines.lizard.exclude_paths` for the `excluded` rows;
+  and two `resolved` rows with their written reason.
+- **SC-004** — the same check's `0 without-verdict` is the gate: `validateInventory` requires a written
+  verdict on every security-classified row, and the record's tables carry each verdict in the
+  `where / reason` column.
+- **SC-005** — SonarCloud's `coverage` history on `main`: 93.3 at the baseline `5e03d67f`, 93.6, 93.9,
+  93.9, **93.8 at `e27bb029`** (this feature's last merge), 93.9 today. The figure never fell below the
+  baseline, and no assertion was changed to keep a suite green.
+- **SC-006** — `git diff 5e03d67f..HEAD` touches three gate-adjacent files. `.github/workflows/ci.yml`
+  has one change, from batch A (`c0ed2500`), and it *adds* a test run (the record suites, at
+  `--test-concurrency=1`, into the same coverage directory); no job, condition or threshold was removed
+  or relaxed. `sonar-project.properties` and `.codacy.yml` carry batch A's file-class exclusions, which
+  are the feature's own US4 work and are each recorded as an `excluded` row with the rule and the file
+  class. The SonarCloud Quality Gate conditions, CodeQL, semgrep, secret scanning and DCO definitions
+  are untouched.
+- **SC-007** — the daily dogfood runs from cron and appends its own evidence; each failure is traced
+  and filed rather than silenced (#175 for the credential copy, #212 for the `doctor: catalog,agent:grok`
+  signature).
+- **SC-008** — each batch is one rule family or module area and merged through its own gate: A
+  (configuration, `c0ed2500`), E (security verdicts), B1–B3 (#161, #162, #163), C1–C4 (#165, #166, #164,
+  #173), D (#185), F (this pull request).
+
 **SC-001 / SC-002** are met as amended (spec.md "Scope amendment"): every inventory finding is closed
 on `main` or carries a disposition confirmed against a named analysis, and the live counts above are
 recorded with the pull request that owns each part. The original "0 open issues on `main`" wording is
