@@ -1,0 +1,41 @@
+specs/008-quality-debt-zero/plan.md
+  s_076159715aefe6::t_dacb63b1f81a69 155
+specs/008-quality-debt-zero/quickstart.md
+  s_076159715aefe6::t_28cf3402ab07f6 213,267,280
+  s_076159715aefe6::t_c39ee8d11e5fe7 269
+  s_533a8ac449afd0::t_e324807e8547fa 268
+specs/008-quality-debt-zero/tasks.md
+  s_076159715aefe6::t_28cf3402ab07f6 138,148,163
+  s_076159715aefe6::t_c39ee8d11e5fe7 140
+  s_533a8ac449afd0::t_76b3d8cae10dad 139
+specs/008-quality-debt-zero/verify-tasks-report.md
+  s_076159715aefe6::t_28cf3402ab07f6 25,27,36,88,159
+docs/evidence/quality-debt-2026-09.md
+  s_076159715aefe6::t_28cf3402ab07f6 107-114
+specs/008-quality-debt-zero/research.md
+  s_076159715aefe6::t_28cf3402ab07f6 246,277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "efeef75b233e05ce06d04aac7eaf96bb38ffb0e5",
+  "prompts": {},
+  "sessions": {
+    "s_076159715aefe6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09bd2-4c98-7db0-a460-caee8d9ee255",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_533a8ac449afd0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09bc6-3c1d-7543-bac3-0077582c2e43",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
