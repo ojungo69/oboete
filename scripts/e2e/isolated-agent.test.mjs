@@ -192,12 +192,16 @@ function writeAccountCredentials(home) {
   fs.writeFileSync(path.join(home, ".pi", "agent", "extensions", "oboete.js"), "// extension\n");
 }
 
-test("a leg links the credential file the CLI rotates and copies everything it rewrites", (t) => {
+function credentialFixture(t, name) {
   const account = isolatedAccount(t);
   writeAccountCredentials(account.home);
-  const homes = resolveSourceHomes({}, account.home);
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "oboete-credentials-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `oboete-${name}-`));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  return { account, homes: resolveSourceHomes({}, account.home), root };
+}
+
+test("every leg links the credential its CLI rotates and copies what the harness rewrites", (t) => {
+  const { homes, root } = credentialFixture(t, "credentials");
 
   for (const [agent, copied] of [
     ["codex", ["config.toml", "hooks.json"]],
@@ -207,22 +211,35 @@ test("a leg links the credential file the CLI rotates and copies everything it r
     const directory = path.join(root, agent);
     const prepared = prepareAgent(agent, directory, homes, "prompt", path.join(root, "repo"));
     const staged = path.join(directory, "agent-home", "auth.json");
-    assert.deepEqual(prepared.credentials, [staged], `${agent} reports its credential path`);
+    assert.deepEqual(
+      prepared.credentials,
+      [{ staged, source: path.join(homes[agent], "auth.json") }],
+      `${agent} reports the staged path and the account file behind it`,
+    );
     assert.ok(fs.lstatSync(staged).isSymbolicLink(), `${agent} links auth.json`);
     assert.equal(fs.readlinkSync(staged), path.join(homes[agent], "auth.json"));
     for (const file of copied) {
-      const copy = path.join(directory, "agent-home", file);
-      assert.ok(!fs.lstatSync(copy).isSymbolicLink(), `${agent} copies ${file}`);
+      assert.ok(!fs.lstatSync(path.join(directory, "agent-home", file)).isSymbolicLink(), `${agent} copies ${file}`);
     }
   }
+  // Claude reads its credentials from the configured home, so its leg stages none to settle.
+  const claude = prepareAgent("claude", path.join(root, "claude"), homes, "prompt", path.join(root, "repo"));
+  assert.deepEqual(claude.credentials, []);
 });
 
-test("a leg that replaces the linked credential with a regular file stops the run", async (t) => {
-  const account = isolatedAccount(t);
-  writeAccountCredentials(account.home);
-  const homes = resolveSourceHomes({}, account.home);
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "oboete-credentials-pin-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+test("codex still refuses a leg whose account is missing the files the harness rewrites", (t) => {
+  const { homes, root } = credentialFixture(t, "codex-required");
+  fs.rmSync(path.join(homes.codex, "hooks.json"));
+  assert.throws(
+    () => prepareAgent("codex", path.join(root, "codex"), homes, "prompt", path.join(root, "repo")),
+    (error) => error.name === "PreconditionError" && /missing setup file/.test(error.message),
+  );
+});
+
+test("a refresh reaches the account whether the CLI writes in place or renames over the link", async (t) => {
+  const { homes, root } = credentialFixture(t, "settle");
+  const accountFile = path.join(homes.grok, "auth.json");
+  const runtimeDir = path.join(root, "runtime");
 
   const leg = (name, runTimed) => launchAgent({
     agent: "grok",
@@ -233,28 +250,76 @@ test("a leg that replaces the linked credential with a regular file stops the ru
     homes,
     oboeteHome: path.join(root, "oboete-home"),
     dependencies: { childEnv: probeChildEnv, runTimed },
+    // Every real caller shares one runtime directory across the legs of a suite.
+    launch: { runtimeDir },
   });
 
-  // The refresh reached the account: the link is still a link, so the run carries on.
-  const kept = await leg("kept", async () => ({ exitCode: 0, stdout: "", stderr: "" }));
-  assert.equal(kept.exitCode, 0);
+  // Written in place: the link carries it, and the staged path is still a link afterwards.
+  await leg("in-place", async (argv, options) => {
+    fs.writeFileSync(path.join(options.env.GROK_HOME, "auth.json"), '{"account":"refreshed in place"}\n');
+    return { exitCode: 0, stdout: "", stderr: "" };
+  });
+  assert.equal(JSON.parse(fs.readFileSync(accountFile, "utf8")).account, "refreshed in place");
+  assert.ok(fs.lstatSync(path.join(runtimeDir, "agent-home", "auth.json")).isSymbolicLink());
 
-  // A CLI that renames a temporary file over the path leaves a regular file behind.
-  await assert.rejects(
-    leg("replaced", async (argv, options) => {
-      const staged = path.join(options.env.GROK_HOME, "auth.json");
-      fs.rmSync(staged);
-      fs.writeFileSync(staged, '{"refreshed":"lost"}\n');
-      return { exitCode: 0, stdout: "", stderr: "" };
-    }),
-    (error) => error.name === "PreconditionError" && /grok replaced the linked credential file/.test(error.message),
-  );
+  // Renamed over the link: settling carries the file back and restores the link.
+  await leg("renamed", async (argv, options) => {
+    const staged = path.join(options.env.GROK_HOME, "auth.json");
+    fs.rmSync(staged);
+    fs.writeFileSync(staged, '{"account":"refreshed by rename"}\n');
+    return { exitCode: 0, stdout: "", stderr: "" };
+  });
+  assert.equal(JSON.parse(fs.readFileSync(accountFile, "utf8")).account, "refreshed by rename");
+  assert.ok(fs.lstatSync(path.join(runtimeDir, "agent-home", "auth.json")).isSymbolicLink());
 
-  // A CLI that signs itself out removes the link; the account file is untouched, so the leg stands.
+  // Signed itself out: the link is gone, the account file stands, and the leg's own error stands.
   const removed = await leg("removed", async (argv, options) => {
     fs.rmSync(path.join(options.env.GROK_HOME, "auth.json"));
     return { exitCode: 1, stdout: "", stderr: "Not signed in." };
   });
   assert.equal(removed.exitCode, 1);
-  assert.ok(fs.existsSync(path.join(homes.grok, "auth.json")), "the account credential survives");
+  assert.equal(JSON.parse(fs.readFileSync(accountFile, "utf8")).account, "refreshed by rename");
+});
+
+test("a half-written credential is reported and never overwrites the account's own", async (t) => {
+  const { homes, root } = credentialFixture(t, "settle-partial");
+  const accountFile = path.join(homes.grok, "auth.json");
+  await assert.rejects(
+    launchAgent({
+      agent: "grok",
+      directory: path.join(root, "partial"),
+      repo: path.join(root, "repo"),
+      prompt: "prompt",
+      options: { timeoutMs: 1000 },
+      homes,
+      oboeteHome: path.join(root, "oboete-home"),
+      dependencies: {
+        childEnv: probeChildEnv,
+        runTimed: async (argv, options) => {
+          const staged = path.join(options.env.GROK_HOME, "auth.json");
+          fs.rmSync(staged);
+          fs.writeFileSync(staged, '{"account":"half');
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      },
+    }),
+    (error) => error.name === "Error" && /grok left an unreadable auth.json/.test(error.message),
+  );
+  assert.equal(JSON.parse(fs.readFileSync(accountFile, "utf8")).account, "auth.json");
+});
+
+test("staging a leg carries back a refresh an unsettled leg left in the directory", (t) => {
+  const { homes, root } = credentialFixture(t, "restage");
+  const accountFile = path.join(homes.grok, "auth.json");
+  const directory = path.join(root, "shared");
+
+  prepareAgent("grok", directory, homes, "prompt", path.join(root, "repo"));
+  const staged = path.join(directory, "agent-home", "auth.json");
+  // A leg that renamed over the link and was never settled: the only live token is this file.
+  fs.rmSync(staged);
+  fs.writeFileSync(staged, '{"account":"refreshed but stranded"}\n');
+
+  prepareAgent("grok", directory, homes, "prompt", path.join(root, "repo"));
+  assert.equal(JSON.parse(fs.readFileSync(accountFile, "utf8")).account, "refreshed but stranded");
+  assert.ok(fs.lstatSync(staged).isSymbolicLink());
 });

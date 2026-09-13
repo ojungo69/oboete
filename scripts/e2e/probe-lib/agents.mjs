@@ -79,6 +79,72 @@ export function copyMode(src, dest, mode = 0o600) {
   fs.chmodSync(dest, mode);
 }
 
+/**
+ * A credential file the CLI rotates is linked into the run, never copied: a refresh written into a
+ * copy dies with the run directory while the provider has already retired the previous refresh
+ * token, which signs the account out (issue #175). Everything the harness rewrites per run keeps
+ * being copied. The cost of the link is that a leg which corrupts the file corrupts the account's
+ * own, the way running the CLI directly would; the benefit is that the next leg and the developer
+ * both read the token the last leg refreshed. Settling a copy afterwards would carry most refreshes
+ * back too, but only for a leg that finishes: a leg killed at its timeout, or a crashed run, leaves
+ * the refresh in the run directory, which is the failure this exists to end.
+ *
+ * Returns the entry list to hand `settleCredentials` after the CLI is done, empty when the account
+ * has no such file.
+ */
+export function stageCredential(source, destination) {
+  const target = path.resolve(source);
+  if (!fs.existsSync(target)) return [];
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  const entry = { staged: destination, source: target };
+  // A previous leg on this directory may have renamed a file over the link; carry that refresh
+  // back before the link is rebuilt, or removing the file would discard the only live token.
+  carryBackCredential(entry);
+  fs.rmSync(destination, { force: true });
+  fs.symlinkSync(target, destination);
+  return [entry];
+}
+
+/** True when the staged path was a regular file whose content was carried back to the account. */
+function carryBackCredential({ staged, source }) {
+  let stat;
+  try {
+    stat = fs.lstatSync(staged);
+  } catch {
+    return false; // The CLI signed itself out by removing the link; the account file stands.
+  }
+  if (stat.isSymbolicLink()) return false; // Written in place: the account file already has it.
+  const text = fs.readFileSync(staged, "utf8");
+  JSON.parse(text); // A half-written file must not overwrite a working credential.
+  fs.writeFileSync(source, text, { mode: 0o600 });
+  return true;
+}
+
+/**
+ * Settle every staged credential once the CLI has finished with the home. A CLI that writes the
+ * file in place needs nothing; one that renames a temporary file over the link has the only live
+ * token in the run directory, so carry it back to the account and restore the link. A file that
+ * does not parse is left where it is and reported, because overwriting a working credential with a
+ * half-written one is the worse failure.
+ */
+export function settleCredentials(agent, entries = []) {
+  for (const entry of entries) {
+    let carried;
+    try {
+      carried = carryBackCredential(entry);
+    } catch (error) {
+      throw new Error(
+        `${agent} left an unreadable ${path.basename(entry.source)} at ${entry.staged}; ` +
+          `the account's copy is unchanged (${error.message})`,
+      );
+    }
+    if (!carried) continue;
+    fs.rmSync(entry.staged, { force: true });
+    fs.symlinkSync(entry.source, entry.staged);
+    process.stderr.write(`${agent} rewrote ${path.basename(entry.source)} by rename; carried the refresh back\n`);
+  }
+}
+
 
 
 function resolveRepo(dir, opts) {
@@ -184,7 +250,7 @@ export async function seedGrokHome(runRoot) {
   if (grokSeeds.has(runRoot)) return grokSeeds.get(runRoot);
   const seed = path.join(runRoot, "_grok-seed");
   fs.mkdirSync(path.join(seed, "hooks"), { recursive: true });
-  copyMode(path.join(HOME, ".grok/auth.json"), path.join(seed, "auth.json"));
+  const credentials = stageCredential(path.join(HOME, ".grok/auth.json"), path.join(seed, "auth.json"));
   await runTimed(["grok", "inspect", "--json"], {
     cwd: seed,
     env: childEnv({ GROK_HOME: seed, GROK_CLAUDE_HOOKS_ENABLED: "0" }),
@@ -192,6 +258,7 @@ export async function seedGrokHome(runRoot) {
     stderrPath: path.join(seed, "inspect.err"),
     timeoutMs: 60_000,
   });
+  settleCredentials("grok", credentials);
   grokSeeds.set(runRoot, seed);
   return seed;
 }
@@ -256,7 +323,7 @@ export async function codex(dir, opts = {}) {
   const repo = resolveRepo(dir, opts);
   const home = path.join(dir, "codex-home");
   fs.mkdirSync(home, { recursive: true });
-  copyMode(path.join(HOME, ".codex/auth.json"), path.join(home, "auth.json"));
+  const credentials = stageCredential(path.join(HOME, ".codex/auth.json"), path.join(home, "auth.json"));
   const { eventsPath, json } = writeHookTree(home, "codex", opts);
   const hooksPath = path.join(home, "hooks.json");
   const trust = opts.trust === true;
@@ -290,6 +357,7 @@ export async function codex(dir, opts = {}) {
       stderrPath: path.join(dir, "stderr.txt"),
     },
   );
+  settleCredentials("codex", credentials);
   return packResult("codex", dir, repo, home, proc, eventsPath);
 }
 
@@ -324,6 +392,9 @@ export async function grok(dir, opts = {}) {
     stderrPath: path.join(dir, "stderr.txt"),
     timeoutMs: opts.timeoutMs,
   });
+  // prepareGrokHome copies the seed home, and fs.cpSync keeps a symlink a symlink, so the leg's
+  // auth.json is the same link into the account's file.
+  settleCredentials("grok", [{ staged: path.join(home, "auth.json"), source: path.join(HOME, ".grok/auth.json") }]);
   return packResult("grok", dir, repo, home, proc, eventsPath);
 }
 
@@ -335,7 +406,7 @@ export async function pi(dir, opts = {}) {
   fs.mkdirSync(path.join(tmp, "extensions"), { recursive: true });
   fs.mkdirSync(sessions, { recursive: true });
   const agentDir = path.join(HOME, ".pi/agent");
-  copyMode(path.join(agentDir, "auth.json"), path.join(tmp, "auth.json"));
+  const credentials = stageCredential(path.join(agentDir, "auth.json"), path.join(tmp, "auth.json"));
   for (const name of ["settings.json", "models-store.json"]) {
     const src = path.join(agentDir, name);
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(tmp, name));
@@ -363,5 +434,6 @@ export async function pi(dir, opts = {}) {
       stderrPath: path.join(dir, "stderr.txt"),
     },
   );
+  settleCredentials("pi", credentials);
   return packResult("pi", dir, repo, tmp, proc, eventsPath);
 }

@@ -2,8 +2,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  copyMode,
   seedGrokHome,
+  settleCredentials,
+  stageCredential,
 } from "../probe-lib/agents.mjs";
 import {
   binVersion,
@@ -319,12 +320,12 @@ function preparePiHome(ctx, HOME) {
   const pHome = path.join(ctx.dir, "piagent");
   const sessions = path.join(pHome, "sessions");
   fs.mkdirSync(sessions, { recursive: true });
-  copyMode(path.join(HOME, ".pi/agent/auth.json"), path.join(pHome, "auth.json"));
+  const credentials = stageCredential(path.join(HOME, ".pi/agent/auth.json"), path.join(pHome, "auth.json"));
   for (const name of ["settings.json", "models-store.json"]) {
     const src = path.join(HOME, ".pi/agent", name);
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(pHome, name));
   }
-  return { pHome, sessions };
+  return { pHome, sessions, credentials };
 }
 
 function recordPiCliResult(pi, evidence, per) {
@@ -362,7 +363,7 @@ export const probes = [
       const lastMsg = path.join(ctx.dir, "codex_lastmsg.txt");
       const cHome = path.join(ctx.dir, "codex-home");
       fs.mkdirSync(cHome, { recursive: true });
-      copyMode(path.join(HOME, ".codex/auth.json"), path.join(cHome, "auth.json"));
+      const codexCredentials = stageCredential(path.join(HOME, ".codex/auth.json"), path.join(cHome, "auth.json"));
       const codex = await runTimed(
         ["codex", "exec", "--json", "--skip-git-repo-check", "--output-last-message", lastMsg, SUMMARIZE],
         {
@@ -372,6 +373,7 @@ export const probes = [
           stderrPath: path.join(ctx.dir, "codex_err.txt"),
         },
       );
+      settleCredentials("codex", codexCredentials);
       const codexOk = recordCodexCliResult(lastMsg, codex, evidence, per);
 
       const grokSeed = ctx.grokSeed || (await seedGrokHome(path.dirname(ctx.dir)));
@@ -383,15 +385,18 @@ export const probes = [
         stdoutPath: path.join(ctx.dir, "grok_out.json"),
         stderrPath: path.join(ctx.dir, "grok_err.txt"),
       });
+      // The seed home is copied with fs.cpSync, which keeps the staged link a link.
+      settleCredentials("grok", [{ staged: path.join(gHome, "auth.json"), source: path.join(HOME, ".grok/auth.json") }]);
       const grokOk = recordGrokCliResult(grok, evidence, per);
 
-      const { pHome, sessions } = preparePiHome(ctx, HOME);
+      const { pHome, sessions, credentials: piCredentials } = preparePiHome(ctx, HOME);
       const pi = await runTimed(["pi", "-p", SUMMARIZE, "--mode", "json", "--session-dir", sessions], {
         cwd: repo,
         env: childEnv({ PI_CODING_AGENT_DIR: pHome }),
         stdoutPath: path.join(ctx.dir, "pi_out.jsonl"),
         stderrPath: path.join(ctx.dir, "pi_err.txt"),
       });
+      settleCredentials("pi", piCredentials);
       const piOk = recordPiCliResult(pi, evidence, per);
 
       const all = claudeOk && codexOk && grokOk && piOk;

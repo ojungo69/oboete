@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { CLAUDE_COMPACT_PROMPT, shellQuote, writeCompactFixture } from "./agents.mjs";
+import { CLAUDE_COMPACT_PROMPT, settleCredentials, shellQuote, writeCompactFixture } from "./agents.mjs";
 import { PreconditionError, waitUntil } from "./process.mjs";
 import { readyTui, tuiCmd, tuiQuit, tuiSubmit } from "./tmux.mjs";
 import { LIFECYCLE_ASSERTS, LIFECYCLE_CHECKS } from "./isolated-lifecycle-report.mjs";
@@ -112,10 +112,22 @@ export function startLifecycleTui(options) {
     );
   }
   return {
+    agent,
     argv,
     name,
     tui: session,
+    credentials: prepared.credentials,
   };
+}
+
+/**
+ * Close the TUI and settle the credential the leg was given: an interactive session is the most
+ * likely place for a token to rotate, so the same carry-back launchAgent performs runs here too
+ * (issue #175).
+ */
+async function closeLifecycleTui(opened, options, dependencies) {
+  await tuiQuit(opened.tui, opened.name, options, dependencies);
+  settleCredentials(opened.agent, opened.credentials);
 }
 
 function saveTuiPane(directory, opened) {
@@ -317,7 +329,7 @@ async function runCodexCompactLifecycle(context) {
   } finally {
     saveTuiPane(directory, opened);
     // A missing hook or incomplete turn must not be interrupted by an exit keystroke.
-    if (after !== undefined) await tuiQuit(opened.tui, opened.name, options, dependencies);
+    if (after !== undefined) await closeLifecycleTui(opened, options, dependencies);
     else opened.tui.kill();
   }
   return codexCompactResult({ agent, started, dependencies, before, after, suite, directory, opened });
@@ -453,7 +465,7 @@ async function runForkLifecycle(context) {
       details = { pane, argv: opened.argv, eventDelta: eventDelta(before, after) };
     } finally {
       saveTuiPane(directory, opened);
-      await tuiQuit(opened.tui, opened.name, options, dependencies);
+      await closeLifecycleTui(opened, options, dependencies);
     }
     childNativeSessionId = nativeSessionFromPrompt(
       beforePrompt,
@@ -581,7 +593,7 @@ async function runClearLifecycle(context) {
   } finally {
     saveTuiPane(directory, opened);
     // tuiQuit waits for a quiet second after the final evidence snapshot before sending keys.
-    await tuiQuit(opened.tui, opened.name, options, dependencies);
+    await closeLifecycleTui(opened, options, dependencies);
   }
   const childNativeSessionId =
     agent === "codex"
