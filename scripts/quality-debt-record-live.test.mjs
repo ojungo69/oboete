@@ -16,31 +16,35 @@ const observedCodacyIds = [
   '3536c70ee8b5825f074e7598ca528b30',
 ];
 
-test('--apply-codacy confirms snapshot-absent ids and PATCHes present ids', (t) => {
+test('--apply-codacy PATCHes pending ids even when absent from the current issue search', (t) => {
   const { cwd, ledger } = fixture(t);
   for (const row of ledger.slice(3)) {
     Object.assign(row, { state: 'resolved', reason: 'AcceptedUse' });
     delete row.confirmed;
   }
   writeJson(cwd, 'ledger.json', ledger);
-  const result = run(cwd, ['--apply-codacy'], apiStub([
-    { status: 200 },
+  const searched = run(cwd, ['--check-live'], publicApiStub([
+    { body: { issues: [], total: 0 } },
     { body: { data: [codacyIssue(codacyViewerId)], pagination: { total: 1 } } },
-    { status: 204 },
+  ]));
+  assert.equal(searched.status, 0, searched.stderr);
+  const searches = readCalls(cwd).length;
+  const result = run(cwd, ['--apply-codacy'], apiStub([
+    { status: 200 }, { status: 204 }, { status: 204 },
   ]));
   assert.equal(result.status, 0, result.stderr);
-  const calls = readCalls(cwd).filter((call) => call.url);
+  const calls = readCalls(cwd).slice(searches).filter((call) => call.url);
   assert.deepEqual(calls.map((call) => call.url), [
-    'https://app.codacy.com/api/v3/user', `${codacyIssues}/search?limit=100`, `${codacyIssues}/${codacyViewerId}`,
+    'https://app.codacy.com/api/v3/user', `${codacyIssues}/${codacyHarnessId}`, `${codacyIssues}/${codacyViewerId}`,
   ]);
-  assert.deepEqual(calls.map((call) => call.method), ['GET', 'POST', 'PATCH']);
+  assert.deepEqual(calls.map((call) => call.method), ['GET', 'PATCH', 'PATCH']);
   const saved = readLedger(cwd);
   assert.equal(saved[3].where, ledger[3].where);
-  assert.match(saved[3].confirmed, /^Absent from current Codacy issue search \d{4}-\d\d-\d\dT/);
+  assert.match(saved[3].confirmed, /^HTTP 204 \d{4}-\d\d-\d\dT/);
   assert.match(saved[4].confirmed, /^HTTP 204 /);
 });
 
-test('--apply-codacy leaves the ledger unchanged when the live search fails before PATCH', (t) => {
+test('--apply-codacy leaves the ledger unchanged when the first PATCH fails', (t) => {
   const { cwd, ledger } = fixture(t);
   for (const row of ledger.slice(3)) {
     Object.assign(row, { state: 'resolved', reason: 'AcceptedUse' });
@@ -51,10 +55,10 @@ test('--apply-codacy leaves the ledger unchanged when the live search fails befo
   const before = readFileSync(path, 'utf8');
   const result = run(cwd, ['--apply-codacy'], apiStub([{ status: 200 }, { status: 503 }]));
   assert.equal(result.status, 1);
-  assert.equal(result.stderr, 'Codacy issues search returned HTTP 503\n');
+  assert.equal(result.stderr, `Codacy ${codacyHarnessId}: PATCH returned HTTP 503\n`);
   assert.equal(result.stdout, '');
   assert.deepEqual(readCalls(cwd).filter((call) => call.url).map((call) => call.url), [
-    'https://app.codacy.com/api/v3/user', `${codacyIssues}/search?limit=100`,
+    'https://app.codacy.com/api/v3/user', `${codacyIssues}/${codacyHarnessId}`,
   ]);
   assert.equal(readFileSync(path, 'utf8'), before);
 });
@@ -70,7 +74,6 @@ test('--apply-codacy preserves and PATCHes current ids at observed 30, 31, and 3
   writeJson(cwd, 'ledger.json', ledger);
   const result = run(cwd, ['--apply-codacy'], apiStub([
     { status: 200 },
-    { body: { data: observedCodacyIds.map((id) => codacyIssue(id)), pagination: { total: 3 } } },
     { status: 204 }, { status: 204 }, { status: 204 },
   ]));
   assert.equal(result.status, 0, result.stderr);
@@ -88,23 +91,19 @@ for (const [name, issueId] of [
   ['a hexadecimal id with a trailing newline', `${'a'.repeat(32)}\n`],
   ['an empty id', ''],
 ]) {
-  test(`--apply-codacy rejects ${name} before PATCH or local writes`, (t) => {
-    const { cwd, ledger } = fixture(t);
-    for (const row of ledger.slice(3)) {
-      Object.assign(row, { state: 'resolved', reason: 'AcceptedUse' });
-      delete row.confirmed;
-    }
-    writeJson(cwd, 'ledger.json', ledger);
+  test(`--check-live rejects ${name} without credentials or local writes`, (t) => {
+    const { cwd } = fixture(t);
     const path = join(cwd, evidence, 'ledger.json');
     const before = readFileSync(path, 'utf8');
-    const result = run(cwd, ['--apply-codacy'], apiStub([
-      { status: 200 }, { body: { data: [{ issueId }], pagination: { total: 1 } } },
+    const result = run(cwd, ['--check-live'], publicApiStub([
+      { body: { issues: [], total: 0 } }, { body: { data: [{ issueId }], pagination: { total: 1 } } },
     ]));
     assert.equal(result.status, 1);
     assert.equal(result.stderr, 'Codacy issues search returned an invalid id\n');
     assert.equal(result.stdout, '');
     assert.deepEqual(readCalls(cwd).filter((call) => call.url).map((call) => call.url), [
-      'https://app.codacy.com/api/v3/user', `${codacyIssues}/search?limit=100`,
+      'https://sonarcloud.io/api/issues/search?componentKeys=ojungo69_free-mem&branch=main&resolved=false&ps=500&p=1',
+      `${codacyIssues}/search?limit=100`,
     ]);
     assert.equal(readFileSync(path, 'utf8'), before);
   });
@@ -141,6 +140,31 @@ test('--check-live reports uncovered ids from both services without file writes'
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '');
   assert.equal(result.stderr, `sonar uncovered 1: s-new\ncodacy uncovered 1: ${uncoveredCodacyId}\n`);
+  assert.deepEqual(evidenceText(cwd), before);
+});
+
+test('--check-live keeps uncovered and contradicted groups around invalid issues from both services', (t) => {
+  const { cwd } = fixture(t);
+  const before = evidenceText(cwd);
+  const result = run(cwd, ['--check-live'], publicApiStub([
+    { body: { issues: [
+      sonarIssue('s-new'),
+      sonarIssue('s-worker', { component: 'ojungo69_free-mem' }),
+      sonarIssue('s-regrown', { component: 'ojungo69_free-mem:src/worker/observe.ts' }),
+    ], total: 3 } },
+    { body: { data: [
+      codacyIssue(uncoveredCodacyId, { filePath: 'src/viewer/app/main.tsx' }),
+      codacyIssue('bad', { filePath: null }), codacyIssue('a1'),
+    ], pagination: { total: 3 } } },
+  ]));
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, [
+    'sonar uncovered 2: s-new, s-regrown', `codacy uncovered 2: ${uncoveredCodacyId}, a1`,
+    'sonar contradicted 1: s-regrown', `codacy contradicted 1: ${uncoveredCodacyId}`,
+    'sonar invalid 1: s-worker: Sonar issues search returned an invalid component',
+    'codacy invalid 1: bad: Codacy issues search returned an invalid filePath', '',
+  ].join('\n'));
   assert.deepEqual(evidenceText(cwd), before);
 });
 
@@ -347,7 +371,8 @@ for (const [service, field, invalid] of [
       { body: { data: service === 'Codacy' ? [codacyIssue(codacyViewerId, invalid)] : [], pagination: {} } },
     ]));
     assert.equal(result.status, 1);
-    assert.equal(result.stderr, `${service} issues search returned an invalid ${field}\n`);
+    const id = service === 'Sonar' ? 's-worker' : codacyViewerId;
+    assert.equal(result.stderr, `${service.toLowerCase()} invalid 1: ${id}: ${service} issues search returned an invalid ${field}\n`);
     assert.equal(result.stdout, '');
     assert.deepEqual(evidenceText(cwd), before);
   });

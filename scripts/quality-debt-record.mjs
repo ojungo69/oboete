@@ -10,9 +10,9 @@ import { applyCodacy, applySonar, confirmLedger, openCodacyIssues, openSonarIssu
 const batches = ['A', 'E', 'B1', 'B2', 'B3', 'C1', 'C2', 'C3', 'C4', 'D'];
 const usage = 'Usage: quality-debt-record.mjs [--allocate | --check [--planned] | --check-live | --apply-sonar [--dry-run]'
   + ' | --apply-codacy [--dry-run] | --confirm --sonar-analysis <analysisKey> --codacy-commit <sha>]'
-  + '\n--check-live reads both public main issue sets and the ledger; uncovered ids or findings contradicting confirmed fixed/excluded dispositions fail.'
+  + '\n--check-live reads both public main issue sets and the ledger; uncovered, contradicted, or invalid findings fail.'
   + '\n--apply-sonar reads pending ids; CLOSED, missing ids and mismatched RESOLVED resolutions refuse; matching RESOLVED comments only, otherwise transition/comment.'
-  + '\n--apply-codacy checks the current Codacy issue set before PATCHing; ids already absent are confirmed locally.'
+  + '\n--apply-codacy PATCHes every pending resolved Codacy row and confirms it with the HTTP receipt.'
   + '\n--confirm records the analysis key and commit SHA as labels; the caller must verify beforehand'
   + ' that both services finished analysing that revision'
   + ' (specs/008-quality-debt-zero/quickstart.md, "Final analysis confirmation").'
@@ -108,9 +108,9 @@ function allocate(rows) {
 }
 
 function checkAllocation(rows) {
-  const text = readOrDefault(`${evidence}/allocation.json`, null);
-  if (text === null) return ['allocation.json missing'];
-  const allocation = JSON.parse(text);
+  const allocationText = readOrDefault(`${evidence}/allocation.json`, null);
+  if (allocationText === null) return ['allocation.json missing'];
+  const allocation = JSON.parse(allocationText);
   const assignments = new Map();
   for (const batch of batches) {
     for (const id of allocation[batch] ?? []) {
@@ -190,9 +190,9 @@ function liveClaims(rows, claimedIds) {
   return claims;
 }
 
-function reportLiveFindings(uncovered, contradicted) {
-  for (const [group, findings] of Object.entries({ uncovered, contradicted })) {
-    for (const [service, ids] of Object.entries(findings)) {
+function reportLiveFindings(uncovered, contradicted, invalid) {
+  for (const [group, byService] of Object.entries({ uncovered, contradicted, invalid })) {
+    for (const [service, ids] of Object.entries(byService)) {
       if (ids.length) {
         console.error(`${service} ${group} ${ids.length}: ${ids.join(', ')}`);
         process.exitCode = 1;
@@ -208,9 +208,9 @@ async function checkLive(rows, ledger) {
   // A confirmed `resolved` Sonar row claims the service holds a resolution for that id, and
   // `openSonarIssues` passes `resolved=false`, so the id coming back from it means the resolution was
   // reopened -- a contradiction exactly as a closed id contradicts a `fixed` row. Sonar only:
-  // Codacy's issue search takes no ignore filter and returns ignored issues with no field to tell
-  // (measured 2026-09-13 -- every one of the 23 ids ignored with HTTP 204 comes back in the default
-  // search), so for Codacy presence proves nothing and the PATCH response is the only receipt.
+  // Codacy's issue search reports the current analysed commit and does not distinguish ignored
+  // issues: presence does not prove an ignore, and absence does not prove one either. An inventory id
+  // absent from the search still has a PATCHable record; only that response confirms a resolved Codacy row.
   // Both stay out of the triple map: the row says nothing about the rest of that
   // (service, rule, file), so a sibling finding there is a new finding, not a lie.
   const resolvedIds = new Set(ledger
@@ -219,15 +219,20 @@ async function checkLive(rows, ledger) {
   const [sonar, codacy] = await Promise.all([openSonarIssues(), openCodacyIssues()]);
   const uncovered = { sonar: [], codacy: [] };
   const contradicted = { sonar: [], codacy: [] };
+  const invalid = { sonar: [], codacy: [] };
   for (const [service, issues] of [['sonar', sonar], ['codacy', codacy]]) {
     for (const [id, issue] of issues) {
-      const key = identity({ service, id });
-      const triple = liveKey(service, issue);
-      if (!known.has(key)) uncovered[service].push(id);
-      if (claimedIds.has(key) || resolvedIds.has(key) || claims.get(triple)) contradicted[service].push(id);
+      try {
+        const key = identity({ service, id });
+        const triple = liveKey(service, issue);
+        if (!known.has(key)) uncovered[service].push(id);
+        if (claimedIds.has(key) || resolvedIds.has(key) || claims.get(triple)) contradicted[service].push(id);
+      } catch (error) {
+        invalid[service].push(`${id}: ${error.message}`);
+      }
     }
   }
-  reportLiveFindings(uncovered, contradicted);
+  reportLiveFindings(uncovered, contradicted, invalid);
 }
 
 function tableRow(cells) {
@@ -275,6 +280,11 @@ function generate(rows, ledger) {
   writeFileSync(path, prefix + lines.join('\n'));
 }
 
+function invalidConfirmation(mode, sonarAnalysis, codacyCommit) {
+  return mode === 'confirm' ? !sonarAnalysis?.trim() || !codacyCommit?.trim()
+    : sonarAnalysis !== undefined || codacyCommit !== undefined;
+}
+
 async function main() {
   const { values } = parseArgs({ options: {
     allocate: { type: 'boolean' }, check: { type: 'boolean' }, 'check-live': { type: 'boolean' }, planned: { type: 'boolean' },
@@ -288,8 +298,7 @@ async function main() {
   const codacyCommit = values['codacy-commit'];
   if (modes.length > 1 || (values.planned && mode !== 'check')
     || (dryRun && !['apply-sonar', 'apply-codacy'].includes(mode))
-    || (mode === 'confirm' ? !sonarAnalysis?.trim() || !codacyCommit?.trim()
-      : sonarAnalysis !== undefined || codacyCommit !== undefined)) {
+    || invalidConfirmation(mode, sonarAnalysis, codacyCommit)) {
     throw new Error(usage);
   }
   const rows = findings();

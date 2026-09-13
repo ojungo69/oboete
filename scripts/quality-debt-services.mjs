@@ -128,12 +128,16 @@ function recordSonarCall(row, call, status) {
   }
 }
 
+const sonarResolutions = new Set(['FIXED', 'REMOVED', 'WONTFIX', 'FALSE-POSITIVE']);
+
 function sonarRefusal(row, state) {
   if (!state) return 'the issue search does not report this id';
-  if (state.status === 'CLOSED') return `closed by the service (resolution ${state.resolution})`;
+  const resolution = sonarResolutions.has(state.resolution) ? `resolution ${state.resolution}`
+    : 'see specs/008-quality-debt-zero/quickstart.md';
+  if (state.status === 'CLOSED') return `closed by the service (${resolution})`;
   const expected = (row.transition ?? 'wontfix') === 'falsepositive' ? 'FALSE-POSITIVE' : 'WONTFIX';
   if (state.status === 'RESOLVED' && state.resolution !== expected) {
-    return `resolved by the service (resolution ${state.resolution}, expected ${expected})`;
+    return `resolved by the service (${resolution}, expected ${expected})`;
   }
   return null;
 }
@@ -188,17 +192,10 @@ export async function applyCodacy(ledger, dryRun, inventory) {
   const rows = pendingResolved('codacy', ledger, inventory);
   if (rows.length === 0) return;
   const headers = dryRun ? undefined : await codacyHeaders();
-  const open = dryRun ? undefined : await openCodacyIssues();
   for (const row of rows) {
     const body = JSON.stringify({ ignored: true, reason: row.reason, comment: row.where });
     if (dryRun) {
       console.log(`PATCH ${codacyIssues}/${encodeURIComponent(row.id)} ${body}`);
-      continue;
-    }
-    if (!open.has(row.id)) {
-      // Codacy has no resolution field; its absent-id local confirmation remains deliberate.
-      row.confirmed = `Absent from current Codacy issue search ${new Date().toISOString()}`;
-      writeLedger(ledger);
       continue;
     }
     await pause(200);
@@ -294,7 +291,10 @@ export async function sonarIssueStates(ids, authorization) {
     for (const [id, issue] of found) {
       const { status, resolution } = issue;
       // applySonar transitions every status it does not recognise as terminal, so an unknown one is refused here.
-      if (!sonarStatuses.has(status)) throw new Error(`Sonar issues search returned an unknown status ${JSON.stringify(status)}`);
+      if (!sonarStatuses.has(status)) {
+        throw new Error('Sonar issues search returned an unknown status; the service may have dropped status and resolution'
+          + ' (deprecated in SonarQube 10.4 in favour of issueStatus); see specs/008-quality-debt-zero/quickstart.md');
+      }
       if (resolution !== undefined && (typeof resolution !== 'string' || !resolution)) {
         throw new Error('Sonar issues search returned an invalid resolution');
       }

@@ -94,6 +94,12 @@ export function run(cwd, args = [], preload = '') {
 }
 
 
+function nextResponse(responses, url) {
+  const queue = Array.isArray(responses) ? responses
+    : responses[new URL(url).hostname === 'sonarcloud.io' ? 'sonar' : 'codacy'];
+  return queue.shift();
+}
+
 // expected is the credential the recorded `authMatches` is compared against. A test that writes a
 // token file of its own passes the token it wrote, so the boolean says the reader sent that exact
 // value rather than merely something other than the default fixture.
@@ -108,6 +114,7 @@ export function apiStub(responses, verification = {}, expected = 'fixture-token'
     timers.setTimeout = async (ms) => { record({ sleep: ms }); };
     syncBuiltinESMExports();
     const responses = ${JSON.stringify(responses)};
+    const nextResponse = ${nextResponse.toString()};
     const verification = ${JSON.stringify({
       sonar: { body: { analyses: [{ key: 'analysis-key', revision: 'commit-sha' }] } },
       codacy: { body: { data: { lastAnalysedCommit: { sha: 'commit-sha', endedAnalysis: '2026-09-07T00:00:00Z' } } } },
@@ -129,11 +136,7 @@ export function apiStub(responses, verification = {}, expected = 'fixture-token'
       else if (String(url) === '${codacyRepository}') {
         if (headers.has('authorization') || headers.has('api-token')) throw new Error('expected anonymous request');
         response = verification.codacy;
-      } else {
-        const queue = Array.isArray(responses) ? responses
-          : responses[new URL(url).hostname === 'sonarcloud.io' ? 'sonar' : 'codacy'];
-        response = queue.shift();
-      }
+      } else response = nextResponse(responses, url);
       if (!response) throw new Error('unexpected request');
       if (response.error) {
         const error = new TypeError('Invalid header: ' + (headers.get('authorization') ?? headers.get('api-token')));

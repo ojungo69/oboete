@@ -119,9 +119,10 @@ for (const component of [undefined, 'ojungo69_free-mem', 'ojungo69_free-mem:src/
     for (const index of [1, 2, 4]) assert.deepEqual(saved[index], ledger[index]);
     const checked = run(cwd, ['--check-live'], publicApiStub(responses));
     assert.equal(checked.status, 1);
-    assert.equal(checked.stderr, component?.includes(':')
-      ? 'Codacy issues search returned an invalid patternInfo.id\n'
-      : 'Sonar issues search returned an invalid component\n');
+    const invalidSonar = component?.includes(':') ? ''
+      : 'sonar invalid 1: s-sql: Sonar issues search returned an invalid component\n';
+    assert.equal(checked.stderr, invalidSonar
+      + `codacy invalid 1: ${codacyViewerId}: Codacy issues search returned an invalid patternInfo.id\n`);
     assert.deepEqual(readLedger(cwd), saved);
   });
 }

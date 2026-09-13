@@ -176,7 +176,7 @@ curl -s 'https://sonarcloud.io/api/issues/search?componentKeys=ojungo69_free-mem
 curl -s -X POST 'https://app.codacy.com/api/v3/analysis/organizations/gh/ojungo69/repositories/oboete/issues/search?limit=1' -H 'content-type: application/json' -d '{}' | python3 -c 'import sys,json; d=json.load(sys.stdin); print("codacy current", d["pagination"].get("total", len(d["data"])))'
 ```
 
-Expected trajectory: Sonar 310 → ≈ 295 (A) → ≈ 95 (B) → ≈ 30 (C) → 0 (F). Codacy 397 → ≈ 112 (A) → ≈ 40 (C) → ≈ 30 (D) → 0 (F). The Quality Gate conditions on `main` stay `OK` and `coverage` stays ≥ 93.3 %.
+After batch F's final merge analysis, every frozen inventory id must be dispositioned and confirmed. Record both live counts and attribute findings outside the inventory to the follow-up round (issue #207); those counts may be nonzero under the scope amendment. The Quality Gate conditions on `main` stay `OK` and `coverage` stays ≥ 93.3 %.
 
 ## Disposition record check (every batch, and batch F)
 
@@ -194,9 +194,10 @@ node scripts/quality-debt-record.mjs --check-live
 ```
 
 This reads both services' public current-issue searches for `main` in parallel and reads the ledger.
-It reports `uncovered` IDs outside the frozen inventory and `contradicted` findings matching a
+It reports `uncovered` IDs outside the frozen inventory, `contradicted` findings matching a
 confirmed `fixed`/`excluded` ID, a confirmed `resolved` **Sonar** ID, or a `(service, rule, file)`
-triple whose inventory rows are all confirmed `fixed` or `excluded`. The same confirmed ID is
+triple whose inventory rows are all confirmed `fixed` or `excluded`, and `invalid` findings whose
+comparison fields cannot be read. The same confirmed ID is
 contradicted even if its code moved. Planned dispositions claim nothing; an `open`, `resolved`,
 missing or unconfirmed sibling prevents a triple claim. A confirmed `resolved` Sonar ID that comes
 back from the search has had its resolution reopened, which `resolved=false` makes meaningful; the
@@ -205,9 +206,10 @@ triple, because a `resolved` row claims only its own ID. The claim's rule and fi
 Live comparisons validate Sonar `rule` and `component` (stripping exactly `ojungo69_free-mem:` and
 requiring a non-empty remainder), or Codacy `patternInfo.id` and `filePath`. Only `--check-live`
 requires those comparison fields; `--confirm` and apply modes still validate IDs but do not read
-those fields. Either non-empty group sets exit 1, and empty groups are not printed. No uncovered or
-contradicted findings means exit 0 without output; a failed request or incomplete/invalid page also
-exits 1. The mode reads no credentials and writes no files. Known open issues can still pass, so
+those fields. An invalid comparison field adds `<id>: <sanitized reason>` to that service's `invalid`
+group while the other findings are still classified. Any non-empty group sets exit 1, and empty
+groups are not printed. No uncovered, contradicted or invalid findings means exit 0 without output;
+a failed request or invalid/incomplete page still exits 1. The mode reads no credentials and writes no files. Known open issues can still pass, so
 the service-count checks above remain required for final 0 / 0.
 
 `--apply-sonar` reads each pending resolved ID's state on `main` before its first write, in chunks of
@@ -216,17 +218,26 @@ ledger's `transitioned` marker. The expected resolution is `WONTFIX` for `wontfi
 `FALSE-POSITIVE` for `falsepositive`. Both real and dry runs print one decision line per pending row:
 
 - `REFUSE Sonar <id>: closed by the service (resolution <resolution>); re-disposition this row`
-  for any `CLOSED` issue, including `FIXED` and `REMOVED`.
+  for a `CLOSED` issue with a known resolution (`FIXED`, `REMOVED`, `WONTFIX` or
+  `FALSE-POSITIVE`). A missing or
+  unrecognised resolution prints `(see specs/008-quality-debt-zero/quickstart.md)` instead of the
+  response value.
 - `RESOLVED Sonar <id>: transition already applied, posting the comment` for a service `RESOLVED`
   issue whose resolution matches the ledger transition. Only `add_comment` is sent, even when
   `transitioned` is absent. Success writes `confirmed` and removes `transitioned`.
 - `REFUSE Sonar <id>: resolved by the service (resolution <actual>, expected <expected>); re-disposition this row`
-  for a `RESOLVED` issue whose resolution does not match.
+  for a `RESOLVED` issue whose known resolution does not match. A missing or unrecognised actual
+  resolution uses the same quickstart reference in place of the response value.
 - `REFUSE Sonar <id>: the issue search does not report this id; re-disposition this row` for a
   missing requested ID.
 - `APPLY Sonar <id>: the transition then the comment` otherwise (`OPEN`, `CONFIRMED`, `REOPENED`): transition, then
   comment, even if a stale `transitioned` marker exists. Successful transitions write that marker
   as a crash-safety record; each successful call is persisted immediately.
+
+A status outside `OPEN`, `CONFIRMED`, `REOPENED`, `RESOLVED` and `CLOSED` aborts before writes with a
+generic error that does not echo the response value. `status` and `resolution` were deprecated in
+SonarQube 10.4 in favour of `issueStatus`. Check whether the service dropped them before updating
+the response adapter and this decision table together.
 
 Refused rows receive no transition, comment or ledger change. Other rows are still processed, then
 one error names the refused count and IDs. An invalid or truncated search response still fails
@@ -235,11 +246,11 @@ before any write: a page's reported total must equal the number of issues it ret
 `--apply-sonar --dry-run` uses the public state search without credentials, prints the applicable
 POSTs after the decision lines, and makes no service or ledger writes. Refused rows still fail it.
 
-The real `--apply-codacy` mode also reads the complete current issue set before its first PATCH.
-Pending resolved IDs already absent from that set receive a local confirmation with the search
-absence and timestamp. Current IDs retain the existing reason/comment, incremental persistence and
-fail-fast handling: a refused PATCH stops later rows. `--apply-codacy --dry-run` stays offline and
-prints all planned PATCH requests; filtering against the live set happens only in the real run.
+The real `--apply-codacy` mode PATCHes every pending `resolved` row with its existing reason and
+comment; it does not query the current-commit issue search. That search omitted four ids rewritten by
+earlier batches even though their records remained PATCHable, so only a successful HTTP response
+confirms a resolved row. Each success is persisted immediately, and a refused PATCH stops later
+rows. `--apply-codacy --dry-run` stays offline and prints every planned PATCH request.
 
 ## Record CLI regression checks
 

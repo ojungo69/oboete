@@ -2283,7 +2283,7 @@
   "reason": "FalsePositive",
   "where": "the RegExp is built once from PATH_KEYS and JSON_VALUE, both module constants; no payload text enters the pattern",
   "verdict": "module constants — not applicable",
-  "confirmed": "Absent from current Codacy issue search 2026-09-13T13:51:29.595Z"
+  "confirmed": "HTTP 204 2026-09-13T16:59:30.343Z"
  },
  {
   "service": "codacy",
@@ -2292,7 +2292,7 @@
   "reason": "FalsePositive",
   "where": "scanKey is called with keys.session and keys.tool, constants of the agent table; the payload is only the subject string",
   "verdict": "module constants — not applicable",
-  "confirmed": "Absent from current Codacy issue search 2026-09-13T13:51:29.597Z"
+  "confirmed": "HTTP 204 2026-09-13T16:59:31.259Z"
  },
  {
   "service": "codacy",
@@ -2391,7 +2391,7 @@
   "reason": "FalsePositive",
   "where": "only `?` placeholders are joined into the SQL; the memory ids are bound as parameters",
   "verdict": "bound parameters — not applicable",
-  "confirmed": "Absent from current Codacy issue search 2026-09-13T13:51:39.057Z"
+  "confirmed": "HTTP 204 2026-09-13T16:59:32.161Z"
  },
  {
   "service": "codacy",
@@ -4941,7 +4941,7 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "shellQuote is one return statement and Lizard measures it at 3 NLOC in the same tree; the 492 came from the reader's span, which ran past the function until batch B1 rewrote the /'/g literal below it",
-  "confirmed": "Absent from current Codacy issue search 2026-09-13T13:51:44.616Z"
+  "confirmed": "HTTP 204 2026-09-13T16:59:33.496Z"
  },
  {
   "service": "codacy",

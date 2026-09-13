@@ -12,12 +12,11 @@ Disposition record of feature 008 (`specs/008-quality-debt-zero/`): every SonarC
 ## Batch F (2026-09-13): service calls, confirmations, and the closing count
 
 **Service calls.** Every pending `resolved` row is now recorded at its service: **10 SonarCloud
-transitions** with their comments, **23 Codacy ignores** with their reason and comment, and 4 Codacy
-rows whose ID the service no longer reports, which carry the search timestamp instead of a call result.
+transitions** with their comments and **27 Codacy ignores** with their reason and comment.
 `--apply-sonar` reads each pending row's own `status` and `resolution` before its first write and
-decides from them; `--apply-codacy` reads the complete current issue set, because Codacy exposes no
-resolution field. Either way an ID that has already gone is handled rather than met as an HTTP error
-mid-run.
+decides from them. `--apply-codacy` PATCHes every pending row: the current-commit search omitted four
+ids rewritten by earlier batches even though their issue records remained PATCHable, so absence is
+not a resolution receipt.
 
 **Five rows were re-dispositioned, not confirmed.** The first `--apply-sonar` run stamped five rows
 "absent from the current issue search" — and a query of those IDs without the `resolved=false` filter
@@ -50,16 +49,17 @@ Every one of the 248 SonarCloud findings and all 38 uncovered non-ESLint Codacy 
 that changed between `e27bb029` and `33f8c382` — PR #190 (feature 009 memory core) and PR #211. **No
 live finding is in a file this feature last touched.** Of the Codacy total, 174 are ESLint 8 rows that
 the crashed tool reported (research R10); the tool is now disabled, so they are expected to go at the
-next analysis. SonarCloud re-keyed its issue IDs between the 2026-09-07 export (`AaB3Xk…`) and today
-(`AaCVHm…`), which is why no live SonarCloud ID matches an inventory row; matching by `(rule, file)`
-instead, `--check-live` reports every live finding a **confirmed** `fixed` or `excluded` row claims —
-by its own id or by its triple, covered or not — as a named `contradicted` group and fails on it:
-**20 SonarCloud and 12 Codacy** findings today. A confirmed `resolved` **SonarCloud** id counts too,
-because `openSonarIssues` passes `resolved=false` and the id returning means the resolution was
-reopened. The same test is not applied to Codacy: its issue search takes no ignore filter and
-returns ignored issues with no field distinguishing them — measured on 2026-09-13, all 23 ids ignored
-with HTTP 204 come back in the default search — so there only the PATCH response is a receipt, and
-counting presence as a contradiction would have added those 23 as false ones. An unconfirmed row is a planned disposition whose id
+next analysis. Frozen Sonar ids remain addressable: the ten resolutions applied on 2026-09-13 each
+returned HTTP 200. Every frozen Sonar id is now closed or resolved, and `openSonarIssues` passes
+`resolved=false`, so none can appear in its open set. To surface later regrowth under a new id,
+`--check-live` also matches `(rule, file)` and reports every live finding a **confirmed** `fixed` or
+`excluded` row claims as a named `contradicted` group: **20 SonarCloud and 12 Codacy** findings today.
+A confirmed `resolved` **SonarCloud** id would count too, because its return from that open-only search
+would mean the resolution was reopened. The same test is not applied to Codacy. All 27 ignored rows
+have HTTP 204 receipts, but its current-commit search has neither an ignore filter nor an ignore field:
+presence does not distinguish an ignored issue, and absence does not prove resolution — the four ids
+omitted after earlier rewrites still had PATCHable records. Codacy `resolved` rows therefore stay out
+of `contradicted`. An unconfirmed row is a planned disposition whose id
 closes at the next analysis, so it is not a contradiction; that is why the Stylelint SCSS row is
 absent from the group. Three of the Codacy ones are inventory ids whose rows are confirmed `fixed`,
 and two of those were found only by this group: `captureUnparsed` measured 48 NLOC at the
@@ -71,16 +71,20 @@ findings outside the frozen inventory it would fail every build — so the round
 
 **Success criteria and their evidence.**
 
-- **SC-003** — `node scripts/quality-debt-record.mjs --check` reports `745 ids: 0 missing, 0 duplicate,
-  0 resolved-without-reason, 0 unknown, 0 without-where, 0 without-verdict`, so every inventory entry
-  has a disposition and a `where`. A deterministic sample of 20 (the sorted ledger, every 37th row)
+- **SC-003** — the plain `node scripts/quality-debt-record.mjs --check` exits 1 with exactly
+  `745 ids: 0 missing, 0 duplicate, 1 open, 1 unconfirmed, 0 resolved-without-reason, 0 unknown, 0 without-where, 0 without-verdict`.
+  The failure is the planned Stylelint row `codacy:7935279dc22d4b6af001014179ebdff1`, whose exclusion
+  only the post-merge analysis can confirm. `--check --planned` exits 0 with the same summary except
+  `0 open, 1 unconfirmed`, proving every inventory entry has a disposition and a `where` before that
+  confirmation. A deterministic sample of 20 (the sorted ledger, every 37th row)
   traces to a pull request, a service reason, or a named configuration line: `#166` ×2, `#165`, `#163`,
   `#162`, `#161` ×2, `#173` ×2 for the `fixed` rows; `.codacy.yml` `engines.opengrep.exclude_paths`
   ×6, `engines.tsqllint.exclude_paths` ×2 and `engines.lizard.exclude_paths` for the `excluded` rows;
   and two `resolved` rows with their written reason.
-- **SC-004** — the same check's `0 without-verdict` is the gate: `validateInventory` requires a written
-  verdict on every security-classified row, and the record's tables carry each verdict in the
-  `where / reason` column.
+- **SC-004** — the same check's `0 without-verdict` is the gate: `rowProblems` in the record script
+  requires a verdict on every `fixed` or `resolved` security-classified row, and `pendingResolved` in
+  the services module repeats that guard before service calls. The record tables carry each verdict
+  in the `where / reason` column.
 - **SC-005** — SonarCloud's `coverage` history on `main`: 93.3 at the baseline `5e03d67f`, 93.6, 93.9,
   93.9, **93.8 at `e27bb029`** (this feature's last merge), 93.9 today. The figure never fell below the
   baseline, and no assertion was changed to keep a suite green.

@@ -7,7 +7,9 @@ import {
 } from './quality-debt-record.test-support.mjs';
 import { sonarIssueStates } from './quality-debt-services.mjs';
 
-for (const resolution of ['FIXED', 'REMOVED', undefined]) {
+const quickstart = 'see specs/008-quality-debt-zero/quickstart.md';
+
+for (const resolution of ['FIXED', 'REMOVED', 'WONTFIX', 'FALSE-POSITIVE', undefined, 'response-body-secret']) {
   test(`--apply-sonar refuses CLOSED/${resolution} without POSTs or ledger writes`, (t) => {
     const { cwd, ledger } = fixture(t);
     delete ledger[2].confirmed;
@@ -18,7 +20,9 @@ for (const resolution of ['FIXED', 'REMOVED', undefined]) {
       { body: { issues: [sonarIssue('s-regexp', { status: 'CLOSED', resolution })], total: 1 } },
     ]));
     assert.equal(result.status, 1);
-    assert.equal(result.stdout, `REFUSE Sonar s-regexp: closed by the service (resolution ${resolution}); re-disposition this row\n`);
+    const detail = resolution === undefined || resolution === 'response-body-secret' ? quickstart : `resolution ${resolution}`;
+    assert.equal(result.stdout, `REFUSE Sonar s-regexp: closed by the service (${detail}); re-disposition this row\n`);
+    assert.doesNotMatch(result.stdout + result.stderr, /response-body-secret/);
     assert.match(result.stderr, /1.*s-regexp/);
     assert.deepEqual(readCalls(cwd).map((call) => call.method), ['GET']);
     assert.deepEqual(evidenceText(cwd), before);
@@ -51,7 +55,7 @@ for (const [field, value] of [
   ['status', undefined], ['status', null], ['status', 42], ['status', ''],
   // A status outside the documented set is refused rather than transitioned: applySonar treats
   // everything it does not recognise as terminal as transitionable.
-  ['status', 'PENDING'], ['status', 'open'],
+  ['status', 'PENDING'], ['status', 'open'], ['status', 'response-body-secret'],
   ['resolution', null], ['resolution', 42], ['resolution', ''],
 ]) {
   test(`--apply-sonar rejects invalid ${field}: ${JSON.stringify(value)} before any write`, (t) => {
@@ -66,8 +70,10 @@ for (const [field, value] of [
     ]));
     assert.equal(result.status, 1);
     assert.equal(result.stderr, field === 'status'
-      ? `Sonar issues search returned an unknown status ${JSON.stringify(value)}\n`
+      ? 'Sonar issues search returned an unknown status; the service may have dropped status and resolution'
+        + ' (deprecated in SonarQube 10.4 in favour of issueStatus); see specs/008-quality-debt-zero/quickstart.md\n'
       : `Sonar issues search returned an invalid ${field}\n`);
+    assert.doesNotMatch(result.stdout + result.stderr, /response-body-secret/);
     assert.deepEqual(readCalls(cwd).map((call) => call.method), ['GET']);
     assert.deepEqual(evidenceText(cwd), before);
   });
@@ -111,6 +117,7 @@ for (const missing of [false, true]) {
 for (const [transition, resolution, expected] of [
   ['falsepositive', 'WONTFIX', 'FALSE-POSITIVE'], ['wontfix', 'FALSE-POSITIVE', 'WONTFIX'],
   ['falsepositive', undefined, 'FALSE-POSITIVE'], ['wontfix', 'FIXED', 'WONTFIX'],
+  ['falsepositive', 'response-body-secret', 'FALSE-POSITIVE'],
 ]) {
   test(`--apply-sonar refuses RESOLVED/${resolution} for a ${transition} row without writes`, (t) => {
     const { cwd, ledger } = fixture(t);
@@ -122,7 +129,9 @@ for (const [transition, resolution, expected] of [
       { body: { issues: [sonarIssue('s-regexp', { status: 'RESOLVED', resolution })], total: 1 } },
     ]));
     assert.equal(result.status, 1);
-    assert.equal(result.stdout, `REFUSE Sonar s-regexp: resolved by the service (resolution ${resolution}, expected ${expected}); re-disposition this row\n`);
+    const detail = resolution === undefined || resolution === 'response-body-secret' ? quickstart : `resolution ${resolution}`;
+    assert.equal(result.stdout, `REFUSE Sonar s-regexp: resolved by the service (${detail}, expected ${expected}); re-disposition this row\n`);
+    assert.doesNotMatch(result.stdout + result.stderr, /response-body-secret/);
     assert.equal(result.stderr, 'Sonar refused 1 row(s): s-regexp\n');
     assert.deepEqual(readCalls(cwd).map((call) => call.method), ['GET']);
     assert.deepEqual(evidenceText(cwd), before);

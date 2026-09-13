@@ -5,11 +5,10 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
-  apiStub, codacyHarnessId, codacyIssue, codacyIssues, codacyViewerId, confirmArgs, dryRunStub, evidence, fixture, publicApiStub, readCalls,
+  apiStub, codacyHarnessId, codacyIssues, codacyViewerId, confirmArgs, dryRunStub, evidence, fixture, publicApiStub, readCalls,
   readLedger, run, sonarIssue, sonarOpen, writeJson,
 } from './quality-debt-record.test-support.mjs';
 
-const codacyOpen = (...ids) => ({ body: { data: ids.map((id) => codacyIssue(id)), pagination: { total: ids.length } } });
 const codacyLaterId = '33333333333333333333333333333333';
 
 test('--apply-sonar --dry-run prints both calls without reading credentials or sending writes', (t) => {
@@ -145,17 +144,16 @@ for (const status of [204, 429]) {
     }
     writeJson(cwd, 'ledger.json', ledger);
     const result = run(cwd, ['--apply-codacy'], apiStub([
-      { status: 200 }, codacyOpen(...ledger.slice(3).map((row) => row.id)), { status: 200 }, { status },
+      { status: 200 }, { status: 200 }, { status },
     ]));
     assert.equal(result.status, status === 429 ? 1 : 0, result.stderr);
     if (status === 429) assert.equal(result.stderr, `Codacy ${codacyViewerId}: PATCH returned HTTP 429\n`);
     assert.doesNotMatch(result.stdout + result.stderr, /fixture-token/);
     const events = readFileSync(join(cwd, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-    assert.equal(events.length, 6);
-    assert.equal(events[1].url, `${codacyIssues}/search?limit=100`);
-    for (const i of [2, 4]) assert.deepEqual(events[i], { sleep: 200 });
+    assert.equal(events.length, 5);
+    for (const i of [1, 3]) assert.deepEqual(events[i], { sleep: 200 });
     for (const [i, row] of ledger.slice(3, 5).entries()) {
-      assert.deepEqual(events[3 + i * 2], {
+      assert.deepEqual(events[2 + i * 2], {
         url: `${codacyIssues}/${row.id}`, method: 'PATCH',
         body: { ignored: true, reason: row.reason, comment: row.where },
         authMatches: true, contentType: 'application/json', redirect: 'manual',
@@ -332,12 +330,12 @@ for (const [name, contents] of [
 ]) {
   test(`--apply-codacy reads the token from a file with ${name}`, (t) => {
     const { cwd, ledger } = codacyTokenFixture(t, contents);
-    const result = run(cwd, ['--apply-codacy'], apiStub([{ status: 200 }, codacyOpen(ledger[4].id), { status: 200 }]));
+    const result = run(cwd, ['--apply-codacy'], apiStub([{ status: 200 }, { status: 200 }]));
     assert.equal(result.status, 0, result.stderr);
     const calls = readCalls(cwd).filter((call) => call.url);
     assert.deepEqual(calls.map((call) => call.url),
-      ['https://app.codacy.com/api/v3/user', `${codacyIssues}/search?limit=100`, `${codacyIssues}/${ledger[4].id}`]);
-    assert.deepEqual(calls.map((call) => call.authMatches), [true, false, true]);
+      ['https://app.codacy.com/api/v3/user', `${codacyIssues}/${ledger[4].id}`]);
+    assert.deepEqual(calls.map((call) => call.authMatches), [true, true]);
   });
 }
 
@@ -440,14 +438,14 @@ test('--apply-codacy resumes at the first unconfirmed row and keeps the earlier 
   }
   writeJson(cwd, 'ledger.json', ledger);
   const first = run(cwd, ['--apply-codacy'], apiStub([
-    { status: 200 }, codacyOpen(codacyHarnessId, codacyViewerId), { status: 200 }, { status: 429 },
+    { status: 200 }, { status: 200 }, { status: 429 },
   ]));
   assert.equal(first.status, 1);
   const saved = readLedger(cwd);
   assert.match(saved[3].confirmed, /^HTTP 200 /);
   assert.equal(saved[4].confirmed, undefined);
   const events = readCalls(cwd).length;
-  const rerun = run(cwd, ['--apply-codacy'], apiStub([{ status: 200 }, codacyOpen(codacyViewerId), { status: 204 }]));
+  const rerun = run(cwd, ['--apply-codacy'], apiStub([{ status: 200 }, { status: 204 }]));
   assert.equal(rerun.status, 0, rerun.stderr);
   const patches = readCalls(cwd).slice(events).filter((call) => call.method === 'PATCH');
   assert.deepEqual(patches.map((call) => call.url), [`${codacyIssues}/${ledger[4].id}`]);

@@ -70,10 +70,10 @@ They are listed so the next reader does not re-investigate them:
 
 | Task | Mechanical flag | Why it was wrong |
 |---|---|---|
-| T027 | `providerCall` not in the named files | the function was later moved to `src/worker/observe-batch.ts:236` by batch D and is still called twice |
-| T030 | `launchAgent` not in the named files | moved to `scripts/e2e/probe-lib/isolated-lifecycle.mjs`, called at `:194` and `:338` |
+| T027 | `providerCall` not in the named files | `providerCall` was later moved to `src/worker/observe-batch.ts` by batch D and is called by `retryOnLanguageMismatch` and `processBatch` |
+| T030 | `launchAgent` not in the named files | `launchAgent` is exported by `scripts/e2e/probe-lib/isolated-agent.mjs` and invoked from `isolated-lifecycle.mjs` by the resume, compact, fork and seeding flows |
 | T030a | four symbols absent | `requireAgentSuccess`, `startLifecycleTui`, `prepareAgent`, `detailSuffix` all live in `scripts/e2e/probe-lib/` after the D continuation |
-| T043d | `openSonarIssues` / `openCodacyIssues` absent | both are exported from `scripts/quality-debt-services.mjs` (`:255`, `:312`), not from the record script the task line names |
+| T043d | `openSonarIssues` / `openCodacyIssues` absent | both symbols are exported from `scripts/quality-debt-services.mjs`, not from the record script the task line names |
 | T017 | no S8786 row in the ledger | the ledger row carries no `rule` field; joined against the frozen inventory, all 13 S8786 ids are `fixed` and confirmed |
 | T001, T007, T008, T010, T017, T021, T022, T033 | paths "missing" | `src/`, `test/`, `scripts/`, `legacy/`, `coverage/**` are directory and glob tokens, and `.codacy.yml`, `.markdownlint.json`, `.specify/feature.json`, `dist/oboete.mjs` all exist |
 
@@ -94,9 +94,10 @@ That is what T012, T020, T026, T035 and T041 claim.
 PR #185. A second, earlier window (2026-09-09 07:27Z and 07:59Z, 22 transitions and
 2 ignores) belongs to the batches before F and is not part of this task's claim.
 
-**T043** (`--apply-codacy`): 23 rows confirmed `HTTP 204` and four confirmed
-`Absent from current Codacy issue search`, all between 13:51:24Z and 13:51:49Z on
-2026-09-13 — exactly the counts in the task note.
+**T043** (`--apply-codacy`): 27 rows are confirmed by real `HTTP 204` receipts. The
+first 23 were recorded between 13:51:24Z and 13:51:49Z on 2026-09-13; the four ids
+formerly labelled absent were PATCHed successfully at 16:59:30.343Z, 16:59:31.259Z,
+16:59:32.161Z and 16:59:33.496Z that day.
 
 **T043a** (disable Codacy's ESLint): read live from
 `GET /analysis/organizations/gh/ojungo69/repositories/oboete/tools` — ESLint's settings
@@ -104,19 +105,20 @@ are `isEnabled: false`, `followsStandard: true`, `isCustom: false`, `enabledBy: 
 The task's own note is careful that the ESLint-free analysis log is **T045's** criterion
 and not claimed here; that remains open.
 
-**T043b** (`--check --planned`): run in this session —
+**T043b** (`--check --planned`): run in this session with exit 0 —
 `745 ids: 0 missing, 0 duplicate, 0 open, 1 unconfirmed, 0 resolved-without-reason,
 0 unknown, 0 without-where, 0 without-verdict`. The one unconfirmed row is
 `codacy:7935279dc22d4b6af001014179ebdff1`, the Stylelint SCSS row of T009, which waits
 for the next analysis — which is what both task notes say.
 
-**T043c / T043d** (live-search modes): `checkLive` at
-`scripts/quality-debt-record.mjs:184`, the `--check-live` flag at `:261` and `:265`, and
-`applyCodacy`'s pre-read of the live search at `scripts/quality-debt-services.mjs:186`.
+**T043c / T043d** (record and service paths): `checkLive`, the `values['check-live']` parse
+result and `mode === 'check-live'` dispatch in `main`, and `applyCodacy`'s pending-row
+PATCH loop are the implementation symbols.
 
-**T043e** (security classifier): `['S8786', 'S4036', 'S8707']` at
-`scripts/quality-debt-ledger.mjs:38`, with both new rules exercised in
-`scripts/quality-debt-record.test.mjs:85-86` and `:182-183`.
+**T043e** (security classifier): `securityPopulation` holds
+`['S8786', 'S4036', 'S8707']`; the table-driven `--check requires a verdict only for
+fixed or resolved rows of the security population` test and the `sonarCases`
+allocation table exercise both added rules.
 
 ## Verified items
 
@@ -132,7 +134,7 @@ for the next analysis — which is what both task notes say.
 | T008 | ✅ VERIFIED | `.markdownlint.json` with `default: false` and `MD024 siblings_only` |
 | T010 | ✅ VERIFIED | the verification note names the range and what else the range carries |
 | T011 | ✅ VERIFIED | 302 batch A rows in the ledger |
-| T014 | ✅ VERIFIED | `PATH_KEYS` at `src/agents/index.ts:75`, bounded through `capPaths` at `:151` |
+| T014 | ✅ VERIFIED | `PATH_KEYS` in `src/agents/index.ts`, bounded through `capPaths` in `describeToolInput` |
 | T017 | ✅ VERIFIED | all 13 S8786 inventory ids `fixed` and confirmed |
 | T021, T022, T023 | ✅ VERIFIED | batch B allocation and the named files in the feature diff |
 | T027 | ✅ VERIFIED | `providerCall` extracted, nine named files in the diff |
@@ -211,10 +213,10 @@ for the next analysis — which is what both task notes say.
 | T040 | ⚠️ WEAK | batch D states refreshed |
 | T041 | ⚠️ WEAK | #185 merged as e27bb029, analysis c36a88b6 |
 | T042 | ⚠️ WEAK | 10 transitions HTTP 200, 5 re-dispositions |
-| T043 | ⚠️ WEAK | 23 ignores HTTP 204, 4 absences |
+| T043 | ⚠️ WEAK | 27 ignores, each with an HTTP 204 receipt |
 | T043a | ⚠️ WEAK | ESLint isEnabled false, isCustom false |
 | T043b | ⚠️ WEAK | --check --planned: 1 unconfirmed, by design |
-| T043c | ⚠️ WEAK | live pre-read in applyCodacy |
+| T043c | ⚠️ WEAK | `applyCodacy` PATCHes every pending resolved row; the HTTP response is the receipt |
 | T043d | ✅ VERIFIED | --check-live present |
 | T043e | ⚠️ WEAK | S4036/S8707 in the classifier |
 | T044 | ✅ VERIFIED | spec/plan/research/record swept |

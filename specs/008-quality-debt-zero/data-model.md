@@ -30,7 +30,7 @@ The end state of one Finding. Exactly one per Finding (FR-001).
 | `state` | `fixed` / `resolved` / `excluded` | `fixed`: the code at that line changed in a merged PR and the service no longer reports the id. `resolved`: the id is closed on the service by a transition (Sonar `wontfix` / `falsepositive`) or an ignore (Codacy) that carries the reason. `excluded`: a configuration change stops the rule for the file class; the id closes at the next analysis. |
 | `where` | PR number / comment text / config line | `fixed` → `#NNN`; `resolved` → the one-sentence reason as posted on the service; `excluded` → the file and line of the configuration change (for example `.codacy.yml engines.lizard.exclude_paths`) |
 | `verdict` | free text, security population only | `controller — validation — sink — effect — real / not applicable` (research R6). Required for every `fixed` or `resolved` Finding whose rule is security-flavoured (Codacy `Semgrep_*` and `shellcheck_SC2024`, Sonar S8786/S4036/S8707), whatever the file; an `excluded` Finding is covered by the file-class review in research R4 instead. |
-| `confirmed` | analysis id / commit SHA / HTTP response / Codacy search absence, or absent | The service's agreement with `state`: for `fixed` and `excluded`, the SonarCloud analysis id or the Codacy commit SHA whose analysis no longer lists the id; for `resolved`, the HTTP status and timestamp of the Sonar comment after resolution or the Codacy ignore call. Codacy also permits local confirmation with the search absence and timestamp because it has no resolution field. Sonar completion and `--confirm` remove `transitioned`. Absent until batch F records it; `--check` treats an unconfirmed row as `open`. |
+| `confirmed` | analysis id / commit SHA / HTTP response, or absent | The service's agreement with `state`: for `fixed` and `excluded`, the SonarCloud analysis id or the Codacy commit SHA whose analysis no longer lists the id; for `resolved`, the HTTP status and timestamp of the Sonar comment after resolution or the Codacy ignore `PATCH`. Codacy's issue search reports only issues of the current analyzed commit: an id rewritten by an earlier batch can be absent while its record still exists and accepts PATCH, so a Codacy `resolved` row always needs the PATCH receipt. Sonar completion and `--confirm` remove `transitioned`. Absent until batch F records it; `--check` treats an unconfirmed row as `open`. |
 | `reason` | Codacy only, one of `AcceptedUse`, `FalsePositive`, `NotExploitable`, `TestCode`, `ExternalCode` | The enumerated reason the Codacy API stores alongside the free-text `where` comment. |
 | `transitioned` | Sonar `resolved` rows only, ISO time, or absent | Crash-safety record written by `--apply-sonar` after the transition succeeds and before the comment is posted. No decision reads this marker: each run reads live status and resolution, and an `OPEN` or `REOPENED` issue still needs a transition even when the marker exists. A successful comment writes `confirmed` and removes `transitioned`, so a reopened completed issue is redone by clearing `confirmed` alone. |
 
@@ -41,14 +41,19 @@ maps to the expected service resolution: `wontfix` (the default) → `WONTFIX`, 
 | Live state | Decision |
 |---|---|
 | ID absent from the search | Refuse that row and ask for re-disposition. |
-| `CLOSED`, any resolution (including `FIXED` and `REMOVED`) | Refuse that row, naming the resolution, and ask for re-disposition. |
+| `CLOSED`, any resolution (including `FIXED` and `REMOVED`) | Refuse that row and ask for re-disposition; name only a known resolution, otherwise point to the quickstart. |
 | `RESOLVED`, resolution matches the ledger transition | Send `add_comment` only. |
-| `RESOLVED`, any other resolution | Refuse that row, naming actual and expected resolutions, and ask for re-disposition. |
+| `RESOLVED`, any other resolution | Refuse that row and name the expected resolution; name the actual resolution only if known, otherwise point to the quickstart. |
 | Anything else (`OPEN`, `CONFIRMED`, `REOPENED`) | Transition, then comment. |
 
-Refused rows remain unchanged and make the run fail after the other rows are processed, with one
+Known resolutions are `FIXED`, `REMOVED`, `WONTFIX` and `FALSE-POSITIVE`; other response values are
+never printed. Refused rows remain unchanged and make the run fail after the other rows are processed, with one
 error naming their count and IDs. Successful calls persist immediately. Invalid search responses,
 including a page whose reported total differs from the number returned, fail before any write.
+
+`--apply-codacy` sends the ignore `PATCH` for every pending `resolved` row, including an id absent
+from the current-commit search. Only the HTTP response confirms it; the search describes findings on
+that commit, not whether an older issue record still exists.
 
 State transitions: a Finding is `open` until its batch merges; the ledger row written at merge time is a **planned** end state; it becomes confirmed `fixed` when the next analysis no longer lists the id and the batch changed that line; confirmed `resolved` when the service action succeeds; confirmed `excluded` when the configuration PR merges **and** the following analysis no longer lists the id. Batch F records the confirmations; it owns no Finding. A Finding that reappears (for example because a rewrite was reverted) goes back to `open` and must be dispositioned again; the final tables always hold **exactly one row per `(service, id)`**, and the earlier state is moved to a separate `## History` section (`id | from | to | when | why`).
 
@@ -75,28 +80,31 @@ File: `docs/evidence/quality-debt-2026-09.md`. One section per service, one tabl
 | id | rule | file:line | state | where / reason |
 ```
 
-Security-population rows carry the verdict in the last column before the action, separated by ` — `. A summary line above each table states `open / fixed / resolved / excluded` counts and the analysis timestamp at which the service reported 0.
+Security-population rows carry the verdict in the last column before the action, separated by ` — `. A summary line above each table states the frozen inventory's `open / fixed / resolved / excluded` counts. The closing evidence records the service analysis labels, timestamps and live counts, with ownership of findings outside the inventory.
 
-The record is generated by `scripts/quality-debt-record.mjs` (with `quality-debt-ledger.mjs` for the ledger and `quality-debt-services.mjs` for the service calls, each under the 500-NLOC Codacy file limit) from the two inventory files at `docs/evidence/quality-debt-2026-09/{sonar,codacy}-main-issues.json` (the only copies the script reads) plus a ledger file `docs/evidence/quality-debt-2026-09/ledger.json` (`service, id, state, where, verdict?`) appended per batch. `--check` exits non-zero when an inventory id is missing from the ledger, appears twice, is `open`, or is `resolved` without a reason. The 0 / 0 summary line is written only after both services report a successful analysis of the final `main` SHA with the relevant tools run (SonarCloud `api/ce/activity`; Codacy commit status for that SHA) and the count queries return 0.
+The record is generated by `scripts/quality-debt-record.mjs` (with `quality-debt-ledger.mjs` for the ledger and `quality-debt-services.mjs` for the service calls, each under the 500-NLOC Codacy file limit) from the two inventory files at `docs/evidence/quality-debt-2026-09/{sonar,codacy}-main-issues.json` (the only copies the script reads) plus a ledger file `docs/evidence/quality-debt-2026-09/ledger.json` (`service, id, state, where, verdict?`) appended per batch. `--check` exits non-zero when an inventory id is missing from the ledger, appears twice, is `open`, or is `resolved` without a reason. Closing requires confirmation of every inventory row after both services successfully analyze the final `main` SHA with the required tools (SonarCloud `api/ce/activity`; Codacy commit status for that SHA), plus measurement and attribution of live findings outside the inventory to the follow-up round (issue #207).
 
 `--check-live` reads both public current-issue searches and the ledger. It reports `uncovered` IDs
-outside the inventory and `contradicted` findings matching either a confirmed `fixed`/`excluded`
+outside the inventory, `contradicted` findings matching either a confirmed `fixed`/`excluded`
 `(service, id)`, a confirmed `resolved` **Sonar** `(service, id)`, or an inventory
-`(service, rule, file)` triple whose rows are all confirmed `fixed` or `excluded`. A confirmed ID is
+`(service, rule, file)` triple whose rows are all confirmed `fixed` or `excluded`, and `invalid`
+findings whose comparison fields cannot be read. A confirmed ID is
 contradicted even if its code moved; a planned disposition claims nothing, and a triple with an
 `open`, `resolved`, missing or unconfirmed disposition claims nothing. The `resolved` case is Sonar
 only and ID-level only: `openSonarIssues` passes `resolved=false`, so the ID returning means the
-resolution was reopened, while Codacy's issue search takes no ignore filter and returns ignored
-issues with no field distinguishing them (measured 2026-09-13: all 23 IDs ignored with HTTP 204 come
-back in the default search), so there presence proves nothing and the PATCH response is the receipt.
-A `resolved` row never joins the triple map either — it says nothing about the rest of that
+resolution was reopened. All 27 `resolved` Codacy rows have HTTP 204 receipts, but Codacy's
+current-commit search takes no ignore filter and exposes no ignore field: presence does not
+distinguish an ignored issue, and absence does not prove resolution because four omitted ids still
+had PATCHable records. A `resolved` Codacy row therefore stays out of `contradicted`, and no
+`resolved` row joins the triple map — it says nothing about the rest of that
 `(service, rule, file)`, so a sibling finding there is a new finding.
 Claims use the frozen inventory's rule and file, never ledger copies. Comparison validates Sonar
 `rule` and `component` (including a non-empty path after `ojungo69_free-mem:`), and Codacy
 `patternInfo.id` and `filePath` where it reads them. ID validation remains shared by all searches;
-`--confirm` and apply modes do not require comparison fields they never read. Either group makes
-the run exit 1; empty groups are omitted, and no findings means exit 0 without output. Failed
-requests or invalid/incomplete pages also exit 1. The check reads no credentials and writes no files.
+`--confirm` and apply modes do not require comparison fields they never read. An invalid comparison
+field records `<id>: <sanitized reason>` while the other findings are still classified. Any group
+makes the run exit 1; empty groups are omitted, and no findings means exit 0 without output. Failed
+requests or incomplete pages also exit 1. The check reads no credentials and writes no files.
 
 ## Validation rules
 
