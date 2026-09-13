@@ -101,18 +101,28 @@ export function stageCredential(source, destination) {
   return [entry];
 }
 
-/** True when the staged path was a regular file whose content was carried back to the account. */
+/**
+ * True when the staged path was a regular file whose content was carried back to the account.
+ *
+ * One open answers both questions without a check-then-read window: O_NOFOLLOW fails with ELOOP
+ * while the path is still the link this staged (nothing to carry, the CLI wrote through it) and
+ * with ENOENT once the CLI has signed itself out, and otherwise hands back the regular file the
+ * CLI renamed into place.
+ */
 function carryBackCredential({ staged, source }) {
-  let stat;
+  let handle;
   try {
-    stat = fs.lstatSync(staged);
+    handle = fs.openSync(staged, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   } catch {
-    return false; // The CLI signed itself out by removing the link; the account file stands.
+    return false;
   }
-  if (stat.isSymbolicLink()) return false; // Written in place: the account file already has it.
-  const text = fs.readFileSync(staged, "utf8");
-  JSON.parse(text); // A half-written file must not overwrite a working credential.
-  fs.writeFileSync(source, text, { mode: 0o600 });
+  try {
+    const text = fs.readFileSync(handle, "utf8");
+    JSON.parse(text); // A half-written file must not overwrite a working credential.
+    fs.writeFileSync(source, text, { mode: 0o600 });
+  } finally {
+    fs.closeSync(handle);
+  }
   return true;
 }
 
