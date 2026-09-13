@@ -1,0 +1,35 @@
+docs/evidence/quality-debt-2026-09.md
+  s_a3b2da79705e65::t_0ce831aa2c43fb 10
+  s_a3b2da79705e65::t_441f5f5cc04de9 89,134,145,241,273,320
+  s_a3b2da79705e65::t_ffac11bd153e72 14-30
+  s_a3b2da79705e65::t_d49043202725e8 12-13,31-81,132,158,301-302,367-368,396,404-405,409,432,445-446,450,485,518,561,579,614,620,632,644,672,684-688,690-691,697,729,740,744,747-748,750,752,756,759,761,763-764,767,770,773,775-776,778,781
+  s_a3b2da79705e65::t_181bc3265d68f1 11
+docs/evidence/quality-debt-2026-09/ledger.json
+  s_a3b2da79705e65::t_441f5f5cc04de9 2534-2537,3195-3198,3259-3262,3323-3326,3686-3689
+specs/008-quality-debt-zero/plan.md
+  s_a3b2da79705e65::t_bd3ef4c8de069b 9,116,157
+specs/008-quality-debt-zero/spec.md
+  s_a3b2da79705e65::t_88382bf60aaf9f 157-163,175-187
+specs/008-quality-debt-zero/tasks.md
+  s_a3b2da79705e65::t_e7338227f361c0 42,76-77,96,119,134,144-146,152-153
+  s_a3b2da79705e65::t_8ab003cd7393d1 154
+specs/008-quality-debt-zero/research.md
+  s_a3b2da79705e65::t_71fd904e5a0ac5 157,174,195-225,239-258
+  s_a3b2da79705e65::t_faac893984c4b3 259
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "4b520ce229f9deaaf3c6e231c4ac2e65d022e7e2",
+  "prompts": {},
+  "sessions": {
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
