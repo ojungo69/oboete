@@ -1,0 +1,45 @@
+scripts/quality-debt-record-confirm.test.mjs
+  s_f286ee43d08383::t_57b6c8fb6790cc 8,103-128
+  s_f286ee43d08383::t_1819b5c2cc55f9 9,199-210
+specs/008-quality-debt-zero/data-model.md
+  s_f286ee43d08383::t_aa0044a27940bd 33,35,37-51,83-92
+scripts/quality-debt-record-live.test.mjs
+  s_f286ee43d08383::t_38441b6ae452e3 194,203,205,212-252,258,311
+  s_f286ee43d08383::t_1819b5c2cc55f9 8-9,22
+  s_f286ee43d08383::t_ee72d63c560d75 272
+scripts/quality-debt-record-sonar.test.mjs
+  s_f286ee43d08383::t_1819b5c2cc55f9 1-9,27,30-34,36-39,41-43,46,48-70,104-105,179-192,194-228,233-241,243-247
+  s_f286ee43d08383::t_c8984e2a8a67ad 71-103
+  s_f286ee43d08383::t_1192ccffe6b888 106-178
+  s_f286ee43d08383::t_ca38da051cff35 229-232,242
+  s_f286ee43d08383::t_c5451d7ef8885e 10-26,28-29,35,40,44-45,47,193
+scripts/quality-debt-record.mjs
+  s_f286ee43d08383::t_956d90654166c5 13-14,174-182,188-193,199-202
+scripts/quality-debt-record.test-support.mjs
+  s_f286ee43d08383::t_1819b5c2cc55f9 69-73
+specs/008-quality-debt-zero/quickstart.md
+  s_f286ee43d08383::t_aa0044a27940bd 197-208,211-213,215-216,218-230,241-251
+  s_f286ee43d08383::t_9005f177d3302f 252
+scripts/quality-debt-record-services.test.mjs
+  s_f286ee43d08383::t_fa3c1e46bd98be 48
+  s_f286ee43d08383::t_17722279ac58a3 227,237,239-240,244,246-258
+  s_f286ee43d08383::t_35939ca1393c01 192,219
+scripts/quality-debt-services.mjs
+  s_f286ee43d08383::t_4a14b80ea9c385 21-23,114,119,141-155,246,280-281,283,289
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "e646beab8cf1af06e9db9e25757eaa51353e1903",
+  "prompts": {},
+  "sessions": {
+    "s_f286ee43d08383": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09b3c-041b-7070-8564-09e7c8d29c22",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
