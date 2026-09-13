@@ -43,7 +43,10 @@ Codacy commit analysis ended 2026-09-13T00:22:28Z):
 | service | live | owned by this feature's inventory | outside it |
 |---|---|---|---|
 | SonarCloud | 248 | 0 | 248 |
-| Codacy | 240 | 28 (25 confirmed, 3 still open) | 212 |
+| Codacy | 240 | 28 (27 confirmed, 1 still open) | 212 |
+
+The 28 live inventory ids are 23 confirmed `resolved` rows, four confirmed `fixed` rows, and the one
+unconfirmed `excluded` Stylelint row.
 
 Every one of the 248 SonarCloud findings and all 38 uncovered non-ESLint Codacy findings are in files
 that changed between `e27bb029` and `33f8c382` — PR #190 (feature 009 memory core) and PR #211. **No
@@ -55,19 +58,25 @@ returned HTTP 200. Every frozen Sonar id is now closed or resolved, and `openSon
 `--check-live` also matches `(rule, file)` and reports every live finding a **confirmed** `fixed` or
 `excluded` row claims as a named `contradicted` group: **20 SonarCloud and 12 Codacy** findings today.
 A confirmed `resolved` **SonarCloud** id would count too, because its return from that open-only search
-would mean the resolution was reopened. The same test is not applied to Codacy. All 27 ignored rows
-have HTTP 204 receipts, but its current-commit search has neither an ignore filter nor an ignore field:
-presence does not distinguish an ignored issue, and absence does not prove resolution — the four ids
-omitted after earlier rewrites still had PATCHable records. Codacy `resolved` rows therefore stay out
-of `contradicted`. An unconfirmed row is a planned disposition whose id
-closes at the next analysis, so it is not a contradiction; that is why the Stylelint SCSS row is
-absent from the group. Three of the Codacy ones are inventory ids whose rows are confirmed `fixed`,
-and two of those were found only by this group: `captureUnparsed` measured 48 NLOC at the
-analysis that confirmed it and `buildObserverRequest` 25, both under the 50 bound, and both are over
-it again at `33f8c382` (51 and 54). A check that only looks at uncovered ids cannot see that shape.  The measurements of what
-this feature closed and PR #190 regrew are in research R11; the follow-up round owns all of it
-(issue #207). `--check-live` is a manual diagnostic rather than a CI gate — with 460
-findings outside the frozen inventory it would fail every build — so the round that owns them runs it.
+would mean the resolution was reopened. The same test is not applied to Codacy. All 29 `resolved`
+Codacy rows have HTTP 204 receipts, 27 of them from this batch's calls, but its current-commit search
+has neither an ignore filter nor an ignore field: presence does not distinguish an ignored issue, and
+absence does not prove resolution — the four ids omitted after earlier rewrites still had PATCHable
+records. Codacy `resolved` rows therefore stay out of `contradicted`. An unconfirmed row is a planned
+disposition whose id closes at the next analysis, so it is not a contradiction; that is why the
+Stylelint SCSS row is absent from the group. Four of the Codacy ones are inventory ids whose rows are
+confirmed `fixed`.
+The first two are NLOC regrowths found only by this group: `77635429…` (`#166`,
+`captureUnparsed`) measured 48 NLOC at the analysis that confirmed it, and `188840d7…` (`#165`,
+`buildObserverRequest`) measured 25, both under the 50 bound; they are over it again at `33f8c382`
+(51 and 54). The other two are the file-length regrowths described above: `6d0b78f8…` (`#185`,
+`src/worker/batches.ts`) and `7d9b63ea…` (`#185`, `src/injection/pack.ts`). A check that only looks
+at uncovered ids cannot see that shape; `--check-live` exists and reports it. The measurements of
+what this feature closed and PR #190 regrew are in research R11. The follow-up round (#207) runs the
+detector and owns all of those findings. Until then, no automated reader runs `--check-live`; it is a
+manual diagnostic rather than a CI gate because 460 findings outside the frozen inventory would fail
+every build. The scheduled reader that would close that gap — failing on `contradicted` and `invalid`
+while leaving `uncovered` non-fatal — is filed as #223, blocked on #207.
 
 **Success criteria and their evidence.**
 

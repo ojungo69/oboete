@@ -54,7 +54,7 @@ async function request(service, url, init, failure) {
     } catch (error) {
       throw new Error(`${service} request failed: ${error.name}`, { cause: error });
     }
-    if (!response.ok) throw new Error(failure(response.status));
+    if (!response.ok) throw Object.assign(new Error(failure(response.status)), { status: response.status });
     return response;
   }
   throw new Error(`${service} request refused: ${new URL(url).origin} is not the service`);
@@ -129,6 +129,7 @@ function recordSonarCall(row, call, status) {
 }
 
 const sonarResolutions = new Set(['FIXED', 'REMOVED', 'WONTFIX', 'FALSE-POSITIVE']);
+let sonarRequestCount = 0;
 
 function sonarRefusal(row, state) {
   if (!state) return 'the issue search does not report this id';
@@ -142,28 +143,26 @@ function sonarRefusal(row, state) {
   return null;
 }
 
-async function applySonarCalls(row, resolved, ledger, dryRun, authorization, firstCall) {
+async function applySonarCalls(row, resolved, ledger, dryRun, authorization) {
   for (const call of sonarCalls(row, resolved)) {
     const body = new URLSearchParams(call.fields);
     if (dryRun) {
       console.log(`POST https://sonarcloud.io/api/issues/${call.action} ${body}`);
       continue;
     }
-    if (!firstCall) await pause(200);
-    firstCall = false;
+    if (sonarRequestCount++) await pause(200);
     recordSonarCall(row, call, await postSonar(call, body, authorization));
     writeLedger(ledger);
   }
-  return firstCall;
 }
 
 export async function applySonar(ledger, dryRun, inventory) {
+  sonarRequestCount = 0;
   const rows = pendingResolved('sonar', ledger, inventory);
   if (rows.length === 0) return;
   const authorization = dryRun ? undefined : sonarAuthorization();
   const states = await sonarIssueStates(rows.map((row) => row.id), authorization);
   const refused = [];
-  let firstCall = true;
   for (const row of rows) {
     const state = states.get(row.id);
     const reason = sonarRefusal(row, state);
@@ -176,7 +175,7 @@ export async function applySonar(ledger, dryRun, inventory) {
     console.log(resolved
       ? `RESOLVED Sonar ${row.id}: transition already applied, posting the comment`
       : `APPLY Sonar ${row.id}: the transition then the comment`);
-    firstCall = await applySonarCalls(row, resolved, ledger, dryRun, authorization, firstCall);
+    await applySonarCalls(row, resolved, ledger, dryRun, authorization);
   }
   if (refused.length) throw new Error(`Sonar refused ${refused.length} row(s): ${refused.join(', ')}`);
 }
@@ -192,6 +191,7 @@ export async function applyCodacy(ledger, dryRun, inventory) {
   const rows = pendingResolved('codacy', ledger, inventory);
   if (rows.length === 0) return;
   const headers = dryRun ? undefined : await codacyHeaders();
+  const refused = [];
   for (const row of rows) {
     const body = JSON.stringify({ ignored: true, reason: row.reason, comment: row.where });
     if (dryRun) {
@@ -199,12 +199,21 @@ export async function applyCodacy(ledger, dryRun, inventory) {
       continue;
     }
     await pause(200);
-    const response = await request('Codacy', `${codacyIssues}/${encodeURIComponent(row.id)}`, { method: 'PATCH', headers, body },
-      (status) => `Codacy ${row.id}: PATCH returned HTTP ${status}`);
+    let response;
+    try {
+      response = await request('Codacy', `${codacyIssues}/${encodeURIComponent(row.id)}`, { method: 'PATCH', headers, body },
+        (status) => `Codacy ${row.id}: PATCH returned HTTP ${status}`);
+    } catch (error) {
+      if (error.status !== 404) throw error;
+      console.log(`REFUSE Codacy ${row.id}: the service does not hold this issue record; re-disposition this row`);
+      refused.push(row.id);
+      continue;
+    }
     await discardBody(response);
     row.confirmed = `HTTP ${response.status} ${new Date().toISOString()}`;
     writeLedger(ledger);
   }
+  if (refused.length) throw new Error(`Codacy refused ${refused.length} row(s): ${refused.join(', ')}`);
 }
 
 // Both labels must describe the same repository state, so the Sonar analysis must be of the Codacy commit.
@@ -272,15 +281,16 @@ export async function openSonarIssues(authorization) {
   }
 }
 
-/** Read every pending id, including resolved and closed issues hidden by the open search. */
 /** Every status the issues search may report; `applySonar` decides a row from it, so an unknown one is a refusal. */
 const sonarStatuses = new Set(['OPEN', 'CONFIRMED', 'REOPENED', 'RESOLVED', 'CLOSED']);
 
+/** Read every pending id, including resolved and closed issues hidden by the open search. */
 export async function sonarIssueStates(ids, authorization) {
   const states = new Map();
   const headers = authorization === undefined ? {} : { Authorization: authorization };
   for (let offset = 0; offset < ids.length; offset += 100) {
     const chunk = ids.slice(offset, offset + 100);
+    if (sonarRequestCount++) await pause(200);
     const response = await request('Sonar',
       `https://sonarcloud.io/api/issues/search?componentKeys=${SONAR_PROJECT}&branch=main&issues=${encodeURIComponent(chunk.join(','))}&ps=100`,
       { method: 'GET', headers }, (status) => `Sonar issues search returned HTTP ${status}`);

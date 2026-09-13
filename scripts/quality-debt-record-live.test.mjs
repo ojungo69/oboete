@@ -44,24 +44,45 @@ test('--apply-codacy PATCHes pending ids even when absent from the current issue
   assert.match(saved[4].confirmed, /^HTTP 204 /);
 });
 
-test('--apply-codacy leaves the ledger unchanged when the first PATCH fails', (t) => {
+test('--apply-codacy refuses a missing record and confirms the later row before reporting refusals', (t) => {
   const { cwd, ledger } = fixture(t);
   for (const row of ledger.slice(3)) {
     Object.assign(row, { state: 'resolved', reason: 'AcceptedUse' });
     delete row.confirmed;
   }
   writeJson(cwd, 'ledger.json', ledger);
-  const path = join(cwd, evidence, 'ledger.json');
-  const before = readFileSync(path, 'utf8');
-  const result = run(cwd, ['--apply-codacy'], apiStub([{ status: 200 }, { status: 503 }]));
+  const result = run(cwd, ['--apply-codacy'], apiStub([{ status: 200 }, { status: 404 }, { status: 204 }]));
   assert.equal(result.status, 1);
-  assert.equal(result.stderr, `Codacy ${codacyHarnessId}: PATCH returned HTTP 503\n`);
-  assert.equal(result.stdout, '');
-  assert.deepEqual(readCalls(cwd).filter((call) => call.url).map((call) => call.url), [
-    'https://app.codacy.com/api/v3/user', `${codacyIssues}/${codacyHarnessId}`,
-  ]);
-  assert.equal(readFileSync(path, 'utf8'), before);
+  assert.equal(result.stdout,
+    `REFUSE Codacy ${codacyHarnessId}: the service does not hold this issue record; re-disposition this row\n`);
+  assert.equal(result.stderr, `Codacy refused 1 row(s): ${codacyHarnessId}\n`);
+  assert.deepEqual(readCalls(cwd).filter((call) => call.method === 'PATCH').map((call) => call.url),
+    [`${codacyIssues}/${codacyHarnessId}`, `${codacyIssues}/${codacyViewerId}`]);
+  const saved = readLedger(cwd);
+  assert.deepEqual(saved.slice(0, 4), ledger.slice(0, 4));
+  assert.match(saved[4].confirmed, /^HTTP 204 /);
 });
+
+for (const status of [401, 403, 503]) {
+  test(`--apply-codacy aborts at HTTP ${status} before attempting the later row`, (t) => {
+    const { cwd, ledger } = fixture(t);
+    for (const row of ledger.slice(3)) {
+      Object.assign(row, { state: 'resolved', reason: 'AcceptedUse' });
+      delete row.confirmed;
+    }
+    writeJson(cwd, 'ledger.json', ledger);
+    const path = join(cwd, evidence, 'ledger.json');
+    const before = readFileSync(path, 'utf8');
+    const result = run(cwd, ['--apply-codacy'], apiStub([{ status: 200 }, { status }]));
+    assert.equal(result.status, 1);
+    assert.equal(result.stderr, `Codacy ${codacyHarnessId}: PATCH returned HTTP ${status}\n`);
+    assert.equal(result.stdout, '');
+    assert.deepEqual(readCalls(cwd).filter((call) => call.url).map((call) => call.url), [
+      'https://app.codacy.com/api/v3/user', `${codacyIssues}/${codacyHarnessId}`,
+    ]);
+    assert.equal(readFileSync(path, 'utf8'), before);
+  });
+}
 
 test('--apply-codacy preserves and PATCHes current ids at observed 30, 31, and 32 character widths', (t) => {
   const { cwd, codacy, ledger } = fixture(t);
@@ -130,6 +151,27 @@ test('--check-live accepts covered and empty public issue sets without credentia
   assert.deepEqual(evidenceText(cwd), before);
 });
 
+for (const problem of ['duplicate', 'unknown']) {
+  test(`--check-live rejects ${problem} ledger ids before deriving claims or making requests`, (t) => {
+    const { cwd, ledger } = fixture(t);
+    const row = { ...ledger[0], state: 'open', confirmed: undefined };
+    if (problem === 'unknown') row.id = 's-unknown';
+    ledger.push(row);
+    writeJson(cwd, 'ledger.json', ledger);
+    const before = evidenceText(cwd);
+    const result = run(cwd, ['--check-live'], publicApiStub([
+      { body: { issues: [sonarIssue('s-worker')], total: 1 } },
+      { body: { data: [], pagination: { total: 0 } } },
+    ]));
+    assert.equal(result.status, 1);
+    const reason = problem === 'duplicate' ? 'duplicate in ledger' : 'not in inventory';
+    assert.equal(result.stderr, `sonar:${row.id} ${reason}\n`);
+    assert.equal(result.stdout, '');
+    assert.deepEqual(readCalls(cwd), []);
+    assert.deepEqual(evidenceText(cwd), before);
+  });
+}
+
 test('--check-live reports uncovered ids from both services without file writes', (t) => {
   const { cwd } = fixture(t);
   const before = evidenceText(cwd);
@@ -150,8 +192,10 @@ test('--check-live keeps uncovered and contradicted groups around invalid issues
     { body: { issues: [
       sonarIssue('s-new'),
       sonarIssue('s-worker', { component: 'ojungo69_free-mem' }),
+      sonarIssue('s-unreadable', { component: 'ojungo69_free-mem' }),
+      sonarIssue('s-regexp', { rule: null }),
       sonarIssue('s-regrown', { component: 'ojungo69_free-mem:src/worker/observe.ts' }),
-    ], total: 3 } },
+    ], total: 5 } },
     { body: { data: [
       codacyIssue(uncoveredCodacyId, { filePath: 'src/viewer/app/main.tsx' }),
       codacyIssue('bad', { filePath: null }), codacyIssue('a1'),
@@ -160,9 +204,10 @@ test('--check-live keeps uncovered and contradicted groups around invalid issues
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '');
   assert.equal(result.stderr, [
-    'sonar uncovered 2: s-new, s-regrown', `codacy uncovered 2: ${uncoveredCodacyId}, a1`,
-    'sonar contradicted 1: s-regrown', `codacy contradicted 1: ${uncoveredCodacyId}`,
-    'sonar invalid 1: s-worker: Sonar issues search returned an invalid component',
+    'sonar uncovered 3: s-new, s-unreadable, s-regrown', `codacy uncovered 3: ${uncoveredCodacyId}, bad, a1`,
+    'sonar contradicted 3: s-worker, s-regexp, s-regrown', `codacy contradicted 1: ${uncoveredCodacyId}`,
+    'sonar invalid 3: s-worker: Sonar issues search returned an invalid component, '
+      + 's-unreadable: Sonar issues search returned an invalid component, s-regexp: Sonar issues search returned an invalid rule',
     'codacy invalid 1: bad: Codacy issues search returned an invalid filePath', '',
   ].join('\n'));
   assert.deepEqual(evidenceText(cwd), before);
@@ -372,7 +417,8 @@ for (const [service, field, invalid] of [
     ]));
     assert.equal(result.status, 1);
     const id = service === 'Sonar' ? 's-worker' : codacyViewerId;
-    assert.equal(result.stderr, `${service.toLowerCase()} invalid 1: ${id}: ${service} issues search returned an invalid ${field}\n`);
+    assert.equal(result.stderr, `${service.toLowerCase()} contradicted 1: ${id}\n`
+      + `${service.toLowerCase()} invalid 1: ${id}: ${service} issues search returned an invalid ${field}\n`);
     assert.equal(result.stdout, '');
     assert.deepEqual(evidenceText(cwd), before);
   });

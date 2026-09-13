@@ -1,6 +1,8 @@
 // Exercise Sonar application decisions against the service's live status and resolution.
 import assert from 'node:assert/strict';
+import { syncBuiltinESMExports } from 'node:module';
 import { test } from 'node:test';
+import timers from 'node:timers/promises';
 
 import {
   apiStub, evidenceText, fixture, publicApiStub, readCalls, readLedger, run, sonarIssue, writeJson,
@@ -29,9 +31,12 @@ for (const resolution of ['FIXED', 'REMOVED', 'WONTFIX', 'FALSE-POSITIVE', undef
   });
 }
 
-test('sonarIssueStates reads 201 ids in chunks and returns their real states', async (t) => {
+test('sonarIssueStates spaces its 201-id chunk reads by 200 ms and returns their real states', async (t) => {
   const ids = Array.from({ length: 201 }, (_, index) => `s-${index}`);
   const calls = [];
+  const pause = t.mock.method(timers, 'setTimeout', async (ms) => { calls.push({ sleep: ms }); });
+  syncBuiltinESMExports();
+  t.after(() => { pause.mock.restore(); syncBuiltinESMExports(); });
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     const params = new URL(url).searchParams;
     assert.equal(params.get('componentKeys'), 'ojungo69_free-mem');
@@ -45,7 +50,7 @@ test('sonarIssueStates reads 201 ids in chunks and returns their real states', a
     return new globalThis.Response(JSON.stringify({ issues, total: issues.length }));
   });
   const states = await sonarIssueStates(ids, 'Basic fixture');
-  assert.deepEqual(calls, [ids.slice(0, 100), ids.slice(100, 200), ['s-200']]);
+  assert.deepEqual(calls, [ids.slice(0, 100), { sleep: 200 }, ids.slice(100, 200), { sleep: 200 }, ['s-200']]);
   assert.equal(states.size, 201);
   assert.deepEqual(states.get('s-0'), { status: 'OPEN', resolution: undefined });
   assert.deepEqual(states.get('s-200'), { status: 'RESOLVED', resolution: 'WONTFIX' });
@@ -229,7 +234,7 @@ for (const transitioned of [false, true]) {
       ]));
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stdout, 'RESOLVED Sonar s-regexp: transition already applied, posting the comment\n');
-      const calls = readCalls(cwd);
+      const calls = readCalls(cwd).filter((call) => call.url);
       assert.deepEqual(calls.map((call) => call.method), ['GET', 'POST']);
       assert.equal(calls[1].url, 'https://sonarcloud.io/api/issues/add_comment');
       assert.deepEqual(calls[1].body, { issue: 's-regexp', text: ledger[2].where });

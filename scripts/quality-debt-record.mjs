@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
 import {
-  dispositionState, evidence, identity, indexLedger, isConfirmed, readJson, resolvedWithoutReason, securityPopulation,
+  dispositionState, evidence, identity, indexLedger, isConfirmed, readJson, resolvedWithoutReason, securityPopulation, validateInventory,
 } from './quality-debt-ledger.mjs';
 import { applyCodacy, applySonar, confirmLedger, openCodacyIssues, openSonarIssues, sonarFile } from './quality-debt-services.mjs';
 
@@ -171,14 +171,14 @@ function check(rows, ledger, planned) {
 const ruleFile = (service, rule, file) => JSON.stringify([service, rule, file]);
 
 /** The comparison reads these four fields, so it validates them the way `collectIds` validates an id. */
-function text(value, service, field) {
+function requiredString(value, service, field) {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${service} issues search returned an invalid ${field}`);
   return value;
 }
 
 function liveKey(service, issue) {
-  if (service === 'sonar') return ruleFile(service, text(issue.rule, 'Sonar', 'rule'), sonarFile(issue.component));
-  return ruleFile(service, text(issue.patternInfo?.id, 'Codacy', 'patternInfo.id'), text(issue.filePath, 'Codacy', 'filePath'));
+  if (service === 'sonar') return ruleFile(service, requiredString(issue.rule, 'Sonar', 'rule'), sonarFile(issue.component));
+  return ruleFile(service, requiredString(issue.patternInfo?.id, 'Codacy', 'patternInfo.id'), requiredString(issue.filePath, 'Codacy', 'filePath'));
 }
 
 function liveClaims(rows, claimedIds) {
@@ -202,6 +202,7 @@ function reportLiveFindings(uncovered, contradicted, invalid) {
 }
 
 async function checkLive(rows, ledger) {
+  validateInventory(ledger, ledger, rows);
   const known = new Set(rows.map(identity));
   // Claims use the frozen inventory's rule and file, never hand-edited ledger copies.
   const claimedIds = new Set(ledger.filter((row) => ['fixed', 'excluded'].includes(row.state) && isConfirmed(row)).map(identity));
@@ -222,14 +223,16 @@ async function checkLive(rows, ledger) {
   const invalid = { sonar: [], codacy: [] };
   for (const [service, issues] of [['sonar', sonar], ['codacy', codacy]]) {
     for (const [id, issue] of issues) {
+      const key = identity({ service, id });
+      if (!known.has(key)) uncovered[service].push(id);
+      let contradiction = claimedIds.has(key) || resolvedIds.has(key);
       try {
-        const key = identity({ service, id });
         const triple = liveKey(service, issue);
-        if (!known.has(key)) uncovered[service].push(id);
-        if (claimedIds.has(key) || resolvedIds.has(key) || claims.get(triple)) contradicted[service].push(id);
+        contradiction ||= claims.get(triple);
       } catch (error) {
         invalid[service].push(`${id}: ${error.message}`);
       }
+      if (contradiction) contradicted[service].push(id);
     }
   }
   reportLiveFindings(uncovered, contradicted, invalid);

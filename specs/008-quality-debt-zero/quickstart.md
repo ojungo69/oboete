@@ -193,7 +193,8 @@ Expected: `--check --planned` exits 0 once every batch has merged; `--check` exi
 node scripts/quality-debt-record.mjs --check-live
 ```
 
-This reads both services' public current-issue searches for `main` in parallel and reads the ledger.
+This validates that ledger IDs belong to the inventory and are unique before reading both services'
+public current-issue searches for `main` in parallel.
 It reports `uncovered` IDs outside the frozen inventory, `contradicted` findings matching a
 confirmed `fixed`/`excluded` ID, a confirmed `resolved` **Sonar** ID, or a `(service, rule, file)`
 triple whose inventory rows are all confirmed `fixed` or `excluded`, and `invalid` findings whose
@@ -207,13 +208,15 @@ Live comparisons validate Sonar `rule` and `component` (stripping exactly `ojung
 requiring a non-empty remainder), or Codacy `patternInfo.id` and `filePath`. Only `--check-live`
 requires those comparison fields; `--confirm` and apply modes still validate IDs but do not read
 those fields. An invalid comparison field adds `<id>: <sanitized reason>` to that service's `invalid`
-group while the other findings are still classified. Any non-empty group sets exit 1, and empty
+group while its ID still receives any `uncovered` or `contradicted` verdict that does not need those
+fields; other findings are still classified. Any non-empty group sets exit 1, and empty
 groups are not printed. No uncovered, contradicted or invalid findings means exit 0 without output;
 a failed request or invalid/incomplete page still exits 1. The mode reads no credentials and writes no files. Known open issues can still pass, so
 the service-count checks above remain required to record each service's live count and its owner alongside the frozen inventory's confirmed dispositions (T045; issue #207). *(Amended 2026-09-13; the original text was "the service-count checks above remain required for final 0 / 0".)*
 
 `--apply-sonar` reads each pending resolved ID's state on `main` before its first write, in chunks of
-at most 100 IDs and without `resolved=false`. It decides from live status and resolution, never the
+at most 100 IDs and without `resolved=false`. Requests are spaced by 200 ms across chunk reads and
+writes. It decides from live status and resolution, never the
 ledger's `transitioned` marker. The expected resolution is `WONTFIX` for `wontfix` (the default), or
 `FALSE-POSITIVE` for `falsepositive`. Both real and dry runs print one decision line per pending row:
 
@@ -249,8 +252,11 @@ POSTs after the decision lines, and makes no service or ledger writes. Refused r
 The real `--apply-codacy` mode PATCHes every pending `resolved` row with its existing reason and
 comment; it does not query the current-commit issue search. That search omitted four ids rewritten by
 earlier batches even though their records remained PATCHable, so only a successful HTTP response
-confirms a resolved row. Each success is persisted immediately, and a refused PATCH stops later
-rows. `--apply-codacy --dry-run` stays offline and prints every planned PATCH request.
+confirms a resolved row. Each success is persisted immediately. HTTP 404 prints
+`REFUSE Codacy <id>: the service does not hold this issue record; re-disposition this row` and leaves
+that row unconfirmed while processing later rows. One final error names the refused count and IDs.
+Any other request failure, including HTTP 401, 403 or 5xx, aborts immediately.
+`--apply-codacy --dry-run` stays offline and prints every planned PATCH request.
 
 ## Record CLI regression checks
 
@@ -258,7 +264,7 @@ rows. `--apply-codacy --dry-run` stays offline and prints every planned PATCH re
 npm run typecheck
 npx eslint scripts/quality-debt-record.mjs scripts/quality-debt-services.mjs scripts/quality-debt-ledger.mjs scripts/quality-debt-record.test-support.mjs scripts/quality-debt-record.test.mjs scripts/quality-debt-record-services.test.mjs scripts/quality-debt-record-live.test.mjs scripts/quality-debt-record-confirm.test.mjs scripts/quality-debt-record-sonar.test.mjs
 node --test scripts/quality-debt-record.test.mjs scripts/quality-debt-record-services.test.mjs scripts/quality-debt-record-live.test.mjs scripts/quality-debt-record-confirm.test.mjs scripts/quality-debt-record-sonar.test.mjs
-pipx run lizard -l typescript scripts/quality-debt-record-live.test.mjs scripts/quality-debt-record-sonar.test.mjs scripts/quality-debt-services.mjs scripts/quality-debt-record.mjs
+pipx run lizard -l typescript scripts/quality-debt-record-services.test.mjs scripts/quality-debt-record.test.mjs scripts/quality-debt-record-confirm.test.mjs scripts/quality-debt-record-live.test.mjs scripts/quality-debt-record-sonar.test.mjs scripts/quality-debt-services.mjs scripts/quality-debt-record.mjs
 ```
 
 Both live-test files and both implementation files must stay below 500 NLOC per file and 50 NLOC
