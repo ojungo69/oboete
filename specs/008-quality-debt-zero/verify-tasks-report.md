@@ -11,8 +11,10 @@ changes count as evidence. The deviation is recorded here rather than hidden.
 completion marks in this file and both were parsed).
 **Unchecked tasks**: T045, T046, T047 — not examined; T046 is this report.
 **Amended 2026-09-14**: T032 and T039 have since been unchecked in `tasks.md`, because each task's
-own note records conditions it does not meet; the scorecard below is the run as executed over the 56
-tasks checked when it ran, 54 of which remain checked.
+own note records an acceptance condition it does not meet; the scorecard below is the run as executed
+over the 56 tasks checked when it ran, 54 of which remain checked. Every verdict below records whether
+a task's named artefacts were found, not whether its acceptance thresholds passed — which is why
+T039's rows read VERIFIED on evidence files that exist while its own note keeps the box open.
 
 > ⚠️ **FRESH SESSION ADVISORY**: For maximum reliability, run `/speckit.verify-tasks`
 > in a **separate** agent session from the one that performed `/speckit.implement`.
