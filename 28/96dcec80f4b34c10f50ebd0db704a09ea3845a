@@ -1,0 +1,41 @@
+docs/evidence/quality-debt-2026-09.md
+  s_7168f5710f6d8c::t_48cff1e4b7d430 6,10-23
+specs/008-quality-debt-zero/plan.md
+  s_7168f5710f6d8c::t_48cff1e4b7d430 29
+specs/008-quality-debt-zero/quickstart.md
+  s_7168f5710f6d8c::t_48cff1e4b7d430 22
+specs/008-quality-debt-zero/verify-tasks-report.md
+  s_7168f5710f6d8c::t_48cff1e4b7d430 149,222
+docs/evidence/quality-debt-2026-09/batch-f-round-7-completion-audit.md
+  s_7168f5710f6d8c::t_48cff1e4b7d430 5-9,39
+specs/008-quality-debt-zero/data-model.md
+  s_7168f5710f6d8c::t_48cff1e4b7d430 5,11,24-36,50
+  s_a3b2da79705e65::t_7df3122d6824fc 22,37-39,105
+  s_a3b2da79705e65::t_7e544ae4681542 23
+specs/008-quality-debt-zero/spec.md
+  s_7168f5710f6d8c::t_48cff1e4b7d430 132-135,197-198,200-202
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "2896dcec80f4b34c10f50ebd0db704a09ea3845a",
+  "prompts": {},
+  "sessions": {
+    "s_7168f5710f6d8c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09c7b-742a-75d1-af5b-2b07dbabe613",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
