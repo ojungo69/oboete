@@ -4996,13 +4996,15 @@
   "service": "codacy",
   "id": "161d5b6e6a57ae5ac63a3683a0271135",
   "state": "fixed",
-  "where": "#185"
+  "where": "#185",
+  "confirmed": "33f8c38285b670b2360a7fe6b5f103b787c54bbc"
  },
  {
   "service": "codacy",
   "id": "6d0b78f8fc02642841c96cb14a549f20",
   "state": "fixed",
-  "where": "#185"
+  "where": "#185",
+  "confirmed": "Fixed by PR #185 (e27bb029): src/worker/batches.ts 570 to 411 NLOC, under the 500 bound. Regrown to 551 by PR #190 (590c0a2f), measured 2026-09-13 with pipx run lizard -l typescript. The live finding is owned by the follow-up round, not by batch D."
  },
  {
   "service": "codacy",
@@ -5032,25 +5034,29 @@
   "service": "codacy",
   "id": "4d7c78512df37e8e9cd84c05be7b5457",
   "state": "fixed",
-  "where": "#185"
+  "where": "#185",
+  "confirmed": "33f8c38285b670b2360a7fe6b5f103b787c54bbc"
  },
  {
   "service": "codacy",
   "id": "4bc93ee6ffd7581f439e52f96c13e4fb",
   "state": "fixed",
-  "where": "#185"
+  "where": "#185",
+  "confirmed": "33f8c38285b670b2360a7fe6b5f103b787c54bbc"
  },
  {
   "service": "codacy",
   "id": "dbc89550977f0b36857c5f7f82d33f26",
   "state": "fixed",
-  "where": "#185"
+  "where": "#185",
+  "confirmed": "33f8c38285b670b2360a7fe6b5f103b787c54bbc"
  },
  {
   "service": "codacy",
   "id": "7f441e27985b09cd86bb7ef37794fe8",
   "state": "fixed",
-  "where": "#185"
+  "where": "#185",
+  "confirmed": "33f8c38285b670b2360a7fe6b5f103b787c54bbc"
  },
  {
   "service": "codacy",
@@ -5064,13 +5070,15 @@
   "service": "codacy",
   "id": "7d9b63ea2aafe102e6476a3d93c9c9db",
   "state": "fixed",
-  "where": "#185"
+  "where": "#185",
+  "confirmed": "Fixed by PR #185 (e27bb029): src/injection/pack.ts 602 to 470 NLOC, under the 500 bound. Regrown to 558 by PR #190 (590c0a2f), measured 2026-09-13 with pipx run lizard -l typescript. The live finding is owned by the follow-up round, not by batch D."
  },
  {
   "service": "codacy",
   "id": "102ad9e090737747988c737fdb66bd3b",
   "state": "fixed",
-  "where": "#185"
+  "where": "#185",
+  "confirmed": "33f8c38285b670b2360a7fe6b5f103b787c54bbc"
  },
  {
   "service": "codacy",
@@ -5084,31 +5092,36 @@
   "service": "codacy",
   "id": "13aac59837310b6e3f9466c6ec244d79",
   "state": "fixed",
-  "where": "#185"
+  "where": "#185",
+  "confirmed": "33f8c38285b670b2360a7fe6b5f103b787c54bbc"
  },
  {
   "service": "codacy",
   "id": "e5c566331a7a4187809f6a4b25baaced",
   "state": "fixed",
-  "where": "#185"
+  "where": "#185",
+  "confirmed": "33f8c38285b670b2360a7fe6b5f103b787c54bbc"
  },
  {
   "service": "codacy",
   "id": "925f06752f2e4d955e5cbd1226a388ba",
   "state": "fixed",
-  "where": "#185"
+  "where": "#185",
+  "confirmed": "33f8c38285b670b2360a7fe6b5f103b787c54bbc"
  },
  {
   "service": "codacy",
   "id": "6c7d15e7863e4975dd4b61c93e5a93b1",
   "state": "fixed",
-  "where": "#185"
+  "where": "#185",
+  "confirmed": "33f8c38285b670b2360a7fe6b5f103b787c54bbc"
  },
  {
   "service": "codacy",
   "id": "16267458dd41ebb61fa3aec7549291cc",
   "state": "fixed",
-  "where": "#185"
+  "where": "#185",
+  "confirmed": "33f8c38285b670b2360a7fe6b5f103b787c54bbc"
  },
  {
   "service": "sonar",
