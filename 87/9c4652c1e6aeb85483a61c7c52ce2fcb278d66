@@ -1,0 +1,59 @@
+docs/evidence/quality-debt-2026-09/ledger.json
+  s_7836af6dbef3a3::t_3e5ea9e48df644 2537-2545,3206-3214,3278-3286,3350-3358,3721-3729
+docs/evidence/quality-debt-2026-09/batch-f-round-7-completion-audit.md
+  s_7836af6dbef3a3::t_c0ffd7a351292b 1-203
+docs/evidence/quality-debt-2026-09.md
+  s_7836af6dbef3a3::t_e7e6dfb748c263 6,10,29-30,61-67
+  s_7836af6dbef3a3::t_03ab3f999693de 920-924
+specs/008-quality-debt-zero/research.md
+  s_7836af6dbef3a3::t_b37a1cde86c70a 59
+specs/008-quality-debt-zero/data-model.md
+  s_7836af6dbef3a3::t_e7e6dfb748c263 16,22,110-112
+  s_a3b2da79705e65::t_440006704db0b7 102-108
+  s_7836af6dbef3a3::t_63d3c24f4e382c 5,30
+  s_7836af6dbef3a3::t_472d468dfe4899 33,61
+  s_7836af6dbef3a3::t_b37a1cde86c70a 36
+specs/008-quality-debt-zero/spec.md
+  s_7836af6dbef3a3::t_e7e6dfb748c263 12,194-195,200
+  s_7836af6dbef3a3::t_63d3c24f4e382c 41,45-46,130-131,164,169,171,196-199
+  s_7836af6dbef3a3::t_e31294e84bfe32 124
+  s_a3b2da79705e65::t_3157672cd9ca83 11
+  s_7836af6dbef3a3::t_b37a1cde86c70a 37
+scripts/quality-debt-record.mjs
+  s_7836af6dbef3a3::t_b37a1cde86c70a 215-218
+specs/008-quality-debt-zero/quickstart.md
+  s_7836af6dbef3a3::t_63d3c24f4e382c 22
+  s_7836af6dbef3a3::t_b37a1cde86c70a 207-211
+specs/008-quality-debt-zero/tasks.md
+  s_7836af6dbef3a3::t_e7e6dfb748c263 85,111
+  s_7836af6dbef3a3::t_e31294e84bfe32 155
+specs/008-quality-debt-zero/plan.md
+  s_7836af6dbef3a3::t_96871ed5ed5a42 9
+  s_7836af6dbef3a3::t_e7e6dfb748c263 75
+  s_a3b2da79705e65::t_3157672cd9ca83 96
+  s_a3b2da79705e65::t_035d7cf56ae740 97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "879c4652c1e6aeb85483a61c7c52ce2fcb278d66",
+  "prompts": {},
+  "sessions": {
+    "s_7836af6dbef3a3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09c0e-3a12-7001-a8f2-4e3852891279",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
