@@ -46,9 +46,11 @@ now `fixed` with that analysis as their confirmation, keeping the read verdict i
 `--apply-sonar` reads each pending row's real `status`/`resolution` and refuses a row the service
 closed as FIXED instead of confirming it.
 
-**Confirmations.** 744 of the 745 inventory rows are confirmed. The last one is the Stylelint SCSS
-pattern (`7935279d…`), which leaves Codacy's issue set only after the next analysis runs with the
-pattern disabled. Two `fixed` rows carry a measurement instead of an absence: `6d0b78f8…`
+**Confirmations.** All 745 inventory rows are confirmed. The last one was the Stylelint SCSS pattern
+(`7935279d…`), which could only leave Codacy's issue set once an analysis ran with the pattern
+disabled: Codacy's analysis of the merge commit `199cf59d` (ended 2026-09-13T22:42:42.046Z) reports
+42 issues and no Stylelint pattern among them, and the row names that SHA in `confirmed` (T045, PR
+#227). Two `fixed` rows carry a measurement instead of an absence: `6d0b78f8…`
 (`src/worker/batches.ts`) and `7d9b63ea…` (`src/injection/pack.ts`) were 411 and 470 NLOC at batch D's
 merge (`e27bb029`), under Codacy's 500 bound, and are 551 and 558 at `33f8c382`; PR #190 regrew them,
 so the service will keep reporting them and the row records that rather than claiming an absence.
@@ -61,14 +63,20 @@ Codacy commit analysis ended 2026-09-13T00:22:28Z):
 | SonarCloud | 248 | 0 | 248 |
 | Codacy | 240 | 28 (27 confirmed, 1 still open) | 212 |
 
+At the merge commit `199cf59d` (SonarCloud analysis `72ff86ed-89c1-40fa-80a8-41089c9f6a0e`, Codacy
+commit analysis ended 2026-09-13T22:42:42.046Z) the same two counts read **SonarCloud 248** and
+**Codacy 42**: the ESLint rows are gone with the tool, the Stylelint row is confirmed, and every
+remaining Codacy finding is a Lizard length finding (39) or a Semgrep finding (3) outside the frozen
+inventory.
+
 The 28 live inventory ids are 23 confirmed `resolved` rows, four confirmed `fixed` rows, and the one
 unconfirmed `excluded` Stylelint row.
 
 Every one of the 248 SonarCloud findings and all 38 uncovered non-ESLint Codacy findings are in files
 that changed between `e27bb029` and `33f8c382` — PR #190 (feature 009 memory core) and PR #211. **No
 live finding is in a file this feature last touched.** Of the Codacy total, 174 are ESLint 8 rows that
-the crashed tool reported (research R10); the tool is now disabled, so they are expected to go at the
-next analysis. Frozen Sonar ids remain addressable: the ten resolutions applied on 2026-09-13 each
+the crashed tool reported (research R10); the tool is now disabled, and the analysis of the merge
+commit confirms they are gone — 42 live issues, none from ESLint. Frozen Sonar ids remain addressable: the ten resolutions applied on 2026-09-13 each
 returned HTTP 200. Every frozen Sonar id is now closed or resolved, and `openSonarIssues` passes
 `resolved=false`, so none can appear in its open set. To surface later regrowth under a new id,
 `--check-live` also matches `(rule, file)` and reports every live finding a **confirmed** `fixed` or
@@ -87,8 +95,9 @@ PR #185. Its current-commit search
 has neither an ignore filter nor an ignore field: presence does not distinguish an ignored issue, and
 absence does not prove resolution — the four ids omitted after earlier rewrites still had PATCHable
 records. Codacy `resolved` rows therefore stay out of `contradicted`. An unconfirmed row is a planned
-disposition whose id closes at the next analysis, so it is not a contradiction; that is why the
-Stylelint SCSS row is absent from the group. Four of the Codacy ones are inventory ids whose rows are
+disposition whose id closes at the next analysis, so it is not a contradiction; the Stylelint SCSS
+row was absent from the group for that reason until T045, and stays absent now that the merge
+analysis observed its id gone. Four of the Codacy ones are inventory ids whose rows are
 confirmed `fixed`.
 The first two are NLOC regrowths found only by this group: `77635429…` (`#166`,
 `captureUnparsed`) measured 48 NLOC at the analysis that confirmed it, and `188840d7…` (`#165`,
@@ -104,12 +113,11 @@ while leaving `uncovered` non-fatal — is filed as #223, blocked on #207.
 
 **Success criteria and their evidence.**
 
-- **SC-003** — the plain `node scripts/quality-debt-record.mjs --check` exits 1 with exactly
-  `745 ids: 0 missing, 0 duplicate, 1 open, 1 unconfirmed, 0 resolved-without-reason, 0 unknown, 0 without-where, 0 without-verdict`.
-  The failure is the planned Stylelint row `codacy:7935279dc22d4b6af001014179ebdff1`, whose exclusion
-  only the post-merge analysis can confirm. `--check --planned` exits 0 with the same summary except
-  `0 open, 1 unconfirmed`, proving every inventory entry has a disposition and a `where` before that
-  confirmation. A deterministic sample of 20 (the sorted ledger, every 37th row)
+- **SC-003** — the plain `node scripts/quality-debt-record.mjs --check` exits 0 with exactly
+  `745 ids: 0 missing, 0 duplicate, 0 open, 0 unconfirmed, 0 resolved-without-reason, 0 unknown, 0 without-where, 0 without-verdict`
+  *(amended 2026-09-14: until T045's confirmation it exited 1 with `1 open, 1 unconfirmed`, the planned
+  Stylelint row `codacy:7935279dc22d4b6af001014179ebdff1`, and `--check --planned` exited 0 with
+  `0 open, 1 unconfirmed`; both now print the summary above)*. A deterministic sample of 20 (the sorted ledger, every 37th row)
   traces to a pull request, a service reason, or a named configuration line: `#166` ×2, `#165`, `#163`,
   `#162`, `#161` ×2, `#173` ×2 for the `fixed` rows; `.codacy.yml` `engines.opengrep.exclude_paths`
   ×6, `engines.tsqllint.exclude_paths` ×2 and `engines.lizard.exclude_paths` for the `excluded` rows;
@@ -135,15 +143,14 @@ while leaving `uncovered` non-fatal — is filed as #223, blocked on #207.
   signature).
 - **SC-008** — each batch is one rule family or module area and merged through its own gate: A
   (configuration, `c0ed2500`), E (security verdicts), B1–B3 (#161, #162, #163), C1–C4 (#165, #166, #164,
-  #173), D (#185), F (this pull request, pending its own gate — T045).
+  #173), D (#185), F (#220, merged as `199cf59d`).
 
-**SC-001 / SC-002** are met as amended (spec.md "Scope amendment") for every inventory row except
-the planned Stylelint row `codacy:7935279dc22d4b6af001014179ebdff1`, whose id leaves Codacy's issue
-set at the next analysis and whose exclusion only the post-merge analysis can confirm. Every other
+**SC-001 / SC-002** are met as amended (spec.md "Scope amendment") for every inventory row, the
+planned Stylelint row `codacy:7935279dc22d4b6af001014179ebdff1` included: Codacy's analysis of the
+merge commit `199cf59d` (ended 2026-09-13T22:42:42.046Z, 42 live issues, no Stylelint pattern among
+them) observed that id absent, and the row's `confirmed` field names that SHA. Every
 inventory finding is confirmed as [FR-002](../../specs/008-quality-debt-zero/spec.md#functional-requirements) requires,
-and the live counts above are recorded with the pull request that owns each part. As SC-003 records,
-plain `--check` exits 1 with `1 open, 1 unconfirmed`; SC-001 / SC-002 are final only at T045's
-post-merge confirmation. The original "0 open issues on `main`" wording is not met and cannot be,
+and the live counts above are recorded with the pull request that owns each part. The original "0 open issues on `main`" wording is not met and cannot be,
 because `main` received two unrelated features while the batches ran.
 
 **Configuration changes on Codacy** (T009 and T043a). Both were refused at the repository level with

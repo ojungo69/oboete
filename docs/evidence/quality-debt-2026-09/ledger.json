@@ -297,7 +297,8 @@
   "service": "codacy",
   "id": "7935279dc22d4b6af001014179ebdff1",
   "state": "excluded",
-  "where": "Codacy repository setting: pattern Stylelint_scss_function-disallowed-list disabled (PATCH …/tools/1f03328a-086e-459e-bfa3-73e56f01020f with a patterns array); app.css is plain CSS and the SCSS-only rule cannot apply, every other Stylelint rule keeps running"
+  "where": "Codacy repository setting: pattern Stylelint_scss_function-disallowed-list disabled (PATCH …/tools/1f03328a-086e-459e-bfa3-73e56f01020f with a patterns array); app.css is plain CSS and the SCSS-only rule cannot apply, every other Stylelint rule keeps running",
+  "confirmed": "199cf59d29f09c444c2a0d16c8cfe25c5ce93028"
  },
  {
   "service": "codacy",
