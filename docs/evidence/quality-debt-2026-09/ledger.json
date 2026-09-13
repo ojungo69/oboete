@@ -2246,7 +2246,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "jobId is the test's own literal (dco) and the indent width is a number; no value from outside the test enters the RegExp",
-  "verdict": "test constants — not applicable"
+  "verdict": "test constants — not applicable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:24.040Z"
  },
  {
   "service": "codacy",
@@ -2254,7 +2255,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "jobId is the test's own literal (dco) and the indent width is a number; no value from outside the test enters the RegExp",
-  "verdict": "test constants — not applicable"
+  "verdict": "test constants — not applicable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:25.365Z"
  },
  {
   "service": "codacy",
@@ -2262,7 +2264,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "the 40-hex string is the commit SHA that pins SonarSource/sonarqube-scan-action, not a key; the token comes from secrets.SONAR_TOKEN on the next lines",
-  "verdict": "action pin — not applicable"
+  "verdict": "action pin — not applicable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:28.660Z"
  },
  {
   "service": "codacy",
@@ -2270,7 +2273,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "PI_TOOLS[native] runs after Object.hasOwn(PI_TOOLS, native) on the line above, so a payload name can only select an own entry of the constant table",
-  "verdict": "tool name from the Pi payload, guarded by hasOwn — not applicable"
+  "verdict": "tool name from the Pi payload, guarded by hasOwn — not applicable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:29.594Z"
  },
  {
   "service": "codacy",
@@ -2278,7 +2282,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "the RegExp is built once from PATH_KEYS and JSON_VALUE, both module constants; no payload text enters the pattern",
-  "verdict": "module constants — not applicable"
+  "verdict": "module constants — not applicable",
+  "confirmed": "Absent from current Codacy issue search 2026-09-13T13:51:29.595Z"
  },
  {
   "service": "codacy",
@@ -2286,7 +2291,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "scanKey is called with keys.session and keys.tool, constants of the agent table; the payload is only the subject string",
-  "verdict": "module constants — not applicable"
+  "verdict": "module constants — not applicable",
+  "confirmed": "Absent from current Codacy issue search 2026-09-13T13:51:29.597Z"
  },
  {
   "service": "codacy",
@@ -2294,7 +2300,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "owner_token is a randomUUID lease token compared in JavaScript against the row read from the local SQLite file (in a directory oboete creates with mode 0700); no remote party can time the comparison",
-  "verdict": "local lease token — not applicable"
+  "verdict": "local lease token — not applicable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:31.073Z"
  },
  {
   "service": "codacy",
@@ -2302,7 +2309,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "same lease token as observe.ts:220, compared inside a write transaction on the local database",
-  "verdict": "local lease token — not applicable"
+  "verdict": "local lease token — not applicable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:31.948Z"
  },
  {
   "service": "codacy",
@@ -2310,7 +2318,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "token === null tests whether a lease was acquired; the operand is null, not a secret",
-  "verdict": "null check — not applicable"
+  "verdict": "null check — not applicable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:33.001Z"
  },
  {
   "service": "codacy",
@@ -2318,7 +2327,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "hash !== null tests whether the span was an issued pack; the operand is null, not a secret",
-  "verdict": "null check — not applicable"
+  "verdict": "null check — not applicable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:33.491Z"
  },
  {
   "service": "codacy",
@@ -2326,7 +2336,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "token !== '' tests whether the variable is set; the operand is the empty string, not a secret",
-  "verdict": "empty-string check — not applicable"
+  "verdict": "empty-string check — not applicable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:34.430Z"
  },
  {
   "service": "codacy",
@@ -2334,7 +2345,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "trusted_hash === hash compares two hashes of the operator's own config files on the same machine; there is no remote party to observe the timing",
-  "verdict": "local file hashes — not applicable"
+  "verdict": "local file hashes — not applicable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:35.706Z"
  },
  {
   "service": "codacy",
@@ -2342,7 +2354,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "the loop reads header[key] from the parsed TOML to build a path; nothing is assigned through the key, so no object can be polluted",
-  "verdict": "read-only traversal — not applicable"
+  "verdict": "read-only traversal — not applicable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:36.206Z"
  },
  {
   "service": "codacy",
@@ -2350,7 +2363,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "tableAt reads value[key] after isPlainObject and Object.hasOwn checks; nothing is assigned through the key",
-  "verdict": "read-only traversal — not applicable"
+  "verdict": "read-only traversal — not applicable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:37.258Z"
  },
  {
   "service": "codacy",
@@ -2358,7 +2372,8 @@
   "state": "resolved",
   "where": "The class body comes from a repository .oboete.toml rule that is refused above 256 characters before it is compiled and tokenized once; the RegExp is a single character class and cannot backtrack (#160 fixed the compile-before-bound and the quadratic tokenizer)",
   "verdict": "glob from the repository's .oboete.toml (a non-operator controller) reaching compileGlob through globRuleError; the class itself is one character and cannot backtrack, but the rule was compiled before its 256-character bound was reported and the tokenizer searched the rest of the rule at every `[` (6.8 s per 1 MiB on the capture path) — real (availability), fixed: length gate before compile, linear tokenizer",
-  "reason": "NotExploitable"
+  "reason": "NotExploitable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:38.170Z"
  },
  {
   "service": "codacy",
@@ -2366,7 +2381,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "only `?` placeholders are joined into the SQL; the memory ids are bound as parameters",
-  "verdict": "bound parameters — not applicable"
+  "verdict": "bound parameters — not applicable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:39.055Z"
  },
  {
   "service": "codacy",
@@ -2374,7 +2390,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "only `?` placeholders are joined into the SQL; the memory ids are bound as parameters",
-  "verdict": "bound parameters — not applicable"
+  "verdict": "bound parameters — not applicable",
+  "confirmed": "Absent from current Codacy issue search 2026-09-13T13:51:39.057Z"
  },
  {
   "service": "codacy",
@@ -2382,7 +2399,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "browser code: every caller passes a literal /api path with encodeURIComponent on the id, and the request goes to the page's own origin",
-  "verdict": "viewer frontend, literal same-origin paths — not applicable"
+  "verdict": "viewer frontend, literal same-origin paths — not applicable",
+  "confirmed": "HTTP 204 2026-09-13T13:51:40.918Z"
  },
  {
   "service": "sonar",
@@ -2515,7 +2533,8 @@
   "id": "AaB3XksHIqdfylE4c2su",
   "state": "resolved",
   "where": "The discarded JSON.parse(JSON.stringify(event)) is a serialisability check for the exact call that writes the JSONL line; structuredClone accepts values JSON.stringify rejects (BigInt) and drops nothing, so it would not catch the same inputs.",
-  "transition": "wontfix"
+  "transition": "wontfix",
+  "confirmed": "Absent from current Sonar issue search 2026-09-13T13:50:33.144Z"
  },
  {
   "service": "sonar",
@@ -2879,7 +2898,8 @@
   "id": "AaB3XkqRIqdfylE4c2rp",
   "state": "resolved",
   "where": "A top-level await changes the exit code when main() never settles on a drained event loop (0 with the promise chain, 13 with the await); the probe runner keeps the chain so its exit code stays what dogfood.sh expects",
-  "transition": "wontfix"
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 2026-09-13T13:50:36.368Z"
  },
  {
   "service": "sonar",
@@ -2893,7 +2913,8 @@
   "id": "AaB3Xkm9IqdfylE4c2qD",
   "state": "resolved",
   "where": "Every typeof result has returned from an earlier branch of walk(), so this String(v) is unreachable; v can never be an object here.",
-  "transition": "falsepositive"
+  "transition": "falsepositive",
+  "confirmed": "HTTP 200 2026-09-13T13:50:40.605Z"
  },
  {
   "service": "sonar",
@@ -3173,7 +3194,8 @@
   "id": "AaB3XknlIqdfylE4c2qJ",
   "state": "resolved",
   "where": "childEnv returns env from two exits, but the early exit skips the loop that deletes credential-named keys, so the two returned objects differ; the function does not always return the same value.",
-  "transition": "falsepositive"
+  "transition": "falsepositive",
+  "confirmed": "Absent from current Sonar issue search 2026-09-13T13:50:40.607Z"
  },
  {
   "service": "sonar",
@@ -3236,7 +3258,8 @@
   "id": "AaB3XknlIqdfylE4c2qW",
   "state": "resolved",
   "where": "waitUntil returns last from two exits, but last holds the first truthy result or the final falsy value at the deadline; the function does not always return the same value.",
-  "transition": "falsepositive"
+  "transition": "falsepositive",
+  "confirmed": "Absent from current Sonar issue search 2026-09-13T13:50:40.608Z"
  },
  {
   "service": "sonar",
@@ -3299,7 +3322,8 @@
   "id": "AaB3Xkl3IqdfylE4c2ps",
   "state": "resolved",
   "where": "runHook and runCapture consume this numeric return; returning undefined or a failure code would violate their specified always-zero CLI exit contract.",
-  "transition": "wontfix"
+  "transition": "wontfix",
+  "confirmed": "Absent from current Sonar issue search 2026-09-13T13:50:40.610Z"
  },
  {
   "service": "sonar",
@@ -3390,14 +3414,16 @@
   "id": "AaB3XkbGIqdfylE4c2nX",
   "state": "resolved",
   "where": "row.probe is a field of the setup result that oboete itself wrote to runtime_state as JSON (doctor/agents.ts lastSetupResult); the doctor prints the stored value as it is, with 'none' for an absent one, and String() is that rendering — a non-string there would be oboete's own bug, shown rather than hidden",
-  "transition": "wontfix"
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 2026-09-13T13:50:42.444Z"
  },
  {
   "service": "sonar",
   "id": "AaB3XkbGIqdfylE4c2nY",
   "state": "resolved",
   "where": "row.trust is a field of the setup result that oboete itself wrote to runtime_state as JSON (doctor/agents.ts lastSetupResult); the doctor prints the stored value as it is, with 'none' for an absent one, and String() is that rendering — a non-string there would be oboete's own bug, shown rather than hidden",
-  "transition": "wontfix"
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 2026-09-13T13:50:45.699Z"
  },
  {
   "service": "sonar",
@@ -3523,14 +3549,16 @@
   "id": "AaB3XklOIqdfylE4c2pj",
   "state": "resolved",
   "where": "input.query is the argument of the Pi native tool, declared `type: 'string'` and required in the tool schema Pi enforces before the call; String() turns that declared string into one argv entry for the child CLI, which rejects an empty one",
-  "transition": "wontfix"
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 2026-09-13T13:50:48.725Z"
  },
  {
   "service": "sonar",
   "id": "AaB3XklOIqdfylE4c2pk",
   "state": "resolved",
   "where": "input.id is the argument of the Pi native tool, declared `type: 'string'` and required in the tool schema Pi enforces before the call; String() turns that declared string into one argv entry for the child CLI, which rejects an empty one",
-  "transition": "wontfix"
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 2026-09-13T13:50:54.407Z"
  },
  {
   "service": "sonar",
@@ -3600,7 +3628,8 @@
   "id": "AaB3XkdaIqdfylE4c2n5",
   "state": "resolved",
   "where": "input is the RequestInfo | URL of a fetch fault injector; String() is the intended URL text of a string or URL, and a Request is never passed here",
-  "transition": "wontfix"
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 2026-09-13T13:50:58.403Z"
  },
  {
   "service": "sonar",
@@ -3656,7 +3685,8 @@
   "id": "AaB3Xkc9IqdfylE4c2nn",
   "state": "resolved",
   "where": "String(row.session_id ?? '') is the intended coercion of whatever a Grok fixture payload carries as session_id (a number is a valid key for GROK_SESSION_ID and the resume lookup); a string-only guard would change that key",
-  "transition": "wontfix"
+  "transition": "wontfix",
+  "confirmed": "Absent from current Sonar issue search 2026-09-13T13:50:58.405Z"
  },
  {
   "service": "sonar",
@@ -3880,14 +3910,16 @@
   "id": "AaB3XkhcIqdfylE4c2of",
   "state": "resolved",
   "where": "The memory_sources rows reach the page without their id (the same rows are the CLI and MCP output, whose shape is fixed), and the list is shown in table order and never reordered, so the position is the only identity the page has",
-  "transition": "wontfix"
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 2026-09-13T13:51:01.235Z"
  },
  {
   "service": "sonar",
   "id": "AaB3XkhcIqdfylE4c2og",
   "state": "resolved",
   "where": "No field of a ledger item is unique within one injection: a pack merged before the tool call carries the same memory as planned and then omitted (reparentItems), and the rows have no id on the wire; the list is shown in ledger order and never reordered, so the position is the only identity the page has",
-  "transition": "wontfix"
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 2026-09-13T13:51:03.191Z"
  },
  {
   "service": "sonar",
@@ -3915,7 +3947,8 @@
   "id": "AaB3Xkh3IqdfylE4c2ol",
   "state": "resolved",
   "where": "Hono derives the route parameter names and their types from the string literal; a String.raw template widens the route to string and c.req.param('name') becomes string | undefined, so the literal with the escaped backslash stays",
-  "transition": "wontfix"
+  "transition": "wontfix",
+  "confirmed": "HTTP 200 2026-09-13T13:51:06.085Z"
  },
  {
   "service": "sonar",
@@ -4454,7 +4487,8 @@
   "id": "77fc49747550698c069aab368599e606",
   "state": "resolved",
   "where": "Lizard's TypeScript reader loses this file's structure: it reports unescapeJson, a three-line function, as spanning lines 84 to 157 and reports no other function in a 356-line file that defines 24, so the 73 is a merge of every following declaration and not a function length. Same measurement on main; nothing in the file is over the limit.",
-  "reason": "FalsePositive"
+  "reason": "FalsePositive",
+  "confirmed": "HTTP 204 2026-09-13T13:51:42.206Z"
  },
  {
   "service": "codacy",
@@ -4511,7 +4545,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "PATH_SCAN is built only from PATH_KEYS and JSON_VALUE, both module constants, so no payload value reaches the pattern (same finding as 3fe04e204c3d90d84b07fc9ae40ce4b9, re-issued under a new id when #162 rewrote the argument into String.raw)",
-  "verdict": "no payload-controlled pattern reaches the constructor: PATH_SCAN is assembled once at module load from PATH_KEYS and JSON_VALUE, so there is nothing for a validator to stand between; the payload is the string receiver of prefix.matchAll(PATH_SCAN), and the effect is bounded because the pattern's repetitions cannot backtrack ambiguously: the two \\s* around the colon each sit between literal characters, and the one {1,4096} quantifier runs over an alternation whose branches cannot both match a character (one excludes the backslash the other requires), over a receiver readStdinBounded already caps at 262,144 bytes"
+  "verdict": "no payload-controlled pattern reaches the constructor: PATH_SCAN is assembled once at module load from PATH_KEYS and JSON_VALUE, so there is nothing for a validator to stand between; the payload is the string receiver of prefix.matchAll(PATH_SCAN), and the effect is bounded because the pattern's repetitions cannot backtrack ambiguously: the two \\s* around the colon each sit between literal characters, and the one {1,4096} quantifier runs over an alternation whose branches cannot both match a character (one excludes the backslash the other requires), over a receiver readStdinBounded already caps at 262,144 bytes",
+  "confirmed": "HTTP 204 2026-09-13T13:51:43.529Z"
  },
  {
   "service": "codacy",
@@ -4519,7 +4554,8 @@
   "state": "resolved",
   "reason": "FalsePositive",
   "where": "scanKey is called only with AGENT_KEYS[agent].session and .tool, eight string literals in a module constant, and the payload is the subject of the match rather than part of the pattern (same finding as f5834f762e53f0596f3655477508677f, re-issued under a new id when #162 rewrote the argument into String.raw)",
-  "verdict": "no payload-controlled pattern reaches the constructor: agent comes from resolveAgent, which returns 'codex', 'pi', 'grok', 'claude' or 'unknown' from fixed comparisons on the handler's selector and two environment variables, and captureEvent returns at the 'unknown' guard before the scan, so AGENT_KEYS[agent].session and .tool is a lookup in a constant table of eight string literals; the payload is prefix, the string exec runs against, and the effect is bounded because the pattern's repetitions cannot backtrack ambiguously: the two \\s* around the colon each sit between literal characters, and the one {1,4096} quantifier runs over an alternation whose branches cannot both match a character (one excludes the backslash the other requires), over a receiver readStdinBounded already caps at 262,144 bytes"
+  "verdict": "no payload-controlled pattern reaches the constructor: agent comes from resolveAgent, which returns 'codex', 'pi', 'grok', 'claude' or 'unknown' from fixed comparisons on the handler's selector and two environment variables, and captureEvent returns at the 'unknown' guard before the scan, so AGENT_KEYS[agent].session and .tool is a lookup in a constant table of eight string literals; the payload is prefix, the string exec runs against, and the effect is bounded because the pattern's repetitions cannot backtrack ambiguously: the two \\s* around the colon each sit between literal characters, and the one {1,4096} quantifier runs over an alternation whose branches cannot both match a character (one excludes the backslash the other requires), over a receiver readStdinBounded already caps at 262,144 bytes",
+  "confirmed": "HTTP 204 2026-09-13T13:51:44.614Z"
  },
  {
   "service": "sonar",
@@ -4904,7 +4940,8 @@
   "id": "6d3e0f690f1fa1921d15ecb764a20cb0",
   "state": "resolved",
   "reason": "FalsePositive",
-  "where": "shellQuote is one return statement and Lizard measures it at 3 NLOC in the same tree; the 492 came from the reader's span, which ran past the function until batch B1 rewrote the /'/g literal below it"
+  "where": "shellQuote is one return statement and Lizard measures it at 3 NLOC in the same tree; the 492 came from the reader's span, which ran past the function until batch B1 rewrote the /'/g literal below it",
+  "confirmed": "Absent from current Codacy issue search 2026-09-13T13:51:44.616Z"
  },
  {
   "service": "codacy",
@@ -4972,21 +5009,24 @@
   "id": "f347b941757ef85eff4d9e526869252e",
   "state": "resolved",
   "reason": "AcceptedUse",
-  "where": "single cohesive module after batch, citation and import-maintenance extraction: one bounded leased run owns queue passes, heartbeat, retry, summary completion and release (568 NLOC; 13.6% over 500)"
+  "where": "single cohesive module after batch, citation and import-maintenance extraction: one bounded leased run owns queue passes, heartbeat, retry, summary completion and release (568 NLOC; 13.6% over 500)",
+  "confirmed": "HTTP 204 2026-09-13T13:51:45.124Z"
  },
  {
   "service": "codacy",
   "id": "d7031b338e6f7512b5fd5ed4a6257f17",
   "state": "resolved",
   "reason": "AcceptedUse",
-  "where": "single cohesive module after completed-run evaluation and report extraction: one stateful execution driver shares ReplayRun across fixture parsing, hook/worker startup, lease/pending windows, sample accumulation and cleanup (1143 NLOC; 128.6% over 500)"
+  "where": "single cohesive module after completed-run evaluation and report extraction: one stateful execution driver shares ReplayRun across fixture parsing, hook/worker startup, lease/pending windows, sample accumulation and cleanup (1143 NLOC; 128.6% over 500)",
+  "confirmed": "HTTP 204 2026-09-13T13:51:46.083Z"
  },
  {
   "service": "codacy",
   "id": "e4b6c81044d927678dcb047c885e9def",
   "state": "resolved",
   "reason": "AcceptedUse",
-  "where": "single cohesive module after wire assertions and reporting moved out: client registration, execution and cleanup form one transaction whose restoration is coupled to the commands it starts (546 NLOC; 9.2% over 500)"
+  "where": "single cohesive module after wire assertions and reporting moved out: client registration, execution and cleanup form one transaction whose restoration is coupled to the commands it starts (546 NLOC; 9.2% over 500)",
+  "confirmed": "HTTP 204 2026-09-13T13:51:47.263Z"
  },
  {
   "service": "codacy",
@@ -5017,7 +5057,8 @@
   "id": "ed0feeaa35efccb803dbcc520496b603",
   "state": "resolved",
   "reason": "AcceptedUse",
-  "where": "single cohesive module after process/CLI and compaction-state extraction: one capture transaction shares the adapted/redacted draft, absolute deadline, turn/epoch decision and store-or-spool outcome (999 NLOC; 99.8% over 500)"
+  "where": "single cohesive module after process/CLI and compaction-state extraction: one capture transaction shares the adapted/redacted draft, absolute deadline, turn/epoch decision and store-or-spool outcome (999 NLOC; 99.8% over 500)",
+  "confirmed": "HTTP 204 2026-09-13T13:51:48.265Z"
  },
  {
   "service": "codacy",
@@ -5036,7 +5077,8 @@
   "id": "fae407241cd282592ae2df6f14985e91",
   "state": "resolved",
   "reason": "AcceptedUse",
-  "where": "single cohesive module after coverage validation and fixed corpus inputs moved out: one ordered emitter shares seeded clock/random state, session sequence and payload builders (1344 NLOC; 168.8% over 500)"
+  "where": "single cohesive module after coverage validation and fixed corpus inputs moved out: one ordered emitter shares seeded clock/random state, session sequence and payload builders (1344 NLOC; 168.8% over 500)",
+  "confirmed": "HTTP 204 2026-09-13T13:51:49.229Z"
  },
  {
   "service": "codacy",
