@@ -227,7 +227,11 @@ async function checkLive(rows, ledger) {
       if (!known.has(key)) uncovered[service].push(id);
       let contradiction = claimedIds.has(key) || resolvedIds.has(key);
       try {
-        contradiction ||= claims.get(liveKey(service, issue));
+        // Bound to a local on purpose: `||=` would skip the call once `contradiction` is already
+        // true, and then an unreadable comparison field on an id contradicted by its own id would
+        // never reach `invalid`. The validation has to run for every issue, not just undecided ones.
+        const triple = liveKey(service, issue);
+        contradiction ||= claims.get(triple);
       } catch (error) {
         invalid[service].push(`${id}: ${error.message}`);
       }
