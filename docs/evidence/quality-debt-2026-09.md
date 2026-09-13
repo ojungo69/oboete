@@ -104,12 +104,11 @@ while leaving `uncovered` non-fatal — is filed as #223, blocked on #207.
 
 **Success criteria and their evidence.**
 
-- **SC-003** — the plain `node scripts/quality-debt-record.mjs --check` exits 1 with exactly
-  `745 ids: 0 missing, 0 duplicate, 1 open, 1 unconfirmed, 0 resolved-without-reason, 0 unknown, 0 without-where, 0 without-verdict`.
-  The failure is the planned Stylelint row `codacy:7935279dc22d4b6af001014179ebdff1`, whose exclusion
-  only the post-merge analysis can confirm. `--check --planned` exits 0 with the same summary except
-  `0 open, 1 unconfirmed`, proving every inventory entry has a disposition and a `where` before that
-  confirmation. A deterministic sample of 20 (the sorted ledger, every 37th row)
+- **SC-003** — the plain `node scripts/quality-debt-record.mjs --check` exits 0 with exactly
+  `745 ids: 0 missing, 0 duplicate, 0 open, 0 unconfirmed, 0 resolved-without-reason, 0 unknown, 0 without-where, 0 without-verdict`
+  *(amended 2026-09-14: until T045's confirmation it exited 1 with `1 open, 1 unconfirmed`, the planned
+  Stylelint row `codacy:7935279dc22d4b6af001014179ebdff1`, and `--check --planned` exited 0 with
+  `0 open, 1 unconfirmed`; both now print the summary above)*. A deterministic sample of 20 (the sorted ledger, every 37th row)
   traces to a pull request, a service reason, or a named configuration line: `#166` ×2, `#165`, `#163`,
   `#162`, `#161` ×2, `#173` ×2 for the `fixed` rows; `.codacy.yml` `engines.opengrep.exclude_paths`
   ×6, `engines.tsqllint.exclude_paths` ×2 and `engines.lizard.exclude_paths` for the `excluded` rows;
@@ -135,15 +134,14 @@ while leaving `uncovered` non-fatal — is filed as #223, blocked on #207.
   signature).
 - **SC-008** — each batch is one rule family or module area and merged through its own gate: A
   (configuration, `c0ed2500`), E (security verdicts), B1–B3 (#161, #162, #163), C1–C4 (#165, #166, #164,
-  #173), D (#185), F (this pull request, pending its own gate — T045).
+  #173), D (#185), F (#220, merged as `199cf59d`).
 
-**SC-001 / SC-002** are met as amended (spec.md "Scope amendment") for every inventory row except
-the planned Stylelint row `codacy:7935279dc22d4b6af001014179ebdff1`, whose id leaves Codacy's issue
-set at the next analysis and whose exclusion only the post-merge analysis can confirm. Every other
+**SC-001 / SC-002** are met as amended (spec.md "Scope amendment") for every inventory row, the
+planned Stylelint row `codacy:7935279dc22d4b6af001014179ebdff1` included: Codacy's analysis of the
+merge commit `199cf59d` (ended 2026-09-13T22:42:42.046Z, 42 live issues, no Stylelint pattern among
+them) observed that id absent, and the row's `confirmed` field names that SHA. Every
 inventory finding is confirmed as [FR-002](../../specs/008-quality-debt-zero/spec.md#functional-requirements) requires,
-and the live counts above are recorded with the pull request that owns each part. As SC-003 records,
-plain `--check` exits 1 with `1 open, 1 unconfirmed`; SC-001 / SC-002 are final only at T045's
-post-merge confirmation. The original "0 open issues on `main`" wording is not met and cannot be,
+and the live counts above are recorded with the pull request that owns each part. The original "0 open issues on `main`" wording is not met and cannot be,
 because `main` received two unrelated features while the batches ran.
 
 **Configuration changes on Codacy** (T009 and T043a). Both were refused at the repository level with
