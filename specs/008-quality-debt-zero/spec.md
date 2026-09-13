@@ -129,12 +129,10 @@ The maintainer wants the cleanup delivered as a series of pull requests, each sm
 
 - **FR-001**: Every finding in the frozen 745-id inventory (332 on SonarCloud, 413 on Codacy) MUST end in exactly one of three states: fixed in code, resolved on the service with a one-line reason, or excluded by a configuration change that names a file class and rule set.
 - **FR-002**: Every finding of the frozen 745-id inventory MUST be closed on `main` or carry a
-  disposition confirmed against a named analysis, after the next analysis of the final merge; the
-  record MUST state each service's remaining live count and the pull request that owns each part.
-  Here, "confirmed" uses the [data model's `confirmed` field](./data-model.md#disposition): an absence
-  observed at a named analysis, a service action receipt (`PATCH` for Codacy; resolution/comment for
-  Sonar), or, for regrowth handed to the follow-up round (#207) whose absence was never observed,
-  the R11 before/after measurement tied to the earlier closing SHA and follow-up owner.
+  disposition confirmed as the [data model defines `confirmed`](./data-model.md#disposition) for that
+  row's state, after the next analysis of the final merge; the record MUST state each service's
+  remaining live count, the pull request that owns each part, and the attribution of every live
+  finding outside the inventory to the follow-up round (#207).
   *(Amended 2026-09-13 with SC-001 and SC-002; the original text was "SonarCloud MUST report 0 open
   issues on `main`, and Codacy MUST report 0 current issues on `main`, at the end of the feature and
   after the next analysis of the final merge." See "Scope amendment" under Assumptions.)*
@@ -196,16 +194,17 @@ The maintainer wants the cleanup delivered as a series of pull requests, each sm
   174 are ESLint 8 output from a tool whose step fails on every commit (R10) and 38 are not. Keeping "0 on both services" as this feature's exit condition would
   fold an unbounded second campaign into it and would make the exit depend on code the feature never
   touched. The feature therefore closes against the inventory it froze: **745 IDs (332 SonarCloud, 413 Codacy)**,
-  the 707 baseline IDs plus the 38 additions recorded in T030a (14) and T043e (24). The baseline counts
+  the 707 baseline IDs plus 38 additions, each appended by the commit named in
+  [data-model.md](./data-model.md#inventory-provenance). The baseline counts
   quoted in the stories and amendment notes remain historical; completion covers all 745 retained IDs.
+  *(Clarified 2026-09-14; the original completion references used "the 2026-09-07 inventory",
+  "310" SonarCloud and "397" Codacy findings; the stories, FR-001/FR-002 and SC-001/SC-002/SC-003
+  now explicitly cover the final frozen inventory.)*
   Every live finding outside it
   is measured, attributed, and handed to the follow-up round, with the measurements and the ownership
   table in `docs/evidence/quality-debt-2026-09.md`. Six file-length and four function-level findings
   that the batches had closed were regrown by #190 after batch D's merge; their measurements at both
   revisions are recorded rather than reopened as this feature's work.
-  *(Clarified 2026-09-14; the original completion references used "the 2026-09-07 inventory",
-  "310" SonarCloud and "397" Codacy findings; the stories, FR-001/FR-002 and SC-001/SC-002/SC-003
-  now explicitly cover the final frozen inventory.)*
 - The E2E harness under `scripts/e2e` is an operator-run tool that is not part of the published package. Readability rules (complexity, function length, mechanical rewrites) apply to it as to `src/`. Only rules whose premise is "untrusted input reaches this call" (for example non-literal file path on an operator-owned harness) may be scoped away from it by configuration, and the same rules keep running on `src/`.
 - Mechanical rewrites and readability-preserving refactors outside the security-owned modules may be delegated to an external coding tool and are reviewed before merge; security-owned modules (injection, MCP server, viewer server, transfer, database queries) and any real security finding are handled by the maintainer's own session.
 - The daily dogfood cron on the isolated account continues against `main` unchanged and is the behavioural regression signal for hook-path refactors, alongside the existing unit and E2E suites.

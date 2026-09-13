@@ -19,7 +19,7 @@
   them. The SonarCloud token needs read scope + issue administration (verified 2026-09-07 with
   `additionalFields=transitions`).
 - Codacy: anonymous read works for the public repository; per-issue ignores need an account API token (`CODACY_API_TOKEN`) for `npx @codacy/codacy-cloud-cli` (checkpoint C1 in the plan).
-- Inventories: the frozen 745 IDs in `sonar-main-issues.json` (332) and `codacy-main-issues.json` (413) next to the disposition record: the 2026-09-07 exports (310/397) plus the 38 additions recorded in T030a (14) and T043e (24). *(Clarified 2026-09-14; the original prerequisite described only the files "exported on 2026-09-07".)*
+- Inventories: the frozen 745 IDs in `sonar-main-issues.json` (332) and `codacy-main-issues.json` (413) next to the disposition record: the 2026-09-07 exports (310/397) plus 38 additions, each appended by the commit named in [data-model.md](./data-model.md#inventory-provenance). *(Clarified 2026-09-14; the original prerequisite described only the files "exported on 2026-09-07".)*
 
 ## Per-batch verification (every pull request)
 

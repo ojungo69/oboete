@@ -2,13 +2,13 @@
 
 **Date**: 2026-09-07 | **Plan**: [plan.md](./plan.md)
 
-The feature has no runtime data. Its only artefact is the disposition record, which maps every finding in the frozen 745-id inventory to an end state — the 2026-09-07 export and the 38 additions recorded in T030a (14) and T043e (24).
+The feature has no runtime data. Its only artefact is the disposition record, which maps every finding in the frozen 745-id inventory to an end state — the 2026-09-07 export and 38 additions (see [Inventory provenance](#inventory-provenance)).
 
 ## Entities
 
 ### Finding
 
-One row reported by a service on `main` — as of 5e03d67f for the rows exported 2026-09-07, and of the later commit an added row was read at (T030a).
+One row reported by a service on `main` — as of 5e03d67f for the rows exported 2026-09-07, and of the commit each later addition was read at (see [Inventory provenance](#inventory-provenance)).
 
 | Field | Source | Notes |
 |---|---|---|
@@ -19,7 +19,24 @@ One row reported by a service on `main` — as of 5e03d67f for the rows exported
 | `file`, `line` | service | Repository-relative path; line as of the commit the row was exported from — `5e03d67f` for the 2026-09-07 rows, `9e52c3c2` for the 13 added on 2026-09-08, `67242108` for the one added from the 2026-09-09 search, and `ebe687dc` for the 24 PR #185 / matching push-branch IDs |
 | `population` | derived | `inapplicable` / `mechanical` / `complexity` / `security` (research R1) |
 
-Identity: `(service, id)`. The two inventories (`sonar-main-issues.json`, `codacy-main-issues.json`) hold the frozen **745 IDs (332 Sonar, 413 Codacy)** that must be dispositioned. They began with the 707-row export of `5e03d67f` on 2026-09-07; T030a added 14 IDs and T043e added 24, for 38 additions before batch F froze the scope. A row is never removed: a finding that stops being reported keeps its row and its disposition. Acceptance follows [FR-002](./spec.md#functional-requirements). *(Amended 2026-09-14; the original text described "310 + 410 rows" that "grow only when a service reports a finding no row covers" and said "the acceptance is the service's own count, not the size of this file".)*
+Identity: `(service, id)`. The two inventories (`sonar-main-issues.json`, `codacy-main-issues.json`) hold the frozen **745 IDs (332 Sonar, 413 Codacy)** that must be dispositioned. They began with the 707-row export of `5e03d67f` on 2026-09-07; 38 rows were appended before batch F froze the scope; [Inventory provenance](#inventory-provenance) names the commit for each. A row is never removed: a finding that stops being reported keeps its row and its disposition. Acceptance follows [FR-002](./spec.md#functional-requirements). *(Amended 2026-09-14; the original text described "310 + 410 rows" that "grow only when a service reports a finding no row covers" and said "the acceptance is the service's own count, not the size of this file".)*
+
+#### Inventory provenance
+
+The 707 rows exported on 2026-09-07 and the 38 rows appended afterwards, each with the commit that
+appended it. The counts are the diff of that commit against its parent.
+
+| Commit | Date | Sonar | Codacy | Appended |
+|---|---|---|---|---|
+| `c0ed2500` | 2026-09-07 | 310 | 397 | The frozen export of `5e03d67f`: the 707 baseline. |
+| `d8760a55` | 2026-09-08 | — | +13 | Thirteen Codacy findings the live issue search at `9e52c3c2` reported and no row covered, from the reader-boundary and file-growth causes the T030a note records. |
+| `7c1622b6` | 2026-09-09 | — | +1 | `16267458dd41ebb61fa3aec7549291cc`: C4's own extractions grew `scripts/e2e/probes/claude.mjs` from 478 to 539 NLOC. Found in the review of the C4 ledger rows and allocated to batch D, which became 18 ids. No task owns this row. |
+| `c8fb5d7c` | 2026-09-09 | +11 | +2 | PR #185's analysis of `ebe687dc`: eleven Sonar findings on moved code and two native Codacy lifecycle file-length findings. |
+| `c9a9e585` | 2026-09-09 | +11 | — | Sonar's separately gated push-branch analysis reported the same eleven source findings under distinct ids, matched by rule, file, line, source hash and message before recording. |
+
+332 Sonar (310 plus 22 additions) + 413 Codacy (397 plus 16 additions) = the frozen 745, which is
+the aggregate the spec, plan, quickstart and record all quote. This table is the only statement of
+the per-commit split; no other document attributes an addition to a commit or a task.
 
 ### Disposition
 
@@ -30,7 +47,7 @@ The end state of one Finding. Exactly one per Finding (FR-001).
 | `state` | `fixed` / `resolved` / `excluded` | `fixed`: the code at that line changed in a merged PR and the service no longer reports the id at the named confirming analysis. `resolved`: the id is closed on the service by a transition (Sonar `wontfix` / `falsepositive`) or an ignore (Codacy) that carries the reason. `excluded`: a configuration change stops the rule for the file class; the id closes at the next analysis, which is recorded as its confirmation. |
 | `where` | PR number / comment text / config line | `fixed` → `#NNN`; `resolved` → the one-sentence reason as posted on the service; `excluded` → the file and line of the configuration change (for example `.codacy.yml engines.lizard.exclude_paths`) |
 | `verdict` | free text, security population only | `controller — validation — sink — effect — real / not applicable` (research R6). Required for every `fixed` or `resolved` Finding whose rule is security-flavoured (Codacy `Semgrep_*` and `shellcheck_SC2024`, Sonar S8786/S4036/S8707), whatever the file; an `excluded` Finding is covered by the file-class review in research R4 instead. |
-| `confirmed` | analysis id / commit SHA / HTTP response, or absent | The service's agreement with `state`: for `fixed` and `excluded`, the SonarCloud analysis id or the Codacy commit SHA whose analysis no longer lists the id; for `resolved`, the HTTP status and timestamp of the Sonar comment after resolution or the Codacy ignore `PATCH`. For later regrowth covered by the scope amendment, a `fixed` row may instead retain a before/after measurement tied to the earlier closing SHA and the follow-up owner (research R11; issue #207); it must not claim a service absence that was never observed. Codacy's issue search reports only issues of the current analyzed commit: an id rewritten by an earlier batch can be absent while its record still exists and accepts PATCH, so a Codacy `resolved` row always needs the PATCH receipt. Sonar completion and `--confirm` remove `transitioned`. Absent until the applicable analysis or service receipt is recorded; each batch records available confirmations, and batch F records the remaining/final confirmations. `--check` treats an unconfirmed row as `open`. |
+| `confirmed` | analysis id / commit SHA / HTTP response, or absent | The service's agreement with `state`: for `fixed` and `excluded`, the SonarCloud analysis id or the Codacy commit SHA whose analysis no longer lists the id; for `resolved`, the HTTP status and timestamp of the Sonar comment after resolution or the Codacy ignore `PATCH`. For later regrowth covered by the scope amendment, a `fixed` row may instead retain a before/after measurement tied to the earlier closing SHA and the follow-up owner (research R11; issue #207); it must not claim a service absence that was never observed. Codacy's issue search reports only issues of the current analyzed commit: an id rewritten by an earlier batch can be absent while its record still exists and accepts PATCH, so a Codacy `resolved` row always needs the PATCH receipt. Sonar completion and `--confirm` remove `transitioned`. Absent until the applicable analysis or service receipt is recorded; each batch records available confirmations, and batch F records the remaining/final confirmations. `--check` treats an unconfirmed row as `open`. The field itself accepts any non-blank string, so the CLI cannot tell a service receipt from a hand-recorded measurement; a distinct shape for measured closures is filed in issue #224. |
 | `reason` | Codacy only, one of `AcceptedUse`, `FalsePositive`, `NotExploitable`, `TestCode`, `ExternalCode` | The enumerated reason the Codacy API stores alongside the free-text `where` comment. |
 | `transitioned` | Sonar `resolved` rows only, ISO time, or absent | Crash-safety record written by `--apply-sonar` after the transition succeeds and before the comment is posted. No decision reads this marker: each run reads live status and resolution, and an `OPEN` or `REOPENED` issue still needs a transition even when the marker exists. A successful comment writes `confirmed` and removes `transitioned`, so a reopened completed issue is redone by clearing `confirmed` alone. |
 | `history` | array of `{from, to, when, why}`, or absent | Every re-disposition MUST append an entry, including a planned `resolved` row changed to confirmed `fixed`: previous state, new state, re-disposition date, and the evidence and reason for the change. Keep exactly one current row per `(service, id)`; the generator renders these entries in `## History` as `service / id / from / to / when / why`. This is a recording requirement that `--check` does not yet enforce: it checks neither missing history nor malformed entries, and missing entry fields render as blank cells. The automated reader is filed in issue #223. |
@@ -85,7 +102,7 @@ File: `docs/evidence/quality-debt-2026-09.md`. One section per service, one tabl
 
 Security-population rows carry the verdict in the last column before the action, separated by ` — `. A summary line above each table states the frozen inventory's `open / fixed / resolved / excluded` counts. The closing evidence records the service analysis labels, timestamps and live counts, with ownership of findings outside the inventory.
 
-The record is generated by `scripts/quality-debt-record.mjs` (with `quality-debt-ledger.mjs` for the ledger and `quality-debt-services.mjs` for the service calls, each under the 500-NLOC Codacy file limit) from the two inventory files at `docs/evidence/quality-debt-2026-09/{sonar,codacy}-main-issues.json` (the only copies the script reads) plus a ledger file `docs/evidence/quality-debt-2026-09/ledger.json` (`service, id, state, where, verdict?`) appended per batch. `--check` exits non-zero when an inventory id is missing from the ledger, appears twice, is `open`, or is `resolved` without a reason. Closing follows FR-002; final-analysis checks use SonarCloud `api/ce/activity` and Codacy commit status for that SHA with the required tools.
+The record is generated by `scripts/quality-debt-record.mjs` (with `quality-debt-ledger.mjs` for the ledger and `quality-debt-services.mjs` for the service calls, each under the 500-NLOC Codacy file limit) from the two inventory files at `docs/evidence/quality-debt-2026-09/{sonar,codacy}-main-issues.json` (the only copies the script reads) plus a ledger file `docs/evidence/quality-debt-2026-09/ledger.json` (`service, id, state, where, verdict?`) appended per batch. `--check` prints a count for every failure class it knows — `missing`, `duplicate`, `open`, `unconfirmed`, `resolved-without-reason`, `unknown`, `without-where`, `without-verdict` — and exits non-zero when any of them is not zero; `--check --planned` is the exception, tolerating an unconfirmed row because a planned disposition has no receipt yet. `checkAllocation` reports its own problems separately. Closing follows FR-002; final-analysis checks use SonarCloud `api/ce/activity` and Codacy commit status for that SHA with the required tools.
 
 `--check-live` validates ledger IDs against the inventory and rejects duplicates before reading
 both public current-issue searches. It reports `uncovered` IDs
