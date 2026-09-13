@@ -1,0 +1,29 @@
+scripts/e2e/probe-lib/isolated-agent.mjs
+  s_a3b2da79705e65::t_c5e7c4dfe2e6d7 5,184-185,190,221,226,236,241,255,294
+scripts/e2e/isolated-agent.test.mjs
+  s_a3b2da79705e65::t_dc65f62504360b 195,198,200-204,214-218,222,225-227,230-242,253-254,257-263,265-273,275,281-324
+scripts/e2e/probes/providers.mjs
+  s_a3b2da79705e65::t_636abb7ed9b721 6-7,323,328,366,376,388-389,392,399
+scripts/e2e/probe-lib/isolated-lifecycle.mjs
+  s_a3b2da79705e65::t_ab2d6fbd093413 4,115,119,123-132,332,468,596
+scripts/e2e/probe-lib/agents.mjs
+  s_a3b2da79705e65::t_201b0f7123b3a5 82-145,360,397,437
+  s_a3b2da79705e65::t_3d23d6cf9119f5 395
+  s_a3b2da79705e65::t_36c43bd0fe2ada 146-147,253,261,326,396,409
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "4019e4dbe4563be55f0784535d43d303004d4893",
+  "prompts": {},
+  "sessions": {
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
