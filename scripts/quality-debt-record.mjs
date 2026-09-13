@@ -227,8 +227,7 @@ async function checkLive(rows, ledger) {
       if (!known.has(key)) uncovered[service].push(id);
       let contradiction = claimedIds.has(key) || resolvedIds.has(key);
       try {
-        const triple = liveKey(service, issue);
-        contradiction ||= claims.get(triple);
+        contradiction ||= claims.get(liveKey(service, issue));
       } catch (error) {
         invalid[service].push(`${id}: ${error.message}`);
       }
