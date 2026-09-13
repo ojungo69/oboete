@@ -10,8 +10,9 @@ changes count as evidence. The deviation is recorded here rather than hidden.
 **Completed tasks examined**: 56 (24 written `[x]`, 32 written `[X]`; both forms are
 completion marks in this file and both were parsed).
 **Unchecked tasks**: T045, T046, T047 — not examined; T046 is this report.
-**Amended 2026-09-14**: T009, T032 and T039 have since been unchecked in `tasks.md`, because each
-task's own note records conditions it does not meet; 53 of the 56 examined here remain checked.
+**Amended 2026-09-14**: T032 and T039 have since been unchecked in `tasks.md`, because each task's
+own note records conditions it does not meet; the scorecard below is the run as executed over the 56
+tasks checked when it ran, 54 of which remain checked.
 
 > ⚠️ **FRESH SESSION ADVISORY**: For maximum reliability, run `/speckit.verify-tasks`
 > in a **separate** agent session from the one that performed `/speckit.implement`.
