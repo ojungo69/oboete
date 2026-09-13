@@ -54,7 +54,12 @@ next analysis. SonarCloud re-keyed its issue IDs between the 2026-09-07 export (
 (`AaCVHm…`), which is why no live SonarCloud ID matches an inventory row; matching by `(rule, file)`
 instead, `--check-live` reports every live finding a **confirmed** `fixed` or `excluded` row claims —
 by its own id or by its triple, covered or not — as a named `contradicted` group and fails on it:
-**20 SonarCloud and 12 Codacy** findings today. An unconfirmed row is a planned disposition whose id
+**20 SonarCloud and 12 Codacy** findings today. A confirmed `resolved` **SonarCloud** id counts too,
+because `openSonarIssues` passes `resolved=false` and the id returning means the resolution was
+reopened. The same test is not applied to Codacy: its issue search takes no ignore filter and
+returns ignored issues with no field distinguishing them — measured on 2026-09-13, all 23 ids ignored
+with HTTP 204 come back in the default search — so there only the PATCH response is a receipt, and
+counting presence as a contradiction would have added those 23 as false ones. An unconfirmed row is a planned disposition whose id
 closes at the next analysis, so it is not a contradiction; that is why the Stylelint SCSS row is
 absent from the group. Three of the Codacy ones are inventory ids whose rows are confirmed `fixed`,
 and two of those were found only by this group: `captureUnparsed` measured 48 NLOC at the

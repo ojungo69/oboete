@@ -205,6 +205,16 @@ async function checkLive(rows, ledger) {
   const known = new Set(rows.map(identity));
   // Claims use the frozen inventory's rule and file, never hand-edited ledger copies.
   const claimedIds = new Set(ledger.filter((row) => ['fixed', 'excluded'].includes(row.state) && isConfirmed(row)).map(identity));
+  // A confirmed `resolved` Sonar row claims the service holds a resolution for that id, and
+  // `openSonarIssues` passes `resolved=false`, so the id coming back from it means the resolution was
+  // reopened -- a contradiction exactly as a closed id contradicts a `fixed` row. Sonar only:
+  // Codacy's issue search takes no ignore filter and returns ignored issues with no field to tell
+  // (measured 2026-09-13 -- every one of the 23 ids ignored with HTTP 204 comes back in the default
+  // search), so for Codacy presence proves nothing and the PATCH response is the only receipt.
+  // Both stay out of the triple map: the row says nothing about the rest of that
+  // (service, rule, file), so a sibling finding there is a new finding, not a lie.
+  const resolvedIds = new Set(ledger
+    .filter((row) => row.service === 'sonar' && row.state === 'resolved' && isConfirmed(row)).map(identity));
   const claims = liveClaims(rows, claimedIds);
   const [sonar, codacy] = await Promise.all([openSonarIssues(), openCodacyIssues()]);
   const uncovered = { sonar: [], codacy: [] };
@@ -214,7 +224,7 @@ async function checkLive(rows, ledger) {
       const key = identity({ service, id });
       const triple = liveKey(service, issue);
       if (!known.has(key)) uncovered[service].push(id);
-      if (claimedIds.has(key) || claims.get(triple)) contradicted[service].push(id);
+      if (claimedIds.has(key) || resolvedIds.has(key) || claims.get(triple)) contradicted[service].push(id);
     }
   }
   reportLiveFindings(uncovered, contradicted);

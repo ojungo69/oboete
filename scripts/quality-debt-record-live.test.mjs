@@ -168,6 +168,27 @@ test('--check-live reports contradicted fixed findings separately and fails with
   assert.deepEqual(evidenceText(cwd), before);
 });
 
+test('--check-live contradicts a reopened Sonar resolution and never a returned Codacy ignore', (t) => {
+  const { cwd, ledger } = fixture(t);
+  // `openSonarIssues` passes `resolved=false`, so a confirmed `resolved` Sonar id coming back means
+  // the resolution was reopened. Codacy's search takes no ignore filter and returns ignored issues,
+  // so the same shape there proves nothing and must stay out of the group.
+  Object.assign(ledger[3], { state: 'resolved', where: 'The path is operator-owned.', reason: 'FalsePositive' });
+  writeJson(cwd, 'ledger.json', ledger);
+  const before = evidenceText(cwd);
+  const result = run(cwd, ['--check-live'], publicApiStub([
+    { body: { issues: [
+      { key: 's-regexp', rule: 'typescript:S8786', component: 'ojungo69_free-mem:src/worker/observe.ts', line: 3 },
+    ], paging: { total: 1 } } },
+    { body: { data: [{ issueId: codacyHarnessId, patternInfo: { id: 'Semgrep_fs' },
+      filePath: 'scripts/e2e/probe.mjs', lineNumber: 7 }], pagination: { total: 1 } } },
+  ]));
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, 'sonar contradicted 1: s-regexp\n');
+  assert.deepEqual(evidenceText(cwd), before);
+});
+
 test('--check-live still fails for uncovered ids with no fixed or excluded triple and prints no contradicted group', (t) => {
   const { cwd } = fixture(t);
   const before = evidenceText(cwd);

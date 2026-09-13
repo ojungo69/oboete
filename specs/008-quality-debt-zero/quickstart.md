@@ -195,10 +195,13 @@ node scripts/quality-debt-record.mjs --check-live
 
 This reads both services' public current-issue searches for `main` in parallel and reads the ledger.
 It reports `uncovered` IDs outside the frozen inventory and `contradicted` findings matching a
-confirmed `fixed`/`excluded` ID or a `(service, rule, file)` triple whose inventory rows are all
-confirmed `fixed` or `excluded`. The same confirmed ID is contradicted even if its code moved.
-Planned dispositions claim nothing; an `open`, `resolved`, missing or unconfirmed sibling prevents
-a triple claim. The claim's rule and file come from the frozen inventory, never a ledger copy.
+confirmed `fixed`/`excluded` ID, a confirmed `resolved` **Sonar** ID, or a `(service, rule, file)`
+triple whose inventory rows are all confirmed `fixed` or `excluded`. The same confirmed ID is
+contradicted even if its code moved. Planned dispositions claim nothing; an `open`, `resolved`,
+missing or unconfirmed sibling prevents a triple claim. A confirmed `resolved` Sonar ID that comes
+back from the search has had its resolution reopened, which `resolved=false` makes meaningful; the
+same test is not applied to Codacy, whose search returns ignored issues undistinguished, nor to any
+triple, because a `resolved` row claims only its own ID. The claim's rule and file come from the frozen inventory, never a ledger copy.
 Live comparisons validate Sonar `rule` and `component` (stripping exactly `ojungo69_free-mem:` and
 requiring a non-empty remainder), or Codacy `patternInfo.id` and `filePath`. Only `--check-live`
 requires those comparison fields; `--confirm` and apply modes still validate IDs but do not read
