@@ -10,8 +10,8 @@ import { applyCodacy, applySonar, confirmLedger, openCodacyIssues, openSonarIssu
 const batches = ['A', 'E', 'B1', 'B2', 'B3', 'C1', 'C2', 'C3', 'C4', 'D'];
 const usage = 'Usage: quality-debt-record.mjs [--allocate | --check [--planned] | --check-live | --apply-sonar [--dry-run]'
   + ' | --apply-codacy [--dry-run] | --confirm --sonar-analysis <analysisKey> --codacy-commit <sha>]'
-  + '\n--check-live reads both public main issue sets and the ledger; uncovered ids or findings contradicting fixed/excluded dispositions fail.'
-  + '\n--apply-sonar reads pending ids including resolved/closed issues; FIXED refuses, RESOLVED comments only, otherwise transition/comment.'
+  + '\n--check-live reads both public main issue sets and the ledger; uncovered ids or findings contradicting confirmed fixed/excluded dispositions fail.'
+  + '\n--apply-sonar reads pending ids; CLOSED, missing ids and mismatched RESOLVED resolutions refuse; matching RESOLVED comments only, otherwise transition/comment.'
   + '\n--apply-codacy checks the current Codacy issue set before PATCHing; ids already absent are confirmed locally.'
   + '\n--confirm records the analysis key and commit SHA as labels; the caller must verify beforehand'
   + ' that both services finished analysing that revision'
@@ -171,24 +171,35 @@ function check(rows, ledger, planned) {
 const ruleFile = (service, rule, file) => JSON.stringify([service, rule, file]);
 
 function liveKey(service, issue) {
-  return service === 'sonar'
-    ? ruleFile(service, issue.rule, sonarFile(issue.component))
-    : ruleFile(service, issue.patternInfo.id, issue.filePath);
+  if (service === 'sonar') {
+    if (typeof issue.rule !== 'string' || !issue.rule) throw new Error('Sonar issues search returned an invalid rule');
+    return ruleFile(service, issue.rule, sonarFile(issue.component));
+  }
+  if (typeof issue.patternInfo?.id !== 'string' || !issue.patternInfo.id) {
+    throw new Error('Codacy issues search returned an invalid patternInfo.id');
+  }
+  if (typeof issue.filePath !== 'string' || !issue.filePath) throw new Error('Codacy issues search returned an invalid filePath');
+  return ruleFile(service, issue.patternInfo.id, issue.filePath);
 }
 
 async function checkLive(rows, ledger) {
   const known = new Set(rows.map(identity));
   // Claims use the frozen inventory's rule and file, never hand-edited ledger copies.
-  const claimedIds = new Set(ledger.filter((row) => ['fixed', 'excluded'].includes(row.state)).map(identity));
-  const claims = new Set(rows.filter((row) => claimedIds.has(identity(row)))
-    .map((row) => ruleFile(row.service, row.rule, row.file)));
+  const claimedIds = new Set(ledger.filter((row) => ['fixed', 'excluded'].includes(row.state) && isConfirmed(row)).map(identity));
+  const claims = new Map();
+  for (const row of rows) {
+    const key = ruleFile(row.service, row.rule, row.file);
+    claims.set(key, (claims.get(key) ?? true) && claimedIds.has(identity(row)));
+  }
   const [sonar, codacy] = await Promise.all([openSonarIssues(), openCodacyIssues()]);
   const uncovered = { sonar: [], codacy: [] };
   const contradicted = { sonar: [], codacy: [] };
   for (const [service, issues] of [['sonar', sonar], ['codacy', codacy]]) {
     for (const [id, issue] of issues) {
-      if (!known.has(identity({ service, id }))) uncovered[service].push(id);
-      if (claims.has(liveKey(service, issue))) contradicted[service].push(id);
+      const key = identity({ service, id });
+      const triple = liveKey(service, issue);
+      if (!known.has(key)) uncovered[service].push(id);
+      if (claimedIds.has(key) || claims.get(triple)) contradicted[service].push(id);
     }
   }
   for (const [group, findings] of Object.entries({ uncovered, contradicted })) {

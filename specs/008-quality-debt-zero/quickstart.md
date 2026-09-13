@@ -194,29 +194,40 @@ node scripts/quality-debt-record.mjs --check-live
 ```
 
 This reads both services' public current-issue searches for `main` in parallel and reads the ledger.
-It reports `uncovered` IDs outside the frozen inventory and `contradicted` findings whose
-`(service, rule, file)` matches an inventory row with a `fixed` or `excluded` ledger disposition.
-Contradictions include covered IDs and apply whether or not the disposition is confirmed. The claim's
-rule and file come from the frozen inventory, never a ledger copy. Live comparisons use validated
-Sonar `rule` and `component` (stripping exactly `ojungo69_free-mem:`), or Codacy `patternInfo.id` and
-`filePath`; missing or invalid fields fail the search. Either non-empty group sets exit 1, and empty
-groups are not printed. No uncovered or contradicted findings means exit 0 without output; a failed
-request or incomplete/invalid page also exits 1. The mode reads no credentials and writes no files.
-Known open issues can still pass, so the service-count checks above remain required for final 0 / 0.
+It reports `uncovered` IDs outside the frozen inventory and `contradicted` findings matching a
+confirmed `fixed`/`excluded` ID or a `(service, rule, file)` triple whose inventory rows are all
+confirmed `fixed` or `excluded`. The same confirmed ID is contradicted even if its code moved.
+Planned dispositions claim nothing; an `open`, `resolved`, missing or unconfirmed sibling prevents
+a triple claim. The claim's rule and file come from the frozen inventory, never a ledger copy.
+Live comparisons validate Sonar `rule` and `component` (stripping exactly `ojungo69_free-mem:` and
+requiring a non-empty remainder), or Codacy `patternInfo.id` and `filePath`. Only `--check-live`
+requires those comparison fields; `--confirm` and apply modes still validate IDs but do not read
+those fields. Either non-empty group sets exit 1, and empty groups are not printed. No uncovered or
+contradicted findings means exit 0 without output; a failed request or incomplete/invalid page also
+exits 1. The mode reads no credentials and writes no files. Known open issues can still pass, so
+the service-count checks above remain required for final 0 / 0.
 
 `--apply-sonar` reads each pending resolved ID's state on `main` before its first write, in chunks of
-at most 500 IDs and without `resolved=false`. A missing requested ID fails the run before any write.
-Both real and dry runs print one decision line per pending row:
+at most 100 IDs and without `resolved=false`. It decides from live status and resolution, never the
+ledger's `transitioned` marker. The expected resolution is `WONTFIX` for `wontfix` (the default), or
+`FALSE-POSITIVE` for `falsepositive`. Both real and dry runs print one decision line per pending row:
 
-- `REFUSE Sonar <id>: closed by the service as FIXED; re-disposition this row as fixed` when the
-  resolution is `FIXED`. No transition, comment or ledger write is made for that row. The run fails
-  after processing the other rows, naming the refused count and IDs; successful earlier calls remain
-  saved. Re-disposition the row as `fixed` with the closing analysis.
+- `REFUSE Sonar <id>: closed by the service (resolution <resolution>); re-disposition this row`
+  for any `CLOSED` issue, including `FIXED` and `REMOVED`.
 - `RESOLVED Sonar <id>: transition already applied, posting the comment` for a service `RESOLVED`
-  issue (`WONTFIX` or `FALSE-POSITIVE`). Only `add_comment` is sent, even when `transitioned` is absent.
-  Success writes `confirmed` and removes `transitioned` through the usual comment-completion path.
-- `APPLY Sonar <id>: <n> call(s)` otherwise. The usual transition/comment order and saved progress
-  apply, with each successful call persisted immediately.
+  issue whose resolution matches the ledger transition. Only `add_comment` is sent, even when
+  `transitioned` is absent. Success writes `confirmed` and removes `transitioned`.
+- `REFUSE Sonar <id>: resolved by the service (resolution <actual>, expected <expected>); re-disposition this row`
+  for a `RESOLVED` issue whose resolution does not match.
+- `REFUSE Sonar <id>: the issue search does not report this id; re-disposition this row` for a
+  missing requested ID.
+- `APPLY Sonar <id>: 2 call(s)` otherwise (`OPEN`, `CONFIRMED`, `REOPENED`): transition, then
+  comment, even if a stale `transitioned` marker exists. Successful transitions write that marker
+  as a crash-safety record; each successful call is persisted immediately.
+
+Refused rows receive no transition, comment or ledger change. Other rows are still processed, then
+one error names the refused count and IDs. An invalid or truncated search response still fails
+before any write: a page's reported total must equal the number of issues it returned.
 
 `--apply-sonar --dry-run` uses the public state search without credentials, prints the applicable
 POSTs after the decision lines, and makes no service or ledger writes. Refused rows still fail it.
@@ -226,6 +237,18 @@ Pending resolved IDs already absent from that set receive a local confirmation w
 absence and timestamp. Current IDs retain the existing reason/comment, incremental persistence and
 fail-fast handling: a refused PATCH stops later rows. `--apply-codacy --dry-run` stays offline and
 prints all planned PATCH requests; filtering against the live set happens only in the real run.
+
+## Record CLI regression checks
+
+```bash
+npm run typecheck
+npx eslint scripts/quality-debt-record.mjs scripts/quality-debt-services.mjs scripts/quality-debt-ledger.mjs scripts/quality-debt-record.test-support.mjs scripts/quality-debt-record.test.mjs scripts/quality-debt-record-services.test.mjs scripts/quality-debt-record-live.test.mjs scripts/quality-debt-record-confirm.test.mjs scripts/quality-debt-record-sonar.test.mjs
+node --test scripts/quality-debt-record.test.mjs scripts/quality-debt-record-services.test.mjs scripts/quality-debt-record-live.test.mjs scripts/quality-debt-record-confirm.test.mjs scripts/quality-debt-record-sonar.test.mjs
+pipx run lizard -l typescript scripts/quality-debt-record-live.test.mjs scripts/quality-debt-record-sonar.test.mjs scripts/quality-debt-services.mjs scripts/quality-debt-record.mjs
+```
+
+Both live-test files and both implementation files must stay below 500 NLOC per file and 50 NLOC
+per function. These checks run the source CLI directly and require no build.
 
 ## Final analysis confirmation (batch F, before writing 0 / 0)
 

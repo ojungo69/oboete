@@ -30,14 +30,25 @@ The end state of one Finding. Exactly one per Finding (FR-001).
 | `state` | `fixed` / `resolved` / `excluded` | `fixed`: the code at that line changed in a merged PR and the service no longer reports the id. `resolved`: the id is closed on the service by a transition (Sonar `wontfix` / `falsepositive`) or an ignore (Codacy) that carries the reason. `excluded`: a configuration change stops the rule for the file class; the id closes at the next analysis. |
 | `where` | PR number / comment text / config line | `fixed` → `#NNN`; `resolved` → the one-sentence reason as posted on the service; `excluded` → the file and line of the configuration change (for example `.codacy.yml engines.lizard.exclude_paths`) |
 | `verdict` | free text, security population only | `controller — validation — sink — effect — real / not applicable` (research R6). Required for every `fixed` or `resolved` Finding whose rule is security-flavoured (Codacy `Semgrep_*` and `shellcheck_SC2024`, Sonar S8786/S4036/S8707), whatever the file; an `excluded` Finding is covered by the file-class review in research R4 instead. |
-| `confirmed` | analysis id / commit SHA / HTTP response / Codacy search absence, or absent | The service's agreement with `state`: for `fixed` and `excluded`, the SonarCloud analysis id or the Codacy commit SHA whose analysis no longer lists the id; for `resolved`, the HTTP status and timestamp of the Sonar comment after resolution or the Codacy ignore call. Codacy also permits local confirmation with the search absence and timestamp because it has no resolution field. Every write of `confirmed` removes `transitioned`. Absent until batch F records it; `--check` treats an unconfirmed row as `open`. |
+| `confirmed` | analysis id / commit SHA / HTTP response / Codacy search absence, or absent | The service's agreement with `state`: for `fixed` and `excluded`, the SonarCloud analysis id or the Codacy commit SHA whose analysis no longer lists the id; for `resolved`, the HTTP status and timestamp of the Sonar comment after resolution or the Codacy ignore call. Codacy also permits local confirmation with the search absence and timestamp because it has no resolution field. Sonar completion and `--confirm` remove `transitioned`. Absent until batch F records it; `--check` treats an unconfirmed row as `open`. |
 | `reason` | Codacy only, one of `AcceptedUse`, `FalsePositive`, `NotExploitable`, `TestCode`, `ExternalCode` | The enumerated reason the Codacy API stores alongside the free-text `where` comment. |
-| `transitioned` | Sonar `resolved` rows only, ISO time, or absent | Written by `--apply-sonar` after the transition succeeds and before the comment is posted. Each run reads the pending IDs without an open-only filter: a service `RESOLVED` issue skips the transition and posts only the comment, with or without this marker (SonarCloud refuses a second resolution). The successful comment writes `confirmed` and removes `transitioned`, so a reopened completed issue is redone by clearing `confirmed` alone. |
+| `transitioned` | Sonar `resolved` rows only, ISO time, or absent | Crash-safety record written by `--apply-sonar` after the transition succeeds and before the comment is posted. No decision reads this marker: each run reads live status and resolution, and an `OPEN` or `REOPENED` issue still needs a transition even when the marker exists. A successful comment writes `confirmed` and removes `transitioned`, so a reopened completed issue is redone by clearing `confirmed` alone. |
 
-`--apply-sonar` refuses a pending `resolved` row when the service reports resolution `FIXED`: the row
-needs a `fixed` disposition and the closing analysis, not a local resolution confirmation. Refused
-rows remain unchanged and make the run fail after the other rows are processed; successful calls
-persist immediately. A missing requested ID or invalid search response fails before any write.
+`--apply-sonar` reads pending IDs in chunks of 100 without an open-only filter. The ledger transition
+maps to the expected service resolution: `wontfix` (the default) → `WONTFIX`, `falsepositive` →
+`FALSE-POSITIVE`. Each row follows this decision table:
+
+| Live state | Decision |
+|---|---|
+| ID absent from the search | Refuse that row and ask for re-disposition. |
+| `CLOSED`, any resolution (including `FIXED` and `REMOVED`) | Refuse that row, naming the resolution, and ask for re-disposition. |
+| `RESOLVED`, resolution matches the ledger transition | Send `add_comment` only. |
+| `RESOLVED`, any other resolution | Refuse that row, naming actual and expected resolutions, and ask for re-disposition. |
+| Anything else (`OPEN`, `CONFIRMED`, `REOPENED`) | Transition, then comment. |
+
+Refused rows remain unchanged and make the run fail after the other rows are processed, with one
+error naming their count and IDs. Successful calls persist immediately. Invalid search responses,
+including a page whose reported total differs from the number returned, fail before any write.
 
 State transitions: a Finding is `open` until its batch merges; the ledger row written at merge time is a **planned** end state; it becomes confirmed `fixed` when the next analysis no longer lists the id and the batch changed that line; confirmed `resolved` when the service action succeeds; confirmed `excluded` when the configuration PR merges **and** the following analysis no longer lists the id. Batch F records the confirmations; it owns no Finding. A Finding that reappears (for example because a rewrite was reverted) goes back to `open` and must be dispositioned again; the final tables always hold **exactly one row per `(service, id)`**, and the earlier state is moved to a separate `## History` section (`id | from | to | when | why`).
 
@@ -69,12 +80,16 @@ Security-population rows carry the verdict in the last column before the action,
 The record is generated by `scripts/quality-debt-record.mjs` (with `quality-debt-ledger.mjs` for the ledger and `quality-debt-services.mjs` for the service calls, each under the 500-NLOC Codacy file limit) from the two inventory files at `docs/evidence/quality-debt-2026-09/{sonar,codacy}-main-issues.json` (the only copies the script reads) plus a ledger file `docs/evidence/quality-debt-2026-09/ledger.json` (`service, id, state, where, verdict?`) appended per batch. `--check` exits non-zero when an inventory id is missing from the ledger, appears twice, is `open`, or is `resolved` without a reason. The 0 / 0 summary line is written only after both services report a successful analysis of the final `main` SHA with the relevant tools run (SonarCloud `api/ce/activity`; Codacy commit status for that SHA) and the count queries return 0.
 
 `--check-live` reads both public current-issue searches and the ledger. It reports `uncovered` IDs
-outside the inventory and `contradicted` findings whose `(service, rule, file)` matches an inventory
-row with a `fixed` or `excluded` ledger disposition, regardless of ID coverage or confirmation.
-Claims use the frozen inventory's rule and file; live evidence uses validated search fields. Either
-group makes the run exit 1; empty groups are omitted, and no findings means exit 0 without output.
-Failed requests or invalid/incomplete pages also exit 1. The check reads no credentials and writes
-no files.
+outside the inventory and `contradicted` findings matching either a confirmed `fixed`/`excluded`
+`(service, id)` or an inventory `(service, rule, file)` triple whose rows are all confirmed `fixed`
+or `excluded`. A confirmed ID is contradicted even if its code moved; a planned disposition claims
+nothing, and a triple with an `open`, `resolved`, missing or unconfirmed disposition claims nothing.
+Claims use the frozen inventory's rule and file, never ledger copies. Comparison validates Sonar
+`rule` and `component` (including a non-empty path after `ojungo69_free-mem:`), and Codacy
+`patternInfo.id` and `filePath` where it reads them. ID validation remains shared by all searches;
+`--confirm` and apply modes do not require comparison fields they never read. Either group makes
+the run exit 1; empty groups are omitted, and no findings means exit 0 without output. Failed
+requests or invalid/incomplete pages also exit 1. The check reads no credentials and writes no files.
 
 ## Validation rules
 

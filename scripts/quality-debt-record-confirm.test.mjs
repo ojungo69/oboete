@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
-  apiStub, codacyIssue, codacyIssues, codacyRepository, codacyViewerId, confirmArgs, evidence, fixture, readCalls, run,
-  sonarAnalyses, sonarIssue, writeJson,
+  apiStub, codacyIssue, codacyIssues, codacyRepository, codacyViewerId, confirmArgs, evidence, fixture, publicApiStub, readCalls, readLedger, run,
+  sonarAnalyses, sonarIssue, sonarOpen, writeJson,
 } from './quality-debt-record.test-support.mjs';
 
 const codacyOpenId = '33333333333333333333333333333333';
@@ -100,6 +100,32 @@ test('--confirm accepts empty open sets for both services', (t) => {
   assert.equal(calls.length, 4);
 });
 
+for (const component of [undefined, 'ojungo69_free-mem', 'ojungo69_free-mem:src/fixture.ts']) {
+  test(`--confirm uses only ids while --check-live validates the same pages: ${component}`, (t) => {
+    const { cwd, ledger } = fixture(t);
+    for (const row of ledger) delete row.confirmed;
+    writeJson(cwd, 'ledger.json', ledger);
+    const responses = [
+      { body: { issues: [sonarIssue('s-sql', { component })], total: 1 } },
+      { body: { data: [{ issueId: codacyViewerId }], pagination: { total: 1 } } },
+    ];
+    const confirmed = run(cwd, confirmArgs, apiStub(responses));
+    assert.equal(confirmed.status, 0, confirmed.stderr);
+    assert.equal(confirmed.stdout, 'sonar s-sql: still open\nsonar: 1 confirmed, 1 still open\n'
+      + `codacy ${codacyViewerId}: still open\ncodacy: 1 confirmed, 1 still open\n`);
+    const saved = readLedger(cwd);
+    assert.equal(saved[0].confirmed, 'analysis-key');
+    assert.equal(saved[3].confirmed, 'commit-sha');
+    for (const index of [1, 2, 4]) assert.deepEqual(saved[index], ledger[index]);
+    const checked = run(cwd, ['--check-live'], publicApiStub(responses));
+    assert.equal(checked.status, 1);
+    assert.equal(checked.stderr, component?.includes(':')
+      ? 'Codacy issues search returned an invalid patternInfo.id\n'
+      : 'Sonar issues search returned an invalid component\n');
+    assert.deepEqual(readLedger(cwd), saved);
+  });
+}
+
 for (const [service, response, message] of [
   ['sonar', { body: { analyses: [{ key: 'latest-key', revision: 'unrelated-revision' }, { key: 'analysis-key' }] } },
     'Sonar: the latest analysis is not analysis-key'],
@@ -169,4 +195,16 @@ test('--confirm avoids requests when every planned row is already confirmed', (t
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'sonar: 0 confirmed, 0 still open\ncodacy: 0 confirmed, 0 still open\n');
   assert.equal(existsSync(join(cwd, 'calls.jsonl')), false);
+});
+
+test('--confirm clears transition progress after a row is re-dispositioned as fixed', (t) => {
+  const { cwd, ledger } = fixture(t);
+  Object.assign(ledger[2], { state: 'fixed', where: '#125', transitioned: '2026-09-13T00:00:00.000Z' });
+  delete ledger[2].confirmed;
+  writeJson(cwd, 'ledger.json', ledger);
+  const result = run(cwd, confirmArgs, apiStub([sonarOpen()]));
+  assert.equal(result.status, 0, result.stderr);
+  const saved = readLedger(cwd);
+  assert.equal(saved[2].confirmed, 'analysis-key');
+  assert.equal(Object.hasOwn(saved[2], 'transitioned'), false);
 });

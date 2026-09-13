@@ -66,6 +66,11 @@ export function readLedger(cwd) {
   return JSON.parse(readFileSync(join(cwd, evidence, 'ledger.json'), 'utf8'));
 }
 
+export function evidenceText(cwd) {
+  return Object.fromEntries(['sonar-main-issues.json', 'codacy-main-issues.json', 'ledger.json', 'allocation.json']
+    .map((name) => [name, readFileSync(join(cwd, evidence, name), 'utf8')]));
+}
+
 export function readCalls(cwd) {
   const path = join(cwd, 'calls.jsonl');
   return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').map(JSON.parse) : [];
