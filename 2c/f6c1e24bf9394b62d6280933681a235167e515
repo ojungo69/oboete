@@ -1,0 +1,22 @@
+scripts/e2e/probe-lib/isolated-agent.mjs
+  s_a3b2da79705e65::t_e491e4e28d44b4 161-185,212-214,243,248,258,263-264,277
+  s_a3b2da79705e65::t_2bda7531051600 316
+scripts/e2e/isolated-agent.test.mjs
+  s_a3b2da79705e65::t_65f8aa166125b3 10-11,178-260
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "2cf6c1e24bf9394b62d6280933681a235167e515",
+  "prompts": {},
+  "sessions": {
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
