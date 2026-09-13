@@ -16,7 +16,7 @@ Disposition record of feature 008 (`specs/008-quality-debt-zero/`): every SonarC
   | Live subset awaiting F's service work, at C4 (`67242108`) | 15 | 20 of the 38; the other 18 were the file lengths batch D owns — 17 allocated at that analysis, plus `16267458` appended afterwards |
   | Planned rows to send at that checkpoint | 15 `resolved` | 23 — 22 `resolved` issue rows and 1 `excluded` Stylelint row, including issue IDs absent from the live search |
   | Calls batch F made, 2026-09-13 | 10 transitions | 27 ignore calls |
-  | `resolved` rows in the ledger in all | 32 — 22 receipted by batch D on 2026-09-09, 10 by F | 29 — 27 by F, 2 receipted by batch D on 2026-09-09 |
+  | `resolved` rows in the ledger in all | 32 — 22 receipted by batch D on 2026-09-09, 10 by F | 29 — 27 by F, 2 receipted by batch D (#185) on 2026-09-09 |
 
   F made 10 Sonar calls where 15 were planned because D's own refactor had closed five of those
   findings; those five rows carry a `resolved` → `fixed` history entry. The Stylelint exclusion
@@ -135,7 +135,7 @@ while leaving `uncovered` non-fatal — is filed as #223, blocked on #207.
   signature).
 - **SC-008** — each batch is one rule family or module area and merged through its own gate: A
   (configuration, `c0ed2500`), E (security verdicts), B1–B3 (#161, #162, #163), C1–C4 (#165, #166, #164,
-  #173), D (#185), F (this pull request).
+  #173), D (#185), F (this pull request, pending its own gate — T045).
 
 **SC-001 / SC-002** are met as amended (spec.md "Scope amendment") for every inventory row except
 the planned Stylelint row `codacy:7935279dc22d4b6af001014179ebdff1`, whose id leaves Codacy's issue
