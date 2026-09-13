@@ -172,7 +172,7 @@ const ruleFile = (service, rule, file) => JSON.stringify([service, rule, file]);
 
 /** The comparison reads these four fields, so it validates them the way `collectIds` validates an id. */
 function text(value, service, field) {
-  if (typeof value !== 'string' || !value) throw new Error(`${service} issues search returned an invalid ${field}`);
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`${service} issues search returned an invalid ${field}`);
   return value;
 }
 
@@ -181,15 +181,31 @@ function liveKey(service, issue) {
   return ruleFile(service, text(issue.patternInfo?.id, 'Codacy', 'patternInfo.id'), text(issue.filePath, 'Codacy', 'filePath'));
 }
 
-async function checkLive(rows, ledger) {
-  const known = new Set(rows.map(identity));
-  // Claims use the frozen inventory's rule and file, never hand-edited ledger copies.
-  const claimedIds = new Set(ledger.filter((row) => ['fixed', 'excluded'].includes(row.state) && isConfirmed(row)).map(identity));
+function liveClaims(rows, claimedIds) {
   const claims = new Map();
   for (const row of rows) {
     const key = ruleFile(row.service, row.rule, row.file);
     claims.set(key, (claims.get(key) ?? true) && claimedIds.has(identity(row)));
   }
+  return claims;
+}
+
+function reportLiveFindings(uncovered, contradicted) {
+  for (const [group, findings] of Object.entries({ uncovered, contradicted })) {
+    for (const [service, ids] of Object.entries(findings)) {
+      if (ids.length) {
+        console.error(`${service} ${group} ${ids.length}: ${ids.join(', ')}`);
+        process.exitCode = 1;
+      }
+    }
+  }
+}
+
+async function checkLive(rows, ledger) {
+  const known = new Set(rows.map(identity));
+  // Claims use the frozen inventory's rule and file, never hand-edited ledger copies.
+  const claimedIds = new Set(ledger.filter((row) => ['fixed', 'excluded'].includes(row.state) && isConfirmed(row)).map(identity));
+  const claims = liveClaims(rows, claimedIds);
   const [sonar, codacy] = await Promise.all([openSonarIssues(), openCodacyIssues()]);
   const uncovered = { sonar: [], codacy: [] };
   const contradicted = { sonar: [], codacy: [] };
@@ -201,14 +217,7 @@ async function checkLive(rows, ledger) {
       if (claimedIds.has(key) || claims.get(triple)) contradicted[service].push(id);
     }
   }
-  for (const [group, findings] of Object.entries({ uncovered, contradicted })) {
-    for (const [service, ids] of Object.entries(findings)) {
-      if (ids.length) {
-        console.error(`${service} ${group} ${ids.length}: ${ids.join(', ')}`);
-        process.exitCode = 1;
-      }
-    }
-  }
+  reportLiveFindings(uncovered, contradicted);
 }
 
 function tableRow(cells) {

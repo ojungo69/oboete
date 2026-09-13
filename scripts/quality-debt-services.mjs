@@ -15,7 +15,8 @@ export const SONAR_PROJECT = 'ojungo69_free-mem';
 
 export function sonarFile(component) {
   const prefix = `${SONAR_PROJECT}:`;
-  if (typeof component !== 'string' || !component.startsWith(prefix) || component.length === prefix.length) {
+  // A blank suffix would become a path that matches no claim, so the comparison would silently miss it.
+  if (typeof component !== 'string' || !component.startsWith(prefix) || !component.slice(prefix.length).trim()) {
     throw new Error('Sonar issues search returned an invalid component');
   }
   return component.slice(prefix.length);
@@ -127,6 +128,31 @@ function recordSonarCall(row, call, status) {
   }
 }
 
+function sonarRefusal(row, state) {
+  if (!state) return 'the issue search does not report this id';
+  if (state.status === 'CLOSED') return `closed by the service (resolution ${state.resolution})`;
+  const expected = (row.transition ?? 'wontfix') === 'falsepositive' ? 'FALSE-POSITIVE' : 'WONTFIX';
+  if (state.status === 'RESOLVED' && state.resolution !== expected) {
+    return `resolved by the service (resolution ${state.resolution}, expected ${expected})`;
+  }
+  return null;
+}
+
+async function applySonarCalls(row, resolved, ledger, dryRun, authorization, firstCall) {
+  for (const call of sonarCalls(row, resolved)) {
+    const body = new URLSearchParams(call.fields);
+    if (dryRun) {
+      console.log(`POST https://sonarcloud.io/api/issues/${call.action} ${body}`);
+      continue;
+    }
+    if (!firstCall) await pause(200);
+    firstCall = false;
+    recordSonarCall(row, call, await postSonar(call, body, authorization));
+    writeLedger(ledger);
+  }
+  return firstCall;
+}
+
 export async function applySonar(ledger, dryRun, inventory) {
   const rows = pendingResolved('sonar', ledger, inventory);
   if (rows.length === 0) return;
@@ -136,38 +162,17 @@ export async function applySonar(ledger, dryRun, inventory) {
   let firstCall = true;
   for (const row of rows) {
     const state = states.get(row.id);
-    if (!state) {
-      console.log(`REFUSE Sonar ${row.id}: the issue search does not report this id; re-disposition this row`);
+    const reason = sonarRefusal(row, state);
+    if (reason) {
+      console.log(`REFUSE Sonar ${row.id}: ${reason}; re-disposition this row`);
       refused.push(row.id);
       continue;
     }
-    const { status, resolution } = state;
-    if (status === 'CLOSED') {
-      console.log(`REFUSE Sonar ${row.id}: closed by the service (resolution ${resolution}); re-disposition this row`);
-      refused.push(row.id);
-      continue;
-    }
-    const expected = (row.transition ?? 'wontfix') === 'falsepositive' ? 'FALSE-POSITIVE' : 'WONTFIX';
-    if (status === 'RESOLVED' && resolution !== expected) {
-      console.log(`REFUSE Sonar ${row.id}: resolved by the service (resolution ${resolution}, expected ${expected}); re-disposition this row`);
-      refused.push(row.id);
-      continue;
-    }
-    const resolved = status === 'RESOLVED';
+    const resolved = state.status === 'RESOLVED';
     console.log(resolved
       ? `RESOLVED Sonar ${row.id}: transition already applied, posting the comment`
       : `APPLY Sonar ${row.id}: the transition then the comment`);
-    for (const call of sonarCalls(row, resolved)) {
-      const body = new URLSearchParams(call.fields);
-      if (dryRun) {
-        console.log(`POST https://sonarcloud.io/api/issues/${call.action} ${body}`);
-        continue;
-      }
-      if (!firstCall) await pause(200);
-      firstCall = false;
-      recordSonarCall(row, call, await postSonar(call, body, authorization));
-      writeLedger(ledger);
-    }
+    firstCall = await applySonarCalls(row, resolved, ledger, dryRun, authorization, firstCall);
   }
   if (refused.length) throw new Error(`Sonar refused ${refused.length} row(s): ${refused.join(', ')}`);
 }
@@ -271,6 +276,9 @@ export async function openSonarIssues(authorization) {
 }
 
 /** Read every pending id, including resolved and closed issues hidden by the open search. */
+/** Every status the issues search may report; `applySonar` decides a row from it, so an unknown one is a refusal. */
+const sonarStatuses = ['OPEN', 'CONFIRMED', 'REOPENED', 'RESOLVED', 'CLOSED'];
+
 export async function sonarIssueStates(ids, authorization) {
   const states = new Map();
   const headers = authorization === undefined ? {} : { Authorization: authorization };
@@ -285,7 +293,8 @@ export async function sonarIssueStates(ids, authorization) {
     collectIds(found, data.issues, 'key', 'Sonar');
     for (const [id, issue] of found) {
       const { status, resolution } = issue;
-      if (typeof status !== 'string' || !status) throw new Error('Sonar issues search returned an invalid status');
+      // applySonar transitions every status it does not recognise as terminal, so an unknown one is refused here.
+      if (!sonarStatuses.includes(status)) throw new Error(`Sonar issues search returned an unknown status ${JSON.stringify(status)}`);
       if (resolution !== undefined && (typeof resolution !== 'string' || !resolution)) {
         throw new Error('Sonar issues search returned an invalid resolution');
       }

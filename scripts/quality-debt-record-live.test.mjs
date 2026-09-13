@@ -305,13 +305,18 @@ test('--check-live rejects malformed Codacy pages without file writes', (t) => {
 
 for (const [service, field, invalid] of [
   ['Sonar', 'rule', { rule: undefined }], ['Sonar', 'rule', { rule: '' }], ['Sonar', 'rule', { rule: 42 }],
+  // A blank field would build a triple that matches no claim, so the contradiction would go unreported.
+  ['Sonar', 'rule', { rule: '   ' }],
   ['Sonar', 'component', { component: undefined }], ['Sonar', 'component', { component: 42 }],
   ['Sonar', 'component', { component: 'other-project:src/fixture.ts' }],
   ['Sonar', 'component', { component: 'ojungo69_free-mem-wrong:src/fixture.ts' }],
   ['Sonar', 'component', { component: 'ojungo69_free-mem:' }],
+  ['Sonar', 'component', { component: 'ojungo69_free-mem:   ' }],
   ['Codacy', 'patternInfo.id', { patternInfo: undefined }],
   ['Codacy', 'patternInfo.id', { patternInfo: { id: '' } }], ['Codacy', 'patternInfo.id', { patternInfo: { id: 42 } }],
+  ['Codacy', 'patternInfo.id', { patternInfo: { id: '  ' } }],
   ['Codacy', 'filePath', { filePath: undefined }], ['Codacy', 'filePath', { filePath: '' }], ['Codacy', 'filePath', { filePath: 42 }],
+  ['Codacy', 'filePath', { filePath: '\t' }],
 ]) {
   test(`--check-live rejects invalid ${service} ${field}: ${JSON.stringify(invalid)}`, (t) => {
     const { cwd } = fixture(t);

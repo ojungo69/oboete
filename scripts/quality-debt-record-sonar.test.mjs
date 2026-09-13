@@ -49,6 +49,9 @@ test('sonarIssueStates reads 201 ids in chunks and returns their real states', a
 
 for (const [field, value] of [
   ['status', undefined], ['status', null], ['status', 42], ['status', ''],
+  // A status outside the documented set is refused rather than transitioned: applySonar treats
+  // everything it does not recognise as terminal as transitionable.
+  ['status', 'PENDING'], ['status', 'open'],
   ['resolution', null], ['resolution', 42], ['resolution', ''],
 ]) {
   test(`--apply-sonar rejects invalid ${field}: ${JSON.stringify(value)} before any write`, (t) => {
@@ -62,7 +65,9 @@ for (const [field, value] of [
       { body: { issues: [sonarIssue('s-worker'), sonarIssue('s-regexp', { [field]: value })], total: 2 } },
     ]));
     assert.equal(result.status, 1);
-    assert.equal(result.stderr, `Sonar issues search returned an invalid ${field}\n`);
+    assert.equal(result.stderr, field === 'status'
+      ? `Sonar issues search returned an unknown status ${JSON.stringify(value)}\n`
+      : `Sonar issues search returned an invalid ${field}\n`);
     assert.deepEqual(readCalls(cwd).map((call) => call.method), ['GET']);
     assert.deepEqual(evidenceText(cwd), before);
   });
