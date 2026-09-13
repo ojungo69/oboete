@@ -83,14 +83,10 @@ export function copyMode(src, dest, mode = 0o600) {
  * A credential file the CLI rotates is linked into the run, never copied: a refresh written into a
  * copy dies with the run directory while the provider has already retired the previous refresh
  * token, which signs the account out (issue #175). Everything the harness rewrites per run keeps
- * being copied. The cost of the link is that a leg which corrupts the file corrupts the account's
- * own, the way running the CLI directly would; the benefit is that the next leg and the developer
- * both read the token the last leg refreshed. Settling a copy afterwards would carry most refreshes
- * back too, but only for a leg that finishes: a leg killed at its timeout, or a crashed run, leaves
- * the refresh in the run directory, which is the failure this exists to end.
- *
- * Returns the entry list to hand `settleCredentials` after the CLI is done, empty when the account
- * has no such file.
+ * being copied. The cost is that a leg which corrupts the file corrupts the account's own, the way
+ * running the CLI directly would. Settling a copy afterwards would carry most refreshes back too,
+ * but only for a leg that finishes; a leg killed at its timeout leaves the refresh behind, which is
+ * the failure this exists to end. Returns the entry list for `settleCredentials`.
  */
 export function stageCredential(source, destination) {
   const target = path.resolve(source);
@@ -376,12 +372,14 @@ export function prepareGrokHome(dir, opts = {}) {
     const extra = String(opts.configToml);
     fs.writeFileSync(cfg, prev + (prev && !prev.endsWith("\n") ? "\n" : "") + extra + (extra.endsWith("\n") ? "" : "\n"));
   }
-  return { home, repo, eventsPath };
+  // copyGrokHome keeps the seed's staged link a link, so the leg reads the account's own file.
+  const credentials = [{ staged: path.join(home, "auth.json"), source: path.join(HOME, ".grok/auth.json") }];
+  return { home, repo, eventsPath, credentials };
 }
 
 export async function grok(dir, opts = {}) {
   const grokSeed = opts.homeFrom ? opts.grokSeed : opts.grokSeed || (await seedGrokHome(path.dirname(dir)));
-  const { home, repo, eventsPath } = prepareGrokHome(dir, { ...opts, grokSeed });
+  const { home, repo, eventsPath, credentials } = prepareGrokHome(dir, { ...opts, grokSeed });
   const argv = ["grok", "-p", opts.prompt || toolUsePrompt("grok")];
   if (!opts.noApprove) argv.push("--always-approve");
   argv.push("--output-format", "json", "--cwd", repo, ...(opts.extraArgs || []));
@@ -392,9 +390,7 @@ export async function grok(dir, opts = {}) {
     stderrPath: path.join(dir, "stderr.txt"),
     timeoutMs: opts.timeoutMs,
   });
-  // prepareGrokHome copies the seed home, and fs.cpSync keeps a symlink a symlink, so the leg's
-  // auth.json is the same link into the account's file.
-  settleCredentials("grok", [{ staged: path.join(home, "auth.json"), source: path.join(HOME, ".grok/auth.json") }]);
+  settleCredentials("grok", credentials);
   return packResult("grok", dir, repo, home, proc, eventsPath);
 }
 

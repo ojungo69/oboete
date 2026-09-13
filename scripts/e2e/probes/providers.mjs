@@ -385,7 +385,6 @@ export const probes = [
         stdoutPath: path.join(ctx.dir, "grok_out.json"),
         stderrPath: path.join(ctx.dir, "grok_err.txt"),
       });
-      // The seed home is copied with fs.cpSync, which keeps the staged link a link.
       settleCredentials("grok", [{ staged: path.join(gHome, "auth.json"), source: path.join(HOME, ".grok/auth.json") }]);
       const grokOk = recordGrokCliResult(grok, evidence, per);
 
