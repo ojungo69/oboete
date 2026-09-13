@@ -146,7 +146,7 @@ allocation table exercise both added rules.
 | T037a–T037d, T038a | ✅ VERIFIED | the continuation's 116-file commit range, and all six split modules present |
 | T039 | ✅ VERIFIED | six named files in the diff; evidence files `docs/evidence/quality-debt-2026-09/batch-d-continuation-*.{json,md}` present |
 | T043d | ✅ VERIFIED | `--check-live` present and run in this session |
-| T044 | ✅ VERIFIED | spec.md SC-001/SC-002 amended, research R11 added, the record carries a Batch F section |
+| T044 | ✅ VERIFIED | spec.md SC-001/SC-002 amended, research R11 added, the record carries a Batch F section. The first pass swept by pattern and missed 20 further statements, including three different inventory aggregates; the round 7 semantic audit (`docs/evidence/quality-debt-2026-09/batch-f-round-7-completion-audit.md`, 119 statements inspected) completed it in `879c4652` |
 
 ## Weak items (external product, receipts read above)
 
@@ -219,7 +219,7 @@ allocation table exercise both added rules.
 | T043c | ⚠️ WEAK | `applyCodacy` PATCHes every pending resolved row; the HTTP response is the receipt |
 | T043d | ✅ VERIFIED | --check-live present |
 | T043e | ⚠️ WEAK | S4036/S8707 in the classifier |
-| T044 | ✅ VERIFIED | spec/plan/research/record swept |
+| T044 | ✅ VERIFIED | spec/plan/research/record swept, completed by the round 7 semantic audit of all six documents |
 
 ## Walkthrough Log
 

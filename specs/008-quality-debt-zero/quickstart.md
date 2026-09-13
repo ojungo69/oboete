@@ -19,7 +19,7 @@
   them. The SonarCloud token needs read scope + issue administration (verified 2026-09-07 with
   `additionalFields=transitions`).
 - Codacy: anonymous read works for the public repository; per-issue ignores need an account API token (`CODACY_API_TOKEN`) for `npx @codacy/codacy-cloud-cli` (checkpoint C1 in the plan).
-- Inventories: the frozen 745 IDs in `sonar-main-issues.json` (332) and `codacy-main-issues.json` (413) next to the disposition record: the 2026-09-07 exports (310/397) plus the 38 additions recorded in T030a, T036 and T043e. *(Clarified 2026-09-14; the original prerequisite described only the files "exported on 2026-09-07".)*
+- Inventories: the frozen 745 IDs in `sonar-main-issues.json` (332) and `codacy-main-issues.json` (413) next to the disposition record: the 2026-09-07 exports (310/397) plus the 38 additions recorded in T030a (14) and T043e (24). *(Clarified 2026-09-14; the original prerequisite described only the files "exported on 2026-09-07".)*
 
 ## Per-batch verification (every pull request)
 
@@ -176,7 +176,7 @@ curl -s 'https://sonarcloud.io/api/issues/search?componentKeys=ojungo69_free-mem
 curl -s -X POST 'https://app.codacy.com/api/v3/analysis/organizations/gh/ojungo69/repositories/oboete/issues/search?limit=1' -H 'content-type: application/json' -d '{}' | python3 -c 'import sys,json; d=json.load(sys.stdin); print("codacy current", d["pagination"].get("total", len(d["data"])))'
 ```
 
-After batch F's final merge analysis, every frozen inventory id must be dispositioned and confirmed. Record both live counts and attribute findings outside the inventory to the follow-up round (issue #207); those counts may be nonzero under the scope amendment. The Quality Gate conditions on `main` stay `OK` and `coverage` stays ≥ 93.3 %.
+After batch F's final merge analysis, every frozen inventory id must be confirmed as [FR-002](./spec.md#functional-requirements) requires. Record both live counts and attribute findings outside the inventory to the follow-up round (issue #207); those counts may be nonzero under the scope amendment. The Quality Gate conditions on `main` stay `OK` and `coverage` stays ≥ 93.3 %.
 
 ## Disposition record check (every batch, and batch F)
 

@@ -4,11 +4,13 @@
 
 All 1,247 lines of `spec.md`, `plan.md`, `research.md`, `quickstart.md`, `tasks.md`, and
 `data-model.md` under `specs/008-quality-debt-zero/` were read section by section, with an independent
-read-only audit alongside the edits. This is the full inspection list, including statements retained
-as correct. Line numbers refer to that immutable baseline; headings and task IDs identify the same
+read-only audit alongside the edits. The tables document the listed completion statements, including
+statements retained as correct; they are not an exhaustive inventory of every field definition. Line numbers refer to that immutable baseline; headings and task IDs identify the same
 statements after editing. Outcomes below describe the round-7 changes and retained requirements.
 
 ## Governing meaning
+
+[FR-002](../../../specs/008-quality-debt-zero/spec.md#functional-requirements) is the authoritative statement of the completion criterion; this section summarises it.
 
 Feature completion now means all **745 frozen inventory IDs** (332 SonarCloud, 413 Codacy) have exactly one non-open disposition confirmed by the applicable service evidence, checked after successful analyses of the final `main` SHA. The record also states both live counts and classifies/attributes remaining live findings; findings outside the frozen inventory and findings regrown by later work belong to issue #207. A nonzero live count is therefore compatible with completion. A frozen Codacy ID may remain visible because current-commit search does not expose ignore status, and a previously fixed ID may be reported again after later code growth; neither fact erases the earlier named confirmation.
 
@@ -31,7 +33,7 @@ Feature completion now means all **745 frozen inventory IDs** (332 SonarCloud, 4
 | `tasks.md` | Phase 5 Independent Test, 85 | Requires Sonar S3776 and Codacy function/parameter live counts to be zero. | **amended** — Frozen rule-family confirmations with later/regrown findings measured and attributed; original live-count-zero clauses in a dated note. |
 | `tasks.md` | Phase 6 Independent Test, 111 | Requires Codacy file-length live count zero outside `test/` after F. | **amended** — Frozen file-length confirmations with later/regrown findings measured and attributed; original service-zero clause in a dated note. |
 | `tasks.md` | T044 completion note, 155 | Says spec/plan/research were swept, but active zero/baseline-only clauses remain. | **amended** — Links this six-document inspection; prior implementation account and task checkbox retained. |
-| `data-model.md` | Opening, 5 | Says the inventory is the original export plus “rows added … (T030a),” which omits later additions and never states the frozen 745 aggregate. | **amended** — Explicitly frozen 745 with additions from T030a, T036 and T043e. |
+| `data-model.md` | Opening, 5 | Says the inventory is the original export plus “rows added … (T030a),” which omits later additions and never states the frozen 745 aggregate. | **amended** — Explicitly frozen 745; addition attribution corrected in round 8 to T030a (14) and T043e (24). |
 | `data-model.md` | Finding Identity, 22 | Gives 310 + 410 = 720 and only the 13 T030a additions; ends by saying acceptance is the service’s own count. | **amended** — Frozen 745 = 332/413 from 707 + 38; acceptance is confirmed coverage plus live counts/owners. Original count/growth/acceptance language remains in a dated note. |
 | `data-model.md` | Disposition state, 30 | Defines `fixed` / `excluded` as permanent current absence, which conflicts with retaining an honest confirmation when later work regrows the finding. | **amended** — Absence refers to the named confirming analysis; later regrowth is handled separately in the state-transition/confirmation descriptions. |
 | `data-model.md` | State transitions, 60 | Unconditionally sends every reappearing finding back to `open` for re-disposition. | **amended** — In-scope reopenings require re-disposition/history; later regrowth assigned to #207 retains its earlier confirmation and measurement. Old unconditional rule remains in a dated note. Each batch records available confirmations; F records remaining/final confirmations. |
@@ -68,7 +70,7 @@ The rows below cover the remaining completion, success, end-state, and final-cou
 | SC-001 / SC-002 parentheticals, 164–168 | Original final-analysis 0 / 0 outcomes. | **historical quotation** — explicitly dated 2026-09-13. |
 | SC-004–SC-008, 170–178 | Security verdicts, tests/coverage, gate integrity, dogfood, and PR scope/gate success. | **already compliant** — ordinary acceptance obligations. |
 | Assumptions, 182–183, 197–200 | Permission handoff, analysis configuration, harness/delegation boundaries, dogfood continuity and unchanged M1 contracts. | **already compliant** — operational assumptions; the maintainer list remains intermediate under C1 and FR-002. |
-| Scope amendment, 184–196 | Explains nonzero live counts, frozen-scope closure, outside ownership, and six findings regrown by #190. | **already compliant** — this is the controlling exception. |
+| Scope amendment, 184–196 | Explains nonzero live counts, frozen-scope closure, outside ownership, and six findings regrown by #190. | **already compliant** — this explains the scope rationale for FR-002. |
 
 ### `plan.md`
 
