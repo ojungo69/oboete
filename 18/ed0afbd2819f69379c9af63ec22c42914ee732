@@ -1,0 +1,36 @@
+scripts/quality-debt-services.mjs
+  s_a3b2da79705e65::t_b88d853769f4a9 18-19,279-281,296
+  s_323ed9aa11b336::t_4593ce4aef2595 131-155,165-167,171,175
+  s_a3b2da79705e65::t_7b1be79c866953 297
+scripts/quality-debt-record.mjs
+  s_a3b2da79705e65::t_b88d853769f4a9 175
+  s_323ed9aa11b336::t_4593ce4aef2595 184,190-208,220
+scripts/quality-debt-record-live.test.mjs
+  s_a3b2da79705e65::t_b59e5e8da7ae12 308-309,314,317,319
+scripts/quality-debt-record-sonar.test.mjs
+  s_a3b2da79705e65::t_b59e5e8da7ae12 52-54,68-70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "18ed0afbd2819f69379c9af63ec22c42914ee732",
+  "prompts": {},
+  "sessions": {
+    "s_323ed9aa11b336": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09b5f-c51f-78c0-b718-dcf266d78da3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
