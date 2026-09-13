@@ -1,0 +1,47 @@
+specs/008-quality-debt-zero/data-model.md
+  s_b668778e4d3117::t_da36a8c4149292 33,35-40,71-77
+  s_b668778e4d3117::t_e9723c57ab394a 78
+scripts/quality-debt-record.mjs
+  s_b668778e4d3117::t_c672bd8edbdf5b 8,173-178,181-183,185-194
+  s_b668778e4d3117::t_5bae0ffd1a6bb0 13-14
+scripts/quality-debt-record-confirm.test.mjs
+  s_b668778e4d3117::t_7665d7af50d472 8-9,24-27,60-61,68-69,143-144,149
+scripts/quality-debt-record-live.test.mjs
+  s_b668778e4d3117::t_d900bcf9dea4c2 459-480
+  s_b668778e4d3117::t_7665d7af50d472 9,207,265,306-308,311,330-331,339,359,364,373,378,382,408,410,413,417-418,421,425,436,442
+  s_b668778e4d3117::t_403cb079c11fe9 25,30,32,34-39
+  s_b668778e4d3117::t_bc088114b1c27e 84-115,117-120,124-125,127,129-132,136,141-162,165,171,173,176-178
+  s_b668778e4d3117::t_5bae0ffd1a6bb0 8,11,28,41-60,63-83,201,220-232
+  s_b668778e4d3117::t_6e4b658268a887 386-406
+  s_b668778e4d3117::t_be96061cded3dc 40
+  s_b668778e4d3117::t_90566ed882359c 481
+scripts/quality-debt-services.mjs
+  s_b668778e4d3117::t_c672bd8edbdf5b 16-22
+  s_b668778e4d3117::t_ba8bc56bcaf29a 234,242-250
+  s_b668778e4d3117::t_08f6114a3e2bc6 14,135-136,139-142,145-149,161,183-184,193,201,261,273-300,366
+  s_b668778e4d3117::t_45d17898e239b2 15
+scripts/quality-debt-record.test-support.mjs
+  s_b668778e4d3117::t_a60856f51663c1 127-131
+  s_b668778e4d3117::t_403cb079c11fe9 17-23
+scripts/quality-debt-record-services.test.mjs
+  s_b668778e4d3117::t_7665d7af50d472 8,12
+  s_b668778e4d3117::t_bc088114b1c27e 9,22,40,48,192,219,237,239-240,243
+specs/008-quality-debt-zero/quickstart.md
+  s_b668778e4d3117::t_da36a8c4149292 196-222
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "ec51fb6f32f82dbfe61693bd578d164de83bb450",
+  "prompts": {},
+  "sessions": {
+    "s_b668778e4d3117": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09b1a-83fc-7d81-aec3-f247fada437b",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
