@@ -212,8 +212,10 @@ async function checkLive(rows, ledger) {
   // Codacy's issue search reports the current analysed commit and does not distinguish ignored
   // issues: presence does not prove an ignore, and absence does not prove one either. An inventory id
   // absent from the search still has a PATCHable record; only that response confirms a resolved Codacy row.
-  // Both stay out of the triple map: the row says nothing about the rest of that
-  // (service, rule, file), so a sibling finding there is a new finding, not a lie.
+  // Resolved rows from both services stay out of the triple map: they claim only their own id,
+  // so a new sibling does not contradict that resolution. Confirmed fixed/excluded rows deliberately
+  // claim the rule no longer fires in that file. A triple match cannot distinguish regrowth from a
+  // new instance there; either contradicts that claim. An exact-id return identifies the specific finding.
   const resolvedIds = new Set(ledger
     .filter((row) => row.service === 'sonar' && row.state === 'resolved' && isConfirmed(row)).map(identity));
   const claims = liveClaims(rows, claimedIds);

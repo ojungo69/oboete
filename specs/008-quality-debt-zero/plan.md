@@ -6,7 +6,7 @@
 
 ## Summary
 
-Bring SonarCloud (310 open code smells) and Codacy (397 current issues) to zero on `main` without weakening any gate or changing behaviour. Four populations, four remedies, in this order: (1) one configuration pull request that stops rules that cannot apply to the file class (15 Sonar + 287 Codacy findings), judged complete only by the post-merge analysis; (2) security-flavoured findings read one by one in this session with written verdicts and any real fix merged first (≈ 30, of which ≈ 16 in `src/`); (3) mechanical rewrites delegated to Codex in rule-family batches (≈ 200 Sonar); (4) complexity and function-length refactors by extraction, delegated except for the security-owned modules and the viewer front end (Sonar S3776 58, Codacy function length 73 incl. 6 in harness tests, file length 31 with a decision for every file). Every finding ends as fixed / resolved-with-reason / excluded-by-file-class, recorded in `docs/evidence/quality-debt-2026-09.md`, and the end state is verified against the analysis that dropped it. **Amended 2026-09-13 (batch F)**: the end state was to be 0 / 0 on the services after the last analysis; PR #190 (feature 009 memory core) and PR #211 landed on `main` during the batches and their findings outnumber the frozen inventory, so the feature closes against that inventory and hands every live finding outside it to the follow-up round with its measurement and owner (spec.md "Scope amendment", research R11).
+Complete the confirmed dispositions of the frozen 745-id SonarCloud/Codacy inventory on `main`, recording each service's live count with its owner, without weakening any gate or changing behaviour. Four populations, four remedies, in this order: (1) one configuration pull request that stops rules that cannot apply to the file class (15 Sonar + 287 Codacy findings), judged complete only by the post-merge analysis; (2) security-flavoured findings read one by one in this session with written verdicts and any real fix merged first (≈ 30, of which ≈ 16 in `src/`); (3) mechanical rewrites delegated to Codex in rule-family batches (≈ 200 Sonar); (4) complexity and function-length refactors by extraction, delegated except for the security-owned modules and the viewer front end (Sonar S3776 58, Codacy function length 73 incl. 6 in harness tests, file length 31 with a decision for every file). Every finding ends as fixed / resolved-with-reason / excluded-by-file-class, recorded in `docs/evidence/quality-debt-2026-09.md`, and the end state is verified against the analysis that dropped it. *(Amended 2026-09-13 for scope and 2026-09-14 for the opening; the original opening was "Bring SonarCloud (310 open code smells) and Codacy (397 current issues) to zero on `main` without weakening any gate or changing behaviour." The end state was to be 0 / 0 on the services after the last analysis; PR #190 (feature 009 memory core) and PR #211 landed on `main` during the batches and their findings outnumber the frozen inventory, so the feature closes against that inventory and hands every live finding outside it to the follow-up round with its measurement and owner; see spec.md "Scope amendment", research R11.)*
 
 ## Technical Context
 
@@ -72,7 +72,7 @@ sonar-project.properties          # + sonar.plsql.file.suffixes=pks,pkb
 .codacy.yml                       # rewritten: exclude_paths + per-engine exclude_paths (research R4)
 .markdownlint.json                # new: default false + the standard's possible rules + MD024 siblings_only (Codacy reads it on its own)
 docs/evidence/quality-debt-2026-09.md          # new: disposition record (data-model.md format)
-docs/evidence/quality-debt-2026-09/*.json      # new: the two inventories (they grow when a service reports a finding no row covers) + batch allocation
+docs/evidence/quality-debt-2026-09/*.json      # the frozen 745-id inventories + batch allocation
 scripts/quality-debt-record.mjs   # new: CLI, allocation, record generation, --check
 scripts/quality-debt-ledger.mjs   # new: ledger read/write and validation shared by the CLI and the service module
 scripts/quality-debt-services.mjs # new: --apply-sonar / --apply-codacy / --confirm (the only module that talks to a service)
@@ -92,6 +92,8 @@ scripts/
 
 test/                             # matching tests follow extracted modules; assertions stay unchanged
 ```
+
+(Amended 2026-09-14; the original inventory comment read "they grow when a service reports a finding no row covers". Growth ended at batch F's scope freeze; later findings are measured and attributed to issue #207.)
 
 **Structure Decision**: Existing single-package layout. New files are limited to analysis configuration, the disposition record, and the source/test seams listed in research R7. Added tests cover previously untested rendering/frame/fixture-validation boundaries.
 

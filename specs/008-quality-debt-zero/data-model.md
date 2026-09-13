@@ -2,7 +2,7 @@
 
 **Date**: 2026-09-07 | **Plan**: [plan.md](./plan.md)
 
-The feature has no runtime data. Its only artefact is the disposition record, which maps every finding in the two inventories to an end state — the 2026-09-07 export and the rows added while the feature ran (T030a).
+The feature has no runtime data. Its only artefact is the disposition record, which maps every finding in the frozen 745-id inventory to an end state — the 2026-09-07 export and the additions recorded in T030a, T036 and T043e.
 
 ## Entities
 
@@ -13,13 +13,13 @@ One row reported by a service on `main` — as of 5e03d67f for the rows exported
 | Field | Source | Notes |
 |---|---|---|
 | `service` | fixed | `sonar` or `codacy` |
-| `id` | service | SonarCloud issue key (`AZ...`) or Codacy `issueId` (non-empty lowercase hex preserved exactly, with no inferred width restriction). Stable across analyses while the code line survives. |
+| `id` | service | SonarCloud issue key (`AZ...`) or Codacy `issueId` (non-empty lowercase hex preserved exactly, with no inferred width restriction). Preserved as the service's native value; Sonar can re-key IDs and Codacy content-hash IDs can change when a line moves, so identity across analyses is not guaranteed. |
 | `rule` | service | Sonar rule key (`typescript:S3776`) or Codacy pattern id (`Lizard_nloc-medium`) |
 | `severity` | service | Sonar `BLOCKER…INFO`; Codacy `Error/Warning/Info` |
 | `file`, `line` | service | Repository-relative path; line as of the commit the row was exported from — `5e03d67f` for the 2026-09-07 rows, `9e52c3c2` for the 13 added on 2026-09-08 |
 | `population` | derived | `inapplicable` / `mechanical` / `complexity` / `security` (research R1) |
 
-Identity: `(service, id)`. The two inventories (`sonar-main-issues.json`, `codacy-main-issues.json`) hold every finding that must be dispositioned; 310 + 410 rows. They start as the 2026-09-07 export of `5e03d67f` and grow only when a service reports a finding no row covers — 13 such rows were added on 2026-09-08 from the live search at `9e52c3c2` (T030a). A row is never removed: a finding that stops being reported keeps its row and its disposition, because the acceptance is the service's own count, not the size of this file.
+Identity: `(service, id)`. The two inventories (`sonar-main-issues.json`, `codacy-main-issues.json`) hold the frozen **745 IDs (332 Sonar, 413 Codacy)** that must be dispositioned. They began with the 707-row export of `5e03d67f` on 2026-09-07; T030a, T036 and T043e added 38 IDs before batch F froze the scope. A row is never removed: a finding that stops being reported keeps its row and its disposition. Acceptance requires a confirmed disposition for every frozen inventory ID, plus each service's live count and the owner of its remaining findings (FR-002; issue #207). *(Amended 2026-09-14; the original text described "310 + 410 rows" that "grow only when a service reports a finding no row covers" and said "the acceptance is the service's own count, not the size of this file".)*
 
 ### Disposition
 
@@ -27,12 +27,13 @@ The end state of one Finding. Exactly one per Finding (FR-001).
 
 | Field | Values | Rule |
 |---|---|---|
-| `state` | `fixed` / `resolved` / `excluded` | `fixed`: the code at that line changed in a merged PR and the service no longer reports the id. `resolved`: the id is closed on the service by a transition (Sonar `wontfix` / `falsepositive`) or an ignore (Codacy) that carries the reason. `excluded`: a configuration change stops the rule for the file class; the id closes at the next analysis. |
+| `state` | `fixed` / `resolved` / `excluded` | `fixed`: the code at that line changed in a merged PR and the service no longer reports the id at the named confirming analysis. `resolved`: the id is closed on the service by a transition (Sonar `wontfix` / `falsepositive`) or an ignore (Codacy) that carries the reason. `excluded`: a configuration change stops the rule for the file class; the id closes at the next analysis, which is recorded as its confirmation. |
 | `where` | PR number / comment text / config line | `fixed` → `#NNN`; `resolved` → the one-sentence reason as posted on the service; `excluded` → the file and line of the configuration change (for example `.codacy.yml engines.lizard.exclude_paths`) |
 | `verdict` | free text, security population only | `controller — validation — sink — effect — real / not applicable` (research R6). Required for every `fixed` or `resolved` Finding whose rule is security-flavoured (Codacy `Semgrep_*` and `shellcheck_SC2024`, Sonar S8786/S4036/S8707), whatever the file; an `excluded` Finding is covered by the file-class review in research R4 instead. |
-| `confirmed` | analysis id / commit SHA / HTTP response, or absent | The service's agreement with `state`: for `fixed` and `excluded`, the SonarCloud analysis id or the Codacy commit SHA whose analysis no longer lists the id; for `resolved`, the HTTP status and timestamp of the Sonar comment after resolution or the Codacy ignore `PATCH`. Codacy's issue search reports only issues of the current analyzed commit: an id rewritten by an earlier batch can be absent while its record still exists and accepts PATCH, so a Codacy `resolved` row always needs the PATCH receipt. Sonar completion and `--confirm` remove `transitioned`. Absent until batch F records it; `--check` treats an unconfirmed row as `open`. |
+| `confirmed` | analysis id / commit SHA / HTTP response, or absent | The service's agreement with `state`: for `fixed` and `excluded`, the SonarCloud analysis id or the Codacy commit SHA whose analysis no longer lists the id; for `resolved`, the HTTP status and timestamp of the Sonar comment after resolution or the Codacy ignore `PATCH`. For later regrowth covered by the scope amendment, a `fixed` row may instead retain a before/after measurement tied to the earlier closing SHA and the follow-up owner (research R11; issue #207); it must not claim a service absence that was never observed. Codacy's issue search reports only issues of the current analyzed commit: an id rewritten by an earlier batch can be absent while its record still exists and accepts PATCH, so a Codacy `resolved` row always needs the PATCH receipt. Sonar completion and `--confirm` remove `transitioned`. Absent until the applicable analysis or service receipt is recorded; each batch records available confirmations, and batch F records the remaining/final confirmations. `--check` treats an unconfirmed row as `open`. |
 | `reason` | Codacy only, one of `AcceptedUse`, `FalsePositive`, `NotExploitable`, `TestCode`, `ExternalCode` | The enumerated reason the Codacy API stores alongside the free-text `where` comment. |
 | `transitioned` | Sonar `resolved` rows only, ISO time, or absent | Crash-safety record written by `--apply-sonar` after the transition succeeds and before the comment is posted. No decision reads this marker: each run reads live status and resolution, and an `OPEN` or `REOPENED` issue still needs a transition even when the marker exists. A successful comment writes `confirmed` and removes `transitioned`, so a reopened completed issue is redone by clearing `confirmed` alone. |
+| `history` | array of `{from, to, when, why}`, or absent | Every re-disposition MUST append an entry, including a planned `resolved` row changed to confirmed `fixed`: previous state, new state, re-disposition date, and the evidence and reason for the change. Keep exactly one current row per `(service, id)`; the generator renders these entries in `## History` as `service / id / from / to / when / why`. |
 
 `--apply-sonar` reads pending IDs in chunks of 100 without an open-only filter. The ledger transition
 maps to the expected service resolution: `wontfix` (the default) → `WONTFIX`, `falsepositive` →
@@ -57,7 +58,7 @@ that commit, not whether an older issue record still exists. HTTP 404 refuses th
 confirmation and continues with later rows; one final error names the refused count and IDs.
 Every other request failure aborts immediately.
 
-State transitions: a Finding is `open` until its batch merges; the ledger row written at merge time is a **planned** end state; it becomes confirmed `fixed` when the next analysis no longer lists the id and the batch changed that line; confirmed `resolved` when the service action succeeds; confirmed `excluded` when the configuration PR merges **and** the following analysis no longer lists the id. Batch F records the confirmations; it owns no Finding. A Finding that reappears (for example because a rewrite was reverted) goes back to `open` and must be dispositioned again; the final tables always hold **exactly one row per `(service, id)`**, and the earlier state is moved to a separate `## History` section (`id | from | to | when | why`).
+State transitions: a Finding is `open` until its batch merges; the ledger row written at merge time is a **planned** end state; it becomes confirmed `fixed` when the next analysis no longer lists the id and the batch changed that line; confirmed `resolved` when the service action succeeds; confirmed `excluded` when the configuration PR merges **and** the following analysis no longer lists the id. Each batch records its available confirmations; batch F records the remaining/final confirmations and owns no Finding. A Finding reopened within this feature's scope goes back to `open` and must be dispositioned again. Later regrowth assigned to the follow-up round by the scope amendment instead keeps its earlier named confirmation, with the before/after measurement and owner recorded (research R11; issue #207). The final tables always hold **exactly one row per `(service, id)`**; every re-disposition appends to that row's `history`, rendered in `## History` as `service / id / from / to / when / why`. *(Amended 2026-09-14; the original unconditional rule was "A Finding that reappears (for example because a rewrite was reverted) goes back to `open` and must be dispositioned again".)*
 
 ### Batch
 
@@ -98,9 +99,17 @@ only and ID-level only: `openSonarIssues` passes `resolved=false`, so the ID ret
 resolution was reopened. All 29 `resolved` Codacy rows have HTTP 204 receipts, 27 of them from this
 batch's calls, but Codacy's current-commit search takes no ignore filter and exposes no ignore field:
 presence does not distinguish an ignored issue, and absence does not prove resolution because four
-omitted ids still had PATCHable records. A `resolved` Codacy row therefore stays out of
+omitted ids still had PATCHable records. The same silence does confirm a `fixed` or `excluded` row,
+because those two states claim something else: not that a flag was set on the service, but that the
+named analysis of a named commit does not report the finding. Codacy's search is scoped to the
+current analysed commit, so it measures exactly that claim, and `verifyCodacyCommit` proves the
+analysis ran and ended before any row is stamped. A `resolved` row claims a service-side ignore, and
+the search exposes no ignore field, so its silence measures the wrong thing and only the `PATCH`
+response settles it. A `resolved` Codacy row therefore stays out of
 `contradicted`, and no `resolved` row joins the triple map — it says nothing about the rest of that
-`(service, rule, file)`, so a sibling finding there is a new finding.
+`(service, rule, file)`, so a sibling finding there is a new finding. A triple match for confirmed
+`fixed`/`excluded` rows cannot distinguish regrowth from a new instance of that rule in that file;
+either means their claim no longer holds. An exact-ID return identifies the specific finding.
 Claims use the frozen inventory's rule and file, never ledger copies. Comparison validates Sonar
 `rule` and `component` (including a non-empty path after `ojungo69_free-mem:`), and Codacy
 `patternInfo.id` and `filePath` where it reads them. ID validation remains shared by all searches;

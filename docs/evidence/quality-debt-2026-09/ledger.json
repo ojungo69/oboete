@@ -2534,7 +2534,15 @@
   "state": "fixed",
   "where": "#185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here",
   "confirmed": "c36a88b6-4b7e-4237-8340-792e473849b2",
-  "verdict": "The discarded JSON.parse(JSON.stringify(event)) is a serialisability check for the exact call that writes the JSONL line; structuredClone accepts values JSON.stringify rejects (BigInt) and drops nothing, so it would not catch the same inputs."
+  "verdict": "The discarded JSON.parse(JSON.stringify(event)) is a serialisability check for the exact call that writes the JSONL line; structuredClone accepts values JSON.stringify rejects (BigInt) and drops nothing, so it would not catch the same inputs.",
+  "history": [
+   {
+    "from": "resolved",
+    "to": "fixed",
+    "when": "2026-09-13",
+    "why": "The first --apply-sonar run reported this id absent from the open search; a query without resolved=false returned status: CLOSED, resolution: FIXED, closed at 2026-09-12T03:20:08Z by the analysis of e27bb029. The planned resolved row was re-dispositioned as fixed against analysis c36a88b6-4b7e-4237-8340-792e473849b2, keeping its read verdict."
+   }
+  ]
  },
  {
   "service": "sonar",
@@ -3195,7 +3203,15 @@
   "state": "fixed",
   "where": "#185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here",
   "confirmed": "c36a88b6-4b7e-4237-8340-792e473849b2",
-  "verdict": "childEnv returns env from two exits, but the early exit skips the loop that deletes credential-named keys, so the two returned objects differ; the function does not always return the same value."
+  "verdict": "childEnv returns env from two exits, but the early exit skips the loop that deletes credential-named keys, so the two returned objects differ; the function does not always return the same value.",
+  "history": [
+   {
+    "from": "resolved",
+    "to": "fixed",
+    "when": "2026-09-13",
+    "why": "The first --apply-sonar run reported this id absent from the open search; a query without resolved=false returned status: CLOSED, resolution: FIXED, closed at 2026-09-12T03:20:08Z by the analysis of e27bb029. The planned resolved row was re-dispositioned as fixed against analysis c36a88b6-4b7e-4237-8340-792e473849b2, keeping its read verdict."
+   }
+  ]
  },
  {
   "service": "sonar",
@@ -3259,7 +3275,15 @@
   "state": "fixed",
   "where": "#185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here",
   "confirmed": "c36a88b6-4b7e-4237-8340-792e473849b2",
-  "verdict": "waitUntil returns last from two exits, but last holds the first truthy result or the final falsy value at the deadline; the function does not always return the same value."
+  "verdict": "waitUntil returns last from two exits, but last holds the first truthy result or the final falsy value at the deadline; the function does not always return the same value.",
+  "history": [
+   {
+    "from": "resolved",
+    "to": "fixed",
+    "when": "2026-09-13",
+    "why": "The first --apply-sonar run reported this id absent from the open search; a query without resolved=false returned status: CLOSED, resolution: FIXED, closed at 2026-09-12T03:20:08Z by the analysis of e27bb029. The planned resolved row was re-dispositioned as fixed against analysis c36a88b6-4b7e-4237-8340-792e473849b2, keeping its read verdict."
+   }
+  ]
  },
  {
   "service": "sonar",
@@ -3323,7 +3347,15 @@
   "state": "fixed",
   "where": "#185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here",
   "confirmed": "c36a88b6-4b7e-4237-8340-792e473849b2",
-  "verdict": "runHook and runCapture consume this numeric return; returning undefined or a failure code would violate their specified always-zero CLI exit contract."
+  "verdict": "runHook and runCapture consume this numeric return; returning undefined or a failure code would violate their specified always-zero CLI exit contract.",
+  "history": [
+   {
+    "from": "resolved",
+    "to": "fixed",
+    "when": "2026-09-13",
+    "why": "The first --apply-sonar run reported this id absent from the open search; a query without resolved=false returned status: CLOSED, resolution: FIXED, closed at 2026-09-12T03:20:08Z by the analysis of e27bb029. The planned resolved row was re-dispositioned as fixed against analysis c36a88b6-4b7e-4237-8340-792e473849b2, keeping its read verdict."
+   }
+  ]
  },
  {
   "service": "sonar",
@@ -3686,7 +3718,15 @@
   "state": "fixed",
   "where": "#185 — closed by the analysis of e27bb029 before the transition was applied; the finding had been read and judged not worth changing, and that verdict is kept here",
   "confirmed": "c36a88b6-4b7e-4237-8340-792e473849b2",
-  "verdict": "String(row.session_id ?? '') is the intended coercion of whatever a Grok fixture payload carries as session_id (a number is a valid key for GROK_SESSION_ID and the resume lookup); a string-only guard would change that key"
+  "verdict": "String(row.session_id ?? '') is the intended coercion of whatever a Grok fixture payload carries as session_id (a number is a valid key for GROK_SESSION_ID and the resume lookup); a string-only guard would change that key",
+  "history": [
+   {
+    "from": "resolved",
+    "to": "fixed",
+    "when": "2026-09-13",
+    "why": "The first --apply-sonar run reported this id absent from the open search; a query without resolved=false returned status: CLOSED, resolution: FIXED, closed at 2026-09-12T03:20:08Z by the analysis of e27bb029. The planned resolved row was re-dispositioned as fixed against analysis c36a88b6-4b7e-4237-8340-792e473849b2, keeping its read verdict."
+   }
+  ]
  },
  {
   "service": "sonar",

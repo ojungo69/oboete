@@ -19,7 +19,7 @@
   them. The SonarCloud token needs read scope + issue administration (verified 2026-09-07 with
   `additionalFields=transitions`).
 - Codacy: anonymous read works for the public repository; per-issue ignores need an account API token (`CODACY_API_TOKEN`) for `npx @codacy/codacy-cloud-cli` (checkpoint C1 in the plan).
-- Inventories: `sonar-main-issues.json` and `codacy-main-issues.json` exported on 2026-09-07 (session scratchpad; copied next to the disposition record when batch A opens).
+- Inventories: the frozen 745 IDs in `sonar-main-issues.json` (332) and `codacy-main-issues.json` (413) next to the disposition record: the 2026-09-07 exports (310/397) plus the 38 additions recorded in T030a, T036 and T043e. *(Clarified 2026-09-14; the original prerequisite described only the files "exported on 2026-09-07".)*
 
 ## Per-batch verification (every pull request)
 
@@ -204,6 +204,11 @@ missing or unconfirmed sibling prevents a triple claim. A confirmed `resolved` S
 back from the search has had its resolution reopened, which `resolved=false` makes meaningful; the
 same test is not applied to Codacy, whose search returns ignored issues undistinguished, nor to any
 triple, because a `resolved` row claims only its own ID. The claim's rule and file come from the frozen inventory, never a ledger copy.
+A triple match cannot distinguish a regrown finding from a new instance of the same rule in the same
+file. It deliberately reports both: either means the confirmed `fixed`/`excluded` claim that the rule
+no longer fires in that file no longer holds. Sonar can re-key issue IDs, and Codacy's content-hash
+IDs can change when a line moves, so the triple does not establish a stable finding identity across
+analyses. An exact-ID return is the stronger signal: the specific finding is back.
 Live comparisons validate Sonar `rule` and `component` (stripping exactly `ojungo69_free-mem:` and
 requiring a non-empty remainder), or Codacy `patternInfo.id` and `filePath`. Only `--check-live`
 requires those comparison fields; `--confirm` and apply modes still validate IDs but do not read
