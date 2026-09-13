@@ -14,7 +14,11 @@ completion marks in this file and both were parsed).
 own note records an acceptance condition it does not meet; the scorecard below is the run as executed
 over the 56 tasks checked when it ran, 54 of which remain checked. Every verdict below records whether
 a task's named artefacts were found, not whether its acceptance thresholds passed — which is why
-T039's rows read VERIFIED on evidence files that exist while its own note keeps the box open.
+T039's rows read VERIFIED on evidence files that exist while its own note keeps the box open. Two
+statements below have since been settled and are kept as the run recorded them: T045's criterion, and
+the `1 unconfirmed` row `codacy:7935279dc22d4b6af001014179ebdff1` that was waiting for the next
+analysis — Codacy's analysis of the merge commit `199cf59d` observed its id gone, so the row is
+confirmed and `--check` exits 0 (PR #227).
 
 > ⚠️ **FRESH SESSION ADVISORY**: For maximum reliability, run `/speckit.verify-tasks`
 > in a **separate** agent session from the one that performed `/speckit.implement`.
