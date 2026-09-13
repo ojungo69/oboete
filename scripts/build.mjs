@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-// Builds the engine bundle dist/oboete.mjs and compiles the tests to build/test/**/*.test.mjs.
+// Builds the engine bundle dist/engine.mjs, its launcher dist/oboete.mjs, and compiles the tests
+// to build/test/**/*.test.mjs.
 // Bundle composition is security-owned (plan.md "Structure Decision", research R2): only the
 // hook-path packages ride inside the engine file; the heavy runtime packages stay in node_modules
 // and are imported lazily off the hook path (constitution principle II, amendment A1).
 import { build } from 'esbuild';
-import { chmodSync, existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -35,10 +36,18 @@ for (const dir of ['dist', 'build']) rmSync(join(root, dir), { recursive: true, 
 await build({
   ...common,
   entryPoints: [join(root, 'src/cli.ts')],
-  outfile: join(root, 'dist/oboete.mjs'),
+  outfile: join(root, 'dist/engine.mjs'),
   external: EXTERNAL,
-  banner: { js: '#!/usr/bin/env node\n' + requireShim },
+  banner: { js: requireShim },
 });
+
+// dist/oboete.mjs is a launcher rather than the engine itself: Node compiles an entry file before
+// any of that file's own code runs, so a single-file bundle cannot enable the V8 compile cache for
+// itself (issue #210). src/launcher.mjs is copied rather than bundled -- it must stay small enough
+// to compile uncached on every invocation, and being a real source file keeps the one new piece of
+// hook-path code under eslint like everything else (eslint.config.js names it in both `files` lists;
+// a `.mjs` under src/ matched neither). Its reasoning lives in that file.
+copyFileSync(join(root, 'src/launcher.mjs'), join(root, 'dist/oboete.mjs'));
 chmodSync(join(root, 'dist/oboete.mjs'), 0o755);
 
 // The Pi extension is a second entry point rather than an export of the engine: it is imported into
@@ -78,6 +87,10 @@ const walk = (dir) => {
   }
 };
 if (existsSync(join(root, 'test'))) walk(join(root, 'test'));
+// One helper is an entry point of its own: `package.json` loads it into the test runner with
+// `--import`, so it has to exist as a file rather than only inside the bundles that import it.
+const runnerImport = join(root, 'test/helpers/compile-cache.ts');
+if (existsSync(runnerImport)) tests.push(runnerImport);
 
 if (tests.length > 0) {
   await build({
@@ -98,4 +111,4 @@ if (tests.length > 0) {
   });
 }
 
-console.log(`built dist/oboete.mjs and ${tests.length} test file(s)`);
+console.log(`built dist/engine.mjs, dist/oboete.mjs and ${tests.length} test file(s)`);

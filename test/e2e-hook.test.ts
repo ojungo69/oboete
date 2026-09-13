@@ -3,29 +3,21 @@
 // contracts/cli.md (`hook`), plan.md "Delivery order" step 1 (replay skeleton).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
-import { fileURLToPath } from 'node:url';
 
 import { openDatabase } from '../src/db/open.js';
 
-type Json = Record<string, unknown>;
+import { repositoryRoot, warmCompileCache } from './helpers/compile-cache.js';
 
-function repositoryRoot(): string {
-  let directory = fileURLToPath(new URL('.', import.meta.url));
-  for (;;) {
-    if (existsSync(join(directory, 'package.json'))) return directory;
-    const parent = dirname(directory);
-    assert.notEqual(parent, directory, 'the repository root must contain package.json');
-    directory = parent;
-  }
-}
+type Json = Record<string, unknown>;
 
 const ROOT = repositoryRoot();
 const BUNDLE = join(ROOT, 'dist', 'oboete.mjs');
+warmCompileCache(BUNDLE);
 // A capture hook is budgeted at 300 ms (FR-002). The number is reported on every run; the hard
 // assertion is looser because a shared machine adds process start time this test cannot control.
 const BUDGET_MS = 300;

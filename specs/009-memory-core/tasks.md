@@ -279,3 +279,39 @@ writers require separate worktrees. No deployment follows merely from an increme
   passes 1,213 unit/migration/scripts on each Node, serial E2E/fault 202/202 on Node 22.16.0 and
   pack-check; the Node 24.16.0 serial run hit the documented load-only seed miss (201/202) while the
   resource measurement ran concurrently and is rerun in isolation afterwards.
+- T042 (hook cold start, issue #210): the capture hook's median moved 187.3 ms → 222.2 ms when US6
+  merged. `dist/` is now `src/launcher.mjs` copied to `dist/oboete.mjs` plus the bundle at
+  `dist/engine.mjs`, so the V8 compile cache is enabled before the bundle is compiled; interleaved
+  measurement puts the launcher build back at the pre-US6 baseline (184.5/186.9/192.6 ms against
+  218.9/217.1/214.8 ms). The `/code-review` pass on the first version found the split had also split
+  what "the bundle" means and that the installer had followed the wrong half — `oboete setup` wrote
+  `dist/engine.mjs` into every hook command, so the fix reached no install — plus a cache directory
+  trusted rather than checked after `mkdirSync`; both are fixed and pinned, and the six call sites
+  that name one of the two files are now deliberate. Two further review rounds found that the
+  launcher had no eslint rules at all (a `.mjs` under `src/` matched neither `files` list) and that
+  checking the versioned directories V8 writes inside the cache disabled the cache from the second
+  run onward wherever the umask is 002 -- silently, with every test still green; the check is now on
+  the cache directory's own traverse bits and the pin corrupts an entry to tell a live cache from a
+  dead one. Two rounds after that found a symlink planted at the `oboete` directory: recursive
+  `mkdir` follows one, so the launcher would have created `compile` inside somebody else's tree and
+  written half a megabyte of bytecode there while every check on `compile` itself passed -- the
+  parent is checked before `compile` is created now -- and a named import of `enableCompileCache`,
+  which is resolved when the module is linked, before any statement runs and outside the reach of
+  the surrounding `try`, so on a Node older than 22.1 it was a `SyntaxError` and a non-zero exit for
+  every command including the hook contracted to exit 0 whatever happens; it is a namespace import
+  and an optional call now. A last round moved the cache itself: `$XDG_CACHE_HOME/oboete/compile`
+  writes outside the tree `OBOETE_HOME` bounds, which `CONSTITUTION.md` Principle VI does not allow
+  and explicitly defers, so it is `$OBOETE_HOME/cache/compile` and the launcher resolves the home the
+  way `src/paths.ts` does. That left every test spawning on a cold cache -- 6 % on the fault suites
+  locally, and on CI a jump from a 215 ms median to 246 ms over 48 hook invocations that failed
+  `fault-storage` and `e2e-hook` on both runs -- so both `node --test` runs load
+  `test/helpers/compile-cache.ts` with `--import` and every test and every CLI it spawns shares one
+  `NODE_COMPILE_CACHE`, which puts the suites back at 41.8 s. Wiring three spawn sites instead of
+  the runner was not enough: the unit batch is what leaves the cache warm for the timed suites, and
+  without it the first serial spawn still spent its whole budget compiling. The medians were re-measured interleaved and still show the same ~36 ms. The same round wrapped the launcher's own `import` of the engine: the split put a
+  failure ahead of the handler in `src/cli.ts` that gives `hook`, `capture` and `inject` their
+  contracted exit 0, so a missing engine printed a Node stack over an agent's session; the launcher
+  now repeats that handler for those three commands and rethrows for every other. Cache directory, the rejected alternatives, the
+  accepted `NODE_COMPILE_CACHE` and cache-growth costs and what the numbers do not claim are in
+  `contracts/injection-performance.md`; the pin is `test/unit/launcher.test.ts`. T042 stays
+  unchecked: the 1,000/10,000/100,000-event measurement it names is still open.

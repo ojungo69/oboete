@@ -172,6 +172,11 @@ function expandPayload(
   return walk(payload, (text) => expandString(text, parts));
 }
 
+/** The file to run: `dist/oboete.mjs`, the launcher, because that is what `bin` and the installed
+ *  hook commands name and its compile cache is part of what the replay measures. The engine next to
+ *  it, when there is one, is what `siblingEngine` names alongside it, with its own size: the
+ *  launcher is a couple of kilobytes, most of it comment, so the report gives both numbers rather
+ *  than one that could be either. */
 function bundlePath(): string {
   if (process.argv[1] !== undefined && existsSync(process.argv[1])) return resolve(process.argv[1]);
   return join(repositoryRoot(), 'dist', 'oboete.mjs');

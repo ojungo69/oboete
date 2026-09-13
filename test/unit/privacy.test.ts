@@ -408,29 +408,38 @@ test('fail-closed: a detector that never answers is cut off at the deadline', as
   }
 });
 
+// Both bundle-worker tests run inside `withTempHome`: a worker copies the parent's environment as
+// it starts, and the bundle is the launcher, which makes `cache/compile` inside whatever
+// `OBOETE_HOME` names before it does anything else. Without one, that lands half a megabyte of
+// bytecode in the developer's own `~/.oboete` -- and in the `check` job's unit batch, which is the
+// one run that does not set `NODE_COMPILE_CACHE` (issue #210).
 test('fail-open: the engine bundle worker returns what detectSync returns', async () => {
-  const bundle = resolve(process.cwd(), 'dist/oboete.mjs');
-  for (const text of [corpusLine('github-classic-pat').text, CLEAN_TEXT]) {
-    const inWorker = await detectInWorker(detectorInput(text), { cutoffMs: 5_000, workerScript: bundle });
-    assert.deepEqual(inWorker, await detectSync(detectorInput(text)));
-  }
+  await withTempHome(async () => {
+    const bundle = resolve(process.cwd(), 'dist/oboete.mjs');
+    for (const text of [corpusLine('github-classic-pat').text, CLEAN_TEXT]) {
+      const inWorker = await detectInWorker(detectorInput(text), { cutoffMs: 5_000, workerScript: bundle });
+      assert.deepEqual(inWorker, await detectSync(detectorInput(text)));
+    }
+  });
 });
 
 test('fail-closed: the engine bundle stays silent in a worker it does not recognize', async () => {
   // FR-021: the hook writes nothing but the pack to stdout, so a worker carrying a role this build
   // does not know must not fall through to the CLI dispatch.
-  const worker = new Worker(resolve(process.cwd(), 'dist/oboete.mjs'), {
-    workerData: { role: 'a role from a newer build' },
-    stdout: true,
+  await withTempHome(async () => {
+    const worker = new Worker(resolve(process.cwd(), 'dist/oboete.mjs'), {
+      workerData: { role: 'a role from a newer build' },
+      stdout: true,
+    });
+    const chunks: Buffer[] = [];
+    worker.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
+    const code = await new Promise<number>((resolveExit, rejectExit) => {
+      worker.on('exit', resolveExit);
+      worker.on('error', rejectExit);
+    });
+    assert.equal(code, 0);
+    assert.equal(Buffer.concat(chunks).toString('utf8'), '');
   });
-  const chunks: Buffer[] = [];
-  worker.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
-  const code = await new Promise<number>((resolveExit, rejectExit) => {
-    worker.on('exit', resolveExit);
-    worker.on('error', rejectExit);
-  });
-  assert.equal(code, 0);
-  assert.equal(Buffer.concat(chunks).toString('utf8'), '');
 });
 
 test('egress: the seeded destination_rules table decides every combination', async () => {

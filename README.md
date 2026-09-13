@@ -368,7 +368,7 @@ the next turn.
 
 ```bash
 npm ci
-npm run build          # esbuild: dist/oboete.mjs, build/test/*.mjs, embedded viewer assets
+npm run build          # esbuild: dist/engine.mjs + dist/oboete.mjs launcher, build/test/*.mjs, viewer assets
 npm run typecheck      # tsc --noEmit and the viewer project
 npm run lint           # eslint
 npm test               # node --test on the compiled tests

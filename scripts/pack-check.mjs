@@ -21,6 +21,7 @@ const NPM_TIMEOUT_MS = 10 * 60 * 1000;
 export const LIMIT_BYTES = 30 * 1024 * 1024;
 export const REQUIRED_PACK_FILES = [
   'dist/oboete.mjs',
+  'dist/engine.mjs',
   'dist/pi-extension.mjs',
   'dist/viewer/app.js',
   'dist/viewer/app.css',
@@ -182,11 +183,22 @@ function installAndVerify({ filename, tarball }, prefix, env) {
 
   const bin = join(prefix, 'bin', 'oboete');
   if (!existsSync(bin)) throw new Error(`installed bin missing: ${bin}`);
+  // A home of its own for the smoke run: the installed launcher makes `cache/compile` inside
+  // whatever `OBOETE_HOME` names (#210), and a packaging check has no business writing into the
+  // data directory of whoever ran it. The two compile-cache variables go with it -- Node reads them
+  // before the launcher chooses anything, so an inherited one would either put the cache outside
+  // this directory or turn it off, and either way the run would not be the installed launcher's
+  // own behaviour, which is what a packaging check is here to see.
+  const smokeHome = mkdtempSync(join(tmpdir(), 'oboete-pack-'));
+  const smokeEnv = { ...process.env, OBOETE_HOME: smokeHome };
+  delete smokeEnv.NODE_COMPILE_CACHE;
+  delete smokeEnv.NODE_DISABLE_COMPILE_CACHE;
   const version = spawnSync(bin, ['--version'], {
     encoding: 'utf8',
     timeout: 30_000,
-    env: process.env,
+    env: smokeEnv,
   });
+  rmSync(smokeHome, { recursive: true, force: true });
   if (version.error) throw new Error(`oboete --version: ${version.error.message}`);
   if (version.status !== 0) {
     const detail = (version.stderr || version.stdout || `exit ${String(version.status)}`).trim();

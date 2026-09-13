@@ -1,6 +1,6 @@
 # CLI Contract: `oboete` (M1)
 
-Binary: `oboete` (npm `bin`), engine `dist/oboete.mjs`. All commands accept `--json` where output
+Binary: `oboete` (npm `bin`), entry point `dist/oboete.mjs`, which since issue #210 is the launcher that enables the V8 compile cache and imports the engine, `dist/engine.mjs`, beside it. All commands accept `--json` where output
 is listed as structured. Exit codes: `0` success or explicit empty/degraded result, `1` target not
 found or partially degraded, `2` invalid input or confirmation missing, `3` storage or I/O failure.
 Commands invoked by agents (`hook`, `capture`, `inject`) always exit `0`.

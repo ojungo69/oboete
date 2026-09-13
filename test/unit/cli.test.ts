@@ -10,10 +10,17 @@ import { withTempHome } from '../helpers/home.js';
 
 const root = fileURLToPath(new URL('../../..', import.meta.url));
 const bin = join(root, 'dist/oboete.mjs');
+// dist/oboete.mjs is the launcher that enables the compile cache (scripts/build.mjs, #210);
+// the dispatch and its uncaught-error handling live in the engine file it imports, and only the
+// engine can be re-evaluated per command with a query string.
+const engine = join(root, 'dist/engine.mjs');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
   version: string;
 };
 
+// Called inside `withTempHome`, always: the launcher makes `cache/compile` inside whatever
+// `OBOETE_HOME` names before it hands over to the engine, so a spawn without one leaves that
+// directory in the developer's own `~/.oboete` -- the one thing the suite is not allowed to touch.
 function run(args: string[]) {
   const env = { ...process.env };
   delete env.FORCE_COLOR;
@@ -21,18 +28,22 @@ function run(args: string[]) {
   return spawnSync(process.execPath, [bin, ...args], { encoding: 'utf8', env });
 }
 
-test('--version prints the package version', () => {
-  const result = run(['--version']);
-  assert.equal(result.status, 0);
-  assert.equal(result.stdout.trim(), pkg.version);
+test('--version prints the package version', async () => {
+  await withTempHome(() => {
+    const result = run(['--version']);
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout.trim(), pkg.version);
+  });
 });
 
-test('unknown command exits 2 and prints usage to stderr', () => {
-  for (const name of ['not-a-command', 'constructor', '__proto__', 'toString']) {
-    const result = run([name]);
-    assert.equal(result.status, 2, name);
-    assert.match(result.stderr, /Usage: oboete/, name);
-  }
+test('unknown command exits 2 and prints usage to stderr', async () => {
+  await withTempHome(() => {
+    for (const name of ['not-a-command', 'constructor', '__proto__', 'toString']) {
+      const result = run([name]);
+      assert.equal(result.status, 2, name);
+      assert.match(result.stderr, /Usage: oboete/, name);
+    }
+  });
 });
 
 test('oboete doctor prints a report', async () => {
@@ -89,8 +100,9 @@ for (const command of ['hook', 'capture', 'inject', 'observe']) {
       }
       process.env = { ...process.env, NODE_ENV: 'test', OBOETE_TEST_FAULT: 'pi-throw' };
       try {
-        // Import the real entry point in-process; each command gets a fresh ESM evaluation.
-        await import(`${pathToFileURL(bin).href}?uncaught=${command}`);
+        // Import the engine in-process; the query string gives each command a fresh evaluation,
+        // which importing the launcher would not (its own import of the engine carries no suffix).
+        await import(`${pathToFileURL(engine).href}?uncaught=${command}`);
         assert.equal(process.exitCode, command === 'observe' ? 3 : 0);
         assert.deepEqual(stdout, []);
         const log = oboetePaths(home).hookLog;

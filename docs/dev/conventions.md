@@ -15,8 +15,14 @@ M1 source retention and completion rules.
   `node:util` `parseArgs`, `crypto.randomUUID`, `Intl.Segmenter`, `worker_threads`. No Linux-only
   facility (no Unix sockets, `flock`, bash-only hooks); paths through `node:path` and `os.homedir()`.
 - Build: `scripts/build.mjs` (security-owned, Claude Code only). `src/cli.ts` becomes
-  `dist/oboete.mjs` (esbuild, one ESM file). Hook-path packages are bundled: `zod`, `smol-toml`,
-  `@secretlint/core`, `@secretlint/profiler`, `@secretlint/secretlint-rule-preset-recommend`. Everything else (`ai`,
+  `dist/engine.mjs` (esbuild, one ESM file), and `src/launcher.mjs` is copied verbatim to
+  `dist/oboete.mjs`, which stays the published entry point: it enables the V8 compile cache and then
+  imports the engine (issue #210; the reasoning is in `src/launcher.mjs`). Anything that names the
+  program to run -- hook commands, worker scripts -- names `dist/oboete.mjs`; anything that reports
+  on the build names both files, each with its own size, rather than folding one into the other. Inside the bundle `import.meta.url` is the engine, so
+  the launcher is `join(dirname(fileURLToPath(import.meta.url)), 'oboete.mjs')`. Hook-path packages
+  are bundled: `zod`, `smol-toml`, `@secretlint/core`, `@secretlint/profiler`,
+  `@secretlint/secretlint-rule-preset-recommend`. Everything else (`ai`,
   `@ai-sdk/*`, `workers-ai-provider`, `hono`, `@hono/node-server`, `preact`) stays external and MUST
   be loaded with a dynamic `await import('...')` inside the command that needs it, never at the top
   level of a module the hook path loads (`capture`, `events`, `privacy/*`, `agents/*`, `db/open`,
@@ -35,14 +41,32 @@ M1 source retention and completion rules.
 - A test that touches storage creates a fresh directory with `fs.mkdtempSync` and points
   `OBOETE_HOME` at it; the real `~/.oboete` is never used. Use `test/helpers/home.ts` (T022) once
   it exists.
+- Both `node --test` runs in `package.json` load `test/helpers/compile-cache.ts` with `--import`,
+  which points `NODE_COMPILE_CACHE` at one `build/compile-cache` for every test and everything it
+  spawns. The launcher's own cache lives in `OBOETE_HOME`, so a fresh home per test would otherwise
+  mean a fresh compile of the whole engine per spawn -- about 35 ms, measured on CI against a 300 ms
+  budget. `.github/workflows/ci.yml` also runs the suite through command lines of its own that carry
+  no `--import`; there the variable is set by importing the module, which every timed suite does for
+  `repositoryRoot` or `warmCompileCache`. The helper always picks `build/compile-cache` and ignores
+  whatever the environment already said, because a directory it does not own cannot be checked well
+  enough to tell a working cache from a refused one. `test/unit/launcher.test.ts` deletes the
+  variable deliberately, because the directory the launcher picks for itself is what that suite is
+  about. A suite that times the bundle also calls
+  `warmCompileCache(BUNDLE)` first, so the run that compiles the engine is never the run an
+  assertion measures -- and that call asserts the shared cache is set, so losing the import fails
+  the suite by name instead of by percentile.
 - Red first: write the failing test, run it, confirm it fails for the right reason, then implement.
   A test never recomputes its expected value through the code path it checks.
 
 ## Data directory and files
 
 - `OBOETE_HOME`, else `~/.oboete`. Inside: `config.toml`, `memory.db` (plus `-wal` and `-shm`),
-  `spool/`, `spool/pi-ack/`, `logs/hook.log`, `logs/observe.log`, and the `paused` marker file.
-  `src/paths.ts` (T022) is the only module that composes these paths.
+  `spool/`, `spool/pi-ack/`, `logs/hook.log`, `logs/observe.log`, `cache/compile/`, and the `paused`
+  marker file. `src/paths.ts` (T022) composes all of them but two: `cache/compile/` is the
+  launcher's, and so is `logs/hook.log` on the one path where the engine will not import at all.
+  `src/launcher.mjs` resolves the home a second time because importing the engine is the cost it
+  exists to avoid. The two rules are the same rule, and `test/unit/launcher.test.ts` pins them
+  together against the real `resolveHome` over every shape `OBOETE_HOME` can take.
 - Repository path rules live in `.oboete.toml` at the repository root (same TOML parser).
 
 ## Identifiers, hashes, time

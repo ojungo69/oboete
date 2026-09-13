@@ -8,12 +8,13 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -36,12 +37,55 @@ const { values } = parseArgs({
   strict: true,
 });
 
+// `bundle` is the file to run -- dist/oboete.mjs, the launcher, because that is what `bin` and the
+// installed hook commands name and its compile cache is part of what is being measured.
 const bundle = resolve(values.bundle ?? join(ROOT, 'dist', 'oboete.mjs'));
 const nodes = [...new Set((values.node ?? [process.execPath]).map((path) => resolve(path)))];
 
 for (const path of [bundle, ...nodes]) {
   if (!existsSync(path)) throw new Error(`not found: ${path}`);
 }
+
+/** The one place this script reads a size, so the record's two numbers come from one call site that
+ *  runs after the guard above. `--bundle` is a developer's own argument to a measurement script that
+ *  spawns whatever it names a hundred times over; reading its size is the least of what it does. */
+const bytes = (path) => statSync(path).size;
+
+// The launcher is a couple of kilobytes, most of it comment, and the engine beside it is what the
+// timings paid to compile -- so the record names both. It does not fold one into the other: a
+// `--bundle` naming a single-file build that happens to share a directory with an unrelated engine
+// would then carry that engine's bytes against its own timings. `realpathSync` because a global
+// install runs a symlinked bin and the engine sits beside the real file; a pre-split build has no
+// sibling of its own. Resolved after the guard above, which owns the diagnostic.
+const real = realpathSync(bundle);
+const sibling = join(dirname(real), 'engine.mjs');
+const engine = sibling !== real && existsSync(sibling) ? sibling : undefined;
+const beside = engine === undefined ? '' : `, beside \`${displayPath(engine)}\` (${bytes(engine)} bytes)`;
+/** The same rule the launcher applies (src/launcher.mjs), which is the one src/paths.ts applies:
+ *  OBOETE_HOME if it names anything, anchored to the home directory when it is relative. Written
+ *  with returns rather than nested conditionals, as the launcher writes it. */
+function oboeteHome() {
+  const override = process.env.OBOETE_HOME?.trim();
+  if (!override) return join(homedir(), '.oboete');
+  return isAbsolute(override) ? resolve(override) : resolve(homedir(), override);
+}
+
+const dataHome = oboeteHome();
+const compileCache = join(dataHome, 'cache', 'compile');
+let cacheWarm = false;
+try {
+  cacheWarm = readdirSync(compileCache).length > 0;
+} catch {
+  // A path that is a file or unreadable is a cold cache, not a reason to abort over one record line.
+}
+
+// Either of these decides the compile cache before the launcher can -- one pointing it at another
+// directory, the other switching it off -- while the record below names the directory the launcher
+// would have chosen. Every child of this script runs without them, so the run and the record
+// describe the same thing.
+const baseEnv = { ...process.env };
+delete baseEnv.NODE_COMPILE_CACHE;
+delete baseEnv.NODE_DISABLE_COMPILE_CACHE;
 
 function run(file, args, options = {}) {
   const capture = mkdtempSync(join(tmpdir(), 'oboete-command-'));
@@ -54,6 +98,7 @@ function run(file, args, options = {}) {
     result = spawnSync(file, args, {
       encoding: 'utf8',
       timeout: 10_000,
+      env: baseEnv,
       ...options,
       stdio: ['ignore', stdout, stderr],
     });
@@ -114,6 +159,7 @@ function measuredSpawn(node, args, options) {
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
       timeout: 5_000,
+      env: baseEnv,
       ...spawnOptions,
       stdio: stdin === undefined ? ['ignore', 'pipe', 'pipe'] : [stdin, 'pipe', 'pipe'],
     });
@@ -211,7 +257,7 @@ function measureHook(node, parent, key, description, content, databasePresent) {
   mkdirSync(repo);
   run('git', ['-C', repo, 'init', '--quiet']);
 
-  const env = { ...process.env, OBOETE_HOME: home };
+  const env = { ...baseEnv, OBOETE_HOME: home };
   delete env.GROK_SESSION_ID;
   if (databasePresent) run(node, [bundle, 'observe'], { cwd: repo, env });
 
@@ -308,7 +354,8 @@ lines.push(
   `- Date: ${measuredAt}`,
   `- Node versions: ${nodeVersionsText}`,
   `- Commit: \`${commit}\``,
-  `- Bundle: \`${displayPath(bundle)}\` (${statSync(bundle).size} bytes)`,
+  `- Bundle: \`${displayPath(bundle)}\` (${bytes(bundle)} bytes)${beside}`,
+  `- Compile cache: \`${displayPath(compileCache)}\`, ${cacheWarm ? 'non-empty' : 'empty'} before this run, and used by the scenarios that run against this developer's own home. The hook scenarios each get a temporary \`OBOETE_HOME\`, so each starts on an empty cache that its warm-up runs fill. Either way this is what a directory held, not what the launcher did with it: Node keys entries by version, architecture and uid, and the launcher refuses the directory outright unless it is a real directory of this user's that nobody else can enter, so a non-empty directory means neither that the Node measured here found its own entries nor that any cache was enabled (issue #210: a cold cache costs the hook about 35 ms).`,
   `- Samples: ${RUNS} measured runs after ${WARM_UPS} warm-up runs per scenario`,
   `- Measurement attempts: ${attemptsText}; kept run ${kept.index} (lower 1-minute load average)`,
   '- Percentiles: linear interpolation over the 30 measured runs; status is `max <= budget`',
