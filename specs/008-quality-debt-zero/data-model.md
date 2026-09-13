@@ -16,27 +16,25 @@ One row reported by a service on `main` — as of 5e03d67f for the rows exported
 | `id` | service | SonarCloud issue key (`AZ...`) or Codacy `issueId` (non-empty lowercase hex preserved exactly, with no inferred width restriction). Preserved as the service's native value; Sonar can re-key IDs and Codacy content-hash IDs can change when a line moves, so identity across analyses is not guaranteed. |
 | `rule` | service | Sonar rule key (`typescript:S3776`) or Codacy pattern id (`Lizard_nloc-medium`) |
 | `severity` | service | Sonar `BLOCKER…INFO`; Codacy `Error/Warning/Info` |
-| `file`, `line` | service | Repository-relative path; line as of the commit the row was exported from — `5e03d67f` for the 2026-09-07 rows, `9e52c3c2` for the 13 added on 2026-09-08, `67242108` for the one added from the 2026-09-09 search, and `ebe687dc` for the 24 PR #185 / matching push-branch IDs |
+| `file`, `line` | service | Repository-relative path; line as of the commit the row was exported from, named per addition in [Inventory provenance](#inventory-provenance) |
 | `population` | derived | `inapplicable` / `mechanical` / `complexity` / `security` (research R1) |
 
 Identity: `(service, id)`. The two inventories (`sonar-main-issues.json`, `codacy-main-issues.json`) hold the frozen **745 IDs (332 Sonar, 413 Codacy)** that must be dispositioned. They began with the 707-row export of `5e03d67f` on 2026-09-07; 38 rows were appended before batch F froze the scope; [Inventory provenance](#inventory-provenance) names the commit for each. A row is never removed: a finding that stops being reported keeps its row and its disposition. Acceptance follows [FR-002](./spec.md#functional-requirements). *(Amended 2026-09-14; the original text described "310 + 410 rows" that "grow only when a service reports a finding no row covers" and said "the acceptance is the service's own count, not the size of this file".)*
 
 #### Inventory provenance
 
-The 707 rows exported on 2026-09-07 and the 38 rows appended afterwards, each with the commit that
-appended it. The counts are the diff of that commit against its parent.
+The counts are the diff of each commit against its parent.
 
 | Commit | Date | Sonar | Codacy | Appended |
 |---|---|---|---|---|
 | `c0ed2500` | 2026-09-07 | 310 | 397 | The frozen export of `5e03d67f`: the 707 baseline. |
 | `d8760a55` | 2026-09-08 | — | +13 | Thirteen Codacy findings the live issue search at `9e52c3c2` reported and no row covered, from the reader-boundary and file-growth causes the T030a note records. |
-| `7c1622b6` | 2026-09-09 | — | +1 | `16267458dd41ebb61fa3aec7549291cc`: C4's own extractions grew `scripts/e2e/probes/claude.mjs` from 478 to 539 NLOC. Found in the review of the C4 ledger rows and allocated to batch D, which became 18 ids. No task owns this row. |
+| `7c1622b6` | 2026-09-09 | — | +1 | `16267458dd41ebb61fa3aec7549291cc`: read at `67242108`, where C4's own extractions had grown `scripts/e2e/probes/claude.mjs` from 478 to 539 NLOC. Found in the review of the C4 ledger rows and allocated to batch D, which became 18 ids. No task owns this row. |
 | `c8fb5d7c` | 2026-09-09 | +11 | +2 | PR #185's analysis of `ebe687dc`: eleven Sonar findings on moved code and two native Codacy lifecycle file-length findings. |
-| `c9a9e585` | 2026-09-09 | +11 | — | Sonar's separately gated push-branch analysis reported the same eleven source findings under distinct ids, matched by rule, file, line, source hash and message before recording. |
+| `c9a9e585` | 2026-09-09 | +11 | — | Sonar's separately gated push-branch analysis of `ebe687dc` reported the same eleven source findings under distinct ids, matched by rule, file, line, source hash and message before recording. |
 
-332 Sonar (310 plus 22 additions) + 413 Codacy (397 plus 16 additions) = the frozen 745, which is
-the aggregate the spec, plan, quickstart and record all quote. This table is the only statement of
-the per-commit split; no other document attributes an addition to a commit or a task.
+332 Sonar (310 plus 22 additions) + 413 Codacy (397 plus 16 additions) = the frozen 745. This table
+is the only statement of the per-commit split: state an addition's provenance here and point at it.
 
 ### Disposition
 

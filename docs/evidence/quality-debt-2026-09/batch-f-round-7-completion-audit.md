@@ -3,9 +3,8 @@
 **Date**: 2026-09-14. **Review baseline**: `008-qd-f` at `9e6ce79b9463cec77dd57b82eeacd2b6c949034d`.
 
 This audit reads the documents as they stood at that baseline and its verdicts describe the round-7
-edits. Later commits amended the same documents further — see their commit messages, and
-[FR-002](../../../specs/008-quality-debt-zero/spec.md#functional-requirements) for the completion
-criterion as it now stands.
+edits; later commits amended them further. [FR-002](../../../specs/008-quality-debt-zero/spec.md#functional-requirements) carries the
+completion criterion as it now stands.
 
 All 1,247 lines of `spec.md`, `plan.md`, `research.md`, `quickstart.md`, `tasks.md`, and
 `data-model.md` under `specs/008-quality-debt-zero/` were read section by section, with an independent
