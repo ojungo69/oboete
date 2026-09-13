@@ -167,15 +167,33 @@ function check(rows, ledger, planned) {
     || Object.entries(problems).some(([name, ids]) => ids.length > 0 && !(planned && name === 'unconfirmed')) ? 1 : 0;
 }
 
-async function checkLive(rows) {
+const ruleFile = (service, rule, file) => JSON.stringify([service, rule, file]);
+
+async function checkLive(rows, ledger) {
   const known = new Set(rows.map(identity));
+  // A new id can describe a finding a merged batch claimed fixed. The disposition names the old
+  // id; its rule and file come from that id's frozen inventory row, never from a ledger copy.
+  const fixedIds = new Set(ledger.filter((row) => row.state === 'fixed').map(identity));
+  const fixed = new Set(rows.filter((row) => fixedIds.has(identity(row)))
+    .map((row) => ruleFile(row.service, row.rule, row.file)));
   const open = { sonar: await openSonarIssues(), codacy: await openCodacyIssues() };
   const uncovered = Object.fromEntries(Object.entries(open).map(([service, ids]) => [service,
-    [...ids].filter((id) => !known.has(`${service}:${id}`))]));
-  for (const [service, ids] of Object.entries(uncovered)) {
-    if (ids.length) console.error(`${service} uncovered ${ids.length}: ${ids.join(', ')}`);
+    [...ids.keys()].filter((id) => !known.has(`${service}:${id}`))]));
+  const rekeyed = Object.fromEntries(Object.entries(uncovered).map(([service, ids]) => [service, ids.filter((id) => {
+    const issue = open[service].get(id);
+    const key = service === 'sonar'
+      ? ruleFile(service, issue.rule, issue.component?.replace(/^[^:]*:/, ''))
+      : ruleFile(service, issue.patternInfo?.id, issue.filePath);
+    return fixed.has(key);
+  })]));
+  for (const [group, findings] of Object.entries({ uncovered, 're-keyed': rekeyed })) {
+    for (const [service, ids] of Object.entries(findings)) {
+      if (ids.length) {
+        console.error(`${service} ${group} ${ids.length}: ${ids.join(', ')}`);
+        process.exitCode = 1;
+      }
+    }
   }
-  if (uncovered.sonar.length || uncovered.codacy.length) process.exitCode = 1;
 }
 
 function tableRow(cells) {
@@ -252,7 +270,7 @@ async function main() {
     return;
   }
   if (mode === 'check-live') {
-    await checkLive(rows);
+    await checkLive(rows, readJson('ledger.json'));
     return;
   }
   if (mode === 'allocate') allocate(rows);

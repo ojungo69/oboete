@@ -123,8 +123,19 @@ export async function applySonar(ledger, dryRun, inventory) {
   const rows = pendingResolved('sonar', ledger, inventory);
   if (rows.length === 0) return;
   const authorization = dryRun ? undefined : sonarAuthorization();
+  // An id the service no longer reports cannot be transitioned. Read the complete open set before
+  // recording any row; the public search also lets a dry run name its skips without a token.
+  const open = await openSonarIssues(authorization);
   let firstCall = true;
   for (const row of rows) {
+    if (!open.has(row.id)) {
+      if (dryRun) console.log(`SKIP Sonar ${row.id}: absent from current Sonar issue search`);
+      else {
+        row.confirmed = `Absent from current Sonar issue search ${new Date().toISOString()}`;
+        writeLedger(ledger);
+      }
+      continue;
+    }
     for (const call of sonarCalls(row)) {
       const body = new URLSearchParams(call.fields);
       if (dryRun) {
@@ -214,12 +225,14 @@ function collectIds(open, items, field, service) {
       throw new Error(`${service} issues search returned an invalid id`);
     }
     if (open.has(id)) throw new Error(`${service} issues search returned a repeated id`);
-    open.add(id);
+    // Keep the search payload beside its id: coverage also compares the rule and file when a
+    // service gives a surviving finding a new id. Apply and confirmation still use only `.has`.
+    open.set(id, item);
   }
 }
 
 export async function openSonarIssues(authorization) {
-  const open = new Set();
+  const open = new Map();
   const headers = authorization === undefined ? {} : { Authorization: authorization };
   let total;
   for (let page = 1; ; page++) {
@@ -250,7 +263,7 @@ function codacyTotal(data, previous) {
 }
 
 export async function openCodacyIssues() {
-  const open = new Set();
+  const open = new Map();
   const cursors = new Set();
   const params = new URLSearchParams({ limit: '100' });
   let total;

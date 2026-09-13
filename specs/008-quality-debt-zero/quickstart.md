@@ -196,8 +196,20 @@ node scripts/quality-debt-record.mjs --check-live
 This reads both services' public current-issue searches for `main`. A complete search whose IDs are
 all covered by the inventory exits 0 without output. An uncovered ID is reported with its service and
 exits 1; a failed request or incomplete/invalid page also exits 1. The mode does not read credentials
-or the ledger and writes no files. A successful coverage check can include known open issues, so the
-service-count checks above remain required for the final 0 / 0 result.
+and writes no files. It reads the ledger to report an additional `re-keyed` group for each service:
+uncovered IDs whose `(service, rule, file)` matches the frozen inventory row of a `fixed` disposition,
+whether or not that disposition is confirmed. The live rule and file come from the search payload
+(Sonar `rule` and `component` without this project's prefix; Codacy `patternInfo.id` and `filePath`).
+These IDs contradict the recorded fix; they still appear in `uncovered`, and either reported group
+sets exit 1. Empty groups are not printed. A successful coverage check can include known open issues,
+so the service-count checks above remain required for the final 0 / 0 result.
+
+`--apply-sonar` reads the complete open issue set for `main` before its first write. An absent pending
+resolved ID receives `Absent from current Sonar issue search <timestamp>` in `confirmed`, with no
+transition or comment call; its other fields are preserved. Present IDs keep the transition/comment
+order, `transitioned` progress and persistence after each successful call. `--apply-sonar --dry-run`
+uses the public search without credentials, prints `SKIP Sonar <id>: absent from current Sonar issue
+search` for absent IDs and previews the POSTs for present IDs; it makes no service or ledger writes.
 
 The real `--apply-codacy` mode also reads the complete current issue set before its first PATCH.
 Pending resolved IDs already absent from that set receive a local confirmation with the search

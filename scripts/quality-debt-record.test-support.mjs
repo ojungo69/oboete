@@ -14,6 +14,7 @@ export const codacyRepository = 'https://app.codacy.com/api/v3/analysis/organiza
 export const confirmArgs = ['--confirm', '--sonar-analysis', 'analysis-key', '--codacy-commit', 'commit-sha'];
 export const codacyHarnessId = 'cdcb204be8f7e0941ec2d1eca871d4';
 export const codacyViewerId = '7001b39120b60918527820572a47897';
+export const sonarOpen = (...ids) => ({ body: { issues: ids.map((key) => ({ key })), paging: { total: ids.length } } });
 
 export function fixture(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'quality-debt-record-'));
@@ -129,6 +130,19 @@ export function apiStub(responses, verification = {}, expected = 'fixture-token'
         return new Response(stream, { status: response.status ?? 200 });
       }
       return new Response(response.body === undefined ? null : JSON.stringify(response.body), { status: response.status ?? 200 });
+    };
+  `;
+}
+
+export function publicApiStub(responses) {
+  return `${apiStub(responses)}
+    os.homedir = () => { throw new Error('credentials accessed during public issue search'); };
+    syncBuiltinESMExports();
+    const publicFetch = globalThis.fetch;
+    globalThis.fetch = (url, init) => {
+      const headers = new Headers(init.headers);
+      if (headers.has('authorization') || headers.has('api-token')) throw new Error('authentication sent during public issue search');
+      return publicFetch(url, init);
     };
   `;
 }
