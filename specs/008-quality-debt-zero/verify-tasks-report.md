@@ -235,7 +235,7 @@ above. Dispositions:
 - **Six mechanically-flagged tasks** (T027, T030, T030a, T043d, T017, and the
   directory-token group) — investigated, no change needed: the symbols and files exist
   at the paths the later extractions moved them to.
-- **27 WEAK tasks** — investigated, no change needed: their product is a service state
+- **25 WEAK tasks** — investigated, no change needed: their product is a service state
   or a merged pull request, and the receipt for each was read directly this session.
 
 T043b's completion criterion was amended in this branch rather than left contradicted: it required
