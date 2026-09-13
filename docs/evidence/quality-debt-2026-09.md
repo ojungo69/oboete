@@ -50,9 +50,12 @@ live finding is in a file this feature last touched.** Of the Codacy total, 174 
 the crashed tool reported (research R10); the tool is now disabled, so they are expected to go at the
 next analysis. SonarCloud re-keyed its issue IDs between the 2026-09-07 export (`AaB3Xk…`) and today
 (`AaCVHm…`), which is why no live SonarCloud ID matches an inventory row; matching by `(rule, file)`
-instead, 20 SonarCloud and 8 Codacy findings contradict a `fixed` disposition, and `--check-live` now
-reports every such finding — covered or not, confirmed or not, `fixed` or `excluded` — as a named
-`contradicted` group and fails on it. That group also holds the Stylelint SCSS row until the next
+instead, `--check-live` reports every live finding whose triple a `fixed` or `excluded` row claims —
+covered or not, confirmed or not — as a named `contradicted` group and fails on it: **20 SonarCloud
+and 13 Codacy** findings today. Four of the Codacy ones are inventory ids whose rows are confirmed
+`fixed`, and two of those were found only by this group: `captureUnparsed` measured 48 NLOC at the
+analysis that confirmed it and `buildObserverRequest` 25, both under the 50 bound, and both are over
+it again at `33f8c382` (51 and 54). A check that only looks at uncovered ids cannot see that shape. That group also holds the Stylelint SCSS row until the next
 analysis drops it, and the two regrown file lengths, which the ledger documents rather than reopens. The measurements of what
 this feature closed and PR #190 regrew are in research R11; the follow-up round owns all of it
 (issue #207).

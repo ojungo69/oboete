@@ -210,6 +210,8 @@ Codacy's: 500 NLOC per file (`Lizard_file-nloc-medium`), 50 NLOC per function (`
 | `applyPreparedObservation` | CCN 10 | CCN 24 | #190 |
 | `applyPreparedObservations` | 29 NLOC / CCN 4 | 83 NLOC / CCN 36 | #190 |
 | `applyFallback` parameters (S107) | 7 | 8 (`coverage?` added by `590c0a2f`) | #190 |
+| `captureUnparsed` (`src/capture.ts`) | 48 NLOC | 51 NLOC | #190 |
+| `buildObserverRequest` (`src/observer/request.ts`) | 25 NLOC / CCN 7 | 54 NLOC / CCN 24 | #190 |
 
 **Why line blame is not the discriminator**: `git blame` on the reported line names a batch commit for
 several of these, because the function's opening line or the file's first line is old while the body
@@ -218,6 +220,13 @@ axis that decides ownership: a subject under the bound at `e27bb029` and over it
 this feature's last merge. By that axis this feature owns **no** live finding outside its frozen
 inventory; `emptyCounts` (`src/worker/observe.ts:366`) and the `src/sync/*` findings are `590c0a2f`'s
 own new code.
+
+The last two were found by `--check-live`'s `contradicted` group, not by hand: both ids are **in** the
+frozen inventory and both rows are confirmed `fixed` against the analysis of `67242108`, which was
+true when it was written -- `captureUnparsed` measured 48 NLOC at that analysis and still 48 at
+`e27bb029`, `buildObserverRequest` 25 at both. They are over the bound again only at `33f8c382`. A
+check that only looks at ids the inventory does not cover cannot see this shape at all, which is why
+the group compares dispositions rather than inventory membership.
 
 **Consequence**: the two ledger rows for `batches.ts` and `pack.ts` (`6d0b78f8…`, `7d9b63ea…`) stay
 `fixed` -- they were honest at `e27bb029` -- and their `confirmed` field records this measurement
