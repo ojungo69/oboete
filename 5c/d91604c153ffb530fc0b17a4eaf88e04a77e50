@@ -1,0 +1,60 @@
+src/doctor.ts
+  s_a3b2da79705e65::t_1698386157ee82 17,122
+src/worker/observe-batch.ts
+  s_a3b2da79705e65::t_aac356c254db86 627,697-699,703-704
+  s_a3b2da79705e65::t_6ce4d2f20ae659 6,16,18,62-74,78,458,628-654,657-660,662-664,687,690-696,700-702,705-714
+test/unit/consent.test.ts
+  s_a3b2da79705e65::t_d58d56cbf0c676 33-51
+src/observer/classify.ts
+  s_a3b2da79705e65::t_0655e13ebb0b6f 171-176,356
+test/unit/providers.test.ts
+  s_a3b2da79705e65::t_0653b2d31cf543 99,104,109,124,128-146,310
+src/worker/observe.ts
+  s_a3b2da79705e65::t_27b94c49bb92ee 16
+  s_a3b2da79705e65::t_f86ea6b30971bf 418-421,425-427,433,742-750
+test/helpers/observe.ts
+  s_a3b2da79705e65::t_e68d28ee3502ca 101-136
+test/unit/provider-fallback.test.ts
+  s_a3b2da79705e65::t_540bc0c087809e 201,235-236,238
+  s_a3b2da79705e65::t_9b001dc14bc77c 326,328
+  s_a3b2da79705e65::t_99f8baaf08fa46 268-325,327,329-340
+  s_a3b2da79705e65::t_eae42b58d6102b 1-94,97-127,129-163,165-200,202-227,230-234,237,239-267
+  s_a3b2da79705e65::t_07e69adfbe003f 95-96,128,164,228-229
+specs/009-memory-core/quickstart.md
+  s_a3b2da79705e65::t_5dcfc0a9336ea9 1003-1072
+src/observer/providers.ts
+  s_a3b2da79705e65::t_f2eb05c9563b13 8-10
+  s_a3b2da79705e65::t_0655e13ebb0b6f 18,27-37,40-41,43-46,54-59
+test/unit/setup.test.ts
+  s_a3b2da79705e65::t_ee380ebfeae32e 164-187
+specs/009-memory-core/tasks.md
+  s_a3b2da79705e65::t_a27d7ab2566a0d 98-99
+test/unit/doctor.test.ts
+  s_a3b2da79705e65::t_4af84a4346f41e 499-500,502-503,505-517,520,522,524-530,539-553
+  s_a3b2da79705e65::t_5404da507ee405 501,504,531-538
+  s_a3b2da79705e65::t_cdcb401cb91f93 523
+  s_a3b2da79705e65::t_e1f816e2124d64 518-519,521
+src/doctor/provider.ts
+  s_a3b2da79705e65::t_f57a0bc21d3bc3 366-367,370,372
+  s_a3b2da79705e65::t_bc3530f165a362 9,340,346,353,357-358,375-383,397,401
+  s_a3b2da79705e65::t_1698386157ee82 6,36,315-339,341-345,347-352,354-356,359-365,368-369,371,373-374,384-396,398-400,402
+  s_a3b2da79705e65::t_4b918ec17ae6f2 403
+src/setup/consent.ts
+  s_a3b2da79705e65::t_1698386157ee82 51-60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "5cd91604c153ffb530fc0b17a4eaf88e04a77e50",
+  "prompts": {},
+  "sessions": {
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
