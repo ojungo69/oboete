@@ -322,8 +322,9 @@ writers require separate worktrees. No deployment follows merely from an increme
   `contracts/migration.md` pins `oboete-export/1`, `oboete-export/2` and
   `claude-mem-query-export@8bc631a` against the upstream exporter, store queries, types and public
   documentation at v13.24.5 (T029). `src/transfer.ts` and its `transfer-*.ts` modules carry scope
-  and provenance and still read v1 (T030). The read-only adapter previews by default, takes the
-  mapping flags of its own format (`--map-repo`/`--map-work` for native input, `--map-project`/
+  and provenance and still read v1 (T030). The read-only adapter previews by default for native v2 and
+  claude-mem input — `oboete-export/1` keeps its documented implicit apply, and says so in its own
+  output — takes the mapping flags of its own format (`--map-repo`/`--map-work` for native input, `--map-project`/
   `--map-project-hash` for `--from claude-mem`, each rejected for the other), never opens a source
   with SQLite, and quarantines every memory it newly inserts as `imported`/`local_only` until the
   worker classifies it in `src/worker/imported.ts`; a row that matches an existing memory keeps
@@ -331,9 +332,10 @@ writers require separate worktrees. No deployment follows merely from an increme
   or held historical record is never rewritten to `imported` (T031). The matrix is the seven
   `test/unit/migration-*.test.ts` files plus `test/unit/transfer.test.ts`: 142 checks pass on both
   Node 24.16.0 and 22.16.0, with typecheck, lint and pack-check (20.879 MB installed) exit 0. The
-  packed-CLI half of T032 ran with them at three levels: `matrix D10` and the last import case drive
-  the built `dist/oboete.mjs`, `pack-check` installs the tarball, and a preview through the
-  installed package is recorded in `us5-close-installed-import.log` (exit 2 on unresolved project
+  packed-CLI half of T032 ran with them at three levels: `matrix D10` alone spawns the built
+  `dist/oboete.mjs` (previews and promotion, not export or an applied import), `pack-check` installs
+  the tarball and calls `--version`, and a preview through the installed package is recorded in
+  `us5-close-installed-import.log` (exit 2 on unresolved project
   mappings, `applyPossible: false`, fixture bytes unchanged). Applying through an installed package
   and the near-limit measurement stay E5's recorded result at `97bbe882`, whose evidence bundle
   survives at `/var/tmp/oboete-009-20260909.jJ5grc/us5-rss3/` (T032). Receipts `us5-close-*` under `/var/tmp/oboete-009-us5close/`; see `quickstart.md` E7. The

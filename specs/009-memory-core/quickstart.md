@@ -790,11 +790,14 @@ gate and records why the four markers can be checked.
 - `us5-close-typecheck.log`, `us5-close-lint.log` and `us5-close-pack.log` exit 0; the packed CLI
   installs at 20.879 MB (limit 30 MB) and reports `0.1.0-alpha.0`.
 - Three levels of "packed" are distinguished here, because T032's packed-CLI requirement is easy to
-  over-claim. `matrix D10` and the last case of `migration-import.test.ts` drive the **built bundle**
-  `dist/oboete.mjs` through external and native previews, a refused promotion and the export/import
-  exit codes (exits 0/0/0/1, bounded metadata only); both ran in today's suite. `pack-check` builds
-  and installs the **tarball** but only calls `--version`. Neither is an import through an installed
-  package, so one was run today as well and recorded in `us5-close-installed-import.log`: oboete
+  over-claim. Exactly one test spawns the **built bundle** `dist/oboete.mjs`: `matrix D10`, which
+  covers an external preview, a native preview, `import promote --list` and a refused promotion
+  (exits 0/0/0/1, bounded metadata only) — not an export and not an applied import. The
+  export/import exit codes of the CLI contract are pinned in `transfer.test.ts`, and
+  `migration-import.test.ts` calls `runExport`/`runImport` directly; both are in-process and neither
+  spawns a binary. `pack-check` builds and installs the **tarball** but only calls `--version`. None
+  of those is an import through an installed package, so one was run today as well and recorded in
+  `us5-close-installed-import.log`: oboete
   0.1.0-alpha.0 installed from `npm pack` into a temporary prefix, invoked under `env -i` with `HOME`
   and `OBOETE_HOME` inside the temporary tree, previews the frozen claude-mem fixture with exit 2 and
   an empty stderr — source hash `cfd2203c…`, 8 observations / 3 sessions / 1 summary / 4 prompts, two
