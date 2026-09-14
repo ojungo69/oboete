@@ -71,11 +71,14 @@ A target is admitted when all of the following hold:
 3. Its `(preset, resolvedModel)` pair has not already appeared, counting the primary as position
    zero. A later duplicate is dropped, not refused: the same preset with two different models is two
    targets, and the same pair twice is one.
-4. Its egress is narrower than or equal to the primary's. `PRESET_CATALOG[preset].egress` is `local`
-   or `remote`; a `local` target under a `remote` primary is admitted, a `remote` target under a
-   `local` primary is a `ProviderConfigError`. A local selection that could reach the network under
-   any failure is not a local selection, and the user who wrote it meant something the configuration
-   cannot deliver, so the error belongs at the resolve, not at the send.
+4. Its egress is narrower than or equal to the primary's. A `local` target under a `remote` primary
+   is admitted; a `remote` target under any primary that is not itself `remote` is a
+   `ProviderConfigError`. The test is written against `remote` rather than against `local` because
+   `ProviderPreset['egress']` also has `none`: no preset carries it today, and a target that could
+   reach the network under a primary that cannot is the same mistake whichever of the two narrower
+   classes the primary has. A local selection that could reach the network under any failure is not
+   a local selection, and the user who wrote it meant something the configuration cannot deliver, so
+   the error belongs at the resolve, not at the send.
 5. Its `costClass` is in `cost_policy`. A target that fails only this test is **skipped, not
    refused**: it stays in the file, contributes nothing, and is reported by `oboete doctor` as
    excluded by the policy. The asymmetry with rule 4 is deliberate — the cost policy is a live
@@ -124,8 +127,14 @@ there is no new destination to consent to.
 degrade the run, not crash it.
 
 `consentMatches` is unchanged. Its no-stored-record branch already refuses any `remote` egress, and
-rule 4 forbids a chain from widening a `local` primary's egress, so that branch stays correct
+rule 4 forbids a chain from widening a non-`remote` primary's egress, so that branch stays correct
 without naming the chain.
+
+A target's displayed **sensitivity classes are the primary's**, not its own preset's capability: the
+chain never re-batches, so a local target under a remote primary receives the `remote_observer`
+batch and sees only what that destination may carry. The hashed `egressClasses` stay the target's own
+(they describe the destination, which is what consent binds); the displayed line describes what is
+sent, and overstating it would make a user refuse a target that never receives the material.
 
 `setup` displays the chain with the primary — one line per target with its host and cost class — so
 the consent the user accepts is the consent the hash binds.
@@ -177,11 +186,15 @@ Every `FailureReason` therefore falls into one of two cases:
 
 A successful target ends the chain and the batch applies its output exactly as it does today.
 
-`language_mismatch` is the one stop that keeps its own reason rather than the most severe of the
-attempted ones: `retryOnLanguageMismatch` (`src/worker/observe-batch.ts:501-529`) owns its retry and
-its fallback, so a chain that met `provider_exhausted` first and then a second mismatch degrades with
-`language_mismatch`. It is the reason of the target that actually answered, which is the more useful
-of the two here, and it costs no code.
+**The reason a stop ended the chain on outranks the precedence order.** A chain that met
+`auth_failed` and then stopped on `consent_changed` degrades with `consent_changed`, even though
+`auth_failed` is the more severe of the two in `DEGRADED_PRECEDENCE`: consent is the thing the user
+has to act on, and sending them to fix a credential instead would be the wrong instruction. Only
+when the chain ran out of targets does the batch keep the most severe reason it met.
+`language_mismatch` reaches this rule from a different direction — `retryOnLanguageMismatch`
+(`src/worker/observe-batch.ts:501-529`) owns its retry and its own fallback — but the outcome is the
+same: the target that actually answered is the one the batch names, and its attempt line is recorded
+where it settles rather than in the loop.
 
 ## When every target fails
 
@@ -194,8 +207,11 @@ batch, which is what CONSTITUTION IV ("accepted information remains available") 
 require.
 
 The batch's single `degraded_reason` is the most severe reason among the targets actually attempted,
-taken with the codebase's existing rule — the first match in `DEGRADED_PRECEDENCE`
-(`src/observer/classify.ts:350`, `src/injection/pack.ts:253`). No new reason is minted, so migration
+taken with the codebase's existing rule — the first match in `DEGRADED_PRECEDENCE`, named once as
+`mostSevereReason` (`src/observer/classify.ts`). `src/injection/pack.ts` keeps its own copy of the
+expression on purpose: its local `DegradedReason` is wider (it adds `index_unavailable`,
+`summary_pending`, `window_unknown` and `empty`), so sharing the helper would either narrow the pack
+or widen the batch column's closed reason set. No new reason is minted, so migration
 0009 is not needed and the column's CHECK list is untouched. The per-target reasons that the single
 column cannot hold go to the observe log, one line per attempted target.
 
@@ -204,7 +220,11 @@ column cannot hold go to the observe log, one line per attempted target.
 - **Observe log**: one `provider attempt` line per target with its position, preset, model and
   outcome reason, then the existing degraded line for the batch. This is the surface that
   "distinguishes each target's fixed failure reason from successful generation" (US7 scenario 6);
-  the reasons are codes, never provider response text.
+  the reasons are codes, never provider response text. The line's `position` is the attempt order
+  with the primary at 0, while `fallback:N` in `oboete doctor` numbers the *configuration's* entries
+  — an entry the policy excludes has a doctor number and no attempt position — so `model` is what
+  identifies one target across the two surfaces. A pass that stops between targets writes its
+  attempt lines and no batch line.
 - **`oboete doctor`**: the provider item keeps probing the **primary only**. `providerItem`
   (`src/doctor/provider.ts`) calls `summarizeWithProvider` with a real reservation, so one probe per
   target would spend the daily allowance on diagnostics. The chain is reported statically: each
@@ -230,8 +250,21 @@ column cannot hold go to the observe log, one line per attempted target.
   narrowing, and re-selecting rows for a target would be a different batch identity.
 - It never changes the payload between targets. Every target receives the payload the final detector
   check approved.
-- It adds no attempt counter. The chain's length is its bound, and each target's internal retries are
-  the ones it already had.
+- It adds no attempt counter. The chain's length is its bound, and each target's internal retries
+  are the ones it already had — but the *reservations* one batch can take multiply with it. One
+  target takes up to four (`summarizeWithProvider`'s own `while (attempts < 2)`, once more through
+  the language retry), so a four-target chain can take up to sixteen where a single preset took
+  four. `DAILY_CAP` still bounds the day, because every target passes its own `reserveAttempt`
+  before any request. What the length does divide is `SESSION_END_RESERVE`: the ten calls held back
+  for session-end batches cover fewer such batches when several *capped* targets are configured.
+  The default `cost_policy` admits only one capped preset (`workers-ai`; `ollama` and `agent-cli`
+  are uncapped and the other remote presets are outside the default policy), so this needs a
+  deliberate `cost_policy = [… "remote"]` to reach.
+- It does not move the chain's length bound out of the configuration schema. A fourth
+  `[[observer.fallback]]` table is a `ConfigError` from `loadConfig` like any other malformed
+  configuration, with the same consequence capture already has for one (metadata-only events until
+  it is corrected). The three chain mistakes the *resolver* owns — a missing model, a widening
+  egress, a chain with no primary — are the ones that degrade only the observer.
 
 ## Verification
 
@@ -270,3 +303,13 @@ column cannot hold go to the observe log, one line per attempted target.
 15. A `workers-ai` primary with no credentials and an `ollama` target applies the ollama output: the
     primary's host receives no request, ollama receives exactly one, and the batch is `applied` on
     the `remote_observer` destination the primary's egress chose.
+16. A chain that fails `auth_failed` and then stops on `consent_changed` degrades with
+    `consent_changed`, and both attempt lines are in the observe log.
+17. A target whose answer is refused for its language has its own `provider attempt` line, at its
+    own position, with `language_mismatch`.
+18. `oboete setup --remove`, a bare `oboete setup` and `--provider none` all succeed while a chain
+    the configuration cannot use sits in the file; only a `--provider` that narrows egress under an
+    admitted chain is refused, and it writes nothing.
+19. Two identical `[[observer.fallback]]` entries: `fallback:1` is healthy and `fallback:2` says a
+    nearer target already covers it. `preset = "none"` with an entry reports the missing primary
+    rather than "fallback target 0".

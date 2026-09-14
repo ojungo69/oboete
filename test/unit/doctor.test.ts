@@ -568,7 +568,37 @@ test('a fallback chain the resolver refuses is reported once, at its position', 
     ].join('\n'));
     chmodSync(context.paths.config, 0o600);
     assert.equal(await context.doctor(), 1, context.output);
-    assertBroken(context.item('fallback'), 'degraded', 'egress widened', 'no provider at all', 'observer.fallback');
+    assertBroken(context.item('fallback'), 'degraded', 'sends further', 'no provider at all', 'observer.fallback');
+
+    // `chain_without_primary` carries position 0, which is the primary: numbering it as a fallback
+    // target would name an entry that does not exist, and the fix is to select a preset.
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "none"', '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"', '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    assert.equal(await context.doctor(), 1, context.output);
+    assertBroken(context.item('fallback'), 'degraded', 'needs a selected observer preset', 'no provider at all',
+      'setup --provider');
+  });
+});
+
+test('the second of two identical fallback entries is reported as covered, not as ready', async () => {
+  await harness(async (context) => {
+    const observer = { preset: 'workers-ai',
+      fallback: [{ preset: 'ollama', model: 'qwen3:8b' }, { preset: 'ollama', model: 'qwen3:8b' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+
+    await context.doctor(['--json']);
+    // Admission deduplicates by `(preset, model)`, so only the first entry is ever attempted.
+    assert.equal(context.item('fallback:1').status, 'healthy');
+    assertBroken(context.item('fallback:2'), 'warning', 'a nearer target already covers');
   });
 });
 

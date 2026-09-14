@@ -6,7 +6,6 @@ import {
   admittedChain,
   consentMatches,
   readCredentials,
-  type ChainTarget,
   type OboeteConfig,
   type PresetName,
 } from '../config.js';
@@ -26,6 +25,7 @@ import {
   type DoctorOptions,
 } from '../doctor.js';
 import { CACHE_MS, cachedCatalog } from '../observer/catalog.js';
+import { chainErrorMessage } from '../observer/providers.js';
 import type { ObserverInput } from '../observer/contract.js';
 import { summarizeWithProvider, type CallOutcome } from '../observer/llm.js';
 import {
@@ -336,31 +336,42 @@ export function fallbackItems(
   if (chain.error !== null) {
     return [degraded(
       'fallback',
-      `Fallback target ${chain.error.position} cannot be used: ${chain.error.code.replace(/_/g, ' ')}.`,
+      chainErrorMessage(chain.error),
       'The observer runs with no provider at all while the chain is unusable.',
-      'Correct the `[[observer.fallback]]` entry in the configuration file, then run `oboete doctor` again.',
+      chain.error.code === 'chain_without_primary'
+        ? '`oboete setup --provider <preset>`, or remove the `[[observer.fallback]]` entries.'
+        : 'Correct the `[[observer.fallback]]` entry in the configuration file, then run `oboete doctor` again.',
     )];
   }
-  return entries.map((entry, index) =>
-    fallbackTargetItem({ entry, position: index + 1, chain: chain.targets, config, db, integrityFailed, env, now }));
+  // Each admitted target is claimed by the first entry that produced it, so the second of two
+  // identical entries is reported as covered rather than as ready.
+  const unclaimed = [...chain.targets];
+  return entries.map((entry, index) => {
+    const model = (entry.model ?? PRESET_CATALOG[entry.preset].defaultModel).trim();
+    const claimed = unclaimed.findIndex(
+      (target) => target.preset === entry.preset && target.model === model);
+    if (claimed !== -1) unclaimed.splice(claimed, 1);
+    return fallbackTargetItem({ entry, position: index + 1, admitted: claimed !== -1,
+      config, db, integrityFailed, env, now });
+  });
 }
 
 function fallbackTargetItem(input: {
   entry: OboeteConfig['observer']['fallback'][number];
   position: number;
-  chain: ChainTarget[];
+  admitted: boolean;
   config: OboeteConfig;
   db: DatabaseSync | null;
   integrityFailed: boolean;
   env: NodeJS.ProcessEnv;
   now: number;
 }): DoctorItem {
-  const { entry, position, chain, config, db, integrityFailed, env, now } = input;
+  const { entry, position, admitted, config, db, integrityFailed, env, now } = input;
   const name = `fallback:${position}`;
   const catalog = PRESET_CATALOG[entry.preset];
   const model = (entry.model ?? catalog.defaultModel).trim();
   const where = `Target ${position} is ${entry.preset} with model ${model}`;
-  if (!chain.some((target) => target.preset === entry.preset && target.model === model)) {
+  if (!admitted) {
     return warning(
       name,
       `${where}, which the cost policy does not admit or a nearer target already covers.`,

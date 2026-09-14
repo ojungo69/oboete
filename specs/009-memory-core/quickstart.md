@@ -1076,6 +1076,27 @@ otherwise.
 15. `a primary with absent credentials is a failed target, not a run without a provider` — the
     destination label comes from the primary's egress class, so the loop is reached and the local
     target applies. Names the ceiling the contract retired.
+16. `the reason a stop ended the chain on outranks a more severe reason behind it` — `auth_failed`
+    then `consent_changed`; the batch keeps the consent reason and both attempt lines are logged.
+17. `a target whose answer is refused for its language is still named in the log` — the ollama
+    target answers twice in the wrong language, and its own `language_mismatch` line is present.
+18. `a chain the configuration cannot use blocks neither capture-only nor rewiring`
+    (`setup.test.ts`), and the `--remove` leg of
+    `a destination that would strip the chain of its admission is refused before anything is
+    written`.
+19. `the second of two identical fallback entries is reported as covered, not as ready`
+    (`doctor.test.ts`), and the `preset = "none"` leg of `a fallback chain the resolver refuses is
+    reported once, at its position`.
+
+Findings from the review round, all fixed in the same branch: the setup gate refused
+`--remove`/`--provider none`/a bare run (P2, both reviewers); a stop's reason was hidden behind a
+more severe earlier reason (P2); a `language_mismatch` target had no attempt line; doctor numbered
+`chain_without_primary` as "fallback target 0" and reported a duplicated entry as ready; admission
+rule 4 let an `egress: 'none'` primary admit a remote target (latent); the consent screen displayed
+a local target's full capability rather than what the remote batch carries; and the dead
+`?? outcome.reason` / `?? outcome.detail` branches hid the reason/detail pairing `loggableDetail`
+depends on. Rejected: moving the three-target bound out of the configuration schema, which would
+make one key's arity behave unlike every other malformed-config error.
 
 Setup's side of T037 is `adding a fallback target refuses --yes and is displayed before it is
 accepted` (`setup.test.ts`): a target written in after consent was stored refuses `--yes` with exit

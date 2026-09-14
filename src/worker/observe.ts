@@ -740,16 +740,23 @@ async function observeLifecycle(
         }
       }
 
-      function logBatch(): void {
-        // One line per target the chain reached: the batch keeps only the most severe reason.
+      // One line per target the chain reached, in attempt order with the primary at position 0:
+      // the batch itself keeps only one reason. `fallback:N` in `oboete doctor` numbers the
+      // configuration's entries instead, so the model is what identifies a target across the two.
+      function logAttempts(): void {
         for (const attempt of batchResult?.attempts ?? []) {
           appendLog(paths.observeLog, 'info', 'provider attempt', {
             id: batch.id,
             position: attempt.position,
             preset: attempt.preset,
+            model: attempt.model,
             reason: attempt.reason,
           });
         }
+      }
+
+      function logBatch(): void {
+        logAttempts();
         appendLog(paths.observeLog, batchError === undefined ? 'info' : 'error', 'batch', {
           id: batch.id,
           state: batchResult?.state ?? 'error',
@@ -767,6 +774,9 @@ async function observeLifecycle(
         }));
         if (batchResult.state === 'done') {
           stopReason = batchResult.reason;
+          // A stop keeps no batch line, but the targets this pass already tried are the only
+          // record of what it spent before the stop arrived.
+          logAttempts();
           return;
         }
         const recorded = recordBatchResult(result, batchResult);

@@ -41,6 +41,10 @@ test('the display names every fallback target the consent hash binds', () => {
   assert.match(lines, /2\. nim at integrate\.api\.nvidia\.com/);
   // The second target is remote and paid, so the reader sees that before accepting.
   assert.match(lines, /Cost class: remote/);
+  // A local target under a remote preset receives the remote batch, so the display must not
+  // promise it the classes a local destination could carry (it never re-batches).
+  assert.doesNotMatch(lines, /Sensitivity classes sent: eligible, local_only/);
+  assert.equal(lines.match(/Sensitivity classes sent: eligible$/gm)?.length, 3);
   // A target the policy excludes is not a destination, so it is not displayed as one.
   const excluded = consentDisplay(
     configSchema.parse({ observer: { preset: 'workers-ai', fallback: [{ preset: 'nim' }] } }),

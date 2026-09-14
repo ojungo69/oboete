@@ -432,8 +432,9 @@ export function admittedChain(config: OboeteConfig): { targets: ChainTarget[]; e
     const catalog = PRESET_CATALOG[entry.preset];
     const model = (entry.model ?? catalog.defaultModel).trim();
     if (model === '') return { targets: [], error: { code: 'model_required', position } };
-    if (catalog.egress === 'remote' && primaryEgress === 'local') {
-      // A local selection that could reach the network under any failure is not a local selection.
+    if (catalog.egress === 'remote' && primaryEgress !== 'remote') {
+      // A selection that could reach the network under any failure is not a narrower selection:
+      // `remote` is the only egress class a remote target does not widen.
       return { targets: [], error: { code: 'egress_widened', position } };
     }
     const identity = identityOf(entry.preset, model);

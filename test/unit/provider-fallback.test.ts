@@ -102,7 +102,7 @@ test('an exhausted primary hands the same batch to the next admitted target', as
       { destination: 'remote_observer', state: 'applied', degraded_reason: null, provider_attempts: 1 },
     ]);
     const log = readFileSync(fixture.paths.observeLog, 'utf8');
-    assert.match(log, /provider attempt .*position=0 preset=workers-ai reason=provider_exhausted/);
+    assert.match(log, /provider attempt .*position=0 preset=workers-ai model=[^ ]+ reason=provider_exhausted/);
     assert.match(log, /batch .*state=applied/);
   });
 });
@@ -133,8 +133,8 @@ test('the daily cap advances past every capped target and stops at none of the l
     assert.equal(hosts.nim, 0);
     assert.equal(hosts.ollama, 1);
     const log = readFileSync(fixture.paths.observeLog, 'utf8');
-    assert.match(log, /provider attempt .*position=0 preset=workers-ai reason=daily_cap/);
-    assert.match(log, /provider attempt .*position=1 preset=nim reason=daily_cap/);
+    assert.match(log, /provider attempt .*position=0 preset=workers-ai model=[^ ]+ reason=daily_cap/);
+    assert.match(log, /provider attempt .*position=1 preset=nim model=[^ ]+ reason=daily_cap/);
     assert.deepEqual(batchRows(fixture), [
       { destination: 'remote_observer', state: 'applied', degraded_reason: null, provider_attempts: 1 },
     ]);
@@ -168,7 +168,7 @@ test('a target with no credentials is attempted, answers without a request and t
     assert.equal(hosts.nim, 0);
     assert.equal(hosts.ollama, 1);
     const log = readFileSync(fixture.paths.observeLog, 'utf8');
-    assert.match(log, /provider attempt .*position=1 preset=nim reason=no_provider/);
+    assert.match(log, /provider attempt .*position=1 preset=nim model=[^ ]+ reason=no_provider/);
   });
 });
 
@@ -205,8 +205,8 @@ test('every target failing settles once, keeps the worst reason and leaves the s
       assert.notEqual(source?.retry_after, null);
     });
     const log = readFileSync(fixture.paths.observeLog, 'utf8');
-    assert.match(log, /provider attempt .*position=0 preset=workers-ai reason=provider_exhausted/);
-    assert.match(log, /provider attempt .*position=1 preset=ollama reason=unreachable/);
+    assert.match(log, /provider attempt .*position=0 preset=workers-ai model=[^ ]+ reason=provider_exhausted/);
+    assert.match(log, /provider attempt .*position=1 preset=ollama model=[^ ]+ reason=unreachable/);
   });
 });
 
@@ -332,8 +332,8 @@ test('a target that answers after two failures applies its output like any other
         'processed');
     });
     const log = readFileSync(fixture.paths.observeLog, 'utf8');
-    assert.match(log, /provider attempt .*position=0 preset=workers-ai reason=unreachable/);
-    assert.match(log, /provider attempt .*position=1 preset=nim reason=unreachable/);
+    assert.match(log, /provider attempt .*position=0 preset=workers-ai model=[^ ]+ reason=unreachable/);
+    assert.match(log, /provider attempt .*position=1 preset=nim model=[^ ]+ reason=unreachable/);
     // The target that answered is not an attempt line: the batch state already says it applied.
     assert.equal(/position=2/.test(log), false);
   });
@@ -363,7 +363,85 @@ test('a primary with absent credentials is a failed target, not a run without a 
       { destination: 'remote_observer', state: 'applied', degraded_reason: null, provider_attempts: 1 },
     ]);
     const log = readFileSync(fixture.paths.observeLog, 'utf8');
-    assert.match(log, /provider attempt .*position=0 preset=workers-ai reason=no_provider/);
+    assert.match(log, /provider attempt .*position=0 preset=workers-ai model=[^ ]+ reason=no_provider/);
     assert.match(log, /batch .*state=applied/);
+  });
+});
+
+test('the reason a stop ended the chain on outranks a more severe reason behind it', async () => {
+  await withFixture(async (fixture) => {
+    fixture.env = chainEnv(fixture);
+    writeChainConfig(fixture, {
+      preset: 'workers-ai',
+      costPolicy: ['free-tier', 'local', 'remote'],
+      fallback: [{ preset: 'nim' }],
+      env: fixture.env,
+    });
+    await captureEndedSession(fixture, {
+      sessionId: 'chain-stop-reason',
+      prompts: ['Record which reason a stopped chain keeps.'],
+    });
+
+    const hosts = counters();
+    const fetchImpl = chainFetch(hosts, {
+      // The primary fails with a reason that outranks `consent_changed` in `DEGRADED_PRECEDENCE`,
+      // and withdraws consent on its way out.
+      cloudflare: async () => {
+        writeChainConfig(fixture, {
+          preset: 'workers-ai',
+          costPolicy: ['free-tier', 'local', 'remote'],
+          fallback: [{ preset: 'nim' }],
+          env: fixture.env,
+          consent: 'invalid',
+        });
+        return new Response('unauthorized', { status: 401 });
+      },
+    });
+    assert.equal(await runObserveForFixture(fixture, { fetch: fetchImpl }), 1);
+
+    assert.equal(hosts.nim, 0);
+    // `auth_failed` is the more severe reason, but consent is what the user has to act on, and
+    // sending them to fix a credential instead would be the wrong instruction.
+    assert.deepEqual(batchRows(fixture), [
+      { destination: 'remote_observer', state: 'fallback', degraded_reason: 'consent_changed', provider_attempts: 1 },
+    ]);
+    const log = readFileSync(fixture.paths.observeLog, 'utf8');
+    assert.match(log, /provider attempt .*position=0 preset=workers-ai model=[^ ]+ reason=auth_failed/);
+    assert.match(log, /provider attempt .*position=1 preset=nim model=[^ ]+ reason=consent_changed/);
+  });
+});
+
+test('a target whose answer is refused for its language is still named in the log', async () => {
+  await withFixture(async (fixture) => {
+    fixture.env = chainEnv(fixture);
+    writeChainConfig(fixture, {
+      preset: 'workers-ai',
+      fallback: [{ preset: 'ollama', model: OLLAMA_MODEL }],
+      env: fixture.env,
+    });
+    const prompt = 'アップロード処理の再試行を記録してください。';
+    await captureEndedSession(fixture, {
+      sessionId: 'chain-language',
+      prompts: [prompt],
+      assistant: 'アップロード処理は一回再試行します。',
+    });
+    const sourceId = eventId(fixture, prompt);
+
+    const hosts = counters();
+    const fetchImpl = chainFetch(hosts, {
+      cloudflare: async () => { throw new Error('connection refused'); },
+      // Two English answers for Japanese input: the target answered, so the chain stops here.
+      ollama: async () => openAiResponse(providerOutput(sourceId), OLLAMA_MODEL),
+    });
+    assert.equal(await runObserveForFixture(fixture, { fetch: fetchImpl }), 1);
+
+    assert.equal(hosts.ollama, 2, 'the language retry happens inside the target');
+    assert.deepEqual(batchRows(fixture), [
+      { destination: 'remote_observer', state: 'fallback', degraded_reason: 'language_mismatch', provider_attempts: 3 },
+    ]);
+    const log = readFileSync(fixture.paths.observeLog, 'utf8');
+    assert.match(log, /provider attempt .*position=0 preset=workers-ai model=[^ ]+ reason=unreachable/);
+    // The target that spent an allowance is the one the log must not omit.
+    assert.match(log, /provider attempt .*position=1 preset=ollama model=[^ ]+ reason=language_mismatch/);
   });
 });

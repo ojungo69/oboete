@@ -15,7 +15,7 @@ import { promoteSensitivity } from '../privacy/classify.js';
 import { applyObservations, type ApplyResult } from '../observer/apply.js';
 import { checkLanguage, mostSevereReason, rejectsDirectives, type DegradedReason } from '../observer/classify.js';
 import { fallbackObserve, type FallbackEvent } from '../observer/fallback.js';
-import { summarizeWithProvider, type CallOutcome, type FailureReason } from '../observer/llm.js';
+import { summarizeWithProvider, type CallOutcome } from '../observer/llm.js';
 import { buildObserverRequest } from '../observer/request.js';
 import { recordExhausted, reserveAttempt } from '../observer/reservation.js';
 import type { DetectorResult } from '../privacy/detect.js';
@@ -645,7 +645,15 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
       model: target.model,
       outcome: called.outcome,
     });
-    if ('done' in settled) return { ...settled.done, attempts };
+    if ('done' in settled) {
+      // A target whose answer arrived and was then refused settles inside `settleProviderOutcome`,
+      // so this is the only place its attempt line can be recorded.
+      if (settled.done.state === 'fallback' && settled.done.reason !== null) {
+        attempts.push({ position, preset: target.preset, model: target.model,
+          reason: settled.done.reason, detail: settled.done.detail ?? '' });
+      }
+      return { ...settled.done, attempts };
+    }
     outcome = settled.outcome;
     if (outcome.ok) break;
     attempts.push({ position, preset: target.preset, model: target.model,
@@ -654,13 +662,20 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
   }
 
   if (!outcome.ok) {
-    // The batch keeps one reason, and it is the most severe of the ones the chain actually met.
-    const reason = mostSevereReason(attempts.map((attempt) => attempt.reason)) ?? outcome.reason;
-    const worst = attempts.find((attempt) => attempt.reason === reason);
+    // Every failed target is in `attempts`, so the loop above ran at least once. The reason a stop
+    // ended the chain on wins, because that is the one the user has to act on; otherwise the batch
+    // keeps the most severe of the reasons the chain actually met. The kept reason and the kept
+    // detail always come from the same attempt, which is what lets `loggableDetail` decide by
+    // reason whether the text is the provider's (contracts/provider-fallback.md "Advance and stop").
+    const last = attempts[attempts.length - 1]!;
+    const reason = CHAIN_STOPS.has(last.reason)
+      ? last.reason
+      : mostSevereReason(attempts.map((attempt) => attempt.reason))!;
+    const worst = attempts.find((attempt) => attempt.reason === reason)!;
     providerState.set(batch.session_id, reason);
     return {
       ...(await applyFallback(db, token, input, nearby, reason, detect, deps.now(), request.coverage)),
-      detail: loggableDetail(reason, worst?.detail ?? outcome.detail),
+      detail: loggableDetail(reason, worst.detail),
       attempts,
     };
   }
@@ -702,7 +717,9 @@ function chainTargets(
   return [
     { preset, model },
     ...chain.filter((target) =>
-      destination === 'remote_observer' || PRESET_CATALOG[target.preset].egress === 'local'),
+      destination === 'local_observer'
+        ? PRESET_CATALOG[target.preset].egress === 'local'
+        : destination === 'remote_observer'),
   ];
 }
 
@@ -711,4 +728,4 @@ function chainTargets(
  * answer that arrived unusable already spent its target's allowance and owns its own retries
  * (contracts/provider-fallback.md "Advance and stop").
  */
-const CHAIN_STOPS = new Set<FailureReason>(['consent_changed', 'unusable_output']);
+const CHAIN_STOPS = new Set<DegradedReason>(['consent_changed', 'unusable_output']);

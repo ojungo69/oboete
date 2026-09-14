@@ -54,7 +54,10 @@ export function consentDisplay(config: OboeteConfig, env: NodeJS.ProcessEnv): st
       lines.push(
         `    ${index + 1}. ${target.preset} at ${target.host}`,
         `       Cost class: ${target.costClass}; credential source: ${target.credentialSource}`,
-        `       Sensitivity classes sent: ${target.egressClasses.join(', ') || 'none'}`,
+        // A target receives the batch the selected preset's destination allowed, never more: the
+        // chain does not re-batch, so a local target under a remote preset still sees only the
+        // classes the remote destination may carry.
+        `       Sensitivity classes sent: ${tuple.egressClasses.join(', ') || 'none'}`,
       );
     }
   }

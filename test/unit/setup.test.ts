@@ -217,6 +217,32 @@ test('a destination that would strip the chain of its admission is refused befor
     const after = loadConfig(context.paths);
     assert.equal(after.observer.preset, before.observer.preset, 'the refused destination is not enabled');
     assert.equal(after.consent.hash, before.consent.hash);
+
+    // The gate is the destination's doing, so it must not take the recovery paths with it: going
+    // capture-only is a destination the user asked for, and `--remove` never reads the chain.
+    context.output = '';
+    assert.equal(await context.run(['--provider', 'ollama', '--accept-egress', '--remove']), 0, context.output);
+    assert.doesNotMatch(
+      readFileSync(join(context.userHome, '.claude', 'settings.json'), 'utf8'), /oboete/,
+      'the removal ran instead of stopping at the chain',
+    );
+  });
+});
+
+test('a chain the configuration cannot use blocks neither capture-only nor rewiring', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--provider', 'ollama', '--accept-egress']), 0, context.output);
+    // A widening entry written by hand: the observer has no provider until it is corrected.
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "nim"\n`);
+
+    context.output = '';
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    assert.ok(existsSync(join(context.userHome, '.claude', 'settings.json')), 'agents are still wired');
+
+    context.output = '';
+    assert.equal(await context.run(['--provider', 'none', '--accept-egress']), 0, context.output);
+    assert.equal(loadConfig(context.paths).observer.preset, 'none');
   });
 });
 
