@@ -519,12 +519,18 @@ The normalized header reports `query_scoped=true`, `origin_id=null` and `source_
 
 ## Appendix: exact native v2 wire format
 
-Source snapshot read on 2026-09-10, pinned with `sha256sum`:
+Source snapshot re-read on 2026-09-14, pinned with `sha256sum`:
 
 ```text
 0ca1e0553117c593028b7f7b3a82413437ba4d74adb8c87710f884ff3310098c  src/transfer-format.ts
-41fbd9eedec5528f537916077248ef55cf1995d1fdfb5b2b3884aa48a5bb2303  src/transfer-plan.ts
+278e4836c027b1e20824f47866d6089084a8619cd401ff3195b4980f12a6230e  src/transfer-plan.ts
 ```
+
+`transfer-format.ts` is unchanged since the 2026-09-10 snapshot. `transfer-plan.ts` was
+`41fbd9ee…` then; `849fde57` added the accepted-input checks that stop an import selecting,
+downgrading or rehydrating a local memory (dependency sensitivity, orphan origins) and `97bbe882`
+moved the merge into one scratch transaction with cached statements. Both are behaviour this
+appendix describes, so the pin is refreshed rather than annotated.
 
 The authorities are [transfer-format.ts](../../../src/transfer-format.ts) and
 [transfer-plan.ts](../../../src/transfer-plan.ts).

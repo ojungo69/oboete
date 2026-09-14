@@ -331,8 +331,11 @@ writers require separate worktrees. No deployment follows merely from an increme
   or held historical record is never rewritten to `imported` (T031). The matrix is the seven
   `test/unit/migration-*.test.ts` files plus `test/unit/transfer.test.ts`: 142 checks pass on both
   Node 24.16.0 and 22.16.0, with typecheck, lint and pack-check (20.879 MB installed) exit 0. The
-  packed-CLI half of T032 is in-tree and ran with them — `matrix D10` drives the built
-  `dist/oboete.mjs` and the last import case wires the CLI exit codes — while the near-limit packed
-  measurement stays E5's recorded result at `97bbe882` (T032). Receipts `us5-close-*` under `/var/tmp/oboete-009-us5close/`; see `quickstart.md` E7. The
+  packed-CLI half of T032 ran with them at three levels: `matrix D10` and the last import case drive
+  the built `dist/oboete.mjs`, `pack-check` installs the tarball, and a preview through the
+  installed package is recorded in `us5-close-installed-import.log` (exit 2 on unresolved project
+  mappings, `applyPossible: false`, fixture bytes unchanged). Applying through an installed package
+  and the near-limit measurement stay E5's recorded result at `97bbe882`, whose evidence bundle
+  survives at `/var/tmp/oboete-009-20260909.jJ5grc/us5-rss3/` (T032). Receipts `us5-close-*` under `/var/tmp/oboete-009-us5close/`; see `quickstart.md` E7. The
   macOS platform probe remains T040's (its macOS leg deferred by the owner) and the cohesive
   product gate remains T043's.

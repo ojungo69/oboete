@@ -789,16 +789,26 @@ gate and records why the four markers can be checked.
   `build/test/unit/transfer.test.mjs`, 0 fail, 0 skipped.
 - `us5-close-typecheck.log`, `us5-close-lint.log` and `us5-close-pack.log` exit 0; the packed CLI
   installs at 20.879 MB (limit 30 MB) and reports `0.1.0-alpha.0`.
-- The packed-CLI half of T032 is in-tree and therefore ran today: `matrix D10` drives the built
-  `dist/oboete.mjs` through external and native previews and a refused promotion (exits 0/0/0/1,
-  bounded metadata only), and `migration-import.test.ts`'s last case wires `oboete export` and
-  `oboete import` to the exit codes of the CLI contract. Today's `pack-check` is separate again: it
-  validates the tarball, not an import.
-- The near-limit packed measurement is not repeated here. It stays E5's, recorded in that section
-  at `97bbe882` — 108 s apply, 28 s preview, largest run 374,544 KiB under the contract's 512 MiB
-  budget. Its raw `us5-perf1-*` files were under `/tmp` and a reboot has since cleared them, so E5's
-  recorded numbers are the surviving record; nothing in T029-T032 needs them re-measured.
+- Three levels of "packed" are distinguished here, because T032's packed-CLI requirement is easy to
+  over-claim. `matrix D10` and the last case of `migration-import.test.ts` drive the **built bundle**
+  `dist/oboete.mjs` through external and native previews, a refused promotion and the export/import
+  exit codes (exits 0/0/0/1, bounded metadata only); both ran in today's suite. `pack-check` builds
+  and installs the **tarball** but only calls `--version`. Neither is an import through an installed
+  package, so one was run today as well and recorded in `us5-close-installed-import.log`: oboete
+  0.1.0-alpha.0 installed from `npm pack` into a temporary prefix, invoked under `env -i` with `HOME`
+  and `OBOETE_HOME` inside the temporary tree, previews the frozen claude-mem fixture with exit 2 and
+  an empty stderr — source hash `cfd2203c…`, 8 observations / 3 sessions / 1 summary / 4 prompts, two
+  unresolved project hashes, `applyPossible: false`, 31 records held — and `import promote --list`
+  exits 1 with the bounded scope message. The fixture's SHA-256 is identical before and after.
+- Applying an import through an installed package is still not claimed by this section, and neither
+  is the near-limit measurement. That stays E5's, recorded at `97bbe882`: 108 s apply, 28 s preview,
+  largest run 374,544 KiB under the contract's 512 MiB budget. Its evidence bundle survives at
+  `/var/tmp/oboete-009-20260909.jJ5grc/us5-rss3/` (2.8 GB; `/var/tmp`, so the reboot that cleared the
+  `/tmp` scratch did not touch it). The `us5-perf1-*` files are that increment's gate logs, not its
+  RSS bundle; both are intact and nothing in T029-T032 needs re-measuring.
 - Two earlier statements said T029-T032 stay unchecked pending the macOS probe and a final review
   pass. Both are amended in `tasks.md`: the platform probe is T040's product, whose macOS leg the
   owner deferred, and the cohesive product gate is T043's. Neither is named by T029-T032.
-- Receipts under `/var/tmp/oboete-009-us5close/`.
+- Receipts under `/var/tmp/oboete-009-us5close/`. Running the installed package's `setup` rewrites
+  the real agent configuration files whatever `OBOETE_HOME` says, so that check must run with `HOME`
+  pointed inside the temporary tree.
