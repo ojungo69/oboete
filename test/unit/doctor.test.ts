@@ -822,23 +822,35 @@ test('a missing full-text table explains why search and injection are unavailabl
 });
 
 test('an unreadable lease table produces a worker recovery sentence', async () => {
-  await withItemDatabase((db) => {
+  await withItemDatabase((db, paths) => {
     db.exec('DROP TABLE worker_lease');
-    assert.deepEqual(workerItem(db, ITEM_NOW, false), {
+    assert.deepEqual(workerItem(db, ITEM_NOW, false, paths, configSchema.parse({})), {
       item: 'worker', status: 'degraded',
-      reason: 'no such table: worker_lease resident=true idle_exit_ms=900000 stop=clear.',
+      reason: 'The worker lease could not be read: no such table: worker_lease. Resident mode is enabled, and the idle-exit timeout is 900000 milliseconds. No stop request is set.',
       consequence: 'Queued events are not summarized until the lease is reclaimed.',
       recovery: '`oboete observe` (it reclaims a stale lease and releases it when the queue is empty)',
     });
   });
 });
 
+test('unreadable worker settings are not reported as effective defaults', async () => {
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    assert.deepEqual(workerItem(null, ITEM_NOW, false, paths, null), {
+      item: 'worker', status: 'unverified',
+      reason: 'The database is unavailable, so the worker lease could not be verified. The effective worker settings could not be read. No stop request is set.',
+      consequence: 'Queued events cannot be summarized until storage is open.',
+      recovery: '`oboete doctor` after storage is repaired.',
+    });
+  });
+});
+
 test('a fresh worker heartbeat reports the process and elapsed seconds', async () => {
-  await withItemDatabase((db) => {
+  await withItemDatabase((db, paths) => {
     db.prepare("UPDATE worker_lease SET owner_token = 'live-owner', pid = 1234, heartbeat_at = ? WHERE id = 1").run(ITEM_NOW - 2000);
-    assert.deepEqual(workerItem(db, ITEM_NOW, false), {
+    assert.deepEqual(workerItem(db, ITEM_NOW, false, paths, configSchema.parse({})), {
       item: 'worker', status: 'healthy',
-      reason: 'The worker process 1234 is alive (heartbeat 2 seconds ago). resident=true idle_exit_ms=900000 stop=clear.',
+      reason: 'The worker process 1234 is alive (heartbeat 2 seconds ago). Resident mode is enabled, and the idle-exit timeout is 900000 milliseconds. No stop request is set.',
       consequence: '', recovery: '',
     });
   });
@@ -851,9 +863,12 @@ test('the worker item reports stop=set when the sentinel is present', async () =
     writeFileSync(paths.workerStop, '');
     const { db } = openDatabase({ path: paths.db, timeoutMs: 2_000 });
     try {
-      const item = workerItem(db, ITEM_NOW, false, paths, null);
-      assert.match(item.reason, /stop=set/);
-      assert.match(item.reason, /resident=true idle_exit_ms=900000/);
+      const config = configSchema.parse({ worker: { resident: false, idle_exit_ms: 60_000 } });
+      assert.deepEqual(workerItem(db, ITEM_NOW, false, paths, config), {
+        item: 'worker', status: 'healthy',
+        reason: 'No worker is running; a hook starts one when work is queued. Resident mode is disabled, and the idle-exit timeout is 60000 milliseconds. A stop request is set.',
+        consequence: '', recovery: '',
+      });
     } finally {
       db.close();
     }

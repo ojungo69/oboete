@@ -1,13 +1,18 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { shouldSpawnResident } from '../../src/capture-command.js';
 import { writeWorkerStop } from '../../src/pause.js';
 import { queueIsEmpty, runObserve, type ObserveDeps } from '../../src/worker/observe.js';
 import { claimLease } from '../../src/worker/lease.js';
 import { openDatabase } from '../../src/db/open.js';
+import { detectSync } from '../../src/privacy/detect.js';
+import { repositoryRoot } from '../helpers/compile-cache.js';
+import { WALL_CLOCK_IS_MEASURED } from '../helpers/home.js';
 import {
   NOW,
   captureEndedSession,
@@ -167,6 +172,25 @@ async function runResident(
   );
 }
 
+async function captureRunningBatch(fixture: Fixture): Promise<void> {
+  writeConfig(fixture, 'none');
+  await captureEndedSession(fixture, {
+    sessionId: 'reclaim-wait',
+    prompts: ['Do not spin while a batch is running.'],
+  });
+  fixture.withDb((db) => {
+    const event = db.prepare("SELECT id, session_id, repo_id FROM raw_events WHERE kind = 'prompt'").get();
+    if (event === undefined) assert.fail('expected a captured prompt');
+    db.prepare(
+      `INSERT INTO observation_batches
+         (id, repo_id, session_id, through_event_id, destination, trigger, state, owner_token, provider_attempts, claimed_at)
+       VALUES ('running-wait', ?, ?, ?, 'fallback', 'session_end', 'running', 'dead-worker', 1, ?)`,
+    ).run(event.repo_id, event.session_id, event.id, NOW);
+    db.exec("UPDATE raw_events SET processing_state = 'processed', batch_id = 'running-wait'");
+    db.exec("UPDATE sessions SET summary_state = 'done'");
+  });
+}
+
 test('one-shot observe still exits after a failed source and does not retry in-process', async () => {
   await withFixture(async (fixture) => {
     fixture.env = cleanEnv(fixture.home, { OBOETE_OPENROUTER_API_KEY: 'one-shot-no-retry' });
@@ -232,41 +256,135 @@ test('the idle probe sees a due retry, a spool file, a pending batch and a pendi
 
 test('a running batch inside its reclaim window does not start an epoch per poll', async () => {
   await withFixture(async (fixture) => {
-    writeConfig(fixture, 'none');
-    await captureEndedSession(fixture, {
-      sessionId: 'reclaim-wait',
-      prompts: ['Do not spin while a batch is running.'],
-    });
-    fixture.withDb((db) => {
-      const event = db.prepare("SELECT id, session_id, repo_id FROM raw_events WHERE kind = 'prompt'").get();
-      if (event === undefined) assert.fail('expected a captured prompt');
-      db.prepare(
-        `INSERT INTO observation_batches
-           (id, repo_id, session_id, through_event_id, destination, trigger, state, owner_token, provider_attempts, claimed_at)
-         VALUES ('running-wait', ?, ?, ?, 'fallback', 'session_end', 'running', 'dead-worker', 1, ?)`,
-      ).run(event.repo_id, event.session_id, event.id, NOW);
-      db.exec("UPDATE raw_events SET processing_state = 'processed', batch_id = 'running-wait'");
-      db.exec("UPDATE sessions SET summary_state = 'done'");
-    });
+    await captureRunningBatch(fixture);
 
-    let polls = 0;
+    const waits: number[] = [];
+    const tokens = new Set<string>();
+    let elapsed = 0;
     const exit = await runResident(fixture, {
       now: () => NOW,
+      maxRunMs: 400,
       sleep: async (ms) => {
-        polls += 1;
-        if (polls >= 8) writeWorkerStop(fixture.paths);
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        void ms;
+        waits.push(ms);
+        elapsed += ms;
+        fixture.withDb((db) => {
+          tokens.add(String(db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token));
+        });
+        if (waits.length === 8) writeWorkerStop(fixture.paths);
       },
-      elapsedMs: () => polls * 2_000,
+      elapsedMs: () => elapsed,
     });
     assert.equal(exit, 0);
     const log = readFileSync(fixture.paths.observeLog, 'utf8');
     assert.equal(log.includes('\n') && / epoch /.test(log), false, 'no epoch line while the batch is unreclaimable');
     assert.match(log, /reason=stopped/);
-    assert.ok(polls >= 8);
-    assert.ok(polls < 8 + 5, 'stop is noticed on the next poll, not one epoch per poll');
+    assert.deepEqual(waits, [200, 200, 2_000, 200, 200, 2_000, 200, 200]);
+    assert.equal(tokens.size, 3, 'max_run ends only the epoch; each new epoch gets its full budget');
+    assert.equal(log.includes('reason=max_run'), false);
   });
+});
+
+test('a batch_error ends a run after one attempt, including at the deadline in either mode', async () => {
+  for (const mode of ['resident', 'one-shot', 'resident-at-deadline', 'one-shot-at-deadline']) {
+    const resident = mode.startsWith('resident');
+    await withFixture(async (fixture) => {
+      fixture.env = cleanEnv(fixture.home, { OBOETE_OPENROUTER_API_KEY: 'batch-error-test-key' });
+      writeConfig(fixture, 'openrouter', fixture.env);
+      const prompt = 'End the process when applying a batch fails.';
+      await captureEndedSession(fixture, { sessionId: 'batch-error', prompts: [prompt] });
+      let elapsed = 0;
+      let calls = 0;
+      let waits = 0;
+      const exit = await runResident(fixture, {
+        maxRunMs: 400,
+        now: () => NOW + elapsed,
+        elapsedMs: () => elapsed,
+        fetch: async () => {
+          calls += 1;
+          return openAiResponse(providerOutput(eventId(fixture, prompt)));
+        },
+        applyHook: () => {
+          if (mode.endsWith('at-deadline')) elapsed = 400;
+          throw new Error('fixture apply failure');
+        },
+        sleep: async () => {
+          waits += 1;
+          writeWorkerStop(fixture.paths);
+        },
+      }, resident ? ['--resident'] : []);
+      assert.equal(exit, 0);
+      assert.equal(calls, 1);
+      assert.equal(waits, 0, 'a batch error must not begin another idle wait or epoch');
+      assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=batch_error/);
+      fixture.withDb((db) => {
+        const owner = db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token;
+        if (resident) assert.equal(owner, null);
+        else assert.equal(typeof owner, 'string', 'one-shot batch_error keeps its existing lease receipt');
+      });
+    });
+  }
+});
+
+test('a stop before the provider request leaves the batch pending for immediate adoption', async () => {
+  await withFixture(async (fixture) => {
+    fixture.env = cleanEnv(fixture.home, { OBOETE_OPENROUTER_API_KEY: 'request-stop-test-key' });
+    writeConfig(fixture, 'openrouter', fixture.env);
+    const prompt = 'Keep a stopped request pending.';
+    await captureEndedSession(fixture, { sessionId: 'request-stop', prompts: [prompt] });
+    const sourceId = eventId(fixture, prompt);
+    let calls = 0;
+    const fetch: typeof globalThis.fetch = async () => {
+      calls += 1;
+      return openAiResponse(providerOutput(sourceId));
+    };
+    assert.equal(await runResident(fixture, {
+      fetch,
+      detect: async (input) => {
+        const result = await detectSync(input);
+        if (input.text.includes('"checkpoint_context"')) writeWorkerStop(fixture.paths);
+        return result;
+      },
+    }), 0);
+    assert.equal(calls, 0);
+    fixture.withDb((db) => {
+      assert.deepEqual({ ...db.prepare('SELECT state, provider_attempts FROM observation_batches').get() },
+        { state: 'pending', provider_attempts: 0 });
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM provider_usage').get()?.n, 0);
+      assert.equal(db.prepare('SELECT processing_offset FROM raw_events WHERE id = ?').get(sourceId)?.processing_offset, 0);
+      assert.equal(db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token, null);
+    });
+    assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=stopped/);
+    assert.equal(await runObserveForFixture(fixture, { fetch }), 0);
+    assert.equal(calls, 1, 'the next spawn adopts the pending batch without a reclaim delay');
+  });
+});
+
+test('a stop after a response prevents both output and language retries', async () => {
+  for (const retry of ['output', 'language']) {
+    await withFixture(async (fixture) => {
+      fixture.env = cleanEnv(fixture.home, { OBOETE_OPENROUTER_API_KEY: 'request-retry-stop-key' });
+      writeConfig(fixture, 'openrouter', fixture.env);
+      const prompt = 'アップロードの再試行について記録してください。';
+      await captureEndedSession(fixture, { sessionId: `stop-${retry}-retry`, prompts: [prompt] });
+      let calls = 0;
+      const exit = await runResident(fixture, {
+        fetch: async () => {
+          calls += 1;
+          writeWorkerStop(fixture.paths);
+          const output = providerOutput(eventId(fixture, prompt));
+          if (retry === 'output') output.observations[0]!.title = '';
+          return openAiResponse(output);
+        },
+      });
+      assert.equal(exit, 0);
+      assert.equal(calls, 1, retry);
+      assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=stopped/);
+      fixture.withDb((db) => {
+        assert.equal(db.prepare('SELECT state FROM observation_batches').get()?.state, 'running');
+        assert.equal(db.prepare('SELECT COUNT(*) AS n FROM memories').get()?.n, 0);
+      });
+    });
+  }
 });
 
 test('each cooperative control exits 0 with its own reason', async () => {
@@ -356,6 +474,142 @@ test('each cooperative control exits 0 with its own reason', async () => {
   }
 });
 
+test('a config malformed at startup exits as config_changed before loading the worker config', async () => {
+  await withFixture(async (fixture) => {
+    writeFileSync(fixture.paths.config, '[observer\npreset = ');
+    assert.equal(await runResident(fixture), 0);
+    assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=config_changed/);
+    fixture.withDb((db) => {
+      assert.equal(db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token, null);
+    });
+  });
+});
+
+// Invoke the newly installed worker handler without triggering node:test's own signal handler.
+function signalWorker(signal: NodeJS.Signals, existing: NodeJS.SignalsListener[]): boolean {
+  const handler = process.listeners(signal).find((listener) => !existing.includes(listener));
+  if (handler === undefined) return false;
+  handler(signal);
+  return true;
+}
+
+test('signals interrupt an injected wait during an epoch and release the lease', async () => {
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    await withFixture(async (fixture) => {
+      await captureRunningBatch(fixture);
+      let elapsed = 0;
+      let sleptToEnd = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const listeners = process.listeners(signal);
+      try {
+        const exit = await runResident(fixture, {
+          elapsedMs: () => elapsed,
+          sleep: (ms) => new Promise((resolve) => {
+            assert.equal(ms, 200, 'the signal lands inside the active epoch');
+            queueMicrotask(() => signalWorker(signal, listeners));
+            timer = setTimeout(() => {
+              sleptToEnd = true;
+              elapsed += ms;
+              resolve();
+            }, 100);
+          }),
+        });
+        assert.equal(exit, 0);
+        assert.equal(sleptToEnd, false, 'the signal wakes an injected sleep before it resolves');
+        assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=signal/);
+        fixture.withDb((db) => {
+          assert.equal(db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token, null);
+          assert.equal(db.prepare('SELECT state FROM observation_batches').get()?.state, 'running');
+        });
+        assert.deepEqual(process.listeners(signal), listeners);
+      } finally {
+        clearTimeout(timer);
+      }
+    });
+  }
+});
+
+test('SIGTERM cancels the native idle timer so the resident process exits promptly', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    const child = spawn(process.execPath, [join(repositoryRoot(), 'dist', 'oboete.mjs'), 'observe', '--resident'], {
+      env: fixture.env,
+      stdio: 'ignore',
+    });
+    const finished = new Promise<{ status: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (status, signal) => resolve({ status, signal }));
+    });
+    void finished.catch(() => undefined);
+    const watchdog = setTimeout(() => child.kill('SIGKILL'), 10_000);
+    try {
+      const deadline = performance.now() + 8_000;
+      let idle = false;
+      while (performance.now() < deadline) {
+        assert.equal(child.exitCode, null, 'the resident must stay alive until signalled');
+        assert.equal(child.signalCode, null);
+        idle = fixture.withDb((db) => {
+          const lease = db.prepare('SELECT pid, started_at, heartbeat_at FROM worker_lease WHERE id = 1').get();
+          return lease?.pid === child.pid && Number(lease?.heartbeat_at) > Number(lease?.started_at);
+        });
+        if (idle) break;
+        await delay(20);
+      }
+      assert.equal(idle, true, 'the empty resident must reach its first periodic heartbeat');
+      // The heartbeat precedes the next idle wait; signal near the beginning of that wait.
+      await delay(100);
+      const signalledAt = performance.now();
+      assert.equal(child.kill('SIGTERM'), true);
+      assert.deepEqual(await finished, { status: 0, signal: null });
+      const elapsed = performance.now() - signalledAt;
+      if (WALL_CLOCK_IS_MEASURED) {
+        assert.ok(elapsed < 1_000, `the native idle timer kept the process alive for ${elapsed.toFixed(0)} ms`);
+      }
+      assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=signal/);
+      fixture.withDb((db) => {
+        assert.equal(db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token, null);
+      });
+    } finally {
+      clearTimeout(watchdog);
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await finished.catch(() => undefined);
+    }
+  });
+});
+
+test('signal handlers survive shutdown and a signalled worker preserves the stop sentinel', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    let signalled = false;
+    let handledDuringShutdown = false;
+    const listeners = process.listeners('SIGINT');
+    const termListeners = process.listeners('SIGTERM');
+    const exit = await runResident(fixture, {
+      now: () => {
+        if (signalled && !handledDuringShutdown) {
+          fixture.withDb((db) => {
+            assert.equal(typeof db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token, 'string');
+          });
+          handledDuringShutdown = signalWorker('SIGINT', listeners);
+        }
+        return NOW;
+      },
+      sleep: async () => {
+        writeWorkerStop(fixture.paths);
+        signalled = signalWorker('SIGTERM', termListeners);
+      },
+    });
+    assert.equal(exit, 0);
+    assert.equal(handledDuringShutdown, true, 'a second signal still has a handler before release');
+    assert.equal(existsSync(fixture.paths.workerStop), true);
+    assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=signal/);
+    fixture.withDb((db) => {
+      assert.equal(db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token, null);
+    });
+    assert.deepEqual(process.listeners('SIGINT'), listeners);
+  });
+});
+
 test('a fallback epoch still exits 0 on a cooperative stop', async () => {
   await withFixture(async (fixture) => {
     writeConfig(fixture, 'none');
@@ -376,6 +630,66 @@ test('a fallback epoch still exits 0 on a cooperative stop', async () => {
     fixture.withDb((db) => {
       assert.ok(Number(db.prepare("SELECT COUNT(*) AS n FROM observation_batches WHERE state = 'fallback'").get()?.n) >= 1);
     });
+  });
+});
+
+test('fallback exits keep worker and storage error codes in resident mode', async () => {
+  for (const storage of [false, true]) {
+    await withFixture(async (fixture) => {
+      writeConfig(fixture, 'none');
+      await captureEndedSession(fixture, {
+        sessionId: 'fallback-error', prompts: ['Report a failure after a fallback.'],
+      });
+      const exit = await runResident(fixture, {
+        sleep: async () => {
+          throw storage ? Object.assign(new Error('fixture storage failure'), { code: 'EIO' })
+            : new Error('fixture worker failure');
+        },
+      });
+      assert.equal(exit, storage ? 3 : 1);
+      assert.match(readFileSync(fixture.paths.observeLog, 'utf8'),
+        new RegExp(`run end .*reason=${storage ? 'storage_error' : 'worker_error'}`));
+    });
+  }
+});
+
+test('an idle exit preserves a stop sentinel written during that exit', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    let elapsed = 0;
+    assert.equal(await runResident(fixture, {
+      elapsedMs: () => {
+        if (elapsed === 900_000) writeWorkerStop(fixture.paths);
+        return elapsed;
+      },
+      sleep: async () => { elapsed = 900_000; },
+    }), 0);
+    assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=idle_exit/);
+    assert.equal(existsSync(fixture.paths.workerStop), true);
+  });
+});
+
+test('retention wakes an epoch for an expired secret with no batchable work', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    const prompt = 'Delete expired private material.';
+    await captureEndedSession(fixture, { sessionId: 'secret-retention', prompts: [prompt] });
+    const sourceId = eventId(fixture, prompt);
+    fixture.withDb((db) => {
+      db.exec("UPDATE sessions SET summary_state = 'done'");
+      db.exec('UPDATE raw_events SET work_binding_id = NULL');
+      db.prepare("UPDATE raw_events SET sensitivity = 'secret', classification_state = 'done', expires_at = ? WHERE id = ?")
+        .run(NOW - 1, sourceId);
+    });
+    assert.equal(await runResident(fixture, {
+      sleep: async () => { writeWorkerStop(fixture.paths); },
+    }), 0);
+    fixture.withDb((db) => {
+      assert.equal(db.prepare('SELECT id FROM raw_events WHERE id = ?').get(sourceId), undefined);
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM observation_batches').get()?.n, 0);
+      assert.equal(db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token, null);
+    });
+    assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /epoch .*purged=1/);
   });
 });
 
@@ -401,10 +715,11 @@ test('worker-stop is removed before the lease is released and pause is not consu
     });
 
     writeFileSync(fixture.paths.paused, '');
+    const beforePause = readFileSync(fixture.paths.observeLog, 'utf8');
     const pausedExit = await runResident(fixture);
     assert.equal(pausedExit, 0);
     assert.equal(existsSync(fixture.paths.paused), true);
-    assert.equal(existsSync(fixture.paths.observeLog) && readFileSync(fixture.paths.observeLog, 'utf8').includes('run start'), true);
+    assert.equal(readFileSync(fixture.paths.observeLog, 'utf8'), beforePause, 'the paused run never starts a worker');
   });
 });
 
@@ -493,4 +808,3 @@ test('shouldSpawnResident follows [worker] resident and defaults true', async ()
     assert.equal(shouldSpawnResident(fixture.paths), true);
   });
 });
-

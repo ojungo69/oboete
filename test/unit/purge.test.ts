@@ -10,6 +10,7 @@ import { claimLease } from '../../src/worker/lease.js';
 import {
   checkpoint,
   cleanupPiAck,
+  hasPurgeableEvents,
   purgeExpiredEvents,
   runtimeStateGet,
   runtimeStateSet,
@@ -123,6 +124,28 @@ test('expired unbatched failed and secret rows are deleted; expired unbatched lo
     assert.equal(result.leaseLost, false);
     assert.equal(result.deleted, 2);
     assert.deepEqual(eventIds(db), ['e-local']);
+  });
+});
+
+test('purge probe agrees with deletion for expired secret and retained material', async () => {
+  await withOpened((db) => {
+    const now = 1_757_000_000_000;
+    const token = claimLease(db, { pid: 1, now });
+    if (token === null) assert.fail('expected a lease token');
+    seedGraph(db);
+    insertBatch(db, 'b-applied', 'applied');
+    insertEvent(db, { id: 'e-secret', expiresAt: now, batchId: null, sensitivity: 'secret' });
+    insertEvent(db, { id: 'e-retained', expiresAt: now, batchId: 'b-applied', processedAt: now - 1 });
+    db.prepare(
+      `INSERT INTO memories (id, repo_id, type, title, body, content_hash, sensitivity)
+       VALUES ('m-retained', 'repo1', 'discovery', 'retained', 'retained', 'retained', 'local_only')`,
+    ).run();
+    db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id) VALUES ('m-retained', 'e-retained')").run();
+
+    assert.equal(hasPurgeableEvents(db, now), true);
+    assert.equal(purgeExpiredEvents(db, token, now).deleted, 1);
+    assert.equal(hasPurgeableEvents(db, now), false);
+    assert.deepEqual(eventIds(db), ['e-retained']);
   });
 });
 

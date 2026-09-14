@@ -139,6 +139,29 @@ test('rotateLease replaces the token and keeps pid and started_at', async () => 
   });
 });
 
+test('rotateLease propagates SQLITE_BUSY so its caller can retry', async () => {
+  await withTempHome((home) => {
+    const dbPath = oboetePaths(home).db;
+    const first = openDatabase({ path: dbPath, timeoutMs: 1000 });
+    const token = claimLease(first.db, { pid: 7, now: 1_757_000_000_000 });
+    if (token === null) assert.fail('expected a lease token');
+    first.db.exec('BEGIN IMMEDIATE');
+    const second = openDatabase({ path: dbPath, timeoutMs: 50 });
+    try {
+      assert.throws(() => rotateLease(second.db, token, 1_757_000_000_050), /locked|busy/u);
+      assert.equal(leaseColumns(first.db)?.owner_token, token);
+    } finally {
+      try {
+        if (first.db.isTransaction) first.db.exec('ROLLBACK');
+      } catch {
+        // Closing still runs.
+      }
+      if (second.db.isOpen) second.db.close();
+      if (first.db.isOpen) first.db.close();
+    }
+  });
+});
+
 test('claimLease returns null when another connection holds BEGIN IMMEDIATE', async () => {
   await withTempHome((home) => {
     const dbPath = oboetePaths(home).db;

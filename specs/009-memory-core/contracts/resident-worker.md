@@ -121,8 +121,13 @@ IPC channel, and a missed signal cannot strand work. Adaptive backoff is deliber
 heartbeats and control checks have to run during any backoff anyway, so the extra scheduling state
 removes no wakes, and a cap would add that much latency before a stop or an upgrade is noticed.
 
-Idle cost is measured as what it is: one indexed read plus a heartbeat write per two seconds, the
-control checks below, and whatever the existing empty-pass maintenance writes. Target: under 0.5% of
+Idle cost is measured as what it is, and the honest list is longer than one read: per poll, the
+queue probe (one clause per kind of queued work, each on an existing index), the control checks
+below — one `config.toml` parse and stat, one stat of the engine artifact, two sentinel `existsSync`
+calls — the two `MAX()` reads that date the newest capture and the newest completed processing, the
+wake-delay reads, a heartbeat write, and whatever the existing empty-pass maintenance writes. The
+two `MAX()` reads have no index behind them; both tables are small in practice, so T042 measures
+them rather than an index being added on speculation. Target: under 0.5% of
 one core averaged over ten idle minutes, with RSS flat across a long run (T042). No transaction and
 no unfinished statement iterator is held across a sleep or a provider wait, so a long-lived resident
 cannot pin the WAL; the worker keeps SQLite's default auto-checkpoint and the existing per-batch

@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn, type spawn } from 'node:child_process';
 import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
+import { setTimeout as timerSleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -9,6 +10,7 @@ import {
   consentHash,
   consentMatches,
   consentTuple,
+  DEFAULT_IDLE_EXIT_MS,
   isPaused,
   loadConfig,
   readCredentials,
@@ -48,6 +50,7 @@ import {
 import {
   checkpoint,
   cleanupPiAck,
+  hasPurgeableEvents,
   purgeExpiredEvents,
   runtimeStateSet,
 } from './purge.js';
@@ -69,10 +72,11 @@ export type ObserveDeps = {
   maxRunMs: number;
   /** Test seam for the A11 crash window after a response and before its fenced apply. */
   applyHook: () => void | Promise<void>;
+  shouldStop: () => string | undefined;
   writeError: (text: string) => void;
   /** Monotonic elapsed ms from an arbitrary origin; idle and epoch budgets use this. */
   elapsedMs: () => number;
-  sleep: (ms: number) => Promise<void>;
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** Resolved engine artifact; tests point this at a file they can mutate. */
   engineArtifact: string;
 };
@@ -110,8 +114,8 @@ export function isStorageError(error: unknown): boolean {
   );
 }
 
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return timerSleep(ms, undefined, { signal });
 }
 
 async function retryBusy<T>(work: () => T | Promise<T>): Promise<T> {
@@ -208,6 +212,7 @@ export function queueIsEmpty(db: DatabaseSync, paths: OboetePaths, token: string
     return false;
   }
   if (hasBatchableSources(db, token, now)) return false;
+  if (hasPurgeableEvents(db, now)) return false;
   try {
     if (
       readdirSync(paths.spool, { withFileTypes: true }).some(
@@ -257,6 +262,7 @@ function observeDependencies(overrides: Partial<ObserveDeps>): ObserveDeps {
     heartbeatMs: overrides.heartbeatMs ?? DEFAULT_HEARTBEAT_MS,
     maxRunMs: overrides.maxRunMs ?? DEFAULT_MAX_RUN_MS,
     applyHook: overrides.applyHook ?? (() => undefined),
+    shouldStop: overrides.shouldStop ?? (() => undefined),
     writeError: overrides.writeError ?? ((text) => { process.stderr.write(text); }),
     elapsedMs: overrides.elapsedMs ?? (() => performance.now()),
     sleep: overrides.sleep ?? defaultSleep,
@@ -308,49 +314,22 @@ function engineArtifactPath(): string {
   return fileURLToPath(import.meta.url);
 }
 
-type ConfigStamp = { kind: 'absent' } | { kind: 'file'; identity: FileIdentity };
+type ConfigStamp =
+  | { kind: 'absent' }
+  | { kind: 'file'; identity: FileIdentity; idleExitMs: number };
 
+/** One parse per control check: the stamp carries the settings the check needs. */
 function readConfigStamp(paths: OboetePaths): ConfigStamp | 'unreadable' {
   if (!existsSync(paths.config)) return { kind: 'absent' };
+  let idleExitMs: number;
   try {
-    loadConfig(paths);
+    idleExitMs = loadConfig(paths).worker.idle_exit_ms;
   } catch {
     return 'unreadable';
   }
   const identity = readFileIdentity(paths.config);
   if (identity === 'unreadable' || !identity.exists) return 'unreadable';
-  return { kind: 'file', identity };
-}
-
-function epochIsActionable(db: DatabaseSync, paths: OboetePaths, now: number): boolean {
-  if (
-    db.prepare("SELECT 1 AS work FROM observation_batches WHERE state = 'pending' LIMIT 1").get() !==
-    undefined
-  ) {
-    return true;
-  }
-  if (
-    db
-      .prepare(
-        "SELECT 1 AS work FROM observation_batches WHERE state = 'running' AND claimed_at <= ? LIMIT 1",
-      )
-      .get(now - RECLAIM_AFTER_MS) !== undefined
-  ) {
-    return true;
-  }
-  if (hasBatchableSources(db, '', now)) return true;
-  try {
-    if (
-      readdirSync(paths.spool, { withFileTypes: true }).some(
-        (entry) => entry.isFile() && entry.name.endsWith('.json'),
-      )
-    ) {
-      return true;
-    }
-  } catch {
-    // A missing spool directory contains no queued entry.
-  }
-  return pendingSummaries(db, '', now).length > 0;
+  return { kind: 'file', identity, idleExitMs };
 }
 
 function nextWakeDelay(db: DatabaseSync, now: number): number {
@@ -487,7 +466,7 @@ function recordBatchResult(
   batchResult: BatchResult,
 ): { leaseLost: boolean; usedFallback: boolean } {
   if (batchResult.state === 'lease_lost') return { leaseLost: true, usedFallback: false };
-  if (batchResult.state === 'requeued') return { leaseLost: false, usedFallback: false };
+  if (batchResult.state === 'requeued' || batchResult.state === 'done') return { leaseLost: false, usedFallback: false };
   result.batches += 1;
   result[batchResult.state] += 1;
   return {
@@ -516,14 +495,8 @@ const COOPERATIVE_REASONS = new Set([
   'upgraded',
   'idle_exit',
   'lease_lost',
+  'signal',
 ]);
-
-class StopRun extends Error {
-  constructor() {
-    super('stop');
-    this.name = 'StopRun';
-  }
-}
 
 async function observeLifecycle(
   overrides: Partial<ObserveDeps>,
@@ -572,7 +545,11 @@ async function observeLifecycle(
   let lastCaptureWall = 0;
   let lastProcessedWall = 0;
   let lastActivityElapsed = deps.elapsedMs();
-  const injectedSleep = overrides.sleep !== undefined;
+
+  function onSignal(): void {
+    stopReason ??= 'signal';
+    wakeSleep?.();
+  }
 
   function recordRunFailure(error: unknown, db: DatabaseSync, token: string): void {
     let logFailed = false;
@@ -652,12 +629,7 @@ async function observeLifecycle(
     }
     if (!ownsLease(db as DatabaseSync, token)) return 'lease_lost';
     pollIdleActivity();
-    let idleMs: number;
-    try {
-      idleMs = loadConfig(paths).worker.idle_exit_ms;
-    } catch {
-      return 'config_changed';
-    }
+    const idleMs = configNow.kind === 'absent' ? DEFAULT_IDLE_EXIT_MS : configNow.idleExitMs;
     if (deps.elapsedMs() - lastActivityElapsed >= idleMs && queueIsEmpty(db as DatabaseSync, paths, '', deps.now())) {
       return 'idle_exit';
     }
@@ -666,21 +638,16 @@ async function observeLifecycle(
 
   async function interruptibleSleep(ms: number): Promise<void> {
     if (ms <= 0 || stopReason !== undefined) return;
-    if (injectedSleep) {
-      await deps.sleep(ms);
-      return;
+    const sleepAbort = new AbortController();
+    try {
+      await Promise.race([
+        deps.sleep(ms, sleepAbort.signal),
+        new Promise<void>((resolve) => { wakeSleep = resolve; }),
+      ]);
+    } finally {
+      sleepAbort.abort();
+      wakeSleep = undefined;
     }
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        wakeSleep = undefined;
-        resolve();
-      }, ms);
-      wakeSleep = () => {
-        clearTimeout(timer);
-        wakeSleep = undefined;
-        resolve();
-      };
-    });
   }
 
   async function observeClaimedLease(db: DatabaseSync): Promise<void> {
@@ -732,9 +699,19 @@ async function observeLifecycle(
       ) {
         catalogChecked = true;
         await retryBusy(() =>
-          refreshWorkersAiCatalog(db, { env: deps.env, now: deps.now(), fetchImpl: deps.fetch }),
+          refreshWorkersAiCatalog(db, {
+            env: deps.env, now: deps.now(),
+            fetchImpl: async (...args) => {
+              const reason = batchDeps.shouldStop();
+              if (reason !== undefined) {
+                stopReason = reason;
+                throw new Error('worker stopped');
+              }
+              return await deps.fetch(...args);
+            },
+          }),
         );
-        if (leaseLost || !ownsLease(db, token)) return true;
+        if (stopReason !== undefined || leaseLost || !ownsLease(db, token)) return true;
       }
 
       return false;
@@ -777,17 +754,19 @@ async function observeLifecycle(
       let batchError: unknown;
       try {
         batchResult = (await processBatch({
-          db, token, batch, config, deps, detect, providerState,
+          db, token, batch, config, deps: batchDeps, detect, providerState,
           initialProviderReason, resolved, consentOk,
         }));
+        if (batchResult.state === 'done') {
+          stopReason = batchResult.reason;
+          return;
+        }
         const recorded = recordBatchResult(result, batchResult);
         if (recorded.leaseLost) leaseLost = true;
         if (recorded.usedFallback) usedFallback = true;
       } catch (error) {
         if (error instanceof LeaseLostError) leaseLost = true;
-        else if (error instanceof StopRun) {
-          // Leave pending/running state for the next spawn.
-        } else {
+        else {
           batchError = error;
           yieldAfterPass = true;
         }
@@ -804,7 +783,7 @@ async function observeLifecycle(
     async function processPendingBatches(): Promise<void> {
       const batches = pendingBatches(db);
       for (const batch of batches) {
-        if (leaseLost || timedOut()) break;
+        if (leaseLost || stopReason !== undefined || timedOut()) break;
         const reason = controlReason();
         if (reason !== undefined) {
           stopReason = reason;
@@ -849,7 +828,15 @@ async function observeLifecycle(
         await retryBusy(() => checkpoint(db, 'TRUNCATE'));
         return true;
       }
-      await deps.sleep(Math.min(Math.max(1, deps.heartbeatMs), BUSY_RETRY_MS));
+      await drainedOrWait();
+      return false;
+    }
+
+    async function drainedOrWait(): Promise<boolean> {
+      if (queueIsEmpty(db, paths, token, deps.now())) return true;
+      const wait = Math.min(Math.max(1, deps.heartbeatMs), BUSY_RETRY_MS);
+      if (resident) await interruptibleSleep(wait);
+      else await deps.sleep(wait);
       return false;
     }
 
@@ -875,7 +862,7 @@ async function observeLifecycle(
       if (leaseLost || stopReason !== undefined) return true;
 
       if (yieldAfterPass || timedOut()) {
-        endReason = yieldAfterPass && !timedOut() ? 'batch_error' : 'max_run';
+        endReason = yieldAfterPass ? 'batch_error' : 'max_run';
         yieldAfterPass = true;
         return true;
       }
@@ -899,6 +886,11 @@ async function observeLifecycle(
 
     async function runPasses(): Promise<void> {
       for (;;) {
+        const reason = controlReason();
+        if (reason !== undefined) {
+          stopReason = reason;
+          break;
+        }
         if (timedOut()) {
           yieldAfterPass = true;
           endReason = 'max_run';
@@ -907,87 +899,67 @@ async function observeLifecycle(
 
         if (await processPass()) break;
 
-        if (await releaseEmptyPass()) break;
+        if (resident ? await drainedOrWait() : await releaseEmptyPass()) break;
       }
 
-    }
-
-    async function runEpoch(): Promise<void> {
-      epochDeadlineElapsed = deps.elapsedMs() + Math.max(0, deps.maxRunMs);
-      yieldAfterPass = false;
-      for (;;) {
-        if (stopReason !== undefined || leaseLost) return;
-        if (timedOut()) {
-          yieldAfterPass = false;
-          endReason = 'empty';
-          return;
-        }
-        if (await processPass()) {
-          if (leaseLost) return;
-          if (stopReason !== undefined) return;
-          if (yieldAfterPass) {
-            yieldAfterPass = false;
-            endReason = 'empty';
-          }
-          return;
-        }
-        if (queueIsEmpty(db, paths, token, deps.now())) return;
-      }
     }
 
     async function runResident(): Promise<void> {
-      const onSignal = () => {
-        stopReason = 'stopped';
-        wakeSleep?.();
-      };
-      process.on('SIGTERM', onSignal);
-      process.on('SIGINT', onSignal);
-      try {
-        for (;;) {
-          const reason = controlReason();
-          if (reason !== undefined) {
-            endReason = reason;
-            exit = 0;
-            if (reason === 'lease_lost') leaseLost = true;
-            return;
-          }
-          const now = deps.now();
-          if (queueIsEmpty(db, paths, '', now) || !epochIsActionable(db, paths, now)) {
-            await interruptibleSleep(nextWakeDelay(db, now));
-            continue;
-          }
-          const rotated = rotateLease(db, token, now);
-          if (rotated === null) {
-            leaseLost = true;
-            endReason = 'lease_lost';
-            exit = 0;
-            return;
-          }
-          token = rotated;
-          providerState.clear();
-          ancestorCache = createAncestorCache();
-          const before = { ...result };
-          await runEpoch();
-          if (leaseLost) {
-            endReason = 'lease_lost';
-            exit = 0;
-            return;
-          }
-          if (stopReason !== undefined) {
-            endReason = stopReason;
-            exit = 0;
-            return;
-          }
-          if (countsChanged(before, result)) {
-            appendLog(paths.observeLog, 'info', 'epoch', countDelta(before, result));
-          }
+      for (;;) {
+        const reason = controlReason();
+        if (reason !== undefined) {
+          endReason = reason;
+          exit = 0;
+          if (reason === 'lease_lost') leaseLost = true;
+          return;
         }
-      } finally {
-        process.off('SIGTERM', onSignal);
-        process.off('SIGINT', onSignal);
+        const now = deps.now();
+        if (queueIsEmpty(db, paths, '', now)) {
+          await interruptibleSleep(nextWakeDelay(db, now));
+          continue;
+        }
+        const rotated = await retryBusy(() => rotateLease(db, token, deps.now()));
+        if (rotated === null) {
+          leaseLost = true;
+          endReason = 'lease_lost';
+          exit = 0;
+          return;
+        }
+        token = rotated;
+        epochDeadlineElapsed = deps.elapsedMs() + Math.max(0, deps.maxRunMs);
+        yieldAfterPass = false;
+        endReason = 'empty';
+        providerState.clear();
+        ancestorCache = createAncestorCache();
+        const before = { ...result };
+        await runPasses();
+        if (leaseLost) {
+          endReason = 'lease_lost';
+          exit = 0;
+          return;
+        }
+        if (stopReason !== undefined) {
+          endReason = stopReason;
+          exit = 0;
+          return;
+        }
+        if (countsChanged(before, result)) {
+          appendLog(paths.observeLog, 'info', 'epoch', countDelta(before, result));
+        }
+        if (endReason === 'batch_error') {
+          exit = 0;
+          return;
+        }
+        await interruptibleSleep(nextWakeDelay(db, deps.now()));
       }
     }
 
+    const startupReason = controlReason();
+    if (startupReason !== undefined) {
+      endReason = startupReason;
+      exit = 0;
+      return;
+    }
     const config = loadConfig(paths);
     const resolved = resolveObserveModel(config);
     const presetEntry = resolved.preset === 'none' ? null : PRESET_CATALOG[resolved.preset];
@@ -1000,15 +972,7 @@ async function observeLifecycle(
     const consentOk = (): boolean => liveConsentOk(paths, deps.env, startedConsentHash);
     const providerState = new Map<string, DegradedReason | null>();
     let ancestorCache = createAncestorCache();
-    const userApplyHook = deps.applyHook;
-    deps.applyHook = async () => {
-      await userApplyHook();
-      const reason = controlReason();
-      if (reason !== undefined) {
-        stopReason = reason;
-        throw new StopRun();
-      }
-    };
+    const batchDeps = { ...deps, shouldStop: () => controlReason() ?? deps.shouldStop() };
     const detect = async (text: string) => {
       try { return await deps.detect({
         text,
@@ -1027,13 +991,15 @@ async function observeLifecycle(
   }
 
   async function shutdownResident(): Promise<void> {
-    try {
-      clearWorkerStop(paths);
-    } catch {
-      // The next capture must not consume a leftover sentinel.
-    }
     const conn = db as DatabaseSync;
     if (!conn.isOpen || !ownsLease(conn, token)) return;
+    if (endReason === 'stopped') {
+      try {
+        clearWorkerStop(paths);
+      } catch {
+        // A failed removal must not prevent releasing this worker's lease.
+      }
+    }
     try {
       const released = releaseForExit(conn, paths, token, deps.now(), result, endReason, true);
       if (released === 'released') await retryBusy(() => checkpoint(conn, 'TRUNCATE'));
@@ -1043,6 +1009,10 @@ async function observeLifecycle(
     }
   }
 
+  if (resident) {
+    process.on('SIGTERM', onSignal);
+    process.on('SIGINT', onSignal);
+  }
   try {
     const queued = reprocessSource === undefined ? 'queued' : requeueSource(db, token, reprocessSource, deps.now());
     if (queued === 'queued') await observeClaimedLease(db);
@@ -1058,16 +1028,23 @@ async function observeLifecycle(
   } catch (error) {
     recordRunFailure(error, db, token);
   } finally {
-    wakeSleep?.();
-    clearInterval(heartbeatTimer);
-    if (resident) await shutdownResident();
-    if (db.isOpen) db.close();
+    try {
+      wakeSleep?.();
+      clearInterval(heartbeatTimer);
+      if (resident) await shutdownResident();
+      if (db.isOpen) db.close();
+    } finally {
+      if (resident) {
+        process.off('SIGTERM', onSignal);
+        process.off('SIGINT', onSignal);
+      }
+    }
   }
 
   // Every path above assigns it; the check is here so a future one that does not fails loudly
   // instead of reporting `undefined` as this run's exit code (contracts/cli.md pins 0, 1 and 3).
   if (exit === undefined) throw new Error('observe run produced no exit code');
-  if (!resident && reportsFallbackExit(exit, usedFallback, endReason)) {
+  if (reportsFallbackExit(exit, usedFallback, endReason)) {
     exit = 1;
   }
   if (resident && COOPERATIVE_REASONS.has(endReason)) exit = 0;

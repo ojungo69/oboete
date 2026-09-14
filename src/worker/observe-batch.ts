@@ -56,11 +56,12 @@ function loggableDetail(reason: DegradedReason, detail: string): string {
 }
 
 export type BatchResult = {
-  state: 'applied' | 'fallback' | 'lease_lost' | 'requeued';
-  reason: DegradedReason | null;
   detail?: string;
   memoryIds: string[];
-};
+} & (
+  | { state: 'applied' | 'fallback' | 'lease_lost' | 'requeued'; reason: DegradedReason | null }
+  | { state: 'done'; reason: string }
+);
 
 export class LeaseLostError extends Error {
   constructor() {
@@ -233,15 +234,20 @@ type ProviderCallOptions = {
   consentOk: () => boolean;
 };
 
-async function providerCall(options: ProviderCallOptions): Promise<CallOutcome> {
+async function providerCall(options: ProviderCallOptions): Promise<ProviderResult> {
   const { db, token, input, batch, config, deps, preset, model, consentOk } = options;
   const entry = PRESET_CATALOG[preset];
-  return await summarizeWithProvider(input, {
+  let stopReason: string | undefined;
+  const outcome = await summarizeWithProvider(input, {
     preset,
     model,
     agentCli: config.observer.agent_cli,
     credentials: readCredentials(preset, deps.env, config.observer.agent_cli),
-    consentOk,
+    consentOk: () => {
+      // This boundary also runs before output retries and agent CLI attempts.
+      stopReason ??= deps.shouldStop();
+      return stopReason === undefined && consentOk();
+    },
     reserve: () => {
       const result = reserveAttempt(db, {
         preset,
@@ -263,6 +269,8 @@ async function providerCall(options: ProviderCallOptions): Promise<CallOutcome> 
     spawn: deps.spawn,
     now: deps.now,
   });
+  return stopReason === undefined ? { outcome }
+    : { done: { state: 'done', reason: stopReason, memoryIds: [] } };
 }
 
 async function applyFallback(
@@ -445,7 +453,7 @@ function fallbackReason(
   return sessionState ?? 'rule_based';
 }
 
-type LanguageRetry = { done: BatchResult } | { outcome: CallOutcome };
+type ProviderResult = { done: BatchResult } | { outcome: CallOutcome };
 
 /**
  * Records a successful provider answer and retries once if it came back in the wrong language, in
@@ -460,7 +468,7 @@ async function settleProviderOutcome(args: {
   preset: PresetName;
   model: string;
   outcome: CallOutcome;
-}): Promise<LanguageRetry> {
+}): Promise<ProviderResult> {
   const { options, request, preset, outcome } = args;
   const { db, token, deps } = options;
   if (!outcome.ok) return { outcome };
@@ -484,12 +492,14 @@ async function retryOnLanguageMismatch(args: {
   nearby: ReturnType<typeof nearbyForBatch>;
   preset: PresetName;
   model: string;
-}): Promise<LanguageRetry> {
+}): Promise<ProviderResult> {
   const { options, request, input, nearby, preset, model } = args;
   const { db, token, batch, config, deps, detect, providerState } = options;
-  const outcome = await providerCall({
+  const called = await providerCall({
     db, token, input: request.input, batch, config, deps, preset, model, consentOk: options.consentOk,
   });
+  if ('done' in called) return called;
+  const { outcome } = called;
   if (outcome.ok && !recordProviderResult(db, token, preset, outcome, deps.now())) {
     return { done: { state: 'lease_lost', reason: null, memoryIds: [] } };
   }
@@ -590,14 +600,18 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
   if (finalCheck?.ok !== true || finalCheck.sensitivity === 'secret' || finalCheck.privateRemoved > 0) {
     return await applyFallback(db, token, input, [], 'unusable_output', detect, deps.now());
   }
+  const stopReason = deps.shouldStop();
+  if (stopReason !== undefined) return { state: 'done', reason: stopReason, memoryIds: [] };
   if (!markRequest(db, token, input, request, deps.now(), parentId)) {
     return { state: 'lease_lost', reason: null, memoryIds: [] };
   }
 
-  let outcome = await providerCall({
+  const called = await providerCall({
     db, token, input: request.input, batch, config, deps,
     preset: resolved.preset, model: resolved.model, consentOk: currentConsent,
   });
+  if ('done' in called) return called.done;
+  let { outcome } = called;
   const settled = await settleProviderOutcome({
     options: { ...options, consentOk: currentConsent },
     request,

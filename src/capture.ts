@@ -747,6 +747,7 @@ async function write(options: WriteOptions): Promise<CaptureOutcome> {
   const remaining = (): number => deadlineMs - deps.elapsedMs();
   if (rows.length === 0 && diagnostics.length === 0) return { outcome: 'dropped', rows: 0 };
 
+  let spawnAfterSpool = false;
   // contracts/agents.md: below the spool reserve the database is not opened at all.
   if (remaining() >= SPOOL_RESERVE_MS) {
     const timeoutMs = Math.max(
@@ -754,40 +755,34 @@ async function write(options: WriteOptions): Promise<CaptureOutcome> {
       Math.min(BUSY_TIMEOUT_CEILING_MS, Math.floor(remaining() - SPOOL_RESERVE_MS)),
     );
     const opened = openCaptureDatabase(paths, timeoutMs);
-    if (opened !== null && 'db' in opened) {
+    if (opened !== null && opened !== true) {
       // The handle is closed where it was opened: nothing between the two can leak it.
       try {
-        return await writeToDatabase(options, opened.db, remaining);
+        return await writeToDatabase(options, opened, remaining);
       } finally {
-        opened.db.close();
+        opened.close();
       }
     }
-    if (opened?.spawnAfterSpool === true) {
-      const outcome = spoolAll(paths, identity, rows);
-      try {
-        deps.spawnWorker();
-      } catch {
-        // Best-effort: the next hook retries the spawn (FR-002).
-      }
-      return {
-        ...outcome,
-        stdout: await injectAfterCapture(deps, paths, identity, injection, undefined),
-      };
-    }
+    spawnAfterSpool = opened === true;
   }
   const outcome = spoolAll(paths, identity, rows);
+  if (spawnAfterSpool) {
+    try {
+      deps.spawnWorker();
+    } catch {
+      // Best-effort: the next hook retries the spawn (FR-002).
+    }
+  }
   return {
     ...outcome,
     stdout: await injectAfterCapture(deps, paths, identity, injection, undefined),
   };
 }
 
-type CaptureOpen = { db: DatabaseSync } | { spawnAfterSpool: boolean };
-
 function openCaptureDatabase(
   paths: OboetePaths,
   timeoutMs: number,
-): CaptureOpen | null {
+): DatabaseSync | true | null {
   try {
     const opened = openDatabase({ path: paths.db, timeoutMs, hook: true });
     // data-model: the hook never migrates, so an older file is left to the worker. The handle is
@@ -805,9 +800,9 @@ function openCaptureDatabase(
       } catch {
         // The spool path does not use this handle.
       }
-      return { spawnAfterSpool };
+      return spawnAfterSpool ? true : null;
     }
-    return { db: opened.db };
+    return opened.db;
   } catch {
     // A missing or unopenable database is an availability problem, not a privacy one (R1): `write`
     // spools the sanitized event when this returns null.

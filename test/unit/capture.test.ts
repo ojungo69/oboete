@@ -1030,6 +1030,27 @@ test('a schema-behind capture spools and still starts a worker when the lease is
   });
 });
 
+test('a schema-behind capture does not start a worker while the lease is held', async () => {
+  await withCapture(async (context) => {
+    const opened = openDatabase({ path: context.paths.db, timeoutMs: 2_000 });
+    opened.db
+      .prepare('UPDATE worker_lease SET owner_token = ?, heartbeat_at = ? WHERE id = 1')
+      .run('another-worker', Date.now());
+    opened.db.exec('PRAGMA user_version = 1');
+    opened.db.close();
+
+    const outcome = await context.capture('claude', 'Stop', {
+      session_id: 'session-schema-behind-held',
+      cwd: context.repo,
+      prompt_id: 'prompt-1',
+      last_assistant_message: 'done',
+    });
+    assert.equal(outcome.outcome, 'spooled');
+    assert.equal(context.spawned, 0);
+    assert.ok(listSpool(context.paths).length > 0);
+  });
+});
+
 test('a worker spawn that throws leaves the stored rows alone', async () => {
   await withCapture(async (context) => {
     const base = { session_id: 'session-spawn-throws', cwd: context.repo, prompt_id: 'prompt-1' };
