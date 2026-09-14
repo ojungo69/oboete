@@ -825,11 +825,11 @@ with a review pass over each delta — correctness first, over-engineering secon
 round for the inputs that had no reader.
 
 - Gate: `npm run build`, `npm run typecheck` and `npm run lint` exit 0. The full `npm test` passes
-  on both supported Node versions — 1,507 pass / 0 fail / 2 skipped in the parallel leg and 280
+  on both supported Node versions — 1,508 pass / 0 fail / 2 skipped in the parallel leg and 280
   pass / 0 fail in the serial one, no `not ok` lines in either
-  (`t047-full-v24.16.0-r10.log`, `t047-full-v22.16.0-r10.log`; the same legs before the last two
+  (`t047-full-v24.16.0-r11.log`, `t047-full-v22.16.0-r11.log`; the same legs before the last two
   review rounds are `t047-full-v24-r5.log` and `t047-full-v22-r5.log`, and before the first
-  `t047-full-v24.16.0.log` and `t047-full-v22.16.0.log`). 30 of those tests are the resident's own,
+  `t047-full-v24.16.0.log` and `t047-full-v22.16.0.log`). 31 of those tests are the resident's own,
   in `test/unit/resident-worker.test.ts`.
 - Idle cost, contract item 12, measured on a replayed corpus rather than an empty process: the
   1,051-event fixture bundle replayed into a kept home (1,322 raw events, 100 batches, 48
@@ -875,10 +875,13 @@ round for the inputs that had no reader.
   `a backward system clock does not read continuing captures as idleness` (RED against the stamp
   read: `idle_exit` at 900,000 ms instead of surviving to 1,350,000 ms) and
   `a purge that frees the newest rowid does not hide the capture that reuses it` (RED against the
-  rowid read, same shape). Completed processing is the resident's own applied and fallback count;
-  that half has no isolating test, because every stimulus that completes a batch also inserts raw
-  events or leaves work queued, and a test that passed on the other half's reset would be the
-  narrow kind.
+  rowid read, same shape). The one capture that arrives on the resident's own connection — a hook
+  that exhausted its database budget spools, and recovery stores it later — resets the mark at that
+  insert, asserted by `a capture the resident stores from the spool resets the idle budget` (RED
+  without the reset: the log shows `recovered=1` and then `reason=idle_exit`). Completed processing
+  is the resident's own applied and fallback count; that half has no isolating test, because every
+  stimulus that completes a batch also inserts raw events or leaves work queued, and a test that
+  passed on the other half's reset would be the narrow kind.
 - Two controls were confirmed in production rather than only in tests, both with the lease released
   and exit 0: `SIGTERM` ended a resident as `signal` (`idle-cost.json`), and rebuilding
   `dist/engine.mjs` under an idle resident ended it as `upgraded` within one poll
@@ -912,8 +915,9 @@ file is named, the test is in `test/unit/resident-worker.test.ts`.
    `a fallback epoch still exits 0 on a cooperative stop`,
    `fallback exits keep worker and storage error codes in resident mode`,
    `capture activity resets the idle budget while an unchanged session expires` for the idle row's
-   inputs, and `a purge that frees the newest rowid does not hide the capture that reuses it` for
-   the mark that carries them.
+   inputs, and `a purge that frees the newest rowid does not hide the capture that reuses it` and
+   `a capture the resident stores from the spool resets the idle budget` for the mark that carries
+   them.
 5. `worker-stop is removed before the lease is released and pause is not consumed`,
    `a stop sentinel survives a takeover that happens during shutdown` — the removal runs inside the
    releasing transaction, so ownership is tested at the write rather than before it, and a lease

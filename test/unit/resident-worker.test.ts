@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { existsSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -664,6 +664,67 @@ test('a purge that frees the newest rowid does not hide the capture that reuses 
     assert.equal(await runResident(fixture, clock), 0);
     assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=stopped/,
       'a capture that reuses a freed rowid must still reset the idle budget');
+    assert.equal(clock.elapsedMs(), 1_350_000);
+  });
+});
+
+test('a capture the resident stores from the spool resets the idle budget', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    const spooled = {
+      repo: {
+        id: 'repo-spooled',
+        identity_kind: 'common_dir',
+        normalized_identity: '/tmp/oboete-idle-spool',
+        display_root: '/tmp/oboete-idle-spool',
+      },
+      session: {
+        id: 'sess-idle-spool',
+        repo_id: 'repo-spooled',
+        agent: 'claude',
+        native_session_id: 'native-idle-spool',
+        conversation_id: 'sess-idle-spool',
+        started_at: NOW,
+        status: 'active',
+      },
+      row: {
+        id: 'spooled-idle-start',
+        repo_id: 'repo-spooled',
+        session_id: 'sess-idle-spool',
+        turn_id: null,
+        agent: 'claude',
+        kind: 'session_start',
+        content: null,
+        truncated: 0,
+        payload_json: null,
+        content_hash: 'hash-idle-spool',
+        sensitivity: 'local_only',
+        classification_state: 'done',
+        captured_at: NOW,
+        expires_at: NOW + 7 * DAY,
+      },
+    };
+    const clock = residentClock((polls) => {
+      if (polls === 1) {
+        // A hook that exhausted its database budget spools instead of writing, so this capture
+        // reaches the database through the resident's own connection — the one commit
+        // `data_version` cannot see. It opens no batchable work, so nothing else holds the resident.
+        mkdirSync(fixture.paths.spool, { recursive: true });
+        writeFileSync(join(fixture.paths.spool, `${NOW}-spooled-idle-start.json`), JSON.stringify(spooled));
+      }
+      if (polls === 3) writeWorkerStop(fixture.paths);
+    }, 450_000);
+    assert.equal(await runResident(fixture, clock), 0);
+    fixture.withDb((db) => {
+      assert.equal(
+        Number(db.prepare('SELECT via_spool FROM raw_events WHERE id = ?').get('spooled-idle-start')?.via_spool),
+        1,
+        'the spooled capture must have been recovered',
+      );
+      assert.equal(queueIsEmpty(db, fixture.paths, '', NOW), true);
+    });
+    assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=stopped/,
+      'a capture stored by spool recovery must reset the idle budget');
     assert.equal(clock.elapsedMs(), 1_350_000);
   });
 });

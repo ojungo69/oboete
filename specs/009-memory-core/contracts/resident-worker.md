@@ -163,11 +163,18 @@ request. The first that holds ends the process cooperatively with exit 0:
 
 Neither half of the idle row reads a timestamp. A capture is observed as a change in SQLite's
 `data_version`, which advances when another connection commits and never for this process's own
-writes: a capture is always another process, so it is always seen, and this resident's own
-maintenance can never be mistaken for one. Any other connection's commit counts, which in normal
-operation means a capture or an operator command — activity either way, and the direction of the
-error is to stay alive. Completed processing is the resident's own count of applied and fallback
-batches for the epoch, and while it holds the lease it is the only process that completes one.
+writes: a capture is normally another process, so it is seen, and this resident's own maintenance
+can never be mistaken for one. Any other connection's commit counts, which in normal operation
+means a capture or an operator command — activity either way, and the direction of the error is to
+stay alive. Completed processing is the resident's own count of applied and fallback batches for the
+epoch, and while it holds the lease it is the only process that completes one.
+
+One capture does reach the database on this process's own connection: a hook that has exhausted its
+database budget spools instead of writing, and spool recovery stores it later. That insert is
+therefore its own reset, taken where it happens rather than at the end of the epoch, because the
+next pass checks the controls and a recovered `session_start` leaves nothing queued to hold the
+resident past that check. Spool recovery is the whole of that set — every other write the resident
+makes on its own connection is processing, which the completion count already carries.
 
 Two mechanisms were rejected because each hides a real capture. Timestamps: a backward system-clock
 correction is exactly when the mark matters, `last_captured_at` is written clamped so it never

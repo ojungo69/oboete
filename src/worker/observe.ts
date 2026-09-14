@@ -631,6 +631,11 @@ async function observeLifecycle(
     async function recoverAndClassify(): Promise<boolean> {
       const recovered = await retryBusy(() => recoverSpool(db, paths, token, deps.now()));
       result.recovered += recovered.inserted;
+      // A spooled capture is still a capture, and this is the one that arrives on the resident's own
+      // connection, which `data_version` deliberately does not see. The reset belongs here rather
+      // than at the end of the epoch: the next pass checks the controls, and a recovered
+      // `session_start` leaves nothing queued to hold the resident past that check.
+      if (recovered.inserted > 0) lastActivityElapsed = deps.elapsedMs();
       if (leaseLost || !ownsLease(db, token)) return true;
 
       const classified = await retryBusy(() => classifyPending(db, token, deps.now(), detect));
