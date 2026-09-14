@@ -133,7 +133,9 @@ below — one `config.toml` parse and stat, one stat of the engine artifact, two
 calls — the two `MAX()` reads that date the newest capture and the newest completed processing, the
 wake-delay reads, a heartbeat write, and whatever the existing empty-pass maintenance writes. The
 two `MAX()` reads have no index behind them; both tables are small in practice, so T042 measures
-them rather than an index being added on speculation. Target: under 0.5% of
+them rather than an index being added on speculation. Once a minute the list also carries one
+maintenance epoch — a token rotation and one empty pass — which T042 counts as idle cost rather
+than treating it as work. Target: under 0.5% of
 one core averaged over ten idle minutes, with RSS flat across a long run (T042). No transaction and
 no unfinished statement iterator is held across a sleep or a provider wait, so a long-lived resident
 cannot pin the WAL; the worker keeps SQLite's default auto-checkpoint and the existing per-batch

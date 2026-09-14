@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
-import { openDatabase } from '../../src/db/open.js';
+import { isBusyError, openDatabase } from '../../src/db/open.js';
 import { oboetePaths } from '../../src/paths.js';
 import {
   assertLease,
@@ -148,8 +148,14 @@ test('rotateLease propagates SQLITE_BUSY so its caller can retry', async () => {
     first.db.exec('BEGIN IMMEDIATE');
     const second = openDatabase({ path: dbPath, timeoutMs: 50 });
     try {
-      assert.throws(() => rotateLease(second.db, token, 1_757_000_000_050), /locked|busy/u);
+      assert.throws(() => rotateLease(second.db, token, 1_757_000_000_050), isBusyError,
+        'rotateLease must propagate SQLITE_BUSY so the caller can retry');
       assert.equal(leaseColumns(first.db)?.owner_token, token);
+      first.db.exec('ROLLBACK');
+      const rotated = rotateLease(second.db, token, 1_757_000_000_100);
+      assert.notEqual(rotated, null, 'rotation must succeed once the writer releases its transaction');
+      assert.notEqual(rotated, token);
+      assert.equal(leaseColumns(second.db)?.owner_token, rotated);
     } finally {
       try {
         if (first.db.isTransaction) first.db.exec('ROLLBACK');

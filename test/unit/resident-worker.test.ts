@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import { promisify } from 'node:util';
 
 import { shouldSpawnResident } from '../../src/capture-command.js';
 import { writeWorkerStop } from '../../src/pause.js';
@@ -70,17 +71,13 @@ test('a resident retries a due source in a later epoch of the same process', asy
       return clock;
     };
 
-    let elapsed = 0;
     const exit = await runObserveForFixture(
       fixture,
       {
         now,
         fetch: fetchImpl,
         maxRunMs: 60 * 60 * 1000,
-        elapsedMs: () => elapsed,
-        sleep: async (ms) => {
-          elapsed += ms;
-        },
+        ...residentClock(),
       },
       ['--resident'],
     );
@@ -134,22 +131,18 @@ test('a resident retries a due source in a later epoch of the same process', asy
   });
 });
 
-function residentClock(): {
-  elapsed: number;
-  elapsedMs: () => number;
-  sleep: (ms: number) => Promise<void>;
-} {
-  const state = { elapsed: 0 };
+function residentClock(
+  onSleep?: (polls: number) => void | Promise<void>,
+  stepMs?: number,
+): Pick<ObserveDeps, 'elapsedMs' | 'sleep'> {
+  let elapsed = 0;
+  let polls = 0;
   return {
-    get elapsed() {
-      return state.elapsed;
-    },
-    set elapsed(value: number) {
-      state.elapsed = value;
-    },
-    elapsedMs: () => state.elapsed,
+    elapsedMs: () => elapsed,
     sleep: async (ms: number) => {
-      state.elapsed += ms;
+      elapsed += stepMs ?? ms;
+      polls += 1;
+      await onSleep?.(polls);
     },
   };
 }
@@ -284,6 +277,44 @@ test('a running batch inside its reclaim window does not start an epoch per poll
   });
 });
 
+test('the heartbeat keeps ownership under the token rotated for the second epoch', async () => {
+  await withFixture(async (fixture) => {
+    await captureRunningBatch(fixture);
+    let wall = NOW;
+    const epochTokens: unknown[] = [];
+    let heartbeatRow: Record<string, unknown> | undefined;
+    const clock = residentClock(async (polls) => {
+      if (polls === 1 || polls === 4) {
+        epochTokens.push(fixture.withDb((db) =>
+          db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token));
+      }
+      if (polls === 4) {
+        // Two 5 ms waits exhaust epoch one; the idle wait precedes epoch two's first wait.
+        wall += 1_000;
+        await delay(30);
+        heartbeatRow = fixture.withDb((db) =>
+          db.prepare('SELECT owner_token, heartbeat_at, pid FROM worker_lease WHERE id = 1').get());
+        writeWorkerStop(fixture.paths);
+      }
+    });
+    const exit = await runResident(fixture, {
+      ...clock, now: () => wall, maxRunMs: 10, heartbeatMs: 5,
+    });
+    assert.equal(exit, 0);
+    const log = readFileSync(fixture.paths.observeLog, 'utf8');
+    assert.doesNotMatch(log, /run end .*reason=lease_lost/,
+      'the second epoch heartbeat must use the rotated lease token');
+    assert.match(log, /run end .*reason=stopped/);
+    assert.equal(epochTokens.length, 2);
+    assert.equal(typeof epochTokens[0], 'string');
+    assert.equal(typeof epochTokens[1], 'string');
+    assert.notEqual(epochTokens[0], epochTokens[1]);
+    assert.equal(heartbeatRow?.owner_token, epochTokens[1], 'the lease stays owned during the heartbeat wait');
+    assert.equal(heartbeatRow?.pid, process.pid);
+    assert.equal(heartbeatRow?.heartbeat_at, NOW + 1_000, 'the real interval fires after the wall clock advances');
+  });
+});
+
 test('a batch_error ends a run after one attempt, including at the deadline in either mode', async () => {
   for (const mode of ['resident', 'one-shot', 'resident-at-deadline', 'one-shot-at-deadline']) {
     const resident = mode.startsWith('resident');
@@ -357,6 +388,56 @@ test('a stop before the provider request leaves the batch pending for immediate 
     assert.equal(await runObserveForFixture(fixture, { fetch }), 0);
     assert.equal(calls, 1, 'the next spawn adopts the pending batch without a reclaim delay');
   });
+});
+
+test('a control after a usable response preserves the applied batch citations and log', async () => {
+  const root = repositoryRoot();
+  const { stdout } = await promisify(execFile)('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' });
+  const head = stdout.trim();
+  for (const control of ['sentinel', 'signal']) {
+    await withFixture(async (fixture) => {
+      fixture.env = cleanEnv(fixture.home, { OBOETE_OPENROUTER_API_KEY: 'applied-stop-key' });
+      writeConfig(fixture, 'openrouter', fixture.env);
+      const prompt = 'Keep citations when stopping after a usable response.';
+      await captureEndedSession(fixture, { sessionId: `applied-${control}`, cwd: root, prompts: [prompt] });
+      const sourceId = eventId(fixture, prompt);
+      const output = providerOutput(sourceId);
+      output.observations[0]!.citations.files_read = ['package.json'];
+      const listeners = process.listeners('SIGTERM');
+      let applied = 0;
+      const exit = await runResident(fixture, {
+        fetch: async () => openAiResponse(output),
+        applyHook: () => {
+          applied += 1;
+          if (control === 'sentinel') writeWorkerStop(fixture.paths);
+          else assert.equal(signalWorker('SIGTERM', listeners), true);
+        },
+      });
+      assert.equal(exit, 0);
+      assert.equal(applied, 1, 'the control becomes true after a usable provider response');
+      const log = readFileSync(fixture.paths.observeLog, 'utf8');
+      assert.match(log, new RegExp(`run end .*reason=${control === 'sentinel' ? 'stopped' : 'signal'}`));
+      const batchId = fixture.withDb((db) => {
+        const batch = db.prepare('SELECT id, state FROM observation_batches').get();
+        assert.equal(batch?.state, 'applied');
+        const memories = db.prepare('SELECT id, citations_head, citations_ok FROM memories WHERE source_batch_id = ?')
+          .all(String(batch?.id));
+        assert.ok(memories.length > 0, 'the accepted response must produce memories');
+        for (const memory of memories) {
+          assert.equal(memory.citations_head, head, `${control}: applied memories must have citations stamped after a control`);
+          assert.equal(memory.citations_ok, 1);
+          assert.ok(db.prepare('SELECT 1 FROM memory_sources WHERE memory_id = ? AND raw_event_id = ? AND context_only = 0')
+            .get(String(memory.id), sourceId));
+        }
+        assert.ok(db.prepare(`SELECT 1 FROM memory_sources ms JOIN memories m ON m.id = ms.memory_id
+          WHERE m.source_batch_id = ? AND ms.citation_kind = 'file_read' AND ms.citation_value = 'package.json'
+            AND ms.context_only = 0`).get(String(batch?.id)));
+        return String(batch?.id);
+      });
+      assert.ok(log.includes(` batch id=${batchId} state=applied `),
+        `${control}: the applied batch must be logged after a control`);
+    });
+  }
 });
 
 test('a stop after a response prevents both output and language retries', async () => {
@@ -454,20 +535,10 @@ test('each cooperative control exits 0 with its own reason', async () => {
       writeConfig(fixture, 'none');
       const artifact = join(fixture.home, 'engine-artifact');
       writeFileSync(artifact, 'engine');
-      let polls = 0;
-      const extra: Partial<ObserveDeps> = {
+      const exit = await runResident(fixture, {
         engineArtifact: artifact,
-        ...(item.reason === 'idle_exit'
-          ? {}
-          : {
-              sleep: async () => {
-                polls += 1;
-                item.poke(fixture, polls);
-              },
-              elapsedMs: () => polls * 2_000,
-            }),
-      };
-      const exit = await runResident(fixture, extra);
+        ...residentClock((polls) => { item.poke(fixture, polls); }),
+      });
       assert.equal(exit, 0, item.name);
       assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), new RegExp(`reason=${item.reason}`), item.name);
     });
@@ -483,6 +554,39 @@ test('a config malformed at startup exits as config_changed before loading the w
       assert.equal(db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token, null);
     });
   });
+});
+
+test('capture activity resets the idle budget while an unchanged session expires', async () => {
+  for (const advances of [true, false]) {
+    await withFixture(async (fixture) => {
+      writeConfig(fixture, 'none');
+      await fixture.capture('SessionStart', {
+        session_id: 'idle-capture', cwd: process.cwd(), source: 'startup',
+      });
+      fixture.withDb((db) => {
+        assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sessions').get()?.n, 1);
+        assert.equal(queueIsEmpty(db, fixture.paths, '', NOW), true);
+      });
+      const clock = residentClock((polls) => {
+        if (advances && polls === 1) {
+          fixture.withDb((db) => {
+            db.prepare('UPDATE sessions SET last_captured_at = ?').run(NOW);
+          });
+        }
+        if (polls === 3) writeWorkerStop(fixture.paths);
+      }, 450_000);
+      assert.equal(await runResident(fixture, clock), 0);
+      const log = readFileSync(fixture.paths.observeLog, 'utf8');
+      if (advances) {
+        assert.match(log, /run end .*reason=stopped/,
+          'capture activity at 450000 ms must keep the resident alive past 900000 ms');
+        assert.equal(clock.elapsedMs(), 1_350_000);
+      } else {
+        assert.match(log, /run end .*reason=idle_exit/, 'an unchanged session must exhaust the idle budget');
+        assert.equal(clock.elapsedMs(), 900_000);
+      }
+    });
+  }
 });
 
 // Invoke the newly installed worker handler without triggering node:test's own signal handler.
@@ -617,14 +721,7 @@ test('a fallback epoch still exits 0 on a cooperative stop', async () => {
       sessionId: 'fallback-then-stop',
       prompts: ['Fallback must not force exit 1 on stop.'],
     });
-    let polls = 0;
-    const exit = await runResident(fixture, {
-      sleep: async () => {
-        polls += 1;
-        if (polls === 1) writeWorkerStop(fixture.paths);
-      },
-      elapsedMs: () => polls * 2_000,
-    });
+    const exit = await runResident(fixture, residentClock(() => { writeWorkerStop(fixture.paths); }));
     assert.equal(exit, 0);
     assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /reason=stopped/);
     fixture.withDb((db) => {
@@ -706,14 +803,27 @@ test('worker-stop is removed before the lease is released and pause is not consu
       sessionId: 'stop-consumed',
       prompts: ['Stop the resident once it is idle.'],
     });
-    let polls = 0;
-    await runResident(fixture, {
-      sleep: async () => {
-        polls += 1;
-        if (polls === 1) writeWorkerStop(fixture.paths);
-      },
-      elapsedMs: () => polls * 2_000,
+    let stopWritten = false;
+    let beforeRelease: { stopExists: boolean; leaseOwned: boolean } | undefined;
+    const clock = residentClock(() => {
+      writeWorkerStop(fixture.paths);
+      stopWritten = true;
     });
+    assert.equal(await runResident(fixture, {
+      ...clock,
+      now: () => {
+        // After the idle wait writes stop, the next now() evaluates releaseForExit's arguments.
+        if (stopWritten && beforeRelease === undefined) {
+          beforeRelease = fixture.withDb((db) => ({
+            stopExists: existsSync(fixture.paths.workerStop),
+            leaseOwned: typeof db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token === 'string',
+          }));
+        }
+        return NOW;
+      },
+    }), 0);
+    assert.deepEqual(beforeRelease, { stopExists: false, leaseOwned: true },
+      'worker-stop must be absent while the lease is still owned immediately before release');
     assert.equal(readFileSync(fixture.paths.observeLog, 'utf8').includes('reason=stopped'), true);
     assert.equal(existsSync(fixture.paths.workerStop), false);
     fixture.withDb((db) => {
@@ -788,20 +898,53 @@ test('a wall-clock jump does not end an epoch budget measured on elapsed time', 
       prompts: ['Epoch budgets stay on the monotonic clock.'],
     });
     let wall = NOW;
-    let polls = 0;
     const exit = await runResident(fixture, {
       now: () => wall,
       maxRunMs: 5_000,
-      sleep: async () => {
-        polls += 1;
+      ...residentClock((polls) => {
         wall += 60 * 60_000;
         if (polls === 2) writeWorkerStop(fixture.paths);
-      },
-      elapsedMs: () => polls * 2_000,
+      }),
     });
     assert.equal(exit, 0);
     assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /reason=stopped/);
     assert.equal(readFileSync(fixture.paths.observeLog, 'utf8').includes('reason=max_run'), false);
+  });
+});
+
+test('a wall-clock jump during apply does not cut the active epoch short', async () => {
+  await withFixture(async (fixture) => {
+    fixture.env = cleanEnv(fixture.home, { OBOETE_OPENROUTER_API_KEY: 'in-flight-clock-key' });
+    writeConfig(fixture, 'openrouter', fixture.env);
+    const prompt = 'Finish the active epoch despite a wall-clock jump.';
+    await captureEndedSession(fixture, { sessionId: 'in-flight-clock', prompts: [prompt] });
+    const sourceId = eventId(fixture, prompt);
+    let wall = NOW;
+    let applied = 0;
+    const clock = residentClock(() => { writeWorkerStop(fixture.paths); });
+    const exit = await runResident(fixture, {
+      ...clock,
+      now: () => wall,
+      maxRunMs: 5_000,
+      fetch: async () => openAiResponse(providerOutput(sourceId)),
+      applyHook: () => {
+        applied += 1;
+        wall += 60 * 60_000;
+      },
+    });
+    assert.equal(exit, 0);
+    assert.equal(applied, 1, 'the wall clock jumps while the batch is in flight');
+    assert.equal(clock.elapsedMs(), 2_000);
+    fixture.withDb((db) => {
+      const batch = db.prepare('SELECT state, completed_at FROM observation_batches').get();
+      assert.equal(batch?.state, 'applied');
+      assert.equal(batch?.completed_at, NOW + 60 * 60_000);
+      assert.equal(db.prepare('SELECT summary_state FROM sessions').get()?.summary_state, 'done',
+        'a wall-clock jump must not cut the active epoch short before its session summary');
+    });
+    const log = readFileSync(fixture.paths.observeLog, 'utf8');
+    assert.match(log, /run end .*reason=stopped/);
+    assert.doesNotMatch(log, /reason=max_run/);
   });
 });
 
