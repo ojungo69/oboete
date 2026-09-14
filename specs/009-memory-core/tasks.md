@@ -71,10 +71,10 @@ tasks/projects; inferred sharing and imported/tool instructions cannot self-appr
 Independent test: preview and import a supported frozen corpus twice without changing the
 source store, duplicating effects, reviving tombstones or activating historical tasks.
 
-- [ ] T029 [US5] Pin supported claude-mem/CMEM export schemas and migration mappings in `specs/009-memory-core/contracts/migration.md` using primary sources and synthetic fixtures.
-- [ ] T030 [US5] Extend versioned Oboete transfer with scope/provenance and the old reader in `src/transfer.ts` and `test/unit/transfer.test.ts`.
-- [ ] T031 [US5] Add a read-only migration adapter with dry-run/explicit mapping and classification quarantine in migration operations and `src/worker/imported.ts`.
-- [ ] T032 [US5] Verify source immutability, identity collisions, tombstones, repetition and historical work in `test/unit/migration-import.test.ts` and packed CLI checks.
+- [X] T029 [US5] Pin supported claude-mem/CMEM export schemas and migration mappings in `specs/009-memory-core/contracts/migration.md` using primary sources and synthetic fixtures.
+- [X] T030 [US5] Extend versioned Oboete transfer with scope/provenance and the old reader in `src/transfer.ts` and `test/unit/transfer.test.ts`.
+- [X] T031 [US5] Add a read-only migration adapter with dry-run/explicit mapping and classification quarantine in migration operations and `src/worker/imported.ts`.
+- [X] T032 [US5] Verify source immutability, identity collisions, tombstones, repetition and historical work in `test/unit/migration-import.test.ts` and packed CLI checks.
 
 ## Phase 8: US6 — Carry memory across devices (P1)
 
@@ -178,7 +178,9 @@ writers require separate worktrees. No deployment follows merely from an increme
   1,181 unit/migration/scripts + 202 serial E2E/fault per Node, plus pack-check) and then passed the
   whole gate again on this follow-up (`us5-e2b-*`: 1,203 + 202 per Node, pack-check 20.703 MB).
   Earlier `us5-promote-*` receipts remain historical evidence.
-  T029-T032 stay unchecked: the remaining matrix, RSS/packed checks and full reviews remain open.
+  T029-T032 stayed unchecked here: the remaining matrix, RSS/packed checks and full reviews were open.
+  Amended 2026-09-14: E3 closed the matrix, E4 the security review and E5 the RSS/packed checks, so the
+  four markers are now checked with the E7 receipts below.
 - T043/T031 (E4 security, this commit): the US5 security review converged after the initial
   architecture/g1-g3 Codex pass, eight fresh Codex follow-up rounds and the `code-review` finder
   set; eight security fixes plus one error-code fix in `transfer-merge.ts`/`transfer-plan.ts`/
@@ -189,8 +191,9 @@ writers require separate worktrees. No deployment follows merely from an increme
   per-database prepared-statement cache; near-limit import 3,228 s → 108 s apply, 2,987 s → 28 s
   preview, every packed-CLI run below the 512 MiB import/export budget the contract now states
   (largest 374,544 KiB), counts and effects identical to the E1 baseline. Gate `us5-perf1-*` green.
-  See `quickstart.md` E5. T029-T032/T043 stay unchecked pending the macOS probe and the final
-  review pass.
+  See `quickstart.md` E5. Amended 2026-09-14: the macOS probe is T040's product and the cohesive
+  gate is T043's, so neither belongs to T029-T032; those four are checked with the E7 receipts and
+  T043 stays open.
 - T034–T036 (US6, `4317d3ea`…`4b426a1c`): the owner chose "implement per the contract" on
   2026-09-11. Schema 0008 (`sync_spaces`, `sync_cursors`, `sync_origins`, `sync_revisions` +
   parents, `sync_repo_mappings`, `sync_approvals`), `src/sync/` (identity, envelope, format,
@@ -315,3 +318,26 @@ writers require separate worktrees. No deployment follows merely from an increme
   accepted `NODE_COMPILE_CACHE` and cache-growth costs and what the numbers do not claim are in
   `contracts/injection-performance.md`; the pin is `test/unit/launcher.test.ts`. T042 stays
   unchecked: the 1,000/10,000/100,000-event measurement it names is still open.
+- T029-T032 (E7 close, `35c1d9d4`): the US5 increment is complete and the four markers are checked.
+  `contracts/migration.md` pins `oboete-export/1`, `oboete-export/2` and
+  `claude-mem-query-export@8bc631a` against the upstream exporter, store queries, types and public
+  documentation at v13.24.5 (T029). `src/transfer.ts` and its `transfer-*.ts` modules carry scope
+  and provenance and still read v1 (T030). The read-only adapter previews by default for native v2 and
+  claude-mem input — `oboete-export/1` keeps its documented implicit apply, and says so in its own
+  output — takes the mapping flags of its own format (`--map-repo`/`--map-work` for native input, `--map-project`/
+  `--map-project-hash` for `--from claude-mem`, each rejected for the other), never opens a source
+  with SQLite, and quarantines every memory it newly inserts as `imported`/`local_only` until the
+  worker classifies it in `src/worker/imported.ts`; a row that matches an existing memory keeps
+  that memory's local review state and scope and is recorded as `matched_existing`, and a tombstone
+  or held historical record is never rewritten to `imported` (T031). The matrix is the seven
+  `test/unit/migration-*.test.ts` files plus `test/unit/transfer.test.ts`: 142 checks pass on both
+  Node 24.16.0 and 22.16.0, with typecheck, lint and pack-check (20.879 MB installed) exit 0. The
+  packed-CLI half of T032 ran with them at three levels: `matrix D10` alone spawns the built
+  `dist/oboete.mjs` (previews and promotion, not export or an applied import), `pack-check` installs
+  the tarball and calls `--version`, and a preview through the installed package is recorded in
+  `us5-close-installed-import.log` (exit 2 on unresolved project
+  mappings, `applyPossible: false`, fixture bytes unchanged). Applying through an installed package
+  and the near-limit measurement stay E5's recorded result at `97bbe882`, whose evidence bundle
+  survives at `/var/tmp/oboete-009-20260909.jJ5grc/us5-rss3/` (T032). Receipts `us5-close-*` under `/var/tmp/oboete-009-us5close/`; see `quickstart.md` E7. The
+  macOS platform probe remains T040's (its macOS leg deferred by the owner) and the cohesive
+  product gate remains T043's.
