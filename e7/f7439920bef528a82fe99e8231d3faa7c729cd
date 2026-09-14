@@ -1,0 +1,33 @@
+test/migrations/apply.test.ts
+  s_a3b2da79705e65::t_f258568f04a68a 15,203-235
+  s_a3b2da79705e65::t_cc439c5a3faeb7 236-237
+test/unit/resident-worker.test.ts
+  s_a3b2da79705e65::t_d3ed76b81948ad 443-474
+specs/009-memory-core/contracts/resident-worker.md
+  s_a3b2da79705e65::t_b91403f285fa7f 312-317
+  s_a3b2da79705e65::t_d3ed76b81948ad 299-302
+specs/009-memory-core/quickstart.md
+  s_a3b2da79705e65::t_f4c369f069506a 822-823
+  s_a3b2da79705e65::t_ab0f47c7454810 834-839,846-847,849-857
+  s_a3b2da79705e65::t_80dffe256870ed 818-821,824-826,832-833,840-845,848,858-875
+  s_a3b2da79705e65::t_d626608588b2c7 876-925
+  s_a3b2da79705e65::t_1560562c4c12d1 827-831
+specs/009-memory-core/tasks.md
+  s_a3b2da79705e65::t_66c040b1ae81e9 101,344-352
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "e7f7439920bef528a82fe99e8231d3faa7c729cd",
+  "prompts": {},
+  "sessions": {
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
