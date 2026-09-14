@@ -1,7 +1,7 @@
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { ensureDirectories, oboetePaths, resolveHome } from './paths.js';
+import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from './paths.js';
 
 const PAUSED_TEXT =
   'Capture and injection are paused. Run `oboete resume` to continue; existing memories are untouched.';
@@ -41,6 +41,24 @@ function parse(argv: string[], io: PauseIo): { json: boolean } | null {
 
 function report(io: PauseIo, json: boolean, paused: boolean, text: string): void {
   io.writeOut(json ? `${JSON.stringify({ paused })}\n` : `${text}\n`);
+}
+
+/** `oboete observe --stop` writes this sentinel; the resident removes it on the way out. */
+export function isWorkerStopped(paths: OboetePaths): boolean {
+  return existsSync(paths.workerStop);
+}
+
+export function writeWorkerStop(paths: OboetePaths): void {
+  ensureDirectories(paths);
+  writeFileSync(paths.workerStop, '', { mode: 0o600 });
+}
+
+export function clearWorkerStop(paths: OboetePaths): void {
+  try {
+    unlinkSync(paths.workerStop);
+  } catch {
+    // Already gone, or never written.
+  }
 }
 
 /** `oboete pause [--json]`: create `~/.oboete/paused` without opening the database (FR-034, R12). */

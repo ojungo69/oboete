@@ -50,7 +50,7 @@ test('explicit reprocessing rejects missing, malformed and unknown options witho
   for (const args of [['--reprocess-source'], ['--reprocess-source', '../private-file'], ['--unexpected']]) {
     let error = '';
     assert.equal(await runObserve(args, { writeError: (text) => { error += text; } }), 2);
-    assert.equal(error, 'Usage: oboete observe [--reprocess-source <source-id>]\n');
+    assert.equal(error, 'Usage: oboete observe [--reprocess-source <source-id>] [--resident] [--stop]\n');
   }
 });
 

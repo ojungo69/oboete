@@ -754,13 +754,25 @@ async function write(options: WriteOptions): Promise<CaptureOutcome> {
       Math.min(BUSY_TIMEOUT_CEILING_MS, Math.floor(remaining() - SPOOL_RESERVE_MS)),
     );
     const opened = openCaptureDatabase(paths, timeoutMs);
-    if (opened !== null) {
+    if (opened !== null && 'db' in opened) {
       // The handle is closed where it was opened: nothing between the two can leak it.
       try {
         return await writeToDatabase(options, opened.db, remaining);
       } finally {
         opened.db.close();
       }
+    }
+    if (opened?.spawnAfterSpool === true) {
+      const outcome = spoolAll(paths, identity, rows);
+      try {
+        deps.spawnWorker();
+      } catch {
+        // Best-effort: the next hook retries the spawn (FR-002).
+      }
+      return {
+        ...outcome,
+        stdout: await injectAfterCapture(deps, paths, identity, injection, undefined),
+      };
     }
   }
   const outcome = spoolAll(paths, identity, rows);
@@ -770,27 +782,37 @@ async function write(options: WriteOptions): Promise<CaptureOutcome> {
   };
 }
 
+type CaptureOpen = { db: DatabaseSync } | { spawnAfterSpool: boolean };
+
 function openCaptureDatabase(
   paths: OboetePaths,
   timeoutMs: number,
-): ReturnType<typeof openDatabase> | null {
-  let opened: ReturnType<typeof openDatabase> | null = null;
+): CaptureOpen | null {
   try {
-    opened = openDatabase({ path: paths.db, timeoutMs, hook: true });
+    const opened = openDatabase({ path: paths.db, timeoutMs, hook: true });
     // data-model: the hook never migrates, so an older file is left to the worker. The handle is
     // dropped before it is closed, so a throwing close cannot leave the caller writing through a
     // connection this function has already refused.
     if (opened.schemaBehind) {
-      const behind = opened;
-      opened = null;
-      behind.db.close();
+      let spawnAfterSpool = false;
+      try {
+        spawnAfterSpool = isLeaseFree(opened.db, Date.now());
+      } catch {
+        spawnAfterSpool = false;
+      }
+      try {
+        opened.db.close();
+      } catch {
+        // The spool path does not use this handle.
+      }
+      return { spawnAfterSpool };
     }
+    return { db: opened.db };
   } catch {
     // A missing or unopenable database is an availability problem, not a privacy one (R1): `write`
     // spools the sanitized event when this returns null.
+    return null;
   }
-
-  return opened;
 }
 
 async function writeToDatabase(

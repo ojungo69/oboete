@@ -12,6 +12,7 @@ import {
   type CaptureOutcome,
   type StdinRead,
 } from './capture.js';
+import { loadConfig } from './config.js';
 import { appendLogQuietly, errorCode } from './log.js';
 import { ensureDirectories, oboetePaths, resolveHome } from './paths.js';
 import { detectInWorker } from './privacy/detect.js';
@@ -25,6 +26,15 @@ import { testFault } from './testing/faults.js';
  * as A7 prescribes: a redacted `partial` row marked truncated.
  */
 export const STDIN_READ_BOUND = 262_144;
+
+/** Capture spawns `observe --resident` while `[worker] resident` is true (default). */
+export function shouldSpawnResident(paths: ReturnType<typeof oboetePaths>): boolean {
+  try {
+    return loadConfig(paths).worker.resident;
+  } catch {
+    return true;
+  }
+}
 
 const STDIN_WAIT_LIMIT = 100;
 
@@ -84,7 +94,11 @@ function defaultRuntime(): CaptureRuntime {
       // performance.now() counts from process start, which is where the budget is measured from.
       elapsedMs: () => performance.now(),
       spawnWorker: () => {
-        const child = spawn(process.execPath, [bundlePath, 'observe'], {
+        const paths = oboetePaths(resolveHome());
+        const args = shouldSpawnResident(paths)
+          ? [bundlePath, 'observe', '--resident']
+          : [bundlePath, 'observe'];
+        const child = spawn(process.execPath, args, {
           detached: true,
           stdio: 'ignore',
         });

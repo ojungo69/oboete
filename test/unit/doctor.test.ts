@@ -825,7 +825,8 @@ test('an unreadable lease table produces a worker recovery sentence', async () =
   await withItemDatabase((db) => {
     db.exec('DROP TABLE worker_lease');
     assert.deepEqual(workerItem(db, ITEM_NOW, false), {
-      item: 'worker', status: 'degraded', reason: 'no such table: worker_lease',
+      item: 'worker', status: 'degraded',
+      reason: 'no such table: worker_lease resident=true idle_exit_ms=900000 stop=clear.',
       consequence: 'Queued events are not summarized until the lease is reclaimed.',
       recovery: '`oboete observe` (it reclaims a stale lease and releases it when the queue is empty)',
     });
@@ -836,9 +837,26 @@ test('a fresh worker heartbeat reports the process and elapsed seconds', async (
   await withItemDatabase((db) => {
     db.prepare("UPDATE worker_lease SET owner_token = 'live-owner', pid = 1234, heartbeat_at = ? WHERE id = 1").run(ITEM_NOW - 2000);
     assert.deepEqual(workerItem(db, ITEM_NOW, false), {
-      item: 'worker', status: 'healthy', reason: 'The worker process 1234 is alive (heartbeat 2 seconds ago).',
+      item: 'worker', status: 'healthy',
+      reason: 'The worker process 1234 is alive (heartbeat 2 seconds ago). resident=true idle_exit_ms=900000 stop=clear.',
       consequence: '', recovery: '',
     });
+  });
+});
+
+test('the worker item reports stop=set when the sentinel is present', async () => {
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    ensureDirectories(paths);
+    writeFileSync(paths.workerStop, '');
+    const { db } = openDatabase({ path: paths.db, timeoutMs: 2_000 });
+    try {
+      const item = workerItem(db, ITEM_NOW, false, paths, null);
+      assert.match(item.reason, /stop=set/);
+      assert.match(item.reason, /resident=true idle_exit_ms=900000/);
+    } finally {
+      db.close();
+    }
   });
 });
 

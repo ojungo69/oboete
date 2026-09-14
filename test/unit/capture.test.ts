@@ -1013,6 +1013,23 @@ test('the worker is spawned at the end of a turn only while the lease is free', 
   });
 });
 
+test('a schema-behind capture spools and still starts a worker when the lease is free', async () => {
+  await withCapture(async (context) => {
+    const opened = openDatabase({ path: context.paths.db, timeoutMs: 2_000 });
+    opened.db.exec('PRAGMA user_version = 1');
+    opened.db.close();
+
+    const base = { session_id: 'session-schema-behind', cwd: context.repo, prompt_id: 'prompt-1' };
+    const outcome = await context.capture('claude', 'Stop', {
+      ...base,
+      last_assistant_message: 'done',
+    });
+    assert.equal(outcome.outcome, 'spooled');
+    assert.equal(context.spawned, 1);
+    assert.ok(listSpool(context.paths).length > 0);
+  });
+});
+
 test('a worker spawn that throws leaves the stored rows alone', async () => {
   await withCapture(async (context) => {
     const base = { session_id: 'session-spawn-throws', cwd: context.repo, prompt_id: 'prompt-1' };

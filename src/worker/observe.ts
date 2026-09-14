@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn, type spawn } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import {
@@ -20,11 +21,13 @@ import { appendLog, appendLogQuietly, credentialValues, errorCode } from '../log
 import { refreshWorkersAiCatalog } from '../observer/catalog.js';
 import { sessionSummary, type DegradedReason } from '../observer/classify.js';
 import { resolveModel } from '../observer/providers.js';
+import { clearWorkerStop, isWorkerStopped, writeWorkerStop } from '../pause.js';
 import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from '../paths.js';
 import { detectSync, type DetectorInput, type DetectorResult } from '../privacy/detect.js';
 import {
   classifyPending,
   DUE_SOURCE_SQL,
+  RECLAIM_AFTER_MS,
   SUMMARIZABLE_ROW_SQL,
   createBatches,
   hasBatchableSources,
@@ -36,7 +39,7 @@ import {
 } from './batches.js';
 import { updateBatchCitations } from './citations.js';
 import { reclassifyImported } from './imported.js';
-import { assertLease, claimLease, heartbeat, releaseLease, transactionImmediate } from './lease.js';
+import { assertLease, claimLease, heartbeat, releaseLease, rotateLease, transactionImmediate } from './lease.js';
 import {
   LeaseLostError,
   processBatch,
@@ -53,6 +56,8 @@ import { recoverSpool } from './spool-recovery.js';
 const DEFAULT_HEARTBEAT_MS = 2_000;
 const DEFAULT_MAX_RUN_MS = 20 * 60 * 1_000;
 const BUSY_RETRY_MS = 200;
+const RESIDENT_POLL_MS = 2_000;
+const OBSERVE_USAGE = 'Usage: oboete observe [--reprocess-source <source-id>] [--resident] [--stop]\n';
 
 export type ObserveDeps = {
   now: () => number;
@@ -65,6 +70,11 @@ export type ObserveDeps = {
   /** Test seam for the A11 crash window after a response and before its fenced apply. */
   applyHook: () => void | Promise<void>;
   writeError: (text: string) => void;
+  /** Monotonic elapsed ms from an arbitrary origin; idle and epoch budgets use this. */
+  elapsedMs: () => number;
+  sleep: (ms: number) => Promise<void>;
+  /** Resolved engine artifact; tests point this at a file they can mutate. */
+  engineArtifact: string;
 };
 
 type Counts = {
@@ -100,7 +110,7 @@ export function isStorageError(error: unknown): boolean {
   );
 }
 
-function sleep(ms: number): Promise<void> {
+function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
@@ -109,7 +119,7 @@ async function retryBusy<T>(work: () => T | Promise<T>): Promise<T> {
     return await work();
   } catch (error) {
     if (!isBusyError(error)) throw error;
-    await sleep(BUSY_RETRY_MS);
+    await defaultSleep(BUSY_RETRY_MS);
     return await work();
   }
 }
@@ -189,7 +199,8 @@ function pendingSummaries(db: DatabaseSync, token: string, now: number): string[
     .map((row) => String(row.id));
 }
 
-function queueIsEmpty(db: DatabaseSync, paths: OboetePaths, token: string, now: number): boolean {
+/** Idle probe: pass a token that matches no attempt (the empty string). */
+export function queueIsEmpty(db: DatabaseSync, paths: OboetePaths, token: string, now: number): boolean {
   if (
     db.prepare("SELECT 1 AS work FROM observation_batches WHERE state IN ('pending', 'running') LIMIT 1").get() !==
     undefined
@@ -247,6 +258,141 @@ function observeDependencies(overrides: Partial<ObserveDeps>): ObserveDeps {
     maxRunMs: overrides.maxRunMs ?? DEFAULT_MAX_RUN_MS,
     applyHook: overrides.applyHook ?? (() => undefined),
     writeError: overrides.writeError ?? ((text) => { process.stderr.write(text); }),
+    elapsedMs: overrides.elapsedMs ?? (() => performance.now()),
+    sleep: overrides.sleep ?? defaultSleep,
+    engineArtifact: overrides.engineArtifact ?? engineArtifactPath(),
+  };
+}
+
+type FileIdentity = {
+  exists: boolean;
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  target: string | null;
+};
+
+function readFileIdentity(path: string): FileIdentity | 'unreadable' {
+  try {
+    const link = lstatSync(path);
+    const target = link.isSymbolicLink() ? realpathSync(path) : null;
+    const st = statSync(path);
+    return {
+      exists: true,
+      dev: st.dev,
+      ino: st.ino,
+      size: st.size,
+      mtimeMs: st.mtimeMs,
+      target,
+    };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { exists: false, dev: 0, ino: 0, size: 0, mtimeMs: 0, target: null }
+      : 'unreadable';
+  }
+}
+
+function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
+  return (
+    left.exists === right.exists &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.target === right.target
+  );
+}
+
+function engineArtifactPath(): string {
+  return fileURLToPath(import.meta.url);
+}
+
+type ConfigStamp = { kind: 'absent' } | { kind: 'file'; identity: FileIdentity };
+
+function readConfigStamp(paths: OboetePaths): ConfigStamp | 'unreadable' {
+  if (!existsSync(paths.config)) return { kind: 'absent' };
+  try {
+    loadConfig(paths);
+  } catch {
+    return 'unreadable';
+  }
+  const identity = readFileIdentity(paths.config);
+  if (identity === 'unreadable' || !identity.exists) return 'unreadable';
+  return { kind: 'file', identity };
+}
+
+function epochIsActionable(db: DatabaseSync, paths: OboetePaths, now: number): boolean {
+  if (
+    db.prepare("SELECT 1 AS work FROM observation_batches WHERE state = 'pending' LIMIT 1").get() !==
+    undefined
+  ) {
+    return true;
+  }
+  if (
+    db
+      .prepare(
+        "SELECT 1 AS work FROM observation_batches WHERE state = 'running' AND claimed_at <= ? LIMIT 1",
+      )
+      .get(now - RECLAIM_AFTER_MS) !== undefined
+  ) {
+    return true;
+  }
+  if (hasBatchableSources(db, '', now)) return true;
+  try {
+    if (
+      readdirSync(paths.spool, { withFileTypes: true }).some(
+        (entry) => entry.isFile() && entry.name.endsWith('.json'),
+      )
+    ) {
+      return true;
+    }
+  } catch {
+    // A missing spool directory contains no queued entry.
+  }
+  return pendingSummaries(db, '', now).length > 0;
+}
+
+function nextWakeDelay(db: DatabaseSync, now: number): number {
+  let delay = RESIDENT_POLL_MS;
+  const retry = db
+    .prepare(
+      `SELECT MIN(retry_after) AS t FROM raw_events
+       WHERE processing_state = 'waiting' AND retry_after IS NOT NULL AND retry_after > ?`,
+    )
+    .get(now)?.t;
+  if (typeof retry === 'number') delay = Math.min(delay, Math.max(1, retry - now));
+  const claimed = db
+    .prepare("SELECT MIN(claimed_at) AS t FROM observation_batches WHERE state = 'running'")
+    .get()?.t;
+  if (typeof claimed === 'number') {
+    const reclaimAt = claimed + RECLAIM_AFTER_MS;
+    if (reclaimAt > now) delay = Math.min(delay, Math.max(1, reclaimAt - now));
+  }
+  return delay;
+}
+
+function countsChanged(before: Counts, after: Counts): boolean {
+  return (
+    after.recovered !== before.recovered ||
+    after.classified !== before.classified ||
+    after.reclassified !== before.reclassified ||
+    after.batches !== before.batches ||
+    after.applied !== before.applied ||
+    after.fallback !== before.fallback ||
+    after.purged !== before.purged
+  );
+}
+
+function countDelta(before: Counts, after: Counts): Counts {
+  return {
+    recovered: after.recovered - before.recovered,
+    classified: after.classified - before.classified,
+    reclassified: after.reclassified - before.reclassified,
+    batches: after.batches - before.batches,
+    applied: after.applied - before.applied,
+    fallback: after.fallback - before.fallback,
+    purged: after.purged - before.purged,
   };
 }
 
@@ -363,7 +509,27 @@ function emptyCounts(): Counts {
   };
 }
 
-async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource?: string): Promise<number> {
+const COOPERATIVE_REASONS = new Set([
+  'paused',
+  'stopped',
+  'config_changed',
+  'upgraded',
+  'idle_exit',
+  'lease_lost',
+]);
+
+class StopRun extends Error {
+  constructor() {
+    super('stop');
+    this.name = 'StopRun';
+  }
+}
+
+async function observeLifecycle(
+  overrides: Partial<ObserveDeps>,
+  options: { reprocessSource?: string; resident: boolean },
+): Promise<number> {
+  const { reprocessSource, resident } = options;
   const deps = observeDependencies(overrides);
   const paths = oboetePaths(resolveHome(deps.env));
   if (isPaused(paths)) {
@@ -386,7 +552,7 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource
     }
     return claim.exit;
   }
-  const token = claim.token;
+  let token = claim.token;
 
   let leaseLost = false;
   const heartbeatTimer = setInterval(heartbeatLease, Math.max(1, deps.heartbeatMs));
@@ -397,6 +563,16 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource
   let yieldAfterPass = false;
   let exit: number | undefined;
   let endReason = 'empty';
+  let stopReason: string | undefined;
+  let wakeSleep: (() => void) | undefined;
+  let epochDeadlineElapsed = deps.elapsedMs() + Math.max(0, deps.maxRunMs);
+  const enginePath = deps.engineArtifact;
+  const startedEngine = readFileIdentity(enginePath);
+  const startedConfig = readConfigStamp(paths);
+  let lastCaptureWall = 0;
+  let lastProcessedWall = 0;
+  let lastActivityElapsed = deps.elapsedMs();
+  const injectedSleep = overrides.sleep !== undefined;
 
   function recordRunFailure(error: unknown, db: DatabaseSync, token: string): void {
     let logFailed = false;
@@ -408,7 +584,7 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource
     const storageError = logFailed || isStorageError(error);
     exit = storageError ? 3 : 0;
     endReason = storageError ? 'storage_error' : 'worker_error';
-    if (ownsLease(db, token)) {
+    if (!resident && ownsLease(db, token)) {
       try {
         releaseForExit(db, paths, token, deps.now(), result, endReason, false);
       } catch {
@@ -427,7 +603,87 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource
     }
   }
 
-  async function observeClaimedLease(db: DatabaseSync, token: string): Promise<void> {
+  function timedOut(): boolean {
+    return resident ? deps.elapsedMs() >= epochDeadlineElapsed : deps.now() >= deadline;
+  }
+
+  function importDeadline(): number {
+    if (!resident) return deadline;
+    return deps.now() + Math.max(0, epochDeadlineElapsed - deps.elapsedMs());
+  }
+
+  function pollIdleActivity(): void {
+    const conn = db as DatabaseSync;
+    const capture = conn.prepare('SELECT MAX(last_captured_at) AS t FROM sessions').get()?.t;
+    const processed = conn
+      .prepare(
+        "SELECT MAX(completed_at) AS t FROM observation_batches WHERE state IN ('applied', 'fallback')",
+      )
+      .get()?.t;
+    const captureAt = typeof capture === 'number' ? capture : 0;
+    const processedAt = typeof processed === 'number' ? processed : 0;
+    if (captureAt > lastCaptureWall || processedAt > lastProcessedWall) {
+      lastCaptureWall = Math.max(lastCaptureWall, captureAt);
+      lastProcessedWall = Math.max(lastProcessedWall, processedAt);
+      lastActivityElapsed = deps.elapsedMs();
+    }
+  }
+
+  function controlReason(): string | undefined {
+    if (stopReason !== undefined) return stopReason;
+    if (!resident) return undefined;
+    if (isPaused(paths)) return 'paused';
+    if (isWorkerStopped(paths)) return 'stopped';
+    const engineNow = readFileIdentity(enginePath);
+    if (
+      startedEngine === 'unreadable' ||
+      engineNow === 'unreadable' ||
+      !engineNow.exists ||
+      (startedEngine.exists && !sameIdentity(startedEngine, engineNow))
+    ) {
+      return 'upgraded';
+    }
+    const configNow = readConfigStamp(paths);
+    if (configNow === 'unreadable' || startedConfig === 'unreadable') return 'config_changed';
+    if (startedConfig.kind === 'absent') {
+      if (configNow.kind !== 'absent') return 'config_changed';
+    } else if (configNow.kind === 'absent' || !sameIdentity(startedConfig.identity, configNow.identity)) {
+      return 'config_changed';
+    }
+    if (!ownsLease(db as DatabaseSync, token)) return 'lease_lost';
+    pollIdleActivity();
+    let idleMs: number;
+    try {
+      idleMs = loadConfig(paths).worker.idle_exit_ms;
+    } catch {
+      return 'config_changed';
+    }
+    if (deps.elapsedMs() - lastActivityElapsed >= idleMs && queueIsEmpty(db as DatabaseSync, paths, '', deps.now())) {
+      return 'idle_exit';
+    }
+    return undefined;
+  }
+
+  async function interruptibleSleep(ms: number): Promise<void> {
+    if (ms <= 0 || stopReason !== undefined) return;
+    if (injectedSleep) {
+      await deps.sleep(ms);
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        wakeSleep = undefined;
+        resolve();
+      }, ms);
+      wakeSleep = () => {
+        clearTimeout(timer);
+        wakeSleep = undefined;
+        resolve();
+      };
+    });
+  }
+
+  async function observeClaimedLease(db: DatabaseSync): Promise<void> {
     async function recoverAndClassify(): Promise<boolean> {
       const recovered = await retryBusy(() => recoverSpool(db, paths, token, deps.now()));
       result.recovered += recovered.inserted;
@@ -438,7 +694,7 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource
       if (classified.leaseLost || leaseLost) return true;
 
       const reclassified = await retryBusy(() => reclassifyImported(db, token, deps.now, deps.detect,
-        { home: paths.home, env: deps.env, deadline }));
+        { home: paths.home, env: deps.env, deadline: importDeadline() }));
       result.reclassified += reclassified.examined;
       if (reclassified.leaseLost || leaseLost) return true;
 
@@ -529,24 +785,31 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource
         if (recorded.usedFallback) usedFallback = true;
       } catch (error) {
         if (error instanceof LeaseLostError) leaseLost = true;
-        else {
+        else if (error instanceof StopRun) {
+          // Leave pending/running state for the next spawn.
+        } else {
           batchError = error;
           yieldAfterPass = true;
         }
       }
 
-      if (!leaseLost) {
+      if (!leaseLost && stopReason === undefined) {
         await checkpointBatch();
       }
 
-      logBatch();
+      if (stopReason === undefined) logBatch();
 
     }
 
     async function processPendingBatches(): Promise<void> {
       const batches = pendingBatches(db);
       for (const batch of batches) {
-        if (leaseLost || deps.now() >= deadline) break;
+        if (leaseLost || timedOut()) break;
+        const reason = controlReason();
+        if (reason !== undefined) {
+          stopReason = reason;
+          break;
+        }
         await processPendingBatch(batch);
       }
     }
@@ -571,7 +834,7 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource
 
     async function summarizePendingSessions(): Promise<void> {
       for (const sessionId of pendingSummaries(db, token, deps.now())) {
-        if (leaseLost || deps.now() >= deadline) break;
+        if (leaseLost || timedOut() || stopReason !== undefined) break;
         if (await summarizeSession(sessionId)) break;
       }
     }
@@ -586,7 +849,7 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource
         await retryBusy(() => checkpoint(db, 'TRUNCATE'));
         return true;
       }
-      await sleep(Math.min(Math.max(1, deps.heartbeatMs), BUSY_RETRY_MS));
+      await deps.sleep(Math.min(Math.max(1, deps.heartbeatMs), BUSY_RETRY_MS));
       return false;
     }
 
@@ -606,13 +869,13 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource
 
       if (!adoptPendingBatches(db, token, deps.now())) return true;
       await processPendingBatches();
-      if (leaseLost) return true;
+      if (leaseLost || stopReason !== undefined) return true;
 
-      if (deps.now() < deadline) await summarizePendingSessions();
-      if (leaseLost) return true;
+      if (!timedOut()) await summarizePendingSessions();
+      if (leaseLost || stopReason !== undefined) return true;
 
-      if (yieldAfterPass || deps.now() >= deadline) {
-        endReason = yieldAfterPass ? 'batch_error' : 'max_run';
+      if (yieldAfterPass || timedOut()) {
+        endReason = yieldAfterPass && !timedOut() ? 'batch_error' : 'max_run';
         yieldAfterPass = true;
         return true;
       }
@@ -636,7 +899,7 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource
 
     async function runPasses(): Promise<void> {
       for (;;) {
-        if (deps.now() >= deadline) {
+        if (timedOut()) {
           yieldAfterPass = true;
           endReason = 'max_run';
           break;
@@ -647,6 +910,82 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource
         if (await releaseEmptyPass()) break;
       }
 
+    }
+
+    async function runEpoch(): Promise<void> {
+      epochDeadlineElapsed = deps.elapsedMs() + Math.max(0, deps.maxRunMs);
+      yieldAfterPass = false;
+      for (;;) {
+        if (stopReason !== undefined || leaseLost) return;
+        if (timedOut()) {
+          yieldAfterPass = false;
+          endReason = 'empty';
+          return;
+        }
+        if (await processPass()) {
+          if (leaseLost) return;
+          if (stopReason !== undefined) return;
+          if (yieldAfterPass) {
+            yieldAfterPass = false;
+            endReason = 'empty';
+          }
+          return;
+        }
+        if (queueIsEmpty(db, paths, token, deps.now())) return;
+      }
+    }
+
+    async function runResident(): Promise<void> {
+      const onSignal = () => {
+        stopReason = 'stopped';
+        wakeSleep?.();
+      };
+      process.on('SIGTERM', onSignal);
+      process.on('SIGINT', onSignal);
+      try {
+        for (;;) {
+          const reason = controlReason();
+          if (reason !== undefined) {
+            endReason = reason;
+            exit = 0;
+            if (reason === 'lease_lost') leaseLost = true;
+            return;
+          }
+          const now = deps.now();
+          if (queueIsEmpty(db, paths, '', now) || !epochIsActionable(db, paths, now)) {
+            await interruptibleSleep(nextWakeDelay(db, now));
+            continue;
+          }
+          const rotated = rotateLease(db, token, now);
+          if (rotated === null) {
+            leaseLost = true;
+            endReason = 'lease_lost';
+            exit = 0;
+            return;
+          }
+          token = rotated;
+          providerState.clear();
+          ancestorCache = createAncestorCache();
+          const before = { ...result };
+          await runEpoch();
+          if (leaseLost) {
+            endReason = 'lease_lost';
+            exit = 0;
+            return;
+          }
+          if (stopReason !== undefined) {
+            endReason = stopReason;
+            exit = 0;
+            return;
+          }
+          if (countsChanged(before, result)) {
+            appendLog(paths.observeLog, 'info', 'epoch', countDelta(before, result));
+          }
+        }
+      } finally {
+        process.off('SIGTERM', onSignal);
+        process.off('SIGINT', onSignal);
+      }
     }
 
     const config = loadConfig(paths);
@@ -660,7 +999,16 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource
     const startedConsentHash = consentHash(consentTuple(config, deps.env));
     const consentOk = (): boolean => liveConsentOk(paths, deps.env, startedConsentHash);
     const providerState = new Map<string, DegradedReason | null>();
-    const ancestorCache = createAncestorCache();
+    let ancestorCache = createAncestorCache();
+    const userApplyHook = deps.applyHook;
+    deps.applyHook = async () => {
+      await userApplyHook();
+      const reason = controlReason();
+      if (reason !== undefined) {
+        stopReason = reason;
+        throw new StopRun();
+      }
+    };
     const detect = async (text: string) => {
       try { return await deps.detect({
         text,
@@ -671,13 +1019,33 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource
       }); } catch { return { ok: false, reason: 'detector_error' } as const; }
     };
 
-    await runPasses();
-    await finishLeaseRun();
+    if (resident) await runResident();
+    else {
+      await runPasses();
+      await finishLeaseRun();
+    }
+  }
+
+  async function shutdownResident(): Promise<void> {
+    try {
+      clearWorkerStop(paths);
+    } catch {
+      // The next capture must not consume a leftover sentinel.
+    }
+    const conn = db as DatabaseSync;
+    if (!conn.isOpen || !ownsLease(conn, token)) return;
+    try {
+      const released = releaseForExit(conn, paths, token, deps.now(), result, endReason, true);
+      if (released === 'released') await retryBusy(() => checkpoint(conn, 'TRUNCATE'));
+      else if (released === 'lost') endReason = 'lease_lost';
+    } catch {
+      // A held lease becomes stale for takeover.
+    }
   }
 
   try {
     const queued = reprocessSource === undefined ? 'queued' : requeueSource(db, token, reprocessSource, deps.now());
-    if (queued === 'queued') await observeClaimedLease(db, token);
+    if (queued === 'queued') await observeClaimedLease(db);
     else {
       const lost = queued === 'lease_lost';
       deps.writeError(lost ? 'Another worker took over. Retry this reprocessing command after it finishes.\n'
@@ -690,33 +1058,51 @@ async function observeLifecycle(overrides: Partial<ObserveDeps>, reprocessSource
   } catch (error) {
     recordRunFailure(error, db, token);
   } finally {
+    wakeSleep?.();
     clearInterval(heartbeatTimer);
+    if (resident) await shutdownResident();
     if (db.isOpen) db.close();
   }
 
   // Every path above assigns it; the check is here so a future one that does not fails loudly
   // instead of reporting `undefined` as this run's exit code (contracts/cli.md pins 0, 1 and 3).
   if (exit === undefined) throw new Error('observe run produced no exit code');
-  if (reportsFallbackExit(exit, usedFallback, endReason)) {
+  if (!resident && reportsFallbackExit(exit, usedFallback, endReason)) {
     exit = 1;
   }
+  if (resident && COOPERATIVE_REASONS.has(endReason)) exit = 0;
   return logEnd(paths, result, exit, endReason);
 }
 
-/** Detached `oboete observe`: one bounded worker run, never a resident service (FR-009). */
+/** Detached `oboete observe`: one bounded worker run, or `--resident` across idle epochs. */
 export async function runObserve(argv: string[], overrides: Partial<ObserveDeps> = {}): Promise<number> {
-  let reprocessSource: string | undefined;
+  let parsed: { reprocessSource?: string; resident: boolean; stop: boolean };
   try {
     const { values } = parseArgs({ args: argv, allowPositionals: false, strict: true,
-      options: { 'reprocess-source': { type: 'string' } } });
-    reprocessSource = values['reprocess-source'];
+      options: {
+        'reprocess-source': { type: 'string' },
+        resident: { type: 'boolean' },
+        stop: { type: 'boolean' },
+      } });
+    const reprocessSource = values['reprocess-source'];
+    const resident = values.resident === true;
+    const stop = values.stop === true;
     if (reprocessSource !== undefined && !/^[a-zA-Z0-9:_-]{1,200}$/u.test(reprocessSource)) throw new Error('invalid_source');
+    if (stop && (resident || reprocessSource !== undefined)) throw new Error('invalid_flags');
+    parsed = { reprocessSource, resident, stop };
   } catch {
-    (overrides.writeError ?? ((text: string) => { process.stderr.write(text); }))(
-      'Usage: oboete observe [--reprocess-source <source-id>]\n');
+    (overrides.writeError ?? ((text: string) => { process.stderr.write(text); }))(OBSERVE_USAGE);
     return 2;
   }
-  return await observeLifecycle(overrides, reprocessSource);
+  if (parsed.stop) {
+    const paths = oboetePaths(resolveHome(overrides.env ?? process.env));
+    writeWorkerStop(paths);
+    return 0;
+  }
+  return await observeLifecycle(overrides, {
+    reprocessSource: parsed.reprocessSource,
+    resident: parsed.resident && parsed.reprocessSource === undefined,
+  });
 }
 
 /** Historical processing starts only when the user names a surviving source explicitly. */

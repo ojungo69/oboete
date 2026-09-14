@@ -146,6 +146,13 @@ const consentSchema = z.strictObject({
   accepted_at: z.number().int().optional(),
 });
 
+export const DEFAULT_IDLE_EXIT_MS = 900_000;
+
+const workerSchema = z.strictObject({
+  resident: z.boolean().default(true),
+  idle_exit_ms: z.number().int().gte(60_000).lte(86_400_000).default(DEFAULT_IDLE_EXIT_MS),
+});
+
 /** Device sync (contracts/sync.md "Sync space, replicas and keys"): the key itself never lives here. */
 export const syncSchema = z.strictObject({
   directory: z.string().min(1),
@@ -161,6 +168,7 @@ export const configSchema = z.strictObject({
   injection: injectionSchema.prefault({}),
   privacy: privacySchema.prefault({}),
   consent: consentSchema.prefault({}),
+  worker: workerSchema.prefault({}),
   sync: syncSchema.optional(),
 });
 
@@ -223,6 +231,9 @@ const KNOWN_KEY_PATHS = new Set([
   'consent',
   'consent.hash',
   'consent.accepted_at',
+  'worker',
+  'worker.resident',
+  'worker.idle_exit_ms',
   'sync',
   'sync.directory',
   'sync.directory_realpath',

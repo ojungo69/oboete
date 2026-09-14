@@ -10,6 +10,7 @@ import {
   heartbeat,
   isLeaseFree,
   releaseLease,
+  rotateLease,
 } from '../../src/worker/lease.js';
 import { withTempHome } from '../helpers/home.js';
 
@@ -117,6 +118,24 @@ test("releaseLease returns 'kept', 'released', or 'lost' and updates owner_token
     assert.equal(isLeaseFree(db, now), true);
 
     assert.equal(releaseLease(db, token, () => true), 'lost');
+  });
+});
+
+test('rotateLease replaces the token and keeps pid and started_at', async () => {
+  await withOpened((db) => {
+    const now = 1_757_000_000_000;
+    const first = claimLease(db, { pid: 7, now });
+    if (first === null) assert.fail('expected a lease token');
+    const rotated = rotateLease(db, first, now + 50);
+    if (rotated === null) assert.fail('expected rotation to keep the lease');
+    assert.notEqual(rotated, first);
+    const row = leaseColumns(db);
+    assert.equal(row?.owner_token, rotated);
+    assert.equal(row?.pid, 7);
+    assert.equal(row?.started_at, now);
+    assert.equal(row?.heartbeat_at, now + 50);
+    assert.equal(rotateLease(db, first, now + 80), null);
+    assert.equal(leaseColumns(db)?.owner_token, rotated);
   });
 });
 

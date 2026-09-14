@@ -83,6 +83,7 @@ test('ensureDirectories creates the data directories and keeps the home director
     assert.equal(paths.hookLog, join(paths.logs, 'hook.log'));
     assert.equal(paths.observeLog, join(paths.logs, 'observe.log'));
     assert.equal(paths.paused, join(paths.home, 'paused'));
+    assert.equal(paths.workerStop, join(paths.home, 'worker-stop'));
   });
 });
 
@@ -93,6 +94,7 @@ test('loadConfig returns the defaults when there is no config file', async () =>
       injection: { context_fraction: 0.05, threshold: 0.3 },
       privacy: { secret_paths: [] },
       consent: {},
+      worker: { resident: true, idle_exit_ms: 900_000 },
     });
   });
 });
@@ -126,6 +128,7 @@ test('a complete config file round-trips through loadConfig', async () => {
       injection: { context_fraction: 0.1, threshold: 0.5 },
       privacy: { secret_paths: ['deploy/*.pem', '**/.env'] },
       consent: { hash: WORKERS_AI_CONSENT, accepted_at: 1756900000000 },
+      worker: { resident: true, idle_exit_ms: 900_000 },
     });
   });
 });
@@ -184,6 +187,12 @@ test('a value out of range is rejected', async () => {
     assert.throws(() => loadConfig(paths), ConfigError);
     writeFileSync(paths.config, '[injection]\nthreshold = 1.5\n');
     assert.throws(() => loadConfig(paths), ConfigError);
+    writeFileSync(paths.config, '[worker]\nidle_exit_ms = 59999\n');
+    assert.throws(() => loadConfig(paths), ConfigError);
+    writeFileSync(paths.config, '[worker]\nidle_exit_ms = 86400001\n');
+    assert.throws(() => loadConfig(paths), ConfigError);
+    writeFileSync(paths.config, '[worker]\nresident = true\nidle_exit_ms = 60000\n');
+    assert.deepEqual(loadConfig(paths).worker, { resident: true, idle_exit_ms: 60_000 });
   });
 });
 

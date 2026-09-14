@@ -75,6 +75,7 @@ function usage(): string {
   return `Usage: oboete <command> [options]\n\nCommands: ${knownCommands.join(', ')}.\n\n` +
     'Memory reads: search, get, timeline accept --binding <binding-id> and --history.\n' +
     'Reprocess retained source: oboete observe --reprocess-source <source-id>\n' +
+    'Resident worker: oboete observe --resident   Stop it: oboete observe --stop\n' +
     'Use oboete why <session-id> to inspect source IDs and processing outcomes.\n' +
     'Work: oboete work status [--all] [--json]\n' +
     '      oboete work choose <binding-id> <work-id|new>\n' +
