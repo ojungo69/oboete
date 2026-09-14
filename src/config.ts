@@ -24,9 +24,6 @@ export const COST_CLASSES = ['free-tier', 'local', 'remote', 'own-subscription']
 
 export type CostClass = (typeof COST_CLASSES)[number];
 
-/** The chain's bound is its length, so the length is what has to stay small (contracts/provider-fallback.md). */
-export const MAX_FALLBACK_TARGETS = 3;
-
 export type ProviderPreset = {
   host: string;
   baseUrl: string;
@@ -129,8 +126,10 @@ const observerSchema = z.strictObject({
   model: z.string().min(1).optional(),
   agent_cli: z.enum(AGENT_CLIS).default('claude'),
   // The default is today's behaviour for every install: no paid class is admitted until it is written in.
-  cost_policy: z.array(z.enum(COST_CLASSES)).max(COST_CLASSES.length).default(['free-tier', 'local']),
-  fallback: z.array(fallbackTargetSchema).max(MAX_FALLBACK_TARGETS).default([]),
+  cost_policy: z.array(z.enum(COST_CLASSES)).default(['free-tier', 'local']),
+  // Three is the chain's whole bound, so the length is what has to stay small
+  // (contracts/provider-fallback.md "Admission").
+  fallback: z.array(fallbackTargetSchema).max(3).default([]),
 });
 
 const injectionSchema = z.strictObject({
