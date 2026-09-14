@@ -1000,3 +1000,125 @@ file is named, the test is in `test/unit/resident-worker.test.ts`.
 14. `a maintenance epoch purges an expired secret with no batchable work`.
 15. `a config malformed at startup exits as config_changed before loading the worker config`.
 16. `a batch_error ends a run after one attempt, including at the deadline in either mode`.
+
+## E9 — bounded consented provider fallback chain (T037, T038, T039, T048)
+
+2026-09-15, branch `009-t048-fallback-chain`. The binding spec is
+`contracts/provider-fallback.md`, written at `73568de6` before any implementation, after four
+orientation reads whose findings it records: consent covered only the primary preset, the
+destination label is an authorization that `reconcilePendingDestinations` re-validates per pass,
+`outcomeForSource` already defers a failed batch's sources with a retry time, and `CONSTITUTION.md`
+requires an explicit spending policy. The same commit retires "M1 enables exactly one observer
+preset at a time" in `specs/007-oboete-m1-alpha/contracts/observer.md`. Security-scoped work
+(consent, credentials, egress), so it was implemented in this session rather than delegated.
+
+- Gate: `npm run build`, `npm run typecheck`, `npm run lint` and `semgrep scan --config auto`
+  (over the nine changed source files) exit 0 with 0 findings; `markdownlint-cli2` reports 0 issues;
+  `scripts/dco-check.mjs main HEAD` passes all six commits. `npm test` is green on Node 24.16.0 and
+  22.16.0 at the final head: 1537 tests, 1535 pass, 0 fail, 2 skipped, `NPM_TEST_EXIT=0` on both
+  (`/var/tmp/oboete-009-t048/t048-full-v{24.16.0,22.16.0}-r7.log`). One earlier run failed
+  `viewer-server.test.ts`'s SC-011 bound on Node 24 with `took 3235 ms`; the file passes 8/8 twice
+  when run alone and this branch touches no viewer code — the test starts its clock before the
+  stream is open, filed as #237.
+- Two keys, one default: `[observer] fallback` is at most three ordered `{preset, model}` targets
+  and `[observer] cost_policy` defaults to `["free-tier", "local"]`. Every configuration that
+  exists today parses to an empty admitted chain, so `consentHash` appends nothing and the literal
+  digest already pinned in `test/unit/config.test.ts` (`WORKERS_AI_CONSENT`) still matches — no
+  install is asked to re-consent on upgrade. The opposite direction is pinned beside it: one
+  admitted target changes the digest, and a listed target the policy excludes does not.
+- The chain is a loop around the existing call and settlement in `processBatch`, not a new send
+  path. Everything before it still happens once — privacy revalidation, the destination reconcile,
+  the request build, the final detector check, `markRequest` — so one batch is one payload and its
+  sources settle once. `observation_batches.provider_attempts` counts the reservations the chain
+  took, which nothing reads as a bound.
+- Packed CLI, 2026-09-15, temp home with no Workers AI credentials, a `ollama` target and a
+  policy-excluded `nim` target (`/var/tmp/oboete-009-t048/packed-receipt/`): `setup --accept-egress`
+  displays "Fallback targets, tried in this order only after a target fails" with the ollama target
+  and its sensitivity classes, and does not display the excluded one; `oboete doctor` then reports
+  `fallback:1 healthy  Target 1 is ollama with model qwen2.5:7b, admitted as local and ready`,
+  `fallback:2 warning  … which the cost policy does not admit`, and a `provider degraded` whose
+  consequence reads "every batch is summarized by the fallback chain below" rather than the
+  rule-based sentence — the uncredentialed primary is a failed target, not a run without a provider.
+- Measured, not asserted: a failing target that already answered does not spend a second
+  allowance. The `unusable_output` case takes two reservations on one target (llm.ts's own retry)
+  and makes zero requests to the next host; the three-target success case takes exactly three, one
+  per target.
+
+### E9 verification
+
+Numbered against the contract's list. All in `test/unit/provider-fallback.test.ts` unless named
+otherwise.
+
+1. `an empty chain leaves the consent hash exactly where it was, and one target moves it`
+   (`config.test.ts`) — against the literal digest, with the one-target half beside it.
+2. `resolveModel carries the admitted chain and refuses one it cannot use` (`providers.test.ts`)
+   and `a fallback chain the resolver refuses is reported once, at its position` (`doctor.test.ts`)
+   — a `local` primary with a `remote` entry is `chain_unusable` at the resolve, and the run has no
+   provider rather than a crash.
+3. `a local target is never given a batch a remote target could not have been given`.
+4. `admission drops what the policy excludes and refuses what widens egress` (`config.test.ts`) —
+   the same fixture one key apart: default policy admits nothing remote, `remote` in the policy
+   admits it in written order.
+5. `admission drops what the policy excludes and refuses what widens egress` covers the
+   `model_required` position and the `chain_without_primary` case.
+6. The same test's last block: the primary repeated is dropped, a second model on the same preset
+   is its own target.
+7. `an exhausted primary hands the same batch to the next admitted target` — `exhausted_at` is
+   per-preset, so the exhausted host receives nothing at all.
+8. `the daily cap advances past every capped target and stops at none of the local ones` —
+   `workers-ai` and `nim` both refuse at their own reservation, `ollama` answers.
+9. `a target with no credentials is attempted, answers without a request and the chain moves on`.
+10. `a consent change between targets stops the chain before the next host`.
+11. `an unusable answer stops the chain instead of spending a second allowance on it`.
+12. `every target failing settles once, keeps the worst reason and leaves the source retryable` —
+    `provider_exhausted` outranks `unreachable` in `DEGRADED_PRECEDENCE`, the source is `waiting`
+    with a non-null `retry_after`, and `processing_attempts` rose by one for the whole chain.
+13. `a target that answers after two failures applies its output like any other`.
+14. `the fallback chain is reported per target without a second provider request`
+    (`doctor.test.ts`) — one provider request with a three-target chain, `fallback:1` healthy and
+    `fallback:2`/`fallback:3` warning, and the same test shows that admitting a paid class stops
+    the stored consent from matching.
+15. `a primary with absent credentials is a failed target, not a run without a provider` — the
+    destination label comes from the primary's egress class, so the loop is reached and the local
+    target applies. Names the ceiling the contract retired.
+16. `the reason a stop ended the chain on outranks a more severe reason behind it` — `auth_failed`
+    then `consent_changed`; the batch keeps the consent reason and both attempt lines are logged.
+17. `a target whose answer is refused for its language is still named in the log` — the ollama
+    target answers twice in the wrong language, and its own `language_mismatch` line is present.
+18. `a chain the configuration cannot use blocks neither capture-only nor rewiring`
+    (`setup.test.ts`), and the `--remove` leg of
+    `a destination that would strip the chain of its admission is refused before anything is
+    written`.
+19. `the second of two identical fallback entries is reported as covered, not as ready`
+    (`doctor.test.ts`), and the `preset = "none"` leg of `a fallback chain the resolver refuses is
+    reported once, at its position`.
+
+Bot round on PR #238 at head `011b1b2e`: all check-runs completed, `dco`, `secrets`, `check`,
+`engine (22.16.0)`, `engine (24.x)`, `semgrep-cloud-platform/scan`, SonarCloud (gate passed),
+GitGuardian and Socket green; Codex code review and security review both completed with no
+findings. Fixed from the four that did report: CodeQL's two high `js/incomplete-url-substring-
+sanitization` alerts on the test helper's `url.includes(<host>)` dispatch (now `new URL(...).host`
+equality), Codacy's `Semgrep unsafe-dynamic-method` on the `CHAIN_MESSAGES[code]` lookup (now a
+`switch`, and the table is gone), Codacy's `Lizard_nloc-medium` on `fallbackTargetItem` (53 → 43
+NLOC, measured with `pipx run lizard -l typescript`), SonarCloud's `typescript:S7755`
+(`attempts.at(-1)`), and two CodeRabbit findings: an `agent-cli` target was reported ready although
+`readCredentials` calls an agent login present without checking it, and a capped target was reported
+ready with the shared allowance spent — which `allowanceItem` only reports when the primary is
+capped. Declined: CodeRabbit's "apply `cost_policy` before validating an excluded target", because
+it would move a hard privacy refusal behind a policy flag (see "Admission" rule 5).
+
+Findings from the review round, all fixed in the same branch: the setup gate refused
+`--remove`/`--provider none`/a bare run (P2, both reviewers); a stop's reason was hidden behind a
+more severe earlier reason (P2); a `language_mismatch` target had no attempt line; doctor numbered
+`chain_without_primary` as "fallback target 0" and reported a duplicated entry as ready; admission
+rule 4 let an `egress: 'none'` primary admit a remote target (latent); the consent screen displayed
+a local target's full capability rather than what the remote batch carries; and the dead
+`?? outcome.reason` / `?? outcome.detail` branches hid the reason/detail pairing `loggableDetail`
+depends on. Rejected: moving the three-target bound out of the configuration schema, which would
+make one key's arity behave unlike every other malformed-config error.
+
+Setup's side of T037 is `adding a fallback target refuses --yes and is displayed before it is
+accepted` (`setup.test.ts`): a target written in after consent was stored refuses `--yes` with exit
+2, prints the target's host before it is accepted, and leaves the stored hash alone until
+`--accept-egress` re-records it. `the display names every fallback target the consent hash binds`
+(`consent.test.ts`) pins that a policy-excluded target is not displayed as a destination.

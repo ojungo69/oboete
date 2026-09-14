@@ -96,15 +96,17 @@ function credentialsFor(preset: PresetName): Credentials {
 test('resolveModel uses the configured override and catalog default', () => {
   assert.deepEqual(
     resolveModel(configSchema.parse({ observer: { preset: 'workers-ai', model: 'custom/model' } })),
-    { preset: 'workers-ai', model: 'custom/model' },
+    { preset: 'workers-ai', model: 'custom/model', chain: [] },
   );
   assert.deepEqual(resolveModel(configSchema.parse({ observer: { preset: 'nim' } })), {
     preset: 'nim',
     model: PRESET_CATALOG.nim.defaultModel,
+    chain: [],
   });
   assert.deepEqual(resolveModel(configSchema.parse({ observer: { preset: 'none' } })), {
     preset: 'none',
     model: '',
+    chain: [],
   });
 });
 
@@ -119,8 +121,27 @@ test('resolveModel rejects presets without a model default', () => {
   }
   assert.deepEqual(
     resolveModel(configSchema.parse({ observer: { preset: 'ollama', model: 'qwen3:8b' } })),
-    { preset: 'ollama', model: 'qwen3:8b' },
+    { preset: 'ollama', model: 'qwen3:8b', chain: [] },
   );
+});
+
+test('resolveModel carries the admitted chain and refuses one it cannot use', () => {
+  assert.deepEqual(
+    resolveModel(configSchema.parse({ observer: { preset: 'workers-ai',
+      fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] } })).chain,
+    [{ preset: 'ollama', model: 'qwen3:8b' }],
+  );
+  for (const observer of [
+    { preset: 'ollama', model: 'q', cost_policy: ['free-tier', 'local', 'remote'], fallback: [{ preset: 'nim' }] },
+    { preset: 'workers-ai', fallback: [{ preset: 'ollama' }] },
+    { preset: 'none', fallback: [{ preset: 'ollama', model: 'q' }] },
+  ]) {
+    assert.throws(
+      () => resolveModel(configSchema.parse({ observer })),
+      (error: unknown) => error instanceof ProviderConfigError && error.code === 'chain_unusable',
+      JSON.stringify(observer),
+    );
+  }
 });
 
 test('providerRequestOptions follows the preset structured-output policy', () => {
@@ -286,7 +307,7 @@ test('runAgentCli inherits the login environment without forwarding oboete crede
 
 test('model overrides are trimmed before they select the provider model', () => {
   assert.deepEqual(resolveModel(configSchema.parse({ observer: { preset: 'nim', model: '  custom-model  ' } })), {
-    preset: 'nim', model: 'custom-model',
+    preset: 'nim', model: 'custom-model', chain: [],
   });
 });
 

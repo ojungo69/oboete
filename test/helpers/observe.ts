@@ -98,12 +98,42 @@ export function writeConfig(
   env: NodeJS.ProcessEnv = fixture.env,
   consent: 'valid' | 'invalid' = 'valid',
 ): void {
-  const parsed = configSchema.parse({ observer: { preset } });
-  const hash = consent === 'valid' ? consentHash(consentTuple(parsed, env)) : 'not-the-live-consent-hash';
-  writeFileSync(
-    fixture.paths.config,
-    `[observer]\npreset = "${preset}"\n${preset === 'none' ? '' : `\n[consent]\nhash = "${hash}"\naccepted_at = ${NOW}\n`}`,
-  );
+  writeChainConfig(fixture, { preset, env, consent });
+}
+
+/** The same writer with the fallback chain and cost policy of contracts/provider-fallback.md. */
+export function writeChainConfig(
+  fixture: Fixture,
+  options: {
+    preset: PresetName | 'none';
+    model?: string;
+    costPolicy?: string[];
+    fallback?: { preset: PresetName; model?: string }[];
+    env?: NodeJS.ProcessEnv;
+    consent?: 'valid' | 'invalid';
+  },
+): void {
+  const { preset, model, costPolicy, fallback = [] } = options;
+  const env = options.env ?? fixture.env;
+  const observer = {
+    preset,
+    ...(model === undefined ? {} : { model }),
+    ...(costPolicy === undefined ? {} : { cost_policy: costPolicy }),
+    ...(fallback.length === 0 ? {} : { fallback }),
+  };
+  const parsed = configSchema.parse({ observer });
+  const hash = options.consent === 'invalid'
+    ? 'not-the-live-consent-hash' : consentHash(consentTuple(parsed, env));
+  const lines = [
+    '[observer]',
+    `preset = "${preset}"`,
+    ...(model === undefined ? [] : [`model = "${model}"`]),
+    ...(costPolicy === undefined ? [] : [`cost_policy = [${costPolicy.map((entry) => `"${entry}"`).join(', ')}]`]),
+    ...fallback.flatMap((target) => ['', '[[observer.fallback]]', `preset = "${target.preset}"`,
+      ...(target.model === undefined ? [] : [`model = "${target.model}"`])]),
+    ...(preset === 'none' ? [] : ['', '[consent]', `hash = "${hash}"`, `accepted_at = ${NOW}`]),
+  ];
+  writeFileSync(fixture.paths.config, `${lines.join('\n')}\n`);
 }
 
 export function eventBase(sessionId: string): Json {

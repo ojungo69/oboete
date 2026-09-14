@@ -48,6 +48,19 @@ export function consentDisplay(config: OboeteConfig, env: NodeJS.ProcessEnv): st
     `  Cost class: ${tuple.costClass}`,
     `  Sensitivity classes sent: ${tuple.egressClasses.join(', ') || 'none'}`,
   ];
+  if (tuple.chain !== undefined) {
+    lines.push('  Fallback targets, tried in this order only after a target fails:');
+    for (const [index, target] of tuple.chain.entries()) {
+      lines.push(
+        `    ${index + 1}. ${target.preset} at ${target.host}`,
+        `       Cost class: ${target.costClass}; credential source: ${target.credentialSource}`,
+        // A target receives the batch the selected preset's destination allowed, never more: the
+        // chain does not re-batch, so a local target under a remote preset still sees only the
+        // classes the remote destination may carry.
+        `       Sensitivity classes sent: ${tuple.egressClasses.join(', ') || 'none'}`,
+      );
+    }
+  }
   if (tuple.preset === 'agent-cli') {
     const cli = config.observer.agent_cli;
     lines.push(

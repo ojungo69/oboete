@@ -161,6 +161,30 @@ test('switching to a local preset re-records consent instead of leaving the remo
   });
 });
 
+test('adding a fallback target refuses --yes and is displayed before it is accepted', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    const accepted = loadConfig(context.paths);
+
+    // A target written in after consent was stored is a destination the reader never saw (US7 #4).
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "ollama"\nmodel = "qwen3:8b"\n`);
+    assert.equal(consentMatches(loadConfig(context.paths), { HOME: context.userHome }), false);
+
+    context.output = '';
+    assert.equal(await context.run(['--yes']), 2, context.output);
+    assert.match(context.output, /Fallback targets/);
+    assert.match(context.output, /ollama at 127\.0\.0\.1:11434/);
+    assert.equal(loadConfig(context.paths).consent.hash, accepted.consent.hash, 'the refused chain is not consented');
+
+    context.output = '';
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    const stored = loadConfig(context.paths);
+    assert.notEqual(stored.consent.hash, accepted.consent.hash);
+    assert.equal(consentMatches(stored, { HOME: context.userHome }), true);
+  });
+});
+
 test('a destination the run refuses is not written to the configuration', async () => {
   await harness(async (context) => {
     assert.equal(await context.run(['--accept-egress']), 0, context.output);
@@ -172,6 +196,53 @@ test('a destination the run refuses is not written to the configuration', async 
     assert.equal(after.observer.preset, before.observer.preset, 'the refused destination is not enabled');
     assert.equal(after.consent.hash, before.consent.hash);
     assert.match(context.output, /generativelanguage\.googleapis\.com/, 'it still shows what it refused');
+  });
+});
+
+test('a destination that would strip the chain of its admission is refused before anything is written', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    // A remote target is admitted under a remote primary and merely skipped by the default cost
+    // policy, so this configuration is accepted as it stands.
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "nim"\n`);
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    const before = loadConfig(context.paths);
+
+    // `--provider ollama` narrows the primary's egress, which turns that entry into a widening one.
+    context.output = '';
+    assert.equal(await context.run(['--provider', 'ollama', '--accept-egress']), 2, context.output);
+    assert.match(context.output, /Fallback target 1 sends further/);
+
+    const after = loadConfig(context.paths);
+    assert.equal(after.observer.preset, before.observer.preset, 'the refused destination is not enabled');
+    assert.equal(after.consent.hash, before.consent.hash);
+
+    // The gate is the destination's doing, so it must not take the recovery paths with it: going
+    // capture-only is a destination the user asked for, and `--remove` never reads the chain.
+    context.output = '';
+    assert.equal(await context.run(['--provider', 'ollama', '--accept-egress', '--remove']), 0, context.output);
+    assert.doesNotMatch(
+      readFileSync(join(context.userHome, '.claude', 'settings.json'), 'utf8'), /oboete/,
+      'the removal ran instead of stopping at the chain',
+    );
+  });
+});
+
+test('a chain the configuration cannot use blocks neither capture-only nor rewiring', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--provider', 'ollama', '--accept-egress']), 0, context.output);
+    // A widening entry written by hand: the observer has no provider until it is corrected.
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "nim"\n`);
+
+    context.output = '';
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    assert.ok(existsSync(join(context.userHome, '.claude', 'settings.json')), 'agents are still wired');
+
+    context.output = '';
+    assert.equal(await context.run(['--provider', 'none', '--accept-egress']), 0, context.output);
+    assert.equal(loadConfig(context.paths).observer.preset, 'none');
   });
 });
 

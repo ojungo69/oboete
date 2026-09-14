@@ -10,7 +10,8 @@ import type { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-import { loadConfig, PRESET_CATALOG, type OboeteConfig, type PresetName } from '../config.js';
+import { admittedChain, loadConfig, PRESET_CATALOG, type OboeteConfig, type PresetName } from '../config.js';
+import { chainErrorMessage } from '../observer/providers.js';
 import { openDatabase } from '../db/open.js';
 import { appendLog, childEnvironment } from '../log.js';
 import { ensureDirectories, oboetePaths, resolveHome } from '../paths.js';
@@ -357,6 +358,20 @@ export async function runSetup(argv: string[], overrides: Partial<SetupDeps> = {
   // refused run must not leave the destination it refused enabled (contracts/cli.md, FR-022).
   const provider = options.remove ? null : options.provider;
   if (provider !== null) config = { ...config, observer: { ...config.observer, preset: provider } };
+  // A narrower destination can strip a stored fallback chain of its admission, and a run that
+  // enabled it anyway would leave the observer with no provider at all until someone reads the log
+  // (contracts/provider-fallback.md "Admission"). Refuse before anything is written. Only this
+  // refusal is the destination's doing: `--provider none` is capture-only, which the user asked
+  // for, and a chain already unusable on disk must not block `--remove` or a rewiring run.
+  const chainError =
+    provider === null || provider === 'none' ? null : admittedChain(config).error;
+  if (chainError?.code === 'egress_widened') {
+    note(
+      chainErrorMessage(chainError),
+      'Nothing was written. Correct the `[[observer.fallback]]` entry, then run setup again.',
+    );
+    return finishSetup(deps, options, paths, notes, [], 2);
+  }
 
   const detected = detectAgents(deps.env, deps.versionSpawn);
   // Default: every agent that is installed. Named agents are reported even when they are not, so

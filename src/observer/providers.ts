@@ -5,6 +5,9 @@ import { join } from 'node:path';
 
 import {
   PRESET_CATALOG,
+  admittedChain,
+  type ChainError,
+  type ChainTarget,
   type Credentials,
   type OboeteConfig,
   type PresetName,
@@ -12,7 +15,7 @@ import {
 import { observerOutputJsonSchema } from './contract.js';
 
 export class ProviderConfigError extends Error {
-  readonly code: 'model_required' | 'credentials_required' | 'unsupported_preset';
+  readonly code: 'model_required' | 'credentials_required' | 'unsupported_preset' | 'chain_unusable';
 
   constructor(message: string, code: ProviderConfigError['code']) {
     super(message);
@@ -21,11 +24,20 @@ export class ProviderConfigError extends Error {
   }
 }
 
+/**
+ * The primary and the fallback targets a pass may attempt, in order. An unusable chain throws here
+ * rather than in `admittedChain`, which stays total for the consent re-check
+ * (contracts/provider-fallback.md "Admission").
+ */
 export function resolveModel(
   config: OboeteConfig,
-): { preset: PresetName | 'none'; model: string } {
+): { preset: PresetName | 'none'; model: string; chain: ChainTarget[] } {
+  const chain = admittedChain(config);
   const preset = config.observer.preset;
-  if (preset === 'none') return { preset, model: '' };
+  if (preset === 'none') {
+    if (chain.error !== null) throw chainError(chain.error);
+    return { preset, model: '', chain: [] };
+  }
   const model = (config.observer.model ?? PRESET_CATALOG[preset].defaultModel).trim();
   if (model === '') {
     throw new ProviderConfigError(
@@ -33,7 +45,25 @@ export function resolveModel(
       'model_required',
     );
   }
-  return { preset, model };
+  if (chain.error !== null) throw chainError(chain.error);
+  return { preset, model, chain: chain.targets };
+}
+
+/** The sentence a refused chain is reported with, wherever the refusal is noticed. */
+export function chainErrorMessage(error: ChainError): string {
+  switch (error.code) {
+    case 'model_required':
+      return `Fallback target ${error.position} requires an observer model in the configuration.`;
+    case 'egress_widened':
+      return `Fallback target ${error.position} sends further than the selected preset does.`;
+    case 'chain_without_primary':
+      // The position is the primary's, so naming a target number here would name nothing.
+      return 'A fallback chain needs a selected observer preset.';
+  }
+}
+
+function chainError(error: ChainError): ProviderConfigError {
+  return new ProviderConfigError(chainErrorMessage(error), 'chain_unusable');
 }
 
 function credentialValue(credentials: Credentials, name: string): string {

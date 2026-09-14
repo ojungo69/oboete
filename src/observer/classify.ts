@@ -168,6 +168,12 @@ export const DEGRADED_PRECEDENCE = [
 
 export type DegradedReason = (typeof DEGRADED_PRECEDENCE)[number];
 
+/** The reason a record keeps when several apply: the first match in `DEGRADED_PRECEDENCE`. */
+export function mostSevereReason(reasons: Iterable<DegradedReason>): DegradedReason | null {
+  const present = new Set(reasons);
+  return DEGRADED_PRECEDENCE.find((reason) => present.has(reason)) ?? null;
+}
+
 export const INSERT_MEMORY = `INSERT INTO memories
   (id, repo_id, type, title, body, concepts, cjk_bigrams, material_hash, content_hash,
    sensitivity, review_state, degraded_reason, source_session_id, source_batch_id,
@@ -347,7 +353,7 @@ function degradedReasonForSession(db: DatabaseSync, sessionId: string): Degraded
     .filter((reason): reason is DegradedReason =>
       DEGRADED_PRECEDENCE.includes(reason as DegradedReason),
     ));
-  return DEGRADED_PRECEDENCE.find((reason) => reasons.has(reason)) ?? null;
+  return mostSevereReason(reasons);
 }
 
 function insertSessionSummary(

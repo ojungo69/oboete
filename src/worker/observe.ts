@@ -13,6 +13,7 @@ import {
   isPaused,
   loadConfig,
   readCredentials,
+  type ChainTarget,
   type OboeteConfig,
   type PresetName,
 } from '../config.js';
@@ -414,18 +415,24 @@ function claimObserveLease(
   return { ok: true, token };
 }
 
-function resolveObserveModel(config: OboeteConfig): { preset: PresetName | 'none'; model: string } {
-  let resolved: { preset: PresetName | 'none'; model: string };
+type ResolvedObserver = { preset: PresetName | 'none'; model: string; chain: ChainTarget[] };
+
+function resolveObserveModel(config: OboeteConfig, observeLog: string): ResolvedObserver {
+  let resolved: ResolvedObserver;
   try {
     resolved = resolveModel(config);
-  } catch {
-    resolved = { preset: config.observer.preset, model: '' };
+  } catch (error) {
+    // A configuration the resolver refuses — including an unusable fallback chain — is a run with
+    // no provider, never a crash (contracts/provider-fallback.md "Admission"). The batches then say
+    // `no_provider`; this line is what names the configuration that took the provider away.
+    appendLogQuietly(observeLog, 'warn', 'observer configuration refused', { code: errorCode(error) });
+    resolved = { preset: config.observer.preset, model: '', chain: [] };
   }
   return resolved;
 }
 
 function initialProviderFailure(
-  resolved: { preset: PresetName | 'none'; model: string },
+  resolved: ResolvedObserver,
   credentials: ReturnType<typeof readCredentials> | null,
   config: OboeteConfig,
   env: NodeJS.ProcessEnv,
@@ -733,7 +740,23 @@ async function observeLifecycle(
         }
       }
 
+      // One line per target the chain reached, in attempt order with the primary at position 0:
+      // the batch itself keeps only one reason. `fallback:N` in `oboete doctor` numbers the
+      // configuration's entries instead, so the model is what identifies a target across the two.
+      function logAttempts(): void {
+        for (const attempt of batchResult?.attempts ?? []) {
+          appendLog(paths.observeLog, 'info', 'provider attempt', {
+            id: batch.id,
+            position: attempt.position,
+            preset: attempt.preset,
+            model: attempt.model,
+            reason: attempt.reason,
+          });
+        }
+      }
+
       function logBatch(): void {
+        logAttempts();
         appendLog(paths.observeLog, batchError === undefined ? 'info' : 'error', 'batch', {
           id: batch.id,
           state: batchResult?.state ?? 'error',
@@ -751,6 +774,9 @@ async function observeLifecycle(
         }));
         if (batchResult.state === 'done') {
           stopReason = batchResult.reason;
+          // A stop keeps no batch line, but the targets this pass already tried are the only
+          // record of what it spent before the stop arrived.
+          logAttempts();
           return;
         }
         const recorded = recordBatchResult(result, batchResult);
@@ -948,7 +974,7 @@ async function observeLifecycle(
       return;
     }
     const config = loadConfig(paths);
-    const resolved = resolveObserveModel(config);
+    const resolved = resolveObserveModel(config, paths.observeLog);
     const presetEntry = resolved.preset === 'none' ? null : PRESET_CATALOG[resolved.preset];
     const credentials =
       resolved.preset === 'none'
