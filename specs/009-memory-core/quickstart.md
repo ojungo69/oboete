@@ -825,12 +825,15 @@ with a review pass over each delta — correctness first, over-engineering secon
 round for the inputs that had no reader.
 
 - Gate: `npm run build`, `npm run typecheck` and `npm run lint` exit 0. The full `npm test` passes
-  on both supported Node versions — 1,508 pass / 0 fail / 2 skipped in the parallel leg and 280
+  on both supported Node versions — 1,510 pass / 0 fail / 2 skipped in the parallel leg and 280
   pass / 0 fail in the serial one, no `not ok` lines in either
-  (`t047-full-v24.16.0-r11.log`, `t047-full-v22.16.0-r11.log`; the same legs before the last two
+  (`t047-full-v24.16.0-r14.log`, `t047-full-v22.16.0-r14b.log`; the same legs before the last two
   review rounds are `t047-full-v24-r5.log` and `t047-full-v22-r5.log`, and before the first
-  `t047-full-v24.16.0.log` and `t047-full-v22.16.0.log`). 31 of those tests are the resident's own,
-  in `test/unit/resident-worker.test.ts`.
+  `t047-full-v24.16.0.log` and `t047-full-v22.16.0.log`). 32 of those tests are the resident's own,
+  in `test/unit/resident-worker.test.ts`. The Node 22 leg is the re-run: the first one lost
+  `matrix A2` in `migration-matrix.test.ts` to `ENOTEMPTY: directory not empty, rmdir
+  '<home>/workspace/.git'` inside the temporary home's teardown — the harness flake already filed
+  as #206, in a test this PR does not touch (`t047-full-v22.16.0-r14.log` keeps that leg).
 - Idle cost, contract item 12, measured on a replayed corpus rather than an empty process: the
   1,051-event fixture bundle replayed into a kept home (1,322 raw events, 100 batches, 48
   sessions), then quiesced, then a resident run with no injected clock and a raised idle timeout.
@@ -878,7 +881,16 @@ round for the inputs that had no reader.
   rowid read, same shape). The one capture that arrives on the resident's own connection — a hook
   that exhausted its database budget spools, and recovery stores it later — resets the mark at that
   insert, asserted by `a capture the resident stores from the spool resets the idle budget` (RED
-  without the reset: the log shows `recovered=1` and then `reason=idle_exit`). Completed processing
+  without the reset: the log shows `recovered=1` and then `reason=idle_exit`). That reset reads an
+  exact count only because recovery no longer discards committed work: a busy database now ends
+  `recoverSpool` the way a lost lease already did, returning what it stored and leaving the
+  remaining files queued for the next pass, so the call site needs no busy retry around it. The pin
+  is `spool-recovery.test.ts`'s `a busy database returns what was committed and leaves the spool for
+  the next pass` (RED before the change: `Error: database is locked` out of `transactionImmediate`).
+  The ordering half — an entry stored before the busy one stays counted — holds by construction,
+  since the counter moves before the throw point, and no test can sequence two writers inside one
+  synchronous loop from outside it. The same hole undercounted `recovered` in the epoch log and
+  `last_run` for the one-shot worker, which becomes exact with it. Completed processing
   is the resident's own applied and fallback count; that half has no isolating test, because every
   stimulus that completes a batch also inserts raw events or leaves work queued, and a test that
   passed on the other half's reset would be the narrow kind.
@@ -895,6 +907,15 @@ round for the inputs that had no reader.
 - The migration fence is a staleness rule, not occupancy, and now has a test rather than a source
   reading: a fresh heartbeat defers the migration with `MigrationBusyError`, and a heartbeat older
   than 6,000 ms is cleared by the migration itself, so a killed resident cannot deadlock an upgrade.
+- The cleanup ownership probe is inside the failure guard, on both the resident and the one-shot
+  path. A storage fault leaves the handle open with its statements failing, so a probe outside the
+  guard throws while the storage outcome is being recorded and the run ends with no `run end` line
+  and no closed handle. `a cleanup ownership probe that cannot answer still records the run end`
+  asserts exit 3 and the run-end record, driving the fault by dropping `worker_lease` from a second
+  connection (RED before the fix: `Error: no such table: worker_lease` out of `shutdownResident`,
+  reported as a rejected call rather than an exit code). The one-shot mirror has no isolating test:
+  a one-shot pass reaches its only `sleep` seam while the queue is undrainable, and every stimulus
+  that leaves it undrainable also keeps the run away from the storage-failure path.
 - What T047 does not claim: the resource sweep and soak (T042), the macOS platform leg (T040,
   deferred by the owner), and the pre-existing pass-loop defect filed as issue #231, which the
   resident inherits unchanged from the one-shot worker.
@@ -924,8 +945,10 @@ file is named, the test is in `test/unit/resident-worker.test.ts`.
    stolen in that seam leaves the sentinel for the new owner —
    `an idle exit preserves a stop sentinel written during that exit`,
    `signal handlers survive shutdown and a signalled worker preserves the stop sentinel`,
-   `shutdown with queued work releases the lease so a later spawn can reach it` and
-   `observe --stop writes the sentinel and exits 0 without claiming the lease`.
+   `shutdown with queued work releases the lease so a later spawn can reach it`,
+   `observe --stop writes the sentinel and exits 0 without claiming the lease` and
+   `a cleanup ownership probe that cannot answer still records the run end` for the guard the
+   sequence runs inside.
 6. `capture.test.ts`'s `a schema-behind capture spools and still starts a worker when the lease is
    free` and `a schema-behind capture does not start a worker while the lease is held`, the
    `upgraded` row of item 4's table, and `test/migrations/apply.test.ts`'s `a live worker defers the

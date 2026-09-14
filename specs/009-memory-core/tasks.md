@@ -347,7 +347,9 @@ writers require separate worktrees. No deployment follows merely from an increme
   were also confirmed on a real process against a replayed corpus (`signal` and `upgraded`, each
   exit 0 with the lease released), and the idle poll cost was measured in a window containing no
   epoch. This marker covers the resident lifecycle, its controls, capture startup and the retained
-  one-shot behaviour. It does not cover the resource sweep and the soak, which item 12 of the
+  one-shot behaviour — including the two corrections the one-shot run shares with the resident: an
+  exact `recovered` count when a spool recovery meets a busy database, and a lease-ownership probe
+  that stays inside the guard that records a storage failure. It does not cover the resource sweep and the soak, which item 12 of the
   contract assigns to T042, nor the macOS leg, which is T040's and stays deferred; issues #231,
   #233 and #234 are recorded against the contract paragraphs that place them outside this task —
   a pre-existing pass-loop defect the resident inherits, two clock-and-retention findings from the

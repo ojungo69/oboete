@@ -174,7 +174,10 @@ database budget spools instead of writing, and spool recovery stores it later. T
 therefore its own reset, taken where it happens rather than at the end of the epoch, because the
 next pass checks the controls and a recovered `session_start` leaves nothing queued to hold the
 resident past that check. Spool recovery is the whole of that set — every other write the resident
-makes on its own connection is processing, which the completion count already carries.
+makes on its own connection is processing, which the completion count already carries. The count
+it resets on is exact: a recovery that meets a busy database returns what it has already committed
+and leaves the remaining files queued for the next pass, so a capture stored before the busy entry
+is never dropped from the count that the reset, the epoch log and `last_run` all read.
 
 Two mechanisms were rejected because each hides a real capture. Timestamps: a backward system-clock
 correction is exactly when the mark matters, `last_captured_at` is written clamped so it never
@@ -197,6 +200,12 @@ sentinel — but only when `stopped` is this process's own exit reason, and only
 the lease — before that lease is released, so a capture that spawns the moment the lease frees
 starts a resident rather than consuming the sentinel and exiting; release the lease if the row still
 carries this token, **whether or not the queue is empty**; close the database.
+
+The whole sequence runs inside the failure guard, its ownership probe included. A storage fault
+leaves the handle open with its statements failing, which is the state the run-end record exists to
+report; a probe outside the guard would instead end the process with no `run end` line, no closed
+handle and a rejected call in place of the exit code. The one-shot run releases the lease on the
+same terms, so its probe sits inside the same guard.
 
 The two conditions on that removal are not defensive padding. A resident exiting for `idle_exit`,
 `upgraded`, `config_changed`, `paused`, `lease_lost` or `signal` did not act on the sentinel, so
