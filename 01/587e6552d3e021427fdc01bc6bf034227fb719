@@ -1,0 +1,27 @@
+test/unit/resident-worker.test.ts
+  s_a3b2da79705e65::t_66154e423211d3 3,671-727
+  s_a3b2da79705e65::t_e0b7d1633464f6 728-731
+src/worker/observe.ts
+  s_a3b2da79705e65::t_66154e423211d3 634-638
+specs/009-memory-core/contracts/resident-worker.md
+  s_a3b2da79705e65::t_e9b15f6970d234 166-177
+specs/009-memory-core/quickstart.md
+  s_a3b2da79705e65::t_fc2e0adc51afe0 828,830,832
+  s_a3b2da79705e65::t_e9b15f6970d234 878-884,918-920
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "01587e6552d3e021427fdc01bc6bf034227fb719",
+  "prompts": {},
+  "sessions": {
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
