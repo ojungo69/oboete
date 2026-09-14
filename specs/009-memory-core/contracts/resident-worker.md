@@ -36,6 +36,14 @@ Each epoch is then exactly today's bounded run: same predicate, same suppression
 at-least-once provider attempt with exactly-once applied effects. Nothing about retry semantics is
 redefined and no schema changes.
 
+With one subtraction, and it is the easiest thing to get wrong when lifting the bounded body: **an
+epoch never calls `releaseLease`.** Today's run ends by releasing in `releaseEmptyPass`; a resident
+that kept that line would release and re-claim at every epoch, which is precisely what rotation
+exists to avoid, and a test of the retry case would still pass because a re-claim also yields a
+fresh token. The only release is the shutdown below. Across an idle wait the lease row's
+`owner_token` is non-NULL and `pid` is this process; the token changes only at the start of an
+epoch.
+
 **The idle probe is `queueIsEmpty` called with a token that was never issued.** Two things are
 easy to get wrong here, and the existing predicate settles both.
 
@@ -133,9 +141,9 @@ leave the lease held by a process that will never work again, and capture would 
 because the lease looked live. Shutdown therefore releases unconditionally, exactly as FR-009
 already requires of a bounded worker ("releases even with queued work so the next hook can respawn
 it"). Work left behind waits for the next capture, which is both today's behaviour and, for
-`paused`, `stopped`, `config_changed` and `upgraded`, the intended one. The recheck keeps its
-current meaning in the one place it still applies: the transition from an empty pass back to idle,
-where a resident does not exit at all. Release alone never loses an accepted batch — the reservation marks it durably
+`paused`, `stopped`, `config_changed` and `upgraded`, the intended one. Nothing is left for the
+recheck to guard at the empty-pass boundary, because a resident does not release there: the idle
+probe two seconds later, reading with the never-issued token, is that recheck. Release alone never loses an accepted batch — the reservation marks it durably
 and the fenced apply commits effects, terminal state and settlement together — but releasing during
 a request discards that response, which the at-least-once rule already permits.
 
@@ -162,6 +170,14 @@ Because a schema-behind capture closes its handle and spools without spawning a 
 an old resident is not by itself enough to get the new bundle running. Capture therefore attempts a
 best-effort worker start after a schema-behind spool as well, when the lease is free or stale. The
 migration fence itself is unchanged.
+
+That fence cannot be deadlocked by a long-lived process, and the reason is worth stating because the
+opposite is the obvious fear. `fenceOldWorker` in `src/db/open.ts` refuses only while the lease's
+**heartbeat is fresh** — not merely while a token is present — and when the heartbeat is stale it
+clears the row itself under the migration's write lock. A resident that is genuinely working
+therefore blocks a migration for as long as it works, which is the intended answer; one that was
+killed blocks it for `STALE_AFTER_MS`, 6,000 ms. No exit of the resident is required for a migration
+to proceed, so the durable refusal a resident could otherwise create does not exist.
 
 ## Idle exit, and what "session-scoped" means
 
@@ -218,7 +234,9 @@ nothing, so neither an idle day nor a two-minute reclaim wait grows the log.
    starts a new one, and a capture racing that release starts a resident rather than finding the
    sentinel; `paused` is not consumed and nothing starts until `resume`.
 6. An upgrade sequence: old resident running, new bundle installed, resident exits `upgraded`,
-   schema-behind capture spools and starts a worker, the migration runs, the spool is recovered.
+   schema-behind capture spools and starts a worker, the migration runs, the spool is recovered. And
+   its crash variant: the old resident is `SIGKILL`ed instead of exiting, and the migration proceeds
+   once the heartbeat is stale, without any process having released the lease.
 7. Shutdown at each boundary — before reservation, during a request, after a response and before
    apply, and concurrently with a capture at release time — never commits an effect twice and never
    leaves work that no later spawn can reach. Asserted for every exit reason, with a non-empty queue
