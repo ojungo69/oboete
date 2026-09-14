@@ -1,0 +1,43 @@
+test/unit/resident-worker.test.ts
+  s_7b6c7d0c6e8c20::t_cead353a81a6a2 393-394,397-428,431-433,435-440
+  s_7b6c7d0c6e8c20::t_2c882f49f65835 441,590,915-950
+  s_7b6c7d0c6e8c20::t_5fcb477a83f2c2 134-139,141,143-145,559-589
+  s_7b6c7d0c6e8c20::t_1e63cb4bd99666 292,301
+  s_7b6c7d0c6e8c20::t_4a973d4b7ff1df 2,7,395-396,429-430,434
+  s_7b6c7d0c6e8c20::t_b5152275e5e452 80,538,540-541,724,904,907
+  s_7b6c7d0c6e8c20::t_1765362741bdbd 806-810,812-826
+  s_7b6c7d0c6e8c20::t_54a8c3d58a7481 280-291,293-300,302-317
+  s_7b6c7d0c6e8c20::t_4882f72a407728 442
+  s_7b6c7d0c6e8c20::t_4c50f67b373536 591
+test/unit/lease.test.ts
+  s_7b6c7d0c6e8c20::t_cb8e85db4f57b2 5
+  s_7b6c7d0c6e8c20::t_f35b8c19f5b394 151-152,154-158
+test/helpers/observe.ts
+  s_7b6c7d0c6e8c20::t_5fcb477a83f2c2 234
+specs/009-memory-core/contracts/resident-worker.md
+  s_a3b2da79705e65::t_9dd89623ccb3b1 136-138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "77b55d66ea75a568725d53ef1e123dfc19fc6d35",
+  "prompts": {},
+  "sessions": {
+    "s_7b6c7d0c6e8c20": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09f01-fb33-7401-bf17-9546d257ca65",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
