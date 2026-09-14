@@ -1,0 +1,39 @@
+specs/009-memory-core/contracts/resident-worker.md
+  s_a3b2da79705e65::t_01057d026d4028 112-113,304-307
+  s_a3b2da79705e65::t_b188a14cdd27ee 134-135,312-317
+specs/009-memory-core/quickstart.md
+  s_a3b2da79705e65::t_b188a14cdd27ee 912-918
+  s_a3b2da79705e65::t_0b70af48a8f59b 831
+  s_a3b2da79705e65::t_755de1c6e6e74b 828,830
+  s_a3b2da79705e65::t_01057d026d4028 839-840
+test/unit/purge.test.ts
+  s_a3b2da79705e65::t_01057d026d4028 197-198,202-205
+src/worker/purge.ts
+  s_a3b2da79705e65::t_01057d026d4028 40,47-50
+src/worker/imported.ts
+  s_a3b2da79705e65::t_539189761bc286 29,334,349
+test/unit/resident-worker.test.ts
+  s_a3b2da79705e65::t_0768d4399e387b 635-640,644,646-657
+  s_a3b2da79705e65::t_acc2e5e135b526 641-643,645
+  s_a3b2da79705e65::t_1c249589d819ae 32-46,309,472
+src/worker/observe.ts
+  s_a3b2da79705e65::t_539189761bc286 577-579,641
+  s_a3b2da79705e65::t_407398ca7cff9c 580-582
+  s_a3b2da79705e65::t_01057d026d4028 656
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "68f19802cea4f5b6b26d25309933323c78a40e99",
+  "prompts": {},
+  "sessions": {
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
