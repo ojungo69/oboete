@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { GROK_ISOLATION_ENV, copyMode, shellQuote } from "./agents.mjs";
+import { GROK_ISOLATION_ENV, copyMode, settleCredentials, shellQuote, stageCredential } from "./agents.mjs";
 import { AGENT_OUTAGE_RE, PreconditionError, waitUntil } from "./process.mjs";
 
 const SYNTHETIC_REMOTE = "https://example.invalid/oboete-e2e.git";
@@ -158,6 +158,7 @@ function copySetupFile(source, destination, required = false) {
   copyMode(source, destination, fs.statSync(source).mode & 0o7777);
 }
 
+
 export function prepareOboeteHome(destination, source) {
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   copySetupFile(path.join(source, "config.toml"), path.join(destination, "config.toml"), true);
@@ -180,12 +181,15 @@ function prepareClaudeAgent(config, homes, prompt, extraArgs) {
     ],
     env: {},
     config,
+    // Claude reads its credentials from the configured home, so the leg stages none.
+    credentials: [],
   };
 }
 
 function prepareCodexAgent(config, homes, prompt, repo, extraArgs) {
-  for (const file of ["auth.json", "config.toml", "hooks.json"]) {
-    copySetupFile(path.join(homes.codex, file), path.join(config, file), file !== "auth.json");
+  const credentials = stageCredential(path.join(homes.codex, "auth.json"), path.join(config, "auth.json"));
+  for (const file of ["config.toml", "hooks.json"]) {
+    copySetupFile(path.join(homes.codex, file), path.join(config, file), true);
   }
   const configToml = path.join(config, "config.toml");
   // The TUI asks "Do you trust the contents of this directory?" for a repository it has not
@@ -214,11 +218,12 @@ function prepareCodexAgent(config, homes, prompt, repo, extraArgs) {
     ],
     env: { CODEX_HOME: config },
     config,
+    credentials,
   };
 }
 
 function prepareGrokAgent(config, homes, prompt, repo) {
-  copySetupFile(path.join(homes.grok, "auth.json"), path.join(config, "auth.json"));
+  const credentials = stageCredential(path.join(homes.grok, "auth.json"), path.join(config, "auth.json"));
   copySetupFile(path.join(homes.grok, "config.toml"), path.join(config, "config.toml"), true);
   copySetupFile(
     path.join(homes.grok, "hooks", "oboete.json"),
@@ -228,11 +233,13 @@ function prepareGrokAgent(config, homes, prompt, repo) {
   return {
     argv: ["grok", "-p", prompt, "--always-approve", "--output-format", "json", "--cwd", repo],
     env: { GROK_HOME: config, ...GROK_ISOLATION_ENV },
+    credentials,
   };
 }
 
 function preparePiAgent(config, directory, homes, prompt) {
-  for (const file of ["auth.json", "settings.json", "models-store.json"]) {
+  const credentials = stageCredential(path.join(homes.pi, "auth.json"), path.join(config, "auth.json"));
+  for (const file of ["settings.json", "models-store.json"]) {
     copySetupFile(path.join(homes.pi, file), path.join(config, file));
   }
   copySetupFile(
@@ -245,6 +252,7 @@ function preparePiAgent(config, directory, homes, prompt) {
   return {
     argv: ["pi", "-p", prompt, "--mode", "json", "--session-dir", sessions],
     env: { PI_CODING_AGENT_DIR: config },
+    credentials,
   };
 }
 
@@ -283,6 +291,7 @@ export async function launchAgent(configuration
     stderrPath,
     timeoutMs: options.timeoutMs,
   });
+  settleCredentials(agent, prepared.credentials);
   return { ...proc, stdoutPath, stderrPath };
 }
 

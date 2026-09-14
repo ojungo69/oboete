@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { eventsFile, parseEvents, redactValue, toolNameOf, truncateEvents, writeFixture } from "./agent-events.mjs";
 import { readMcpFrames } from "./mcp-frames.mjs";
 import { binVersion, childEnv, runTimed } from "./process.mjs";
-import { DONE_PROMPT } from "./agents.mjs";
+import { DONE_PROMPT, credentialEntries, settleCredentials } from "./agents.mjs";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 const MCP_DUMMY = path.join(HERE, "../probe-lib/mcp-dummy.mjs");
@@ -117,6 +117,8 @@ export const codexMcpProbe = {
           timeoutMs: 90_000,
         },
       );
+      // A second API-backed run against the seeded home; its refresh belongs to the account too.
+      settleCredentials("codex", credentialEntries("codex", seed.tree));
       return codexMcpResult(ctx, seed, proc, log);
     },
   };
