@@ -20,8 +20,9 @@ the resident, and is what `src/capture-command.ts` spawns while `[worker] reside
 The current queue predicate excludes a waiting source when any earlier attempt carries **the lease
 token now held** (`DUE_SOURCE_SQL` in `src/worker/batches.ts`, whose comment says deferred sources
 "wait between bounded worker runs, never in a resident retry loop"). A process that keeps one token
-forever therefore never retries its own failures — the single thing T047 exists for. Measured: at one
-overdue timestamp the predicate returns 0 eligible rows for the original owner and 1 for any other.
+forever therefore never retries its own failures — the single thing T047 exists for. Measured at one
+overdue timestamp: the outgoing token sees 0 eligible rows, while the empty string and a fresh token
+each see 1.
 
 The resident's unit of work is an **active epoch**. An epoch begins only when the idle probe below
 finds work, and it begins by rotating the lease to a fresh token inside one `BEGIN IMMEDIATE`
@@ -35,11 +36,29 @@ Each epoch is then exactly today's bounded run: same predicate, same suppression
 at-least-once provider attempt with exactly-once applied effects. Nothing about retry semantics is
 redefined and no schema changes.
 
-**The idle probe runs with a token that was never issued.** This is the part that is easy to get
-wrong twice: asking "is anything due?" with the token the resident currently holds re-applies the
-same exclusion one layer up, so the probe would report an empty queue forever and the next epoch
-would never start. The probe is a read that passes the empty string as the owner token, which
-matches no attempt, so a row whose `retry_after` has passed is visible to it.
+**The idle probe is `queueIsEmpty` called with a token that was never issued.** Two things are
+easy to get wrong here, and the existing predicate settles both.
+
+The token first. Asking "is anything due?" with the token the resident currently holds re-applies
+the same exclusion one layer up, so the probe would report an empty queue forever and the next epoch
+would never start. The probe passes the empty string, which matches no attempt — exactly like the
+fresh token the epoch is about to rotate to. That correspondence is the point, not a coincidence:
+every clause the probe reads binds the token, and one of them (`pendingSummaries`, whose
+`NOT EXISTS` contains `DUE_SOURCE_SQL`) reads it with inverted polarity, so only a probe token that
+matches no attempt is guaranteed to see what the next epoch will see.
+
+The breadth second. The dueness query alone is not the queue. `queueIsEmpty` in
+`src/worker/observe.ts` already counts the four things that make a queue non-empty — a `pending` or
+`running` batch, a batchable source cohort, a spool file, and a session awaiting a summary — and a
+resident that polled only `DUE_SOURCE_SQL` would idle through a recovered spool file, an orphaned
+batch and a pending summary. The probe is therefore that same function with the never-issued token,
+not a new query.
+
+An epoch may begin and find nothing to batch: the probe counts a `running` batch that is not yet
+reclaimable (`RECLAIM_AFTER_MS`, 120,000 ms after its claim), and until that deadline no owner can
+take it. Such an epoch ends immediately, and to keep it from becoming a 2,000 ms rotate-and-log
+treadmill for two minutes it writes no epoch line, and the idle wait that follows runs to the
+nearest of the fixed poll, the earliest `retry_after` and the earliest reclaim deadline.
 
 The epoch is also the reset point for the three pieces of state a one-shot run allocates once: the
 run deadline, the provider-state map and the ancestor cache. Each is established per epoch. No new
@@ -103,10 +122,20 @@ and exit 0.
 Shutdown, in order: stop beginning new batches; finish or explicitly abort the operation in flight;
 leave pending and running state and every cursor as it is; clear timers; remove the `worker-stop`
 sentinel before the lease is released, so a capture that spawns the moment the lease frees starts a
-resident rather than consuming the sentinel and exiting; recheck the idle predicate
-inside the same transaction that releases the lease, so work captured a moment earlier cannot be
-stranded by a hook that saw the lease occupied; release only if the row still carries this token;
-close the database. Release alone never loses an accepted batch — the reservation marks it durably
+resident rather than consuming the sentinel and exiting; release the lease if the row still carries
+this token, **whether or not the queue is empty**; close the database.
+
+That last clause is the `releaseMaxRun` path, not the `releaseEmptyPass` path, and the distinction
+is load-bearing. `releaseLease` returns `kept` when its recheck finds work, and today that answer
+means "do not exit, go around the loop again" — which is a sound answer only while a loop still
+exists. A shutdown has already stopped beginning batches and cleared timers, so `kept` there would
+leave the lease held by a process that will never work again, and capture would decline to spawn
+because the lease looked live. Shutdown therefore releases unconditionally, exactly as FR-009
+already requires of a bounded worker ("releases even with queued work so the next hook can respawn
+it"). Work left behind waits for the next capture, which is both today's behaviour and, for
+`paused`, `stopped`, `config_changed` and `upgraded`, the intended one. The recheck keeps its
+current meaning in the one place it still applies: the transition from an empty pass back to idle,
+where a resident does not exit at all. Release alone never loses an accepted batch — the reservation marks it durably
 and the fenced apply commits effects, terminal state and settlement together — but releasing during
 a request discards that response, which the at-least-once rule already permits.
 
@@ -164,8 +193,9 @@ plus `resident = true` cannot tell a resident from a manual `observe`.
 
 ## Logging
 
-One line per epoch with the counts the bounded run already reports, and one `run end` line naming
-the reason from the table. Idle waits write nothing, so an idle day does not grow the log.
+One line per epoch that did work, with the counts the bounded run already reports, and one `run end`
+line naming the reason from the table. Idle waits and epochs that find nothing batchable write
+nothing, so neither an idle day nor a two-minute reclaim wait grows the log.
 
 ## Verification
 
@@ -173,31 +203,38 @@ the reason from the table. Idle waits write nothing, so an idle day does not gro
    and its effects apply once. This is the test the current owner-token predicate fails. It has two
    halves, and both must be asserted: the idle probe after the failed epoch sees the row once
    `retry_after` has passed, and the epoch that follows actually batches it.
-2. Two captures racing: exactly one process claims the lease, the loser exits 0 as `another_worker`
+2. The probe wakes an epoch for each of the four kinds of queued work, one case each: a due retry, a
+   spool file, an adoptable `pending` batch and a session awaiting a summary. A `running` batch
+   inside its reclaim window wakes an epoch that batches nothing, writes no epoch line, and does not
+   spin — the process performs a bounded number of epochs, not one per poll, before the batch
+   becomes reclaimable.
+3. Two captures racing: exactly one process claims the lease, the loser exits 0 as `another_worker`
    with no source, batch or memory write, and the winner's lease row is never overwritten.
-3. Each control row exits 0 with its own reason and leaves the queue intact — `paused`,
+4. Each control row exits 0 with its own reason and leaves the queue intact — `paused`,
    `worker-stop`, a rewritten config, an unreadable config, a changed engine artifact, a removed
    engine artifact, idle timeout, lost lease — including one case where the epoch had applied a
    fallback summary, proving the exit is still 0.
-4. `worker-stop` is consumed by the exiting resident before it releases the lease, a later capture
+5. `worker-stop` is consumed by the exiting resident before it releases the lease, a later capture
    starts a new one, and a capture racing that release starts a resident rather than finding the
    sentinel; `paused` is not consumed and nothing starts until `resume`.
-5. An upgrade sequence: old resident running, new bundle installed, resident exits `upgraded`,
+6. An upgrade sequence: old resident running, new bundle installed, resident exits `upgraded`,
    schema-behind capture spools and starts a worker, the migration runs, the spool is recovered.
-6. Shutdown at each boundary — before reservation, during a request, after a response and before
+7. Shutdown at each boundary — before reservation, during a request, after a response and before
    apply, and concurrently with a capture at release time — never commits an effect twice and never
-   leaves work that no later spawn can reach.
-7. Heartbeat under load: a long synchronous maintenance stretch and a delayed apply do not let the
+   leaves work that no later spawn can reach. Asserted for every exit reason, with a non-empty queue
+   in at least one of them: the lease row's `owner_token` is NULL once the process is gone, so a
+   `kept` answer can never survive a shutdown.
+8. Heartbeat under load: a long synchronous maintenance stretch and a delayed apply do not let the
    lease go stale, and the apply cannot write an older heartbeat over a newer one.
-8. Crash: `SIGKILL` mid-batch. Takeover is possible more than 6,000 ms after the last heartbeat;
+9. Crash: `SIGKILL` mid-batch. Takeover is possible more than 6,000 ms after the last heartbeat;
    the running batch is reclaimable by another owner 120,000 ms after its claim. Those two latencies
    are asserted separately, and the reclaimed-batch count is reported separately from the spool
    recovery count.
-9. Clock changes: a forward jump, a backward jump and suspend/resume leave epoch budgets and control
+10. Clock changes: a forward jump, a backward jump and suspend/resume leave epoch budgets and control
    ordering correct.
-10. `resident = false` reproduces today's one-shot receipts, including the trigger and budget
+11. `resident = false` reproduces today's one-shot receipts, including the trigger and budget
     conditions under which capture does not spawn at all, and the existing `observe` suites pass
     unchanged on both supported Node versions.
-11. Idle cost and RSS over a long run meet the targets, measured with many distinct sessions,
+12. Idle cost and RSS over a long run meet the targets, measured with many distinct sessions,
     repositories and retries rather than an empty process, and with concurrent captures and a
     held reader to show the WAL recycles.
