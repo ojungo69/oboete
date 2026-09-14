@@ -131,11 +131,11 @@ removes no wakes, and a cap would add that much latency before a stop or an upgr
 Idle cost is measured as what it is, and the honest list is longer than one read: per poll, the
 queue probe (one clause per kind of queued work, each on an existing index), the control checks
 below — one `config.toml` parse and stat, one stat of the engine artifact, two sentinel `existsSync`
-calls — the two `MAX()` reads that date the newest capture and the newest completed processing and
-are compared for change rather than growth, the
-wake-delay reads, a heartbeat write, and whatever the existing empty-pass maintenance writes. The
-two `MAX()` reads have no index behind them; both tables are small in practice, so T042 measures
-them rather than an index being added on speculation. Once a minute the list also carries one
+calls — one `MAX(rowid)` read over `raw_events` that dates the newest capture, the
+wake-delay reads, a heartbeat write, and whatever the existing empty-pass maintenance writes. That
+read is a rowid maximum, which SQLite answers from the b-tree without a scan, and completed
+processing is counted in the process rather than read back, so no aggregate over a growing table
+runs per poll. Once a minute the list also carries one
 maintenance epoch — a token rotation and one empty pass — which T042 counts as idle cost rather
 than treating it as work. Target: under 0.5% of
 one core averaged over ten idle minutes, with RSS flat across a long run (T042). No transaction and
@@ -162,6 +162,14 @@ request. The first that holds ends the process cooperatively with exit 0:
 | the lease is held by another owner | `lease_lost` | takeover |
 | `SIGTERM` or `SIGINT` received | `signal` | an operator or a process manager |
 
+Neither half of the idle row reads a timestamp. A capture is observed as a change in `MAX(rowid)` over
+`raw_events`, which every stored capture moves and no clock can; completed processing is the
+resident's own count of applied and fallback batches for the epoch, and while it holds the lease it
+is the only process that completes one. Stamps cannot carry this signal: a backward system-clock
+correction is exactly when it matters, `last_captured_at` is written clamped so it never decreases,
+and a batch completing after the correction adds a row whose smaller stamp a maximum over rows
+hides — so a stamp-based mark, tested for growth or for change, freezes while work continues.
+
 Cooperative exit is 0 even when the epoch applied a fallback summary, which the existing exit
 calculation would otherwise report as 1. That exemption is per reason, not per mode: the reasons in
 the table above are exempt, and `batch_error`, `worker_error` and `storage_error` keep the existing
@@ -180,7 +188,10 @@ carries this token, **whether or not the queue is empty**; close the database.
 The two conditions on that removal are not defensive padding. A resident exiting for `idle_exit`,
 `upgraded`, `config_changed`, `paused`, `lease_lost` or `signal` did not act on the sentinel, so
 deleting it would silently discard a stop the user asked for; and a process that has already lost
-the lease would be deleting a sentinel aimed at its successor.
+the lease would be deleting a sentinel aimed at its successor. Both are evaluated where they can be
+trusted: the removal runs inside the transaction that releases the lease, after its ownership test
+and before the row is cleared, so a process suspended between an unlocked check and the release
+cannot delete a sentinel its successor is meant to read.
 
 That last clause is the `releaseMaxRun` path, not the `releaseEmptyPass` path, and the distinction
 is load-bearing. `releaseLease` returns `kept` when its recheck finds work, and today that answer
@@ -211,8 +222,11 @@ An upgrade is observed on the artifact the process actually loaded. Capture resp
 `process.argv[1]`, the launcher, which resolves its real path and imports the sibling `engine.mjs`;
 the version constant is embedded at build time, so comparing it with itself proves nothing. The
 resident stats the resolved engine artifact — device and inode, size, mtime, and the target of a
-symlink — and exits when that identity changes, when the artifact disappears, or when it cannot be
-read. During the window where an install has removed the artifact and not yet written the new one,
+symlink — and exits when that identity changes, when the artifact disappears, or when stating it
+fails for any other reason. Whether the file's contents can be read is deliberately not a trigger:
+a `chmod 000` leaves that identity intact and supersedes nothing, the process already holds the code
+it loaded, and exiting would release the lease to a spawn that cannot read the engine either, so the
+queue would stop draining for as long as the mode stayed wrong. During the window where an install has removed the artifact and not yet written the new one,
 exit is still the answer: the next capture spawns whatever is installed by then.
 
 Because a schema-behind capture closes its handle and spools without spawning a worker, the exit of
@@ -232,8 +246,8 @@ to proceed, so the durable refusal a resident could otherwise create does not ex
 
 The lease belongs to the data directory, not to one native session, and a session row stays active
 until an explicit session-end capture that a crashed agent may never send. Liveness is therefore not
-read from session or work status. Idle is measured from observable events: the newest capture
-activity (`sessions.last_captured_at`) and the newest completed processing, on a monotonic timer.
+read from session or work status. Idle is measured from observable events on a monotonic timer: a
+stored capture (`MAX(rowid)` over `raw_events`) and a completed batch, neither read from a clock.
 `idle_exit_ms` defaults to 900,000 ms, bounds 60,000–86,400,000.
 
 A retry due beyond the idle window is not a reason to stay alive. It is preserved for the next spawn
@@ -310,11 +324,12 @@ nothing, so neither an idle day nor a two-minute reclaim wait grows the log.
    are asserted separately, and the reclaimed-batch count is reported separately from the spool
    recovery count.
 10. Clock changes: a forward jump, a backward jump and suspend/resume leave epoch budgets and
-   control ordering correct. Two mechanisms carry this, and both are asserted: every budget reads
-   `elapsedMs`, never a wall deadline derived from it, so no pass can be cut short or extended by a
-   correction; and capture activity is detected as a **change** in the newest capture and
-   completion stamps rather than an increase, because a backward correction makes a later capture
-   carry a smaller timestamp and a growth test would read that as idleness.
+   control ordering correct. Two mechanisms carry this: every budget reads `elapsedMs`, never a wall
+   deadline derived from it, so no pass can be cut short or extended by a correction; and the idle
+   activity marks read no clock at all — a rowid maximum for captures, an in-process count for
+   completed batches. The capture half is asserted with a clamped stamp a later capture cannot
+   move; the completion half has no isolating test, because every stimulus that completes a batch
+   also inserts raw events or leaves work queued.
 11. `resident = false` reproduces today's one-shot receipts, including the trigger and budget
     conditions under which capture does not spawn at all, and the existing `observe` suites pass
     unchanged on both supported Node versions.

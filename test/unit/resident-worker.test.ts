@@ -15,6 +15,7 @@ import { detectSync } from '../../src/privacy/detect.js';
 import { repositoryRoot } from '../helpers/compile-cache.js';
 import { WALL_CLOCK_IS_MEASURED } from '../helpers/home.js';
 import {
+  DAY,
   NOW,
   captureEndedSession,
   cleanEnv,
@@ -610,10 +611,14 @@ test('capture activity resets the idle budget while an unchanged session expires
         assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sessions').get()?.n, 1);
         assert.equal(queueIsEmpty(db, fixture.paths, '', NOW), true);
       });
-      const clock = residentClock((polls) => {
+      const clock = residentClock(async (polls) => {
         if (advances && polls === 1) {
+          await fixture.capture('SessionStart', {
+            session_id: 'idle-capture-later', cwd: process.cwd(), source: 'startup',
+          });
+          // The reset has to be attributable to the activity signal, not to queued work.
           fixture.withDb((db) => {
-            db.prepare('UPDATE sessions SET last_captured_at = ?').run(NOW);
+            assert.equal(queueIsEmpty(db, fixture.paths, '', NOW), true);
           });
         }
         if (polls === 3) writeWorkerStop(fixture.paths);
@@ -638,19 +643,23 @@ test('a backward system clock does not read continuing captures as idleness', as
     await fixture.capture('SessionStart', {
       session_id: 'idle-backward', cwd: process.cwd(), source: 'startup',
     });
-    // The session starts with a capture stamp the startup poll reads, and each later poll writes an
-    // EARLIER one, which is what a backward system-clock correction produces: activity is still
-    // activity, so the idle budget must keep resetting.
-    let stamp = NOW;
-    fixture.withDb((db) => { db.prepare('UPDATE sessions SET last_captured_at = ?').run(stamp); });
-    const clock = residentClock((polls) => {
-      stamp -= 60_000;
-      fixture.withDb((db) => { db.prepare('UPDATE sessions SET last_captured_at = ?').run(stamp); });
+    // What a backward system-clock correction leaves behind: `last_captured_at` is written clamped,
+    // so the stamp already on the row outlives the correction and every later capture writes a
+    // smaller one that the row and the maximum over rows both discard. The captures are real and
+    // leave nothing queued, so only the activity signal can keep the resident alive.
+    fixture.withDb((db) => { db.prepare('UPDATE sessions SET last_captured_at = ?').run(NOW + DAY); });
+    const clock = residentClock(async (polls) => {
+      await fixture.capture('SessionStart', {
+        session_id: `idle-backward-${polls}`, cwd: process.cwd(), source: 'startup',
+      });
+      fixture.withDb((db) => {
+        assert.equal(queueIsEmpty(db, fixture.paths, '', NOW), true);
+      });
       if (polls === 3) writeWorkerStop(fixture.paths);
     }, 450_000);
     assert.equal(await runResident(fixture, clock), 0);
     assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=stopped/,
-      'a capture whose stamp moved backward must still reset the idle budget');
+      'a capture the clamped stamp cannot record must still reset the idle budget');
     assert.equal(clock.elapsedMs(), 1_350_000);
   });
 });
@@ -862,15 +871,15 @@ test('a maintenance epoch purges an expired secret with no batchable work', asyn
   });
 });
 
-test('worker-stop is removed before the lease is released and pause is not consumed', async () => {
+test('a stop sentinel survives a takeover that happens during shutdown', async () => {
   await withFixture(async (fixture) => {
     writeConfig(fixture, 'none');
     await captureEndedSession(fixture, {
-      sessionId: 'stop-consumed',
+      sessionId: 'stop-stolen',
       prompts: ['Stop the resident once it is idle.'],
     });
     let stopWritten = false;
-    let beforeRelease: { stopExists: boolean; leaseOwned: boolean } | undefined;
+    let stolen = false;
     const clock = residentClock(() => {
       writeWorkerStop(fixture.paths);
       stopWritten = true;
@@ -878,18 +887,37 @@ test('worker-stop is removed before the lease is released and pause is not consu
     assert.equal(await runResident(fixture, {
       ...clock,
       now: () => {
-        // After the idle wait writes stop, the next now() evaluates releaseForExit's arguments.
-        if (stopWritten && beforeRelease === undefined) {
-          beforeRelease = fixture.withDb((db) => ({
-            stopExists: existsSync(fixture.paths.workerStop),
-            leaseOwned: typeof db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token === 'string',
-          }));
+        // After the idle wait writes stop, the next now() evaluates releaseForExit's arguments -
+        // between shutdown's unlocked ownership check and the transaction that releases the lease.
+        if (stopWritten && !stolen) {
+          stolen = true;
+          fixture.withDb((db) => {
+            db.prepare("UPDATE worker_lease SET owner_token = 'foreign' WHERE id = 1").run();
+          });
         }
         return NOW;
       },
     }), 0);
-    assert.deepEqual(beforeRelease, { stopExists: false, leaseOwned: true },
-      'worker-stop must be absent while the lease is still owned immediately before release');
+    assert.equal(stolen, true, 'the test must reach the seam it is asserting about');
+    assert.equal(existsSync(fixture.paths.workerStop), true,
+      'a worker whose lease was taken over must leave the stop request for its successor');
+    fixture.withDb((db) => {
+      assert.equal(db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token, 'foreign');
+    });
+  });
+});
+
+test('worker-stop is removed before the lease is released and pause is not consumed', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    await captureEndedSession(fixture, {
+      sessionId: 'stop-consumed',
+      prompts: ['Stop the resident once it is idle.'],
+    });
+    const clock = residentClock(() => {
+      writeWorkerStop(fixture.paths);
+    });
+    assert.equal(await runResident(fixture, clock), 0);
     assert.equal(readFileSync(fixture.paths.observeLog, 'utf8').includes('reason=stopped'), true);
     assert.equal(existsSync(fixture.paths.workerStop), false);
     fixture.withDb((db) => {

@@ -245,6 +245,10 @@ function releaseForExit(
   releaseWithPending: boolean,
 ): 'released' | 'kept' | 'lost' {
   return releaseLease(db, token, () => {
+    // Inside the transaction, after `releaseLease` has confirmed this row still carries this token:
+    // a process suspended long enough to lose the lease must leave the stop request for the owner
+    // that replaced it. Only a resident shutdown reaches here with `stopped`.
+    if (reason === 'stopped') clearWorkerStop(paths);
     const empty = releaseWithPending || queueIsEmpty(db, paths, token, now);
     if (empty) runtimeStateSet(db, 'last_run', JSON.stringify({ at: now, reason, ...result }), now);
     return empty;
@@ -525,8 +529,7 @@ async function observeLifecycle(
   const enginePath = deps.engineArtifact;
   const startedEngine = readFileIdentity(enginePath);
   const startedConfig = readConfigStamp(paths);
-  let lastCaptureWall = 0;
-  let lastProcessedWall = 0;
+  let lastCaptureMark = 0;
   let lastActivityElapsed = deps.elapsedMs();
 
   function onSignal(): void {
@@ -566,20 +569,15 @@ async function observeLifecycle(
   }
 
   function pollIdleActivity(): void {
-    const capture = db.prepare('SELECT MAX(last_captured_at) AS t FROM sessions').get()?.t;
-    const processed = db
-      .prepare(
-        "SELECT MAX(completed_at) AS t FROM observation_batches WHERE state IN ('applied', 'fallback')",
-      )
-      .get()?.t;
-    const captureAt = typeof capture === 'number' ? capture : 0;
-    const processedAt = typeof processed === 'number' ? processed : 0;
-    // Activity is a change in these stamps, not an increase: a backward system-clock correction
-    // makes a later capture carry a smaller timestamp, and requiring growth would read that as
-    // idleness while captures continue.
-    if (captureAt !== lastCaptureWall || processedAt !== lastProcessedWall) {
-      lastCaptureWall = captureAt;
-      lastProcessedWall = processedAt;
+    // Timestamps cannot carry this signal. A backward system-clock correction is exactly when it
+    // matters, and both stamps read as a maximum over rows: `last_captured_at` is written clamped so
+    // it never decreases, and a batch completing after the jump adds a row whose smaller stamp the
+    // maximum hides. A rowid no clock can move says the same thing for a capture, and the resident
+    // is the only owner that completes batches, so it counts its own instead of reading them back.
+    const captured = db.prepare('SELECT MAX(rowid) AS n FROM raw_events').get()?.n;
+    const mark = typeof captured === 'number' ? captured : 0;
+    if (mark !== lastCaptureMark) {
+      lastCaptureMark = mark;
       lastActivityElapsed = deps.elapsedMs();
     }
   }
@@ -920,6 +918,7 @@ async function observeLifecycle(
           return;
         }
         const delta = countDelta(before, result);
+        if (delta.applied !== 0 || delta.fallback !== 0) lastActivityElapsed = deps.elapsedMs();
         if (Object.values(delta).some(Boolean)) appendLog(paths.observeLog, 'info', 'epoch', delta);
         if (endReason === 'batch_error') {
           exit = 0;
@@ -967,13 +966,6 @@ async function observeLifecycle(
 
   async function shutdownResident(): Promise<void> {
     if (!db.isOpen || !ownsLease(db, token)) return;
-    if (endReason === 'stopped') {
-      try {
-        clearWorkerStop(paths);
-      } catch {
-        // A failed removal must not prevent releasing this worker's lease.
-      }
-    }
     try {
       const released = releaseForExit(db, paths, token, deps.now(), result, endReason, true);
       if (released === 'released') await retryBusy(() => checkpoint(db, 'TRUNCATE'));
