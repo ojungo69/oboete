@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn, type spawn } from 'node:child_process';
-import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
 import { setTimeout as timerSleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +10,6 @@ import {
   consentHash,
   consentMatches,
   consentTuple,
-  DEFAULT_IDLE_EXIT_MS,
   isPaused,
   loadConfig,
   readCredentials,
@@ -45,12 +44,12 @@ import { assertLease, claimLease, heartbeat, releaseLease, rotateLease, transact
 import {
   LeaseLostError,
   processBatch,
+  type BatchDeps,
   type BatchResult,
 } from './observe-batch.js';
 import {
   checkpoint,
   cleanupPiAck,
-  hasPurgeableEvents,
   purgeExpiredEvents,
   runtimeStateSet,
 } from './purge.js';
@@ -60,6 +59,8 @@ const DEFAULT_HEARTBEAT_MS = 2_000;
 const DEFAULT_MAX_RUN_MS = 20 * 60 * 1_000;
 const BUSY_RETRY_MS = 200;
 const RESIDENT_POLL_MS = 2_000;
+/** An idle resident still opens an epoch this often so expiry and reclaim keep running. */
+const MAINTENANCE_MS = 60_000;
 const OBSERVE_USAGE = 'Usage: oboete observe [--reprocess-source <source-id>] [--resident] [--stop]\n';
 
 export type ObserveDeps = {
@@ -72,7 +73,6 @@ export type ObserveDeps = {
   maxRunMs: number;
   /** Test seam for the A11 crash window after a response and before its fenced apply. */
   applyHook: () => void | Promise<void>;
-  shouldStop: () => string | undefined;
   writeError: (text: string) => void;
   /** Monotonic elapsed ms from an arbitrary origin; idle and epoch budgets use this. */
   elapsedMs: () => number;
@@ -212,7 +212,6 @@ export function queueIsEmpty(db: DatabaseSync, paths: OboetePaths, token: string
     return false;
   }
   if (hasBatchableSources(db, token, now)) return false;
-  if (hasPurgeableEvents(db, now)) return false;
   try {
     if (
       readdirSync(paths.spool, { withFileTypes: true }).some(
@@ -262,7 +261,6 @@ function observeDependencies(overrides: Partial<ObserveDeps>): ObserveDeps {
     heartbeatMs: overrides.heartbeatMs ?? DEFAULT_HEARTBEAT_MS,
     maxRunMs: overrides.maxRunMs ?? DEFAULT_MAX_RUN_MS,
     applyHook: overrides.applyHook ?? (() => undefined),
-    shouldStop: overrides.shouldStop ?? (() => undefined),
     writeError: overrides.writeError ?? ((text) => { process.stderr.write(text); }),
     elapsedMs: overrides.elapsedMs ?? (() => performance.now()),
     sleep: overrides.sleep ?? defaultSleep,
@@ -314,13 +312,10 @@ function engineArtifactPath(): string {
   return fileURLToPath(import.meta.url);
 }
 
-type ConfigStamp =
-  | { kind: 'absent' }
-  | { kind: 'file'; identity: FileIdentity; idleExitMs: number };
+type ConfigStamp = { identity: FileIdentity; idleExitMs: number };
 
 /** One parse per control check: the stamp carries the settings the check needs. */
 function readConfigStamp(paths: OboetePaths): ConfigStamp | 'unreadable' {
-  if (!existsSync(paths.config)) return { kind: 'absent' };
   let idleExitMs: number;
   try {
     idleExitMs = loadConfig(paths).worker.idle_exit_ms;
@@ -328,8 +323,7 @@ function readConfigStamp(paths: OboetePaths): ConfigStamp | 'unreadable' {
     return 'unreadable';
   }
   const identity = readFileIdentity(paths.config);
-  if (identity === 'unreadable' || !identity.exists) return 'unreadable';
-  return { kind: 'file', identity, idleExitMs };
+  return identity === 'unreadable' ? 'unreadable' : { identity, idleExitMs };
 }
 
 function nextWakeDelay(db: DatabaseSync, now: number): number {
@@ -349,18 +343,6 @@ function nextWakeDelay(db: DatabaseSync, now: number): number {
     if (reclaimAt > now) delay = Math.min(delay, Math.max(1, reclaimAt - now));
   }
   return delay;
-}
-
-function countsChanged(before: Counts, after: Counts): boolean {
-  return (
-    after.recovered !== before.recovered ||
-    after.classified !== before.classified ||
-    after.reclassified !== before.reclassified ||
-    after.batches !== before.batches ||
-    after.applied !== before.applied ||
-    after.fallback !== before.fallback ||
-    after.purged !== before.purged
-  );
 }
 
 function countDelta(before: Counts, after: Counts): Counts {
@@ -512,8 +494,9 @@ async function observeLifecycle(
   }
 
   const result = emptyCounts();
-  const db = openObserveDatabase(paths);
-  if (db === null) return 3;
+  const opened = openObserveDatabase(paths);
+  if (opened === null) return 3;
+  const db: DatabaseSync = opened;
 
   const startedAt = deps.now();
   const deadline = startedAt + Math.max(0, deps.maxRunMs);
@@ -572,9 +555,7 @@ async function observeLifecycle(
 
   function heartbeatLease(): void {
     try {
-      // `db` is declared before the null check that narrows it, and this timer only ever fires
-      // after that check has passed.
-      if (!heartbeat(db as DatabaseSync, token, deps.now())) leaseLost = true;
+      if (!heartbeat(db, token, deps.now())) leaseLost = true;
     } catch (error) {
       appendLogQuietly(paths.observeLog, 'warn', 'heartbeat failed', { code: errorCode(error) });
     }
@@ -590,9 +571,8 @@ async function observeLifecycle(
   }
 
   function pollIdleActivity(): void {
-    const conn = db as DatabaseSync;
-    const capture = conn.prepare('SELECT MAX(last_captured_at) AS t FROM sessions').get()?.t;
-    const processed = conn
+    const capture = db.prepare('SELECT MAX(last_captured_at) AS t FROM sessions').get()?.t;
+    const processed = db
       .prepare(
         "SELECT MAX(completed_at) AS t FROM observation_batches WHERE state IN ('applied', 'fallback')",
       )
@@ -616,21 +596,19 @@ async function observeLifecycle(
       startedEngine === 'unreadable' ||
       engineNow === 'unreadable' ||
       !engineNow.exists ||
-      (startedEngine.exists && !sameIdentity(startedEngine, engineNow))
+      !sameIdentity(startedEngine, engineNow)
     ) {
       return 'upgraded';
     }
     const configNow = readConfigStamp(paths);
     if (configNow === 'unreadable' || startedConfig === 'unreadable') return 'config_changed';
-    if (startedConfig.kind === 'absent') {
-      if (configNow.kind !== 'absent') return 'config_changed';
-    } else if (configNow.kind === 'absent' || !sameIdentity(startedConfig.identity, configNow.identity)) {
-      return 'config_changed';
-    }
-    if (!ownsLease(db as DatabaseSync, token)) return 'lease_lost';
+    if (!sameIdentity(startedConfig.identity, configNow.identity)) return 'config_changed';
+    if (!ownsLease(db, token)) return 'lease_lost';
     pollIdleActivity();
-    const idleMs = configNow.kind === 'absent' ? DEFAULT_IDLE_EXIT_MS : configNow.idleExitMs;
-    if (deps.elapsedMs() - lastActivityElapsed >= idleMs && queueIsEmpty(db as DatabaseSync, paths, '', deps.now())) {
+    if (
+      deps.elapsedMs() - lastActivityElapsed >= configNow.idleExitMs &&
+      queueIsEmpty(db, paths, '', deps.now())
+    ) {
       return 'idle_exit';
     }
     return undefined;
@@ -651,6 +629,7 @@ async function observeLifecycle(
   }
 
   async function observeClaimedLease(db: DatabaseSync): Promise<void> {
+    const busyWaitMs = Math.min(Math.max(1, deps.heartbeatMs), BUSY_RETRY_MS);
     async function recoverAndClassify(): Promise<boolean> {
       const recovered = await retryBusy(() => recoverSpool(db, paths, token, deps.now()));
       result.recovered += recovered.inserted;
@@ -772,11 +751,9 @@ async function observeLifecycle(
         }
       }
 
-      if (!leaseLost && stopReason === undefined) {
-        await checkpointBatch();
-      }
+      if (!leaseLost) await checkpointBatch();
 
-      if (stopReason === undefined) logBatch();
+      logBatch();
 
     }
 
@@ -828,15 +805,14 @@ async function observeLifecycle(
         await retryBusy(() => checkpoint(db, 'TRUNCATE'));
         return true;
       }
-      await drainedOrWait();
+      await deps.sleep(busyWaitMs);
       return false;
     }
 
+    /** Resident-only: the epoch ends when the queue is drained, and waits out a busy row. */
     async function drainedOrWait(): Promise<boolean> {
       if (queueIsEmpty(db, paths, token, deps.now())) return true;
-      const wait = Math.min(Math.max(1, deps.heartbeatMs), BUSY_RETRY_MS);
-      if (resident) await interruptibleSleep(wait);
-      else await deps.sleep(wait);
+      await interruptibleSleep(busyWaitMs);
       return false;
     }
 
@@ -905,6 +881,7 @@ async function observeLifecycle(
     }
 
     async function runResident(): Promise<void> {
+      let lastEpochElapsed = deps.elapsedMs();
       for (;;) {
         const reason = controlReason();
         if (reason !== undefined) {
@@ -914,7 +891,7 @@ async function observeLifecycle(
           return;
         }
         const now = deps.now();
-        if (queueIsEmpty(db, paths, '', now)) {
+        if (deps.elapsedMs() - lastEpochElapsed < MAINTENANCE_MS && queueIsEmpty(db, paths, '', now)) {
           await interruptibleSleep(nextWakeDelay(db, now));
           continue;
         }
@@ -933,6 +910,7 @@ async function observeLifecycle(
         ancestorCache = createAncestorCache();
         const before = { ...result };
         await runPasses();
+        lastEpochElapsed = deps.elapsedMs();
         if (leaseLost) {
           endReason = 'lease_lost';
           exit = 0;
@@ -943,9 +921,8 @@ async function observeLifecycle(
           exit = 0;
           return;
         }
-        if (countsChanged(before, result)) {
-          appendLog(paths.observeLog, 'info', 'epoch', countDelta(before, result));
-        }
+        const delta = countDelta(before, result);
+        if (Object.values(delta).some(Boolean)) appendLog(paths.observeLog, 'info', 'epoch', delta);
         if (endReason === 'batch_error') {
           exit = 0;
           return;
@@ -972,7 +949,7 @@ async function observeLifecycle(
     const consentOk = (): boolean => liveConsentOk(paths, deps.env, startedConsentHash);
     const providerState = new Map<string, DegradedReason | null>();
     let ancestorCache = createAncestorCache();
-    const batchDeps = { ...deps, shouldStop: () => controlReason() ?? deps.shouldStop() };
+    const batchDeps: BatchDeps = { ...deps, shouldStop: controlReason };
     const detect = async (text: string) => {
       try { return await deps.detect({
         text,
@@ -991,8 +968,7 @@ async function observeLifecycle(
   }
 
   async function shutdownResident(): Promise<void> {
-    const conn = db as DatabaseSync;
-    if (!conn.isOpen || !ownsLease(conn, token)) return;
+    if (!db.isOpen || !ownsLease(db, token)) return;
     if (endReason === 'stopped') {
       try {
         clearWorkerStop(paths);
@@ -1001,8 +977,8 @@ async function observeLifecycle(
       }
     }
     try {
-      const released = releaseForExit(conn, paths, token, deps.now(), result, endReason, true);
-      if (released === 'released') await retryBusy(() => checkpoint(conn, 'TRUNCATE'));
+      const released = releaseForExit(db, paths, token, deps.now(), result, endReason, true);
+      if (released === 'released') await retryBusy(() => checkpoint(db, 'TRUNCATE'));
       else if (released === 'lost') endReason = 'lease_lost';
     } catch {
       // A held lease becomes stale for takeover.

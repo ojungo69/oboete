@@ -10,7 +10,6 @@ import { claimLease } from '../../src/worker/lease.js';
 import {
   checkpoint,
   cleanupPiAck,
-  hasPurgeableEvents,
   purgeExpiredEvents,
   runtimeStateGet,
   runtimeStateSet,
@@ -127,7 +126,7 @@ test('expired unbatched failed and secret rows are deleted; expired unbatched lo
   });
 });
 
-test('purge probe agrees with deletion for expired secret and retained material', async () => {
+test('an expired source cited by a live memory survives while an expired secret row is deleted', async () => {
   await withOpened((db) => {
     const now = 1_757_000_000_000;
     const token = claimLease(db, { pid: 1, now });
@@ -142,9 +141,7 @@ test('purge probe agrees with deletion for expired secret and retained material'
     ).run();
     db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id) VALUES ('m-retained', 'e-retained')").run();
 
-    assert.equal(hasPurgeableEvents(db, now), true);
     assert.equal(purgeExpiredEvents(db, token, now).deleted, 1);
-    assert.equal(hasPurgeableEvents(db, now), false);
     assert.deepEqual(eventIds(db), ['e-retained']);
   });
 });

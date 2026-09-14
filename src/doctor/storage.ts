@@ -299,8 +299,7 @@ export function migrationItem(
 }
 
 function workerSettings(config: OboeteConfig | null, paths: OboetePaths): string {
-  const stop = isWorkerStopped(paths);
-  const stopState = stop ? 'A stop request is set.' : 'No stop request is set.';
+  const stopState = isWorkerStopped(paths) ? 'A stop request is set.' : 'No stop request is set.';
   if (config === null) return `The effective worker settings could not be read. ${stopState}`;
   return `Resident mode is ${config.worker.resident ? 'enabled' : 'disabled'}, and the idle-exit timeout is ${config.worker.idle_exit_ms} milliseconds. ${stopState}`;
 }

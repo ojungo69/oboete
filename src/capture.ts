@@ -793,7 +793,7 @@ function openCaptureDatabase(
       try {
         spawnAfterSpool = isLeaseFree(opened.db, Date.now());
       } catch {
-        spawnAfterSpool = false;
+        // An unreadable lease leaves the spawn to the next hook.
       }
       try {
         opened.db.close();

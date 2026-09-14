@@ -669,7 +669,7 @@ test('an idle exit preserves a stop sentinel written during that exit', async ()
   });
 });
 
-test('retention wakes an epoch for an expired secret with no batchable work', async () => {
+test('a maintenance epoch purges an expired secret with no batchable work', async () => {
   await withFixture(async (fixture) => {
     writeConfig(fixture, 'none');
     const prompt = 'Delete expired private material.';
@@ -681,8 +681,14 @@ test('retention wakes an epoch for an expired secret with no batchable work', as
       db.prepare("UPDATE raw_events SET sensitivity = 'secret', classification_state = 'done', expires_at = ? WHERE id = ?")
         .run(NOW - 1, sourceId);
     });
+    // The queue is empty, so only the maintenance interval can open the epoch that purges.
+    let elapsed = 0;
     assert.equal(await runResident(fixture, {
-      sleep: async () => { writeWorkerStop(fixture.paths); },
+      elapsedMs: () => elapsed,
+      sleep: async () => {
+        if (elapsed === 0) elapsed = 60_000;
+        else writeWorkerStop(fixture.paths);
+      },
     }), 0);
     fixture.withDb((db) => {
       assert.equal(db.prepare('SELECT id FROM raw_events WHERE id = ?').get(sourceId), undefined);

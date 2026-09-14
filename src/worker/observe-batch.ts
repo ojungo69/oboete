@@ -35,6 +35,9 @@ import {
 import { assertLease, transactionImmediate } from './lease.js';
 import type { ObserveDeps } from './observe.js';
 
+/** The run's dependencies plus the worker's own control check, which the batches consult. */
+export type BatchDeps = ObserveDeps & { shouldStop: () => string | undefined };
+
 /**
  * contracts/cli.md line 35: a log never carries provider content. llm.ts's fixed unusable-output
  * messages are safe verbatim; a validation detail from contract.ts can echo provider-owned keys or
@@ -228,7 +231,7 @@ type ProviderCallOptions = {
   input: ReturnType<typeof buildObserverRequest>['input'];
   batch: BatchRow;
   config: OboeteConfig;
-  deps: ObserveDeps;
+  deps: BatchDeps;
   preset: PresetName;
   model: string;
   consentOk: () => boolean;
@@ -433,7 +436,7 @@ type ProcessBatchOptions = {
   token: string;
   batch: BatchRow;
   config: OboeteConfig;
-  deps: ObserveDeps;
+  deps: BatchDeps;
   detect: (text: string) => Promise<DetectorResult>;
   providerState: Map<string, DegradedReason | null>;
   initialProviderReason: DegradedReason | null;

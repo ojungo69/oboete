@@ -76,14 +76,18 @@ resident that polled only `DUE_SOURCE_SQL` would idle through a recovered spool 
 batch and a pending summary. The probe is therefore that same function with the never-issued token,
 not a new query.
 
-`queueIsEmpty` gains one clause for this purpose, and it is the only change to it: **expired
-material that retention would delete counts as queued work.** A resident holds the lease across idle
-periods, so no other worker can run the maintenance pass, and expired rows include `secret` ones —
-retaining those because nothing happened to be batchable is a privacy regression, not a latency
-one. The clause reuses `purge.ts`'s own predicate as an `EXISTS` rather than restating it, so the
-probe and the delete can never disagree, and it reads the existing `raw_events_expires_at` index.
-Pi-ack file cleanup is not probed for: it rides along with any epoch, its material is temporary, and
-`idle_exit` hands the directory to the next one-shot run within the idle window.
+`queueIsEmpty` is not extended, and retention is why the probe alone cannot be the only trigger.
+A resident holds the lease across idle periods, so no other worker can run the maintenance pass,
+and expired rows include `secret` ones — retaining those because nothing happened to be batchable
+is a privacy regression, not a latency one. **An epoch therefore also begins when the maintenance
+interval, 60,000 ms since the last epoch ended, has elapsed**, whatever the probe says. The
+alternative — teaching the probe to ask whether retention would delete anything — was measured and
+rejected: that predicate is a correlated `NOT EXISTS` over every row already past `expires_at`, a
+range that never empties because cited rows are retained forever, so it costs about 1.6 µs per
+retained row on every poll (27.9 ms at 20,000 rows, and rising). A timer pays nothing per poll and
+bounds the delay to one minute against a seven-day TTL. Pi-ack file cleanup needs no trigger of its
+own: it rides along with any epoch, its material is temporary, and `idle_exit` hands the directory
+to the next one-shot run within the idle window.
 
 An epoch may begin and find nothing it can act on: the probe counts a `running` batch that is not
 yet reclaimable (`RECLAIM_AFTER_MS`, 120,000 ms after its claim), and until that deadline no owner
@@ -102,8 +106,10 @@ cache layer is introduced — these three already exist and only their lifetime 
 Ownership stays the existing lease: `claimLease` under `BEGIN IMMEDIATE`, `assertLease` in every
 fenced transaction, 6,000 ms staleness and 60,000 ms future skew from `lease-clock.ts`. One
 heartbeat schedule runs for the whole process — the same two-second cadence the bounded run already
-uses — and the heartbeat timestamp is read at the fenced write rather than inherited from a receipt,
-so a late apply cannot overwrite a newer heartbeat with an older one.
+uses — and the ownership half of every fence is evaluated at the write itself, so a late apply can
+never commit under a successor's token. The timestamp such a write leaves behind is the `now` its
+caller captured, which for an apply trails the clock by one detector pass, so lease freshness is
+owed to the heartbeat schedule and not to the fences.
 
 `isLeaseFree` is a read hint, so two captures can both spawn; `claimLease` decides. The loser keeps
 today's behaviour (`another_worker`, exit 0) and is not a lease-loss case. What this contract
@@ -306,8 +312,8 @@ nothing, so neither an idle day nor a two-minute reclaim wait grows the log.
     lease and exits 0 as `signal`; the second does not kill the process before the lease is
     released.
 14. Retention is not starved by a held lease: with expired material present and nothing batchable,
-    an epoch begins and the purge runs. Asserted with a `secret` expired row, because that is the
-    case where starvation is a privacy regression.
+    the maintenance interval opens an epoch and the purge runs. Asserted with a `secret` expired
+    row, because that is the case where starvation is a privacy regression.
 15. A `config.toml` that is already malformed when the resident starts ends the process with
     `config_changed`, not `worker_error`.
 16. `batch_error` ends the process and `max_run` ends only the epoch: a source that fails every

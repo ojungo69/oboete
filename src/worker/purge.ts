@@ -15,29 +15,23 @@ const PI_ACK_REMOVE_AFTER_MS = 24 * 60 * 60 * 1000;
 // outside `content`, so an empty-content tool call is left alone.
 // ponytail: a tool call with neither content nor input is the one shape that still accumulates;
 // read payload_json here if one ever turns up.
-export const PURGEABLE_EVENTS_SQL = `SELECT r.id FROM raw_events r
-WHERE r.expires_at <= ?
-  AND ((r.processing_state = 'processed' AND r.processed_at IS NOT NULL
-    AND NOT EXISTS (
-      SELECT 1 FROM memory_sources ms JOIN memories m ON m.id = ms.memory_id
-      WHERE ms.raw_event_id = r.id AND ms.context_only = 0 AND m.deleted_at IS NULL
-        AND m.type <> 'session_summary' AND m.degraded_reason IS NULL
-        AND NOT EXISTS (SELECT 1 FROM memory_sources evidence
-          WHERE evidence.memory_id = m.id AND evidence.raw_event_id = r.id AND evidence.context_only = 0 AND evidence.evidence IS NOT NULL)
-    )) OR r.classification_state = 'failed' OR r.sensitivity = 'secret'
-    OR (r.batch_id IS NULL AND (
-      r.kind NOT IN (${SUMMARIZABLE_KINDS_SQL})
-      OR (r.kind <> 'tool_call' AND TRIM(COALESCE(r.content, ''), ${BLANK_CHARACTERS_SQL}) = '')
-    )))`;
-
 const DELETE_EXPIRED = `DELETE FROM raw_events WHERE id IN (
-  ${PURGEABLE_EVENTS_SQL}
+  SELECT r.id FROM raw_events r
+  WHERE r.expires_at <= ?
+    AND ((r.processing_state = 'processed' AND r.processed_at IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM memory_sources ms JOIN memories m ON m.id = ms.memory_id
+        WHERE ms.raw_event_id = r.id AND ms.context_only = 0 AND m.deleted_at IS NULL
+          AND m.type <> 'session_summary' AND m.degraded_reason IS NULL
+          AND NOT EXISTS (SELECT 1 FROM memory_sources evidence
+            WHERE evidence.memory_id = m.id AND evidence.raw_event_id = r.id AND evidence.context_only = 0 AND evidence.evidence IS NOT NULL)
+      )) OR r.classification_state = 'failed' OR r.sensitivity = 'secret'
+      OR (r.batch_id IS NULL AND (
+        r.kind NOT IN (${SUMMARIZABLE_KINDS_SQL})
+        OR (r.kind <> 'tool_call' AND TRIM(COALESCE(r.content, ''), ${BLANK_CHARACTERS_SQL}) = '')
+      )))
   LIMIT ?
 )`;
-
-export function hasPurgeableEvents(db: DatabaseSync, now: number): boolean {
-  return db.prepare(`${PURGEABLE_EVENTS_SQL} LIMIT 1`).get(now) !== undefined;
-}
 
 export function purgeExpiredEvents(
   db: DatabaseSync,
