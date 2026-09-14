@@ -565,11 +565,6 @@ async function observeLifecycle(
     return resident ? deps.elapsedMs() >= epochDeadlineElapsed : deps.now() >= deadline;
   }
 
-  function importDeadline(): number {
-    if (!resident) return deadline;
-    return deps.now() + Math.max(0, epochDeadlineElapsed - deps.elapsedMs());
-  }
-
   function pollIdleActivity(): void {
     const capture = db.prepare('SELECT MAX(last_captured_at) AS t FROM sessions').get()?.t;
     const processed = db
@@ -579,9 +574,12 @@ async function observeLifecycle(
       .get()?.t;
     const captureAt = typeof capture === 'number' ? capture : 0;
     const processedAt = typeof processed === 'number' ? processed : 0;
-    if (captureAt > lastCaptureWall || processedAt > lastProcessedWall) {
-      lastCaptureWall = Math.max(lastCaptureWall, captureAt);
-      lastProcessedWall = Math.max(lastProcessedWall, processedAt);
+    // Activity is a change in these stamps, not an increase: a backward system-clock correction
+    // makes a later capture carry a smaller timestamp, and requiring growth would read that as
+    // idleness while captures continue.
+    if (captureAt !== lastCaptureWall || processedAt !== lastProcessedWall) {
+      lastCaptureWall = captureAt;
+      lastProcessedWall = processedAt;
       lastActivityElapsed = deps.elapsedMs();
     }
   }
@@ -640,7 +638,7 @@ async function observeLifecycle(
       if (classified.leaseLost || leaseLost) return true;
 
       const reclassified = await retryBusy(() => reclassifyImported(db, token, deps.now, deps.detect,
-        { home: paths.home, env: deps.env, deadline: importDeadline() }));
+        { home: paths.home, env: deps.env, stop: timedOut }));
       result.reclassified += reclassified.examined;
       if (reclassified.leaseLost || leaseLost) return true;
 
@@ -655,7 +653,7 @@ async function observeLifecycle(
         reconcilePendingDestinations(db, token, deps.now(), presetEntry?.egress ?? 'none'));
       if (reconciled.leaseLost || leaseLost) return true;
 
-      const purged = await retryBusy(() => purgeExpiredEvents(db, token, deps.now()));
+      const purged = await retryBusy(() => purgeExpiredEvents(db, token, deps.now(), { clock: deps.now }));
       result.purged += purged.deleted;
       if (purged.leaseLost || leaseLost) return true;
 

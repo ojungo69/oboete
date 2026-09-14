@@ -109,7 +109,8 @@ heartbeat schedule runs for the whole process — the same two-second cadence th
 uses — and the ownership half of every fence is evaluated at the write itself, so a late apply can
 never commit under a successor's token. The timestamp such a write leaves behind is the `now` its
 caller captured, which for an apply trails the clock by one detector pass, so lease freshness is
-owed to the heartbeat schedule and not to the fences.
+owed to the heartbeat schedule and not to the fences — except across a synchronous chunk loop,
+which the schedule cannot interrupt and which therefore stamps a live clock at each fence.
 
 `isLeaseFree` is a read hint, so two captures can both spawn; `claimLease` decides. The loser keeps
 today's behaviour (`another_worker`, exit 0) and is not a lease-loss case. What this contract
@@ -130,7 +131,8 @@ removes no wakes, and a cap would add that much latency before a stop or an upgr
 Idle cost is measured as what it is, and the honest list is longer than one read: per poll, the
 queue probe (one clause per kind of queued work, each on an existing index), the control checks
 below — one `config.toml` parse and stat, one stat of the engine artifact, two sentinel `existsSync`
-calls — the two `MAX()` reads that date the newest capture and the newest completed processing, the
+calls — the two `MAX()` reads that date the newest capture and the newest completed processing and
+are compared for change rather than growth, the
 wake-delay reads, a heartbeat write, and whatever the existing empty-pass maintenance writes. The
 two `MAX()` reads have no index behind them; both tables are small in practice, so T042 measures
 them rather than an index being added on speculation. Once a minute the list also carries one
@@ -299,13 +301,20 @@ nothing, so neither an idle day nor a two-minute reclaim wait grows the log.
    lease go stale. What is asserted is the schedule, not the fences: the timer writes while an
    apply is in flight and the lease is still owned when that apply commits. A fenced write stamps
    the `now` its caller captured, so it can move the stamp back by at most one detector pass —
-   three orders of magnitude below the 6,000 ms staleness bound, and the next tick corrects it.
+   three orders of magnitude below the 6,000 ms staleness bound, and the next tick corrects it. A
+   synchronous chunk loop is the exception, because it starves the schedule outright rather than
+   delaying it: `purgeExpiredEvents` takes its clock as a function and stamps a live read at each
+   chunk's fence, asserted in `test/unit/purge.test.ts`.
 9. Crash: `SIGKILL` mid-batch. Takeover is possible more than 6,000 ms after the last heartbeat;
    the running batch is reclaimable by another owner 120,000 ms after its claim. Those two latencies
    are asserted separately, and the reclaimed-batch count is reported separately from the spool
    recovery count.
-10. Clock changes: a forward jump, a backward jump and suspend/resume leave epoch budgets and control
-   ordering correct.
+10. Clock changes: a forward jump, a backward jump and suspend/resume leave epoch budgets and
+   control ordering correct. Two mechanisms carry this, and both are asserted: every budget reads
+   `elapsedMs`, never a wall deadline derived from it, so no pass can be cut short or extended by a
+   correction; and capture activity is detected as a **change** in the newest capture and
+   completion stamps rather than an increase, because a backward correction makes a later capture
+   carry a smaller timestamp and a growth test would read that as idleness.
 11. `resident = false` reproduces today's one-shot receipts, including the trigger and budget
     conditions under which capture does not spawn at all, and the existing `observe` suites pass
     unchanged on both supported Node versions.

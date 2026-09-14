@@ -29,6 +29,21 @@ import {
 
 const FIRST_RETRY_MS = 5 * 60_000;
 
+// The heartbeat is a real `setInterval`, so wait for the tick that carries the advanced wall clock
+// rather than a fixed sleep the instrumented coverage leg can outrun (test/helpers/home.ts). The
+// last row is returned on timeout so the caller's own assertion reports the failure.
+async function heartbeatAtLeast(fixture: Fixture, expected: number): Promise<Record<string, unknown> | undefined> {
+  const deadline = performance.now() + 8_000;
+  let row: Record<string, unknown> | undefined;
+  do {
+    row = fixture.withDb((db) =>
+      db.prepare('SELECT owner_token, heartbeat_at, pid FROM worker_lease WHERE id = 1').get());
+    if (Number(row?.heartbeat_at) >= expected) return row;
+    await delay(5);
+  } while (performance.now() < deadline);
+  return row;
+}
+
 test('a resident retries a due source in a later epoch of the same process', async () => {
   await withFixture(async (fixture) => {
     fixture.env = cleanEnv(fixture.home, { OBOETE_OPENROUTER_API_KEY: 'resident-retry-key' });
@@ -291,9 +306,7 @@ test('the heartbeat keeps ownership under the token rotated for the second epoch
       if (polls === 4) {
         // Two 5 ms waits exhaust epoch one; the idle wait precedes epoch two's first wait.
         wall += 1_000;
-        await delay(30);
-        heartbeatRow = fixture.withDb((db) =>
-          db.prepare('SELECT owner_token, heartbeat_at, pid FROM worker_lease WHERE id = 1').get());
+        heartbeatRow = await heartbeatAtLeast(fixture, wall);
         writeWorkerStop(fixture.paths);
       }
     });
@@ -456,9 +469,7 @@ test('the heartbeat fires during a delayed apply and the lease survives it', asy
       fetch: async () => openAiResponse(providerOutput(sourceId)),
       applyHook: async () => {
         wall += 1_000;
-        await delay(30);
-        duringApply = fixture.withDb((db) =>
-          db.prepare('SELECT owner_token, heartbeat_at FROM worker_lease WHERE id = 1').get());
+        duringApply = await heartbeatAtLeast(fixture, wall);
       },
     });
     assert.equal(exit, 0);
@@ -619,6 +630,29 @@ test('capture activity resets the idle budget while an unchanged session expires
       }
     });
   }
+});
+
+test('a backward system clock does not read continuing captures as idleness', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    await fixture.capture('SessionStart', {
+      session_id: 'idle-backward', cwd: process.cwd(), source: 'startup',
+    });
+    // The session starts with a capture stamp the startup poll reads, and each later poll writes an
+    // EARLIER one, which is what a backward system-clock correction produces: activity is still
+    // activity, so the idle budget must keep resetting.
+    let stamp = NOW;
+    fixture.withDb((db) => { db.prepare('UPDATE sessions SET last_captured_at = ?').run(stamp); });
+    const clock = residentClock((polls) => {
+      stamp -= 60_000;
+      fixture.withDb((db) => { db.prepare('UPDATE sessions SET last_captured_at = ?').run(stamp); });
+      if (polls === 3) writeWorkerStop(fixture.paths);
+    }, 450_000);
+    assert.equal(await runResident(fixture, clock), 0);
+    assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=stopped/,
+      'a capture whose stamp moved backward must still reset the idle budget');
+    assert.equal(clock.elapsedMs(), 1_350_000);
+  });
 });
 
 // Invoke the newly installed worker handler without triggering node:test's own signal handler.

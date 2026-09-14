@@ -825,9 +825,10 @@ with a review pass over each delta — correctness first, over-engineering secon
 round for the inputs that had no reader.
 
 - Gate: `npm run build`, `npm run typecheck` and `npm run lint` exit 0. The full `npm test` passes
-  on both supported Node versions — 1,504 pass / 0 fail / 2 skipped in the parallel leg and 280
+  on both supported Node versions — 1,505 pass / 0 fail / 2 skipped in the parallel leg and 280
   pass / 0 fail in the serial one, no `not ok` lines in either
-  (`t047-full-v24.16.0.log`, `t047-full-v22.16.0.log`). 27 of those tests are the resident's own,
+  (`t047-full-v24-r5.log`, `t047-full-v22-r5.log`; the same legs before the review round are
+  `t047-full-v24.16.0.log` and `t047-full-v22.16.0.log`). 28 of those tests are the resident's own,
   in `test/unit/resident-worker.test.ts`.
 - Idle cost, contract item 12, measured on a replayed corpus rather than an empty process: the
   1,051-event fixture bundle replayed into a kept home (1,322 raw events, 100 batches, 48
@@ -835,8 +836,8 @@ round for the inputs that had no reader.
   Over 675 s the process used 1,200 ms of CPU: **0.178% of one core**, per-30-s-sample 0.125% to
   0.218%, against a 0.5% target, and the observe log records no epoch line for the window because
   a maintenance epoch that changes no counts writes none (`idle-cost-final.json`). RSS settled
-  rather than grew: 72.1 MiB at start, 79.6 MiB from 356 s onward, 79.6 MiB peak, unchanged across
-  the last four minutes. `SIGTERM` then ended it as `signal`, exit 0, lease released. The first
+  rather than grew: 72.1 MiB at start, 78.6 MiB by 162 s, and a 79.6 MiB peak first reached at
+  546 s and flat to the 675 s end — 1.0 MiB of drift across the last 8.5 minutes. `SIGTERM` then ended it as `signal`, exit 0, lease released. The first
   measurement (`idle-cost.json`) kept the un-quiesced home, so its first five minutes are the
   worker doing real work — 1.0-1.8% of one core while it produced 100 fallback batches — and its
   last 5.8 minutes contain no epoch at all: 0.233-0.300% of one core, sampled every 30 s. Both
@@ -908,11 +909,13 @@ file is named, the test is in `test/unit/resident-worker.test.ts`.
    fenced out`, `batches.test.ts`'s `a stale running batch of a dead worker is reclaimed after 120
    seconds`, and `observe.test.ts`'s `a crash after response leaves running work that is reclaimed
    once with two calls and one apply` — the two latencies separately, as the item requires.
-10. `a wall-clock jump does not end an epoch budget measured on elapsed time` and `a wall-clock jump
-    during apply does not cut the active epoch short`. A backward jump and suspend/resume are not
-    separately asserted: the epoch budget reads only `elapsedMs`, and every wake delay is the
-    minimum of the 2,000 ms poll and a computed deadline, so a backward wall jump can only shorten
-    a wait. Suspend/resume is a platform question and stays with T042 and T040.
+10. `a wall-clock jump does not end an epoch budget measured on elapsed time`, `a wall-clock jump
+    during apply does not cut the active epoch short`, and `a backward system clock does not read
+    continuing captures as idleness` — the last one written against the mutation that requires the
+    capture stamp to grow, which is what the code did before this PR's last round. The one wall
+    deadline the resident still derived from a monotonic budget, for the imported-record scan, is
+    gone: `reclassifyImported` takes a stop predicate, so `timedOut()` is the only judge of the
+    budget in either mode. Suspend/resume stays a platform question for T042 and T040.
 11. `one-shot observe still exits after a failed source and does not retry in-process`,
     `shouldSpawnResident follows [worker] resident and defaults true`, and the unchanged
     `observe`/e2e suites on both Node versions.

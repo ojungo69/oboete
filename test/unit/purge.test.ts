@@ -194,10 +194,15 @@ test('with limit 2 and 5 deletable rows the function reports deleted 5', async (
       insertEvent(db, { id, expiresAt: now, batchId: 'b-applied', processedAt: now - 30 * 86400000 });
     }
 
-    const result = purgeExpiredEvents(db, token, now, { limit: 2 });
+    let tick = now;
+    const result = purgeExpiredEvents(db, token, now, { limit: 2, clock: () => (tick += 1) });
     assert.equal(result.leaseLost, false);
     assert.equal(result.deleted, 5);
     assert.deepEqual(eventIds(db), []);
+    // The chunk loop starves the heartbeat schedule, so each fence stamps a live read: three
+    // chunks (2 + 2 + 1) must leave the last one behind, not the `now` captured before the loop.
+    assert.equal(tick, now + 3);
+    assert.equal(db.prepare('SELECT heartbeat_at FROM worker_lease WHERE id = 1').get()?.heartbeat_at, tick);
   });
 });
 

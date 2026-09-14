@@ -37,14 +37,17 @@ export function purgeExpiredEvents(
   db: DatabaseSync,
   token: string,
   now: number,
-  { limit = 500 }: { limit?: number } = {},
+  { limit = 500, clock }: { limit?: number; clock?: () => number } = {},
 ): { deleted: number; leaseLost: boolean } {
   if (limit < 1) return { deleted: 0, leaseLost: false };
   let deleted = 0;
   let n = limit;
   while (n >= limit) {
     const step = transactionImmediate(db, () => {
-      if (!assertLease(db, token, now)) {
+      // This loop never yields, so the heartbeat schedule cannot run for its duration: each fence
+      // stamps a live read rather than the `now` captured before the first chunk. `now` stays the
+      // expiry cutoff, so the set being deleted does not grow while the loop runs.
+      if (!assertLease(db, token, clock?.() ?? now)) {
         db.exec('ROLLBACK');
         return { lost: true, n: 0 };
       }
