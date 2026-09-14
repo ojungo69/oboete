@@ -341,7 +341,7 @@ Receipts under `/var/tmp/oboete-009-20260909.jJ5grc/`:
 The current command is `oboete import promote <migration-record-id> --work <local-work-id> [--json]`
 in `src/transfer-promote.ts`, with dispatch in `src/transfer.ts` and CLI help in `src/cli.ts`.
 Use `oboete import promote --list [--json]` to discover receipts in the verified cwd repository.
-It adds no dependency or schema. T029-T032 remain unchecked.
+It adds no dependency or schema. T029-T032 remained unchecked at E2; E7 closes them.
 
 - Git identity and stored-context verification run before the immediate transaction. Inside it,
   the context ID/repository/local key, clean held candidate, import-created (`effect='inserted'`),
@@ -777,3 +777,21 @@ adds the 256 MiB push round trip (82 s) and the 180,000-line chain / fan-out / m
 3,700 lines/s, so the heavy gate runs the largest size under 60 s. Writing the verification list
 found seven apply/publish defects and one CLI input gap, all fixed before review (tasks.md,
 T034–T036 note).
+
+## E7 — US5 close (T029-T032, `35c1d9d4`)
+
+2026-09-14, on `main` at `35c1d9d4`, no source change. E3 closed the migration matrix, E4 the
+security review and E5 the import wall time and RSS, so this section only re-runs the increment's
+gate and records why the four markers can be checked.
+
+- `us5-close-unit-v24.16.0.tap` and `us5-close-unit-v22.16.0.tap`: 142 checks pass on each
+  supported Node over the seven `build/test/unit/migration-*.test.mjs` files and
+  `build/test/unit/transfer.test.mjs`, 0 fail, 0 skipped.
+- `us5-close-typecheck.log`, `us5-close-lint.log` and `us5-close-pack.log` exit 0; the packed CLI
+  installs at 20.879 MB (limit 30 MB) and reports `0.1.0-alpha.0`.
+- This run validates the tarball, not the packed near-limit import matrix: that measurement stays
+  E5's (`us5-perf1-*` at `97bbe882`, largest run 374,544 KiB under the contract's 512 MiB budget).
+- Two earlier statements said T029-T032 stay unchecked pending the macOS probe and a final review
+  pass. Both are amended in `tasks.md`: the platform probe is T040's product, whose macOS leg the
+  owner deferred, and the cohesive product gate is T043's. Neither is named by T029-T032.
+- Receipts under `/var/tmp/oboete-009-us5close/`.
