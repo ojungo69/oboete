@@ -789,8 +789,15 @@ gate and records why the four markers can be checked.
   `build/test/unit/transfer.test.mjs`, 0 fail, 0 skipped.
 - `us5-close-typecheck.log`, `us5-close-lint.log` and `us5-close-pack.log` exit 0; the packed CLI
   installs at 20.879 MB (limit 30 MB) and reports `0.1.0-alpha.0`.
-- This run validates the tarball, not the packed near-limit import matrix: that measurement stays
-  E5's (`us5-perf1-*` at `97bbe882`, largest run 374,544 KiB under the contract's 512 MiB budget).
+- The packed-CLI half of T032 is in-tree and therefore ran today: `matrix D10` drives the built
+  `dist/oboete.mjs` through external and native previews and a refused promotion (exits 0/0/0/1,
+  bounded metadata only), and `migration-import.test.ts`'s last case wires `oboete export` and
+  `oboete import` to the exit codes of the CLI contract. Today's `pack-check` is separate again: it
+  validates the tarball, not an import.
+- The near-limit packed measurement is not repeated here. It stays E5's, recorded in that section
+  at `97bbe882` — 108 s apply, 28 s preview, largest run 374,544 KiB under the contract's 512 MiB
+  budget. Its raw `us5-perf1-*` files were under `/tmp` and a reboot has since cleared them, so E5's
+  recorded numbers are the surviving record; nothing in T029-T032 needs them re-measured.
 - Two earlier statements said T029-T032 stay unchecked pending the macOS probe and a final review
   pass. Both are amended in `tasks.md`: the platform probe is T040's product, whose macOS leg the
   owner deferred, and the cohesive product gate is T043's. Neither is named by T029-T032.

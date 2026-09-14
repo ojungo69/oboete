@@ -322,11 +322,17 @@ writers require separate worktrees. No deployment follows merely from an increme
   `contracts/migration.md` pins `oboete-export/1`, `oboete-export/2` and
   `claude-mem-query-export@8bc631a` against the upstream exporter, store queries, types and public
   documentation at v13.24.5 (T029). `src/transfer.ts` and its `transfer-*.ts` modules carry scope
-  and provenance and still read v1 (T030). The read-only adapter previews by default, takes
-  explicit `--map-repo`/`--map-context`, never opens a source with SQLite, and quarantines every
-  imported row as `imported`/`local_only` until the worker classifies it in
-  `src/worker/imported.ts` (T031). The matrix is the seven `test/unit/migration-*.test.ts` files
-  plus `test/unit/transfer.test.ts`: 142 checks pass on both Node 24.16.0 and 22.16.0, with
-  typecheck, lint and pack-check (20.879 MB installed) exit 0 (T032). Receipts `us5-close-*` under `/var/tmp/oboete-009-us5close/`; see `quickstart.md` E7. The
+  and provenance and still read v1 (T030). The read-only adapter previews by default, takes the
+  mapping flags of its own format (`--map-repo`/`--map-work` for native input, `--map-project`/
+  `--map-project-hash` for `--from claude-mem`, each rejected for the other), never opens a source
+  with SQLite, and quarantines every memory it newly inserts as `imported`/`local_only` until the
+  worker classifies it in `src/worker/imported.ts`; a row that matches an existing memory keeps
+  that memory's local review state and scope and is recorded as `matched_existing`, and a tombstone
+  or held historical record is never rewritten to `imported` (T031). The matrix is the seven
+  `test/unit/migration-*.test.ts` files plus `test/unit/transfer.test.ts`: 142 checks pass on both
+  Node 24.16.0 and 22.16.0, with typecheck, lint and pack-check (20.879 MB installed) exit 0. The
+  packed-CLI half of T032 is in-tree and ran with them — `matrix D10` drives the built
+  `dist/oboete.mjs` and the last import case wires the CLI exit codes — while the near-limit packed
+  measurement stays E5's recorded result at `97bbe882` (T032). Receipts `us5-close-*` under `/var/tmp/oboete-009-us5close/`; see `quickstart.md` E7. The
   macOS platform probe remains T040's (its macOS leg deferred by the owner) and the cohesive
   product gate remains T043's.
