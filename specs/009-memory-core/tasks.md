@@ -95,6 +95,8 @@ free/local failure causes zero attempts at an unselected paid destination.
 - [ ] T038 [US7] Complete explicit cost-policy setup and reservation handling in `src/config.ts`, `src/setup/`, `src/observer/reservation.ts` and `src/doctor/provider.ts`.
 - [ ] T039 [US7] Verify no-model capture-only behavior and real chosen profiles through `src/doctor.ts`, packed CLI and `specs/009-memory-core/quickstart.md` evidence.
 
+T037-T039 and T048 share one contract, `contracts/provider-fallback.md`, and one branch.
+
 Owner amendment, 2026-09-10:
 
 - [X] T046 Record the approved resident-worker option and configured model/provider failover in `CONSTITUTION.md`, the local Spec Kit constitution, `specs/009-memory-core/spec.md` and `plan.md`.

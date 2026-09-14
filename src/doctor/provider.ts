@@ -3,8 +3,10 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import {
   PRESET_CATALOG,
+  admittedChain,
   consentMatches,
   readCredentials,
+  type ChainTarget,
   type OboeteConfig,
   type PresetName,
 } from '../config.js';
@@ -31,6 +33,7 @@ import {
   recordExhausted,
   recordProviderAttempt,
   usageEstimate,
+  utcDay,
 } from '../observer/reservation.js';
 import type { OboetePaths } from '../paths.js';
 import { credentialGuidance } from '../setup/consent.js';
@@ -307,6 +310,95 @@ function credentialSteps(config: OboeteConfig, env: NodeJS.ProcessEnv): string {
     .filter((line) => /^\s+\d+\./.test(line) || /^\s+Export /.test(line))
     .map((line) => line.trim())
     .join(' ');
+}
+
+/**
+ * The chain's targets are reported, never probed: `providerItem` spends a real reservation, so one
+ * probe per target would spend the daily allowance on diagnostics
+ * (contracts/provider-fallback.md "Diagnostics"). No configured chain means no items at all.
+ */
+export function fallbackItems(
+  config: OboeteConfig | null,
+  db: DatabaseSync | null,
+  integrityFailed: boolean,
+  env: NodeJS.ProcessEnv,
+  now: number,
+): DoctorItem[] {
+  if (config === null) return [];
+  const entries = config.observer.fallback;
+  if (entries.length === 0) return [];
+  const chain = admittedChain(config);
+  if (chain.error !== null) {
+    return [degraded(
+      'fallback',
+      `Fallback target ${chain.error.position} cannot be used: ${chain.error.code.replace(/_/g, ' ')}.`,
+      'The observer runs with no provider at all while the chain is unusable.',
+      'Correct the `[[observer.fallback]]` entry in the configuration file, then run `oboete doctor` again.',
+    )];
+  }
+  return entries.map((entry, index) =>
+    fallbackTargetItem({ entry, position: index + 1, chain: chain.targets, config, db, integrityFailed, env, now }));
+}
+
+function fallbackTargetItem(input: {
+  entry: OboeteConfig['observer']['fallback'][number];
+  position: number;
+  chain: ChainTarget[];
+  config: OboeteConfig;
+  db: DatabaseSync | null;
+  integrityFailed: boolean;
+  env: NodeJS.ProcessEnv;
+  now: number;
+}): DoctorItem {
+  const { entry, position, chain, config, db, integrityFailed, env, now } = input;
+  const name = `fallback:${position}`;
+  const catalog = PRESET_CATALOG[entry.preset];
+  const model = (entry.model ?? catalog.defaultModel).trim();
+  const where = `Target ${position} is ${entry.preset} with model ${model}`;
+  if (!chain.some((target) => target.preset === entry.preset && target.model === model)) {
+    return warning(
+      name,
+      `${where}, which the cost policy does not admit or a nearer target already covers.`,
+      'This target is never attempted, so a failure ahead of it falls through to rule-based records.',
+      `Add "${catalog.costClass}" to \`[observer] cost_policy\` to admit it, or remove the entry.`,
+    );
+  }
+  const credentials = readCredentials(entry.preset, env, config.observer.agent_cli);
+  if (!credentials.present) {
+    return warning(
+      name,
+      `${where}, and its credentials are not set (${credentials.source}).`,
+      'The target is attempted and answers without a request, so the chain moves straight past it.',
+      'Set that credential in the shell that runs the agents, or remove the entry from the chain.',
+    );
+  }
+  if (db === null) {
+    return dbUnread(
+      name,
+      integrityFailed,
+      `${where}, and today's allowance record could not be read.`,
+      'Whether this target still has allowance is unknown until storage is open.',
+      '`oboete doctor` after storage is repaired.',
+    );
+  }
+  const exhaustedAt = presetExhaustedAt(entry.preset, db, now);
+  if (exhaustedAt !== null) {
+    return warning(
+      name,
+      `${where}, and it reported its allowance exhausted at ${iso(exhaustedAt)}.`,
+      'The target is skipped at its own reservation until the allowance resets.',
+      'Wait for the reset, or reorder the chain so a target with allowance comes first.',
+    );
+  }
+  return healthy(name, `${where}, admitted as ${catalog.costClass} and ready.`);
+}
+
+/** Today's per-preset exhaustion stamp, or null when the preset may still be reserved. */
+function presetExhaustedAt(preset: PresetName, db: DatabaseSync, now: number): number | null {
+  const row = db.prepare('SELECT exhausted_at, reset_at FROM provider_usage WHERE utc_day = ? AND preset = ?')
+    .get(utcDay(now), preset);
+  const exhaustedAt = asNumber(row?.exhausted_at);
+  return exhaustedAt !== null && (asNumber(row?.reset_at) ?? 0) > now ? exhaustedAt : null;
 }
 
 export function allowanceItem(

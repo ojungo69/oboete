@@ -1000,3 +1000,73 @@ file is named, the test is in `test/unit/resident-worker.test.ts`.
 14. `a maintenance epoch purges an expired secret with no batchable work`.
 15. `a config malformed at startup exits as config_changed before loading the worker config`.
 16. `a batch_error ends a run after one attempt, including at the deadline in either mode`.
+
+## E9 — bounded consented provider fallback chain (T037, T038, T039, T048)
+
+2026-09-15, branch `009-t048-fallback-chain`. The binding spec is
+`contracts/provider-fallback.md`, written at `73568de6` before any implementation, after four
+orientation reads whose findings it records: consent covered only the primary preset, the
+destination label is an authorization that `reconcilePendingDestinations` re-validates per pass,
+`outcomeForSource` already defers a failed batch's sources with a retry time, and `CONSTITUTION.md`
+requires an explicit spending policy. The same commit retires "M1 enables exactly one observer
+preset at a time" in `specs/007-oboete-m1-alpha/contracts/observer.md`. Security-scoped work
+(consent, credentials, egress), so it was implemented in this session rather than delegated.
+
+- Gate: `npm run build`, `npm run typecheck`, `npm run lint` and `semgrep scan` (378 rules over the
+  six changed source files) exit 0 with 0 findings.
+- Two keys, one default: `[observer] fallback` is at most three ordered `{preset, model}` targets
+  and `[observer] cost_policy` defaults to `["free-tier", "local"]`. Every configuration that
+  exists today parses to an empty admitted chain, so `consentHash` appends nothing and the literal
+  digest already pinned in `test/unit/config.test.ts` (`WORKERS_AI_CONSENT`) still matches — no
+  install is asked to re-consent on upgrade. The opposite direction is pinned beside it: one
+  admitted target changes the digest, and a listed target the policy excludes does not.
+- The chain is a loop around the existing call and settlement in `processBatch`, not a new send
+  path. Everything before it still happens once — privacy revalidation, the destination reconcile,
+  the request build, the final detector check, `markRequest` — so one batch is one payload and its
+  sources settle once. `observation_batches.provider_attempts` counts the reservations the chain
+  took, which nothing reads as a bound.
+- Measured, not asserted: a failing target that already answered does not spend a second
+  allowance. The `unusable_output` case takes two reservations on one target (llm.ts's own retry)
+  and makes zero requests to the next host; the three-target success case takes exactly three, one
+  per target.
+
+### E9 verification
+
+Numbered against the contract's list. All in `test/unit/provider-fallback.test.ts` unless named
+otherwise.
+
+1. `an empty chain leaves the consent hash exactly where it was, and one target moves it`
+   (`config.test.ts`) — against the literal digest, with the one-target half beside it.
+2. `resolveModel carries the admitted chain and refuses one it cannot use` (`providers.test.ts`)
+   and `a fallback chain the resolver refuses is reported once, at its position` (`doctor.test.ts`)
+   — a `local` primary with a `remote` entry is `chain_unusable` at the resolve, and the run has no
+   provider rather than a crash.
+3. `a local target is never given a batch a remote target could not have been given`.
+4. `admission drops what the policy excludes and refuses what widens egress` (`config.test.ts`) —
+   the same fixture one key apart: default policy admits nothing remote, `remote` in the policy
+   admits it in written order.
+5. `admission drops what the policy excludes and refuses what widens egress` covers the
+   `model_required` position and the `chain_without_primary` case.
+6. The same test's last block: the primary repeated is dropped, a second model on the same preset
+   is its own target.
+7. `an exhausted primary hands the same batch to the next admitted target` — `exhausted_at` is
+   per-preset, so the exhausted host receives nothing at all.
+8. `the daily cap advances past every capped target and stops at none of the local ones` —
+   `workers-ai` and `nim` both refuse at their own reservation, `ollama` answers.
+9. `a target with no credentials is attempted, answers without a request and the chain moves on`.
+10. `a consent change between targets stops the chain before the next host`.
+11. `an unusable answer stops the chain instead of spending a second allowance on it`.
+12. `every target failing settles once, keeps the worst reason and leaves the source retryable` —
+    `provider_exhausted` outranks `unreachable` in `DEGRADED_PRECEDENCE`, the source is `waiting`
+    with a non-null `retry_after`, and `processing_attempts` rose by one for the whole chain.
+13. `a target that answers after two failures applies its output like any other`.
+14. `the fallback chain is reported per target without a second provider request`
+    (`doctor.test.ts`) — one provider request with a three-target chain, `fallback:1` healthy and
+    `fallback:2`/`fallback:3` warning, and the same test shows that admitting a paid class stops
+    the stored consent from matching.
+
+Setup's side of T037 is `adding a fallback target refuses --yes and is displayed before it is
+accepted` (`setup.test.ts`): a target written in after consent was stored refuses `--yes` with exit
+2, prints the target's host before it is accepted, and leaves the stored hash alone until
+`--accept-egress` re-records it. `the display names every fallback target the consent hash binds`
+(`consent.test.ts`) pins that a policy-excluded target is not displayed as a destination.

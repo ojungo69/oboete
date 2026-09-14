@@ -13,6 +13,7 @@ import {
   isPaused,
   loadConfig,
   readCredentials,
+  type ChainTarget,
   type OboeteConfig,
   type PresetName,
 } from '../config.js';
@@ -414,18 +415,22 @@ function claimObserveLease(
   return { ok: true, token };
 }
 
-function resolveObserveModel(config: OboeteConfig): { preset: PresetName | 'none'; model: string } {
-  let resolved: { preset: PresetName | 'none'; model: string };
+type ResolvedObserver = { preset: PresetName | 'none'; model: string; chain: ChainTarget[] };
+
+function resolveObserveModel(config: OboeteConfig): ResolvedObserver {
+  let resolved: ResolvedObserver;
   try {
     resolved = resolveModel(config);
   } catch {
-    resolved = { preset: config.observer.preset, model: '' };
+    // A configuration the resolver refuses — including an unusable fallback chain — is a run with
+    // no provider, never a crash (contracts/provider-fallback.md "Admission").
+    resolved = { preset: config.observer.preset, model: '', chain: [] };
   }
   return resolved;
 }
 
 function initialProviderFailure(
-  resolved: { preset: PresetName | 'none'; model: string },
+  resolved: ResolvedObserver,
   credentials: ReturnType<typeof readCredentials> | null,
   config: OboeteConfig,
   env: NodeJS.ProcessEnv,
@@ -734,6 +739,15 @@ async function observeLifecycle(
       }
 
       function logBatch(): void {
+        // One line per target the chain reached: the batch keeps only the most severe reason.
+        for (const attempt of batchResult?.attempts ?? []) {
+          appendLog(paths.observeLog, 'info', 'provider attempt', {
+            id: batch.id,
+            position: attempt.position,
+            preset: attempt.preset,
+            reason: attempt.reason,
+          });
+        }
         appendLog(paths.observeLog, batchError === undefined ? 'info' : 'error', 'batch', {
           id: batch.id,
           state: batchResult?.state ?? 'error',

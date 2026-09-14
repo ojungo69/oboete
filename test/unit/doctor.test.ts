@@ -496,6 +496,61 @@ test('an exhausted allowance degrades and advancing now past reset_at restores i
   });
 });
 
+test('the fallback chain is reported per target without a second provider request', async () => {
+  await harness(async (context) => {
+    // ollama is admitted and local; nim and gemini are remote, which the default policy excludes.
+    const observer = {
+      preset: 'workers-ai',
+      cost_policy: ['free-tier', 'local'],
+      fallback: [{ preset: 'ollama', model: 'qwen3:8b' }, { preset: 'nim' }, { preset: 'gemini' }],
+    };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"', 'cost_policy = ["free-tier", "local"]',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[[observer.fallback]]', 'preset = "nim"',
+      '', '[[observer.fallback]]', 'preset = "gemini"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+
+    let providerRequests = 0;
+    const answering = answeringFetch();
+    context.fetch = async (input, init) => {
+      if (!String(input).includes('/models/search')) providerRequests += 1;
+      return await answering(input, init);
+    };
+    await context.doctor(['--json', '--probe-provider']);
+
+    // Only the primary is probed: one probe per target would spend the daily allowance on diagnostics.
+    assert.equal(providerRequests, 1, context.output);
+    assert.equal(context.item('fallback:1').status, 'healthy');
+    assert.match(context.item('fallback:1').reason, /ollama with model qwen3:8b/);
+    assertBroken(context.item('fallback:2'), 'warning', 'cost policy does not admit');
+    assertBroken(context.item('fallback:3'), 'warning', 'cost policy does not admit');
+    assert.equal(context.item('provider').status, 'healthy', context.output);
+
+    // Admitting a paid class is a new destination, so the stored consent stops matching.
+    writeFileSync(context.paths.config,
+      readFileSync(context.paths.config, 'utf8')
+        .replace('cost_policy = ["free-tier", "local"]', 'cost_policy = ["free-tier", "local", "remote"]'));
+    await context.doctor(['--json', '--probe-provider']);
+    assertBroken(context.item('provider'), 'degraded', 'consent changed');
+  });
+});
+
+test('a fallback chain the resolver refuses is reported once, at its position', async () => {
+  await harness(async (context) => {
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "ollama"', 'model = "qwen3:8b"', 'cost_policy = ["free-tier", "local", "remote"]',
+      '', '[[observer.fallback]]', 'preset = "nim"', '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    assert.equal(await context.doctor(), 1, context.output);
+    assertBroken(context.item('fallback'), 'degraded', 'egress widened', 'no provider at all', 'observer.fallback');
+  });
+});
+
 test('a stale Pi .started file degrades pi and deleting it restores health', async () => {
   await harness(async (context) => {
     const file = join(context.paths.piAck, 'abc.started');

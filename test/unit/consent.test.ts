@@ -30,6 +30,25 @@ test('the consent display states host, credential source, cost class and egress 
   assert.match(lines, /eligible/);
 });
 
+test('the display names every fallback target the consent hash binds', () => {
+  const lines = consentDisplay(
+    configSchema.parse({ observer: { preset: 'workers-ai', cost_policy: ['free-tier', 'local', 'remote'],
+      fallback: [{ preset: 'ollama', model: 'qwen3:8b' }, { preset: 'nim' }] } }),
+    CLOUDFLARE,
+  ).join('\n');
+  assert.match(lines, /Fallback targets/);
+  assert.match(lines, /1\. ollama at 127\.0\.0\.1:11434/);
+  assert.match(lines, /2\. nim at integrate\.api\.nvidia\.com/);
+  // The second target is remote and paid, so the reader sees that before accepting.
+  assert.match(lines, /Cost class: remote/);
+  // A target the policy excludes is not a destination, so it is not displayed as one.
+  const excluded = consentDisplay(
+    configSchema.parse({ observer: { preset: 'workers-ai', fallback: [{ preset: 'nim' }] } }),
+    CLOUDFLARE,
+  ).join('\n');
+  assert.equal(excluded.includes('Fallback targets'), false);
+});
+
 test('the agent-cli display names the subscription the preset consumes', () => {
   const lines = consentDisplay(
     configSchema.parse({ observer: { preset: 'agent-cli', agent_cli: 'grok' } }),

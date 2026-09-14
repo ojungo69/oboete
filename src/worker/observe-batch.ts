@@ -3,6 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import {
   PRESET_CATALOG,
   readCredentials,
+  type ChainTarget,
   type OboeteConfig,
   type PresetName,
 } from '../config.js';
@@ -12,9 +13,9 @@ import { contentHash } from '../events.js';
 import { checkpointHash, materialHash, memoryIdFor } from '../db/identity.js';
 import { promoteSensitivity } from '../privacy/classify.js';
 import { applyObservations, type ApplyResult } from '../observer/apply.js';
-import { checkLanguage, rejectsDirectives, type DegradedReason } from '../observer/classify.js';
+import { checkLanguage, mostSevereReason, rejectsDirectives, type DegradedReason } from '../observer/classify.js';
 import { fallbackObserve, type FallbackEvent } from '../observer/fallback.js';
-import { summarizeWithProvider, type CallOutcome } from '../observer/llm.js';
+import { summarizeWithProvider, type CallOutcome, type FailureReason } from '../observer/llm.js';
 import { buildObserverRequest } from '../observer/request.js';
 import { recordExhausted, reserveAttempt } from '../observer/reservation.js';
 import type { DetectorResult } from '../privacy/detect.js';
@@ -58,9 +59,23 @@ function loggableDetail(reason: DegradedReason, detail: string): string {
   return 'provider response failed observation validation';
 }
 
+/**
+ * One target's turn in the chain, for the observe log: the batch's single `degraded_reason` keeps
+ * only the most severe reason, so the rest are only visible here (contracts/provider-fallback.md
+ * "Diagnostics"). `detail` picks the message for the reason that wins and is sanitized there.
+ */
+export type ProviderAttempt = {
+  position: number;
+  preset: PresetName;
+  model: string;
+  reason: DegradedReason;
+  detail: string;
+};
+
 export type BatchResult = {
   detail?: string;
   memoryIds: string[];
+  attempts?: ProviderAttempt[];
 } & (
   | { state: 'applied' | 'fallback' | 'lease_lost' | 'requeued'; reason: DegradedReason | null }
   | { state: 'done'; reason: string }
@@ -440,7 +455,7 @@ type ProcessBatchOptions = {
   detect: (text: string) => Promise<DetectorResult>;
   providerState: Map<string, DegradedReason | null>;
   initialProviderReason: DegradedReason | null;
-  resolved: { preset: PresetName | 'none'; model: string };
+  resolved: { preset: PresetName | 'none'; model: string; chain: ChainTarget[] };
   consentOk: () => boolean;
 };
 
@@ -609,29 +624,44 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
     return { state: 'lease_lost', reason: null, memoryIds: [] };
   }
 
-  const called = await providerCall({
-    db, token, input: request.input, batch, config, deps,
-    preset: resolved.preset, model: resolved.model, consentOk: currentConsent,
-  });
-  if ('done' in called) return called.done;
-  let { outcome } = called;
-  const settled = await settleProviderOutcome({
-    options: { ...options, consentOk: currentConsent },
-    request,
-    input,
-    nearby,
-    preset: resolved.preset,
-    model: resolved.model,
-    outcome,
-  });
-  if ('done' in settled) return settled.done;
-  outcome = settled.outcome;
+  const targets = chainTargets(resolved.preset, resolved.model, resolved.chain, batch.destination);
+  const attempts: ProviderAttempt[] = [];
+  // `targets` always begins with the primary, so the loop settles `outcome` at least once.
+  let outcome!: CallOutcome;
+  for (const [position, target] of targets.entries()) {
+    const between = deps.shouldStop();
+    if (between !== undefined) return { state: 'done', reason: between, memoryIds: [], attempts };
+    const called = await providerCall({
+      db, token, input: request.input, batch, config, deps,
+      preset: target.preset, model: target.model, consentOk: currentConsent,
+    });
+    if ('done' in called) return { ...called.done, attempts };
+    const settled = await settleProviderOutcome({
+      options: { ...options, consentOk: currentConsent },
+      request,
+      input,
+      nearby,
+      preset: target.preset,
+      model: target.model,
+      outcome: called.outcome,
+    });
+    if ('done' in settled) return { ...settled.done, attempts };
+    outcome = settled.outcome;
+    if (outcome.ok) break;
+    attempts.push({ position, preset: target.preset, model: target.model,
+      reason: outcome.reason, detail: outcome.detail });
+    if (CHAIN_STOPS.has(outcome.reason)) break;
+  }
 
   if (!outcome.ok) {
-    providerState.set(batch.session_id, outcome.reason);
+    // The batch keeps one reason, and it is the most severe of the ones the chain actually met.
+    const reason = mostSevereReason(attempts.map((attempt) => attempt.reason)) ?? outcome.reason;
+    const worst = attempts.find((attempt) => attempt.reason === reason);
+    providerState.set(batch.session_id, reason);
     return {
-      ...(await applyFallback(db, token, input, nearby, outcome.reason, detect, deps.now(), request.coverage)),
-      detail: loggableDetail(outcome.reason, outcome.detail),
+      ...(await applyFallback(db, token, input, nearby, reason, detect, deps.now(), request.coverage)),
+      detail: loggableDetail(reason, worst?.detail ?? outcome.detail),
+      attempts,
     };
   }
 
@@ -654,5 +684,31 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
     state: applied.leaseLost ? 'lease_lost' : applied.fallbackReason === undefined ? 'applied' : 'fallback',
     reason: applied.fallbackReason ?? null,
     memoryIds: appliedMemoryIds(applied),
+    attempts,
   };
 }
+
+/**
+ * The primary first, then each admitted target the batch's destination label already allows:
+ * `remote_observer` admits a local or a remote target, `local_observer` a local one only
+ * (contracts/provider-fallback.md "The destination label, and per-attempt eligibility").
+ */
+function chainTargets(
+  preset: PresetName,
+  model: string,
+  chain: ChainTarget[],
+  destination: BatchRow['destination'],
+): ChainTarget[] {
+  return [
+    { preset, model },
+    ...chain.filter((target) =>
+      destination === 'remote_observer' || PRESET_CATALOG[target.preset].egress === 'local'),
+  ];
+}
+
+/**
+ * The failures a later target cannot improve on: consent authorizes no destination at all, and an
+ * answer that arrived unusable already spent its target's allowance and owns its own retries
+ * (contracts/provider-fallback.md "Advance and stop").
+ */
+const CHAIN_STOPS = new Set<FailureReason>(['consent_changed', 'unusable_output']);

@@ -161,6 +161,30 @@ test('switching to a local preset re-records consent instead of leaving the remo
   });
 });
 
+test('adding a fallback target refuses --yes and is displayed before it is accepted', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    const accepted = loadConfig(context.paths);
+
+    // A target written in after consent was stored is a destination the reader never saw (US7 #4).
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "ollama"\nmodel = "qwen3:8b"\n`);
+    assert.equal(consentMatches(loadConfig(context.paths), { HOME: context.userHome }), false);
+
+    context.output = '';
+    assert.equal(await context.run(['--yes']), 2, context.output);
+    assert.match(context.output, /Fallback targets/);
+    assert.match(context.output, /ollama at 127\.0\.0\.1:11434/);
+    assert.equal(loadConfig(context.paths).consent.hash, accepted.consent.hash, 'the refused chain is not consented');
+
+    context.output = '';
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    const stored = loadConfig(context.paths);
+    assert.notEqual(stored.consent.hash, accepted.consent.hash);
+    assert.equal(consentMatches(stored, { HOME: context.userHome }), true);
+  });
+});
+
 test('a destination the run refuses is not written to the configuration', async () => {
   await harness(async (context) => {
     assert.equal(await context.run(['--accept-egress']), 0, context.output);
