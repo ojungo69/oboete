@@ -356,7 +356,7 @@ export function fallbackItems(
   });
 }
 
-function fallbackTargetItem(input: {
+type FallbackTarget = {
   entry: OboeteConfig['observer']['fallback'][number];
   position: number;
   admitted: boolean;
@@ -365,7 +365,9 @@ function fallbackTargetItem(input: {
   integrityFailed: boolean;
   env: NodeJS.ProcessEnv;
   now: number;
-}): DoctorItem {
+};
+
+function fallbackTargetItem(input: FallbackTarget): DoctorItem {
   const { entry, position, admitted, config, db, integrityFailed, env, now } = input;
   const name = `fallback:${position}`;
   const catalog = PRESET_CATALOG[entry.preset];
@@ -388,6 +390,16 @@ function fallbackTargetItem(input: {
       'Set that credential in the shell that runs the agents, or remove the entry from the chain.',
     );
   }
+  if (catalog.credential.kind === 'agent-login') {
+    // `readCredentials` calls an agent login present because `setup` is what verifies it; this
+    // item does not, so it must not call the target ready either.
+    return unverified(
+      name,
+      `${where}, and whether the ${config.observer.agent_cli} login is live is not checked here.`,
+      'A target whose subscription is not logged in fails its attempt and the chain moves past it.',
+      '`oboete setup` reports the login state of each agent command line tool.',
+    );
+  }
   if (db === null) {
     return dbUnread(
       name,
@@ -397,13 +409,38 @@ function fallbackTargetItem(input: {
       '`oboete doctor` after storage is repaired.',
     );
   }
-  const exhaustedAt = presetExhaustedAt(entry.preset, db, now);
+  return fallbackAllowanceItem(name, where, entry.preset, catalog, db, now);
+}
+
+/**
+ * The allowance half of a target's verdict: its own exhaustion stamp first, then the allowance all
+ * capped presets share — which `allowanceItem` only reports when the *primary* is capped, so a
+ * capped target under an uncapped primary has no other surface to say it.
+ */
+function fallbackAllowanceItem(
+  name: string,
+  where: string,
+  preset: PresetName,
+  catalog: (typeof PRESET_CATALOG)[PresetName],
+  db: DatabaseSync,
+  now: number,
+): DoctorItem {
+  const exhaustedAt = presetExhaustedAt(preset, db, now);
   if (exhaustedAt !== null) {
     return warning(
       name,
       `${where}, and it reported its allowance exhausted at ${iso(exhaustedAt)}.`,
       'The target is skipped at its own reservation until the allowance resets.',
       'Wait for the reset, or reorder the chain so a target with allowance comes first.',
+    );
+  }
+  const estimate = usageEstimate(db, now);
+  if (catalog.capped && (estimate.exhausted || estimate.remaining === 0)) {
+    return warning(
+      name,
+      `${where}, and today's shared allowance is spent (${estimate.calls} of ${DAILY_CAP} calls).`,
+      'Every capped target refuses at its own reservation until the allowance resets.',
+      `Wait for the reset at ${iso(estimate.resetAt)}, or add an uncapped target to the chain.`,
     );
   }
   return healthy(name, `${where}, admitted as ${catalog.costClass} and ready.`);

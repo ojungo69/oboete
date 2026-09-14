@@ -26,7 +26,7 @@ import { ensureDirectories, oboetePaths, type OboetePaths } from '../../src/path
 import type { VersionSpawn } from '../../src/setup/detect.js';
 import { removeJsonHandlers } from '../../src/setup/managed-block.js';
 import { runSetup, type SetupDeps } from '../../src/setup/setup.js';
-import { utcDay } from '../../src/observer/reservation.js';
+import { DAILY_CAP, utcDay } from '../../src/observer/reservation.js';
 import { runtimeStateSet } from '../../src/worker/purge.js';
 import { withTempHome } from '../helpers/home.js';
 
@@ -579,6 +579,47 @@ test('a fallback chain the resolver refuses is reported once, at its position', 
     assert.equal(await context.doctor(), 1, context.output);
     assertBroken(context.item('fallback'), 'degraded', 'needs a selected observer preset', 'no provider at all',
       'setup --provider');
+  });
+});
+
+test('a fallback target is not called ready when its allowance is gone or its login is unchecked', async () => {
+  await harness(async (context) => {
+    // A capped target under an uncapped primary: `allowanceItem` reports "no daily cap" for the
+    // primary, so this item is the only place the shared allowance can be named.
+    // (`agent-cli` is the one remote preset with no cap, and a capped target needs a remote primary.)
+    const capped = { preset: 'agent-cli', fallback: [{ preset: 'workers-ai' }] };
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "agent-cli"',
+      '', '[[observer.fallback]]', 'preset = "workers-ai"',
+      '', '[consent]',
+      `hash = "${consentHash(consentTuple(configSchema.parse({ observer: capped }), context.env))}"`,
+      `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    const { db } = openDatabase({ path: context.paths.db, timeoutMs: 5_000 });
+    try {
+      db.prepare(`INSERT INTO provider_usage (utc_day, preset, calls, neurons_estimate, reset_at)
+        VALUES (?, 'workers-ai', ?, 0, ?)`).run(utcDay(context.now), DAILY_CAP, context.now + 3_600_000);
+    } finally {
+      db.close();
+    }
+    await context.doctor(['--json']);
+    assert.equal(context.item('allowance').status, 'healthy', 'the primary has no cap of its own');
+    assertBroken(context.item('fallback:1'), 'warning', 'shared allowance is spent');
+
+    // `readCredentials` calls an agent login present because setup is what checks it.
+    const login = { preset: 'workers-ai', cost_policy: ['free-tier', 'local', 'own-subscription'],
+      fallback: [{ preset: 'agent-cli', model: 'claude-sonnet-4-5' }] };
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"', 'cost_policy = ["free-tier", "local", "own-subscription"]',
+      '', '[[observer.fallback]]', 'preset = "agent-cli"', 'model = "claude-sonnet-4-5"',
+      '', '[consent]',
+      `hash = "${consentHash(consentTuple(configSchema.parse({ observer: login }), context.env))}"`,
+      `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    await context.doctor(['--json']);
+    assert.equal(context.item('fallback:1').status, 'unverified');
+    assert.match(context.item('fallback:1').reason, /login is live is not checked here/);
   });
 });
 

@@ -667,7 +667,7 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
     // keeps the most severe of the reasons the chain actually met. The kept reason and the kept
     // detail always come from the same attempt, which is what lets `loggableDetail` decide by
     // reason whether the text is the provider's (contracts/provider-fallback.md "Advance and stop").
-    const last = attempts[attempts.length - 1]!;
+    const last = attempts.at(-1)!;
     const reason = CHAIN_STOPS.has(last.reason)
       ? last.reason
       : mostSevereReason(attempts.map((attempt) => attempt.reason))!;

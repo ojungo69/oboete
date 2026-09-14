@@ -40,24 +40,26 @@ function chainFetch(
   plan: { cloudflare?: () => Promise<Response>; ollama?: () => Promise<Response>; nim?: () => Promise<Response> },
 ): typeof fetch {
   return async (input) => {
-    const url = String(input);
-    if (url.includes('/models/search')) {
+    // Matched on the parsed origin, never on a substring of the whole URL: a host is only this
+    // target's host when it is the authority, not when it appears in a path or a query.
+    const url = new URL(String(input));
+    if (url.pathname.endsWith('/models/search')) {
       hosts.catalog += 1;
-      return catalogResponse(Number(new URL(url).searchParams.get('page') ?? '1'));
+      return catalogResponse(Number(url.searchParams.get('page') ?? '1'));
     }
-    if (url.includes('api.cloudflare.com')) {
+    if (url.host === 'api.cloudflare.com') {
       hosts.cloudflare += 1;
       return await (plan.cloudflare ?? (() => assert.fail('the Workers AI target was not expected')))();
     }
-    if (url.includes('11434')) {
+    if (url.host === '127.0.0.1:11434') {
       hosts.ollama += 1;
       return await (plan.ollama ?? (() => assert.fail('the ollama target was not expected')))();
     }
-    if (url.includes('nvidia.com')) {
+    if (url.host === 'integrate.api.nvidia.com') {
       hosts.nim += 1;
       return await (plan.nim ?? (() => assert.fail('the nim target was not expected')))();
     }
-    return assert.fail(`an unexpected host was called: ${url}`);
+    return assert.fail(`an unexpected host was called: ${url.href}`);
   };
 }
 

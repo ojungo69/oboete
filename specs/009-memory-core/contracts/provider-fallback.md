@@ -228,8 +228,12 @@ column cannot hold go to the observe log, one line per attempted target.
 - **`oboete doctor`**: the provider item keeps probing the **primary only**. `providerItem`
   (`src/doctor/provider.ts`) calls `summarizeWithProvider` with a real reservation, so one probe per
   target would spend the daily allowance on diagnostics. The chain is reported statically: each
-  target's position, preset, model, admission verdict (admitted / excluded by `cost_policy`), whether
-  its credentials are present, and its `provider_usage.exhausted_at` if set.
+  target's position, preset, model, admission verdict (admitted / excluded by `cost_policy` or
+  covered by a nearer target), whether its credentials are present, and its
+  `provider_usage.exhausted_at` if set. Two verdicts it does not overstate: an `agent-cli` target is
+  `unverified` rather than ready, because `readCredentials` calls an agent login present and only
+  `setup` checks it; and a **capped** target is a warning once the shared allowance is spent, which
+  `allowanceItem` reports only when the *primary* is capped.
 
 ## What the chain does not do
 

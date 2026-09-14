@@ -24,12 +24,6 @@ export class ProviderConfigError extends Error {
   }
 }
 
-const CHAIN_MESSAGES: Record<ChainError['code'], (position: number) => string> = {
-  model_required: (position) => `Fallback target ${position} requires an observer model in the configuration.`,
-  egress_widened: (position) => `Fallback target ${position} sends further than the selected preset does.`,
-  chain_without_primary: () => 'A fallback chain needs a selected observer preset.',
-};
-
 /**
  * The primary and the fallback targets a pass may attempt, in order. An unusable chain throws here
  * rather than in `admittedChain`, which stays total for the consent re-check
@@ -57,7 +51,15 @@ export function resolveModel(
 
 /** The sentence a refused chain is reported with, wherever the refusal is noticed. */
 export function chainErrorMessage(error: ChainError): string {
-  return CHAIN_MESSAGES[error.code](error.position);
+  switch (error.code) {
+    case 'model_required':
+      return `Fallback target ${error.position} requires an observer model in the configuration.`;
+    case 'egress_widened':
+      return `Fallback target ${error.position} sends further than the selected preset does.`;
+    case 'chain_without_primary':
+      // The position is the primary's, so naming a target number here would name nothing.
+      return 'A fallback chain needs a selected observer preset.';
+  }
 }
 
 function chainError(error: ChainError): ProviderConfigError {

@@ -1093,6 +1093,20 @@ otherwise.
     (`doctor.test.ts`), and the `preset = "none"` leg of `a fallback chain the resolver refuses is
     reported once, at its position`.
 
+Bot round on PR #238 at head `011b1b2e`: all check-runs completed, `dco`, `secrets`, `check`,
+`engine (22.16.0)`, `engine (24.x)`, `semgrep-cloud-platform/scan`, SonarCloud (gate passed),
+GitGuardian and Socket green; Codex code review and security review both completed with no
+findings. Fixed from the four that did report: CodeQL's two high `js/incomplete-url-substring-
+sanitization` alerts on the test helper's `url.includes(<host>)` dispatch (now `new URL(...).host`
+equality), Codacy's `Semgrep unsafe-dynamic-method` on the `CHAIN_MESSAGES[code]` lookup (now a
+`switch`, and the table is gone), Codacy's `Lizard_nloc-medium` on `fallbackTargetItem` (53 → 43
+NLOC, measured with `pipx run lizard -l typescript`), SonarCloud's `typescript:S7755`
+(`attempts.at(-1)`), and two CodeRabbit findings: an `agent-cli` target was reported ready although
+`readCredentials` calls an agent login present without checking it, and a capped target was reported
+ready with the shared allowance spent — which `allowanceItem` only reports when the primary is
+capped. Declined: CodeRabbit's "apply `cost_policy` before validating an excluded target", because
+it would move a hard privacy refusal behind a policy flag (see "Admission" rule 5).
+
 Findings from the review round, all fixed in the same branch: the setup gate refused
 `--remove`/`--provider none`/a bare run (P2, both reviewers); a stop's reason was hidden behind a
 more severe earlier reason (P2); a `language_mismatch` target had no attempt line; doctor numbered
