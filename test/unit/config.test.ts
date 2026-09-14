@@ -9,6 +9,7 @@ import {
   EGRESS_CLASSES,
   PRESET_CATALOG,
   RepoConfigError,
+  admittedChain,
   configSchema,
   consentHash,
   consentMatches,
@@ -90,7 +91,7 @@ test('ensureDirectories creates the data directories and keeps the home director
 test('loadConfig returns the defaults when there is no config file', async () => {
   await withTempHome((home) => {
     assert.deepEqual(loadConfig(oboetePaths(home)), {
-      observer: { preset: 'workers-ai', agent_cli: 'claude' },
+      observer: { preset: 'workers-ai', agent_cli: 'claude', cost_policy: ['free-tier', 'local'], fallback: [] },
       injection: { context_fraction: 0.05, threshold: 0.3 },
       privacy: { secret_paths: [] },
       consent: {},
@@ -124,7 +125,8 @@ test('a complete config file round-trips through loadConfig', async () => {
       ].join('\n'),
     );
     assert.deepEqual(loadConfig(paths), {
-      observer: { preset: 'nim', model: 'meta/llama-3.2-11b-vision-instruct', agent_cli: 'codex' },
+      observer: { preset: 'nim', model: 'meta/llama-3.2-11b-vision-instruct', agent_cli: 'codex',
+        cost_policy: ['free-tier', 'local'], fallback: [] },
       injection: { context_fraction: 0.1, threshold: 0.5 },
       privacy: { secret_paths: ['deploy/*.pem', '**/.env'] },
       consent: { hash: WORKERS_AI_CONSENT, accepted_at: 1756900000000 },
@@ -263,6 +265,89 @@ test('consentHash is stable for one tuple and changes with every field of it', (
   ]) {
     assert.notEqual(consentHash(changed), WORKERS_AI_CONSENT);
   }
+});
+
+test('the fallback chain and cost policy are configuration, with today as the default', () => {
+  const bare = configSchema.parse({});
+  assert.deepEqual(bare.observer.cost_policy, ['free-tier', 'local']);
+  assert.deepEqual(bare.observer.fallback, []);
+  const chained = configSchema.parse({
+    observer: { preset: 'workers-ai', cost_policy: ['free-tier', 'local', 'remote'],
+      fallback: [{ preset: 'ollama', model: 'qwen2.5:7b' }, { preset: 'nim' }] },
+  });
+  assert.deepEqual(chained.observer.fallback, [{ preset: 'ollama', model: 'qwen2.5:7b' }, { preset: 'nim' }]);
+  // The chain's bound is its length, and a cost class outside the catalog is not a class.
+  assert.throws(() => configSchema.parse({ observer: { fallback: [
+    { preset: 'nim' }, { preset: 'openrouter' }, { preset: 'gemini' }, { preset: 'ollama', model: 'm' },
+  ] } }));
+  assert.throws(() => configSchema.parse({ observer: { cost_policy: ['gratis'] } }));
+  assert.throws(() => configSchema.parse({ observer: { fallback: [{ preset: 'none' }] } }));
+});
+
+test('admission drops what the policy excludes and refuses what widens egress', () => {
+  const admitted = (observer: Record<string, unknown>) => admittedChain(configSchema.parse({ observer }));
+
+  // Default policy admits free-tier and local only; the listed remote target contributes nothing.
+  assert.deepEqual(admitted({ preset: 'workers-ai', fallback: [{ preset: 'nim' }, { preset: 'ollama', model: 'q' }] }), {
+    targets: [{ preset: 'ollama', model: 'q' }],
+    error: null,
+  });
+  // One key apart: the same file with `remote` in the policy admits it, in written order.
+  assert.deepEqual(admitted({ preset: 'workers-ai', cost_policy: ['free-tier', 'local', 'remote'],
+    fallback: [{ preset: 'nim' }, { preset: 'ollama', model: 'q' }] }).targets, [
+    { preset: 'nim', model: PRESET_CATALOG.nim.defaultModel },
+    { preset: 'ollama', model: 'q' },
+  ]);
+
+  // A local primary can never reach the network through its own fallback.
+  assert.deepEqual(admitted({ preset: 'ollama', model: 'q', cost_policy: ['free-tier', 'local', 'remote'],
+    fallback: [{ preset: 'nim' }] }), { targets: [], error: { code: 'egress_widened', position: 1 } });
+  // A remote primary may narrow to a local one.
+  assert.deepEqual(admitted({ preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'q' }] }).targets,
+    [{ preset: 'ollama', model: 'q' }]);
+
+  // ollama has no default model, so a chain entry on it must carry one.
+  assert.deepEqual(admitted({ preset: 'workers-ai', fallback: [{ preset: 'ollama' }] }),
+    { targets: [], error: { code: 'model_required', position: 1 } });
+  // A chain with no primary names a destination that was never selected.
+  assert.deepEqual(admitted({ preset: 'none', fallback: [{ preset: 'ollama', model: 'q' }] }),
+    { targets: [], error: { code: 'chain_without_primary', position: 0 } });
+  assert.deepEqual(admitted({ preset: 'none' }), { targets: [], error: null });
+
+  // (preset, model) is the identity: the primary repeated is dropped, a second model is its own target.
+  assert.deepEqual(admitted({ preset: 'workers-ai', model: 'm1', cost_policy: ['free-tier', 'local', 'remote'],
+    fallback: [{ preset: 'workers-ai', model: 'm1' }, { preset: 'workers-ai', model: 'm2' },
+      { preset: 'workers-ai', model: 'm2' }] }).targets,
+    [{ preset: 'workers-ai', model: 'm2' }]);
+});
+
+test('an empty chain leaves the consent hash exactly where it was, and one target moves it', () => {
+  const env = { OBOETE_CF_API_TOKEN: 't', OBOETE_CF_ACCOUNT_ID: 'a' };
+  const bare = configSchema.parse({ observer: { preset: 'workers-ai' } });
+  // The literal is the digest of main's formula: an upgrade must not ask anybody to re-consent.
+  assert.equal(consentHash(consentTuple(bare, env)), WORKERS_AI_CONSENT);
+  assert.equal(consentTuple(bare, env).chain, undefined);
+
+  // A listed target the policy excludes is not a destination, so it is not consent either.
+  const excluded = configSchema.parse({ observer: { preset: 'workers-ai', fallback: [{ preset: 'nim' }] } });
+  assert.equal(consentHash(consentTuple(excluded, env)), WORKERS_AI_CONSENT);
+
+  const chained = configSchema.parse({
+    observer: { preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'q' }] },
+  });
+  const tuple = consentTuple(chained, env);
+  assert.deepEqual(tuple.chain, [{
+    preset: 'ollama',
+    host: PRESET_CATALOG.ollama.host,
+    credentialSource: 'none',
+    costClass: 'local',
+    egressClasses: EGRESS_CLASSES.local,
+  }]);
+  assert.notEqual(consentHash(tuple), WORKERS_AI_CONSENT);
+  assert.equal(consentMatches(configSchema.parse({
+    ...chained,
+    consent: { hash: WORKERS_AI_CONSENT, accepted_at: 1 },
+  }), env), false);
 });
 
 test('consentTuple describes the live preset and credential source', () => {

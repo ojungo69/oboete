@@ -19,11 +19,19 @@ export type CredentialSpec =
   | { kind: 'none' }
   | { kind: 'agent-login' };
 
+/** The cost classes `cost_policy` chooses from (CONSTITUTION: local, free or paid, and its policy). */
+export const COST_CLASSES = ['free-tier', 'local', 'remote', 'own-subscription'] as const;
+
+export type CostClass = (typeof COST_CLASSES)[number];
+
+/** The chain's bound is its length, so the length is what has to stay small (contracts/provider-fallback.md). */
+export const MAX_FALLBACK_TARGETS = 3;
+
 export type ProviderPreset = {
   host: string;
   baseUrl: string;
   credential: CredentialSpec;
-  costClass: 'free-tier' | 'remote' | 'local' | 'own-subscription';
+  costClass: CostClass;
   egress: 'remote' | 'local' | 'none';
   defaultModel: string;
   structuredOutput: 'json_schema' | 'response_format' | 'text-json';
@@ -110,10 +118,19 @@ export const PRESET_CATALOG: Record<PresetName, ProviderPreset> = {
   },
 };
 
+/** One fallback target: the same two fields the primary reads, on a preset that is never `none`. */
+const fallbackTargetSchema = z.strictObject({
+  preset: z.enum(PRESET_NAMES),
+  model: z.string().min(1).optional(),
+});
+
 const observerSchema = z.strictObject({
   preset: z.enum(['none', ...PRESET_NAMES]).default('workers-ai'),
   model: z.string().min(1).optional(),
   agent_cli: z.enum(AGENT_CLIS).default('claude'),
+  // The default is today's behaviour for every install: no paid class is admitted until it is written in.
+  cost_policy: z.array(z.enum(COST_CLASSES)).max(COST_CLASSES.length).default(['free-tier', 'local']),
+  fallback: z.array(fallbackTargetSchema).max(MAX_FALLBACK_TARGETS).default([]),
 });
 
 const injectionSchema = z.strictObject({
@@ -384,12 +401,67 @@ export function readCredentials(
   }
 }
 
+export type ChainTarget = { preset: PresetName; model: string };
+
+/** Why a written chain cannot be used at all; `resolveModel` is where it becomes a thrown error. */
+export type ChainError = {
+  code: 'model_required' | 'egress_widened' | 'chain_without_primary';
+  /** The primary is position zero, so the first fallback entry is position one. */
+  position: number;
+};
+
+/**
+ * The fallback targets a pass may attempt, in written order, with the primary counted as position
+ * zero. Pure and total: an unusable chain comes back as `error` with no targets rather than a throw,
+ * because `consentTuple` recomputes this on every pass (`src/worker/observe.ts` consent re-check)
+ * and a configuration mistake has to degrade the run, not crash it.
+ */
+export function admittedChain(config: OboeteConfig): { targets: ChainTarget[]; error: ChainError | null } {
+  const entries = config.observer.fallback;
+  const primary = config.observer.preset;
+  if (primary === 'none') {
+    // A chain with no primary names a destination the user never selected, so it is not ignored.
+    return { targets: [], error: entries.length === 0 ? null : { code: 'chain_without_primary', position: 0 } };
+  }
+  const primaryEgress = PRESET_CATALOG[primary].egress;
+  const policy = new Set<string>(config.observer.cost_policy);
+  const seen = new Set([identityOf(primary, config.observer.model)]);
+  const targets: ChainTarget[] = [];
+  for (const [index, entry] of entries.entries()) {
+    const position = index + 1;
+    const catalog = PRESET_CATALOG[entry.preset];
+    const model = (entry.model ?? catalog.defaultModel).trim();
+    if (model === '') return { targets: [], error: { code: 'model_required', position } };
+    if (catalog.egress === 'remote' && primaryEgress === 'local') {
+      // A local selection that could reach the network under any failure is not a local selection.
+      return { targets: [], error: { code: 'egress_widened', position } };
+    }
+    const identity = identityOf(entry.preset, model);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    // The cost policy is a live switch over targets the user has already written down, so a class
+    // outside it is skipped and reported by doctor, never an error.
+    if (policy.has(catalog.costClass)) targets.push({ preset: entry.preset, model });
+  }
+  return { targets, error: null };
+}
+
+/** A target's identity: the same preset with two models is two targets, the same pair twice is one. */
+function identityOf(preset: PresetName, model: string | undefined): string {
+  return JSON.stringify([preset, (model ?? PRESET_CATALOG[preset].defaultModel).trim()]);
+}
+
+/** One admitted target's share of the consent tuple: the five facts the primary contributes. */
+export type ChainConsent = Omit<ConsentTuple, 'chain'>;
+
 export type ConsentTuple = {
   preset: string;
   host: string;
   credentialSource: string;
   costClass: string;
   egressClasses: readonly string[];
+  /** Present only when the admitted chain is non-empty, so an install without one hashes as before. */
+  chain?: ChainConsent[];
 };
 
 /** The tuple setup displays and consent is bound to (R8): preset, host, credential source, cost class, egress classes. */
@@ -399,6 +471,16 @@ export function consentTuple(config: OboeteConfig, env: NodeJS.ProcessEnv = proc
   if (preset === 'none') {
     return { preset, host: '', credentialSource: 'none', costClass: 'none', egressClasses: [] };
   }
+  const chain = admittedChain(config).targets
+    .map((target) => presetConsent(target.preset, config, env));
+  return {
+    ...presetConsent(preset, config, env),
+    // FR-011 and US7 scenario 4: stored consent may not authorize a destination the user never saw.
+    ...(chain.length === 0 ? {} : { chain }),
+  };
+}
+
+function presetConsent(preset: PresetName, config: OboeteConfig, env: NodeJS.ProcessEnv): ChainConsent {
   const entry = PRESET_CATALOG[preset];
   return {
     preset,
@@ -416,6 +498,10 @@ export function consentHash(tuple: ConsentTuple): string {
     tuple.credentialSource,
     tuple.costClass,
     tuple.egressClasses,
+    // Appended only when a chain exists, so every configuration without one keeps its stored hash.
+    ...(tuple.chain === undefined ? [] : [tuple.chain.map((entry) => [
+      entry.preset, entry.host, entry.credentialSource, entry.costClass, entry.egressClasses,
+    ])]),
   ]);
 }
 
