@@ -1,0 +1,22 @@
+specs/009-memory-core/quickstart.md
+  s_a3b2da79705e65::t_ddf3c9eb569515 914-922
+  s_a3b2da79705e65::t_3de9571fe37b9b 830,833-836
+test/unit/resident-worker.test.ts
+  s_a3b2da79705e65::t_0e5a44b087efa8 1147-1161,1169-1176,1178
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "2f03f6cf0830977099aa5236232b62cccc3ff9f9",
+  "prompts": {},
+  "sessions": {
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
