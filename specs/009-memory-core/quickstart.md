@@ -1013,8 +1013,13 @@ preset at a time" in `specs/007-oboete-m1-alpha/contracts/observer.md`. Security
 (consent, credentials, egress), so it was implemented in this session rather than delegated.
 
 - Gate: `npm run build`, `npm run typecheck`, `npm run lint` and `semgrep scan --config auto`
-  (over the nine changed source files) exit 0 with 0 findings, and `npm test` is green on Node
-  24.16.0 and 22.16.0.
+  (over the nine changed source files) exit 0 with 0 findings; `markdownlint-cli2` reports 0 issues;
+  `scripts/dco-check.mjs main HEAD` passes all six commits. `npm test` is green on Node 24.16.0 and
+  22.16.0 at the final head: 1537 tests, 1535 pass, 0 fail, 2 skipped, `NPM_TEST_EXIT=0` on both
+  (`/var/tmp/oboete-009-t048/t048-full-v{24.16.0,22.16.0}-r7.log`). One earlier run failed
+  `viewer-server.test.ts`'s SC-011 bound on Node 24 with `took 3235 ms`; the file passes 8/8 twice
+  when run alone and this branch touches no viewer code — the test starts its clock before the
+  stream is open, filed as #237.
 - Two keys, one default: `[observer] fallback` is at most three ordered `{preset, model}` targets
   and `[observer] cost_policy` defaults to `["free-tier", "local"]`. Every configuration that
   exists today parses to an empty admitted chain, so `consentHash` appends nothing and the literal
