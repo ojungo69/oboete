@@ -98,7 +98,7 @@ free/local failure causes zero attempts at an unselected paid destination.
 Owner amendment, 2026-09-10:
 
 - [X] T046 Record the approved resident-worker option and configured model/provider failover in `CONSTITUTION.md`, the local Spec Kit constitution, `specs/009-memory-core/spec.md` and `plan.md`.
-- [ ] T047 [US1] Implement and verify resident waiting for new/due work, one owner through idle/active epochs, pause/stop/config changes and upgrade/crash recovery in `src/worker/`, capture startup and operator controls; retain bounded one-shot observe and prove idle/long-run resources.
+- [X] T047 [US1] Implement and verify resident waiting for new/due work, one owner through idle/active epochs, pause/stop/config changes and upgrade/crash recovery in `src/worker/`, capture startup and operator controls; retain bounded one-shot observe and prove idle/long-run resources.
 - [ ] T048 [US7] Implement a bounded, consented model/provider fallback chain after free-tier/API failures in provider selection, reservations, setup/config and worker processing; verify free-only admission, shared quota versus target failure, per-attempt source eligibility and all-targets-failed retention.
 
 ## Phase 10: Completed-product verification
@@ -341,3 +341,12 @@ writers require separate worktrees. No deployment follows merely from an increme
   survives at `/var/tmp/oboete-009-20260909.jJ5grc/us5-rss3/` (T032). Receipts `us5-close-*` under `/var/tmp/oboete-009-us5close/`; see `quickstart.md` E7. The
   macOS platform probe remains T040's (its macOS leg deferred by the owner) and the cohesive
   product gate remains T043's.
+- T047: the resident observation worker is implemented and verified against
+  `contracts/resident-worker.md`, whose sixteen verification items are mapped to tests in the E8
+  receipts in `quickstart.md`. Both supported Node versions pass the full `npm test`. Two controls
+  were also confirmed on a real process against a replayed corpus (`signal` and `upgraded`, each
+  exit 0 with the lease released), and the idle poll cost was measured in a window containing no
+  epoch. This marker covers the resident lifecycle, its controls, capture startup and the retained
+  one-shot behaviour. It does not cover the resource sweep and the soak, which item 12 of the
+  contract assigns to T042, nor the macOS leg, which is T040's and stays deferred; issue #231 is a
+  pre-existing pass-loop defect the resident inherits and is out of scope by the same contract.

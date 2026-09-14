@@ -440,6 +440,38 @@ test('a control after a usable response preserves the applied batch citations an
   }
 });
 
+test('the heartbeat fires during a delayed apply and the lease survives it', async () => {
+  await withFixture(async (fixture) => {
+    fixture.env = cleanEnv(fixture.home, { OBOETE_OPENROUTER_API_KEY: 'delayed-apply-key' });
+    writeConfig(fixture, 'openrouter', fixture.env);
+    const prompt = 'A delayed apply must not let the lease go stale.';
+    await captureEndedSession(fixture, { sessionId: 'delayed-apply', prompts: [prompt] });
+    const sourceId = eventId(fixture, prompt);
+    let wall = NOW;
+    let duringApply: Record<string, unknown> | undefined;
+    const exit = await runResident(fixture, {
+      ...residentClock(() => { writeWorkerStop(fixture.paths); }),
+      now: () => wall,
+      heartbeatMs: 5,
+      fetch: async () => openAiResponse(providerOutput(sourceId)),
+      applyHook: async () => {
+        wall += 1_000;
+        await delay(30);
+        duringApply = fixture.withDb((db) =>
+          db.prepare('SELECT owner_token, heartbeat_at FROM worker_lease WHERE id = 1').get());
+      },
+    });
+    assert.equal(exit, 0);
+    assert.equal(duringApply?.heartbeat_at, NOW + 1_000, 'the schedule heartbeats while the apply is in flight');
+    assert.equal(typeof duringApply?.owner_token, 'string', 'the lease is still owned when the apply commits');
+    const log = readFileSync(fixture.paths.observeLog, 'utf8');
+    assert.doesNotMatch(log, /reason=lease_lost/);
+    fixture.withDb((db) => {
+      assert.equal(db.prepare('SELECT state FROM observation_batches').get()?.state, 'applied');
+    });
+  });
+});
+
 test('a stop after a response prevents both output and language retries', async () => {
   for (const retry of ['output', 'language']) {
     await withFixture(async (fixture) => {

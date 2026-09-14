@@ -296,7 +296,10 @@ nothing, so neither an idle day nor a two-minute reclaim wait grows the log.
    in at least one of them: the lease row's `owner_token` is NULL once the process is gone, so a
    `kept` answer can never survive a shutdown.
 8. Heartbeat under load: a long synchronous maintenance stretch and a delayed apply do not let the
-   lease go stale, and the apply cannot write an older heartbeat over a newer one.
+   lease go stale. What is asserted is the schedule, not the fences: the timer writes while an
+   apply is in flight and the lease is still owned when that apply commits. A fenced write stamps
+   the `now` its caller captured, so it can move the stamp back by at most one detector pass —
+   three orders of magnitude below the 6,000 ms staleness bound, and the next tick corrects it.
 9. Crash: `SIGKILL` mid-batch. Takeover is possible more than 6,000 ms after the last heartbeat;
    the running batch is reclaimable by another owner 120,000 ms after its claim. Those two latencies
    are asserted separately, and the reclaimed-batch count is reported separately from the spool
@@ -306,10 +309,12 @@ nothing, so neither an idle day nor a two-minute reclaim wait grows the log.
 11. `resident = false` reproduces today's one-shot receipts, including the trigger and budget
     conditions under which capture does not spawn at all, and the existing `observe` suites pass
     unchanged on both supported Node versions.
-12. Idle cost and RSS over a long run meet the targets, measured with many distinct sessions,
-    repositories and retries rather than an empty process, and with concurrent captures and a
-    held reader to show the WAL recycles. The per-poll work is counted, not assumed: one queue
-    probe, not two, and no full-table scan.
+12. Idle cost meets the target on a replayed corpus rather than an empty process: many distinct
+    sessions, real batches and real retries, with the CPU share taken from a window that contains
+    no epoch. The per-poll work is counted, not assumed: one queue probe, not two, and no
+    full-table scan. RSS is reported for the same window. The rest of this item is T042's, which
+    owns the resource sweep: a long run with concurrent captures and a held reader to show the WAL
+    recycles, at the three corpus sizes, and the seven-day soak.
 13. A signal during an epoch and a signal during shutdown: the first ends the wait, releases the
     lease and exits 0 as `signal`; the second does not kill the process before the lease is
     released.
