@@ -1,0 +1,76 @@
+src/doctor/storage.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 6,18,301-306,311-312,314,316,323,328-331,340,349,354
+test/unit/capture.test.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 9,1017-1072
+  s_a3b2da79705e65::t_1c4d091b56f3d8 1073
+test/unit/config.test.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 86,97,131,190-195
+src/config.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 149-155,171,234-236
+src/capture.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 750,758,761,763,766,769-775,785,787,792-807,809,813
+test/unit/resident-worker.test.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 1-1205
+specs/009-memory-core/quickstart.md
+  s_a3b2da79705e65::t_b2c66bec2c5d96 818-1002
+src/cli.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 78
+src/worker/lease.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 82-92
+src/worker/observe-batch.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 38-40,64-67,234,240,243-244,249-253,275-276,439,459,474,498,501,504-505,606-607,612,616-617
+test/unit/doctor.test.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 825,827-829,836-847,849,851-853,859-876
+  s_a3b2da79705e65::t_f715bbd6ddf84a 877
+src/capture-command.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 15,30-38,97-101
+src/pause.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 4-5,47-70
+  s_a3b2da79705e65::t_cb14c9a9ff7db2 71
+specs/009-memory-core/contracts/resident-worker.md
+  s_a3b2da79705e65::t_b2c66bec2c5d96 1-382
+src/doctor.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 114
+src/worker/purge.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 40,47-50
+src/worker/spool-recovery.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 219-224
+test/unit/lease.test.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 5,13,124-169
+  s_a3b2da79705e65::t_3d88f3eaa6abda 170
+specs/009-memory-core/tasks.md
+  s_a3b2da79705e65::t_b2c66bec2c5d96 101,344-357
+src/paths.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 16,45
+src/worker/imported.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 29,334,349
+test/unit/observe.test.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 53
+test/migrations/apply.test.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 15,203-235
+  s_a3b2da79705e65::t_cc2236a32ee37a 236-237
+test/unit/purge.test.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 129-148,197-198,202-205
+test/unit/spool-recovery.test.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 161-221
+src/worker/observe.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 2,4-5,25,31,43,47,61-64,77-81,117-118,126,206-207,248-259,277-368,463,485-499,509-511,523,534-546,558,560-562,571,577-640,642,644-648,656,671,694-704,706,749,752-755,767,776-781,806,821-828,848,850-851,853,878-883,891,896-949,961-962,973-977,980-998,1001,1014-1024,1033,1037,1039,1042-1049,1051-1052,1054,1057-1065
+test/helpers/observe.ts
+  s_a3b2da79705e65::t_b2c66bec2c5d96 234
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "85d48437d4d0bd1d5d74b9e8071279d3439485f7",
+  "prompts": {},
+  "sessions": {
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
