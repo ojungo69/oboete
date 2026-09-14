@@ -36,13 +36,27 @@ Each epoch is then exactly today's bounded run: same predicate, same suppression
 at-least-once provider attempt with exactly-once applied effects. Nothing about retry semantics is
 redefined and no schema changes.
 
-With one subtraction, and it is the easiest thing to get wrong when lifting the bounded body: **an
-epoch never calls `releaseLease`.** Today's run ends by releasing in `releaseEmptyPass`; a resident
-that kept that line would release and re-claim at every epoch, which is precisely what rotation
-exists to avoid, and a test of the retry case would still pass because a re-claim also yields a
-fresh token. The only release is the shutdown below. Across an idle wait the lease row's
-`owner_token` is non-NULL and `pid` is this process; the token changes only at the start of an
-epoch.
+"Exactly today's bounded run" is literal: an epoch **is** the existing pass loop, with one
+subtraction and nothing else. The subtraction is the easiest thing to get wrong when lifting that
+body: **an epoch never calls `releaseLease`.** Today's loop ends by releasing in
+`releaseEmptyPass`; a resident that kept that line would release and re-claim at every epoch, which
+is precisely what rotation exists to avoid, and a test of the retry case would still pass because a
+re-claim also yields a fresh token. What replaces it keeps the other half of that function — the
+200 ms wait between passes while the queue is non-empty but undrainable — because dropping it turns
+an undrainable queue into a write-transaction busy-spin for the whole epoch budget. Across an idle
+wait the lease row's `owner_token` is non-NULL and `pid` is this process; the token changes only at
+the start of an epoch.
+
+Writing a second pass loop beside the first is the failure mode to avoid here: the two drift, and
+the copy silently loses whichever guard was living in the original. The same applies to the idle
+probe — it is `queueIsEmpty`, not a parallel predicate that answers nearly the same question.
+
+The two `yieldAfterPass` outcomes diverge in a resident, and the divergence is the contract, not an
+implementation detail. `max_run` ends the **epoch**: the budget is per-epoch, so the loop continues
+and the next epoch starts with a fresh budget. `batch_error` ends the **process**, exit 0, exactly
+as a one-shot run ends today — a source or summary that fails every attempt then costs one attempt
+per spawn, which is today's cadence and needs no new backoff. Neither reason may be rewritten to
+`empty`.
 
 **The idle probe is `queueIsEmpty` called with a token that was never issued.** Two things are
 easy to get wrong here, and the existing predicate settles both.
@@ -62,11 +76,22 @@ resident that polled only `DUE_SOURCE_SQL` would idle through a recovered spool 
 batch and a pending summary. The probe is therefore that same function with the never-issued token,
 not a new query.
 
-An epoch may begin and find nothing to batch: the probe counts a `running` batch that is not yet
-reclaimable (`RECLAIM_AFTER_MS`, 120,000 ms after its claim), and until that deadline no owner can
-take it. Such an epoch ends immediately, and to keep it from becoming a 2,000 ms rotate-and-log
-treadmill for two minutes it writes no epoch line, and the idle wait that follows runs to the
-nearest of the fixed poll, the earliest `retry_after` and the earliest reclaim deadline.
+`queueIsEmpty` gains one clause for this purpose, and it is the only change to it: **expired
+material that retention would delete counts as queued work.** A resident holds the lease across idle
+periods, so no other worker can run the maintenance pass, and expired rows include `secret` ones —
+retaining those because nothing happened to be batchable is a privacy regression, not a latency
+one. The clause reuses `purge.ts`'s own predicate as an `EXISTS` rather than restating it, so the
+probe and the delete can never disagree, and it reads the existing `raw_events_expires_at` index.
+Pi-ack file cleanup is not probed for: it rides along with any epoch, its material is temporary, and
+`idle_exit` hands the directory to the next one-shot run within the idle window.
+
+An epoch may begin and find nothing it can act on: the probe counts a `running` batch that is not
+yet reclaimable (`RECLAIM_AFTER_MS`, 120,000 ms after its claim), and until that deadline no owner
+can take it. Inside the epoch that is today's behaviour exactly — the pass loop waits 200 ms between
+passes while the queue is non-empty but undrainable — so nothing new is needed there. What keeps it
+from becoming a rotate-and-log treadmill is that an epoch which changed no counts writes no epoch
+line, and that the idle wait which follows runs to the nearest of the fixed poll, the earliest
+`retry_after` and the earliest reclaim deadline.
 
 The epoch is also the reset point for the three pieces of state a one-shot run allocates once: the
 run deadline, the provider-state map and the ancestor cache. Each is established per epoch. No new
@@ -120,18 +145,27 @@ request. The first that holds ends the process cooperatively with exit 0:
 | the resolved engine artifact's identity changed, vanished or became unreadable | `upgraded` | an install or upgrade |
 | no capture activity and no completed processing for `[worker] idle_exit_ms`, with nothing due inside it | `idle_exit` | time |
 | the lease is held by another owner | `lease_lost` | takeover |
+| `SIGTERM` or `SIGINT` received | `signal` | an operator or a process manager |
 
 Cooperative exit is 0 even when the epoch applied a fallback summary, which the existing exit
-calculation would otherwise report as 1; storage and log-write failures keep their current
-precedence and codes, and the existing `max_run`, `batch_error`, `worker_error` and `storage_error`
-reasons are unchanged. `SIGTERM` and `SIGINT` end the current wait, run the shutdown sequence below,
-and exit 0.
+calculation would otherwise report as 1. That exemption is per reason, not per mode: the reasons in
+the table above are exempt, and `batch_error`, `worker_error` and `storage_error` keep the existing
+fallback rule and the existing codes in a resident exactly as in a one-shot run. `max_run` never
+reaches a resident's run-end line, because it ends an epoch rather than the process. `SIGTERM` and `SIGINT` end the current wait, run the shutdown sequence below, and exit 0 with the
+reason `signal` — deliberately not `stopped`, because the sentinel rule below is keyed on the reason
+and a signalled process must not consume a stop request meant for whoever holds the lease next.
 
 Shutdown, in order: stop beginning new batches; finish or explicitly abort the operation in flight;
 leave pending and running state and every cursor as it is; clear timers; remove the `worker-stop`
-sentinel before the lease is released, so a capture that spawns the moment the lease frees starts a
-resident rather than consuming the sentinel and exiting; release the lease if the row still carries
-this token, **whether or not the queue is empty**; close the database.
+sentinel — but only when `stopped` is this process's own exit reason, and only while it still owns
+the lease — before that lease is released, so a capture that spawns the moment the lease frees
+starts a resident rather than consuming the sentinel and exiting; release the lease if the row still
+carries this token, **whether or not the queue is empty**; close the database.
+
+The two conditions on that removal are not defensive padding. A resident exiting for `idle_exit`,
+`upgraded`, `config_changed`, `paused`, `lease_lost` or `signal` did not act on the sentinel, so
+deleting it would silently discard a stop the user asked for; and a process that has already lost
+the lease would be deleting a sentinel aimed at its successor.
 
 That last clause is the `releaseMaxRun` path, not the `releaseEmptyPass` path, and the distinction
 is load-bearing. `releaseLease` returns `kept` when its recheck finds work, and today that answer
@@ -196,7 +230,9 @@ the one-shot path and the daily cron both remain.
 `[worker]` is new in the typed schema and in the known key paths: `resident` (boolean, default true)
 and `idle_exit_ms`. An absent `config.toml` fingerprints as absent rather than as a change; an
 unreadable or malformed one ends the process with `config_changed` rather than running on stale
-settings. `--resident` on the command line wins over `resident = false`, and a configuration change
+settings. That includes a file already malformed when the resident starts: the control is evaluated
+before the run's own `loadConfig`, so the reason is `config_changed` and not the `worker_error` a
+thrown parse would otherwise produce. `--resident` on the command line wins over `resident = false`, and a configuration change
 between the hook's decision and the worker's claim is resolved by the worker's own read.
 
 Per-send consent and privacy rechecks stay exactly where they are; the fingerprint is a lifetime
@@ -225,14 +261,18 @@ nothing, so neither an idle day nor a two-minute reclaim wait grows the log.
    spin — the process performs a bounded number of epochs, not one per poll, before the batch
    becomes reclaimable.
 3. Two captures racing: exactly one process claims the lease, the loser exits 0 as `another_worker`
-   with no source, batch or memory write, and the winner's lease row is never overwritten.
+   with no source, batch or memory write, and the winner's lease row is never overwritten. And
+   rotation under write contention: a lease rotation that meets `SQLITE_BUSY` retries like every
+   other write and the resident keeps the lease it still owns, rather than reporting `lease_lost`.
 4. Each control row exits 0 with its own reason and leaves the queue intact — `paused`,
    `worker-stop`, a rewritten config, an unreadable config, a changed engine artifact, a removed
    engine artifact, idle timeout, lost lease — including one case where the epoch had applied a
    fallback summary, proving the exit is still 0.
 5. `worker-stop` is consumed by the exiting resident before it releases the lease, a later capture
    starts a new one, and a capture racing that release starts a resident rather than finding the
-   sentinel; `paused` is not consumed and nothing starts until `resume`.
+   sentinel; `paused` is not consumed and nothing starts until `resume`. A sentinel written while a
+   resident is exiting for some other reason survives that exit — asserted for `idle_exit` and for
+   a signalled shutdown, each from a log that only this run wrote.
 6. An upgrade sequence: old resident running, new bundle installed, resident exits `upgraded`,
    schema-behind capture spools and starts a worker, the migration runs, the spool is recovered. And
    its crash variant: the old resident is `SIGKILL`ed instead of exiting, and the migration proceeds
@@ -255,4 +295,16 @@ nothing, so neither an idle day nor a two-minute reclaim wait grows the log.
     unchanged on both supported Node versions.
 12. Idle cost and RSS over a long run meet the targets, measured with many distinct sessions,
     repositories and retries rather than an empty process, and with concurrent captures and a
-    held reader to show the WAL recycles.
+    held reader to show the WAL recycles. The per-poll work is counted, not assumed: one queue
+    probe, not two, and no full-table scan.
+13. A signal during an epoch and a signal during shutdown: the first ends the wait, releases the
+    lease and exits 0 as `signal`; the second does not kill the process before the lease is
+    released.
+14. Retention is not starved by a held lease: with expired material present and nothing batchable,
+    an epoch begins and the purge runs. Asserted with a `secret` expired row, because that is the
+    case where starvation is a privacy regression.
+15. A `config.toml` that is already malformed when the resident starts ends the process with
+    `config_changed`, not `worker_error`.
+16. `batch_error` ends the process and `max_run` ends only the epoch: a source that fails every
+    attempt produces one attempt per run rather than a loop, and an epoch that exhausts its budget
+    is followed by another epoch with a fresh budget.
