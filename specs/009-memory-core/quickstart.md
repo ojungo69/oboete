@@ -911,11 +911,11 @@ file is named, the test is in `test/unit/resident-worker.test.ts`.
    once with two calls and one apply` — the two latencies separately, as the item requires.
 10. `a wall-clock jump does not end an epoch budget measured on elapsed time`, `a wall-clock jump
     during apply does not cut the active epoch short`, and `a backward system clock does not read
-    continuing captures as idleness` — the last one written against the mutation that requires the
-    capture stamp to grow, which is what the code did before this PR's last round. The one wall
-    deadline the resident still derived from a monotonic budget, for the imported-record scan, is
-    gone: `reclassifyImported` takes a stop predicate, so `timedOut()` is the only judge of the
-    budget in either mode. Suspend/resume stays a platform question for T042 and T040.
+    continuing captures as idleness` — the last written against the mutation that requires the
+    capture stamp to grow, which is what the code did before this PR's last round. The item's two
+    mechanisms are stated in the contract; what changed to make the first of them true everywhere
+    is that `reclassifyImported` now takes a stop predicate, so no pass derives a wall deadline
+    from a monotonic budget. Suspend/resume stays a platform question for T042 and T040.
 11. `one-shot observe still exits after a failed source and does not retry in-process`,
     `shouldSpawnResident follows [worker] resident and defaults true`, and the unchanged
     `observe`/e2e suites on both Node versions.
