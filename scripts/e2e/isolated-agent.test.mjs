@@ -273,13 +273,15 @@ test("a refresh reaches the account whether the CLI writes in place or renames o
   assert.equal(JSON.parse(fs.readFileSync(accountFile, "utf8")).account, "refreshed by rename");
   assert.ok(fs.lstatSync(path.join(runtimeDir, "agent-home", "auth.json")).isSymbolicLink());
 
-  // Signed itself out: the link is gone, the account file stands, and the leg's own error stands.
+  // Signed itself out: the account file stands, the leg's own error stands, and the link is put
+  // back so a home a later probe reuses is not left without a credential at all.
   const removed = await leg("removed", async (argv, options) => {
     fs.rmSync(path.join(options.env.GROK_HOME, "auth.json"));
     return { exitCode: 1, stdout: "", stderr: "Not signed in." };
   });
   assert.equal(removed.exitCode, 1);
   assert.equal(JSON.parse(fs.readFileSync(accountFile, "utf8")).account, "refreshed by rename");
+  assert.ok(fs.lstatSync(path.join(runtimeDir, "agent-home", "auth.json")).isSymbolicLink());
 });
 
 test("a half-written credential is reported and never overwrites the account's own", async (t) => {

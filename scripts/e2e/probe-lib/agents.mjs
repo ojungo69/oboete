@@ -170,7 +170,14 @@ export function settleCredentials(agent, entries = []) {
           `the account's copy is unchanged (${error.message})`,
       );
     }
-    if (!carried) continue;
+    if (!carried) {
+      // A CLI that signed itself out removed the link. The account file is untouched, so restore
+      // the link rather than leaving a reused home with no credential at all.
+      if (!fs.existsSync(entry.staged) && fs.existsSync(entry.source)) {
+        fs.symlinkSync(entry.source, entry.staged);
+      }
+      continue;
+    }
     fs.rmSync(entry.staged, { force: true });
     fs.symlinkSync(entry.source, entry.staged);
     process.stderr.write(`${agent} rewrote ${path.basename(entry.source)} by rename; carried the refresh back\n`);
