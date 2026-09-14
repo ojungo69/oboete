@@ -569,13 +569,15 @@ async function observeLifecycle(
   }
 
   function pollIdleActivity(): void {
-    // Timestamps cannot carry this signal. A backward system-clock correction is exactly when it
-    // matters, and both stamps read as a maximum over rows: `last_captured_at` is written clamped so
-    // it never decreases, and a batch completing after the jump adds a row whose smaller stamp the
-    // maximum hides. A rowid no clock can move says the same thing for a capture, and the resident
-    // is the only owner that completes batches, so it counts its own instead of reading them back.
-    const captured = db.prepare('SELECT MAX(rowid) AS n FROM raw_events').get()?.n;
-    const mark = typeof captured === 'number' ? captured : 0;
+    // `data_version` changes when another connection commits and never for this process's own
+    // writes, so a capture — always another process — is always seen, while this resident's own
+    // maintenance cannot look like one. The two obvious alternatives both hide a capture:
+    // timestamps, because `last_captured_at` is written clamped and a maximum over rows hides a
+    // batch that completes after a backward correction; and `MAX(rowid)`, because a purge that
+    // deletes the newest row frees exactly the rowid the next insert takes. Completed processing is
+    // counted in the epoch below, since the lease owner is the only process that completes a batch.
+    const version = db.prepare('PRAGMA data_version').get()?.data_version;
+    const mark = typeof version === 'number' ? version : 0;
     if (mark !== lastCaptureMark) {
       lastCaptureMark = mark;
       lastActivityElapsed = deps.elapsedMs();
@@ -907,13 +909,9 @@ async function observeLifecycle(
         const before = { ...result };
         await runPasses();
         lastEpochElapsed = deps.elapsedMs();
-        if (leaseLost) {
-          endReason = 'lease_lost';
-          exit = 0;
-          return;
-        }
-        if (stopReason !== undefined) {
-          endReason = stopReason;
+        const ended = leaseLost ? 'lease_lost' : stopReason;
+        if (ended !== undefined) {
+          endReason = ended;
           exit = 0;
           return;
         }

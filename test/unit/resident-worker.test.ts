@@ -637,6 +637,37 @@ test('capture activity resets the idle budget while an unchanged session expires
   }
 });
 
+test('a purge that frees the newest rowid does not hide the capture that reuses it', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    await fixture.capture('SessionStart', {
+      session_id: 'idle-reuse', cwd: process.cwd(), source: 'startup',
+    });
+    const clock = residentClock(async (polls) => {
+      if (polls === 1) {
+        // What retention does to a long-idle home: the newest raw event expires and is deleted, and
+        // SQLite hands its rowid to the next insert. The capture that follows is real activity, and
+        // a mark read as `MAX(rowid)` would be unchanged across both.
+        fixture.withDb((db) => {
+          db.prepare('DELETE FROM raw_events WHERE rowid = (SELECT MAX(rowid) FROM raw_events)').run();
+        });
+        await fixture.capture('SessionStart', {
+          session_id: 'idle-reuse-later', cwd: process.cwd(), source: 'startup',
+        });
+        fixture.withDb((db) => {
+          assert.equal(db.prepare('SELECT MAX(rowid) AS n FROM raw_events').get()?.n, 1);
+          assert.equal(queueIsEmpty(db, fixture.paths, '', NOW), true);
+        });
+      }
+      if (polls === 3) writeWorkerStop(fixture.paths);
+    }, 450_000);
+    assert.equal(await runResident(fixture, clock), 0);
+    assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=stopped/,
+      'a capture that reuses a freed rowid must still reset the idle budget');
+    assert.equal(clock.elapsedMs(), 1_350_000);
+  });
+});
+
 test('a backward system clock does not read continuing captures as idleness', async () => {
   await withFixture(async (fixture) => {
     writeConfig(fixture, 'none');

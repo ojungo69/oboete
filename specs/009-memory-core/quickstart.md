@@ -825,11 +825,11 @@ with a review pass over each delta — correctness first, over-engineering secon
 round for the inputs that had no reader.
 
 - Gate: `npm run build`, `npm run typecheck` and `npm run lint` exit 0. The full `npm test` passes
-  on both supported Node versions — 1,506 pass / 0 fail / 2 skipped in the parallel leg and 280
+  on both supported Node versions — 1,507 pass / 0 fail / 2 skipped in the parallel leg and 280
   pass / 0 fail in the serial one, no `not ok` lines in either
-  (`t047-full-v24.16.0-r8.log`, `t047-full-v22.16.0-r8.log`; the same legs before the last two
+  (`t047-full-v24.16.0-r10.log`, `t047-full-v22.16.0-r10.log`; the same legs before the last two
   review rounds are `t047-full-v24-r5.log` and `t047-full-v22-r5.log`, and before the first
-  `t047-full-v24.16.0.log` and `t047-full-v22.16.0.log`). 29 of those tests are the resident's own,
+  `t047-full-v24.16.0.log` and `t047-full-v22.16.0.log`). 30 of those tests are the resident's own,
   in `test/unit/resident-worker.test.ts`.
 - Idle cost, contract item 12, measured on a replayed corpus rather than an empty process: the
   1,051-event fixture bundle replayed into a kept home (1,322 raw events, 100 batches, 48
@@ -856,21 +856,29 @@ round for the inputs that had no reader.
   idle budgets read the monotonic clock while expiry and retry read the wall clock. The idle poll's
   inputs were watched from a second connection every 2 s for a whole run and never moved, so the
   activity mark resets once at startup and a maintenance epoch does not postpone `idle_exit`. Those
-  were the capture and completion stamps the poll read at the time; the poll now reads a rowid
-  maximum and an in-process count instead, for the reason in the next bullet, and the measurement
-  stands as a receipt that nothing was captured or processed during the window.
-- The idle activity marks read no clock. The stamps the first implementation compared — a change in
+  were the capture and completion stamps the poll read at the time; the poll now reads
+  `data_version` and an in-process count instead, for the reason in the next bullet, and the
+  measurement stands as a receipt that nothing was captured or processed during the window.
+- The idle activity marks read no clock, and two candidate mechanisms were measured against a
+  capture they must not hide. The stamps the first implementation compared — a change in
   `MAX(last_captured_at)` and `MAX(completed_at)` rather than an increase — cannot carry the signal
   they were chosen for: `markSessionCaptured` writes `last_captured_at` clamped with `MAX`, so it
   never decreases, and a batch completing after a backward correction adds a row whose smaller
   stamp the maximum over rows hides. Both marks therefore freeze while work continues, which is the
-  failure the change comparison was meant to fix. A capture is now a change in `MAX(rowid)` over
-  `raw_events` and completed processing is the resident's own applied and fallback count. The
-  capture half is asserted by seeding the clamped stamp above every later capture
-  (`a backward system clock does not read continuing captures as idleness`, RED against the stamp
-  read); the completion half has no isolating test, because every stimulus that completes a batch
-  also inserts raw events or leaves work queued, and a test that passed on the other half's reset
-  would be the narrow kind.
+  failure the change comparison was meant to fix. `MAX(rowid)` over `raw_events` replaced them and
+  has a narrower hole of the same kind: a purge that deletes the newest row frees exactly the rowid
+  the next insert takes, so retention plus a capture inside one poll window leaves the mark
+  unchanged. The mark is therefore SQLite's `data_version`, which advances on another connection's
+  commit and never on this process's own writes — so a capture, always another process, is always
+  seen, and the resident's own purge can never be mistaken for one. Both halves of that are
+  asserted, each RED against the mechanism it replaced:
+  `a backward system clock does not read continuing captures as idleness` (RED against the stamp
+  read: `idle_exit` at 900,000 ms instead of surviving to 1,350,000 ms) and
+  `a purge that frees the newest rowid does not hide the capture that reuses it` (RED against the
+  rowid read, same shape). Completed processing is the resident's own applied and fallback count;
+  that half has no isolating test, because every stimulus that completes a batch also inserts raw
+  events or leaves work queued, and a test that passed on the other half's reset would be the
+  narrow kind.
 - Two controls were confirmed in production rather than only in tests, both with the lease released
   and exit 0: `SIGTERM` ended a resident as `signal` (`idle-cost.json`), and rebuilding
   `dist/engine.mjs` under an idle resident ended it as `upgraded` within one poll
@@ -902,9 +910,10 @@ file is named, the test is in `test/unit/resident-worker.test.ts`.
    follows returns a new token.
 4. `each cooperative control exits 0 with its own reason` (eight rows), with
    `a fallback epoch still exits 0 on a cooperative stop`,
-   `fallback exits keep worker and storage error codes in resident mode` and
+   `fallback exits keep worker and storage error codes in resident mode`,
    `capture activity resets the idle budget while an unchanged session expires` for the idle row's
-   inputs.
+   inputs, and `a purge that frees the newest rowid does not hide the capture that reuses it` for
+   the mark that carries them.
 5. `worker-stop is removed before the lease is released and pause is not consumed`,
    `a stop sentinel survives a takeover that happens during shutdown` — the removal runs inside the
    releasing transaction, so ownership is tested at the write rather than before it, and a lease

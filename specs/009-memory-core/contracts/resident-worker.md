@@ -131,11 +131,10 @@ removes no wakes, and a cap would add that much latency before a stop or an upgr
 Idle cost is measured as what it is, and the honest list is longer than one read: per poll, the
 queue probe (one clause per kind of queued work, each on an existing index), the control checks
 below — one `config.toml` parse and stat, one stat of the engine artifact, two sentinel `existsSync`
-calls — one `MAX(rowid)` read over `raw_events` that dates the newest capture, the
+calls — one `PRAGMA data_version` read that says whether another connection has committed, the
 wake-delay reads, a heartbeat write, and whatever the existing empty-pass maintenance writes. That
-read is a rowid maximum, which SQLite answers from the b-tree without a scan, and completed
-processing is counted in the process rather than read back, so no aggregate over a growing table
-runs per poll. Once a minute the list also carries one
+read touches no table, and completed processing is counted in the process rather than read back, so
+no aggregate over a growing table runs per poll. Once a minute the list also carries one
 maintenance epoch — a token rotation and one empty pass — which T042 counts as idle cost rather
 than treating it as work. Target: under 0.5% of
 one core averaged over ten idle minutes, with RSS flat across a long run (T042). No transaction and
@@ -162,13 +161,20 @@ request. The first that holds ends the process cooperatively with exit 0:
 | the lease is held by another owner | `lease_lost` | takeover |
 | `SIGTERM` or `SIGINT` received | `signal` | an operator or a process manager |
 
-Neither half of the idle row reads a timestamp. A capture is observed as a change in `MAX(rowid)` over
-`raw_events`, which every stored capture moves and no clock can; completed processing is the
-resident's own count of applied and fallback batches for the epoch, and while it holds the lease it
-is the only process that completes one. Stamps cannot carry this signal: a backward system-clock
-correction is exactly when it matters, `last_captured_at` is written clamped so it never decreases,
-and a batch completing after the correction adds a row whose smaller stamp a maximum over rows
-hides — so a stamp-based mark, tested for growth or for change, freezes while work continues.
+Neither half of the idle row reads a timestamp. A capture is observed as a change in SQLite's
+`data_version`, which advances when another connection commits and never for this process's own
+writes: a capture is always another process, so it is always seen, and this resident's own
+maintenance can never be mistaken for one. Any other connection's commit counts, which in normal
+operation means a capture or an operator command — activity either way, and the direction of the
+error is to stay alive. Completed processing is the resident's own count of applied and fallback
+batches for the epoch, and while it holds the lease it is the only process that completes one.
+
+Two mechanisms were rejected because each hides a real capture. Timestamps: a backward system-clock
+correction is exactly when the mark matters, `last_captured_at` is written clamped so it never
+decreases, and a batch completing after the correction adds a row whose smaller stamp a maximum over
+rows hides — so a stamp-based mark, tested for growth or for change, freezes while work continues.
+`MAX(rowid)` over `raw_events`: a purge that deletes the newest row frees exactly the rowid the next
+insert takes, so retention plus a capture in one poll window leaves the mark unchanged.
 
 Cooperative exit is 0 even when the epoch applied a fallback summary, which the existing exit
 calculation would otherwise report as 1. That exemption is per reason, not per mode: the reasons in
@@ -247,7 +253,8 @@ to proceed, so the durable refusal a resident could otherwise create does not ex
 The lease belongs to the data directory, not to one native session, and a session row stays active
 until an explicit session-end capture that a crashed agent may never send. Liveness is therefore not
 read from session or work status. Idle is measured from observable events on a monotonic timer: a
-stored capture (`MAX(rowid)` over `raw_events`) and a completed batch, neither read from a clock.
+commit by another connection (`PRAGMA data_version`) and a completed batch, neither read from a
+clock.
 `idle_exit_ms` defaults to 900,000 ms, bounds 60,000–86,400,000.
 
 A retry due beyond the idle window is not a reason to stay alive. It is preserved for the next spawn
@@ -326,10 +333,11 @@ nothing, so neither an idle day nor a two-minute reclaim wait grows the log.
 10. Clock changes: a forward jump, a backward jump and suspend/resume leave epoch budgets and
    control ordering correct. Two mechanisms carry this: every budget reads `elapsedMs`, never a wall
    deadline derived from it, so no pass can be cut short or extended by a correction; and the idle
-   activity marks read no clock at all — a rowid maximum for captures, an in-process count for
-   completed batches. The capture half is asserted with a clamped stamp a later capture cannot
-   move; the completion half has no isolating test, because every stimulus that completes a batch
-   also inserts raw events or leaves work queued.
+   activity marks read no clock at all — another connection's commit for captures, an in-process
+   count for completed batches. The capture half is asserted twice, against a clamped stamp a later
+   capture cannot move and against a purge that frees the rowid the next capture reuses; the
+   completion half has no isolating test, because every stimulus that completes a batch also
+   inserts raw events or leaves work queued.
 11. `resident = false` reproduces today's one-shot receipts, including the trigger and budget
     conditions under which capture does not spawn at all, and the existing `observe` suites pass
     unchanged on both supported Node versions.

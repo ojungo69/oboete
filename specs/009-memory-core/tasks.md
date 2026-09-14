@@ -348,5 +348,7 @@ writers require separate worktrees. No deployment follows merely from an increme
   exit 0 with the lease released), and the idle poll cost was measured in a window containing no
   epoch. This marker covers the resident lifecycle, its controls, capture startup and the retained
   one-shot behaviour. It does not cover the resource sweep and the soak, which item 12 of the
-  contract assigns to T042, nor the macOS leg, which is T040's and stays deferred; issue #231 is a
-  pre-existing pass-loop defect the resident inherits and is out of scope by the same contract.
+  contract assigns to T042, nor the macOS leg, which is T040's and stays deferred; issues #231,
+  #233 and #234 are recorded against the contract paragraphs that place them outside this task —
+  a pre-existing pass-loop defect the resident inherits, two clock-and-retention findings from the
+  delta reviews, and the post-release spawn hand-off the unconditional release leaves open.
