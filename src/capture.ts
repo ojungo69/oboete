@@ -747,6 +747,7 @@ async function write(options: WriteOptions): Promise<CaptureOutcome> {
   const remaining = (): number => deadlineMs - deps.elapsedMs();
   if (rows.length === 0 && diagnostics.length === 0) return { outcome: 'dropped', rows: 0 };
 
+  let spawnAfterSpool = false;
   // contracts/agents.md: below the spool reserve the database is not opened at all.
   if (remaining() >= SPOOL_RESERVE_MS) {
     const timeoutMs = Math.max(
@@ -754,16 +755,24 @@ async function write(options: WriteOptions): Promise<CaptureOutcome> {
       Math.min(BUSY_TIMEOUT_CEILING_MS, Math.floor(remaining() - SPOOL_RESERVE_MS)),
     );
     const opened = openCaptureDatabase(paths, timeoutMs);
-    if (opened !== null) {
+    if (opened !== null && opened !== true) {
       // The handle is closed where it was opened: nothing between the two can leak it.
       try {
-        return await writeToDatabase(options, opened.db, remaining);
+        return await writeToDatabase(options, opened, remaining);
       } finally {
-        opened.db.close();
+        opened.close();
       }
     }
+    spawnAfterSpool = opened === true;
   }
   const outcome = spoolAll(paths, identity, rows);
+  if (spawnAfterSpool) {
+    try {
+      deps.spawnWorker();
+    } catch {
+      // Best-effort: the next hook retries the spawn (FR-002).
+    }
+  }
   return {
     ...outcome,
     stdout: await injectAfterCapture(deps, paths, identity, injection, undefined),
@@ -773,24 +782,36 @@ async function write(options: WriteOptions): Promise<CaptureOutcome> {
 function openCaptureDatabase(
   paths: OboetePaths,
   timeoutMs: number,
-): ReturnType<typeof openDatabase> | null {
-  let opened: ReturnType<typeof openDatabase> | null = null;
+): DatabaseSync | true | null {
   try {
-    opened = openDatabase({ path: paths.db, timeoutMs, hook: true });
+    const opened = openDatabase({ path: paths.db, timeoutMs, hook: true });
     // data-model: the hook never migrates, so an older file is left to the worker. The handle is
     // dropped before it is closed, so a throwing close cannot leave the caller writing through a
     // connection this function has already refused.
     if (opened.schemaBehind) {
-      const behind = opened;
-      opened = null;
-      behind.db.close();
+      let spawnAfterSpool = false;
+      try {
+        spawnAfterSpool = isLeaseFree(opened.db, Date.now());
+      } catch {
+        // Version zero is the file an interrupted first migration leaves behind: it has no lease
+        // table, so nothing can be holding a lease and the worker that applies the migration has
+        // to be started, or every later capture spools against the same unmigrated file. Any
+        // other unreadable lease leaves the spawn to the next hook.
+        spawnAfterSpool = opened.schemaVersion === 0;
+      }
+      try {
+        opened.db.close();
+      } catch {
+        // The spool path does not use this handle.
+      }
+      return spawnAfterSpool ? true : null;
     }
+    return opened.db;
   } catch {
     // A missing or unopenable database is an availability problem, not a privacy one (R1): `write`
     // spools the sanitized event when this returns null.
+    return null;
   }
-
-  return opened;
 }
 
 async function writeToDatabase(

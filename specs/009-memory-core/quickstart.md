@@ -815,3 +815,188 @@ gate and records why the four markers can be checked.
 - Receipts under `/var/tmp/oboete-009-us5close/`. Running the installed package's `setup` rewrites
   the real agent configuration files whatever `OBOETE_HOME` says, so that check must run with `HOME`
   pointed inside the temporary tree.
+
+## E8 — resident observation worker (T047)
+
+2026-09-14, branch `009-t047-resident`. The binding spec is
+`contracts/resident-worker.md`, created at `f0f2dda6` before any implementation and amended in the
+thirteen later commits that the implementation and the reviews exposed, the last of them this round's. Three implementation rounds (Grok, then Codex twice)
+with a review pass over each delta — correctness first, over-engineering second — and a final test
+round for the inputs that had no reader.
+
+- Gate: `npm run build`, `npm run typecheck` and `npm run lint` exit 0. The full `npm test` passes
+  on both supported Node versions — 1,512 pass / 0 fail / 2 skipped in the parallel leg and 280
+  pass / 0 fail in the serial one, no `not ok` lines in either
+  (`t047-full-v24.16.0-r16.log`, `t047-full-v22.16.0-r16.log`; the same legs before the last two
+  review rounds are `t047-full-v24-r5.log` and `t047-full-v22-r5.log`, and before the first
+  `t047-full-v24.16.0.log` and `t047-full-v22.16.0.log`). 33 of those tests are the resident's own,
+  in `test/unit/resident-worker.test.ts`. Two harness flakes were met and re-run along the way,
+  both in tests this PR does not touch: `matrix A2` lost to `ENOTEMPTY` inside the temporary home's
+  teardown (#206, `t047-full-v22.16.0-r14.log`), and CI lost `grok-other-handler-deny` and
+  `migration-promote` on one twin of the duplicated run (#168, #214), each green on the re-run.
+- Idle cost, contract item 12, measured on a replayed corpus rather than an empty process: the
+  1,051-event fixture bundle replayed into a kept home (1,322 raw events, 100 batches, 48
+  sessions), then quiesced, then a resident run with no injected clock and a raised idle timeout.
+  Over 675 s the process used 1,200 ms of CPU: **0.178% of one core**, per-30-s-sample 0.125% to
+  0.218%, against a 0.5% target, and the observe log records no epoch line for the window because
+  a maintenance epoch that changes no counts writes none (`idle-cost-final.json`). RSS settled
+  rather than grew: 72.1 MiB at start, 78.6 MiB by 162 s, and a 79.6 MiB peak first reached at
+  546 s and flat to the 675 s end — 1.0 MiB of drift across the last 8.5 minutes. `SIGTERM` then ended it as `signal`, exit 0, lease released. The first
+  measurement (`idle-cost.json`) kept the un-quiesced home, so its first five minutes are the
+  worker doing real work — 1.0-1.8% of one core while it produced 100 fallback batches — and its
+  last 5.8 minutes contain no epoch at all: 0.233-0.300% of one core, sampled every 30 s. Both
+  windows are reported because the average across them (0.746%) is not an idle number and would be
+  the wrong receipt.
+- RSS over the first measurement: 72.1 MiB at start, 97.7 MiB at the end, 99.1 MiB peak; within
+  the epoch-free window it moved 97.1 to 97.7 MiB; the quiesced run above settles 18 MiB lower
+  because it never produced the 100 fallback batches. The long-run RSS claim is not made here; item 12 was split so that T042's sweep owns it, along with
+  the three corpus sizes, concurrent captures, the held reader and the WAL recycle.
+- This host's monotonic clock runs about 7.4% slower than its wall clock (`clocksource` is `tsc`
+  under WSL2): a 30,000 ms timer returns after 32,200 ms, measured directly. Every rate above is
+  therefore computed from the sampled interval rather than the requested one, and `idle_exit` fires
+  at about 1.07 times its configured duration in wall terms — 129.0 s and 129.3 s for a 120,000 ms
+  bound in two runs, 960 s for 900,000 ms. That is the contract behaving as written, since epoch and
+  idle budgets read the monotonic clock while expiry and retry read the wall clock. The idle poll's
+  inputs were watched from a second connection every 2 s for a whole run and never moved, so the
+  activity mark resets once at startup and a maintenance epoch does not postpone `idle_exit`. Those
+  were the capture and completion stamps the poll read at the time; the poll now reads
+  `data_version` and an in-process count instead, for the reason in the next bullet, and the
+  measurement stands as a receipt that nothing was captured or processed during the window.
+- The idle activity marks read no clock, and two candidate mechanisms were measured against a
+  capture they must not hide. The stamps the first implementation compared — a change in
+  `MAX(last_captured_at)` and `MAX(completed_at)` rather than an increase — cannot carry the signal
+  they were chosen for: `markSessionCaptured` writes `last_captured_at` clamped with `MAX`, so it
+  never decreases, and a batch completing after a backward correction adds a row whose smaller
+  stamp the maximum over rows hides. Both marks therefore freeze while work continues, which is the
+  failure the change comparison was meant to fix. `MAX(rowid)` over `raw_events` replaced them and
+  has a narrower hole of the same kind: a purge that deletes the newest row frees exactly the rowid
+  the next insert takes, so retention plus a capture inside one poll window leaves the mark
+  unchanged. The mark is therefore SQLite's `data_version`, which advances on another connection's
+  commit and never on this process's own writes — so a capture, always another process, is always
+  seen, and the resident's own purge can never be mistaken for one. Both halves of that are
+  asserted, each RED against the mechanism it replaced:
+  `a backward system clock does not read continuing captures as idleness` (RED against the stamp
+  read: `idle_exit` at 900,000 ms instead of surviving to 1,350,000 ms) and
+  `a purge that frees the newest rowid does not hide the capture that reuses it` (RED against the
+  rowid read, same shape). The one capture that arrives on the resident's own connection — a hook
+  that exhausted its database budget spools, and recovery stores it later — resets the mark at that
+  insert, asserted by `a capture the resident stores from the spool resets the idle budget` (RED
+  without the reset: the log shows `recovered=1` and then `reason=idle_exit`). That reset reads an
+  exact count only because recovery no longer discards committed work: a busy database now ends
+  `recoverSpool` the way a lost lease already did, returning what it stored and leaving the
+  remaining files queued for the next pass, so the call site needs no busy retry around it. The pin
+  is `spool-recovery.test.ts`'s `a busy database returns what was committed and leaves the spool for
+  the next pass` (RED before the change: `Error: database is locked` out of `transactionImmediate`).
+  The ordering half — an entry stored before the busy one stays counted — holds by construction,
+  since the counter moves before the throw point, and no test can sequence two writers inside one
+  synchronous loop from outside it. The same hole undercounted `recovered` in the epoch log and
+  `last_run` for the one-shot worker, which becomes exact with it. Completed processing
+  is the resident's own applied and fallback count; that half has no isolating test, because every
+  stimulus that completes a batch also inserts raw events or leaves work queued, and a test that
+  passed on the other half's reset would be the narrow kind.
+- Two controls were confirmed in production rather than only in tests, both with the lease released
+  and exit 0: `SIGTERM` ended a resident as `signal` (`idle-cost.json`), and rebuilding
+  `dist/engine.mjs` under an idle resident ended it as `upgraded` within one poll
+  (`idle2-upgraded-exit.log`). The second was an accident — a rebuild during a measurement — which
+  is the strongest form of that evidence and the reason the measurement had to be re-run.
+- Retention does not ride on the idle probe. The probe clause the first contract draft called for
+  was measured at about 1.6 microseconds per retained row on every poll, over a range that never
+  empties because cited rows are retained forever (27.9 ms at 20,000 rows). An epoch now also opens
+  on a 60,000 ms maintenance interval, which costs nothing per poll and bounds the delay to one
+  minute against a seven-day TTL.
+- The migration fence is a staleness rule, not occupancy, and now has a test rather than a source
+  reading: a fresh heartbeat defers the migration with `MigrationBusyError`, and a heartbeat older
+  than 6,000 ms is cleared by the migration itself, so a killed resident cannot deadlock an upgrade.
+- The cleanup ownership probe is inside the failure guard, on both the resident and the one-shot
+  path. A storage fault leaves the handle open with its statements failing, so a probe outside the
+  guard throws while the storage outcome is being recorded and the run ends with no `run end` line
+  and no closed handle. `a cleanup ownership probe that cannot answer still records the run end`
+  asserts exit 3 and the run-end record on both paths, driving the fault by dropping `worker_lease`
+  from a second connection. Each leg is RED against its own site: the resident leg with
+  `shutdownResident` unfixed (`Error: no such table: worker_lease` out of `shutdownResident`,
+  reported as a rejected call rather than an exit code), and the one-shot leg with only
+  `recordRunFailure` reverted (the same error out of `recordRunFailure`). The one-shot leg reaches
+  the fault through `captureRunningBatch`: a running batch inside its reclaim window keeps the
+  queue undrainable, so the pass waits between passes instead of releasing. The first draft of
+  this bullet claimed that seam did not exist; the Codex gate's fifth round named the fixture that
+  provides it.
+- Two holes in this PR's own new code, found by the sixth review round and fixed with a pin each.
+  A database at schema version zero — what an interrupted first migration leaves behind — has no
+  `worker_lease` table, so the `spawnAfterSpool` probe threw instead of answering and every capture
+  spooled against a file that nothing would ever migrate; the catch now reads the version, which is
+  exactly the set of states with no lease table (`a version-zero database spools and still starts
+  the worker that migrates it`, RED before the fix on `spawned 0 !== 1`). And a stop sentinel that
+  cannot be removed exited `stopped` in silence, stopping every later resident on sight; the removal
+  now reports its error code and the release logs it (`a stop sentinel that cannot be removed is
+  logged and the lease is released anyway`, RED on the missing warn line while the run still exits 0
+  `reason=stopped`). Propagating the unlink failure instead was declined: the removal runs inside
+  the transaction that releases the lease, so a throw would roll the release back and leave the
+  sentinel as well as a held lease.
+- What T047 does not claim: the resource sweep and soak (T042), the macOS platform leg (T040,
+  deferred by the owner), and the pre-existing pass-loop defect filed as issue #231, which the
+  resident inherits unchanged from the one-shot worker.
+- Receipts under `/var/tmp/oboete-009-t047/`; the round-3 RED/GREEN logs, one per mutation, under
+  `/var/tmp/oboete-009-t047/round3/`.
+
+The contract's sixteen verification items, each against the test that carries it. Unless another
+file is named, the test is in `test/unit/resident-worker.test.ts`.
+
+1. `a resident retries a due source in a later epoch of the same process` — asserts both halves,
+   the probe seeing the row and the next epoch batching it.
+2. `the idle probe sees a due retry, a spool file, a pending batch and a pending summary`, and
+   `a running batch inside its reclaim window does not start an epoch per poll`.
+3. `a second resident exits 0 as another_worker without writing`, and `lease.test.ts`'s
+   `rotateLease propagates SQLITE_BUSY so its caller can retry`, which also asserts the retry that
+   follows returns a new token.
+4. `each cooperative control exits 0 with its own reason` (eight rows), with
+   `a fallback epoch still exits 0 on a cooperative stop`,
+   `fallback exits keep worker and storage error codes in resident mode`,
+   `capture activity resets the idle budget while an unchanged session expires` for the idle row's
+   inputs, and `a purge that frees the newest rowid does not hide the capture that reuses it` and
+   `a capture the resident stores from the spool resets the idle budget` for the mark that carries
+   them.
+5. `worker-stop is removed before the lease is released and pause is not consumed`,
+   `a stop sentinel survives a takeover that happens during shutdown` — the removal runs inside the
+   releasing transaction, so ownership is tested at the write rather than before it, and a lease
+   stolen in that seam leaves the sentinel for the new owner —
+   `an idle exit preserves a stop sentinel written during that exit`,
+   `signal handlers survive shutdown and a signalled worker preserves the stop sentinel`,
+   `shutdown with queued work releases the lease so a later spawn can reach it`,
+   `observe --stop writes the sentinel and exits 0 without claiming the lease`,
+   `a cleanup ownership probe that cannot answer still records the run end` for the guard the
+   sequence runs inside, and
+   `a stop sentinel that cannot be removed is logged and the lease is released anyway`, whose
+   fixture puts a directory at the sentinel path so `unlinkSync` fails with a code the log names.
+6. `capture.test.ts`'s `a schema-behind capture spools and still starts a worker when the lease is
+   free`, `a schema-behind capture does not start a worker while the lease is held` and
+   `a version-zero database spools and still starts the worker that migrates it` for the file an
+   interrupted first migration leaves behind, which has no lease table to read at all, the
+   `upgraded` row of item 4's table, and `test/migrations/apply.test.ts`'s `a live worker defers the
+   migration and a stale one is cleared by it` for the crash variant.
+7. `a stop before the provider request leaves the batch pending for immediate adoption`,
+   `a control after a usable response preserves the applied batch citations and log`,
+   `a stop after a response prevents both output and language retries` and
+   `shutdown with queued work releases the lease so a later spawn can reach it`.
+8. `the heartbeat keeps ownership under the token rotated for the second epoch` and
+   `the heartbeat fires during a delayed apply and the lease survives it`.
+9. `lease.test.ts`'s `after 6001 ms without heartbeat the second claim steals and the first token is
+   fenced out`, `batches.test.ts`'s `a stale running batch of a dead worker is reclaimed after 120
+   seconds`, and `observe.test.ts`'s `a crash after response leaves running work that is reclaimed
+   once with two calls and one apply` — the two latencies separately, as the item requires.
+10. `a wall-clock jump does not end an epoch budget measured on elapsed time`, `a wall-clock jump
+    during apply does not cut the active epoch short`, and `a backward system clock does not read
+    continuing captures as idleness` — the last written against the mutation that requires the
+    capture stamp to grow, which is what the code did before this PR's last round. The item's two
+    mechanisms are stated in the contract; what changed to make the first of them true everywhere
+    is that `reclassifyImported` now takes a stop predicate, so no pass derives a wall deadline
+    from a monotonic budget. Suspend/resume stays a platform question for T042 and T040.
+11. `one-shot observe still exits after a failed source and does not retry in-process`,
+    `shouldSpawnResident follows [worker] resident and defaults true`, and the unchanged
+    `observe`/e2e suites on both Node versions.
+12. This section's measurement.
+13. `signals interrupt an injected wait during an epoch and release the lease`, `SIGTERM cancels the
+    native idle timer so the resident process exits promptly`, and `signal handlers survive shutdown
+    and a signalled worker preserves the stop sentinel`.
+14. `a maintenance epoch purges an expired secret with no batchable work`.
+15. `a config malformed at startup exits as config_changed before loading the worker config`.
+16. `a batch_error ends a run after one attempt, including at the deadline in either mode`.

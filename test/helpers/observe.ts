@@ -229,8 +229,8 @@ export function runObserveForFixture(
     env: fixture.env,
     now: () => NOW,
     detect: detectSync,
-    heartbeatMs: 60_000,
     fetch: async () => assert.fail('an observer request was not expected'),
     ...overrides,
+    heartbeatMs: overrides.heartbeatMs ?? 60_000,
   });
 }

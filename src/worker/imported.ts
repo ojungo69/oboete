@@ -26,7 +26,7 @@ const JSON_LIST_FIELDS = new Set(['concepts', 'facts', 'source_paths_json', 'rep
 type Row = Record<string, SQLOutputValue>;
 type Unit = { memoryId: string | null; repoId: string; importId: string | null; owned: boolean };
 type Snapshot = { memory: MemoryRow | null; sources: Row[]; grants: Row[]; records: Row[]; stamp: string };
-type Options = { home: string; env: NodeJS.ProcessEnv; deadline?: number };
+type Options = { home: string; env: NodeJS.ProcessEnv; stop?: () => boolean };
 
 function relativeInside(root: string, path: string): string | null {
   const api = /^[A-Za-z]:[\\/]|^\\\\/u.test(root) ? win32 : posix;
@@ -331,7 +331,7 @@ export async function reclassifyImported(db: DatabaseSync, token: string, now: (
   } catch { /* A malformed private cursor only restarts the idempotent scan. */ }
   const initial = JSON.stringify(cursor);
   let examined = 0;
-  scan: while (examined < 100 && now() < (options.deadline ?? Infinity)) {
+  scan: while (examined < 100 && options.stop?.() !== true) {
     const owned = cursor.phase === 'memory';
     const limit = Math.min(50, 100 - examined);
     const rows = owned ? db.prepare(`SELECT id, repo_id FROM memories
@@ -346,7 +346,7 @@ export async function reclassifyImported(db: DatabaseSync, token: string, now: (
       continue;
     }
     for (const row of rows) {
-      if (now() >= (options.deadline ?? Infinity)) break scan;
+      if (options.stop?.() === true) break scan;
       const unit: Unit = owned ? { memoryId: String(row.id), repoId: String(row.repo_id), importId: null, owned }
         : { memoryId: typeof row.destination_memory_id === 'string' ? row.destination_memory_id : null,
           repoId: String(row.destination_repo_id), importId: String(row.first_import_id), owned };

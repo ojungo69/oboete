@@ -111,7 +111,7 @@ export async function runDoctor(argv: string[], overrides: Partial<DoctorDeps> =
       guardItem('migration', () =>
         migrationItem(storage.schemaVersion, storage.schemaAhead, integrityFailed),
       ),
-      guardItem('worker', () => workerItem(db, now, integrityFailed)),
+      guardItem('worker', () => workerItem(db, now, integrityFailed, paths, config)),
       guardItem('generation', () => generationItem(db, integrityFailed)),
       guardItem('spool', () => spoolItem(paths)),
       guardItem('sync', () => syncItem(paths, db, integrityFailed)),

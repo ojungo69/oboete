@@ -126,6 +126,26 @@ test('expired unbatched failed and secret rows are deleted; expired unbatched lo
   });
 });
 
+test('an expired source cited by a live memory survives while an expired secret row is deleted', async () => {
+  await withOpened((db) => {
+    const now = 1_757_000_000_000;
+    const token = claimLease(db, { pid: 1, now });
+    if (token === null) assert.fail('expected a lease token');
+    seedGraph(db);
+    insertBatch(db, 'b-applied', 'applied');
+    insertEvent(db, { id: 'e-secret', expiresAt: now, batchId: null, sensitivity: 'secret' });
+    insertEvent(db, { id: 'e-retained', expiresAt: now, batchId: 'b-applied', processedAt: now - 1 });
+    db.prepare(
+      `INSERT INTO memories (id, repo_id, type, title, body, content_hash, sensitivity)
+       VALUES ('m-retained', 'repo1', 'discovery', 'retained', 'retained', 'retained', 'local_only')`,
+    ).run();
+    db.prepare("INSERT INTO memory_sources (memory_id, raw_event_id) VALUES ('m-retained', 'e-retained')").run();
+
+    assert.equal(purgeExpiredEvents(db, token, now).deleted, 1);
+    assert.deepEqual(eventIds(db), ['e-retained']);
+  });
+});
+
 test('expired unbatched rows no summarizer can use are purged and the ones it can use survive', async () => {
   await withOpened((db) => {
     const now = 1_757_000_000_000;
@@ -174,10 +194,15 @@ test('with limit 2 and 5 deletable rows the function reports deleted 5', async (
       insertEvent(db, { id, expiresAt: now, batchId: 'b-applied', processedAt: now - 30 * 86400000 });
     }
 
-    const result = purgeExpiredEvents(db, token, now, { limit: 2 });
+    let tick = now;
+    const result = purgeExpiredEvents(db, token, now, { limit: 2, clock: () => (tick += 1) });
     assert.equal(result.leaseLost, false);
     assert.equal(result.deleted, 5);
     assert.deepEqual(eventIds(db), []);
+    // The chunk loop starves the heartbeat schedule, so each fence stamps a live read: three
+    // chunks (2 + 2 + 1) must leave the last one behind, not the `now` captured before the loop.
+    assert.equal(tick, now + 3);
+    assert.equal(db.prepare('SELECT heartbeat_at FROM worker_lease WHERE id = 1').get()?.heartbeat_at, tick);
   });
 });
 

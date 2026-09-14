@@ -158,3 +158,64 @@ test('a spool entry the database refuses is quarantined and the run continues', 
     assert.deepEqual(readdirSync(paths.spool).filter((name) => name.endsWith('.json')), []);
   });
 });
+
+test('a busy database returns what was committed and leaves the spool for the next pass', async () => {
+  await withOpened(async (db, home, token) => {
+    const paths = oboetePaths(home);
+    mkdirSync(paths.spool, { recursive: true });
+    const name = `${NOW - DAY}-busy.json`;
+    writeFileSync(
+      join(paths.spool, name),
+      JSON.stringify({
+        repo: {
+          id: 'repo-busy',
+          identity_kind: 'common_dir',
+          normalized_identity: '/tmp/oboete-busy',
+          display_root: '/tmp/oboete-busy',
+        },
+        session: {
+          id: 'sess-busy',
+          repo_id: 'repo-busy',
+          agent: 'claude',
+          native_session_id: 'native-busy',
+          conversation_id: 'sess-busy',
+          started_at: NOW - DAY,
+          status: 'active',
+        },
+        row: {
+          id: 'spooled-busy',
+          repo_id: 'repo-busy',
+          session_id: 'sess-busy',
+          turn_id: null,
+          agent: 'claude',
+          kind: 'prompt',
+          content: 'a prompt that was spooled while another writer held the database',
+          truncated: 0,
+          payload_json: null,
+          content_hash: 'hash-busy',
+          sensitivity: 'local_only',
+          classification_state: 'done',
+          captured_at: NOW - DAY,
+          expires_at: NOW + 7 * DAY,
+        },
+      }),
+    );
+
+    // R6: another writer holds the write lock, so this entry's transaction cannot start. Recovery
+    // reports the work it committed — none here — instead of throwing away its counts, and the
+    // file stays queued so the next pass retries it.
+    const blocker = openDatabase({ path: paths.db, timeoutMs: 0 });
+    try {
+      blocker.db.exec('BEGIN IMMEDIATE');
+      assert.deepEqual(recoverSpool(db, paths, token, NOW), { inserted: 0, skipped: 0, failed: 0 });
+      assert.deepEqual(readdirSync(paths.spool).filter((file) => file.endsWith('.json')), [name]);
+      assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM raw_events').get()?.n), 0);
+      blocker.db.exec('ROLLBACK');
+    } finally {
+      if (blocker.db.isOpen) blocker.db.close();
+    }
+
+    assert.equal(recoverSpool(db, paths, token, NOW).inserted, 1);
+    assert.deepEqual(readdirSync(paths.spool).filter((file) => file.endsWith('.json')), []);
+  });
+});

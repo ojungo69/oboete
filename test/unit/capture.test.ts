@@ -6,6 +6,7 @@ import {
   existsSync,
   readFileSync,
   realpathSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -1010,6 +1011,63 @@ test('the worker is spawned at the end of a turn only while the lease is free', 
       last_assistant_message: 'done again',
     });
     assert.equal(context.spawned, 1, 'a held lease means no second worker');
+  });
+});
+
+test('a schema-behind capture spools and still starts a worker when the lease is free', async () => {
+  await withCapture(async (context) => {
+    const opened = openDatabase({ path: context.paths.db, timeoutMs: 2_000 });
+    opened.db.exec('PRAGMA user_version = 1');
+    opened.db.close();
+
+    const base = { session_id: 'session-schema-behind', cwd: context.repo, prompt_id: 'prompt-1' };
+    const outcome = await context.capture('claude', 'Stop', {
+      ...base,
+      last_assistant_message: 'done',
+    });
+    assert.equal(outcome.outcome, 'spooled');
+    assert.equal(context.spawned, 1);
+    assert.ok(listSpool(context.paths).length > 0);
+  });
+});
+
+test('a schema-behind capture does not start a worker while the lease is held', async () => {
+  await withCapture(async (context) => {
+    const opened = openDatabase({ path: context.paths.db, timeoutMs: 2_000 });
+    opened.db
+      .prepare('UPDATE worker_lease SET owner_token = ?, heartbeat_at = ? WHERE id = 1')
+      .run('another-worker', Date.now());
+    opened.db.exec('PRAGMA user_version = 1');
+    opened.db.close();
+
+    const outcome = await context.capture('claude', 'Stop', {
+      session_id: 'session-schema-behind-held',
+      cwd: context.repo,
+      prompt_id: 'prompt-1',
+      last_assistant_message: 'done',
+    });
+    assert.equal(outcome.outcome, 'spooled');
+    assert.equal(context.spawned, 0);
+    assert.ok(listSpool(context.paths).length > 0);
+  });
+});
+
+test('a version-zero database spools and still starts the worker that migrates it', async () => {
+  await withCapture(async (context) => {
+    // What an interrupted first migration leaves behind: the file exists, `user_version` is 0 and
+    // no table does. The lease cannot be read at all, so the spawn has to come from the version.
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${context.paths.db}${suffix}`, { force: true });
+    new DatabaseSync(context.paths.db).close();
+
+    const outcome = await context.capture('claude', 'Stop', {
+      session_id: 'session-version-zero',
+      cwd: context.repo,
+      prompt_id: 'prompt-1',
+      last_assistant_message: 'done',
+    });
+    assert.equal(outcome.outcome, 'spooled');
+    assert.equal(context.spawned, 1);
+    assert.ok(listSpool(context.paths).length > 0);
   });
 });
 

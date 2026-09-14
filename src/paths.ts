@@ -13,6 +13,7 @@ export type OboetePaths = {
   hookLog: string;
   observeLog: string;
   paused: string;
+  workerStop: string;
 };
 
 /** The one data directory (FR-039, amendment A4): `OBOETE_HOME`, else `~/.oboete`. */
@@ -41,6 +42,7 @@ export function oboetePaths(home: string): OboetePaths {
     hookLog: join(logs, 'hook.log'),
     observeLog: join(logs, 'observe.log'),
     paused: join(home, 'paused'),
+    workerStop: join(home, 'worker-stop'),
   };
 }
 

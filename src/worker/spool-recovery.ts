@@ -216,10 +216,12 @@ export function recoverSpool(
         return changes === 0 ? 'skipped' : 'inserted';
       });
     } catch (error) {
-      // A busy database is the caller's retry (R6); anything else means the database refused this
-      // entry (a foreign key it cannot satisfy, a value the schema rejects), so the file is moved
-      // aside rather than replayed on every run (FR-003).
-      if (isBusyError(error)) throw error;
+      // A busy database ends this call the way a lost lease does, returning what was already
+      // committed rather than discarding that count: the file is still in the spool, so the queue
+      // stays non-empty and the next pass retries it after the R6 wait. Anything else means the
+      // database refused this entry (a foreign key it cannot satisfy, a value the schema rejects),
+      // so the file is moved aside rather than replayed on every run (FR-003).
+      if (isBusyError(error)) return { inserted, skipped, failed };
       quarantineSpoolEntry(paths, name);
       failed += 1;
       continue;

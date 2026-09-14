@@ -12,6 +12,7 @@ import {
   isBusyError,
   LATEST_SCHEMA_VERSION,
   MIGRATIONS,
+  MigrationBusyError,
   MigrationMismatchError,
   openDatabase,
   SchemaAheadError,
@@ -197,6 +198,41 @@ test('hook role does not migrate and does not create a missing file', (t) => {
     DatabaseMissingError,
   );
   assert.equal(fs.existsSync(missingPath), false);
+});
+
+test('a live worker defers the migration and a stale one is cleared by it', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oboete-mig-'));
+  const dbPath = path.join(dir, 'memory.db');
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  fs.copyFileSync(previousVersionDb, dbPath);
+  const seed = new DatabaseSync(dbPath, { timeout: 1000 });
+  seed
+    .prepare('UPDATE worker_lease SET owner_token = ?, pid = ?, heartbeat_at = ? WHERE id = 1')
+    .run('live-resident', 4242, Date.now());
+  seed.close();
+
+  // A resident holding the lease with a fresh heartbeat is still running: the migration waits for
+  // it rather than pulling the schema out from under it.
+  assert.throws(() => openDatabase({ path: dbPath, timeoutMs: 1000 }), MigrationBusyError);
+  const behind = openDatabase({ path: dbPath, timeoutMs: 1000, hook: true });
+  assert.equal(behind.schemaVersion, 1);
+  behind.db.close();
+
+  // A killed resident leaves the same row behind, so the fence is a staleness rule, not occupancy:
+  // once the heartbeat is older than the bound the migration clears the row itself.
+  const age = new DatabaseSync(dbPath, { timeout: 1000 });
+  age.prepare('UPDATE worker_lease SET heartbeat_at = ? WHERE id = 1').run(Date.now() - 6_001);
+  age.close();
+
+  const opened = openDatabase({ path: dbPath, timeoutMs: 1000 });
+  t.after(() => closeQuietly(opened.db));
+  assert.equal(opened.schemaVersion, LATEST_SCHEMA_VERSION);
+  const lease = opened.db.prepare('SELECT owner_token, pid FROM worker_lease WHERE id = 1').get();
+  assert.equal(lease?.owner_token, null, 'the migration clears a stale owner rather than deadlocking');
+  assert.equal(lease?.pid, null);
 });
 
 test('mismatch throws MigrationMismatchError', (t) => {

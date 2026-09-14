@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
-import { openDatabase } from '../../src/db/open.js';
+import { isBusyError, openDatabase } from '../../src/db/open.js';
 import { oboetePaths } from '../../src/paths.js';
 import {
   assertLease,
@@ -10,6 +10,7 @@ import {
   heartbeat,
   isLeaseFree,
   releaseLease,
+  rotateLease,
 } from '../../src/worker/lease.js';
 import { withTempHome } from '../helpers/home.js';
 
@@ -117,6 +118,53 @@ test("releaseLease returns 'kept', 'released', or 'lost' and updates owner_token
     assert.equal(isLeaseFree(db, now), true);
 
     assert.equal(releaseLease(db, token, () => true), 'lost');
+  });
+});
+
+test('rotateLease replaces the token and keeps pid and started_at', async () => {
+  await withOpened((db) => {
+    const now = 1_757_000_000_000;
+    const first = claimLease(db, { pid: 7, now });
+    if (first === null) assert.fail('expected a lease token');
+    const rotated = rotateLease(db, first, now + 50);
+    if (rotated === null) assert.fail('expected rotation to keep the lease');
+    assert.notEqual(rotated, first);
+    const row = leaseColumns(db);
+    assert.equal(row?.owner_token, rotated);
+    assert.equal(row?.pid, 7);
+    assert.equal(row?.started_at, now);
+    assert.equal(row?.heartbeat_at, now + 50);
+    assert.equal(rotateLease(db, first, now + 80), null);
+    assert.equal(leaseColumns(db)?.owner_token, rotated);
+  });
+});
+
+test('rotateLease propagates SQLITE_BUSY so its caller can retry', async () => {
+  await withTempHome((home) => {
+    const dbPath = oboetePaths(home).db;
+    const first = openDatabase({ path: dbPath, timeoutMs: 1000 });
+    const token = claimLease(first.db, { pid: 7, now: 1_757_000_000_000 });
+    if (token === null) assert.fail('expected a lease token');
+    first.db.exec('BEGIN IMMEDIATE');
+    const second = openDatabase({ path: dbPath, timeoutMs: 50 });
+    try {
+      assert.throws(() => rotateLease(second.db, token, 1_757_000_000_050), isBusyError,
+        'rotateLease must propagate SQLITE_BUSY so the caller can retry');
+      assert.equal(leaseColumns(first.db)?.owner_token, token);
+      first.db.exec('ROLLBACK');
+      const rotated = rotateLease(second.db, token, 1_757_000_000_100);
+      assert.notEqual(rotated, null, 'rotation must succeed once the writer releases its transaction');
+      assert.notEqual(rotated, token);
+      assert.equal(leaseColumns(second.db)?.owner_token, rotated);
+    } finally {
+      try {
+        if (first.db.isTransaction) first.db.exec('ROLLBACK');
+      } catch {
+        // Closing still runs.
+      }
+      if (second.db.isOpen) second.db.close();
+      if (first.db.isOpen) first.db.close();
+    }
   });
 });
 

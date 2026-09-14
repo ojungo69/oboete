@@ -3,6 +3,7 @@ import { accessSync, constants, existsSync, readdirSync, unlinkSync, writeFileSy
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 
+import type { OboeteConfig } from '../config.js';
 import { LATEST_SCHEMA_VERSION, SchemaAheadError, openDatabase, sqliteErrorInfo } from '../db/open.js';
 import {
   asNumber,
@@ -14,6 +15,7 @@ import {
   warning,
   type DoctorItem,
 } from '../doctor.js';
+import { isWorkerStopped } from '../pause.js';
 import type { OboetePaths } from '../paths.js';
 import { describe } from '../setup/report.js';
 import { listSpool } from '../spool.js';
@@ -296,24 +298,37 @@ export function migrationItem(
   );
 }
 
+function workerSettings(config: OboeteConfig | null, paths: OboetePaths): string {
+  const stopState = isWorkerStopped(paths) ? 'A stop request is set.' : 'No stop request is set.';
+  if (config === null) return `The effective worker settings could not be read. ${stopState}`;
+  return `Resident mode is ${config.worker.resident ? 'enabled' : 'disabled'}, and the idle-exit timeout is ${config.worker.idle_exit_ms} milliseconds. ${stopState}`;
+}
+
 export function workerItem(
   db: DatabaseSync | null,
   now: number,
   integrityFailed: boolean,
+  paths: OboetePaths,
+  config: OboeteConfig | null,
 ): DoctorItem {
+  const settings = workerSettings(config, paths);
   if (db === null) {
-    return dbUnread(
+    const unread = dbUnread(
       'worker',
       integrityFailed,
       'The database is unavailable, so the worker lease could not be verified.',
       'Queued events cannot be summarized until storage is open.',
       '`oboete doctor` after storage is repaired.',
     );
+    return { ...unread, reason: `${unread.reason} ${settings}` };
   }
   try {
     const row = db.prepare('SELECT owner_token, pid, heartbeat_at FROM worker_lease WHERE id = 1').get();
     if (row?.owner_token == null) {
-      return healthy('worker', 'No worker is running; a hook starts one when work is queued.');
+      return healthy(
+        'worker',
+        `No worker is running; a hook starts one when work is queued. ${settings}`,
+      );
     }
     const processId = asNumber(row.pid) ?? 0;
     if (stale(row.heartbeat_at, now)) {
@@ -322,7 +337,7 @@ export function workerItem(
         heartbeat === null ? 0 : Math.max(0, Math.round((now - heartbeat) / 1000));
       return degraded(
         'worker',
-        `The worker process ${processId} holds the lease but its last heartbeat was ${seconds} seconds ago.`,
+        `The worker process ${processId} holds the lease but its last heartbeat was ${seconds} seconds ago. ${settings}`,
         'Queued events are not summarized until the lease is reclaimed.',
         '`oboete observe` (it reclaims a stale lease and releases it when the queue is empty)',
       );
@@ -331,12 +346,12 @@ export function workerItem(
     const seconds = Math.max(0, Math.round((now - heartbeat) / 1000));
     return healthy(
       'worker',
-      `The worker process ${processId} is alive (heartbeat ${seconds} seconds ago).`,
+      `The worker process ${processId} is alive (heartbeat ${seconds} seconds ago). ${settings}`,
     );
   } catch (error) {
     return degraded(
       'worker',
-      describe(error),
+      `The worker lease could not be read: ${describe(error)}. ${settings}`,
       'Queued events are not summarized until the lease is reclaimed.',
       '`oboete observe` (it reclaims a stale lease and releases it when the queue is empty)',
     );

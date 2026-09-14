@@ -79,3 +79,14 @@ export function releaseLease(
     return 'released';
   });
 }
+
+/** Rotate the held token in place. pid and started_at stay; the lease is never free. */
+export function rotateLease(db: DatabaseSync, outgoing: string, now: number): string | null {
+  return transactionImmediate(db, () => {
+    const token = randomUUID();
+    const result = db
+      .prepare('UPDATE worker_lease SET owner_token = ?, heartbeat_at = ? WHERE id = 1 AND owner_token = ?')
+      .run(token, now, outgoing);
+    return Number(result.changes) === 0 ? null : token;
+  });
+}
