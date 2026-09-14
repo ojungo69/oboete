@@ -1144,6 +1144,21 @@ test('shouldSpawnResident follows [worker] resident and defaults true', async ()
   });
 });
 
+// A storage fault the handle survives: it stays open and its statements start failing, which is the
+// state `recordRunFailure` records as `storage_error` and then hands to a release probe. Dropping
+// the lease table from another connection produces exactly that.
+function failTheOpenHandle(fixture: Fixture): () => Promise<void> {
+  return async () => {
+    const other = openDatabase({ path: fixture.paths.db, timeoutMs: 1000 });
+    try {
+      other.db.exec('DROP TABLE worker_lease');
+    } finally {
+      other.db.close();
+    }
+    throw Object.assign(new Error('fixture storage failure'), { code: 'EIO' });
+  };
+}
+
 test('a cleanup ownership probe that cannot answer still records the run end', async () => {
   await withFixture(async (fixture) => {
     writeConfig(fixture, 'none');
@@ -1151,22 +1166,16 @@ test('a cleanup ownership probe that cannot answer still records the run end', a
       sessionId: 'probe-fault', prompts: ['Fail the ownership probe during cleanup.'],
     });
 
-    const exit = await runResident(fixture, {
-      sleep: async () => {
-        // A storage fault the handle survives: it stays open and its statements start failing,
-        // which is the state `recordRunFailure` records as `storage_error` and then hands to the
-        // shutdown probe. Dropping the lease table from another connection produces exactly that.
-        const other = openDatabase({ path: fixture.paths.db, timeoutMs: 1000 });
-        try {
-          other.db.exec('DROP TABLE worker_lease');
-        } finally {
-          other.db.close();
-        }
-        throw Object.assign(new Error('fixture storage failure'), { code: 'EIO' });
-      },
-    });
+    assert.equal(await runResident(fixture, { sleep: failTheOpenHandle(fixture) }), 3);
+    assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=storage_error/);
+  });
 
-    assert.equal(exit, 3);
+  // The one-shot release probes the same way. A running batch inside its reclaim window keeps the
+  // queue undrainable, so the pass reaches the wait between passes and the fault lands there.
+  await withFixture(async (fixture) => {
+    await captureRunningBatch(fixture);
+
+    assert.equal(await runObserveForFixture(fixture, { sleep: failTheOpenHandle(fixture) }), 3);
     assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=storage_error/);
   });
 });

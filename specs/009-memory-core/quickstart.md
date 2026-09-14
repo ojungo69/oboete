@@ -827,13 +827,13 @@ round for the inputs that had no reader.
 - Gate: `npm run build`, `npm run typecheck` and `npm run lint` exit 0. The full `npm test` passes
   on both supported Node versions — 1,510 pass / 0 fail / 2 skipped in the parallel leg and 280
   pass / 0 fail in the serial one, no `not ok` lines in either
-  (`t047-full-v24.16.0-r14.log`, `t047-full-v22.16.0-r14b.log`; the same legs before the last two
+  (`t047-full-v24.16.0-r15.log`, `t047-full-v22.16.0-r15.log`; the same legs before the last two
   review rounds are `t047-full-v24-r5.log` and `t047-full-v22-r5.log`, and before the first
   `t047-full-v24.16.0.log` and `t047-full-v22.16.0.log`). 32 of those tests are the resident's own,
-  in `test/unit/resident-worker.test.ts`. The Node 22 leg is the re-run: the first one lost
-  `matrix A2` in `migration-matrix.test.ts` to `ENOTEMPTY: directory not empty, rmdir
-  '<home>/workspace/.git'` inside the temporary home's teardown — the harness flake already filed
-  as #206, in a test this PR does not touch (`t047-full-v22.16.0-r14.log` keeps that leg).
+  in `test/unit/resident-worker.test.ts`. Two harness flakes were met and re-run along the way,
+  both in tests this PR does not touch: `matrix A2` lost to `ENOTEMPTY` inside the temporary home's
+  teardown (#206, `t047-full-v22.16.0-r14.log`), and CI lost `grok-other-handler-deny` and
+  `migration-promote` on one twin of the duplicated run (#168, #214), each green on the re-run.
 - Idle cost, contract item 12, measured on a replayed corpus rather than an empty process: the
   1,051-event fixture bundle replayed into a kept home (1,322 raw events, 100 batches, 48
   sessions), then quiesced, then a resident run with no injected clock and a raised idle timeout.
@@ -911,11 +911,15 @@ round for the inputs that had no reader.
   path. A storage fault leaves the handle open with its statements failing, so a probe outside the
   guard throws while the storage outcome is being recorded and the run ends with no `run end` line
   and no closed handle. `a cleanup ownership probe that cannot answer still records the run end`
-  asserts exit 3 and the run-end record, driving the fault by dropping `worker_lease` from a second
-  connection (RED before the fix: `Error: no such table: worker_lease` out of `shutdownResident`,
-  reported as a rejected call rather than an exit code). The one-shot mirror has no isolating test:
-  a one-shot pass reaches its only `sleep` seam while the queue is undrainable, and every stimulus
-  that leaves it undrainable also keeps the run away from the storage-failure path.
+  asserts exit 3 and the run-end record on both paths, driving the fault by dropping `worker_lease`
+  from a second connection. Each leg is RED against its own site: the resident leg with
+  `shutdownResident` unfixed (`Error: no such table: worker_lease` out of `shutdownResident`,
+  reported as a rejected call rather than an exit code), and the one-shot leg with only
+  `recordRunFailure` reverted (the same error out of `recordRunFailure`). The one-shot leg reaches
+  the fault through `captureRunningBatch`: a running batch inside its reclaim window keeps the
+  queue undrainable, so the pass waits between passes instead of releasing. The first draft of
+  this bullet claimed that seam did not exist; the Codex gate's fifth round named the fixture that
+  provides it.
 - What T047 does not claim: the resource sweep and soak (T042), the macOS platform leg (T040,
   deferred by the owner), and the pre-existing pass-loop defect filed as issue #231, which the
   resident inherits unchanged from the one-shot worker.
