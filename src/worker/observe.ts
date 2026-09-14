@@ -248,7 +248,15 @@ function releaseForExit(
     // Inside the transaction, after `releaseLease` has confirmed this row still carries this token:
     // a process suspended long enough to lose the lease must leave the stop request for the owner
     // that replaced it. Only a resident shutdown reaches here with `stopped`.
-    if (reason === 'stopped') clearWorkerStop(paths);
+    if (reason === 'stopped') {
+      // A sentinel that cannot be removed stops every later resident, so name the reason. The log
+      // write is quiet because this runs inside the release transaction: a throw here would roll
+      // the release back and leave the lease held as well.
+      const failure = clearWorkerStop(paths);
+      if (failure !== null) {
+        appendLogQuietly(paths.observeLog, 'warn', 'stop sentinel kept', { code: failure });
+      }
+    }
     const empty = releaseWithPending || queueIsEmpty(db, paths, token, now);
     if (empty) runtimeStateSet(db, 'last_run', JSON.stringify({ at: now, reason, ...result }), now);
     return empty;

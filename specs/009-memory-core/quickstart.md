@@ -819,17 +819,17 @@ gate and records why the four markers can be checked.
 ## E8 — resident observation worker (T047)
 
 2026-09-14, branch `009-t047-resident`. The binding spec is
-`contracts/resident-worker.md`, created at `f0f2dda6` before any implementation and amended in six
-later commits by what the implementation and the reviews exposed. Three implementation rounds (Grok, then Codex twice)
+`contracts/resident-worker.md`, created at `f0f2dda6` before any implementation and amended in the
+thirteen later commits that the implementation and the reviews exposed, the last of them this round's. Three implementation rounds (Grok, then Codex twice)
 with a review pass over each delta — correctness first, over-engineering second — and a final test
 round for the inputs that had no reader.
 
 - Gate: `npm run build`, `npm run typecheck` and `npm run lint` exit 0. The full `npm test` passes
-  on both supported Node versions — 1,510 pass / 0 fail / 2 skipped in the parallel leg and 280
+  on both supported Node versions — 1,512 pass / 0 fail / 2 skipped in the parallel leg and 280
   pass / 0 fail in the serial one, no `not ok` lines in either
-  (`t047-full-v24.16.0-r15.log`, `t047-full-v22.16.0-r15.log`; the same legs before the last two
+  (`t047-full-v24.16.0-r16.log`, `t047-full-v22.16.0-r16.log`; the same legs before the last two
   review rounds are `t047-full-v24-r5.log` and `t047-full-v22-r5.log`, and before the first
-  `t047-full-v24.16.0.log` and `t047-full-v22.16.0.log`). 32 of those tests are the resident's own,
+  `t047-full-v24.16.0.log` and `t047-full-v22.16.0.log`). 33 of those tests are the resident's own,
   in `test/unit/resident-worker.test.ts`. Two harness flakes were met and re-run along the way,
   both in tests this PR does not touch: `matrix A2` lost to `ENOTEMPTY` inside the temporary home's
   teardown (#206, `t047-full-v22.16.0-r14.log`), and CI lost `grok-other-handler-deny` and
@@ -920,6 +920,18 @@ round for the inputs that had no reader.
   queue undrainable, so the pass waits between passes instead of releasing. The first draft of
   this bullet claimed that seam did not exist; the Codex gate's fifth round named the fixture that
   provides it.
+- Two holes in this PR's own new code, found by the sixth review round and fixed with a pin each.
+  A database at schema version zero — what an interrupted first migration leaves behind — has no
+  `worker_lease` table, so the `spawnAfterSpool` probe threw instead of answering and every capture
+  spooled against a file that nothing would ever migrate; the catch now reads the version, which is
+  exactly the set of states with no lease table (`a version-zero database spools and still starts
+  the worker that migrates it`, RED before the fix on `spawned 0 !== 1`). And a stop sentinel that
+  cannot be removed exited `stopped` in silence, stopping every later resident on sight; the removal
+  now reports its error code and the release logs it (`a stop sentinel that cannot be removed is
+  logged and the lease is released anyway`, RED on the missing warn line while the run still exits 0
+  `reason=stopped`). Propagating the unlink failure instead was declined: the removal runs inside
+  the transaction that releases the lease, so a throw would roll the release back and leave the
+  sentinel as well as a held lease.
 - What T047 does not claim: the resource sweep and soak (T042), the macOS platform leg (T040,
   deferred by the owner), and the pre-existing pass-loop defect filed as issue #231, which the
   resident inherits unchanged from the one-shot worker.
@@ -950,11 +962,15 @@ file is named, the test is in `test/unit/resident-worker.test.ts`.
    `an idle exit preserves a stop sentinel written during that exit`,
    `signal handlers survive shutdown and a signalled worker preserves the stop sentinel`,
    `shutdown with queued work releases the lease so a later spawn can reach it`,
-   `observe --stop writes the sentinel and exits 0 without claiming the lease` and
+   `observe --stop writes the sentinel and exits 0 without claiming the lease`,
    `a cleanup ownership probe that cannot answer still records the run end` for the guard the
-   sequence runs inside.
+   sequence runs inside, and
+   `a stop sentinel that cannot be removed is logged and the lease is released anyway`, whose
+   fixture puts a directory at the sentinel path so `unlinkSync` fails with a code the log names.
 6. `capture.test.ts`'s `a schema-behind capture spools and still starts a worker when the lease is
-   free` and `a schema-behind capture does not start a worker while the lease is held`, the
+   free`, `a schema-behind capture does not start a worker while the lease is held` and
+   `a version-zero database spools and still starts the worker that migrates it` for the file an
+   interrupted first migration leaves behind, which has no lease table to read at all, the
    `upgraded` row of item 4's table, and `test/migrations/apply.test.ts`'s `a live worker defers the
    migration and a stale one is cleared by it` for the crash variant.
 7. `a stop before the provider request leaves the batch pending for immediate adoption`,

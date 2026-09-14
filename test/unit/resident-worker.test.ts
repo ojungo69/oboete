@@ -1025,6 +1025,30 @@ test('worker-stop is removed before the lease is released and pause is not consu
   });
 });
 
+test('a stop sentinel that cannot be removed is logged and the lease is released anyway', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    await captureEndedSession(fixture, {
+      sessionId: 'stop-undeletable',
+      prompts: ['Stop the resident once it is idle.'],
+    });
+    // A directory at the sentinel path exists for the stop check and refuses `unlinkSync`, which
+    // is the shape an unwritable state directory leaves behind. The stop then repeats for every
+    // later resident, so the run that could not clear it has to say so.
+    const clock = residentClock(() => {
+      mkdirSync(fixture.paths.workerStop, { recursive: true });
+    });
+    assert.equal(await runResident(fixture, clock), 0);
+    const log = readFileSync(fixture.paths.observeLog, 'utf8');
+    assert.match(log, /warn stop sentinel kept code=(EISDIR|EPERM)/);
+    assert.match(log, /run end .*reason=stopped/);
+    assert.equal(existsSync(fixture.paths.workerStop), true);
+    fixture.withDb((db) => {
+      assert.equal(db.prepare('SELECT owner_token FROM worker_lease WHERE id = 1').get()?.owner_token, null);
+    });
+  });
+});
+
 test('shutdown with queued work releases the lease so a later spawn can reach it', async () => {
   await withFixture(async (fixture) => {
     writeConfig(fixture, 'none');

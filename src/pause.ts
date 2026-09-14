@@ -1,6 +1,7 @@
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
+import { errorCode } from './log.js';
 import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from './paths.js';
 
 const PAUSED_TEXT =
@@ -53,11 +54,18 @@ export function writeWorkerStop(paths: OboetePaths): void {
   writeFileSync(paths.workerStop, '', { mode: 0o600 });
 }
 
-export function clearWorkerStop(paths: OboetePaths): void {
+/**
+ * Removes the sentinel and reports the error code when it survives: an unremovable sentinel stops
+ * every later resident on sight, so the run that could not clear it says so in the log.
+ */
+export function clearWorkerStop(paths: OboetePaths): string | null {
   try {
     unlinkSync(paths.workerStop);
-  } catch {
+    return null;
+  } catch (error) {
     // Already gone, or never written.
+    const code = errorCode(error);
+    return code === 'ENOENT' ? null : code;
   }
 }
 

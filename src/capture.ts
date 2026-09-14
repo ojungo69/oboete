@@ -793,7 +793,11 @@ function openCaptureDatabase(
       try {
         spawnAfterSpool = isLeaseFree(opened.db, Date.now());
       } catch {
-        // An unreadable lease leaves the spawn to the next hook.
+        // Version zero is the file an interrupted first migration leaves behind: it has no lease
+        // table, so nothing can be holding a lease and the worker that applies the migration has
+        // to be started, or every later capture spools against the same unmigrated file. Any
+        // other unreadable lease leaves the spawn to the next hook.
+        spawnAfterSpool = opened.schemaVersion === 0;
       }
       try {
         opened.db.close();

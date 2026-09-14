@@ -213,7 +213,10 @@ deleting it would silently discard a stop the user asked for; and a process that
 the lease would be deleting a sentinel aimed at its successor. Both are evaluated where they can be
 trusted: the removal runs inside the transaction that releases the lease, after its ownership test
 and before the row is cleared, so a process suspended between an unlocked check and the release
-cannot delete a sentinel its successor is meant to read.
+cannot delete a sentinel its successor is meant to read. A removal that fails for any reason other
+than the file already being gone is logged with its error code, and the release still completes: the
+sentinel then stops every later resident on sight, so the run that could not clear it is the only
+place that can say why.
 
 That last clause is the `releaseMaxRun` path, not the `releaseEmptyPass` path, and the distinction
 is load-bearing. `releaseLease` returns `kept` when its recheck finds work, and today that answer
@@ -253,8 +256,11 @@ exit is still the answer: the next capture spawns whatever is installed by then.
 
 Because a schema-behind capture closes its handle and spools without spawning a worker, the exit of
 an old resident is not by itself enough to get the new bundle running. Capture therefore attempts a
-best-effort worker start after a schema-behind spool as well, when the lease is free or stale. The
-migration fence itself is unchanged.
+best-effort worker start after a schema-behind spool as well, when the lease is free or stale. A
+database at schema version zero — what an interrupted first migration leaves behind — has no lease
+table at all, so the lease read fails rather than answering; that case counts as free, because
+nothing can hold a lease that does not exist and the worker that applies migration 0001 is the only
+way out. The migration fence itself is unchanged.
 
 That fence cannot be deadlocked by a long-lived process, and the reason is worth stating because the
 opposite is the obvious fear. `fenceOldWorker` in `src/db/open.ts` refuses only while the lease's
