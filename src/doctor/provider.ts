@@ -158,10 +158,15 @@ function configuredProvider(
 
   const credentials = readCredentials(preset, env, config.observer.agent_cli);
   if (!credentials.present) {
+    // An uncredentialed primary is one failed target, not a run without a provider: the chain is
+    // still attempted (contracts/provider-fallback.md "What the chain does not do").
+    const chained = admittedChain(config).targets.length > 0;
     return degraded(
       'provider',
       `No credentials are set for the ${preset} preset (${credentials.source}).`,
-      'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
+      chained
+        ? 'This target answers without a request, so every batch is summarized by the fallback chain below.'
+        : 'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
       credentialSteps(config, env) ||
         '`oboete setup --provider <preset>` (workers-ai is the free remote default; ollama stays local)',
     );

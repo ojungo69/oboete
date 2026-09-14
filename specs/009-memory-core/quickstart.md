@@ -1012,8 +1012,9 @@ requires an explicit spending policy. The same commit retires "M1 enables exactl
 preset at a time" in `specs/007-oboete-m1-alpha/contracts/observer.md`. Security-scoped work
 (consent, credentials, egress), so it was implemented in this session rather than delegated.
 
-- Gate: `npm run build`, `npm run typecheck`, `npm run lint` and `semgrep scan` (378 rules over the
-  six changed source files) exit 0 with 0 findings.
+- Gate: `npm run build`, `npm run typecheck`, `npm run lint` and `semgrep scan --config auto`
+  (over the nine changed source files) exit 0 with 0 findings, and `npm test` is green on Node
+  24.16.0 and 22.16.0.
 - Two keys, one default: `[observer] fallback` is at most three ordered `{preset, model}` targets
   and `[observer] cost_policy` defaults to `["free-tier", "local"]`. Every configuration that
   exists today parses to an empty admitted chain, so `consentHash` appends nothing and the literal
@@ -1025,6 +1026,14 @@ preset at a time" in `specs/007-oboete-m1-alpha/contracts/observer.md`. Security
   the request build, the final detector check, `markRequest` — so one batch is one payload and its
   sources settle once. `observation_batches.provider_attempts` counts the reservations the chain
   took, which nothing reads as a bound.
+- Packed CLI, 2026-09-15, temp home with no Workers AI credentials, a `ollama` target and a
+  policy-excluded `nim` target (`/var/tmp/oboete-009-t048/packed-receipt/`): `setup --accept-egress`
+  displays "Fallback targets, tried in this order only after a target fails" with the ollama target
+  and its sensitivity classes, and does not display the excluded one; `oboete doctor` then reports
+  `fallback:1 healthy  Target 1 is ollama with model qwen2.5:7b, admitted as local and ready`,
+  `fallback:2 warning  … which the cost policy does not admit`, and a `provider degraded` whose
+  consequence reads "every batch is summarized by the fallback chain below" rather than the
+  rule-based sentence — the uncredentialed primary is a failed target, not a run without a provider.
 - Measured, not asserted: a failing target that already answered does not spend a second
   allowance. The `unusable_output` case takes two reservations on one target (llm.ts's own retry)
   and makes zero requests to the next host; the three-target success case takes exactly three, one
@@ -1064,6 +1073,9 @@ otherwise.
     (`doctor.test.ts`) — one provider request with a three-target chain, `fallback:1` healthy and
     `fallback:2`/`fallback:3` warning, and the same test shows that admitting a paid class stops
     the stored consent from matching.
+15. `a primary with absent credentials is a failed target, not a run without a provider` — the
+    destination label comes from the primary's egress class, so the loop is reached and the local
+    target applies. Names the ceiling the contract retired.
 
 Setup's side of T037 is `adding a fallback target refuses --yes and is displayed before it is
 accepted` (`setup.test.ts`): a target written in after consent was stored refuses `--yes` with exit

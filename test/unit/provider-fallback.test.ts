@@ -338,3 +338,32 @@ test('a target that answers after two failures applies its output like any other
     assert.equal(/position=2/.test(log), false);
   });
 });
+
+test('a primary with absent credentials is a failed target, not a run without a provider', async () => {
+  await withFixture(async (fixture) => {
+    // No Workers AI credentials: the destination label still comes from the primary's egress, so
+    // the loop is reached and the primary is one more target that answers `no_provider`.
+    fixture.env = cleanEnv(fixture.home, {});
+    writeChainConfig(fixture, {
+      preset: 'workers-ai',
+      fallback: [{ preset: 'ollama', model: OLLAMA_MODEL }],
+      env: fixture.env,
+    });
+    const prompt = 'Record what happens when the primary has no secret at all.';
+    await captureEndedSession(fixture, { sessionId: 'chain-uncredentialed-primary', prompts: [prompt] });
+    const sourceId = eventId(fixture, prompt);
+
+    const hosts = counters();
+    const fetchImpl = chainFetch(hosts, { ollama: async () => openAiResponse(providerOutput(sourceId), OLLAMA_MODEL) });
+    assert.equal(await runObserveForFixture(fixture, { fetch: fetchImpl }), 0);
+
+    assert.equal(hosts.cloudflare, 0);
+    assert.equal(hosts.ollama, 1);
+    assert.deepEqual(batchRows(fixture), [
+      { destination: 'remote_observer', state: 'applied', degraded_reason: null, provider_attempts: 1 },
+    ]);
+    const log = readFileSync(fixture.paths.observeLog, 'utf8');
+    assert.match(log, /provider attempt .*position=0 preset=workers-ai reason=no_provider/);
+    assert.match(log, /batch .*state=applied/);
+  });
+});

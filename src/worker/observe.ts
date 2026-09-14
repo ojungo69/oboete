@@ -417,13 +417,15 @@ function claimObserveLease(
 
 type ResolvedObserver = { preset: PresetName | 'none'; model: string; chain: ChainTarget[] };
 
-function resolveObserveModel(config: OboeteConfig): ResolvedObserver {
+function resolveObserveModel(config: OboeteConfig, observeLog: string): ResolvedObserver {
   let resolved: ResolvedObserver;
   try {
     resolved = resolveModel(config);
-  } catch {
+  } catch (error) {
     // A configuration the resolver refuses — including an unusable fallback chain — is a run with
-    // no provider, never a crash (contracts/provider-fallback.md "Admission").
+    // no provider, never a crash (contracts/provider-fallback.md "Admission"). The batches then say
+    // `no_provider`; this line is what names the configuration that took the provider away.
+    appendLogQuietly(observeLog, 'warn', 'observer configuration refused', { code: errorCode(error) });
     resolved = { preset: config.observer.preset, model: '', chain: [] };
   }
   return resolved;
@@ -962,7 +964,7 @@ async function observeLifecycle(
       return;
     }
     const config = loadConfig(paths);
-    const resolved = resolveObserveModel(config);
+    const resolved = resolveObserveModel(config, paths.observeLog);
     const presetEntry = resolved.preset === 'none' ? null : PRESET_CATALOG[resolved.preset];
     const credentials =
       resolved.preset === 'none'

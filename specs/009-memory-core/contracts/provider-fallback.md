@@ -177,6 +177,12 @@ Every `FailureReason` therefore falls into one of two cases:
 
 A successful target ends the chain and the batch applies its output exactly as it does today.
 
+`language_mismatch` is the one stop that keeps its own reason rather than the most severe of the
+attempted ones: `retryOnLanguageMismatch` (`src/worker/observe-batch.ts:501-529`) owns its retry and
+its fallback, so a chain that met `provider_exhausted` first and then a second mismatch degrades with
+`language_mismatch`. It is the reason of the target that actually answered, which is the more useful
+of the two here, and it costs no code.
+
 ## When every target fails
 
 No new requeue path. `applyFallback` runs once with a rule-based output, and `outcomeForSource`
@@ -207,16 +213,17 @@ column cannot hold go to the observe log, one line per attempted target.
 
 ## What the chain does not do
 
-- **A statically unusable primary still makes the batch rule-based, before the chain is reached.**
-  `initialProviderFailure` (`src/worker/observe.ts:427-440`) answers `no_provider` when the primary
-  has no credentials, no model or no preset, and the batch is then stamped `fallback` and returns at
-  `src/worker/observe-batch.ts:557-560`. So a workers-ai primary with absent credentials and a
-  working `ollama` target produces rule-based memories, and `oboete doctor` is where the user learns
-  why. FR-011 and US7 scenario 5 both speak of a target that *fails or exhausts its allowance* —
-  a runtime event on a primary that was usable — so this is the scope T048 asks for. Lifting the
-  ceiling means choosing the batch's destination from the first *usable* target instead of the
-  primary, which changes `destinationFor`, `initialProviderFailure` and the `selectedDestination`
-  check together, and re-opens a privacy question the current label closes; it is a separate task.
+- **A primary the resolver refuses leaves no chain to try.** `resolveModel` throws on
+  `model_required`, `egress_widened` and `chain_without_primary`, and `resolveObserveModel`
+  (`src/worker/observe.ts:420-429`) turns that into a run with no model and no targets, so every
+  batch is rule-based with `no_provider` and `oboete doctor` is where the user learns why. Absent
+  *credentials* are not that case: the destination label comes from the primary's egress class alone
+  (`destinationFor` in `src/worker/batches.ts:400-415` reads `PRESET_CATALOG[preset].egress`, never
+  the secret), so the loop is reached and the uncredentialed primary is just the first target to
+  answer `no_provider`. A workers-ai primary with no `OBOETE_CF_API_TOKEN` and a working `ollama`
+  target therefore applies the local target's output (Verification 15). `initialProviderReason` still
+  decides the reason a batch already stamped `fallback` records, which is the per-row privacy split
+  below and not a property of the chain.
 - It never re-batches. Under a remote primary, `local_only` and `private` rows go to a rule-based
   `fallback` batch at batching time, as generation-privacy.md specifies; a local target later in the
   chain does not make them eligible. Sending the remote batch's payload to a local target is
@@ -260,3 +267,6 @@ column cannot hold go to the observe log, one line per attempted target.
     the sources are `processed`, and the observe log carries one line per failed target.
 14. `oboete doctor` with a three-target chain makes exactly one provider request, and lists every
     target's admission verdict and credential presence.
+15. A `workers-ai` primary with no credentials and an `ollama` target applies the ollama output: the
+    primary's host receives no request, ollama receives exactly one, and the batch is `applied` on
+    the `remote_observer` destination the primary's egress chose.

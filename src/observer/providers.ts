@@ -55,8 +55,13 @@ export function resolveModel(
   return { preset, model, chain: chain.targets };
 }
 
+/** The sentence a refused chain is reported with, wherever the refusal is noticed. */
+export function chainErrorMessage(error: ChainError): string {
+  return CHAIN_MESSAGES[error.code](error.position);
+}
+
 function chainError(error: ChainError): ProviderConfigError {
-  return new ProviderConfigError(CHAIN_MESSAGES[error.code](error.position), 'chain_unusable');
+  return new ProviderConfigError(chainErrorMessage(error), 'chain_unusable');
 }
 
 function credentialValue(credentials: Credentials, name: string): string {

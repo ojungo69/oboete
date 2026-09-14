@@ -91,17 +91,26 @@ incompatible progress conflicts without clock-only overwrites.
 Independent test: selected free/local/paid/agent modes obey consent and configured limits;
 free/local failure causes zero attempts at an unselected paid destination.
 
-- [ ] T037 [US7] Test mode choice, limit exhaustion and consent changes in `test/unit/providers.test.ts` and `test/unit/setup.test.ts`.
-- [ ] T038 [US7] Complete explicit cost-policy setup and reservation handling in `src/config.ts`, `src/setup/`, `src/observer/reservation.ts` and `src/doctor/provider.ts`.
-- [ ] T039 [US7] Verify no-model capture-only behavior and real chosen profiles through `src/doctor.ts`, packed CLI and `specs/009-memory-core/quickstart.md` evidence.
+- [X] T037 [US7] Test mode choice, limit exhaustion and consent changes in `test/unit/providers.test.ts` and `test/unit/setup.test.ts`.
+- [X] T038 [US7] Complete explicit cost-policy setup and reservation handling in `src/config.ts`, `src/setup/`, `src/observer/reservation.ts` and `src/doctor/provider.ts`.
+- [X] T039 [US7] Verify no-model capture-only behavior and real chosen profiles through `src/doctor.ts`, packed CLI and `specs/009-memory-core/quickstart.md` evidence.
 
 T037-T039 and T048 share one contract, `contracts/provider-fallback.md`, and one branch.
+
+Evidence for all four is `quickstart.md` section E9 and its fifteen numbered items, against the
+contract's verification list. T037 is `provider-fallback.test.ts` plus the two setup tests named
+there; T039 is the two doctor tests plus the packed-CLI gates in the same section. T038 needed **no
+new accounting**: `src/observer/reservation.ts` is unchanged, because `provider_usage.exhausted_at`
+is already per-preset and `DAILY_CAP` is already summed over the capped presets, so each target
+refuses at its own reservation with no write. The cost policy is `observer.cost_policy` in
+`src/config.ts` with `admittedChain` as its one reader, and `fallbackItems` in
+`src/doctor/provider.ts` reports each target's verdict.
 
 Owner amendment, 2026-09-10:
 
 - [X] T046 Record the approved resident-worker option and configured model/provider failover in `CONSTITUTION.md`, the local Spec Kit constitution, `specs/009-memory-core/spec.md` and `plan.md`.
 - [X] T047 [US1] Implement and verify resident waiting for new/due work, one owner through idle/active epochs, pause/stop/config changes and upgrade/crash recovery in `src/worker/`, capture startup and operator controls; retain bounded one-shot observe and prove idle/long-run resources.
-- [ ] T048 [US7] Implement a bounded, consented model/provider fallback chain after free-tier/API failures in provider selection, reservations, setup/config and worker processing; verify free-only admission, shared quota versus target failure, per-attempt source eligibility and all-targets-failed retention.
+- [X] T048 [US7] Implement a bounded, consented model/provider fallback chain after free-tier/API failures in provider selection, reservations, setup/config and worker processing; verify free-only admission, shared quota versus target failure, per-attempt source eligibility and all-targets-failed retention.
 
 ## Phase 10: Completed-product verification
 

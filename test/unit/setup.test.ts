@@ -199,6 +199,27 @@ test('a destination the run refuses is not written to the configuration', async 
   });
 });
 
+test('a destination that would strip the chain of its admission is refused before anything is written', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    // A remote target is admitted under a remote primary and merely skipped by the default cost
+    // policy, so this configuration is accepted as it stands.
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "nim"\n`);
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    const before = loadConfig(context.paths);
+
+    // `--provider ollama` narrows the primary's egress, which turns that entry into a widening one.
+    context.output = '';
+    assert.equal(await context.run(['--provider', 'ollama', '--accept-egress']), 2, context.output);
+    assert.match(context.output, /Fallback target 1 sends further/);
+
+    const after = loadConfig(context.paths);
+    assert.equal(after.observer.preset, before.observer.preset, 'the refused destination is not enabled');
+    assert.equal(after.consent.hash, before.consent.hash);
+  });
+});
+
 test('a machine with no supported agent says that nothing was wired', async () => {
   await withTempHome(async (home) => {
     const userHome = join(home, 'user');

@@ -539,6 +539,27 @@ test('the fallback chain is reported per target without a second provider reques
   });
 });
 
+test('an uncredentialed primary with an admitted chain says the chain summarizes, not the rules', async () => {
+  await harness(async (context) => {
+    delete context.env.OBOETE_CF_API_TOKEN;
+    delete context.env.OBOETE_CF_ACCOUNT_ID;
+    const observer = { preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+
+    await context.doctor(['--json']);
+    // The primary answers `no_provider` without a request and the chain carries the batch, so the
+    // rule-based consequence would be wrong here (contracts/provider-fallback.md).
+    assertBroken(context.item('provider'), 'degraded', 'summarized by the fallback chain');
+    assert.equal(context.item('fallback:1').status, 'healthy');
+  });
+});
+
 test('a fallback chain the resolver refuses is reported once, at its position', async () => {
   await harness(async (context) => {
     writeFileSync(context.paths.config, [
