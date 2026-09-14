@@ -1,0 +1,23 @@
+specs/009-memory-core/contracts/migration.md
+  s_a3b2da79705e65::t_90999819ff30d5 522,526,529-534
+specs/009-memory-core/quickstart.md
+  s_a3b2da79705e65::t_784c842ce6d927 344,780-817
+specs/009-memory-core/tasks.md
+  s_a3b2da79705e65::t_0fad2cfa5b0a64 74-77,181-183,194-196,321-343
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "6a8d97b30a78792eeaccc4046ac86fc18827d67e",
+  "prompts": {},
+  "sessions": {
+    "s_a3b2da79705e65": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c444def-d2de-453a-8d7f-00c27afdf4f3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
