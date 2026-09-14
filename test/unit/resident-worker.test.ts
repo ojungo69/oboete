@@ -1143,3 +1143,30 @@ test('shouldSpawnResident follows [worker] resident and defaults true', async ()
     assert.equal(shouldSpawnResident(fixture.paths), true);
   });
 });
+
+test('a cleanup ownership probe that cannot answer still records the run end', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    await captureEndedSession(fixture, {
+      sessionId: 'probe-fault', prompts: ['Fail the ownership probe during cleanup.'],
+    });
+
+    const exit = await runResident(fixture, {
+      sleep: async () => {
+        // A storage fault the handle survives: it stays open and its statements start failing,
+        // which is the state `recordRunFailure` records as `storage_error` and then hands to the
+        // shutdown probe. Dropping the lease table from another connection produces exactly that.
+        const other = openDatabase({ path: fixture.paths.db, timeoutMs: 1000 });
+        try {
+          other.db.exec('DROP TABLE worker_lease');
+        } finally {
+          other.db.close();
+        }
+        throw Object.assign(new Error('fixture storage failure'), { code: 'EIO' });
+      },
+    });
+
+    assert.equal(exit, 3);
+    assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /run end .*reason=storage_error/);
+  });
+});

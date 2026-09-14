@@ -547,9 +547,11 @@ async function observeLifecycle(
     const storageError = logFailed || isStorageError(error);
     exit = storageError ? 3 : 0;
     endReason = storageError ? 'storage_error' : 'worker_error';
-    if (!resident && ownsLease(db, token)) {
+    if (!resident) {
       try {
-        releaseForExit(db, paths, token, deps.now(), result, endReason, false);
+        // Inside the guard for the same reason as the resident's shutdown: on a failing handle the
+        // probe itself throws, and this runs while the storage outcome is being recorded.
+        if (ownsLease(db, token)) releaseForExit(db, paths, token, deps.now(), result, endReason, false);
       } catch {
         // R6: preserve the original storage outcome; a held lease becomes stale for takeover.
       }
@@ -629,7 +631,7 @@ async function observeLifecycle(
   async function observeClaimedLease(db: DatabaseSync): Promise<void> {
     const busyWaitMs = Math.min(Math.max(1, deps.heartbeatMs), BUSY_RETRY_MS);
     async function recoverAndClassify(): Promise<boolean> {
-      const recovered = await retryBusy(() => recoverSpool(db, paths, token, deps.now()));
+      const recovered = recoverSpool(db, paths, token, deps.now());
       result.recovered += recovered.inserted;
       // A spooled capture is still a capture, and this is the one that arrives on the resident's own
       // connection, which `data_version` deliberately does not see. The reset belongs here rather
@@ -968,8 +970,12 @@ async function observeLifecycle(
   }
 
   async function shutdownResident(): Promise<void> {
-    if (!db.isOpen || !ownsLease(db, token)) return;
+    if (!db.isOpen) return;
     try {
+      // The probe is a statement on a handle that is open but may already be failing, which is the
+      // state a storage fault leaves behind. This runs in the lifecycle's own `finally`, so a
+      // throw escaping here would cost the run its `run end` record and leave the handle open.
+      if (!ownsLease(db, token)) return;
       const released = releaseForExit(db, paths, token, deps.now(), result, endReason, true);
       if (released === 'released') await retryBusy(() => checkpoint(db, 'TRUNCATE'));
       else if (released === 'lost') endReason = 'lease_lost';
