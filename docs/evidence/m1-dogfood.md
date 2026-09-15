@@ -575,3 +575,65 @@ copied-credential hypothesis and its remediation.
 
 
 - Filed against the release (SC-007): https://github.com/ojungo69/oboete/issues/187
+
+## 2026-09-11 daily run (SC-007, day 6)
+
+- bundle 0.1.0-alpha.0, node v24.20.0, pairs `all`, 1-minute load at start 2.88, started 2026-09-10T16:05:04Z
+
+### Pairs (harness section, exit 1)
+
+#### 2026-09-10 run 2026-09-10T16-05-04-950Z
+
+- 6 of 12 pairs pass
+- No provider credentials: no
+- Report: <run>/report.json
+
+| seed | receive | status | elapsed ms | missing facts |
+|---|---|---:|---:|---|
+| claude | codex | pass | 65959 | none |
+| claude | grok | fail | 34049 | fact-2026-09-10T16-05-04-950Z-claude-to-grok-1: the build token is cedar.; fact-2026-09-10T16-05-04-950Z-claude-to-grok-2: the release bird is heron.; fact-2026-09-10T16-05-04-950Z-claude-to-grok-3: 配布色は琥珀。 |
+| claude | pi | pass | 46118 | none |
+| codex | claude | pass | 55925 | none |
+| codex | grok | fail | 37397 | fact-2026-09-10T16-05-04-950Z-codex-to-grok-1: the build token is cedar.; fact-2026-09-10T16-05-04-950Z-codex-to-grok-2: the release bird is heron.; fact-2026-09-10T16-05-04-950Z-codex-to-grok-3: 配布色は琥珀。 |
+| codex | pi | pass | 42851 | none |
+| grok | claude | fail | 543 | fact-2026-09-10T16-05-04-950Z-grok-to-claude-1: the build token is cedar.; fact-2026-09-10T16-05-04-950Z-grok-to-claude-2: the release bird is heron.; fact-2026-09-10T16-05-04-950Z-grok-to-claude-3: 配布色は琥珀。 |
+| grok | codex | fail | 525 | fact-2026-09-10T16-05-04-950Z-grok-to-codex-1: the build token is cedar.; fact-2026-09-10T16-05-04-950Z-grok-to-codex-2: the release bird is heron.; fact-2026-09-10T16-05-04-950Z-grok-to-codex-3: 配布色は琥珀。 |
+| grok | pi | fail | 531 | fact-2026-09-10T16-05-04-950Z-grok-to-pi-1: the build token is cedar.; fact-2026-09-10T16-05-04-950Z-grok-to-pi-2: the release bird is heron.; fact-2026-09-10T16-05-04-950Z-grok-to-pi-3: 配布色は琥珀。 |
+| pi | claude | pass | 36913 | none |
+| pi | codex | pass | 63806 | none |
+| pi | grok | fail | 36723 | fact-2026-09-10T16-05-04-950Z-pi-to-grok-1: the build token is cedar.; fact-2026-09-10T16-05-04-950Z-pi-to-grok-2: the release bird is heron.; fact-2026-09-10T16-05-04-950Z-pi-to-grok-3: 配布色は琥珀。 |
+
+### Doctor (credentials sourced)
+
+| item | status | reason |
+|---|---|---|
+| config | healthy | Configuration at /home/oboete-dogfood/.oboete/config.toml loaded (mode 0o600). |
+| paused | healthy | Not paused. |
+| storage | healthy | `/home/oboete-dogfood/.oboete/memory.db` opened; PRAGMA quick_check returned ok; 99 memories. |
+| fts | healthy | Full-text search is available (lexical in M1). |
+| migration | healthy | The schema is at version 3, the latest this bundle knows. |
+| worker | healthy | No worker is running; a hook starts one when work is queued. |
+| spool | healthy | Spool is writable and empty. |
+| provider | unverified | Not probed this run; last worker outcome: fallback/no_provider/2026-09-09T15:13:36.028Z. |
+| allowance | healthy | Estimated 150 of 150 calls remaining today (2026-09-10); resets at 2026-09-11T00:00:00.000Z. |
+| catalog | unverified | The cached catalog is stale; the worker refreshes it on the next batch. |
+| agent:claude | healthy | The hook fired and the event was stored (5406 milliseconds); trust: n/a. |
+| native-memory:claude | warning | claude: its own memory feature (claude_auto_memory) is enabled. oboete neither reads it nor changes it; the two run side by side. |
+| agent:codex | healthy | The hook fired and the event was stored (5654 milliseconds); trust: trusted. |
+| agent:grok | degraded | Grok rewrote its config.toml and dropped the oboete markers; the MCP table is still there. |
+| agent:pi | healthy | The hook fired and the event was stored (4848 milliseconds); trust: wired. |
+| unrecognized-agents | healthy | No invocation from an unrecognized agent. |
+| pi | healthy | No Pi diagnostics. |
+
+### Metrics
+
+- Provider usage (UTC 2026-09-10): no calls recorded
+- Memories: 103 total, 103 live, 26 sharing a material hash (duplicates)
+- Injection items omitted as duplicate_in_conversation: 3 (cumulative)
+- Raw events failed: 0 of 322 (cumulative)
+- Spool backlog: 0 files (0 failed)
+- Viewer GET /api/memories: median 5 ms, max 49 ms over 5 requests, 13 memories listed (budget 2000 ms)
+- finished 2026-09-10T16:12:12Z, 1-minute load 2.37
+
+
+- Filed against the release (SC-007): https://github.com/ojungo69/oboete/issues/189
