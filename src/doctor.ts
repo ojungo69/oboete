@@ -211,13 +211,13 @@ export function dbUnread(
   unavailable: string,
   consequence: string,
   recovery: string,
+  // Prefixed to whichever sentence is chosen. An item that has to name what it is about — a chain
+  // target names its position, preset and model (contracts/provider-fallback.md "Diagnostics") —
+  // would otherwise lose that to the integrity substitution and print the same line as every other.
+  subject = '',
 ): DoctorItem {
-  return unverified(
-    name,
-    integrityFailed ? INTEGRITY_UNVERIFIED : unavailable,
-    consequence,
-    recovery,
-  );
+  const reason = integrityFailed ? INTEGRITY_UNVERIFIED : unavailable;
+  return unverified(name, subject === '' ? reason : `${subject} ${reason}`, consequence, recovery);
 }
 
 export function failedItem(name: string, error: unknown): DoctorItem {

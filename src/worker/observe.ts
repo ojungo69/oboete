@@ -746,9 +746,7 @@ async function observeLifecycle(
       // configuration's entries instead, so the model is what identifies a target across the two.
       function logAttempts(): void {
         for (const attempt of attempts) {
-          // Quiet, and per line: these are written on the path where storage is already failing, and
-          // one append that cannot land must not take the remaining targets' lines with it.
-          appendLogQuietly(paths.observeLog, 'info', 'provider attempt', {
+          appendLog(paths.observeLog, 'info', 'provider attempt', {
             id: batch.id,
             position: attempt.position,
             preset: attempt.preset,
@@ -758,12 +756,22 @@ async function observeLifecycle(
         }
       }
 
+      /**
+        * One line per batch, always: the batch row may be committed before the pass fails, and a
+        * line that is simply absent then leaves nothing in the log for a batch the database says is
+        * applied. `state` and `reason` are the batch's; `error` and `pass` are the pass's, kept
+        * apart because a batch that settled on a reason of its own would otherwise hide the code of
+        * whatever failed after it.
+        */
       function logBatch(): void {
         logAttempts();
-        appendLog(paths.observeLog, batchError === undefined ? 'info' : 'error', 'batch', {
+        const failed = batchError !== undefined || passError !== undefined;
+        appendLog(paths.observeLog, failed ? 'error' : 'info', 'batch', {
           id: batch.id,
           state: batchResult?.state ?? 'error',
           reason: batchResult?.reason ?? (batchError === undefined ? 'none' : errorCode(batchError)),
+          ...(batchError === undefined ? {} : { error: errorCode(batchError) }),
+          ...(passError === undefined ? {} : { pass: errorCode(passError) }),
           ...(batchResult?.detail === undefined ? {} : { detail: batchResult.detail.split(/[\r\n]/)[0] }),
         });
       }
@@ -771,6 +779,7 @@ async function observeLifecycle(
       const attempts: ProviderAttempt[] = [];
       let batchResult: BatchResult | null = null;
       let batchError: unknown;
+      let passError: unknown;
       try {
         batchResult = (await processBatch({
           db, token, batch, config, deps: batchDeps, detect, providerState,
@@ -794,25 +803,24 @@ async function observeLifecycle(
         }
       }
 
+      // `checkpointBatch` rethrows a storage error, which ends the run. It is held rather than
+      // thrown here so that the log is written for the batch either way: the batch row may already
+      // be committed, and `recordRunFailure` reports this error, never the `batchError` the call
+      // above may have recorded.
       try {
         if (!leaseLost) await checkpointBatch();
       } catch (error) {
-        // `checkpointBatch` rethrows a storage error and the pass ends here. The attempt lines are
-        // the only record of what it spent (contracts/provider-fallback.md "Diagnostics"), and a
-        // `batchError` from the call above is the only record of why the batch itself failed —
-        // `recordRunFailure` reports this error, not that one. What is not written is a
-        // `state=applied` line for a pass that did not finish: the missing batch line says so.
-        try {
-          if (batchError === undefined) logAttempts();
-          else logBatch();
-        } catch {
-          // The batch line's own write can fail on the same disk; the storage error below is the
-          // one worth reporting.
-        }
-        throw error;
+        passError = error;
       }
 
-      logBatch();
+      try {
+        logBatch();
+      } catch (logError) {
+        // A log the worker cannot write is itself a storage failure and is worth exit 3 — but not
+        // in place of the one already in flight, which is the one `recordRunFailure` should see.
+        if (passError === undefined) throw logError;
+      }
+      if (passError !== undefined) throw passError;
     }
 
     async function processPendingBatches(): Promise<void> {

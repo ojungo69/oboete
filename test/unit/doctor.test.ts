@@ -1038,6 +1038,11 @@ test('a corrupt database names itself on the chain items, whatever the target is
     for (const name of ['fallback:1', 'fallback:2']) {
       assert.equal(context.item(name).status, 'unverified', `${name}: ${context.item(name).reason}`);
       assert.match(context.item(name).reason, /integrity check/i, context.item(name).reason);
+      // The integrity sentence replaces the item's own, so without a subject every chain item
+      // prints the same line and names no target at all (contracts/provider-fallback.md
+      // "Diagnostics": each target's position, preset and model).
+      assert.match(context.item(name).reason, /^Target [12] is (ollama|nim) with model \S+\./,
+        context.item(name).reason);
       assert.match(context.item(name).recovery, /after storage is repaired/, context.item(name).recovery);
       assert.doesNotMatch(context.item(name).recovery, /local model server/, context.item(name).recovery);
     }

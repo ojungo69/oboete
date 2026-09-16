@@ -1981,3 +1981,67 @@ It is now written as one statement of all six cases rather than a patch on the l
 Gate at this head: `npm test` 1567 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
 markdownlint clean; `semgrep scan --config auto` unchanged against the round-12 baseline; the lizard
 warning set differenced against `85d48437` adds nothing and drops two.
+
+### E9 follow-up — restating the block instead of patching it again
+
+`85cb4669..daa878d0` returned twelve findings, and the last one named what the previous three rounds
+had been doing: each fixed the case it was pointed at and added a branch to the same eleven lines.
+Two of the twelve were regressions from the round immediately before, which is the third time in a
+row. `review-rounds-narrowing-means-wrong-design` is the memory for that, and it says to stop
+patching and restate.
+
+What the block actually has to say is two independent facts, and every round so far had been
+encoding them as one:
+
+- **what the batch reached** — `state` and `reason`, which are the batch's and are true even when
+  the pass then fails, because `applyObservations` has already committed the row;
+- **how the pass ended** — `error` for a failure inside `processBatch`, `pass` for one out of
+  `checkpointBatch`.
+
+So the batch line is now written for every batch, always, with those as separate fields, and the
+"a missing line means the pass did not finish" convention is gone. It was never writable and it was
+already wrong: a committed `applied` batch whose checkpoint then failed left no line at all, and a
+batch whose destination is `fallback` — which returns before any target is attempted, so `attempts`
+is empty — wrote nothing whatsoever for a batch the database says it applied.
+
+Three regressions this fixes, all introduced by the two rounds before it:
+
+- `appendLogQuietly` in `logAttempts` removed the escalation of a log-write failure to exit 3. That
+  is `FR-002`'s rule for the hook, and the opposite of the worker's: on the stop path `logAttempts`
+  is the *only* log call, so a full disk became an exit 0. It is `appendLog` again, and the one
+  place a log failure must not win — while a storage error is already in flight — is stated where
+  that is true rather than by making every write quiet.
+- `reason: batchResult?.reason ?? errorCode(batchError)` let a batch that settled on a reason of its
+  own hide the code of whatever failed after it. `error` is its own field now.
+- Routing every `db === null` chain item through `dbUnread` lost the target's name: the integrity
+  substitution replaces the whole sentence, so `fallback:1` and `fallback:2` printed the same line
+  and named no position, preset or model — against "Diagnostics", which asks for all three.
+  `dbUnread` takes a `subject` now, the test pins it, and the recovery follows the failure: only a
+  corrupt database is a repair, while a missing, unwritable or schema-behind one is the `storage`
+  item's own business.
+
+Also: the excluded entry's consequence has three cases rather than two, because "no admitted target
+after it" and "the chain is not runnable at all" are different, and the second must not imply that
+adding a cost class would help — with a stale consent record the `consent` item is the one to act
+on. And `refusedPrimaryConsequence`'s doc block no longer claims `fallbackItems` reaches it.
+
+**Declined, filed as #246:** the `catch` around `processBatch` has no `isStorageError` rethrow, while
+`checkpointBatch` and `summarizeSession` both do — so the same error class exits 0 from one and 3
+from the other. It predates this pull request, and the same `catch` also receives busy errors that
+have already exhausted `retryBusy`, for which yielding may be right; splitting those is its own
+change.
+
+**Measured, and worth writing down:** `openObserveDatabase` left the lizard warning set this round
+without anyone touching it. It is a parser artefact, not a fix — lizard reports its span as
+`@374-798` (425 lines) where the function is 23 NLOC, and the round before reported `@374-1023`
+(650 lines). The differenced set is still the right gate, and it still adds nothing; but a warning
+that *disappears* has to be counted by hand before it is called fixed
+(`silent-oracle-is-not-under-the-bound`).
+
+One load-only failure on the Node 22.23.1 full run: `ENOTEMPTY ... rmdir
+'…/work/.git/ai/working_logs'` in `staleness.test.ts`, issue #206's teardown race. Green on the
+isolated rerun, 6 of 6.
+
+Gate at this head: `npm test` 1567 + 280 green on Node 24.16.0 and 22.23.1 (the latter after that
+rerun); typecheck, lint and markdownlint clean; `semgrep scan --config auto` unchanged against the
+round-12 baseline; the lizard warning set differenced against `85d48437` adds nothing.

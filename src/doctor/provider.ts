@@ -74,10 +74,10 @@ const FALLBACK_CONSEQUENCE =
  *
  * Admission alone is not enough to promise that, because a primary the *resolver* refuses leaves no
  * chain to try at all: `resolveObserveModel` turns the throw into a run with no model and no
- * targets. `providerItem` and `fallbackItems` notice that through `resolvedObserver` before they
- * reach this helper, but `allowanceItem` and the catalog items have no such step — so the test
- * belongs here, in the one function all of them share, rather than in the two that would otherwise
- * each need it.
+ * targets. `providerItem` notices that through `resolvedObserver` before it reaches this helper,
+ * but `allowanceItem` and the catalog items have no such step — so the test belongs here, in the
+ * function they share. `fallbackItems` asks `chainIsReachable` directly instead: what it reports is
+ * an entry the policy excluded, not a refused primary, and it has one more condition of its own.
  */
 function refusedPrimaryConsequence(
   config: OboeteConfig,
@@ -535,14 +535,16 @@ function unadmittedEntryItem(
     return warning(
       name,
       `${where}, whose "${catalog.costClass}" cost class \`[observer] cost_policy\` does not admit.`,
-      // A failure ahead of an excluded target is not the end of the chain when the policy admits
-      // another one *after* it: `daily_cap`, `auth_failed` and the rest advance past it
-      // (contracts/provider-fallback.md "Advance and stop"). An admitted target earlier in the
-      // chain is not that — it already had its turn. Written as the one boolean it is, rather than
-      // through `refusedPrimaryConsequence`, whose subject is a refused primary and not this.
-      admittedAfter && chainIsReachable(config, env)
-        ? 'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.'
-        : EXCLUDED_FALLS_THROUGH,
+      // Three cases, not two. A failure ahead of an excluded target reaches an admitted one only
+      // when the policy admits another *after* it — an admitted target earlier in the chain already
+      // had its turn (contracts/provider-fallback.md "Advance and stop"). And when the chain is not
+      // runnable at all, this entry's cost class is not what stopped it, so the item must not
+      // imply that the recovery below would help.
+      !admittedAfter
+        ? EXCLUDED_FALLS_THROUGH
+        : chainIsReachable(config, env)
+          ? 'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.'
+          : 'This target is never attempted, and the chain is not runnable for a separate reason: the `consent` and `provider` items above say which.',
       `Add "${catalog.costClass}" to \`[observer] cost_policy\` to admit it, or remove the entry.`,
     );
   }
@@ -566,20 +568,26 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
       'Set that credential in the shell that runs the agents, or remove the entry from the chain.',
     );
   }
-  const unverifiable = unverifiableTarget(catalog, config.observer.agent_cli);
   if (db === null) {
-    // Storage is the blocker, so it is what the item reports — `dbUnread` is also the only path that
-    // carries the integrity-check message, and telling the user to start a local model server while
-    // the database is corrupt names the wrong thing. The record, not an "allowance": `reserveAttempt`
-    // reads `presetExhaustedAt` above `capped`, so an uncapped target has a stamp here too.
+    // Storage is the blocker, so it is what the item reports: telling the user to start a local
+    // model server while the database is corrupt names the wrong thing. The target still names
+    // itself through `subject`, because the integrity substitution replaces the whole sentence and
+    // every chain item would otherwise print the same one. The record, not an "allowance":
+    // `reserveAttempt` reads `presetExhaustedAt` above `capped`, so an uncapped target has a stamp
+    // in it too. The recovery follows the failure — only `integrityFailed` is a repair; a database
+    // that is missing, unwritable or behind the schema is the `storage` item's own business.
     return dbUnread(
       name,
       integrityFailed,
-      `${where}, and today's provider usage record could not be read.`,
+      "Today's provider usage record could not be read.",
       'Whether this target has already refused itself today is unknown until storage is open.',
-      '`oboete doctor` after storage is repaired.',
+      integrityFailed
+        ? '`oboete doctor` after storage is repaired.'
+        : 'The `storage` item above says what the database needs.',
+      `${where}.`,
     );
   }
+  const unverifiable = unverifiableTarget(catalog, config.observer.agent_cli);
   // A refusal this item can read outranks one it cannot. `reserveAttempt` consults the exhaustion
   // stamp before it looks at `capped`, so an uncapped local target that reported exhaustion today
   // is refused on every attempt; reporting "not checked here" instead would call a known,
