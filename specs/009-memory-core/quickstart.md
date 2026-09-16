@@ -1556,3 +1556,34 @@ refuses and only which reasons stop, leaving the rest to be inferred.
 Gate at this head: `npm test` 1554 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
 markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
 `85d48437` adds nothing.
+
+### E9 follow-up — the ninth bot round
+
+Two P2s, both taken, and both are the same shape as earlier rounds one surface further out: a report
+that displays the chain and then describes the primary as the whole provider configuration.
+
+- **The reserved band kept the refused-primary consequence.** `allowanceClause` was added in the
+  fifth round precisely so 140–149 calls could say something true — end-of-session summaries still
+  run — and `providerCapItem` then used only its `reason`, passing the spent state's consequence and
+  re-implementing its `recovery` inline in different words. So at 145 calls the `provider` item said
+  processing waits (or that the chain takes the batch) while `reserveAttempt` still grants a
+  `session_end` batch that very preset. `refusedPrimaryConsequence` gained a default-argument so the
+  band can pass the clause's own sentence as the unchained case, and the inline recovery is gone;
+  both cap states now quote the clause the `allowance` item quotes.
+- **`credentialGuidance` said "written by rule alone" over a usable chain.** With a `workers-ai`
+  primary and no `OBOETE_CF_API_TOKEN`, the same report displayed an admitted `ollama` target and
+  then told the user memories come from the rules — while Verification 15 pins that the worker
+  advances past the primary's `no_provider` and applies that target's output. The doctor item was
+  corrected for this in the fourth round; the setup report never was.
+
+Red before each fix: the allowance table test's reserved row returned the waiting consequence and
+the second copy of the recovery, and the new setup test's
+`/fallback targets shown above are attempted instead/` did not match.
+
+`npm test` on Node 22.23.1 failed once here with `a busy database spools inside the capture budget`
+— "the hook took 493.6 ms" against the 300 ms budget — when it ran immediately after the Node 24.16.0
+suite on the same machine. Alone it is green (1555 + 280, 0 fail, 2 skipped). Same load-only family
+as issues #203 and #168, and as the CI flake filed as #243 in this PR.
+
+Gate at this head: `npm test` green on Node 24.16.0 and 22.23.1; typecheck, lint, markdownlint and
+`semgrep scan --config auto` clean; lizard warning set differenced against `85d48437` adds nothing.
