@@ -245,21 +245,23 @@ column cannot hold go to the observe log, one line per attempted target.
 
 - **Observe log**: one `provider attempt` line per target with its position, preset, model and
   outcome reason, then one `batch` line. That batch line is written for every batch the pass
-  reached, even when the pass then fails: `applyObservations` commits the row before the checkpoint
-  that follows it, so a line left out would leave nothing at all in the log for a batch the database
-  says is applied. It carries the *batch's* `state` and `reason`, and separately the *pass's*
-  `error` (a failure inside `processBatch`) and `pass` (one out of the checkpoint after it) — kept
-  apart because a batch that settled on a reason of its own would otherwise hide the code of
-  whatever failed later. The attempt lines are written with the swallowing writer and the batch line
-  with the throwing one: an unwritable log is a storage failure worth exit 3, but a pass that stops
-  must still clear the worker-stop sentinel, and one attempt append must not take the batch line
-  with it. This is the surface that
+  reached, with one exception — a pass that stops between targets writes its attempt lines and no
+  batch line — and it is written even when the pass then fails: `applyObservations` commits the row
+  before the checkpoint that follows it, so a line left out would leave nothing at all in the log
+  for a batch the database says is applied. It carries the *batch's* `state` and `reason`, and
+  separately the *pass's* `error` and `pass` — kept apart because a batch that settled on a reason
+  of its own would otherwise hide the code of whatever failed later. The split between those two is
+  by severity, not by where the failure happened: `pass` is a storage failure out of the checkpoint,
+  which ends the run, and `error` is everything else, whether it came from `processBatch` or from a
+  checkpoint failure the worker carries on past. The attempt lines are written with the swallowing
+  writer and the batch line with the throwing one: an unwritable log is a storage failure worth exit
+  3, but a pass that stops must still clear the worker-stop sentinel, and one attempt append must
+  not take the batch line with it. This is the surface that
   "distinguishes each target's fixed failure reason from successful generation" (US7 scenario 6);
   the reasons are codes, never provider response text. The line's `position` is the attempt order
   with the primary at 0, while `fallback:N` in `oboete doctor` numbers the *configuration's* entries
   — an entry the policy excludes has a doctor number and no attempt position — so `model` is what
-  identifies one target across the two surfaces. A pass that stops between targets writes its
-  attempt lines and no batch line.
+  identifies one target across the two surfaces.
 - **`oboete doctor`**: the provider item keeps probing the **primary only**. `providerItem`
   (`src/doctor/provider.ts`) calls `summarizeWithProvider` with a real reservation, so one probe per
   target would spend the daily allowance on diagnostics. The chain is reported statically: each

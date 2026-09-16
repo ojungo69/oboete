@@ -746,9 +746,10 @@ async function observeLifecycle(
       // configuration's entries instead, so the model is what identifies a target across the two.
       // Quietly, for two reasons. A pass that stops writes these and returns: a throw there escapes
       // to `recordRunFailure`, which ends the run as `storage_error` instead of `stopped`, and
-      // `releaseForExit` clears the worker-stop sentinel only for `stopped` — so a full disk would
-      // leave every later resident refusing to run. And the batch line below is what escalates a
-      // log that cannot be written; one attempt append must not take it with them.
+      // `releaseForExit` clears the worker-stop sentinel only for `stopped` — so a full disk during
+      // a stop would leave the sentinel behind for the next resident, which reads it at startup,
+      // exits `stopped` without doing any work and clears it then. And the batch line below is what
+      // escalates a log that cannot be written; one attempt append must not take it with them.
       function logAttempts(): void {
         for (const attempt of attempts) {
           appendLogQuietly(paths.observeLog, 'info', 'provider attempt', {

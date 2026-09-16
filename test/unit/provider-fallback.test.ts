@@ -579,7 +579,11 @@ test('a stop is noticed even when the next target could not have made a request'
   });
 });
 
-test('a log the worker cannot write ends the run as a storage failure', async () => {
+test('a log the worker cannot write ends the run as a storage failure', async (t) => {
+  if (process.getuid?.() === 0) {
+    t.skip('the root user writes into a file without write permission');
+    return;
+  }
   await withFixture(async (fixture) => {
     fixture.env = chainEnv(fixture);
     writeChainConfig(fixture, {
@@ -593,6 +597,7 @@ test('a log the worker cannot write ends the run as a storage failure', async ()
 
     const hosts = counters();
     const fetchImpl = chainFetch(hosts, {
+      cloudflare: async () => { throw new Error('connection refused'); },
       // Read-only from the answer on, so the `batch` line's own append fails. That line is written
       // with the throwing writer on purpose: `EACCES` is `isStorageError`, so `recordRunFailure`
       // ends the run at exit 3 instead of reporting a clean pass over a log nobody can read.
@@ -610,6 +615,18 @@ test('a log the worker cannot write ends the run as a storage failure', async ()
 
     assert.equal(hosts.ollama, 1);
     assert.equal(exit, 3, 'an unwritable observe log is a storage failure, not a clean run');
+    // The exit alone does not say why: `logEnd` returns 3 when its own append fails, whatever the
+    // run reached. What separates the two is where the run stopped — the same scenario with a
+    // writable log ends `empty` at exit 0, having drained the session-end summary behind this
+    // batch; this one throws out of the batch line and records no end at all.
+    let lastRun: unknown;
+    fixture.withDb((db) => {
+      lastRun = db.prepare('SELECT value_json FROM runtime_state WHERE key = ?').get('last_run');
+    });
+    assert.equal(lastRun, undefined, 'a storage failure leaves the queue undrained, unlike a clean pass');
+    // The attempt lines use the quiet writer, so the unwritable log swallows them instead of
+    // ending the run before the batch line decides its exit.
+    assert.doesNotMatch(readFileSync(fixture.paths.observeLog, 'utf8'), /provider attempt/);
   });
 });
 

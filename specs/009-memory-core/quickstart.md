@@ -2063,8 +2063,10 @@ about the shape and wrong in three details, two of which a reviewer confirmed by
 - Writing the attempt lines with the **throwing** writer put the worker-stop sentinel at risk. A
   pass that stops calls `logAttempts` and returns; a throw there reaches `recordRunFailure`, which
   ends the run as `storage_error` rather than `stopped`, and `releaseForExit` clears the sentinel
-  only for `stopped`. A full disk during a stop would have left every later resident refusing to
-  run until someone deleted the marker by hand. The attempt lines are written quietly again; the
+  only for `stopped`. A full disk during a stop would have left the sentinel behind: the stop the
+  user asked for is reported as a storage failure, and the next resident spends its whole run
+  reading the marker at startup, exiting `stopped` and clearing it — one run lost, not a worker that
+  never runs again. The attempt lines are written quietly again; the
   **batch** line keeps the throwing writer, and it is the one that escalates — `EACCES` and `ENOSPC`
   are `isStorageError`. That is also what makes one failed attempt append no longer take the batch
   line with it.
@@ -2096,3 +2098,54 @@ Also declined here and already filed: #246.
 Gate at this head: `npm test` 1568 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
 markdownlint clean; `semgrep scan --config auto` unchanged against the round-12 baseline; the lizard
 warning set differenced against `85d48437` adds nothing.
+
+### E9 follow-up — the consent check moves to the seam that already collapses the chain
+
+`37533dc2..663d1be0` returned fourteen findings; thirteen adopted, one declined and filed. The top
+one is the round before's own fix placed at the wrong altitude, which is the shape
+`patched-handler-needs-restating-not-another-branch` describes.
+
+**The consent check was in one entry's verdict, and belongs at the chain's seam.** The previous
+round added it to the *excluded* branch of `unadmittedEntryItem`, so a stale consent hash still let
+an admitted target report `healthy … admitted as remote and ready` — the report's largest untruth,
+because no target is attempted at all. One hash covers the primary and the whole chain, so the test
+belongs where `fallbackItems` already collapses the chain into a single item on a resolver refusal.
+The guard there replaces the third branch, its second spelling of `chainIsReachable`, the
+three-case consequence and the two-case recovery, and takes `config` and `env` off
+`unadmittedEntryItem` entirely. The file is +29/−27: the branch is gone and the reasoning it had
+spread across two verdicts is now stated once, next to the guard.
+
+**Now pinned** (`test/unit/doctor.test.ts`): a stale record with two configured entries yields
+exactly `['fallback']` — RED without the guard on `actual: ['fallback:1', 'fallback:2']` — and a
+matching record still yields `['fallback:1', 'fallback:2']`, so the guard cannot pass by refusing
+everything.
+
+**The unwritable-log test asserted the wrong thing.** `exit === 3` does not discriminate: `logEnd`
+returns 3 when its own append fails, whatever the run reached. The same scenario with a writable log
+was measured — exit 0, `last_run` reason `empty`, attempt lines present — so the test now asserts
+what actually differs: the failing run records no `last_run` at all, because it throws out of the
+batch line instead of draining the session-end summary behind it, and the attempt lines are absent,
+which is the quiet writer doing its job. Two more from the same finding list: the Workers AI primary
+is stubbed with a throwing handler rather than left to `chainFetch`'s `assert.fail`, which the
+worker's own catch would swallow into an ordinary provider failure; and the test skips under root
+like the other permission fixtures (`test/fault-storage.test.ts`).
+
+**Two overstatements corrected.** The contract called `error` "a failure inside `processBatch`" and
+`pass` "one out of the checkpoint after it". The split is by severity, not by location:
+`checkpointBatch` puts a *non-storage* failure into `batchError` and rethrows only storage errors,
+so `pass` is the storage failure that ends the run and `error` is everything else. And "a full disk
+during a stop would leave every later resident refusing to run" was too strong — the next resident
+reads the sentinel in `controlReason()` at startup, exits `stopped` without doing any work and
+clears it there. The cost is one lost run, not a dead worker; corrected in the code comment, this
+document and the contract. The contract's stop-path exception now sits beside the sentence it
+qualifies rather than at the end of the bullet.
+
+**Filed rather than fixed:** #248 — a stop that ends as `storage_error` leaves its sentinel behind,
+because `releaseForExit` clears it only for `stopped`. Clearing it whenever `isWorkerStopped` holds
+was the finding's own suggestion and was declined: it would swallow a stop request written *during*
+an unrelated exit, which three existing tests pin.
+
+Gate at this head: `npm test` 1569 + 280 green on Node 24.16.0 and 22.23.1, no flake either run;
+typecheck, lint and markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged against
+the round-12 baseline and none in a touched file; the lizard warning set differenced against
+`85d48437` adds nothing (113 of the base's 116, the three absences all counted in earlier rounds).

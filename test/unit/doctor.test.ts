@@ -1660,6 +1660,29 @@ test('an unresolvable primary makes every item stop promising the chain', async 
   });
 });
 
+test('a consent record that no longer matches collapses the chain instead of calling a target ready', async () => {
+  await withItemDatabase(async (db) => {
+    // One hash covers the primary and the whole chain, so a record that stopped matching stops
+    // every target before any is reached. A per-entry verdict under that is the report's largest
+    // untruth: `admitted as remote and ready` for a target the worker will never attempt.
+    const stale = configSchema.parse({
+      observer: { preset: 'workers-ai', cost_policy: ['free-tier', 'local', 'remote'],
+        fallback: [{ preset: 'ollama', model: 'qwen3:8b' }, { preset: 'nim' }] },
+      consent: { hash: 'not-the-tuple', accepted_at: ITEM_NOW },
+    });
+    const env = { ...ITEM_ENV, OBOETE_NIM_API_KEY: 'k' };
+    const items = fallbackItems(stale, db, false, env, ITEM_NOW);
+    assert.deepEqual(items.map((entry) => entry.item), ['fallback']);
+    assertBroken(items[0], 'degraded', '2 entries are configured', 'setup --accept-egress');
+
+    // And the matching record still reports each target, so the check is not simply refusing.
+    const fresh = consented({ preset: 'workers-ai', cost_policy: ['free-tier', 'local', 'remote'],
+      fallback: [{ preset: 'ollama', model: 'qwen3:8b' }, { preset: 'nim' }] });
+    assert.deepEqual(fallbackItems(fresh, db, false, env, ITEM_NOW).map((entry) => entry.item),
+      ['fallback:1', 'fallback:2']);
+  });
+});
+
 test('a cost-policy exclusion says the chain continues when another target is admitted', async () => {
   await withItemDatabase(async (db, paths) => {
     void paths;

@@ -89,6 +89,9 @@ function refusedPrimaryConsequence(
 ): string {
   return chainIsReachable(config, env) ? whenChained : otherwise;
 }
+/** What an excluded entry means when an admitted target does come after it. */
+const CHAIN_TAKES_THE_FAILURE =
+  'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.';
 /** What an excluded entry means when no admitted target comes after it. */
 const EXCLUDED_FALLS_THROUGH =
   'This target is never attempted, so nothing past it is reached: once the targets ahead of it have '
@@ -486,6 +489,20 @@ export function fallbackItems(
     'Set `[observer] model` in the configuration file to a model that preset accepts, then run `oboete doctor` again.',
   );
   if (!('kind' in resolved)) return [resolved];
+  // Consent authorizes the primary and the whole chain with one hash, so a record that does not
+  // match stops every target before any of them is reached — an admitted target reported ready
+  // would be the report's largest untruth, and there is no `consent` item to carry this instead
+  // (contracts/provider-fallback.md "Diagnostics"). Collapsed into one item for the same reason a
+  // refused resolver is: no per-target verdict below it means anything.
+  if (!consentMatches(config, env)) {
+    return [degraded(
+      'fallback',
+      `No fallback target is attempted: ${entries.length} entries are configured and the`
+      + ' configuration has not been accepted for egress.',
+      'Every batch is rule-based until the configuration on screen is accepted.',
+      '`oboete setup --accept-egress`',
+    )];
+  }
   return entries.map((entry, index) => fallbackTargetItem({
     entry, position: index + 1, verdict: chain.verdicts[index],
     // The chain is ordered, so "a failure ahead of this entry" reaches a target only when an
@@ -519,8 +536,6 @@ function unadmittedEntryItem(
   catalog: (typeof PRESET_CATALOG)[PresetName],
   verdict: ChainVerdict,
   admittedAfter: boolean,
-  config: OboeteConfig,
-  env: NodeJS.ProcessEnv,
 ): DoctorItem | null {
   if (verdict === 'covered') {
     // Adding the cost class cannot make a duplicate runnable, so this verdict must not recommend it.
@@ -535,24 +550,13 @@ function unadmittedEntryItem(
     return warning(
       name,
       `${where}, whose "${catalog.costClass}" cost class \`[observer] cost_policy\` does not admit.`,
-      // Three cases, not two. A failure ahead of an excluded target reaches an admitted one only
-      // when the policy admits another *after* it — an admitted target earlier in the chain already
-      // had its turn (contracts/provider-fallback.md "Advance and stop"). And when the chain is not
-      // runnable at all, this entry's cost class is not what stopped it, so the item must not
-      // imply that the recovery below would help.
-      !admittedAfter
-        ? EXCLUDED_FALLS_THROUGH
-        : chainIsReachable(config, env)
-          ? 'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.'
-          // Only one thing is left when a target is admitted after this entry: `resolvedObserver`
-          // returned early on a resolver refusal, so `chainIsReachable` can only be false here
-          // because the stored consent record no longer matches. Naming it is the point — the cost
-          // class is not what stopped the chain, and adding it would change nothing.
-          : 'This target is never attempted, and no target is: the stored consent record no longer matches this configuration.',
-      admittedAfter && !chainIsReachable(config, env)
-        ? '`oboete setup --accept-egress`, then add '
-          + `"${catalog.costClass}" to \`[observer] cost_policy\` if this entry should be admitted too.`
-        : `Add "${catalog.costClass}" to \`[observer] cost_policy\` to admit it, or remove the entry.`,
+      // A failure ahead of an excluded target reaches an admitted one only when the policy admits
+      // another *after* it — an admitted target earlier in the chain already had its turn
+      // (contracts/provider-fallback.md "Advance and stop"). The other way the chain can be dead,
+      // an unaccepted configuration, is answered by `fallbackItems` before any entry is reported,
+      // so this verdict never has to carry it.
+      admittedAfter ? CHAIN_TAKES_THE_FAILURE : EXCLUDED_FALLS_THROUGH,
+      `Add "${catalog.costClass}" to \`[observer] cost_policy\` to admit it, or remove the entry.`,
     );
   }
   return null;
@@ -564,7 +568,7 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
   const catalog = PRESET_CATALOG[entry.preset];
   const model = targetModel(entry.preset, entry.model);
   const where = `Target ${position} is ${entry.preset} with model ${model}`;
-  const unadmitted = unadmittedEntryItem(name, where, catalog, verdict, admittedAfter, config, env);
+  const unadmitted = unadmittedEntryItem(name, where, catalog, verdict, admittedAfter);
   if (unadmitted !== null) return unadmitted;
   const credentials = readCredentials(entry.preset, env, config.observer.agent_cli);
   if (!credentials.present) {
@@ -577,9 +581,7 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
   }
   if (db === null) {
     // Storage is the blocker, so it is what the item reports: telling the user to start a local
-    // model server while the database is corrupt names the wrong thing. The target still names
-    // itself through `subject`, because the integrity substitution replaces the whole sentence and
-    // every chain item would otherwise print the same one. The record, not an "allowance":
+    // model server while the database is corrupt names the wrong thing. The record, not an "allowance":
     // `reserveAttempt` reads `presetExhaustedAt` above `capped`, so an uncapped target has a stamp
     // in it too. The recovery follows the failure — only `integrityFailed` is a repair; a database
     // that is missing, unwritable or behind the schema is the `storage` item's own business.
@@ -592,9 +594,9 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
         ? '`oboete doctor` after storage is repaired.'
         : 'The `storage` item above says what the database needs.',
     );
-    // The integrity substitution replaces the whole sentence, so the target's name is put back the
-    // way `workerItem` does it (src/doctor/storage.ts): without it every chain item prints the same
-    // line and names no position, preset or model, against "Diagnostics".
+    // The integrity substitution replaces the whole sentence, so the preset and model are put back
+    // the way `workerItem` does it (src/doctor/storage.ts). Only the position survives on its own,
+    // in the item's name, and "Diagnostics" asks for all three.
     return { ...unread, reason: `${where}. ${unread.reason}` };
   }
   const unverifiable = unverifiableTarget(catalog, config.observer.agent_cli);
