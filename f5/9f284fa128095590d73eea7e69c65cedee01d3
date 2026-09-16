@@ -1,0 +1,20 @@
+src/setup/setup.ts
+  s_892d4f75e21024::t_2b18b4a82a0f55 344
+  s_892d4f75e21024::t_6ec2e2e9b2eee9 330-343,345-357,385-387
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "f59f284fa128095590d73eea7e69c65cedee01d3",
+  "prompts": {},
+  "sessions": {
+    "s_892d4f75e21024": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79c129f3-aa1e-4d43-970b-c316e499606d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
