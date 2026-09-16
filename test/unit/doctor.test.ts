@@ -537,7 +537,7 @@ test('the fallback chain is reported per target without a second provider reques
     // comes after this entry. The single admitted target here is position 1, before both, and by
     // the time the chain is at 2 that target has already failed.
     for (const name of ['fallback:2', 'fallback:3']) {
-      assert.match(context.item(name).consequence, /falls through to rule-based records/,
+      assert.match(context.item(name).consequence, /once the targets ahead of it have failed, the batch is rule-based/,
         context.item(name).consequence);
     }
     assert.equal(context.item('provider').status, 'healthy', context.output);
@@ -1012,6 +1012,35 @@ test('quick_check failure degrades storage with exit 3 and does not spawn agent 
       assert.match(context.item(name).reason, /integrity check/i);
     }
     assert.equal(spawned, 0, 'probe must not spawn against a corrupt database');
+  });
+});
+
+test('a corrupt database names itself on the chain items, whatever the target is', async () => {
+  await harness(async (context) => {
+    // Both kinds of target: one whose runnability this report never checks (`ollama`) and one whose
+    // allowance it normally reads (`nim`). Storage is the blocker for both, so both say so — a
+    // target reporting "start your local model server" while the database is corrupt would name the
+    // wrong thing, and `dbUnread` is the only path that carries the integrity message at all.
+    context.env.OBOETE_NIM_API_KEY = 'nvapi-doctor-test';
+    const observer = { preset: 'workers-ai', cost_policy: ['free-tier', 'local', 'remote'],
+      fallback: [{ preset: 'ollama', model: 'qwen3:8b' }, { preset: 'nim' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"', 'cost_policy = ["free-tier", "local", "remote"]',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[[observer.fallback]]', 'preset = "nim"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    corruptQuickCheck(context.paths.db);
+
+    assert.equal(await context.doctor(['--json']), 3, context.output);
+    for (const name of ['fallback:1', 'fallback:2']) {
+      assert.equal(context.item(name).status, 'unverified', `${name}: ${context.item(name).reason}`);
+      assert.match(context.item(name).reason, /integrity check/i, context.item(name).reason);
+      assert.match(context.item(name).recovery, /after storage is repaired/, context.item(name).recovery);
+      assert.doesNotMatch(context.item(name).recovery, /local model server/, context.item(name).recovery);
+    }
   });
 });
 

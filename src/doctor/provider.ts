@@ -91,7 +91,8 @@ function refusedPrimaryConsequence(
 }
 /** What an excluded entry means when no admitted target comes after it. */
 const EXCLUDED_FALLS_THROUGH =
-  'This target is never attempted, so a failure ahead of it falls through to rule-based records.';
+  'This target is never attempted, so nothing past it is reached: once the targets ahead of it have '
+  + 'failed, the batch is rule-based.';
 /** What a refused probe reservation means when the chain is reachable. */
 const REFUSED_RESERVATION =
   'This reservation is refused without a request, so the batch is offered to the fallback chain below.';
@@ -537,15 +538,10 @@ function unadmittedEntryItem(
       // A failure ahead of an excluded target is not the end of the chain when the policy admits
       // another one *after* it: `daily_cap`, `auth_failed` and the rest advance past it
       // (contracts/provider-fallback.md "Advance and stop"). An admitted target earlier in the
-      // chain is not that — it already had its turn, which is what the failure ahead of this entry
-      // means.
-      admittedAfter
-        ? refusedPrimaryConsequence(
-          config,
-          env,
-          'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.',
-          EXCLUDED_FALLS_THROUGH,
-        )
+      // chain is not that — it already had its turn. Written as the one boolean it is, rather than
+      // through `refusedPrimaryConsequence`, whose subject is a refused primary and not this.
+      admittedAfter && chainIsReachable(config, env)
+        ? 'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.'
         : EXCLUDED_FALLS_THROUGH,
       `Add "${catalog.costClass}" to \`[observer] cost_policy\` to admit it, or remove the entry.`,
     );
@@ -571,19 +567,16 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
     );
   }
   const unverifiable = unverifiableTarget(catalog, config.observer.agent_cli);
-  // Taken as an argument rather than captured, so the two call sites' `!== null` test is what makes
-  // it non-null here instead of two assertions the compiler has to be told to believe.
-  const unverifiableItem = (why: NonNullable<typeof unverifiable>): DoctorItem =>
-    unverified(name, `${where}, and ${why.reason}`, why.consequence, why.recovery);
   if (db === null) {
-    // No storage is no allowance verdict, so a target whose runnability nothing here checks says
-    // that instead of naming a record it does not have — `ollama` is uncapped and would be told to
-    // wait for an allowance it never spends.
-    return unverifiable !== null ? unverifiableItem(unverifiable) : dbUnread(
+    // Storage is the blocker, so it is what the item reports — `dbUnread` is also the only path that
+    // carries the integrity-check message, and telling the user to start a local model server while
+    // the database is corrupt names the wrong thing. The record, not an "allowance": `reserveAttempt`
+    // reads `presetExhaustedAt` above `capped`, so an uncapped target has a stamp here too.
+    return dbUnread(
       name,
       integrityFailed,
-      `${where}, and today's allowance record could not be read.`,
-      'Whether this target still has allowance is unknown until storage is open.',
+      `${where}, and today's provider usage record could not be read.`,
+      'Whether this target has already refused itself today is unknown until storage is open.',
       '`oboete doctor` after storage is repaired.',
     );
   }
@@ -593,9 +586,9 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
   // actionable state unknown.
   const refused = fallbackAllowanceItem(name, where, entry.preset, catalog, db, now);
   if (refused !== null) return refused;
-  return unverifiable !== null
-    ? unverifiableItem(unverifiable)
-    : healthy(name, `${where}, admitted as ${catalog.costClass} and ready.`);
+  return unverifiable === null
+    ? healthy(name, `${where}, admitted as ${catalog.costClass} and ready.`)
+    : unverified(name, `${where}, and ${unverifiable.reason}`, unverifiable.consequence, unverifiable.recovery);
 }
 
 /**

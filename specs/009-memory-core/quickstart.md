@@ -1934,3 +1934,50 @@ Gate at this head: `npm test` 1566 + 280 green on Node 24.16.0 and 22.23.1 (the 
 isolated rerun of the flake above); typecheck, lint and markdownlint clean; `semgrep scan
 --config auto` unchanged against the round-12 baseline; the lizard warning set differenced against
 `85d48437` adds nothing and drops two.
+
+### E9 follow-up — the round that corrected the round before it
+
+`3239ec08..85cb4669` returned nine findings, seven adopted, and two of them were corrections of what
+the *previous* review round had asked for. That is the useful part of this receipt.
+
+- The `catch` that replaced the `finally` omitted the batch line unconditionally. Its reason —
+  a `state=applied` line would claim a pass that did not finish — is true only when the pass had no
+  error of its own. When `processBatch` had already thrown a non-storage error and
+  `checkpointBatch` then threw a storage one, the first error's code was written nowhere:
+  `recordRunFailure` reports the second. The catch now writes the batch line when `batchError` is
+  set and the attempt lines otherwise.
+- Putting the "nothing here checks this" item ahead of `dbUnread` — adopted one round earlier so an
+  uncapped `ollama` target would not be told to wait for an allowance — suppressed the
+  integrity-check message and told a user with a corrupt database to start a local model server.
+  `dbUnread` is the only path that carries that message. Storage is the blocker when there is none,
+  so it is reported; the sentence names the **provider usage record** rather than an "allowance",
+  which is what makes it true for an uncapped target: `reserveAttempt` reads `presetExhaustedAt`
+  above `capped`. The branch now has a test, which it did not before — `fallbackItems` was only ever
+  called with an open database in the suite.
+
+The rest: `logAttempts` uses the repository's own `appendLogQuietly` per line instead of a
+hand-rolled swallow around the whole loop, so one append that cannot land no longer takes the
+remaining targets' lines; the excluded entry's sentence was rewritten, because "a failure ahead of
+it falls through to rule-based records" reads as *any* earlier failure and the primary's failure
+does reach an admitted target at position 1; that consequence is now the one boolean it always was,
+`admittedAfter && chainIsReachable(...)`, rather than a ternary wrapped around a helper whose
+subject is a refused primary; the closure left with one call site was inlined; and a stray blank
+line went.
+
+Declined: rewriting `chain.verdicts.slice(index + 1).includes('admitted')` as a single reverse pass.
+`fallback` is bounded at three entries by the schema, and the slice reads as the invariant it
+checks.
+
+Acknowledged, already filed: the attempt lines surviving a storage throw is still unpinned (#245),
+so deleting the `catch` and restoring `finally { logBatch(); }` leaves the suite green.
+
+**What the three fix rounds actually show.** Fourteen findings over the pull request, then nine over
+the fixes, then nine over those — but the second and third rounds each found two real defects *in
+the eleven lines the round before wrote*, and both times in the same error-handling block. The
+pattern is not that the reviews are not converging; it is that this block has three exit shapes
+(a stop, a normal end, a throw) and two log kinds, and each round fixed the pair it was pointed at.
+It is now written as one statement of all six cases rather than a patch on the last patch.
+
+Gate at this head: `npm test` 1567 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` unchanged against the round-12 baseline; the lizard
+warning set differenced against `85d48437` adds nothing and drops two.

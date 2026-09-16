@@ -746,7 +746,9 @@ async function observeLifecycle(
       // configuration's entries instead, so the model is what identifies a target across the two.
       function logAttempts(): void {
         for (const attempt of attempts) {
-          appendLog(paths.observeLog, 'info', 'provider attempt', {
+          // Quiet, and per line: these are written on the path where storage is already failing, and
+          // one append that cannot land must not take the remaining targets' lines with it.
+          appendLogQuietly(paths.observeLog, 'info', 'provider attempt', {
             id: batch.id,
             position: attempt.position,
             preset: attempt.preset,
@@ -795,22 +797,22 @@ async function observeLifecycle(
       try {
         if (!leaseLost) await checkpointBatch();
       } catch (error) {
-        // `checkpointBatch` rethrows a storage error, and the attempt lines are the only record of
-        // what this pass already spent, so they are written before it propagates
-        // (contracts/provider-fallback.md "Diagnostics"). Only those: `logBatch` would write
-        // `level=info state=applied` for a pass that did not finish, and the missing batch line is
-        // what says so. `appendLog` throws on the same full or read-only disk, and that error must
-        // not replace the one being reported.
+        // `checkpointBatch` rethrows a storage error and the pass ends here. The attempt lines are
+        // the only record of what it spent (contracts/provider-fallback.md "Diagnostics"), and a
+        // `batchError` from the call above is the only record of why the batch itself failed —
+        // `recordRunFailure` reports this error, not that one. What is not written is a
+        // `state=applied` line for a pass that did not finish: the missing batch line says so.
         try {
-          logAttempts();
+          if (batchError === undefined) logAttempts();
+          else logBatch();
         } catch {
-          // The storage error below is the one worth reporting.
+          // The batch line's own write can fail on the same disk; the storage error below is the
+          // one worth reporting.
         }
         throw error;
       }
 
       logBatch();
-
     }
 
     async function processPendingBatches(): Promise<void> {
