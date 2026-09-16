@@ -91,13 +91,6 @@ function refusedPrimaryConsequence(
 ): string {
   return chainIsReachable(config, env) ? whenChained : otherwise;
 }
-/** What an excluded entry means when an admitted target does come after it. */
-const CHAIN_TAKES_THE_FAILURE =
-  'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.';
-/** What an excluded entry means when no admitted target comes after it. */
-const EXCLUDED_FALLS_THROUGH =
-  'This target is never attempted, so nothing past it is reached: once the targets ahead of it have '
-  + 'failed, the batch is rule-based.';
 /** What a refused probe reservation means when the chain is reachable. */
 const REFUSED_RESERVATION =
   'This reservation is refused without a request, so the batch is offered to the fallback chain below.';
@@ -623,7 +616,10 @@ function unadmittedEntryItem(
       // (contracts/provider-fallback.md "Advance and stop"). The other way the chain can be dead,
       // an unaccepted configuration, is answered by `fallbackItems` before any entry is reported,
       // so this verdict never has to carry it.
-      admittedAfter ? CHAIN_TAKES_THE_FAILURE : EXCLUDED_FALLS_THROUGH,
+      admittedAfter
+        ? 'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.'
+        : 'This target is never attempted, so nothing past it is reached: once the targets ahead of it'
+          + ' have failed, the batch is rule-based.',
       `Add "${catalog.costClass}" to \`[observer] cost_policy\` to admit it, or remove the entry.`,
     );
   }
@@ -667,7 +663,6 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
     // in the item's name, and "Diagnostics" asks for all three.
     return { ...unread, reason: `${where}. ${unread.reason}` };
   }
-  const unverifiable = unverifiableTarget(catalog, config.observer.agent_cli);
   // Before the allowance, because the two refusals are not the same kind: a model the account does
   // not serve is wrong until the entry is edited, while a spent allowance resets at midnight UTC.
   // `catalogItems` checks the *primary's* model and returns nothing at all when another preset is
@@ -683,6 +678,7 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
   // actionable state unknown.
   const refused = fallbackAllowanceItem(name, where, entry.preset, catalog, db, now);
   if (refused !== null) return refused;
+  const unverifiable = unverifiableTarget(catalog, config.observer.agent_cli);
   return unverifiable === null
     ? healthy(name, `${where}, admitted as ${catalog.costClass} and ready.`)
     : unverified(name, `${where}, and ${unverifiable.reason}`, unverifiable.consequence, unverifiable.recovery);
@@ -705,7 +701,11 @@ function catalogTargetItem(
   now: number,
 ): DoctorItem | null {
   const cache = cachedCatalog(db);
-  if (cache === null || cache.accountId !== accountId || catalogIsStale(cache, now)) return null;
+  // Two statements rather than one disjunction: `cache === null || cache.accountId !== …` is the
+  // shape S6582 asks to write as `cache?.accountId !== …`, which would stop narrowing `cache` for
+  // the reads below it.
+  if (cache === null) return null;
+  if (cache.accountId !== accountId || catalogIsStale(cache, now)) return null;
   if (cache.models.includes(model)) return null;
   return warning(
     name,
