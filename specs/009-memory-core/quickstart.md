@@ -1519,3 +1519,40 @@ as "under the bound".
 Gate at this head: `npm test` 1553 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
 markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
 `85d48437` adds nothing.
+
+### E9 follow-up — the eighth bot round
+
+Two P2s, one taken and one declined, and both are about a boundary this PR drew rather than about
+new code.
+
+**Taken: a bare `oboete setup` said nothing about an unusable chain.** The seventh round's reporting
+only ran when `--provider` named a destination, which was my scope line and it was drawn in the
+wrong place: the entry that stops `resolveModel` takes the *stored* primary down with it, and
+nothing else in the report names it — the consent display lists the targets of an admitted chain,
+and an unusable chain has none. `selectedDestination` now takes the whole `Options` and looks on
+every run except `--remove`, which is the recovery path. Refusal is unchanged and still only for a
+`--provider` that widens egress. Red before the fix: a bare `--accept-egress` over a modelless
+`ollama` entry printed the consent tuple, the credential steps and the agent table, and never the
+entry; the same test pins that `--remove` stays silent.
+
+**Declined: stop the chain when a target's retry fails after it already answered.** The mechanism is
+real — `agentCliResultOutcome` and `providerTextOutcome` both return `null` for an unusable first
+answer so the loop retries, and a second attempt that dies in transit makes the settled reason
+`timeout` or `unreachable`, which advances. But that is the right row. "Advance and stop" is read
+from the reason the target settles with, and "no answer from this host" is what happened: the host
+gave one unusable answer and then nothing. A later target can plainly improve on a dropped
+connection, and stopping instead would strand the batch on a transport error while an admitted local
+target sat unused — which is what US7 scenario 5 asks the chain to prevent. The evidence the stop
+rule is about is *two* unusable answers, which is exactly the case `summarizeWithProvider` reports as
+`unusable_output`. The proposed fix also needs cross-attempt state the contract does not define
+("preserve that an answer was received"), and `CallOutcome` carries one reason by design — the same
+objection that declined the fourth round's stopped-attempt line and the fifth round's success line.
+
+Both decisions are now in the contract rather than only here: "Advance and stop" states that the
+column is read from the settled reason, and Verification 18 states that a bare setup names the chain
+error too. The previous rounds' findings came back because the contract said only what setup
+refuses and only which reasons stop, leaving the rest to be inferred.
+
+Gate at this head: `npm test` 1554 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing.
