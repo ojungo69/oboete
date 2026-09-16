@@ -1,0 +1,21 @@
+src/doctor/provider.ts
+  s_892d4f75e21024::t_79111c7344eceb 269,274-282,287-291,320,325-329,608,615,629
+test/unit/doctor.test.ts
+  s_892d4f75e21024::t_cd0798f6b7a3c6 1400-1423
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5d70a06c4ad74358f0cd5c65639eede6ef221404",
+  "prompts": {},
+  "sessions": {
+    "s_892d4f75e21024": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79c129f3-aa1e-4d43-970b-c316e499606d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
