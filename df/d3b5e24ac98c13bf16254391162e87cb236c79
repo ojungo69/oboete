@@ -1,0 +1,40 @@
+src/worker/observe-batch.ts
+  s_c7695365ee909e::t_d1fa0d3470f89c 496,500,602,701
+  s_c7695365ee909e::t_cf30a5db5255f0 467-495,497-499,501-529,695-698
+  s_c7695365ee909e::t_86f848925be3c9 460-464,603,740,745
+src/setup/setup.ts
+  s_c7695365ee909e::t_86f848925be3c9 360
+  s_892d4f75e21024::t_a2fcd21d920956 369-379
+  s_892d4f75e21024::t_2c2eeb716027d7 380
+test/unit/setup.test.ts
+  s_c7695365ee909e::t_6102099a7e2882 304-321
+test/unit/provider-fallback.test.ts
+  s_c7695365ee909e::t_6102099a7e2882 355-393
+src/worker/observe.ts
+  s_c7695365ee909e::t_86f848925be3c9 50,769,775
+  s_c7695365ee909e::t_2249da03425fef 748
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "dfd3b5e24ac98c13bf16254391162e87cb236c79",
+  "prompts": {},
+  "sessions": {
+    "s_892d4f75e21024": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79c129f3-aa1e-4d43-970b-c316e499606d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_c7695365ee909e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0aaff-8a8f-7ea1-9caa-07862d51fd31",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
