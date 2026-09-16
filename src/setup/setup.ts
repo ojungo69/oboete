@@ -327,6 +327,34 @@ function recordSetupResult(
   return failed ? 1 : 0;
 }
 
+/**
+ * The configuration this run would settle on, or `null` when the destination refuses it.
+ *
+ * `--provider` names that destination. It is applied in memory so the consent screen shows it, and
+ * written only once the run is past the gate: a refused run must not leave the destination it
+ * refused enabled (contracts/cli.md, FR-022). A narrower destination can strip a stored fallback
+ * chain of its admission, and a run that enabled it anyway would leave the observer with no
+ * provider at all until someone reads the log (contracts/provider-fallback.md "Admission"), so that
+ * one case is refused before anything is written. Only that refusal is the destination's doing:
+ * `--provider none` is capture-only, which the user asked for, and a chain already unusable on disk
+ * must not block `--remove` or a rewiring run.
+ */
+function selectedDestination(
+  config: OboeteConfig,
+  provider: Options['provider'],
+  note: (...lines: string[]) => void,
+): OboeteConfig | null {
+  if (provider === null) return config;
+  const destined = { ...config, observer: { ...config.observer, preset: provider } };
+  const chainError = provider === 'none' ? null : admittedChain(destined).error;
+  if (chainError?.code !== 'egress_widened') return destined;
+  note(
+    chainErrorMessage(chainError),
+    'Nothing was written. Correct the `[[observer.fallback]]` entry, then run setup again.',
+  );
+  return null;
+}
+
 export async function runSetup(argv: string[], overrides: Partial<SetupDeps> = {}): Promise<number> {
   const deps: SetupDeps = { ...defaults(), ...overrides };
 
@@ -353,25 +381,10 @@ export async function runSetup(argv: string[], overrides: Partial<SetupDeps> = {
     note(describe(error));
     return finishSetup(deps, options, paths, notes, [], 2);
   }
-  // `--provider` names the destination this run would settle on. It is applied in memory so the
-  // consent screen shows that destination, and written only once the run is past the gate: a
-  // refused run must not leave the destination it refused enabled (contracts/cli.md, FR-022).
   const provider = options.remove ? null : options.provider;
-  if (provider !== null) config = { ...config, observer: { ...config.observer, preset: provider } };
-  // A narrower destination can strip a stored fallback chain of its admission, and a run that
-  // enabled it anyway would leave the observer with no provider at all until someone reads the log
-  // (contracts/provider-fallback.md "Admission"). Refuse before anything is written. Only this
-  // refusal is the destination's doing: `--provider none` is capture-only, which the user asked
-  // for, and a chain already unusable on disk must not block `--remove` or a rewiring run.
-  const chainError =
-    provider === null || provider === 'none' ? null : admittedChain(config).error;
-  if (chainError?.code === 'egress_widened') {
-    note(
-      chainErrorMessage(chainError),
-      'Nothing was written. Correct the `[[observer.fallback]]` entry, then run setup again.',
-    );
-    return finishSetup(deps, options, paths, notes, [], 2);
-  }
+  const destined = selectedDestination(config, provider, note);
+  if (destined === null) return finishSetup(deps, options, paths, notes, [], 2);
+  config = destined;
 
   const detected = detectAgents(deps.env, deps.versionSpawn);
   // Default: every agent that is installed. Named agents are reported even when they are not, so
