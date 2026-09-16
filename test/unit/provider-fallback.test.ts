@@ -494,6 +494,52 @@ test('the reason a stop ended the chain on outranks a more severe reason behind 
   });
 });
 
+test('a stop is noticed even when the next target could not have made a request', async () => {
+  await withFixture(async (fixture) => {
+    // No NVIDIA key: `summarizeWithProvider` answers `no_provider` for `nim` before it ever asks
+    // whether consent still holds, so the stop has to be noticed by the loop itself
+    // (contracts/provider-fallback.md "The attempt sequence", step 2).
+    fixture.env = cleanEnv(fixture.home, {
+      OBOETE_CF_API_TOKEN: 'chain-test-token',
+      OBOETE_CF_ACCOUNT_ID: 'chain-test-account',
+    });
+    writeChainConfig(fixture, {
+      preset: 'workers-ai',
+      costPolicy: ['free-tier', 'local', 'remote'],
+      fallback: [{ preset: 'nim' }],
+      env: fixture.env,
+    });
+    await captureEndedSession(fixture, {
+      sessionId: 'chain-stop-uncredentialed',
+      prompts: ['Record which reason a stopped chain keeps when the next target has no key.'],
+    });
+
+    const hosts = counters();
+    const fetchImpl = chainFetch(hosts, {
+      cloudflare: async () => {
+        writeChainConfig(fixture, {
+          preset: 'workers-ai',
+          costPolicy: ['free-tier', 'local', 'remote'],
+          fallback: [{ preset: 'nim' }],
+          env: fixture.env,
+          consent: 'invalid',
+        });
+        return new Response('unauthorized', { status: 401 });
+      },
+    });
+    assert.equal(await runObserveForFixture(fixture, { fetch: fetchImpl }), 1);
+
+    assert.equal(hosts.nim, 0);
+    // Without the loop's own check the batch keeps `auth_failed` by precedence and sends the user
+    // to fix a credential, when consent is the thing they have to act on.
+    assert.deepEqual(batchRows(fixture), [
+      { destination: 'remote_observer', state: 'fallback', degraded_reason: 'consent_changed', provider_attempts: 1 },
+    ]);
+    const log = readFileSync(fixture.paths.observeLog, 'utf8');
+    assert.match(log, /provider attempt .*position=1 preset=nim model=[^ ]+ reason=consent_changed/);
+  });
+});
+
 test('a target whose answer is refused for its language is still named in the log', async () => {
   await withFixture(async (fixture) => {
     fixture.env = chainEnv(fixture);

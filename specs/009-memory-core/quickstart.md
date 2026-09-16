@@ -1716,3 +1716,30 @@ both were wrong for the same reason.
 Gate at this head: `npm test` 1563 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
 markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
 `85d48437` adds nothing.
+
+### E9 follow-up — the twelfth bot round
+
+Two P2s, both taken, and the first is the previous round's own fix not reaching its sibling.
+
+- **`credentialGuidance` kept the admission-only test** the doctor helper had just stopped using, so
+  `oboete setup` still promised the chain for a primary the resolver refuses. The fix is not a second
+  copy of the guard: `chainIsReachable(config)` now lives in `src/observer/providers.ts` beside
+  `resolveModel`, which applies both tests in one expression (`resolveModel(config).chain.length > 0`),
+  and the doctor helper and the setup guidance are its two readers. That is what the eleventh round's
+  fix should have been — putting the guard inside `refusedPrimaryConsequence` closed doctor and left
+  setup, because the shared thing was the *question*, not the doctor's sentence.
+- **A stop was missed when the next target had no credentials.** `summarizeWithProvider` answers
+  `no_provider` for an uncredentialed target *before* it asks whether consent still holds, so a chain
+  that ended on such a target kept an earlier target's reason by precedence — an `auth_failed`
+  primary followed by an uncredentialed `nim` degraded with `auth_failed`, sending the user to fix a
+  credential when consent was what they had to act on. The contract lists `currentConsent()` as step
+  2 of "The attempt sequence", before the reservation and the call, and it is now the loop's own
+  check rather than something delegated to `providerCall`.
+
+Red before the second fix: `degraded_reason: 'auth_failed'` where the contract's "the reason a stop
+ended the chain on outranks the precedence order" requires `consent_changed`. The existing test for
+that rule passes with a *credentialed* final target, which is why the rule looked pinned.
+
+Gate at this head: `npm test` 1564 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing.

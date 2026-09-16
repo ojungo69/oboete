@@ -27,7 +27,7 @@ import {
 } from '../doctor.js';
 import { CACHE_MS, cachedCatalog } from '../observer/catalog.js';
 import { CHAIN_STOPS } from '../observer/classify.js';
-import { chainErrorMessage, resolveModel } from '../observer/providers.js';
+import { chainErrorMessage, chainIsReachable, resolveModel } from '../observer/providers.js';
 import type { ObserverInput } from '../observer/contract.js';
 import { summarizeWithProvider, type CallOutcome } from '../observer/llm.js';
 import {
@@ -84,15 +84,7 @@ function refusedPrimaryConsequence(
   // clause's own sentence rather than the queue-waits default.
   otherwise: string = FALLBACK_CONSEQUENCE,
 ): string {
-  try {
-    // Throws only for a chain the admission already emptied and for a primary with no model of its
-    // own; absent credentials are not a resolve error, so an uncredentialed primary still chains.
-    resolveModel(config);
-  }
-  catch {
-    return otherwise;
-  }
-  return admittedChain(config).targets.length > 0 ? whenChained : otherwise;
+  return chainIsReachable(config) ? whenChained : otherwise;
 }
 const ALLOWANCE_CONSEQUENCE =
   'Source processing waits for the allowance to reset; later worker runs retry due sources.';

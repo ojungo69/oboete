@@ -8,7 +8,6 @@ import { chmodSync, existsSync, readFileSync, renameSync, rmSync, statSync, writ
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 
 import {
-  admittedChain,
   consentHash,
   consentMatches,
   consentTuple,
@@ -17,6 +16,7 @@ import {
   type ConsentTuple,
   type OboeteConfig,
 } from '../config.js';
+import { chainIsReachable } from '../observer/providers.js';
 import type { OboetePaths } from '../paths.js';
 
 /** Where `oboete doctor` reads the consent record back from (data-model.md runtime_state). */
@@ -174,7 +174,7 @@ export function credentialGuidance(config: OboeteConfig, env: NodeJS.ProcessEnv)
   // (contracts/provider-fallback.md Verification 15). Saying otherwise contradicts the chain this
   // same report displayed a few lines above.
   lines.push(
-    ...(admittedChain(config).targets.length > 0
+    ...(chainIsReachable(config)
       ? [
         'Setup continues: the fallback targets shown above are attempted instead, so summaries come',
         'from the first one that answers until the credentials above are set.',

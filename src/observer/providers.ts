@@ -49,6 +49,26 @@ export function resolveModel(
   return { preset, model, chain: chain.targets };
 }
 
+/**
+ * Whether a failure of the primary would actually reach a configured target.
+ *
+ * Admission alone does not answer that: a primary the resolver refuses leaves no chain to try,
+ * because `resolveObserveModel` turns the throw into a run with no model *and* no targets
+ * (contracts/provider-fallback.md "What the chain does not do"). `resolveModel` applies both tests
+ * in one place, so every surface that predicts where a batch goes — `oboete doctor`'s items and
+ * `oboete setup`'s credential guidance — asks this rather than each keeping its own pair of checks.
+ * Absent credentials are deliberately not part of it: they are not a resolve error, and a target
+ * whose key appears between two batches is reached without a configuration change.
+ */
+export function chainIsReachable(config: OboeteConfig): boolean {
+  try {
+    return resolveModel(config).chain.length > 0;
+  }
+  catch {
+    return false;
+  }
+}
+
 /** The sentence a refused chain is reported with, wherever the refusal is noticed. */
 export function chainErrorMessage(error: ChainError): string {
   switch (error.code) {

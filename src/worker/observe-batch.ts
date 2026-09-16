@@ -633,6 +633,16 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
   for (const [position, target] of targets.entries()) {
     const between = deps.shouldStop();
     if (between !== undefined) return { state: 'done', reason: between, memoryIds: [], attempts };
+    // Step 2 of "The attempt sequence", and it has to be the loop's own: `summarizeWithProvider`
+    // answers `no_provider` for a target with no credentials before it ever asks whether consent
+    // still holds, so a chain that ends on such a target would keep an earlier target's reason by
+    // precedence and send the user to fix a credential when consent is what they must act on.
+    if (!currentConsent()) {
+      outcome = { ok: false, reason: 'consent_changed', attempts: 0, detail: '' };
+      attempts.push({ position, preset: target.preset, model: target.model,
+        reason: 'consent_changed', detail: '' });
+      break;
+    }
     const called = await providerCall({
       db, token, input: request.input, batch, config, deps,
       preset: target.preset, model: target.model, consentOk: currentConsent,
