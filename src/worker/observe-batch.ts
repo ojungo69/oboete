@@ -626,8 +626,10 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
 
   const targets = chainTargets(resolved.preset, resolved.model, resolved.chain, batch.destination);
   const attempts: ProviderAttempt[] = [];
-  // `targets` always begins with the primary, so the loop settles `outcome` at least once.
+  // `targets` always begins with the primary, so the loop settles `outcome` at least once, and
+  // `answered` with it on the branch that leaves the loop with an answer to apply.
   let outcome!: CallOutcome;
+  let answered!: { position: number; preset: PresetName; model: string };
   for (const [position, target] of targets.entries()) {
     const between = deps.shouldStop();
     if (between !== undefined) return { state: 'done', reason: between, memoryIds: [], attempts };
@@ -655,7 +657,10 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
       return { ...settled.done, attempts };
     }
     outcome = settled.outcome;
-    if (outcome.ok) break;
+    if (outcome.ok) {
+      answered = { position, preset: target.preset, model: target.model };
+      break;
+    }
     attempts.push({ position, preset: target.preset, model: target.model,
       reason: outcome.reason, detail: outcome.detail });
     if (CHAIN_STOPS.has(outcome.reason)) break;
@@ -695,11 +700,17 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
     detect,
     now: deps.now(),
   });
+  // `applyObservations` can refuse the answer it was given — a required progress decision the
+  // detector rejects mints `unusable_output` *after* the call — and that reason is created too late
+  // for `reserveAttempt` to have tied it to a target. Without this line the log names every target
+  // that failed to answer and then a batch reason nothing accounts for
+  // (contracts/provider-fallback.md "Diagnostics": one line per target that failed).
+  const refused = applied.leaseLost ? null : applied.fallbackReason ?? null;
   return {
     state: applied.leaseLost ? 'lease_lost' : applied.fallbackReason === undefined ? 'applied' : 'fallback',
     reason: applied.fallbackReason ?? null,
     memoryIds: appliedMemoryIds(applied),
-    attempts,
+    attempts: refused === null ? attempts : [...attempts, { ...answered, reason: refused, detail: '' }],
   };
 }
 

@@ -4,6 +4,7 @@ import { test } from 'node:test';
 
 import { nextUtcMidnight, recordExhausted, utcDay } from '../../src/observer/reservation.js';
 import { DAILY_CAP } from '../../src/observer/reservation.js';
+import { detectSync } from '../../src/privacy/detect.js';
 import { cliSpawn } from '../helpers/agent-cli.js';
 import {
   NOW,
@@ -240,6 +241,52 @@ test('an unusable answer stops the chain instead of spending a second allowance 
     assert.deepEqual(batchRows(fixture), [
       { destination: 'remote_observer', state: 'fallback', degraded_reason: 'unusable_output', provider_attempts: 2 },
     ]);
+  });
+});
+
+test('a target whose answer is refused during apply has its own attempt line', async () => {
+  await withFixture(async (fixture) => {
+    fixture.env = chainEnv(fixture);
+    writeChainConfig(fixture, {
+      preset: 'workers-ai',
+      fallback: [{ preset: 'ollama', model: OLLAMA_MODEL }],
+      env: fixture.env,
+    });
+    const prompt = 'Record what a refused checkpoint does to the attempt lines.';
+    await captureEndedSession(fixture, { sessionId: 'chain-apply-refused', prompts: [prompt] });
+    const sourceId = eventId(fixture, prompt);
+    fixture.withDb((db) => {
+      db.prepare(`INSERT INTO provider_usage (utc_day, preset, calls, neurons_estimate, reset_at)
+        VALUES (?, 'workers-ai', 1, 0, ?)`).run(utcDay(NOW), nextUtcMidnight(NOW));
+      recordExhausted(db, { preset: 'workers-ai', reservationId: 'chain-apply-refused', now: NOW });
+    });
+
+    const hosts = counters();
+    const fetchImpl = chainFetch(hosts, {
+      ollama: async () => openAiResponse({
+        ...providerOutput(sourceId),
+        checkpoint: { decision: 'replace', purpose: 'Verify the refused checkpoint', constraints: [],
+          decisions: [], outstanding: ['Check the attempt line.'], source_event_ids: [sourceId],
+          reason: 'Retained progress.' },
+      }, OLLAMA_MODEL),
+    });
+    // The detector refuses the checkpoint text only, so the request itself passes its final check and
+    // the second target answers; `applyObservations` then rejects the required progress decision and
+    // mints `unusable_output` after the call, where no reservation ties it to a target.
+    assert.equal(await runObserveForFixture(fixture, {
+      fetch: fetchImpl,
+      detect: async (input) => input.text.startsWith('Purpose\n')
+        ? { ok: false, reason: 'detector_error' }
+        : await detectSync(input),
+    }), 1);
+
+    assert.equal(hosts.ollama, 1);
+    assert.deepEqual(batchRows(fixture), [
+      { destination: 'remote_observer', state: 'fallback', degraded_reason: 'unusable_output', provider_attempts: 1 },
+    ]);
+    const log = readFileSync(fixture.paths.observeLog, 'utf8');
+    assert.match(log, /provider attempt .*position=0 preset=workers-ai model=[^ ]+ reason=provider_exhausted/);
+    assert.match(log, /provider attempt .*position=1 preset=ollama model=[^ ]+ reason=unusable_output/);
   });
 });
 

@@ -573,7 +573,7 @@ test('an advancing probe failure says the chain takes the batch, and a stop reas
   });
 });
 
-test('an uncredentialed primary with an admitted chain says the chain summarizes, not the rules', async () => {
+test('an uncredentialed primary with an admitted chain says the chain is offered the batch, not the rules', async () => {
   await harness(async (context) => {
     delete context.env.OBOETE_CF_API_TOKEN;
     delete context.env.OBOETE_CF_ACCOUNT_ID;
@@ -589,7 +589,9 @@ test('an uncredentialed primary with an admitted chain says the chain summarizes
     await context.doctor(['--json']);
     // The primary answers `no_provider` without a request and the chain carries the batch, so the
     // rule-based consequence would be wrong here (contracts/provider-fallback.md).
-    assertBroken(context.item('provider'), 'degraded', 'summarized by the fallback chain');
+    // Admission is not runnability, so the item says the batch is offered to the chain rather
+    // than promising the chain summarizes it: a target may lack its own credential or allowance.
+    assertBroken(context.item('provider'), 'degraded', 'offered to the fallback chain below');
     assert.equal(context.item('fallback:1').status, 'healthy');
   });
 });
@@ -1420,6 +1422,22 @@ for (const [band, calls, chained, unchained] of [
     });
   });
 }
+
+test('an exhausted allowance says the chain takes the batch only when a target is admitted', async () => {
+  await withItemDatabase(async (db) => {
+    db.prepare('INSERT INTO provider_usage (utc_day, preset, calls, exhausted_at, reset_at) VALUES (?, ?, ?, ?, ?)')
+      .run('2026-09-06', 'workers-ai', 1, ITEM_NOW, ITEM_RESET);
+    // `exhausted_at` is per preset, so the chain's next target is unaffected and the worker advances
+    // past `provider_exhausted` (contracts/provider-fallback.md "Advance and stop").
+    const withChain = configSchema.parse({
+      observer: { preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] },
+    });
+    assert.equal(allowanceItem(withChain, db, false, ITEM_NOW).consequence,
+      'Batches are offered to the fallback chain below; a capped target there shares this allowance.');
+    assert.equal(allowanceItem(configSchema.parse({}), db, false, ITEM_NOW).consequence,
+      'Source processing waits for the allowance to reset; later worker runs retry due sources.');
+  });
+});
 
 test('a rejected provider credential consumes one probe and recommends checking credentials', async () => {
   await withItemDatabase(async (db, paths) => {

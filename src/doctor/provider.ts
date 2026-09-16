@@ -64,8 +64,11 @@ const PROVIDER_PROBE_INPUT: ObserverInput = {
 
 const FALLBACK_CONSEQUENCE =
   'Temporary guidance is available while source processing waits for the provider.';
+// "Offered", never "summarized": admission is not runnability. A target may lack its own credential
+// or its own allowance, and then the batch is rule-based after all — which is why every target's own
+// verdict is reported as `fallback:N` rather than summarized into this one sentence.
 const CHAINED_CONSEQUENCE =
-  'This target answers without a request, so every batch is summarized by the fallback chain below.';
+  'This target answers without a request, so every batch is offered to the fallback chain below.';
 
 /**
  * What a refused primary means for the queue. An admitted chain is attempted on the same batch
@@ -620,7 +623,13 @@ function allowanceEstimateItem(
       return degraded(
         'allowance',
         'The provider reported exhaustion today.',
-        ALLOWANCE_CONSEQUENCE,
+        // `exhausted_at` is per preset, so the chain's next target is unaffected and the worker
+        // advances past `provider_exhausted` — the same reading the cap branch below takes.
+        refusedPrimaryConsequence(
+          config,
+          'Batches are offered to the fallback chain below; a capped target there shares this allowance.',
+          ALLOWANCE_CONSEQUENCE,
+        ),
         `Wait for the reset at ${iso(estimate.resetAt)} or switch preset with \`oboete setup --provider\`.`,
       );
     }
