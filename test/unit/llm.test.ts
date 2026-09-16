@@ -558,3 +558,14 @@ test('a consent change after the agent-cli reservation stops the chain before th
   if (!result.ok) assert.equal(result.reason, 'consent_changed');
   assert.equal(cli.calls(), 0);
 });
+
+/**
+ * The stub is handed to the product through slots typed `typeof spawn` (`deps.spawn` in
+ * `src/worker/observe.ts`, `src/doctor.ts` and `src/setup/probe.ts`), and that type permits
+ * `spawn(command, args)`. A stub that read `options.signal` unconditionally would fail such a call
+ * with a `TypeError` in the tests while the same call worked in production.
+ */
+test('the agent CLI stub answers a spawn call that omits options, as `typeof spawn` allows', () => {
+  const cli = cliSpawn([]);
+  assert.doesNotThrow(() => cli.spawn('claude', ['--version']));
+});

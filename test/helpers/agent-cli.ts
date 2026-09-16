@@ -31,7 +31,7 @@ type FakeChild = EventEmitter & {
 export function cliSpawn(texts: string[]): { spawn: typeof spawn; calls: () => number } {
   let count = 0;
   return {
-    spawn: ((command: string, args: readonly string[], options: { signal?: AbortSignal }) => {
+    spawn: ((command: string, args: readonly string[], options: { signal?: AbortSignal } = {}) => {
       if (!FAKED.has(command)) return nodeSpawn(command, [...args], options);
       const child = Object.assign(new EventEmitter(), {
         stdin: new PassThrough(),
