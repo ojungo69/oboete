@@ -1453,3 +1453,38 @@ state.
 Gate at this head: `npm test` green on Node 24.16.0 (1551 + 280, 0 fail, 2 skipped) and 22.23.1
 (same totals); typecheck, lint, markdownlint and `semgrep scan --config auto` clean; lizard warning
 set differenced against `85d48437` adds nothing and drops `writeConfig`.
+
+### E9 follow-up — the sixth bot round
+
+One finding, on the extraction the fifth round produced, and it is real: `oboete setup --provider
+<preset>` over a `[[observer.fallback]]` entry with no model wrote the destination and said nothing.
+Reproduced before changing anything (a `none` primary, an `ollama` entry with no model, then
+`--provider workers-ai`): exit 0, `preset = "workers-ai"` written, and no mention of the entry
+anywhere in the report — while `resolveModel` refuses a chain it cannot resolve, so the primary the
+run had just selected would not run either and every batch would be rule-based.
+
+The reviewer's own fix — refuse on any chain error — is the one thing the contract rules out.
+Verification 18: "`oboete setup --remove`, a bare `oboete setup` and `--provider none` all succeed
+while a chain the configuration cannot use sits in the file; **only** a `--provider` that narrows
+egress under an admitted chain is refused." Refusing `model_required` would block a destination
+selection over a defect the flag did not cause, and it would be the opposite of what the same
+command already does for a missing credential, which `contracts/cli.md` says setup reports "instead
+of failing".
+
+So the destination is still written and the entry is now named, with the sentence that the selected
+preset does not run until it is corrected. Verification 18 gained that case, because the contract
+previously said only what setup refuses and left what it does with the rest to be inferred — which
+is the gap the finding read.
+
+One edge named rather than closed: `admittedChain` returns at the first entry it refuses, so a
+modelless entry ahead of a widening one hides the widening from this check, and such a file can be
+written. Nothing is sent — the resolver refuses the same chain for the same reason, so no target is
+ever built — and the report now says entries after the named one were not examined. Re-deriving the
+admission rules in `setup.ts` to close it would put the same policy in two places, which is the
+shape that drifts.
+
+Red before the fix: the new setup test's `/Fallback target 1 requires an observer model/` did not
+match, with the report printing the consent tuple and the credential steps and nothing else.
+
+Gate at this head: `npm test` green on Node 24.16.0 and 22.23.1; typecheck, lint, markdownlint and
+`semgrep scan --config auto` clean; lizard warning set differenced against `85d48437` unchanged.
