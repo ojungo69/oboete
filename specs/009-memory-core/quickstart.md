@@ -2120,6 +2120,12 @@ exactly `['fallback']` — RED without the guard on `actual: ['fallback:1', 'fal
 matching record still yields `['fallback:1', 'fallback:2']`, so the guard cannot pass by refusing
 everything.
 
+**A behaviour change worth naming:** the collapsed item is `degraded`, and only degraded items move
+the exit, so `oboete doctor` now exits 1 for a stale record with a chain configured. Measured both
+ways on the same fixture: before the guard, exit 0 with no degraded item at all — a report that
+passed while no summary would ever be written. No `--probe-provider` is involved either way; the new
+CLI test pins both directions.
+
 **The unwritable-log test asserted the wrong thing.** `exit === 3` does not discriminate: `logEnd`
 returns 3 when its own append fails, whatever the run reached. The same scenario with a writable log
 was measured — exit 0, `last_run` reason `empty`, attempt lines present — so the test now asserts
@@ -2145,7 +2151,16 @@ because `releaseForExit` clears it only for `stopped`. Clearing it whenever `isW
 was the finding's own suggestion and was declined: it would swallow a stop request written *during*
 an unrelated exit, which three existing tests pin.
 
-Gate at this head: `npm test` 1569 + 280 green on Node 24.16.0 and 22.23.1, no flake either run;
-typecheck, lint and markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged against
-the round-12 baseline and none in a touched file; the lizard warning set differenced against
-`85d48437` adds nothing (113 of the base's 116, the three absences all counted in earlier rounds).
+**Caught by the oracle, not by the eye:** `fallbackItems` crossed 50 NLOC (51) once the guard was
+added, and lizard's TypeScript reader made it worse by swallowing the `FallbackTarget` type alias
+after it — the nested template literal in the new sentence is the same parser hazard as
+`lizard-ts-parse-swallows-after-angle-compare`. The count is named in a local now, and the
+chain-error branch moved out to `chainErrorItem`, which takes the function to 42.
+
+Gate at this head: `npm test` 1570 + 280 green on Node 24.16.0 and 22.23.1, each after one
+load-only rerun — `grok-no-tool` saw `pending` where `omitted` was expected (issue #243, the same
+pair of states in the other direction; 6 of 6 on the isolated rerun), and `staleness.test.ts` hit
+`ENOTEMPTY … rmdir '…/work/.git'` (issue #206; 6 of 6 isolated). Typecheck, lint and markdownlint
+clean; `semgrep scan --config auto` 21 findings, unchanged against the round-12 baseline and none in
+a touched file; the lizard warning set differenced against `85d48437` adds nothing (113 of the
+base's 116, the three absences all counted in earlier rounds).

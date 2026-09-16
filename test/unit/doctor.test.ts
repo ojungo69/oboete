@@ -1683,6 +1683,30 @@ test('a consent record that no longer matches collapses the chain instead of cal
   });
 });
 
+test('a stale consent record with a configured chain fails the report instead of passing it', async () => {
+  await harness(async (context) => {
+    const observer = { preset: 'workers-ai', cost_policy: ['free-tier', 'local'],
+      fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"', 'cost_policy = ["free-tier", "local"]',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    assert.equal(await context.doctor(['--json']), 0, context.output);
+
+    // Only a `degraded` item moves the exit, and before the chain checked consent at its own seam
+    // this configuration reported no degraded item at all: a report that exits 0 while no summary
+    // will ever be written is the failure this replaces. No probe is involved.
+    writeFileSync(context.paths.config,
+      readFileSync(context.paths.config, 'utf8').replace(hash, 'not-the-tuple'));
+    assert.equal(await context.doctor(['--json']), 1, context.output);
+    assertBroken(context.item('fallback'), 'degraded', 'one entry is configured',
+      'setup --accept-egress');
+  });
+});
+
 test('a cost-policy exclusion says the chain continues when another target is admitted', async () => {
   await withItemDatabase(async (db, paths) => {
     void paths;

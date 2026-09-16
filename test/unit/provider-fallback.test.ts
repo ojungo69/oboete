@@ -616,9 +616,10 @@ test('a log the worker cannot write ends the run as a storage failure', async (t
     assert.equal(hosts.ollama, 1);
     assert.equal(exit, 3, 'an unwritable observe log is a storage failure, not a clean run');
     // The exit alone does not say why: `logEnd` returns 3 when its own append fails, whatever the
-    // run reached. What separates the two is where the run stopped — the same scenario with a
-    // writable log ends `empty` at exit 0, having drained the session-end summary behind this
-    // batch; this one throws out of the batch line and records no end at all.
+    // run reached. What separates the two is where the run stopped. Measured: with a writable log
+    // the same scenario exits 0 and records `last_run` reason `empty`; here the batch is `applied`
+    // and its session is still `ended` with `summary_state = 'pending'`, so `queueIsEmpty` is false
+    // and the run that threw out of the batch line records no end at all.
     let lastRun: unknown;
     fixture.withDb((db) => {
       lastRun = db.prepare('SELECT value_json FROM runtime_state WHERE key = ?').get('last_run');

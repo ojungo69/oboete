@@ -279,13 +279,15 @@ column cannot hold go to the observe log, one line per attempted target.
   stamp answer for a preset that reported nothing, which is why `usageEstimate` carries no such
   field.
 
-  Consent is not part of a target's verdict — it is one hash over the primary and the whole chain.
-  There is no `consent` item in the report, so nothing may point at one: a mismatch is named where
-  it is noticed. `providerItem` reports it on a probe, and the one chain item that can reach it — an
-  excluded entry with an admitted target behind it, where the resolver has already been ruled out —
-  says the stored record no longer matches and recovers with `oboete setup --accept-egress`, not
-  with the cost class, which is not what stopped the chain. `oboete setup` is the surface that
-  displays the tuple and takes the acceptance (FR-022).
+  Consent is not part of a target's verdict — it is one hash over the primary and the whole chain,
+  so a record that no longer matches stops every target and no per-target verdict below it means
+  anything. The chain report therefore collapses the way it does on a resolver refusal: one
+  **degraded** `fallback` item naming how many entries are configured and recovering with
+  `oboete setup --accept-egress`, in place of the per-entry items. Being degraded, it also moves
+  `oboete doctor`'s exit to 1, which a report that called an unreachable target ready did not.
+  `providerItem` reports the same mismatch on a probe. There is no `consent` item in the report, so
+  nothing may point at one: a mismatch is named where it is noticed. `oboete setup` is the surface
+  that displays the tuple and takes the acceptance (FR-022).
 
 ## What the chain does not do
 

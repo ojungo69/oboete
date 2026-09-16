@@ -4,6 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import {
   PRESET_CATALOG,
   admittedChain,
+  type ChainError,
   type ChainVerdict,
   consentMatches,
   targetModel,
@@ -76,8 +77,9 @@ const FALLBACK_CONSEQUENCE =
  * chain to try at all: `resolveObserveModel` turns the throw into a run with no model and no
  * targets. `providerItem` notices that through `resolvedObserver` before it reaches this helper,
  * but `allowanceItem` and the catalog items have no such step — so the test belongs here, in the
- * function they share. `fallbackItems` asks `chainIsReachable` directly instead: what it reports is
- * an entry the policy excluded, not a refused primary, and it has one more condition of its own.
+ * function they share. `fallbackItems` takes the two halves apart instead of calling this helper:
+ * it reports the chain itself, so each half needs its own sentence — the resolver refusal names the
+ * model, the consent mismatch names the acceptance — and either one collapses the whole report.
  */
 function refusedPrimaryConsequence(
   config: OboeteConfig,
@@ -454,6 +456,18 @@ function resolvedObserver(
   }
 }
 
+/** The whole chain as one item when the configuration does not describe a runnable chain at all. */
+function chainErrorItem(error: ChainError): DoctorItem {
+  return degraded(
+    'fallback',
+    chainErrorMessage(error),
+    'The observer runs with no provider at all while the chain is unusable.',
+    error.code === 'chain_without_primary'
+      ? '`oboete setup --provider <preset>`, or remove the `[[observer.fallback]]` entries.'
+      : 'Correct the `[[observer.fallback]]` entry in the configuration file, then run `oboete doctor` again.',
+  );
+}
+
 /**
  * The chain's targets are reported, never probed: `providerItem` spends a real reservation, so one
  * probe per target would spend the daily allowance on diagnostics
@@ -470,16 +484,7 @@ export function fallbackItems(
   const entries = config.observer.fallback;
   if (entries.length === 0) return [];
   const chain = admittedChain(config);
-  if (chain.error !== null) {
-    return [degraded(
-      'fallback',
-      chainErrorMessage(chain.error),
-      'The observer runs with no provider at all while the chain is unusable.',
-      chain.error.code === 'chain_without_primary'
-        ? '`oboete setup --provider <preset>`, or remove the `[[observer.fallback]]` entries.'
-        : 'Correct the `[[observer.fallback]]` entry in the configuration file, then run `oboete doctor` again.',
-    )];
-  }
+  if (chain.error !== null) return [chainErrorItem(chain.error)];
   // Only the primary's own model can reach this: a chain error returned above. `resolveModel`
   // checks the primary before the chain, so the message is always about the preset.
   const resolved = resolvedObserver(
@@ -495,10 +500,14 @@ export function fallbackItems(
   // (contracts/provider-fallback.md "Diagnostics"). Collapsed into one item for the same reason a
   // refused resolver is: no per-target verdict below it means anything.
   if (!consentMatches(config, env)) {
+    // Named rather than nested in the sentence below: a template literal inside a template literal
+    // is where lizard's TypeScript reader loses the function boundary and reports this function's
+    // span as the rest of the file (`lizard-ts-parse-swallows-after-angle-compare`).
+    const configured = entries.length === 1 ? 'one entry is' : `${entries.length} entries are`;
     return [degraded(
       'fallback',
-      `No fallback target is attempted: ${entries.length} entries are configured and the`
-      + ' configuration has not been accepted for egress.',
+      `No fallback target is attempted: ${configured} configured and the configuration has not`
+      + ' been accepted for egress.',
       'Every batch is rule-based until the configuration on screen is accepted.',
       '`oboete setup --accept-egress`',
     )];
