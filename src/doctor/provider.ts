@@ -243,13 +243,13 @@ function configuredProvider(
   );
   if (!('kind' in resolved)) return resolved;
 
-  const credentials = readCredentials(preset, env, config.observer.agent_cli);
-  if (!credentials.present) return uncredentialedPrimary(config, preset, credentials, env);
   if (!consentMatches(config, env)) {
-    // Where the worker reads it: `initialProviderFailure` takes the preset, credentials and model
-    // first and then consent (src/worker/observe.ts), and refuses every batch with
-    // `consent_changed` — primary and chain alike, because one hash covers both. It belongs here
-    // rather than only in `fallbackItems`, which has nothing to collapse when
+    // Ahead of the credential test, because the worker acts in that order: `attemptTargets` asks
+    // `consentOk()` before `providerCall` precisely so that a target with no credentials cannot
+    // answer `no_provider` first and "send the user to fix a credential when consent is what they
+    // must act on" (src/worker/observe-batch.ts). One hash covers the primary and the chain, so a
+    // stale record stops everything; a missing credential only skips this one target. It belongs
+    // here rather than only in `fallbackItems`, which has nothing to collapse when
     // `[[observer.fallback]]` is empty, the schema's default. Answering before the probe is the
     // point as well: a probe under a stale record can only come back `consent_changed`, and it
     // would spend a reservation to say so.
@@ -260,6 +260,8 @@ function configuredProvider(
       '`oboete setup --accept-egress`',
     );
   }
+  const credentials = readCredentials(preset, env, config.observer.agent_cli);
+  if (!credentials.present) return uncredentialedPrimary(config, preset, credentials, env);
   return { kind: 'configured', config, preset, credentials, model: resolved.model };
 }
 
@@ -639,9 +641,47 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
   // actionable state unknown.
   const refused = fallbackAllowanceItem(name, where, entry.preset, catalog, db, now);
   if (refused !== null) return refused;
+  // `catalogItems` checks the *primary's* model against the cached list and returns nothing at all
+  // when another preset is primary, so without this a chain entry naming a model the account does
+  // not serve reads "admitted as free-tier and ready" while the worker answers `model_alias` on it.
+  const listing = entry.preset === 'workers-ai' ? catalogTargetItem(name, where, db, model, env, now) : null;
+  if (listing !== null) return listing;
   return unverifiable === null
     ? healthy(name, `${where}, admitted as ${catalog.costClass} and ready.`)
     : unverified(name, `${where}, and ${unverifiable.reason}`, unverifiable.consequence, unverifiable.recovery);
+}
+
+/**
+ * What the cached Workers AI catalog says about a chain target's model, or null when it lists it.
+ * The freshness tests are `catalogItems`'s: a cache from another account or older than `CACHE_MS`
+ * is one the worker replaces on its next batch, so it cannot refuse a model either — that is a
+ * `warning` only when the list is current, and "not checked here" otherwise.
+ */
+function catalogTargetItem(
+  name: string,
+  where: string,
+  db: DatabaseSync,
+  model: string,
+  env: NodeJS.ProcessEnv,
+  now: number,
+): DoctorItem | null {
+  const cache = cachedCatalog(db);
+  const accountId = readCredentials('workers-ai', env).values.accountId ?? '';
+  if (cache === null || cache.accountId !== accountId || now < cache.fetchedAt || now - cache.fetchedAt >= CACHE_MS) {
+    return unverified(
+      name,
+      `${where}, and whether this account serves that model is not checked here: no fresh catalog is cached.`,
+      'A model the account does not serve fails its attempt with `model_alias`, and the chain moves past it.',
+      '`oboete observe` fetches the catalog on the first batch; run `oboete doctor` again after that.',
+    );
+  }
+  if (cache.models.includes(model)) return null;
+  return warning(
+    name,
+    `${where}, which is not in the cached catalog of ${cache.models.length} models fetched ${iso(cache.fetchedAt)}.`,
+    'The target fails its attempt with `model_alias`, so the chain moves straight past it.',
+    'Point the entry at a listed model, or remove it from the chain.',
+  );
 }
 
 /**

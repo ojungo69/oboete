@@ -272,7 +272,12 @@ column cannot hold go to the observe log, one line per attempted target.
   `provider_usage.exhausted_at` if set. Two verdicts it does not overstate: an `agent-cli` target is
   `unverified` rather than ready, because `readCredentials` calls an agent login present and only
   `setup` checks it; and a **capped** target is a warning once the shared allowance is spent, which
-  `allowanceItem` reports only when the *primary* is capped. The two halves of that verdict come
+  `allowanceItem` reports only when the *primary* is capped. A **Workers AI** target adds a third:
+  its model is checked against the cached catalog, because `catalogItems` validates the primary's
+  model and returns nothing at all when another preset is primary. A current list that omits the
+  model makes the target a warning naming it, since the worker answers `model_alias` there and moves
+  past; a missing, foreign-account or stale list leaves it `unverified`, because a cache the worker
+  replaces on its next batch may not refuse a model. The two halves of that verdict come
   from different places on purpose: a target's `exhausted_at` is read from its own
   `provider_usage` row (`presetExhaustedAt`), while the spent-allowance warning comes from the
   shared call count alone (`usageEstimate`). A day-wide exhaustion flag would let one preset's

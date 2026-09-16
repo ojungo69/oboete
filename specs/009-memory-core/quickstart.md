@@ -2209,6 +2209,37 @@ markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged; the liz
 differenced against `85d48437` adds nothing — `configuredProvider` crossed at 57 NLOC when the
 consent branch landed, and `uncredentialedPrimary` came out of it (44).
 
+### E9 follow-up — two Codex threads the earlier polling had not seen
+
+Both were `chatgpt-codex-connector` P2 inline comments, and both were missed the same way: the
+polling read `pulls/238/comments` without `--paginate`, so a finding on page two looked like
+silence. The connector's legend is explicit — it comments when it has suggestions and reacts 👍 only
+when every review finishes with none — and the missing 👍 was the signal, not the reaction that
+never came.
+
+**Consent belongs ahead of the missing credential, not behind it.** When a remote primary has
+neither a credential nor a matching consent record, the report named the credential and recommended
+exporting the variable — and the worker does the opposite: `attemptTargets` asks `consentOk()`
+before `providerCall` for exactly this reason, and its comment says so ("send the user to fix a
+credential when consent is what they must act on", `src/worker/observe-batch.ts`). Adding the
+credential would have left every batch stopping on `consent_changed`. Consent is tested first now;
+one existing fixture had both problems and was pinning the wrong half, so it takes a matching
+record, and a new test pins the order.
+
+**A Workers AI chain target was called ready without consulting the catalog.** `catalogItems`
+validates the *primary's* model and returns nothing at all when another preset is primary, so
+`fallback:1 … admitted as free-tier and ready` was printed for a model the account does not serve —
+the worker answers `model_alias` on it and moves past. `catalogTargetItem` now reads the same cached
+list, with `catalogItems`'s own freshness rules: a current list that omits the model is a `warning`
+naming it, a missing, foreign-account or stale list is `unverified` ("not checked here"), because a
+cache the worker is about to replace may not refuse anything. Pinned in all three directions,
+including the listed-model case so the check cannot pass by doubting everything.
+
+Gate at this head: `npm test` 1573 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged; the lizard warning set
+differenced against `85d48437` adds nothing (`fallbackTargetItem` 39, `catalogTargetItem` 27,
+`configuredProvider` 44).
+
 Gate at the previous head: `npm test` 1570 + 280 green on Node 24.16.0 and 22.23.1, each after one
 load-only rerun — `grok-no-tool` saw `pending` where `omitted` was expected (issue #243, the same
 pair of states in the other direction; 6 of 6 on the isolated rerun), and `staleness.test.ts` hit

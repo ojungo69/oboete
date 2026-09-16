@@ -26,6 +26,7 @@ import { ensureDirectories, oboetePaths, type OboetePaths } from '../../src/path
 import type { VersionSpawn } from '../../src/setup/detect.js';
 import { removeJsonHandlers } from '../../src/setup/managed-block.js';
 import { runSetup, type SetupDeps } from '../../src/setup/setup.js';
+import { CACHE_MS } from '../../src/observer/catalog.js';
 import { DAILY_CAP, SESSION_END_RESERVE, utcDay } from '../../src/observer/reservation.js';
 import { runtimeStateSet } from '../../src/worker/purge.js';
 import { withTempHome } from '../helpers/home.js';
@@ -1384,15 +1385,36 @@ test('an unconfigured provider explains fallback without probing', async () => {
 
 test('missing provider credentials name the variable to export', async () => {
   await withItemDatabase(async (db, paths) => {
+    // With a matching consent record, because consent is reported ahead of a missing credential:
+    // the test below is the one that pins that order.
+    const draft = configSchema.parse({ observer: { preset: 'openrouter' } });
+    const config = configSchema.parse({
+      ...draft, consent: { hash: consentHash(consentTuple(draft, {})), accepted_at: ITEM_NOW },
+    });
     assert.deepEqual(await providerItem({
-      config: configSchema.parse({ observer: { preset: 'openrouter' } }), paths, db,
-      integrityFailed: false, deps: itemDeps, options: itemOptions, now: ITEM_NOW,
+      config, paths, db, integrityFailed: false, deps: itemDeps, options: itemOptions, now: ITEM_NOW,
     }), {
       item: 'provider', status: 'degraded',
       reason: 'No credentials are set for the openrouter preset (env:OBOETE_OPENROUTER_API_KEY).',
       consequence: 'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
       recovery: 'Export that variable in the shell that runs the agents.',
     });
+  });
+});
+
+test('a primary missing both its credential and its consent names the consent', async () => {
+  await withItemDatabase(async (db, paths) => {
+    // The worker's order, and its reason: `attemptTargets` asks `consentOk()` before
+    // `providerCall` so that a target with no credentials cannot answer `no_provider` first and
+    // send the user to fix a credential while consent is what stops every batch
+    // (src/worker/observe-batch.ts). Exporting the variable alone would leave processing blocked.
+    const item = await providerItem({
+      config: configSchema.parse({ observer: { preset: 'openrouter' } }), paths, db,
+      integrityFailed: false, deps: itemDeps, options: itemOptions, now: ITEM_NOW,
+    });
+    assert.equal(item.status, 'degraded');
+    assert.match(item.reason, /Observer consent changed/);
+    assert.equal(item.recovery, '`oboete setup --accept-egress`');
   });
 });
 
@@ -1736,6 +1758,35 @@ test('a stale consent record is reported with no chain configured at all', async
       'setup --accept-egress');
     assert.deepEqual(context.report().items.filter((entry) => entry.item.startsWith('fallback')), [],
       'no chain is configured, so no chain item exists to carry this');
+  });
+});
+
+test('a Workers AI chain target is checked against the cached catalog, not called ready', async () => {
+  await withItemDatabase((db) => {
+    // `catalogItems` validates the primary only, and returns nothing at all when another preset is
+    // primary, so an entry naming a model this account does not serve used to read "admitted as
+    // free-tier and ready" while the worker answers `model_alias` on it.
+    const config = consented({ preset: 'workers-ai', model: 'primary-model',
+      cost_policy: ['free-tier'], fallback: [{ preset: 'workers-ai', model: 'chosen-model' }] });
+    const listed = (models: string[], fetchedAt = ITEM_NOW): DoctorItem => {
+      runtimeStateSet(db, 'workers_ai_catalog', JSON.stringify({
+        accountId: 'account', models, defaultModelPresent: false, hasPaidOnlyModels: false, fetchedAt,
+      }), ITEM_NOW);
+      return fallbackItems(config, db, false, ITEM_ENV, ITEM_NOW)[0];
+    };
+
+    // No cache at all: nothing here can check it, and saying so is not the same as refusing it.
+    const uncached = fallbackItems(config, db, false, ITEM_ENV, ITEM_NOW)[0];
+    assert.equal(uncached.status, 'unverified', uncached.reason);
+    assert.match(uncached.reason, /no fresh catalog is cached/);
+
+    assertBroken(listed(['other-model']), 'warning', 'not in the cached catalog of 1 models',
+      'Point the entry at a listed model');
+    // A stale cache is one the worker replaces on its next batch, so it may not refuse a model.
+    const stale = listed(['other-model'], ITEM_NOW - CACHE_MS);
+    assert.equal(stale.status, 'unverified', stale.reason);
+    // And the other direction, so the check cannot pass by doubting everything.
+    assert.equal(listed(['chosen-model']).status, 'healthy', listed(['chosen-model']).reason);
   });
 });
 
