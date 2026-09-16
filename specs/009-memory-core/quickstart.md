@@ -1173,8 +1173,8 @@ see, and it is issue #240.
 - Gate at this head: `npm run typecheck`, `npm run lint`, `markdownlint-cli2` and
   `semgrep scan --config auto` over the three changed source files all exit 0 with 0 findings.
   `npm test` green on Node 24.16.0 and on Node 22.23.1 (the 22.x line installed here; CI's
-  `engine (22.16.0)` job covers the engines floor): 1545 + 280 tests, 0 fail, 2 skipped,
-  `NPM_TEST_EXIT=0` on both.
+  `engine (22.16.0)` job covers the engines floor): 1547 + 280 tests, 0 fail, 2 skipped,
+  `NPM_TEST_EXIT=0` on both, rerun at the review round's head.
 - Each of the five was written as a failing test first, and each failed for its own reason before
   the fix. The first seven were run red before the fixes landed; the last three (`a reservation
   restamps claimed_at…`, `the provider item names a primary the resolver refuses…`, and the extended
