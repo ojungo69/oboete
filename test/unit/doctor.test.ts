@@ -1387,12 +1387,9 @@ test('missing provider credentials name the variable to export', async () => {
   await withItemDatabase(async (db, paths) => {
     // With a matching consent record, because consent is reported ahead of a missing credential:
     // the test below is the one that pins that order.
-    const draft = configSchema.parse({ observer: { preset: 'openrouter' } });
-    const config = configSchema.parse({
-      ...draft, consent: { hash: consentHash(consentTuple(draft, {})), accepted_at: ITEM_NOW },
-    });
     assert.deepEqual(await providerItem({
-      config, paths, db, integrityFailed: false, deps: itemDeps, options: itemOptions, now: ITEM_NOW,
+      config: consented({ preset: 'openrouter' }), paths, db, integrityFailed: false,
+      deps: itemDeps, options: itemOptions, now: ITEM_NOW,
     }), {
       item: 'provider', status: 'degraded',
       reason: 'No credentials are set for the openrouter preset (env:OBOETE_OPENROUTER_API_KEY).',

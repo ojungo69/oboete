@@ -2240,9 +2240,9 @@ differenced against `85d48437` adds nothing (`fallbackTargetItem` 39, `catalogTa
 
 ### E9 follow-up — the catalog verdict was written for data that is never there
 
-Twelve findings on the round above; six adopted, one filed, five declined. The two that matter are
-both about the check written to close a Codex finding, which is the shape
-`fix-can-be-worse-in-another-dimension` warns about.
+Twelve findings on the round above; eleven adopted, one declined, and the worker-side gap behind the
+first one filed as #250. The two that matter are both about the check written to close a Codex
+finding, which is the shape `fix-can-be-worse-in-another-dimension` warns about.
 
 **The recovery it printed could never come true.** `refreshCatalog` fetches the Workers AI model
 list only when Workers AI is the **primary** (`src/worker/observe.ts`), so the configuration the
@@ -2270,7 +2270,8 @@ original finding asked for the order *or* both recoveries, and taking only the o
 wrong until the entry is edited while a spent allowance resets at midnight; `catalogIsStale` is one
 function shared with the primary's item instead of a second copy of the same two clauses; the
 credentials the caller already read are passed in rather than read again; `models(n)` makes it
-"1 model"; and the modified fixture uses the file's own `consented()` helper.
+"1 model"; the modified fixture uses the file's own `consented()` helper instead of inlining it; and
+the healthy-case assertion binds its item once instead of building the same one twice.
 
 **Declined.** Mirroring the primary's paid-plan warning onto every chain entry: `hasPaidOnlyModels`
 is an account-level flag, not a property of the entry's model, so it would mark targets that are
