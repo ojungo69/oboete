@@ -1587,3 +1587,39 @@ as issues #203 and #168, and as the CI flake filed as #243 in this PR.
 
 Gate at this head: `npm test` green on Node 24.16.0 and 22.23.1; typecheck, lint, markdownlint and
 `semgrep scan --config auto` clean; lizard warning set differenced against `85d48437` adds nothing.
+
+### E9 follow-up — closing the shape instead of waiting for the tenth round
+
+Rounds four, seven and nine each fixed one instance of the same defect: a report that predicts what
+happens to a batch the primary cannot serve, without asking whether a target is admitted. Each round
+found the next instance rather than the shape, so the shape was enumerated directly this time —
+every user-facing sentence in `src/doctor/` and `src/setup/` that says where a batch goes:
+
+| surface | state it predicts | closed in |
+|---|---|---|
+| `configuredProvider` | primary has no credentials | round 4 |
+| `providerItem` post-probe | the probe call failed | round 7 |
+| `providerCapItem` exhaustion / cap | the reservation is refused | rounds 4 and 9 |
+| `credentialGuidance` (setup) | primary has no credentials | round 9 |
+| `allowanceItem` | the shared daily allowance | **this sweep** |
+
+`allowanceItem` was the one left, and structurally so: `allowanceEstimateItem` never received the
+configuration, so it could not have consulted `admittedChain` even if it wanted to. It said
+processing waits for the reset while an admitted `ollama` target summarizes those batches. The
+chain-awareness moved into `allowanceClause` itself, which both readers already share, so
+`providerCapItem`'s reserved branch lost the wrapper the ninth round put around it.
+
+The chained sentence says the batch is **offered** to the chain rather than summarized by it,
+because `DAILY_CAP` is shared across capped presets: a capped target refuses at its own reservation
+with its own `daily_cap`, and only an uncapped target answers. Which targets those are is
+`fallback:N`'s to report, and it already does.
+
+Both directions are pinned per band, in one test each, against the same database: with an admitted
+target and with none.
+
+Everything else in that table was re-read rather than assumed; `fallbackAllowanceItem` speaks about
+one target rather than about the batch, so it is not in the family.
+
+Gate at this head: `npm test` 1557 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing.
