@@ -26,7 +26,7 @@ import { ensureDirectories, oboetePaths, type OboetePaths } from '../../src/path
 import type { VersionSpawn } from '../../src/setup/detect.js';
 import { removeJsonHandlers } from '../../src/setup/managed-block.js';
 import { runSetup, type SetupDeps } from '../../src/setup/setup.js';
-import { DAILY_CAP, utcDay } from '../../src/observer/reservation.js';
+import { DAILY_CAP, SESSION_END_RESERVE, utcDay } from '../../src/observer/reservation.js';
 import { runtimeStateSet } from '../../src/worker/purge.js';
 import { withTempHome } from '../helpers/home.js';
 
@@ -687,6 +687,42 @@ test("one capped preset's exhaustion is neither another's nor the shared allowan
   });
 });
 
+test('a capped target is warned while the last calls are held for end-of-session batches', async () => {
+  await harness(async (context) => {
+    context.env.OBOETE_NIM_API_KEY = 'nvapi-doctor-test';
+    const observer = { preset: 'workers-ai', cost_policy: ['free-tier', 'remote'],
+      fallback: [{ preset: 'nim' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"', 'cost_policy = ["free-tier", "remote"]',
+      '', '[[observer.fallback]]', 'preset = "nim"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    const seed = (calls: number): void => {
+      const { db } = openDatabase({ path: context.paths.db, timeoutMs: 5_000 });
+      try {
+        db.prepare('DELETE FROM provider_usage').run();
+        db.prepare(`INSERT INTO provider_usage (utc_day, preset, calls, neurons_estimate, reset_at)
+          VALUES (?, 'workers-ai', ?, 0, ?)`).run(utcDay(context.now), calls, context.now + 3_600_000);
+      } finally {
+        db.close();
+      }
+    };
+
+    // One call below the reserve the worker keeps for session ends: still open, both surfaces.
+    seed(DAILY_CAP - SESSION_END_RESERVE - 1);
+    await context.doctor(['--json']);
+    assert.equal(context.item('allowance').status, 'healthy', context.item('allowance').reason);
+    assert.equal(context.item('fallback:1').status, 'healthy', context.item('fallback:1').reason);
+
+    seed(DAILY_CAP - SESSION_END_RESERVE);
+    await context.doctor(['--json']);
+    assertBroken(context.item('allowance'), 'degraded', 'held for end-of-session batches');
+    assertBroken(context.item('fallback:1'), 'warning', 'held for end-of-session batches');
+  });
+});
+
 test('a primary the resolver refuses leaves no fallback target to call ready', async () => {
   await harness(async (context) => {
     // `ollama` has no default model, so the primary fails `resolveModel` and the worker degrades
@@ -1239,6 +1275,11 @@ test('changed provider consent stops a doctor probe before reserving allowance',
 for (const [name, calls, exhaustedAt, reason] of [
   ['provider exhaustion', 1, ITEM_NOW, 'provider_exhausted: The provider reported exhaustion today.'],
   ['the daily cap', 150, null, 'daily_cap: The daily cap of 150 calls is used up.'],
+  // `reserveAttempt` refuses `ten_turns` and `retention` from 140 calls on, so a surface that waits
+  // for 150 reports ten calls of allowance the worker will not grant, and the probe would spend
+  // them (issue #240, found independently by three reviewers).
+  ['the session-end reserve', 140, null,
+    'daily_cap: Only 10 of the daily 150 calls are left, and they are held for end-of-session batches.'],
 ] as const) {
   test(`${name} stops a doctor probe without consuming another call`, async () => {
     await withItemDatabase(async (db, paths) => {
@@ -1256,7 +1297,9 @@ for (const [name, calls, exhaustedAt, reason] of [
       });
       assert.deepEqual(allowanceItem(config, db, false, ITEM_NOW), {
         item: 'allowance', status: 'degraded',
-        reason: exhaustedAt === null ? 'The daily cap of 150 calls is used up.' : 'The provider reported exhaustion today.',
+        reason: exhaustedAt !== null
+          ? 'The provider reported exhaustion today.'
+          : reason.replace('daily_cap: ', ''),
         consequence: 'Source processing waits for the allowance to reset; later worker runs retry due sources.',
         recovery: 'Wait for the reset at 2026-09-07T00:00:00.000Z or switch preset with `oboete setup --provider`.',
       });

@@ -1298,3 +1298,42 @@ Two nits and two pre-existing observations, none blocking:
 - Pre-existing and already filed: doctor ignores `SESSION_END_RESERVE` (#240, which now also records
   that `--probe-provider` can spend from that reserve), and `fallbackTargetItem` echoes the user's
   own configured model into `--json`.
+
+### E9 follow-up — the session-end reserve, found three times
+
+`SESSION_END_RESERVE` is 10 of `DAILY_CAP`'s 150 calls, and `reserveAttempt` refuses a `ten_turns`
+or `retention` reservation from 140 calls on so an end-of-session summary is still possible. No
+doctor surface knew that: `providerCapItem`, `fallbackAllowanceItem` and `allowanceEstimateItem` all
+waited for `remaining === 0`, and `doctorReserve` used the same threshold, so between 140 and 150
+calls doctor reported "Estimated 8 of 150 calls remaining" and a capped target as ready while the
+worker refused every batch that was not a session end — and `--probe-provider`, the one doctor
+caller that takes a real reservation, could spend from the ten held calls.
+
+It was filed rather than fixed at first (#240), on the grounds that the wording was a decision about
+a trigger doctor cannot see. Three independent finders changed that: this session's own sibling
+sweep, the defensive security review, and CodeRabbit on the pushed head. It is also the same shape
+`2129c357` closed for a fallback target — a surface calling something ready that cannot be
+attempted — which is this branch's subject. So it is fixed here, and doctor does not need the
+trigger to be accurate: below the reserve, only an end-of-session batch is served, and that is what
+the items now say. `sharedAllowance` is the one reader of the band and `allowanceClause` the one
+sentence the two allowance surfaces share; `doctorReserve` refuses in the band for the same reason
+`reserveAttempt` does.
+
+- `a capped target is warned while the last calls are held for end-of-session batches` pins both
+  sides of the boundary — one call below the reserve both surfaces are still healthy, and at the
+  reserve both report it. That is the clean red: `healthy` → `degraded` with the threshold reverted.
+- `the session-end reserve stops a doctor probe without consuming another call` is a third row on
+  the existing table beside `provider exhaustion` and `the daily cap`, pinning the exact sentence
+  and that `provider_usage.calls` does not move. Its red is indirect — with the threshold reverted
+  the fixture falls through to the probe and fails on its missing consent hash rather than on the
+  band — so the boundary test above is the behavioural pin and this row is the string and no-spend
+  pin.
+- Gate at this head: `npm test` green on Node 24.16.0 and 22.23.1, 1549 + 280 tests, 0 fail, 2
+  skipped; typecheck, lint, markdownlint, `semgrep scan --config auto` and
+  `pipx run lizard -l typescript -T nloc=50 src/doctor/provider.ts` all clean.
+
+The adversarial half of the security gate ran four attack lenses over the same range with two
+refuters each, and **none of its ten findings survived refutation** — including two that named this
+same reserve band, both refuted as pre-existing rather than introduced, which is what the record
+above says too. #240 stays open only for the wording of the primary `allowance` item's healthy line,
+which still quotes the raw remainder.

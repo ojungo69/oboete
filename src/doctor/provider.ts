@@ -30,6 +30,7 @@ import type { ObserverInput } from '../observer/contract.js';
 import { summarizeWithProvider, type CallOutcome } from '../observer/llm.js';
 import {
   DAILY_CAP,
+  SESSION_END_RESERVE,
   presetExhaustedAt,
   recordExhausted,
   recordProviderAttempt,
@@ -216,6 +217,27 @@ function providerProbeReadiness(
   return { kind: 'ready', db, estimate };
 }
 
+/**
+ * What the shared allowance still admits. `reserveAttempt` holds the last `SESSION_END_RESERVE`
+ * calls for `session_end` triggers, so a surface that stops at `remaining === 0` calls a provider
+ * ready while every `ten_turns` and `retention` batch is already being refused — the same shape as
+ * a target reported ready that cannot be attempted.
+ */
+function sharedAllowance(estimate: ReturnType<typeof usageEstimate>): 'open' | 'reserved' | 'spent' {
+  if (estimate.remaining === 0) return 'spent';
+  return estimate.remaining <= SESSION_END_RESERVE ? 'reserved' : 'open';
+}
+
+/** The sentence the two allowance surfaces share once it is no longer open. */
+function allowanceClause(
+  state: 'reserved' | 'spent',
+  estimate: ReturnType<typeof usageEstimate>,
+): string {
+  return state === 'spent'
+    ? `The daily cap of ${DAILY_CAP} calls is used up.`
+    : `Only ${estimate.remaining} of the daily ${DAILY_CAP} calls are left, and they are held for end-of-session batches.`;
+}
+
 function providerCapItem(
   preset: Exclude<PresetName, 'none'>,
   estimate: ReturnType<typeof usageEstimate>,
@@ -233,10 +255,11 @@ function providerCapItem(
       `Wait for the reset at ${iso(estimate.resetAt)} or choose another preset with \`oboete setup --provider\`.`,
     );
   }
-  if (PRESET_CATALOG[preset].capped && estimate.remaining <= 0) {
+  const shared = sharedAllowance(estimate);
+  if (PRESET_CATALOG[preset].capped && shared !== 'open') {
     return degraded(
       'provider',
-      `daily_cap: The daily cap of ${DAILY_CAP} calls is used up.`,
+      `daily_cap: ${allowanceClause(shared, estimate)}`,
       FALLBACK_CONSEQUENCE,
       `Wait for the reset at ${iso(estimate.resetAt)} or choose another preset with \`oboete setup --provider\`.`,
     );
@@ -255,7 +278,8 @@ function doctorReserve(
   }
   return transactionImmediate(db, () => {
     if (presetExhaustedAt(db, preset, now) !== null) return { ok: false, reason: 'provider_exhausted' };
-    if (usageEstimate(db, now).remaining <= 0) return { ok: false, reason: 'daily_cap' };
+    // The probe takes a real reservation, so it must not spend the calls held for session ends.
+    if (sharedAllowance(usageEstimate(db, now)) !== 'open') return { ok: false, reason: 'daily_cap' };
     const reservationId = randomUUID();
     recordProviderAttempt(db, { preset, now });
     return { ok: true, reservationId };
@@ -477,10 +501,13 @@ function fallbackAllowanceItem(
     );
   }
   const estimate = usageEstimate(db, now);
-  if (catalog.capped && estimate.remaining === 0) {
+  const shared = sharedAllowance(estimate);
+  if (catalog.capped && shared !== 'open') {
     return warning(
       name,
-      `${where}, and today's shared allowance is spent (${estimate.calls} of ${DAILY_CAP} calls).`,
+      shared === 'spent'
+        ? `${where}, and today's shared allowance is spent (${estimate.calls} of ${DAILY_CAP} calls).`
+        : `${where}, and only ${estimate.remaining} of today's ${DAILY_CAP} shared calls are left, held for end-of-session batches.`,
       'Every capped target refuses at its own reservation until the allowance resets.',
       `Wait for the reset at ${iso(estimate.resetAt)}, or add an uncapped target to the chain.`,
     );
@@ -526,10 +553,11 @@ function allowanceEstimateItem(
         `Wait for the reset at ${iso(estimate.resetAt)} or switch preset with \`oboete setup --provider\`.`,
       );
     }
-    if (estimate.remaining === 0) {
+    const shared = sharedAllowance(estimate);
+    if (shared !== 'open') {
       return degraded(
         'allowance',
-        `The daily cap of ${DAILY_CAP} calls is used up.`,
+        allowanceClause(shared, estimate),
         ALLOWANCE_CONSEQUENCE,
         `Wait for the reset at ${iso(estimate.resetAt)} or switch preset with \`oboete setup --provider\`.`,
       );
