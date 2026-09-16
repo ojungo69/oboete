@@ -557,13 +557,15 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
     );
   }
   const unverifiable = unverifiableTarget(catalog, config.observer.agent_cli);
-  const unverifiableItem = (): DoctorItem =>
-    unverified(name, `${where}, and ${unverifiable!.reason}`, unverifiable!.consequence, unverifiable!.recovery);
+  // Taken as an argument rather than captured, so the two call sites' `!== null` test is what makes
+  // it non-null here instead of two assertions the compiler has to be told to believe.
+  const unverifiableItem = (why: NonNullable<typeof unverifiable>): DoctorItem =>
+    unverified(name, `${where}, and ${why.reason}`, why.consequence, why.recovery);
   if (db === null) {
     // No storage is no allowance verdict, so a target whose runnability nothing here checks says
     // that instead of naming a record it does not have — `ollama` is uncapped and would be told to
     // wait for an allowance it never spends.
-    return unverifiable !== null ? unverifiableItem() : dbUnread(
+    return unverifiable !== null ? unverifiableItem(unverifiable) : dbUnread(
       name,
       integrityFailed,
       `${where}, and today's allowance record could not be read.`,
@@ -578,7 +580,7 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
   const refused = fallbackAllowanceItem(name, where, entry.preset, catalog, db, now);
   if (refused !== null) return refused;
   return unverifiable !== null
-    ? unverifiableItem()
+    ? unverifiableItem(unverifiable)
     : healthy(name, `${where}, admitted as ${catalog.costClass} and ready.`);
 }
 
