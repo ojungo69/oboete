@@ -82,7 +82,10 @@ export function consentDisplay(config: OboeteConfig, env: NodeJS.ProcessEnv): st
 /**
  * `--accept-egress` accepts the tuple shown now; `--yes` accepts only when the stored record is
  * the hash of that same tuple, which is what makes a changed host, credential source or egress
- * class refuse the flag (R8).
+ * class refuse the flag (R8). "Shown" is exact for the primary and for every fallback target's
+ * preset, host, credential source and cost class; the one field where the printed line and the
+ * hashed value differ on purpose is a target's egress classes, which the header of this module
+ * explains.
  */
 export function decideConsent(options: {
   config: OboeteConfig;

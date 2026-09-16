@@ -792,9 +792,14 @@ async function observeLifecycle(
         }
       }
 
-      if (!leaseLost) await checkpointBatch();
-
-      logBatch();
+      // `checkpointBatch` rethrows a storage error, and the attempt lines this pass already spent
+      // are only in memory until they are written: a `finally` is what makes the array's caller
+      // ownership worth anything on that path (contracts/provider-fallback.md "Diagnostics").
+      try {
+        if (!leaseLost) await checkpointBatch();
+      } finally {
+        logBatch();
+      }
 
     }
 

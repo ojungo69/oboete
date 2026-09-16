@@ -1818,3 +1818,41 @@ narrowed what a stored consent record covers for every chained install.
 lines at high effort returns twelve to thirteen findings every time
 (`whole-pr-rereview-does-not-converge`), and this pass is the record of the whole diff having been
 read. The `ok: true` is taken on the fix delta.
+
+### E9 follow-up — the fix delta's own review, and the shape it kept finding
+
+The `ok: true` for the merge gate was taken on `de99b2ed..1e57b3bc`, the delta of the round above
+rather than the pull request again. It returned nine findings, and the two most severe were both the
+same shape: a fix that closed the path it was pointed at and left a sibling open.
+
+- The attempt array moved to the caller so a throw could not drop it — and `checkpointBatch`
+  rethrows a storage error *after* the `try`, so `logBatch()` never ran and the lines were dropped
+  anyway. `logBatch()` is now in a `finally`.
+- "Do not call a target ready" returned `unverified` before `fallbackAllowanceItem` ran, so an
+  `ollama` target that reported exhaustion today — which `reserveAttempt` refuses on the stamp
+  *before* it looks at `capped` — was reported as merely unchecked, and the `db === null` branch was
+  skipped with it. The allowance verdict is read first now and only its `healthy` answer is
+  downgraded, by one `unverifiableTarget` test rather than a branch per preset. That also closes the
+  same swallow for `agent-cli`, which had it before this pull request.
+
+The rest: `allowanceClause` took the spent band's consequence as the caller's thunk, so finding 10's
+discarded work is gone rather than moved; `ChainResult` became a union whose `answered` exists only
+on the variant that has an answer, so the pairing a comment carried is the type's; four comments and
+a docstring that justified a sentence by the target being reported `healthy` were swept, since local
+targets no longer are; and the `notDeepEqual` pin added the round before came out — it was implied by
+the `deepEqual` above it and false in general, because a local primary admits only local targets and
+then the two agree.
+
+Declined: that reporting an orphaned chain under `--provider none` is a symptom fix and setup should
+strip the entries instead. Verification 18 has that run succeed, the note names the two commands that
+resolve it, and setup does not delete configuration the user wrote anywhere else. The test now pins
+that the entries survive the run.
+
+`fallbackTargetItem` crossed the length bound at 52 NLOC while that restructure happened, which the
+warning **set** differenced against `85d48437` caught and the count would not have: the same run
+dropped `fallbackReason` and `writeConfig`. `unadmittedEntryItem` took the two verdicts that need no
+storage read.
+
+Gate at this head: `npm test` 1566 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` unchanged against the round-12 baseline; the lizard
+warning set differenced against `85d48437` adds nothing and drops two.

@@ -68,8 +68,9 @@ const FALLBACK_CONSEQUENCE =
 /**
  * What a refused primary means for the queue. An admitted chain is attempted on the same batch
  * (contracts/provider-fallback.md "Advance and stop": `daily_cap` and `provider_exhausted` both
- * advance), so an item that says processing waits contradicts both the worker and the healthy
- * target reported below it.
+ * advance), so an item that says processing waits contradicts both the worker and the admitted
+ * target reported below it — whatever verdict that target's own item carries, since admission is
+ * what decides where the batch goes.
  *
  * Admission alone is not enough to promise that, because a primary the *resolver* refuses leaves no
  * chain to try at all: `resolveObserveModel` turns the throw into a run with no model and no
@@ -136,8 +137,9 @@ export async function providerItem(input: {
       'provider',
       outcomeSentence(outcome),
       // A probe failure the chain advances past is not the queue waiting: the worker hands the same
-      // batch to the admitted target this report calls healthy a few lines below. `CHAIN_STOPS` is
-      // the worker's own set, not a copy (src/observer/classify.ts).
+      // batch to the admitted target this report lists below — which for a local target is reported
+      // `unverified` rather than healthy, because nothing here probes it. `CHAIN_STOPS` is the
+      // worker's own set, not a copy (src/observer/classify.ts).
       CHAIN_STOPS.has(outcome.reason)
         ? FALLBACK_CONSEQUENCE
         : refusedPrimaryConsequence(
@@ -284,20 +286,14 @@ function allowanceClause(
   resetAt: string,
   config: OboeteConfig,
   env: NodeJS.ProcessEnv,
+  // A thunk, and the caller's: the two surfaces word a spent allowance differently, so building
+  // both here would spend a consent hash on the sentence the caller throws away.
+  spentConsequence: () => string,
 ): { reason: string; consequence: string; recovery: string } {
   return state === 'spent'
     ? {
       reason: `The daily cap of ${DAILY_CAP} calls is used up.`,
-      // "Offered" rather than "summarized": the cap is shared across capped presets, so a capped
-      // target refuses at its own reservation too (contracts/provider-fallback.md "Advance and
-      // stop", `daily_cap`). Only an uncapped target actually answers, and `fallback:N` is where
-      // each target's own allowance is reported.
-      consequence: refusedPrimaryConsequence(
-        config,
-        env,
-        'Batches are offered to the fallback chain below; a capped target there shares this allowance.',
-        ALLOWANCE_CONSEQUENCE,
-      ),
+      consequence: spentConsequence(),
       recovery: `Wait for the reset at ${resetAt} or switch preset with \`oboete setup --provider\`.`,
     }
     : {
@@ -333,20 +329,13 @@ function providerCapItem(
   }
   const shared = sharedAllowance(estimate);
   if (PRESET_CATALOG[preset].capped && shared !== 'open') {
-    const clause = allowanceClause(shared, estimate, iso(estimate.resetAt), config, env);
-    return degraded(
-      'provider',
-      `daily_cap: ${clause.reason}`,
-      // In the reserved band `reserveAttempt` still grants a `session_end` batch this preset, so
-      // neither "processing waits" nor "the chain takes it" is true of every batch — the clause's
-      // own sentence is, and it is chain-aware. The spent band keeps this item's own sentence
-      // because it is reporting a refused probe reservation rather than the shared allowance. The
-      // recovery is the clause's too: the copy that stood here said the same thing in other words.
-      shared === 'reserved'
-        ? clause.consequence
-        : refusedPrimaryConsequence(config, env, REFUSED_RESERVATION),
-      clause.recovery,
-    );
+    // In the reserved band `reserveAttempt` still grants a `session_end` batch this preset, so
+    // neither "processing waits" nor "the chain takes it" is true of every batch — the clause's own
+    // sentence is, and it is chain-aware. The spent band gets this item's own sentence, because it
+    // is reporting a refused probe reservation rather than the shared allowance.
+    const clause = allowanceClause(shared, estimate, iso(estimate.resetAt), config, env,
+      () => refusedPrimaryConsequence(config, env, REFUSED_RESERVATION));
+    return degraded('provider', `daily_cap: ${clause.reason}`, clause.consequence, clause.recovery);
   }
   return null;
 }
@@ -510,12 +499,19 @@ type FallbackTarget = {
   now: number;
 };
 
-function fallbackTargetItem(input: FallbackTarget): DoctorItem {
-  const { entry, position, verdict, config, db, integrityFailed, env, now } = input;
-  const name = `fallback:${position}`;
-  const catalog = PRESET_CATALOG[entry.preset];
-  const model = targetModel(entry.preset, entry.model);
-  const where = `Target ${position} is ${entry.preset} with model ${model}`;
+/**
+ * The verdict of an entry the admission did not take, or null when it did. Neither answer depends on
+ * storage, which is why they are decided before the allowance is read at all.
+ */
+function unadmittedEntryItem(
+  name: string,
+  where: string,
+  preset: PresetName,
+  verdict: ChainVerdict,
+  config: OboeteConfig,
+  env: NodeJS.ProcessEnv,
+): DoctorItem | null {
+  const catalog = PRESET_CATALOG[preset];
   if (verdict === 'covered') {
     // Adding the cost class cannot make a duplicate runnable, so this verdict must not recommend it.
     return warning(
@@ -541,6 +537,17 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
       `Add "${catalog.costClass}" to \`[observer] cost_policy\` to admit it, or remove the entry.`,
     );
   }
+  return null;
+}
+
+function fallbackTargetItem(input: FallbackTarget): DoctorItem {
+  const { entry, position, verdict, config, db, integrityFailed, env, now } = input;
+  const name = `fallback:${position}`;
+  const catalog = PRESET_CATALOG[entry.preset];
+  const model = targetModel(entry.preset, entry.model);
+  const where = `Target ${position} is ${entry.preset} with model ${model}`;
+  const unadmitted = unadmittedEntryItem(name, where, entry.preset, verdict, config, env);
+  if (unadmitted !== null) return unadmitted;
   const credentials = readCredentials(entry.preset, env, config.observer.agent_cli);
   if (!credentials.present) {
     return warning(
@@ -548,28 +555,6 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
       `${where}, and its credentials are not set (${credentials.source}).`,
       'The target is attempted and answers without a request, so the chain moves straight past it.',
       'Set that credential in the shell that runs the agents, or remove the entry from the chain.',
-    );
-  }
-  if (catalog.credential.kind === 'none') {
-    // `readCredentials` calls a preset with no credential present, which says nothing about whether
-    // the model is being served. Reporting it ready would be the one claim in this report that
-    // rests on nothing: a target is never probed, and an unstarted local server answers
-    // `unreachable` on every attempt.
-    return unverified(
-      name,
-      `${where}, and whether that model is served on this machine is not checked here.`,
-      'A target whose local model is not being served fails its attempt and the chain moves past it.',
-      'Confirm the local model server is running and the model is pulled before relying on this target.',
-    );
-  }
-  if (catalog.credential.kind === 'agent-login') {
-    // `readCredentials` calls an agent login present because `setup` is what verifies it; this
-    // item does not, so it must not call the target ready either.
-    return unverified(
-      name,
-      `${where}, and whether the ${config.observer.agent_cli} login is live is not checked here.`,
-      'A target whose subscription is not logged in fails its attempt and the chain moves past it.',
-      '`oboete setup` reports the login state of each agent command line tool.',
     );
   }
   if (db === null) {
@@ -581,7 +566,46 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
       '`oboete doctor` after storage is repaired.',
     );
   }
-  return fallbackAllowanceItem(name, where, entry.preset, catalog, db, now);
+  const allowance = fallbackAllowanceItem(name, where, entry.preset, catalog, db, now);
+  const unverifiable = unverifiableTarget(catalog, config.observer.agent_cli);
+  // A refusal this item can read outranks one it cannot. `reserveAttempt` consults the exhaustion
+  // stamp before it looks at `capped`, so an uncapped local target that reported exhaustion today
+  // is refused on every attempt; reporting "not checked here" instead would call a known,
+  // actionable state unknown. Only the ready verdict rests on nothing, so only it is downgraded.
+  return allowance.status === 'healthy' && unverifiable !== null
+    ? unverified(name, `${where}, and ${unverifiable.reason}`, unverifiable.consequence, unverifiable.recovery)
+    : allowance;
+}
+
+/**
+ * Why nothing in this report can tell whether a target would answer, or null when its credential is
+ * one `readCredentials` really checks. One test rather than a branch per preset: the next local
+ * preset added to `PRESET_CATALOG` would otherwise need a third copy of the same rule, and a capped
+ * one would lose its allowance report the way an early return once cost `ollama` its own.
+ */
+function unverifiableTarget(
+  catalog: (typeof PRESET_CATALOG)[PresetName],
+  agentCli: OboeteConfig['observer']['agent_cli'],
+): { reason: string; consequence: string; recovery: string } | null {
+  if (catalog.credential.kind === 'none') {
+    // A target is never probed, so an unstarted local server is indistinguishable from a ready one
+    // here, and every attempt on it would answer `unreachable`.
+    return {
+      reason: 'whether that model is served on this machine is not checked here.',
+      consequence: 'A target whose local model is not being served fails its attempt and the chain moves past it.',
+      recovery: 'Confirm the local model server is running and the model is pulled before relying on this target.',
+    };
+  }
+  if (catalog.credential.kind === 'agent-login') {
+    // `readCredentials` calls an agent login present because `setup` is what verifies it; this
+    // item does not, so it must not call the target ready either.
+    return {
+      reason: `whether the ${agentCli} login is live is not checked here.`,
+      consequence: 'A target whose subscription is not logged in fails its attempt and the chain moves past it.',
+      recovery: '`oboete setup` reports the login state of each agent command line tool.',
+    };
+  }
+  return null;
 }
 
 /**
@@ -673,7 +697,14 @@ function allowanceEstimateItem(
     }
     const shared = sharedAllowance(estimate);
     if (shared !== 'open') {
-      const clause = allowanceClause(shared, estimate, iso(estimate.resetAt), config, env);
+      // "Offered" rather than "summarized": the cap is shared across capped presets, so a capped
+      // target refuses at its own reservation too (contracts/provider-fallback.md "Advance and
+      // stop", `daily_cap`). Only an uncapped target actually answers, and `fallback:N` is where
+      // each target's own allowance is reported.
+      const clause = allowanceClause(shared, estimate, iso(estimate.resetAt), config, env,
+        () => refusedPrimaryConsequence(config, env,
+          'Batches are offered to the fallback chain below; a capped target there shares this allowance.',
+          ALLOWANCE_CONSEQUENCE));
       return degraded('allowance', clause.reason, clause.consequence, clause.recovery);
     }
     return healthy(

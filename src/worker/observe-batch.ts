@@ -464,20 +464,21 @@ type ProcessBatchOptions = {
   attempts: ProviderAttempt[];
 };
 
-type ChainResult = { done: BatchResult } | {
-  outcome: CallOutcome;
-  answered: Pick<ProviderAttempt, 'position' | 'preset' | 'model'>;
-};
+/**
+ * How a pass through the chain ended. `answered` exists only on the variant that has an answer to
+ * apply, so the pairing "a target is named exactly when the call succeeded" is the type's rather
+ * than a comment's: `processBatch` reads the failure from `attempts`, which is the caller's.
+ */
+type ChainResult =
+  | { done: BatchResult }
+  | { answered: Pick<ProviderAttempt, 'position' | 'preset' | 'model'>; outcome: Extract<CallOutcome, { ok: true }> }
+  | { answered: null };
 
 async function attemptTargets(
   options: ProcessBatchOptions, input: BatchInput, nearby: NearbyCandidate[],
   request: ReturnType<typeof buildObserverRequest>, targets: ChainTarget[],
 ): Promise<ChainResult> {
   const { db, token, batch, config, deps, consentOk, attempts } = options;
-  // `targets` always begins with the primary, so the loop settles `outcome` at least once, and
-  // `answered` with it on the branch that leaves the loop with an answer to apply.
-  let outcome!: CallOutcome;
-  let answered!: { position: number; preset: PresetName; model: string };
   for (const [position, target] of targets.entries()) {
     const between = deps.shouldStop();
     if (between !== undefined) return { done: { state: 'done', reason: between, memoryIds: [], attempts } };
@@ -486,10 +487,9 @@ async function attemptTargets(
     // still holds, so a chain that ends on such a target would keep an earlier target's reason by
     // precedence and send the user to fix a credential when consent is what they must act on.
     if (!consentOk()) {
-      outcome = { ok: false, reason: 'consent_changed', attempts: 0, detail: '' };
       attempts.push({ position, preset: target.preset, model: target.model,
         reason: 'consent_changed', detail: '' });
-      break;
+      return { answered: null };
     }
     const called = await providerCall({
       db, token, input: request.input, batch, config, deps,
@@ -514,17 +514,14 @@ async function attemptTargets(
       }
       return { done: { ...settled.done, attempts } };
     }
-    outcome = settled.outcome;
-    if (outcome.ok) {
-      answered = { position, preset: target.preset, model: target.model };
-      break;
-    }
+    const outcome = settled.outcome;
+    if (outcome.ok) return { answered: { position, preset: target.preset, model: target.model }, outcome };
     attempts.push({ position, preset: target.preset, model: target.model,
       reason: outcome.reason, detail: outcome.detail });
     if (CHAIN_STOPS.has(outcome.reason)) break;
   }
 
-  return { outcome, answered };
+  return { answered: null };
 }
 
 /** The reason a fallback records: this session's own degraded state, else the worker's, else rules. */
@@ -695,9 +692,8 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
   const chain = await attemptTargets({ ...options, consentOk: currentConsent }, input, nearby, request,
     chainTargets(resolved.preset, resolved.model, resolved.chain, batch.destination));
   if ('done' in chain) return chain.done;
-  const { outcome, answered } = chain;
 
-  if (!outcome.ok) {
+  if (chain.answered === null) {
     // Every failed target is in `attempts`, so attemptTargets ran at least once. The reason a stop
     // ended the chain on wins, because that is the one the user has to act on; otherwise the batch
     // keeps the most severe of the reasons the chain actually met. The kept reason and the kept
@@ -716,6 +712,7 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
     };
   }
 
+  const { answered, outcome } = chain;
   providerState.set(batch.session_id, null);
   await deps.applyHook();
   const applied = await applyObservations(db, token, {

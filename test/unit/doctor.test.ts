@@ -563,7 +563,7 @@ test('an advancing probe failure says the chain takes the batch, and a stop reas
     chmodSync(context.paths.config, 0o600);
 
     // `unreachable` advances the chain (contracts/provider-fallback.md "Advance and stop"), so the
-    // batch the probe failed on is offered to the admitted target this same report calls healthy.
+    // batch the probe failed on is offered to the admitted target this same report lists below.
     context.fetch = refusingFetch();
     assert.equal(await context.doctor(['--json', '--probe-provider']), 1, context.output);
     assert.equal(context.item('fallback:1').status, 'unverified', context.output);
@@ -777,7 +777,7 @@ test('a capped target is warned while the last calls are held for end-of-session
 test('a refused primary says the chain is offered the batch, not that processing waits', async () => {
   await harness(async (context) => {
     // `daily_cap` and `provider_exhausted` both advance the chain, so an item that says processing
-    // waits contradicts the worker and the healthy target reported below it.
+    // waits contradicts the worker and the admitted target reported below it.
     const observer = { preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] };
     const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
     writeFileSync(context.paths.config, [
@@ -800,6 +800,38 @@ test('a refused primary says the chain is offered the batch, not that processing
       'offered to the fallback chain below');
     assert.doesNotMatch(context.item('provider').consequence, /source processing waits/i);
     assert.equal(context.item('fallback:1').status, 'unverified', context.item('fallback:1').reason);
+  });
+});
+
+test('a target with nothing to verify still reports a refusal it can read', async () => {
+  await harness(async (context) => {
+    // `reserveAttempt` refuses on the exhaustion stamp before it looks at `capped`, so an
+    // uncapped local target that reported exhaustion today is refused on every attempt. That is a
+    // known, actionable state: it must outrank "whether the model is served here is not checked",
+    // which is only a claim about what this item could not read.
+    const observer = { preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+
+    await context.doctor(['--json']);
+    assert.equal(context.item('fallback:1').status, 'unverified', context.item('fallback:1').reason);
+
+    const { db } = openDatabase({ path: context.paths.db, timeoutMs: 5_000 });
+    try {
+      db.prepare(`INSERT INTO provider_usage (utc_day, preset, calls, neurons_estimate, reset_at, exhausted_at)
+        VALUES (?, 'ollama', 1, 0, ?, ?)`).run(utcDay(context.now), context.now + 3_600_000, context.now);
+    } finally {
+      db.close();
+    }
+
+    await context.doctor(['--json']);
+    assertBroken(context.item('fallback:1'), 'warning', 'reported its allowance exhausted at',
+      'reorder the chain');
   });
 });
 
@@ -1528,7 +1560,7 @@ for (const [name, models, paid, expected] of [
 
 // `model_alias` and `provider_paid` both advance the chain (contracts/provider-fallback.md "Advance
 // and stop"), so a catalog verdict that predicts rule-based records contradicts an admitted target
-// the same report calls healthy.
+// the same report lists below it.
 for (const [name, models, paid, consequence] of [
   ['an unlisted model', ['other-model'], false,
     'The batch is offered to the fallback chain below instead of the configured model.'],

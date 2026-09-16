@@ -364,11 +364,11 @@ test('an empty chain leaves the consent hash exactly where it was, and one targe
     costClass: 'local',
     egressClasses: EGRESS_CLASSES.local,
   }]);
-  // Pinned in both directions so the next reader does not take it for a slip: the hashed field is
-  // the target's own capability, because that is what consent binds, while the line
-  // `consentDisplay` prints for the same target is the primary's, because that is all the batch
-  // carries (contracts/provider-fallback.md "Consent coverage", and consent.test.ts pins the line).
-  assert.notDeepEqual(tuple.chain![0].egressClasses, tuple.egressClasses);
+  // The `local` above is not a slip. The hashed field is the target's own capability, because that
+  // is what consent binds, while the line `consentDisplay` prints for the same target is the
+  // primary's, because that is all the batch carries (contracts/provider-fallback.md "Consent
+  // coverage"; consent.test.ts pins the printed side). Pinning "the two differ" here would be
+  // wrong in general — a local primary admits only local targets, and then they agree.
   assert.notEqual(consentHash(tuple), WORKERS_AI_CONSENT);
   assert.equal(consentMatches(configSchema.parse({
     ...chained,

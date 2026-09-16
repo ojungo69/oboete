@@ -316,6 +316,10 @@ test('selecting none reports the fallback chain without a primary and still writ
       '`oboete setup --provider <preset>`, or remove the `[[observer.fallback]]` entries.',
     ));
     assert.doesNotMatch(context.output, /including the selected preset/);
+    // Setup reports the orphaned entries; it does not delete them. Removing configuration the user
+    // wrote is not something this command does anywhere else, and the note names the two commands
+    // that resolve it (contracts/provider-fallback.md Verification 18: this run succeeds).
+    assert.match(readFileSync(context.paths.config, 'utf8'), /\[\[observer\.fallback\]\]/);
   });
 });
 
