@@ -1257,3 +1257,44 @@ so selecting a local preset and then naming the model is the specified flow, and
 the recovery path rather than a regression. What is genuinely odd is that `agent-cli` requires a
 model nothing ever sends — `summarizeWithAgentCli` reads it only as a non-empty gate and
 `runAgentCli` never receives it. Fixing that moves the consent hash, so it is issue #241.
+
+### E9 follow-up — the security review of the fixes
+
+Defensive pass over `f5f766f9~1..62a9e2b9`, scoped to the four places the fixes could have moved an
+authorization: the consent boundary on the agent-CLI path, the restamped fence, the removal of the
+day-wide exhaustion flag, and the new doctor strings. **CLEAR, no P0/P1.** What it grounded, rather
+than what it concluded:
+
+- The agent-CLI path's condition for spawning the child is now `consentOk()` → `reserve()` →
+  `consentOk()`, a strict subset of the old single check, so no input reaches the child under
+  consent the old code refused; a consent change *during* the reservation is newly refused.
+  `LeaseLostError` has no new escape: the worker's throw site is inside the chain loop that
+  `src/worker/observe.ts` already wraps for the HTTP targets, and `doctorReserve` holds no lease, so
+  its only throw is the `SQLITE_BUSY` the item already catches.
+- The restamp cannot produce a concurrent call, a live-lock or a changed pick order, and the
+  deciding inequality is `REQUEST_TIMEOUT_MS` (60 s) < `RECLAIM_AFTER_MS` (120 s): an in-flight call
+  always finishes inside its own new window. A dead worker restamps nothing, because the restamp is
+  `WHERE owner_token = ?` after `assertLease` while `reclaimStale` takes `owner_token IS NOT ?`.
+  `pendingBatches` reads only `pending`, and the one `running → pending` path writes `claimed_at`
+  itself, so restamped values never enter that queue's order.
+- Dropping the day-wide flag removed *over*-refusal, not a refusal: it let one preset's stamp refuse
+  another's. `reserveAttempt` was per-preset before the change, so doctor moved to the worker's rule
+  and not the reverse. The review's own P2 — `doctorReserve` and `providerCapItem` still reading the
+  stamp below the `capped` gate — was the correctness round's finding too, and `62a9e2b9` closes it.
+- Nothing from `resolveModel` can carry a credential into a report: it throws only
+  `ProviderConfigError`, interpolating a zod-enum preset name or an integer position, and
+  `admittedChain` is total so there is no third path. Doctor reasons reach stdout and `--json`
+  only — `src/doctor.ts` logs `{ exit, degraded }` and never the reason text.
+
+Two nits and two pre-existing observations, none blocking:
+
+- `src/work.ts` and `src/why.ts` order checkpoint decisions by `claimed_at DESC`, which the restamp
+  makes further from settle order than it already was (`reclaimStale` restamped too). Nothing in
+  `test/` covers either query today, so moving a sort key blind is not the trade: issue #242 carries
+  the fix and the fixture it needs.
+- The new number/bigint guard flips an unreachable state from fail-closed to fail-open.
+  `provider_usage` is a `STRICT` table with an `INTEGER` column and `recordExhausted` is its only
+  writer, so the direction is moot; the comment now says so instead of the code branching on it.
+- Pre-existing and already filed: doctor ignores `SESSION_END_RESERVE` (#240, which now also records
+  that `--probe-provider` can spend from that reserve), and `fallbackTargetItem` echoes the user's
+  own configured model into `--json`.

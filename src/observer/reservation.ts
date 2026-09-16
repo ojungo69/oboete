@@ -40,7 +40,9 @@ export function presetExhaustedAt(db: DatabaseSync, preset: PresetName, now: num
     .get(utcDay(now), preset);
   const exhaustedAt = row?.exhausted_at;
   // Only a number is a stamp: `numberValue` would read anything else as the epoch and report a row
-  // that was never stamped as exhausted since 1970.
+  // that was never stamped as exhausted since 1970. Which way an unusable value should fall is moot
+  // rather than chosen — `provider_usage` is a `STRICT` table whose `exhausted_at` is `INTEGER`
+  // (`src/db/migrations/0003_operations.sql`), and `recordExhausted` is its only writer.
   if (typeof exhaustedAt !== 'number' && typeof exhaustedAt !== 'bigint') return null;
   return numberValue(row?.reset_at) > now ? numberValue(exhaustedAt) : null;
 }
