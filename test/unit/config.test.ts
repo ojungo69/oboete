@@ -288,8 +288,11 @@ test('admission drops what the policy excludes and refuses what widens egress', 
   const admitted = (observer: Record<string, unknown>) => admittedChain(configSchema.parse({ observer }));
 
   // Default policy admits free-tier and local only; the listed remote target contributes nothing.
+  // The verdict per entry is what doctor reports, and `excluded` is not `covered`: they have
+  // different fixes, so the admission decides which it was rather than doctor re-deriving it.
   assert.deepEqual(admitted({ preset: 'workers-ai', fallback: [{ preset: 'nim' }, { preset: 'ollama', model: 'q' }] }), {
     targets: [{ preset: 'ollama', model: 'q' }],
+    verdicts: ['excluded', 'admitted'],
     error: null,
   });
   // One key apart: the same file with `remote` in the policy admits it, in written order.
@@ -301,24 +304,29 @@ test('admission drops what the policy excludes and refuses what widens egress', 
 
   // A local primary can never reach the network through its own fallback.
   assert.deepEqual(admitted({ preset: 'ollama', model: 'q', cost_policy: ['free-tier', 'local', 'remote'],
-    fallback: [{ preset: 'nim' }] }), { targets: [], error: { code: 'egress_widened', position: 1 } });
+    fallback: [{ preset: 'nim' }] }), { targets: [], verdicts: [], error: { code: 'egress_widened', position: 1 } });
   // A remote primary may narrow to a local one.
   assert.deepEqual(admitted({ preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'q' }] }).targets,
     [{ preset: 'ollama', model: 'q' }]);
 
   // ollama has no default model, so a chain entry on it must carry one.
   assert.deepEqual(admitted({ preset: 'workers-ai', fallback: [{ preset: 'ollama' }] }),
-    { targets: [], error: { code: 'model_required', position: 1 } });
+    { targets: [], verdicts: [], error: { code: 'model_required', position: 1 } });
   // A chain with no primary names a destination that was never selected.
   assert.deepEqual(admitted({ preset: 'none', fallback: [{ preset: 'ollama', model: 'q' }] }),
-    { targets: [], error: { code: 'chain_without_primary', position: 0 } });
-  assert.deepEqual(admitted({ preset: 'none' }), { targets: [], error: null });
+    { targets: [], verdicts: [], error: { code: 'chain_without_primary', position: 0 } });
+  assert.deepEqual(admitted({ preset: 'none' }), { targets: [], verdicts: [], error: null });
 
   // (preset, model) is the identity: the primary repeated is dropped, a second model is its own target.
   assert.deepEqual(admitted({ preset: 'workers-ai', model: 'm1', cost_policy: ['free-tier', 'local', 'remote'],
     fallback: [{ preset: 'workers-ai', model: 'm1' }, { preset: 'workers-ai', model: 'm2' },
       { preset: 'workers-ai', model: 'm2' }] }).targets,
     [{ preset: 'workers-ai', model: 'm2' }]);
+  // The same fixture's verdicts name why each of the three was dropped or kept.
+  assert.deepEqual(admitted({ preset: 'workers-ai', model: 'm1', cost_policy: ['free-tier', 'local', 'remote'],
+    fallback: [{ preset: 'workers-ai', model: 'm1' }, { preset: 'workers-ai', model: 'm2' },
+      { preset: 'workers-ai', model: 'm2' }] }).verdicts,
+    ['covered', 'admitted', 'covered']);
 });
 
 test('an empty chain leaves the consent hash exactly where it was, and one target moves it', () => {

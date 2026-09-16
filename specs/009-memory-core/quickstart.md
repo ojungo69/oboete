@@ -1337,3 +1337,35 @@ refuters each, and **none of its ten findings survived refutation** — includin
 same reserve band, both refuted as pre-existing rather than introduced, which is what the record
 above says too. #240 stays open only for the wording of the primary `allowance` item's healthy line,
 which still quotes the raw remainder.
+
+### E9 follow-up — the third bot round
+
+Two more P2s from Codex on the pushed head, both taken.
+
+- **The reserved band reused the spent state's consequence.** Folding `reserved` into the branch
+  that already existed meant `oboete doctor` said "Source processing waits for the allowance to
+  reset" while end-of-session summaries were still running — false for exactly the batches the
+  reserve exists to protect. That was a judgement call made in the previous commit (the reason line
+  carries the nuance, so let the consequence stand) and the reviewer was right that it does not:
+  each of an item's three lines has to be true on its own. `allowanceClause` now returns all three,
+  and the reserved state says that end-of-session summaries still run and that the reset is what the
+  other batches wait for.
+- **A duplicate entry was told to widen its cost policy.** `fallbackTargetItem` reported one
+  combined "the cost policy does not admit or a nearer target already covers" for both of the
+  un-admitted cases, and recommended adding the cost class — which cannot make a duplicate runnable,
+  and which the entry usually already has. The contract's Diagnostics had asked for the two verdicts
+  apart since it was written. `admittedChain` now returns a `ChainVerdict` per written entry
+  (`admitted` / `covered` / `excluded`), because it is the function that knows which branch dropped
+  the entry; doctor reads it instead of matching admitted targets back to entries, which deletes the
+  `unclaimed`/`findIndex`/`splice` dance the item used to do. A duplicate is told to remove the entry
+  or point it elsewhere, and its recovery is pinned not to mention `cost_policy` at all.
+
+Red before the fix, by reverting the two branches: the duplicate's recovery still named
+`cost_policy`, and the reserved band still claimed all processing waits. Gate at this head:
+`npm test` green on Node 24.16.0 and 22.23.1 (1549 + 280, 0 fail, 2 skipped), typecheck, lint,
+markdownlint, semgrep and lizard clean.
+
+One process note worth keeping: restoring the two reverted branches by hand swapped the `spent` and
+`reserved` texts, which the suite caught as three failures — including a row that had been green
+before the revert. A revert-to-verify-red is only safe with the suite rerun after the restore, not
+just after the fix.

@@ -4,6 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import {
   PRESET_CATALOG,
   admittedChain,
+  type ChainVerdict,
   consentMatches,
   readCredentials,
   type OboeteConfig,
@@ -228,14 +229,27 @@ function sharedAllowance(estimate: ReturnType<typeof usageEstimate>): 'open' | '
   return estimate.remaining <= SESSION_END_RESERVE ? 'reserved' : 'open';
 }
 
-/** The sentence the two allowance surfaces share once it is no longer open. */
+/**
+ * The three sentences the two allowance surfaces share once it is no longer open. The reserved band
+ * gets its own consequence and recovery because end-of-session summaries still run in it: saying
+ * processing waits for the reset would be false for the batches that are still served.
+ */
 function allowanceClause(
   state: 'reserved' | 'spent',
   estimate: ReturnType<typeof usageEstimate>,
-): string {
+  resetAt: string,
+): { reason: string; consequence: string; recovery: string } {
   return state === 'spent'
-    ? `The daily cap of ${DAILY_CAP} calls is used up.`
-    : `Only ${estimate.remaining} of the daily ${DAILY_CAP} calls are left, and they are held for end-of-session batches.`;
+    ? {
+      reason: `The daily cap of ${DAILY_CAP} calls is used up.`,
+      consequence: ALLOWANCE_CONSEQUENCE,
+      recovery: `Wait for the reset at ${resetAt} or switch preset with \`oboete setup --provider\`.`,
+    }
+    : {
+      reason: `Only ${estimate.remaining} of the daily ${DAILY_CAP} calls are left, and they are held for end-of-session batches.`,
+      consequence: 'End-of-session summaries still run; ten-turn and retention batches wait for the allowance to reset, and later worker runs retry due sources.',
+      recovery: `Wait for the reset at ${resetAt} for the other batches, or switch preset with \`oboete setup --provider\`.`,
+    };
 }
 
 function providerCapItem(
@@ -257,11 +271,16 @@ function providerCapItem(
   }
   const shared = sharedAllowance(estimate);
   if (PRESET_CATALOG[preset].capped && shared !== 'open') {
+    const clause = allowanceClause(shared, estimate, iso(estimate.resetAt));
     return degraded(
       'provider',
-      `daily_cap: ${allowanceClause(shared, estimate)}`,
+      `daily_cap: ${clause.reason}`,
+      // The provider item's consequence names the chain rather than the queue, and that is true in
+      // both states: a refused reservation is what the fallback chain exists for.
       FALLBACK_CONSEQUENCE,
-      `Wait for the reset at ${iso(estimate.resetAt)} or choose another preset with \`oboete setup --provider\`.`,
+      shared === 'spent'
+        ? `Wait for the reset at ${iso(estimate.resetAt)} or choose another preset with \`oboete setup --provider\`.`
+        : `Wait for the reset at ${iso(estimate.resetAt)} for the other batches, or choose another preset with \`oboete setup --provider\`.`,
     );
   }
   return null;
@@ -409,23 +428,16 @@ export function fallbackItems(
     'Set `[observer] model` in the configuration file to a model that preset accepts, then run `oboete doctor` again.',
   );
   if (!('kind' in resolved)) return [resolved];
-  // Each admitted target is claimed by the first entry that produced it, so the second of two
-  // identical entries is reported as covered rather than as ready.
-  const unclaimed = [...chain.targets];
-  return entries.map((entry, index) => {
-    const model = (entry.model ?? PRESET_CATALOG[entry.preset].defaultModel).trim();
-    const claimed = unclaimed.findIndex(
-      (target) => target.preset === entry.preset && target.model === model);
-    if (claimed !== -1) unclaimed.splice(claimed, 1);
-    return fallbackTargetItem({ entry, position: index + 1, admitted: claimed !== -1,
-      config, db, integrityFailed, env, now });
-  });
+  return entries.map((entry, index) => fallbackTargetItem({
+    entry, position: index + 1, verdict: chain.verdicts[index] ?? 'excluded',
+    config, db, integrityFailed, env, now,
+  }));
 }
 
 type FallbackTarget = {
   entry: OboeteConfig['observer']['fallback'][number];
   position: number;
-  admitted: boolean;
+  verdict: ChainVerdict;
   config: OboeteConfig;
   db: DatabaseSync | null;
   integrityFailed: boolean;
@@ -434,15 +446,24 @@ type FallbackTarget = {
 };
 
 function fallbackTargetItem(input: FallbackTarget): DoctorItem {
-  const { entry, position, admitted, config, db, integrityFailed, env, now } = input;
+  const { entry, position, verdict, config, db, integrityFailed, env, now } = input;
   const name = `fallback:${position}`;
   const catalog = PRESET_CATALOG[entry.preset];
   const model = (entry.model ?? catalog.defaultModel).trim();
   const where = `Target ${position} is ${entry.preset} with model ${model}`;
-  if (!admitted) {
+  if (verdict === 'covered') {
+    // Adding the cost class cannot make a duplicate runnable, so this verdict must not recommend it.
     return warning(
       name,
-      `${where}, which the cost policy does not admit or a nearer target already covers.`,
+      `${where}, which a nearer target already covers.`,
+      'This entry is never attempted on its own, because the target ahead of it is the same one.',
+      'Remove the entry, or point it at another preset or model.',
+    );
+  }
+  if (verdict === 'excluded') {
+    return warning(
+      name,
+      `${where}, whose "${catalog.costClass}" cost class \`[observer] cost_policy\` does not admit.`,
       'This target is never attempted, so a failure ahead of it falls through to rule-based records.',
       `Add "${catalog.costClass}" to \`[observer] cost_policy\` to admit it, or remove the entry.`,
     );
@@ -508,7 +529,9 @@ function fallbackAllowanceItem(
       shared === 'spent'
         ? `${where}, and today's shared allowance is spent (${estimate.calls} of ${DAILY_CAP} calls).`
         : `${where}, and only ${estimate.remaining} of today's ${DAILY_CAP} shared calls are left, held for end-of-session batches.`,
-      'Every capped target refuses at its own reservation until the allowance resets.',
+      shared === 'spent'
+        ? 'Every capped target refuses at its own reservation until the allowance resets.'
+        : 'Every capped target refuses a ten-turn or retention batch at its own reservation; an end-of-session batch is still served.',
       `Wait for the reset at ${iso(estimate.resetAt)}, or add an uncapped target to the chain.`,
     );
   }
@@ -555,12 +578,8 @@ function allowanceEstimateItem(
     }
     const shared = sharedAllowance(estimate);
     if (shared !== 'open') {
-      return degraded(
-        'allowance',
-        allowanceClause(shared, estimate),
-        ALLOWANCE_CONSEQUENCE,
-        `Wait for the reset at ${iso(estimate.resetAt)} or switch preset with \`oboete setup --provider\`.`,
-      );
+      const clause = allowanceClause(shared, estimate, iso(estimate.resetAt));
+      return degraded('allowance', clause.reason, clause.consequence, clause.recovery);
     }
     return healthy(
       'allowance',

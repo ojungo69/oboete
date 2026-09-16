@@ -402,6 +402,13 @@ export function readCredentials(
 
 export type ChainTarget = { preset: PresetName; model: string };
 
+/**
+ * Why one written entry is not among the targets. `covered` and `excluded` are different verdicts
+ * to the user and have different fixes, so the admission decides which it was rather than leaving
+ * doctor to re-derive it (contracts/provider-fallback.md "Diagnostics").
+ */
+export type ChainVerdict = 'admitted' | 'covered' | 'excluded';
+
 /** Why a written chain cannot be used at all; `resolveModel` is where it becomes a thrown error. */
 export type ChainError = {
   code: 'model_required' | 'egress_widened' | 'chain_without_primary';
@@ -415,35 +422,47 @@ export type ChainError = {
  * because `consentTuple` recomputes this on every pass (`src/worker/observe.ts` consent re-check)
  * and a configuration mistake has to degrade the run, not crash it.
  */
-export function admittedChain(config: OboeteConfig): { targets: ChainTarget[]; error: ChainError | null } {
+export function admittedChain(
+  config: OboeteConfig,
+): { targets: ChainTarget[]; verdicts: ChainVerdict[]; error: ChainError | null } {
   const entries = config.observer.fallback;
   const primary = config.observer.preset;
   if (primary === 'none') {
     // A chain with no primary names a destination the user never selected, so it is not ignored.
-    return { targets: [], error: entries.length === 0 ? null : { code: 'chain_without_primary', position: 0 } };
+    return { targets: [], verdicts: [],
+      error: entries.length === 0 ? null : { code: 'chain_without_primary', position: 0 } };
   }
   const primaryEgress = PRESET_CATALOG[primary].egress;
   const policy = new Set<string>(config.observer.cost_policy);
   const seen = new Set([identityOf(primary, config.observer.model)]);
   const targets: ChainTarget[] = [];
+  const verdicts: ChainVerdict[] = [];
   for (const [index, entry] of entries.entries()) {
     const position = index + 1;
     const catalog = PRESET_CATALOG[entry.preset];
     const model = (entry.model ?? catalog.defaultModel).trim();
-    if (model === '') return { targets: [], error: { code: 'model_required', position } };
+    if (model === '') return { targets: [], verdicts: [], error: { code: 'model_required', position } };
     if (catalog.egress === 'remote' && primaryEgress !== 'remote') {
       // A selection that could reach the network under any failure is not a narrower selection:
       // `remote` is the only egress class a remote target does not widen.
-      return { targets: [], error: { code: 'egress_widened', position } };
+      return { targets: [], verdicts: [], error: { code: 'egress_widened', position } };
     }
     const identity = identityOf(entry.preset, model);
-    if (seen.has(identity)) continue;
+    if (seen.has(identity)) {
+      verdicts.push('covered');
+      continue;
+    }
     seen.add(identity);
     // The cost policy is a live switch over targets the user has already written down, so a class
     // outside it is skipped and reported by doctor, never an error.
-    if (policy.has(catalog.costClass)) targets.push({ preset: entry.preset, model });
+    if (policy.has(catalog.costClass)) {
+      targets.push({ preset: entry.preset, model });
+      verdicts.push('admitted');
+    } else {
+      verdicts.push('excluded');
+    }
   }
-  return { targets, error: null };
+  return { targets, verdicts, error: null };
 }
 
 /** A target's identity: the same preset with two models is two targets, the same pair twice is one. */

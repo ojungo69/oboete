@@ -526,8 +526,9 @@ test('the fallback chain is reported per target without a second provider reques
     assert.equal(providerRequests, 1, context.output);
     assert.equal(context.item('fallback:1').status, 'healthy');
     assert.match(context.item('fallback:1').reason, /ollama with model qwen3:8b/);
-    assertBroken(context.item('fallback:2'), 'warning', 'cost policy does not admit');
-    assertBroken(context.item('fallback:3'), 'warning', 'cost policy does not admit');
+    // A cost class the policy excludes and a duplicate are different verdicts with different fixes.
+    assertBroken(context.item('fallback:2'), 'warning', 'cost_policy` does not admit', 'Add "remote"');
+    assertBroken(context.item('fallback:3'), 'warning', 'cost_policy` does not admit', 'Add "remote"');
     assert.equal(context.item('provider').status, 'healthy', context.output);
 
     // Admitting a paid class is a new destination, so the stored consent stops matching.
@@ -643,7 +644,10 @@ test('the second of two identical fallback entries is reported as covered, not a
     await context.doctor(['--json']);
     // Admission deduplicates by `(preset, model)`, so only the first entry is ever attempted.
     assert.equal(context.item('fallback:1').status, 'healthy');
-    assertBroken(context.item('fallback:2'), 'warning', 'a nearer target already covers');
+    assertBroken(context.item('fallback:2'), 'warning', 'a nearer target already covers',
+      'Remove the entry');
+    assert.doesNotMatch(context.item('fallback:2').recovery, /cost_policy/,
+      'a duplicate cannot be admitted by a cost class it already has');
   });
 });
 
@@ -718,8 +722,10 @@ test('a capped target is warned while the last calls are held for end-of-session
 
     seed(DAILY_CAP - SESSION_END_RESERVE);
     await context.doctor(['--json']);
-    assertBroken(context.item('allowance'), 'degraded', 'held for end-of-session batches');
-    assertBroken(context.item('fallback:1'), 'warning', 'held for end-of-session batches');
+    assertBroken(context.item('allowance'), 'degraded', 'held for end-of-session batches',
+      'End-of-session summaries still run');
+    assertBroken(context.item('fallback:1'), 'warning', 'held for end-of-session batches',
+      'an end-of-session batch is still served');
   });
 });
 
@@ -1286,6 +1292,9 @@ for (const [name, calls, exhaustedAt, reason] of [
       db.prepare('INSERT INTO provider_usage (utc_day, preset, calls, exhausted_at, reset_at) VALUES (?, ?, ?, ?, ?)')
         .run('2026-09-06', 'workers-ai', calls, exhaustedAt, ITEM_RESET);
       const config = configSchema.parse({});
+      // In the reserved band an end-of-session batch is still served, so saying that processing
+      // waits for the reset would be false: that state carries its own consequence and recovery.
+      const reserved = reason.includes('held for end-of-session');
       assert.deepEqual(await providerItem({
         config, paths, db, integrityFailed: false,
         deps: { ...itemDeps, env: { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' } },
@@ -1293,15 +1302,21 @@ for (const [name, calls, exhaustedAt, reason] of [
       }), {
         item: 'provider', status: 'degraded', reason,
         consequence: 'Temporary guidance is available while source processing waits for the provider.',
-        recovery: 'Wait for the reset at 2026-09-07T00:00:00.000Z or choose another preset with `oboete setup --provider`.',
+        recovery: reserved
+          ? 'Wait for the reset at 2026-09-07T00:00:00.000Z for the other batches, or choose another preset with `oboete setup --provider`.'
+          : 'Wait for the reset at 2026-09-07T00:00:00.000Z or choose another preset with `oboete setup --provider`.',
       });
       assert.deepEqual(allowanceItem(config, db, false, ITEM_NOW), {
         item: 'allowance', status: 'degraded',
         reason: exhaustedAt !== null
           ? 'The provider reported exhaustion today.'
           : reason.replace('daily_cap: ', ''),
-        consequence: 'Source processing waits for the allowance to reset; later worker runs retry due sources.',
-        recovery: 'Wait for the reset at 2026-09-07T00:00:00.000Z or switch preset with `oboete setup --provider`.',
+        consequence: reserved
+          ? 'End-of-session summaries still run; ten-turn and retention batches wait for the allowance to reset, and later worker runs retry due sources.'
+          : 'Source processing waits for the allowance to reset; later worker runs retry due sources.',
+        recovery: reserved
+          ? 'Wait for the reset at 2026-09-07T00:00:00.000Z for the other batches, or switch preset with `oboete setup --provider`.'
+          : 'Wait for the reset at 2026-09-07T00:00:00.000Z or switch preset with `oboete setup --provider`.',
       });
       assert.deepEqual(
         { ...db.prepare('SELECT calls, exhausted_at FROM provider_usage').get() },

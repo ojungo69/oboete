@@ -239,7 +239,9 @@ column cannot hold go to the observe log, one line per attempted target.
   (`src/doctor/provider.ts`) calls `summarizeWithProvider` with a real reservation, so one probe per
   target would spend the daily allowance on diagnostics. The chain is reported statically: each
   target's position, preset, model, admission verdict (admitted / excluded by `cost_policy` or
-  covered by a nearer target), whether its credentials are present, and its
+  covered by a nearer target — two verdicts, not one sentence, because adding the cost class cannot
+  make a duplicate runnable and `admittedChain` is what decides which of the two it was), whether
+  its credentials are present, and its
   `provider_usage.exhausted_at` if set. Two verdicts it does not overstate: an `agent-cli` target is
   `unverified` rather than ready, because `readCredentials` calls an agent login present and only
   `setup` checks it; and a **capped** target is a warning once the shared allowance is spent, which
