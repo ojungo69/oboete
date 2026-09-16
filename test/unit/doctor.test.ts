@@ -20,7 +20,7 @@ import { PRESET_CATALOG, configSchema, consentHash, consentTuple } from '../../s
 import { LATEST_SCHEMA_VERSION, openDatabase } from '../../src/db/open.js';
 import { runDoctor, type DoctorDeps, type DoctorItem } from '../../src/doctor.js';
 import { probeReason } from '../../src/doctor/agents.js';
-import { allowanceItem, catalogItems, providerItem } from '../../src/doctor/provider.js';
+import { allowanceItem, catalogItems, fallbackItems, providerItem } from '../../src/doctor/provider.js';
 import { ftsItem, generationItem, migrationItem, openStorage, spoolItem, workerItem } from '../../src/doctor/storage.js';
 import { ensureDirectories, oboetePaths, type OboetePaths } from '../../src/paths.js';
 import type { VersionSpawn } from '../../src/setup/detect.js';
@@ -1507,3 +1507,41 @@ for (const [name, models, paid, expected] of [
     });
   });
 }
+
+// `model_alias` and `provider_paid` both advance the chain (contracts/provider-fallback.md "Advance
+// and stop"), so a catalog verdict that predicts rule-based records contradicts an admitted target
+// the same report calls healthy.
+for (const [name, models, paid, consequence] of [
+  ['an unlisted model', ['other-model'], false,
+    'The batch is offered to the fallback chain below instead of the configured model.'],
+  ['a paid-only model', ['chosen-model'], true,
+    'A paid-only model fails with provider_paid, and the batch is offered to the fallback chain below.'],
+] as const) {
+  test(`${name} with an admitted target says the chain takes the batch`, async () => {
+    await withItemDatabase((db) => {
+      runtimeStateSet(db, 'workers_ai_catalog', JSON.stringify({
+        accountId: 'account', models, defaultModelPresent: false, hasPaidOnlyModels: paid, fetchedAt: ITEM_NOW,
+      }), ITEM_NOW);
+      const config = configSchema.parse({
+        observer: { model: 'chosen-model', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] },
+      });
+      assert.equal(catalogItems(config, db, false,
+        { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' }, ITEM_NOW)[0].consequence,
+        consequence);
+    });
+  });
+}
+
+test('a cost-policy exclusion says the chain continues when another target is admitted', async () => {
+  await withItemDatabase(async (db, paths) => {
+    const observer = { preset: 'workers-ai', cost_policy: ['free-tier', 'local'],
+      fallback: [{ preset: 'nim' }, { preset: 'ollama', model: 'qwen3:8b' }] };
+    void paths;
+    const config = configSchema.parse({ observer });
+    const items = fallbackItems(config, db, false,
+      { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token', OBOETE_NIM_API_KEY: 'k' }, ITEM_NOW);
+    const excluded = items.find((entry) => entry.item === 'fallback:1')!;
+    assert.match(excluded.consequence, /passes to the targets the policy does admit/);
+    assert.doesNotMatch(excluded.consequence, /rule-based records/);
+  });
+});

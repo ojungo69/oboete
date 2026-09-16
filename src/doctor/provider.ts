@@ -514,7 +514,12 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
     return warning(
       name,
       `${where}, whose "${catalog.costClass}" cost class \`[observer] cost_policy\` does not admit.`,
-      'This target is never attempted, so a failure ahead of it falls through to rule-based records.',
+      // A failure ahead of an excluded target is not the end of the chain when the policy admits
+      // another one: `daily_cap`, `auth_failed` and the rest advance past it
+      // (contracts/provider-fallback.md "Advance and stop").
+      admittedChain(config).targets.length > 0
+        ? 'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.'
+        : 'This target is never attempted, so a failure ahead of it falls through to rule-based records.',
       `Add "${catalog.costClass}" to \`[observer] cost_policy\` to admit it, or remove the entry.`,
     );
   }
@@ -726,7 +731,13 @@ function catalogModelItems(
       degraded(
         'catalog',
         `The configured model is not in the catalog of ${cache.models.length} models fetched ${iso(cache.fetchedAt)}.`,
-        'Summaries fall back to rule-based until `[observer] model` names a listed model.',
+        // `model_alias` advances the chain, so an admitted target takes the batch rather than the
+        // rules (contracts/provider-fallback.md "Advance and stop").
+        refusedPrimaryConsequence(
+          config,
+          'The batch is offered to the fallback chain below instead of the configured model.',
+          'Summaries fall back to rule-based until `[observer] model` names a listed model.',
+        ),
         'Set `[observer] model` to a listed model.',
       ),
     ];
@@ -736,7 +747,11 @@ function catalogModelItems(
       warning(
         'catalog',
         `The catalog lists models that need a paid Workers plan; the configured model ${configured} is only used if it is free.`,
-        'A paid-only model will fail with provider_paid and fall back to rule-based summaries.',
+        refusedPrimaryConsequence(
+          config,
+          'A paid-only model fails with provider_paid, and the batch is offered to the fallback chain below.',
+          'A paid-only model will fail with provider_paid and fall back to rule-based summaries.',
+        ),
         'Keep `[observer] model` on a free model.',
       ),
     ];

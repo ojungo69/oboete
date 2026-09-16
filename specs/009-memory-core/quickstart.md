@@ -1656,3 +1656,30 @@ a branch the enumeration did not open and another had its sentence in a constant
 Gate at this head: `npm test` 1559 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
 markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
 `85d48437` adds nothing.
+
+### E9 follow-up — the same sweep on the axis the tenth round exposed
+
+The tenth round found two instances of a shape the sweep before it had declared closed, and the
+reason was in how the sweep looked: it enumerated **functions**, and the two it missed were a
+*branch* inside one of them and a *constant* read by another. Re-running the sweep along those two
+axes — every `degraded`/`warning`/`unverified` construction in `src/doctor/provider.ts` and every
+string in `src/doctor/` and `src/setup/` that claims a batch becomes rule-based — found three more,
+none of them in a function the first sweep had listed:
+
+- **`fallback:N` for a target the cost policy excludes** said "a failure ahead of it falls through to
+  rule-based records". With `[nim (excluded), ollama (admitted)]` a failure ahead of it passes to
+  `ollama`; the sentence is only true when the policy admits nothing at all.
+- **The `catalog` item for a model the catalog does not list** said summaries fall back to
+  rule-based. That call fails with `model_alias`, which advances.
+- **The `catalog` warning for a paid-only model** said the same about `provider_paid`, which also
+  advances.
+
+All three were verified against the "Advance and stop" table rather than against the code, and all
+three keep their original sentence for the case that makes it true — no admitted target.
+
+Three axes have now produced instances of this one shape: the surface, the branch within a surface,
+and the constant a surface reads. The reusable form is [[defect-shape-closure-needs-second-axis]]:
+enumerate the *claims*, not the code that makes them.
+
+Gate at this head: `npm test` 1562 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean.
