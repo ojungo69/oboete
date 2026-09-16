@@ -156,20 +156,13 @@ function configuredProvider(
     );
   }
 
-  // The worker's own resolver, asked before anything is probed: a primary whose model does not
-  // resolve, or a chain entry that makes the chain unusable, leaves the observer with no model and
-  // no targets at all, and this item is where the user learns why
-  // (contracts/provider-fallback.md "What the chain does not do").
-  try {
-    resolveModel(config);
-  } catch (error) {
-    return degraded(
-      'provider',
-      describe(error),
-      'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
-      'Set `[observer] model` to a model the preset lists, or correct the `[[observer.fallback]]` entry, then run `oboete doctor` again.',
-    );
-  }
+  const refused = resolverRefusal(
+    config,
+    'provider',
+    'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
+    'Set `[observer] model` to a model the preset lists, or correct the `[[observer.fallback]]` entry, then run `oboete doctor` again.',
+  );
+  if (refused !== null) return refused;
 
   const credentials = readCredentials(preset, env, config.observer.agent_cli);
   if (!credentials.present) {
@@ -338,6 +331,27 @@ function credentialSteps(config: OboeteConfig, env: NodeJS.ProcessEnv): string {
  * probe per target would spend the daily allowance on diagnostics
  * (contracts/provider-fallback.md "Diagnostics"). No configured chain means no items at all.
  */
+/**
+ * The worker's own resolver, not a second copy of its rules: a primary whose model does not
+ * resolve, or a chain entry that makes the chain unusable, leaves the observer with no model and no
+ * targets at all, so neither the provider item nor any target below may be reported as ready, and
+ * both say why (contracts/provider-fallback.md "What the chain does not do"). Null means it
+ * resolves.
+ */
+function resolverRefusal(
+  config: OboeteConfig,
+  name: 'provider' | 'fallback',
+  consequence: string,
+  recovery: string,
+): DoctorItem | null {
+  try {
+    resolveModel(config);
+    return null;
+  } catch (error) {
+    return degraded(name, describe(error), consequence, recovery);
+  }
+}
+
 export function fallbackItems(
   config: OboeteConfig | null,
   db: DatabaseSync | null,
@@ -359,19 +373,13 @@ export function fallbackItems(
         : 'Correct the `[[observer.fallback]]` entry in the configuration file, then run `oboete doctor` again.',
     )];
   }
-  // The worker's own resolver, not a second copy of its rules: a primary it refuses takes the whole
-  // chain down with it, so no target below may be reported as ready
-  // (contracts/provider-fallback.md "What the chain does not do").
-  try {
-    resolveModel(config);
-  } catch (error) {
-    return [degraded(
-      'fallback',
-      describe(error),
-      'No target below is ever attempted: the observer has no usable primary, so every batch is rule-based.',
-      'Set `[observer] model` to a model the preset lists, then run `oboete doctor` again.',
-    )];
-  }
+  const refused = resolverRefusal(
+    config,
+    'fallback',
+    'No target below is ever attempted: the observer has no usable primary, so every batch is rule-based.',
+    'Set `[observer] model` to a model the preset lists, then run `oboete doctor` again.',
+  );
+  if (refused !== null) return [refused];
   // Each admitted target is claimed by the first entry that produced it, so the second of two
   // identical entries is reported as covered rather than as ready.
   const unclaimed = [...chain.targets];

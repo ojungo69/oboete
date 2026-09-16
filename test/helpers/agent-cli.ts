@@ -26,9 +26,7 @@ export function cliSpawn(texts: string[]): { spawn: typeof spawn; calls: () => n
   let count = 0;
   return {
     spawn: ((command: string, args: readonly string[], options: { signal?: AbortSignal }) => {
-      if (!AGENT_CLIS.has(command)) {
-        return (nodeSpawn as unknown as (...rest: unknown[]) => unknown)(command, args, options);
-      }
+      if (!AGENT_CLIS.has(command)) return nodeSpawn(command, [...args], options);
       const child = Object.assign(new EventEmitter(), {
         stdin: new PassThrough(),
         stdout: new PassThrough(),
