@@ -327,6 +327,19 @@ test('admission drops what the policy excludes and refuses what widens egress', 
     fallback: [{ preset: 'workers-ai', model: 'm1' }, { preset: 'workers-ai', model: 'm2' },
       { preset: 'workers-ai', model: 'm2' }] }).verdicts,
     ['covered', 'admitted', 'covered']);
+
+  // `agent-cli` is identified by the command line tool, not the model: nothing sends the model, so
+  // two entries on the same CLI would launch the identical paid call twice for one payload.
+  assert.deepEqual(admitted({ preset: 'workers-ai', cost_policy: ['free-tier', 'own-subscription'],
+    fallback: [{ preset: 'agent-cli', model: 'a' }, { preset: 'agent-cli', model: 'b' }] }), {
+    targets: [{ preset: 'agent-cli', model: 'a' }],
+    verdicts: ['admitted', 'covered'],
+    error: null,
+  });
+  // The primary counts the same way: a chain entry on the primary's own CLI is covered by it.
+  assert.deepEqual(admitted({ preset: 'agent-cli', model: 'a',
+    cost_policy: ['free-tier', 'own-subscription'],
+    fallback: [{ preset: 'agent-cli', model: 'b' }] }).verdicts, ['covered']);
 });
 
 test('an empty chain leaves the consent hash exactly where it was, and one target moves it', () => {

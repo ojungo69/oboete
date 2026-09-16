@@ -729,6 +729,35 @@ test('a capped target is warned while the last calls are held for end-of-session
   });
 });
 
+test('a refused primary says the chain is offered the batch, not that processing waits', async () => {
+  await harness(async (context) => {
+    // `daily_cap` and `provider_exhausted` both advance the chain, so an item that says processing
+    // waits contradicts the worker and the healthy target reported below it.
+    const observer = { preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    const { db } = openDatabase({ path: context.paths.db, timeoutMs: 5_000 });
+    try {
+      db.prepare(`INSERT INTO provider_usage (utc_day, preset, calls, neurons_estimate, reset_at)
+        VALUES (?, 'workers-ai', ?, 0, ?)`).run(utcDay(context.now), DAILY_CAP, context.now + 3_600_000);
+    } finally {
+      db.close();
+    }
+    context.fetch = () => assert.fail('a refused reservation makes no request');
+
+    assert.equal(await context.doctor(['--json', '--probe-provider']), 1, context.output);
+    assertBroken(context.item('provider'), 'degraded', 'daily_cap',
+      'offered to the fallback chain below');
+    assert.doesNotMatch(context.item('provider').consequence, /source processing waits/i);
+    assert.equal(context.item('fallback:1').status, 'healthy', context.item('fallback:1').reason);
+  });
+});
+
 test('a primary the resolver refuses leaves no fallback target to call ready', async () => {
   await harness(async (context) => {
     // `ollama` has no default model, so the primary fails `resolveModel` and the worker degrades

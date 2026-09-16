@@ -434,7 +434,8 @@ export function admittedChain(
   }
   const primaryEgress = PRESET_CATALOG[primary].egress;
   const policy = new Set<string>(config.observer.cost_policy);
-  const seen = new Set([identityOf(primary, config.observer.model)]);
+  const agentCli = config.observer.agent_cli;
+  const seen = new Set([identityOf(primary, config.observer.model, agentCli)]);
   const targets: ChainTarget[] = [];
   const verdicts: ChainVerdict[] = [];
   for (const [index, entry] of entries.entries()) {
@@ -447,7 +448,7 @@ export function admittedChain(
       // `remote` is the only egress class a remote target does not widen.
       return { targets: [], verdicts: [], error: { code: 'egress_widened', position } };
     }
-    const identity = identityOf(entry.preset, model);
+    const identity = identityOf(entry.preset, model, agentCli);
     if (seen.has(identity)) {
       verdicts.push('covered');
       continue;
@@ -465,9 +466,20 @@ export function admittedChain(
   return { targets, verdicts, error: null };
 }
 
-/** A target's identity: the same preset with two models is two targets, the same pair twice is one. */
-function identityOf(preset: PresetName, model: string | undefined): string {
-  return JSON.stringify([preset, (model ?? PRESET_CATALOG[preset].defaultModel).trim()]);
+/**
+ * A target's identity: the same preset with two models is two targets, the same pair twice is one.
+ *
+ * `agent-cli` is identified by the command line tool instead, because that is what a target of that
+ * preset actually invokes: `summarizeWithAgentCli` reads `[observer] model` only as a non-empty gate
+ * and `runAgentCli` is never given it, so two entries on the same CLI are one target however their
+ * models differ. Admitting them as two would let an advancing failure pay the same subscription
+ * twice for one payload, which is the shape US7 scenario 2 forbids. Sending the model instead is
+ * the other way to fix it and is issue #241; it would widen what oboete asks of the subscription.
+ */
+function identityOf(preset: PresetName, model: string | undefined, agentCli: AgentCli): string {
+  return preset === 'agent-cli'
+    ? JSON.stringify([preset, agentCli])
+    : JSON.stringify([preset, (model ?? PRESET_CATALOG[preset].defaultModel).trim()]);
 }
 
 /** One admitted target's share of the consent tuple: the five facts the primary contributes. */

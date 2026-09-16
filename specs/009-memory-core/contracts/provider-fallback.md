@@ -177,6 +177,13 @@ than one per batch. Nothing reads that column as a bound — it is written in
 `src/observer/reservation.ts:92` and listed in the insert at `src/worker/batches.ts:602`, and read
 nowhere — so a three-target pass does not trip any threshold.
 
+**Identity.** A target is `(preset, model)`, except `agent-cli`, which is `(preset, agent_cli)`:
+`summarizeWithAgentCli` reads `[observer] model` only as a non-empty gate and `runAgentCli` is never
+given it, so two entries on the same command line tool invoke the identical call. Admitting them as
+two targets would let one advancing failure pay that subscription twice for one payload, which is
+the shape US7 scenario 2 forbids. The other way to close it — sending the model to the CLI — widens
+what oboete asks of the subscription and is issue #241.
+
 ## Advance and stop
 
 The chain exists for failures to obtain an answer, not for the quality of an answer that arrived.

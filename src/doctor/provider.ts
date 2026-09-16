@@ -63,6 +63,19 @@ const PROVIDER_PROBE_INPUT: ObserverInput = {
 
 const FALLBACK_CONSEQUENCE =
   'Temporary guidance is available while source processing waits for the provider.';
+const CHAINED_CONSEQUENCE =
+  'This target answers without a request, so every batch is summarized by the fallback chain below.';
+
+/**
+ * What a refused primary means for the queue. An admitted chain is attempted on the same batch
+ * (contracts/provider-fallback.md "Advance and stop": `daily_cap` and `provider_exhausted` both
+ * advance), so an item that says processing waits contradicts both the worker and the healthy
+ * target reported below it. The condition is the one the uncredentialed-primary branch already
+ * uses, so the two cannot disagree.
+ */
+function refusedPrimaryConsequence(config: OboeteConfig, whenChained: string): string {
+  return admittedChain(config).targets.length > 0 ? whenChained : FALLBACK_CONSEQUENCE;
+}
 const ALLOWANCE_CONSEQUENCE =
   'Source processing waits for the allowance to reset; later worker runs retry due sources.';
 
@@ -79,7 +92,7 @@ export async function providerItem(input: {
   const configured = configuredProvider(config, integrityFailed, deps.env);
   if (!('kind' in configured)) return configured;
   const { config: readyConfig, preset, credentials, model } = configured;
-  const probe = providerProbeReadiness(preset, db, options, now);
+  const probe = providerProbeReadiness(readyConfig, preset, db, options, now);
   if (!('kind' in probe)) return probe;
   const { db: openDb, estimate } = probe;
 
@@ -172,12 +185,11 @@ function configuredProvider(
   if (!credentials.present) {
     // An uncredentialed primary is one failed target, not a run without a provider: the chain is
     // still attempted (contracts/provider-fallback.md "What the chain does not do").
-    const chained = admittedChain(config).targets.length > 0;
     return degraded(
       'provider',
       `No credentials are set for the ${preset} preset (${credentials.source}).`,
-      chained
-        ? 'This target answers without a request, so every batch is summarized by the fallback chain below.'
+      admittedChain(config).targets.length > 0
+        ? CHAINED_CONSEQUENCE
         : 'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
       credentialSteps(config, env) ||
         '`oboete setup --provider <preset>` (workers-ai is the free remote default; ollama stays local)',
@@ -187,6 +199,7 @@ function configuredProvider(
 }
 
 function providerProbeReadiness(
+  config: OboeteConfig,
   preset: Exclude<PresetName, 'none'>,
   db: DatabaseSync | null,
   options: DoctorOptions,
@@ -213,7 +226,7 @@ function providerProbeReadiness(
   }
 
   const estimate = usageEstimate(db, now);
-  const capItem = providerCapItem(preset, estimate, db, now);
+  const capItem = providerCapItem(preset, estimate, db, now, config);
   if (capItem !== null) return capItem;
   return { kind: 'ready', db, estimate };
 }
@@ -257,7 +270,12 @@ function providerCapItem(
   estimate: ReturnType<typeof usageEstimate>,
   db: DatabaseSync,
   now: number,
+  config: OboeteConfig,
 ): DoctorItem | null {
+  const consequence = refusedPrimaryConsequence(
+    config,
+    'This reservation is refused without a request, so the batch is offered to the fallback chain below.',
+  );
   // Not behind `capped`: `reserveAttempt` refuses on this stamp whatever the preset's cap is, and
   // `doctorReserve` now does too — without this the probe is still stopped, but it is reported as a
   // refused reservation rather than as the exhaustion it is.
@@ -265,7 +283,7 @@ function providerCapItem(
     return degraded(
       'provider',
       'provider_exhausted: The provider reported exhaustion today.',
-      FALLBACK_CONSEQUENCE,
+      consequence,
       `Wait for the reset at ${iso(estimate.resetAt)} or choose another preset with \`oboete setup --provider\`.`,
     );
   }
@@ -275,9 +293,7 @@ function providerCapItem(
     return degraded(
       'provider',
       `daily_cap: ${clause.reason}`,
-      // The provider item's consequence names the chain rather than the queue, and that is true in
-      // both states: a refused reservation is what the fallback chain exists for.
-      FALLBACK_CONSEQUENCE,
+      consequence,
       shared === 'spent'
         ? `Wait for the reset at ${iso(estimate.resetAt)} or choose another preset with \`oboete setup --provider\`.`
         : `Wait for the reset at ${iso(estimate.resetAt)} for the other batches, or choose another preset with \`oboete setup --provider\`.`,

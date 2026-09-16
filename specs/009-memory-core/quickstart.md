@@ -1369,3 +1369,31 @@ One process note worth keeping: restoring the two reverted branches by hand swap
 `reserved` texts, which the suite caught as three failures — including a row that had been green
 before the revert. A revert-to-verify-red is only safe with the suite rerun after the restore, not
 just after the fix.
+
+### E9 follow-up — the fourth bot round
+
+Two more P2s, both taken, and both the same defect family one axis further out.
+
+- **Two `agent-cli` entries with different models were two targets.** Nothing sends the model —
+  `summarizeWithAgentCli` reads it only as a non-empty gate and `runAgentCli` never receives it — so
+  both entries launch the identical paid call, and an advancing failure such as `timeout` on the
+  first pays the subscription twice for one payload. That is the shape US7 scenario 2 forbids, and
+  it is the same paid-double-spend the first round's third finding was about, reached through
+  admission instead of through the reservation. `identityOf` now identifies an `agent-cli` target by
+  the command line tool, so the second entry is `covered`; the contract's Admission section says so.
+  The other way to close it, sending the model to the CLI, widens what oboete asks of the
+  subscription and stays issue #241.
+- **A refused primary still claimed processing waits.** `daily_cap` and `provider_exhausted` both
+  *advance* the chain, so `FALLBACK_CONSEQUENCE` contradicted the worker and the healthy target
+  reported below it in the same report. `afeca975` had already made exactly this conditional for the
+  uncredentialed primary; `providerCapItem` never got it. `refusedPrimaryConsequence` is now the one
+  place that decides, and the credentials branch reads it too, so the two cannot disagree.
+
+Red before the fix: `admission drops what the policy excludes and refuses what widens egress`
+reported `verdicts: ['admitted', 'admitted']` with two `agent-cli` targets, and `a refused primary
+says the chain is offered the batch, not that processing waits` got the "source processing waits"
+consequence. Restoring after that check was done by copying the files back rather than by hand,
+after the previous round's hand-restore swapped two branches.
+
+Gate at this head: `npm test` green on Node 24.16.0 and 22.23.1 (1550 + 280, 0 fail, 2 skipped);
+typecheck, lint, markdownlint, semgrep and lizard clean.
