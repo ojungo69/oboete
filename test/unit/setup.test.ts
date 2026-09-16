@@ -246,6 +246,26 @@ test('a chain the configuration cannot use blocks neither capture-only nor rewir
   });
 });
 
+test('a bare setup reports a chain the stored preset cannot use, and still succeeds', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--provider', 'workers-ai', '--accept-egress']), 0, context.output);
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "ollama"\n`);
+
+    // No `--provider`, so this run changes no destination — but the entry it leaves in place stops
+    // `resolveModel`, which takes the stored primary down with it, and a run that said nothing left
+    // the user to find that in `oboete doctor` or in rule-based memories.
+    context.output = '';
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    assert.match(context.output, /Fallback target 1 requires an observer model/);
+
+    // `--remove` is the recovery path and never reads the chain.
+    context.output = '';
+    assert.equal(await context.run(['--remove']), 0, context.output);
+    assert.doesNotMatch(context.output, /Fallback target/);
+  });
+});
+
 test('a fallback entry the destination cannot use is reported, and the destination is still written', async () => {
   await harness(async (context) => {
     assert.equal(await context.run(['--provider', 'none', '--accept-egress']), 0, context.output);

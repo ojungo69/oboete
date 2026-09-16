@@ -201,6 +201,15 @@ Every `FailureReason` therefore falls into one of two cases:
 | `consent_changed` | stop | consent no longer authorizes any destination; a later target is not more authorized than this one |
 | `unusable_output`, `language_mismatch` | stop | the request reached a provider, was answered, and spent that target's allowance; both reasons already own their retries, and spending a second allowance on the same payload is the paid-by-accident shape US7 scenario 2 forbids |
 
+The column is read from **the reason the target settles with**, not from anything an earlier attempt
+of that target produced. A target whose first attempt answered unusably and whose retry then failed
+in transit settles with `timeout` or `unreachable` and therefore advances: the row's reason — "no
+answer from this host" — is what happened, and a later target plainly can improve on a dropped
+connection. Stopping there instead would strand the batch on a transport error while an admitted
+local target sat unused, which is what US7 scenario 5 asks the chain to prevent. The evidence the
+stop rule is about is two unusable answers, and that is exactly the case
+`summarizeWithProvider` reports as `unusable_output`.
+
 A successful target ends the chain and the batch applies its output exactly as it does today.
 
 **The reason a stop ended the chain on outranks the precedence order.** A chain that met
@@ -341,12 +350,16 @@ column cannot hold go to the observe log, one line per attempted target.
 18. `oboete setup --remove`, a bare `oboete setup` and `--provider none` all succeed while a chain
     the configuration cannot use sits in the file; only a `--provider` that narrows egress under an
     admitted chain is refused, and it writes nothing. Every other chain error is **reported and the
-    destination is still written**, the way a missing credential is (contracts/cli.md: setup prints
-    the steps "instead of failing"): a `--provider` over an entry with no model succeeds, writes the
+    run continues**, the way a missing credential is (contracts/cli.md: setup prints the steps
+    "instead of failing"): a `--provider` over an entry with no model succeeds, writes the
     destination and names the entry, because the entry is the file's defect rather than the
     destination's doing — the selected preset does not run until it is corrected, which is what the
-    report says. `admittedChain` returns at the first entry it refuses, so entries after it are
-    unexamined and the report says that too rather than restating the admission rules.
+    report says. **A bare `oboete setup` names it too**, because the same entry takes the stored
+    primary down and nothing else in the report mentions it: the consent display lists the targets
+    of an *admitted* chain, and an unusable chain has none. `--remove` is the one run that does not
+    look, because it is the recovery path. `admittedChain` returns at the first entry it refuses, so
+    entries after it are unexamined and the report says that too rather than restating the admission
+    rules.
 19. Two identical `[[observer.fallback]]` entries: `fallback:1` is healthy and `fallback:2` says a
     nearer target already covers it. `preset = "none"` with an entry reports the missing primary
     rather than "fallback target 0".

@@ -328,9 +328,10 @@ function recordSetupResult(
 }
 
 /**
- * The configuration this run would settle on, or `null` when the destination refuses it.
+ * The configuration this run would settle on, or `null` when the destination refuses it, having
+ * reported any chain error the run is about to leave in place.
  *
- * `--provider` names that destination. It is applied in memory so the consent screen shows it, and
+ * `--provider` names the destination. It is applied in memory so the consent screen shows it, and
  * written only once the run is past the gate: a refused run must not leave the destination it
  * refused enabled (contracts/cli.md, FR-022). A narrower destination can strip a stored fallback
  * chain of its admission, and a run that enabled it anyway would leave the observer with no
@@ -340,22 +341,26 @@ function recordSetupResult(
  * chain the configuration cannot use sits in the file, and only a `--provider` that narrows egress
  * under an admitted chain is refused.
  *
- * Every other chain error is reported and the destination is still written, the way a missing
- * credential is reported and setup continues (contracts/cli.md). Reporting is the part that was
- * missing: one entry the chain cannot resolve makes `resolveModel` refuse the whole chain, so the
- * primary the run just selected does not run either, and a run that wrote it in silence left the
- * user to discover that from `oboete doctor` or from rule-based memories.
+ * Every other chain error is reported and the run continues, the way a missing credential is
+ * reported and setup continues (contracts/cli.md). The reporting is not limited to runs that name a
+ * destination: one entry the chain cannot resolve makes `resolveModel` refuse the whole chain, so
+ * the stored primary does not run either, and nothing else in the report names it — the consent
+ * display shows the targets of an *admitted* chain and an unusable one has none. `--remove` is the
+ * exception because it is the recovery path and never reads the chain.
  */
 function selectedDestination(
   config: OboeteConfig,
-  provider: Options['provider'],
+  options: Options,
   note: (...lines: string[]) => void,
 ): OboeteConfig | null {
-  if (provider === null) return config;
-  const destined = { ...config, observer: { ...config.observer, preset: provider } };
-  const chainError = provider === 'none' ? null : admittedChain(destined).error;
+  if (options.remove) return config;
+  const provider = options.provider;
+  const destined =
+    provider === null ? config : { ...config, observer: { ...config.observer, preset: provider } };
+  // Capture-only is a destination with no chain to run, whichever way the run arrived at it.
+  const chainError = destined.observer.preset === 'none' ? null : admittedChain(destined).error;
   if (chainError === null) return destined;
-  if (chainError.code === 'egress_widened') {
+  if (provider !== null && chainError.code === 'egress_widened') {
     note(
       chainErrorMessage(chainError),
       'Nothing was written. Correct the `[[observer.fallback]]` entry, then run setup again.',
@@ -364,11 +369,13 @@ function selectedDestination(
   }
   note(
     chainErrorMessage(chainError),
+    provider === null
+      ? 'No summary is generated until that entry is corrected: the observer refuses a chain it'
+      : 'The destination below is still selected, but no summary is generated until that entry is',
+    'corrected: the observer refuses a chain it cannot resolve, including the selected preset.',
     // `admittedChain` returns at the first entry it refuses, so the entries after it were not
     // examined. Saying so is cheaper and more honest than a second copy of the admission rules
     // here, which would be the one to drift.
-    'The destination below is still selected, but no summary is generated until that entry is',
-    'corrected: the observer refuses a chain it cannot resolve, including its selected preset.',
     'Entries after it were not checked.',
   );
   return destined;
@@ -401,7 +408,7 @@ export async function runSetup(argv: string[], overrides: Partial<SetupDeps> = {
     return finishSetup(deps, options, paths, notes, [], 2);
   }
   const provider = options.remove ? null : options.provider;
-  const destined = selectedDestination(config, provider, note);
+  const destined = selectedDestination(config, options, note);
   if (destined === null) return finishSetup(deps, options, paths, notes, [], 2);
   config = destined;
 
