@@ -1,0 +1,44 @@
+test/unit/llm.test.ts
+  s_892d4f75e21024::t_b1576e65808561 479-509,511-512,521,526-527,532-559
+  s_892d4f75e21024::t_87dc715c39c3b5 7
+test/unit/provider-fallback.test.ts
+  s_892d4f75e21024::t_9e892e08fe4097 7,374-403
+  s_892d4f75e21024::t_291308b30a051e 404-406
+src/observer/reservation.ts
+  s_892d4f75e21024::t_760e045ed8280a 57-62,104,107
+  s_892d4f75e21024::t_430624236703c8 32-45,83,154-157,161,163
+test/unit/callpolicy.test.ts
+  s_892d4f75e21024::t_0941479dbf349e 11,238,249-270
+src/doctor/provider.ts
+  s_892d4f75e21024::t_0dbfdee87d32b0 362-374
+  s_892d4f75e21024::t_6bf40045c2f681 28,33,221,229-230,232,260-261,457,467,508
+  s_892d4f75e21024::t_760e045ed8280a 159-173
+test/unit/degraded.test.ts
+  s_892d4f75e21024::t_d67e49357a1f0a 511,525,529
+  s_892d4f75e21024::t_115f0874647073 22
+test/unit/doctor.test.ts
+  s_892d4f75e21024::t_92974d56f2a521 647-698,700-702
+  s_892d4f75e21024::t_4f603298392cdd 590-591,593,699
+  s_892d4f75e21024::t_0941479dbf349e 703-725
+src/observer/llm.ts
+  s_892d4f75e21024::t_0dbfdee87d32b0 280-285
+test/helpers/agent-cli.ts
+  s_892d4f75e21024::t_390bdfc507df4a 1,3-5,8-19,24-27,32-60
+  s_892d4f75e21024::t_0cec45def854c7 2,6-7,20-23,28-31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "f5f766f954b991c8dfe9113ad28e3496be2297d1",
+  "prompts": {},
+  "sessions": {
+    "s_892d4f75e21024": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79c129f3-aa1e-4d43-970b-c316e499606d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
