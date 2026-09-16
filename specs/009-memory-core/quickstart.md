@@ -1900,3 +1900,37 @@ behaviour. The next pass would review eleven more lines of error handling, which
 Gate at this head: `npm test` 1566 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
 markdownlint clean; `semgrep scan --config auto` unchanged against the round-12 baseline; the lizard
 warning set differenced against `85d48437` adds nothing and drops two.
+
+### E9 follow-up — the two bot findings on the fix rounds
+
+CodeRabbit and the Codex connector each found one thing in the four fix commits, and both were
+real.
+
+The chain is ordered, so an excluded entry's consequence — "a failure ahead of it passes to the
+targets the policy does admit" — is true only when an admitted target comes **after** it.
+`chainIsReachable` answers for the whole chain, so with an admitted `ollama` at position 1 and an
+excluded `nim` at position 2 the report promised a handoff that cannot happen: by the time the chain
+is at 2, the target at 1 has already had its turn and failed. `fallbackItems` passes
+`admittedAfter` now, and the test that exercises that exact configuration asserts the rule-based
+sentence for both excluded entries.
+
+The language-mismatch attempt line was written after `applyFallback` rather than before it, so a
+target that had just spent two allowances lost its line whenever that call came back `lease_lost` or
+threw. It is written where the reason is decided now, and the delayed append in `attemptTargets` is
+gone — it only ever fired for this one reason.
+
+That second one is **not pinned**, and #245 carries the measurement: staging a lease theft from the
+answering target's second `fetch` lands *before* `recordProviderResult`, so the run returns
+`lease_lost` at that check and the language comparison never runs. No line is owed on that path
+either — the target answered and the pass lost its lease, so no `DegradedReason` was decided. The
+gap that needs a seam is narrower: a failure inside `applyFallback` itself, where the harness has no
+`fetch` to hang a fault on.
+
+One load-only failure on Node 22.23.1 in this round's full run: `ENOTEMPTY ... rmdir
+'…/workspace/.git'` in `memory-scope.test.ts`, the teardown race of issue #206. Green on the
+isolated rerun, 39 of 39.
+
+Gate at this head: `npm test` 1566 + 280 green on Node 24.16.0 and 22.23.1 (the latter after the
+isolated rerun of the flake above); typecheck, lint and markdownlint clean; `semgrep scan
+--config auto` unchanged against the round-12 baseline; the lizard warning set differenced against
+`85d48437` adds nothing and drops two.

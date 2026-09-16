@@ -89,6 +89,9 @@ function refusedPrimaryConsequence(
 ): string {
   return chainIsReachable(config, env) ? whenChained : otherwise;
 }
+/** What an excluded entry means when no admitted target comes after it. */
+const EXCLUDED_FALLS_THROUGH =
+  'This target is never attempted, so a failure ahead of it falls through to rule-based records.';
 /** What a refused probe reservation means when the chain is reachable. */
 const REFUSED_RESERVATION =
   'This reservation is refused without a request, so the batch is offered to the fallback chain below.';
@@ -484,6 +487,10 @@ export function fallbackItems(
   if (!('kind' in resolved)) return [resolved];
   return entries.map((entry, index) => fallbackTargetItem({
     entry, position: index + 1, verdict: chain.verdicts[index],
+    // The chain is ordered, so "a failure ahead of this entry" reaches a target only when an
+    // admitted one comes *after* it. An admitted target earlier in the chain has already had its
+    // turn and failed by the time the chain is here.
+    admittedAfter: chain.verdicts.slice(index + 1).includes('admitted'),
     config, db, integrityFailed, env, now,
   }));
 }
@@ -492,6 +499,8 @@ type FallbackTarget = {
   entry: OboeteConfig['observer']['fallback'][number];
   position: number;
   verdict: ChainVerdict;
+  /** Whether an admitted target comes after this entry, which is what a failure here would reach. */
+  admittedAfter: boolean;
   config: OboeteConfig;
   db: DatabaseSync | null;
   integrityFailed: boolean;
@@ -508,6 +517,7 @@ function unadmittedEntryItem(
   where: string,
   catalog: (typeof PRESET_CATALOG)[PresetName],
   verdict: ChainVerdict,
+  admittedAfter: boolean,
   config: OboeteConfig,
   env: NodeJS.ProcessEnv,
 ): DoctorItem | null {
@@ -525,14 +535,18 @@ function unadmittedEntryItem(
       name,
       `${where}, whose "${catalog.costClass}" cost class \`[observer] cost_policy\` does not admit.`,
       // A failure ahead of an excluded target is not the end of the chain when the policy admits
-      // another one: `daily_cap`, `auth_failed` and the rest advance past it
-      // (contracts/provider-fallback.md "Advance and stop").
-      refusedPrimaryConsequence(
-        config,
-        env,
-        'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.',
-        'This target is never attempted, so a failure ahead of it falls through to rule-based records.',
-      ),
+      // another one *after* it: `daily_cap`, `auth_failed` and the rest advance past it
+      // (contracts/provider-fallback.md "Advance and stop"). An admitted target earlier in the
+      // chain is not that — it already had its turn, which is what the failure ahead of this entry
+      // means.
+      admittedAfter
+        ? refusedPrimaryConsequence(
+          config,
+          env,
+          'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.',
+          EXCLUDED_FALLS_THROUGH,
+        )
+        : EXCLUDED_FALLS_THROUGH,
       `Add "${catalog.costClass}" to \`[observer] cost_policy\` to admit it, or remove the entry.`,
     );
   }
@@ -540,12 +554,12 @@ function unadmittedEntryItem(
 }
 
 function fallbackTargetItem(input: FallbackTarget): DoctorItem {
-  const { entry, position, verdict, config, db, integrityFailed, env, now } = input;
+  const { entry, position, verdict, admittedAfter, config, db, integrityFailed, env, now } = input;
   const name = `fallback:${position}`;
   const catalog = PRESET_CATALOG[entry.preset];
   const model = targetModel(entry.preset, entry.model);
   const where = `Target ${position} is ${entry.preset} with model ${model}`;
-  const unadmitted = unadmittedEntryItem(name, where, catalog, verdict, config, env);
+  const unadmitted = unadmittedEntryItem(name, where, catalog, verdict, admittedAfter, config, env);
   if (unadmitted !== null) return unadmitted;
   const credentials = readCredentials(entry.preset, env, config.observer.agent_cli);
   if (!credentials.present) {

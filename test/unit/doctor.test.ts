@@ -533,6 +533,13 @@ test('the fallback chain is reported per target without a second provider reques
     // A cost class the policy excludes and a duplicate are different verdicts with different fixes.
     assertBroken(context.item('fallback:2'), 'warning', 'cost_policy` does not admit', 'Add "remote"');
     assertBroken(context.item('fallback:3'), 'warning', 'cost_policy` does not admit', 'Add "remote"');
+    // The chain is ordered, so "a failure ahead of it" reaches an admitted target only when one
+    // comes after this entry. The single admitted target here is position 1, before both, and by
+    // the time the chain is at 2 that target has already failed.
+    for (const name of ['fallback:2', 'fallback:3']) {
+      assert.match(context.item(name).consequence, /falls through to rule-based records/,
+        context.item(name).consequence);
+    }
     assert.equal(context.item('provider').status, 'healthy', context.output);
 
     // Three items above the chain say the batch goes to "the fallback chain below", so the order

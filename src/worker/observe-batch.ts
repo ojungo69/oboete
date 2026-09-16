@@ -503,19 +503,16 @@ async function attemptTargets(
       request,
       input,
       nearby,
+      position,
       preset: target.preset,
       model: target.model,
       outcome: called.outcome,
     });
-    if ('done' in settled) {
-      // A target whose answer arrived and was then refused settles inside `settleProviderOutcome`,
-      // so this is the only place its attempt line can be recorded.
-      if (settled.done.state === 'fallback' && settled.done.reason !== null) {
-        attempts.push({ position, preset: target.preset, model: target.model,
-          reason: settled.done.reason, detail: settled.done.detail ?? '' });
-      }
-      return { done: { ...settled.done, attempts } };
-    }
+    // A target whose answer arrived and was then refused records its own line where the refusal is
+    // decided (`retryOnLanguageMismatch`), not here: the fallback that follows it can come back
+    // `lease_lost` or throw, and the line would be lost on the one path that already spent two
+    // allowances on this target.
+    if ('done' in settled) return { done: { ...settled.done, attempts } };
     const outcome = settled.outcome;
     if (outcome.ok) return { answered: { position, preset: target.preset, model: target.model }, outcome };
     attempts.push({ position, preset: target.preset, model: target.model,
@@ -550,6 +547,7 @@ async function settleProviderOutcome(args: {
   request: ReturnType<typeof buildObserverRequest>;
   input: BatchInput;
   nearby: ReturnType<typeof nearbyForBatch>;
+  position: number;
   preset: PresetName;
   model: string;
   outcome: CallOutcome;
@@ -575,10 +573,11 @@ async function retryOnLanguageMismatch(args: {
   request: ReturnType<typeof buildObserverRequest>;
   input: BatchInput;
   nearby: ReturnType<typeof nearbyForBatch>;
+  position: number;
   preset: PresetName;
   model: string;
 }): Promise<ProviderResult> {
-  const { options, request, input, nearby, preset, model } = args;
+  const { options, request, input, nearby, position, preset, model } = args;
   const { db, token, batch, config, deps, detect, providerState } = options;
   const called = await providerCall({
     db, token, input: request.input, batch, config, deps, preset, model, consentOk: options.consentOk,
@@ -590,6 +589,10 @@ async function retryOnLanguageMismatch(args: {
   }
   if (outcome.ok && checkLanguage(request.input, outcome.output) === 'mismatch') {
     providerState.set(batch.session_id, 'language_mismatch');
+    // Before the fallback, because this target has now spent two allowances and `applyFallback`
+    // can return `lease_lost` or throw — and the reason is already decided here
+    // (contracts/provider-fallback.md "Diagnostics": one line per target that failed).
+    options.attempts.push({ position, preset, model, reason: 'language_mismatch', detail: '' });
     return {
       done: await applyFallback(db, token, input, nearby, 'language_mismatch', detect, deps.now(), request.coverage),
     };
