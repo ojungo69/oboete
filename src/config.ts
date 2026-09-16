@@ -403,6 +403,15 @@ export function readCredentials(
 export type ChainTarget = { preset: PresetName; model: string };
 
 /**
+ * A target's model: the one written for it, else the preset's default, trimmed. The admission, the
+ * identity and every surface that names a target read it from here, because a surface that
+ * re-derived the rule would print a model the worker does not send.
+ */
+export function targetModel(preset: PresetName, model: string | undefined): string {
+  return (model ?? PRESET_CATALOG[preset].defaultModel).trim();
+}
+
+/**
  * Why one written entry is not among the targets. `covered` and `excluded` are different verdicts
  * to the user and have different fixes, so the admission decides which it was rather than leaving
  * doctor to re-derive it (contracts/provider-fallback.md "Diagnostics").
@@ -441,7 +450,7 @@ export function admittedChain(
   for (const [index, entry] of entries.entries()) {
     const position = index + 1;
     const catalog = PRESET_CATALOG[entry.preset];
-    const model = (entry.model ?? catalog.defaultModel).trim();
+    const model = targetModel(entry.preset, entry.model);
     if (model === '') return { targets: [], verdicts: [], error: { code: 'model_required', position } };
     if (catalog.egress === 'remote' && primaryEgress !== 'remote') {
       // A selection that could reach the network under any failure is not a narrower selection:
@@ -479,7 +488,7 @@ export function admittedChain(
 function identityOf(preset: PresetName, model: string | undefined, agentCli: AgentCli): string {
   return preset === 'agent-cli'
     ? JSON.stringify([preset, agentCli])
-    : JSON.stringify([preset, (model ?? PRESET_CATALOG[preset].defaultModel).trim()]);
+    : JSON.stringify([preset, targetModel(preset, model)]);
 }
 
 /** One admitted target's share of the consent tuple: the five facts the primary contributes. */
@@ -502,10 +511,14 @@ export function consentTuple(config: OboeteConfig, env: NodeJS.ProcessEnv = proc
   if (preset === 'none') {
     return { preset, host: '', credentialSource: 'none', costClass: 'none', egressClasses: [] };
   }
+  const primary = presetConsent(preset, config, env);
+  // A target receives the batch the selected preset's destination allowed and never more, so its
+  // classes are the primary's, not the wider set its own egress would carry. `consentDisplay`
+  // prints them that way (src/setup/consent.ts) and the hash has to bind the tuple that was shown.
   const chain = admittedChain(config).targets
-    .map((target) => presetConsent(target.preset, config, env));
+    .map((target) => ({ ...presetConsent(target.preset, config, env), egressClasses: primary.egressClasses }));
   return {
-    ...presetConsent(preset, config, env),
+    ...primary,
     // FR-011 and US7 scenario 4: stored consent may not authorize a destination the user never saw.
     ...(chain.length === 0 ? {} : { chain }),
   };

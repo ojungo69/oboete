@@ -7,6 +7,7 @@ import {
   PRESET_CATALOG,
   admittedChain,
   consentMatches,
+  targetModel,
   type ChainError,
   type ChainTarget,
   type Credentials,
@@ -39,7 +40,7 @@ export function resolveModel(
     if (chain.error !== null) throw chainError(chain.error);
     return { preset, model: '', chain: [] };
   }
-  const model = (config.observer.model ?? PRESET_CATALOG[preset].defaultModel).trim();
+  const model = targetModel(preset, config.observer.model);
   if (model === '') {
     throw new ProviderConfigError(
       `The ${preset} preset requires an observer model in the configuration.`,

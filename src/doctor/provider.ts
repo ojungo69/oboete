@@ -6,6 +6,7 @@ import {
   admittedChain,
   type ChainVerdict,
   consentMatches,
+  targetModel,
   readCredentials,
   type OboeteConfig,
   type PresetName,
@@ -87,6 +88,9 @@ function refusedPrimaryConsequence(
 ): string {
   return chainIsReachable(config, env) ? whenChained : otherwise;
 }
+/** What a refused probe reservation means when the chain is reachable. */
+const REFUSED_RESERVATION =
+  'This reservation is refused without a request, so the batch is offered to the fallback chain below.';
 const ALLOWANCE_CONSEQUENCE =
   'Source processing waits for the allowance to reset; later worker runs retry due sources.';
 
@@ -316,11 +320,6 @@ function providerCapItem(
   config: OboeteConfig,
   env: NodeJS.ProcessEnv,
 ): DoctorItem | null {
-  const consequence = refusedPrimaryConsequence(
-    config,
-    env,
-    'This reservation is refused without a request, so the batch is offered to the fallback chain below.',
-  );
   // Not behind `capped`: `reserveAttempt` refuses on this stamp whatever the preset's cap is, and
   // `doctorReserve` now does too — without this the probe is still stopped, but it is reported as a
   // refused reservation rather than as the exhaustion it is.
@@ -328,7 +327,7 @@ function providerCapItem(
     return degraded(
       'provider',
       'provider_exhausted: The provider reported exhaustion today.',
-      consequence,
+      refusedPrimaryConsequence(config, env, REFUSED_RESERVATION),
       `Wait for the reset at ${iso(estimate.resetAt)} or choose another preset with \`oboete setup --provider\`.`,
     );
   }
@@ -343,7 +342,9 @@ function providerCapItem(
       // own sentence is, and it is chain-aware. The spent band keeps this item's own sentence
       // because it is reporting a refused probe reservation rather than the shared allowance. The
       // recovery is the clause's too: the copy that stood here said the same thing in other words.
-      shared === 'reserved' ? clause.consequence : consequence,
+      shared === 'reserved'
+        ? clause.consequence
+        : refusedPrimaryConsequence(config, env, REFUSED_RESERVATION),
       clause.recovery,
     );
   }
@@ -493,7 +494,7 @@ export function fallbackItems(
   );
   if (!('kind' in resolved)) return [resolved];
   return entries.map((entry, index) => fallbackTargetItem({
-    entry, position: index + 1, verdict: chain.verdicts[index] ?? 'excluded',
+    entry, position: index + 1, verdict: chain.verdicts[index],
     config, db, integrityFailed, env, now,
   }));
 }
@@ -513,7 +514,7 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
   const { entry, position, verdict, config, db, integrityFailed, env, now } = input;
   const name = `fallback:${position}`;
   const catalog = PRESET_CATALOG[entry.preset];
-  const model = (entry.model ?? catalog.defaultModel).trim();
+  const model = targetModel(entry.preset, entry.model);
   const where = `Target ${position} is ${entry.preset} with model ${model}`;
   if (verdict === 'covered') {
     // Adding the cost class cannot make a duplicate runnable, so this verdict must not recommend it.
@@ -547,6 +548,18 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
       `${where}, and its credentials are not set (${credentials.source}).`,
       'The target is attempted and answers without a request, so the chain moves straight past it.',
       'Set that credential in the shell that runs the agents, or remove the entry from the chain.',
+    );
+  }
+  if (catalog.credential.kind === 'none') {
+    // `readCredentials` calls a preset with no credential present, which says nothing about whether
+    // the model is being served. Reporting it ready would be the one claim in this report that
+    // rests on nothing: a target is never probed, and an unstarted local server answers
+    // `unreachable` on every attempt.
+    return unverified(
+      name,
+      `${where}, and whether that model is served on this machine is not checked here.`,
+      'A target whose local model is not being served fails its attempt and the chain moves past it.',
+      'Confirm the local model server is running and the model is pulled before relying on this target.',
     );
   }
   if (catalog.credential.kind === 'agent-login') {

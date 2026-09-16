@@ -524,12 +524,22 @@ test('the fallback chain is reported per target without a second provider reques
 
     // Only the primary is probed: one probe per target would spend the daily allowance on diagnostics.
     assert.equal(providerRequests, 1, context.output);
-    assert.equal(context.item('fallback:1').status, 'healthy');
+    // Nothing here starts the local model server, so this target's runnability is unchecked the
+    // same way an agent login is: `credential.kind` `none` and `agent-login` both leave this item
+    // nothing to read.
+    assert.equal(context.item('fallback:1').status, 'unverified');
     assert.match(context.item('fallback:1').reason, /ollama with model qwen3:8b/);
+    assert.match(context.item('fallback:1').reason, /not checked here/);
     // A cost class the policy excludes and a duplicate are different verdicts with different fixes.
     assertBroken(context.item('fallback:2'), 'warning', 'cost_policy` does not admit', 'Add "remote"');
     assertBroken(context.item('fallback:3'), 'warning', 'cost_policy` does not admit', 'Add "remote"');
     assert.equal(context.item('provider').status, 'healthy', context.output);
+
+    // Three items above the chain say the batch goes to "the fallback chain below", so the order
+    // the report is built in has to put them there: `catalog` was pushed after the chain items.
+    const names = context.report().items.map((entry) => entry.item);
+    assert.ok(names.includes('catalog'), names.join(','));
+    assert.ok(names.indexOf('catalog') < names.indexOf('fallback:1'), names.join(','));
 
     // Admitting a paid class is a new destination, so the stored consent stops matching.
     writeFileSync(context.paths.config,
@@ -556,7 +566,7 @@ test('an advancing probe failure says the chain takes the batch, and a stop reas
     // batch the probe failed on is offered to the admitted target this same report calls healthy.
     context.fetch = refusingFetch();
     assert.equal(await context.doctor(['--json', '--probe-provider']), 1, context.output);
-    assert.equal(context.item('fallback:1').status, 'healthy', context.output);
+    assert.equal(context.item('fallback:1').status, 'unverified', context.output);
     assert.match(context.item('provider').consequence, /offered to the fallback targets below/);
     assert.doesNotMatch(context.item('provider').consequence, /waits for the provider/);
 
@@ -592,7 +602,7 @@ test('an uncredentialed primary with an admitted chain says the chain is offered
     // Admission is not runnability, so the item says the batch is offered to the chain rather
     // than promising the chain summarizes it: a target may lack its own credential or allowance.
     assertBroken(context.item('provider'), 'degraded', 'offered to the fallback chain below');
-    assert.equal(context.item('fallback:1').status, 'healthy');
+    assert.equal(context.item('fallback:1').status, 'unverified');
   });
 });
 
@@ -678,7 +688,7 @@ test('the second of two identical fallback entries is reported as covered, not a
 
     await context.doctor(['--json']);
     // Admission deduplicates by `(preset, model)`, so only the first entry is ever attempted.
-    assert.equal(context.item('fallback:1').status, 'healthy');
+    assert.equal(context.item('fallback:1').status, 'unverified');
     assertBroken(context.item('fallback:2'), 'warning', 'a nearer target already covers',
       'Remove the entry');
     assert.doesNotMatch(context.item('fallback:2').recovery, /cost_policy/,
@@ -789,7 +799,7 @@ test('a refused primary says the chain is offered the batch, not that processing
     assertBroken(context.item('provider'), 'degraded', 'daily_cap',
       'offered to the fallback chain below');
     assert.doesNotMatch(context.item('provider').consequence, /source processing waits/i);
-    assert.equal(context.item('fallback:1').status, 'healthy', context.item('fallback:1').reason);
+    assert.equal(context.item('fallback:1').status, 'unverified', context.item('fallback:1').reason);
   });
 });
 

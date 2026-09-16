@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { PRESET_CATALOG, type PresetName } from '../config.js';
+import { prepared } from '../db/statements.js';
 import { assertLease, transactionImmediate } from '../worker/lease.js';
 
 export const DAILY_CAP = 150;
@@ -35,8 +36,9 @@ function numberValue(value: unknown): number {
  * daily call count, which `usageEstimate` reports.
  */
 export function presetExhaustedAt(db: DatabaseSync, preset: PresetName, now: number): number | null {
-  const row = db
-    .prepare('SELECT exhausted_at, reset_at FROM provider_usage WHERE utc_day = ? AND preset = ?')
+  // Cached: a chain asks this once per target per batch, and every fallback item asks it again
+  // (src/db/statements.ts: a statement prepared per call is native memory until a collection).
+  const row = prepared(db, 'SELECT exhausted_at, reset_at FROM provider_usage WHERE utc_day = ? AND preset = ?')
     .get(utcDay(now), preset);
   const exhaustedAt = row?.exhausted_at;
   // Only a number is a stamp: `numberValue` would read anything else as the epoch and report a row

@@ -173,6 +173,11 @@ export type DegradedReason = (typeof DEGRADED_PRECEDENCE)[number];
  * and an answer that arrived unusable already spent its target's allowance and owns its own retries
  * (contracts/provider-fallback.md "Advance and stop"). Every other failure advances the chain.
  *
+ * The contract's stop column has a third row, `language_mismatch`, which is deliberately not here:
+ * it is not a `FailureReason` at all (`src/observer/llm.ts`), and `retryOnLanguageMismatch` settles
+ * it as a `done` result before any code reads this set. A change that made it a `FailureReason`
+ * would have to add it here as well.
+ *
  * It lives beside `DEGRADED_PRECEDENCE` because two surfaces read it — the worker's target loop
  * decides whether to try the next target, and `oboete doctor` decides whether a probe failure means
  * the queue waits or the chain takes the batch. A second copy is the one that would drift.

@@ -119,8 +119,10 @@ export async function runDoctor(argv: string[], overrides: Partial<DoctorDeps> =
         providerItem({ config, paths, db, integrityFailed, deps, options, now }),
       ),
       guardItem('allowance', () => allowanceItem(config, db, integrityFailed, now, deps.env)),
-      ...guardList('fallback', () => fallbackItems(config, db, integrityFailed, deps.env, now)),
       ...guardList('catalog', () => catalogItems(config, db, integrityFailed, deps.env, now)),
+      // After the items that say a refused primary offers the batch to "the fallback chain below":
+      // `report` prints `items` in this order, so the chain has to be below them for that to be true.
+      ...guardList('fallback', () => fallbackItems(config, db, integrityFailed, deps.env, now)),
       ...(await guardListAsync('agent:claude', () => agentItems(db, integrityFailed, deps, options))),
       guardItem('unrecognized-agents', () => unrecognizedItem(db, integrityFailed)),
       guardItem('pi', () => piItem(paths, db, integrityFailed, now)),
