@@ -1488,3 +1488,34 @@ match, with the report printing the consent tuple and the credential steps and n
 
 Gate at this head: `npm test` green on Node 24.16.0 and 22.23.1; typecheck, lint, markdownlint and
 `semgrep scan --config auto` clean; lizard warning set differenced against `85d48437` unchanged.
+
+### E9 follow-up — the seventh bot round
+
+One P2, taken: the same defect the fourth round fixed, one branch further along. `providerItem`'s
+**post-probe** failure returned `FALLBACK_CONSEQUENCE` unconditionally, so a probe that failed with
+`auth_failed`, `unreachable`, `timeout`, `no_provider`, `provider_paid` or `model_alias` while an
+admitted target sat below it in the same report said "source processing waits for the provider" —
+while the worker hands that batch straight to the target the report calls healthy. The fourth round
+gave the *pre-probe* refusals (credentials, cap, exhaustion) a shared `refusedPrimaryConsequence`;
+the branch that reads `summarizeWithProvider`'s own answer never got it.
+
+`CHAIN_STOPS` decides which it is, and it moved to `src/observer/classify.ts` beside
+`DEGRADED_PRECEDENCE` rather than being copied: the worker's target loop and the doctor item are two
+readers of one rule, and a second copy is the one that drifts. A stop reason keeps the waiting text,
+because a stop really does leave the queue waiting.
+
+Both directions are pinned in one test, and both were measured: with the fix reverted the chained
+assertion fails (`'Temporary guidance is available while source processing waits for the provider.'`),
+and with the branch forced to always chain the `consent_changed` half fails instead.
+
+Also in this round, from the oracle rather than a bot: the new test's
+`replace(/hash = "[^"]*"/u, …)` put a double quote inside a regular expression, and lizard's
+TypeScript reader lost the function boundary there and swallowed 700 lines of `doctor.test.ts` into
+one 588-NLOC span. The differenced warning set is what showed it — the file had no findings at the
+base and two after. Replacing the value instead of matching the line removes the quote and the
+warnings with it. Recorded because the oracle's *silence* over those 700 lines would have been read
+as "under the bound".
+
+Gate at this head: `npm test` 1553 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing.
