@@ -1,0 +1,25 @@
+test/unit/doctor.test.ts
+  s_892d4f75e21024::t_d1eb9705fe0560 29
+  s_892d4f75e21024::t_e31e6d74e76d6c 690-725
+  s_892d4f75e21024::t_8bedd471f9e871 1278-1282,1300-1302
+specs/009-memory-core/quickstart.md
+  s_892d4f75e21024::t_3b481ca4b7160a 1301-1339
+src/doctor/provider.ts
+  s_892d4f75e21024::t_e86bce28d1583f 33,220-240,258-259,262,281-282,504-505,508-510,556-557,560
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "8b9b8e56519e1bcbf8ff2d039cd863795e61ea5b",
+  "prompts": {},
+  "sessions": {
+    "s_892d4f75e21024": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79c129f3-aa1e-4d43-970b-c316e499606d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
