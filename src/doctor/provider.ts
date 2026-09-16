@@ -74,8 +74,14 @@ const CHAINED_CONSEQUENCE =
  * target reported below it. The condition is the one the uncredentialed-primary branch already
  * uses, so the two cannot disagree.
  */
-function refusedPrimaryConsequence(config: OboeteConfig, whenChained: string): string {
-  return admittedChain(config).targets.length > 0 ? whenChained : FALLBACK_CONSEQUENCE;
+function refusedPrimaryConsequence(
+  config: OboeteConfig,
+  whenChained: string,
+  // The reserved band is the one refusal where the primary still serves something, so it passes the
+  // clause's own sentence rather than the queue-waits default.
+  otherwise: string = FALLBACK_CONSEQUENCE,
+): string {
+  return admittedChain(config).targets.length > 0 ? whenChained : otherwise;
 }
 const ALLOWANCE_CONSEQUENCE =
   'Source processing waits for the allowance to reset; later worker runs retry due sources.';
@@ -302,10 +308,18 @@ function providerCapItem(
     return degraded(
       'provider',
       `daily_cap: ${clause.reason}`,
-      consequence,
-      shared === 'spent'
-        ? `Wait for the reset at ${iso(estimate.resetAt)} or choose another preset with \`oboete setup --provider\`.`
-        : `Wait for the reset at ${iso(estimate.resetAt)} for the other batches, or choose another preset with \`oboete setup --provider\`.`,
+      // In the reserved band `reserveAttempt` still grants a `session_end` batch this preset, so
+      // neither "processing waits" nor "the chain takes it" is true of every batch: the clause's
+      // own sentence is, and the chained variant says which half the chain gets. The recovery is
+      // the clause's too — the copy that stood here said the same thing in different words.
+      shared === 'reserved'
+        ? refusedPrimaryConsequence(
+            config,
+            'End-of-session summaries still run on this preset; every other batch is offered to the fallback chain below.',
+            clause.consequence,
+          )
+        : consequence,
+      clause.recovery,
     );
   }
   return null;

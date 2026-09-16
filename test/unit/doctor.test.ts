@@ -1363,10 +1363,19 @@ for (const [name, calls, exhaustedAt, reason] of [
         options: itemOptions, now: ITEM_NOW,
       }), {
         item: 'provider', status: 'degraded', reason,
-        consequence: 'Temporary guidance is available while source processing waits for the provider.',
-        recovery: reserved
-          ? 'Wait for the reset at 2026-09-07T00:00:00.000Z for the other batches, or choose another preset with `oboete setup --provider`.'
-          : 'Wait for the reset at 2026-09-07T00:00:00.000Z or choose another preset with `oboete setup --provider`.',
+        // The reserved band is the one state where the primary still serves something, so it keeps
+        // the clause's own consequence instead of the refused-primary one, and the clause's own
+        // recovery instead of a second copy of it.
+        consequence: reserved
+          ? 'End-of-session summaries still run; ten-turn and retention batches wait for the allowance to reset, and later worker runs retry due sources.'
+          : 'Temporary guidance is available while source processing waits for the provider.',
+        // Exhaustion is not a cap state, so it keeps its own recovery; both cap states now quote the
+        // clause's, which is the one the `allowance` item below quotes as well.
+        recovery: exhaustedAt !== null
+          ? 'Wait for the reset at 2026-09-07T00:00:00.000Z or choose another preset with `oboete setup --provider`.'
+          : reserved
+            ? 'Wait for the reset at 2026-09-07T00:00:00.000Z for the other batches, or switch preset with `oboete setup --provider`.'
+            : 'Wait for the reset at 2026-09-07T00:00:00.000Z or switch preset with `oboete setup --provider`.',
       });
       assert.deepEqual(allowanceItem(config, db, false, ITEM_NOW), {
         item: 'allowance', status: 'degraded',

@@ -8,6 +8,7 @@ import { chmodSync, existsSync, readFileSync, renameSync, rmSync, statSync, writ
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 
 import {
+  admittedChain,
   consentHash,
   consentMatches,
   consentTuple,
@@ -168,10 +169,21 @@ export function credentialGuidance(config: OboeteConfig, env: NodeJS.ProcessEnv)
   } else {
     lines.push(`  Export that variable in the shell that runs the agents.`);
   }
+  // An uncredentialed primary is one failed target, not a run without a provider: the worker
+  // advances past its `no_provider` and applies the first target that answers
+  // (contracts/provider-fallback.md Verification 15). Saying otherwise contradicts the chain this
+  // same report displayed a few lines above.
   lines.push(
-    'Setup continues without a provider. You can also run `oboete setup --provider ollama` to summarize',
-    'with a model on this machine, `oboete setup --provider agent-cli` to spend your agent command line',
-    'subscription, or leave it as it is: until a provider is configured, memories are written by rule alone.',
+    ...(admittedChain(config).targets.length > 0
+      ? [
+        'Setup continues: the fallback targets shown above are attempted instead, so summaries come',
+        'from the first one that answers until the credentials above are set.',
+      ]
+      : [
+        'Setup continues without a provider. You can also run `oboete setup --provider ollama` to summarize',
+        'with a model on this machine, `oboete setup --provider agent-cli` to spend your agent command line',
+        'subscription, or leave it as it is: until a provider is configured, memories are written by rule alone.',
+      ]),
   );
   return lines;
 }

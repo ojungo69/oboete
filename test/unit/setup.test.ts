@@ -246,6 +246,23 @@ test('a chain the configuration cannot use blocks neither capture-only nor rewir
   });
 });
 
+test('an uncredentialed primary with an admitted target says the chain is attempted, not the rules', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--provider', 'workers-ai', '--accept-egress']), 0, context.output);
+    // `ollama` needs no credential, so the worker advances past the primary's `no_provider` and
+    // applies this target's output (contracts/provider-fallback.md Verification 15). The report
+    // displayed that target and then said memories were written by rule alone in the same output.
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "ollama"\nmodel = "qwen3:8b"\n`);
+
+    context.output = '';
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    assert.match(context.output, /No credentials are set for the workers-ai preset/);
+    assert.match(context.output, /fallback targets shown above are attempted instead/);
+    assert.doesNotMatch(context.output, /memories are written by rule alone/);
+  });
+});
+
 test('a bare setup reports a chain the stored preset cannot use, and still succeeds', async () => {
   await harness(async (context) => {
     assert.equal(await context.run(['--provider', 'workers-ai', '--accept-egress']), 0, context.output);
