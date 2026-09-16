@@ -1163,8 +1163,10 @@ one shape with five instances, so the fix is the shape, not the three lines:
    contract sentence added for item 3 would have been false.
 
 Deliberately not changed: the `fallback:N` items say nothing about consent, because consent is one
-hash over the primary and the whole chain and the `consent` item is the surface that reports a
-mismatch (contract "Diagnostics"). Filed instead of fixed: doctor calls the shared cap spent at
+hash over the primary and the whole chain. (**Retired two rounds later** — there is no `consent`
+item in the report at all, so that silence left a stale record unnamed: the chain now collapses into
+one `fallback` item and the `provider` item carries the same sentence. See "the consent check moves
+to the seam that already collapses the chain" below.) Filed instead of fixed: doctor calls the shared cap spent at
 `remaining === 0`, while `reserveAttempt` already refuses `ten_turns` and `retention` at
 `DAILY_CAP - SESSION_END_RESERVE`, so between 140 and 150 calls doctor reports an allowance the
 worker will not grant. That is pre-existing, it is a wording decision about a trigger doctor cannot
@@ -2137,9 +2139,10 @@ worker's own catch would swallow into an ordinary provider failure; and the test
 like the other permission fixtures (`test/fault-storage.test.ts`).
 
 **Two overstatements corrected.** The contract called `error` "a failure inside `processBatch`" and
-`pass` "one out of the checkpoint after it". The split is by severity, not by location:
-`checkpointBatch` puts a *non-storage* failure into `batchError` and rethrows only storage errors,
-so `pass` is the storage failure that ends the run and `error` is everything else. And "a full disk
+`pass` "one out of the checkpoint after it". `pass` takes both conditions at once — a storage
+failure *out of the checkpoint*, the one that ends the run — while `error` is anything out of
+`processBatch`, storage or not, plus a non-storage checkpoint failure `checkpointBatch` carries on
+past. And "a full disk
 during a stop would leave every later resident refusing to run" was too strong — the next resident
 reads the sentinel in `controlReason()` at startup, exits `stopped` without doing any work and
 clears it there. The cost is one lost run, not a dead worker; corrected in the code comment, this
@@ -2157,7 +2160,56 @@ after it — the nested template literal in the new sentence is the same parser 
 `lizard-ts-parse-swallows-after-angle-compare`. The count is named in a local now, and the
 chain-error branch moved out to `chainErrorItem`, which takes the function to 42.
 
-Gate at this head: `npm test` 1570 + 280 green on Node 24.16.0 and 22.23.1, each after one
+### E9 follow-up — consent belongs where the worker reads it, not only where the chain is reported
+
+The delta's own review returned seven findings; four adopted, one split into a fix and an issue,
+two declined.
+
+**The guard was still in one caller.** `[[observer.fallback]]` is empty by default, and
+`fallbackItems` returns `[]` before reaching any guard when it is — so the case the previous round
+called "a report that passed while no summary would ever be written" was still live for the majority
+of configurations. The check moved to `configuredProvider`, which both the probe and the non-probe
+path go through, at the position the worker uses: `initialProviderFailure` reads the preset, the
+model and the credentials first, then consent. Same shape as
+`guard-belongs-in-the-shared-function-not-one-caller`, one round later.
+
+Three consequences worth naming. A stale record now answers **before** the probe, so `oboete doctor
+--probe-provider` no longer spends a reservation on a call that could only come back
+`consent_changed`. Three cap tests were passing configurations with no stored consent at all, which
+the worker would refuse for consent rather than for the cap; they take a matching record now, so
+they exercise the state they name. And the collapsed `fallback` item and the `provider` item now
+carry the same consequence sentence, rather than one saying the batch is rule-based while the other
+says processing waits.
+
+**The chain item claimed an egress cause it cannot know.** An all-local chain whose hash drifted —
+adding an entry changes the tuple — read "the configuration has not been accepted for egress" while
+nothing in it leaves the machine. It names the record instead: "the stored consent record no longer
+matches this configuration".
+
+**The `error`/`pass` rule was rewritten in the wrong direction.** Last round called the split
+"severity, not location". It is both: `pass` is a storage failure *out of the checkpoint*, and
+everything out of `processBatch` lands in `error`, storage or not — the catch there has no
+`isStorageError` test. Which surfaced a real inconsistency, filed as **#249**: a storage error
+raised inside `processBatch` exits 0 while the same error out of the checkpoint exits 3.
+
+**Declined.** (1) That the collapse hides the per-entry `covered`/`excluded` warnings and costs the
+user a second `doctor` run — it does, and that is the point: no target is attempted, so no
+per-target verdict is true, and the deleted combined recovery is exactly what the previous round's
+top finding said to delete. (2) That `consentMatches` recomputes `admittedChain` and a SHA-256 the
+function already has in hand — one hash in a one-shot CLI, against a branch that would have to be
+threaded through `resolvedObserver`; `allowanceClause`'s thunk exists because it can skip the work
+entirely, which this cannot.
+
+**Also pinned:** the unwritable-log test asserts its own preconditions now (the primary was called
+and failed, the batch is `applied` with two attempts), so its negative assertions cannot pass on a
+run that stopped earlier.
+
+Gate at this head: `npm test` 1571 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged; the lizard warning set
+differenced against `85d48437` adds nothing — `configuredProvider` crossed at 57 NLOC when the
+consent branch landed, and `uncredentialedPrimary` came out of it (44).
+
+Gate at the previous head: `npm test` 1570 + 280 green on Node 24.16.0 and 22.23.1, each after one
 load-only rerun — `grok-no-tool` saw `pending` where `omitted` was expected (issue #243, the same
 pair of states in the other direction; 6 of 6 on the isolated rerun), and `staleness.test.ts` hit
 `ENOTEMPTY … rmdir '…/work/.git'` (issue #206; 6 of 6 isolated). Typecheck, lint and markdownlint

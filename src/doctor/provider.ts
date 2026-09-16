@@ -182,6 +182,33 @@ type ProviderProbeReadiness =
   | DoctorItem
   | { kind: 'ready'; db: DatabaseSync; estimate: ReturnType<typeof usageEstimate> };
 
+/**
+ * An uncredentialed primary is one failed target, not a run without a provider: the chain is still
+ * attempted (contracts/provider-fallback.md "What the chain does not do").
+ */
+function uncredentialedPrimary(
+  config: OboeteConfig,
+  preset: Exclude<PresetName, 'none'>,
+  credentials: ReturnType<typeof readCredentials>,
+  env: NodeJS.ProcessEnv,
+): DoctorItem {
+  return degraded(
+    'provider',
+    `No credentials are set for the ${preset} preset (${credentials.source}).`,
+    // "Offered", never "summarized": admission is not runnability. A target may lack its own
+    // credential or its own allowance, and then the batch is rule-based after all, which is what
+    // each `fallback:N` reports.
+    refusedPrimaryConsequence(
+      config,
+      env,
+      'This target answers without a request, so every batch is offered to the fallback chain below.',
+      'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
+    ),
+    credentialSteps(config, env) ||
+      '`oboete setup --provider <preset>` (workers-ai is the free remote default; ollama stays local)',
+  );
+}
+
 function configuredProvider(
   config: OboeteConfig | null,
   integrityFailed: boolean,
@@ -217,23 +244,20 @@ function configuredProvider(
   if (!('kind' in resolved)) return resolved;
 
   const credentials = readCredentials(preset, env, config.observer.agent_cli);
-  if (!credentials.present) {
-    // An uncredentialed primary is one failed target, not a run without a provider: the chain is
-    // still attempted (contracts/provider-fallback.md "What the chain does not do").
+  if (!credentials.present) return uncredentialedPrimary(config, preset, credentials, env);
+  if (!consentMatches(config, env)) {
+    // Where the worker reads it: `initialProviderFailure` takes the preset, credentials and model
+    // first and then consent (src/worker/observe.ts), and refuses every batch with
+    // `consent_changed` — primary and chain alike, because one hash covers both. It belongs here
+    // rather than only in `fallbackItems`, which has nothing to collapse when
+    // `[[observer.fallback]]` is empty, the schema's default. Answering before the probe is the
+    // point as well: a probe under a stale record can only come back `consent_changed`, and it
+    // would spend a reservation to say so.
     return degraded(
       'provider',
-      `No credentials are set for the ${preset} preset (${credentials.source}).`,
-      // "Offered", never "summarized": admission is not runnability. A target may lack its own
-      // credential or its own allowance, and then the batch is rule-based after all, which is what
-      // each `fallback:N` reports.
-      refusedPrimaryConsequence(
-        config,
-        env,
-        'This target answers without a request, so every batch is offered to the fallback chain below.',
-        'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
-      ),
-      credentialSteps(config, env) ||
-        '`oboete setup --provider <preset>` (workers-ai is the free remote default; ollama stays local)',
+      'Observer consent changed: the stored record no longer matches this configuration.',
+      FALLBACK_CONSEQUENCE,
+      '`oboete setup --accept-egress`',
     );
   }
   return { kind: 'configured', config, preset, credentials, model: resolved.model };
@@ -506,9 +530,9 @@ export function fallbackItems(
     const configured = entries.length === 1 ? 'one entry is' : `${entries.length} entries are`;
     return [degraded(
       'fallback',
-      `No fallback target is attempted: ${configured} configured and the configuration has not`
-      + ' been accepted for egress.',
-      'Every batch is rule-based until the configuration on screen is accepted.',
+      `No fallback target is attempted: ${configured} configured and the stored consent record no`
+      + ' longer matches this configuration.',
+      FALLBACK_CONSEQUENCE,
       '`oboete setup --accept-egress`',
     )];
   }

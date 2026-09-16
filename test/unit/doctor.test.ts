@@ -1417,7 +1417,11 @@ test('changed provider consent stops a doctor probe before reserving allowance',
       deps: { ...itemDeps, env: { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' } },
       options: itemOptions, now: ITEM_NOW,
     }), {
-      item: 'provider', status: 'degraded', reason: 'Observer consent changed before reservation.',
+      // Answered before the probe: `configuredProvider` reads consent where the worker's
+      // `initialProviderFailure` does, so no reservation is taken for a call that could only come
+      // back `consent_changed`.
+      item: 'provider', status: 'degraded',
+      reason: 'Observer consent changed: the stored record no longer matches this configuration.',
       consequence: 'Temporary guidance is available while source processing waits for the provider.',
       recovery: '`oboete setup --accept-egress`',
     });
@@ -1450,7 +1454,9 @@ for (const [name, calls, exhaustedAt, reason] of [
     await withItemDatabase(async (db, paths) => {
       db.prepare('INSERT INTO provider_usage (utc_day, preset, calls, exhausted_at, reset_at) VALUES (?, ?, ?, ?, ?)')
         .run('2026-09-06', 'workers-ai', calls, exhaustedAt, ITEM_RESET);
-      const config = configSchema.parse({});
+      // With a matching record, because consent is read before the allowance is: a configuration
+      // with no stored consent would stop at that item and never reach the cap state under test.
+      const config = consented({});
       // In the reserved band an end-of-session batch is still served, so saying that processing
       // waits for the reset would be false: that state carries its own consequence and recovery.
       const reserved = reason.includes('held for end-of-session');
@@ -1704,6 +1710,32 @@ test('a stale consent record with a configured chain fails the report instead of
     assert.equal(await context.doctor(['--json']), 1, context.output);
     assertBroken(context.item('fallback'), 'degraded', 'one entry is configured',
       'setup --accept-egress');
+    assertBroken(context.item('provider'), 'degraded', 'Observer consent changed',
+      'setup --accept-egress');
+  });
+});
+
+test('a stale consent record is reported with no chain configured at all', async () => {
+  await harness(async (context) => {
+    // `[[observer.fallback]]` is empty by default, so a check that lives only in `fallbackItems`
+    // answers for the minority of configurations. The worker refuses this one too: consent is read
+    // in `initialProviderFailure` whether or not a chain exists.
+    const observer = { preset: 'workers-ai' };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    assert.equal(await context.doctor(['--json']), 0, context.output);
+
+    writeFileSync(context.paths.config,
+      readFileSync(context.paths.config, 'utf8').replace(hash, 'not-the-tuple'));
+    assert.equal(await context.doctor(['--json']), 1, context.output);
+    assertBroken(context.item('provider'), 'degraded', 'Observer consent changed',
+      'setup --accept-egress');
+    assert.deepEqual(context.report().items.filter((entry) => entry.item.startsWith('fallback')), [],
+      'no chain is configured, so no chain item exists to carry this');
   });
 });
 

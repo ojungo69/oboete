@@ -613,7 +613,11 @@ test('a log the worker cannot write ends the run as a storage failure', async (t
       chmodSync(fixture.paths.observeLog, 0o600);
     }
 
-    assert.equal(hosts.ollama, 1);
+    // Both halves of the precondition, so the assertions below cannot pass on a run that stopped
+    // earlier: the primary was called and failed, and the answering target's batch was committed.
+    assert.deepEqual({ cloudflare: hosts.cloudflare, ollama: hosts.ollama }, { cloudflare: 1, ollama: 1 });
+    assert.deepEqual(batchRows(fixture), [{ destination: 'remote_observer', state: 'applied',
+      degraded_reason: null, provider_attempts: 2 }]);
     assert.equal(exit, 3, 'an unwritable observe log is a storage failure, not a clean run');
     // The exit alone does not say why: `logEnd` returns 3 when its own append fails, whatever the
     // run reached. What separates the two is where the run stopped. Measured: with a writable log

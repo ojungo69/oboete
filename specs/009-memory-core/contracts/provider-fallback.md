@@ -250,9 +250,9 @@ column cannot hold go to the observe log, one line per attempted target.
   before the checkpoint that follows it, so a line left out would leave nothing at all in the log
   for a batch the database says is applied. It carries the *batch's* `state` and `reason`, and
   separately the *pass's* `error` and `pass` — kept apart because a batch that settled on a reason
-  of its own would otherwise hide the code of whatever failed later. The split between those two is
-  by severity, not by where the failure happened: `pass` is a storage failure out of the checkpoint,
-  which ends the run, and `error` is everything else, whether it came from `processBatch` or from a
+  of its own would otherwise hide the code of whatever failed later. `pass` takes both conditions at
+  once — a **storage** failure **out of the checkpoint**, which is the one that ends the run — and
+  `error` is everything else: anything out of `processBatch`, storage or not, and a non-storage
   checkpoint failure the worker carries on past. The attempt lines are written with the swallowing
   writer and the batch line with the throwing one: an unwritable log is a storage failure worth exit
   3, but a pass that stops must still clear the worker-stop sentinel, and one attempt append must
@@ -285,9 +285,15 @@ column cannot hold go to the observe log, one line per attempted target.
   **degraded** `fallback` item naming how many entries are configured and recovering with
   `oboete setup --accept-egress`, in place of the per-entry items. Being degraded, it also moves
   `oboete doctor`'s exit to 1, which a report that called an unreachable target ready did not.
-  `providerItem` reports the same mismatch on a probe. There is no `consent` item in the report, so
-  nothing may point at one: a mismatch is named where it is noticed. `oboete setup` is the surface
-  that displays the tuple and takes the acceptance (FR-022).
+
+  The `provider` item carries the same mismatch, which is the half that matters when no chain is
+  configured — the schema's default — because `fallbackItems` returns nothing then. It is read
+  where the worker reads it: `configuredProvider` tests consent after the preset, the model and the
+  credentials, the order `initialProviderFailure` uses, and answers before any probe, since a probe
+  under a stale record can only come back `consent_changed` and would spend a reservation saying so.
+  There is no `consent` item in the report, so nothing may point at one: a mismatch is named where
+  it is noticed. `oboete setup` is the surface that displays the tuple and takes the acceptance
+  (FR-022).
 
 ## What the chain does not do
 
