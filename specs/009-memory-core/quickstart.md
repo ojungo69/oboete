@@ -1407,3 +1407,49 @@ targets, and the omission is the same decision the settle path takes explicitly 
 (a line only for `state === 'fallback'` with a reason). `ProviderAttempt.reason` is a
 `DegradedReason` read by `CHAIN_STOPS` and `mostSevereReason`; a cooperative stop is not one, so
 recording it would widen that union with a value neither consumer can rank.
+
+### E9 follow-up — the fifth bot round
+
+One taken, three declined, and the three declines all resolve against this feature's own contract
+rather than against the code.
+
+- **Taken: the agent CLI stub refused a spawn call that omitted `options`.** `cliSpawn` hands its
+  stub to the product through slots typed `typeof spawn` (`deps.spawn` in `src/worker/observe.ts`,
+  `src/doctor.ts` and `src/setup/probe.ts`), and that type permits `spawn(command, args)`. The stub
+  read `options.signal` unconditionally, so such a call would have failed with a `TypeError` in the
+  tests while the same call worked in production — a test-only landmine of exactly the kind the
+  stub's scoping fix was already about. `options` now defaults to `{}`, and a test calls the stub
+  with two arguments. Red before the fix: `TypeError: Cannot read properties of undefined (reading
+  'signal')` at `test/helpers/agent-cli.ts:50`.
+- **Declined: continue the chain after `language_mismatch`.** The finding read `CHAIN_STOPS`, which
+  lists only `consent_changed` and `unusable_output`, and concluded that `language_mismatch` was
+  meant to advance. The set is not the authority — `contracts/provider-fallback.md` "Advance and
+  stop" puts `language_mismatch` in the **stop** row beside `unusable_output`, for the reason the
+  row gives: the request reached a provider, was answered, and spent that target's allowance, and
+  both reasons already own their retries. `language_mismatch` is absent from `CHAIN_STOPS` because
+  it never reaches that branch: `retryOnLanguageMismatch` owns its retry and its own fallback and
+  returns `done`, which the contract states in the same section.
+- **Declined: record the successful target in `attempts`.** Verification 13 pins the opposite —
+  "the observe log carries one line per **failed** target" — and a batch that reaches `applied` is
+  itself the record that a target succeeded. `ProviderAttempt.reason` is a `DegradedReason` read by
+  `CHAIN_STOPS` and `mostSevereReason`; widening it to represent success would hand both consumers a
+  value neither can rank, which is the same objection that declined the fourth round's finding.
+- **Declined as already filed: expose the session-end reserve in `usageEstimate`.** Correct, and
+  already issue #240, which names the same 140-of-150 threshold, the same three doctor surfaces and
+  the same both-sides-of-140 test. It is a wording decision about one number describing two limits,
+  not a threshold change, so it stays a follow-up rather than growing this PR.
+
+**And one the bots did not report.** Running the length oracle over the whole tree and differencing
+the warning set against the PR's own base (`85d48437`) — rather than reading the total, which stayed
+116 in both — showed `runSetup` (`src/setup/setup.ts`) had crossed the bound this feature's own work
+pushed it over: 43 NLOC at the base, 52 at this head, against `-T nloc=50`. It was invisible in the
+total because `writeConfig` in `test/helpers/observe.ts` fell from 52 to 9 in the same PR and
+cancelled it out. The `--provider`/chain-admission decision is now `selectedDestination`, which is
+what the block already was — one decision with its own paragraph of comment — and `runSetup` is back
+to 45. The earlier rounds in this section said "lizard clean" meaning the functions that round
+touched; the differenced set is the claim that actually holds, and it is what the remaining rounds
+state.
+
+Gate at this head: `npm test` green on Node 24.16.0 (1551 + 280, 0 fail, 2 skipped) and 22.23.1
+(same totals); typecheck, lint, markdownlint and `semgrep scan --config auto` clean; lizard warning
+set differenced against `85d48437` adds nothing and drops `writeConfig`.
