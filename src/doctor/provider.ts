@@ -79,12 +79,13 @@ const FALLBACK_CONSEQUENCE =
  */
 function refusedPrimaryConsequence(
   config: OboeteConfig,
+  env: NodeJS.ProcessEnv,
   whenChained: string,
   // The reserved band is the one refusal where the primary still serves something, so it passes the
   // clause's own sentence rather than the queue-waits default.
   otherwise: string = FALLBACK_CONSEQUENCE,
 ): string {
-  return chainIsReachable(config) ? whenChained : otherwise;
+  return chainIsReachable(config, env) ? whenChained : otherwise;
 }
 const ALLOWANCE_CONSEQUENCE =
   'Source processing waits for the allowance to reset; later worker runs retry due sources.';
@@ -102,7 +103,7 @@ export async function providerItem(input: {
   const configured = configuredProvider(config, integrityFailed, deps.env);
   if (!('kind' in configured)) return configured;
   const { config: readyConfig, preset, credentials, model } = configured;
-  const probe = providerProbeReadiness(readyConfig, preset, db, options, now);
+  const probe = providerProbeReadiness(readyConfig, preset, db, options, now, deps.env);
   if (!('kind' in probe)) return probe;
   const { db: openDb, estimate } = probe;
 
@@ -137,6 +138,7 @@ export async function providerItem(input: {
         ? FALLBACK_CONSEQUENCE
         : refusedPrimaryConsequence(
             readyConfig,
+            deps.env,
             'This failure advances the chain, so the batch is offered to the fallback targets below.',
           ),
       providerRecovery(outcome.reason, readyConfig, paths, deps.env, estimate.resetAt),
@@ -211,6 +213,7 @@ function configuredProvider(
       // each `fallback:N` reports.
       refusedPrimaryConsequence(
         config,
+        env,
         'This target answers without a request, so every batch is offered to the fallback chain below.',
         'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
       ),
@@ -227,6 +230,7 @@ function providerProbeReadiness(
   db: DatabaseSync | null,
   options: DoctorOptions,
   now: number,
+  env: NodeJS.ProcessEnv,
 ): ProviderProbeReadiness {
   if (!options.probeProvider) {
     const last = db === null ? 'none yet' : lastProviderOutcome(db);
@@ -249,7 +253,7 @@ function providerProbeReadiness(
   }
 
   const estimate = usageEstimate(db, now);
-  const capItem = providerCapItem(preset, estimate, db, now, config);
+  const capItem = providerCapItem(preset, estimate, db, now, config, env);
   if (capItem !== null) return capItem;
   return { kind: 'ready', db, estimate };
 }
@@ -275,6 +279,7 @@ function allowanceClause(
   estimate: ReturnType<typeof usageEstimate>,
   resetAt: string,
   config: OboeteConfig,
+  env: NodeJS.ProcessEnv,
 ): { reason: string; consequence: string; recovery: string } {
   return state === 'spent'
     ? {
@@ -285,6 +290,7 @@ function allowanceClause(
       // each target's own allowance is reported.
       consequence: refusedPrimaryConsequence(
         config,
+        env,
         'Batches are offered to the fallback chain below; a capped target there shares this allowance.',
         ALLOWANCE_CONSEQUENCE,
       ),
@@ -294,6 +300,7 @@ function allowanceClause(
       reason: `Only ${estimate.remaining} of the daily ${DAILY_CAP} calls are left, and they are held for end-of-session batches.`,
       consequence: refusedPrimaryConsequence(
         config,
+        env,
         'End-of-session summaries still run on this preset; every other batch is offered to the fallback chain below.',
         'End-of-session summaries still run; ten-turn and retention batches wait for the allowance to reset, and later worker runs retry due sources.',
       ),
@@ -307,9 +314,11 @@ function providerCapItem(
   db: DatabaseSync,
   now: number,
   config: OboeteConfig,
+  env: NodeJS.ProcessEnv,
 ): DoctorItem | null {
   const consequence = refusedPrimaryConsequence(
     config,
+    env,
     'This reservation is refused without a request, so the batch is offered to the fallback chain below.',
   );
   // Not behind `capped`: `reserveAttempt` refuses on this stamp whatever the preset's cap is, and
@@ -325,7 +334,7 @@ function providerCapItem(
   }
   const shared = sharedAllowance(estimate);
   if (PRESET_CATALOG[preset].capped && shared !== 'open') {
-    const clause = allowanceClause(shared, estimate, iso(estimate.resetAt), config);
+    const clause = allowanceClause(shared, estimate, iso(estimate.resetAt), config, env);
     return degraded(
       'provider',
       `daily_cap: ${clause.reason}`,
@@ -524,6 +533,7 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
       // (contracts/provider-fallback.md "Advance and stop").
       refusedPrimaryConsequence(
         config,
+        env,
         'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.',
         'This target is never attempted, so a failure ahead of it falls through to rule-based records.',
       ),
@@ -605,6 +615,7 @@ export function allowanceItem(
   db: DatabaseSync | null,
   integrityFailed: boolean,
   now: number,
+  env: NodeJS.ProcessEnv,
 ): DoctorItem {
   if (config === null) return configUnread('allowance');
   const preset = config.observer.preset;
@@ -620,7 +631,7 @@ export function allowanceItem(
       '`oboete doctor` after storage is repaired.',
     );
   }
-  return allowanceEstimateItem(preset, db, now, config);
+  return allowanceEstimateItem(preset, db, now, config, env);
 }
 
 function allowanceEstimateItem(
@@ -628,6 +639,7 @@ function allowanceEstimateItem(
   db: DatabaseSync,
   now: number,
   config: OboeteConfig,
+  env: NodeJS.ProcessEnv,
 ): DoctorItem {
   try {
     const estimate = usageEstimate(db, now);
@@ -639,6 +651,7 @@ function allowanceEstimateItem(
         // advances past `provider_exhausted` — the same reading the cap branch below takes.
         refusedPrimaryConsequence(
           config,
+          env,
           'Batches are offered to the fallback chain below; a capped target there shares this allowance.',
           ALLOWANCE_CONSEQUENCE,
         ),
@@ -647,7 +660,7 @@ function allowanceEstimateItem(
     }
     const shared = sharedAllowance(estimate);
     if (shared !== 'open') {
-      const clause = allowanceClause(shared, estimate, iso(estimate.resetAt), config);
+      const clause = allowanceClause(shared, estimate, iso(estimate.resetAt), config, env);
       return degraded('allowance', clause.reason, clause.consequence, clause.recovery);
     }
     return healthy(
@@ -725,12 +738,13 @@ function catalogCacheItems(
       ),
     ];
   }
-  return catalogModelItems(config, cache);
+  return catalogModelItems(config, cache, env);
 }
 
 function catalogModelItems(
   config: OboeteConfig,
   cache: NonNullable<ReturnType<typeof cachedCatalog>>,
+  env: NodeJS.ProcessEnv,
 ): DoctorItem[] {
   const configured = (config.observer.model ?? PRESET_CATALOG['workers-ai'].defaultModel).trim();
   if (!cache.models.includes(configured)) {
@@ -742,6 +756,7 @@ function catalogModelItems(
         // rules (contracts/provider-fallback.md "Advance and stop").
         refusedPrimaryConsequence(
           config,
+          env,
           'The batch is offered to the fallback chain below instead of the configured model.',
           'Summaries fall back to rule-based until `[observer] model` names a listed model.',
         ),
@@ -756,6 +771,7 @@ function catalogModelItems(
         `The catalog lists models that need a paid Workers plan; the configured model ${configured} is only used if it is free.`,
         refusedPrimaryConsequence(
           config,
+          env,
           'A paid-only model fails with provider_paid, and the batch is offered to the fallback chain below.',
           'A paid-only model will fail with provider_paid and fall back to rule-based summaries.',
         ),

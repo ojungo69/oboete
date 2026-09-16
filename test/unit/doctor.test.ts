@@ -1342,6 +1342,18 @@ test('changed provider consent stops a doctor probe before reserving allowance',
   });
 });
 
+/** The credentials the item tests probe with, and the env their consent hashes are computed in. */
+const ITEM_ENV: NodeJS.ProcessEnv = { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' };
+
+/** A configuration whose stored consent matches, so a chain prediction is not refused by R8. */
+function consented(observer: Record<string, unknown>): ReturnType<typeof configSchema.parse> {
+  const draft = configSchema.parse({ observer });
+  return configSchema.parse({
+    ...draft,
+    consent: { hash: consentHash(consentTuple(draft, ITEM_ENV)), accepted_at: ITEM_NOW },
+  });
+}
+
 for (const [name, calls, exhaustedAt, reason] of [
   ['provider exhaustion', 1, ITEM_NOW, 'provider_exhausted: The provider reported exhaustion today.'],
   ['the daily cap', 150, null, 'daily_cap: The daily cap of 150 calls is used up.'],
@@ -1379,7 +1391,7 @@ for (const [name, calls, exhaustedAt, reason] of [
             ? 'Wait for the reset at 2026-09-07T00:00:00.000Z for the other batches, or switch preset with `oboete setup --provider`.'
             : 'Wait for the reset at 2026-09-07T00:00:00.000Z or switch preset with `oboete setup --provider`.',
       });
-      assert.deepEqual(allowanceItem(config, db, false, ITEM_NOW), {
+      assert.deepEqual(allowanceItem(config, db, false, ITEM_NOW, ITEM_ENV), {
         item: 'allowance', status: 'degraded',
         reason: exhaustedAt !== null
           ? 'The provider reported exhaustion today.'
@@ -1414,11 +1426,9 @@ for (const [band, calls, chained, unchained] of [
       // The shared cap refuses the primary's reservation, and an admitted target is offered the
       // batch instead — `ollama` is uncapped, so it answers; a capped target would refuse at its
       // own reservation, which is why the chained sentence says "offered" rather than "summarized".
-      const withChain = configSchema.parse({
-        observer: { preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] },
-      });
-      assert.equal(allowanceItem(withChain, db, false, ITEM_NOW).consequence, chained);
-      assert.equal(allowanceItem(configSchema.parse({}), db, false, ITEM_NOW).consequence, unchained);
+      const withChain = consented({ preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] });
+      assert.equal(allowanceItem(withChain, db, false, ITEM_NOW, ITEM_ENV).consequence, chained);
+      assert.equal(allowanceItem(configSchema.parse({}), db, false, ITEM_NOW, ITEM_ENV).consequence, unchained);
     });
   });
 }
@@ -1429,12 +1439,10 @@ test('an exhausted allowance says the chain takes the batch only when a target i
       .run('2026-09-06', 'workers-ai', 1, ITEM_NOW, ITEM_RESET);
     // `exhausted_at` is per preset, so the chain's next target is unaffected and the worker advances
     // past `provider_exhausted` (contracts/provider-fallback.md "Advance and stop").
-    const withChain = configSchema.parse({
-      observer: { preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] },
-    });
-    assert.equal(allowanceItem(withChain, db, false, ITEM_NOW).consequence,
+    const withChain = consented({ preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] });
+    assert.equal(allowanceItem(withChain, db, false, ITEM_NOW, ITEM_ENV).consequence,
       'Batches are offered to the fallback chain below; a capped target there shares this allowance.');
-    assert.equal(allowanceItem(configSchema.parse({}), db, false, ITEM_NOW).consequence,
+    assert.equal(allowanceItem(configSchema.parse({}), db, false, ITEM_NOW, ITEM_ENV).consequence,
       'Source processing waits for the allowance to reset; later worker runs retry due sources.');
   });
 });
@@ -1522,15 +1530,30 @@ for (const [name, models, paid, consequence] of [
       runtimeStateSet(db, 'workers_ai_catalog', JSON.stringify({
         accountId: 'account', models, defaultModelPresent: false, hasPaidOnlyModels: paid, fetchedAt: ITEM_NOW,
       }), ITEM_NOW);
-      const config = configSchema.parse({
-        observer: { model: 'chosen-model', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] },
-      });
-      assert.equal(catalogItems(config, db, false,
-        { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' }, ITEM_NOW)[0].consequence,
-        consequence);
+      const config = consented({ model: 'chosen-model', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] });
+      assert.equal(catalogItems(config, db, false, ITEM_ENV, ITEM_NOW)[0].consequence, consequence);
     });
   });
 }
+
+test('a consent record that no longer matches makes every item stop promising the chain', async () => {
+  await withItemDatabase((db) => {
+    db.prepare('INSERT INTO provider_usage (utc_day, preset, calls, exhausted_at, reset_at) VALUES (?, ?, ?, ?, ?)')
+      .run('2026-09-06', 'workers-ai', 150, null, ITEM_RESET);
+    // One hash covers the primary and the whole chain, so a stored record that stopped matching
+    // stops every target: `consent_changed` is in `CHAIN_STOPS`, and no target is reached at all.
+    const stale = configSchema.parse({
+      observer: { preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] },
+      consent: { hash: 'not-the-tuple', accepted_at: ITEM_NOW },
+    });
+    assert.equal(allowanceItem(stale, db, false, ITEM_NOW, ITEM_ENV).consequence,
+      'Source processing waits for the allowance to reset; later worker runs retry due sources.');
+    // And the matching record still gets the handoff sentence, so the check is not simply refusing.
+    const fresh = consented({ preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] });
+    assert.equal(allowanceItem(fresh, db, false, ITEM_NOW, ITEM_ENV).consequence,
+      'Batches are offered to the fallback chain below; a capped target there shares this allowance.');
+  });
+});
 
 test('an unresolvable primary makes every item stop promising the chain', async () => {
   await withItemDatabase((db) => {
@@ -1546,7 +1569,7 @@ test('an unresolvable primary makes every item stop promising the chain', async 
     const config = configSchema.parse({
       observer: { preset: 'workers-ai', model: '  ', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] },
     });
-    assert.equal(allowanceItem(config, db, false, ITEM_NOW).consequence,
+    assert.equal(allowanceItem(config, db, false, ITEM_NOW, ITEM_ENV).consequence,
       'Source processing waits for the allowance to reset; later worker runs retry due sources.');
     assert.equal(catalogItems(config, db, false,
       { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' }, ITEM_NOW)[0].consequence,
@@ -1556,12 +1579,10 @@ test('an unresolvable primary makes every item stop promising the chain', async 
 
 test('a cost-policy exclusion says the chain continues when another target is admitted', async () => {
   await withItemDatabase(async (db, paths) => {
-    const observer = { preset: 'workers-ai', cost_policy: ['free-tier', 'local'],
-      fallback: [{ preset: 'nim' }, { preset: 'ollama', model: 'qwen3:8b' }] };
     void paths;
-    const config = configSchema.parse({ observer });
-    const items = fallbackItems(config, db, false,
-      { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token', OBOETE_NIM_API_KEY: 'k' }, ITEM_NOW);
+    const config = consented({ preset: 'workers-ai', cost_policy: ['free-tier', 'local'],
+      fallback: [{ preset: 'nim' }, { preset: 'ollama', model: 'qwen3:8b' }] });
+    const items = fallbackItems(config, db, false, { ...ITEM_ENV, OBOETE_NIM_API_KEY: 'k' }, ITEM_NOW);
     const excluded = items.find((entry) => entry.item === 'fallback:1')!;
     assert.match(excluded.consequence, /passes to the targets the policy does admit/);
     assert.doesNotMatch(excluded.consequence, /rule-based records/);

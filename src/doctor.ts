@@ -118,7 +118,7 @@ export async function runDoctor(argv: string[], overrides: Partial<DoctorDeps> =
       await guardItemAsync('provider', () =>
         providerItem({ config, paths, db, integrityFailed, deps, options, now }),
       ),
-      guardItem('allowance', () => allowanceItem(config, db, integrityFailed, now)),
+      guardItem('allowance', () => allowanceItem(config, db, integrityFailed, now, deps.env)),
       ...guardList('fallback', () => fallbackItems(config, db, integrityFailed, deps.env, now)),
       ...guardList('catalog', () => catalogItems(config, db, integrityFailed, deps.env, now)),
       ...(await guardListAsync('agent:claude', () => agentItems(db, integrityFailed, deps, options))),

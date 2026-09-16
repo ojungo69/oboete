@@ -174,7 +174,7 @@ export function credentialGuidance(config: OboeteConfig, env: NodeJS.ProcessEnv)
   // (contracts/provider-fallback.md Verification 15). Saying otherwise contradicts the chain this
   // same report displayed a few lines above.
   lines.push(
-    ...(chainIsReachable(config)
+    ...(chainIsReachable(config, env)
       ? [
         'Setup continues: the fallback targets shown above are attempted instead, so summaries come',
         'from the first one that answers until the credentials above are set.',

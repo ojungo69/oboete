@@ -1743,3 +1743,37 @@ that rule passes with a *credentialed* final target, which is why the rule looke
 Gate at this head: `npm test` 1564 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
 markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
 `85d48437` adds nothing.
+
+### E9 follow-up — the thirteenth bot round
+
+One P2, taken, with its stated cause corrected: consent was missing from the reachability question.
+With a stored record that no longer matches the tuple, `consent_changed` stops the chain before any
+target is reached — one hash covers the primary and the whole chain — while the credential, cap,
+allowance and catalog items all said the batch is offered to the fallback chain.
+
+The finding attributed this to the twelfth round's new `currentConsent()` check in the loop. It is
+not: `providerCall` already passed `consentOk` into `summarizeWithProvider`, which calls it inside
+`prepareProviderReservation`, so a credentialed primary was refused on consent before that change
+too. The contradiction is pre-existing; the finding is right and only its mechanism was misread.
+Recorded because a fix committed under a wrong cause is the failure mode
+[[revert-rationale-must-name-a-verified-mechanism]] names.
+
+`chainIsReachable(config, env)` takes consent now, which is where the three tests it has to satisfy
+belong together: the resolver refuses a primary with no model, admission empties a chain the policy
+cannot use, and consent authorizes all of it or none. Threading `env` reached `allowanceItem`, which
+had never needed it — the parameter is the price of the item being able to answer a question about
+authorization at all.
+
+**Four fixtures asserted the chained sentence for configurations the worker would have refused**,
+because `configSchema.parse({ observer: { preset: 'workers-ai', … } })` stores no consent record and
+`consentMatches` refuses a remote preset without one (R8). They now build their consent with
+`consented()`, and a new test pins the other direction: the same chain with `hash: 'not-the-tuple'`
+gets the waiting sentence, and with a matching hash gets the handoff.
+
+`npm test` on Node 22.23.1 failed once here with `ENOTEMPTY: directory not empty, rmdir
+'…/work/.git'` in `staleness.test.ts` teardown — issue #206, the documented teardown race. Green on
+the rerun.
+
+Gate at this head: `npm test` 1565 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing.

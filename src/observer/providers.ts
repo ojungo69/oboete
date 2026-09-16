@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   PRESET_CATALOG,
   admittedChain,
+  consentMatches,
   type ChainError,
   type ChainTarget,
   type Credentials,
@@ -60,7 +61,12 @@ export function resolveModel(
  * Absent credentials are deliberately not part of it: they are not a resolve error, and a target
  * whose key appears between two batches is reached without a configuration change.
  */
-export function chainIsReachable(config: OboeteConfig): boolean {
+export function chainIsReachable(config: OboeteConfig, env: NodeJS.ProcessEnv): boolean {
+  // Consent authorizes the whole chain with one hash, so a stored record that no longer matches
+  // stops every target and not just the primary: `consent_changed` is in `CHAIN_STOPS`, and a
+  // surface that predicted a handoff under a stale record contradicted the worker before any target
+  // was reached.
+  if (!consentMatches(config, env)) return false;
   try {
     return resolveModel(config).chain.length > 0;
   }
