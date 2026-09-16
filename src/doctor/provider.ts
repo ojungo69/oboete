@@ -266,16 +266,29 @@ function allowanceClause(
   state: 'reserved' | 'spent',
   estimate: ReturnType<typeof usageEstimate>,
   resetAt: string,
+  config: OboeteConfig,
 ): { reason: string; consequence: string; recovery: string } {
   return state === 'spent'
     ? {
       reason: `The daily cap of ${DAILY_CAP} calls is used up.`,
-      consequence: ALLOWANCE_CONSEQUENCE,
+      // "Offered" rather than "summarized": the cap is shared across capped presets, so a capped
+      // target refuses at its own reservation too (contracts/provider-fallback.md "Advance and
+      // stop", `daily_cap`). Only an uncapped target actually answers, and `fallback:N` is where
+      // each target's own allowance is reported.
+      consequence: refusedPrimaryConsequence(
+        config,
+        'Batches are offered to the fallback chain below; a capped target there shares this allowance.',
+        ALLOWANCE_CONSEQUENCE,
+      ),
       recovery: `Wait for the reset at ${resetAt} or switch preset with \`oboete setup --provider\`.`,
     }
     : {
       reason: `Only ${estimate.remaining} of the daily ${DAILY_CAP} calls are left, and they are held for end-of-session batches.`,
-      consequence: 'End-of-session summaries still run; ten-turn and retention batches wait for the allowance to reset, and later worker runs retry due sources.',
+      consequence: refusedPrimaryConsequence(
+        config,
+        'End-of-session summaries still run on this preset; every other batch is offered to the fallback chain below.',
+        'End-of-session summaries still run; ten-turn and retention batches wait for the allowance to reset, and later worker runs retry due sources.',
+      ),
       recovery: `Wait for the reset at ${resetAt} for the other batches, or switch preset with \`oboete setup --provider\`.`,
     };
 }
@@ -304,21 +317,16 @@ function providerCapItem(
   }
   const shared = sharedAllowance(estimate);
   if (PRESET_CATALOG[preset].capped && shared !== 'open') {
-    const clause = allowanceClause(shared, estimate, iso(estimate.resetAt));
+    const clause = allowanceClause(shared, estimate, iso(estimate.resetAt), config);
     return degraded(
       'provider',
       `daily_cap: ${clause.reason}`,
       // In the reserved band `reserveAttempt` still grants a `session_end` batch this preset, so
-      // neither "processing waits" nor "the chain takes it" is true of every batch: the clause's
-      // own sentence is, and the chained variant says which half the chain gets. The recovery is
-      // the clause's too — the copy that stood here said the same thing in different words.
-      shared === 'reserved'
-        ? refusedPrimaryConsequence(
-            config,
-            'End-of-session summaries still run on this preset; every other batch is offered to the fallback chain below.',
-            clause.consequence,
-          )
-        : consequence,
+      // neither "processing waits" nor "the chain takes it" is true of every batch — the clause's
+      // own sentence is, and it is chain-aware. The spent band keeps this item's own sentence
+      // because it is reporting a refused probe reservation rather than the shared allowance. The
+      // recovery is the clause's too: the copy that stood here said the same thing in other words.
+      shared === 'reserved' ? clause.consequence : consequence,
       clause.recovery,
     );
   }
@@ -597,13 +605,14 @@ export function allowanceItem(
       '`oboete doctor` after storage is repaired.',
     );
   }
-  return allowanceEstimateItem(preset, db, now);
+  return allowanceEstimateItem(preset, db, now, config);
 }
 
 function allowanceEstimateItem(
   preset: Exclude<PresetName, 'none'>,
   db: DatabaseSync,
   now: number,
+  config: OboeteConfig,
 ): DoctorItem {
   try {
     const estimate = usageEstimate(db, now);
@@ -617,7 +626,7 @@ function allowanceEstimateItem(
     }
     const shared = sharedAllowance(estimate);
     if (shared !== 'open') {
-      const clause = allowanceClause(shared, estimate, iso(estimate.resetAt));
+      const clause = allowanceClause(shared, estimate, iso(estimate.resetAt), config);
       return degraded('allowance', clause.reason, clause.consequence, clause.recovery);
     }
     return healthy(

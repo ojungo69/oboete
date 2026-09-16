@@ -1397,6 +1397,30 @@ for (const [name, calls, exhaustedAt, reason] of [
   });
 }
 
+for (const [band, calls, chained, unchained] of [
+  ['spent', 150,
+    'Batches are offered to the fallback chain below; a capped target there shares this allowance.',
+    'Source processing waits for the allowance to reset; later worker runs retry due sources.'],
+  ['reserved', 140,
+    'End-of-session summaries still run on this preset; every other batch is offered to the fallback chain below.',
+    'End-of-session summaries still run; ten-turn and retention batches wait for the allowance to reset, and later worker runs retry due sources.'],
+] as const) {
+  test(`the ${band} allowance says the chain takes the batch only when a target is admitted`, async () => {
+    await withItemDatabase(async (db) => {
+      db.prepare('INSERT INTO provider_usage (utc_day, preset, calls, exhausted_at, reset_at) VALUES (?, ?, ?, ?, ?)')
+        .run('2026-09-06', 'workers-ai', calls, null, ITEM_RESET);
+      // The shared cap refuses the primary's reservation, and an admitted target is offered the
+      // batch instead — `ollama` is uncapped, so it answers; a capped target would refuse at its
+      // own reservation, which is why the chained sentence says "offered" rather than "summarized".
+      const withChain = configSchema.parse({
+        observer: { preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] },
+      });
+      assert.equal(allowanceItem(withChain, db, false, ITEM_NOW).consequence, chained);
+      assert.equal(allowanceItem(configSchema.parse({}), db, false, ITEM_NOW).consequence, unchained);
+    });
+  });
+}
+
 test('a rejected provider credential consumes one probe and recommends checking credentials', async () => {
   await withItemDatabase(async (db, paths) => {
     const env = { OBOETE_OPENROUTER_API_KEY: 'test-key' };
