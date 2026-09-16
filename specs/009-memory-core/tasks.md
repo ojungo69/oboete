@@ -355,6 +355,26 @@ writers require separate worktrees. No deployment follows merely from an increme
   survives at `/var/tmp/oboete-009-20260909.jJ5grc/us5-rss3/` (T032). Receipts `us5-close-*` under `/var/tmp/oboete-009-us5close/`; see `quickstart.md` E7. The
   macOS platform probe remains T040's (its macOS leg deferred by the owner) and the cohesive
   product gate remains T043's.
+- T048: the bounded, consented fallback chain is implemented and verified against
+  `contracts/provider-fallback.md`, whose nineteen verification items are mapped to tests in the E9
+  receipts in `quickstart.md`. Both supported Node versions pass the full `npm test`. This marker
+  covers the five admission rules and their `ProviderConfigError`s, the `chain` field in
+  `consentTuple` and its effect on `consentHash` (unchanged for an install with no admitted chain),
+  the attempt sequence — stop sentinel, consent, a reservation for **every** target whether capped
+  or not, then the call — the advance-and-stop table, the single `applyFallback` that keeps every
+  source retryable when all targets fail, and the diagnostics: one observe-log line per target that
+  failed, and a static per-target report in `oboete doctor` that spends no allowance.
+  Two corrections it carries beyond the chain itself, because the chain depends on them: `claimed_at`
+  is restamped at the reservation rather than only at batch creation, without which the 120 s
+  `reclaimStale` fence was already spent for every preset; and `presetExhaustedAt` is the single
+  reader of a per-preset stamp that four callers had been reading as a day-wide flag.
+  It does not cover the real agent pairs and real-model evaluations (T041), the resource sweep and
+  the seven-day soak (T042), the macOS platform leg (T040) or the cohesive product gate (T043).
+  Issues recorded against paragraphs that place them outside this task: #240 (doctor reports
+  allowance the worker will not grant between 140 and 150 calls), #241 (`agent-cli` requires an
+  `[observer] model` that nothing sends), #242 (`claimed_at DESC` is no longer settle order for two
+  display queries, which the restamp above is what changed) and #243 (an inject test that flaked
+  once on a duplicate CI run).
 - T047: the resident observation worker is implemented and verified against
   `contracts/resident-worker.md`, whose sixteen verification items are mapped to tests in the E8
   receipts in `quickstart.md`. Both supported Node versions pass the full `npm test`. Two controls
