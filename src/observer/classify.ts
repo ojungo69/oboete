@@ -168,6 +168,17 @@ export const DEGRADED_PRECEDENCE = [
 
 export type DegradedReason = (typeof DEGRADED_PRECEDENCE)[number];
 
+/**
+ * The failures a later provider target cannot improve on: consent authorizes no destination at all,
+ * and an answer that arrived unusable already spent its target's allowance and owns its own retries
+ * (contracts/provider-fallback.md "Advance and stop"). Every other failure advances the chain.
+ *
+ * It lives beside `DEGRADED_PRECEDENCE` because two surfaces read it — the worker's target loop
+ * decides whether to try the next target, and `oboete doctor` decides whether a probe failure means
+ * the queue waits or the chain takes the batch. A second copy is the one that would drift.
+ */
+export const CHAIN_STOPS = new Set<DegradedReason>(['consent_changed', 'unusable_output']);
+
 /** The reason a record keeps when several apply: the first match in `DEGRADED_PRECEDENCE`. */
 export function mostSevereReason(reasons: Iterable<DegradedReason>): DegradedReason | null {
   const present = new Set(reasons);

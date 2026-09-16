@@ -540,6 +540,39 @@ test('the fallback chain is reported per target without a second provider reques
   });
 });
 
+test('an advancing probe failure says the chain takes the batch, and a stop reason still says it waits', async () => {
+  await harness(async (context) => {
+    const observer = { preset: 'workers-ai', cost_policy: ['free-tier', 'local'],
+      fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"', 'cost_policy = ["free-tier", "local"]',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+
+    // `unreachable` advances the chain (contracts/provider-fallback.md "Advance and stop"), so the
+    // batch the probe failed on is offered to the admitted target this same report calls healthy.
+    context.fetch = refusingFetch();
+    assert.equal(await context.doctor(['--json', '--probe-provider']), 1, context.output);
+    assert.equal(context.item('fallback:1').status, 'healthy', context.output);
+    assert.match(context.item('provider').consequence, /offered to the fallback targets below/);
+    assert.doesNotMatch(context.item('provider').consequence, /waits for the provider/);
+
+    // The other direction, so the check cannot pass by saying "chained" to everything: a stop
+    // reason ends the chain, so the queue really does wait and the text must say so.
+    // Replacing the value rather than matching the line: a double quote inside a regular expression
+    // is where lizard's TypeScript reader loses the function boundary and swallows the rest of the
+    // file, which takes this file's length findings out of the oracle's sight.
+    writeFileSync(context.paths.config,
+      readFileSync(context.paths.config, 'utf8').replace(hash, 'not-the-tuple'));
+    assert.equal(await context.doctor(['--json', '--probe-provider']), 1, context.output);
+    assertBroken(context.item('provider'), 'degraded', 'consent changed');
+    assert.match(context.item('provider').consequence, /waits for the provider/);
+  });
+});
+
 test('an uncredentialed primary with an admitted chain says the chain summarizes, not the rules', async () => {
   await harness(async (context) => {
     delete context.env.OBOETE_CF_API_TOKEN;

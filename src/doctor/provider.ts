@@ -26,6 +26,7 @@ import {
   type DoctorOptions,
 } from '../doctor.js';
 import { CACHE_MS, cachedCatalog } from '../observer/catalog.js';
+import { CHAIN_STOPS } from '../observer/classify.js';
 import { chainErrorMessage, resolveModel } from '../observer/providers.js';
 import type { ObserverInput } from '../observer/contract.js';
 import { summarizeWithProvider, type CallOutcome } from '../observer/llm.js';
@@ -120,7 +121,15 @@ export async function providerItem(input: {
     return degraded(
       'provider',
       outcomeSentence(outcome),
-      FALLBACK_CONSEQUENCE,
+      // A probe failure the chain advances past is not the queue waiting: the worker hands the same
+      // batch to the admitted target this report calls healthy a few lines below. `CHAIN_STOPS` is
+      // the worker's own set, not a copy (src/observer/classify.ts).
+      CHAIN_STOPS.has(outcome.reason)
+        ? FALLBACK_CONSEQUENCE
+        : refusedPrimaryConsequence(
+            readyConfig,
+            'This failure advances the chain, so the batch is offered to the fallback targets below.',
+          ),
       providerRecovery(outcome.reason, readyConfig, paths, deps.env, estimate.resetAt),
     );
   } catch (error) {

@@ -13,7 +13,7 @@ import { contentHash } from '../events.js';
 import { checkpointHash, materialHash, memoryIdFor } from '../db/identity.js';
 import { promoteSensitivity } from '../privacy/classify.js';
 import { applyObservations, type ApplyResult } from '../observer/apply.js';
-import { checkLanguage, mostSevereReason, rejectsDirectives, type DegradedReason } from '../observer/classify.js';
+import { CHAIN_STOPS, checkLanguage, mostSevereReason, rejectsDirectives, type DegradedReason } from '../observer/classify.js';
 import { fallbackObserve, type FallbackEvent } from '../observer/fallback.js';
 import { summarizeWithProvider, type CallOutcome } from '../observer/llm.js';
 import { buildObserverRequest } from '../observer/request.js';
@@ -722,10 +722,3 @@ function chainTargets(
         : destination === 'remote_observer'),
   ];
 }
-
-/**
- * The failures a later target cannot improve on: consent authorizes no destination at all, and an
- * answer that arrived unusable already spent its target's allowance and owns its own retries
- * (contracts/provider-fallback.md "Advance and stop").
- */
-const CHAIN_STOPS = new Set<DegradedReason>(['consent_changed', 'unusable_output']);
