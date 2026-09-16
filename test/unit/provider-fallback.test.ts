@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { chmodSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import { nextUtcMidnight, recordExhausted, utcDay } from '../../src/observer/reservation.js';
@@ -576,6 +576,40 @@ test('a stop is noticed even when the next target could not have made a request'
     ]);
     const log = readFileSync(fixture.paths.observeLog, 'utf8');
     assert.match(log, /provider attempt .*position=1 preset=nim model=[^ ]+ reason=consent_changed/);
+  });
+});
+
+test('a log the worker cannot write ends the run as a storage failure', async () => {
+  await withFixture(async (fixture) => {
+    fixture.env = chainEnv(fixture);
+    writeChainConfig(fixture, {
+      preset: 'workers-ai',
+      fallback: [{ preset: 'ollama', model: OLLAMA_MODEL }],
+      env: fixture.env,
+    });
+    const prompt = 'Record that an unwritable log is a storage failure.';
+    await captureEndedSession(fixture, { sessionId: 'chain-log-eacces', prompts: [prompt] });
+    const sourceId = eventId(fixture, prompt);
+
+    const hosts = counters();
+    const fetchImpl = chainFetch(hosts, {
+      // Read-only from the answer on, so the `batch` line's own append fails. That line is written
+      // with the throwing writer on purpose: `EACCES` is `isStorageError`, so `recordRunFailure`
+      // ends the run at exit 3 instead of reporting a clean pass over a log nobody can read.
+      ollama: async () => {
+        chmodSync(fixture.paths.observeLog, 0o400);
+        return openAiResponse(providerOutput(sourceId), OLLAMA_MODEL);
+      },
+    });
+    let exit: number;
+    try {
+      exit = await runObserveForFixture(fixture, { fetch: fetchImpl });
+    } finally {
+      chmodSync(fixture.paths.observeLog, 0o600);
+    }
+
+    assert.equal(hosts.ollama, 1);
+    assert.equal(exit, 3, 'an unwritable observe log is a storage failure, not a clean run');
   });
 });
 

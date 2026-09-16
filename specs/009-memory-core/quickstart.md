@@ -2045,3 +2045,54 @@ isolated rerun, 6 of 6.
 Gate at this head: `npm test` 1567 + 280 green on Node 24.16.0 and 22.23.1 (the latter after that
 rerun); typecheck, lint and markdownlint clean; `semgrep scan --config auto` unchanged against the
 round-12 baseline; the lizard warning set differenced against `85d48437` adds nothing.
+
+### E9 follow-up — the restatement's own review, and the contract it had to retire
+
+`daa878d0..37533dc2` returned eleven findings, nine adopted, two filed. The restatement was right
+about the shape and wrong in three details, two of which a reviewer confirmed by running the built
+`fallbackItems` against a stale-consent configuration rather than by reading it.
+
+- The new third branch pointed the user at a **`consent` doctor item that does not exist**. The
+  report's items are config, storage, fts, migration, worker, generation, spool, sync, provider,
+  allowance, catalog, `fallback:N`, `agent:*`, unrecognized-agents, pi and paused — there is no
+  consent item, and without `--probe-provider` the provider item says only "not probed this run".
+  Worse, the branch's *recovery* was never changed at all, so the item still told the user to add a
+  cost class that would change nothing. The branch fires if and only if `consentMatches` is false —
+  `resolvedObserver` has already returned on a resolver refusal, and `admittedAfter` implies the
+  chain is non-empty — so it names that, and recovers with `oboete setup --accept-egress`.
+- Writing the attempt lines with the **throwing** writer put the worker-stop sentinel at risk. A
+  pass that stops calls `logAttempts` and returns; a throw there reaches `recordRunFailure`, which
+  ends the run as `storage_error` rather than `stopped`, and `releaseForExit` clears the sentinel
+  only for `stopped`. A full disk during a stop would have left every later resident refusing to
+  run until someone deleted the marker by hand. The attempt lines are written quietly again; the
+  **batch** line keeps the throwing writer, and it is the one that escalates — `EACCES` and `ENOSPC`
+  are `isStorageError`. That is also what makes one failed attempt append no longer take the batch
+  line with it.
+- `state=error reason=none` at level `info` for a batch lost to `LeaseLostError`, because
+  `processBatch` throws instead of returning the `lease_lost` state it has. The fallback pair reads
+  `leaseLost` now. And `errorCode(batchError)` was printed twice, as `reason` and again as `error` —
+  `reason` belongs to the batch and is `none` when the batch never settled on one.
+
+The doc block's "one line per batch, always" was also false: a pass that stops writes its attempt
+lines and no batch line, which the contract states at "Diagnostics". The comment names that
+exception now.
+
+**The contract was the thing to retire.** `contracts/provider-fallback.md` still described the log
+as "one `provider attempt` line per target … then the existing degraded line for the batch" and
+still asserted that "the `consent` item is where a mismatch is reported". The quickstart's narrative
+does not retire normative text — `new-decision-doc-must-retire-old-statements` — so both sections
+were rewritten: the batch line's `error`/`pass` split and which writer each line uses, and the fact
+that no `consent` item exists together with where a mismatch *is* named.
+
+**Now pinned:** `test/unit/provider-fallback.test.ts` makes the observe log unwritable from inside
+the answering target's fetch handler and asserts the run exits 3. That is the escalation this round
+restored, and it was the review's own finding that it had no test.
+
+**Filed rather than fixed:** #247 — `dbUnread` branches its reason on `integrityFailed` but not its
+recovery, so eight other doctor items still tell the user to repair a database that is merely
+missing, unwritable or behind the schema. Fixing it there is right and belongs in its own change.
+Also declined here and already filed: #246.
+
+Gate at this head: `npm test` 1568 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` unchanged against the round-12 baseline; the lizard
+warning set differenced against `85d48437` adds nothing.

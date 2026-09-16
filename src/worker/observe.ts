@@ -744,9 +744,14 @@ async function observeLifecycle(
       // One line per target the chain reached, in attempt order with the primary at position 0:
       // the batch itself keeps only one reason. `fallback:N` in `oboete doctor` numbers the
       // configuration's entries instead, so the model is what identifies a target across the two.
+      // Quietly, for two reasons. A pass that stops writes these and returns: a throw there escapes
+      // to `recordRunFailure`, which ends the run as `storage_error` instead of `stopped`, and
+      // `releaseForExit` clears the worker-stop sentinel only for `stopped` — so a full disk would
+      // leave every later resident refusing to run. And the batch line below is what escalates a
+      // log that cannot be written; one attempt append must not take it with them.
       function logAttempts(): void {
         for (const attempt of attempts) {
-          appendLog(paths.observeLog, 'info', 'provider attempt', {
+          appendLogQuietly(paths.observeLog, 'info', 'provider attempt', {
             id: batch.id,
             position: attempt.position,
             preset: attempt.preset,
@@ -757,19 +762,26 @@ async function observeLifecycle(
       }
 
       /**
-        * One line per batch, always: the batch row may be committed before the pass fails, and a
-        * line that is simply absent then leaves nothing in the log for a batch the database says is
-        * applied. `state` and `reason` are the batch's; `error` and `pass` are the pass's, kept
-        * apart because a batch that settled on a reason of its own would otherwise hide the code of
-        * whatever failed after it.
+        * One line for every batch this pass reached, with one exception the contract states too: a
+        * pass that stops between targets writes its attempt lines and no batch line
+        * (contracts/provider-fallback.md "Diagnostics"). Otherwise the line is written even when the
+        * pass then fails, because the batch row may already be committed and a line that is simply
+        * absent leaves nothing in the log for a batch the database says is applied.
+        *
+        * `state` and `reason` are the batch's own; `error` and `pass` are the pass's — a batch that
+        * settled on a reason would otherwise hide the code of whatever failed after it. This is the
+        * write that escalates an unwritable log: `EACCES` and `ENOSPC` are `isStorageError`, so the
+        * throw reaches `recordRunFailure` and the run exits 3.
         */
       function logBatch(): void {
         logAttempts();
         const failed = batchError !== undefined || passError !== undefined;
         appendLog(paths.observeLog, failed ? 'error' : 'info', 'batch', {
           id: batch.id,
-          state: batchResult?.state ?? 'error',
-          reason: batchResult?.reason ?? (batchError === undefined ? 'none' : errorCode(batchError)),
+          // A lease taken by another worker is not an error of this batch's, and `BatchResult` has
+          // a state for it; `processBatch` just cannot return one, because it threw.
+          state: batchResult?.state ?? (leaseLost ? 'lease_lost' : 'error'),
+          reason: batchResult?.reason ?? 'none',
           ...(batchError === undefined ? {} : { error: errorCode(batchError) }),
           ...(passError === undefined ? {} : { pass: errorCode(passError) }),
           ...(batchResult?.detail === undefined ? {} : { detail: batchResult.detail.split(/[\r\n]/)[0] }),

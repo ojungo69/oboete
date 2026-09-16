@@ -544,8 +544,15 @@ function unadmittedEntryItem(
         ? EXCLUDED_FALLS_THROUGH
         : chainIsReachable(config, env)
           ? 'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.'
-          : 'This target is never attempted, and the chain is not runnable for a separate reason: the `consent` and `provider` items above say which.',
-      `Add "${catalog.costClass}" to \`[observer] cost_policy\` to admit it, or remove the entry.`,
+          // Only one thing is left when a target is admitted after this entry: `resolvedObserver`
+          // returned early on a resolver refusal, so `chainIsReachable` can only be false here
+          // because the stored consent record no longer matches. Naming it is the point — the cost
+          // class is not what stopped the chain, and adding it would change nothing.
+          : 'This target is never attempted, and no target is: the stored consent record no longer matches this configuration.',
+      admittedAfter && !chainIsReachable(config, env)
+        ? '`oboete setup --accept-egress`, then add '
+          + `"${catalog.costClass}" to \`[observer] cost_policy\` if this entry should be admitted too.`
+        : `Add "${catalog.costClass}" to \`[observer] cost_policy\` to admit it, or remove the entry.`,
     );
   }
   return null;
@@ -576,7 +583,7 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
     // `reserveAttempt` reads `presetExhaustedAt` above `capped`, so an uncapped target has a stamp
     // in it too. The recovery follows the failure — only `integrityFailed` is a repair; a database
     // that is missing, unwritable or behind the schema is the `storage` item's own business.
-    return dbUnread(
+    const unread = dbUnread(
       name,
       integrityFailed,
       "Today's provider usage record could not be read.",
@@ -584,8 +591,11 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
       integrityFailed
         ? '`oboete doctor` after storage is repaired.'
         : 'The `storage` item above says what the database needs.',
-      `${where}.`,
     );
+    // The integrity substitution replaces the whole sentence, so the target's name is put back the
+    // way `workerItem` does it (src/doctor/storage.ts): without it every chain item prints the same
+    // line and names no position, preset or model, against "Diagnostics".
+    return { ...unread, reason: `${where}. ${unread.reason}` };
   }
   const unverifiable = unverifiableTarget(catalog, config.observer.agent_cli);
   // A refusal this item can read outranks one it cannot. `reserveAttempt` consults the exhaustion

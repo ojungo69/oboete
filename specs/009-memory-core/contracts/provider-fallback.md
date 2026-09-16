@@ -244,7 +244,16 @@ column cannot hold go to the observe log, one line per attempted target.
 ## Diagnostics
 
 - **Observe log**: one `provider attempt` line per target with its position, preset, model and
-  outcome reason, then the existing degraded line for the batch. This is the surface that
+  outcome reason, then one `batch` line. That batch line is written for every batch the pass
+  reached, even when the pass then fails: `applyObservations` commits the row before the checkpoint
+  that follows it, so a line left out would leave nothing at all in the log for a batch the database
+  says is applied. It carries the *batch's* `state` and `reason`, and separately the *pass's*
+  `error` (a failure inside `processBatch`) and `pass` (one out of the checkpoint after it) — kept
+  apart because a batch that settled on a reason of its own would otherwise hide the code of
+  whatever failed later. The attempt lines are written with the swallowing writer and the batch line
+  with the throwing one: an unwritable log is a storage failure worth exit 3, but a pass that stops
+  must still clear the worker-stop sentinel, and one attempt append must not take the batch line
+  with it. This is the surface that
   "distinguishes each target's fixed failure reason from successful generation" (US7 scenario 6);
   the reasons are codes, never provider response text. The line's `position` is the attempt order
   with the primary at 0, while `fallback:N` in `oboete doctor` numbers the *configuration's* entries
@@ -266,8 +275,15 @@ column cannot hold go to the observe log, one line per attempted target.
   `provider_usage` row (`presetExhaustedAt`), while the spent-allowance warning comes from the
   shared call count alone (`usageEstimate`). A day-wide exhaustion flag would let one preset's
   stamp answer for a preset that reported nothing, which is why `usageEstimate` carries no such
-  field. Consent is not part of a target's verdict — it is one hash over the primary and the whole
-  chain, and the `consent` item is where a mismatch is reported.
+  field.
+
+  Consent is not part of a target's verdict — it is one hash over the primary and the whole chain.
+  There is no `consent` item in the report, so nothing may point at one: a mismatch is named where
+  it is noticed. `providerItem` reports it on a probe, and the one chain item that can reach it — an
+  excluded entry with an admitted target behind it, where the resolver has already been ruled out —
+  says the stored record no longer matches and recovers with `oboete setup --accept-egress`, not
+  with the cost class, which is not what stopped the chain. `oboete setup` is the surface that
+  displays the tuple and takes the acceptance (FR-022).
 
 ## What the chain does not do
 
