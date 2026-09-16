@@ -538,8 +538,10 @@ test('the fallback chain is reported per target without a second provider reques
     // comes after this entry. The single admitted target here is position 1, before both, and by
     // the time the chain is at 2 that target has already failed.
     for (const name of ['fallback:2', 'fallback:3']) {
-      assert.match(context.item(name).consequence, /once the targets ahead of it have failed, the batch is rule-based/,
-        context.item(name).consequence);
+      // The whole sentence, because inlining it retyped the opening clause a substring match skips.
+      assert.equal(context.item(name).consequence,
+        'This target is never attempted, so nothing past it is reached: once the targets ahead of it'
+        + ' have failed, the batch is rule-based.');
     }
     assert.equal(context.item('provider').status, 'healthy', context.output);
 
@@ -1799,7 +1801,7 @@ test('a cost-policy exclusion says the chain continues when another target is ad
       fallback: [{ preset: 'nim' }, { preset: 'ollama', model: 'qwen3:8b' }] });
     const items = fallbackItems(config, db, false, { ...ITEM_ENV, OBOETE_NIM_API_KEY: 'k' }, ITEM_NOW);
     const excluded = items.find((entry) => entry.item === 'fallback:1')!;
-    assert.match(excluded.consequence, /passes to the targets the policy does admit/);
-    assert.doesNotMatch(excluded.consequence, /rule-based records/);
+    assert.equal(excluded.consequence,
+      'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.');
   });
 });

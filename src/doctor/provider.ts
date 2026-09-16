@@ -689,8 +689,9 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
  * give. Silent unless the list could refuse the model: the worker fetches the catalog only when
  * `workers-ai` is the **primary** (`refreshCatalog`, src/worker/observe.ts), so a chain-only
  * Workers AI target may have no cache at all and an item telling the user to run `oboete observe`
- * would never come true (issue #250). A cache from another account or past `CACHE_MS` is one the
- * worker replaces on its next batch, so it may not refuse a model either.
+ * would never come true (issue #250). A cache from another account or past `CACHE_MS` may not
+ * refuse a model either: where Workers AI is also the primary the worker replaces it on the next
+ * batch, and where it is not, nothing refreshes it at all — neither is a list to judge against.
  */
 function catalogTargetItem(
   name: string,
@@ -948,8 +949,11 @@ function catalogModelItems(
       degraded(
         'catalog',
         `The configured model is not in the catalog of ${models(cache.models.length)} fetched ${iso(cache.fetchedAt)}.`,
-        // `model_alias` advances the chain, so an admitted target takes the batch rather than the
-        // rules (contracts/provider-fallback.md "Advance and stop").
+        // `unreachable`, like the chain's own catalog verdict: a model the account does not serve
+        // answers with an HTTP status `classifyApiError` has no row for, while `model_alias` is a
+        // *successful* call that named another model (src/observer/llm.ts). Both advance the chain,
+        // so an admitted target takes the batch rather than the rules
+        // (contracts/provider-fallback.md "Advance and stop").
         refusedPrimaryConsequence(
           config,
           env,

@@ -2282,6 +2282,49 @@ Gate at this head: `npm test` 1573 + 280 green on Node 24.16.0 and 22.23.1; type
 markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged; the lizard warning set
 differenced against `85d48437` adds nothing.
 
+### E9 follow-up — the merge gate's own two blockers
+
+`pr-merge-gatekeeper` returned **NO-GO** on the 7-item checklist with two blockers, both real and
+both mine.
+
+**SonarCloud had one new OPEN issue nobody had triaged.** `typescript:S6582` on
+`src/doctor/provider.ts`, from the commit two before: `cache === null || cache.accountId !== …` is
+the shape the rule asks to write as `cache?.accountId !== …`, which would stop narrowing `cache` for
+the three reads below it. The null test is its own statement instead — not the shape the rule looks
+for, and the narrowing survives. Reproduced locally with `@typescript-eslint/prefer-optional-chain`
+(the rule behind S6582): it fires on the disjunction and is silent on the split.
+
+**The recorded `ponytail-review` was six and a half hours stale.** It covered `main...de99b2ed`
+(3582/204) while the head was 4808/242 — 14 commits and +1398/-210 unreviewed by that lens,
+including this file's +408. Run over `de99b2ed..HEAD`, it found the delta lean apart from
+`CHAIN_TAKES_THE_FAILURE` and `EXCLUDED_FALLS_THROUGH`, one caller each, now inlined in the ternary
+that chose between them; `unverifiableTarget` moved to where its answer is read.
+
+`/code-review` on the resulting delta returned **no correctness findings**, having reproduced each
+claim rather than reading them: the inlined sentences are byte-identical to the constants, the moved
+call is pure, and the rule dodge was verified against the plugin. Its six quality findings, three
+adopted:
+
+- the primary's catalog comment still said a model missing from the list fails with `model_alias`;
+  it fails with `unreachable` for the same reason the chain's does, and `model_alias` needs a
+  *successful* call that named another model;
+- `catalogTargetItem`'s docstring justified its silence with "the worker replaces that cache on its
+  next batch", which is false for the chain-only configuration the function exists for — nothing
+  refreshes it there at all (#250);
+- the two inlined sentences were asserted by substring regexes that skipped the clause the inlining
+  had retyped by hand; both tests assert the whole sentence now.
+
+Declined: sharing one `usableCatalog(db, accountId, now)` between the chain and primary paths — the
+primary words a *different* item for each of the three states (absent, foreign account, stale) and a
+helper that answers `cache | null` would take that distinction away, so the shared piece is the age
+rule, which `catalogIsStale` already is. Also declined: enabling
+`@typescript-eslint/prefer-optional-chain` repo-wide (28 other sites, its own cleanup), and reading
+the catalog row once per report instead of once per entry (a one-shot CLI diagnostic).
+
+Gate at this head: `npm test` 1573 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged; the lizard warning set
+differenced against `85d48437` adds nothing; SonarCloud PR 238 back to **0** OPEN issues.
+
 Gate at the previous head: `npm test` 1570 + 280 green on Node 24.16.0 and 22.23.1, each after one
 load-only rerun — `grok-no-tool` saw `pending` where `omitted` was expected (issue #243, the same
 pair of states in the other direction; 6 of 6 on the isolated rerun), and `staleness.test.ts` hit
