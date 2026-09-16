@@ -1681,5 +1681,14 @@ Three axes have now produced instances of this one shape: the surface, the branc
 and the constant a surface reads. The reusable form is [[defect-shape-closure-needs-second-axis]]:
 enumerate the *claims*, not the code that makes them.
 
+The `ponytail-review` pass over the same range then found the reason two of the three had survived:
+both were **open-coded copies of `refusedPrimaryConsequence`** — the same
+`admittedChain(config).targets.length > 0` test written out at the call site — and one of them read
+its chained sentence from a module constant far from the call. That is the drift vector, not just
+duplication: the constant held the wrong wording for three rounds while the function beside it was
+"fixed" twice. Both call sites use the helper now, the constant is gone, and one occurrence of the
+test remains in the file.
+
 Gate at this head: `npm test` 1562 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
-markdownlint and `semgrep scan --config auto` clean.
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing. CodeRabbit reviewed `b2fda4c1` with no findings.

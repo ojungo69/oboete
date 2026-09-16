@@ -64,12 +64,6 @@ const PROVIDER_PROBE_INPUT: ObserverInput = {
 
 const FALLBACK_CONSEQUENCE =
   'Temporary guidance is available while source processing waits for the provider.';
-// "Offered", never "summarized": admission is not runnability. A target may lack its own credential
-// or its own allowance, and then the batch is rule-based after all — which is why every target's own
-// verdict is reported as `fallback:N` rather than summarized into this one sentence.
-const CHAINED_CONSEQUENCE =
-  'This target answers without a request, so every batch is offered to the fallback chain below.';
-
 /**
  * What a refused primary means for the queue. An admitted chain is attempted on the same batch
  * (contracts/provider-fallback.md "Advance and stop": `daily_cap` and `provider_exhausted` both
@@ -206,9 +200,14 @@ function configuredProvider(
     return degraded(
       'provider',
       `No credentials are set for the ${preset} preset (${credentials.source}).`,
-      admittedChain(config).targets.length > 0
-        ? CHAINED_CONSEQUENCE
-        : 'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
+      // "Offered", never "summarized": admission is not runnability. A target may lack its own
+      // credential or its own allowance, and then the batch is rule-based after all, which is what
+      // each `fallback:N` reports.
+      refusedPrimaryConsequence(
+        config,
+        'This target answers without a request, so every batch is offered to the fallback chain below.',
+        'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
+      ),
       credentialSteps(config, env) ||
         '`oboete setup --provider <preset>` (workers-ai is the free remote default; ollama stays local)',
     );
@@ -517,9 +516,11 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
       // A failure ahead of an excluded target is not the end of the chain when the policy admits
       // another one: `daily_cap`, `auth_failed` and the rest advance past it
       // (contracts/provider-fallback.md "Advance and stop").
-      admittedChain(config).targets.length > 0
-        ? 'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.'
-        : 'This target is never attempted, so a failure ahead of it falls through to rule-based records.',
+      refusedPrimaryConsequence(
+        config,
+        'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.',
+        'This target is never attempted, so a failure ahead of it falls through to rule-based records.',
+      ),
       `Add "${catalog.costClass}" to \`[observer] cost_policy\` to admit it, or remove the entry.`,
     );
   }
