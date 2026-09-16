@@ -1692,3 +1692,27 @@ test remains in the file.
 Gate at this head: `npm test` 1562 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
 markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
 `85d48437` adds nothing. CodeRabbit reviewed `b2fda4c1` with no findings.
+
+### E9 follow-up — the eleventh bot round, on the helper itself
+
+One P2, taken, and it is the shape turned inward: `refusedPrimaryConsequence` tested chain
+*admission* and nothing else, so a primary the **resolver** refuses — `workers-ai` with a
+whitespace-only `[observer] model` and a valid `ollama` entry — still got the chained sentence, while
+`resolveObserveModel` turns that throw into a run with no model *and no targets*. `providerItem` and
+`fallbackItems` notice it first through `resolvedObserver`; `allowanceItem` and the catalog items
+have no such step, which is exactly the two the previous two commits had just wired to the helper.
+
+The test went into the helper rather than into those two callers
+([[guard-belongs-in-the-shared-function-not-one-caller]]): one guard in the function all of them
+share is smaller than two, and a third caller added later inherits it. `resolveModel` throws only
+for a chain admission already emptied and for a primary with no model of its own — **absent
+credentials are not a resolve error** — so the fourth round's uncredentialed primary still says the
+chain is offered the batch, which its own test re-confirms.
+
+Red before the fix: `allowanceItem` returned "Batches are offered to the fallback chain below…" for
+a configuration whose observer cannot start at all. One test pins both surfaces at once, because
+both were wrong for the same reason.
+
+Gate at this head: `npm test` 1563 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing.

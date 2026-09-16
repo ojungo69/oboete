@@ -68,8 +68,14 @@ const FALLBACK_CONSEQUENCE =
  * What a refused primary means for the queue. An admitted chain is attempted on the same batch
  * (contracts/provider-fallback.md "Advance and stop": `daily_cap` and `provider_exhausted` both
  * advance), so an item that says processing waits contradicts both the worker and the healthy
- * target reported below it. The condition is the one the uncredentialed-primary branch already
- * uses, so the two cannot disagree.
+ * target reported below it.
+ *
+ * Admission alone is not enough to promise that, because a primary the *resolver* refuses leaves no
+ * chain to try at all: `resolveObserveModel` turns the throw into a run with no model and no
+ * targets. `providerItem` and `fallbackItems` notice that through `resolvedObserver` before they
+ * reach this helper, but `allowanceItem` and the catalog items have no such step — so the test
+ * belongs here, in the one function all of them share, rather than in the two that would otherwise
+ * each need it.
  */
 function refusedPrimaryConsequence(
   config: OboeteConfig,
@@ -78,6 +84,14 @@ function refusedPrimaryConsequence(
   // clause's own sentence rather than the queue-waits default.
   otherwise: string = FALLBACK_CONSEQUENCE,
 ): string {
+  try {
+    // Throws only for a chain the admission already emptied and for a primary with no model of its
+    // own; absent credentials are not a resolve error, so an uncredentialed primary still chains.
+    resolveModel(config);
+  }
+  catch {
+    return otherwise;
+  }
   return admittedChain(config).targets.length > 0 ? whenChained : otherwise;
 }
 const ALLOWANCE_CONSEQUENCE =

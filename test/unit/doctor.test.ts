@@ -1532,6 +1532,28 @@ for (const [name, models, paid, consequence] of [
   });
 }
 
+test('an unresolvable primary makes every item stop promising the chain', async () => {
+  await withItemDatabase((db) => {
+    db.prepare('INSERT INTO provider_usage (utc_day, preset, calls, exhausted_at, reset_at) VALUES (?, ?, ?, ?, ?)')
+      .run('2026-09-06', 'workers-ai', 150, null, ITEM_RESET);
+    runtimeStateSet(db, 'workers_ai_catalog', JSON.stringify({
+      accountId: 'account', models: ['other-model'], defaultModelPresent: false, hasPaidOnlyModels: false,
+      fetchedAt: ITEM_NOW,
+    }), ITEM_NOW);
+    // `resolveModel` refuses a primary with no model of its own, and `resolveObserveModel` turns
+    // that into a run with no model *and no targets* (contracts/provider-fallback.md "What the
+    // chain does not do"), so an admitted target here is not a reachable one.
+    const config = configSchema.parse({
+      observer: { preset: 'workers-ai', model: '  ', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] },
+    });
+    assert.equal(allowanceItem(config, db, false, ITEM_NOW).consequence,
+      'Source processing waits for the allowance to reset; later worker runs retry due sources.');
+    assert.equal(catalogItems(config, db, false,
+      { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' }, ITEM_NOW)[0].consequence,
+      'Summaries fall back to rule-based until `[observer] model` names a listed model.');
+  });
+});
+
 test('a cost-policy exclusion says the chain continues when another target is admitted', async () => {
   await withItemDatabase(async (db, paths) => {
     const observer = { preset: 'workers-ai', cost_policy: ['free-tier', 'local'],
