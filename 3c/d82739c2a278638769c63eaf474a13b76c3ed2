@@ -1,0 +1,25 @@
+test/helpers/agent-cli.ts
+  s_892d4f75e21024::t_bf117dafbafaa7 6-8,31
+test/unit/doctor.test.ts
+  s_892d4f75e21024::t_bf117dafbafaa7 563,572-574,706,708-710
+src/config.ts
+  s_892d4f75e21024::t_bf117dafbafaa7 11
+specs/009-memory-core/quickstart.md
+  s_892d4f75e21024::t_bf117dafbafaa7 1055-1056,1095,1181
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "3cd82739c2a278638769c63eaf474a13b76c3ed2",
+  "prompts": {},
+  "sessions": {
+    "s_892d4f75e21024": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79c129f3-aa1e-4d43-970b-c316e499606d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
