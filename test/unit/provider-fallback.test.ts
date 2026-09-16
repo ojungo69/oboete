@@ -352,6 +352,45 @@ test('a consent change between targets stops the chain before the next host', as
   });
 });
 
+test('lease loss at the next reservation keeps the earlier provider attempt in the log', async () => {
+  await withFixture(async (fixture) => {
+    fixture.env = chainEnv(fixture);
+    writeChainConfig(fixture, {
+      preset: 'workers-ai',
+      fallback: [{ preset: 'ollama', model: OLLAMA_MODEL }],
+      env: fixture.env,
+    });
+    await captureEndedSession(fixture, {
+      sessionId: 'chain-lease-lost',
+      prompts: ['Record the provider attempt spent before the lease was lost.'],
+    });
+
+    const hosts = counters();
+    const fetchImpl = chainFetch(hosts, {
+      cloudflare: async () => {
+        // Target 1 reaches reserveAttempt after this failure; its lease_lost result makes
+        // providerCall throw after target 0 has already spent its reservation.
+        fixture.withDb((db) => {
+          db.prepare("UPDATE worker_lease SET owner_token = 'chain-lease-thief' WHERE id = 1").run();
+        });
+        return new Response('unauthorized', { status: 401 });
+      },
+    });
+    assert.equal(await runObserveForFixture(fixture, { fetch: fetchImpl }), 0);
+
+    assert.equal(hosts.cloudflare, 1);
+    assert.equal(hosts.ollama, 0);
+    assert.deepEqual(batchRows(fixture), [
+      { destination: 'remote_observer', state: 'running', degraded_reason: null, provider_attempts: 1 },
+    ]);
+    const log = readFileSync(fixture.paths.observeLog, 'utf8');
+    assert.match(log, /end .*reason=lease_lost/);
+    assert.match(log, /provider attempt .*position=0 preset=workers-ai model=[^ ]+ reason=auth_failed/,
+      'lease loss at the next reservation must retain the earlier provider attempt');
+    assert.equal(log.match(/provider attempt /g)?.length, 1);
+  });
+});
+
 test('a target that answers after two failures applies its output like any other', async () => {
   await withFixture(async (fixture) => {
     fixture.env = chainEnv(fixture);

@@ -301,6 +301,24 @@ test('a fallback entry the destination cannot use is reported, and the destinati
   });
 });
 
+test('selecting none reports the fallback chain without a primary and still writes the destination', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--provider', 'workers-ai', '--accept-egress']), 0, context.output);
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "ollama"\nmodel = "qwen3:8b"\n`);
+
+    context.output = '';
+    assert.equal(await context.run(['--provider', 'none']), 0, context.output);
+    assert.match(readFileSync(context.paths.config, 'utf8'), /preset = "none"/);
+    assert.match(context.output, /A fallback chain needs a selected observer preset\./,
+      'setup --provider none must report the fallback chain without a primary');
+    assert.ok(context.output.includes(
+      '`oboete setup --provider <preset>`, or remove the `[[observer.fallback]]` entries.',
+    ));
+    assert.doesNotMatch(context.output, /including the selected preset/);
+  });
+});
+
 
 test('a machine with no supported agent says that nothing was wired', async () => {
   await withTempHome(async (home) => {

@@ -357,8 +357,7 @@ function selectedDestination(
   const provider = options.provider;
   const destined =
     provider === null ? config : { ...config, observer: { ...config.observer, preset: provider } };
-  // Capture-only is a destination with no chain to run, whichever way the run arrived at it.
-  const chainError = destined.observer.preset === 'none' ? null : admittedChain(destined).error;
+  const chainError = admittedChain(destined).error;
   if (chainError === null) return destined;
   if (provider !== null && chainError.code === 'egress_widened') {
     note(
@@ -366,6 +365,18 @@ function selectedDestination(
       'Nothing was written. Correct the `[[observer.fallback]]` entry, then run setup again.',
     );
     return null;
+  }
+  if (chainError.code === 'chain_without_primary') {
+    // `admittedChain` refuses this one at position zero, before it reads any entry, so there is
+    // nothing to say about the entries after it and no selected preset to name. The recovery is the
+    // one `fallbackItems` already gives for the same code (src/doctor/provider.ts).
+    note(
+      chainErrorMessage(chainError),
+      'No summary is generated while entries sit under no destination: the observer refuses the',
+      'whole chain.',
+      '`oboete setup --provider <preset>`, or remove the `[[observer.fallback]]` entries.',
+    );
+    return destined;
   }
   note(
     chainErrorMessage(chainError),

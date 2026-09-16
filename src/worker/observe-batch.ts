@@ -457,7 +457,75 @@ type ProcessBatchOptions = {
   initialProviderReason: DegradedReason | null;
   resolved: { preset: PresetName | 'none'; model: string; chain: ChainTarget[] };
   consentOk: () => boolean;
+  /**
+   * Caller-owned so providerCall's LeaseLostError or an applyObservations storage error cannot
+   * discard earlier attempts required by contracts/provider-fallback.md "Diagnostics".
+   */
+  attempts: ProviderAttempt[];
 };
+
+type ChainResult = { done: BatchResult } | {
+  outcome: CallOutcome;
+  answered: Pick<ProviderAttempt, 'position' | 'preset' | 'model'>;
+};
+
+async function attemptTargets(
+  options: ProcessBatchOptions, input: BatchInput, nearby: NearbyCandidate[],
+  request: ReturnType<typeof buildObserverRequest>, targets: ChainTarget[],
+): Promise<ChainResult> {
+  const { db, token, batch, config, deps, consentOk, attempts } = options;
+  // `targets` always begins with the primary, so the loop settles `outcome` at least once, and
+  // `answered` with it on the branch that leaves the loop with an answer to apply.
+  let outcome!: CallOutcome;
+  let answered!: { position: number; preset: PresetName; model: string };
+  for (const [position, target] of targets.entries()) {
+    const between = deps.shouldStop();
+    if (between !== undefined) return { done: { state: 'done', reason: between, memoryIds: [], attempts } };
+    // Step 2 of "The attempt sequence", and it has to be the loop's own: `summarizeWithProvider`
+    // answers `no_provider` for a target with no credentials before it ever asks whether consent
+    // still holds, so a chain that ends on such a target would keep an earlier target's reason by
+    // precedence and send the user to fix a credential when consent is what they must act on.
+    if (!consentOk()) {
+      outcome = { ok: false, reason: 'consent_changed', attempts: 0, detail: '' };
+      attempts.push({ position, preset: target.preset, model: target.model,
+        reason: 'consent_changed', detail: '' });
+      break;
+    }
+    const called = await providerCall({
+      db, token, input: request.input, batch, config, deps,
+      preset: target.preset, model: target.model, consentOk,
+    });
+    if ('done' in called) return { done: { ...called.done, attempts } };
+    const settled = await settleProviderOutcome({
+      options,
+      request,
+      input,
+      nearby,
+      preset: target.preset,
+      model: target.model,
+      outcome: called.outcome,
+    });
+    if ('done' in settled) {
+      // A target whose answer arrived and was then refused settles inside `settleProviderOutcome`,
+      // so this is the only place its attempt line can be recorded.
+      if (settled.done.state === 'fallback' && settled.done.reason !== null) {
+        attempts.push({ position, preset: target.preset, model: target.model,
+          reason: settled.done.reason, detail: settled.done.detail ?? '' });
+      }
+      return { done: { ...settled.done, attempts } };
+    }
+    outcome = settled.outcome;
+    if (outcome.ok) {
+      answered = { position, preset: target.preset, model: target.model };
+      break;
+    }
+    attempts.push({ position, preset: target.preset, model: target.model,
+      reason: outcome.reason, detail: outcome.detail });
+    if (CHAIN_STOPS.has(outcome.reason)) break;
+  }
+
+  return { outcome, answered };
+}
 
 /** The reason a fallback records: this session's own degraded state, else the worker's, else rules. */
 function fallbackReason(
@@ -531,8 +599,8 @@ async function retryOnLanguageMismatch(args: {
 }
 
 export async function processBatch(options: ProcessBatchOptions): Promise<BatchResult> {
-  const { db, token, batch, config, deps, detect, providerState,
-    initialProviderReason, resolved, consentOk } = options;
+  const { db, token, batch, deps, detect, providerState,
+    initialProviderReason, resolved, consentOk, attempts } = options;
   let input = loadBatchInput(db, batch.id);
   if (input === null) throw new Error('batch input missing');
   const repoId = input.session.repo_id;
@@ -624,60 +692,13 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
     return { state: 'lease_lost', reason: null, memoryIds: [] };
   }
 
-  const targets = chainTargets(resolved.preset, resolved.model, resolved.chain, batch.destination);
-  const attempts: ProviderAttempt[] = [];
-  // `targets` always begins with the primary, so the loop settles `outcome` at least once, and
-  // `answered` with it on the branch that leaves the loop with an answer to apply.
-  let outcome!: CallOutcome;
-  let answered!: { position: number; preset: PresetName; model: string };
-  for (const [position, target] of targets.entries()) {
-    const between = deps.shouldStop();
-    if (between !== undefined) return { state: 'done', reason: between, memoryIds: [], attempts };
-    // Step 2 of "The attempt sequence", and it has to be the loop's own: `summarizeWithProvider`
-    // answers `no_provider` for a target with no credentials before it ever asks whether consent
-    // still holds, so a chain that ends on such a target would keep an earlier target's reason by
-    // precedence and send the user to fix a credential when consent is what they must act on.
-    if (!currentConsent()) {
-      outcome = { ok: false, reason: 'consent_changed', attempts: 0, detail: '' };
-      attempts.push({ position, preset: target.preset, model: target.model,
-        reason: 'consent_changed', detail: '' });
-      break;
-    }
-    const called = await providerCall({
-      db, token, input: request.input, batch, config, deps,
-      preset: target.preset, model: target.model, consentOk: currentConsent,
-    });
-    if ('done' in called) return { ...called.done, attempts };
-    const settled = await settleProviderOutcome({
-      options: { ...options, consentOk: currentConsent },
-      request,
-      input,
-      nearby,
-      preset: target.preset,
-      model: target.model,
-      outcome: called.outcome,
-    });
-    if ('done' in settled) {
-      // A target whose answer arrived and was then refused settles inside `settleProviderOutcome`,
-      // so this is the only place its attempt line can be recorded.
-      if (settled.done.state === 'fallback' && settled.done.reason !== null) {
-        attempts.push({ position, preset: target.preset, model: target.model,
-          reason: settled.done.reason, detail: settled.done.detail ?? '' });
-      }
-      return { ...settled.done, attempts };
-    }
-    outcome = settled.outcome;
-    if (outcome.ok) {
-      answered = { position, preset: target.preset, model: target.model };
-      break;
-    }
-    attempts.push({ position, preset: target.preset, model: target.model,
-      reason: outcome.reason, detail: outcome.detail });
-    if (CHAIN_STOPS.has(outcome.reason)) break;
-  }
+  const chain = await attemptTargets({ ...options, consentOk: currentConsent }, input, nearby, request,
+    chainTargets(resolved.preset, resolved.model, resolved.chain, batch.destination));
+  if ('done' in chain) return chain.done;
+  const { outcome, answered } = chain;
 
   if (!outcome.ok) {
-    // Every failed target is in `attempts`, so the loop above ran at least once. The reason a stop
+    // Every failed target is in `attempts`, so attemptTargets ran at least once. The reason a stop
     // ended the chain on wins, because that is the one the user has to act on; otherwise the batch
     // keeps the most severe of the reasons the chain actually met. The kept reason and the kept
     // detail always come from the same attempt, which is what lets `loggableDetail` decide by
@@ -716,11 +737,12 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
   // that failed to answer and then a batch reason nothing accounts for
   // (contracts/provider-fallback.md "Diagnostics": one line per target that failed).
   const refused = applied.leaseLost ? null : applied.fallbackReason ?? null;
+  if (refused !== null) attempts.push({ ...answered, reason: refused, detail: '' });
   return {
     state: applied.leaseLost ? 'lease_lost' : applied.fallbackReason === undefined ? 'applied' : 'fallback',
     reason: applied.fallbackReason ?? null,
     memoryIds: appliedMemoryIds(applied),
-    attempts: refused === null ? attempts : [...attempts, { ...answered, reason: refused, detail: '' }],
+    attempts,
   };
 }
 

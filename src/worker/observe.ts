@@ -47,6 +47,7 @@ import {
   processBatch,
   type BatchDeps,
   type BatchResult,
+  type ProviderAttempt,
 } from './observe-batch.js';
 import {
   checkpoint,
@@ -744,7 +745,7 @@ async function observeLifecycle(
       // the batch itself keeps only one reason. `fallback:N` in `oboete doctor` numbers the
       // configuration's entries instead, so the model is what identifies a target across the two.
       function logAttempts(): void {
-        for (const attempt of batchResult?.attempts ?? []) {
+        for (const attempt of attempts) {
           appendLog(paths.observeLog, 'info', 'provider attempt', {
             id: batch.id,
             position: attempt.position,
@@ -765,12 +766,13 @@ async function observeLifecycle(
         });
       }
 
+      const attempts: ProviderAttempt[] = [];
       let batchResult: BatchResult | null = null;
       let batchError: unknown;
       try {
         batchResult = (await processBatch({
           db, token, batch, config, deps: batchDeps, detect, providerState,
-          initialProviderReason, resolved, consentOk,
+          initialProviderReason, resolved, consentOk, attempts,
         }));
         if (batchResult.state === 'done') {
           stopReason = batchResult.reason;
