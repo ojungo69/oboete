@@ -560,7 +560,7 @@ test('an uncredentialed primary with an admitted chain says the chain summarizes
   });
 });
 
-test('a fallback chain the resolver refuses is reported once, at its position', async () => {
+test('a fallback chain the resolver refuses is reported at its position and on the provider item', async () => {
   await harness(async (context) => {
     writeFileSync(context.paths.config, [
       '[observer]', 'preset = "ollama"', 'model = "qwen3:8b"', 'cost_policy = ["free-tier", "local", "remote"]',
@@ -569,6 +569,9 @@ test('a fallback chain the resolver refuses is reported once, at its position', 
     chmodSync(context.paths.config, 0o600);
     assert.equal(await context.doctor(), 1, context.output);
     assertBroken(context.item('fallback'), 'degraded', 'sends further', 'no provider at all', 'observer.fallback');
+    // The refused entry takes the primary down with it, so the provider item says so too rather
+    // than reporting a provider the worker does not have.
+    assertBroken(context.item('provider'), 'degraded', 'sends further', 'rule-based fallback only');
 
     // `chain_without_primary` carries position 0, which is the primary: numbering it as a fallback
     // target would name an entry that does not exist, and the fix is to select a preset.
@@ -700,26 +703,16 @@ test('a primary the resolver refuses leaves no fallback target to call ready', a
   });
 });
 
-test('the provider item names a primary the resolver refuses, with or without a chain', async () => {
+test('the provider item names a primary the resolver refuses when no chain reports it', async () => {
   await harness(async (context) => {
-    // No chain at all, so `fallbackItems` returns nothing and this item is the only surface left
-    // to say that every batch will be rule-based.
+    // `ollama` has no default model, and with no `[[observer.fallback]]` entry `fallbackItems`
+    // returns nothing at all, so this item is the only surface left to say that every batch will
+    // be rule-based.
     writeFileSync(context.paths.config, ['[observer]', 'preset = "ollama"', ''].join('\n'));
     chmodSync(context.paths.config, 0o600);
     assert.equal(await context.doctor(), 1, context.output);
     assertBroken(context.item('provider'), 'degraded', 'requires an observer model',
       'rule-based fallback only');
-
-    // A chain entry that widens egress takes the primary down with it: a healthy probe here would
-    // contradict a worker that has no provider at all.
-    writeFileSync(context.paths.config, [
-      '[observer]', 'preset = "ollama"', 'model = "qwen3:8b"',
-      'cost_policy = ["free-tier", "local", "remote"]',
-      '', '[[observer.fallback]]', 'preset = "nim"', '',
-    ].join('\n'));
-    chmodSync(context.paths.config, 0o600);
-    assert.equal(await context.doctor(['--json', '--probe-provider']), 1, context.output);
-    assertBroken(context.item('provider'), 'degraded', 'sends further');
   });
 });
 

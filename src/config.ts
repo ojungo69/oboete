@@ -8,7 +8,7 @@ import { globRuleError } from './privacy/detect.js';
 import type { OboetePaths } from './paths.js';
 
 const PRESET_NAMES = ['workers-ai', 'ollama', 'nim', 'openrouter', 'gemini', 'agent-cli'] as const;
-const AGENT_CLIS = ['claude', 'codex', 'grok'] as const;
+export const AGENT_CLIS = ['claude', 'codex', 'grok'] as const;
 
 export type PresetName = (typeof PRESET_NAMES)[number];
 export type AgentCli = (typeof AGENT_CLIS)[number];

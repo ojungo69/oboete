@@ -3,7 +3,9 @@ import { spawn as nodeSpawn, type spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 
-const AGENT_CLIS = new Set(['claude', 'codex', 'grok']);
+import { AGENT_CLIS } from '../../src/config.js';
+
+const FAKED: ReadonlySet<string> = new Set(AGENT_CLIS);
 
 type FakeChild = EventEmitter & {
   stdin: PassThrough;
@@ -26,7 +28,7 @@ export function cliSpawn(texts: string[]): { spawn: typeof spawn; calls: () => n
   let count = 0;
   return {
     spawn: ((command: string, args: readonly string[], options: { signal?: AbortSignal }) => {
-      if (!AGENT_CLIS.has(command)) return nodeSpawn(command, [...args], options);
+      if (!FAKED.has(command)) return nodeSpawn(command, [...args], options);
       const child = Object.assign(new EventEmitter(), {
         stdin: new PassThrough(),
         stdout: new PassThrough(),

@@ -1052,7 +1052,8 @@ otherwise.
 1. `an empty chain leaves the consent hash exactly where it was, and one target moves it`
    (`config.test.ts`) — against the literal digest, with the one-target half beside it.
 2. `resolveModel carries the admitted chain and refuses one it cannot use` (`providers.test.ts`)
-   and `a fallback chain the resolver refuses is reported once, at its position` (`doctor.test.ts`)
+   and `a fallback chain the resolver refuses is reported at its position and on the provider item`
+   (`doctor.test.ts`)
    — a `local` primary with a `remote` entry is `chain_unusable` at the resolve, and the run has no
    provider rather than a crash.
 3. `a local target is never given a batch a remote target could not have been given`.
@@ -1091,7 +1092,7 @@ otherwise.
     written`.
 19. `the second of two identical fallback entries is reported as covered, not as ready`
     (`doctor.test.ts`), and the `preset = "none"` leg of `a fallback chain the resolver refuses is
-    reported once, at its position`.
+    reported at its position and on the provider item`.
 
 Bot round on PR #238 at head `011b1b2e`: all check-runs completed, `dco`, `secrets`, `check`,
 `engine (22.16.0)`, `engine (24.x)`, `semgrep-cloud-platform/scan`, SonarCloud (gate passed),
@@ -1177,7 +1178,7 @@ see, and it is issue #240.
 - Each of the five was written as a failing test first, and each failed for its own reason before
   the fix: `one capped preset's exhaustion is neither another's nor the shared allowance`,
   `a primary the resolver refuses leaves no fallback target to call ready`,
-  `the provider item names a primary the resolver refuses, with or without a chain`
+  `the provider item names a primary the resolver refuses when no chain reports it`
   (`doctor.test.ts`); `agent-cli is uncapped, consented, reserves its attempt and validates the CLI
   text as observer JSON`, `a refused reservation stops agent-cli before the paid child process
   runs`, `a consent change after the agent-cli reservation stops the chain before the child
