@@ -76,10 +76,10 @@ export async function providerItem(input: {
   const { config, paths, db, integrityFailed, deps, options, now } = input;
   const configured = configuredProvider(config, integrityFailed, deps.env);
   if (!('kind' in configured)) return configured;
-  const { config: readyConfig, preset, credentials } = configured;
-  const probe = providerProbeReadiness(readyConfig, preset, db, options, now);
+  const { config: readyConfig, preset, credentials, model } = configured;
+  const probe = providerProbeReadiness(preset, db, options, now);
   if (!('kind' in probe)) return probe;
-  const { db: openDb, model, estimate } = probe;
+  const { db: openDb, estimate } = probe;
 
   try {
     const outcome = await summarizeWithProvider(PROVIDER_PROBE_INPUT, {
@@ -124,11 +124,13 @@ type ConfiguredProvider = {
   config: OboeteConfig;
   preset: Exclude<PresetName, 'none'>;
   credentials: ReturnType<typeof readCredentials>;
+  /** From `resolveModel`, so the probe and the worker never derive the primary's model apart. */
+  model: string;
 };
 
 type ProviderProbeReadiness =
   | DoctorItem
-  | { kind: 'ready'; db: DatabaseSync; model: string; estimate: ReturnType<typeof usageEstimate> };
+  | { kind: 'ready'; db: DatabaseSync; estimate: ReturnType<typeof usageEstimate> };
 
 function configuredProvider(
   config: OboeteConfig | null,
@@ -156,13 +158,13 @@ function configuredProvider(
     );
   }
 
-  const refused = resolverRefusal(
+  const resolved = resolvedObserver(
     config,
     'provider',
     'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
-    'Set `[observer] model` to a model the preset lists, or correct the `[[observer.fallback]]` entry, then run `oboete doctor` again.',
+    'Set `[observer] model` in the configuration file to a model that preset accepts, or correct the `[[observer.fallback]]` entry, then run `oboete doctor` again.',
   );
-  if (refused !== null) return refused;
+  if (!('kind' in resolved)) return resolved;
 
   const credentials = readCredentials(preset, env, config.observer.agent_cli);
   if (!credentials.present) {
@@ -179,11 +181,10 @@ function configuredProvider(
         '`oboete setup --provider <preset>` (workers-ai is the free remote default; ollama stays local)',
     );
   }
-  return { kind: 'configured', config, preset, credentials };
+  return { kind: 'configured', config, preset, credentials, model: resolved.model };
 }
 
 function providerProbeReadiness(
-  config: OboeteConfig,
   preset: Exclude<PresetName, 'none'>,
   db: DatabaseSync | null,
   options: DoctorOptions,
@@ -209,11 +210,10 @@ function providerProbeReadiness(
     );
   }
 
-  const model = (config.observer.model ?? PRESET_CATALOG[preset].defaultModel).trim();
   const estimate = usageEstimate(db, now);
   const capItem = providerCapItem(preset, estimate, db, now);
   if (capItem !== null) return capItem;
-  return { kind: 'ready', db, model, estimate };
+  return { kind: 'ready', db, estimate };
 }
 
 function providerCapItem(
@@ -222,7 +222,10 @@ function providerCapItem(
   db: DatabaseSync,
   now: number,
 ): DoctorItem | null {
-  if (PRESET_CATALOG[preset].capped && presetExhaustedAt(db, preset, now) !== null) {
+  // Not behind `capped`: `reserveAttempt` refuses on this stamp whatever the preset's cap is, and
+  // `doctorReserve` now does too — without this the probe is still stopped, but it is reported as a
+  // refused reservation rather than as the exhaustion it is.
+  if (presetExhaustedAt(db, preset, now) !== null) {
     return degraded(
       'provider',
       'provider_exhausted: The provider reported exhaustion today.',
@@ -246,6 +249,7 @@ function doctorReserve(
   preset: PresetName,
   now: number,
 ): { ok: true; reservationId: string } | { ok: false; reason: 'daily_cap' | 'provider_exhausted' } {
+  if (presetExhaustedAt(db, preset, now) !== null) return { ok: false, reason: 'provider_exhausted' };
   if (!PRESET_CATALOG[preset].capped) {
     return { ok: true, reservationId: randomUUID() };
   }
@@ -327,31 +331,30 @@ function credentialSteps(config: OboeteConfig, env: NodeJS.ProcessEnv): string {
 }
 
 /**
- * The chain's targets are reported, never probed: `providerItem` spends a real reservation, so one
- * probe per target would spend the daily allowance on diagnostics
- * (contracts/provider-fallback.md "Diagnostics"). No configured chain means no items at all.
+ * The worker's own resolver, asked once and answered with what it resolved: a primary whose model
+ * does not resolve, or a chain entry that makes the chain unusable, leaves the observer with no
+ * model and no targets at all, so neither the provider item nor any target below may be reported as
+ * ready, and both say why (contracts/provider-fallback.md "What the chain does not do"). The
+ * `kind` tag tells the two answers apart, as it does for `ConfiguredProvider`.
  */
-/**
- * The worker's own resolver, not a second copy of its rules: a primary whose model does not
- * resolve, or a chain entry that makes the chain unusable, leaves the observer with no model and no
- * targets at all, so neither the provider item nor any target below may be reported as ready, and
- * both say why (contracts/provider-fallback.md "What the chain does not do"). Null means it
- * resolves.
- */
-function resolverRefusal(
+function resolvedObserver(
   config: OboeteConfig,
   name: 'provider' | 'fallback',
   consequence: string,
   recovery: string,
-): DoctorItem | null {
+): { kind: 'resolved'; model: string } | DoctorItem {
   try {
-    resolveModel(config);
-    return null;
+    return { kind: 'resolved', model: resolveModel(config).model };
   } catch (error) {
     return degraded(name, describe(error), consequence, recovery);
   }
 }
 
+/**
+ * The chain's targets are reported, never probed: `providerItem` spends a real reservation, so one
+ * probe per target would spend the daily allowance on diagnostics
+ * (contracts/provider-fallback.md "Diagnostics"). No configured chain means no items at all.
+ */
 export function fallbackItems(
   config: OboeteConfig | null,
   db: DatabaseSync | null,
@@ -373,13 +376,15 @@ export function fallbackItems(
         : 'Correct the `[[observer.fallback]]` entry in the configuration file, then run `oboete doctor` again.',
     )];
   }
-  const refused = resolverRefusal(
+  // Only the primary's own model can reach this: a chain error returned above. `resolveModel`
+  // checks the primary before the chain, so the message is always about the preset.
+  const resolved = resolvedObserver(
     config,
     'fallback',
     'No target below is ever attempted: the observer has no usable primary, so every batch is rule-based.',
-    'Set `[observer] model` to a model the preset lists, then run `oboete doctor` again.',
+    'Set `[observer] model` in the configuration file to a model that preset accepts, then run `oboete doctor` again.',
   );
-  if (refused !== null) return [refused];
+  if (!('kind' in resolved)) return [resolved];
   // Each admitted target is claimed by the first entry that produced it, so the second of two
   // identical entries is reported as covered rather than as ready.
   const unclaimed = [...chain.targets];

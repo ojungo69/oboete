@@ -1,4 +1,3 @@
-import assert from 'node:assert/strict';
 import { spawn as nodeSpawn, type spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
@@ -16,9 +15,14 @@ type FakeChild = EventEmitter & {
 
 /**
  * A stand-in for the agent command line tool: each spawn answers with the next text wrapped the
- * way the real CLI wraps it, and one more spawn than there are texts fails the test rather than
- * hanging. Shared by the observer unit tests and the chain's worker tests so both see the same
- * child process shape.
+ * way the real CLI wraps it. Shared by the observer unit tests and the chain's worker tests so both
+ * see the same child process shape.
+ *
+ * One more spawn than there are texts is answered as a failed child rather than by throwing: an
+ * `assert` inside a stream handler is an asynchronous throw whose delivery is Node-version
+ * dependent, and on Node 22 it stalled a worker pass instead of reporting anything. The overflow
+ * therefore comes back through `runChild`'s own `process_failed`, and `calls()` is what a test
+ * asserts the count on.
  *
  * Only the agent command line tool is faked. A worker pass also spawns `git` for citations, and
  * answering that with a scripted CLI reply (or failing it as unexpected) stalls the pass instead of
@@ -39,10 +43,9 @@ export function cliSpawn(texts: string[]): { spawn: typeof spawn; calls: () => n
       child.stdin.on('finish', () => {
         const text = texts[count];
         count += 1;
-        if (text === undefined) assert.fail('unexpected child process');
-        child.stdout.end(JSON.stringify({ result: text }));
-        child.stderr.end();
-        queueMicrotask(() => child.emit('close', 0, null));
+        child.stdout.end(text === undefined ? '' : JSON.stringify({ result: text }));
+        child.stderr.end(text === undefined ? 'unexpected child process' : '');
+        queueMicrotask(() => child.emit('close', text === undefined ? 1 : 0, null));
       });
       options.signal?.addEventListener(
         'abort',

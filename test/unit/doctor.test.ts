@@ -925,6 +925,26 @@ test('an ollama probe is healthy and writes no provider_usage row', async () => 
   });
 });
 
+test('an uncapped preset that reported exhaustion is not probed and is not called healthy', async () => {
+  await harness(async (context) => {
+    // `reserveAttempt` refuses on the stamp before it looks at the cap, so a capped-only check here
+    // would report a provider ready that the worker refuses for the rest of the day.
+    writeFileSync(context.paths.config, '[observer]\npreset = "ollama"\nmodel = "qwen3:8b"\n');
+    chmodSync(context.paths.config, 0o600);
+    const { db } = openDatabase({ path: context.paths.db, timeoutMs: 5_000 });
+    try {
+      db.prepare(`INSERT INTO provider_usage (utc_day, preset, calls, neurons_estimate, reset_at, exhausted_at)
+        VALUES (?, 'ollama', 1, 0, ?, ?)`).run(utcDay(context.now), context.now + 3_600_000, context.now);
+    } finally {
+      db.close();
+    }
+    context.fetch = () => assert.fail('an exhausted preset must not be probed');
+
+    assert.equal(await context.doctor(['--json', '--probe-provider']), 1, context.output);
+    assertBroken(context.item('provider'), 'degraded', 'reported exhaustion today');
+  });
+});
+
 test('a catalog cache from another account is unverified', async () => {
   await harness(async (context) => {
     const { db } = openDatabase({ path: context.paths.db, timeoutMs: 2_000 });

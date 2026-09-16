@@ -1176,7 +1176,12 @@ see, and it is issue #240.
   `engine (22.16.0)` job covers the engines floor): 1545 + 280 tests, 0 fail, 2 skipped,
   `NPM_TEST_EXIT=0` on both.
 - Each of the five was written as a failing test first, and each failed for its own reason before
-  the fix: `one capped preset's exhaustion is neither another's nor the shared allowance`,
+  the fix. The first seven were run red before the fixes landed; the last three (`a reservation
+  restamps claimed_at…`, `the provider item names a primary the resolver refuses…`, and the extended
+  chain case) were confirmed red afterwards by reverting the two product lines, rebuilding and
+  rerunning them — `claimed_at` came back as the creation stamp, and the provider item came back
+  `unverified` with "Not probed this run" while doctor exited 0. The tests:
+  `one capped preset's exhaustion is neither another's nor the shared allowance`,
   `a primary the resolver refuses leaves no fallback target to call ready`,
   `the provider item names a primary the resolver refuses when no chain reports it`
   (`doctor.test.ts`); `agent-cli is uncapped, consented, reserves its attempt and validates the CLI
@@ -1200,3 +1205,55 @@ see, and it is issue #240.
   which the resolver refuses, so its capped-target warning was only reachable while doctor ignored
   the primary. It now names a model, which is what makes the uncapped-primary case it was written
   for real.
+
+### E9 follow-up — the correctness review of the fixes
+
+Eleven findings on the three fix commits. Seven taken, two rejected on their premise, one already
+done, one deliberately left as an issue.
+
+Taken:
+
+- Three more `usageEstimate().exhausted` readers than Codex named, which is the sweep result above
+  and was already in the fix. Beyond it: `providerCapItem` and `doctorReserve` still kept the stamp
+  behind `PRESET_CATALOG[preset].capped`, while `reserveAttempt` reads it before it looks at the
+  cap. Both now read it for any preset, which is what the fix commit's own title claims. Measured
+  rather than assumed: with only `providerCapItem` reverted the probe is *still* stopped, by
+  `doctorReserve`, but reported as "Provider reservation refused" instead of as the exhaustion it
+  is — so both halves earn their place. Reachable only through a 429 carrying body code 3036
+  (`classifyApiError`), which in practice is Workers AI, so this is alignment rather than a live
+  bug. Test: `an uncapped preset that reported exhaustion is not probed and is not called healthy`.
+- `presetExhaustedAt` dropped a guard the doctor helper it replaced had: `numberValue` reads a
+  non-numeric `exhausted_at` as the epoch, so a row that was never stamped would have been reported
+  as "exhausted at 1970-01-01". It now returns null unless the value is a number or a bigint.
+- The `reset_at > now` half of that function had no test that could tell it from `true`, because
+  both existing pins cross the UTC day and are filtered out by `utc_day` first. `a same-day stamp
+  whose reset has already passed is not exhaustion` seeds the row the clause exists for and asserts
+  the reservation is granted.
+- The stub answered an overflow spawn with `assert.fail` inside a stream handler — the same
+  asynchronous-throw channel that stalled the Node 22 run. Overflow now comes back as a failed
+  child through `runChild`'s own `process_failed`, and the count is what a test asserts.
+- `resolverRefusal` borrowed only `resolveModel`'s throw and discarded its result, so
+  `providerProbeReadiness` still re-derived `(config.observer.model ?? defaultModel).trim()` by
+  hand — two copies of one rule. It is now `resolvedObserver`, returning the resolved model for
+  `configuredProvider` to pass down, in the same `kind`-tagged shape the file already uses.
+- Extracting that helper had left `fallbackItems`'s own paragraph attached to it, stacking two doc
+  blocks and leaving the exported function with none. Moved back.
+- The recovery line said to set `[observer] model` to "a model the preset lists", which `agent-cli`
+  and `ollama` do not do. It now says "a model that preset accepts".
+
+Rejected:
+
+- "`providerCapItem`'s `estimate` parameter is only read for `resetAt`, a pure function of `now`" —
+  it is also read for `estimate.remaining <= 0`, which is the daily-cap branch.
+- "`presetExhaustedAt` should use `prepared(db, sql)`" — `src/db/statements.ts` is used across
+  `src/sync/`, and no module in `src/observer/` or `src/worker/` imports it. Adopting it for one
+  function would leave `reservation.ts` inconsistent with itself, and the reader runs once per
+  attempt, not once per row.
+
+Left as an issue rather than fixed: the reviewer's root-cause proposal was to refuse
+`setup --provider ollama|agent-cli` when no model is set. `a chain the configuration cannot use
+blocks neither capture-only nor rewiring` (`setup.test.ts`) asserts exit 0 for exactly that command,
+so selecting a local preset and then naming the model is the specified flow, and doctor saying so is
+the recovery path rather than a regression. What is genuinely odd is that `agent-cli` requires a
+model nothing ever sends — `summarizeWithAgentCli` reads it only as a non-empty gate and
+`runAgentCli` never receives it. Fixing that moves the consent hash, so it is issue #241.

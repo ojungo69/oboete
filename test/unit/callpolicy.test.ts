@@ -254,6 +254,18 @@ test('usageEstimate reports the shared capped calls and reset; exhaustion stays 
   });
 });
 
+test("a same-day stamp whose reset has already passed is not exhaustion", async () => {
+  await withDatabase((db, token) => {
+    // `utc_day` and `reset_at` are not the same bound: a row can still be today's while its reset
+    // has passed, and then the preset may be reserved again.
+    seedUsage(db, 'workers-ai', 1, { exhaustedAt: NOW - 2, resetAt: NOW - 1 });
+    assert.equal(presetExhaustedAt(db, 'workers-ai', NOW), null);
+    seedBatch(db, 'batch-stale-reset', token);
+    const reserved = reserve(db, token, 'workers-ai', 'batch-stale-reset');
+    assert.equal(reserved.ok, true, reserved.ok ? '' : reserved.reason);
+  });
+});
+
 test('a reservation restamps claimed_at so the reclaim timer runs from the attempt', async () => {
   await withDatabase((db, token) => {
     seedBatch(db, 'batch-claimed-at', token);

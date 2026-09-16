@@ -39,7 +39,9 @@ export function presetExhaustedAt(db: DatabaseSync, preset: PresetName, now: num
     .prepare('SELECT exhausted_at, reset_at FROM provider_usage WHERE utc_day = ? AND preset = ?')
     .get(utcDay(now), preset);
   const exhaustedAt = row?.exhausted_at;
-  if (exhaustedAt === null || exhaustedAt === undefined) return null;
+  // Only a number is a stamp: `numberValue` would read anything else as the epoch and report a row
+  // that was never stamped as exhausted since 1970.
+  if (typeof exhaustedAt !== 'number' && typeof exhaustedAt !== 'bigint') return null;
   return numberValue(row?.reset_at) > now ? numberValue(exhaustedAt) : null;
 }
 
