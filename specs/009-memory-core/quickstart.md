@@ -1397,3 +1397,13 @@ after the previous round's hand-restore swapped two branches.
 
 Gate at this head: `npm test` green on Node 24.16.0 and 22.23.1 (1550 + 280, 0 fail, 2 skipped);
 typecheck, lint, markdownlint, semgrep and lizard clean.
+
+Declined in the same round: a stop landing between one target's own internal retries drops that
+target's attempt line, which the finding called the stopped pass's only provider record. It is not —
+the target reached that state by taking a reservation, and `reserveAttempt` writes the
+`provider_usage` row and increments `provider_attempts` in the same committed transaction, which is
+the accounting the contract names. The contract's sentence is about a pass that stops *between*
+targets, and the omission is the same decision the settle path takes explicitly one branch below
+(a line only for `state === 'fallback'` with a reason). `ProviderAttempt.reason` is a
+`DegradedReason` read by `CHAIN_STOPS` and `mostSevereReason`; a cooperative stop is not one, so
+recording it would widen that union with a value neither consumer can rank.
