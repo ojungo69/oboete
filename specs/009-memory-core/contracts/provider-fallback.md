@@ -340,7 +340,13 @@ column cannot hold go to the observe log, one line per attempted target.
     own position, with `language_mismatch`.
 18. `oboete setup --remove`, a bare `oboete setup` and `--provider none` all succeed while a chain
     the configuration cannot use sits in the file; only a `--provider` that narrows egress under an
-    admitted chain is refused, and it writes nothing.
+    admitted chain is refused, and it writes nothing. Every other chain error is **reported and the
+    destination is still written**, the way a missing credential is (contracts/cli.md: setup prints
+    the steps "instead of failing"): a `--provider` over an entry with no model succeeds, writes the
+    destination and names the entry, because the entry is the file's defect rather than the
+    destination's doing — the selected preset does not run until it is corrected, which is what the
+    report says. `admittedChain` returns at the first entry it refuses, so entries after it are
+    unexamined and the report says that too rather than restating the admission rules.
 19. Two identical `[[observer.fallback]]` entries: `fallback:1` is healthy and `fallback:2` says a
     nearer target already covers it. `preset = "none"` with an entry reports the missing primary
     rather than "fallback target 0".

@@ -335,9 +335,16 @@ function recordSetupResult(
  * refused enabled (contracts/cli.md, FR-022). A narrower destination can strip a stored fallback
  * chain of its admission, and a run that enabled it anyway would leave the observer with no
  * provider at all until someone reads the log (contracts/provider-fallback.md "Admission"), so that
- * one case is refused before anything is written. Only that refusal is the destination's doing:
- * `--provider none` is capture-only, which the user asked for, and a chain already unusable on disk
- * must not block `--remove` or a rewiring run.
+ * one case is refused before anything is written. It is the only refusal, which Verification 18 of
+ * that contract states: `--remove`, a bare `oboete setup` and `--provider none` all succeed while a
+ * chain the configuration cannot use sits in the file, and only a `--provider` that narrows egress
+ * under an admitted chain is refused.
+ *
+ * Every other chain error is reported and the destination is still written, the way a missing
+ * credential is reported and setup continues (contracts/cli.md). Reporting is the part that was
+ * missing: one entry the chain cannot resolve makes `resolveModel` refuse the whole chain, so the
+ * primary the run just selected does not run either, and a run that wrote it in silence left the
+ * user to discover that from `oboete doctor` or from rule-based memories.
  */
 function selectedDestination(
   config: OboeteConfig,
@@ -347,12 +354,24 @@ function selectedDestination(
   if (provider === null) return config;
   const destined = { ...config, observer: { ...config.observer, preset: provider } };
   const chainError = provider === 'none' ? null : admittedChain(destined).error;
-  if (chainError?.code !== 'egress_widened') return destined;
+  if (chainError === null) return destined;
+  if (chainError.code === 'egress_widened') {
+    note(
+      chainErrorMessage(chainError),
+      'Nothing was written. Correct the `[[observer.fallback]]` entry, then run setup again.',
+    );
+    return null;
+  }
   note(
     chainErrorMessage(chainError),
-    'Nothing was written. Correct the `[[observer.fallback]]` entry, then run setup again.',
+    // `admittedChain` returns at the first entry it refuses, so the entries after it were not
+    // examined. Saying so is cheaper and more honest than a second copy of the admission rules
+    // here, which would be the one to drift.
+    'The destination below is still selected, but no summary is generated until that entry is',
+    'corrected: the observer refuses a chain it cannot resolve, including its selected preset.',
+    'Entries after it were not checked.',
   );
-  return null;
+  return destined;
 }
 
 export async function runSetup(argv: string[], overrides: Partial<SetupDeps> = {}): Promise<number> {

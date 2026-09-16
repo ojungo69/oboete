@@ -246,6 +246,25 @@ test('a chain the configuration cannot use blocks neither capture-only nor rewir
   });
 });
 
+test('a fallback entry the destination cannot use is reported, and the destination is still written', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--provider', 'none', '--accept-egress']), 0, context.output);
+    // `[observer] model` is the primary's only, so an `ollama` entry without one can never resolve
+    // a model. It is inert while the primary is `none` — `admittedChain` reports the missing
+    // primary instead — and it stops the whole chain resolving once a real destination is selected,
+    // which leaves even the selected primary unusable.
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "ollama"\n`);
+
+    context.output = '';
+    assert.equal(await context.run(['--provider', 'workers-ai', '--accept-egress']), 0, context.output);
+    assert.match(context.output, /Fallback target 1 requires an observer model/);
+    assert.equal(loadConfig(context.paths).observer.preset, 'workers-ai',
+      'the destination the run selected is written; only a widening chain is refused');
+  });
+});
+
+
 test('a machine with no supported agent says that nothing was wired', async () => {
   await withTempHome(async (home) => {
     const userHome = join(home, 'user');
