@@ -1,0 +1,29 @@
+specs/009-memory-core/quickstart.md
+  s_892d4f75e21024::t_80ec045e90c1bd 1839-1841,1860-1898
+  s_892d4f75e21024::t_3d9c0a366d6faa 1899-1902
+src/observer/reservation.ts
+  s_892d4f75e21024::t_6e0dd02589ca10 53-55,58
+src/worker/observe-batch.ts
+  s_892d4f75e21024::t_6e0dd02589ca10 468-472
+src/worker/observe.ts
+  s_892d4f75e21024::t_6e0dd02589ca10 797-809,812
+  s_892d4f75e21024::t_68a41abdfd3c82 813
+src/doctor/provider.ts
+  s_892d4f75e21024::t_42fc16c37c24f0 509,548,559-561,563-566,577-582,617-621,630,640-643,646,658
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "602b55ceaf3450651239074a241948c05c8c704d",
+  "prompts": {},
+  "sessions": {
+    "s_892d4f75e21024": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79c129f3-aa1e-4d43-970b-c316e499606d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
