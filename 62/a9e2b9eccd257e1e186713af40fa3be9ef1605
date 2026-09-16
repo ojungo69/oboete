@@ -1,0 +1,30 @@
+test/helpers/agent-cli.ts
+  s_892d4f75e21024::t_0f290647bc86c3 18-25,46-48
+test/unit/doctor.test.ts
+  s_892d4f75e21024::t_f24ae3002b954c 928-947
+src/observer/reservation.ts
+  s_892d4f75e21024::t_0f290647bc86c3 42-44
+specs/009-memory-core/quickstart.md
+  s_892d4f75e21024::t_8558818d163833 1179-1184,1208-1259
+src/doctor/provider.ts
+  s_892d4f75e21024::t_2941bc6419b1a3 79-80,82,127-128,133,161,165,167,184,216,252,334-338,340,345,347,353-357,379-381,385,387
+  s_892d4f75e21024::t_3b5bd6411eddf5 225-228
+test/unit/callpolicy.test.ts
+  s_892d4f75e21024::t_f24ae3002b954c 257-268
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "62a9e2b9eccd257e1e186713af40fa3be9ef1605",
+  "prompts": {},
+  "sessions": {
+    "s_892d4f75e21024": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79c129f3-aa1e-4d43-970b-c316e499606d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
