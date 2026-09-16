@@ -1777,3 +1777,44 @@ the rerun.
 Gate at this head: `npm test` 1565 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
 markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
 `85d48437` adds nothing.
+
+### E9 follow-up: the whole-pull-request correctness review, and what the bot rounds did not reach
+
+Thirteen bot rounds had cleared `d78ea756` and the `ponytail-review` pass over `main...HEAD` had
+returned "lean", so the pre-merge gate's remaining item was a correctness review with `ok: true` on
+the final head. A `/code-review` pass over the **whole** pull request — not the round's delta —
+returned fourteen findings. Ten were adopted, four declined with a mechanism. The receipts:
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | `catalog` was pushed after the chain items, so three consequences that say "the fallback chain below" printed above it | adopted: `doctor.ts` order, plus an assertion that reads the report's own item names |
+| 2 | Nothing names the target that answered | declined: Verification 13 asks for one line per **failed** target |
+| 3 | A fallback entry on a preset with no `defaultModel` refuses the whole chain | declined: the refusal is the contract's; the arbitrary half is `agent-cli`'s and now named in #241 |
+| 4 | `oboete setup --provider none` over a chain reports nothing and leaves a configuration `resolveModel` always refuses | adopted |
+| 5 | A throw inside `processBatch` discards every attempt line already recorded | adopted: the caller owns the array |
+| 6 | An `ollama` target was reported "ready" with nothing checked behind it | adopted: `credential.kind === 'none'` answers `unverified`, as `agent-login` beside it already did |
+| 7 | `chainTargets`' egress test restated as "not wider than the label" | declined: that admits an `egress: 'none'` target the consent tuple authorizes for no classes at all |
+| 8 | `presetExhaustedAt` prepares its statement per call | adopted: the repository's own `prepared(db, sql)` cache |
+| 9 | The loop's consent check as amplification | declined: one extra evaluation on the path where the primary answers; it only repeats after two targets have failed |
+| 10 | `providerCapItem` builds a consent hash on the path that discards it | adopted |
+| 11 | Four places each derived "its own model, else the preset's default, trimmed" | adopted: `targetModel` is the one reader |
+| 12 | The consent screen prints the primary's classes for a target while the hash binds the target's own | **adopted, then reverted**: the contract's "Consent coverage" decides it, and states why the two differ. The defect was the `consent.ts` header, written before the chain existed, which claimed the hash binds the tuple shown. The header now names the one field that differs, and `config.test.ts` pins the asymmetry in both directions |
+| 13 | `?? 'excluded'` under `verdicts[index]` | adopted: it could only mislabel a target as excluded by a policy that would not help it |
+| 14 | `CHAIN_STOPS` holds two of the contract's three stop rows | adopted: the doc block now says why `language_mismatch` is not one |
+
+Three of the ten — 10, 11 and 13 — are `ponytail-review`-shaped, and the ponytail pass over the same
+range had missed them: it enumerated the abstractions the diff **adds** and checked each for a second
+caller, which is blind to work done on a path that discards it, to an expression duplicated across
+two files, and to a defaulting operator that cannot fire. The lesson is the same shape as
+`enumerate-the-claims-not-the-code-that-makes-them`, one axis further out.
+
+Finding 12 is the one to read twice. The reviewer's reasoning was sound and the fix passed its RED
+test; it was still wrong, because `contracts/provider-fallback.md` "Consent coverage" had already
+decided the question in the other direction with a reason ("they describe the destination, which is
+what consent binds"). The test that "failed" was the contract's own pin. Adopting it would have
+narrowed what a stored consent record covers for every chained install.
+
+**Scope of the `ok: true` that follows.** A second whole-pull-request pass is not the gate: 3,500
+lines at high effort returns twelve to thirteen findings every time
+(`whole-pr-rereview-does-not-converge`), and this pass is the record of the whole diff having been
+read. The `ok: true` is taken on the fix delta.
