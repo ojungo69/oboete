@@ -511,14 +511,14 @@ export function consentTuple(config: OboeteConfig, env: NodeJS.ProcessEnv = proc
   if (preset === 'none') {
     return { preset, host: '', credentialSource: 'none', costClass: 'none', egressClasses: [] };
   }
-  const primary = presetConsent(preset, config, env);
-  // A target receives the batch the selected preset's destination allowed and never more, so its
-  // classes are the primary's, not the wider set its own egress would carry. `consentDisplay`
-  // prints them that way (src/setup/consent.ts) and the hash has to bind the tuple that was shown.
+  // Each target contributes its own five facts, `egressClasses` included: the field describes the
+  // destination, which is what consent binds, while the line `consentDisplay` prints describes what
+  // is sent and is the primary's. The two differ on purpose and
+  // contracts/provider-fallback.md "Consent coverage" is where that is decided.
   const chain = admittedChain(config).targets
-    .map((target) => ({ ...presetConsent(target.preset, config, env), egressClasses: primary.egressClasses }));
+    .map((target) => presetConsent(target.preset, config, env));
   return {
-    ...primary,
+    ...presetConsent(preset, config, env),
     // FR-011 and US7 scenario 4: stored consent may not authorize a destination the user never saw.
     ...(chain.length === 0 ? {} : { chain }),
   };

@@ -362,13 +362,13 @@ test('an empty chain leaves the consent hash exactly where it was, and one targe
     host: PRESET_CATALOG.ollama.host,
     credentialSource: 'none',
     costClass: 'local',
-    // The batch is built for the primary's destination, so a target receives those classes and
-    // never its own wider set. `consentDisplay` prints it that way, and the hash has to bind the
-    // tuple that was shown (src/setup/consent.ts).
-    egressClasses: EGRESS_CLASSES.remote,
+    egressClasses: EGRESS_CLASSES.local,
   }]);
-  assert.deepEqual(tuple.chain![0].egressClasses, tuple.egressClasses,
-    'the hashed target must carry the classes the consent screen printed for it');
+  // Pinned in both directions so the next reader does not take it for a slip: the hashed field is
+  // the target's own capability, because that is what consent binds, while the line
+  // `consentDisplay` prints for the same target is the primary's, because that is all the batch
+  // carries (contracts/provider-fallback.md "Consent coverage", and consent.test.ts pins the line).
+  assert.notDeepEqual(tuple.chain![0].egressClasses, tuple.egressClasses);
   assert.notEqual(consentHash(tuple), WORKERS_AI_CONSENT);
   assert.equal(consentMatches(configSchema.parse({
     ...chained,

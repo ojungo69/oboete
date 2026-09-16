@@ -4,6 +4,12 @@
 // stops accepting `--yes` the moment any of those five change. The same hash is recomputed by
 // src/config.ts before every provider call (contracts/observer.md call policy 6); nothing in this
 // module is on the hook path.
+//
+// Those five fields are the primary's. A fallback target contributes the same five to the hash, but
+// one of them is printed differently on purpose: the hashed `egressClasses` are the target's own
+// capability, while the line shown for it is the primary's, because the chain never re-batches and
+// a target only ever receives what the primary's destination allowed
+// (contracts/provider-fallback.md "Consent coverage").
 import { chmodSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 
