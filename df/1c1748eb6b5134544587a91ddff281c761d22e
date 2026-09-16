@@ -1,0 +1,25 @@
+specs/009-memory-core/quickstart.md
+  s_892d4f75e21024::t_0a8dc04a81c93b 1125-1169,1171-1173,1176-1187,1197-1201
+  s_892d4f75e21024::t_dc0397bbfc7569 1170,1174-1175
+  s_892d4f75e21024::t_661d98e4f81394 1188-1196
+specs/009-memory-core/tasks.md
+  s_892d4f75e21024::t_3411f60c03c655 103-108
+specs/009-memory-core/contracts/provider-fallback.md
+  s_892d4f75e21024::t_5e9fba26178ff2 161-171,246-252,259-261
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "df1c1748eb6b5134544587a91ddff281c761d22e",
+  "prompts": {},
+  "sessions": {
+    "s_892d4f75e21024": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79c129f3-aa1e-4d43-970b-c316e499606d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
