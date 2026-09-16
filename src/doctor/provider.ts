@@ -182,6 +182,45 @@ type ProviderProbeReadiness =
   | DoctorItem
   | { kind: 'ready'; db: DatabaseSync; estimate: ReturnType<typeof usageEstimate> };
 
+/** `1 model` rather than `1 models`: these sentences are read by the user (CLAUDE.md "UI文言"). */
+function models(count: number): string {
+  return `${count} ${count === 1 ? 'model' : 'models'}`;
+}
+
+/**
+ * Why consent does not authorize this configuration. Two cases, not one: `consentMatches` also
+ * answers false when nothing was ever stored, and telling that user a record "changed" names a
+ * record they never made (src/config.ts).
+ */
+function consentSentence(config: OboeteConfig): string {
+  return config.consent.hash === undefined
+    ? 'this configuration has not been accepted for egress yet'
+    : 'the stored consent record no longer matches this configuration';
+}
+
+/**
+ * The primary's consent verdict, with the credential named when that is missing too. Consent comes
+ * first because it stops every batch while a missing credential skips one target, but the user
+ * needs both to get a summary, and a report that named one would send them back for the other.
+ */
+function unacceptedConsent(
+  config: OboeteConfig,
+  preset: Exclude<PresetName, 'none'>,
+  credentials: ReturnType<typeof readCredentials>,
+  env: NodeJS.ProcessEnv,
+): DoctorItem {
+  const steps = credentials.present ? '' : credentialSteps(config, env);
+  return degraded(
+    'provider',
+    credentials.present
+      ? `Consent does not cover the observer: ${consentSentence(config)}.`
+      : `Consent does not cover the observer: ${consentSentence(config)}, and no credentials are set`
+        + ` for the ${preset} preset (${credentials.source}).`,
+    FALLBACK_CONSEQUENCE,
+    steps === '' ? '`oboete setup --accept-egress`' : `\`oboete setup --accept-egress\`, and: ${steps}`,
+  );
+}
+
 /**
  * An uncredentialed primary is one failed target, not a run without a provider: the chain is still
  * attempted (contracts/provider-fallback.md "What the chain does not do").
@@ -243,24 +282,18 @@ function configuredProvider(
   );
   if (!('kind' in resolved)) return resolved;
 
-  if (!consentMatches(config, env)) {
-    // Ahead of the credential test, because the worker acts in that order: `attemptTargets` asks
-    // `consentOk()` before `providerCall` precisely so that a target with no credentials cannot
-    // answer `no_provider` first and "send the user to fix a credential when consent is what they
-    // must act on" (src/worker/observe-batch.ts). One hash covers the primary and the chain, so a
-    // stale record stops everything; a missing credential only skips this one target. It belongs
-    // here rather than only in `fallbackItems`, which has nothing to collapse when
-    // `[[observer.fallback]]` is empty, the schema's default. Answering before the probe is the
-    // point as well: a probe under a stale record can only come back `consent_changed`, and it
-    // would spend a reservation to say so.
-    return degraded(
-      'provider',
-      'Observer consent changed: the stored record no longer matches this configuration.',
-      FALLBACK_CONSEQUENCE,
-      '`oboete setup --accept-egress`',
-    );
-  }
   const credentials = readCredentials(preset, env, config.observer.agent_cli);
+  // Consent ahead of the credential, and naming the credential when both are missing. The worker
+  // acts in that order — `attemptTargets` asks `consentOk()` before `providerCall` precisely so a
+  // target with no credentials cannot answer `no_provider` first and "send the user to fix a
+  // credential when consent is what they must act on" (src/worker/observe-batch.ts) — but
+  // `initialProviderFailure` stamps `no_provider` on the batch in that case, so a report that named
+  // only one of the two would disagree with the pack the user is holding. It belongs here rather
+  // than only in `fallbackItems`, which has nothing to collapse when `[[observer.fallback]]` is
+  // empty, the schema's default. Answering before the probe is the point as well: a probe under an
+  // unaccepted configuration can only come back `consent_changed`, and it would spend a reservation
+  // to say so.
+  if (!consentMatches(config, env)) return unacceptedConsent(config, preset, credentials, env);
   if (!credentials.present) return uncredentialedPrimary(config, preset, credentials, env);
   return { kind: 'configured', config, preset, credentials, model: resolved.model };
 }
@@ -530,10 +563,10 @@ export function fallbackItems(
     // is where lizard's TypeScript reader loses the function boundary and reports this function's
     // span as the rest of the file (`lizard-ts-parse-swallows-after-angle-compare`).
     const configured = entries.length === 1 ? 'one entry is' : `${entries.length} entries are`;
+    const why = consentSentence(config);
     return [degraded(
       'fallback',
-      `No fallback target is attempted: ${configured} configured and the stored consent record no`
-      + ' longer matches this configuration.',
+      `No fallback target is attempted: ${configured} configured and ${why}.`,
       FALLBACK_CONSEQUENCE,
       '`oboete setup --accept-egress`',
     )];
@@ -635,53 +668,59 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
     return { ...unread, reason: `${where}. ${unread.reason}` };
   }
   const unverifiable = unverifiableTarget(catalog, config.observer.agent_cli);
+  // Before the allowance, because the two refusals are not the same kind: a model the account does
+  // not serve is wrong until the entry is edited, while a spent allowance resets at midnight UTC.
+  // `catalogItems` checks the *primary's* model and returns nothing at all when another preset is
+  // primary, so without this a chain entry naming an unserved model reads "admitted as free-tier
+  // and ready".
+  const listing = entry.preset === 'workers-ai'
+    ? catalogTargetItem(name, where, db, model, credentials.values.accountId ?? '', now)
+    : null;
+  if (listing !== null) return listing;
   // A refusal this item can read outranks one it cannot. `reserveAttempt` consults the exhaustion
   // stamp before it looks at `capped`, so an uncapped local target that reported exhaustion today
   // is refused on every attempt; reporting "not checked here" instead would call a known,
   // actionable state unknown.
   const refused = fallbackAllowanceItem(name, where, entry.preset, catalog, db, now);
   if (refused !== null) return refused;
-  // `catalogItems` checks the *primary's* model against the cached list and returns nothing at all
-  // when another preset is primary, so without this a chain entry naming a model the account does
-  // not serve reads "admitted as free-tier and ready" while the worker answers `model_alias` on it.
-  const listing = entry.preset === 'workers-ai' ? catalogTargetItem(name, where, db, model, env, now) : null;
-  if (listing !== null) return listing;
   return unverifiable === null
     ? healthy(name, `${where}, admitted as ${catalog.costClass} and ready.`)
     : unverified(name, `${where}, and ${unverifiable.reason}`, unverifiable.consequence, unverifiable.recovery);
 }
 
 /**
- * What the cached Workers AI catalog says about a chain target's model, or null when it lists it.
- * The freshness tests are `catalogItems`'s: a cache from another account or older than `CACHE_MS`
- * is one the worker replaces on its next batch, so it cannot refuse a model either — that is a
- * `warning` only when the list is current, and "not checked here" otherwise.
+ * The cached Workers AI catalog's verdict on a chain target's model, or null when it has none to
+ * give. Silent unless the list could refuse the model: the worker fetches the catalog only when
+ * `workers-ai` is the **primary** (`refreshCatalog`, src/worker/observe.ts), so a chain-only
+ * Workers AI target may have no cache at all and an item telling the user to run `oboete observe`
+ * would never come true (issue #250). A cache from another account or past `CACHE_MS` is one the
+ * worker replaces on its next batch, so it may not refuse a model either.
  */
 function catalogTargetItem(
   name: string,
   where: string,
   db: DatabaseSync,
   model: string,
-  env: NodeJS.ProcessEnv,
+  accountId: string,
   now: number,
 ): DoctorItem | null {
   const cache = cachedCatalog(db);
-  const accountId = readCredentials('workers-ai', env).values.accountId ?? '';
-  if (cache === null || cache.accountId !== accountId || now < cache.fetchedAt || now - cache.fetchedAt >= CACHE_MS) {
-    return unverified(
-      name,
-      `${where}, and whether this account serves that model is not checked here: no fresh catalog is cached.`,
-      'A model the account does not serve fails its attempt with `model_alias`, and the chain moves past it.',
-      '`oboete observe` fetches the catalog on the first batch; run `oboete doctor` again after that.',
-    );
-  }
+  if (cache === null || cache.accountId !== accountId || catalogIsStale(cache, now)) return null;
   if (cache.models.includes(model)) return null;
   return warning(
     name,
-    `${where}, which is not in the cached catalog of ${cache.models.length} models fetched ${iso(cache.fetchedAt)}.`,
-    'The target fails its attempt with `model_alias`, so the chain moves straight past it.',
+    `${where}, which is not in the cached catalog of ${models(cache.models.length)} fetched ${iso(cache.fetchedAt)}.`,
+    // `unreachable`, not `model_alias`: an unserved model answers with an HTTP status
+    // `classifyApiError` has no row for, and `model_alias` is a *successful* call that named
+    // another model (src/observer/llm-errors.ts, src/observer/llm.ts).
+    'The target fails its attempt with `unreachable`, so the chain moves straight past it.',
     'Point the entry at a listed model, or remove it from the chain.',
   );
+}
+
+/** One reading of the cache's age, shared with the primary's catalog item. */
+function catalogIsStale(cache: NonNullable<ReturnType<typeof cachedCatalog>>, now: number): boolean {
+  return now < cache.fetchedAt || now - cache.fetchedAt >= CACHE_MS;
 }
 
 /**
@@ -885,7 +924,7 @@ function catalogCacheItems(
       ),
     ];
   }
-  if (now < cache.fetchedAt || now - cache.fetchedAt >= CACHE_MS) {
+  if (catalogIsStale(cache, now)) {
     return [
       unverified(
         'catalog',
@@ -908,7 +947,7 @@ function catalogModelItems(
     return [
       degraded(
         'catalog',
-        `The configured model is not in the catalog of ${cache.models.length} models fetched ${iso(cache.fetchedAt)}.`,
+        `The configured model is not in the catalog of ${models(cache.models.length)} fetched ${iso(cache.fetchedAt)}.`,
         // `model_alias` advances the chain, so an admitted target takes the batch rather than the
         // rules (contracts/provider-fallback.md "Advance and stop").
         refusedPrimaryConsequence(
@@ -939,7 +978,7 @@ function catalogModelItems(
   return [
     healthy(
       'catalog',
-      `The catalog of ${cache.models.length} models fetched ${iso(cache.fetchedAt)} includes the configured model.`,
+      `The catalog of ${models(cache.models.length)} fetched ${iso(cache.fetchedAt)} includes the configured model.`,
     ),
   ];
 }

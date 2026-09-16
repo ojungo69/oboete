@@ -554,7 +554,7 @@ test('the fallback chain is reported per target without a second provider reques
       readFileSync(context.paths.config, 'utf8')
         .replace('cost_policy = ["free-tier", "local"]', 'cost_policy = ["free-tier", "local", "remote"]'));
     await context.doctor(['--json', '--probe-provider']);
-    assertBroken(context.item('provider'), 'degraded', 'consent changed');
+    assertBroken(context.item('provider'), 'degraded', 'Consent does not cover the observer');
   });
 });
 
@@ -586,7 +586,7 @@ test('an advancing probe failure says the chain takes the batch, and a stop reas
     writeFileSync(context.paths.config,
       readFileSync(context.paths.config, 'utf8').replace(hash, 'not-the-tuple'));
     assert.equal(await context.doctor(['--json', '--probe-provider']), 1, context.output);
-    assertBroken(context.item('provider'), 'degraded', 'consent changed');
+    assertBroken(context.item('provider'), 'degraded', 'Consent does not cover the observer');
     assert.match(context.item('provider').consequence, /waits for the provider/);
   });
 });
@@ -1413,8 +1413,10 @@ test('a primary missing both its credential and its consent names the consent', 
       integrityFailed: false, deps: itemDeps, options: itemOptions, now: ITEM_NOW,
     });
     assert.equal(item.status, 'degraded');
-    assert.match(item.reason, /Observer consent changed/);
-    assert.equal(item.recovery, '`oboete setup --accept-egress`');
+    // Both blockers in one item: `initialProviderFailure` stamps `no_provider` on the batch while
+    // the chain stops on consent, so naming only one would disagree with the pack the user holds.
+    assert.match(item.reason, /has not been accepted for egress yet, and no credentials are set for the openrouter preset/);
+    assert.match(item.recovery, /^`oboete setup --accept-egress`, and: /);
   });
 });
 
@@ -1439,11 +1441,11 @@ test('changed provider consent stops a doctor probe before reserving allowance',
       deps: { ...itemDeps, env: { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' } },
       options: itemOptions, now: ITEM_NOW,
     }), {
-      // Answered before the probe: `configuredProvider` reads consent where the worker's
-      // `initialProviderFailure` does, so no reservation is taken for a call that could only come
-      // back `consent_changed`.
+      // Answered before the probe, so no reservation is taken for a call that could only come
+      // back `consent_changed` — and worded for what is true of this fixture: nothing was ever
+      // stored, so no record "changed".
       item: 'provider', status: 'degraded',
-      reason: 'Observer consent changed: the stored record no longer matches this configuration.',
+      reason: 'Consent does not cover the observer: this configuration has not been accepted for egress yet.',
       consequence: 'Temporary guidance is available while source processing waits for the provider.',
       recovery: '`oboete setup --accept-egress`',
     });
@@ -1605,7 +1607,7 @@ for (const [name, fetchedAt] of [['an expired', ITEM_NOW - 86_400_000], ['a futu
 
 for (const [name, models, paid, expected] of [
   ['a missing model', ['another-model'], false, {
-    status: 'degraded', reason: 'The configured model is not in the catalog of 1 models fetched 2026-09-06T12:00:00.000Z.',
+    status: 'degraded', reason: 'The configured model is not in the catalog of 1 model fetched 2026-09-06T12:00:00.000Z.',
     consequence: 'Summaries fall back to rule-based until `[observer] model` names a listed model.', recovery: 'Set `[observer] model` to a listed model.',
   }],
   ['paid models', ['chosen-model'], true, {
@@ -1613,7 +1615,7 @@ for (const [name, models, paid, expected] of [
     consequence: 'A paid-only model will fail with provider_paid and fall back to rule-based summaries.', recovery: 'Keep `[observer] model` on a free model.',
   }],
   ['a listed model', ['chosen-model'], false, {
-    status: 'healthy', reason: 'The catalog of 1 models fetched 2026-09-06T12:00:00.000Z includes the configured model.', consequence: '', recovery: '',
+    status: 'healthy', reason: 'The catalog of 1 model fetched 2026-09-06T12:00:00.000Z includes the configured model.', consequence: '', recovery: '',
   }],
 ] as const) {
   test(`a fresh catalog reports ${name}`, async () => {
@@ -1732,7 +1734,7 @@ test('a stale consent record with a configured chain fails the report instead of
     assert.equal(await context.doctor(['--json']), 1, context.output);
     assertBroken(context.item('fallback'), 'degraded', 'one entry is configured',
       'setup --accept-egress');
-    assertBroken(context.item('provider'), 'degraded', 'Observer consent changed',
+    assertBroken(context.item('provider'), 'degraded', 'no longer matches this configuration',
       'setup --accept-egress');
   });
 });
@@ -1754,7 +1756,7 @@ test('a stale consent record is reported with no chain configured at all', async
     writeFileSync(context.paths.config,
       readFileSync(context.paths.config, 'utf8').replace(hash, 'not-the-tuple'));
     assert.equal(await context.doctor(['--json']), 1, context.output);
-    assertBroken(context.item('provider'), 'degraded', 'Observer consent changed',
+    assertBroken(context.item('provider'), 'degraded', 'no longer matches this configuration',
       'setup --accept-egress');
     assert.deepEqual(context.report().items.filter((entry) => entry.item.startsWith('fallback')), [],
       'no chain is configured, so no chain item exists to carry this');
@@ -1768,25 +1770,28 @@ test('a Workers AI chain target is checked against the cached catalog, not calle
     // free-tier and ready" while the worker answers `model_alias` on it.
     const config = consented({ preset: 'workers-ai', model: 'primary-model',
       cost_policy: ['free-tier'], fallback: [{ preset: 'workers-ai', model: 'chosen-model' }] });
-    const listed = (models: string[], fetchedAt = ITEM_NOW): DoctorItem => {
+    const listed = (models: string[], fetchedAt = ITEM_NOW, accountId = 'account'): DoctorItem => {
       runtimeStateSet(db, 'workers_ai_catalog', JSON.stringify({
-        accountId: 'account', models, defaultModelPresent: false, hasPaidOnlyModels: false, fetchedAt,
+        accountId, models, defaultModelPresent: false, hasPaidOnlyModels: false, fetchedAt,
       }), ITEM_NOW);
       return fallbackItems(config, db, false, ITEM_ENV, ITEM_NOW)[0];
     };
+    const ready = /admitted as free-tier and ready/;
 
-    // No cache at all: nothing here can check it, and saying so is not the same as refusing it.
-    const uncached = fallbackItems(config, db, false, ITEM_ENV, ITEM_NOW)[0];
-    assert.equal(uncached.status, 'unverified', uncached.reason);
-    assert.match(uncached.reason, /no fresh catalog is cached/);
+    // No cache at all is silent: the worker fetches the catalog only for a workers-ai *primary*
+    // (issue #250), so an item telling this user to run `oboete observe` would never come true.
+    assert.match(fallbackItems(config, db, false, ITEM_ENV, ITEM_NOW)[0].reason, ready);
 
-    assertBroken(listed(['other-model']), 'warning', 'not in the cached catalog of 1 models',
+    assertBroken(listed(['other-model']), 'warning', 'not in the cached catalog of 1 model',
       'Point the entry at a listed model');
-    // A stale cache is one the worker replaces on its next batch, so it may not refuse a model.
-    const stale = listed(['other-model'], ITEM_NOW - CACHE_MS);
-    assert.equal(stale.status, 'unverified', stale.reason);
+    // The three caches that may not refuse a model, each silent for its own reason: one the worker
+    // replaces because it is too old, one dated in the future, one belonging to another account.
+    assert.match(listed(['other-model'], ITEM_NOW - CACHE_MS).reason, ready);
+    assert.match(listed(['other-model'], ITEM_NOW + 1).reason, ready);
+    assert.match(listed(['other-model'], ITEM_NOW, 'other-account').reason, ready);
     // And the other direction, so the check cannot pass by doubting everything.
-    assert.equal(listed(['chosen-model']).status, 'healthy', listed(['chosen-model']).reason);
+    const ok = listed(['chosen-model']);
+    assert.equal(ok.status, 'healthy', ok.reason);
   });
 });
 

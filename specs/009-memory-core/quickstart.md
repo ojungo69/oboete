@@ -2228,17 +2228,58 @@ record, and a new test pins the order.
 
 **A Workers AI chain target was called ready without consulting the catalog.** `catalogItems`
 validates the *primary's* model and returns nothing at all when another preset is primary, so
-`fallback:1 … admitted as free-tier and ready` was printed for a model the account does not serve —
-the worker answers `model_alias` on it and moves past. `catalogTargetItem` now reads the same cached
-list, with `catalogItems`'s own freshness rules: a current list that omits the model is a `warning`
-naming it, a missing, foreign-account or stale list is `unverified` ("not checked here"), because a
-cache the worker is about to replace may not refuse anything. Pinned in all three directions,
-including the listed-model case so the check cannot pass by doubting everything.
+`fallback:1 … admitted as free-tier and ready` was printed for a model the account does not serve.
+`catalogTargetItem` now reads the same cached list under the same freshness rule, and says nothing
+unless that list could refuse the model — see the round below, which corrected both the failure code
+this item names and the states it was willing to speak in.
 
 Gate at this head: `npm test` 1573 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
 markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged; the lizard warning set
 differenced against `85d48437` adds nothing (`fallbackTargetItem` 39, `catalogTargetItem` 27,
 `configuredProvider` 44).
+
+### E9 follow-up — the catalog verdict was written for data that is never there
+
+Twelve findings on the round above; six adopted, one filed, five declined. The two that matter are
+both about the check written to close a Codex finding, which is the shape
+`fix-can-be-worse-in-another-dimension` warns about.
+
+**The recovery it printed could never come true.** `refreshCatalog` fetches the Workers AI model
+list only when Workers AI is the **primary** (`src/worker/observe.ts`), so the configuration the
+check was written for — another preset primary, a `workers-ai` chain entry — never caches a list at
+all. Every run would have printed `no fresh catalog is cached` with "run `oboete observe`, then
+`oboete doctor` again", and the second run would print it again. The item is silent in every cache
+state that cannot refuse a model now, and speaks only when a current list for this account omits it.
+The worker-side gap is **#250**; when it closes, this item starts answering with no change of its
+own.
+
+**It named the wrong failure code.** An unserved Workers AI model returns a status
+`classifyApiError` has no row for, so the attempt records `unreachable`; `model_alias` is a
+*successful* call that answered with a different model id (`src/observer/llm.ts`). Corrected in the
+item, the contract and this document.
+
+**"Observer consent changed" for a record that never existed.** `consentMatches` also answers false
+when `[consent] hash` is absent, which is every install that has not run `setup --accept-egress`
+yet, so the first thing a half-configured install read was that a stored record no longer matched.
+Two sentences now, chosen by whether a hash exists, shared by the `provider` item and the collapsed
+`fallback` one. And the same item names the missing credential when both are missing — Codex's
+original finding asked for the order *or* both recoveries, and taking only the order left
+`initialProviderFailure` stamping `no_provider` on the batch while the report talked about consent.
+
+**Also adopted:** the catalog check runs ahead of the allowance one, because an unlisted model is
+wrong until the entry is edited while a spent allowance resets at midnight; `catalogIsStale` is one
+function shared with the primary's item instead of a second copy of the same two clauses; the
+credentials the caller already read are passed in rather than read again; `models(n)` makes it
+"1 model"; and the modified fixture uses the file's own `consented()` helper.
+
+**Declined.** Mirroring the primary's paid-plan warning onto every chain entry: `hasPaidOnlyModels`
+is an account-level flag, not a property of the entry's model, so it would mark targets that are
+entirely free — and it can only be true in configurations where the primary is Workers AI, where the
+`catalog` item already says it once.
+
+Gate at this head: `npm test` 1573 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged; the lizard warning set
+differenced against `85d48437` adds nothing.
 
 Gate at the previous head: `npm test` 1570 + 280 green on Node 24.16.0 and 22.23.1, each after one
 load-only rerun — `grok-no-tool` saw `pending` where `omitted` was expected (issue #243, the same

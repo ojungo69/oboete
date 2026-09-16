@@ -274,10 +274,15 @@ column cannot hold go to the observe log, one line per attempted target.
   `setup` checks it; and a **capped** target is a warning once the shared allowance is spent, which
   `allowanceItem` reports only when the *primary* is capped. A **Workers AI** target adds a third:
   its model is checked against the cached catalog, because `catalogItems` validates the primary's
-  model and returns nothing at all when another preset is primary. A current list that omits the
-  model makes the target a warning naming it, since the worker answers `model_alias` there and moves
-  past; a missing, foreign-account or stale list leaves it `unverified`, because a cache the worker
-  replaces on its next batch may not refuse a model. The two halves of that verdict come
+  model and returns nothing at all when another preset is primary. A current list for this account
+  that omits the model makes the target a warning naming it — the attempt answers `unreachable`,
+  since `classifyApiError` has no row for the status an unserved model returns and `model_alias` is
+  a *successful* call that named another model — and the target is reported the way it was
+  otherwise in every other cache state, because a missing, foreign-account or stale list is one the
+  worker replaces and may not refuse anything. The catalog is fetched only for a `workers-ai`
+  **primary** today, so a chain-only Workers AI target has no list to check against at all
+  (issue #250); the check is silent there rather than printing a recovery that would never come
+  true. The two halves of that verdict come
   from different places on purpose: a target's `exhausted_at` is read from its own
   `provider_usage` row (`presetExhaustedAt`), while the spent-allowance warning comes from the
   shared call count alone (`usageEstimate`). A day-wide exhaustion flag would let one preset's
