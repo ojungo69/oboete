@@ -158,7 +158,17 @@ For each target, in order:
    per-preset, so the reservation is what makes "shared quota versus per-target failure" (T048's
    phrase) come out right without any new accounting. A refusal writes nothing: `reserveAttempt`
    returns `daily_cap` or `provider_exhausted` before `recordProviderAttempt` and before the
-   `provider_attempts` increment (`src/observer/reservation.ts:71-82`).
+   `provider_attempts` increment (`src/observer/reservation.ts`).
+
+   **Every target reserves, capped or not.** `capped: false` skips the shared-cap check and nothing
+   else, because the reservation is also the fence: it is what sets `state = 'running'` and
+   restamps `claimed_at`, which is what gives an in-flight call the 120 s `reclaimStale` grants
+   before another worker may take the batch (`RECLAIM_AFTER_MS` in `src/worker/batches.ts`). A
+   target that skipped it would run with the batch still `pending`, which `adoptPendingBatches`
+   takes over at once and without any wait — so an `own-subscription` target would pay a second
+   time for the same payload whenever a worker died with its child process in flight. `claimed_at`
+   is therefore restamped at the reservation and not only at batch creation; a batch created
+   minutes earlier would otherwise be reclaimable the instant it started running.
 4. `providerCall` and `settleProviderOutcome` for that target, unchanged. Each target keeps its own
    output retries and its own single language-mismatch retry; the chain adds no retry of its own.
 
@@ -233,14 +243,22 @@ column cannot hold go to the observe log, one line per attempted target.
   `provider_usage.exhausted_at` if set. Two verdicts it does not overstate: an `agent-cli` target is
   `unverified` rather than ready, because `readCredentials` calls an agent login present and only
   `setup` checks it; and a **capped** target is a warning once the shared allowance is spent, which
-  `allowanceItem` reports only when the *primary* is capped.
+  `allowanceItem` reports only when the *primary* is capped. The two halves of that verdict come
+  from different places on purpose: a target's `exhausted_at` is read from its own
+  `provider_usage` row (`presetExhaustedAt`), while the spent-allowance warning comes from the
+  shared call count alone (`usageEstimate`). A day-wide exhaustion flag would let one preset's
+  stamp answer for a preset that reported nothing, which is why `usageEstimate` carries no such
+  field. Consent is not part of a target's verdict — it is one hash over the primary and the whole
+  chain, and the `consent` item is where a mismatch is reported.
 
 ## What the chain does not do
 
 - **A primary the resolver refuses leaves no chain to try.** `resolveModel` throws on
   `model_required`, `egress_widened` and `chain_without_primary`, and `resolveObserveModel`
   (`src/worker/observe.ts:420-429`) turns that into a run with no model and no targets, so every
-  batch is rule-based with `no_provider` and `oboete doctor` is where the user learns why. Absent
+  batch is rule-based with `no_provider` and `oboete doctor` is where the user learns why: the
+  `provider` item carries that sentence whether or not a chain is configured, and the chain report
+  replaces its per-target items with the same one rather than calling any target ready. Absent
   *credentials* are not that case: the destination label comes from the primary's egress class alone
   (`destinationFor` in `src/worker/batches.ts:400-415` reads `PRESET_CATALOG[preset].egress`, never
   the secret), so the loop is reached and the uncredentialed primary is just the first target to

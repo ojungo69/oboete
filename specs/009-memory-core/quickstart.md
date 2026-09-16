@@ -1122,3 +1122,80 @@ accepted` (`setup.test.ts`): a target written in after consent was stored refuse
 2, prints the target's host before it is accepted, and leaves the stored hash alone until
 `--accept-egress` re-records it. `the display names every fallback target the consent hash binds`
 (`consent.test.ts`) pins that a policy-excluded target is not displayed as a destination.
+
+### E9 follow-up — the second bot round, and the shape it opened
+
+Head `2129c357` drew three P2 findings from Codex's PR reviewer, all three confirmed against the
+source and the contract before anything was changed, and all three fixed here. Reading them opened
+one shape with five instances, so the fix is the shape, not the three lines:
+
+1. **A day-wide exhaustion flag answered for one preset.** `usageEstimate` returned
+   `exhausted: MAX(exhausted_at) over every capped preset`, and four single-preset callers read it:
+   `fallbackAllowanceItem` (Codex's finding), plus `providerCapItem`, `doctorReserve` and
+   `allowanceEstimateItem`. `doctorReserve`'s was not cosmetic — it refused the probe's own
+   reservation, so `oboete doctor --probe-provider` silently never called a primary that had its
+   full allowance. The field is gone; `presetExhaustedAt(db, preset, now)` is exported from
+   `src/observer/reservation.ts` and is the one reader of the stamp, including inside
+   `reserveAttempt`, which had its own copy of the query.
+2. **Doctor reported a fallback target ready under a primary the resolver refuses.** `admittedChain`
+   validates the entries only, so `preset = "ollama"` with no `[observer] model` (its catalog
+   default is empty) reported `fallback:1 … admitted as local and ready` while the worker degraded
+   every batch with `no_provider`. Both surfaces now ask `resolveModel`, the worker's own resolver:
+   the chain report replaces its per-target items with one degraded item, and the `provider` item
+   carries the same sentence — which is the half that matters when no chain is configured at all,
+   because `fallbackItems` returns nothing then. The same guard closes a case the reviewer did not
+   name: a chain entry that widens egress takes the primary down with it, so a probed
+   `provider healthy` used to contradict a `fallback degraded` in the same report.
+3. **An `agent-cli` target spawned the paid child process without a reservation.**
+   `summarizeWithAgentCli` never called `ctx.reserve`, so the batch stayed `pending` through the
+   call. `adoptPendingBatches` takes a `pending` batch over with no wait at all, while
+   `reclaimStale` fences a `running` one for 120 s — so a worker that died with the CLI in flight
+   had its subscription spent again at once. It now takes the same `prepareProviderReservation` the
+   HTTP targets take, which also gives it their second consent boundary. Two unit tests pinned the
+   defect as an invariant (`reserve: () => assert.fail('agent-cli must not reserve')`); the contract
+   never exempted an uncapped target from step 3, so the pins were stale and are now the opposite
+   assertion.
+4. **The fence those three lean on was measured from the wrong moment.** `claimed_at` was stamped
+   once, at batch creation, and `adoptPendingBatches` only `COALESCE`s it, so `reclaimStale`'s 120 s
+   was already spent for any batch created more than two minutes before its attempt — for every
+   preset, not just `agent-cli`. `reserveAttempt` now restamps it with the attempt. Without this the
+   contract sentence added for item 3 would have been false.
+
+Deliberately not changed: the `fallback:N` items say nothing about consent, because consent is one
+hash over the primary and the whole chain and the `consent` item is the surface that reports a
+mismatch (contract "Diagnostics"). Filed instead of fixed: doctor calls the shared cap spent at
+`remaining === 0`, while `reserveAttempt` already refuses `ten_turns` and `retention` at
+`DAILY_CAP - SESSION_END_RESERVE`, so between 140 and 150 calls doctor reports an allowance the
+worker will not grant. That is pre-existing, it is a wording decision about a trigger doctor cannot
+see, and it is issue #240.
+
+- Gate at this head: `npm run typecheck`, `npm run lint`, `markdownlint-cli2` and
+  `semgrep scan --config auto` over the three changed source files all exit 0 with 0 findings.
+  `npm test` green on Node 24.16.0 and on Node 22.23.1 (the 22.x line installed here; CI's
+  `engine (22.16.0)` job covers the engines floor): 1545 + 280 tests, 0 fail, 2 skipped,
+  `NPM_TEST_EXIT=0` on both.
+- Each of the five was written as a failing test first, and each failed for its own reason before
+  the fix: `one capped preset's exhaustion is neither another's nor the shared allowance`,
+  `a primary the resolver refuses leaves no fallback target to call ready`,
+  `the provider item names a primary the resolver refuses, with or without a chain`
+  (`doctor.test.ts`); `agent-cli is uncapped, consented, reserves its attempt and validates the CLI
+  text as observer JSON`, `a refused reservation stops agent-cli before the paid child process
+  runs`, `a consent change after the agent-cli reservation stops the chain before the child
+  process` (`llm.test.ts`); `an agent-cli target reserves its attempt before the paid child process
+  runs` (`provider-fallback.test.ts`); `a reservation restamps claimed_at so the reclaim timer runs
+  from the attempt` and `usageEstimate reports the shared capped calls and reset; exhaustion stays
+  per preset` (`callpolicy.test.ts`).
+- The worker-level test for item 3 was green on Node 24 and stalled on Node 22 with
+  `Promise resolution is still pending but the event loop has already resolved`, deterministically
+  and in isolation. Not a flake and not a Node difference in the product: the shared agent-CLI spawn
+  stub answered *every* command, so the `git rev-parse` that `updateBatchCitations` runs after a
+  batch applies was handed a scripted CLI reply, and the pass stopped inside `checkpointBatch`
+  without reporting anything. Node 24 hid it by delivering the stream events in an order that let
+  the stub's failure land inside the `catch`. The stub now fakes only `claude`, `codex` and `grok`
+  and hands every other command to the real `spawn`, which is what the two unit tests using it
+  always assumed.
+- One existing fixture was relying on the second defect: `a fallback target is not called ready when
+  its allowance is gone or its login is unchecked` configured `preset = "agent-cli"` with no model,
+  which the resolver refuses, so its capped-target warning was only reachable while doctor ignored
+  the primary. It now names a model, which is what makes the uncapped-primary case it was written
+  for real.

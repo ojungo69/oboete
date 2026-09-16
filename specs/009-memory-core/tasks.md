@@ -100,9 +100,12 @@ T037-T039 and T048 share one contract, `contracts/provider-fallback.md`, and one
 Evidence for all four is `quickstart.md` section E9 and its fifteen numbered items, against the
 contract's verification list. T037 is `provider-fallback.test.ts` plus the two setup tests named
 there; T039 is the two doctor tests plus the packed-CLI gates in the same section. T038 needed **no
-new accounting**: `src/observer/reservation.ts` is unchanged, because `provider_usage.exhausted_at`
-is already per-preset and `DAILY_CAP` is already summed over the capped presets, so each target
-refuses at its own reservation with no write. The cost policy is `observer.cost_policy` in
+new accounting**: `provider_usage.exhausted_at` is already per-preset and `DAILY_CAP` is already
+summed over the capped presets, so each target refuses at its own reservation with no write. It did
+need two corrections in `src/observer/reservation.ts`, both recorded in E9's follow-up: the
+per-preset stamp is now one exported reader (`presetExhaustedAt`) instead of a day-wide flag every
+single-preset caller could misread, and a reservation restamps `claimed_at` so the reclaim timer
+runs from the attempt rather than from batch creation. The cost policy is `observer.cost_policy` in
 `src/config.ts` with `admittedChain` as its one reader, and `fallbackItems` in
 `src/doctor/provider.ts` reports each target's verdict.
 
