@@ -1623,3 +1623,36 @@ one target rather than about the batch, so it is not in the family.
 Gate at this head: `npm test` 1557 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
 markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
 `85d48437` adds nothing.
+
+### E9 follow-up — the tenth bot round, including two the sweep missed
+
+Three P2s, all taken. Two of them are instances of the shape the sweep above claimed to have closed,
+which is the sweep's own lesson: enumerating the *surfaces* was not enough, because one surface had
+a branch the enumeration did not open and another had its sentence in a constant.
+
+- **`CHAINED_CONSEQUENCE` promised the chain would summarize.** Admission is not runnability: a
+  `workers-ai` primary with no credentials followed by a `nim` target with no credentials admits a
+  target that also answers `no_provider`, after which the batch is rule-based. The sentence the
+  sweep wrote for the allowance says the batch is *offered* to the chain for exactly this reason;
+  the constant written three rounds earlier still said "summarized by". It says "offered" now, and
+  every target's own verdict stays `fallback:N`'s to report.
+- **The exhaustion branch of `allowanceEstimateItem` still hard-coded `ALLOWANCE_CONSEQUENCE`.** The
+  sweep made the *cap* branch of that function chain-aware and left the branch immediately above it
+  alone. `exhausted_at` is per preset, so the chain's next target is unaffected and the worker
+  advances past `provider_exhausted` — the allowance item was the only surface still saying the
+  queue waits.
+- **A target whose answer `applyObservations` refuses had no attempt line.** A required progress
+  decision the detector rejects mints `unusable_output` *after* the provider call, so — unlike the
+  stopped-pass case declined in the fourth round — no reservation row ties that reason to a target.
+  The log therefore named every target that failed to answer and then a batch reason nothing
+  accounted for. `processBatch` remembers which target answered and appends its line when the apply
+  refuses it. Red before the fix, with the ollama line absent:
+
+  ```text
+  provider attempt … position=0 preset=workers-ai … reason=provider_exhausted
+  batch … state=fallback reason=unusable_output
+  ```
+
+Gate at this head: `npm test` 1559 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing.
