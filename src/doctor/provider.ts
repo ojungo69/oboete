@@ -506,12 +506,11 @@ type FallbackTarget = {
 function unadmittedEntryItem(
   name: string,
   where: string,
-  preset: PresetName,
+  catalog: (typeof PRESET_CATALOG)[PresetName],
   verdict: ChainVerdict,
   config: OboeteConfig,
   env: NodeJS.ProcessEnv,
 ): DoctorItem | null {
-  const catalog = PRESET_CATALOG[preset];
   if (verdict === 'covered') {
     // Adding the cost class cannot make a duplicate runnable, so this verdict must not recommend it.
     return warning(
@@ -546,7 +545,7 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
   const catalog = PRESET_CATALOG[entry.preset];
   const model = targetModel(entry.preset, entry.model);
   const where = `Target ${position} is ${entry.preset} with model ${model}`;
-  const unadmitted = unadmittedEntryItem(name, where, entry.preset, verdict, config, env);
+  const unadmitted = unadmittedEntryItem(name, where, catalog, verdict, config, env);
   if (unadmitted !== null) return unadmitted;
   const credentials = readCredentials(entry.preset, env, config.observer.agent_cli);
   if (!credentials.present) {
@@ -557,8 +556,14 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
       'Set that credential in the shell that runs the agents, or remove the entry from the chain.',
     );
   }
+  const unverifiable = unverifiableTarget(catalog, config.observer.agent_cli);
+  const unverifiableItem = (): DoctorItem =>
+    unverified(name, `${where}, and ${unverifiable!.reason}`, unverifiable!.consequence, unverifiable!.recovery);
   if (db === null) {
-    return dbUnread(
+    // No storage is no allowance verdict, so a target whose runnability nothing here checks says
+    // that instead of naming a record it does not have — `ollama` is uncapped and would be told to
+    // wait for an allowance it never spends.
+    return unverifiable !== null ? unverifiableItem() : dbUnread(
       name,
       integrityFailed,
       `${where}, and today's allowance record could not be read.`,
@@ -566,15 +571,15 @@ function fallbackTargetItem(input: FallbackTarget): DoctorItem {
       '`oboete doctor` after storage is repaired.',
     );
   }
-  const allowance = fallbackAllowanceItem(name, where, entry.preset, catalog, db, now);
-  const unverifiable = unverifiableTarget(catalog, config.observer.agent_cli);
   // A refusal this item can read outranks one it cannot. `reserveAttempt` consults the exhaustion
   // stamp before it looks at `capped`, so an uncapped local target that reported exhaustion today
   // is refused on every attempt; reporting "not checked here" instead would call a known,
-  // actionable state unknown. Only the ready verdict rests on nothing, so only it is downgraded.
-  return allowance.status === 'healthy' && unverifiable !== null
-    ? unverified(name, `${where}, and ${unverifiable.reason}`, unverifiable.consequence, unverifiable.recovery)
-    : allowance;
+  // actionable state unknown.
+  const refused = fallbackAllowanceItem(name, where, entry.preset, catalog, db, now);
+  if (refused !== null) return refused;
+  return unverifiable !== null
+    ? unverifiableItem()
+    : healthy(name, `${where}, admitted as ${catalog.costClass} and ready.`);
 }
 
 /**
@@ -609,9 +614,11 @@ function unverifiableTarget(
 }
 
 /**
- * The allowance half of a target's verdict: its own exhaustion stamp first, then the allowance all
- * capped presets share — which `allowanceItem` only reports when the *primary* is capped, so a
- * capped target under an uncapped primary has no other surface to say it.
+ * What today's allowance refuses this target, or null when it refuses nothing: its own exhaustion
+ * stamp first, then the allowance all capped presets share — which `allowanceItem` only reports when
+ * the *primary* is capped, so a capped target under an uncapped primary has no other surface to say
+ * it. A refusal rather than an item, so the caller decides what a target with nothing refused is
+ * called without reading a status string back out of one.
  */
 function fallbackAllowanceItem(
   name: string,
@@ -620,7 +627,7 @@ function fallbackAllowanceItem(
   catalog: (typeof PRESET_CATALOG)[PresetName],
   db: DatabaseSync,
   now: number,
-): DoctorItem {
+): DoctorItem | null {
   const exhaustedAt = presetExhaustedAt(db, preset, now);
   if (exhaustedAt !== null) {
     return warning(
@@ -630,9 +637,13 @@ function fallbackAllowanceItem(
       'Wait for the reset, or reorder the chain so a target with allowance comes first.',
     );
   }
+  // Only a preset that shares the allowance reads it: the answer is the same for every target in
+  // one report, and an uncapped target cannot use it (`src/observer/reservation.ts` refuses on the
+  // stamp above whatever the cap is, and on the shared count only when `capped`).
+  if (!catalog.capped) return null;
   const estimate = usageEstimate(db, now);
   const shared = sharedAllowance(estimate);
-  if (catalog.capped && shared !== 'open') {
+  if (shared !== 'open') {
     return warning(
       name,
       shared === 'spent'
@@ -644,7 +655,7 @@ function fallbackAllowanceItem(
       `Wait for the reset at ${iso(estimate.resetAt)}, or add an uncapped target to the chain.`,
     );
   }
-  return healthy(name, `${where}, admitted as ${catalog.costClass} and ready.`);
+  return null;
 }
 
 export function allowanceItem(

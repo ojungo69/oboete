@@ -792,14 +792,24 @@ async function observeLifecycle(
         }
       }
 
-      // `checkpointBatch` rethrows a storage error, and the attempt lines this pass already spent
-      // are only in memory until they are written: a `finally` is what makes the array's caller
-      // ownership worth anything on that path (contracts/provider-fallback.md "Diagnostics").
       try {
         if (!leaseLost) await checkpointBatch();
-      } finally {
-        logBatch();
+      } catch (error) {
+        // `checkpointBatch` rethrows a storage error, and the attempt lines are the only record of
+        // what this pass already spent, so they are written before it propagates
+        // (contracts/provider-fallback.md "Diagnostics"). Only those: `logBatch` would write
+        // `level=info state=applied` for a pass that did not finish, and the missing batch line is
+        // what says so. `appendLog` throws on the same full or read-only disk, and that error must
+        // not replace the one being reported.
+        try {
+          logAttempts();
+        } catch {
+          // The storage error below is the one worth reporting.
+        }
+        throw error;
       }
+
+      logBatch();
 
     }
 

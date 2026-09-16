@@ -50,12 +50,12 @@ export function presetExhaustedAt(db: DatabaseSync, preset: PresetName, now: num
 }
 
 function cappedCalls(db: DatabaseSync, day: string): number {
-  const row = db
-    .prepare(
-      `SELECT COALESCE(SUM(COALESCE(calls, 0)), 0) AS calls
+  const row = prepared(
+    db,
+    `SELECT COALESCE(SUM(COALESCE(calls, 0)), 0) AS calls
        FROM provider_usage
        WHERE utc_day = ? AND preset IN (${CAPPED_PLACEHOLDERS})`,
-    )
+  )
     .get(day, ...CAPPED_PRESETS);
   return numberValue(row?.calls);
 }

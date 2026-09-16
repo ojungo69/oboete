@@ -1836,8 +1836,9 @@ same shape: a fix that closed the path it was pointed at and left a sibling open
   same swallow for `agent-cli`, which had it before this pull request.
 
 The rest: `allowanceClause` took the spent band's consequence as the caller's thunk, so finding 10's
-discarded work is gone rather than moved; `ChainResult` became a union whose `answered` exists only
-on the variant that has an answer, so the pairing a comment carried is the type's; four comments and
+discarded work is gone rather than moved; `ChainResult` became a union whose `outcome` exists only
+on the variant that has an answer, with `answered` null on the other, so the pairing a comment
+carried is the type's; four comments and
 a docstring that justified a sentence by the target being reported `healthy` were swept, since local
 targets no longer are; and the `notDeepEqual` pin added the round before came out — it was implied by
 the `deepEqual` above it and false in general, because a local primary admits only local targets and
@@ -1852,6 +1853,49 @@ that the entries survive the run.
 warning **set** differenced against `85d48437` caught and the count would not have: the same run
 dropped `fallbackReason` and `writeConfig`. `unadmittedEntryItem` took the two verdicts that need no
 storage read.
+
+Gate at this head: `npm test` 1566 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` unchanged against the round-12 baseline; the lizard
+warning set differenced against `85d48437` adds nothing and drops two.
+
+### E9 follow-up — the second delta review, and where it stopped
+
+`1e57b3bc..3239ec08` returned nine findings, eight adopted. Two were regressions the round before
+introduced, both in the same eleven lines:
+
+- `logBatch()` in a `finally` can itself throw — `appendLog` writes to a file in the same directory
+  as the database, so the ENOSPC or EROFS that made the checkpoint fail makes the log write fail
+  too, and a throw from a `finally` replaces the error being reported. `recordRunFailure` would have
+  recorded the log write's code instead of the `SQLITE_*` one.
+- That same `finally` wrote `level=info state=applied` for a pass that did not finish. The *absence*
+  of the batch line is what said so.
+
+Both are closed by a `catch` that writes only the attempt lines, inside its own `try`, and rethrows.
+
+The rest were the shape of the fixes rather than their effect: the `db === null` branch had moved
+ahead of the local-target check and told an uncapped `ollama` target to wait for an allowance it
+never spends; `fallbackAllowanceItem` returns `DoctorItem | null` now, so nothing builds a
+`… and ready.` sentence to throw away and nothing reads a status string back out of an item to
+decide; an uncapped target no longer reads the shared allowance at all, and `cappedCalls` goes
+through the `prepared` cache; `unadmittedEntryItem` takes the catalog entry its caller already had;
+and the `ChainResult` doc block named the wrong exclusive member — it is `outcome`, since `answered`
+is on both non-`done` variants and the caller discriminates on `answered === null`.
+
+Declined: replacing the `spentConsequence` thunk with an object of the two literals. Equivalent, and
+the churn buys nothing.
+
+**Not pinned, and filed as #245.** The attempt lines' survival of a storage throw has no test.
+`src/testing/faults.ts` forbids a seam for this class outright — "a missing, corrupt or read-only
+database ... is induced for real by the test" — and inducing it for real from the answering target's
+fetch handler does not work: `chmod 0o400` does not revoke the write descriptor the worker already
+holds, and the run finishes `exit=0 applied=1` (measured). The issue names the one approach that
+would work, a competing `BEGIN IMMEDIATE` held past `retryBusy`'s budget.
+
+This is where the delta reviews stop. The first returned fourteen findings over the whole pull
+request, the second nine over its fixes, this one nine over those — but the two that mattered here
+were both in eleven lines written the round before, and the remaining seven were shape rather than
+behaviour. The next pass would review eleven more lines of error handling, which is the regress
+`whole-pr-rereview-does-not-converge` describes from the other end.
 
 Gate at this head: `npm test` 1566 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
 markdownlint clean; `semgrep scan --config auto` unchanged against the round-12 baseline; the lizard

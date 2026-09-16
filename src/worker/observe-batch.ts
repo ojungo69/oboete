@@ -465,9 +465,11 @@ type ProcessBatchOptions = {
 };
 
 /**
- * How a pass through the chain ended. `answered` exists only on the variant that has an answer to
- * apply, so the pairing "a target is named exactly when the call succeeded" is the type's rather
- * than a comment's: `processBatch` reads the failure from `attempts`, which is the caller's.
+ * How a pass through the chain ended. `outcome` exists only on the variant that has an answer to
+ * apply, and `answered` is null on the other, so the pairing "a target is named exactly when the
+ * call succeeded" is the type's rather than a comment's. The caller discriminates on
+ * `answered === null`, never on a key being present; the failure path reads `attempts`, which is
+ * the caller's own array.
  */
 type ChainResult =
   | { done: BatchResult }
