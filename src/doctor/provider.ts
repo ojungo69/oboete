@@ -25,15 +25,15 @@ import {
   type DoctorOptions,
 } from '../doctor.js';
 import { CACHE_MS, cachedCatalog } from '../observer/catalog.js';
-import { chainErrorMessage } from '../observer/providers.js';
+import { chainErrorMessage, resolveModel } from '../observer/providers.js';
 import type { ObserverInput } from '../observer/contract.js';
 import { summarizeWithProvider, type CallOutcome } from '../observer/llm.js';
 import {
   DAILY_CAP,
+  presetExhaustedAt,
   recordExhausted,
   recordProviderAttempt,
   usageEstimate,
-  utcDay,
 } from '../observer/reservation.js';
 import type { OboetePaths } from '../paths.js';
 import { credentialGuidance } from '../setup/consent.js';
@@ -156,6 +156,21 @@ function configuredProvider(
     );
   }
 
+  // The worker's own resolver, asked before anything is probed: a primary whose model does not
+  // resolve, or a chain entry that makes the chain unusable, leaves the observer with no model and
+  // no targets at all, and this item is where the user learns why
+  // (contracts/provider-fallback.md "What the chain does not do").
+  try {
+    resolveModel(config);
+  } catch (error) {
+    return degraded(
+      'provider',
+      describe(error),
+      'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
+      'Set `[observer] model` to a model the preset lists, or correct the `[[observer.fallback]]` entry, then run `oboete doctor` again.',
+    );
+  }
+
   const credentials = readCredentials(preset, env, config.observer.agent_cli);
   if (!credentials.present) {
     // An uncredentialed primary is one failed target, not a run without a provider: the chain is
@@ -203,7 +218,7 @@ function providerProbeReadiness(
 
   const model = (config.observer.model ?? PRESET_CATALOG[preset].defaultModel).trim();
   const estimate = usageEstimate(db, now);
-  const capItem = providerCapItem(preset, estimate);
+  const capItem = providerCapItem(preset, estimate, db, now);
   if (capItem !== null) return capItem;
   return { kind: 'ready', db, model, estimate };
 }
@@ -211,8 +226,10 @@ function providerProbeReadiness(
 function providerCapItem(
   preset: Exclude<PresetName, 'none'>,
   estimate: ReturnType<typeof usageEstimate>,
+  db: DatabaseSync,
+  now: number,
 ): DoctorItem | null {
-  if (PRESET_CATALOG[preset].capped && estimate.exhausted) {
+  if (PRESET_CATALOG[preset].capped && presetExhaustedAt(db, preset, now) !== null) {
     return degraded(
       'provider',
       'provider_exhausted: The provider reported exhaustion today.',
@@ -240,9 +257,8 @@ function doctorReserve(
     return { ok: true, reservationId: randomUUID() };
   }
   return transactionImmediate(db, () => {
-    const estimate = usageEstimate(db, now);
-    if (estimate.exhausted) return { ok: false, reason: 'provider_exhausted' };
-    if (estimate.remaining <= 0) return { ok: false, reason: 'daily_cap' };
+    if (presetExhaustedAt(db, preset, now) !== null) return { ok: false, reason: 'provider_exhausted' };
+    if (usageEstimate(db, now).remaining <= 0) return { ok: false, reason: 'daily_cap' };
     const reservationId = randomUUID();
     recordProviderAttempt(db, { preset, now });
     return { ok: true, reservationId };
@@ -343,6 +359,19 @@ export function fallbackItems(
         : 'Correct the `[[observer.fallback]]` entry in the configuration file, then run `oboete doctor` again.',
     )];
   }
+  // The worker's own resolver, not a second copy of its rules: a primary it refuses takes the whole
+  // chain down with it, so no target below may be reported as ready
+  // (contracts/provider-fallback.md "What the chain does not do").
+  try {
+    resolveModel(config);
+  } catch (error) {
+    return [degraded(
+      'fallback',
+      describe(error),
+      'No target below is ever attempted: the observer has no usable primary, so every batch is rule-based.',
+      'Set `[observer] model` to a model the preset lists, then run `oboete doctor` again.',
+    )];
+  }
   // Each admitted target is claimed by the first entry that produced it, so the second of two
   // identical entries is reported as covered rather than as ready.
   const unclaimed = [...chain.targets];
@@ -425,7 +454,7 @@ function fallbackAllowanceItem(
   db: DatabaseSync,
   now: number,
 ): DoctorItem {
-  const exhaustedAt = presetExhaustedAt(preset, db, now);
+  const exhaustedAt = presetExhaustedAt(db, preset, now);
   if (exhaustedAt !== null) {
     return warning(
       name,
@@ -435,7 +464,7 @@ function fallbackAllowanceItem(
     );
   }
   const estimate = usageEstimate(db, now);
-  if (catalog.capped && (estimate.exhausted || estimate.remaining === 0)) {
+  if (catalog.capped && estimate.remaining === 0) {
     return warning(
       name,
       `${where}, and today's shared allowance is spent (${estimate.calls} of ${DAILY_CAP} calls).`,
@@ -444,14 +473,6 @@ function fallbackAllowanceItem(
     );
   }
   return healthy(name, `${where}, admitted as ${catalog.costClass} and ready.`);
-}
-
-/** Today's per-preset exhaustion stamp, or null when the preset may still be reserved. */
-function presetExhaustedAt(preset: PresetName, db: DatabaseSync, now: number): number | null {
-  const row = db.prepare('SELECT exhausted_at, reset_at FROM provider_usage WHERE utc_day = ? AND preset = ?')
-    .get(utcDay(now), preset);
-  const exhaustedAt = asNumber(row?.exhausted_at);
-  return exhaustedAt !== null && (asNumber(row?.reset_at) ?? 0) > now ? exhaustedAt : null;
 }
 
 export function allowanceItem(
@@ -484,7 +505,7 @@ function allowanceEstimateItem(
 ): DoctorItem {
   try {
     const estimate = usageEstimate(db, now);
-    if (estimate.exhausted) {
+    if (presetExhaustedAt(db, preset, now) !== null) {
       return degraded(
         'allowance',
         'The provider reported exhaustion today.',

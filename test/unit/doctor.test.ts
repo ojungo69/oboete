@@ -587,9 +587,10 @@ test('a fallback target is not called ready when its allowance is gone or its lo
     // A capped target under an uncapped primary: `allowanceItem` reports "no daily cap" for the
     // primary, so this item is the only place the shared allowance can be named.
     // (`agent-cli` is the one remote preset with no cap, and a capped target needs a remote primary.)
-    const capped = { preset: 'agent-cli', fallback: [{ preset: 'workers-ai' }] };
+    const capped = { preset: 'agent-cli', model: 'claude-sonnet-4-5',
+      fallback: [{ preset: 'workers-ai' }] };
     writeFileSync(context.paths.config, [
-      '[observer]', 'preset = "agent-cli"',
+      '[observer]', 'preset = "agent-cli"', 'model = "claude-sonnet-4-5"',
       '', '[[observer.fallback]]', 'preset = "workers-ai"',
       '', '[consent]',
       `hash = "${consentHash(consentTuple(configSchema.parse({ observer: capped }), context.env))}"`,
@@ -640,6 +641,85 @@ test('the second of two identical fallback entries is reported as covered, not a
     // Admission deduplicates by `(preset, model)`, so only the first entry is ever attempted.
     assert.equal(context.item('fallback:1').status, 'healthy');
     assertBroken(context.item('fallback:2'), 'warning', 'a nearer target already covers');
+  });
+});
+
+test("one capped preset's exhaustion is neither another's nor the shared allowance", async () => {
+  await harness(async (context) => {
+    // `exhausted_at` is per-preset and the daily cap is shared, so a day-wide exhaustion flag makes
+    // every capped surface answer for a preset that never reported anything.
+    context.env.OBOETE_NIM_API_KEY = 'nvapi-doctor-test';
+    const observer = { preset: 'workers-ai', cost_policy: ['free-tier', 'remote'],
+      fallback: [{ preset: 'nim' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"', 'cost_policy = ["free-tier", "remote"]',
+      '', '[[observer.fallback]]', 'preset = "nim"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+
+    const exhaust = (preset: string): void => {
+      const { db } = openDatabase({ path: context.paths.db, timeoutMs: 5_000 });
+      try {
+        db.prepare('DELETE FROM provider_usage').run();
+        db.prepare(`INSERT INTO provider_usage (utc_day, preset, calls, neurons_estimate, reset_at, exhausted_at)
+          VALUES (?, ?, 1, 0, ?, ?)`).run(utcDay(context.now), preset, context.now + 3_600_000, context.now);
+      } finally {
+        db.close();
+      }
+    };
+
+    exhaust('workers-ai');
+    await context.doctor(['--json']);
+    assertBroken(context.item('allowance'), 'degraded', 'reported exhaustion today');
+    assert.equal(context.item('fallback:1').status, 'healthy', context.item('fallback:1').reason);
+    assert.match(context.item('fallback:1').reason, /nim with model .*admitted as remote and ready/);
+
+    exhaust('nim');
+    await context.doctor(['--json']);
+    assert.equal(context.item('allowance').status, 'healthy', context.item('allowance').reason);
+    assert.match(context.item('allowance').reason, new RegExp(`${DAILY_CAP - 1} of ${DAILY_CAP} calls remaining`));
+    assertBroken(context.item('fallback:1'), 'warning', 'reported its allowance exhausted at');
+  });
+});
+
+test('a primary the resolver refuses leaves no fallback target to call ready', async () => {
+  await harness(async (context) => {
+    // `ollama` has no default model, so the primary fails `resolveModel` and the worker degrades
+    // every batch with `no_provider`: the chain below it is never attempted.
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "ollama"',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"', '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+
+    assert.equal(await context.doctor(), 1, context.output);
+    assert.equal(context.report().items.some((entry) => entry.item === 'fallback:1'), false, context.output);
+    assertBroken(context.item('fallback'), 'degraded', 'requires an observer model', 'ever attempted');
+  });
+});
+
+test('the provider item names a primary the resolver refuses, with or without a chain', async () => {
+  await harness(async (context) => {
+    // No chain at all, so `fallbackItems` returns nothing and this item is the only surface left
+    // to say that every batch will be rule-based.
+    writeFileSync(context.paths.config, ['[observer]', 'preset = "ollama"', ''].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    assert.equal(await context.doctor(), 1, context.output);
+    assertBroken(context.item('provider'), 'degraded', 'requires an observer model',
+      'rule-based fallback only');
+
+    // A chain entry that widens egress takes the primary down with it: a healthy probe here would
+    // contradict a worker that has no provider at all.
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      'cost_policy = ["free-tier", "local", "remote"]',
+      '', '[[observer.fallback]]', 'preset = "nim"', '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    assert.equal(await context.doctor(['--json', '--probe-provider']), 1, context.output);
+    assertBroken(context.item('provider'), 'degraded', 'sends further');
   });
 });
 

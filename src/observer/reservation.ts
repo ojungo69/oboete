@@ -29,6 +29,20 @@ function numberValue(value: unknown): number {
   return 0;
 }
 
+/**
+ * Today's exhaustion stamp for one preset, or null when it may still be reserved. `exhausted_at` is
+ * per-preset: one preset's exhaustion says nothing about another's, and nothing about the shared
+ * daily call count, which `usageEstimate` reports.
+ */
+export function presetExhaustedAt(db: DatabaseSync, preset: PresetName, now: number): number | null {
+  const row = db
+    .prepare('SELECT exhausted_at, reset_at FROM provider_usage WHERE utc_day = ? AND preset = ?')
+    .get(utcDay(now), preset);
+  const exhaustedAt = row?.exhausted_at;
+  if (exhaustedAt === null || exhaustedAt === undefined) return null;
+  return numberValue(row?.reset_at) > now ? numberValue(exhaustedAt) : null;
+}
+
 function cappedCalls(db: DatabaseSync, day: string): number {
   const row = db
     .prepare(
@@ -40,6 +54,12 @@ function cappedCalls(db: DatabaseSync, day: string): number {
   return numberValue(row?.calls);
 }
 
+/**
+ * One target's attempt on one batch. `claimed_at` is restamped here, not only at creation, because
+ * `reclaimStale` measures its 120 s grace from that column: a batch created minutes before the
+ * attempt would otherwise be reclaimable — and its provider call repeated — the instant it starts
+ * running (`src/worker/batches.ts` RECLAIM_AFTER_MS).
+ */
 export function reserveAttempt(
   db: DatabaseSync,
   options: {
@@ -60,16 +80,7 @@ export function reserveAttempt(
     }
 
     const day = utcDay(options.now);
-    const presetUsage = db
-      .prepare(
-        'SELECT exhausted_at, reset_at FROM provider_usage WHERE utc_day = ? AND preset = ?',
-      )
-      .get(day, options.preset);
-    if (
-      presetUsage?.exhausted_at !== null &&
-      presetUsage?.exhausted_at !== undefined &&
-      numberValue(presetUsage.reset_at) > options.now
-    ) {
+    if (presetExhaustedAt(db, options.preset, options.now) !== null) {
       return { ok: false, reason: 'provider_exhausted' };
     }
 
@@ -90,10 +101,10 @@ export function reserveAttempt(
       .prepare(
         `UPDATE observation_batches
          SET provider_attempts = COALESCE(provider_attempts, 0) + 1,
-             last_reservation_id = ?, state = 'running'
+             last_reservation_id = ?, state = 'running', claimed_at = ?
          WHERE id = ? AND owner_token = ?`,
       )
-      .run(reservationId, options.batchId, options.token);
+      .run(reservationId, options.now, options.batchId, options.token);
     if (Number(batch.changes) === 0) {
       db.exec('ROLLBACK');
       return { ok: false, reason: 'lease_lost' };
@@ -140,26 +151,20 @@ export function recordExhausted(
   });
 }
 
+/**
+ * The allowance every capped preset shares. Per-preset exhaustion is `presetExhaustedAt`, not a
+ * field here: summing it over the capped presets would answer for a preset that reported nothing.
+ */
 export function usageEstimate(
   db: DatabaseSync,
   now: number,
-): { day: string; calls: number; remaining: number; exhausted: boolean; resetAt: number } {
+): { day: string; calls: number; remaining: number; resetAt: number } {
   const day = utcDay(now);
-  const row = db
-    .prepare(
-      `SELECT
-         COALESCE(SUM(COALESCE(calls, 0)), 0) AS calls,
-         COALESCE(MAX(CASE WHEN exhausted_at IS NOT NULL AND reset_at > ? THEN 1 ELSE 0 END), 0) AS exhausted
-       FROM provider_usage
-       WHERE utc_day = ? AND preset IN (${CAPPED_PLACEHOLDERS})`,
-    )
-    .get(now, day, ...CAPPED_PRESETS);
-  const calls = numberValue(row?.calls);
+  const calls = cappedCalls(db, day);
   return {
     day,
     calls,
     remaining: Math.max(0, DAILY_CAP - calls),
-    exhausted: numberValue(row?.exhausted) !== 0,
     resetAt: nextUtcMidnight(now),
   };
 }

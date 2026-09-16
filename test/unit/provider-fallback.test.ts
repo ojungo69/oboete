@@ -4,6 +4,7 @@ import { test } from 'node:test';
 
 import { nextUtcMidnight, recordExhausted, utcDay } from '../../src/observer/reservation.js';
 import { DAILY_CAP } from '../../src/observer/reservation.js';
+import { cliSpawn } from '../helpers/agent-cli.js';
 import {
   NOW,
   captureEndedSession,
@@ -367,6 +368,39 @@ test('a primary with absent credentials is a failed target, not a run without a 
     const log = readFileSync(fixture.paths.observeLog, 'utf8');
     assert.match(log, /provider attempt .*position=0 preset=workers-ai model=[^ ]+ reason=no_provider/);
     assert.match(log, /batch .*state=applied/);
+  });
+});
+
+test('an agent-cli target reserves its attempt before the paid child process runs', async () => {
+  await withFixture(async (fixture) => {
+    // The primary has no credentials, so it answers `no_provider` and takes no reservation: the
+    // agent-cli target behind it is the first thing in the pass that can fence the batch.
+    fixture.env = cleanEnv(fixture.home, {});
+    writeChainConfig(fixture, {
+      preset: 'workers-ai',
+      costPolicy: ['free-tier', 'own-subscription'],
+      fallback: [{ preset: 'agent-cli', model: 'claude-sonnet-4-5' }],
+      env: fixture.env,
+    });
+    const prompt = 'Record what the subscription target spends.';
+    await captureEndedSession(fixture, { sessionId: 'chain-agent-cli-reserves', prompts: [prompt] });
+    const sourceId = eventId(fixture, prompt);
+
+    const hosts = counters();
+    const cli = cliSpawn([JSON.stringify(providerOutput(sourceId))]);
+    assert.equal(await runObserveForFixture(fixture, { fetch: chainFetch(hosts, {}), spawn: cli.spawn }), 0);
+
+    assert.equal(hosts.cloudflare, 0);
+    assert.equal(cli.calls(), 1);
+    assert.deepEqual(batchRows(fixture), [
+      { destination: 'remote_observer', state: 'applied', degraded_reason: null, provider_attempts: 1 },
+    ]);
+    let usage: Record<string, unknown>[] = [];
+    fixture.withDb((db) => {
+      usage = db.prepare('SELECT preset, calls FROM provider_usage ORDER BY preset')
+        .all().map((row) => ({ ...row }));
+    });
+    assert.deepEqual(usage, [{ preset: 'agent-cli', calls: 1 }]);
   });
 });
 

@@ -19,6 +19,7 @@ import { sessionSummary } from '../../src/observer/classify.js';
 import {
   DAILY_CAP,
   nextUtcMidnight,
+  presetExhaustedAt,
   recordExhausted,
   usageEstimate,
   utcDay,
@@ -507,7 +508,7 @@ test('a pack whose rendered text trips the detector returns null and records omi
   });
 });
 
-test('usageEstimate reports exhausted while reset_at is in the future and not after it', async () => {
+test('a preset reads exhausted while reset_at is in the future and not after it', async () => {
   await withTempHome(async (home) => {
     const { db } = openDatabase({ path: oboetePaths(home).db, timeoutMs: 1_000 });
     try {
@@ -521,11 +522,11 @@ test('usageEstimate reports exhausted while reset_at is in the future and not af
       ).run(utcDay(now), calls, nextUtcMidnight(now), now);
 
       const today = usageEstimate(db, now);
-      assert.equal(today.exhausted, true);
+      assert.equal(presetExhaustedAt(db, 'workers-ai', now), now);
       assert.equal(today.remaining, DAILY_CAP - calls);
       assert.equal(today.calls, calls);
 
-      assert.equal(usageEstimate(db, later).exhausted, false);
+      assert.equal(presetExhaustedAt(db, 'workers-ai', later), null);
     } finally {
       db.close();
     }
