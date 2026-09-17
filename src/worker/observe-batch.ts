@@ -363,11 +363,6 @@ function nearbyForBatch(db: DatabaseSync, input: BatchInput): NearbyCandidate[] 
 
 type PrivacyReader = (context: SourceContext | null, projectMemoryId?: string) => ReturnType<typeof readSourcePrivacy>;
 
-/**
- * Why this pass deferred a source. `observation_batch_sources.reason` carries more values than
- * these — `apply.ts` and `batches.ts` write their own, and the column has no CHECK — so this union
- * covers the reasons `revalidateSources` writes, not the column.
- */
 /** The reasons of this batch's deferred sources, for a pass that re-checked none of them itself. */
 function recordedDeferrals(db: DatabaseSync, batchId: string): string[] {
   return db.prepare(`SELECT DISTINCT reason FROM observation_batch_sources

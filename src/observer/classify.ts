@@ -184,7 +184,12 @@ export type DegradedReason = (typeof DEGRADED_PRECEDENCE)[number];
  */
 export const CHAIN_STOPS = new Set<DegradedReason>(['consent_changed', 'unusable_output']);
 
-/** Why one source of a batch was put back rather than summarized. */
+/**
+ * Why one pass of the worker put a source back rather than summarizing it.
+ * `observation_batch_sources.reason` carries more values than these — `apply.ts` and `batches.ts`
+ * write their own, and the column has no CHECK — so this union covers what `revalidateSources`
+ * writes, not the column.
+ */
 export type SourceReason = 'detector_failed' | 'source_context_unknown' | 'consent_changed';
 
 /**

@@ -265,48 +265,33 @@ function summaryDegraded(db: DatabaseSync, memoryId: string): string | null {
   return (row?.degraded_reason as string | null | undefined) ?? null;
 }
 
-test('a detector failure is reported even when the rest of its batch summarized', async () => {
-  // The partial case: one source of an applied batch was deferred `detector_failed` while the
-  // others went through the provider, so the batch's own `degraded_reason` is NULL and the receipt
-  // is the only record of the failure. Reading the batch alone reports rule-based notes and hides it.
-  await withOpened((db, token) => {
-    seedSummaryFixture(db, 'sess-partial', 'Record the mixed detector outcome.', [
-      { id: 'b-applied', degraded: null },
-    ]);
-    db.prepare(`INSERT INTO raw_events
-      (id, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at)
-      SELECT ?, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at
-      FROM raw_events WHERE id = 'sess-partial-p1'`).run('sess-partial-p2');
-    db.prepare("UPDATE raw_events SET batch_id = 'b-applied', processing_state = 'waiting' WHERE id = 'sess-partial-p2'")
-      .run();
-    db.prepare(`INSERT INTO observation_batch_sources (batch_id, raw_event_id, outcome, reason, recorded_at)
-      VALUES ('b-applied', 'sess-partial-p2', 'deferred', 'detector_failed', ?)`).run(NOW);
+test('a deferred source reports its own reason when the rest of its batch summarized', async () => {
+  // One source of an applied batch was deferred while the others went through the provider, so the
+  // batch's own `degraded_reason` is NULL and the receipt is the only record. Reading the batch
+  // alone reports rule-based notes for both, which hides the detector failure.
+  const cases = [
+    { reason: 'detector_failed', expect: 'unusable_output' },
+    { reason: 'source_context_unknown', expect: 'rule_based' },
+  ];
+  for (const { reason, expect } of cases) {
+    await withOpened((db, token) => {
+      const session = `sess-${reason}`;
+      seedSummaryFixture(db, session, 'Record the mixed source outcome.', [{ id: 'b-applied', degraded: null }]);
+      db.prepare(`INSERT INTO raw_events
+        (id, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at)
+        SELECT ?, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at
+        FROM raw_events WHERE id = ?`).run(`${session}-p2`, `${session}-p1`);
+      db.prepare("UPDATE raw_events SET batch_id = 'b-applied', processing_state = 'waiting' WHERE id = ?")
+        .run(`${session}-p2`);
+      db.prepare(`INSERT INTO observation_batch_sources (batch_id, raw_event_id, outcome, reason, recorded_at)
+        VALUES ('b-applied', ?, 'deferred', ?, ?)`).run(`${session}-p2`, reason, NOW);
 
-    const result = sessionSummary(db, token, 'sess-partial', NOW);
-    assert.equal(result.state, 'waiting');
-    if (result.memoryId === null) assert.fail('expected a summary memory');
-    assert.equal(summaryDegraded(db, result.memoryId), 'unusable_output');
-  });
-
-  // The held case keeps the rule-based reading: nothing refused this source, its origin is unverified.
-  await withOpened((db, token) => {
-    seedSummaryFixture(db, 'sess-held', 'Record the held source.', [
-      { id: 'b-held', degraded: null },
-    ]);
-    db.prepare(`INSERT INTO raw_events
-      (id, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at)
-      SELECT ?, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at
-      FROM raw_events WHERE id = 'sess-held-p1'`).run('sess-held-p2');
-    db.prepare("UPDATE raw_events SET batch_id = 'b-held', processing_state = 'waiting' WHERE id = 'sess-held-p2'")
-      .run();
-    db.prepare(`INSERT INTO observation_batch_sources (batch_id, raw_event_id, outcome, reason, recorded_at)
-      VALUES ('b-held', 'sess-held-p2', 'deferred', 'source_context_unknown', ?)`).run(NOW);
-
-    const result = sessionSummary(db, token, 'sess-held', NOW);
-    assert.equal(result.state, 'waiting');
-    if (result.memoryId === null) assert.fail('expected a summary memory');
-    assert.equal(summaryDegraded(db, result.memoryId), 'rule_based');
-  });
+      const result = sessionSummary(db, token, session, NOW);
+      assert.equal(result.state, 'waiting');
+      if (result.memoryId === null) assert.fail('expected a summary memory');
+      assert.equal(summaryDegraded(db, result.memoryId), expect, reason);
+    });
+  }
 });
 
 test('session summary reflects unresolved source outcomes and complete processing clears degradation', async () => {
