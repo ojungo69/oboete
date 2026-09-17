@@ -2610,8 +2610,9 @@ facts; true paraphrase is T024's (#266).
 | `searchMemories hides a superseded fact unless history is requested` | default search omits the superseded row; `--history` returns both; `get --history --json` shows `valid_to` and `superseded_by` naming the current row |
 | `searchMemories returns two distinct facts that share a title when they are the only candidates` | both returned |
 | `searchMemories returns the fact-bearing memory of a five-row corpus` (skipped, #275) | the five rows of the `claude-to-codex` pair at pack time and that pair's recall prompt; un-skipped it fails with `returned m_confirm`, the receipt below |
+| `the pinned pair prompts are still the ones the probe library sends` | the copied recall and seeding prompts, including the `printf` command, against `scripts/e2e/probe-lib/isolated-agent.mjs`; runs whether or not the artifact is skipped |
 
-All 35 runnable tests in the file pass on Node 24.16.0 and 22.23.1; the 36th is the #275 artifact, which is skipped until that fix. Each mutation below edits the built test
+All 36 runnable tests in the file pass on Node 24.16.0 and 22.23.1; the 37th is the #275 artifact, which is skipped until that fix. Each mutation below edits the built test
 bundle, runs the named test, and restores the bundle (sha256 compared):
 
 | Mutation | Failing assertion |
@@ -2636,9 +2637,13 @@ bundle, runs the named test, and restores the bundle (sha256 compared):
   the three exact facts is omitted. The same prompt against the same rows one memory later includes
   all three. That is #275, and T023 stays open for it. Those five rows and that recall prompt are carried
   verbatim in `test/unit/retrieval.test.ts` as a skipped test, which reproduces the same three raw scores,
-  so the fix un-skips a failing artifact rather than writing a new one. All five rows are load-bearing:
-  the two session summaries are out of the search scope but in the FTS index, and removing them takes the
-  corpus to three documents, which lifts `m_363fe065` above the threshold.
+  so the fix un-skips a failing artifact rather than writing a new one. The artifact names the rows
+  `m_confirm`, `m_decision` and `m_fact` for `m_c2bfcff0`, `m_363fe065` and `m_9da36e8d`, plus
+  `m_checkpoint` and `m_request` for the pair's two session summaries. Keep all five: the miss still
+  reproduces on the three searchable rows alone, but the summaries are in the FTS index even though the
+  scope hides them, and removing them takes the corpus to three documents, which lifts `m_decision`
+  above the threshold — measuring the fix against a corpus the run never had. The pair databases of the
+  run are the receipt for the copied text.
 - A memory injected once and then unused for 90 days is omitted from packs as `retired` (data model);
   it is still returned by search, which has no `last_injected_at` filter, so User Story 3's first
   acceptance scenario (age alone does not make a fact unavailable when asked about) holds.

@@ -188,7 +188,8 @@ writers require separate worktrees. No deployment follows merely from an increme
   the ineligible native-fork timing sample and passes worker RSS at 106.1 MiB. Ordinary hook timing,
   two unprinted Grok starts and real-model recall remain failed/unqualified, not reclassified as
   successful evaluation. See `quickstart.md`. As of C3 (2026-09-10) T023/T024/T040-T043 were all open; since then T040
-  closed 2026-09-17 in E10, and T023 closed on 2026-09-17 and reopened the next day for #275.
+  closed on the E10 evidence and T023 closed on the E12 fixture replay, then reopened on the E13
+  dogfood run for #275.
 - T025-T028: D1 implements explicit work/project grants, exact personal proposals/projections,
   common source/visibility checks, and CLI/viewer approval plus work-preserving adoption. Both Node
   versions pass 1,097 + 202 checks; installed-browser actions, package validation, normal security,
