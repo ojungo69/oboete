@@ -190,6 +190,8 @@ test('buildSummarizerPrompt preserves exact strings in both modes', () => {
     // The per-fact rule (#274) and the schema's hard observation cap.
     assert.match(prompt.system, /one observation per item/);
     assert.match(prompt.system, /at most 20 observations/);
+    // The accounting sense of noop, kept distinct from the add/update/delete/noop classification.
+    assert.match(prompt.system, /never accounted for by a noop observation/);
   }
 });
 
