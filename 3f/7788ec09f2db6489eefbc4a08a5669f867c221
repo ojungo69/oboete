@@ -1,0 +1,19 @@
+.github/workflows/platform.yml
+  s_d675408629836f::t_fea51aacc9df89 43-56,58,60-62,64
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3f7788ec09f2db6489eefbc4a08a5669f867c221",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
