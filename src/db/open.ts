@@ -117,24 +117,24 @@ const lockWaitSleep = new Int32Array(new SharedArrayBuffer(4));
  * SQLite's busy handler sums requested sleeps and never reads a clock; on macOS those short
  * sleeps last several times longer, so `sqlite3_busy_timeout` is not a wall-time limit.
  */
-export function beginImmediate(db: DatabaseSync): void {
+function retryBusy<T>(db: DatabaseSync, fn: () => T): T {
   const bound = lockWaitMsByDb.get(db);
-  if (bound === undefined) {
-    db.exec('BEGIN IMMEDIATE');
-    return;
-  }
+  if (bound === undefined) return fn();
   const start = performance.now();
-  for (;;) {
+  for (let attempt = 0; ; attempt++) {
     try {
-      db.exec('BEGIN IMMEDIATE');
-      return;
+      return fn();
     } catch (error) {
       if (!isBusyError(error)) throw error;
       const left = bound - (performance.now() - start);
-      if (left <= 0) throw error;
-      Atomics.wait(lockWaitSleep, 0, 0, Math.min(10, left));
+      if (!(left > 0)) throw error;
+      Atomics.wait(lockWaitSleep, 0, 0, Math.min(2 ** attempt, 10, left));
     }
   }
+}
+
+export function beginImmediate(db: DatabaseSync): void {
+  retryBusy(db, () => db.exec('BEGIN IMMEDIATE'));
 }
 
 export function openDatabase(options: {
@@ -249,11 +249,18 @@ function openConfiguredDatabase(
   options: Parameters<typeof openDatabase>[0],
   hook: boolean,
 ): OpenedDatabase {
+  const requested = options.lockWaitMs;
+  const lockWaitMs =
+    requested === undefined
+      ? undefined
+      : Number.isFinite(requested) && requested > 0
+        ? requested
+        : 1;
   const db = new (loadSqlite().DatabaseSync)(options.path, {
-    timeout: options.lockWaitMs === undefined ? options.timeoutMs : 0,
+    timeout: lockWaitMs === undefined ? options.timeoutMs : 0,
     readOnly: options.readOnly === true,
   });
-  if (options.lockWaitMs !== undefined) lockWaitMsByDb.set(db, options.lockWaitMs);
+  if (lockWaitMs !== undefined) lockWaitMsByDb.set(db, lockWaitMs);
   try {
     if (options.readOnly === true) {
       const schemaVersion = readUserVersion(db);
@@ -261,19 +268,24 @@ function openConfiguredDatabase(
       verifyAppliedHashes(db);
       return { db, schemaVersion, schemaBehind: schemaVersion < LATEST_SCHEMA_VERSION };
     }
+    if (hook) {
+      return retryBusy(db, () => {
+        db.exec('PRAGMA journal_mode = WAL');
+        db.exec('PRAGMA foreign_keys = ON');
+        db.exec('PRAGMA synchronous = NORMAL');
+        db.exec('PRAGMA wal_autocheckpoint = 0');
+        const schemaVersion = readUserVersion(db);
+        if (schemaVersion > LATEST_SCHEMA_VERSION) throw new SchemaAheadError(schemaVersion);
+        return {
+          db,
+          schemaVersion,
+          schemaBehind: schemaVersion < LATEST_SCHEMA_VERSION,
+        };
+      });
+    }
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('PRAGMA foreign_keys = ON');
     db.exec('PRAGMA synchronous = NORMAL');
-    if (hook) {
-      db.exec('PRAGMA wal_autocheckpoint = 0');
-      const schemaVersion = readUserVersion(db);
-      if (schemaVersion > LATEST_SCHEMA_VERSION) throw new SchemaAheadError(schemaVersion);
-      return {
-        db,
-        schemaVersion,
-        schemaBehind: schemaVersion < LATEST_SCHEMA_VERSION,
-      };
-    }
 
     const schemaVersion = migrate(db);
     return { db, schemaVersion, schemaBehind: false };

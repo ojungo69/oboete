@@ -87,7 +87,9 @@ M1 source retention and completion rules.
 - Open through `src/db/open.ts` (T019) only: `new DatabaseSync(path, { timeout })`,
   `PRAGMA journal_mode = WAL`, `PRAGMA foreign_keys = ON`; hook connections add
   `PRAGMA wal_autocheckpoint = 0`. Migrations are forward-only, one transaction each,
-  `PRAGMA user_version` = the highest applied number.
+  `PRAGMA user_version` = the highest applied number. Hook-budget connections pass
+  `lockWaitMs` instead, open with timeout 0, and wait for locks by wall clock through
+  `retryBusy`, because SQLite's busy timeout counts requested sleep, not elapsed time.
 - A read-then-write unit is one `BEGIN IMMEDIATE` transaction. Every worker write is fenced by
   `worker_lease.owner_token` (`... WHERE owner_token = ?`; zero rows changed means the lease was
   lost) except the exhaustion signal in `provider_usage`.

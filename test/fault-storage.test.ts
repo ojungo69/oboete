@@ -180,7 +180,7 @@ scenario('busy', (t: TestContext) => {
   holder.exec('BEGIN IMMEDIATE');
   try {
     const elapsed = runHook(t, place, SELECTOR, EVENT, claudePayload(place.repo));
-    // Busy timeout is min(150 ms, remaining - 40); the hook still has to exit inside the deadline.
+    // Write-lock wait is bounded by wall clock at min(150 ms, remaining − 40); the hook still has to exit inside the deadline.
     t.diagnostic(`busy hook elapsed ${elapsed.toFixed(1)} ms`);
     assert.equal(spoolFiles(place).length, 1);
     assert.equal(rows(place, 'SELECT id FROM raw_events').length, 0);

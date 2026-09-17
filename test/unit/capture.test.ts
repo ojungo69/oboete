@@ -961,6 +961,7 @@ test('a busy database spools inside the capture budget', async () => {
       assert.equal(listSpool(context.paths).length, 1);
       if (WALL_CLOCK_IS_MEASURED) {
         assert.ok(elapsed < CAPTURE_DEADLINE_MS, `the hook took ${elapsed.toFixed(1)} ms`);
+        assert.ok(elapsed >= 100, `hook did not wait for the lock before spooling: ${elapsed.toFixed(1)} ms`);
       }
     } finally {
       holder.exec('ROLLBACK');

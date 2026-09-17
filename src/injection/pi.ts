@@ -144,9 +144,8 @@ function openForInject(
 ): ReturnType<typeof openDatabase> | null {
   let opened: ReturnType<typeof openDatabase>;
   try {
-    // Wall-clock bound: SQLite's busy handler sums requested sleeps and never reads a clock;
-    // on macOS those short sleeps last several times longer, so sqlite3_busy_timeout is not
-    // a wall-time limit. sessionForPi writes through transactionImmediate on this handle.
+    // See beginImmediate / retryBusy in src/db/open.ts. sessionForPi writes through
+    // transactionImmediate on this handle.
     const lockWaitMs = Math.max(1, Math.min(150, Math.floor(remainingBudget())));
     opened = openDatabase({ path: paths.db, timeoutMs: 0, hook: true, lockWaitMs });
   } catch {

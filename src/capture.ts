@@ -63,7 +63,7 @@ export const DETECTOR_MIN_MS = 60;
 /** Initial due-by hint and metadata expiry; accepted sources retain data until processed + 30 days. */
 export const RAW_EVENT_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 
-const BUSY_TIMEOUT_CEILING_MS = 150;
+const LOCK_WAIT_CEILING_MS = 150;
 const SPAWN_MIN_REMAINING_MS = 10;
 const TURN_BATCH = 10;
 const UNKNOWN_SESSION = 'unknown';
@@ -750,12 +750,10 @@ async function write(options: WriteOptions): Promise<CaptureOutcome> {
   let spawnAfterSpool = false;
   // contracts/agents.md: below the spool reserve the database is not opened at all.
   if (remaining() >= SPOOL_RESERVE_MS) {
-    // Wall-clock bound: SQLite's busy handler sums requested sleeps and never reads a clock;
-    // on macOS those short sleeps last several times longer, so sqlite3_busy_timeout is not
-    // a wall-time limit.
+    // Wall-clock lock wait: see beginImmediate / retryBusy in src/db/open.ts.
     const lockWaitMs = Math.max(
       1,
-      Math.min(BUSY_TIMEOUT_CEILING_MS, Math.floor(remaining() - SPOOL_RESERVE_MS)),
+      Math.min(LOCK_WAIT_CEILING_MS, Math.floor(remaining() - SPOOL_RESERVE_MS)),
     );
     const opened = openCaptureDatabase(paths, lockWaitMs);
     if (opened !== null && opened !== true) {
