@@ -2562,12 +2562,12 @@ the bundle from a copy. Each one fails all thirteen, on the assertion named:
 
 - `contracts/work.md` B3 keeps real agents and platforms separate acceptance gates. The native runs
   through `scripts/e2e/isolated-user.mjs` and `isolated-lifecycle*.mjs` are #265.
-- The daily dogfood's twelve pairs (#244) run the schema 3 bundle and check fact recall only; they
-  are not SC-002 evidence.
+- The daily dogfood's twelve pairs (#244) ran the schema 3 bundle until 2026-09-17 (E13) and check
+  fact recall only; they are not SC-002 evidence.
 - The older twelve-pair loop in `work-readers.test.ts` (one work per corpus) stays; it covers
   checkpoint delivery per receiver, not sibling isolation.
 
-## E12 — retrieval misses investigated, none reproduced (T023)
+## E12 — retrieval misses investigated on the fixture corpus (T023)
 
 ### The no-model replay
 
@@ -2627,6 +2627,13 @@ bundle, runs the named test, and restores the bundle (sha256 compared):
 - The pins go through the search surface. The injection pack uses the same ranking with a character
   budget and filters already-delivered and retired rows (`src/injection/pack.ts`); the pack path is
   measured by the replay above, which needs a model to say anything about recall.
+- The fixture corpus is too large to show a small-corpus miss that the first 009 dogfood run did
+  (E13, #274). In pair `claude-to-codex` at pack time (five memories, session summaries excluded),
+  FTS5 clamps the IDF of trigrams in more than half the documents to 1e-6, so one row matching a
+  rare trigram scores -0.436 and the other two -0.0000064 and -0.0000047. Normalized by the ratio
+  to the best score, both fall to about 0.00001, below the 0.3 threshold, and the memory holding
+  the three exact facts is omitted. The same prompt against the same rows one memory later includes
+  all three. That is #275, and T023 stays open for it.
 - A memory injected once and then unused for 90 days is omitted from packs as `retired` (data model);
   it is still returned by search, which has no `last_injected_at` filter, so User Story 3's first
   acceptance scenario (age alone does not make a fact unavailable when asked about) holds.
