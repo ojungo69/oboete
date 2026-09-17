@@ -1,0 +1,19 @@
+.github/workflows/platform.yml
+  s_e427cb12165c6a::t_daf0b8e4c14807 75,91-92,98-99
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "298c2a48ffc957c4c2206936314ad5bb52c6819d",
+  "prompts": {},
+  "sessions": {
+    "s_e427cb12165c6a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0af33-23e1-79c3-9c6c-045f918898db",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
