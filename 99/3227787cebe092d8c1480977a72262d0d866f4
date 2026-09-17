@@ -1,0 +1,29 @@
+test/helpers/pair-275.ts
+  s_d675408629836f::t_4fa8b7e1d2452f 1-95
+specs/009-memory-core/quickstart.md
+  s_d675408629836f::t_e298e58bddfdaf 2612-2614,2617,2634,2637-2659
+specs/009-memory-core/tasks.md
+  s_d675408629836f::t_6bf5bb662bb6ee 56-67,190-191
+src/retrieval/rank.ts
+  s_d675408629836f::t_841a426b175b14 61-79,92-97
+test/unit/deferred.test.ts
+  s_d675408629836f::t_3fd6199f440fcd 23,32,37,41,77,795-817
+test/unit/retrieval.test.ts
+  s_d675408629836f::t_73d88454db8092 8,26,846,849-858,864-865,867-869,871-896,898,900-901,909-913
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "993227787cebe092d8c1480977a72262d0d866f4",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
