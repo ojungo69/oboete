@@ -33,7 +33,8 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - name: Platform
-        run: sw_vers && uname -m && node -v
+        # The receipt is for Apple Silicon: fail if the label ever resolves to an Intel image.
+        run: sw_vers && uname -m && node -v && test "$(uname -m)" = arm64
       - name: Install dependencies
         run: npm ci
       - name: Typecheck
@@ -62,18 +63,26 @@ jobs:
         run: node scripts/measure-cold-start.mjs --bundle dist/oboete.mjs --markdown
       - name: Packed engine in an isolated home
         if: ${{ !cancelled() }}
-        # A no-model setup must still open storage, full-text search and the schema on this platform.
-        # Setup's own exit is not the verdict: with no agent installed it reports nothing to wire.
+        # The installed package must support no-model setup in an isolated home on this platform.
+        # Every doctor item must be healthy except an unconfigured provider, which may be degraded.
         run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          npm install --prefix "$RUNNER_TEMP/pkg" --no-audit --no-fund "$RUNNER_TEMP"/oboete-*.tgz
           export HOME="$RUNNER_TEMP/home" OBOETE_HOME="$RUNNER_TEMP/home/.oboete"
           mkdir -p "$HOME"
-          node dist/oboete.mjs --version
-          node dist/oboete.mjs setup --provider none --yes || echo "setup exit $?"
-          node dist/oboete.mjs doctor --json > "$RUNNER_TEMP/doctor.json" || echo "doctor exit $?"
+          node "$RUNNER_TEMP/pkg/node_modules/oboete/dist/oboete.mjs" --version
+          node "$RUNNER_TEMP/pkg/node_modules/oboete/dist/oboete.mjs" setup --provider none --yes
+          set +e
+          node "$RUNNER_TEMP/pkg/node_modules/oboete/dist/oboete.mjs" doctor --json > "$RUNNER_TEMP/doctor.json"
+          code=$?
+          set -e
+          echo "doctor exit $code"
           node -e '
             const items = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).items;
-            const bad = ["storage", "fts", "migration", "worker", "spool"]
-              .filter((name) => items.find((item) => item.item === name)?.status !== "healthy");
+            const bad = items
+              .filter((item) => item.status !== "healthy" && !(item.item === "provider" && item.status === "degraded"))
+              .map((item) => item.item);
             for (const item of items) console.log(item.item, item.status);
-            if (bad.length > 0) { console.error("not healthy:", bad.join(", ")); process.exit(1); }
-          ' "$RUNNER_TEMP/doctor.json"
+            if (bad.length > 0) console.error("not healthy:", bad.join(", "));
+            if (Number(process.argv[2]) > 1 || bad.length > 0) process.exit(1);
+          ' "$RUNNER_TEMP/doctor.json" "$code"
