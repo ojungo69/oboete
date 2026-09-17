@@ -8,6 +8,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
@@ -410,6 +411,33 @@ test('fail-closed: a repository path rule keeps the tool name and drops the cont
     assert.equal(stored.path_rule, 'secrets/**');
     assert.ok(!JSON.stringify(stored).includes(line.secret));
     assert.ok(!everythingWritten(context.paths).includes(line.secret));
+  });
+});
+
+test('fail-closed: the user\'s absolute path rule written through a symbolic link still keeps the content out', async () => {
+  await withCapture(async (context) => {
+    const link = join(realpathSync(context.paths.home), '..', `${String(process.pid)}-capture-link-${Date.now()}`);
+    symlinkSync(realpathSync(context.repo), link);
+    try {
+      writeFileSync(context.paths.config, `[privacy]\nsecret_paths = [${JSON.stringify(join(link, 'secrets/**'))}]\n`);
+      // Ordinary content, so only the path rule can make this row secret.
+      const text = 'The deployment notes list the staging hostnames.';
+      const physical = join(realpathSync(context.repo), 'secrets/notes.txt');
+      const payload = { ...((fixture('claude', 'read.json').events as Json).PostToolUse as Json) };
+      payload.cwd = context.repo;
+      payload.tool_input = { file_path: physical };
+      payload.tool_response = { type: 'text', file: { filePath: physical, content: text } };
+
+      await context.capture('claude', 'PostToolUse', payload);
+
+      const row = context.all('SELECT * FROM raw_events')[0] as Json;
+      assert.equal(row.content, null);
+      assert.equal(row.sensitivity, 'secret');
+      assert.equal((JSON.parse(row.payload_json as string) as Json).path_rule, join(realpathSync(context.repo), 'secrets/**'));
+      assert.ok(!everythingWritten(context.paths).includes(text));
+    } finally {
+      rmSync(link, { force: true });
+    }
   });
 });
 

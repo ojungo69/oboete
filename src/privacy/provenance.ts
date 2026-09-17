@@ -7,7 +7,7 @@ import { memoryScope, memoryVisibility, type NearbyCandidate, type TimelineMemor
 import { contentHash } from '../events.js';
 import { credentialValues } from '../log.js';
 import { memoryContexts, sourceContext, type SourceContext } from './source-context.js';
-import { oboetePaths, resolveHome } from '../paths.js';
+import { oboetePaths, physicalPath, resolveHome, withPhysicalRules } from '../paths.js';
 import { resolveRepoIdentity, type RepoIdentity } from '../repo-identity.js';
 import { readWorkSelection } from '../work.js';
 import { isAllowed, loadDestinationRules, type Sensitivity } from './egress.js';
@@ -187,7 +187,7 @@ export function readSourcePrivacy(db: DatabaseSync, location: PrivacyLocation, c
   const config = loadConfig(oboetePaths(location.home ?? resolveHome(env)));
   const rules = db.prepare('SELECT * FROM destination_rules ORDER BY destination, sensitivity').all();
   const detector = { repoRoot: null as string | null, paths: [] as string[],
-    secretPaths: [...config.privacy.secret_paths], credentialValues: credentialValues(env) };
+    secretPaths: withPhysicalRules(config.privacy.secret_paths), credentialValues: credentialValues(env) };
   const policyRoots = new Set<string>();
   let binding = location.bindingId === null ? undefined : db.prepare(`SELECT b.id, b.work_id, b.context_id,
     b.reason, b.closed_at, c.repo_id, c.local_key, c.root, c.repo_secret_paths_json,
@@ -259,10 +259,15 @@ export function readSourcePrivacy(db: DatabaseSync, location: PrivacyLocation, c
     if (context.paths === null && detector.secretPaths.length > 0) return null;
     for (const path of context.paths ?? []) {
       detector.paths.push(path);
-      const inside = relative(resolve(context.root), resolve(context.root, path));
-      if (inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside)) {
-        detector.paths.push(inside);
-        for (const root of policyRoots) detector.paths.push(resolve(root, inside));
+      // As written and physical: `context.root` is Git's resolved root while a captured path keeps
+      // the links it was written with, and a link inside the worktree may point outside it. A path
+      // that never reaches the other policy roots below is never checked against their rules.
+      const written = resolve(context.root, path);
+      for (const inside of [relative(resolve(context.root), written), relative(physicalPath(context.root), physicalPath(written))]) {
+        if (inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside)) {
+          detector.paths.push(inside);
+          for (const root of policyRoots) detector.paths.push(resolve(root, inside));
+        }
       }
     }
   }

@@ -14,7 +14,7 @@ import { openDatabase } from '../db/open.js';
 import { findNativeSession, nativeSessionStorage } from '../db/sessions.js';
 import type { NormalizedEvent } from '../events.js';
 import { appendLogQuietly, errorCode } from '../log.js';
-import { ensureDirectories, oboetePaths, resolveHome, type OboetePaths } from '../paths.js';
+import { ensureDirectories, oboetePaths, resolveHome, withPhysicalRules, type OboetePaths } from '../paths.js';
 import { resolveRepoIdentity, type RepoIdentity } from '../repo-identity.js';
 import { detectInWorker, type DetectorInput, type DetectorResult } from '../privacy/detect.js';
 import { transactionImmediate } from '../worker/lease.js';
@@ -251,7 +251,7 @@ export async function runInject(
     const identity = resolveRepoIdentity(parsed.data.cwd);
     const config = loadConfig(paths);
     const secretPaths = [
-      ...config.privacy.secret_paths,
+      ...withPhysicalRules(config.privacy.secret_paths),
       ...loadRepoRules(identity.root).secretPaths,
     ];
     if (remainingBudget() <= 0) throw new Error('inject_deadline');

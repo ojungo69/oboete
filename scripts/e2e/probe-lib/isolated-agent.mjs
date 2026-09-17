@@ -102,6 +102,20 @@ function configuredHome(env, name, fallback) {
   return value ? path.resolve(value) : fallback;
 }
 
+// A home that does not exist yet is compared through its nearest existing ancestor, so a symbolic
+// link above it (every macOS temporary directory) cannot make it look outside the account.
+function physical(configured) {
+  const rest = [];
+  for (let existing = path.resolve(configured); ; existing = path.dirname(existing)) {
+    try {
+      return path.join(fs.realpathSync(existing), ...rest);
+    } catch {
+      if (path.dirname(existing) === existing) return path.resolve(configured);
+      rest.unshift(path.basename(existing));
+    }
+  }
+}
+
 export function resolveSourceHomes(env, home) {
   const homes = {
     oboete: configuredHome(env, "OBOETE_HOME", path.join(home, ".oboete")),
@@ -112,7 +126,7 @@ export function resolveSourceHomes(env, home) {
   };
   const realHome = fs.realpathSync(home);
   for (const [name, configured] of Object.entries(homes)) {
-    const target = fs.existsSync(configured) ? fs.realpathSync(configured) : path.resolve(configured);
+    const target = physical(configured);
     const relative = path.relative(realHome, target);
     if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
       throw new PreconditionError(`${name} setup home escapes the isolated account: ${configured}`);

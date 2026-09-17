@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { writeFileSync } from 'node:fs';
+import { realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { contentHash, materialHash, memoryIdFor } from '../../src/db/identity.js';
@@ -126,7 +126,7 @@ test('clean sanitation stores the new identity and a verified flat proof', async
     assert.equal(active[0].provenance_complete, 1);
     assert.equal(active[0].source_session_id, null);
     const sources = fixture.db.prepare('SELECT * FROM memory_sources WHERE memory_id = ?').all(active[0].id);
-    assert.ok(sources.some((row) => row.context_only === 1 && row.capture_root === fixture.repo));
+    assert.ok(sources.some((row) => row.context_only === 1 && row.capture_root === realpathSync(fixture.repo)));
     assert.ok(sources.some((row) => row.evidence === 'Source  evidence.'));
     assert.ok(sources.every((row) => row.raw_event_id === null));
     const holds = fixture.db.prepare('SELECT payload_json FROM migration_records WHERE payload_json IS NOT NULL').all();

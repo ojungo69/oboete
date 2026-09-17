@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { grantVisibility } from '../../src/db/queries.js';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { devNull } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -106,9 +106,11 @@ test('removed contexts preserve saved path restrictions and reject unknown or re
     const identity = resolveRepoIdentity(main);
     const selected = fixture.withDb((db) => chooseWork(db, { repoId: identity.id, contextKey: identity.worktreeKey,
       bindingId: String(current.id), workId: String(origin.work_id), now: NOW }))!;
+    // The stored root is Git's physical one, which is what a source context carries.
+    const physicalLinked = realpathSync(linked);
     git(main, 'worktree', 'remove', '--force', linked);
     const location = { repoId: identity.id, bindingId: selected.id, home: fixture.paths.home };
-    const context = { root: linked, contextId: String(origin.context_id), paths: [join(linked, 'protected/config.ts')] };
+    const context = { root: physicalLinked, contextId: String(origin.context_id), paths: [join(linked, 'protected/config.ts')] };
     const policy = fixture.withDb((db) => readSourcePrivacy(db, location, context, fixture.env));
     assert.ok(policy);
     const detected = await detectSync({ ...policy.detector, text: 'The retained progress body.' });
@@ -117,7 +119,7 @@ test('removed contexts preserve saved path restrictions and reject unknown or re
     mkdirSync(linked);
     git(linked, 'init', '--quiet', '--initial-branch=unrelated');
     assert.equal(fixture.withDb((db) => readSourcePrivacy(db, location, context, fixture.env)), null);
-    assert.equal(fixture.withDb((db) => db.prepare('SELECT root FROM work_contexts WHERE id = ?').get(origin.context_id)?.root), linked);
+    assert.equal(fixture.withDb((db) => db.prepare('SELECT root FROM work_contexts WHERE id = ?').get(origin.context_id)?.root), physicalLinked);
   });
 });
 
@@ -170,13 +172,13 @@ test('moving the same worktree preserves its binding and checks old paths under 
     const before = binding(fixture, 'moved-work');
     const moved = join(fixture.home, 'moved');
     git(main, 'worktree', 'move', linked, moved);
-    writeFileSync(join(moved, '.oboete.toml'), `[privacy]\nsecret_paths = [${JSON.stringify(join(moved, 'protected/**'))}]\n`);
+    writeFileSync(join(moved, '.oboete.toml'), `[privacy]\nsecret_paths = [${JSON.stringify(join(realpathSync(moved), 'protected/**'))}]\n`);
     await fixture.capture('SessionStart', { cwd: moved, session_id: 'moved-work', source: 'resume' });
     assert.equal(binding(fixture, 'moved-work').id, before.id);
     const context = { root: linked, contextId: String(before.context_id), paths: [join(linked, 'protected/config.ts')] };
     const policy = fixture.withDb((db) => readSourcePrivacy(db, { repoId: String(before.repo_id), bindingId: String(before.id) }, context, fixture.env));
     assert.ok(policy);
-    assert.equal(policy.detector.repoRoot, moved);
+    assert.equal(policy.detector.repoRoot, realpathSync(moved));
     const result = await detectSync({ ...policy.detector, text: 'Retained upload work.' });
     assert.equal(result.ok && result.sensitivity, 'secret');
     assert.equal(context.root, linked);
@@ -214,11 +216,60 @@ test('current absolute rules apply to an original path even while the other sour
     await fixture.capture('SessionStart', { cwd: main, session_id: 'live-reader', source: 'startup' });
     const origin = binding(fixture, 'live-origin');
     const current = binding(fixture, 'live-reader');
-    writeFileSync(join(main, '.oboete.toml'), `[privacy]\nsecret_paths = [${JSON.stringify(join(main, 'protected/**'))}]\n`);
+    // A repository rule is matched as written, so it names the root in Git's physical spelling.
+    writeFileSync(join(main, '.oboete.toml'), `[privacy]\nsecret_paths = [${JSON.stringify(join(realpathSync(main), 'protected/**'))}]\n`);
     const policy = fixture.withDb((db) => readSourcePrivacy(db, { repoId: String(current.repo_id), bindingId: String(current.id) },
       { root: linked, contextId: String(origin.context_id), paths: [join(linked, 'protected/config.ts')] }, fixture.env));
     assert.ok(policy);
     const checked = await detectSync({ ...policy.detector, text: 'Source from the other live worktree.' });
+    assert.equal(checked.ok && checked.sensitivity, 'secret');
+  });
+});
+
+test('a source path written through a symbolic link reaches the rules of the other live worktree', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    const { main, linked } = worktrees(fixture);
+    // The stored root is Git's physical one; the agent's path and the user's rule keep the link.
+    const link = join(realpathSync(fixture.home), '..', `${String(process.pid)}-link-${Date.now()}`);
+    symlinkSync(realpathSync(fixture.home), link);
+    try {
+      const through = (path: string) => join(link, path.slice(fixture.home.length));
+      await fixture.capture('SessionStart', { cwd: linked, session_id: 'link-origin', source: 'startup' });
+      await fixture.capture('SessionStart', { cwd: main, session_id: 'link-reader', source: 'startup' });
+      const origin = binding(fixture, 'link-origin');
+      const current = binding(fixture, 'link-reader');
+      // The user's own absolute rule, written through the link, is resolved where it enters.
+      appendFileSync(fixture.paths.config, `\n[privacy]\nsecret_paths = [${JSON.stringify(through(join(main, 'protected/**')))}]\n`);
+      const root = fixture.withDb((db) => String(db.prepare('SELECT root FROM work_contexts WHERE id = ?').get(origin.context_id)?.root));
+      const policy = fixture.withDb((db) => readSourcePrivacy(db, { repoId: String(current.repo_id), bindingId: String(current.id) },
+        { root, contextId: String(origin.context_id), paths: [through(join(linked, 'protected/config.ts'))] }, fixture.env));
+      assert.ok(policy);
+      const checked = await detectSync({ ...policy.detector, text: 'Source from the other live worktree.' });
+      assert.equal(checked.ok && checked.sensitivity, 'secret');
+    } finally {
+      rmSync(link, { force: true });
+    }
+  });
+});
+
+test('a source path under a link inside the worktree that points outside it keeps its written relative form', async () => {
+  await withFixture(async (fixture) => {
+    writeConfig(fixture, 'none');
+    const { main, linked } = worktrees(fixture);
+    mkdirSync(join(fixture.home, 'vault'));
+    symlinkSync(join(fixture.home, 'vault'), join(linked, 'protected'));
+    await fixture.capture('SessionStart', { cwd: linked, session_id: 'inner-origin', source: 'startup' });
+    await fixture.capture('SessionStart', { cwd: main, session_id: 'inner-reader', source: 'startup' });
+    const origin = binding(fixture, 'inner-origin');
+    const current = binding(fixture, 'inner-reader');
+    // An absolute rule of the other worktree reaches this path only through its re-rooted relative form.
+    writeFileSync(join(main, '.oboete.toml'), `[privacy]\nsecret_paths = [${JSON.stringify(join(realpathSync(main), 'protected/**'))}]\n`);
+    const root = fixture.withDb((db) => String(db.prepare('SELECT root FROM work_contexts WHERE id = ?').get(origin.context_id)?.root));
+    const policy = fixture.withDb((db) => readSourcePrivacy(db, { repoId: String(current.repo_id), bindingId: String(current.id) },
+      { root, contextId: String(origin.context_id), paths: [join(root, 'protected/config.ts')] }, fixture.env));
+    assert.ok(policy);
+    const checked = await detectSync({ ...policy.detector, text: 'Source behind a link to outside the worktree.' });
     assert.equal(checked.ok && checked.sensitivity, 'secret');
   });
 });
@@ -242,7 +293,7 @@ for (const condition of ['clean', 'current rules', 'origin rules', 'removed orig
       });
       if (condition === 'current rules' || condition === 'origin rules') {
         const root = condition === 'current rules' ? main : linked;
-        writeFileSync(join(root, '.oboete.toml'), `[privacy]\nsecret_paths = [${JSON.stringify(join(root, 'protected/**'))}]\n`);
+        writeFileSync(join(root, '.oboete.toml'), `[privacy]\nsecret_paths = [${JSON.stringify(join(realpathSync(root), 'protected/**'))}]\n`);
       }
       if (condition === 'removed origin' || condition === 'replaced origin') git(main, 'worktree', 'remove', '--force', linked);
       if (condition === 'replaced origin') {
@@ -321,7 +372,8 @@ test('processing an accepted source after a worktree move retains complete origi
       const memory = db.prepare('SELECT m.* FROM work_items w JOIN memories m ON m.id = w.current_checkpoint_memory_id WHERE w.id = ?').get(origin.work_id)!;
       assert.ok(memory);
       assert.equal(memory.provenance_complete, 1);
-      assert.equal(db.prepare('SELECT capture_root FROM memory_sources WHERE memory_id = ? AND raw_event_id IS NULL').get(memory.id)?.capture_root, linked);
+      assert.equal(db.prepare('SELECT capture_root FROM memory_sources WHERE memory_id = ? AND raw_event_id IS NULL').get(memory.id)?.capture_root,
+        join(realpathSync(fixture.home), 'linked'));
     });
     await fixture.capture('UserPromptSubmit', { cwd: moved, session_id: 'after-move', prompt_id: 'after', prompt: 'Continue deployment verification.' });
     await fixture.capture('SessionEnd', { cwd: moved, session_id: 'after-move', reason: 'exit' });
@@ -741,7 +793,7 @@ test('late recovery does not replace a context root observed more recently', asy
     await fixture.capture('UserPromptSubmit', { ...common, prompt_id: 'late', prompt: 'Inspect the retry behavior.' }, 'spooled');
     toggleDatabase(fixture, false);
     const moved = join(fixture.home, 'moved-worktree');
-    fixture.withDb((db) => db.prepare('UPDATE work_contexts SET root = ?, last_seen_at = ? WHERE root = ?').run(moved, NOW, main));
+    fixture.withDb((db) => db.prepare('UPDATE work_contexts SET root = ?, last_seen_at = ? WHERE root = ?').run(moved, NOW, realpathSync(main)));
     await runObserveForFixture(fixture);
     fixture.withDb((db) => {
       assert.equal(db.prepare('SELECT root FROM work_contexts').get()?.root, moved);
