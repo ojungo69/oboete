@@ -2618,11 +2618,12 @@ the named test, and restores the bundle (sha256 compared). The last four edit
 `scripts/e2e/probe-lib/isolated-agent.mjs`, which the prompt pin imports, and restore it
 (`git status` clean afterwards).
 
-That import is a plain one. It became possible in this PR: `trusthash.mjs` ended in a
-`process.argv[1] === self` block, which esbuild's bundle made fire on the test runner's own
-arguments, so the six lines moved to `scripts/e2e/probe-lib/trusthash-cli.mjs` and
-`test/unit/codex-trust.test.ts` spawns that instead. `scripts/e2e` is outside the TypeScript
-program, so `isolated-agent.d.mts` declares the four functions a `.ts` file imports.
+That import is a plain one. It became possible in this PR: `trusthash.mjs` guarded its command
+block with `realpathSync(process.argv[1]) === self`, and esbuild collapses `import.meta.url` to the
+bundle, so the guard fired on the test runner's own entry and read an argument it does not set. The
+guard now checks the entry's name first — nothing but that file is called `trusthash.mjs` — which
+holds whether the module is bundled or not. `scripts/e2e` is outside the TypeScript program, so
+`isolated-agent.d.mts` declares the four functions a `.ts` file imports.
 
 | Mutation | Failing assertion |
 | --- | --- |

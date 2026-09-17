@@ -22,7 +22,7 @@ import { detectAgents, type VersionSpawn } from '../../src/setup/detect.js';
 import { withTempHome } from '../helpers/home.js';
 
 const root = fileURLToPath(new URL('../../..', import.meta.url));
-const TRUSTHASH = join(root, 'scripts/e2e/probe-lib/trusthash-cli.mjs');
+const TRUSTHASH = join(root, 'scripts/e2e/probe-lib/trusthash.mjs');
 
 type FixtureGroup = { matcher?: string; hooks: CodexHandler[]; oboete: true };
 
