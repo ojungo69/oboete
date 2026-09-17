@@ -262,6 +262,9 @@ test('fail-closed: a path rule matches a path written through a symbolic link to
     // A file that no longer exists, below a directory that never did, still has a physical spelling.
     assert.equal(matchSecretPath(join(logical, 'gone/secrets/old.txt'), ['gone/**'], root), 'gone/**');
     assert.equal(matchSecretPath(join(logical, 'secrets/k.txt'), [join(root, 'secrets/**')], root), join(root, 'secrets/**'));
+    // A root spelled through the link pairs with the written path, its physical form with the physical one.
+    assert.equal(matchSecretPath(join(logical, 'secrets/k.txt'), ['secrets/**'], logical), 'secrets/**');
+    assert.equal(matchSecretPath(join(root, 'secrets/k.txt'), ['secrets/**'], logical), 'secrets/**');
     // A rule is matched as written, so a repository's `.oboete.toml` never makes the hook resolve a
     // path of its choosing; the user's own absolute rules get their physical form added once.
     assert.equal(matchSecretPath(join(root, 'secrets/k.txt'), [join(logical, 'secrets/**')], root), null);
@@ -301,6 +304,8 @@ test('fail-closed: an absolute path rule matches a relative tool path, also thro
     assert.equal(matchSecretPath('./secrets/b.txt', ['secrets/**'], root, app), null);
     // Through a link that leaves the repository, only the written form lies inside it.
     assert.equal(matchSecretPath('key.txt', ['protected/**'], root, join(root, 'protected')), 'protected/**');
+    // Its physical form lies outside the repository, so no relative rule sees `../vault/key.txt`.
+    assert.equal(matchSecretPath('key.txt', [`**/${basename(vault)}/**`], root, join(root, 'protected')), null);
     // `.` is the working directory, which a rule on a directory above it covers.
     assert.equal(matchSecretPath('.', [join(root, '**')], root, app), join(root, '**'));
     // A name that merely starts with two dots is inside the repository.

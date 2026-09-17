@@ -254,7 +254,7 @@ export function globRuleError(rule: string): string | null {
   }
 }
 
-/** `path` relative to `root`, or null outside it: such a path has no repository-relative form. */
+/** `path` relative to `root`, or null for the root itself or a path outside it (no repository-relative form). */
 function insideRoot(root: string, path: string): string | null {
   const inside = relative(root, path);
   return inside === '' || inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside) ? null : inside;
