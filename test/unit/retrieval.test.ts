@@ -856,15 +856,10 @@ test('searchMemories returns the fact-bearing memory of a five-row corpus', { sk
         repoId: 'repo_a',
         type: 'session_summary',
         title: 'Record three exact strings as durable facts in NOTES.md.',
-        body: [
-          'Purpose',
-          'Record three exact strings as durable facts in NOTES.md.',
-          '',
-          'Constraints',
-          '- Preserve the three exact strings verbatim.',
-          '- Use exactly one tool call.',
+        body:
+          'Purpose\nRecord three exact strings as durable facts in NOTES.md.\n\nConstraints\n' +
+          '- Preserve the three exact strings verbatim.\n- Use exactly one tool call.\n' +
           '- Append the strings to NOTES.md.',
-        ].join('\n'),
       });
       insertSearchable(opened.db, {
         id: 'm_fact',
