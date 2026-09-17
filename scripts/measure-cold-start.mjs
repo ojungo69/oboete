@@ -13,7 +13,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir, loadavg, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
@@ -120,7 +120,10 @@ function run(file, args, options = {}) {
 }
 
 function loadAverage() {
-  const raw = readFileSync('/proc/loadavg', 'utf8').trim();
+  // `/proc/loadavg` also carries the run queue and the last pid; macOS has only the three averages.
+  const raw = existsSync('/proc/loadavg')
+    ? readFileSync('/proc/loadavg', 'utf8').trim()
+    : loadavg().map((value) => value.toFixed(2)).join(' ');
   return { raw, oneMinute: Number(raw.split(/\s+/, 1)[0]) };
 }
 
