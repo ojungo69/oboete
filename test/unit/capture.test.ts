@@ -446,7 +446,9 @@ test('fail-closed: the user\'s absolute path rule written through a symbolic lin
 test('fail-closed: the user\'s absolute path rule applies to a relative Codex patch path from a subdirectory', async () => {
   await withCapture(async (context) => {
     // A Git repository, so the identity root is the repository and not the agent's subdirectory.
-    assert.equal(spawnSync('git', ['-C', context.repo, 'init', '--quiet']).status, 0);
+    const gitEnv = { ...process.env, GIT_DIR: undefined, GIT_WORK_TREE: undefined };
+    assert.equal(spawnSync('git', ['-C', context.repo, 'init', '--quiet'], { env: gitEnv }).status, 0);
+    assert.ok(existsSync(join(context.repo, '.git')), 'git init created no repository');
     const app = join(realpathSync(context.repo), 'app');
     mkdirSync(join(app, 'secrets'), { recursive: true });
     writeFileSync(context.paths.config, `[privacy]\nsecret_paths = [${JSON.stringify(join(app, 'secrets/**'))}]\n`);

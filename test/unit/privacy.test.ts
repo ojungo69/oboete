@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { Worker } from 'node:worker_threads';
@@ -303,6 +303,9 @@ test('fail-closed: an absolute path rule matches a relative tool path, also thro
     assert.equal(matchSecretPath('.', [join(root, '**')], root, app), join(root, '**'));
     // A name that merely starts with two dots is inside the repository.
     assert.equal(matchSecretPath(join(root, '..cache/x'), ['..cache/**'], root), '..cache/**');
+    // A relative rule never sees the absolute form of a relative path, so a directory above the
+    // repository that happens to share its name does not turn every tool path into a hit.
+    assert.equal(matchSecretPath('src/app.ts', [`**/${basename(base)}/**`], root), null);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

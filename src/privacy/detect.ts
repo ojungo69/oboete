@@ -255,13 +255,14 @@ export function globRuleError(rule: string): string | null {
 }
 
 /**
- * The repository path rule that this path matches, or null. The path is tested in its raw form, in
- * its absolute form (a relative path resolved against the agent's working directory, falling back
- * to the repository root), and in its repository-relative form when it lies inside the repository;
- * a match makes the whole event a path-rule hit, which is stored as metadata only (R4). Because the
- * absolute form is compared, a `**` rule naming a directory above the repository matches too.
+ * The path rule that this path matches, or null; a match makes the whole event a path-rule hit,
+ * which is stored as metadata only (R4). Every rule sees the path as written and its
+ * repository-relative form when it lies inside the repository. An absolute rule also sees the
+ * absolute form of a relative path, resolved against the agent's working directory (falling back
+ * to the repository root); a relative rule does not, so a `**` rule cannot match a directory above
+ * the repository through a path the agent wrote relative.
  *
- * The absolute and repository-relative forms are also compared in their physical spelling
+ * Absolute and repository-relative forms are also compared in their physical spelling
  * (`physicalPath`): the root is Git's resolved `--show-toplevel` while a payload path keeps the
  * symbolic links it was written with, and a rule that misses its own file fails open. Rules are
  * matched as written; the user's own absolute rules arrive with their physical form already added
@@ -275,27 +276,31 @@ export function matchSecretPath(
 ): string | null {
   if (rules.length === 0) return null;
 
-  const candidates = [withForwardSlashes(pathValue)];
+  const forEveryRule = [pathValue];
+  const forAbsoluteRules: string[] = [];
   let written = isAbsolute(pathValue) ? pathValue : null;
   // A relative tool path (a Codex patch, a Pi read) is relative to where the agent runs.
   if (cwd !== null) written = resolve(cwd, pathValue);
   if (written !== null) {
     const physical = physicalPath(written);
-    candidates.push(withForwardSlashes(written), withForwardSlashes(physical));
+    (isAbsolute(pathValue) ? forEveryRule : forAbsoluteRules).push(written, physical);
     if (repoRoot !== null) {
       for (const [root, path] of [[resolve(repoRoot), written], [physicalPath(repoRoot), physical]]) {
         const inside = relative(root, path);
         // A path outside the repository has no repository-relative form to compare.
         if (inside !== '' && inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside)) {
-          candidates.push(withForwardSlashes(inside));
+          forEveryRule.push(inside);
         }
       }
     }
   }
 
+  const relativeRuleForms = [...new Set(forEveryRule.map(withForwardSlashes))];
+  const absoluteRuleForms = [...new Set([...forEveryRule, ...forAbsoluteRules].map(withForwardSlashes))];
   for (const rule of rules) {
     const pattern = compileGlob(withForwardSlashes(rule));
-    if (candidates.some((candidate) => pattern.test(candidate))) return rule;
+    const forms = isAbsolute(rule) ? absoluteRuleForms : relativeRuleForms;
+    if (forms.some((form) => pattern.test(form))) return rule;
   }
   return null;
 }
