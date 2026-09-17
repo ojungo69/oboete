@@ -1,0 +1,27 @@
+specs/009-memory-core/quickstart.md
+  s_892d4f75e21024::t_b478c418128dfc 2333-2345
+src/worker/observe-batch.ts
+  s_892d4f75e21024::t_1b257c5a013a95 491,646-653
+test/unit/provider-fallback.test.ts
+  s_892d4f75e21024::t_2de390bc395d21 377-380,382-384,386-390
+src/worker/observe.ts
+  s_892d4f75e21024::t_1b257c5a013a95 698-701
+specs/009-memory-core/contracts/provider-fallback.md
+  s_892d4f75e21024::t_b478c418128dfc 155,310-317
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9cc50a2f4fce1749a0c51db1db1af366bd5ec7af",
+  "prompts": {},
+  "sessions": {
+    "s_892d4f75e21024": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79c129f3-aa1e-4d43-970b-c316e499606d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
