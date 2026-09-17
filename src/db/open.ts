@@ -133,6 +133,7 @@ function waitForLock<T>(db: DatabaseSync, fn: () => T): T {
       const left = until - performance.now();
       if (!(left > 0)) throw error;
       Atomics.wait(lockWaitSleep, 0, 0, Math.min(2 ** attempt, 10, left));
+      if (!(until - performance.now() > 0)) throw error;
     }
   }
 }
