@@ -1,0 +1,100 @@
+# T040 / SC-006: the engine gate on actual macOS (Apple Silicon). Linux is ci.yml's `engine` job and
+# WSL is the developer host; this workflow is the macOS row, run on demand and by the pull request
+# that changes it. It is not on every push: the timed hook tests carry 300 ms bounds that duplicate
+# runs starve (issue #221), and one recorded run per engine change is what the check asks for.
+# No agent CLI is installed on the runner, so doctor reports every agent item as not installed
+# (healthy). No model or account is used.
+name: Platform
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/platform.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.16.0", "24.x"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # A pull_request's merge ref is a preview commit that exists nowhere else, and the cold-start
+          # table prints `git rev-parse --short HEAD` as its receipt.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Platform
+        # uname -m stays on the log; the arm64 check is the Node binary under test, not the image label.
+        run: sw_vers && uname -m && node -v && test "$(node -p process.arch)" = arm64
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Build
+        id: build
+        run: npm run build
+      # The two legs of `npm test`, split so a failure in one still records the other. Each verdict
+      # is recorded, but only for a commit whose build succeeded.
+      - name: Unit tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: >-
+          node --test --enable-source-maps --import ./build/test/helpers/compile-cache.mjs
+          'build/test/unit/**/*.test.mjs' 'build/test/migrations/**/*.test.mjs' 'scripts/e2e/**/*.test.mjs'
+          'scripts/dco-check.test.mjs' 'scripts/pack-check.test.mjs'
+      - name: Serial end-to-end and fault tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: >-
+          node --test --enable-source-maps --import ./build/test/helpers/compile-cache.mjs --test-concurrency=1
+          'build/test/e2e-*.test.mjs' 'build/test/fault-*.test.mjs' 'scripts/quality-debt-record*.test.mjs'
+      - name: Pack check
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run pack-check
+      # Measured after the suites, not straight after the build: the 1-minute load average was 9 to 12
+      # after typecheck, lint and build (run 35210161686) and 2.5 to 4.9 here (run 35206343042).
+      - name: Hook cold start
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: node scripts/measure-cold-start.mjs --bundle dist/oboete.mjs --markdown
+      - name: Packed engine in an isolated home
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        # The installed package must support no-model setup in an isolated home on this platform.
+        # Every engine item must be present.
+        # Every doctor item must be healthy except an unconfigured provider, which may be degraded
+        # with reason "No observer provider is configured." (that reason only appears for preset none).
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          npm install --prefix "$RUNNER_TEMP/pkg" --no-audit --no-fund "$RUNNER_TEMP"/oboete-*.tgz
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
+          oboete="$RUNNER_TEMP/pkg/node_modules/.bin/oboete"
+          "$oboete" --version
+          "$oboete" setup --provider none --yes
+          code=0
+          "$oboete" doctor --json > "$RUNNER_TEMP/doctor.json" || code=$?
+          echo "doctor exit $code"
+          node -e '
+            const items = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).items;
+            const missing = ["config", "paused", "storage", "fts", "migration", "worker", "generation", "spool", "sync", "provider", "allowance"]
+              .filter((name) => !items.some((item) => item.item === name));
+            const bad = items
+              .filter((item) => item.status !== "healthy" && !(item.item === "provider" && item.status === "degraded" && item.reason === "No observer provider is configured."))
+              .map((item) => item.item);
+            for (const item of items) console.log(item.item, item.status);
+            if (bad.length > 0) console.error("not healthy:", bad.join(", "));
+            if (missing.length > 0) console.error("missing:", missing.join(", "));
+            if (Number(process.argv[2]) > 1 || bad.length > 0 || missing.length > 0) process.exitCode = 1;
+          ' "$RUNNER_TEMP/doctor.json" "$code"

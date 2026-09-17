@@ -389,3 +389,10 @@ writers require separate worktrees. No deployment follows merely from an increme
   #233 and #234 are recorded against the contract paragraphs that place them outside this task —
   a pre-existing pass-loop defect the resident inherits, two clock-and-retention findings from the
   delta reviews, and the post-release spawn hand-off the unconditional release leaves open.
+- T040 (open, 2026-09-17): the macOS leg now runs on a GitHub-hosted `macos-15` runner through
+  `.github/workflows/platform.yml` instead of the M1 iMac. Four runs are recorded in E10 of
+  `quickstart.md`: they found a fail-open `secret_paths` defect through symbolic links (fixed in
+  #254), measure the hook inside its budget on macOS, and leave one deterministic defect — the
+  database busy wait is not a wall-clock bound (#255) — plus five one-off timing failures (#256).
+  The marker stays open until the #255 fix passes on the runner. Agent probes on macOS are recorded
+  as unverified: a hosted runner has no agent login.
