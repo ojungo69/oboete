@@ -40,12 +40,28 @@ jobs:
         run: npm run typecheck
       - name: Lint
         run: npm run lint
-      - name: Test
-        # `npm test` builds first, then runs the unit glob and the serial E2E/fault glob.
-        run: npm test
+      - name: Build
+        run: npm run build
+      # The two legs of `npm test`, split so a failure in one still records the other; every step
+      # after the build runs unless the job was cancelled, because a platform check wants each verdict.
+      - name: Unit tests
+        run: >-
+          node --test --enable-source-maps --import ./build/test/helpers/compile-cache.mjs
+          'build/test/unit/**/*.test.mjs' 'build/test/migrations/**/*.test.mjs' 'scripts/e2e/**/*.test.mjs'
+          'scripts/dco-check.test.mjs' 'scripts/pack-check.test.mjs'
+      - name: Serial end-to-end and fault tests
+        if: ${{ !cancelled() }}
+        run: >-
+          node --test --enable-source-maps --import ./build/test/helpers/compile-cache.mjs --test-concurrency=1
+          'build/test/e2e-*.test.mjs' 'build/test/fault-*.test.mjs' 'scripts/quality-debt-record*.test.mjs'
       - name: Pack check
+        if: ${{ !cancelled() }}
         run: npm run pack-check
+      - name: Hook cold start
+        if: ${{ !cancelled() }}
+        run: node scripts/measure-cold-start.mjs --bundle dist/oboete.mjs --markdown
       - name: Packed engine in an isolated home
+        if: ${{ !cancelled() }}
         # A no-model setup must still open storage, full-text search and the schema on this platform.
         # Setup's own exit is not the verdict: with no agent installed it reports nothing to wire.
         run: |
