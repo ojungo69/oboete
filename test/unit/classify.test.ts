@@ -123,6 +123,69 @@ test('a fact quoted verbatim from the input keeps its own script', () => {
     { observations: [], checkpoint: { ...constraint, constraints: ['配布物の色を決める。'] } }), 'mismatch');
 });
 
+test('a quote keeps its script inside the framing the prompt asks for', () => {
+  const fact = '配布色は琥珀。';
+  const events = [{ id: 'e1', kind: 'prompt', text: `Record these durable facts: the build token is cedar. ${fact}` }];
+  // buildSummarizerPrompt asks for a title and body that *contain* the string, not that are it.
+  const framed = output(observation({ title: `Durable fact: ${fact}`, body: `The developer asked to keep ${fact} exactly.` }));
+  assert.equal(checkLanguage(inputWithHint('en', events), framed), 'ok');
+  // Framing around an invented Japanese phrase is still the observer's own words.
+  const invented = output(observation({ title: 'Durable fact: 配布物の色は未定。', body: 'The colour is undecided.' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), invented), 'mismatch');
+});
+
+test('a short coincidence does not exempt a field', () => {
+  // '色' appears inside the quoted fact, but one shared character is not a quotation.
+  const fact = '配布色は琥珀。';
+  const events = [{ id: 'e1', kind: 'prompt', text: `Record these durable facts: ${fact}` }];
+  const short = output(observation({ title: '色', body: 'The colour of the distribution is not decided.' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), short), 'mismatch');
+});
+
+test('a quote survives the paged and trimmed shapes it arrives in', () => {
+  const fact = '配布色は琥珀。';
+  // The paged path carries a slice of the canonical JSON, where a quote and a newline are escaped.
+  const escaped = String.raw`{"id":"e1","text":"the developer said \"` + fact + String.raw`\"\nkeep it"}`;
+  const fragment = [{ id: 'e1', kind: 'prompt',
+    fragment: { format: 'event-json-v1', source_hash: 'h1', start: 0, end: escaped.length,
+      total: escaped.length * 2, text: escaped } }];
+  const quoted = output(observation({ title: 'fact-3', body: fact }));
+  assert.equal(checkLanguage(inputWithHint('en', fragment), quoted), 'ok');
+
+  // A body over MAX_BODY comes back with an omission marker appended, so it is no longer the whole
+  // quote. The marker is the observer's own words, and they are Latin.
+  const long = `${fact.repeat(40)}\n... (+3 omitted)`;
+  const events = [{ id: 'e1', kind: 'prompt', text: `Record: ${fact.repeat(40)}` }];
+  assert.equal(checkLanguage(inputWithHint('en', events), output(observation({ title: 'fact-3', body: long }))), 'ok');
+});
+
+test('an update may carry the nearby title it targets', () => {
+  const nearby = [{ id: 'm_1', type: 'discovery', title: '配布色の決定', body: '配布色は琥珀に決まりました。', deleted: false }];
+  const input = observerInputSchema.parse({
+    repo_ref: REPO_ID,
+    checkpoint_context: { state: 'none' },
+    session: { started_at: NOW, turns: [] },
+    events: [{ id: 'e1', kind: 'prompt', text: 'Confirm the release colour decision.' }],
+    free_summaries: {},
+    nearby,
+    language_hint: 'en',
+  });
+  const update = output(observation({ title: '配布色の決定', body: '配布色は琥珀に決まりました。' }));
+  assert.equal(checkLanguage(input, update), 'ok');
+  const invented = output(observation({ title: '配布色の再検討', body: '配布色をもう一度検討します。' }));
+  assert.equal(checkLanguage(input, invented), 'mismatch');
+});
+
+test('a checkpoint purpose is never exempted by quoting', () => {
+  const fact = '配布色は琥珀。';
+  const events = [{ id: 'e1', kind: 'prompt', text: `Record these durable facts: ${fact}` }];
+  // `checkpointText` picks all four section headings from the purpose, so a purpose that is only a
+  // quote renders the whole checkpoint in the wrong language.
+  const checkpoint = { decision: 'replace' as const, purpose: fact, constraints: [], decisions: [],
+    outstanding: [], source_event_ids: ['e1'], reason: 'Progress changed.' };
+  assert.equal(checkLanguage(inputWithHint('en', events), { observations: [], checkpoint }), 'mismatch');
+});
+
 test('the session summary preserves a roughly 600-character first prompt verbatim', async () => {
   await withOpened(async (db, token) => {
     seedRepo(db);

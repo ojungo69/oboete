@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { PRESET_CATALOG, type Credentials } from '../../src/config.js';
-import type { ObserverInput, ObserverOutput } from '../../src/observer/contract.js';
+import { MAX_OBSERVATIONS, type ObserverInput, type ObserverOutput } from '../../src/observer/contract.js';
 import { buildSummarizerPrompt, summarizeWithProvider } from '../../src/observer/llm.js';
 import { cliSpawn } from '../helpers/agent-cli.js';
 
@@ -189,9 +189,10 @@ test('buildSummarizerPrompt preserves exact strings in both modes', () => {
     assert.match(prompt.system, /never translate/);
     // The per-fact rule (#274) and the schema's hard observation cap.
     assert.match(prompt.system, /one observation per item/);
-    assert.match(prompt.system, /at most 20 observations/);
+    assert.ok(prompt.system.includes(`at most ${MAX_OBSERVATIONS} observations`),
+      'the prompt states the schema cap it is derived from');
     // The accounting sense of noop, kept distinct from the add/update/delete/noop classification.
-    assert.match(prompt.system, /never accounted for by a noop observation/);
+    assert.match(prompt.system, /never accounted for by a noop observation with no target/);
   }
 });
 

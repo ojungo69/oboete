@@ -9,6 +9,7 @@ import type { AgentCli, Credentials, PresetName } from '../config.js';
 import { classifyApiError, findApiError, hasErrorName, isAbort, MAX_RESPONSE_BYTES } from './llm-errors.js';
 import {
   CONCEPTS,
+  MAX_OBSERVATIONS,
   OBSERVATION_TYPES,
   observerOutputJsonSchema,
   observerOutputSchema,
@@ -188,7 +189,7 @@ export function buildSummarizerPrompt(
     'Every observation must have non-empty source_event_ids chosen from the events list only.',
     'Choose visibility: work for task progress/drafts/constraints; project for reusable knowledge about this project; personal_proposal for a generic stable preference that may apply across projects. A proposal never grants personal approval. Supply no repository, work, approval or proposal-state identifiers.',
     'Account for every supplied event ID: retain its useful independent facts and decisions, or emit an explicit noop with a non-empty reason explaining why no memory is needed.',
-    'When an event states facts, values or strings the developer asks to keep (durable, remember, exact, verbatim), emit one observation per item whose title and body contain that string copied character for character, including any identifier prefix; such an event is never accounted for by a noop observation. The answer carries at most 20 observations in total: fold surplus items into the last one.',
+    `When an event states facts, values or strings the developer asks to keep (durable, remember, exact, verbatim), emit one observation per item whose title and body contain that string copied character for character, including any identifier prefix; such an event is never accounted for by a noop observation with no target. The answer carries at most ${MAX_OBSERVATIONS} observations in total: fold surplus items into the last one.`,
     'Do not silently omit an event or replace exact facts with a generic description of the task.',
     'Also return a checkpoint decision: replace with a complete snapshot of the work purpose, constraints, decisions and outstanding steps, or explicitly leave it unchanged. Cite supplied event IDs and explain the choice.',
     'Preserve all still-applicable constraints and outstanding steps from the provided checkpoint. Related investigation and Git integration do not complete the work. Never invent completion.',

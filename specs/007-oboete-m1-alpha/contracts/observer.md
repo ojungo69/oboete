@@ -132,12 +132,24 @@ matching a tombstoned memory suppresses the insert and is recorded for `why`; `u
 `valid_to` and `superseded_by`; `delete` tombstones the target only with a non-empty `reason`; the
 observer answers in the dominant language of the input (FR-014); the worker compares the
 dominant script of every field the answer writes — every title and body, and in 009 the
-checkpoint's own items — with the input's, and exempts a field whose whole text the request
-already carries (its events or the provided checkpoint), because a string quoted verbatim is
-the content's own language; it retries once on mismatch, and on a
+checkpoint's constraints, decisions and outstanding items — with the input's. A string the request
+already carries is the content's own language, not the observer's, so a field is scored on its
+residual: every run of at least four characters that the request carries (its events, its nearby
+memories, or the provided checkpoint, in the escaped form a paged fragment carries as well) is
+removed first, and what remains has to agree. That covers a quote inside the framing the prompt
+asks for, a body trimmed with an omission marker, and a title reused from the memory an `update`
+targets. The checkpoint's own `purpose` is never exempted, because `checkpointText` picks all four
+section headings from it. The worker retries once on mismatch, and on a
 second mismatch discards the output and routes the batch to the fallback with
 `language_mismatch` (fallback records copy input text verbatim, so their language is the
 input's); a provider fixture returning English for Japanese input verifies this.
+
+**Declared exact facts**: when an event states strings the developer asks to keep (durable,
+remember, exact, verbatim), the prompt asks for one observation per item whose title and body carry
+that string character for character, and such an event is never accounted for by a `noop` with no
+target. The answer carries at most `MAX_OBSERVATIONS` observations in total — the schema rejects
+more, and the rejection is a fatal `unusable_output` — so the prompt asks for surplus items to be
+folded into the last one.
 
 ## Provider presets
 
