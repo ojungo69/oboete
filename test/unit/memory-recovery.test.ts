@@ -126,12 +126,51 @@ test('a source whose captured root was removed is held as source_context_unknown
     assert.equal(calls, 0);
     assert.equal(exit, 0, 'a held source is not a summarizer fallback');
     fixture.withDb((db) => {
-      const receipts = db.prepare("SELECT DISTINCT reason FROM observation_batch_sources WHERE outcome = 'deferred'").all().map((row) => row.reason);
+      const receipts = db.prepare(`SELECT DISTINCT reason FROM observation_batch_sources
+        WHERE outcome = 'deferred' ORDER BY reason`).all().map((row) => row.reason);
       assert.deepEqual(receipts, ['source_context_unknown']);
-      assert.equal(db.prepare('SELECT degraded_reason FROM observation_batches').get()?.degraded_reason, null,
-        'a held origin is not a summarizer outcome');
+      const batch = db.prepare('SELECT state, degraded_reason, completed_at FROM observation_batches').get();
+      assert.equal(batch?.degraded_reason, null, 'a held origin is not a summarizer outcome');
+      // The batch is finished, not left pending: its sources carry their own retry.
+      assert.equal(batch?.state, 'fallback');
+      assert.ok(batch?.completed_at != null);
+      // And the session's own notes say they are rule-based, not that a summarizer refused them.
+      assert.equal(db.prepare('SELECT summary_degraded_reason FROM sessions').get()?.summary_degraded_reason,
+        'rule_based', 'a held source does not blame the summarizer');
       assert.equal(db.prepare("SELECT COUNT(*) AS n FROM observation_batches WHERE degraded_reason = 'consent_changed'").get()?.n, 0);
       assert.equal(db.prepare("SELECT COUNT(*) AS n FROM raw_events WHERE kind = 'prompt' AND processing_state = 'waiting'").get()?.n, 1);
+    });
+  });
+});
+
+// The other half of the same classifier: a source the detector could not scan is a summarizer
+// outcome, not a held origin. A batch belongs to one session and one captured origin, so a single
+// batch cannot mix the two — each reason has to be pinned on its own batch.
+test('a source the detector cannot scan leaves the batch as unusable_output, not held', async () => {
+  await withFixture(async (fixture) => {
+    fixture.env = cleanEnv(fixture.home, { OBOETE_OPENROUTER_API_KEY: 'detector-failure-fixture-key' });
+    writeConfig(fixture, 'openrouter');
+    const root = fixtureRepo(fixture, 'scannable-checkout');
+    await captureEndedSession(fixture, { sessionId: 'detector-failure', cwd: root, prompts: ['Review the retry behavior.'] });
+    let calls = 0;
+    const exit = await runObserveForFixture(fixture, {
+      now: () => NOW,
+      maxRunMs: 2_000,
+      detect: async () => ({ ok: false, reason: 'detector_error' as const }),
+      fetch: async () => {
+        calls += 1;
+        return openAiResponse(providerOutput('none'));
+      },
+    });
+    assert.equal(calls, 0);
+    // Unlike a held origin, this one is a degradation, so the run says so on the way out.
+    assert.equal(exit, 1);
+    fixture.withDb((db) => {
+      const receipts = db.prepare(`SELECT DISTINCT reason FROM observation_batch_sources
+        WHERE outcome = 'deferred' ORDER BY reason`).all().map((row) => row.reason);
+      assert.deepEqual(receipts, ['detector_failed']);
+      assert.equal(db.prepare('SELECT degraded_reason FROM observation_batches').get()?.degraded_reason,
+        'unusable_output');
     });
   });
 });

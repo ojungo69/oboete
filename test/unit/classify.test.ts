@@ -457,12 +457,13 @@ test('identical summary text does not share generation health between sessions',
     const pending = sessionSummary(db, token, 'sess1', NOW);
     assert.equal(pending.state, 'waiting');
     assert.ok(pending.memoryId);
-    assert.equal(memoryRow(db, pending.memoryId)?.degraded_reason, 'unusable_output');
+    // Nothing failed here: no batch recorded a reason, so the pending summary is rule-based notes.
+    assert.equal(memoryRow(db, pending.memoryId)?.degraded_reason, 'rule_based');
     db.prepare("UPDATE raw_events SET processing_state = 'processed', processed_at = ? WHERE session_id = 'sess2'").run(NOW);
     const completed = sessionSummary(db, token, 'sess2', NOW + 1);
     assert.equal(completed.state, 'done');
     assert.equal(completed.memoryId, pending.memoryId, 'identical text may share content identity');
-    assert.equal(memoryRow(db, pending.memoryId)?.degraded_reason, 'unusable_output',
+    assert.equal(memoryRow(db, pending.memoryId)?.degraded_reason, 'rule_based',
       'another session cannot overwrite the original summary artifact health');
     assert.equal(latestSessionSummary(db, REPO_ID, `fixture-work:${REPO_ID}`)?.degraded_reason, null,
       'the selected session has its own completed-generation health');

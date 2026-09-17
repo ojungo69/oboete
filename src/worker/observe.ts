@@ -473,7 +473,10 @@ function recordBatchResult(
   result[batchResult.state] += 1;
   return {
     leaseLost: false,
-    usedFallback: batchResult.state === 'fallback' && batchResult.reason !== 'rule_based',
+    // A fallback with no reason is a batch whose sources were all held for a later pass: nothing
+    // was degraded, so the run neither reports nor exits on it.
+    usedFallback: batchResult.state === 'fallback' && batchResult.reason !== null
+      && batchResult.reason !== 'rule_based',
   };
 }
 

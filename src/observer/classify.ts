@@ -531,7 +531,10 @@ function summarizeSession(
     FROM raw_events WHERE session_id = ? AND ${SUMMARY_SOURCE_SQL}`).get(sessionId)!;
   const generationPending = sourceState.pending === 1;
   const sensitivity = strictest(learnedSensitivity, (['eligible', 'local_only', 'private'] as const)[Number(sourceState.sensitivity)]);
-  const degraded = generationPending ? degradedReasonForSession(db, sessionId) ?? 'unusable_output' : null;
+  // A pending source whose batch recorded no failure has not been refused by a summarizer: it is
+  // held (an origin this worker cannot verify) or still queued, so the notes are rule-based and
+  // say only that. Blaming the summarizer here re-labels every held batch as an unusable answer.
+  const degraded = generationPending ? degradedReasonForSession(db, sessionId) ?? 'rule_based' : null;
   const material = materialHash(title, body);
   const content = workId === null ? contentHash(repoId, material) : sha256Json(['work-session-summary-v1', repoId, workId, material]);
   const memoryId = memoryIdFor(content);
