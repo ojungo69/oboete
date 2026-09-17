@@ -2399,7 +2399,7 @@ on pull requests that change it, not on every push (#221).
 | --- | --- | --- | --- |
 | Linux | `ci.yml` on `main` `092807c9`, ubuntu-24.04, run 35185205588 | `engine` pass on 22.16.0 and 24.x; the `check` coverage job failed once on `matrix A1` (#213) | not run: no agent login on a hosted runner |
 | WSL | developer host, Node 24.16.0 and 22.23.1 | pass at `568155b7` (#254): 1579 + 280 on Node 24.16.0; the same on 22.23.1 one `src/paths.ts` edit earlier | the dogfood user runs all 12 ordered pairs daily (#244, 2026-09-17: 0 failing pairs) |
-| macOS | `platform.yml`, runs below; one probe on an M1 iMac | red: one deterministic product defect (#255, fix in #262) and five one-off timing failures (#256) | **unverified**: no agent login on a hosted runner |
+| macOS | `platform.yml`, runs below; probes on an M1 iMac | red: one deterministic product defect (#255, fix in #262), one-off timing failures (#256) and a hook cold start at the edge of its budget on the virtualised runner; the M1 iMac passes the cold start | **unverified**: no agent login on a hosted runner |
 
 ### macOS runs
 
@@ -2409,6 +2409,9 @@ on pull requests that change it, not on every push (#221).
 | 35188141848 | `905e5447` (with #254) | unit suite 1577 of 1581, 1 failure on both: the busy wait |
 | 35188559922 | `3f7788ec` | unit 1577 and 1576 of 1581, serial 278 of 280; the busy wait on both, plus `busy`, `db-missing`, `worker-kill`, a partial-row e2e and a slow-git capture test once each |
 | 35188968971 | `ad0d8b80` | unit 1577 and 1576 of 1581, serial 279 of 280; the busy wait and fault `busy` on both, plus the slow-git repository-identity test once |
+| 35206343042 | `2e7c4e55` | unit 1576 and 1577 of 1581, serial 279 of 280; the busy wait and fault `busy` on both, plus the slow-git detector test once on 22.16.0; hook cold start pass |
+| 35210161686 | `193f607a` | unit 1573 and 1576 of 1581, serial 278 of 280; the busy wait and fault `busy`, plus a harness test broken by that commit's `package.json` split (reverted in `cf3862f6`) and five one-off timing failures; hook cold start measured straight after the build at load 9.25 fails `--version` on 22.16.0 (max 137.0 ms against 100) |
+| 35211675707 | `cf3862f6` | unit 1577 and 1576 of 1581, serial 279 and 280 of 280; the busy wait on both, fault `busy` on 22.16.0, the slow-git timeout test once on 24.x; hook cold start fails on both (below) |
 
 The first run found a fail-open privacy defect, not a macOS quirk: on macOS the temporary directory
 is a symbolic link, and a `secret_paths` rule or a worktree root compared in one spelling missed a
@@ -2427,6 +2430,24 @@ cold start stays inside its budget with the suite's load still on the runner (lo
 | --- | --- | --- | --- | --- | --- |
 | 22.16.0 | 42.8 / 45.2 ms | 128.9 / 153.3 ms | 137.7 / 154.6 ms | 128.4 / 175.5 ms | 100 / 300 ms |
 | 24.20.0 | 49.0 / 58.6 ms | 151.2 / 190.0 ms | 160.1 / 201.4 ms | 151.2 / 220.1 ms | 100 / 300 ms |
+
+From `cf3862f6` the cold-start step exits 1 when a row fails. On that commit the runner failed it and
+the M1 iMac, measuring the same commit over SSH, did not:
+
+| Machine | Node | 1-minute load | `--version` p50 / max | hook small, DB present p50 / max | secret-dense 200 KB p50 / max | DB absent (spool) p50 / max | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| runner, run 35211675707 | 22.16.0 | 3.99 | 55.4 / 73.3 ms | 191.0 / 297.1 ms | 220.5 / 304.3 ms | 185.4 / 243.1 ms | fail: secret-dense max |
+| runner, run 35211675707 | 24.20.0 | 5.27 | 62.3 / 80.6 ms | 216.0 / 266.0 ms | 223.6 / 300.2 ms | 229.0 / 288.6 ms | fail: secret-dense max; 32 of 33 events in the database |
+| M1 iMac, macOS 26.6.2 | 22.16.0 | 2.52 | 38.4 / 39.1 ms | 143.4 / 147.7 ms | 151.0 / 160.4 ms | 138.6 / 140.6 ms | pass |
+| M1 iMac, macOS 26.6.2 | 24.21.0 | 2.52 | 41.7 / 44.2 ms | 148.5 / 153.2 ms | 153.3 / 160.2 ms | 144.1 / 145.9 ms | pass |
+
+The runner's hook medians were 128–160 ms in run 35188968971 and 185–229 ms here, while the iMac
+measured 138–153 ms at the same commit, so the spread is the runner's; on the iMac every scenario
+keeps all 33 events and no maximum passes 177.2 ms (clean 200 KB on 22.16.0). The 24.20.0 row's missing
+event is not lost: past the 40 ms spool reserve the hook appends the event to the spool and returns,
+as FR-002 allows, and since the commit after `cf3862f6` the landed check counts both. The runner's
+cold-start failure is filed with the busy wait as virtualised-timer inflation, not as a product
+regression; the gate is not loosened for it.
 
 ### The deterministic macOS failure: the busy wait is not a wall-clock bound (#255)
 
@@ -2463,7 +2484,8 @@ end-to-end test have the shape of #203 and #213, a seed that runs out of its dea
 ### Verdict
 
 T040 stays open. Linux and WSL pass the engine gate. macOS runs the whole gate for the first time:
-it found and fixed a fail-open privacy defect (#254), measures the hook inside its budget, and leaves
-one deterministic defect (#255, fixed in #262) whose fix needs its own macOS receipt. Agent probes
+it found and fixed a fail-open privacy defect (#254), measures the hook inside its budget on real
+Apple Silicon (M1 iMac, max 177.2 ms) but at its edge on the virtualised runner, and leaves one
+deterministic defect (#255, fixed in #262) whose fix needs its own macOS receipt. Agent probes
 on macOS are recorded as unverified, not as passing: a hosted runner has no agent login, and the
-iMac was used only for the busy-wait probe.
+iMac was used only for the busy-wait probe and the cold-start measurement.
