@@ -141,7 +141,8 @@ adds repository-aware native-session lookup without rebuilding the old foreign-k
 ## B2-B5: Work checkpoints and all readers
 
 Artifact root remains `/var/tmp/oboete-009-20260909.jJ5grc`. T018/T019 cover local implementation
-and synthetic hook/worker verification; they do not complete T020 or the real-agent/product gates.
+and synthetic hook/worker verification; they do not complete T020 (closed later, E11) or the
+real-agent/product gates.
 
 - Checkpoint generation validates exact admitted sources, immutable parentage and the current
   pointer under the existing lease. Same-content confirmation, conflicts, historical outputs,
@@ -2393,13 +2394,15 @@ at the owner's direction, by a GitHub-hosted `macos-15` runner (macOS 15.7.9, ar
 fault suites, pack-check, `scripts/measure-cold-start.mjs` and a no-model packed engine in an
 isolated home, on Node 22.16.0 and 24.x (24.20.0). Every step after a successful build runs even
 when an earlier one fails, so one red suite does not hide the rest. The workflow runs on demand and
-on pull requests that change it, not on every push (#221).
+on pull requests that change it, not on every push (#221). Later the same day the owner made the
+M1 iMac available at any time over SSH; its runs of the same steps are the primary macOS receipt,
+and the runner's are kept as a second, virtualised one.
 
 | Platform | Where | Engine gate | Agent probes |
 | --- | --- | --- | --- |
 | Linux | `ci.yml` on `main` `092807c9`, ubuntu-24.04, run 35185205588 | `engine` pass on 22.16.0 and 24.x; the `check` coverage job failed once on `matrix A1` (#213) | not run: no agent login on a hosted runner |
 | WSL | developer host, Node 24.16.0 and 22.23.1 | pass at `568155b7` (#254): 1579 + 280 on Node 24.16.0; the same on 22.23.1 one `src/paths.ts` edit earlier | the dogfood user runs all 12 ordered pairs daily (#244, 2026-09-17: 0 failing pairs) |
-| macOS | `platform.yml`, runs below; probes on an M1 iMac | red: one deterministic product defect (#255, fix in #262), one-off timing failures (#256) and a hook cold start at the edge of its budget on the virtualised runner; the M1 iMac passes the cold start | **unverified**: no agent login on a hosted runner |
+| macOS | M1 iMac (macOS 26.6.2) on `main` `84ba32ff`, and `platform.yml` runs below | M1 iMac: pass on 22.16.0 and 24.21.0 (typecheck, lint, build, 1585 + 280, pack-check, cold start, packed engine). Runner: unit and serial pass on both after #262; its hook cold start fails on the virtualised timer spread | **unverified**: no agent CLI on either machine (#269) |
 
 ### macOS runs
 
@@ -2412,6 +2415,9 @@ on pull requests that change it, not on every push (#221).
 | 35206343042 | `2e7c4e55` | unit 1576 and 1577 of 1581, serial 279 of 280; the busy wait and fault `busy` on both, plus the slow-git detector test once on 22.16.0; hook cold start pass |
 | 35210161686 | `193f607a` | unit 1573 and 1576 of 1581, serial 278 of 280; the busy wait and fault `busy`, plus a harness test broken by that commit's `package.json` split (reverted in `cf3862f6`) and five one-off timing failures; hook cold start measured straight after the build at load 9.25 fails `--version` on 22.16.0 (max 137.0 ms against 100) |
 | 35211675707 | `cf3862f6` | unit 1577 and 1576 of 1581, serial 279 and 280 of 280; the busy wait on both, fault `busy` on 22.16.0, the slow-git timeout test once on 24.x; hook cold start fails on both (below) |
+| 35213351032 | `11f65c09` | unit 1577 and 1576 of 1581, serial 280 of 280; the busy wait on both and the slow-git detector test once on 24.x; hook cold start passes on 22.16.0 (max 286.1 ms) and fails on 24.x (`--version` max 113.4 ms, secret-dense max 340.8 ms) |
+| 35217962090 | `298c2a48` (#251's head) | unit 1576 and 1577 of 1581, serial 280 and 279 of 280; the busy wait on both, fault `busy` on 24.x, the slow-git detector test once on 22.16.0; the packed engine with all eleven engine items passes on both; hook cold start fails on both (`--version` max 104.1 and 148.4 ms, clean 200 KB max 396.4 ms, spool max 303.2 ms) |
+| 35224724418 | `9753829e`: #262's head `5780b4b2` merged onto `main` `b324f8b8`, on a temporary branch deleted afterwards; its tree is the tree of #262's merge commit `84ba32ff` | unit 1585 of 1588 (3 skipped) and serial 280 of 280 on both, including `a busy database spools inside the capture budget` (236 ms on 24.20.0) and fault `busy`; pack-check and the packed engine pass; hook cold start fails on both (`--version` max 118.3 and 105.6 ms; clean 200 KB max 309.8 and 312.1 ms; small, DB present max 350.9 ms with one of 33 events spooled on 24.20.0; one secret-dense sample of 675.9 ms on 22.16.0 at a 5-minute load of 15.02) |
 
 The first run found a fail-open privacy defect, not a macOS quirk: on macOS the temporary directory
 is a symbolic link, and a `secret_paths` rule or a worktree root compared in one spelling missed a
@@ -2445,7 +2451,7 @@ The runner's hook medians were 128–160 ms in run 35188968971 and 185–229 ms 
 measured 138–153 ms at the same commit, so the spread is the runner's; on the iMac every scenario
 keeps all 33 events and no maximum passes 177.2 ms (clean 200 KB on 22.16.0). The 24.20.0 row's missing
 event is not lost: past the 40 ms spool reserve the hook appends the event to the spool and returns,
-as FR-002 allows, and since the commit after `cf3862f6` the landed check counts both. The runner's
+as spec 007 FR-002 allows, and since the commit after `cf3862f6` the landed check counts both. The runner's
 cold-start failure is filed with the busy wait as virtualised-timer inflation, not as a product
 regression; the gate is not loosened for it.
 
@@ -2471,8 +2477,11 @@ capture (hook startup plus the wait) past 300 ms. SQLite's default busy handler 
 *requested* sleeps add up to the timeout and never reads a clock, so the contract's "busy timeout is
 min(150 ms, remaining budget minus the spool reserve)" (spec 007 `contracts/agents.md`) is a wall-clock
 bound on Linux and not on macOS. The event still spools and nothing is lost; the hook overruns its
-budget 3–6 times. The fix (wall-clock retry of `BEGIN IMMEDIATE` on hook-budget connections) is its
-own change, with a `platform.yml` run on its branch as the macOS receipt.
+budget 3–6 times. #262 (merged as `84ba32ff`) fixes it: a hook-budget connection fixes a wall-clock
+deadline when it is opened and retries `BEGIN IMMEDIATE`, and the open step, in short sleeps that
+re-read `performance.now()`, each wait capped at 150 ms. Run 35224724418 above passes both busy
+tests on the runner, and the M1 iMac passes the full suite on #262's head and on `main` (below).
+Timing details of the last retry are #270.
 
 ### One-off timing failures (#256)
 
@@ -2481,11 +2490,79 @@ git by blocking the thread for most of the real budget and then read what the cl
 a late wakeup leaves nothing (fixable in the tests); `db-missing`, `worker-kill` and the partial-row
 end-to-end test have the shape of #203 and #213, a seed that runs out of its deadline under load.
 
+### The M1 iMac: the gate on `main` after #262
+
+`main` `84ba32ff`, cloned on the iMac with `HOME` and `TMPDIR` redirected to a scratch directory,
+portable Node from the official tarballs, the `platform.yml` steps in order:
+
+| Node | typecheck, lint, build | Unit, migrations, scripts | Serial end-to-end and fault | pack-check | Packed engine, isolated home |
+| --- | --- | --- | --- | --- | --- |
+| 22.16.0 (arm64) | pass | 1585 of 1588, 3 skipped, 0 fail | 280 of 280 | pass, 20.917 MB installed | `setup --provider none` exit 0; doctor exit 1 with every engine item healthy and `provider` degraded ("No observer provider is configured.") |
+| 24.21.0 (arm64) | pass | 1585 of 1588, 3 skipped, 0 fail | 280 of 280 | pass, 20.917 MB installed | same |
+
+| Node | 1-minute load, kept attempt | `--version` p50 / max | hook small, DB present p50 / max | clean 200 KB p50 / max | secret-dense 200 KB p50 / max | DB absent (spool) p50 / max | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 22.16.0 | 6.85 | 38.0 / 38.5 ms | 143.3 / 152.2 ms | 144.8 / 146.4 ms | 149.9 / 152.8 ms | 140.0 / 142.0 ms | pass, all 33 events kept |
+| 24.21.0 | 10.70 | 42.2 / 44.5 ms | 147.3 / 149.1 ms | 148.8 / 151.2 ms | 154.1 / 156.4 ms | 145.4 / 148.9 ms | pass, all 33 events kept |
+
+The script measures twice and keeps the attempt with the lower 1-minute load. The load comes from
+the suites that ran just before on the same machine (8.48 and 12.37 before the first attempt), and
+the cold start stays within 156.4 ms under it.
+
 ### Verdict
 
-T040 stays open. Linux and WSL pass the engine gate. macOS runs the whole gate for the first time:
-it found and fixed a fail-open privacy defect (#254), measures the hook inside its budget on real
-Apple Silicon (M1 iMac, max 177.2 ms) but at its edge on the virtualised runner, and leaves one
-deterministic defect (#255, fixed in #262) whose fix needs its own macOS receipt. Agent probes
-on macOS are recorded as unverified, not as passing: a hosted runner has no agent login, and the
-iMac was used only for the busy-wait probe and the cold-start measurement.
+T040 is complete (2026-09-17). Linux and WSL pass the engine gate. On macOS the whole gate ran on real Apple
+Silicon and on a virtualised runner: it found and fixed a fail-open privacy defect (#254) and a busy
+wait that was not a wall-clock bound (#255, #262), and `main` `84ba32ff` passes every step on the M1
+iMac on both Node versions. The runner still fails the hook cold start on its timer spread and
+sometimes a one-off timing test (#256); these are recorded, not counted as passes. Agent probes on
+macOS stay unverified, not passing: neither machine has an agent CLI (#269). Remaining macOS
+privacy gaps are #252 and #253.
+
+## E11 — synthetic ordered agent pairs and a removed worktree (T020)
+
+Commit `2339d2c1` adds `test/unit/work-pairs.test.ts`. Everything in it is synthetic: the observer
+runs through `runObserveForFixture` with a mocked provider response, capture goes through the
+product's hook path with a stubbed `git` that replays each worktree's identity, and the receivers
+are the in-process readers of each agent (Claude prompt stdout, Codex `hookSpecificOutput`, Grok's
+pending runtime state attached on `PreToolUse`, Pi `runInject`). No agent CLI, model or network is
+used.
+
+### What the thirteen tests assert
+
+| Test | Assertion |
+| --- | --- |
+| `synthetic <seed> -> <receiver>` for the twelve ordered pairs of claude, codex, grok and pi | One corpus per pair: a repository with linked worktrees A and B, works X and Y in A, work Z in B, prompts interleaved across the three works, a checkpoint generated for each by the observer, and a later prompt per work left unprocessed. The continuation prompt shares words with all three works. The observer is asked once per work and never sees a sibling's checkpoint or nearby memory. The receiver's ambiguous start in A lists X and Y, not Z, and delivers no checkpoint. After an explicit choice (X for even pairs, Y for odd) the pack holds the selected work's outstanding checkpoint, and the siblings' checkpoints, outstanding text, work-scoped observations and pending prompts are withheld; the injection ledger joined with memory visibility names no sibling work memory. |
+| `removed worktree: search and explicit continuation retain Z checkpoint and provenance without recreating the directory` | After `git worktree remove` of B, a new session in A that explicitly chooses Z receives only Z's checkpoint; CLI history search finds it, `get` on that hit shows only Z's agent as its source, the stored sources keep B's original path and context, and B is still absent afterwards. |
+
+### Runs
+
+| Node | `work-pairs.test.ts` | with `work-readers.test.ts` and `work-context.test.ts` |
+| --- | --- | --- |
+| 24.16.0 | 13 of 13 | 88 of 88 |
+| 22.23.1 | 13 of 13 | 88 of 88 |
+
+On WSL the branch's full gate exits 0: typecheck, lint, markdownlint, and `npm test` on both versions
+(unit 1599 of 1601 with 0 failing, serial 280 of 280).
+
+### Mutations
+
+Each mutation edits the engine's SQL in the built test bundle, runs the thirteen tests, and restores
+the bundle from a copy. Each one fails all thirteen, on the assertion named:
+
+| Mutation | Engine change | Failing assertion |
+| --- | --- | --- |
+| no checkpoint | the selected work's checkpoint query (`src/db/queries.ts`) returns nothing | `selected work X/Y/Z includes its generated checkpoint` |
+| other checkpoint | the same query returns another active work's checkpoint | `selected work X/Y/Z includes its generated checkpoint` |
+| scope leak | the memory, checkpoint and visibility work filters admit any work of the repository, and the pack stops excluding session summaries | `work X/Y checkpoint is withheld` |
+| raw activity | the pack reads pending prompts of any work (`src/injection/pack.ts`) | `work X/Y pending activity is withheld` |
+| knowledge lane | the memory and visibility work filters admit any work of the repository | `work X/Y observation is withheld` |
+
+### Limits
+
+- `contracts/work.md` B3 keeps real agents and platforms separate acceptance gates. The native runs
+  through `scripts/e2e/isolated-user.mjs` and `isolated-lifecycle*.mjs` are #265.
+- The daily dogfood's twelve pairs (#244) run the schema 3 bundle and check fact recall only; they
+  are not SC-002 evidence.
+- The older twelve-pair loop in `work-readers.test.ts` (one work per corpus) stays; it covers
+  checkpoint delivery per receiver, not sibling isolation.

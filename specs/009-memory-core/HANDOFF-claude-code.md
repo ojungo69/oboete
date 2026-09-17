@@ -144,17 +144,17 @@ Codex を起動する shell からは API key 類を `env -u` で外す。
 1. **US5 を閉じる**: PR の bot/CI 指摘を `pr-merge-gate` で処理 → T029–T032/T043 をチェック。
    gate の再実行は `sec-gate.sh` (`/var/tmp/oboete-009-20260909.jJ5grc/scratch/`、`P=` を変えて
    setsid で起動。並行 build/review 禁止、serial の 300 ms seed miss は単独再実行)。
-2. **macOS (T040 / SC-006)**: `docs/evidence/memory-core-2026-09/macos-runbook.md` を M1 iMac
-   (remote desktop) で実行し、receipt を `/var/tmp/oboete-009-20260909.jJ5grc/macos/` に戻して
-   quickstart に記録する。platform probe のみ、agent pair は対象外。
+2. **macOS (T040 / SC-006)**: 2026-09-17 に close (quickstart E10)。M1 iMac (SSH、owner が常時利用可と
+   判断) で `main` `84ba32ff` の platform step が Node 22.16.0 / 24.21.0 とも pass。GHA macOS runner の
+   hook cold start は仮想化の timer 由来で fail のまま記録。macOS の agent probe は #269。
 3. **US6**: 実装済み (上記)。#185 は 2026-09-12 03:18 に merge 済み。PR #190 は round 14 まで
    triage 完了、review thread は全 resolve、required check (check / secrets / CodeQL /
    SonarCloud / semgrep-cloud-platform/scan / dco) は green。残りは最終 head での bot 再レビュー
    確認 → `pr-merge-gatekeeper` → merge。
 4. **US7 + amendment**: T037–T039、T047 (session スコープ常駐、hook 起動、lease 所有、idle exit)、
    T048 (detected local + consented free presets、有料は自動選択しない)。
-5. **実測と最終 gate**: T020、T023–T024、T041–T045。実 agent pair・実モデル・100k events・7 日運用は
-   merge 後の follow-up issue + dogfood cron で追う (owner 判断)。
+5. **実測と最終 gate**: T020 (2026-09-17 に合成テストで close、native は #265)、T023–T024、
+   T041–T045。実 agent pair・実モデル・100k events・7 日運用は merge 後の follow-up issue + dogfood cron で追う (owner 判断)。
 
 ## 検証の作法
 

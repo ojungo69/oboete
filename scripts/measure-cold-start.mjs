@@ -292,7 +292,7 @@ function measureHook(node, parent, key, description, content, databasePresent) {
   let landed;
   let landedAll;
   if (databasePresent) {
-    // FR-002: an event spooled for time is kept, not lost; both counts are printed
+    // Spec 007 FR-002: an event spooled for time is kept, not lost; both counts are printed
     // so a regression that spools everything stays visible.
     const events = rawEventCount(node, home);
     const spooled = spoolCount(home);
@@ -379,7 +379,7 @@ lines.push(
   `- Compile cache: \`${displayPath(compileCache)}\`, ${cacheWarm ? 'non-empty' : 'empty'} before this run, and used by the scenarios that run against this developer's own home. The hook scenarios each get a temporary \`OBOETE_HOME\`, so each starts on an empty cache that its warm-up runs fill. Either way this is what a directory held, not what the launcher did with it: Node keys entries by version, architecture and uid, and the launcher refuses the directory outright unless it is a real directory of this user's that nobody else can enter, so a non-empty directory means neither that the Node measured here found its own entries nor that any cache was enabled (issue #210: a cold cache costs the hook about 35 ms).`,
   `- Samples: ${RUNS} measured runs after ${WARM_UPS} warm-up runs per scenario`,
   `- Measurement attempts: ${attemptsText}; kept run ${kept.index} (lower 1-minute load average)`,
-  '- Percentiles: linear interpolation over the 30 measured runs; status is `max <= budget` and all 33 hook events kept (in the database or its spool, FR-002; only the spool when the database is absent)',
+  '- Percentiles: linear interpolation over the 30 measured runs; status is `max <= budget` and all 33 hook events kept (in the database or its spool, spec 007 FR-002; only the spool when the database is absent)',
   '',
   `Load average next to this table (kept run ${kept.index}, before the measurement set): \`${kept.load.raw}\``,
   '',
