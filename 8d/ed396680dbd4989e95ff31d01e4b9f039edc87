@@ -1,0 +1,33 @@
+scripts/e2e/isolated-user.mjs
+  s_d675408629836f::t_1b4e8ded0b5711 12,250
+scripts/e2e/probe-lib/isolated-agent.d.mts
+  s_d675408629836f::t_5356135a0e8692 1-15
+scripts/e2e/probe-lib/isolated-agent.mjs
+  s_d675408629836f::t_786993813c2e13 67-71
+scripts/e2e/probe-lib/trusthash-cli.mjs
+  s_d675408629836f::t_00631b92437d5a 1-13
+specs/009-memory-core/quickstart.md
+  s_d675408629836f::t_5a053ba7126fd4 2613,2615-2625,2638,2652-2653,2659-2662
+specs/009-memory-core/tasks.md
+  s_d675408629836f::t_7c30bcca84ac9b 440-442
+test/unit/codex-trust.test.ts
+  s_d675408629836f::t_211ecc9af5013d 25
+test/unit/retrieval.test.ts
+  s_d675408629836f::t_14ae4a87333234 25-30,850-852,854,875-877,883-893,899-902,907-910
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8ded396680dbd4989e95ff31d01e4b9f039edc87",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
