@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
 import { openDatabase } from '../../src/db/open.js';
+import { grantVisibility } from '../../src/db/queries.js';
+import type { Line } from '../../src/fixture/replay.js';
+import { runGet, searchMemories } from '../../src/memories-cli.js';
 import { oboetePaths } from '../../src/paths.js';
+import { resolveRepoIdentity } from '../../src/repo-identity.js';
 import { buildMatch, cjkBigrams, isCjk, segmentQuery } from '../../src/retrieval/fts.js';
 import { searchCandidates } from '../../src/retrieval/query.js';
 import type { RankRow } from '../../src/retrieval/rank.js';
@@ -16,6 +22,7 @@ import {
   rankCandidates,
   rrfFuse,
 } from '../../src/retrieval/rank.js';
+import { repositoryRoot } from '../helpers/compile-cache.js';
 import { withTempHome } from '../helpers/home.js';
 
 const SCOPE_A = { where: 'm.repo_id = ? AND m.deleted_at IS NULL', params: ['repo_a'] };
@@ -57,6 +64,60 @@ function insertMemory(
     `hash_${memory.id}`,
     memory.createdAt ?? 1,
   );
+}
+
+function insertSearchable(
+  db: DatabaseSync,
+  memory: {
+    id: string;
+    repoId: string;
+    title: string;
+    body: string;
+    createdAt?: number;
+    validTo?: number | null;
+    supersededBy?: string | null;
+  },
+): void {
+  insertMemory(db, memory);
+  grantVisibility(db, memory.id, { audience: 'project', repoId: memory.repoId }, 'migration', memory.createdAt ?? 1);
+  if (memory.validTo !== undefined || memory.supersededBy !== undefined) {
+    db.prepare('UPDATE memories SET valid_to = ?, superseded_by = ? WHERE id = ?').run(
+      memory.validTo ?? null,
+      memory.supersededBy ?? null,
+      memory.id,
+    );
+  }
+}
+
+type FactTag = NonNullable<NonNullable<Line['tags']>['fact']>;
+
+function payloadStrings(payload: unknown): string[] {
+  const texts: string[] = [];
+  JSON.parse(JSON.stringify(payload), (key, value: unknown) => {
+    if (typeof value === 'string') texts.push(value);
+    if (key === 'output' && Array.isArray(value) && value.every((item): item is number => typeof item === 'number')) {
+      texts.push(Buffer.from(value).toString('utf8'));
+    }
+    return value;
+  });
+  return texts;
+}
+
+function fixtureFacts(): Array<FactTag & { sentence: string }> {
+  const facts: Array<FactTag & { sentence: string }> = [];
+  for (const raw of readFileSync(join(repositoryRoot(), 'test/fixtures/events-1000.jsonl'), 'utf8')
+    .trim()
+    .split('\n')) {
+    const line = JSON.parse(raw) as Line;
+    const fact = line.tags?.fact;
+    if (fact === undefined) continue;
+    const sentence = payloadStrings(line.payload)
+      .flatMap((text) => text.split('\n'))
+      .find((entry) => entry.includes(fact.expect));
+    assert.ok(sentence !== undefined, `fact ${fact.id} has no payload line containing ${fact.expect}`);
+    facts.push({ ...fact, sentence });
+  }
+  return facts;
 }
 
 function seedSearchDb(db: DatabaseSync): void {
@@ -557,4 +618,222 @@ test('rankCandidates returns bm25, rrf and mmr scores on included rows', () => {
   assert.ok(result.included.every((item) => item.id !== 'weak'));
   assert.ok(result.omitted.some((item) => item.id === 'weak' && item.reason === 'below_threshold'));
   assert.ok(result.omitted.some((item) => item.id === 'dup' && item.reason === 'mmr_redundant'));
+});
+
+// Pin: measured on current product code (title = fact id, body = sentence) through searchMemories.
+const MEASURED_FIRST_RANK_COUNT = 39;
+
+test('searchMemories returns each events-1000 fact among the first five through the search surface', async () => {
+  const facts = fixtureFacts();
+  assert.equal(facts.length, 40);
+  assert.equal(facts.filter((fact) => fact.lang === 'ja').length, 20);
+  assert.equal(facts.filter((fact) => fact.lang === 'en').length, 20);
+
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    const opened = openDatabase({ path: paths.db, timeoutMs: 1000 });
+    try {
+      insertRepo(opened.db, 'repo_a', '/tmp/oboete-a');
+      for (const fact of facts) {
+        insertSearchable(opened.db, {
+          id: fact.id,
+          repoId: 'repo_a',
+          title: fact.id,
+          body: fact.sentence,
+        });
+      }
+      const placements = facts.map((fact) => {
+        const ranked = searchMemories(opened.db, {
+          repoId: 'repo_a',
+          paths,
+          query: fact.query,
+          limit: 50,
+        });
+        const position = ranked.findIndex((row) => row.id === fact.id);
+        const above = position > 0 ? ranked.slice(0, position).map((row) => row.id) : [];
+        return { id: fact.id, query: fact.query, position, above };
+      });
+      for (const fact of placements) {
+        assert.ok(
+          fact.position >= 0 && fact.position < 5,
+          `fact ${fact.id} query ${fact.query} position ${fact.position < 0 ? 'absent' : String(fact.position)} above [${fact.above.join(', ')}]`,
+        );
+      }
+      const notFirst = placements.filter((fact) => fact.position !== 0);
+      const firstCount = facts.length - notFirst.length;
+      const notFirstText =
+        notFirst.length === 0
+          ? '(none)'
+          : notFirst
+              .map((fact) => `${fact.id} query ${fact.query} position ${fact.position} above [${fact.above.join(', ')}]`)
+              .join('; ');
+      assert.ok(
+        firstCount >= MEASURED_FIRST_RANK_COUNT - 1,
+        `first-rank count ${firstCount} (measured ${MEASURED_FIRST_RANK_COUNT}); not first: ${notFirstText}`,
+      );
+    } finally {
+      opened.db.close();
+    }
+  });
+});
+
+test('rankCandidates ignores created_at when trigram and cjk scores are equal', () => {
+  const older = 1;
+  const newer = Date.now();
+  const alpha = row({
+    id: 'a_old',
+    title: 'Hydrazine tank',
+    body: 'The hydrazine tank uses a burst disk.',
+    scoreTrigram: -2,
+    scoreCjk: -2,
+    created_at: older,
+  });
+  const omega = row({
+    id: 'z_new',
+    title: 'Kerosene pump',
+    body: 'The kerosene pump runs at two thousand RPM.',
+    scoreTrigram: -2,
+    scoreCjk: -2,
+    created_at: newer,
+  });
+  const options = { threshold: 0.3, lambda: 0.5, budgetChars: 10_000, limit: 10 };
+  const first = rankCandidates([alpha, omega], options);
+  const swapped = rankCandidates(
+    [
+      { ...alpha, created_at: newer },
+      { ...omega, created_at: older },
+    ],
+    options,
+  );
+  const expected = [alpha.id, omega.id].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  assert.deepEqual(first.included.map((item) => item.id), expected);
+  assert.deepEqual(swapped.included.map((item) => item.id), expected);
+});
+
+test('searchMemories returns a relevant older fact among newer unrelated memories', async () => {
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    const opened = openDatabase({ path: paths.db, timeoutMs: 1000 });
+    try {
+      insertRepo(opened.db, 'repo_a', '/tmp/oboete-a');
+      insertSearchable(opened.db, {
+        id: 'm_old',
+        repoId: 'repo_a',
+        title: 'Busy timeout',
+        body: 'The busy timeout for hooks is 150 ms.',
+        createdAt: 1,
+      });
+      insertSearchable(opened.db, {
+        id: 'm_new',
+        repoId: 'repo_a',
+        title: 'SQLite',
+        body: 'SQLite stores application data.',
+        createdAt: Date.now(),
+      });
+      insertSearchable(opened.db, {
+        id: 'm_newer',
+        repoId: 'repo_a',
+        title: 'WAL journal',
+        body: 'Write-ahead logging is ok for readers.',
+        createdAt: Date.now(),
+      });
+      const found = searchMemories(opened.db, {
+        repoId: 'repo_a',
+        paths,
+        query: 'What is the SQLite busy timeout?',
+        limit: 10,
+      });
+      assert.ok(
+        found.some((row) => row.id === 'm_old'),
+        `older fact absent; returned ${found.map((row) => row.id).join(', ') || '(none)'}`,
+      );
+    } finally {
+      opened.db.close();
+    }
+  });
+});
+
+test('searchMemories hides a superseded fact unless history is requested', async () => {
+  await withTempHome(async (home) => {
+    const repo = join(home, 'repos', 'current');
+    mkdirSync(repo, { recursive: true });
+    const identity = resolveRepoIdentity(repo);
+    const paths = oboetePaths(home);
+    const opened = openDatabase({ path: paths.db, timeoutMs: 1000 });
+    try {
+      insertRepo(opened.db, identity.id, identity.normalizedIdentity);
+      insertSearchable(opened.db, {
+        id: 'm_current',
+        repoId: identity.id,
+        title: 'Busy timeout',
+        body: 'The busy timeout is 2000 ms.',
+        createdAt: 20,
+      });
+      insertSearchable(opened.db, {
+        id: 'm_old',
+        repoId: identity.id,
+        title: 'Busy timeout',
+        body: 'The busy timeout is 150 ms.',
+        createdAt: 10,
+        validTo: 15,
+        supersededBy: 'm_current',
+      });
+      const query = 'busy timeout';
+      const current = searchMemories(opened.db, { repoId: identity.id, paths, query, limit: 10 });
+      assert.ok(current.some((row) => row.id === 'm_current'));
+      assert.equal(current.some((row) => row.id === 'm_old'), false);
+      const withHistory = searchMemories(opened.db, {
+        repoId: identity.id,
+        paths,
+        query,
+        limit: 10,
+        history: true,
+      });
+      assert.ok(withHistory.some((row) => row.id === 'm_current'));
+      assert.ok(withHistory.some((row) => row.id === 'm_old'));
+    } finally {
+      opened.db.close();
+    }
+    let stdout = '';
+    let stderr = '';
+    const status = await runGet(['m_old', '--history', '--json'], {
+      cwd: repo,
+      writeOut: (text) => {
+        stdout += text;
+      },
+      writeError: (text) => {
+        stderr += text;
+      },
+    });
+    assert.equal(status, 0, stderr || stdout);
+    const historical = JSON.parse(stdout) as { valid_to?: number | null; superseded_by?: string | null };
+    assert.ok(historical.valid_to != null, `valid_to missing or null in get --history --json: ${stdout}`);
+    assert.equal(historical.superseded_by, 'm_current', `superseded_by in get --history --json: ${stdout}`);
+  });
+});
+
+test('searchMemories returns two distinct facts that share a title when they are the only candidates', async () => {
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    const opened = openDatabase({ path: paths.db, timeoutMs: 1000 });
+    try {
+      insertRepo(opened.db, 'repo_a', '/tmp/oboete-a');
+      insertSearchable(opened.db, {
+        id: 'm_hooks',
+        repoId: 'repo_a',
+        title: 'Busy timeout',
+        body: 'The busy timeout for hooks is 150 ms.',
+      });
+      insertSearchable(opened.db, {
+        id: 'm_cli',
+        repoId: 'repo_a',
+        title: 'Busy timeout',
+        body: 'The busy timeout for the CLI is 2000 ms.',
+      });
+      const found = searchMemories(opened.db, { repoId: 'repo_a', paths, query: 'busy timeout', limit: 10 });
+      assert.deepEqual(found.map((row) => row.id).sort(), ['m_cli', 'm_hooks']);
+    } finally {
+      opened.db.close();
+    }
+  });
 });
