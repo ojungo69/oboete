@@ -695,6 +695,10 @@ async function observeLifecycle(
       if (
         !catalogChecked &&
         resolved.preset === 'workers-ai' &&
+        // Not for a configuration the resolver refused: an empty model means no batch can reach a
+        // provider, so walking the account's model list would spend the token on a list nothing
+        // in this run can use.
+        resolved.model !== '' &&
         credentials?.present === true
       ) {
         catalogChecked = true;

@@ -152,11 +152,7 @@ For each target, in order:
 1. `deps.shouldStop()` — a stop sentinel or a due exit ends the pass between targets, as it does
    today inside `providerCall`'s consent boundary.
 2. `currentConsent()` — the same closure the primary uses, so a consent, privacy-stamp, checkpoint
-   or nearby change between targets stops the send exactly as it stops a retry today. **A target
-   with no model skips this step**: `resolveObserveModel` answers a refused configuration with an
-   empty model and an empty chain, and no acceptance makes that runnable — the batch must say
-   `no_provider`, which `summarizeWithProvider` answers without a request, rather than send the user
-   to `setup --accept-egress` for a failure that would still be there afterwards.
+   or nearby change between targets stops the send exactly as it stops a retry today.
 3. `reserveAttempt(db, { preset, capped: PRESET_CATALOG[preset].capped, … })` for *that* target's
    preset. The daily allowance is summed over capped presets and `provider_usage.exhausted_at` is
    per-preset, so the reservation is what makes "shared quota versus per-target failure" (T048's
@@ -311,6 +307,14 @@ column cannot hold go to the observe log, one line per attempted target.
 
 ## What the chain does not do
 
+- **A refused configuration never reaches the attempt sequence.** `processBatch` answers it where it
+  answers `preset = "none"`: an empty model from `resolveObserveModel` means no target exists, so the
+  batch falls back with `no_provider` before a request is built. Nothing else would be true — the
+  sequence's step 2 would stop such a batch with `consent_changed` under a stale record and send the
+  user to accept an egress that leaves the resolver error in place, step 3's reservation is never
+  reached because `summarizeWithProvider` refuses first, and an attempt line naming an empty model
+  would record a target that does not exist. The catalog refresh is skipped for the same reason: a
+  run that cannot reach a provider has no use for the account's model list.
 - **A primary the resolver refuses leaves no chain to try.** `resolveModel` throws on
   `model_required`, `egress_widened` and `chain_without_primary`, and `resolveObserveModel`
   (`src/worker/observe.ts:420-429`) turns that into a run with no model and no targets, so every

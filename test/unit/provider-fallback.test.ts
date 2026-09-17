@@ -374,15 +374,20 @@ test('a configuration the resolver refuses says no_provider, not consent_changed
     const hosts = counters();
     assert.equal(await runObserveForFixture(fixture, { fetch: chainFetch(hosts, {}) }), 1);
 
-    // The catalog refresh still runs — it belongs to the primary preset, not to a target — but no
-    // provider is called, because `providerConfigured` is false for an empty model.
-    assert.deepEqual({ cloudflare: hosts.cloudflare, ollama: hosts.ollama, nim: hosts.nim },
-      { cloudflare: 0, ollama: 0, nim: 0 });
+    // Every counter, the catalog walk included: a run that cannot reach a provider has no use for
+    // the account's model list either, and `hosts.catalog` is the one that would hide a request
+    // made with the account token.
+    assert.deepEqual(hosts, counters());
     fixture.withDb((db) => {
-      assert.deepEqual(db.prepare('SELECT DISTINCT degraded_reason FROM observation_batches').all()
-        .map((row) => row.degraded_reason), ['no_provider']);
+      assert.deepEqual(db.prepare('SELECT DISTINCT degraded_reason, provider_attempts FROM observation_batches')
+        .all().map((row) => ({ reason: row.degraded_reason, attempts: row.provider_attempts })),
+      [{ reason: 'no_provider', attempts: 0 }]);
     });
-    assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /observer configuration refused/);
+    // The run says why once, before any batch, and no target is built from a refused resolution —
+    // an attempt line naming an empty model would be a target that does not exist.
+    const log = readFileSync(fixture.paths.observeLog, 'utf8');
+    assert.match(log, /observer configuration refused/);
+    assert.doesNotMatch(log, /provider attempt/);
   });
 });
 

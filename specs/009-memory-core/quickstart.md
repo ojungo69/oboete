@@ -2330,11 +2330,19 @@ such a batch recorded `consent_changed` and the recovery said `setup --accept-eg
 have changed nothing: accepting leaves the resolver error, and the next run fails `no_provider`.
 `oboete doctor` names the resolver refusal first, so the report and the pack disagreed as well.
 
-A target with no model skips the consent step now and answers `no_provider`. Nothing is sent either
-way — `providerConfigured` is false for an empty model — so the guard gives nothing up. RED before
-the fix on `actual: ['consent_changed'] / expected: ['no_provider']`
-(`a configuration the resolver refuses says no_provider, not consent_changed`), and the contract's
-step 2 states the exception.
+The first fix put the exception inside the target loop; the review of that commit put it where its
+sibling already lives. `processBatch` answers `preset = "none"` with `no_provider` before any request
+is built, and an empty model is the same state — so both are one condition now. That removes more
+than the guard: the whole pipeline (`revalidateNearby`, the request build, a detector pass over the
+serialized request, `markRequest`) no longer runs for a batch that cannot reach a provider, and no
+`provider attempt` line names a target with an empty model. The catalog walk is skipped too — a
+`workers-ai` primary under a refused configuration was still paginating `/models/search` with the
+account token for a list nothing in the run could use, and the test's host assertion had excluded the
+one counter that would have shown it.
+
+RED before the fix on `['consent_changed'] !== ['no_provider']`, and RED again on
+`catalog: 2 !== 0` once the test counted every host
+(`a configuration the resolver refuses says no_provider, not consent_changed`).
 
 Gate at this head: `npm test` 1574 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
 markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged; the lizard warning set

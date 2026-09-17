@@ -488,13 +488,7 @@ async function attemptTargets(
     // answers `no_provider` for a target with no credentials before it ever asks whether consent
     // still holds, so a chain that ends on such a target would keep an earlier target's reason by
     // precedence and send the user to fix a credential when consent is what they must act on.
-    //
-    // A target with no model is the exception: `resolveObserveModel` returns an empty model and an
-    // empty chain when the resolver refuses the configuration, and no acceptance makes that
-    // runnable — re-accepting egress would only change the next failure to `no_provider`, which is
-    // what `oboete doctor` names first. Nothing is sent either way, because `providerConfigured`
-    // is false for an empty model and `summarizeWithProvider` answers before any request.
-    if (target.model !== '' && !consentOk()) {
+    if (!consentOk()) {
       attempts.push({ position, preset: target.preset, model: target.model,
         reason: 'consent_changed', detail: '' });
       return { answered: null };
@@ -649,7 +643,14 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
     return await applyFallback(db, token, input, nearby, reason, detect, deps.now());
   }
 
-  if (resolved.preset === 'none') {
+  // Both ways a run can have no provider at all, answered here rather than inside the target loop.
+  // `resolveObserveModel` turns a configuration the resolver refuses into an empty model and an
+  // empty chain, which `initialProviderFailure` has already read as `no_provider` before the first
+  // batch: building a target from it would spend the whole pipeline — the detector pass over the
+  // request included — on a call `summarizeWithProvider` refuses at its first line, and would reach
+  // the consent guard, whose `consent_changed` sends the user to accept an egress that leaves the
+  // resolver error exactly where it was.
+  if (resolved.preset === 'none' || resolved.model === '') {
     providerState.set(batch.session_id, 'no_provider');
     return await applyFallback(db, token, input, nearby, 'no_provider', detect, deps.now());
   }
