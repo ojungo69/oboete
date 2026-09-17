@@ -44,26 +44,8 @@ async function waitForHeld(child: ChildProcess): Promise<void> {
   const exited = once(child, 'exit').then(([code, signal]) => {
     throw new Error(`lock holder exited before reporting held (${code ?? signal}): ${err}`);
   });
-  void exited.catch(() => undefined);
-  if (child.exitCode !== null || child.signalCode !== null) {
-    throw new Error(
-      `lock holder exited before reporting held (${child.exitCode ?? child.signalCode}): ${err}`,
-    );
-  }
-  try {
-    await Promise.race([once(child.stdout!, 'data', { signal: AbortSignal.timeout(5_000) }), exited]);
-  } catch (error) {
-    if (error instanceof Error && error.message.startsWith('lock holder exited before reporting held')) {
-      throw error;
-    }
-    const reason = child.exitCode ?? child.signalCode;
-    throw new Error(
-      reason !== null
-        ? `lock holder exited before reporting held (${reason}): ${err}`
-        : `lock holder did not report held: ${err}`,
-      { cause: error },
-    );
-  }
+  exited.catch(() => {});
+  await Promise.race([once(child.stdout!, 'data', { signal: AbortSignal.timeout(5_000) }), exited]);
 }
 
 async function reap(child: ChildProcess | undefined): Promise<void> {
@@ -91,6 +73,22 @@ async function withOpened(fn: (db: DatabaseSync, home: string) => void | Promise
 
 function leaseColumns(db: DatabaseSync): Record<string, unknown> | undefined {
   return db.prepare('SELECT owner_token, pid, started_at, heartbeat_at FROM worker_lease WHERE id = 1').get();
+}
+
+function withHeldLock(dbPath: string, fn: () => void): void {
+  const holder = new DatabaseSync(dbPath, { timeout: 2000 });
+  try {
+    holder.exec('PRAGMA journal_mode = WAL');
+    holder.exec('BEGIN IMMEDIATE');
+    fn();
+  } finally {
+    try {
+      if (holder.isTransaction) holder.exec('ROLLBACK');
+    } catch {
+      // Closing still runs.
+    }
+    if (holder.isOpen) holder.close();
+  }
 }
 
 test('fresh database: claimLease returns a token and the row has pid/started_at/heartbeat_at', async () => {
@@ -257,32 +255,22 @@ test('transactionImmediate on a lockBudgetMs connection throws busy after the wa
     const dbPath = oboetePaths(home).db;
     const migrated = openDatabase({ path: dbPath, timeoutMs: 2000 });
     migrated.db.close();
-    let holder: DatabaseSync | undefined;
-    let opened: ReturnType<typeof openDatabase> | undefined;
-    try {
-      holder = new DatabaseSync(dbPath, { timeout: 2000 });
-      holder.exec('PRAGMA journal_mode = WAL');
-      holder.exec('BEGIN IMMEDIATE');
+    withHeldLock(dbPath, () => {
       const started = performance.now();
-      opened = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockBudgetMs: 100 });
-      const db = opened.db;
-      assert.throws(() => transactionImmediate(db, () => 1), isBusyError);
-      const elapsed = performance.now() - started;
-      // Upper bound is the wait plus one scheduler wakeup and a generous runner-load
-      // margin; Linux is tight, macOS short sleeps are several times longer without this loop.
-      assert.ok(elapsed >= 95, `waited only ${elapsed.toFixed(1)} ms`);
-      if (WALL_CLOCK_IS_MEASURED) {
-        assert.ok(elapsed < 250, `waited ${elapsed.toFixed(1)} ms`);
-      }
-    } finally {
+      const opened = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockBudgetMs: 100 });
       try {
-        if (holder?.isTransaction) holder.exec('ROLLBACK');
-      } catch {
-        // Closing still runs.
+        assert.throws(() => transactionImmediate(opened.db, () => 1), isBusyError);
+        const elapsed = performance.now() - started;
+        // Upper bound is the wait plus one scheduler wakeup and a generous runner-load
+        // margin; Linux is tight, macOS short sleeps are several times longer without this loop.
+        assert.ok(elapsed >= 95, `waited only ${elapsed.toFixed(1)} ms`);
+        if (WALL_CLOCK_IS_MEASURED) {
+          assert.ok(elapsed < 250, `waited ${elapsed.toFixed(1)} ms`);
+        }
+      } finally {
+        if (opened.db.isOpen) opened.db.close();
       }
-      if (opened?.db.isOpen) opened.db.close();
-      if (holder?.isOpen) holder.close();
-    }
+    });
   });
 });
 
@@ -294,25 +282,18 @@ test('idle time after the open spends the lock budget', async () => {
     const sleep = new Int32Array(new SharedArrayBuffer(4));
     const opened = performance.now();
     const { db } = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockBudgetMs: 200 });
-    let holder: DatabaseSync | undefined;
     try {
       Atomics.wait(sleep, 0, 0, 120);
-      holder = new DatabaseSync(dbPath, { timeout: 0 });
-      holder.exec('BEGIN IMMEDIATE');
-      assert.throws(() => transactionImmediate(db, () => 1), isBusyError);
-      const elapsed = performance.now() - opened;
-      assert.ok(elapsed >= 190, `waited only ${elapsed.toFixed(1)} ms`);
-      if (WALL_CLOCK_IS_MEASURED) {
-        assert.ok(elapsed < 250, `waited ${elapsed.toFixed(1)} ms`);
-      }
+      withHeldLock(dbPath, () => {
+        assert.throws(() => transactionImmediate(db, () => 1), isBusyError);
+        const elapsed = performance.now() - opened;
+        assert.ok(elapsed >= 190, `waited only ${elapsed.toFixed(1)} ms`);
+        if (WALL_CLOCK_IS_MEASURED) {
+          assert.ok(elapsed < 250, `waited ${elapsed.toFixed(1)} ms`);
+        }
+      });
     } finally {
-      try {
-        if (holder?.isTransaction) holder.exec('ROLLBACK');
-      } catch {
-        // Closing still runs.
-      }
       if (db.isOpen) db.close();
-      if (holder?.isOpen) holder.close();
     }
   });
 });
@@ -384,30 +365,20 @@ test('transactionImmediate on a lockBudgetMs connection caps each wait at 150 ms
     const dbPath = oboetePaths(home).db;
     const migrated = openDatabase({ path: dbPath, timeoutMs: 2000 });
     migrated.db.close();
-    let holder: DatabaseSync | undefined;
-    let opened: ReturnType<typeof openDatabase> | undefined;
-    try {
-      holder = new DatabaseSync(dbPath, { timeout: 2000 });
-      holder.exec('PRAGMA journal_mode = WAL');
-      holder.exec('BEGIN IMMEDIATE');
-      opened = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockBudgetMs: 1000 });
-      const db = opened.db;
-      const started = performance.now();
-      assert.throws(() => transactionImmediate(db, () => 1), isBusyError);
-      const elapsed = performance.now() - started;
-      assert.ok(elapsed >= 140, `waited only ${elapsed.toFixed(1)} ms`);
-      if (WALL_CLOCK_IS_MEASURED) {
-        assert.ok(elapsed < 150 + 100, `waited ${elapsed.toFixed(1)} ms`);
-      }
-    } finally {
+    withHeldLock(dbPath, () => {
+      const opened = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockBudgetMs: 1000 });
       try {
-        if (holder?.isTransaction) holder.exec('ROLLBACK');
-      } catch {
-        // Closing still runs.
+        const started = performance.now();
+        assert.throws(() => transactionImmediate(opened.db, () => 1), isBusyError);
+        const elapsed = performance.now() - started;
+        assert.ok(elapsed >= 140, `waited only ${elapsed.toFixed(1)} ms`);
+        if (WALL_CLOCK_IS_MEASURED) {
+          assert.ok(elapsed < 150 + 100, `waited ${elapsed.toFixed(1)} ms`);
+        }
+      } finally {
+        if (opened.db.isOpen) opened.db.close();
       }
-      if (opened?.db.isOpen) opened.db.close();
-      if (holder?.isOpen) holder.close();
-    }
+    });
   });
 });
 
