@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn, type ChildProcess } from 'node:child_process';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
@@ -11,8 +12,80 @@ import {
   isLeaseFree,
   releaseLease,
   rotateLease,
+  transactionImmediate,
 } from '../../src/worker/lease.js';
 import { withTempHome } from '../helpers/home.js';
+
+function spawnLockHolder(dbPath: string, holdMs?: number): ChildProcess {
+  const hold =
+    holdMs === undefined
+      ? 'setInterval(() => {}, 1 << 30);'
+      : `setTimeout(() => { try { db.exec('ROLLBACK'); } finally { db.close(); } }, ${holdMs});`;
+  return spawn(
+    process.execPath,
+    [
+      '-e',
+      `const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(${JSON.stringify(dbPath)}, { timeout: 2000 });
+db.exec('BEGIN IMMEDIATE');
+process.stdout.write('held\\n');
+${hold}`,
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+}
+
+function waitForHeld(child: ChildProcess): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let buf = '';
+    let err = '';
+    const onData = (chunk: Buffer | string): void => {
+      buf += String(chunk);
+      if (buf.includes('held')) {
+        cleanup();
+        resolve();
+      }
+    };
+    const onErr = (chunk: Buffer | string): void => {
+      err += String(chunk);
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      cleanup();
+      reject(new Error(`lock holder exited before reporting held (${code ?? signal}): ${err}`));
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`lock holder did not report held: ${err}`));
+    }, 5_000);
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      child.stdout?.off('data', onData);
+      child.stderr?.off('data', onErr);
+      child.off('exit', onExit);
+      child.off('error', onError);
+    };
+    child.stdout?.on('data', onData);
+    child.stderr?.on('data', onErr);
+    child.on('exit', onExit);
+    child.on('error', onError);
+  });
+}
+
+async function reap(child: ChildProcess | undefined): Promise<void> {
+  if (child === undefined) return;
+  await new Promise<void>((resolve) => {
+    child.once('exit', () => resolve());
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve();
+      return;
+    }
+    child.kill('SIGKILL');
+  });
+}
 
 async function withOpened(fn: (db: DatabaseSync, home: string) => void | Promise<void>): Promise<void> {
   await withTempHome(async (home) => {
@@ -184,6 +257,60 @@ test('claimLease returns null when another connection holds BEGIN IMMEDIATE', as
       }
       if (second.db.isOpen) second.db.close();
       if (first.db.isOpen) first.db.close();
+    }
+  });
+});
+
+test('transactionImmediate on a lockWaitMs connection throws busy after the wall-clock bound', async () => {
+  await withTempHome(async (home) => {
+    const dbPath = oboetePaths(home).db;
+    const migrated = openDatabase({ path: dbPath, timeoutMs: 2000 });
+    migrated.db.close();
+    const opened = openDatabase({ path: dbPath, timeoutMs: 150, hook: true, lockWaitMs: 100 });
+    let child: ChildProcess | undefined;
+    try {
+      child = spawnLockHolder(dbPath);
+      await waitForHeld(child);
+      const started = performance.now();
+      assert.throws(() => transactionImmediate(opened.db, () => 1), isBusyError);
+      const elapsed = performance.now() - started;
+      // Upper bound is the wait plus one scheduler wakeup and a generous runner-load
+      // margin; Linux is tight, macOS short sleeps are several times longer without this loop.
+      assert.ok(elapsed >= 95, `waited only ${elapsed.toFixed(1)} ms`);
+      assert.ok(elapsed < 100 + 150, `waited ${elapsed.toFixed(1)} ms`);
+    } finally {
+      await reap(child);
+      if (opened.db.isOpen) opened.db.close();
+    }
+  });
+});
+
+test('a lockWaitMs hook connection reports busy_timeout 0 and acquires after a child releases', async () => {
+  await withTempHome(async (home) => {
+    const dbPath = oboetePaths(home).db;
+    const migrated = openDatabase({ path: dbPath, timeoutMs: 2000 });
+    migrated.db.close();
+    const opened = openDatabase({ path: dbPath, timeoutMs: 150, hook: true, lockWaitMs: 300 });
+    let child: ChildProcess | undefined;
+    try {
+      assert.equal(opened.db.prepare('PRAGMA busy_timeout').get()?.timeout, 0);
+      child = spawnLockHolder(dbPath, 60);
+      await waitForHeld(child);
+      assert.equal(transactionImmediate(opened.db, () => 1), 1);
+    } finally {
+      await reap(child);
+      if (opened.db.isOpen) opened.db.close();
+    }
+  });
+});
+
+test('a connection without lockWaitMs keeps the SQLite busy timeout it was opened with', async () => {
+  await withTempHome((home) => {
+    const opened = openDatabase({ path: oboetePaths(home).db, timeoutMs: 1234 });
+    try {
+      assert.equal(opened.db.prepare('PRAGMA busy_timeout').get()?.timeout, 1234);
+    } finally {
+      if (opened.db.isOpen) opened.db.close();
     }
   });
 });

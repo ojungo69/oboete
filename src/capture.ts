@@ -750,11 +750,14 @@ async function write(options: WriteOptions): Promise<CaptureOutcome> {
   let spawnAfterSpool = false;
   // contracts/agents.md: below the spool reserve the database is not opened at all.
   if (remaining() >= SPOOL_RESERVE_MS) {
-    const timeoutMs = Math.max(
+    // Wall-clock bound: SQLite's busy handler sums requested sleeps and never reads a clock;
+    // on macOS those short sleeps last several times longer, so sqlite3_busy_timeout is not
+    // a wall-time limit.
+    const lockWaitMs = Math.max(
       1,
       Math.min(BUSY_TIMEOUT_CEILING_MS, Math.floor(remaining() - SPOOL_RESERVE_MS)),
     );
-    const opened = openCaptureDatabase(paths, timeoutMs);
+    const opened = openCaptureDatabase(paths, lockWaitMs);
     if (opened !== null && opened !== true) {
       // The handle is closed where it was opened: nothing between the two can leak it.
       try {
@@ -781,10 +784,10 @@ async function write(options: WriteOptions): Promise<CaptureOutcome> {
 
 function openCaptureDatabase(
   paths: OboetePaths,
-  timeoutMs: number,
+  lockWaitMs: number,
 ): DatabaseSync | true | null {
   try {
-    const opened = openDatabase({ path: paths.db, timeoutMs, hook: true });
+    const opened = openDatabase({ path: paths.db, timeoutMs: 0, hook: true, lockWaitMs });
     // data-model: the hook never migrates, so an older file is left to the worker. The handle is
     // dropped before it is closed, so a throwing close cannot leave the caller writing through a
     // connection this function has already refused.

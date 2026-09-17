@@ -19,7 +19,7 @@ import {
   storePending,
   type PackValidation,
 } from './deferred.js';
-import { cancelUndelivered, confirmDelivery, sessionStartAttempted } from './ledger.js';
+import { cancelUndelivered, confirmDeliveryIn, sessionStartAttempted } from './ledger.js';
 import {
   buildPromptPack,
   buildSessionStartPack,
@@ -205,14 +205,16 @@ function includedMemoryIds(db: DatabaseSync, injectionId: string): string[] {
 }
 
 function confirm(db: DatabaseSync, pack: BuiltPack, now: number): void {
-  confirmDelivery(db, pack.injectionId, now);
-  markInjectedMemories(
-    db,
-    pack.items
-      .filter((item) => item.decision === 'planned' && item.memoryId !== null)
-      .map((item) => item.memoryId as string),
-    now,
-  );
+  transactionImmediate(db, () => {
+    confirmDeliveryIn(db, pack.injectionId, now);
+    markInjectedMemories(
+      db,
+      pack.items
+        .filter((item) => item.decision === 'planned' && item.memoryId !== null)
+        .map((item) => item.memoryId as string),
+      now,
+    );
+  });
 }
 
 function markLatestDeferred(context: HookContext): void {
@@ -346,11 +348,12 @@ async function deferPack(
   pack: BuiltPack | null,
   validation: PackValidation,
 ): Promise<void> {
-  if (pack === null || context.db === undefined) return;
-  context.db
-    .prepare("UPDATE injections SET kind = 'grok_deferred' WHERE id = ?")
-    .run(pack.injectionId);
-  await storePending(context.db, {
+  const db = context.db;
+  if (pack === null || db === undefined) return;
+  transactionImmediate(db, () => {
+    db.prepare("UPDATE injections SET kind = 'grok_deferred' WHERE id = ?").run(pack.injectionId);
+  });
+  await storePending(db, {
     conversationId: context.conversationId,
     epoch: context.epoch,
     pack,

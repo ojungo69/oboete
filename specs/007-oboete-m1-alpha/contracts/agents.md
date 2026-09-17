@@ -200,10 +200,12 @@ spool).
   first; the detector runs in a `worker_threads` Worker that the main thread terminates at a
   hard cutoff (deadline minus the spool reserve minus a 20 ms row-build margin); a terminated
   detector yields a metadata-only row (`classification_state = failed`, reason `deadline`),
-  never unsanitized content. The database busy timeout is min(150 ms, remaining budget minus the
-  spool reserve); when the remaining budget after the detector is below the reserve the database
-  is not opened and the sanitized event goes straight to the spool; a storage failure after the
-  detector → spool. A wall-time test combines a slow detector with a busy database. The full detector
+  never unsanitized content. The write lock is waited for by wall clock for at most min(150 ms,
+  remaining budget minus the spool reserve); SQLite's own busy timeout is not used on hook
+  connections because it bounds requested sleep rather than elapsed time. When the remaining
+  budget after the detector is below the reserve the database is not opened and the sanitized
+  event goes straight to the spool; a storage failure after the detector → spool. A wall-time
+  test combines a slow detector with a busy database. The full detector
   must finish the read bound inside the cutoff on Node 22.16 (R13 probe); if it cannot, no
   smaller bound is introduced silently: the capture lane is blocked and the measured bound goes
   to the owner as A14. Measured on 2026-09-04: a secret-dense 1 MB payload takes 406-665 ms, above

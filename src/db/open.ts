@@ -109,11 +109,40 @@ export function isBusyError(error: unknown): boolean {
   return typeof info.errstr === 'string' && /database is locked|busy/.test(info.errstr);
 }
 
+const lockWaitMsByDb = new WeakMap<DatabaseSync, number>();
+const lockWaitSleep = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Hook-budget connections (`lockWaitMs`) retry on SQLITE_BUSY until wall time passes the bound.
+ * SQLite's busy handler sums requested sleeps and never reads a clock; on macOS those short
+ * sleeps last several times longer, so `sqlite3_busy_timeout` is not a wall-time limit.
+ */
+export function beginImmediate(db: DatabaseSync): void {
+  const bound = lockWaitMsByDb.get(db);
+  if (bound === undefined) {
+    db.exec('BEGIN IMMEDIATE');
+    return;
+  }
+  const start = performance.now();
+  for (;;) {
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      return;
+    } catch (error) {
+      if (!isBusyError(error)) throw error;
+      const left = bound - (performance.now() - start);
+      if (left <= 0) throw error;
+      Atomics.wait(lockWaitSleep, 0, 0, Math.min(10, left));
+    }
+  }
+}
+
 export function openDatabase(options: {
   path: string;
   timeoutMs: number;
   hook?: boolean;
   readOnly?: boolean;
+  lockWaitMs?: number;
 }): OpenedDatabase {
   const hook = options.hook === true;
   if ((hook || options.readOnly === true) && !existsSync(options.path)) {
@@ -221,8 +250,10 @@ function openConfiguredDatabase(
   hook: boolean,
 ): OpenedDatabase {
   const db = new (loadSqlite().DatabaseSync)(options.path, {
-    timeout: options.timeoutMs, readOnly: options.readOnly === true,
+    timeout: options.lockWaitMs === undefined ? options.timeoutMs : 0,
+    readOnly: options.readOnly === true,
   });
+  if (options.lockWaitMs !== undefined) lockWaitMsByDb.set(db, options.lockWaitMs);
   try {
     if (options.readOnly === true) {
       const schemaVersion = readUserVersion(db);
