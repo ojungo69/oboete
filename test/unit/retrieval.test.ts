@@ -49,15 +49,16 @@ function insertRepo(db: DatabaseSync, id: string, identity: string): void {
 
 function insertMemory(
   db: DatabaseSync,
-  memory: { id: string; repoId: string; title: string; body: string; createdAt?: number },
+  memory: { id: string; repoId: string; title: string; body: string; createdAt?: number; type?: string },
 ): void {
   const cjk = cjkBigrams(`${memory.title} ${memory.body}`);
   db.prepare(
     `INSERT INTO memories (id, repo_id, type, title, body, cjk_bigrams, content_hash, sensitivity, created_at)
-     VALUES (?, ?, 'discovery', ?, ?, ?, ?, 'local_only', ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'local_only', ?)`,
   ).run(
     memory.id,
     memory.repoId,
+    memory.type ?? 'discovery',
     memory.title,
     memory.body,
     cjk,
@@ -74,33 +75,26 @@ function insertSearchable(
     title: string;
     body: string;
     createdAt?: number;
+    type?: string;
     validTo?: number | null;
     supersededBy?: string | null;
   },
 ): void {
   insertMemory(db, memory);
   grantVisibility(db, memory.id, { audience: 'project', repoId: memory.repoId }, 'migration', memory.createdAt ?? 1);
-  if (memory.validTo !== undefined || memory.supersededBy !== undefined) {
-    db.prepare('UPDATE memories SET valid_to = ?, superseded_by = ? WHERE id = ?').run(
-      memory.validTo ?? null,
-      memory.supersededBy ?? null,
-      memory.id,
-    );
-  }
+  db.prepare('UPDATE memories SET valid_to = ?, superseded_by = ? WHERE id = ?').run(
+    memory.validTo ?? null,
+    memory.supersededBy ?? null,
+    memory.id,
+  );
 }
 
 type FactTag = NonNullable<NonNullable<Line['tags']>['fact']>;
 
 function payloadStrings(payload: unknown): string[] {
-  const texts: string[] = [];
-  JSON.parse(JSON.stringify(payload), (key, value: unknown) => {
-    if (typeof value === 'string') texts.push(value);
-    if (key === 'output' && Array.isArray(value) && value.every((item): item is number => typeof item === 'number')) {
-      texts.push(Buffer.from(value).toString('utf8'));
-    }
-    return value;
-  });
-  return texts;
+  if (typeof payload === 'string') return [payload];
+  if (payload === null || typeof payload !== 'object') return [];
+  return Object.values(payload).flatMap(payloadStrings);
 }
 
 function fixtureFacts(): Array<FactTag & { sentence: string }> {
@@ -668,7 +662,7 @@ test('searchMemories returns each events-1000 fact among the first five through 
               .map((fact) => `${fact.id} query ${fact.query} position ${fact.position} above [${fact.above.join(', ')}]`)
               .join('; ');
       assert.ok(
-        firstCount >= MEASURED_FIRST_RANK_COUNT - 1,
+        firstCount >= MEASURED_FIRST_RANK_COUNT,
         `first-rank count ${firstCount} (measured ${MEASURED_FIRST_RANK_COUNT}); not first: ${notFirstText}`,
       );
     } finally {
@@ -705,7 +699,7 @@ test('rankCandidates ignores created_at when trigram and cjk scores are equal', 
     ],
     options,
   );
-  const expected = [alpha.id, omega.id].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  const expected = [alpha.id, omega.id].sort();
   assert.deepEqual(first.included.map((item) => item.id), expected);
   assert.deepEqual(swapped.included.map((item) => item.id), expected);
 });
@@ -743,9 +737,10 @@ test('searchMemories returns a relevant older fact among newer unrelated memorie
         query: 'What is the SQLite busy timeout?',
         limit: 10,
       });
-      assert.ok(
-        found.some((row) => row.id === 'm_old'),
-        `older fact absent; returned ${found.map((row) => row.id).join(', ') || '(none)'}`,
+      assert.equal(
+        found[0]?.id,
+        'm_old',
+        `older fact not first; returned ${found.map((row) => row.id).join(', ') || '(none)'}`,
       );
     } finally {
       opened.db.close();
@@ -780,8 +775,9 @@ test('searchMemories hides a superseded fact unless history is requested', async
       });
       const query = 'busy timeout';
       const current = searchMemories(opened.db, { repoId: identity.id, paths, query, limit: 10 });
-      assert.ok(current.some((row) => row.id === 'm_current'));
-      assert.equal(current.some((row) => row.id === 'm_old'), false);
+      const currentIds = current.map((row) => row.id).join(', ') || '(none)';
+      assert.ok(current.some((row) => row.id === 'm_current'), `current fact absent: ${currentIds}`);
+      assert.equal(current.some((row) => row.id === 'm_old'), false, `superseded fact returned: ${currentIds}`);
       const withHistory = searchMemories(opened.db, {
         repoId: identity.id,
         paths,
@@ -789,8 +785,9 @@ test('searchMemories hides a superseded fact unless history is requested', async
         limit: 10,
         history: true,
       });
-      assert.ok(withHistory.some((row) => row.id === 'm_current'));
-      assert.ok(withHistory.some((row) => row.id === 'm_old'));
+      const withHistoryIds = withHistory.map((row) => row.id).join(', ') || '(none)';
+      assert.ok(withHistory.some((row) => row.id === 'm_current'), `current fact absent with history: ${withHistoryIds}`);
+      assert.ok(withHistory.some((row) => row.id === 'm_old'), `superseded fact absent with history: ${withHistoryIds}`);
     } finally {
       opened.db.close();
     }
@@ -832,6 +829,80 @@ test('searchMemories returns two distinct facts that share a title when they are
       });
       const found = searchMemories(opened.db, { repoId: 'repo_a', paths, query: 'busy timeout', limit: 10 });
       assert.deepEqual(found.map((row) => row.id).sort(), ['m_cli', 'm_hooks']);
+    } finally {
+      opened.db.close();
+    }
+  });
+});
+
+// Artifact for issue #275, rebuilt from the `claude-to-codex` pair of the 2026-09-17T15-05-08-894Z
+// dogfood run: five memories at pack time, of which the two session summaries are out of the search
+// scope. `m_fact` carries the three facts the recall prompt asks for, and the pack dropped it as
+// `below_threshold` while keeping `m_confirm`, which carries none of them. Skipped until #275 is
+// fixed; un-skip it with the fix.
+test('searchMemories returns the fact-bearing memory of a five-row corpus', { skip: 'issue #275' }, async () => {
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    const opened = openDatabase({ path: paths.db, timeoutMs: 1000 });
+    try {
+      insertRepo(opened.db, 'repo_a', '/tmp/oboete-a');
+      const facts = [
+        'fact-2026-09-17T15-05-08-894Z-claude-to-codex-1: the build token is cedar.',
+        'fact-2026-09-17T15-05-08-894Z-claude-to-codex-2: the release bird is heron.',
+        'fact-2026-09-17T15-05-08-894Z-claude-to-codex-3: 配布色は琥珀。',
+      ];
+      insertSearchable(opened.db, {
+        id: 'm_checkpoint',
+        repoId: 'repo_a',
+        type: 'session_summary',
+        title: 'Record three exact strings as durable facts in NOTES.md.',
+        body: [
+          'Purpose',
+          'Record three exact strings as durable facts in NOTES.md.',
+          '',
+          'Constraints',
+          '- Preserve the three exact strings verbatim.',
+          '- Use exactly one tool call.',
+          '- Append the strings to NOTES.md.',
+        ].join('\n'),
+      });
+      insertSearchable(opened.db, {
+        id: 'm_fact',
+        repoId: 'repo_a',
+        title: 'Durable facts recorded to NOTES.md',
+        body: `Three exact strings were written to NOTES.md to serve as durable facts about the repository. The strings are: '${facts.join("', '")}'.`,
+      });
+      insertSearchable(opened.db, {
+        id: 'm_decision',
+        repoId: 'repo_a',
+        title: 'Use NOTES.md for durable facts',
+        body: 'A decision was made to append the three exact strings to NOTES.md to preserve them as durable facts about the repository.',
+      });
+      insertSearchable(opened.db, {
+        id: 'm_confirm',
+        repoId: 'repo_a',
+        title: 'Assistant message confirms fact strings',
+        body: "The assistant's final message contained the three exact strings joined by a pipe character (|), confirming the successful execution of the tool call.",
+      });
+      insertSearchable(opened.db, {
+        id: 'm_request',
+        repoId: 'repo_a',
+        type: 'session_summary',
+        title: 'These three exact strings are durable facts about this repository.',
+        body: `request: These three exact strings are durable facts about this repository. Preserve them verbatim:\n${facts.join('\n')}`,
+      });
+      // The receiving agent's recall prompt, verbatim from scripts/e2e/probe-lib/isolated-agent.mjs.
+      const query = [
+        'Before the tool call, remember the fact lines already present inside the oboete memory context markers.',
+        "Use the shell tool exactly once to run: sed -n '1,20p' NOTES.md",
+        'Make no other tool call.',
+        'After the result, reply with every remembered fact line verbatim, joined by |. Do not derive the answer from NOTES.md.',
+      ].join('\n');
+      const found = searchMemories(opened.db, { repoId: 'repo_a', paths, query, limit: 10 });
+      assert.ok(
+        found.some((row) => row.id === 'm_fact'),
+        `fact-bearing memory absent; returned ${found.map((row) => row.id).join(', ') || '(none)'}`,
+      );
     } finally {
       opened.db.close();
     }

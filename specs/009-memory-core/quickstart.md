@@ -2604,18 +2604,19 @@ facts; true paraphrase is T024's (#266).
 
 | Test | Pins |
 | --- | --- |
-| `searchMemories returns each events-1000 fact among the first five through the search surface` | 40 facts derived from the fixture's `tags.fact`, 20 ja and 20 en; each within the first five; at least 38 first |
+| `searchMemories returns each events-1000 fact among the first five through the search surface` | 40 facts derived from the fixture's `tags.fact`, 20 ja and 20 en; each within the first five; at least 39 first |
 | `rankCandidates ignores created_at when trigram and cjk scores are equal` | equal scores order by id, and swapping `created_at` changes nothing |
-| `searchMemories returns a relevant older fact among newer unrelated memories` | a fact created at time 1 is returned for its query |
+| `searchMemories returns a relevant older fact among newer unrelated memories` | a fact created at time 1 ranks first for its query |
 | `searchMemories hides a superseded fact unless history is requested` | default search omits the superseded row; `--history` returns both; `get --history --json` shows `valid_to` and `superseded_by` naming the current row |
 | `searchMemories returns two distinct facts that share a title when they are the only candidates` | both returned |
+| `searchMemories returns the fact-bearing memory of a five-row corpus` (skipped, #275) | the five rows of the `claude-to-codex` pair at pack time and that pair's recall prompt; un-skipped it fails with `returned m_confirm`, the receipt below |
 
-All 35 tests in the file pass on Node 24.16.0 and 22.23.1. Each mutation below edits the built test
+All 35 runnable tests in the file pass on Node 24.16.0 and 22.23.1; the 36th is the #275 artifact, which is skipped until that fix. Each mutation below edits the built test
 bundle, runs the named test, and restores the bundle (sha256 compared):
 
 | Mutation | Failing assertion |
 | --- | --- |
-| threshold raised to 0.99 | corpus: `fact f-ja-19 … position absent` |
+| `injection.threshold` config default raised to 0.99 (the live path; `DEFAULT_THRESHOLD` in `rank.ts` is only the fallback and mutating it changes nothing) | corpus: `fact f-ja-19 query 鍵ローテは月のいつ？ position absent above []` |
 | equal scores prefer the newer `created_at` | age: `[z_new, a_old]` instead of `[a_old, z_new]` |
 | normalized score × 0.6 for rows older than a day | age: the same |
 | `m.valid_to IS NULL` removed from `memoryScope` | supersession: default search returned the old row |
@@ -2633,7 +2634,9 @@ bundle, runs the named test, and restores the bundle (sha256 compared):
   rare trigram scores -0.436 and the other two -0.0000064 and -0.0000047. Normalized by the ratio
   to the best score, both fall to about 0.00001, below the 0.3 threshold, and the memory holding
   the three exact facts is omitted. The same prompt against the same rows one memory later includes
-  all three. That is #275, and T023 stays open for it.
+  all three. That is #275, and T023 stays open for it. The five rows and that recall prompt are carried in
+  `test/unit/retrieval.test.ts` as a skipped test, so the fix un-skips a failing artifact rather than writing a
+  new one.
 - A memory injected once and then unused for 90 days is omitted from packs as `retired` (data model);
   it is still returned by search, which has no `last_injected_at` filter, so User Story 3's first
   acceptance scenario (age alone does not make a fact unavailable when asked about) holds.

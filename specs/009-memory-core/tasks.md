@@ -53,7 +53,13 @@ produce separately scored retention, retrieval, delivery and answer outcomes.
 
 - [X] T021 [US3] Correct readiness/lease barriers and prior-delivery accounting in `src/fixture/replay.ts` and `src/fixture/replay-evaluate.ts`, with a focused `test/unit/replay-evaluate.test.ts` regression.
 - [X] T022 [US3] Add source-stage accounting and inspectable omission reasons in `src/fixture/replay-evaluate.ts`, `src/why.ts` and `src/fixture/replay-report.ts`.
-- [ ] T023 [US3] Investigate lexical, MMR and supersession misses and correct any that reproduce: none on the `events-1000` corpus (the no-model replay stops every fact before ranking; stored verbatim, all 40 fixture facts rank within the first five), pinned in `test/unit/retrieval.test.ts`; the MMR depth observation is #272; a small-corpus threshold miss reproduced from the 2026-09-18 dogfood run is #275.
+- [ ] T023 [US3] Reproduce and correct demonstrated lexical/MMR/supersession misses in `src/retrieval/rank.ts`,
+  `src/db/queries.ts` and `test/unit/retrieval.test.ts`. Status: none reproduce on the `events-1000` corpus
+  (the no-model replay stops every fact before ranking; stored verbatim, all 40 fixture facts rank within the
+  first five), pinned in `test/unit/retrieval.test.ts`; the MMR depth observation is #272. The open miss is the
+  small-corpus threshold drop #275, reproduced from the 2026-09-18 dogfood run and carried as a skipped
+  five-row artifact in the same file. Acceptance: #275 fixed, that artifact un-skipped and passing, the
+  fixture pins and the threshold mutation still green.
 - [ ] T024 [US3] Qualify selected local/external profiles on the paraphrase corpus; add semantic retrieval in `src/retrieval/` only if the measured target requires it, documenting primary API/dependency evidence in `specs/009-memory-core/research.md`.
 
 ## Phase 6: US4 — Share at the correct scope (P1)
