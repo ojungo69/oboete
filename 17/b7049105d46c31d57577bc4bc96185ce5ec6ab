@@ -1,0 +1,19 @@
+test/unit/lease.test.ts
+  s_d675408629836f::t_a096174bdf0bce 47-48,78-93,258,260,262-271,273,287-294,368-369,371-379,381
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "17b7049105d46c31d57577bc4bc96185ce5ec6ab",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
