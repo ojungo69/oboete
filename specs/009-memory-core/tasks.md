@@ -44,7 +44,7 @@ resumes the selected work with zero unrelated active checkpoints.
 - [X] T017 [US2] Extend Git identity and add context/work/session bindings in `src/repo-identity.ts`, `src/capture.ts` and a numbered `src/db/migrations/` file.
 - [X] T018 [US2] Implement automatic/explicit work selection and current checkpoints in `src/db/queries.ts`, `src/injection/pack.ts`, `src/mcp.ts` and work CLI operations.
 - [X] T019 [US2] Preserve related investigation, compaction/fork lineage and outstanding steps after merge in `src/events.ts`, `src/observer/classify.ts` and work operations.
-- [ ] T020 [US2] Verify removed worktrees and ordered cross-agent continuation through `scripts/e2e/isolated-user.mjs` and `scripts/e2e/probe-lib/isolated-lifecycle*.mjs`; record actual runs in `specs/009-memory-core/quickstart.md`.
+- [X] T020 [US2] Verify removed worktrees and ordered cross-agent continuation: all twelve ordered agent pairs over an interleaved parallel-work corpus, and search and explicit continuation after `git worktree remove`, in `test/unit/work-pairs.test.ts`; record runs in `specs/009-memory-core/quickstart.md`. Native runs through `scripts/e2e/isolated-user.mjs` and `scripts/e2e/probe-lib/isolated-lifecycle*.mjs` are a separate acceptance gate (`contracts/work.md` B3) tracked in #265.
 
 ## Phase 5: US3 — Useful current knowledge (P1)
 
@@ -117,7 +117,7 @@ Owner amendment, 2026-09-10:
 
 ## Phase 10: Completed-product verification
 
-- [ ] T040 Align accepted native capabilities and run actual Linux/WSL/macOS checks in `.github/workflows/` and `scripts/e2e/probes/`; preserve unsupported/unavailable verdicts.
+- [X] T040 Align accepted native capabilities and run actual Linux/WSL/macOS checks in `.github/workflows/` and `scripts/e2e/probes/`; preserve unsupported/unavailable verdicts (macOS agent probes stay unverified: #269).
 - [ ] T041 Run all twelve ordered agent pairs and selected real-model Japanese/English evaluations; record sanitized evidence under `docs/evidence/memory-core-2026-09/`.
 - [ ] T042 Measure 1,000/10,000/100,000-event resources and seven days of real use with `src/fixture/replay.ts` and `scripts/measure-cold-start.mjs`; include local-model consumption.
 - [ ] T043 Run cohesive typecheck/lint/build/tests/pack and correctness/security, code-review and ponytail-review; record results in `specs/009-memory-core/quickstart.md`.
@@ -165,7 +165,8 @@ writers require separate worktrees. No deployment follows merely from an increme
 - T018/T019: B2-B5 implement and verify checkpoint production, all read/injection paths, explicit
   work selection, removed/moved/recreated worktrees, native lineage and inherited generation
   privacy. Both supported Node versions pass 1,014 + 202 tests; see the B5 receipts in `quickstart.md`.
-  T020 still requires actual native-agent runs. Security review and regression repairs are recorded,
+  T020 then still required actual native-agent runs (closed 2026-09-17 on synthetic coverage; native
+  runs are #265). Security review and regression repairs are recorded,
   but the terminal report finalizer rejected an evidence path; report packaging remains a T043
   follow-up and no finalized security report is claimed.
 - T021/T022: C2 passes 25 focused tests on Node 22.16.0 and 24.16.0, plus typecheck/lint and
@@ -396,3 +397,21 @@ writers require separate worktrees. No deployment follows merely from an increme
   database busy wait is not a wall-clock bound (#255) — plus five one-off timing failures (#256).
   The marker stays open until the #255 fix passes on the runner. Agent probes on macOS are recorded
   as unverified: a hosted runner has no agent login.
+- T040 (closed 2026-09-17): #262 fixed #255 (merged as `84ba32ff`). Run 35224724418, on #262's head
+  merged onto `main`, passes unit and serial on both runner legs; the M1 iMac, available at any time
+  by the owner's decision of 2026-09-17, passes every `platform.yml` step on `main` `84ba32ff` on
+  Node 22.16.0 and 24.21.0 (E10). The runner's hook cold start still fails on its timer spread and is
+  recorded as such; macOS agent probes stay unverified (#269).
+- T020 (closed 2026-09-17): `test/unit/work-pairs.test.ts` runs all twelve ordered pairs of claude,
+  codex, grok and pi over one parallel-work corpus each (two linked worktrees, two purposes in one
+  of them, a third work in the other, checkpoints generated through the observer with a mocked
+  provider). The receiver's ambiguous start lists only the two candidates of its worktree and
+  delivers no checkpoint; after an explicit choice its pack and delivery ledger carry only the
+  selected work's checkpoint, and the siblings' checkpoints, work-scoped observations and pending
+  prompts are withheld. A removed worktree's work stays searchable with its provenance and is
+  delivered on explicit continuation without recreating the directory. Five product mutations each
+  fail all thirteen tests; see E11 in `quickstart.md`. `contracts/work.md` B3 keeps real agents a
+  separate acceptance gate, so the native harness runs (`isolated-user.mjs`,
+  `isolated-lifecycle*.mjs`) are #265; the harness's own tests run in `npm test`. The daily
+  dogfood's twelve pairs (#244) run the M1 bundle (schema 3) and check fact recall only, so they are
+  not SC-002 evidence.
