@@ -3,7 +3,11 @@ name: CI
 on:
   workflow_dispatch:
   pull_request:
+  # Branch pushes are covered by the pull_request run. Without this filter both fire on the same
+  # commit, and the two SonarCloud scanners race on the same project analysis: the loser gets
+  # `Error 500 on .../batch/project.protobuf` and the required `check` context fails (#221).
   push:
+    branches: [main]
 
 permissions:
   contents: read
