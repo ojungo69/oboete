@@ -11,6 +11,7 @@ import {
   type PresetName,
 } from '../../src/config.js';
 import { openDatabase } from '../../src/db/open.js';
+import type { AgentName } from '../../src/events.js';
 import type { ObserverOutput } from '../../src/observer/contract.js';
 import { ensureDirectories, oboetePaths, type OboetePaths } from '../../src/paths.js';
 import { childEnvironment, credentialValues } from '../../src/log.js';
@@ -31,7 +32,8 @@ export type Fixture = {
   paths: OboetePaths;
   env: NodeJS.ProcessEnv;
   /** Captures through the real hook path and returns the outcome, whose `stdout` is the pack. */
-  capture(eventName: string, payload: Json, expected?: CaptureOutcome['outcome']): Promise<CaptureOutcome>;
+  capture(eventName: string, payload: Json, expected?: CaptureOutcome['outcome'],
+    overrides?: { agent?: AgentName; deps?: Partial<CaptureDeps> }): Promise<CaptureOutcome>;
   withDb<T>(fn: (db: DatabaseSync) => T): T;
 };
 
@@ -69,9 +71,9 @@ export async function withFixture(fn: (fixture: Fixture) => Promise<void>): Prom
       home,
       paths,
       env: cleanEnv(home),
-      capture: async (eventName, payload, expected = 'stored') => {
-        const outcome = await captureEvent(captureDeps, {
-          agent: 'claude',
+      capture: async (eventName, payload, expected = 'stored', overrides = {}) => {
+        const outcome = await captureEvent({ ...captureDeps, ...overrides.deps }, {
+          agent: overrides.agent ?? 'claude',
           eventName,
           paths,
           readStdin: () => ({ text: JSON.stringify(payload), truncated: false }),
