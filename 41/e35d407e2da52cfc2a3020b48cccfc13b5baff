@@ -1,0 +1,32 @@
+test/unit/classify.test.ts
+  s_d675408629836f::t_6cd27fe4fb1f7c 150-151
+  s_d675408629836f::t_45e6a151817440 148
+  s_d675408629836f::t_d0d0cdd716738c 145-147
+  s_d675408629836f::t_3abec6915e9022 149
+  s_d675408629836f::t_1decc5310917c1 152-154
+  s_d675408629836f::t_0ada47a3561526 126-144,155-188
+specs/007-oboete-m1-alpha/contracts/observer.md
+  s_d675408629836f::t_ed72bdbb452e1e 135-142,147-153
+src/observer/classify.ts
+  s_d675408629836f::t_ea4b833e79c741 72-79,85-90,92-95,97-98,102-142,144-145,147-163
+src/observer/llm.ts
+  s_d675408629836f::t_99004c3dc0bc0c 12,192
+test/unit/llm.test.ts
+  s_d675408629836f::t_c60766939abff2 5,192-193,195
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "41e35d407e2da52cfc2a3020b48cccfc13b5baff",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
