@@ -1,0 +1,19 @@
+scripts/measure-cold-start.mjs
+  s_645c89af315e59::t_976cb0aeb74f6d 371,375,382-384
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2e7c4e55d4f04f910fd4dec0a438be75ac5ed9e6",
+  "prompts": {},
+  "sessions": {
+    "s_645c89af315e59": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0aeb7-c6ba-7110-a64c-32f7900299ae",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
