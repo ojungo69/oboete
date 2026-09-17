@@ -900,10 +900,7 @@ test('the pinned pair prompts are still the ones the probe library sends', async
 // `m_confirm`, which carries none of them. Un-skipped, the corpus reproduces the three raw `bm25()`
 // magnitudes quickstart E12 quotes for the run; skipped, nothing here measures them.
 //
-// Keep all five rows: the defect still reproduces on the three searchable ones, but the two session
-// summaries are in the FTS index even though the scope hides them, and removing them takes the
-// corpus from five documents to three, which lifts `m_decision` above the threshold and changes what
-// comes back. Trimming them would measure the fix against a corpus the run never had.
+// Keep all five rows; quickstart E12 Limits says what trimming the two summaries would change.
 //
 // What it does not model: the pair's checkpoint is work-scoped in production, while these rows take
 // the file's ordinary project grant and are excluded by `m.type <> 'session_summary'` alone; and all
@@ -963,12 +960,7 @@ test('searchMemories returns the fact-bearing memory of a five-row corpus', { sk
           `request: ${PAIR_SEEDING_PROMPT}\ninvestigated:\nlearned: Assistant message confirms fact strings, ` +
           'Durable facts recorded to NOTES.md, Use NOTES.md for durable facts\ncompleted:\nnext_steps:',
       });
-      const found = searchMemories(opened.db, {
-        repoId: 'repo_a',
-        paths,
-        query: PAIR_RECALL_PROMPT,
-        limit: 10,
-      });
+      const found = searchMemories(opened.db, { repoId: 'repo_a', paths, query: PAIR_RECALL_PROMPT, limit: 10 });
       assert.ok(
         found.some((row) => row.id === 'm_fact'),
         `fact-bearing memory absent; returned ${found.map((row) => row.id).join(', ') || '(none)'}`,
