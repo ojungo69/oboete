@@ -64,8 +64,9 @@ produce separately scored retention, retrieval, delivery and answer outcomes.
   the pair's own five rows through `searchMemories` and through `buildPromptPack`, and by the rescued row
   arriving through the trigram index rather than the LIKE fallback. A memory sharing no term with the query
   is still omitted, but that holds because it is never a candidate: below the floor there is no selectivity
-  left, and the limit, MMR and the character budget bound the volume instead. the fixture pins and the threshold mutation stay green, and the clamp floor is killed
-  in both directions. See `quickstart.md` E12.
+  left, and the limit, MMR and the character budget bound the volume instead. The fixture pins and
+  the threshold mutation stay green, and the clamp floor is killed in both directions. See
+  `quickstart.md` E12.
 - [ ] T024 [US3] Qualify selected local/external profiles on the paraphrase corpus; add semantic retrieval in `src/retrieval/` only if the measured target requires it, documenting primary API/dependency evidence in `specs/009-memory-core/research.md`.
 
 ## Phase 6: US4 — Share at the correct scope (P1)

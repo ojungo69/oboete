@@ -872,12 +872,7 @@ test('searchMemories returns the fact-bearing memory of a five-row corpus', asyn
     try {
       insertRepo(opened.db, 'repo_a', '/tmp/oboete-a');
       for (const memory of PAIR_ROWS) insertSearchable(opened.db, { ...memory, repoId: 'repo_a' });
-      const found = searchMemories(opened.db, {
-        repoId: 'repo_a',
-        paths,
-        query: PAIR_RECALL_PROMPT,
-        limit: 10,
-      });
+      const found = searchMemories(opened.db, { repoId: 'repo_a', paths, query: PAIR_RECALL_PROMPT, limit: 10 });
       assert.ok(
         found.some((row) => row.id === 'm_fact'),
         `fact-bearing memory absent; returned ${found.map((row) => row.id).join(', ') || '(none)'}`,
