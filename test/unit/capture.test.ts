@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
   copyFileSync,
   existsSync,
+  mkdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -438,6 +440,35 @@ test('fail-closed: the user\'s absolute path rule written through a symbolic lin
     } finally {
       rmSync(link, { force: true });
     }
+  });
+});
+
+test('fail-closed: the user\'s absolute path rule applies to a relative Codex patch path from a subdirectory', async () => {
+  await withCapture(async (context) => {
+    // A Git repository, so the identity root is the repository and not the agent's subdirectory.
+    assert.equal(spawnSync('git', ['-C', context.repo, 'init', '--quiet']).status, 0);
+    const app = join(realpathSync(context.repo), 'app');
+    mkdirSync(join(app, 'secrets'), { recursive: true });
+    writeFileSync(context.paths.config, `[privacy]\nsecret_paths = [${JSON.stringify(join(app, 'secrets/**'))}]\n`);
+    // Ordinary content, so only the path rule can make this row secret.
+    const text = 'The deployment notes list the staging hostnames.';
+    const payload = {
+      session_id: 'session-codex-relative',
+      cwd: app,
+      turn_id: 'turn-1',
+      model: 'gpt-5.6-sol',
+      tool_name: 'apply_patch',
+      tool_input: { command: `*** Begin Patch\n*** Add File: secrets/notes.txt\n+${text}\n*** End Patch` },
+      tool_use_id: 'exec-relative',
+    };
+
+    await context.capture('codex', 'PreToolUse', payload);
+
+    const row = context.all('SELECT * FROM raw_events')[0] as Json;
+    assert.equal(row.content, null);
+    assert.equal(row.sensitivity, 'secret');
+    assert.equal((JSON.parse(row.payload_json as string) as Json).path_rule, join(app, 'secrets/**'));
+    assert.ok(!everythingWritten(context.paths).includes(text));
   });
 });
 

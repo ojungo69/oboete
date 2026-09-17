@@ -274,6 +274,40 @@ test('fail-closed: a path rule matches a path written through a symbolic link to
   }
 });
 
+test('fail-closed: an absolute path rule matches a relative tool path, also through a link in the repository', () => {
+  // Codex patch paths and Pi read paths arrive relative to the agent's working directory; the user's rule may be absolute.
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'oboete-relative-rules-')));
+  try {
+    const root = join(base, 'repo');
+    const vault = join(base, 'vault');
+    mkdirSync(join(root, 'secrets'), { recursive: true });
+    mkdirSync(vault);
+    writeFileSync(join(root, 'secrets', 'a.txt'), 'x');
+    writeFileSync(join(vault, 'key.txt'), 'x');
+    symlinkSync(vault, join(root, 'protected'));
+    mkdirSync(join(vault, 'current'));
+    mkdirSync(join(root, 'app', 'secrets'), { recursive: true });
+    assert.equal(matchSecretPath('secrets/a.txt', [join(root, 'secrets/**')], root), join(root, 'secrets/**'));
+    assert.equal(matchSecretPath('protected/key.txt', [join(vault, '**')], root), join(vault, '**'));
+    assert.equal(matchSecretPath('src/app.ts', [join(root, 'secrets/**'), join(vault, '**')], root), null);
+    // A glob before the link: only the written absolute form still carries the link's own name.
+    assert.equal(matchSecretPath('protected/current/key.txt', [join(root, '*/current/key.txt')], root), join(root, '*/current/key.txt'));
+    // The agent's working directory is the base of a relative path, not the repository root.
+    const app = join(root, 'app');
+    assert.equal(matchSecretPath('secrets/b.txt', [join(app, 'secrets/**')], root, app), join(app, 'secrets/**'));
+    assert.equal(matchSecretPath('secrets/b.txt', [join(root, 'secrets/**')], root, app), null);
+    // Repository rules see the path relative to the repository, taken from the working directory too.
+    assert.equal(matchSecretPath('secrets/b.txt', ['app/secrets/**'], root, app), 'app/secrets/**');
+    assert.equal(matchSecretPath('./secrets/b.txt', ['secrets/**'], root, app), null);
+    // `.` is the working directory, which a rule on a directory above it covers.
+    assert.equal(matchSecretPath('.', [join(root, '**')], root, app), join(root, '**'));
+    // A name that merely starts with two dots is inside the repository.
+    assert.equal(matchSecretPath(join(root, '..cache/x'), ['..cache/**'], root), '..cache/**');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('fail-closed: a path rule matches the repository-relative and the raw form', () => {
   const rules = ['secrets/**', '*.pem', '.env*'];
   const root = '/home/dev/repo';

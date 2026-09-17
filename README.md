@@ -255,9 +255,12 @@ values) before the first write anywhere, including the spool. A detector throw, 
 malformed `.oboete.toml` stores metadata only (`classification_state = failed`) and never the
 unsanitized payload. Availability fails open: capture still exits 0.
 
-**Path rules and symbolic links.** A path from an agent is matched both as written and with its
-symbolic links resolved. An absolute rule in `~/.oboete/config.toml` is matched both as written
-and resolved too. A rule in a repository's `.oboete.toml` is matched only as written, because it
+**Path rules and symbolic links.** A path from an agent is matched as written, in its absolute
+form, and with its symbolic links resolved. At capture, a relative path (a Codex patch, a Pi read)
+is made absolute against the agent's working directory, so an absolute rule applies to it; a `**`
+rule that names a directory above the repository therefore matches every path below it. The
+worker's later checks of stored sources still resolve a relative path against the repository root
+(#260). An absolute rule in `~/.oboete/config.toml` is matched both as written and resolved too. A rule in a repository's `.oboete.toml` is matched only as written, because it
 arrives with a clone and oboete does not look up paths a commit chose. Write repository rules
 relative to the repository (`secrets/**`); put absolute rules in `config.toml`.
 
