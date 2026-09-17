@@ -134,10 +134,16 @@ observer answers in the dominant language of the input (FR-014); the worker comp
 dominant script of every field the answer writes — every title and body, and in 009 the
 checkpoint's constraints, decisions and outstanding items — with the input's. A string the request
 already carries is the content's own language, not the observer's, so a field is scored on its
-residual: every run of at least four characters that the request carries (its events, its nearby
-memories, or the provided checkpoint, in the escaped form a paged fragment carries as well) is
-removed first, and what remains has to agree. That covers a quote inside the framing the prompt
-asks for, a body trimmed with an omission marker, and a title reused from the memory an `update`
+residual against the strings the request carries: each field of each event (a paged fragment also in
+the text its canonical JSON stands for), each nearby memory's title and body, and the provided
+checkpoint's title and body, each kept as its own string so that a quote cannot straddle a seam the
+request never wrote. A field the request carries whole is a quote, down to two characters. Otherwise
+every run of at least four characters that the request carries is removed, except that where one
+removed run ends and the next begins with nothing between them, one character of the join stays: the
+join is the observer's, so a sentence tiled out of quoted fragments is still scored. The omission
+marker the worker appends when it trims a body is removed before scoring, being nobody's answer.
+What remains has to agree. That covers a quote inside the framing the prompt asks for, a body
+trimmed with an omission marker, a short exact value, and a title reused from the memory an `update`
 targets. The checkpoint's own `purpose` is never exempted, because `checkpointText` picks all four
 section headings from it. The worker retries once on mismatch, and on a
 second mismatch discards the output and routes the batch to the fallback with

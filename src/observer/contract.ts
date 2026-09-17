@@ -220,19 +220,45 @@ export const observerOutputJsonSchema = z.toJSONSchema(observerOutputSchema);
 
 export type ObserverInput = z.infer<typeof observerInputSchema>;
 
+/** The omission marker `trimBody` appends, which the worker writes and the provider never sends. */
+export const TRIM_MARKER = /\n?\.\.\. \(\+\d+ omitted\)$/u;
+
 /**
- * The text an event carries. `request.ts` derives `language_hint` from it and `classify.ts` decides
- * from the same text whether an output field was quoted verbatim, so the two must read one list.
+ * Each string an event carries, one field per entry. `classify.ts` decides from these whether an
+ * output field was quoted verbatim, so they stay separate: joining them first would let a quote
+ * straddle two fields the request never wrote side by side.
+ *
+ * Only `fragment.text` is decoded. It is a slice of the canonical JSON, so a quote or a control
+ * character reaches it escaped, while every other field is already the text it stands for —
+ * decoding those again would invent a variant of a value that literally contains `\n`.
  */
-export function eventText(event: ObserverInput['events'][number]): string {
+export function eventParts(event: ObserverInput['events'][number]): string[] {
   const input = event.input as { command?: string; text?: string; paths?: unknown } | undefined;
   // `paths` is the third field a tool call carries (`isSummarizableRow` in `src/worker/batches.ts`
   // joins exactly command, text and paths), and a file name is often the only foreign-script string
   // an otherwise English event holds.
   const paths = Array.isArray(input?.paths) ? input.paths : [];
-  return [event.text, event.output, event.error, event.fragment?.text, input?.command, input?.text, ...paths]
+  const fragment = event.fragment?.text;
+  return [event.text, event.output, event.error, input?.command, input?.text, ...paths]
     .filter((value): value is string => typeof value === 'string')
-    .join('\n');
+    .concat(typeof fragment === 'string' ? [fragment, decodeFragment(fragment)] : []);
+}
+
+/** A JSON slice as the text it stands for, or the slice itself when it does not parse alone. */
+function decodeFragment(text: string): string {
+  try {
+    return JSON.parse(`"${text}"`) as string;
+  } catch {
+    return text;
+  }
+}
+
+/**
+ * The text an event carries. `request.ts` derives `language_hint` from it, which is one judgement
+ * over the whole event, so this is the parts joined.
+ */
+export function eventText(event: ObserverInput['events'][number]): string {
+  return eventParts(event).join('\n');
 }
 export type ObserverOutput = z.infer<typeof observerOutputSchema>;
 export type Observation = z.infer<typeof observationSchema>;

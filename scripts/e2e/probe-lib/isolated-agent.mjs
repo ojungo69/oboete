@@ -363,7 +363,7 @@ export async function waitForSummary(repo, directory, facts, options, dependenci
   while (dependencies.now() < context.deadline) {
     attempts += 1;
     const missing = missingFacts();
-    if (!(await searchPass(missing, found, context))) return { found: false, attempts, missingFacts: missing };
+    if (!(await searchPass(missing, found, context))) return { found: false, attempts, missingFacts: missingFacts() };
     if (found.size === facts.length) return { found: true, attempts, missingFacts: [] };
     const wait = Math.min(1_000, context.deadline - dependencies.now());
     if (wait > 0) await dependencies.sleep(wait);

@@ -15,10 +15,11 @@ import {
 import { assertLease } from '../worker/lease.js';
 import {
   MAX_BODY,
+  TRIM_MARKER,
   DISPLAY_PATH_TAIL,
   MAX_SOURCE_EVENT_IDS,
   MAX_TITLE,
-  eventText,
+  eventParts,
   type ObserverInput,
   type ObserverOutput,
 } from './contract.js';
@@ -112,30 +113,27 @@ const MIN_QUOTED_RUN = 4;
 type QuotedCorpus = { texts: string[]; grams: Set<string> };
 
 /**
- * The text this request carries, which is what an observation may quote. The provided checkpoint
+ * The strings this request carries, which is what an observation may quote. The provided checkpoint
  * counts (the observer is told to preserve its still-applicable items, and a later batch of the same
  * session need not carry the events they were written from), and so do the nearby memories the
  * prompt asks it to classify against: the honest title of an `update` is the target's own.
  *
- * A paged event carries a slice of the canonical JSON, where a quote or a newline is escaped, while
- * the answer arrives through `JSON.parse`. The unescaped form is added so the exemption survives the
- * long-input path, which is where a large verbatim quote is most likely.
+ * Each field stays its own string, down to the six an event holds: joining them would let a quote
+ * straddle a seam the request never wrote. `eventParts` is also where a paged fragment is decoded
+ * from its canonical JSON, and it is the only place anything is decoded.
  *
- * Each part stays its own string. Joining them first would let a run straddle the seam and exempt
- * text that no single part of the request carries.
+ * Everything is normalized with `normalizeForIdentity`, and so is the subject, because a comparison
+ * that disagrees about case or run-length whitespace answers a question nobody asked. That
+ * lowercases, which loosens the English-in-Japanese direction slightly; the containment test below
+ * is what makes it worth it, since it needs both sides in one form to mean anything.
  */
 function quotedCorpus(input: ObserverInput): QuotedCorpus {
-  const parts = [
-    ...input.events.map(eventText),
+  const texts = [
+    ...input.events.flatMap(eventParts),
     ...input.nearby.flatMap((memory) => [memory.title, memory.body]),
     ...(input.checkpoint_context.state === 'provided'
       ? [input.checkpoint_context.title, input.checkpoint_context.body] : []),
-  ];
-  const texts = parts.flatMap((part) => {
-    const normalized = normalizeForIdentity(part);
-    const unescaped = normalizeForIdentity(unescapeJson(part));
-    return unescaped === normalized ? [normalized] : [normalized, unescaped];
-  }).filter((part) => part.length >= MIN_QUOTED_RUN);
+  ].map(normalizeForIdentity).filter((part) => part.length > 0);
   const grams = new Set<string>();
   for (const text of texts) {
     for (let index = 0; index + MIN_QUOTED_RUN <= text.length; index += 1) {
@@ -143,10 +141,6 @@ function quotedCorpus(input: ObserverInput): QuotedCorpus {
     }
   }
   return { texts, grams };
-}
-
-function unescapeJson(text: string): string {
-  return text.replaceAll(/\\(["\\/])/gu, '$1').replaceAll('\\n', '\n').replaceAll('\\t', '\t');
 }
 
 /**
@@ -160,7 +154,12 @@ function unescapeJson(text: string): string {
  * has no junction, and neither has a field that is one quote.
  */
 function unquoted(text: string, corpus: QuotedCorpus): string {
-  const subject = normalizeForIdentity(text);
+  // The worker appends the omission marker itself, so its words are nobody's answer.
+  const subject = normalizeForIdentity(text.replace(TRIM_MARKER, ''));
+  // A field the request carries whole is a quote even when it is shorter than a run: `琥珀色` is a
+  // fact somebody asked to keep verbatim, not a coincidence. One character is still a coincidence —
+  // every CJK character of a Japanese request would exempt a title made of it.
+  if (subject.length > 1 && corpus.texts.some((part) => part.includes(subject))) return '';
   let residual = '';
   let index = 0;
   let previousRunEnd = -1;

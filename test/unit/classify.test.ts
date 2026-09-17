@@ -155,6 +155,38 @@ test('a quote keeps its script inside the framing the prompt asks for', () => {
   assert.equal(checkLanguage(inputWithHint('en', events), invented), 'mismatch');
 });
 
+test('a fact shorter than a run is exempt when the request carries it whole', () => {
+  const events = [{ id: 'e1', kind: 'prompt', text: 'Keep this value exactly: 琥珀色' }];
+  const kept = output(observation({ title: '琥珀色', body: '琥珀色' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), kept), 'ok');
+});
+
+test('the worker\'s own omission marker does not vote', () => {
+  // A Japanese session whose oversized body was trimmed: the English left in it is the marker.
+  const quote = 'The uploader retries three times before it gives up.';
+  const events = [{ id: 'e1', kind: 'prompt', text: `記録してください: ${quote}` }];
+  const trimmed = output(observation({ title: '再試行の記録', body: `${quote}\n... (+3 omitted)` }));
+  assert.equal(checkLanguage(inputWithHint('ja', events), trimmed), 'ok');
+});
+
+test('a value that literally contains a backslash-n is not decoded into the corpus', () => {
+  // `eventText` already holds the text an ordinary event stands for. Decoding it again would put a
+  // real newline in the corpus and exempt a value the request never carried.
+  const events = [{ id: 'e1', kind: 'prompt', text: String.raw`the literal value is 配布色\n琥珀 here` }];
+  const invented = output(observation({ title: 'Colour', body: '配布色\n琥珀' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), invented), 'mismatch');
+});
+
+test('a paged quote carrying a carriage return is decoded from its fragment', () => {
+  const fact = '配布色\r\n琥珀値';
+  const escaped = JSON.stringify(`the developer said ${fact} keep it`).slice(1, -1);
+  const fragment = [{ id: 'e1', kind: 'prompt',
+    fragment: { format: 'event-json-v1', source_hash: 'h1', start: 0, end: escaped.length,
+      total: escaped.length * 2, text: escaped } }];
+  const quoted = output(observation({ title: 'Colour', body: fact }));
+  assert.equal(checkLanguage(inputWithHint('en', fragment), quoted), 'ok');
+});
+
 test('a short coincidence does not exempt a field', () => {
   // '色' appears inside the quoted fact, but one shared character is not a quotation.
   const fact = '配布色は琥珀。';
