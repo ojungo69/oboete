@@ -82,6 +82,16 @@ test('an English answer to a Japanese input is a language mismatch', () => {
   assert.equal(checkLanguage(inputWithHint('en'), { observations: [], checkpoint }), 'ok');
 });
 
+test('a run that only exists across two events is not treated as quoted', () => {
+  // Neither event carries `配布色 は琥珀。`; it appears only where the two would be joined.
+  const events = [
+    { id: 'e1', kind: 'prompt', text: 'The colour field ends the sentence: 配布色' },
+    { id: 'e2', kind: 'prompt', text: 'は琥珀。 That is the recorded value.' },
+  ];
+  const straddling = output(observation({ title: 'Colour', body: '配布色 は琥珀。' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), straddling), 'mismatch');
+});
+
 test('a fact quoted verbatim from the input keeps its own script', () => {
   const fact = '配布色は琥珀。';
   const events = [{ id: 'e1', kind: 'prompt', text: `Record these durable facts: the build token is cedar. ${fact}` }];

@@ -108,7 +108,8 @@ function scriptAgrees(text: string, hint: 'ja' | 'en'): boolean {
 /** The shortest run of the request a field may reuse without being read as the writer's own words. */
 const MIN_QUOTED_RUN = 4;
 
-type QuotedCorpus = { text: string; grams: Set<string> };
+
+type QuotedCorpus = { texts: string[]; grams: Set<string> };
 
 /**
  * The text this request carries, which is what an observation may quote. The provided checkpoint
@@ -119,6 +120,9 @@ type QuotedCorpus = { text: string; grams: Set<string> };
  * A paged event carries a slice of the canonical JSON, where a quote or a newline is escaped, while
  * the answer arrives through `JSON.parse`. The unescaped form is added so the exemption survives the
  * long-input path, which is where a large verbatim quote is most likely.
+ *
+ * Each part stays its own string. Joining them first would let a run straddle the seam and exempt
+ * text that no single part of the request carries.
  */
 function quotedCorpus(input: ObserverInput): QuotedCorpus {
   const parts = [
@@ -127,13 +131,18 @@ function quotedCorpus(input: ObserverInput): QuotedCorpus {
     ...(input.checkpoint_context.state === 'provided'
       ? [input.checkpoint_context.title, input.checkpoint_context.body] : []),
   ];
-  const joined = parts.join('\n');
-  const text = normalizeForIdentity(`${joined}\n${unescapeJson(joined)}`);
+  const texts = parts.flatMap((part) => {
+    const normalized = normalizeForIdentity(part);
+    const unescaped = normalizeForIdentity(unescapeJson(part));
+    return unescaped === normalized ? [normalized] : [normalized, unescaped];
+  }).filter((part) => part.length >= MIN_QUOTED_RUN);
   const grams = new Set<string>();
-  for (let index = 0; index + MIN_QUOTED_RUN <= text.length; index += 1) {
-    grams.add(text.slice(index, index + MIN_QUOTED_RUN));
+  for (const text of texts) {
+    for (let index = 0; index + MIN_QUOTED_RUN <= text.length; index += 1) {
+      grams.add(text.slice(index, index + MIN_QUOTED_RUN));
+    }
   }
-  return { text, grams };
+  return { texts, grams };
 }
 
 function unescapeJson(text: string): string {
@@ -153,7 +162,7 @@ function unquoted(text: string, corpus: QuotedCorpus): string {
     if (corpus.grams.has(subject.slice(index, index + MIN_QUOTED_RUN))) {
       let length = MIN_QUOTED_RUN;
       while (index + length + 1 <= subject.length
-        && corpus.text.includes(subject.slice(index, index + length + 1))) length += 1;
+        && corpus.texts.some((part) => part.includes(subject.slice(index, index + length + 1)))) length += 1;
       index += length;
       continue;
     }
