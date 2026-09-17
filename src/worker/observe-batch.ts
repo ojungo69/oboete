@@ -355,14 +355,18 @@ function nearbyForBatch(db: DatabaseSync, input: BatchInput): NearbyCandidate[] 
 
 type PrivacyReader = (context: SourceContext | null, projectMemoryId?: string) => ReturnType<typeof readSourcePrivacy>;
 
-/** Why a source left its batch without being summarized. The batch's own outcome is read from these. */
+/**
+ * Why this pass deferred a source. `observation_batch_sources.reason` carries more values than
+ * these — `apply.ts` and `batches.ts` write their own, and the column has no CHECK — so this union
+ * covers the reasons `revalidateSources` writes, not the column.
+ */
 type SourceReason = 'detector_failed' | 'source_context_unknown' | 'consent_changed';
 
 /**
- * What each deferral makes of the batch it emptied, most severe first (declaration order is the
- * precedence). A lost consent is the consent reason, a detector that could not run is an unusable
- * answer, and a source held for an origin this worker cannot verify leaves no summarizer reason at
- * all. A new `SourceReason` has to choose here rather than fall into one of these by default.
+ * What each deferral makes of the batch it emptied. A lost consent is the consent reason, a
+ * detector that could not run is an unusable answer, and a source held for an origin this worker
+ * cannot verify leaves no summarizer reason at all. A new `SourceReason` has to choose here rather
+ * than fall into one of these by default; severity is `DEGRADED_PRECEDENCE`, not this key order.
  *
  * Holding is honest for one pass but is not a resting state: the sources that reach it in practice
  * come from setup/doctor probes, which capture from a temporary root they delete (#279).
@@ -373,13 +377,28 @@ const BATCH_OUTCOME = {
   source_context_unknown: null,
 } satisfies Record<SourceReason, DegradedReason | null>;
 
+/** The reasons of this batch's deferred sources, for a pass that re-checked none of them itself. */
+function recordedDeferrals(db: DatabaseSync, batchId: string): string[] {
+  return db.prepare(`SELECT DISTINCT reason FROM observation_batch_sources
+    WHERE batch_id = ? AND outcome = 'deferred'`).all(batchId).map((row) => String(row.reason));
+}
+
+/** The batch outcome a set of deferral reasons makes, by the shared severity order. */
+function batchOutcomeOf(reasons: readonly string[]): DegradedReason | null {
+  const mapped: (DegradedReason | null)[] = reasons.map((reason) => reason in BATCH_OUTCOME
+    ? BATCH_OUTCOME[reason as SourceReason]
+    // A reason this worker did not write is not a held origin; it is an answer we cannot use.
+    : 'unusable_output');
+  return mostSevereReason(mapped.filter((reason): reason is DegradedReason => reason !== null));
+}
+
 /** The reasons this pass deferred, or null when the lease was lost before they could be recorded. */
 async function revalidateSources(options: ProcessBatchOptions, input: BatchInput,
   privacyFor: PrivacyReader): Promise<SourceReason[] | null> {
   const { db, token, deps } = options;
   const checked: { row: RawEventRow; result: DetectorResult; context: SourceContext; reason: SourceReason }[] = [];
   // Consent is a property of the repository, not of one source, and reading it parses the config
-  // file: one answer for the whole pass, taken only if some source needs it.
+  // file: one answer for this batch, taken only if some source needs it.
   let consentHolds: boolean | null = null;
   for (const selected of input.rows) {
     // Generation receives only partial metadata; privacy also checks the retained prefix itself.
@@ -658,19 +677,23 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
   input = loadBatchInput(db, batch.id)!;
   if (input.batch.state !== 'pending') return { state: 'requeued', reason: null, memoryIds: [] };
   if (input.rows.length === 0) {
-    // What this pass did to the sources decides the batch's own outcome. Reading the reasons from
-    // this pass rather than from the receipt table keeps an earlier pass over the same batch, whose
-    // cause the user may since have fixed, from deciding the outcome.
-    const held = (Object.keys(BATCH_OUTCOME) as SourceReason[]).find((entry) => deferred.includes(entry));
-    const reason: DegradedReason | null = held === undefined ? null : BATCH_OUTCOME[held];
+    // What this pass did to the sources decides the batch's own outcome, so an earlier pass over the
+    // same batch — whose cause the user may since have fixed — does not. When this pass deferred
+    // nothing there is nothing of its own to read: either an earlier pass emptied the batch and its
+    // receipts are the only record, or the sources left for something that is not a deferral at all
+    // (quarantined as secret), which those receipts also say.
+    const reason = batchOutcomeOf(deferred.length > 0 ? deferred : recordedDeferrals(db, batch.id));
     transactionImmediate(db, () => {
       if (!assertLease(db, token, deps.now())) throw new LeaseLostError();
       db.prepare("UPDATE observation_batches SET state = 'fallback', completed_at = ?, degraded_reason = ? WHERE id = ? AND owner_token = ?")
         .run(deps.now(), reason, batch.id, token);
     });
-    // The row is terminal either way, so the run reports it as one finished batch. A held batch is
-    // not a degradation: `usedFallback` ignores a fallback that carries no reason.
-    return { state: 'fallback', reason, memoryIds: [] };
+    // The row is terminal either way. A batch that emptied without a reason did no work and must not
+    // read as activity: counting it would keep a resident worker awake across a held source's own
+    // retries (#279), so it is reported as requeued, with the detail on the log line.
+    return reason === null
+      ? { state: 'requeued', reason: null, detail: 'held', memoryIds: [] }
+      : { state: 'fallback', reason, memoryIds: [] };
   }
   const nearby = privacy === null ? [] : await revalidateNearby(options, nearbyForBatch(db, input), privacyFor);
 

@@ -129,13 +129,15 @@ test('a source whose captured root was removed is held as source_context_unknown
       const receipts = db.prepare(`SELECT DISTINCT reason FROM observation_batch_sources
         WHERE outcome = 'deferred' ORDER BY reason`).all().map((row) => row.reason);
       assert.deepEqual(receipts, ['source_context_unknown']);
-      const batch = db.prepare('SELECT state, degraded_reason, completed_at FROM observation_batches').get();
+      const batch = db.prepare(`SELECT b.state, b.degraded_reason, b.completed_at FROM observation_batches b
+        JOIN sessions s ON s.id = b.session_id WHERE s.native_session_id = 'removed-root'`).get();
       assert.equal(batch?.degraded_reason, null, 'a held origin is not a summarizer outcome');
       // The batch is finished, not left pending: its sources carry their own retry.
       assert.equal(batch?.state, 'fallback');
       assert.ok(batch?.completed_at != null);
       // And the session's own notes say they are rule-based, not that a summarizer refused them.
-      assert.equal(db.prepare('SELECT summary_degraded_reason FROM sessions').get()?.summary_degraded_reason,
+      assert.equal(
+        db.prepare("SELECT summary_degraded_reason FROM sessions WHERE native_session_id = 'removed-root'").get()?.summary_degraded_reason,
         'rule_based', 'a held source does not blame the summarizer');
       assert.equal(db.prepare("SELECT COUNT(*) AS n FROM observation_batches WHERE degraded_reason = 'consent_changed'").get()?.n, 0);
       assert.equal(db.prepare("SELECT COUNT(*) AS n FROM raw_events WHERE kind = 'prompt' AND processing_state = 'waiting'").get()?.n, 1);
@@ -144,8 +146,9 @@ test('a source whose captured root was removed is held as source_context_unknown
 });
 
 // The other half of the same classifier: a source the detector could not scan is a summarizer
-// outcome, not a held origin. A batch belongs to one session and one captured origin, so a single
-// batch cannot mix the two — each reason has to be pinned on its own batch.
+// outcome, not a held origin. The two can also meet in one batch — `readSourcePrivacy` fails per
+// row, not per batch — and `batchOutcomeOf` then takes the more severe one through the shared
+// `DEGRADED_PRECEDENCE`; this pins the detector half on a batch of its own.
 test('a source the detector cannot scan leaves the batch as unusable_output, not held', async () => {
   await withFixture(async (fixture) => {
     fixture.env = cleanEnv(fixture.home, { OBOETE_OPENROUTER_API_KEY: 'detector-failure-fixture-key' });
@@ -169,7 +172,9 @@ test('a source the detector cannot scan leaves the batch as unusable_output, not
       const receipts = db.prepare(`SELECT DISTINCT reason FROM observation_batch_sources
         WHERE outcome = 'deferred' ORDER BY reason`).all().map((row) => row.reason);
       assert.deepEqual(receipts, ['detector_failed']);
-      assert.equal(db.prepare('SELECT degraded_reason FROM observation_batches').get()?.degraded_reason,
+      assert.equal(
+        db.prepare(`SELECT b.degraded_reason FROM observation_batches b JOIN sessions s ON s.id = b.session_id
+          WHERE s.native_session_id = 'detector-failure'`).get()?.degraded_reason,
         'unusable_output');
     });
   });
