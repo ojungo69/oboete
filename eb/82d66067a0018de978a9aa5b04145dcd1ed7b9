@@ -1,0 +1,21 @@
+specs/009-memory-core/tasks.md
+  s_d675408629836f::t_696525ebcf1d93 67-69
+test/unit/retrieval.test.ts
+  s_d675408629836f::t_36dff68f3e45e0 875
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "eb82d66067a0018de978a9aa5b04145dcd1ed7b9",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
