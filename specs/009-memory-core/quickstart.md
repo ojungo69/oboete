@@ -2609,10 +2609,12 @@ facts; true paraphrase is T024's (#266).
 | `searchMemories returns a relevant older fact among newer unrelated memories` | a fact created at time 1 ranks first for its query |
 | `searchMemories hides a superseded fact unless history is requested` | default search omits the superseded row; `--history` returns both; `get --history --json` shows `valid_to` and `superseded_by` naming the current row |
 | `searchMemories returns two distinct facts that share a title when they are the only candidates` | both returned |
-| `searchMemories returns the fact-bearing memory of a five-row corpus` (skipped, #275) | the five rows of the `claude-to-codex` pair at pack time and that pair's recall prompt; un-skipped it fails with `returned m_confirm`, the receipt below |
+| `searchMemories returns the fact-bearing memory of a five-row corpus` | the five rows of the `claude-to-codex` pair at pack time and that pair's recall prompt; before the #275 fix it failed with `returned m_confirm` |
+| `searchMemories omits an unrelated memory of a five-row corpus` | admitting a clamped candidate does not admit the corpus |
+| `the prompt pack of a five-row corpus carries the fact-bearing memory` (`deferred.test.ts`) | the same five rows through `buildPromptPack`, with no item omitted `below_threshold` |
 | `the pinned pair prompts are still the ones the probe library sends` | the copied recall and seeding prompts, including the `printf` command, against `scripts/e2e/probe-lib/isolated-agent.mjs`; runs whether or not the artifact is skipped |
 
-All 36 runnable tests in the file pass on Node 24.16.0 and 22.23.1; the 37th is the #275 artifact, which is skipped until that fix. Each mutation below edits the built test
+All 38 tests in the file pass on Node 24.16.0 and 22.23.1. Each mutation below edits the built test
 bundle, runs the named test, and restores the bundle (sha256 compared):
 
 | Mutation | Failing assertion |
@@ -2629,21 +2631,32 @@ bundle, runs the named test, and restores the bundle (sha256 compared):
 - The pins go through the search surface. The injection pack uses the same ranking with a character
   budget and filters already-delivered and retired rows (`src/injection/pack.ts`); the pack path is
   measured by the replay above, which needs a model to say anything about recall.
-- The fixture corpus is too large to show a small-corpus miss that the first 009 dogfood run did
+- The fixture corpus is too large to show the small-corpus miss the first 009 dogfood run did
   (E13, #274). In pair `claude-to-codex` at pack time (five memories, session summaries excluded),
   FTS5 clamps the IDF of trigrams in more than half the documents to 1e-6, so one row matching a
-  rare trigram scores -0.436 and the other two -0.0000064 and -0.0000047. Normalized by the ratio
-  to the best score, both fall to about 0.00001, below the 0.3 threshold, and the memory holding
-  the three exact facts is omitted. The same prompt against the same rows one memory later includes
-  all three. That is #275, and T023 stays open for it. Those five rows and that recall prompt are carried
-  verbatim in `test/unit/retrieval.test.ts` as a skipped test, which reproduces the same three raw scores,
-  so the fix un-skips a failing artifact rather than writing a new one. The artifact names the rows
-  `m_confirm`, `m_decision` and `m_fact` for `m_c2bfcff0`, `m_363fe065` and `m_9da36e8d`, plus
-  `m_checkpoint` and `m_request` for the pair's two session summaries. Keep all five: the miss still
-  reproduces on the three searchable rows alone, but the summaries are in the FTS index even though the
-  scope hides them, and removing them takes the corpus to three documents, which lifts `m_decision`
-  above the threshold — measuring the fix against a corpus the run never had. The pair databases of the
-  run are the receipt for the copied text.
+  rare trigram scores -0.4361279 and the other two -0.0000064033 and -0.0000046696. Normalized by
+  the ratio to the best score, both fall to about 1e-5, below the 0.3 threshold, and the memory
+  holding the three exact facts is omitted. The same prompt against the same rows one memory later
+  includes all three. That was #275.
+- The fix, measured on this branch: a candidate whose every raw `bm25()` is below a clamp floor of
+  1e-3 is admitted on its rank, as `applyThreshold` already admits a LIKE-only match, instead of
+  being measured against a ratio the clamp decides. The floor sits between the two regimes with room
+  on both sides — two orders above the clamp, and three below the smallest raw score the fixture
+  produces (1.356 over its 40 probes, with runner-up ratios from 0.112 to 0.944), so no fixture probe
+  changes and the threshold mutation still fails the corpus pin. Mutating the floor to 0 fails the
+  five-row pins; mutating it to 1e9 fails `applyThreshold drops a row below 0.3` and the
+  `rankCandidates` score pin.
+- The pair's five rows live in `test/helpers/pair-275.ts` and are pinned three ways: through
+  `searchMemories`, through `buildPromptPack` (the path the run actually dropped the row on, which
+  adds delivery filtering, retirement and the budget cut), and by an unrelated memory of a five-row
+  corpus staying omitted. The rescued row is also shown to arrive through the trigram index rather
+  than the LIKE fallback, which `applyThreshold` admits without comparing it to the threshold. The
+  helper names the rows `m_confirm`, `m_decision` and `m_fact` for `m_c2bfcff0`, `m_363fe065` and
+  `m_9da36e8d`, plus `m_checkpoint` and `m_request` for the pair's two session summaries. Keep all
+  five: the miss reproduces on the three searchable rows alone, but the summaries are in the FTS
+  index even though the scope hides them, and removing them takes the corpus to three documents,
+  which lifts `m_decision` above the threshold — measuring the fix against a corpus the run never
+  had. The pair databases of the run are the receipt for the copied text.
 - A memory injected once and then unused for 90 days is omitted from packs as `retired` (data model);
   it is still returned by search, which has no `last_injected_at` filter, so User Story 3's first
   acceptance scenario (age alone does not make a fact unavailable when asked about) holds.

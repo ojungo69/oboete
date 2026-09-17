@@ -53,19 +53,18 @@ produce separately scored retention, retrieval, delivery and answer outcomes.
 
 - [X] T021 [US3] Correct readiness/lease barriers and prior-delivery accounting in `src/fixture/replay.ts` and `src/fixture/replay-evaluate.ts`, with a focused `test/unit/replay-evaluate.test.ts` regression.
 - [X] T022 [US3] Add source-stage accounting and inspectable omission reasons in `src/fixture/replay-evaluate.ts`, `src/why.ts` and `src/fixture/replay-report.ts`.
-- [ ] T023 [US3] Reproduce and correct demonstrated lexical/MMR/supersession misses in `src/retrieval/rank.ts`,
-  `src/db/queries.ts` and `test/unit/retrieval.test.ts`. Status: none reproduce on the `events-1000` corpus
-  (the no-model replay stops every fact before ranking; stored verbatim, all 40 fixture facts rank within the
-  first five), pinned in `test/unit/retrieval.test.ts`; the MMR depth observation is #272. The open miss is the
-  small-corpus threshold drop #275, reproduced from the `2026-09-17T15-05-08-894Z` dogfood run (JST
-  2026-09-18) and carried as a skipped
-  five-row artifact in the same file. Acceptance: #275 fixed; that artifact un-skipped and passing; the
-  fixture pins and the threshold mutation still green; plus three pins the artifact alone does not give:
-  a small-corpus false-positive case (an unrelated memory in a five-row corpus stays omitted), the same
-  five rows through `buildPromptPack` (the pack path is where the dogfood run dropped the row, and it
-  adds delivery filtering, retirement and the budget cut on top of the shared ranker), and evidence that
-  the rescued row arrives through the trigram index rather than the LIKE fallback, which `applyThreshold`
-  admits without comparing it to the threshold.
+- [X] T023 [US3] Reproduce and correct demonstrated lexical/MMR/supersession misses in `src/retrieval/rank.ts`,
+  `src/db/queries.ts` and `test/unit/retrieval.test.ts`. None reproduce on the `events-1000` corpus (the
+  no-model replay stops every fact before ranking; stored verbatim, all 40 fixture facts rank within the
+  first five, 39 first), pinned in `test/unit/retrieval.test.ts`; the MMR depth observation is #272. The one
+  miss that did reproduce is the small-corpus threshold drop #275, from the `2026-09-17T15-05-08-894Z`
+  dogfood run: FTS5 clamps the IDF of a term present in more than half the documents, so a candidate whose
+  every matched term crosses that half scores around 1e-6 and its ratio to the best candidate collapses.
+  `applyThreshold` now admits such a candidate on its rank, as it already does a LIKE-only match. Pinned by
+  the pair's own five rows through `searchMemories` and through `buildPromptPack`, by an unrelated memory of
+  a five-row corpus staying omitted, and by the rescued row arriving through the trigram index rather than
+  the LIKE fallback; the fixture pins and the threshold mutation stay green, and the clamp floor is killed
+  in both directions. See `quickstart.md` E12.
 - [ ] T024 [US3] Qualify selected local/external profiles on the paraphrase corpus; add semantic retrieval in `src/retrieval/` only if the measured target requires it, documenting primary API/dependency evidence in `specs/009-memory-core/research.md`.
 
 ## Phase 6: US4 — Share at the correct scope (P1)
@@ -188,8 +187,8 @@ writers require separate worktrees. No deployment follows merely from an increme
   the ineligible native-fork timing sample and passes worker RSS at 106.1 MiB. Ordinary hook timing,
   two unprinted Grok starts and real-model recall remain failed/unqualified, not reclassified as
   successful evaluation. See `quickstart.md`. As of C3 (2026-09-10) T023/T024/T040-T043 were all open; since then T040
-  closed on the E10 evidence and T023 closed on the E12 fixture replay, then reopened on the E13
-  dogfood run for #275.
+  closed on the E10 evidence and T023 closed on the E12 fixture replay, reopened on the E13 dogfood run
+  for #275, and closed again with that fix.
 - T025-T028: D1 implements explicit work/project grants, exact personal proposals/projections,
   common source/visibility checks, and CLI/viewer approval plus work-preserving adoption. Both Node
   versions pass 1,097 + 202 checks; installed-browser actions, package validation, normal security,

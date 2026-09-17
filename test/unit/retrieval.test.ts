@@ -5,7 +5,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
 import { openDatabase } from '../../src/db/open.js';
-import { grantVisibility } from '../../src/db/queries.js';
+import { grantVisibility, memoryScope } from '../../src/db/queries.js';
 import type { Line } from '../../src/fixture/replay.js';
 import { runGet, searchMemories } from '../../src/memories-cli.js';
 import { oboetePaths } from '../../src/paths.js';
@@ -23,6 +23,7 @@ import {
   rrfFuse,
 } from '../../src/retrieval/rank.js';
 import { repositoryRoot } from '../helpers/compile-cache.js';
+import { PAIR_RECALL_PROMPT, PAIR_ROWS, PROBE_LIBRARY_LINES } from '../helpers/pair-275.js';
 import { withTempHome } from '../helpers/home.js';
 
 const SCOPE_A = { where: 'm.repo_id = ? AND m.deleted_at IS NULL', params: ['repo_a'] };
@@ -840,123 +841,27 @@ test('searchMemories returns two distinct facts that share a title when they are
   });
 });
 
-// The `claude-to-codex` prompts of the 2026-09-17T15-05-08-894Z dogfood run, copied from
-// `scripts/e2e/probe-lib/isolated-agent.mjs`. That module cannot be imported: esbuild bundles it
-// into this test file, where `trusthash.mjs`'s main-module guard compares `process.argv[1]` with the
-// bundle's own path, matches, and reads `process.argv[2]`, which the test runner does not set. The
-// test below pins these copies against the source instead.
-const PAIR_FACTS = [
-  'fact-2026-09-17T15-05-08-894Z-claude-to-codex-1: the build token is cedar.',
-  'fact-2026-09-17T15-05-08-894Z-claude-to-codex-2: the release bird is heron.',
-  'fact-2026-09-17T15-05-08-894Z-claude-to-codex-3: 配布色は琥珀。',
-];
-
-/** `recallPrompt('codex', false)`: what the receiving agent was asked. */
-const PAIR_RECALL_PROMPT = [
-  'Before the tool call, remember the fact lines already present inside the oboete memory context markers.',
-  "Use the shell tool exactly once to run: sed -n '1,20p' NOTES.md",
-  'Make no other tool call.',
-  'After the result, reply with every remembered fact line verbatim, joined by |. Do not derive the answer from NOTES.md.',
-].join('\n');
-
-/** `buildFactSeedingPrompt(PAIR_FACTS)`: what the sending agent was asked, and what its free summary quotes. */
-const PAIR_SEEDING_PROMPT = [
-  'These three exact strings are durable facts about this repository. Preserve them verbatim:',
-  ...PAIR_FACTS,
-  'Use exactly one tool call and no other tools. In that one call, use the shell tool to run:',
-  "printf '%s\\n' 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-1: the build token is cedar.'"
-    + " 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-2: the release bird is heron.'"
-    + " 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-3: 配布色は琥珀。' >> NOTES.md",
-  'After the tool result, reply on one line with the same three exact strings joined by |.',
-].join('\n');
-
 // Runs whether or not the artifact below is skipped: a reword in the probe library must not leave
 // that corpus reproducing a prompt no agent sends. Substring checks, so a reordering or an added
-// line still passes; the whole-prompt shape is what the copies above state.
+// line still passes; the whole-prompt shape is what `test/helpers/pair-275.ts` states.
 test('the pinned pair prompts are still the ones the probe library sends', () => {
   const source = readFileSync(join(repositoryRoot(), 'scripts/e2e/probe-lib/isolated-agent.mjs'), 'utf8');
-  const lines = [
-    ...PAIR_RECALL_PROMPT.split('\n'),
-    'These three exact strings are durable facts about this repository. Preserve them verbatim:',
-    'Use exactly one tool call and no other tools. In that one call, use the shell tool to run:',
-    'After the tool result, reply on one line with the same three exact strings joined by |.',
-    String.raw`printf '%s\n' ${'$'}{facts.map((fact) => shellQuote(fact)).join(" ")} >> NOTES.md`,
-    '-1: the build token is cedar.',
-    '-2: the release bird is heron.',
-    '-3: 配布色は琥珀。',
-  ];
-  for (const line of lines) assert.ok(source.includes(line), `probe library no longer states: ${line}`);
+  for (const line of PROBE_LIBRARY_LINES) {
+    assert.ok(source.includes(line), `probe library no longer states: ${line}`);
+  }
 });
 
-// Artifact for issue #275: the five memories of the `claude-to-codex` pair of the
-// 2026-09-17T15-05-08-894Z dogfood run (JST 2026-09-18) as they stood when the receiving prompt
-// pack was built, copied verbatim from that pair's database. The scores they produce are the ones
-// quickstart E12 records for the run. `m_fact` carries the three facts the recall prompt asks for
-// and the pack dropped it as `below_threshold`, keeping `m_confirm`, which carries none of them.
-//
-// Keep all five rows: the defect still reproduces on the three searchable ones, but the two session
-// summaries are in the FTS index even though the scope hides them, and removing them takes the
-// corpus from five documents to three, which lifts `m_decision` above the threshold and changes what
-// comes back. Trimming them would measure the fix against a corpus the run never had.
-//
-// What it does not model: the pair's checkpoint is work-scoped in production, while these rows take
-// the file's ordinary project grant and are excluded by `m.type <> 'session_summary'` alone; and all
-// five rows share one `created_at`, so nothing here can show a recency- or retirement-driven drop.
-//
-// Skipped until #275 is fixed. Un-skip it with the fix, together with the counter-pin T023's
-// acceptance names: an unrelated memory in a five-row corpus must still be omitted, or a fix that
-// simply admits everything turns this green.
-test('searchMemories returns the fact-bearing memory of a five-row corpus', { skip: 'issue #275' }, async () => {
+// The reproduction of #275; see `test/helpers/pair-275.ts` for the corpus and why every row of it
+// matters. What it does not model: the pair's checkpoint is work-scoped in production, while these
+// rows take the file's ordinary project grant and are excluded by `m.type <> 'session_summary'`
+// alone; and all five share one `created_at`, so nothing here shows a recency-driven drop.
+test('searchMemories returns the fact-bearing memory of a five-row corpus', async () => {
   await withTempHome((home) => {
     const paths = oboetePaths(home);
     const opened = openDatabase({ path: paths.db, timeoutMs: 1000 });
     try {
       insertRepo(opened.db, 'repo_a', '/tmp/oboete-a');
-      insertSearchable(opened.db, {
-        id: 'm_checkpoint',
-        repoId: 'repo_a',
-        type: 'session_summary',
-        title: 'Record three exact strings as durable facts in NOTES.md.',
-        body:
-          'Purpose\nRecord three exact strings as durable facts in NOTES.md.\n\nConstraints\n' +
-          '- Preserve the three exact strings verbatim.\n- Use exactly one tool call.\n' +
-          '- Append the strings to NOTES.md.\n\nDecisions\n' +
-          '- The three exact strings will be appended to NOTES.md.\n\nOutstanding\n' +
-          '- Verify the contents of NOTES.md to ensure the strings were written correctly.',
-      });
-      insertSearchable(opened.db, {
-        id: 'm_fact',
-        repoId: 'repo_a',
-        title: 'Durable facts recorded to NOTES.md',
-        body:
-          'Three exact strings were written to NOTES.md to serve as durable facts about the repository. ' +
-          `The strings are: '${PAIR_FACTS[0]}', '${PAIR_FACTS[1]}', and '${PAIR_FACTS[2]}'.`,
-      });
-      insertSearchable(opened.db, {
-        id: 'm_decision',
-        repoId: 'repo_a',
-        title: 'Use NOTES.md for durable facts',
-        body: 'A decision was made to append the three exact strings to NOTES.md to preserve them as durable facts about the repository.',
-      });
-      insertSearchable(opened.db, {
-        id: 'm_confirm',
-        repoId: 'repo_a',
-        title: 'Assistant message confirms fact strings',
-        body: "The assistant's final message contained the three exact strings joined by a pipe character (|), confirming the successful execution of the tool call.",
-      });
-      // The sending session's free summary: the seeding prompt the agent received, with the batch's
-      // empty accounting tail, and the truncated title the summariser gave it.
-      insertSearchable(opened.db, {
-        id: 'm_request',
-        repoId: 'repo_a',
-        type: 'session_summary',
-        title:
-          'These three exact strings are durable facts about this repository. Preserve them verbatim:\n' +
-          'fact-2026-09-17T15-05-08-894Z',
-        body:
-          `request: ${PAIR_SEEDING_PROMPT}\ninvestigated:\nlearned: Assistant message confirms fact strings, ` +
-          'Durable facts recorded to NOTES.md, Use NOTES.md for durable facts\ncompleted:\nnext_steps:',
-      });
+      for (const memory of PAIR_ROWS) insertSearchable(opened.db, { ...memory, repoId: 'repo_a' });
       const found = searchMemories(opened.db, {
         repoId: 'repo_a',
         paths,
@@ -966,6 +871,46 @@ test('searchMemories returns the fact-bearing memory of a five-row corpus', { sk
       assert.ok(
         found.some((row) => row.id === 'm_fact'),
         `fact-bearing memory absent; returned ${found.map((row) => row.id).join(', ') || '(none)'}`,
+      );
+      // It is rescued as a clamped trigram match, not through the LIKE fallback, which
+      // `applyThreshold` admits without comparing it to the threshold at all.
+      const scope = memoryScope(opened.db, { repoId: 'repo_a', destination: 'injection', workId: null });
+      const candidate = searchCandidates(opened.db, { text: PAIR_RECALL_PROMPT, scope })
+        .rows.find((row) => row.id === 'm_fact');
+      assert.ok(candidate !== undefined, 'm_fact is not even a candidate');
+      assert.notEqual(candidate.scoreTrigram, null, 'm_fact arrived through the LIKE fallback');
+      assert.equal(candidate.viaLike, false);
+    } finally {
+      opened.db.close();
+    }
+  });
+});
+
+// The other direction of the same gate: admitting a clamped candidate must not admit the corpus.
+test('searchMemories omits an unrelated memory of a five-row corpus', async () => {
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    const opened = openDatabase({ path: paths.db, timeoutMs: 1000 });
+    try {
+      insertRepo(opened.db, 'repo_a', '/tmp/oboete-a');
+      for (const memory of PAIR_ROWS.slice(0, 4)) insertSearchable(opened.db, { ...memory, repoId: 'repo_a' });
+      insertSearchable(opened.db, {
+        id: 'm_unrelated',
+        repoId: 'repo_a',
+        title: 'Espresso grind size',
+        body: 'Finer grounds pull a slower shot; 18 grams filled the basket evenly.',
+      });
+      const found = searchMemories(opened.db, {
+        repoId: 'repo_a',
+        paths,
+        query: PAIR_RECALL_PROMPT,
+        limit: 10,
+      });
+      assert.ok(found.some((row) => row.id === 'm_fact'), 'the fact-bearing memory is still returned');
+      assert.equal(
+        found.some((row) => row.id === 'm_unrelated'),
+        false,
+        `an unrelated memory was admitted; returned ${found.map((row) => row.id).join(', ')}`,
       );
     } finally {
       opened.db.close();
