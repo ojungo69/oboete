@@ -279,7 +279,8 @@ test('a rejected header closes the bundle it opened, so a pull over many bad bun
       ['replica_mismatch', (path) => writeBundle(path, OTHER, () => undefined)],
       ['space_mismatch', (path) => writeBundle(path, SENDER, () => undefined, { space_id: 'f'.repeat(32) })],
     ];
-    const open = (): number => readdirSync(`/proc/${String(process.pid)}/fd`).length;
+    // `/dev/fd` lists this process's descriptors on Linux and macOS alike; `/proc` is Linux only.
+    const open = (): number => readdirSync('/dev/fd').length;
     for (const [name, write] of bad) { // warm up: the first rejection of each shape may open other state.
       const path = join(dir, `${SENDER}.leak-${name}.plain`);
       write(path);

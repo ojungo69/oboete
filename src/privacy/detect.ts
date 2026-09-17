@@ -7,6 +7,7 @@ import { rules as recommendedRules } from '@secretlint/secretlint-rule-preset-re
 import type { SecretLintCoreConfig } from '@secretlint/types';
 
 import { credentialValues } from '../log.js';
+import { physicalPath } from '../paths.js';
 import { testFault } from '../testing/faults.js';
 
 // Library profiling retains marks across every check; the engine never consumes them.
@@ -255,6 +256,11 @@ export function globRuleError(rule: string): string | null {
  * The repository path rule that this path matches, or null. The path is tested in its
  * repository-relative form (when it lies inside the repository) and in its raw form; a match makes
  * the whole event a path-rule hit, which is stored as metadata only (R4).
+ *
+ * The path is also compared in its physical spelling (`physicalPath`): the root is Git's resolved
+ * `--show-toplevel` while a payload path keeps the symbolic links it was written with, and a rule
+ * that misses its own file fails open. Rules are matched as written; the user's own absolute rules
+ * arrive with their physical form already added (`withPhysicalRules`).
  */
 export function matchSecretPath(
   pathValue: string,
@@ -264,11 +270,15 @@ export function matchSecretPath(
   if (rules.length === 0) return null;
 
   const candidates = [withForwardSlashes(pathValue)];
+  if (isAbsolute(pathValue)) candidates.push(withForwardSlashes(physicalPath(pathValue)));
   if (repoRoot !== null) {
-    const inside = relative(resolve(repoRoot), resolve(repoRoot, pathValue));
-    // A path outside the repository has no repository-relative form to compare.
-    if (inside !== '' && !inside.startsWith('..') && !isAbsolute(inside)) {
-      candidates.push(withForwardSlashes(inside));
+    const written = resolve(repoRoot, pathValue);
+    for (const [root, path] of [[resolve(repoRoot), written], [physicalPath(repoRoot), physicalPath(written)]]) {
+      const inside = relative(root, path);
+      // A path outside the repository has no repository-relative form to compare.
+      if (inside !== '' && !inside.startsWith('..') && !isAbsolute(inside)) {
+        candidates.push(withForwardSlashes(inside));
+      }
     }
   }
 

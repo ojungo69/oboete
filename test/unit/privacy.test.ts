@@ -1,7 +1,7 @@
 import { grantVisibility } from '../../src/db/queries.js';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -19,6 +19,7 @@ import {
   loadRepoRules,
 } from '../../src/config.js';
 import { openDatabase } from '../../src/db/open.js';
+import { withPhysicalRules } from '../../src/paths.js';
 import { resolveRepoIdentity } from '../../src/repo-identity.js';
 import { chooseWork } from '../../src/work.js';
 import { PACK_FOOTER, PACK_HEADER, packHash, stripRecognizedPacks } from '../../src/injection/recognize.js';
@@ -245,6 +246,32 @@ test('compileGlob follows gitignore semantics and keeps a single star inside one
   // Regular expression metacharacters in a glob are literal text.
   assert.equal(compileGlob('note(1)+.txt').test('note(1)+.txt'), true);
   assert.equal(compileGlob('note(1)+.txt').test('note(1).txt'), false);
+});
+
+test('fail-closed: a path rule matches a path written through a symbolic link to its repository', () => {
+  // The repository root is Git's physical `--show-toplevel`, while a payload path and a rule keep
+  // whatever spelling they were written in; macOS temporary directories are all such links.
+  const base = mkdtempSync(join(tmpdir(), 'oboete-symlink-rules-'));
+  try {
+    mkdirSync(join(base, 'real', 'repo', 'secrets'), { recursive: true });
+    writeFileSync(join(base, 'real', 'repo', 'secrets', 'k.txt'), 'x');
+    symlinkSync(join(base, 'real'), join(base, 'link'));
+    const root = realpathSync(join(base, 'real', 'repo'));
+    const logical = join(base, 'link', 'repo');
+    assert.equal(matchSecretPath(join(logical, 'secrets/k.txt'), ['secrets/**'], root), 'secrets/**');
+    // A file that no longer exists, below a directory that never did, still has a physical spelling.
+    assert.equal(matchSecretPath(join(logical, 'gone/secrets/old.txt'), ['gone/**'], root), 'gone/**');
+    assert.equal(matchSecretPath(join(logical, 'secrets/k.txt'), [join(root, 'secrets/**')], root), join(root, 'secrets/**'));
+    // A rule is matched as written, so a repository's `.oboete.toml` never makes the hook resolve a
+    // path of its choosing; the user's own absolute rules get their physical form added once.
+    assert.equal(matchSecretPath(join(root, 'secrets/k.txt'), [join(logical, 'secrets/**')], root), null);
+    const expanded = withPhysicalRules([join(logical, 'secrets/**'), 'secrets/**']);
+    assert.deepEqual(expanded, [join(logical, 'secrets/**'), 'secrets/**', join(root, 'secrets/**')]);
+    assert.equal(matchSecretPath(join(root, 'secrets/k.txt'), withPhysicalRules([join(logical, 'secrets/**')]), root), join(root, 'secrets/**'));
+    assert.equal(matchSecretPath(join(logical, 'src/app.ts'), ['secrets/**', join(logical, 'secrets/**')], root), null);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test('fail-closed: a path rule matches the repository-relative and the raw form', () => {

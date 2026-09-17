@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -66,7 +66,7 @@ test('source path revalidation uses its captured checkout, including tool-result
     await fixture.capture('SessionEnd', { session_id: 'original-checkout', cwd: original, reason: 'prompt_input_exit' });
     writeFileSync(join(original, '.oboete.toml'), '[privacy]\nsecret_paths = ["secrets/**"]\n');
     await fixture.capture('SessionStart', { session_id: 'later-checkout', cwd: later, source: 'startup' });
-    fixture.withDb((db) => assert.equal(db.prepare('SELECT display_root FROM repos').get()?.display_root, later));
+    fixture.withDb((db) => assert.equal(db.prepare('SELECT display_root FROM repos').get()?.display_root, realpathSync(later)));
     await observeAt(fixture, NOW, async (_url, options) => {
       const input = sentInput(options);
       assert.ok(input.events.every((event) => event.kind === 'prompt'), 'file material must be excluded by the original checkout rule');

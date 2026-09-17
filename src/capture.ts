@@ -37,7 +37,7 @@ import {
   type SessionStartSource,
 } from './events.js';
 import { appendLogQuietly, credentialValues, errorCode } from './log.js';
-import { ensureDirectories, type OboetePaths } from './paths.js';
+import { ensureDirectories, withPhysicalRules, type OboetePaths } from './paths.js';
 import type { DetectorInput, DetectorResult } from './privacy/detect.js';
 import { resolveRepoIdentity, type GitSpawn, type RepoIdentity } from './repo-identity.js';
 import { writeSpoolEntry, type SpoolEntry } from './spool.js';
@@ -1226,7 +1226,7 @@ function readSettings(paths: OboetePaths, repoRoot: string): CaptureSettings | n
     const repoSecretPaths = loadRepoRules(repoRoot).secretPaths;
     return {
       config,
-      secretPaths: [...config.privacy.secret_paths, ...repoSecretPaths],
+      secretPaths: [...withPhysicalRules(config.privacy.secret_paths), ...repoSecretPaths],
       repoSecretPaths,
     };
   } catch (error) {

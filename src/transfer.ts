@@ -3,17 +3,17 @@
 // as hashes), an imported row can only raise a sensitivity and never lowers one, a tombstone wins
 // in both directions, and every active imported row is quarantined as `local_only` /
 // `review_state = imported` until the worker classifies it. Nothing here is on the hook path.
-import { closeSync, createReadStream, existsSync, mkdtempSync, openSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, createReadStream, existsSync, mkdtempSync, openSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { parseArgs } from 'node:util';
 import { Readable } from 'node:stream';
 
 import { DatabaseMissingError, SchemaAheadError, openDatabase } from './db/open.js';
 import { sha256Hex } from './hash.js';
-import { ensureDirectories, oboetePaths, resolveHome } from './paths.js';
+import { ensureDirectories, oboetePaths, physicalPath, resolveHome } from './paths.js';
 
 import { EXPORT_FORMAT, MAX_LINE_BYTES, MAX_FILE_BYTES, type ImportResult, type ImportOptions } from './transfer-format.js';
 import { readTransferPlan, TransferInputError, type TransferPlan } from './transfer-plan.js';
@@ -152,10 +152,8 @@ function plural(count: number, noun: string, plural = `${noun}s`): string {
 
 function assertExportTarget(target: string): void {
   if (target === '-') return;
-  const physical = (path: string) => existsSync(path) ? realpathSync(path)
-    : existsSync(dirname(path)) ? join(realpathSync(dirname(path)), basename(path)) : resolve(path);
-  const output = physical(resolve(target));
-  const database = physical(oboetePaths(resolveHome()).db);
+  const output = physicalPath(target);
+  const database = physicalPath(oboetePaths(resolveHome()).db);
   for (const suffix of ['', '-wal', '-shm', '-journal']) {
     const path = `${database}${suffix}`;
     if (output === path) throw new Rejection('export_target_is_database');
