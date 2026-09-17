@@ -47,12 +47,12 @@ test('every phrase of the directive corpus is rejected and ordinary prose is not
   assert.equal(rejectsDirectives('アップローダーは三回まで再試行します。'), null);
 });
 
-function inputWithHint(hint: 'ja' | 'en' | 'other'): ObserverInput {
+function inputWithHint(hint: 'ja' | 'en' | 'other', events: unknown[] = []): ObserverInput {
   return observerInputSchema.parse({
     repo_ref: REPO_ID,
     checkpoint_context: { state: 'none' },
     session: { started_at: NOW, turns: [] },
-    events: [],
+    events,
     free_summaries: {},
     nearby: [],
     language_hint: hint,
@@ -80,6 +80,47 @@ test('an English answer to a Japanese input is a language mismatch', () => {
     decisions: [], outstanding: ['Check the timeout.'], source_event_ids: ['e1'], reason: 'Progress changed.' };
   assert.equal(checkLanguage(inputWithHint('ja'), { observations: [], checkpoint }), 'mismatch');
   assert.equal(checkLanguage(inputWithHint('en'), { observations: [], checkpoint }), 'ok');
+});
+
+test('a fact quoted verbatim from the input keeps its own script', () => {
+  const fact = '配布色は琥珀。';
+  const events = [{ id: 'e1', kind: 'prompt', text: `Record these durable facts: the build token is cedar. ${fact}` }];
+  const otherFields = [
+    { id: 'e2', kind: 'tool_result', output: `wrote ${fact} to NOTES.md` },
+    { id: 'e3', kind: 'tool_call', tool_name: 'Bash', input: { command: `printf '%s' '${fact}' >> NOTES.md` } },
+  ];
+  const quoted = output(observation({ title: 'fact-3', body: fact }));
+  const invented = output(observation({ title: '色', body: '配布物の色は決まっていません。' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), quoted), 'ok');
+  assert.equal(checkLanguage(inputWithHint('en', events), invented), 'mismatch');
+  // With no such text in the events there is nothing to have quoted.
+  assert.equal(checkLanguage(inputWithHint('en'), quoted), 'mismatch');
+  // The same text reaches the check through every field the request carries, not only `text`.
+  for (const event of otherFields) {
+    assert.equal(checkLanguage(inputWithHint('en', [event]), quoted), 'ok', JSON.stringify(event));
+  }
+  // The mirror case: an English identifier quoted into a Japanese session.
+  const jaEvents = [{ id: 'e1', kind: 'prompt', text: '配布の設定を確認しました。値は release-bird-heron です。' }];
+  const enQuote = output(observation({ title: 'release-bird-heron', body: 'release-bird-heron' }));
+  const enInvented = output(observation({ title: 'Release settings', body: 'The release configuration was reviewed.' }));
+  assert.equal(checkLanguage(inputWithHint('ja', jaEvents), enQuote), 'ok');
+  assert.equal(checkLanguage(inputWithHint('ja', jaEvents), enInvented), 'mismatch');
+  // A checkpoint item the request carried back is quotable in a later batch with other events.
+  const carried = observerInputSchema.parse({
+    repo_ref: REPO_ID,
+    checkpoint_context: { state: 'provided', id: 'm_1', title: 'Record the facts', body: `決定\n- ${fact}` },
+    session: { started_at: NOW, turns: [] },
+    events: [{ id: 'e9', kind: 'prompt', text: 'Continue with the release checklist.' }],
+    free_summaries: {},
+    nearby: [],
+    language_hint: 'en',
+  });
+  assert.equal(checkLanguage(carried, quoted), 'ok');
+  const constraint = { decision: 'replace' as const, purpose: 'Record the facts', constraints: [fact],
+    decisions: [], outstanding: [], source_event_ids: ['e1'], reason: 'Progress changed.' };
+  assert.equal(checkLanguage(inputWithHint('en', events), { observations: [], checkpoint: constraint }), 'ok');
+  assert.equal(checkLanguage(inputWithHint('en', events),
+    { observations: [], checkpoint: { ...constraint, constraints: ['配布物の色を決める。'] } }), 'mismatch');
 });
 
 test('the session summary preserves a roughly 600-character first prompt verbatim', async () => {

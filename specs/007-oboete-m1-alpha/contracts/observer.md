@@ -131,7 +131,10 @@ one of the supplied `nearby` ids from the same repository, otherwise the decisio
 matching a tombstoned memory suppresses the insert and is recorded for `why`; `update` sets
 `valid_to` and `superseded_by`; `delete` tombstones the target only with a non-empty `reason`; the
 observer answers in the dominant language of the input (FR-014); the worker compares the
-dominant script of every title and body with the input's, retries once on mismatch, and on a
+dominant script of every field the answer writes — every title and body, and in 009 the
+checkpoint's own items — with the input's, and exempts a field whose whole text the request
+already carries (its events or the provided checkpoint), because a string quoted verbatim is
+the content's own language; it retries once on mismatch, and on a
 second mismatch discards the output and routes the batch to the fallback with
 `language_mismatch` (fallback records copy input text verbatim, so their language is the
 input's); a provider fixture returning English for Japanese input verifies this.

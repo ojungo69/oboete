@@ -219,6 +219,17 @@ type RawObservation = z.infer<typeof rawObservationSchema>;
 export const observerOutputJsonSchema = z.toJSONSchema(observerOutputSchema);
 
 export type ObserverInput = z.infer<typeof observerInputSchema>;
+
+/**
+ * The text an event carries. `request.ts` derives `language_hint` from it and `classify.ts` decides
+ * from the same text whether an output field was quoted verbatim, so the two must read one list.
+ */
+export function eventText(event: ObserverInput['events'][number]): string {
+  const input = event.input as { command?: string; text?: string } | undefined;
+  return [event.text, event.output, event.error, event.fragment?.text, input?.command, input?.text]
+    .filter((value): value is string => typeof value === 'string')
+    .join('\n');
+}
 export type ObserverOutput = z.infer<typeof observerOutputSchema>;
 export type Observation = z.infer<typeof observationSchema>;
 export type ObservationType = z.infer<typeof observationTypeSchema>;

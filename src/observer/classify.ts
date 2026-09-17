@@ -18,6 +18,7 @@ import {
   DISPLAY_PATH_TAIL,
   MAX_SOURCE_EVENT_IDS,
   MAX_TITLE,
+  eventText,
   type ObserverInput,
   type ObserverOutput,
 } from './contract.js';
@@ -75,13 +76,33 @@ export function checkLanguage(input: ObserverInput, output: ObserverOutput): 'ok
   const fields = output.observations.flatMap((observation) => [observation.title, observation.body]);
   if (output.checkpoint.decision === 'replace') fields.push(output.checkpoint.purpose,
     ...output.checkpoint.constraints, ...output.checkpoint.decisions, ...output.checkpoint.outstanding);
+  let quoted: string | null = null;
   for (const text of fields) {
       const script = dominantScript(text);
       // A field of paths or numbers says nothing about the language it was written in.
       if (script === 'other') continue;
-      if (script !== input.language_hint) return 'mismatch';
+      if (script === input.language_hint) continue;
+      // A field the input itself carries is the content's own language, and the observer is told to
+      // keep such a string verbatim: an English session that records one Japanese fact must not lose
+      // the whole batch for it (FR-014 with the verbatim rule of buildSummarizerPrompt). The whole
+      // field has to be present, so a paraphrase in another language is still a mismatch, and
+      // checkpoint items quoting an exact fact are exempt on the same ground.
+      quoted ??= quotableText(input);
+      if (quoted.includes(text.trim())) continue;
+      return 'mismatch';
   }
   return 'ok';
+}
+
+/**
+ * The text this request carries, which is what an observation may quote verbatim. The provided
+ * checkpoint counts: the observer is told to preserve its still-applicable items, and a later batch
+ * of the same session need not carry the events those items were written from.
+ */
+function quotableText(input: ObserverInput): string {
+  const checkpoint = input.checkpoint_context.state === 'provided'
+    ? [input.checkpoint_context.title, input.checkpoint_context.body] : [];
+  return [...input.events.map(eventText), ...checkpoint].join('\n');
 }
 
 // ---------------------------------------------------------------------------

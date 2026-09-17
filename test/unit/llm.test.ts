@@ -187,6 +187,9 @@ test('buildSummarizerPrompt preserves exact strings in both modes', () => {
     const prompt = buildSummarizerPrompt(INPUT, mode);
     assert.match(prompt.system, /verbatim/);
     assert.match(prompt.system, /never translate/);
+    // The per-fact rule (#274) and the schema's hard observation cap.
+    assert.match(prompt.system, /one observation per item/);
+    assert.match(prompt.system, /at most 20 observations/);
   }
 });
 

@@ -16,7 +16,7 @@ import {
 import { dominantScript } from './classify.js';
 import {
   MAX_INPUT_CHARS, MAX_NEARBY_BODY, MAX_SOURCE_EVENT_IDS, MAX_TITLE,
-  observerInputSchema, type ObserverInput,
+  eventText, observerInputSchema, type ObserverInput,
 } from './contract.js';
 
 /** The two destinations that produce a request; the fallback needs none (contracts/observer.md). */
@@ -115,13 +115,6 @@ function eventFor(row: RawEventRow): ObserverEvent | null {
     default:
       return null;
   }
-}
-
-function textOf(event: ObserverEvent): string {
-  const input = event.input as { command?: string; text?: string } | undefined;
-  return [event.text, event.output, event.error, event.fragment?.text, input?.command, input?.text]
-    .filter((value): value is string => typeof value === 'string')
-    .join('\n');
 }
 
 /** Admission happens before paging, including all metadata and normalized tool input. */
@@ -229,7 +222,7 @@ export function buildObserverRequest(request: ObserverRequestInput): ObserverReq
     input.nearby.push(candidate);
     if (!fits(input)) input.nearby.pop();
   }
-  input.language_hint = dominantScript(input.events.map(textOf).join('\n'));
+  input.language_hint = dominantScript(input.events.map(eventText).join('\n'));
   return {
     input: observerInputSchema.parse(input),
     excerpted: coverage.some((portion) => portion.state !== 'full'),
