@@ -304,8 +304,10 @@ test('fail-closed: an absolute path rule matches a relative tool path, also thro
     // A name that merely starts with two dots is inside the repository.
     assert.equal(matchSecretPath(join(root, '..cache/x'), ['..cache/**'], root), '..cache/**');
     // A relative rule never sees the absolute form of a relative path, so a directory above the
-    // repository that happens to share its name does not turn every tool path into a hit.
+    // repository that happens to share its name does not turn a relative tool path into a hit.
     assert.equal(matchSecretPath('src/app.ts', [`**/${basename(base)}/**`], root), null);
+    // A path the agent wrote absolute keeps its physical form for relative rules too.
+    assert.equal(matchSecretPath(join(root, 'protected/key.txt'), [`**/${basename(vault)}/**`], root), `**/${basename(vault)}/**`);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
