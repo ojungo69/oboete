@@ -94,7 +94,13 @@ type FactTag = NonNullable<NonNullable<Line['tags']>['fact']>;
 function payloadStrings(payload: unknown): string[] {
   if (typeof payload === 'string') return [payload];
   if (payload === null || typeof payload !== 'object') return [];
-  return Object.values(payload).flatMap(payloadStrings);
+  // 15 fixture lines carry a tool result as `output: [byte, ...]`; two of them are fact-tagged, so
+  // the bytes are decoded rather than walked as numbers.
+  return Object.entries(payload).flatMap(([key, value]) =>
+    key === 'output' && Array.isArray(value) && value.every((item) => typeof item === 'number')
+      ? [Buffer.from(value).toString('utf8')]
+      : payloadStrings(value),
+  );
 }
 
 function fixtureFacts(): Array<FactTag & { sentence: string }> {
@@ -835,22 +841,61 @@ test('searchMemories returns two distinct facts that share a title when they are
   });
 });
 
-// Artifact for issue #275, rebuilt from the `claude-to-codex` pair of the 2026-09-17T15-05-08-894Z
-// dogfood run: five memories at pack time, of which the two session summaries are out of the search
-// scope. `m_fact` carries the three facts the recall prompt asks for, and the pack dropped it as
-// `below_threshold` while keeping `m_confirm`, which carries none of them. Skipped until #275 is
-// fixed; un-skip it with the fix.
+// Artifact for issue #275, the five memories of the `claude-to-codex` pair of the
+// 2026-09-17T15-05-08-894Z dogfood run (JST 2026-09-18) as they stood when the receiving prompt
+// pack was built, copied from that pair's database. `m_fact` carries the three facts the recall
+// prompt asks for and the pack dropped it as `below_threshold`, keeping `m_confirm`, which carries
+// none of them.
+//
+// All five rows are load-bearing: the two session summaries are out of the search scope, but they
+// are in the FTS index, and dropping them takes the corpus from five documents to three, which
+// moves `m_decision` above the threshold and changes what comes back.
+//
+// What it does not model: the pair's checkpoint is work-scoped in production, while these rows take
+// the file's ordinary project grant and are excluded by `m.type <> 'session_summary'` alone, so a
+// change to how checkpoints re-enter retrieval is invisible here.
+//
+// Skipped until #275 is fixed; un-skip it with the fix.
 test('searchMemories returns the fact-bearing memory of a five-row corpus', { skip: 'issue #275' }, async () => {
+  // The pair's prompts, copied from `scripts/e2e/probe-lib/isolated-agent.mjs`. That module cannot be
+  // imported here: it pulls in `trusthash.mjs`, which reads a file at load time. The copies are
+  // pinned against the source below, so an edit there cannot leave this corpus reproducing a prompt
+  // no agent sends.
+  const facts = [
+    'fact-2026-09-17T15-05-08-894Z-claude-to-codex-1: the build token is cedar.',
+    'fact-2026-09-17T15-05-08-894Z-claude-to-codex-2: the release bird is heron.',
+    'fact-2026-09-17T15-05-08-894Z-claude-to-codex-3: 配布色は琥珀。',
+  ];
+  const seeding = [
+    'These three exact strings are durable facts about this repository. Preserve them verbatim:',
+    ...facts,
+    'Use exactly one tool call and no other tools. In that one call, use the shell tool to run:',
+    `printf '%s\\n' ${facts.map((fact) => `'${fact}'`).join(' ')} >> NOTES.md`,
+    'After the tool result, reply on one line with the same three exact strings joined by |.',
+  ].join('\n');
+  const query = [
+    'Before the tool call, remember the fact lines already present inside the oboete memory context markers.',
+    "Use the shell tool exactly once to run: sed -n '1,20p' NOTES.md",
+    'Make no other tool call.',
+    'After the result, reply with every remembered fact line verbatim, joined by |. Do not derive the answer from NOTES.md.',
+  ].join('\n');
+  const probeSource = readFileSync(join(repositoryRoot(), 'scripts/e2e/probe-lib/isolated-agent.mjs'), 'utf8');
+  for (const line of [
+    ...query.split('\n'),
+    'These three exact strings are durable facts about this repository. Preserve them verbatim:',
+    'Use exactly one tool call and no other tools. In that one call, use the shell tool to run:',
+    'After the tool result, reply on one line with the same three exact strings joined by |.',
+    '-1: the build token is cedar.',
+    '-2: the release bird is heron.',
+    '-3: 配布色は琥珀。',
+  ]) {
+    assert.ok(probeSource.includes(line), `probe library no longer states: ${line}`);
+  }
   await withTempHome((home) => {
     const paths = oboetePaths(home);
     const opened = openDatabase({ path: paths.db, timeoutMs: 1000 });
     try {
       insertRepo(opened.db, 'repo_a', '/tmp/oboete-a');
-      const facts = [
-        'fact-2026-09-17T15-05-08-894Z-claude-to-codex-1: the build token is cedar.',
-        'fact-2026-09-17T15-05-08-894Z-claude-to-codex-2: the release bird is heron.',
-        'fact-2026-09-17T15-05-08-894Z-claude-to-codex-3: 配布色は琥珀。',
-      ];
       insertSearchable(opened.db, {
         id: 'm_checkpoint',
         repoId: 'repo_a',
@@ -859,13 +904,17 @@ test('searchMemories returns the fact-bearing memory of a five-row corpus', { sk
         body:
           'Purpose\nRecord three exact strings as durable facts in NOTES.md.\n\nConstraints\n' +
           '- Preserve the three exact strings verbatim.\n- Use exactly one tool call.\n' +
-          '- Append the strings to NOTES.md.',
+          '- Append the strings to NOTES.md.\n\nDecisions\n' +
+          '- The three exact strings will be appended to NOTES.md.\n\nOutstanding\n' +
+          '- Verify the contents of NOTES.md to ensure the strings were written correctly.',
       });
       insertSearchable(opened.db, {
         id: 'm_fact',
         repoId: 'repo_a',
         title: 'Durable facts recorded to NOTES.md',
-        body: `Three exact strings were written to NOTES.md to serve as durable facts about the repository. The strings are: '${facts.join("', '")}'.`,
+        body:
+          'Three exact strings were written to NOTES.md to serve as durable facts about the repository. ' +
+          `The strings are: '${facts[0]}', '${facts[1]}', and '${facts[2]}'.`,
       });
       insertSearchable(opened.db, {
         id: 'm_decision',
@@ -879,21 +928,25 @@ test('searchMemories returns the fact-bearing memory of a five-row corpus', { sk
         title: 'Assistant message confirms fact strings',
         body: "The assistant's final message contained the three exact strings joined by a pipe character (|), confirming the successful execution of the tool call.",
       });
+      // The sending session's free summary: the seeding prompt the agent received, with the batch's
+      // empty accounting tail, and the truncated title the summariser gave it.
       insertSearchable(opened.db, {
         id: 'm_request',
         repoId: 'repo_a',
         type: 'session_summary',
-        title: 'These three exact strings are durable facts about this repository.',
-        body: `request: These three exact strings are durable facts about this repository. Preserve them verbatim:\n${facts.join('\n')}`,
+        title:
+          'These three exact strings are durable facts about this repository. Preserve them verbatim:\n' +
+          'fact-2026-09-17T15-05-08-894Z',
+        body:
+          `request: ${seeding}\ninvestigated:\nlearned: Assistant message confirms fact strings, ` +
+          'Durable facts recorded to NOTES.md, Use NOTES.md for durable facts\ncompleted:\nnext_steps:',
       });
-      // The receiving agent's recall prompt, verbatim from scripts/e2e/probe-lib/isolated-agent.mjs.
-      const query = [
-        'Before the tool call, remember the fact lines already present inside the oboete memory context markers.',
-        "Use the shell tool exactly once to run: sed -n '1,20p' NOTES.md",
-        'Make no other tool call.',
-        'After the result, reply with every remembered fact line verbatim, joined by |. Do not derive the answer from NOTES.md.',
-      ].join('\n');
-      const found = searchMemories(opened.db, { repoId: 'repo_a', paths, query, limit: 10 });
+      const found = searchMemories(opened.db, {
+        repoId: 'repo_a',
+        paths,
+        query,
+        limit: 10,
+      });
       assert.ok(
         found.some((row) => row.id === 'm_fact'),
         `fact-bearing memory absent; returned ${found.map((row) => row.id).join(', ') || '(none)'}`,

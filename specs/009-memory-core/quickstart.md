@@ -2600,7 +2600,7 @@ behind `f-ja-04`, which also mentions the key rotation, and `f-ja-01`: MMR moved
 top one down, and it is still returned. These are lexical questions that share words with their
 facts; true paraphrase is T024's (#266).
 
-### Pins in `test/unit/retrieval.test.ts` (commit `dda3dd81`)
+### Pins in `test/unit/retrieval.test.ts` (PR #273)
 
 | Test | Pins |
 | --- | --- |
@@ -2634,9 +2634,11 @@ bundle, runs the named test, and restores the bundle (sha256 compared):
   rare trigram scores -0.436 and the other two -0.0000064 and -0.0000047. Normalized by the ratio
   to the best score, both fall to about 0.00001, below the 0.3 threshold, and the memory holding
   the three exact facts is omitted. The same prompt against the same rows one memory later includes
-  all three. That is #275, and T023 stays open for it. The five rows and that recall prompt are carried in
-  `test/unit/retrieval.test.ts` as a skipped test, so the fix un-skips a failing artifact rather than writing a
-  new one.
+  all three. That is #275, and T023 stays open for it. Those five rows and that recall prompt are carried
+  verbatim in `test/unit/retrieval.test.ts` as a skipped test, which reproduces the same three raw scores,
+  so the fix un-skips a failing artifact rather than writing a new one. All five rows are load-bearing:
+  the two session summaries are out of the search scope but in the FTS index, and removing them takes the
+  corpus to three documents, which lifts `m_363fe065` above the threshold.
 - A memory injected once and then unused for 90 days is omitted from packs as `retired` (data model);
   it is still returned by search, which has no `last_injected_at` filter, so User Story 3's first
   acceptance scenario (age alone does not make a fact unavailable when asked about) holds.

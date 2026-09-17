@@ -57,9 +57,15 @@ produce separately scored retention, retrieval, delivery and answer outcomes.
   `src/db/queries.ts` and `test/unit/retrieval.test.ts`. Status: none reproduce on the `events-1000` corpus
   (the no-model replay stops every fact before ranking; stored verbatim, all 40 fixture facts rank within the
   first five), pinned in `test/unit/retrieval.test.ts`; the MMR depth observation is #272. The open miss is the
-  small-corpus threshold drop #275, reproduced from the 2026-09-18 dogfood run and carried as a skipped
-  five-row artifact in the same file. Acceptance: #275 fixed, that artifact un-skipped and passing, the
-  fixture pins and the threshold mutation still green.
+  small-corpus threshold drop #275, reproduced from the `2026-09-17T15-05-08-894Z` dogfood run (JST
+  2026-09-18) and carried as a skipped
+  five-row artifact in the same file. Acceptance: #275 fixed; that artifact un-skipped and passing; the
+  fixture pins and the threshold mutation still green; plus three pins the artifact alone does not give:
+  a small-corpus false-positive case (an unrelated memory in a five-row corpus stays omitted), the same
+  five rows through `buildPromptPack` (the pack path is where the dogfood run dropped the row, and it
+  adds delivery filtering, retirement and the budget cut on top of the shared ranker), and evidence that
+  the rescued row arrives through the trigram index rather than the LIKE fallback, which `applyThreshold`
+  admits without comparing it to the threshold.
 - [ ] T024 [US3] Qualify selected local/external profiles on the paraphrase corpus; add semantic retrieval in `src/retrieval/` only if the measured target requires it, documenting primary API/dependency evidence in `specs/009-memory-core/research.md`.
 
 ## Phase 6: US4 — Share at the correct scope (P1)
@@ -181,8 +187,8 @@ writers require separate worktrees. No deployment follows merely from an increme
   captured but awaiting generation, with answer evaluation explicitly not run. C3's repeat removes
   the ineligible native-fork timing sample and passes worker RSS at 106.1 MiB. Ordinary hook timing,
   two unprinted Grok starts and real-model recall remain failed/unqualified, not reclassified as
-  successful evaluation. See `quickstart.md`; T023/T024/T040-T043 stayed open then (T040 closed
-  2026-09-17 in E10).
+  successful evaluation. See `quickstart.md`. As of C3 (2026-09-10) T023/T024/T040-T043 were all open; since then T040
+  closed 2026-09-17 in E10, and T023 closed on 2026-09-17 and reopened the next day for #275.
 - T025-T028: D1 implements explicit work/project grants, exact personal proposals/projections,
   common source/visibility checks, and CLI/viewer approval plus work-preserving adoption. Both Node
   versions pass 1,097 + 202 checks; installed-browser actions, package validation, normal security,
