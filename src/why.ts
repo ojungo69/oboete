@@ -151,7 +151,7 @@ function checkpointProcessing(db: DatabaseSync, sessionId: string, repoId: strin
     WHERE o.session_id = ? AND o.repo_id = ? AND o.checkpoint_decision IS NOT NULL
       AND (? IS NULL OR EXISTS (SELECT 1 FROM observation_batch_sources receipt JOIN turns t ON t.id = receipt.turn_id
         WHERE receipt.batch_id = o.id AND t.session_id = ? AND t.ordinal = ?))
-    ORDER BY o.claimed_at DESC, o.id DESC LIMIT 101`).all(sessionId, repoId, turn ?? null, sessionId, turn ?? null);
+    ORDER BY o.completed_at DESC, o.claimed_at DESC, o.id DESC LIMIT 101`).all(sessionId, repoId, turn ?? null, sessionId, turn ?? null);
   const decisions = new Set(['replace', 'replaced', 'confirmed', 'unchanged', 'historical', 'conflict', 'rejected']);
   const reasons = new Set(['provider_replacement', 'provider_unchanged', 'same_content', 'capture_time_order',
     'parent_changed', 'already_retired', 'tombstoned', 'parent_unavailable', 'source_not_admitted',

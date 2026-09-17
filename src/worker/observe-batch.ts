@@ -3,6 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import {
   PRESET_CATALOG,
   readCredentials,
+  type ChainTarget,
   type OboeteConfig,
   type PresetName,
 } from '../config.js';
@@ -12,7 +13,7 @@ import { contentHash } from '../events.js';
 import { checkpointHash, materialHash, memoryIdFor } from '../db/identity.js';
 import { promoteSensitivity } from '../privacy/classify.js';
 import { applyObservations, type ApplyResult } from '../observer/apply.js';
-import { checkLanguage, rejectsDirectives, type DegradedReason } from '../observer/classify.js';
+import { CHAIN_STOPS, checkLanguage, mostSevereReason, rejectsDirectives, type DegradedReason } from '../observer/classify.js';
 import { fallbackObserve, type FallbackEvent } from '../observer/fallback.js';
 import { summarizeWithProvider, type CallOutcome } from '../observer/llm.js';
 import { buildObserverRequest } from '../observer/request.js';
@@ -58,9 +59,23 @@ function loggableDetail(reason: DegradedReason, detail: string): string {
   return 'provider response failed observation validation';
 }
 
+/**
+ * One target's turn in the chain, for the observe log: the batch's single `degraded_reason` keeps
+ * only the most severe reason, so the rest are only visible here (contracts/provider-fallback.md
+ * "Diagnostics"). `detail` picks the message for the reason that wins and is sanitized there.
+ */
+export type ProviderAttempt = {
+  position: number;
+  preset: PresetName;
+  model: string;
+  reason: DegradedReason;
+  detail: string;
+};
+
 export type BatchResult = {
   detail?: string;
   memoryIds: string[];
+  attempts?: ProviderAttempt[];
 } & (
   | { state: 'applied' | 'fallback' | 'lease_lost' | 'requeued'; reason: DegradedReason | null }
   | { state: 'done'; reason: string }
@@ -440,9 +455,73 @@ type ProcessBatchOptions = {
   detect: (text: string) => Promise<DetectorResult>;
   providerState: Map<string, DegradedReason | null>;
   initialProviderReason: DegradedReason | null;
-  resolved: { preset: PresetName | 'none'; model: string };
+  resolved: { preset: PresetName | 'none'; model: string; chain: ChainTarget[] };
   consentOk: () => boolean;
+  /**
+   * Caller-owned so providerCall's LeaseLostError or an applyObservations storage error cannot
+   * discard earlier attempts required by contracts/provider-fallback.md "Diagnostics".
+   */
+  attempts: ProviderAttempt[];
 };
+
+/**
+ * How a pass through the chain ended. `outcome` exists only on the variant that has an answer to
+ * apply, and `answered` is null on the other, so the pairing "a target is named exactly when the
+ * call succeeded" is the type's rather than a comment's. The caller discriminates on
+ * `answered === null`, never on a key being present; the failure path reads `attempts`, which is
+ * the caller's own array.
+ */
+type ChainResult =
+  | { done: BatchResult }
+  | { answered: Pick<ProviderAttempt, 'position' | 'preset' | 'model'>; outcome: Extract<CallOutcome, { ok: true }> }
+  | { answered: null };
+
+async function attemptTargets(
+  options: ProcessBatchOptions, input: BatchInput, nearby: NearbyCandidate[],
+  request: ReturnType<typeof buildObserverRequest>, targets: ChainTarget[],
+): Promise<ChainResult> {
+  const { db, token, batch, config, deps, consentOk, attempts } = options;
+  for (const [position, target] of targets.entries()) {
+    const between = deps.shouldStop();
+    if (between !== undefined) return { done: { state: 'done', reason: between, memoryIds: [], attempts } };
+    // Step 2 of "The attempt sequence", and it has to be the loop's own: `summarizeWithProvider`
+    // answers `no_provider` for a target with no credentials before it ever asks whether consent
+    // still holds, so a chain that ends on such a target would keep an earlier target's reason by
+    // precedence and send the user to fix a credential when consent is what they must act on.
+    if (!consentOk()) {
+      attempts.push({ position, preset: target.preset, model: target.model,
+        reason: 'consent_changed', detail: '' });
+      return { answered: null };
+    }
+    const called = await providerCall({
+      db, token, input: request.input, batch, config, deps,
+      preset: target.preset, model: target.model, consentOk,
+    });
+    if ('done' in called) return { done: { ...called.done, attempts } };
+    const settled = await settleProviderOutcome({
+      options,
+      request,
+      input,
+      nearby,
+      position,
+      preset: target.preset,
+      model: target.model,
+      outcome: called.outcome,
+    });
+    // A target whose answer arrived and was then refused records its own line where the refusal is
+    // decided (`retryOnLanguageMismatch`), not here: the fallback that follows it can come back
+    // `lease_lost` or throw, and the line would be lost on the one path that already spent two
+    // allowances on this target.
+    if ('done' in settled) return { done: { ...settled.done, attempts } };
+    const outcome = settled.outcome;
+    if (outcome.ok) return { answered: { position, preset: target.preset, model: target.model }, outcome };
+    attempts.push({ position, preset: target.preset, model: target.model,
+      reason: outcome.reason, detail: outcome.detail });
+    if (CHAIN_STOPS.has(outcome.reason)) break;
+  }
+
+  return { answered: null };
+}
 
 /** The reason a fallback records: this session's own degraded state, else the worker's, else rules. */
 function fallbackReason(
@@ -468,6 +547,7 @@ async function settleProviderOutcome(args: {
   request: ReturnType<typeof buildObserverRequest>;
   input: BatchInput;
   nearby: ReturnType<typeof nearbyForBatch>;
+  position: number;
   preset: PresetName;
   model: string;
   outcome: CallOutcome;
@@ -493,10 +573,11 @@ async function retryOnLanguageMismatch(args: {
   request: ReturnType<typeof buildObserverRequest>;
   input: BatchInput;
   nearby: ReturnType<typeof nearbyForBatch>;
+  position: number;
   preset: PresetName;
   model: string;
 }): Promise<ProviderResult> {
-  const { options, request, input, nearby, preset, model } = args;
+  const { options, request, input, nearby, position, preset, model } = args;
   const { db, token, batch, config, deps, detect, providerState } = options;
   const called = await providerCall({
     db, token, input: request.input, batch, config, deps, preset, model, consentOk: options.consentOk,
@@ -508,6 +589,10 @@ async function retryOnLanguageMismatch(args: {
   }
   if (outcome.ok && checkLanguage(request.input, outcome.output) === 'mismatch') {
     providerState.set(batch.session_id, 'language_mismatch');
+    // Before the fallback, because this target has now spent two allowances and `applyFallback`
+    // can return `lease_lost` or throw — and the reason is already decided here
+    // (contracts/provider-fallback.md "Diagnostics": one line per target that failed).
+    options.attempts.push({ position, preset, model, reason: 'language_mismatch', detail: '' });
     return {
       done: await applyFallback(db, token, input, nearby, 'language_mismatch', detect, deps.now(), request.coverage),
     };
@@ -516,8 +601,8 @@ async function retryOnLanguageMismatch(args: {
 }
 
 export async function processBatch(options: ProcessBatchOptions): Promise<BatchResult> {
-  const { db, token, batch, config, deps, detect, providerState,
-    initialProviderReason, resolved, consentOk } = options;
+  const { db, token, batch, deps, detect, providerState,
+    initialProviderReason, resolved, consentOk, attempts } = options;
   let input = loadBatchInput(db, batch.id);
   if (input === null) throw new Error('batch input missing');
   const repoId = input.session.repo_id;
@@ -558,7 +643,14 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
     return await applyFallback(db, token, input, nearby, reason, detect, deps.now());
   }
 
-  if (resolved.preset === 'none') {
+  // Both ways a run can have no provider at all, answered here rather than inside the target loop.
+  // `resolveObserveModel` turns a configuration the resolver refuses into an empty model and an
+  // empty chain, which `initialProviderFailure` has already read as `no_provider` before the first
+  // batch: building a target from it would spend the whole pipeline — the detector pass over the
+  // request included — on a call `summarizeWithProvider` refuses at its first line, and would reach
+  // the consent guard, whose `consent_changed` sends the user to accept an egress that leaves the
+  // resolver error exactly where it was.
+  if (resolved.preset === 'none' || resolved.model === '') {
     providerState.set(batch.session_id, 'no_provider');
     return await applyFallback(db, token, input, nearby, 'no_provider', detect, deps.now());
   }
@@ -609,32 +701,30 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
     return { state: 'lease_lost', reason: null, memoryIds: [] };
   }
 
-  const called = await providerCall({
-    db, token, input: request.input, batch, config, deps,
-    preset: resolved.preset, model: resolved.model, consentOk: currentConsent,
-  });
-  if ('done' in called) return called.done;
-  let { outcome } = called;
-  const settled = await settleProviderOutcome({
-    options: { ...options, consentOk: currentConsent },
-    request,
-    input,
-    nearby,
-    preset: resolved.preset,
-    model: resolved.model,
-    outcome,
-  });
-  if ('done' in settled) return settled.done;
-  outcome = settled.outcome;
+  const chain = await attemptTargets({ ...options, consentOk: currentConsent }, input, nearby, request,
+    chainTargets(resolved.preset, resolved.model, resolved.chain, batch.destination));
+  if ('done' in chain) return chain.done;
 
-  if (!outcome.ok) {
-    providerState.set(batch.session_id, outcome.reason);
+  if (chain.answered === null) {
+    // Every failed target is in `attempts`, so attemptTargets ran at least once. The reason a stop
+    // ended the chain on wins, because that is the one the user has to act on; otherwise the batch
+    // keeps the most severe of the reasons the chain actually met. The kept reason and the kept
+    // detail always come from the same attempt, which is what lets `loggableDetail` decide by
+    // reason whether the text is the provider's (contracts/provider-fallback.md "Advance and stop").
+    const last = attempts.at(-1)!;
+    const reason = CHAIN_STOPS.has(last.reason)
+      ? last.reason
+      : mostSevereReason(attempts.map((attempt) => attempt.reason))!;
+    const worst = attempts.find((attempt) => attempt.reason === reason)!;
+    providerState.set(batch.session_id, reason);
     return {
-      ...(await applyFallback(db, token, input, nearby, outcome.reason, detect, deps.now(), request.coverage)),
-      detail: loggableDetail(outcome.reason, outcome.detail),
+      ...(await applyFallback(db, token, input, nearby, reason, detect, deps.now(), request.coverage)),
+      detail: loggableDetail(reason, worst.detail),
+      attempts,
     };
   }
 
+  const { answered, outcome } = chain;
   providerState.set(batch.session_id, null);
   await deps.applyHook();
   const applied = await applyObservations(db, token, {
@@ -650,9 +740,37 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
     detect,
     now: deps.now(),
   });
+  // `applyObservations` can refuse the answer it was given — a required progress decision the
+  // detector rejects mints `unusable_output` *after* the call — and that reason is created too late
+  // for `reserveAttempt` to have tied it to a target. Without this line the log names every target
+  // that failed to answer and then a batch reason nothing accounts for
+  // (contracts/provider-fallback.md "Diagnostics": one line per target that failed).
+  const refused = applied.leaseLost ? null : applied.fallbackReason ?? null;
+  if (refused !== null) attempts.push({ ...answered, reason: refused, detail: '' });
   return {
     state: applied.leaseLost ? 'lease_lost' : applied.fallbackReason === undefined ? 'applied' : 'fallback',
     reason: applied.fallbackReason ?? null,
     memoryIds: appliedMemoryIds(applied),
+    attempts,
   };
+}
+
+/**
+ * The primary first, then each admitted target the batch's destination label already allows:
+ * `remote_observer` admits a local or a remote target, `local_observer` a local one only
+ * (contracts/provider-fallback.md "The destination label, and per-attempt eligibility").
+ */
+function chainTargets(
+  preset: PresetName,
+  model: string,
+  chain: ChainTarget[],
+  destination: BatchRow['destination'],
+): ChainTarget[] {
+  return [
+    { preset, model },
+    ...chain.filter((target) =>
+      destination === 'local_observer'
+        ? PRESET_CATALOG[target.preset].egress === 'local'
+        : destination === 'remote_observer'),
+  ];
 }

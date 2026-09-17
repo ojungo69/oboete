@@ -91,15 +91,29 @@ incompatible progress conflicts without clock-only overwrites.
 Independent test: selected free/local/paid/agent modes obey consent and configured limits;
 free/local failure causes zero attempts at an unselected paid destination.
 
-- [ ] T037 [US7] Test mode choice, limit exhaustion and consent changes in `test/unit/providers.test.ts` and `test/unit/setup.test.ts`.
-- [ ] T038 [US7] Complete explicit cost-policy setup and reservation handling in `src/config.ts`, `src/setup/`, `src/observer/reservation.ts` and `src/doctor/provider.ts`.
-- [ ] T039 [US7] Verify no-model capture-only behavior and real chosen profiles through `src/doctor.ts`, packed CLI and `specs/009-memory-core/quickstart.md` evidence.
+- [X] T037 [US7] Test mode choice, limit exhaustion and consent changes in `test/unit/providers.test.ts` and `test/unit/setup.test.ts`.
+- [X] T038 [US7] Complete explicit cost-policy setup and reservation handling in `src/config.ts`, `src/setup/`, `src/observer/reservation.ts` and `src/doctor/provider.ts`.
+- [X] T039 [US7] Verify no-model capture-only behavior and real chosen profiles through `src/doctor.ts`, packed CLI and `specs/009-memory-core/quickstart.md` evidence.
+
+T037-T039 and T048 share one contract, `contracts/provider-fallback.md`, and one branch.
+
+Evidence for all four is `quickstart.md` section E9 and its fifteen numbered items, against the
+contract's verification list. T037 is `provider-fallback.test.ts` plus the two setup tests named
+there; T039 is the two doctor tests plus the packed-CLI gates in the same section. T038 needed **no
+new accounting**: `provider_usage.exhausted_at` is already per-preset and `DAILY_CAP` is already
+summed over the capped presets, so each target refuses at its own reservation with no write. It did
+need two corrections in `src/observer/reservation.ts`, both recorded in E9's follow-up: the
+per-preset stamp is now one exported reader (`presetExhaustedAt`) instead of a day-wide flag every
+single-preset caller could misread, and a reservation restamps `claimed_at` so the reclaim timer
+runs from the attempt rather than from batch creation. The cost policy is `observer.cost_policy` in
+`src/config.ts` with `admittedChain` as its one reader, and `fallbackItems` in
+`src/doctor/provider.ts` reports each target's verdict.
 
 Owner amendment, 2026-09-10:
 
 - [X] T046 Record the approved resident-worker option and configured model/provider failover in `CONSTITUTION.md`, the local Spec Kit constitution, `specs/009-memory-core/spec.md` and `plan.md`.
 - [X] T047 [US1] Implement and verify resident waiting for new/due work, one owner through idle/active epochs, pause/stop/config changes and upgrade/crash recovery in `src/worker/`, capture startup and operator controls; retain bounded one-shot observe and prove idle/long-run resources.
-- [ ] T048 [US7] Implement a bounded, consented model/provider fallback chain after free-tier/API failures in provider selection, reservations, setup/config and worker processing; verify free-only admission, shared quota versus target failure, per-attempt source eligibility and all-targets-failed retention.
+- [X] T048 [US7] Implement a bounded, consented model/provider fallback chain after free-tier/API failures in provider selection, reservations, setup/config and worker processing; verify free-only admission, shared quota versus target failure, per-attempt source eligibility and all-targets-failed retention.
 
 ## Phase 10: Completed-product verification
 
@@ -341,6 +355,26 @@ writers require separate worktrees. No deployment follows merely from an increme
   survives at `/var/tmp/oboete-009-20260909.jJ5grc/us5-rss3/` (T032). Receipts `us5-close-*` under `/var/tmp/oboete-009-us5close/`; see `quickstart.md` E7. The
   macOS platform probe remains T040's (its macOS leg deferred by the owner) and the cohesive
   product gate remains T043's.
+- T048: the bounded, consented fallback chain is implemented and verified against
+  `contracts/provider-fallback.md`, whose nineteen verification items are mapped to tests in the E9
+  receipts in `quickstart.md`. Both supported Node versions pass the full `npm test`. This marker
+  covers the five admission rules and their `ProviderConfigError`s, the `chain` field in
+  `consentTuple` and its effect on `consentHash` (unchanged for an install with no admitted chain),
+  the attempt sequence — stop sentinel, consent, a reservation for **every** target whether capped
+  or not, then the call — the advance-and-stop table, the single `applyFallback` that keeps every
+  source retryable when all targets fail, and the diagnostics: one observe-log line per target that
+  failed, and a static per-target report in `oboete doctor` that spends no allowance.
+  Two corrections it carries beyond the chain itself, because the chain depends on them: `claimed_at`
+  is restamped at the reservation rather than only at batch creation, without which the 120 s
+  `reclaimStale` fence was already spent for every preset; and `presetExhaustedAt` is the single
+  reader of a per-preset stamp that four callers had been reading as a day-wide flag.
+  It does not cover the real agent pairs and real-model evaluations (T041), the resource sweep and
+  the seven-day soak (T042), the macOS platform leg (T040) or the cohesive product gate (T043).
+  Issues recorded against paragraphs that place them outside this task: #240 (doctor reports
+  allowance the worker will not grant between 140 and 150 calls), #241 (`agent-cli` requires an
+  `[observer] model` that nothing sends), #242 (`claimed_at DESC` is no longer settle order for two
+  display queries, which the restamp above is what changed) and #243 (an inject test that flaked
+  once on a duplicate CI run).
 - T047: the resident observation worker is implemented and verified against
   `contracts/resident-worker.md`, whose sixteen verification items are mapped to tests in the E8
   receipts in `quickstart.md`. Both supported Node versions pass the full `npm test`. Two controls

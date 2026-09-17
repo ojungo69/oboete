@@ -14,7 +14,7 @@ import {
 } from './config.js';
 import { isBusyError, sqliteErrorInfo } from './db/open.js';
 import { agentItems, piItem, unrecognizedItem } from './doctor/agents.js';
-import { allowanceItem, catalogItems, providerItem } from './doctor/provider.js';
+import { allowanceItem, catalogItems, fallbackItems, providerItem } from './doctor/provider.js';
 import { ftsItem, generationItem, migrationItem, openStorage, spoolItem, syncItem, workerItem } from './doctor/storage.js';
 import { appendLog, errorCode } from './log.js';
 import { LEXICAL_NOTE } from './memories-cli.js';
@@ -118,8 +118,11 @@ export async function runDoctor(argv: string[], overrides: Partial<DoctorDeps> =
       await guardItemAsync('provider', () =>
         providerItem({ config, paths, db, integrityFailed, deps, options, now }),
       ),
-      guardItem('allowance', () => allowanceItem(config, db, integrityFailed, now)),
+      guardItem('allowance', () => allowanceItem(config, db, integrityFailed, now, deps.env)),
       ...guardList('catalog', () => catalogItems(config, db, integrityFailed, deps.env, now)),
+      // After the items that say a refused primary offers the batch to "the fallback chain below":
+      // `report` prints `items` in this order, so the chain has to be below them for that to be true.
+      ...guardList('fallback', () => fallbackItems(config, db, integrityFailed, deps.env, now)),
       ...(await guardListAsync('agent:claude', () => agentItems(db, integrityFailed, deps, options))),
       guardItem('unrecognized-agents', () => unrecognizedItem(db, integrityFailed)),
       guardItem('pi', () => piItem(paths, db, integrityFailed, now)),

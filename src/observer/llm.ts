@@ -277,9 +277,12 @@ async function summarizeWithAgentCli(
   const childPrompt = `${prompt.system}\n\nInput JSON:\n${prompt.user}`;
   let attempts = 0;
   while (attempts < 2) {
-    if (!ctx.consentOk()) {
-      return failure('consent_changed', attempts, 'observer consent changed before the child process');
-    }
+    // The same reservation the HTTP targets take. An own-subscription target spends no daily
+    // allowance, but the reservation is what puts the batch in `running`, so a worker that dies
+    // with the child process in flight is reclaimed on the stale-batch timer instead of having its
+    // paid attempt repeated at once (contracts/provider-fallback.md "For each target").
+    const prepared = prepareProviderReservation(ctx, attempts);
+    if (!prepared.ok) return prepared;
     attempts += 1;
     const result = await runAgentCli(ctx.agentCli ?? 'claude', childPrompt, {
       timeoutMs: ctx.timeoutMs ?? (testFault('provider-hang') ? 500 : REQUEST_TIMEOUT_MS),

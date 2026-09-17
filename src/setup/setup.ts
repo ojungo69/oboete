@@ -10,7 +10,8 @@ import type { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-import { loadConfig, PRESET_CATALOG, type OboeteConfig, type PresetName } from '../config.js';
+import { admittedChain, loadConfig, PRESET_CATALOG, type OboeteConfig, type PresetName } from '../config.js';
+import { chainErrorMessage } from '../observer/providers.js';
 import { openDatabase } from '../db/open.js';
 import { appendLog, childEnvironment } from '../log.js';
 import { ensureDirectories, oboetePaths, resolveHome } from '../paths.js';
@@ -326,6 +327,71 @@ function recordSetupResult(
   return failed ? 1 : 0;
 }
 
+/**
+ * The configuration this run would settle on, or `null` when the destination refuses it, having
+ * reported any chain error the run is about to leave in place.
+ *
+ * `--provider` names the destination. It is applied in memory so the consent screen shows it, and
+ * written only once the run is past the gate: a refused run must not leave the destination it
+ * refused enabled (contracts/cli.md, FR-022). A narrower destination can strip a stored fallback
+ * chain of its admission, and a run that enabled it anyway would leave the observer with no
+ * provider at all until someone reads the log (contracts/provider-fallback.md "Admission"), so that
+ * one case is refused before anything is written. It is the only refusal, which Verification 18 of
+ * that contract states: `--remove`, a bare `oboete setup` and `--provider none` all succeed while a
+ * chain the configuration cannot use sits in the file, and only a `--provider` that narrows egress
+ * under an admitted chain is refused.
+ *
+ * Every other chain error is reported and the run continues, the way a missing credential is
+ * reported and setup continues (contracts/cli.md). The reporting is not limited to runs that name a
+ * destination: one entry the chain cannot resolve makes `resolveModel` refuse the whole chain, so
+ * the stored primary does not run either, and nothing else in the report names it — the consent
+ * display shows the targets of an *admitted* chain and an unusable one has none. `--remove` is the
+ * exception because it is the recovery path and never reads the chain.
+ */
+function selectedDestination(
+  config: OboeteConfig,
+  options: Options,
+  note: (...lines: string[]) => void,
+): OboeteConfig | null {
+  if (options.remove) return config;
+  const provider = options.provider;
+  const destined =
+    provider === null ? config : { ...config, observer: { ...config.observer, preset: provider } };
+  const chainError = admittedChain(destined).error;
+  if (chainError === null) return destined;
+  if (provider !== null && chainError.code === 'egress_widened') {
+    note(
+      chainErrorMessage(chainError),
+      'Nothing was written. Correct the `[[observer.fallback]]` entry, then run setup again.',
+    );
+    return null;
+  }
+  if (chainError.code === 'chain_without_primary') {
+    // `admittedChain` refuses this one at position zero, before it reads any entry, so there is
+    // nothing to say about the entries after it and no selected preset to name. The recovery is the
+    // one `fallbackItems` already gives for the same code (src/doctor/provider.ts).
+    note(
+      chainErrorMessage(chainError),
+      'No summary is generated while entries sit under no destination: the observer refuses the',
+      'whole chain.',
+      '`oboete setup --provider <preset>`, or remove the `[[observer.fallback]]` entries.',
+    );
+    return destined;
+  }
+  note(
+    chainErrorMessage(chainError),
+    provider === null
+      ? 'No summary is generated until that entry is corrected: the observer refuses a chain it'
+      : 'The destination below is still selected, but no summary is generated until that entry is',
+    'corrected: the observer refuses a chain it cannot resolve, including the selected preset.',
+    // `admittedChain` returns at the first entry it refuses, so the entries after it were not
+    // examined. Saying so is cheaper and more honest than a second copy of the admission rules
+    // here, which would be the one to drift.
+    'Entries after it were not checked.',
+  );
+  return destined;
+}
+
 export async function runSetup(argv: string[], overrides: Partial<SetupDeps> = {}): Promise<number> {
   const deps: SetupDeps = { ...defaults(), ...overrides };
 
@@ -352,11 +418,10 @@ export async function runSetup(argv: string[], overrides: Partial<SetupDeps> = {
     note(describe(error));
     return finishSetup(deps, options, paths, notes, [], 2);
   }
-  // `--provider` names the destination this run would settle on. It is applied in memory so the
-  // consent screen shows that destination, and written only once the run is past the gate: a
-  // refused run must not leave the destination it refused enabled (contracts/cli.md, FR-022).
   const provider = options.remove ? null : options.provider;
-  if (provider !== null) config = { ...config, observer: { ...config.observer, preset: provider } };
+  const destined = selectedDestination(config, options, note);
+  if (destined === null) return finishSetup(deps, options, paths, notes, [], 2);
+  config = destined;
 
   const detected = detectAgents(deps.env, deps.versionSpawn);
   // Default: every agent that is installed. Named agents are reported even when they are not, so

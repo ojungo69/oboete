@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { PRESET_CATALOG, type PresetName } from '../config.js';
+import { prepared } from '../db/statements.js';
 import { assertLease, transactionImmediate } from '../worker/lease.js';
 
 export const DAILY_CAP = 150;
@@ -29,17 +30,44 @@ function numberValue(value: unknown): number {
   return 0;
 }
 
+/**
+ * Today's exhaustion stamp for one preset, or null when it may still be reserved. `exhausted_at` is
+ * per-preset: one preset's exhaustion says nothing about another's, and nothing about the shared
+ * daily call count, which `usageEstimate` reports.
+ */
+export function presetExhaustedAt(db: DatabaseSync, preset: PresetName, now: number): number | null {
+  // Cached: a chain asks this once per target per batch, and every fallback item asks it again
+  // (src/db/statements.ts: a statement prepared per call is native memory until a collection).
+  const row = prepared(db, 'SELECT exhausted_at, reset_at FROM provider_usage WHERE utc_day = ? AND preset = ?')
+    .get(utcDay(now), preset);
+  const exhaustedAt = row?.exhausted_at;
+  // Only a number is a stamp: `numberValue` would read anything else as the epoch and report a row
+  // that was never stamped as exhausted since 1970. Which way an unusable value should fall is moot
+  // rather than chosen — `provider_usage` is a `STRICT` table whose `exhausted_at` is `INTEGER`
+  // (`src/db/migrations/0003_operations.sql`), and `recordExhausted` is its only writer.
+  if (typeof exhaustedAt !== 'number' && typeof exhaustedAt !== 'bigint') return null;
+  return numberValue(row?.reset_at) > now ? numberValue(exhaustedAt) : null;
+}
+
 function cappedCalls(db: DatabaseSync, day: string): number {
-  const row = db
-    .prepare(
-      `SELECT COALESCE(SUM(COALESCE(calls, 0)), 0) AS calls
+  const row = prepared(
+    db,
+    `SELECT COALESCE(SUM(COALESCE(calls, 0)), 0) AS calls
        FROM provider_usage
        WHERE utc_day = ? AND preset IN (${CAPPED_PLACEHOLDERS})`,
-    )
+  )
     .get(day, ...CAPPED_PRESETS);
   return numberValue(row?.calls);
 }
 
+/**
+ * One target's attempt on one batch. `claimed_at` is restamped here, not only at creation, because
+ * `reclaimStale` measures its 120 s grace from that column: a batch created minutes before the
+ * attempt would otherwise be reclaimable — and its provider call repeated — the instant it starts
+ * running (`src/worker/batches.ts` RECLAIM_AFTER_MS). That makes `claimed_at` the reclaim fence and
+ * not settlement order: a batch refused here keeps its older stamp and can still settle later, so
+ * a reader that wants the latest decision orders by `completed_at` (`src/work.ts`, `src/why.ts`).
+ */
 export function reserveAttempt(
   db: DatabaseSync,
   options: {
@@ -60,16 +88,7 @@ export function reserveAttempt(
     }
 
     const day = utcDay(options.now);
-    const presetUsage = db
-      .prepare(
-        'SELECT exhausted_at, reset_at FROM provider_usage WHERE utc_day = ? AND preset = ?',
-      )
-      .get(day, options.preset);
-    if (
-      presetUsage?.exhausted_at !== null &&
-      presetUsage?.exhausted_at !== undefined &&
-      numberValue(presetUsage.reset_at) > options.now
-    ) {
+    if (presetExhaustedAt(db, options.preset, options.now) !== null) {
       return { ok: false, reason: 'provider_exhausted' };
     }
 
@@ -90,10 +109,10 @@ export function reserveAttempt(
       .prepare(
         `UPDATE observation_batches
          SET provider_attempts = COALESCE(provider_attempts, 0) + 1,
-             last_reservation_id = ?, state = 'running'
+             last_reservation_id = ?, state = 'running', claimed_at = ?
          WHERE id = ? AND owner_token = ?`,
       )
-      .run(reservationId, options.batchId, options.token);
+      .run(reservationId, options.now, options.batchId, options.token);
     if (Number(batch.changes) === 0) {
       db.exec('ROLLBACK');
       return { ok: false, reason: 'lease_lost' };
@@ -140,26 +159,20 @@ export function recordExhausted(
   });
 }
 
+/**
+ * The allowance every capped preset shares. Per-preset exhaustion is `presetExhaustedAt`, not a
+ * field here: summing it over the capped presets would answer for a preset that reported nothing.
+ */
 export function usageEstimate(
   db: DatabaseSync,
   now: number,
-): { day: string; calls: number; remaining: number; exhausted: boolean; resetAt: number } {
+): { day: string; calls: number; remaining: number; resetAt: number } {
   const day = utcDay(now);
-  const row = db
-    .prepare(
-      `SELECT
-         COALESCE(SUM(COALESCE(calls, 0)), 0) AS calls,
-         COALESCE(MAX(CASE WHEN exhausted_at IS NOT NULL AND reset_at > ? THEN 1 ELSE 0 END), 0) AS exhausted
-       FROM provider_usage
-       WHERE utc_day = ? AND preset IN (${CAPPED_PLACEHOLDERS})`,
-    )
-    .get(now, day, ...CAPPED_PRESETS);
-  const calls = numberValue(row?.calls);
+  const calls = cappedCalls(db, day);
   return {
     day,
     calls,
     remaining: Math.max(0, DAILY_CAP - calls),
-    exhausted: numberValue(row?.exhausted) !== 0,
     resetAt: nextUtcMidnight(now),
   };
 }

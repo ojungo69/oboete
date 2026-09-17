@@ -20,6 +20,7 @@ import type { MemoryCliRuntime } from '../../src/memories-cli.js';
 import { oboetePaths } from '../../src/paths.js';
 import { resolveRepoIdentity } from '../../src/repo-identity.js';
 import { runWhy } from '../../src/why.js';
+import { workStatus } from '../../src/work.js';
 import { withTempHome } from '../helpers/home.js';
 
 const NOW = 1_800_000_000_000;
@@ -572,5 +573,32 @@ test('why identifies unavailable membership from older attempts without inventin
     assert.deepEqual(generation.sources, []);
     const human = await run(runWhy, [SESSION]);
     assert.match(human.stdout, /Original source membership is unavailable/);
+  });
+});
+
+test('why and work order checkpoint decisions by settlement, not by the reclaim fence', async () => {
+  // A reservation restamps `claimed_at` (src/observer/reservation.ts); a batch refused at its own
+  // reservation (`daily_cap`) keeps its creation stamp and still settles after the restamped one,
+  // with the `pending` decision `markRequest` wrote. Its settlement is the latest, not its stamp.
+  let work: ReturnType<typeof workStatus> | undefined;
+  await withSeeded((db) => {
+    db.prepare(`INSERT INTO work_contexts (id, repo_id, local_key, root, created_at, last_seen_at)
+      VALUES ('ctx-order', ?, 'key-order', '/tmp/why', ?, ?)`).run(REPO, NOW, NOW);
+    db.prepare(`INSERT INTO work_items (id, repo_id, origin_context_id, created_at, updated_at)
+      VALUES ('work-order', ?, 'ctx-order', ?, ?)`).run(REPO, NOW, NOW);
+    db.prepare(`INSERT INTO work_bindings (id, session_id, context_id, work_id, created_at, reason)
+      VALUES ('binding-order', ?, 'ctx-order', 'work-order', ?, 'new_context')`).run(SESSION, NOW);
+    const batch = db.prepare(`INSERT INTO observation_batches
+      (id, repo_id, session_id, through_event_id, destination, state, degraded_reason, claimed_at, completed_at,
+       work_binding_id, checkpoint_decision, checkpoint_reason)
+      VALUES (?, ?, ?, ?, 'remote_observer', ?, ?, ?, ?, 'binding-order', ?, ?)`);
+    batch.run('settled-first', REPO, SESSION, 'end-first', 'applied', null, NOW - 1_000, NOW - 900, 'replace', 'provider_replacement');
+    batch.run('settled-last', REPO, SESSION, 'end-last', 'fallback', 'daily_cap', NOW - 5_000, NOW - 500, 'pending', null);
+    work = workStatus(db, { repoId: REPO, contextKey: null }, true);
+  }, async () => {
+    assert.equal(work?.works[0]?.checkpointOutcome?.decision, 'pending');
+    const result = await run(runWhy, [SESSION, '--json']);
+    assert.deepEqual(JSON.parse(result.stdout).checkpoints.decisions.map((row: { batchId: string }) => row.batchId),
+      ['settled-last', 'settled-first']);
   });
 });

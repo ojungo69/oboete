@@ -4,6 +4,12 @@
 // stops accepting `--yes` the moment any of those five change. The same hash is recomputed by
 // src/config.ts before every provider call (contracts/observer.md call policy 6); nothing in this
 // module is on the hook path.
+//
+// Those five fields are the primary's. A fallback target contributes the same five to the hash, but
+// one of them is printed differently on purpose: the hashed `egressClasses` are the target's own
+// capability, while the line shown for it is the primary's, because the chain never re-batches and
+// a target only ever receives what the primary's destination allowed
+// (contracts/provider-fallback.md "Consent coverage").
 import { chmodSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 
@@ -16,6 +22,7 @@ import {
   type ConsentTuple,
   type OboeteConfig,
 } from '../config.js';
+import { chainIsReachable } from '../observer/providers.js';
 import type { OboetePaths } from '../paths.js';
 
 /** Where `oboete doctor` reads the consent record back from (data-model.md runtime_state). */
@@ -48,6 +55,19 @@ export function consentDisplay(config: OboeteConfig, env: NodeJS.ProcessEnv): st
     `  Cost class: ${tuple.costClass}`,
     `  Sensitivity classes sent: ${tuple.egressClasses.join(', ') || 'none'}`,
   ];
+  if (tuple.chain !== undefined) {
+    lines.push('  Fallback targets, tried in this order only after a target fails:');
+    for (const [index, target] of tuple.chain.entries()) {
+      lines.push(
+        `    ${index + 1}. ${target.preset} at ${target.host}`,
+        `       Cost class: ${target.costClass}; credential source: ${target.credentialSource}`,
+        // A target receives the batch the selected preset's destination allowed, never more: the
+        // chain does not re-batch, so a local target under a remote preset still sees only the
+        // classes the remote destination may carry.
+        `       Sensitivity classes sent: ${tuple.egressClasses.join(', ') || 'none'}`,
+      );
+    }
+  }
   if (tuple.preset === 'agent-cli') {
     const cli = config.observer.agent_cli;
     lines.push(
@@ -62,7 +82,10 @@ export function consentDisplay(config: OboeteConfig, env: NodeJS.ProcessEnv): st
 /**
  * `--accept-egress` accepts the tuple shown now; `--yes` accepts only when the stored record is
  * the hash of that same tuple, which is what makes a changed host, credential source or egress
- * class refuse the flag (R8).
+ * class refuse the flag (R8). "Shown" is exact for the primary and for every fallback target's
+ * preset, host, credential source and cost class; the one field where the printed line and the
+ * hashed value differ on purpose is a target's egress classes, which the header of this module
+ * explains.
  */
 export function decideConsent(options: {
   config: OboeteConfig;
@@ -155,10 +178,21 @@ export function credentialGuidance(config: OboeteConfig, env: NodeJS.ProcessEnv)
   } else {
     lines.push(`  Export that variable in the shell that runs the agents.`);
   }
+  // An uncredentialed primary is one failed target, not a run without a provider: the worker
+  // advances past its `no_provider` and applies the first target that answers
+  // (contracts/provider-fallback.md Verification 15). Saying otherwise contradicts the chain this
+  // same report displayed a few lines above.
   lines.push(
-    'Setup continues without a provider. You can also run `oboete setup --provider ollama` to summarize',
-    'with a model on this machine, `oboete setup --provider agent-cli` to spend your agent command line',
-    'subscription, or leave it as it is: until a provider is configured, memories are written by rule alone.',
+    ...(chainIsReachable(config, env)
+      ? [
+        'Setup continues: the fallback targets shown above are attempted instead, so summaries come',
+        'from the first one that answers until the credentials above are set.',
+      ]
+      : [
+        'Setup continues without a provider. You can also run `oboete setup --provider ollama` to summarize',
+        'with a model on this machine, `oboete setup --provider agent-cli` to spend your agent command line',
+        'subscription, or leave it as it is: until a provider is configured, memories are written by rule alone.',
+      ]),
   );
   return lines;
 }

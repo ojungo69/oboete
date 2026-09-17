@@ -8,7 +8,7 @@ import { globRuleError } from './privacy/detect.js';
 import type { OboetePaths } from './paths.js';
 
 const PRESET_NAMES = ['workers-ai', 'ollama', 'nim', 'openrouter', 'gemini', 'agent-cli'] as const;
-const AGENT_CLIS = ['claude', 'codex', 'grok'] as const;
+export const AGENT_CLIS = ['claude', 'codex', 'grok'] as const;
 
 export type PresetName = (typeof PRESET_NAMES)[number];
 export type AgentCli = (typeof AGENT_CLIS)[number];
@@ -19,11 +19,16 @@ export type CredentialSpec =
   | { kind: 'none' }
   | { kind: 'agent-login' };
 
+/** The cost classes `cost_policy` chooses from (CONSTITUTION: local, free or paid, and its policy). */
+export const COST_CLASSES = ['free-tier', 'local', 'remote', 'own-subscription'] as const;
+
+export type CostClass = (typeof COST_CLASSES)[number];
+
 export type ProviderPreset = {
   host: string;
   baseUrl: string;
   credential: CredentialSpec;
-  costClass: 'free-tier' | 'remote' | 'local' | 'own-subscription';
+  costClass: CostClass;
   egress: 'remote' | 'local' | 'none';
   defaultModel: string;
   structuredOutput: 'json_schema' | 'response_format' | 'text-json';
@@ -110,10 +115,21 @@ export const PRESET_CATALOG: Record<PresetName, ProviderPreset> = {
   },
 };
 
+/** One fallback target: the same two fields the primary reads, on a preset that is never `none`. */
+const fallbackTargetSchema = z.strictObject({
+  preset: z.enum(PRESET_NAMES),
+  model: z.string().min(1).optional(),
+});
+
 const observerSchema = z.strictObject({
   preset: z.enum(['none', ...PRESET_NAMES]).default('workers-ai'),
   model: z.string().min(1).optional(),
   agent_cli: z.enum(AGENT_CLIS).default('claude'),
+  // The default is today's behaviour for every install: no paid class is admitted until it is written in.
+  cost_policy: z.array(z.enum(COST_CLASSES)).default(['free-tier', 'local']),
+  // Three is the chain's whole bound, so the length is what has to stay small
+  // (contracts/provider-fallback.md "Admission").
+  fallback: z.array(fallbackTargetSchema).max(3).default([]),
 });
 
 const injectionSchema = z.strictObject({
@@ -384,12 +400,108 @@ export function readCredentials(
   }
 }
 
+export type ChainTarget = { preset: PresetName; model: string };
+
+/**
+ * A target's model: the one written for it, else the preset's default, trimmed. The admission, the
+ * identity and every surface that names a target read it from here, because a surface that
+ * re-derived the rule would print a model the worker does not send.
+ */
+export function targetModel(preset: PresetName, model: string | undefined): string {
+  return (model ?? PRESET_CATALOG[preset].defaultModel).trim();
+}
+
+/**
+ * Why one written entry is not among the targets. `covered` and `excluded` are different verdicts
+ * to the user and have different fixes, so the admission decides which it was rather than leaving
+ * doctor to re-derive it (contracts/provider-fallback.md "Diagnostics").
+ */
+export type ChainVerdict = 'admitted' | 'covered' | 'excluded';
+
+/** Why a written chain cannot be used at all; `resolveModel` is where it becomes a thrown error. */
+export type ChainError = {
+  code: 'model_required' | 'egress_widened' | 'chain_without_primary';
+  /** The primary is position zero, so the first fallback entry is position one. */
+  position: number;
+};
+
+/**
+ * The fallback targets a pass may attempt, in written order, with the primary counted as position
+ * zero. Pure and total: an unusable chain comes back as `error` with no targets rather than a throw,
+ * because `consentTuple` recomputes this on every pass (`src/worker/observe.ts` consent re-check)
+ * and a configuration mistake has to degrade the run, not crash it.
+ */
+export function admittedChain(
+  config: OboeteConfig,
+): { targets: ChainTarget[]; verdicts: ChainVerdict[]; error: ChainError | null } {
+  const entries = config.observer.fallback;
+  const primary = config.observer.preset;
+  if (primary === 'none') {
+    // A chain with no primary names a destination the user never selected, so it is not ignored.
+    return { targets: [], verdicts: [],
+      error: entries.length === 0 ? null : { code: 'chain_without_primary', position: 0 } };
+  }
+  const primaryEgress = PRESET_CATALOG[primary].egress;
+  const policy = new Set<string>(config.observer.cost_policy);
+  const agentCli = config.observer.agent_cli;
+  const seen = new Set([identityOf(primary, config.observer.model, agentCli)]);
+  const targets: ChainTarget[] = [];
+  const verdicts: ChainVerdict[] = [];
+  for (const [index, entry] of entries.entries()) {
+    const position = index + 1;
+    const catalog = PRESET_CATALOG[entry.preset];
+    const model = targetModel(entry.preset, entry.model);
+    if (model === '') return { targets: [], verdicts: [], error: { code: 'model_required', position } };
+    if (catalog.egress === 'remote' && primaryEgress !== 'remote') {
+      // A selection that could reach the network under any failure is not a narrower selection:
+      // `remote` is the only egress class a remote target does not widen.
+      return { targets: [], verdicts: [], error: { code: 'egress_widened', position } };
+    }
+    const identity = identityOf(entry.preset, model, agentCli);
+    if (seen.has(identity)) {
+      verdicts.push('covered');
+      continue;
+    }
+    seen.add(identity);
+    // The cost policy is a live switch over targets the user has already written down, so a class
+    // outside it is skipped and reported by doctor, never an error.
+    if (policy.has(catalog.costClass)) {
+      targets.push({ preset: entry.preset, model });
+      verdicts.push('admitted');
+    } else {
+      verdicts.push('excluded');
+    }
+  }
+  return { targets, verdicts, error: null };
+}
+
+/**
+ * A target's identity: the same preset with two models is two targets, the same pair twice is one.
+ *
+ * `agent-cli` is identified by the command line tool instead, because that is what a target of that
+ * preset actually invokes: `summarizeWithAgentCli` reads `[observer] model` only as a non-empty gate
+ * and `runAgentCli` is never given it, so two entries on the same CLI are one target however their
+ * models differ. Admitting them as two would let an advancing failure pay the same subscription
+ * twice for one payload, which is the shape US7 scenario 2 forbids. Sending the model instead is
+ * the other way to fix it and is issue #241; it would widen what oboete asks of the subscription.
+ */
+function identityOf(preset: PresetName, model: string | undefined, agentCli: AgentCli): string {
+  return preset === 'agent-cli'
+    ? JSON.stringify([preset, agentCli])
+    : JSON.stringify([preset, targetModel(preset, model)]);
+}
+
+/** One admitted target's share of the consent tuple: the five facts the primary contributes. */
+export type ChainConsent = Omit<ConsentTuple, 'chain'>;
+
 export type ConsentTuple = {
   preset: string;
   host: string;
   credentialSource: string;
   costClass: string;
   egressClasses: readonly string[];
+  /** Present only when the admitted chain is non-empty, so an install without one hashes as before. */
+  chain?: ChainConsent[];
 };
 
 /** The tuple setup displays and consent is bound to (R8): preset, host, credential source, cost class, egress classes. */
@@ -399,6 +511,20 @@ export function consentTuple(config: OboeteConfig, env: NodeJS.ProcessEnv = proc
   if (preset === 'none') {
     return { preset, host: '', credentialSource: 'none', costClass: 'none', egressClasses: [] };
   }
+  // Each target contributes its own five facts, `egressClasses` included: the field describes the
+  // destination, which is what consent binds, while the line `consentDisplay` prints describes what
+  // is sent and is the primary's. The two differ on purpose and
+  // contracts/provider-fallback.md "Consent coverage" is where that is decided.
+  const chain = admittedChain(config).targets
+    .map((target) => presetConsent(target.preset, config, env));
+  return {
+    ...presetConsent(preset, config, env),
+    // FR-011 and US7 scenario 4: stored consent may not authorize a destination the user never saw.
+    ...(chain.length === 0 ? {} : { chain }),
+  };
+}
+
+function presetConsent(preset: PresetName, config: OboeteConfig, env: NodeJS.ProcessEnv): ChainConsent {
   const entry = PRESET_CATALOG[preset];
   return {
     preset,
@@ -416,6 +542,10 @@ export function consentHash(tuple: ConsentTuple): string {
     tuple.credentialSource,
     tuple.costClass,
     tuple.egressClasses,
+    // Appended only when a chain exists, so every configuration without one keeps its stored hash.
+    ...(tuple.chain === undefined ? [] : [tuple.chain.map((entry) => [
+      entry.preset, entry.host, entry.credentialSource, entry.costClass, entry.egressClasses,
+    ])]),
   ]);
 }
 

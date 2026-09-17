@@ -20,13 +20,14 @@ import { PRESET_CATALOG, configSchema, consentHash, consentTuple } from '../../s
 import { LATEST_SCHEMA_VERSION, openDatabase } from '../../src/db/open.js';
 import { runDoctor, type DoctorDeps, type DoctorItem } from '../../src/doctor.js';
 import { probeReason } from '../../src/doctor/agents.js';
-import { allowanceItem, catalogItems, providerItem } from '../../src/doctor/provider.js';
+import { allowanceItem, catalogItems, fallbackItems, providerItem } from '../../src/doctor/provider.js';
 import { ftsItem, generationItem, migrationItem, openStorage, spoolItem, workerItem } from '../../src/doctor/storage.js';
 import { ensureDirectories, oboetePaths, type OboetePaths } from '../../src/paths.js';
 import type { VersionSpawn } from '../../src/setup/detect.js';
 import { removeJsonHandlers } from '../../src/setup/managed-block.js';
 import { runSetup, type SetupDeps } from '../../src/setup/setup.js';
-import { utcDay } from '../../src/observer/reservation.js';
+import { CACHE_MS } from '../../src/observer/catalog.js';
+import { DAILY_CAP, SESSION_END_RESERVE, utcDay } from '../../src/observer/reservation.js';
 import { runtimeStateSet } from '../../src/worker/purge.js';
 import { withTempHome } from '../helpers/home.js';
 
@@ -496,6 +497,383 @@ test('an exhausted allowance degrades and advancing now past reset_at restores i
   });
 });
 
+test('the fallback chain is reported per target without a second provider request', async () => {
+  await harness(async (context) => {
+    // ollama is admitted and local; nim and gemini are remote, which the default policy excludes.
+    const observer = {
+      preset: 'workers-ai',
+      cost_policy: ['free-tier', 'local'],
+      fallback: [{ preset: 'ollama', model: 'qwen3:8b' }, { preset: 'nim' }, { preset: 'gemini' }],
+    };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"', 'cost_policy = ["free-tier", "local"]',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[[observer.fallback]]', 'preset = "nim"',
+      '', '[[observer.fallback]]', 'preset = "gemini"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+
+    let providerRequests = 0;
+    const answering = answeringFetch();
+    context.fetch = async (input, init) => {
+      if (!String(input).includes('/models/search')) providerRequests += 1;
+      return await answering(input, init);
+    };
+    await context.doctor(['--json', '--probe-provider']);
+
+    // Only the primary is probed: one probe per target would spend the daily allowance on diagnostics.
+    assert.equal(providerRequests, 1, context.output);
+    // Nothing here starts the local model server, so this target's runnability is unchecked the
+    // same way an agent login is: `credential.kind` `none` and `agent-login` both leave this item
+    // nothing to read.
+    assert.equal(context.item('fallback:1').status, 'unverified');
+    assert.match(context.item('fallback:1').reason, /ollama with model qwen3:8b/);
+    assert.match(context.item('fallback:1').reason, /not checked here/);
+    // A cost class the policy excludes and a duplicate are different verdicts with different fixes.
+    assertBroken(context.item('fallback:2'), 'warning', 'cost_policy` does not admit', 'Add "remote"');
+    assertBroken(context.item('fallback:3'), 'warning', 'cost_policy` does not admit', 'Add "remote"');
+    // The chain is ordered, so "a failure ahead of it" reaches an admitted target only when one
+    // comes after this entry. The single admitted target here is position 1, before both, and by
+    // the time the chain is at 2 that target has already failed.
+    for (const name of ['fallback:2', 'fallback:3']) {
+      // The whole sentence, because inlining it retyped the opening clause a substring match skips.
+      assert.equal(context.item(name).consequence,
+        'This target is never attempted, so nothing past it is reached: once the targets ahead of it'
+        + ' have failed, the batch is rule-based.');
+    }
+    assert.equal(context.item('provider').status, 'healthy', context.output);
+
+    // Three items above the chain say the batch goes to "the fallback chain below", so the order
+    // the report is built in has to put them there: `catalog` was pushed after the chain items.
+    const names = context.report().items.map((entry) => entry.item);
+    assert.ok(names.includes('catalog'), names.join(','));
+    assert.ok(names.indexOf('catalog') < names.indexOf('fallback:1'), names.join(','));
+
+    // Admitting a paid class is a new destination, so the stored consent stops matching.
+    writeFileSync(context.paths.config,
+      readFileSync(context.paths.config, 'utf8')
+        .replace('cost_policy = ["free-tier", "local"]', 'cost_policy = ["free-tier", "local", "remote"]'));
+    await context.doctor(['--json', '--probe-provider']);
+    assertBroken(context.item('provider'), 'degraded', 'Consent does not cover the observer');
+  });
+});
+
+test('an advancing probe failure says the chain takes the batch, and a stop reason still says it waits', async () => {
+  await harness(async (context) => {
+    const observer = { preset: 'workers-ai', cost_policy: ['free-tier', 'local'],
+      fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"', 'cost_policy = ["free-tier", "local"]',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+
+    // `unreachable` advances the chain (contracts/provider-fallback.md "Advance and stop"), so the
+    // batch the probe failed on is offered to the admitted target this same report lists below.
+    context.fetch = refusingFetch();
+    assert.equal(await context.doctor(['--json', '--probe-provider']), 1, context.output);
+    assert.equal(context.item('fallback:1').status, 'unverified', context.output);
+    assert.match(context.item('provider').consequence, /offered to the fallback targets below/);
+    assert.doesNotMatch(context.item('provider').consequence, /waits for the provider/);
+
+    // The other direction, so the check cannot pass by saying "chained" to everything: a stop
+    // reason ends the chain, so the queue really does wait and the text must say so.
+    // Replacing the value rather than matching the line: a double quote inside a regular expression
+    // is where lizard's TypeScript reader loses the function boundary and swallows the rest of the
+    // file, which takes this file's length findings out of the oracle's sight.
+    writeFileSync(context.paths.config,
+      readFileSync(context.paths.config, 'utf8').replace(hash, 'not-the-tuple'));
+    assert.equal(await context.doctor(['--json', '--probe-provider']), 1, context.output);
+    assertBroken(context.item('provider'), 'degraded', 'Consent does not cover the observer');
+    assert.match(context.item('provider').consequence, /waits for the provider/);
+  });
+});
+
+test('an uncredentialed primary with an admitted chain says the chain is offered the batch, not the rules', async () => {
+  await harness(async (context) => {
+    delete context.env.OBOETE_CF_API_TOKEN;
+    delete context.env.OBOETE_CF_ACCOUNT_ID;
+    const observer = { preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+
+    await context.doctor(['--json']);
+    // The primary answers `no_provider` without a request and the chain carries the batch, so the
+    // rule-based consequence would be wrong here (contracts/provider-fallback.md).
+    // Admission is not runnability, so the item says the batch is offered to the chain rather
+    // than promising the chain summarizes it: a target may lack its own credential or allowance.
+    assertBroken(context.item('provider'), 'degraded', 'offered to the fallback chain below');
+    assert.equal(context.item('fallback:1').status, 'unverified');
+  });
+});
+
+test('a fallback chain the resolver refuses is reported at its position and on the provider item', async () => {
+  await harness(async (context) => {
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "ollama"', 'model = "qwen3:8b"', 'cost_policy = ["free-tier", "local", "remote"]',
+      '', '[[observer.fallback]]', 'preset = "nim"', '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    assert.equal(await context.doctor(), 1, context.output);
+    assertBroken(context.item('fallback'), 'degraded', 'sends further', 'no provider at all', 'observer.fallback');
+    // The refused entry takes the primary down with it, so the provider item says so too rather
+    // than reporting a provider the worker does not have.
+    assertBroken(context.item('provider'), 'degraded', 'sends further', 'rule-based fallback only');
+
+    // `chain_without_primary` carries position 0, which is the primary: numbering it as a fallback
+    // target would name an entry that does not exist, and the fix is to select a preset.
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "none"', '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"', '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    assert.equal(await context.doctor(), 1, context.output);
+    assertBroken(context.item('fallback'), 'degraded', 'needs a selected observer preset', 'no provider at all',
+      'setup --provider');
+  });
+});
+
+test('a fallback target is not called ready when its allowance is gone or its login is unchecked', async () => {
+  await harness(async (context) => {
+    // A capped target under an uncapped primary: `allowanceItem` reports "no daily cap" for the
+    // primary, so this item is the only place the shared allowance can be named.
+    // (`agent-cli` is the one remote preset with no cap, and a capped target needs a remote primary.)
+    const capped = { preset: 'agent-cli', model: 'claude-sonnet-4-5',
+      fallback: [{ preset: 'workers-ai' }] };
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "agent-cli"', 'model = "claude-sonnet-4-5"',
+      '', '[[observer.fallback]]', 'preset = "workers-ai"',
+      '', '[consent]',
+      `hash = "${consentHash(consentTuple(configSchema.parse({ observer: capped }), context.env))}"`,
+      `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    const { db } = openDatabase({ path: context.paths.db, timeoutMs: 5_000 });
+    try {
+      db.prepare(`INSERT INTO provider_usage (utc_day, preset, calls, neurons_estimate, reset_at)
+        VALUES (?, 'workers-ai', ?, 0, ?)`).run(utcDay(context.now), DAILY_CAP, context.now + 3_600_000);
+    } finally {
+      db.close();
+    }
+    await context.doctor(['--json']);
+    assert.equal(context.item('allowance').status, 'healthy', 'the primary has no cap of its own');
+    assertBroken(context.item('fallback:1'), 'warning', 'shared allowance is spent');
+
+    // `readCredentials` calls an agent login present because setup is what checks it.
+    const login = { preset: 'workers-ai', cost_policy: ['free-tier', 'local', 'own-subscription'],
+      fallback: [{ preset: 'agent-cli', model: 'claude-sonnet-4-5' }] };
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"', 'cost_policy = ["free-tier", "local", "own-subscription"]',
+      '', '[[observer.fallback]]', 'preset = "agent-cli"', 'model = "claude-sonnet-4-5"',
+      '', '[consent]',
+      `hash = "${consentHash(consentTuple(configSchema.parse({ observer: login }), context.env))}"`,
+      `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    await context.doctor(['--json']);
+    assert.equal(context.item('fallback:1').status, 'unverified');
+    assert.match(context.item('fallback:1').reason, /login is live is not checked here/);
+  });
+});
+
+test('the second of two identical fallback entries is reported as covered, not as ready', async () => {
+  await harness(async (context) => {
+    const observer = { preset: 'workers-ai',
+      fallback: [{ preset: 'ollama', model: 'qwen3:8b' }, { preset: 'ollama', model: 'qwen3:8b' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+
+    await context.doctor(['--json']);
+    // Admission deduplicates by `(preset, model)`, so only the first entry is ever attempted.
+    assert.equal(context.item('fallback:1').status, 'unverified');
+    assertBroken(context.item('fallback:2'), 'warning', 'a nearer target already covers',
+      'Remove the entry');
+    assert.doesNotMatch(context.item('fallback:2').recovery, /cost_policy/,
+      'a duplicate cannot be admitted by a cost class it already has');
+  });
+});
+
+test("one capped preset's exhaustion is neither another's nor the shared allowance", async () => {
+  await harness(async (context) => {
+    // `exhausted_at` is per-preset and the daily cap is shared, so a day-wide exhaustion flag makes
+    // every capped surface answer for a preset that never reported anything.
+    context.env.OBOETE_NIM_API_KEY = 'nvapi-doctor-test';
+    const observer = { preset: 'workers-ai', cost_policy: ['free-tier', 'remote'],
+      fallback: [{ preset: 'nim' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"', 'cost_policy = ["free-tier", "remote"]',
+      '', '[[observer.fallback]]', 'preset = "nim"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+
+    const exhaust = (preset: string): void => {
+      const { db } = openDatabase({ path: context.paths.db, timeoutMs: 5_000 });
+      try {
+        db.prepare('DELETE FROM provider_usage').run();
+        db.prepare(`INSERT INTO provider_usage (utc_day, preset, calls, neurons_estimate, reset_at, exhausted_at)
+          VALUES (?, ?, 1, 0, ?, ?)`).run(utcDay(context.now), preset, context.now + 3_600_000, context.now);
+      } finally {
+        db.close();
+      }
+    };
+
+    exhaust('workers-ai');
+    await context.doctor(['--json']);
+    assertBroken(context.item('allowance'), 'degraded', 'reported exhaustion today');
+    assert.equal(context.item('fallback:1').status, 'healthy', context.item('fallback:1').reason);
+    assert.match(context.item('fallback:1').reason, /nim with model .*admitted as remote and ready/);
+
+    exhaust('nim');
+    await context.doctor(['--json']);
+    assert.equal(context.item('allowance').status, 'healthy', context.item('allowance').reason);
+    assert.match(context.item('allowance').reason, new RegExp(`${DAILY_CAP - 1} of ${DAILY_CAP} calls remaining`));
+    assertBroken(context.item('fallback:1'), 'warning', 'reported its allowance exhausted at');
+  });
+});
+
+test('a capped target is warned while the last calls are held for end-of-session batches', async () => {
+  await harness(async (context) => {
+    context.env.OBOETE_NIM_API_KEY = 'nvapi-doctor-test';
+    const observer = { preset: 'workers-ai', cost_policy: ['free-tier', 'remote'],
+      fallback: [{ preset: 'nim' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"', 'cost_policy = ["free-tier", "remote"]',
+      '', '[[observer.fallback]]', 'preset = "nim"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    const seed = (calls: number): void => {
+      const { db } = openDatabase({ path: context.paths.db, timeoutMs: 5_000 });
+      try {
+        db.prepare('DELETE FROM provider_usage').run();
+        db.prepare(`INSERT INTO provider_usage (utc_day, preset, calls, neurons_estimate, reset_at)
+          VALUES (?, 'workers-ai', ?, 0, ?)`).run(utcDay(context.now), calls, context.now + 3_600_000);
+      } finally {
+        db.close();
+      }
+    };
+
+    // One call below the reserve the worker keeps for session ends: still open, both surfaces.
+    seed(DAILY_CAP - SESSION_END_RESERVE - 1);
+    await context.doctor(['--json']);
+    assert.equal(context.item('allowance').status, 'healthy', context.item('allowance').reason);
+    assert.equal(context.item('fallback:1').status, 'healthy', context.item('fallback:1').reason);
+
+    seed(DAILY_CAP - SESSION_END_RESERVE);
+    await context.doctor(['--json']);
+    assertBroken(context.item('allowance'), 'degraded', 'held for end-of-session batches',
+      'End-of-session summaries still run');
+    assertBroken(context.item('fallback:1'), 'warning', 'held for end-of-session batches',
+      'an end-of-session batch is still served');
+  });
+});
+
+test('a refused primary says the chain is offered the batch, not that processing waits', async () => {
+  await harness(async (context) => {
+    // `daily_cap` and `provider_exhausted` both advance the chain, so an item that says processing
+    // waits contradicts the worker and the admitted target reported below it.
+    const observer = { preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    const { db } = openDatabase({ path: context.paths.db, timeoutMs: 5_000 });
+    try {
+      db.prepare(`INSERT INTO provider_usage (utc_day, preset, calls, neurons_estimate, reset_at)
+        VALUES (?, 'workers-ai', ?, 0, ?)`).run(utcDay(context.now), DAILY_CAP, context.now + 3_600_000);
+    } finally {
+      db.close();
+    }
+    context.fetch = () => assert.fail('a refused reservation makes no request');
+
+    assert.equal(await context.doctor(['--json', '--probe-provider']), 1, context.output);
+    assertBroken(context.item('provider'), 'degraded', 'daily_cap',
+      'offered to the fallback chain below');
+    assert.doesNotMatch(context.item('provider').consequence, /source processing waits/i);
+    assert.equal(context.item('fallback:1').status, 'unverified', context.item('fallback:1').reason);
+  });
+});
+
+test('a target with nothing to verify still reports a refusal it can read', async () => {
+  await harness(async (context) => {
+    // `reserveAttempt` refuses on the exhaustion stamp before it looks at `capped`, so an
+    // uncapped local target that reported exhaustion today is refused on every attempt. That is a
+    // known, actionable state: it must outrank "whether the model is served here is not checked",
+    // which is only a claim about what this item could not read.
+    const observer = { preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+
+    await context.doctor(['--json']);
+    assert.equal(context.item('fallback:1').status, 'unverified', context.item('fallback:1').reason);
+
+    const { db } = openDatabase({ path: context.paths.db, timeoutMs: 5_000 });
+    try {
+      db.prepare(`INSERT INTO provider_usage (utc_day, preset, calls, neurons_estimate, reset_at, exhausted_at)
+        VALUES (?, 'ollama', 1, 0, ?, ?)`).run(utcDay(context.now), context.now + 3_600_000, context.now);
+    } finally {
+      db.close();
+    }
+
+    await context.doctor(['--json']);
+    assertBroken(context.item('fallback:1'), 'warning', 'reported its allowance exhausted at',
+      'reorder the chain');
+  });
+});
+
+test('a primary the resolver refuses leaves no fallback target to call ready', async () => {
+  await harness(async (context) => {
+    // `ollama` has no default model, so the primary fails `resolveModel` and the worker degrades
+    // every batch with `no_provider`: the chain below it is never attempted.
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "ollama"',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"', '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+
+    assert.equal(await context.doctor(), 1, context.output);
+    assert.equal(context.report().items.some((entry) => entry.item === 'fallback:1'), false, context.output);
+    assertBroken(context.item('fallback'), 'degraded', 'requires an observer model', 'ever attempted');
+  });
+});
+
+test('the provider item names a primary the resolver refuses when no chain reports it', async () => {
+  await harness(async (context) => {
+    // `ollama` has no default model, and with no `[[observer.fallback]]` entry `fallbackItems`
+    // returns nothing at all, so this item is the only surface left to say that every batch will
+    // be rule-based.
+    writeFileSync(context.paths.config, ['[observer]', 'preset = "ollama"', ''].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    assert.equal(await context.doctor(), 1, context.output);
+    assertBroken(context.item('provider'), 'degraded', 'requires an observer model',
+      'rule-based fallback only');
+  });
+});
+
 test('a stale Pi .started file degrades pi and deleting it restores health', async () => {
   await harness(async (context) => {
     const file = join(context.paths.piAck, 'abc.started');
@@ -640,6 +1018,40 @@ test('quick_check failure degrades storage with exit 3 and does not spawn agent 
   });
 });
 
+test('a corrupt database names itself on the chain items, whatever the target is', async () => {
+  await harness(async (context) => {
+    // Both kinds of target: one whose runnability this report never checks (`ollama`) and one whose
+    // allowance it normally reads (`nim`). Storage is the blocker for both, so both say so — a
+    // target reporting "start your local model server" while the database is corrupt would name the
+    // wrong thing, and `dbUnread` is the only path that carries the integrity message at all.
+    context.env.OBOETE_NIM_API_KEY = 'nvapi-doctor-test';
+    const observer = { preset: 'workers-ai', cost_policy: ['free-tier', 'local', 'remote'],
+      fallback: [{ preset: 'ollama', model: 'qwen3:8b' }, { preset: 'nim' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"', 'cost_policy = ["free-tier", "local", "remote"]',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[[observer.fallback]]', 'preset = "nim"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    corruptQuickCheck(context.paths.db);
+
+    assert.equal(await context.doctor(['--json']), 3, context.output);
+    for (const name of ['fallback:1', 'fallback:2']) {
+      assert.equal(context.item(name).status, 'unverified', `${name}: ${context.item(name).reason}`);
+      assert.match(context.item(name).reason, /integrity check/i, context.item(name).reason);
+      // The integrity sentence replaces the item's own, so without a subject every chain item
+      // prints the same line and names no target at all (contracts/provider-fallback.md
+      // "Diagnostics": each target's position, preset and model).
+      assert.match(context.item(name).reason, /^Target [12] is (ollama|nim) with model \S+\./,
+        context.item(name).reason);
+      assert.match(context.item(name).recovery, /after storage is repaired/, context.item(name).recovery);
+      assert.doesNotMatch(context.item(name).recovery, /local model server/, context.item(name).recovery);
+    }
+  });
+});
+
 test('a database behind the schema is reported, not migrated, and the items that read it are unverified', async () => {
   await harness(async (context) => {
     const before = new DatabaseSync(context.paths.db);
@@ -702,6 +1114,26 @@ test('an ollama probe is healthy and writes no provider_usage row', async () => 
     } finally {
       db.close();
     }
+  });
+});
+
+test('an uncapped preset that reported exhaustion is not probed and is not called healthy', async () => {
+  await harness(async (context) => {
+    // `reserveAttempt` refuses on the stamp before it looks at the cap, so a capped-only check here
+    // would report a provider ready that the worker refuses for the rest of the day.
+    writeFileSync(context.paths.config, '[observer]\npreset = "ollama"\nmodel = "qwen3:8b"\n');
+    chmodSync(context.paths.config, 0o600);
+    const { db } = openDatabase({ path: context.paths.db, timeoutMs: 5_000 });
+    try {
+      db.prepare(`INSERT INTO provider_usage (utc_day, preset, calls, neurons_estimate, reset_at, exhausted_at)
+        VALUES (?, 'ollama', 1, 0, ?, ?)`).run(utcDay(context.now), context.now + 3_600_000, context.now);
+    } finally {
+      db.close();
+    }
+    context.fetch = () => assert.fail('an exhausted preset must not be probed');
+
+    assert.equal(await context.doctor(['--json', '--probe-provider']), 1, context.output);
+    assertBroken(context.item('provider'), 'degraded', 'reported exhaustion today');
   });
 });
 
@@ -955,15 +1387,35 @@ test('an unconfigured provider explains fallback without probing', async () => {
 
 test('missing provider credentials name the variable to export', async () => {
   await withItemDatabase(async (db, paths) => {
+    // With a matching consent record, because consent is reported ahead of a missing credential:
+    // the test below is the one that pins that order.
     assert.deepEqual(await providerItem({
-      config: configSchema.parse({ observer: { preset: 'openrouter' } }), paths, db,
-      integrityFailed: false, deps: itemDeps, options: itemOptions, now: ITEM_NOW,
+      config: consented({ preset: 'openrouter' }), paths, db, integrityFailed: false,
+      deps: itemDeps, options: itemOptions, now: ITEM_NOW,
     }), {
       item: 'provider', status: 'degraded',
       reason: 'No credentials are set for the openrouter preset (env:OBOETE_OPENROUTER_API_KEY).',
       consequence: 'Summaries come from the rule-based fallback only (packs say `Degraded:`).',
       recovery: 'Export that variable in the shell that runs the agents.',
     });
+  });
+});
+
+test('a primary missing both its credential and its consent names the consent', async () => {
+  await withItemDatabase(async (db, paths) => {
+    // The worker's order, and its reason: `attemptTargets` asks `consentOk()` before
+    // `providerCall` so that a target with no credentials cannot answer `no_provider` first and
+    // send the user to fix a credential while consent is what stops every batch
+    // (src/worker/observe-batch.ts). Exporting the variable alone would leave processing blocked.
+    const item = await providerItem({
+      config: configSchema.parse({ observer: { preset: 'openrouter' } }), paths, db,
+      integrityFailed: false, deps: itemDeps, options: itemOptions, now: ITEM_NOW,
+    });
+    assert.equal(item.status, 'degraded');
+    // Both blockers in one item: `initialProviderFailure` stamps `no_provider` on the batch while
+    // the chain stops on consent, so naming only one would disagree with the pack the user holds.
+    assert.match(item.reason, /has not been accepted for egress yet, and no credentials are set for the openrouter preset/);
+    assert.match(item.recovery, /^`oboete setup --accept-egress`, and: /);
   });
 });
 
@@ -988,7 +1440,11 @@ test('changed provider consent stops a doctor probe before reserving allowance',
       deps: { ...itemDeps, env: { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' } },
       options: itemOptions, now: ITEM_NOW,
     }), {
-      item: 'provider', status: 'degraded', reason: 'Observer consent changed before reservation.',
+      // Answered before the probe, so no reservation is taken for a call that could only come
+      // back `consent_changed` — and worded for what is true of this fixture: nothing was ever
+      // stored, so no record "changed".
+      item: 'provider', status: 'degraded',
+      reason: 'Consent does not cover the observer: this configuration has not been accepted for egress yet.',
       consequence: 'Temporary guidance is available while source processing waits for the provider.',
       recovery: '`oboete setup --accept-egress`',
     });
@@ -996,29 +1452,68 @@ test('changed provider consent stops a doctor probe before reserving allowance',
   });
 });
 
+/** The credentials the item tests probe with, and the env their consent hashes are computed in. */
+const ITEM_ENV: NodeJS.ProcessEnv = { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' };
+
+/** A configuration whose stored consent matches, so a chain prediction is not refused by R8. */
+function consented(observer: Record<string, unknown>): ReturnType<typeof configSchema.parse> {
+  const draft = configSchema.parse({ observer });
+  return configSchema.parse({
+    ...draft,
+    consent: { hash: consentHash(consentTuple(draft, ITEM_ENV)), accepted_at: ITEM_NOW },
+  });
+}
+
 for (const [name, calls, exhaustedAt, reason] of [
   ['provider exhaustion', 1, ITEM_NOW, 'provider_exhausted: The provider reported exhaustion today.'],
   ['the daily cap', 150, null, 'daily_cap: The daily cap of 150 calls is used up.'],
+  // `reserveAttempt` refuses `ten_turns` and `retention` from 140 calls on, so a surface that waits
+  // for 150 reports ten calls of allowance the worker will not grant, and the probe would spend
+  // them (issue #240, found independently by three reviewers).
+  ['the session-end reserve', 140, null,
+    'daily_cap: Only 10 of the daily 150 calls are left, and they are held for end-of-session batches.'],
 ] as const) {
   test(`${name} stops a doctor probe without consuming another call`, async () => {
     await withItemDatabase(async (db, paths) => {
       db.prepare('INSERT INTO provider_usage (utc_day, preset, calls, exhausted_at, reset_at) VALUES (?, ?, ?, ?, ?)')
         .run('2026-09-06', 'workers-ai', calls, exhaustedAt, ITEM_RESET);
-      const config = configSchema.parse({});
+      // With a matching record, because consent is read before the allowance is: a configuration
+      // with no stored consent would stop at that item and never reach the cap state under test.
+      const config = consented({});
+      // In the reserved band an end-of-session batch is still served, so saying that processing
+      // waits for the reset would be false: that state carries its own consequence and recovery.
+      const reserved = reason.includes('held for end-of-session');
       assert.deepEqual(await providerItem({
         config, paths, db, integrityFailed: false,
         deps: { ...itemDeps, env: { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' } },
         options: itemOptions, now: ITEM_NOW,
       }), {
         item: 'provider', status: 'degraded', reason,
-        consequence: 'Temporary guidance is available while source processing waits for the provider.',
-        recovery: 'Wait for the reset at 2026-09-07T00:00:00.000Z or choose another preset with `oboete setup --provider`.',
+        // The reserved band is the one state where the primary still serves something, so it keeps
+        // the clause's own consequence instead of the refused-primary one, and the clause's own
+        // recovery instead of a second copy of it.
+        consequence: reserved
+          ? 'End-of-session summaries still run; ten-turn and retention batches wait for the allowance to reset, and later worker runs retry due sources.'
+          : 'Temporary guidance is available while source processing waits for the provider.',
+        // Exhaustion is not a cap state, so it keeps its own recovery; both cap states now quote the
+        // clause's, which is the one the `allowance` item below quotes as well.
+        recovery: exhaustedAt !== null
+          ? 'Wait for the reset at 2026-09-07T00:00:00.000Z or choose another preset with `oboete setup --provider`.'
+          : reserved
+            ? 'Wait for the reset at 2026-09-07T00:00:00.000Z for the other batches, or switch preset with `oboete setup --provider`.'
+            : 'Wait for the reset at 2026-09-07T00:00:00.000Z or switch preset with `oboete setup --provider`.',
       });
-      assert.deepEqual(allowanceItem(config, db, false, ITEM_NOW), {
+      assert.deepEqual(allowanceItem(config, db, false, ITEM_NOW, ITEM_ENV), {
         item: 'allowance', status: 'degraded',
-        reason: exhaustedAt === null ? 'The daily cap of 150 calls is used up.' : 'The provider reported exhaustion today.',
-        consequence: 'Source processing waits for the allowance to reset; later worker runs retry due sources.',
-        recovery: 'Wait for the reset at 2026-09-07T00:00:00.000Z or switch preset with `oboete setup --provider`.',
+        reason: exhaustedAt !== null
+          ? 'The provider reported exhaustion today.'
+          : reason.replace('daily_cap: ', ''),
+        consequence: reserved
+          ? 'End-of-session summaries still run; ten-turn and retention batches wait for the allowance to reset, and later worker runs retry due sources.'
+          : 'Source processing waits for the allowance to reset; later worker runs retry due sources.',
+        recovery: reserved
+          ? 'Wait for the reset at 2026-09-07T00:00:00.000Z for the other batches, or switch preset with `oboete setup --provider`.'
+          : 'Wait for the reset at 2026-09-07T00:00:00.000Z or switch preset with `oboete setup --provider`.',
       });
       assert.deepEqual(
         { ...db.prepare('SELECT calls, exhausted_at FROM provider_usage').get() },
@@ -1027,6 +1522,42 @@ for (const [name, calls, exhaustedAt, reason] of [
     });
   });
 }
+
+for (const [band, calls, chained, unchained] of [
+  ['spent', 150,
+    'Batches are offered to the fallback chain below; a capped target there shares this allowance.',
+    'Source processing waits for the allowance to reset; later worker runs retry due sources.'],
+  ['reserved', 140,
+    'End-of-session summaries still run on this preset; every other batch is offered to the fallback chain below.',
+    'End-of-session summaries still run; ten-turn and retention batches wait for the allowance to reset, and later worker runs retry due sources.'],
+] as const) {
+  test(`the ${band} allowance says the chain takes the batch only when a target is admitted`, async () => {
+    await withItemDatabase(async (db) => {
+      db.prepare('INSERT INTO provider_usage (utc_day, preset, calls, exhausted_at, reset_at) VALUES (?, ?, ?, ?, ?)')
+        .run('2026-09-06', 'workers-ai', calls, null, ITEM_RESET);
+      // The shared cap refuses the primary's reservation, and an admitted target is offered the
+      // batch instead — `ollama` is uncapped, so it answers; a capped target would refuse at its
+      // own reservation, which is why the chained sentence says "offered" rather than "summarized".
+      const withChain = consented({ preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] });
+      assert.equal(allowanceItem(withChain, db, false, ITEM_NOW, ITEM_ENV).consequence, chained);
+      assert.equal(allowanceItem(configSchema.parse({}), db, false, ITEM_NOW, ITEM_ENV).consequence, unchained);
+    });
+  });
+}
+
+test('an exhausted allowance says the chain takes the batch only when a target is admitted', async () => {
+  await withItemDatabase(async (db) => {
+    db.prepare('INSERT INTO provider_usage (utc_day, preset, calls, exhausted_at, reset_at) VALUES (?, ?, ?, ?, ?)')
+      .run('2026-09-06', 'workers-ai', 1, ITEM_NOW, ITEM_RESET);
+    // `exhausted_at` is per preset, so the chain's next target is unaffected and the worker advances
+    // past `provider_exhausted` (contracts/provider-fallback.md "Advance and stop").
+    const withChain = consented({ preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] });
+    assert.equal(allowanceItem(withChain, db, false, ITEM_NOW, ITEM_ENV).consequence,
+      'Batches are offered to the fallback chain below; a capped target there shares this allowance.');
+    assert.equal(allowanceItem(configSchema.parse({}), db, false, ITEM_NOW, ITEM_ENV).consequence,
+      'Source processing waits for the allowance to reset; later worker runs retry due sources.');
+  });
+});
 
 test('a rejected provider credential consumes one probe and recommends checking credentials', async () => {
   await withItemDatabase(async (db, paths) => {
@@ -1075,7 +1606,7 @@ for (const [name, fetchedAt] of [['an expired', ITEM_NOW - 86_400_000], ['a futu
 
 for (const [name, models, paid, expected] of [
   ['a missing model', ['another-model'], false, {
-    status: 'degraded', reason: 'The configured model is not in the catalog of 1 models fetched 2026-09-06T12:00:00.000Z.',
+    status: 'degraded', reason: 'The configured model is not in the catalog of 1 model fetched 2026-09-06T12:00:00.000Z.',
     consequence: 'Summaries fall back to rule-based until `[observer] model` names a listed model.', recovery: 'Set `[observer] model` to a listed model.',
   }],
   ['paid models', ['chosen-model'], true, {
@@ -1083,7 +1614,7 @@ for (const [name, models, paid, expected] of [
     consequence: 'A paid-only model will fail with provider_paid and fall back to rule-based summaries.', recovery: 'Keep `[observer] model` on a free model.',
   }],
   ['a listed model', ['chosen-model'], false, {
-    status: 'healthy', reason: 'The catalog of 1 models fetched 2026-09-06T12:00:00.000Z includes the configured model.', consequence: '', recovery: '',
+    status: 'healthy', reason: 'The catalog of 1 model fetched 2026-09-06T12:00:00.000Z includes the configured model.', consequence: '', recovery: '',
   }],
 ] as const) {
   test(`a fresh catalog reports ${name}`, async () => {
@@ -1096,3 +1627,181 @@ for (const [name, models, paid, expected] of [
     });
   });
 }
+
+// `model_alias` and `provider_paid` both advance the chain (contracts/provider-fallback.md "Advance
+// and stop"), so a catalog verdict that predicts rule-based records contradicts an admitted target
+// the same report lists below it.
+for (const [name, models, paid, consequence] of [
+  ['an unlisted model', ['other-model'], false,
+    'The batch is offered to the fallback chain below instead of the configured model.'],
+  ['a paid-only model', ['chosen-model'], true,
+    'A paid-only model fails with provider_paid, and the batch is offered to the fallback chain below.'],
+] as const) {
+  test(`${name} with an admitted target says the chain takes the batch`, async () => {
+    await withItemDatabase((db) => {
+      runtimeStateSet(db, 'workers_ai_catalog', JSON.stringify({
+        accountId: 'account', models, defaultModelPresent: false, hasPaidOnlyModels: paid, fetchedAt: ITEM_NOW,
+      }), ITEM_NOW);
+      const config = consented({ model: 'chosen-model', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] });
+      assert.equal(catalogItems(config, db, false, ITEM_ENV, ITEM_NOW)[0].consequence, consequence);
+    });
+  });
+}
+
+test('a consent record that no longer matches makes every item stop promising the chain', async () => {
+  await withItemDatabase((db) => {
+    db.prepare('INSERT INTO provider_usage (utc_day, preset, calls, exhausted_at, reset_at) VALUES (?, ?, ?, ?, ?)')
+      .run('2026-09-06', 'workers-ai', 150, null, ITEM_RESET);
+    // One hash covers the primary and the whole chain, so a stored record that stopped matching
+    // stops every target: `consent_changed` is in `CHAIN_STOPS`, and no target is reached at all.
+    const stale = configSchema.parse({
+      observer: { preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] },
+      consent: { hash: 'not-the-tuple', accepted_at: ITEM_NOW },
+    });
+    assert.equal(allowanceItem(stale, db, false, ITEM_NOW, ITEM_ENV).consequence,
+      'Source processing waits for the allowance to reset; later worker runs retry due sources.');
+    // And the matching record still gets the handoff sentence, so the check is not simply refusing.
+    const fresh = consented({ preset: 'workers-ai', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] });
+    assert.equal(allowanceItem(fresh, db, false, ITEM_NOW, ITEM_ENV).consequence,
+      'Batches are offered to the fallback chain below; a capped target there shares this allowance.');
+  });
+});
+
+test('an unresolvable primary makes every item stop promising the chain', async () => {
+  await withItemDatabase((db) => {
+    db.prepare('INSERT INTO provider_usage (utc_day, preset, calls, exhausted_at, reset_at) VALUES (?, ?, ?, ?, ?)')
+      .run('2026-09-06', 'workers-ai', 150, null, ITEM_RESET);
+    runtimeStateSet(db, 'workers_ai_catalog', JSON.stringify({
+      accountId: 'account', models: ['other-model'], defaultModelPresent: false, hasPaidOnlyModels: false,
+      fetchedAt: ITEM_NOW,
+    }), ITEM_NOW);
+    // `resolveModel` refuses a primary with no model of its own, and `resolveObserveModel` turns
+    // that into a run with no model *and no targets* (contracts/provider-fallback.md "What the
+    // chain does not do"), so an admitted target here is not a reachable one.
+    const config = configSchema.parse({
+      observer: { preset: 'workers-ai', model: '  ', fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] },
+    });
+    assert.equal(allowanceItem(config, db, false, ITEM_NOW, ITEM_ENV).consequence,
+      'Source processing waits for the allowance to reset; later worker runs retry due sources.');
+    assert.equal(catalogItems(config, db, false,
+      { OBOETE_CF_ACCOUNT_ID: 'account', OBOETE_CF_API_TOKEN: 'test-token' }, ITEM_NOW)[0].consequence,
+      'Summaries fall back to rule-based until `[observer] model` names a listed model.');
+  });
+});
+
+test('a consent record that no longer matches collapses the chain instead of calling a target ready', async () => {
+  await withItemDatabase(async (db) => {
+    // One hash covers the primary and the whole chain, so a record that stopped matching stops
+    // every target before any is reached. A per-entry verdict under that is the report's largest
+    // untruth: `admitted as remote and ready` for a target the worker will never attempt.
+    const stale = configSchema.parse({
+      observer: { preset: 'workers-ai', cost_policy: ['free-tier', 'local', 'remote'],
+        fallback: [{ preset: 'ollama', model: 'qwen3:8b' }, { preset: 'nim' }] },
+      consent: { hash: 'not-the-tuple', accepted_at: ITEM_NOW },
+    });
+    const env = { ...ITEM_ENV, OBOETE_NIM_API_KEY: 'k' };
+    const items = fallbackItems(stale, db, false, env, ITEM_NOW);
+    assert.deepEqual(items.map((entry) => entry.item), ['fallback']);
+    assertBroken(items[0], 'degraded', '2 entries are configured', 'setup --accept-egress');
+
+    // And the matching record still reports each target, so the check is not simply refusing.
+    const fresh = consented({ preset: 'workers-ai', cost_policy: ['free-tier', 'local', 'remote'],
+      fallback: [{ preset: 'ollama', model: 'qwen3:8b' }, { preset: 'nim' }] });
+    assert.deepEqual(fallbackItems(fresh, db, false, env, ITEM_NOW).map((entry) => entry.item),
+      ['fallback:1', 'fallback:2']);
+  });
+});
+
+test('a stale consent record with a configured chain fails the report instead of passing it', async () => {
+  await harness(async (context) => {
+    const observer = { preset: 'workers-ai', cost_policy: ['free-tier', 'local'],
+      fallback: [{ preset: 'ollama', model: 'qwen3:8b' }] };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"', 'cost_policy = ["free-tier", "local"]',
+      '', '[[observer.fallback]]', 'preset = "ollama"', 'model = "qwen3:8b"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    assert.equal(await context.doctor(['--json']), 0, context.output);
+
+    // Only a `degraded` item moves the exit, and before the chain checked consent at its own seam
+    // this configuration reported no degraded item at all: a report that exits 0 while no summary
+    // will ever be written is the failure this replaces. No probe is involved.
+    writeFileSync(context.paths.config,
+      readFileSync(context.paths.config, 'utf8').replace(hash, 'not-the-tuple'));
+    assert.equal(await context.doctor(['--json']), 1, context.output);
+    assertBroken(context.item('fallback'), 'degraded', 'one entry is configured',
+      'setup --accept-egress');
+    assertBroken(context.item('provider'), 'degraded', 'no longer matches this configuration',
+      'setup --accept-egress');
+  });
+});
+
+test('a stale consent record is reported with no chain configured at all', async () => {
+  await harness(async (context) => {
+    // `[[observer.fallback]]` is empty by default, so a check that lives only in `fallbackItems`
+    // answers for the minority of configurations. The worker refuses this one too: consent is read
+    // in `initialProviderFailure` whether or not a chain exists.
+    const observer = { preset: 'workers-ai' };
+    const hash = consentHash(consentTuple(configSchema.parse({ observer }), context.env));
+    writeFileSync(context.paths.config, [
+      '[observer]', 'preset = "workers-ai"',
+      '', '[consent]', `hash = "${hash}"`, `accepted_at = ${context.now}`, '',
+    ].join('\n'));
+    chmodSync(context.paths.config, 0o600);
+    assert.equal(await context.doctor(['--json']), 0, context.output);
+
+    writeFileSync(context.paths.config,
+      readFileSync(context.paths.config, 'utf8').replace(hash, 'not-the-tuple'));
+    assert.equal(await context.doctor(['--json']), 1, context.output);
+    assertBroken(context.item('provider'), 'degraded', 'no longer matches this configuration',
+      'setup --accept-egress');
+    assert.deepEqual(context.report().items.filter((entry) => entry.item.startsWith('fallback')), [],
+      'no chain is configured, so no chain item exists to carry this');
+  });
+});
+
+test('a Workers AI chain target is checked against the cached catalog, not called ready', async () => {
+  await withItemDatabase((db) => {
+    // `catalogItems` validates the primary only, and returns nothing at all when another preset is
+    // primary, so an entry naming a model this account does not serve used to read "admitted as
+    // free-tier and ready" while the worker answers `model_alias` on it.
+    const config = consented({ preset: 'workers-ai', model: 'primary-model',
+      cost_policy: ['free-tier'], fallback: [{ preset: 'workers-ai', model: 'chosen-model' }] });
+    const listed = (models: string[], fetchedAt = ITEM_NOW, accountId = 'account'): DoctorItem => {
+      runtimeStateSet(db, 'workers_ai_catalog', JSON.stringify({
+        accountId, models, defaultModelPresent: false, hasPaidOnlyModels: false, fetchedAt,
+      }), ITEM_NOW);
+      return fallbackItems(config, db, false, ITEM_ENV, ITEM_NOW)[0];
+    };
+    const ready = /admitted as free-tier and ready/;
+
+    // No cache at all is silent: the worker fetches the catalog only for a workers-ai *primary*
+    // (issue #250), so an item telling this user to run `oboete observe` would never come true.
+    assert.match(fallbackItems(config, db, false, ITEM_ENV, ITEM_NOW)[0].reason, ready);
+
+    assertBroken(listed(['other-model']), 'warning', 'not in the cached catalog of 1 model',
+      'Point the entry at a listed model');
+    // The three caches that may not refuse a model, each silent for its own reason: one the worker
+    // replaces because it is too old, one dated in the future, one belonging to another account.
+    assert.match(listed(['other-model'], ITEM_NOW - CACHE_MS).reason, ready);
+    assert.match(listed(['other-model'], ITEM_NOW + 1).reason, ready);
+    assert.match(listed(['other-model'], ITEM_NOW, 'other-account').reason, ready);
+    // And the other direction, so the check cannot pass by doubting everything.
+    const ok = listed(['chosen-model']);
+    assert.equal(ok.status, 'healthy', ok.reason);
+  });
+});
+
+test('a cost-policy exclusion says the chain continues when another target is admitted', async () => {
+  await withItemDatabase(async (db, paths) => {
+    void paths;
+    const config = consented({ preset: 'workers-ai', cost_policy: ['free-tier', 'local'],
+      fallback: [{ preset: 'nim' }, { preset: 'ollama', model: 'qwen3:8b' }] });
+    const items = fallbackItems(config, db, false, { ...ITEM_ENV, OBOETE_NIM_API_KEY: 'k' }, ITEM_NOW);
+    const excluded = items.find((entry) => entry.item === 'fallback:1')!;
+    assert.equal(excluded.consequence,
+      'This target is never attempted; a failure ahead of it passes to the targets the policy does admit.');
+  });
+});

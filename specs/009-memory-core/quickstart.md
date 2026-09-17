@@ -1000,3 +1000,1387 @@ file is named, the test is in `test/unit/resident-worker.test.ts`.
 14. `a maintenance epoch purges an expired secret with no batchable work`.
 15. `a config malformed at startup exits as config_changed before loading the worker config`.
 16. `a batch_error ends a run after one attempt, including at the deadline in either mode`.
+
+## E9 — bounded consented provider fallback chain (T037, T038, T039, T048)
+
+2026-09-15, branch `009-t048-fallback-chain`. The binding spec is
+`contracts/provider-fallback.md`, written at `73568de6` before any implementation, after four
+orientation reads whose findings it records: consent covered only the primary preset, the
+destination label is an authorization that `reconcilePendingDestinations` re-validates per pass,
+`outcomeForSource` already defers a failed batch's sources with a retry time, and `CONSTITUTION.md`
+requires an explicit spending policy. The same commit retires "M1 enables exactly one observer
+preset at a time" in `specs/007-oboete-m1-alpha/contracts/observer.md`. Security-scoped work
+(consent, credentials, egress), so it was implemented in this session rather than delegated.
+
+- Gate: `npm run build`, `npm run typecheck`, `npm run lint` and `semgrep scan --config auto`
+  (over the nine changed source files) exit 0 with 0 findings; `markdownlint-cli2` reports 0 issues;
+  `scripts/dco-check.mjs main HEAD` passes all six commits. `npm test` is green on Node 24.16.0 and
+  22.16.0 at the final head: 1537 tests, 1535 pass, 0 fail, 2 skipped, `NPM_TEST_EXIT=0` on both
+  (`/var/tmp/oboete-009-t048/t048-full-v{24.16.0,22.16.0}-r7.log`). One earlier run failed
+  `viewer-server.test.ts`'s SC-011 bound on Node 24 with `took 3235 ms`; the file passes 8/8 twice
+  when run alone and this branch touches no viewer code — the test starts its clock before the
+  stream is open, filed as #237.
+- Two keys, one default: `[observer] fallback` is at most three ordered `{preset, model}` targets
+  and `[observer] cost_policy` defaults to `["free-tier", "local"]`. Every configuration that
+  exists today parses to an empty admitted chain, so `consentHash` appends nothing and the literal
+  digest already pinned in `test/unit/config.test.ts` (`WORKERS_AI_CONSENT`) still matches — no
+  install is asked to re-consent on upgrade. The opposite direction is pinned beside it: one
+  admitted target changes the digest, and a listed target the policy excludes does not.
+- The chain is a loop around the existing call and settlement in `processBatch`, not a new send
+  path. Everything before it still happens once — privacy revalidation, the destination reconcile,
+  the request build, the final detector check, `markRequest` — so one batch is one payload and its
+  sources settle once. `observation_batches.provider_attempts` counts the reservations the chain
+  took, which nothing reads as a bound.
+- Packed CLI, 2026-09-15, temp home with no Workers AI credentials, a `ollama` target and a
+  policy-excluded `nim` target (`/var/tmp/oboete-009-t048/packed-receipt/`): `setup --accept-egress`
+  displays "Fallback targets, tried in this order only after a target fails" with the ollama target
+  and its sensitivity classes, and does not display the excluded one; `oboete doctor` then reports
+  `fallback:1 healthy  Target 1 is ollama with model qwen2.5:7b, admitted as local and ready`,
+  `fallback:2 warning  … which the cost policy does not admit`, and a `provider degraded` whose
+  consequence reads "every batch is summarized by the fallback chain below" rather than the
+  rule-based sentence — the uncredentialed primary is a failed target, not a run without a provider.
+- Measured, not asserted: a failing target that already answered does not spend a second
+  allowance. The `unusable_output` case takes two reservations on one target (llm.ts's own retry)
+  and makes zero requests to the next host; the three-target success case takes exactly three, one
+  per target.
+
+### E9 verification
+
+Numbered against the contract's list. All in `test/unit/provider-fallback.test.ts` unless named
+otherwise.
+
+1. `an empty chain leaves the consent hash exactly where it was, and one target moves it`
+   (`config.test.ts`) — against the literal digest, with the one-target half beside it.
+2. `resolveModel carries the admitted chain and refuses one it cannot use` (`providers.test.ts`)
+   and `a fallback chain the resolver refuses is reported at its position and on the provider item`
+   (`doctor.test.ts`)
+   — a `local` primary with a `remote` entry is `chain_unusable` at the resolve, and the run has no
+   provider rather than a crash.
+3. `a local target is never given a batch a remote target could not have been given`.
+4. `admission drops what the policy excludes and refuses what widens egress` (`config.test.ts`) —
+   the same fixture one key apart: default policy admits nothing remote, `remote` in the policy
+   admits it in written order.
+5. `admission drops what the policy excludes and refuses what widens egress` covers the
+   `model_required` position and the `chain_without_primary` case.
+6. The same test's last block: the primary repeated is dropped, a second model on the same preset
+   is its own target.
+7. `an exhausted primary hands the same batch to the next admitted target` — `exhausted_at` is
+   per-preset, so the exhausted host receives nothing at all.
+8. `the daily cap advances past every capped target and stops at none of the local ones` —
+   `workers-ai` and `nim` both refuse at their own reservation, `ollama` answers.
+9. `a target with no credentials is attempted, answers without a request and the chain moves on`.
+10. `a consent change between targets stops the chain before the next host`.
+11. `an unusable answer stops the chain instead of spending a second allowance on it`.
+12. `every target failing settles once, keeps the worst reason and leaves the source retryable` —
+    `provider_exhausted` outranks `unreachable` in `DEGRADED_PRECEDENCE`, the source is `waiting`
+    with a non-null `retry_after`, and `processing_attempts` rose by one for the whole chain.
+13. `a target that answers after two failures applies its output like any other`.
+14. `the fallback chain is reported per target without a second provider request`
+    (`doctor.test.ts`) — one provider request with a three-target chain, `fallback:1` healthy and
+    `fallback:2`/`fallback:3` warning, and the same test shows that admitting a paid class stops
+    the stored consent from matching.
+15. `a primary with absent credentials is a failed target, not a run without a provider` — the
+    destination label comes from the primary's egress class, so the loop is reached and the local
+    target applies. Names the ceiling the contract retired.
+16. `the reason a stop ended the chain on outranks a more severe reason behind it` — `auth_failed`
+    then `consent_changed`; the batch keeps the consent reason and both attempt lines are logged.
+17. `a target whose answer is refused for its language is still named in the log` — the ollama
+    target answers twice in the wrong language, and its own `language_mismatch` line is present.
+18. `a chain the configuration cannot use blocks neither capture-only nor rewiring`
+    (`setup.test.ts`), and the `--remove` leg of
+    `a destination that would strip the chain of its admission is refused before anything is
+    written`.
+19. `the second of two identical fallback entries is reported as covered, not as ready`
+    (`doctor.test.ts`), and the `preset = "none"` leg of `a fallback chain the resolver refuses is
+    reported at its position and on the provider item`.
+
+Bot round on PR #238 at head `011b1b2e`: all check-runs completed, `dco`, `secrets`, `check`,
+`engine (22.16.0)`, `engine (24.x)`, `semgrep-cloud-platform/scan`, SonarCloud (gate passed),
+GitGuardian and Socket green; Codex code review and security review both completed with no
+findings. Fixed from the four that did report: CodeQL's two high `js/incomplete-url-substring-
+sanitization` alerts on the test helper's `url.includes(<host>)` dispatch (now `new URL(...).host`
+equality), Codacy's `Semgrep unsafe-dynamic-method` on the `CHAIN_MESSAGES[code]` lookup (now a
+`switch`, and the table is gone), Codacy's `Lizard_nloc-medium` on `fallbackTargetItem` (53 → 43
+NLOC, measured with `pipx run lizard -l typescript`), SonarCloud's `typescript:S7755`
+(`attempts.at(-1)`), and two CodeRabbit findings: an `agent-cli` target was reported ready although
+`readCredentials` calls an agent login present without checking it, and a capped target was reported
+ready with the shared allowance spent — which `allowanceItem` only reports when the primary is
+capped. Declined: CodeRabbit's "apply `cost_policy` before validating an excluded target", because
+it would move a hard privacy refusal behind a policy flag (see "Admission" rule 5).
+
+Findings from the review round, all fixed in the same branch: the setup gate refused
+`--remove`/`--provider none`/a bare run (P2, both reviewers); a stop's reason was hidden behind a
+more severe earlier reason (P2); a `language_mismatch` target had no attempt line; doctor numbered
+`chain_without_primary` as "fallback target 0" and reported a duplicated entry as ready; admission
+rule 4 let an `egress: 'none'` primary admit a remote target (latent); the consent screen displayed
+a local target's full capability rather than what the remote batch carries; and the dead
+`?? outcome.reason` / `?? outcome.detail` branches hid the reason/detail pairing `loggableDetail`
+depends on. Rejected: moving the three-target bound out of the configuration schema, which would
+make one key's arity behave unlike every other malformed-config error.
+
+Setup's side of T037 is `adding a fallback target refuses --yes and is displayed before it is
+accepted` (`setup.test.ts`): a target written in after consent was stored refuses `--yes` with exit
+2, prints the target's host before it is accepted, and leaves the stored hash alone until
+`--accept-egress` re-records it. `the display names every fallback target the consent hash binds`
+(`consent.test.ts`) pins that a policy-excluded target is not displayed as a destination.
+
+### E9 follow-up — the second bot round, and the shape it opened
+
+Head `2129c357` drew three P2 findings from Codex's PR reviewer, all three confirmed against the
+source and the contract before anything was changed, and all three fixed here. Reading them opened
+one shape with five instances, so the fix is the shape, not the three lines:
+
+1. **A day-wide exhaustion flag answered for one preset.** `usageEstimate` returned
+   `exhausted: MAX(exhausted_at) over every capped preset`, and four single-preset callers read it:
+   `fallbackAllowanceItem` (Codex's finding), plus `providerCapItem`, `doctorReserve` and
+   `allowanceEstimateItem`. `doctorReserve`'s was not cosmetic — it refused the probe's own
+   reservation, so `oboete doctor --probe-provider` silently never called a primary that had its
+   full allowance. The field is gone; `presetExhaustedAt(db, preset, now)` is exported from
+   `src/observer/reservation.ts` and is the one reader of the stamp, including inside
+   `reserveAttempt`, which had its own copy of the query.
+2. **Doctor reported a fallback target ready under a primary the resolver refuses.** `admittedChain`
+   validates the entries only, so `preset = "ollama"` with no `[observer] model` (its catalog
+   default is empty) reported `fallback:1 … admitted as local and ready` while the worker degraded
+   every batch with `no_provider`. Both surfaces now ask `resolveModel`, the worker's own resolver:
+   the chain report replaces its per-target items with one degraded item, and the `provider` item
+   carries the same sentence — which is the half that matters when no chain is configured at all,
+   because `fallbackItems` returns nothing then. The same guard closes a case the reviewer did not
+   name: a chain entry that widens egress takes the primary down with it, so a probed
+   `provider healthy` used to contradict a `fallback degraded` in the same report.
+3. **An `agent-cli` target spawned the paid child process without a reservation.**
+   `summarizeWithAgentCli` never called `ctx.reserve`, so the batch stayed `pending` through the
+   call. `adoptPendingBatches` takes a `pending` batch over with no wait at all, while
+   `reclaimStale` fences a `running` one for 120 s — so a worker that died with the CLI in flight
+   had its subscription spent again at once. It now takes the same `prepareProviderReservation` the
+   HTTP targets take, which also gives it their second consent boundary. Two unit tests pinned the
+   defect as an invariant (`reserve: () => assert.fail('agent-cli must not reserve')`); the contract
+   never exempted an uncapped target from step 3, so the pins were stale and are now the opposite
+   assertion.
+4. **The fence those three lean on was measured from the wrong moment.** `claimed_at` was stamped
+   once, at batch creation, and `adoptPendingBatches` only `COALESCE`s it, so `reclaimStale`'s 120 s
+   was already spent for any batch created more than two minutes before its attempt — for every
+   preset, not just `agent-cli`. `reserveAttempt` now restamps it with the attempt. Without this the
+   contract sentence added for item 3 would have been false.
+
+Deliberately not changed: the `fallback:N` items say nothing about consent, because consent is one
+hash over the primary and the whole chain. (**Retired two rounds later** — there is no `consent`
+item in the report at all, so that silence left a stale record unnamed: the chain now collapses into
+one `fallback` item and the `provider` item carries the same sentence. See "the consent check moves
+to the seam that already collapses the chain" below.) Filed instead of fixed: doctor calls the shared cap spent at
+`remaining === 0`, while `reserveAttempt` already refuses `ten_turns` and `retention` at
+`DAILY_CAP - SESSION_END_RESERVE`, so between 140 and 150 calls doctor reports an allowance the
+worker will not grant. That is pre-existing, it is a wording decision about a trigger doctor cannot
+see, and it is issue #240.
+
+- Gate at this head: `npm run typecheck`, `npm run lint`, `markdownlint-cli2` and
+  `semgrep scan --config auto` over the three changed source files all exit 0 with 0 findings.
+  `npm test` green on Node 24.16.0 and on Node 22.23.1 (the 22.x line installed here; CI's
+  `engine (22.16.0)` job covers the engines floor): 1547 + 280 tests, 0 fail, 2 skipped,
+  `NPM_TEST_EXIT=0` on both, rerun at the review round's head.
+- Each of the five was written as a failing test first, and each failed for its own reason before
+  the fix. The first seven were run red before the fixes landed; the last three (`a reservation
+  restamps claimed_at…`, `the provider item names a primary the resolver refuses…`, and the extended
+  chain case) were confirmed red afterwards by reverting the two product lines, rebuilding and
+  rerunning them — `claimed_at` came back as the creation stamp, and the provider item came back
+  `unverified` with "Not probed this run" while doctor exited 0. The tests:
+  `one capped preset's exhaustion is neither another's nor the shared allowance`,
+  `a primary the resolver refuses leaves no fallback target to call ready`,
+  `the provider item names a primary the resolver refuses when no chain reports it`
+  (`doctor.test.ts`); `agent-cli is uncapped, consented, reserves its attempt and validates the CLI
+  text as observer JSON`, `a refused reservation stops agent-cli before the paid child process
+  runs`, `a consent change after the agent-cli reservation stops the chain before the child
+  process` (`llm.test.ts`); `an agent-cli target reserves its attempt before the paid child process
+  runs` (`provider-fallback.test.ts`); `a reservation restamps claimed_at so the reclaim timer runs
+  from the attempt` and `usageEstimate reports the shared capped calls and reset; exhaustion stays
+  per preset` (`callpolicy.test.ts`).
+- The worker-level test for item 3 was green on Node 24 and stalled on Node 22 with
+  `Promise resolution is still pending but the event loop has already resolved`, deterministically
+  and in isolation. Not a flake and not a Node difference in the product: the shared agent-CLI spawn
+  stub answered *every* command, so the `git rev-parse` that `updateBatchCitations` runs after a
+  batch applies was handed a scripted CLI reply, and the pass stopped inside `checkpointBatch`
+  without reporting anything. Node 24 hid it by delivering the stream events in an order that let
+  the stub's failure land inside the `catch`. The stub now fakes only `claude`, `codex` and `grok`
+  and hands every other command to the real `spawn`, which is what the two unit tests using it
+  always assumed.
+- One existing fixture was relying on the second defect: `a fallback target is not called ready when
+  its allowance is gone or its login is unchecked` configured `preset = "agent-cli"` with no model,
+  which the resolver refuses, so its capped-target warning was only reachable while doctor ignored
+  the primary. It now names a model, which is what makes the uncapped-primary case it was written
+  for real.
+
+### E9 follow-up — the correctness review of the fixes
+
+Eleven findings on the three fix commits. Seven taken, two rejected on their premise, one already
+done, one deliberately left as an issue.
+
+Taken:
+
+- Three more `usageEstimate().exhausted` readers than Codex named, which is the sweep result above
+  and was already in the fix. Beyond it: `providerCapItem` and `doctorReserve` still kept the stamp
+  behind `PRESET_CATALOG[preset].capped`, while `reserveAttempt` reads it before it looks at the
+  cap. Both now read it for any preset, which is what the fix commit's own title claims. Measured
+  rather than assumed: with only `providerCapItem` reverted the probe is *still* stopped, by
+  `doctorReserve`, but reported as "Provider reservation refused" instead of as the exhaustion it
+  is — so both halves earn their place. Reachable only through a 429 carrying body code 3036
+  (`classifyApiError`), which in practice is Workers AI, so this is alignment rather than a live
+  bug. Test: `an uncapped preset that reported exhaustion is not probed and is not called healthy`.
+- `presetExhaustedAt` dropped a guard the doctor helper it replaced had: `numberValue` reads a
+  non-numeric `exhausted_at` as the epoch, so a row that was never stamped would have been reported
+  as "exhausted at 1970-01-01". It now returns null unless the value is a number or a bigint.
+- The `reset_at > now` half of that function had no test that could tell it from `true`, because
+  both existing pins cross the UTC day and are filtered out by `utc_day` first. `a same-day stamp
+  whose reset has already passed is not exhaustion` seeds the row the clause exists for and asserts
+  the reservation is granted.
+- The stub answered an overflow spawn with `assert.fail` inside a stream handler — the same
+  asynchronous-throw channel that stalled the Node 22 run. Overflow now comes back as a failed
+  child through `runChild`'s own `process_failed`, and the count is what a test asserts.
+- `resolverRefusal` borrowed only `resolveModel`'s throw and discarded its result, so
+  `providerProbeReadiness` still re-derived `(config.observer.model ?? defaultModel).trim()` by
+  hand — two copies of one rule. It is now `resolvedObserver`, returning the resolved model for
+  `configuredProvider` to pass down, in the same `kind`-tagged shape the file already uses.
+- Extracting that helper had left `fallbackItems`'s own paragraph attached to it, stacking two doc
+  blocks and leaving the exported function with none. Moved back.
+- The recovery line said to set `[observer] model` to "a model the preset lists", which `agent-cli`
+  and `ollama` do not do. It now says "a model that preset accepts".
+
+Rejected:
+
+- "`providerCapItem`'s `estimate` parameter is only read for `resetAt`, a pure function of `now`" —
+  it is also read for `estimate.remaining <= 0`, which is the daily-cap branch.
+- "`presetExhaustedAt` should use `prepared(db, sql)`" — `src/db/statements.ts` is used across
+  `src/sync/`, and no module in `src/observer/` or `src/worker/` imports it. Adopting it for one
+  function would leave `reservation.ts` inconsistent with itself, and the reader runs once per
+  attempt, not once per row.
+
+Left as an issue rather than fixed: the reviewer's root-cause proposal was to refuse
+`setup --provider ollama|agent-cli` when no model is set. `a chain the configuration cannot use
+blocks neither capture-only nor rewiring` (`setup.test.ts`) asserts exit 0 for exactly that command,
+so selecting a local preset and then naming the model is the specified flow, and doctor saying so is
+the recovery path rather than a regression. What is genuinely odd is that `agent-cli` requires a
+model nothing ever sends — `summarizeWithAgentCli` reads it only as a non-empty gate and
+`runAgentCli` never receives it. Fixing that moves the consent hash, so it is issue #241.
+
+### E9 follow-up — the security review of the fixes
+
+Defensive pass over `f5f766f9~1..62a9e2b9`, scoped to the four places the fixes could have moved an
+authorization: the consent boundary on the agent-CLI path, the restamped fence, the removal of the
+day-wide exhaustion flag, and the new doctor strings. **CLEAR, no P0/P1.** What it grounded, rather
+than what it concluded:
+
+- The agent-CLI path's condition for spawning the child is now `consentOk()` → `reserve()` →
+  `consentOk()`, a strict subset of the old single check, so no input reaches the child under
+  consent the old code refused; a consent change *during* the reservation is newly refused.
+  `LeaseLostError` has no new escape: the worker's throw site is inside the chain loop that
+  `src/worker/observe.ts` already wraps for the HTTP targets, and `doctorReserve` holds no lease, so
+  its only throw is the `SQLITE_BUSY` the item already catches.
+- The restamp cannot produce a concurrent call, a live-lock or a changed pick order, and the
+  deciding inequality is `REQUEST_TIMEOUT_MS` (60 s) < `RECLAIM_AFTER_MS` (120 s): an in-flight call
+  always finishes inside its own new window. A dead worker restamps nothing, because the restamp is
+  `WHERE owner_token = ?` after `assertLease` while `reclaimStale` takes `owner_token IS NOT ?`.
+  `pendingBatches` reads only `pending`, and the one `running → pending` path writes `claimed_at`
+  itself, so restamped values never enter that queue's order.
+- Dropping the day-wide flag removed *over*-refusal, not a refusal: it let one preset's stamp refuse
+  another's. `reserveAttempt` was per-preset before the change, so doctor moved to the worker's rule
+  and not the reverse. The review's own P2 — `doctorReserve` and `providerCapItem` still reading the
+  stamp below the `capped` gate — was the correctness round's finding too, and `62a9e2b9` closes it.
+- Nothing from `resolveModel` can carry a credential into a report: it throws only
+  `ProviderConfigError`, interpolating a zod-enum preset name or an integer position, and
+  `admittedChain` is total so there is no third path. Doctor reasons reach stdout and `--json`
+  only — `src/doctor.ts` logs `{ exit, degraded }` and never the reason text.
+
+Two nits and two pre-existing observations, none blocking:
+
+- `src/work.ts` and `src/why.ts` order checkpoint decisions by `claimed_at DESC`, which the restamp
+  makes further from settle order than it already was (`reclaimStale` restamped too). Nothing in
+  `test/` covers either query today, so moving a sort key blind is not the trade: issue #242 carries
+  the fix and the fixture it needs.
+- The new number/bigint guard flips an unreachable state from fail-closed to fail-open.
+  `provider_usage` is a `STRICT` table with an `INTEGER` column and `recordExhausted` is its only
+  writer, so the direction is moot; the comment now says so instead of the code branching on it.
+- Pre-existing and already filed: doctor ignores `SESSION_END_RESERVE` (#240, which now also records
+  that `--probe-provider` can spend from that reserve), and `fallbackTargetItem` echoes the user's
+  own configured model into `--json`.
+
+### E9 follow-up — the session-end reserve, found three times
+
+`SESSION_END_RESERVE` is 10 of `DAILY_CAP`'s 150 calls, and `reserveAttempt` refuses a `ten_turns`
+or `retention` reservation from 140 calls on so an end-of-session summary is still possible. No
+doctor surface knew that: `providerCapItem`, `fallbackAllowanceItem` and `allowanceEstimateItem` all
+waited for `remaining === 0`, and `doctorReserve` used the same threshold, so between 140 and 150
+calls doctor reported "Estimated 8 of 150 calls remaining" and a capped target as ready while the
+worker refused every batch that was not a session end — and `--probe-provider`, the one doctor
+caller that takes a real reservation, could spend from the ten held calls.
+
+It was filed rather than fixed at first (#240), on the grounds that the wording was a decision about
+a trigger doctor cannot see. Three independent finders changed that: this session's own sibling
+sweep, the defensive security review, and CodeRabbit on the pushed head. It is also the same shape
+`2129c357` closed for a fallback target — a surface calling something ready that cannot be
+attempted — which is this branch's subject. So it is fixed here, and doctor does not need the
+trigger to be accurate: below the reserve, only an end-of-session batch is served, and that is what
+the items now say. `sharedAllowance` is the one reader of the band and `allowanceClause` the one
+sentence the two allowance surfaces share; `doctorReserve` refuses in the band for the same reason
+`reserveAttempt` does.
+
+- `a capped target is warned while the last calls are held for end-of-session batches` pins both
+  sides of the boundary — one call below the reserve both surfaces are still healthy, and at the
+  reserve both report it. That is the clean red: `healthy` → `degraded` with the threshold reverted.
+- `the session-end reserve stops a doctor probe without consuming another call` is a third row on
+  the existing table beside `provider exhaustion` and `the daily cap`, pinning the exact sentence
+  and that `provider_usage.calls` does not move. Its red is indirect — with the threshold reverted
+  the fixture falls through to the probe and fails on its missing consent hash rather than on the
+  band — so the boundary test above is the behavioural pin and this row is the string and no-spend
+  pin.
+- Gate at this head: `npm test` green on Node 24.16.0 and 22.23.1, 1549 + 280 tests, 0 fail, 2
+  skipped; typecheck, lint, markdownlint, `semgrep scan --config auto` and
+  `pipx run lizard -l typescript -T nloc=50 src/doctor/provider.ts` all clean.
+
+The adversarial half of the security gate ran four attack lenses over the same range with two
+refuters each, and **none of its ten findings survived refutation** — including two that named this
+same reserve band, both refuted as pre-existing rather than introduced, which is what the record
+above says too. #240 stays open only for the wording of the primary `allowance` item's healthy line,
+which still quotes the raw remainder.
+
+### E9 follow-up — the third bot round
+
+Two more P2s from Codex on the pushed head, both taken.
+
+- **The reserved band reused the spent state's consequence.** Folding `reserved` into the branch
+  that already existed meant `oboete doctor` said "Source processing waits for the allowance to
+  reset" while end-of-session summaries were still running — false for exactly the batches the
+  reserve exists to protect. That was a judgement call made in the previous commit (the reason line
+  carries the nuance, so let the consequence stand) and the reviewer was right that it does not:
+  each of an item's three lines has to be true on its own. `allowanceClause` now returns all three,
+  and the reserved state says that end-of-session summaries still run and that the reset is what the
+  other batches wait for.
+- **A duplicate entry was told to widen its cost policy.** `fallbackTargetItem` reported one
+  combined "the cost policy does not admit or a nearer target already covers" for both of the
+  un-admitted cases, and recommended adding the cost class — which cannot make a duplicate runnable,
+  and which the entry usually already has. The contract's Diagnostics had asked for the two verdicts
+  apart since it was written. `admittedChain` now returns a `ChainVerdict` per written entry
+  (`admitted` / `covered` / `excluded`), because it is the function that knows which branch dropped
+  the entry; doctor reads it instead of matching admitted targets back to entries, which deletes the
+  `unclaimed`/`findIndex`/`splice` dance the item used to do. A duplicate is told to remove the entry
+  or point it elsewhere, and its recovery is pinned not to mention `cost_policy` at all.
+
+Red before the fix, by reverting the two branches: the duplicate's recovery still named
+`cost_policy`, and the reserved band still claimed all processing waits. Gate at this head:
+`npm test` green on Node 24.16.0 and 22.23.1 (1549 + 280, 0 fail, 2 skipped), typecheck, lint,
+markdownlint, semgrep and lizard clean.
+
+One process note worth keeping: restoring the two reverted branches by hand swapped the `spent` and
+`reserved` texts, which the suite caught as three failures — including a row that had been green
+before the revert. A revert-to-verify-red is only safe with the suite rerun after the restore, not
+just after the fix.
+
+### E9 follow-up — the fourth bot round
+
+Two more P2s, both taken, and both the same defect family one axis further out.
+
+- **Two `agent-cli` entries with different models were two targets.** Nothing sends the model —
+  `summarizeWithAgentCli` reads it only as a non-empty gate and `runAgentCli` never receives it — so
+  both entries launch the identical paid call, and an advancing failure such as `timeout` on the
+  first pays the subscription twice for one payload. That is the shape US7 scenario 2 forbids, and
+  it is the same paid-double-spend the first round's third finding was about, reached through
+  admission instead of through the reservation. `identityOf` now identifies an `agent-cli` target by
+  the command line tool, so the second entry is `covered`; the contract's Admission section says so.
+  The other way to close it, sending the model to the CLI, widens what oboete asks of the
+  subscription and stays issue #241.
+- **A refused primary still claimed processing waits.** `daily_cap` and `provider_exhausted` both
+  *advance* the chain, so `FALLBACK_CONSEQUENCE` contradicted the worker and the healthy target
+  reported below it in the same report. `afeca975` had already made exactly this conditional for the
+  uncredentialed primary; `providerCapItem` never got it. `refusedPrimaryConsequence` is now the one
+  place that decides, and the credentials branch reads it too, so the two cannot disagree.
+
+Red before the fix: `admission drops what the policy excludes and refuses what widens egress`
+reported `verdicts: ['admitted', 'admitted']` with two `agent-cli` targets, and `a refused primary
+says the chain is offered the batch, not that processing waits` got the "source processing waits"
+consequence. Restoring after that check was done by copying the files back rather than by hand,
+after the previous round's hand-restore swapped two branches.
+
+Gate at this head: `npm test` green on Node 24.16.0 and 22.23.1 (1550 + 280, 0 fail, 2 skipped);
+typecheck, lint, markdownlint, semgrep and lizard clean.
+
+Declined in the same round: a stop landing between one target's own internal retries drops that
+target's attempt line, which the finding called the stopped pass's only provider record. It is not —
+the target reached that state by taking a reservation, and `reserveAttempt` writes the
+`provider_usage` row and increments `provider_attempts` in the same committed transaction, which is
+the accounting the contract names. The contract's sentence is about a pass that stops *between*
+targets, and the omission is the same decision the settle path takes explicitly one branch below
+(a line only for `state === 'fallback'` with a reason). `ProviderAttempt.reason` is a
+`DegradedReason` read by `CHAIN_STOPS` and `mostSevereReason`; a cooperative stop is not one, so
+recording it would widen that union with a value neither consumer can rank.
+
+### E9 follow-up — the fifth bot round
+
+One taken, three declined, and the three declines all resolve against this feature's own contract
+rather than against the code.
+
+- **Taken: the agent CLI stub refused a spawn call that omitted `options`.** `cliSpawn` hands its
+  stub to the product through slots typed `typeof spawn` (`deps.spawn` in `src/worker/observe.ts`,
+  `src/doctor.ts` and `src/setup/probe.ts`), and that type permits `spawn(command, args)`. The stub
+  read `options.signal` unconditionally, so such a call would have failed with a `TypeError` in the
+  tests while the same call worked in production — a test-only landmine of exactly the kind the
+  stub's scoping fix was already about. `options` now defaults to `{}`, and a test calls the stub
+  with two arguments. Red before the fix: `TypeError: Cannot read properties of undefined (reading
+  'signal')` at `test/helpers/agent-cli.ts:50`.
+- **Declined: continue the chain after `language_mismatch`.** The finding read `CHAIN_STOPS`, which
+  lists only `consent_changed` and `unusable_output`, and concluded that `language_mismatch` was
+  meant to advance. The set is not the authority — `contracts/provider-fallback.md` "Advance and
+  stop" puts `language_mismatch` in the **stop** row beside `unusable_output`, for the reason the
+  row gives: the request reached a provider, was answered, and spent that target's allowance, and
+  both reasons already own their retries. `language_mismatch` is absent from `CHAIN_STOPS` because
+  it never reaches that branch: `retryOnLanguageMismatch` owns its retry and its own fallback and
+  returns `done`, which the contract states in the same section.
+- **Declined: record the successful target in `attempts`.** Verification 13 pins the opposite —
+  "the observe log carries one line per **failed** target" — and a batch that reaches `applied` is
+  itself the record that a target succeeded. `ProviderAttempt.reason` is a `DegradedReason` read by
+  `CHAIN_STOPS` and `mostSevereReason`; widening it to represent success would hand both consumers a
+  value neither can rank, which is the same objection that declined the fourth round's finding.
+- **Declined as already filed: expose the session-end reserve in `usageEstimate`.** Correct, and
+  already issue #240, which names the same 140-of-150 threshold, the same three doctor surfaces and
+  the same both-sides-of-140 test. It is a wording decision about one number describing two limits,
+  not a threshold change, so it stays a follow-up rather than growing this PR.
+
+**And one the bots did not report.** Running the length oracle over the whole tree and differencing
+the warning set against the PR's own base (`85d48437`) — rather than reading the total, which stayed
+116 in both — showed `runSetup` (`src/setup/setup.ts`) had crossed the bound this feature's own work
+pushed it over: 43 NLOC at the base, 52 at this head, against `-T nloc=50`. It was invisible in the
+total because `writeConfig` in `test/helpers/observe.ts` fell from 52 to 9 in the same PR and
+cancelled it out. The `--provider`/chain-admission decision is now `selectedDestination`, which is
+what the block already was — one decision with its own paragraph of comment — and `runSetup` is back
+to 45. The earlier rounds in this section said "lizard clean" meaning the functions that round
+touched; the differenced set is the claim that actually holds, and it is what the remaining rounds
+state.
+
+Gate at this head: `npm test` green on Node 24.16.0 (1551 + 280, 0 fail, 2 skipped) and 22.23.1
+(same totals); typecheck, lint, markdownlint and `semgrep scan --config auto` clean; lizard warning
+set differenced against `85d48437` adds nothing and drops `writeConfig`.
+
+### E9 follow-up — the sixth bot round
+
+One finding, on the extraction the fifth round produced, and it is real: `oboete setup --provider
+<preset>` over a `[[observer.fallback]]` entry with no model wrote the destination and said nothing.
+Reproduced before changing anything (a `none` primary, an `ollama` entry with no model, then
+`--provider workers-ai`): exit 0, `preset = "workers-ai"` written, and no mention of the entry
+anywhere in the report — while `resolveModel` refuses a chain it cannot resolve, so the primary the
+run had just selected would not run either and every batch would be rule-based.
+
+The reviewer's own fix — refuse on any chain error — is the one thing the contract rules out.
+Verification 18: "`oboete setup --remove`, a bare `oboete setup` and `--provider none` all succeed
+while a chain the configuration cannot use sits in the file; **only** a `--provider` that narrows
+egress under an admitted chain is refused." Refusing `model_required` would block a destination
+selection over a defect the flag did not cause, and it would be the opposite of what the same
+command already does for a missing credential, which `contracts/cli.md` says setup reports "instead
+of failing".
+
+So the destination is still written and the entry is now named, with the sentence that the selected
+preset does not run until it is corrected. Verification 18 gained that case, because the contract
+previously said only what setup refuses and left what it does with the rest to be inferred — which
+is the gap the finding read.
+
+One edge named rather than closed: `admittedChain` returns at the first entry it refuses, so a
+modelless entry ahead of a widening one hides the widening from this check, and such a file can be
+written. Nothing is sent — the resolver refuses the same chain for the same reason, so no target is
+ever built — and the report now says entries after the named one were not examined. Re-deriving the
+admission rules in `setup.ts` to close it would put the same policy in two places, which is the
+shape that drifts.
+
+Red before the fix: the new setup test's `/Fallback target 1 requires an observer model/` did not
+match, with the report printing the consent tuple and the credential steps and nothing else.
+
+Gate at this head: `npm test` green on Node 24.16.0 and 22.23.1; typecheck, lint, markdownlint and
+`semgrep scan --config auto` clean; lizard warning set differenced against `85d48437` unchanged.
+
+### E9 follow-up — the seventh bot round
+
+One P2, taken: the same defect the fourth round fixed, one branch further along. `providerItem`'s
+**post-probe** failure returned `FALLBACK_CONSEQUENCE` unconditionally, so a probe that failed with
+`auth_failed`, `unreachable`, `timeout`, `no_provider`, `provider_paid` or `model_alias` while an
+admitted target sat below it in the same report said "source processing waits for the provider" —
+while the worker hands that batch straight to the target the report calls healthy. The fourth round
+gave the *pre-probe* refusals (credentials, cap, exhaustion) a shared `refusedPrimaryConsequence`;
+the branch that reads `summarizeWithProvider`'s own answer never got it.
+
+`CHAIN_STOPS` decides which it is, and it moved to `src/observer/classify.ts` beside
+`DEGRADED_PRECEDENCE` rather than being copied: the worker's target loop and the doctor item are two
+readers of one rule, and a second copy is the one that drifts. A stop reason keeps the waiting text,
+because a stop really does leave the queue waiting.
+
+Both directions are pinned in one test, and both were measured: with the fix reverted the chained
+assertion fails (`'Temporary guidance is available while source processing waits for the provider.'`),
+and with the branch forced to always chain the `consent_changed` half fails instead.
+
+Also in this round, from the oracle rather than a bot: the new test's
+`replace(/hash = "[^"]*"/u, …)` put a double quote inside a regular expression, and lizard's
+TypeScript reader lost the function boundary there and swallowed 700 lines of `doctor.test.ts` into
+one 588-NLOC span. The differenced warning set is what showed it — the file had no findings at the
+base and two after. Replacing the value instead of matching the line removes the quote and the
+warnings with it. Recorded because the oracle's *silence* over those 700 lines would have been read
+as "under the bound".
+
+Gate at this head: `npm test` 1553 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing.
+
+### E9 follow-up — the eighth bot round
+
+Two P2s, one taken and one declined, and both are about a boundary this PR drew rather than about
+new code.
+
+**Taken: a bare `oboete setup` said nothing about an unusable chain.** The seventh round's reporting
+only ran when `--provider` named a destination, which was my scope line and it was drawn in the
+wrong place: the entry that stops `resolveModel` takes the *stored* primary down with it, and
+nothing else in the report names it — the consent display lists the targets of an admitted chain,
+and an unusable chain has none. `selectedDestination` now takes the whole `Options` and looks on
+every run except `--remove`, which is the recovery path. Refusal is unchanged and still only for a
+`--provider` that widens egress. Red before the fix: a bare `--accept-egress` over a modelless
+`ollama` entry printed the consent tuple, the credential steps and the agent table, and never the
+entry; the same test pins that `--remove` stays silent.
+
+**Declined: stop the chain when a target's retry fails after it already answered.** The mechanism is
+real — `agentCliResultOutcome` and `providerTextOutcome` both return `null` for an unusable first
+answer so the loop retries, and a second attempt that dies in transit makes the settled reason
+`timeout` or `unreachable`, which advances. But that is the right row. "Advance and stop" is read
+from the reason the target settles with, and "no answer from this host" is what happened: the host
+gave one unusable answer and then nothing. A later target can plainly improve on a dropped
+connection, and stopping instead would strand the batch on a transport error while an admitted local
+target sat unused — which is what US7 scenario 5 asks the chain to prevent. The evidence the stop
+rule is about is *two* unusable answers, which is exactly the case `summarizeWithProvider` reports as
+`unusable_output`. The proposed fix also needs cross-attempt state the contract does not define
+("preserve that an answer was received"), and `CallOutcome` carries one reason by design — the same
+objection that declined the fourth round's stopped-attempt line and the fifth round's success line.
+
+Both decisions are now in the contract rather than only here: "Advance and stop" states that the
+column is read from the settled reason, and Verification 18 states that a bare setup names the chain
+error too. The previous rounds' findings came back because the contract said only what setup
+refuses and only which reasons stop, leaving the rest to be inferred.
+
+Gate at this head: `npm test` 1554 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing.
+
+### E9 follow-up — the ninth bot round
+
+Two P2s, both taken, and both are the same shape as earlier rounds one surface further out: a report
+that displays the chain and then describes the primary as the whole provider configuration.
+
+- **The reserved band kept the refused-primary consequence.** `allowanceClause` was added in the
+  fifth round precisely so 140–149 calls could say something true — end-of-session summaries still
+  run — and `providerCapItem` then used only its `reason`, passing the spent state's consequence and
+  re-implementing its `recovery` inline in different words. So at 145 calls the `provider` item said
+  processing waits (or that the chain takes the batch) while `reserveAttempt` still grants a
+  `session_end` batch that very preset. `refusedPrimaryConsequence` gained a default-argument so the
+  band can pass the clause's own sentence as the unchained case, and the inline recovery is gone;
+  both cap states now quote the clause the `allowance` item quotes.
+- **`credentialGuidance` said "written by rule alone" over a usable chain.** With a `workers-ai`
+  primary and no `OBOETE_CF_API_TOKEN`, the same report displayed an admitted `ollama` target and
+  then told the user memories come from the rules — while Verification 15 pins that the worker
+  advances past the primary's `no_provider` and applies that target's output. The doctor item was
+  corrected for this in the fourth round; the setup report never was.
+
+Red before each fix: the allowance table test's reserved row returned the waiting consequence and
+the second copy of the recovery, and the new setup test's
+`/fallback targets shown above are attempted instead/` did not match.
+
+`npm test` on Node 22.23.1 failed once here with `a busy database spools inside the capture budget`
+— "the hook took 493.6 ms" against the 300 ms budget — when it ran immediately after the Node 24.16.0
+suite on the same machine. Alone it is green (1555 + 280, 0 fail, 2 skipped). Same load-only family
+as issues #203 and #168, and as the CI flake filed as #243 in this PR.
+
+Gate at this head: `npm test` green on Node 24.16.0 and 22.23.1; typecheck, lint, markdownlint and
+`semgrep scan --config auto` clean; lizard warning set differenced against `85d48437` adds nothing.
+
+### E9 follow-up — closing the shape instead of waiting for the tenth round
+
+Rounds four, seven and nine each fixed one instance of the same defect: a report that predicts what
+happens to a batch the primary cannot serve, without asking whether a target is admitted. Each round
+found the next instance rather than the shape, so the shape was enumerated directly this time —
+every user-facing sentence in `src/doctor/` and `src/setup/` that says where a batch goes:
+
+| surface | state it predicts | closed in |
+|---|---|---|
+| `configuredProvider` | primary has no credentials | round 4 |
+| `providerItem` post-probe | the probe call failed | round 7 |
+| `providerCapItem` exhaustion / cap | the reservation is refused | rounds 4 and 9 |
+| `credentialGuidance` (setup) | primary has no credentials | round 9 |
+| `allowanceItem` | the shared daily allowance | **this sweep** |
+
+`allowanceItem` was the one left, and structurally so: `allowanceEstimateItem` never received the
+configuration, so it could not have consulted `admittedChain` even if it wanted to. It said
+processing waits for the reset while an admitted `ollama` target summarizes those batches. The
+chain-awareness moved into `allowanceClause` itself, which both readers already share, so
+`providerCapItem`'s reserved branch lost the wrapper the ninth round put around it.
+
+The chained sentence says the batch is **offered** to the chain rather than summarized by it,
+because `DAILY_CAP` is shared across capped presets: a capped target refuses at its own reservation
+with its own `daily_cap`, and only an uncapped target answers. Which targets those are is
+`fallback:N`'s to report, and it already does.
+
+Both directions are pinned per band, in one test each, against the same database: with an admitted
+target and with none.
+
+Everything else in that table was re-read rather than assumed; `fallbackAllowanceItem` speaks about
+one target rather than about the batch, so it is not in the family.
+
+Gate at this head: `npm test` 1557 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing.
+
+### E9 follow-up — the tenth bot round, including two the sweep missed
+
+Three P2s, all taken. Two of them are instances of the shape the sweep above claimed to have closed,
+which is the sweep's own lesson: enumerating the *surfaces* was not enough, because one surface had
+a branch the enumeration did not open and another had its sentence in a constant.
+
+- **`CHAINED_CONSEQUENCE` promised the chain would summarize.** Admission is not runnability: a
+  `workers-ai` primary with no credentials followed by a `nim` target with no credentials admits a
+  target that also answers `no_provider`, after which the batch is rule-based. The sentence the
+  sweep wrote for the allowance says the batch is *offered* to the chain for exactly this reason;
+  the constant written three rounds earlier still said "summarized by". It says "offered" now, and
+  every target's own verdict stays `fallback:N`'s to report.
+- **The exhaustion branch of `allowanceEstimateItem` still hard-coded `ALLOWANCE_CONSEQUENCE`.** The
+  sweep made the *cap* branch of that function chain-aware and left the branch immediately above it
+  alone. `exhausted_at` is per preset, so the chain's next target is unaffected and the worker
+  advances past `provider_exhausted` — the allowance item was the only surface still saying the
+  queue waits.
+- **A target whose answer `applyObservations` refuses had no attempt line.** A required progress
+  decision the detector rejects mints `unusable_output` *after* the provider call, so — unlike the
+  stopped-pass case declined in the fourth round — no reservation row ties that reason to a target.
+  The log therefore named every target that failed to answer and then a batch reason nothing
+  accounted for. `processBatch` remembers which target answered and appends its line when the apply
+  refuses it. Red before the fix, with the ollama line absent:
+
+  ```text
+  provider attempt … position=0 preset=workers-ai … reason=provider_exhausted
+  batch … state=fallback reason=unusable_output
+  ```
+
+Gate at this head: `npm test` 1559 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing.
+
+### E9 follow-up — the same sweep on the axis the tenth round exposed
+
+The tenth round found two instances of a shape the sweep before it had declared closed, and the
+reason was in how the sweep looked: it enumerated **functions**, and the two it missed were a
+*branch* inside one of them and a *constant* read by another. Re-running the sweep along those two
+axes — every `degraded`/`warning`/`unverified` construction in `src/doctor/provider.ts` and every
+string in `src/doctor/` and `src/setup/` that claims a batch becomes rule-based — found three more,
+none of them in a function the first sweep had listed:
+
+- **`fallback:N` for a target the cost policy excludes** said "a failure ahead of it falls through to
+  rule-based records". With `[nim (excluded), ollama (admitted)]` a failure ahead of it passes to
+  `ollama`; the sentence is only true when the policy admits nothing at all.
+- **The `catalog` item for a model the catalog does not list** said summaries fall back to
+  rule-based. That call fails with `model_alias`, which advances.
+- **The `catalog` warning for a paid-only model** said the same about `provider_paid`, which also
+  advances.
+
+All three were verified against the "Advance and stop" table rather than against the code, and all
+three keep their original sentence for the case that makes it true — no admitted target.
+
+Three axes have now produced instances of this one shape: the surface, the branch within a surface,
+and the constant a surface reads. The reusable form is [[defect-shape-closure-needs-second-axis]]:
+enumerate the *claims*, not the code that makes them.
+
+The `ponytail-review` pass over the same range then found the reason two of the three had survived:
+both were **open-coded copies of `refusedPrimaryConsequence`** — the same
+`admittedChain(config).targets.length > 0` test written out at the call site — and one of them read
+its chained sentence from a module constant far from the call. That is the drift vector, not just
+duplication: the constant held the wrong wording for three rounds while the function beside it was
+"fixed" twice. Both call sites use the helper now, the constant is gone, and one occurrence of the
+test remains in the file.
+
+Gate at this head: `npm test` 1562 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing. CodeRabbit reviewed `b2fda4c1` with no findings.
+
+### E9 follow-up — the eleventh bot round, on the helper itself
+
+One P2, taken, and it is the shape turned inward: `refusedPrimaryConsequence` tested chain
+*admission* and nothing else, so a primary the **resolver** refuses — `workers-ai` with a
+whitespace-only `[observer] model` and a valid `ollama` entry — still got the chained sentence, while
+`resolveObserveModel` turns that throw into a run with no model *and no targets*. `providerItem` and
+`fallbackItems` notice it first through `resolvedObserver`; `allowanceItem` and the catalog items
+have no such step, which is exactly the two the previous two commits had just wired to the helper.
+
+The test went into the helper rather than into those two callers
+([[guard-belongs-in-the-shared-function-not-one-caller]]): one guard in the function all of them
+share is smaller than two, and a third caller added later inherits it. `resolveModel` throws only
+for a chain admission already emptied and for a primary with no model of its own — **absent
+credentials are not a resolve error** — so the fourth round's uncredentialed primary still says the
+chain is offered the batch, which its own test re-confirms.
+
+Red before the fix: `allowanceItem` returned "Batches are offered to the fallback chain below…" for
+a configuration whose observer cannot start at all. One test pins both surfaces at once, because
+both were wrong for the same reason.
+
+Gate at this head: `npm test` 1563 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing.
+
+### E9 follow-up — the twelfth bot round
+
+Two P2s, both taken, and the first is the previous round's own fix not reaching its sibling.
+
+- **`credentialGuidance` kept the admission-only test** the doctor helper had just stopped using, so
+  `oboete setup` still promised the chain for a primary the resolver refuses. The fix is not a second
+  copy of the guard: `chainIsReachable(config)` now lives in `src/observer/providers.ts` beside
+  `resolveModel`, which applies both tests in one expression (`resolveModel(config).chain.length > 0`),
+  and the doctor helper and the setup guidance are its two readers. That is what the eleventh round's
+  fix should have been — putting the guard inside `refusedPrimaryConsequence` closed doctor and left
+  setup, because the shared thing was the *question*, not the doctor's sentence.
+- **A stop was missed when the next target had no credentials.** `summarizeWithProvider` answers
+  `no_provider` for an uncredentialed target *before* it asks whether consent still holds, so a chain
+  that ended on such a target kept an earlier target's reason by precedence — an `auth_failed`
+  primary followed by an uncredentialed `nim` degraded with `auth_failed`, sending the user to fix a
+  credential when consent was what they had to act on. The contract lists `currentConsent()` as step
+  2 of "The attempt sequence", before the reservation and the call, and it is now the loop's own
+  check rather than something delegated to `providerCall`.
+
+Red before the second fix: `degraded_reason: 'auth_failed'` where the contract's "the reason a stop
+ended the chain on outranks the precedence order" requires `consent_changed`. The existing test for
+that rule passes with a *credentialed* final target, which is why the rule looked pinned.
+
+Gate at this head: `npm test` 1564 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing.
+
+### E9 follow-up — the thirteenth bot round
+
+One P2, taken, with its stated cause corrected: consent was missing from the reachability question.
+With a stored record that no longer matches the tuple, `consent_changed` stops the chain before any
+target is reached — one hash covers the primary and the whole chain — while the credential, cap,
+allowance and catalog items all said the batch is offered to the fallback chain.
+
+The finding attributed this to the twelfth round's new `currentConsent()` check in the loop. It is
+not: `providerCall` already passed `consentOk` into `summarizeWithProvider`, which calls it inside
+`prepareProviderReservation`, so a credentialed primary was refused on consent before that change
+too. The contradiction is pre-existing; the finding is right and only its mechanism was misread.
+Recorded because a fix committed under a wrong cause is the failure mode
+[[revert-rationale-must-name-a-verified-mechanism]] names.
+
+`chainIsReachable(config, env)` takes consent now, which is where the three tests it has to satisfy
+belong together: the resolver refuses a primary with no model, admission empties a chain the policy
+cannot use, and consent authorizes all of it or none. Threading `env` reached `allowanceItem`, which
+had never needed it — the parameter is the price of the item being able to answer a question about
+authorization at all.
+
+**Four fixtures asserted the chained sentence for configurations the worker would have refused**,
+because `configSchema.parse({ observer: { preset: 'workers-ai', … } })` stores no consent record and
+`consentMatches` refuses a remote preset without one (R8). They now build their consent with
+`consented()`, and a new test pins the other direction: the same chain with `hash: 'not-the-tuple'`
+gets the waiting sentence, and with a matching hash gets the handoff.
+
+`npm test` on Node 22.23.1 failed once here with `ENOTEMPTY: directory not empty, rmdir
+'…/work/.git'` in `staleness.test.ts` teardown — issue #206, the documented teardown race. Green on
+the rerun.
+
+Gate at this head: `npm test` 1565 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint,
+markdownlint and `semgrep scan --config auto` clean; lizard warning set differenced against
+`85d48437` adds nothing.
+
+### E9 follow-up: the whole-pull-request correctness review, and what the bot rounds did not reach
+
+Thirteen bot rounds had cleared `d78ea756` and the `ponytail-review` pass over `main...HEAD` had
+returned "lean", so the pre-merge gate's remaining item was a correctness review with `ok: true` on
+the final head. A `/code-review` pass over the **whole** pull request — not the round's delta —
+returned fourteen findings. Ten were adopted, four declined with a mechanism. The receipts:
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | `catalog` was pushed after the chain items, so three consequences that say "the fallback chain below" printed above it | adopted: `doctor.ts` order, plus an assertion that reads the report's own item names |
+| 2 | Nothing names the target that answered | declined: Verification 13 asks for one line per **failed** target |
+| 3 | A fallback entry on a preset with no `defaultModel` refuses the whole chain | declined: the refusal is the contract's; the arbitrary half is `agent-cli`'s and now named in #241 |
+| 4 | `oboete setup --provider none` over a chain reports nothing and leaves a configuration `resolveModel` always refuses | adopted |
+| 5 | A throw inside `processBatch` discards every attempt line already recorded | adopted: the caller owns the array |
+| 6 | An `ollama` target was reported "ready" with nothing checked behind it | adopted: `credential.kind === 'none'` answers `unverified`, as `agent-login` beside it already did |
+| 7 | `chainTargets`' egress test restated as "not wider than the label" | declined: that admits an `egress: 'none'` target the consent tuple authorizes for no classes at all |
+| 8 | `presetExhaustedAt` prepares its statement per call | adopted: the repository's own `prepared(db, sql)` cache |
+| 9 | The loop's consent check as amplification | declined: one extra evaluation on the path where the primary answers; it only repeats after two targets have failed |
+| 10 | `providerCapItem` builds a consent hash on the path that discards it | adopted |
+| 11 | Four places each derived "its own model, else the preset's default, trimmed" | adopted: `targetModel` is the one reader |
+| 12 | The consent screen prints the primary's classes for a target while the hash binds the target's own | **adopted, then reverted**: the contract's "Consent coverage" decides it, and states why the two differ. The defect was the `consent.ts` header, written before the chain existed, which claimed the hash binds the tuple shown. The header now names the one field that differs, and `config.test.ts` pins the asymmetry in both directions |
+| 13 | `?? 'excluded'` under `verdicts[index]` | adopted: it could only mislabel a target as excluded by a policy that would not help it |
+| 14 | `CHAIN_STOPS` holds two of the contract's three stop rows | adopted: the doc block now says why `language_mismatch` is not one |
+
+Three of the ten — 10, 11 and 13 — are `ponytail-review`-shaped, and the ponytail pass over the same
+range had missed them: it enumerated the abstractions the diff **adds** and checked each for a second
+caller, which is blind to work done on a path that discards it, to an expression duplicated across
+two files, and to a defaulting operator that cannot fire. The lesson is the same shape as
+`enumerate-the-claims-not-the-code-that-makes-them`, one axis further out.
+
+Finding 12 is the one to read twice. The reviewer's reasoning was sound and the fix passed its RED
+test; it was still wrong, because `contracts/provider-fallback.md` "Consent coverage" had already
+decided the question in the other direction with a reason ("they describe the destination, which is
+what consent binds"). The test that "failed" was the contract's own pin. Adopting it would have
+narrowed what a stored consent record covers for every chained install.
+
+**Scope of the `ok: true` that follows.** A second whole-pull-request pass is not the gate: 3,500
+lines at high effort returns twelve to thirteen findings every time
+(`whole-pr-rereview-does-not-converge`), and this pass is the record of the whole diff having been
+read. The `ok: true` is taken on the fix delta.
+
+### E9 follow-up — the fix delta's own review, and the shape it kept finding
+
+The `ok: true` for the merge gate was taken on `de99b2ed..1e57b3bc`, the delta of the round above
+rather than the pull request again. It returned nine findings, and the two most severe were both the
+same shape: a fix that closed the path it was pointed at and left a sibling open.
+
+- The attempt array moved to the caller so a throw could not drop it — and `checkpointBatch`
+  rethrows a storage error *after* the `try`, so `logBatch()` never ran and the lines were dropped
+  anyway. `logBatch()` is now in a `finally`.
+- "Do not call a target ready" returned `unverified` before `fallbackAllowanceItem` ran, so an
+  `ollama` target that reported exhaustion today — which `reserveAttempt` refuses on the stamp
+  *before* it looks at `capped` — was reported as merely unchecked, and the `db === null` branch was
+  skipped with it. The allowance verdict is read first now and only its `healthy` answer is
+  downgraded, by one `unverifiableTarget` test rather than a branch per preset. That also closes the
+  same swallow for `agent-cli`, which had it before this pull request.
+
+The rest: `allowanceClause` took the spent band's consequence as the caller's thunk, so finding 10's
+discarded work is gone rather than moved; `ChainResult` became a union whose `outcome` exists only
+on the variant that has an answer, with `answered` null on the other, so the pairing a comment
+carried is the type's; four comments and
+a docstring that justified a sentence by the target being reported `healthy` were swept, since local
+targets no longer are; and the `notDeepEqual` pin added the round before came out — it was implied by
+the `deepEqual` above it and false in general, because a local primary admits only local targets and
+then the two agree.
+
+Declined: that reporting an orphaned chain under `--provider none` is a symptom fix and setup should
+strip the entries instead. Verification 18 has that run succeed, the note names the two commands that
+resolve it, and setup does not delete configuration the user wrote anywhere else. The test now pins
+that the entries survive the run.
+
+`fallbackTargetItem` crossed the length bound at 52 NLOC while that restructure happened, which the
+warning **set** differenced against `85d48437` caught and the count would not have: the same run
+dropped `fallbackReason` and `writeConfig`. `unadmittedEntryItem` took the two verdicts that need no
+storage read.
+
+Gate at this head: `npm test` 1566 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` unchanged against the round-12 baseline; the lizard
+warning set differenced against `85d48437` adds nothing and drops two.
+
+### E9 follow-up — the second delta review, and where it stopped
+
+`1e57b3bc..3239ec08` returned nine findings, eight adopted. Two were regressions the round before
+introduced, both in the same eleven lines:
+
+- `logBatch()` in a `finally` can itself throw — `appendLog` writes to a file in the same directory
+  as the database, so the ENOSPC or EROFS that made the checkpoint fail makes the log write fail
+  too, and a throw from a `finally` replaces the error being reported. `recordRunFailure` would have
+  recorded the log write's code instead of the `SQLITE_*` one.
+- That same `finally` wrote `level=info state=applied` for a pass that did not finish. The *absence*
+  of the batch line is what said so.
+
+Both are closed by a `catch` that writes only the attempt lines, inside its own `try`, and rethrows.
+
+The rest were the shape of the fixes rather than their effect: the `db === null` branch had moved
+ahead of the local-target check and told an uncapped `ollama` target to wait for an allowance it
+never spends; `fallbackAllowanceItem` returns `DoctorItem | null` now, so nothing builds a
+`… and ready.` sentence to throw away and nothing reads a status string back out of an item to
+decide; an uncapped target no longer reads the shared allowance at all, and `cappedCalls` goes
+through the `prepared` cache; `unadmittedEntryItem` takes the catalog entry its caller already had;
+and the `ChainResult` doc block named the wrong exclusive member — it is `outcome`, since `answered`
+is on both non-`done` variants and the caller discriminates on `answered === null`.
+
+Declined: replacing the `spentConsequence` thunk with an object of the two literals. Equivalent, and
+the churn buys nothing.
+
+**Not pinned, and filed as #245.** The attempt lines' survival of a storage throw has no test.
+`src/testing/faults.ts` forbids a seam for this class outright — "a missing, corrupt or read-only
+database ... is induced for real by the test" — and inducing it for real from the answering target's
+fetch handler does not work: `chmod 0o400` does not revoke the write descriptor the worker already
+holds, and the run finishes `exit=0 applied=1` (measured). The issue names the one approach that
+would work, a competing `BEGIN IMMEDIATE` held past `retryBusy`'s budget.
+
+This is where the delta reviews stop. The first returned fourteen findings over the whole pull
+request, the second nine over its fixes, this one nine over those — but the two that mattered here
+were both in eleven lines written the round before, and the remaining seven were shape rather than
+behaviour. The next pass would review eleven more lines of error handling, which is the regress
+`whole-pr-rereview-does-not-converge` describes from the other end.
+
+Gate at this head: `npm test` 1566 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` unchanged against the round-12 baseline; the lizard
+warning set differenced against `85d48437` adds nothing and drops two.
+
+### E9 follow-up — the two bot findings on the fix rounds
+
+CodeRabbit and the Codex connector each found one thing in the four fix commits, and both were
+real.
+
+The chain is ordered, so an excluded entry's consequence — "a failure ahead of it passes to the
+targets the policy does admit" — is true only when an admitted target comes **after** it.
+`chainIsReachable` answers for the whole chain, so with an admitted `ollama` at position 1 and an
+excluded `nim` at position 2 the report promised a handoff that cannot happen: by the time the chain
+is at 2, the target at 1 has already had its turn and failed. `fallbackItems` passes
+`admittedAfter` now, and the test that exercises that exact configuration asserts the rule-based
+sentence for both excluded entries.
+
+The language-mismatch attempt line was written after `applyFallback` rather than before it, so a
+target that had just spent two allowances lost its line whenever that call came back `lease_lost` or
+threw. It is written where the reason is decided now, and the delayed append in `attemptTargets` is
+gone — it only ever fired for this one reason.
+
+That second one is **not pinned**, and #245 carries the measurement: staging a lease theft from the
+answering target's second `fetch` lands *before* `recordProviderResult`, so the run returns
+`lease_lost` at that check and the language comparison never runs. No line is owed on that path
+either — the target answered and the pass lost its lease, so no `DegradedReason` was decided. The
+gap that needs a seam is narrower: a failure inside `applyFallback` itself, where the harness has no
+`fetch` to hang a fault on.
+
+One load-only failure on Node 22.23.1 in this round's full run: `ENOTEMPTY ... rmdir
+'…/workspace/.git'` in `memory-scope.test.ts`, the teardown race of issue #206. Green on the
+isolated rerun, 39 of 39.
+
+Gate at this head: `npm test` 1566 + 280 green on Node 24.16.0 and 22.23.1 (the latter after the
+isolated rerun of the flake above); typecheck, lint and markdownlint clean; `semgrep scan
+--config auto` unchanged against the round-12 baseline; the lizard warning set differenced against
+`85d48437` adds nothing and drops two.
+
+### E9 follow-up — the round that corrected the round before it
+
+`3239ec08..85cb4669` returned nine findings, seven adopted, and two of them were corrections of what
+the *previous* review round had asked for. That is the useful part of this receipt.
+
+- The `catch` that replaced the `finally` omitted the batch line unconditionally. Its reason —
+  a `state=applied` line would claim a pass that did not finish — is true only when the pass had no
+  error of its own. When `processBatch` had already thrown a non-storage error and
+  `checkpointBatch` then threw a storage one, the first error's code was written nowhere:
+  `recordRunFailure` reports the second. The catch now writes the batch line when `batchError` is
+  set and the attempt lines otherwise.
+- Putting the "nothing here checks this" item ahead of `dbUnread` — adopted one round earlier so an
+  uncapped `ollama` target would not be told to wait for an allowance — suppressed the
+  integrity-check message and told a user with a corrupt database to start a local model server.
+  `dbUnread` is the only path that carries that message. Storage is the blocker when there is none,
+  so it is reported; the sentence names the **provider usage record** rather than an "allowance",
+  which is what makes it true for an uncapped target: `reserveAttempt` reads `presetExhaustedAt`
+  above `capped`. The branch now has a test, which it did not before — `fallbackItems` was only ever
+  called with an open database in the suite.
+
+The rest: `logAttempts` uses the repository's own `appendLogQuietly` per line instead of a
+hand-rolled swallow around the whole loop, so one append that cannot land no longer takes the
+remaining targets' lines; the excluded entry's sentence was rewritten, because "a failure ahead of
+it falls through to rule-based records" reads as *any* earlier failure and the primary's failure
+does reach an admitted target at position 1; that consequence is now the one boolean it always was,
+`admittedAfter && chainIsReachable(...)`, rather than a ternary wrapped around a helper whose
+subject is a refused primary; the closure left with one call site was inlined; and a stray blank
+line went.
+
+Declined: rewriting `chain.verdicts.slice(index + 1).includes('admitted')` as a single reverse pass.
+`fallback` is bounded at three entries by the schema, and the slice reads as the invariant it
+checks.
+
+Acknowledged, already filed: the attempt lines surviving a storage throw is still unpinned (#245),
+so deleting the `catch` and restoring `finally { logBatch(); }` leaves the suite green.
+
+**What the three fix rounds actually show.** Fourteen findings over the pull request, then nine over
+the fixes, then nine over those — but the second and third rounds each found two real defects *in
+the eleven lines the round before wrote*, and both times in the same error-handling block. The
+pattern is not that the reviews are not converging; it is that this block has three exit shapes
+(a stop, a normal end, a throw) and two log kinds, and each round fixed the pair it was pointed at.
+It is now written as one statement of all six cases rather than a patch on the last patch.
+
+Gate at this head: `npm test` 1567 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` unchanged against the round-12 baseline; the lizard
+warning set differenced against `85d48437` adds nothing and drops two.
+
+### E9 follow-up — restating the block instead of patching it again
+
+`85cb4669..daa878d0` returned twelve findings, and the last one named what the previous three rounds
+had been doing: each fixed the case it was pointed at and added a branch to the same eleven lines.
+Two of the twelve were regressions from the round immediately before, which is the third time in a
+row. `review-rounds-narrowing-means-wrong-design` is the memory for that, and it says to stop
+patching and restate.
+
+What the block actually has to say is two independent facts, and every round so far had been
+encoding them as one:
+
+- **what the batch reached** — `state` and `reason`, which are the batch's and are true even when
+  the pass then fails, because `applyObservations` has already committed the row;
+- **how the pass ended** — `error` for a failure inside `processBatch`, `pass` for one out of
+  `checkpointBatch`.
+
+So the batch line is now written for every batch, always, with those as separate fields, and the
+"a missing line means the pass did not finish" convention is gone. It was never writable and it was
+already wrong: a committed `applied` batch whose checkpoint then failed left no line at all, and a
+batch whose destination is `fallback` — which returns before any target is attempted, so `attempts`
+is empty — wrote nothing whatsoever for a batch the database says it applied.
+
+Three regressions this fixes, all introduced by the two rounds before it:
+
+- `appendLogQuietly` in `logAttempts` removed the escalation of a log-write failure to exit 3. That
+  is `FR-002`'s rule for the hook, and the opposite of the worker's: on the stop path `logAttempts`
+  is the *only* log call, so a full disk became an exit 0. It is `appendLog` again, and the one
+  place a log failure must not win — while a storage error is already in flight — is stated where
+  that is true rather than by making every write quiet.
+- `reason: batchResult?.reason ?? errorCode(batchError)` let a batch that settled on a reason of its
+  own hide the code of whatever failed after it. `error` is its own field now.
+- Routing every `db === null` chain item through `dbUnread` lost the target's name: the integrity
+  substitution replaces the whole sentence, so `fallback:1` and `fallback:2` printed the same line
+  and named no position, preset or model — against "Diagnostics", which asks for all three.
+  `dbUnread` takes a `subject` now, the test pins it, and the recovery follows the failure: only a
+  corrupt database is a repair, while a missing, unwritable or schema-behind one is the `storage`
+  item's own business.
+
+Also: the excluded entry's consequence has three cases rather than two, because "no admitted target
+after it" and "the chain is not runnable at all" are different, and the second must not imply that
+adding a cost class would help — with a stale consent record the `consent` item is the one to act
+on. And `refusedPrimaryConsequence`'s doc block no longer claims `fallbackItems` reaches it.
+
+**Declined, filed as #246:** the `catch` around `processBatch` has no `isStorageError` rethrow, while
+`checkpointBatch` and `summarizeSession` both do — so the same error class exits 0 from one and 3
+from the other. It predates this pull request, and the same `catch` also receives busy errors that
+have already exhausted `retryBusy`, for which yielding may be right; splitting those is its own
+change.
+
+**Measured, and worth writing down:** `openObserveDatabase` left the lizard warning set this round
+without anyone touching it. It is a parser artefact, not a fix — lizard reports its span as
+`@374-798` (425 lines) where the function is 23 NLOC, and the round before reported `@374-1023`
+(650 lines). The differenced set is still the right gate, and it still adds nothing; but a warning
+that *disappears* has to be counted by hand before it is called fixed
+(`silent-oracle-is-not-under-the-bound`).
+
+One load-only failure on the Node 22.23.1 full run: `ENOTEMPTY ... rmdir
+'…/work/.git/ai/working_logs'` in `staleness.test.ts`, issue #206's teardown race. Green on the
+isolated rerun, 6 of 6.
+
+Gate at this head: `npm test` 1567 + 280 green on Node 24.16.0 and 22.23.1 (the latter after that
+rerun); typecheck, lint and markdownlint clean; `semgrep scan --config auto` unchanged against the
+round-12 baseline; the lizard warning set differenced against `85d48437` adds nothing.
+
+### E9 follow-up — the restatement's own review, and the contract it had to retire
+
+`daa878d0..37533dc2` returned eleven findings, nine adopted, two filed. The restatement was right
+about the shape and wrong in three details, two of which a reviewer confirmed by running the built
+`fallbackItems` against a stale-consent configuration rather than by reading it.
+
+- The new third branch pointed the user at a **`consent` doctor item that does not exist**. The
+  report's items are config, storage, fts, migration, worker, generation, spool, sync, provider,
+  allowance, catalog, `fallback:N`, `agent:*`, unrecognized-agents, pi and paused — there is no
+  consent item, and without `--probe-provider` the provider item says only "not probed this run".
+  Worse, the branch's *recovery* was never changed at all, so the item still told the user to add a
+  cost class that would change nothing. The branch fires if and only if `consentMatches` is false —
+  `resolvedObserver` has already returned on a resolver refusal, and `admittedAfter` implies the
+  chain is non-empty — so it names that, and recovers with `oboete setup --accept-egress`.
+- Writing the attempt lines with the **throwing** writer put the worker-stop sentinel at risk. A
+  pass that stops calls `logAttempts` and returns; a throw there reaches `recordRunFailure`, which
+  ends the run as `storage_error` rather than `stopped`, and `releaseForExit` clears the sentinel
+  only for `stopped`. A full disk during a stop would have left the sentinel behind: the stop the
+  user asked for is reported as a storage failure, and the next resident spends its whole run
+  reading the marker at startup, exiting `stopped` and clearing it — one run lost, not a worker that
+  never runs again. The attempt lines are written quietly again; the
+  **batch** line keeps the throwing writer, and it is the one that escalates — `EACCES` and `ENOSPC`
+  are `isStorageError`. That is also what makes one failed attempt append no longer take the batch
+  line with it.
+- `state=error reason=none` at level `info` for a batch lost to `LeaseLostError`, because
+  `processBatch` throws instead of returning the `lease_lost` state it has. The fallback pair reads
+  `leaseLost` now. And `errorCode(batchError)` was printed twice, as `reason` and again as `error` —
+  `reason` belongs to the batch and is `none` when the batch never settled on one.
+
+The doc block's "one line per batch, always" was also false: a pass that stops writes its attempt
+lines and no batch line, which the contract states at "Diagnostics". The comment names that
+exception now.
+
+**The contract was the thing to retire.** `contracts/provider-fallback.md` still described the log
+as "one `provider attempt` line per target … then the existing degraded line for the batch" and
+still asserted that "the `consent` item is where a mismatch is reported". The quickstart's narrative
+does not retire normative text — `new-decision-doc-must-retire-old-statements` — so both sections
+were rewritten: the batch line's `error`/`pass` split and which writer each line uses, and the fact
+that no `consent` item exists together with where a mismatch *is* named.
+
+**Now pinned:** `test/unit/provider-fallback.test.ts` makes the observe log unwritable from inside
+the answering target's fetch handler and asserts the run exits 3. That is the escalation this round
+restored, and it was the review's own finding that it had no test.
+
+**Filed rather than fixed:** #247 — `dbUnread` branches its reason on `integrityFailed` but not its
+recovery, so eight other doctor items still tell the user to repair a database that is merely
+missing, unwritable or behind the schema. Fixing it there is right and belongs in its own change.
+Also declined here and already filed: #246.
+
+Gate at this head: `npm test` 1568 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` unchanged against the round-12 baseline; the lizard
+warning set differenced against `85d48437` adds nothing.
+
+### E9 follow-up — the consent check moves to the seam that already collapses the chain
+
+`37533dc2..663d1be0` returned fourteen findings; thirteen adopted, one declined and filed. The top
+one is the round before's own fix placed at the wrong altitude, which is the shape
+`patched-handler-needs-restating-not-another-branch` describes.
+
+**The consent check was in one entry's verdict, and belongs at the chain's seam.** The previous
+round added it to the *excluded* branch of `unadmittedEntryItem`, so a stale consent hash still let
+an admitted target report `healthy … admitted as remote and ready` — the report's largest untruth,
+because no target is attempted at all. One hash covers the primary and the whole chain, so the test
+belongs where `fallbackItems` already collapses the chain into a single item on a resolver refusal.
+The guard there replaces the third branch, its second spelling of `chainIsReachable`, the
+three-case consequence and the two-case recovery, and takes `config` and `env` off
+`unadmittedEntryItem` entirely. The file is +29/−27: the branch is gone and the reasoning it had
+spread across two verdicts is now stated once, next to the guard.
+
+**Now pinned** (`test/unit/doctor.test.ts`): a stale record with two configured entries yields
+exactly `['fallback']` — RED without the guard on `actual: ['fallback:1', 'fallback:2']` — and a
+matching record still yields `['fallback:1', 'fallback:2']`, so the guard cannot pass by refusing
+everything.
+
+**A behaviour change worth naming:** the collapsed item is `degraded`, and only degraded items move
+the exit, so `oboete doctor` now exits 1 for a stale record with a chain configured. Measured both
+ways on the same fixture: before the guard, exit 0 with no degraded item at all — a report that
+passed while no summary would ever be written. No `--probe-provider` is involved either way; the new
+CLI test pins both directions.
+
+**The unwritable-log test asserted the wrong thing.** `exit === 3` does not discriminate: `logEnd`
+returns 3 when its own append fails, whatever the run reached. The same scenario with a writable log
+was measured — exit 0, `last_run` reason `empty`, attempt lines present — so the test now asserts
+what actually differs: the failing run records no `last_run` at all, because it throws out of the
+batch line instead of draining the session-end summary behind it, and the attempt lines are absent,
+which is the quiet writer doing its job. Two more from the same finding list: the Workers AI primary
+is stubbed with a throwing handler rather than left to `chainFetch`'s `assert.fail`, which the
+worker's own catch would swallow into an ordinary provider failure; and the test skips under root
+like the other permission fixtures (`test/fault-storage.test.ts`).
+
+**Two overstatements corrected.** The contract called `error` "a failure inside `processBatch`" and
+`pass` "one out of the checkpoint after it". `pass` takes both conditions at once — a storage
+failure *out of the checkpoint*, the one that ends the run — while `error` is anything out of
+`processBatch`, storage or not, plus a non-storage checkpoint failure `checkpointBatch` carries on
+past. And "a full disk
+during a stop would leave every later resident refusing to run" was too strong — the next resident
+reads the sentinel in `controlReason()` at startup, exits `stopped` without doing any work and
+clears it there. The cost is one lost run, not a dead worker; corrected in the code comment, this
+document and the contract. The contract's stop-path exception now sits beside the sentence it
+qualifies rather than at the end of the bullet.
+
+**Filed rather than fixed:** #248 — a stop that ends as `storage_error` leaves its sentinel behind,
+because `releaseForExit` clears it only for `stopped`. Clearing it whenever `isWorkerStopped` holds
+was the finding's own suggestion and was declined: it would swallow a stop request written *during*
+an unrelated exit, which three existing tests pin.
+
+**Caught by the oracle, not by the eye:** `fallbackItems` crossed 50 NLOC (51) once the guard was
+added, and lizard's TypeScript reader made it worse by swallowing the `FallbackTarget` type alias
+after it — the nested template literal in the new sentence is the same parser hazard as
+`lizard-ts-parse-swallows-after-angle-compare`. The count is named in a local now, and the
+chain-error branch moved out to `chainErrorItem`, which takes the function to 42.
+
+### E9 follow-up — consent belongs where the worker reads it, not only where the chain is reported
+
+The delta's own review returned seven findings; four adopted, one split into a fix and an issue,
+two declined.
+
+**The guard was still in one caller.** `[[observer.fallback]]` is empty by default, and
+`fallbackItems` returns `[]` before reaching any guard when it is — so the case the previous round
+called "a report that passed while no summary would ever be written" was still live for the majority
+of configurations. The check moved to `configuredProvider`, which both the probe and the non-probe
+path go through, at the position the worker uses: `initialProviderFailure` reads the preset, the
+model and the credentials first, then consent. Same shape as
+`guard-belongs-in-the-shared-function-not-one-caller`, one round later.
+
+Three consequences worth naming. A stale record now answers **before** the probe, so `oboete doctor
+--probe-provider` no longer spends a reservation on a call that could only come back
+`consent_changed`. Three cap tests were passing configurations with no stored consent at all, which
+the worker would refuse for consent rather than for the cap; they take a matching record now, so
+they exercise the state they name. And the collapsed `fallback` item and the `provider` item now
+carry the same consequence sentence, rather than one saying the batch is rule-based while the other
+says processing waits.
+
+**The chain item claimed an egress cause it cannot know.** An all-local chain whose hash drifted —
+adding an entry changes the tuple — read "the configuration has not been accepted for egress" while
+nothing in it leaves the machine. It names the record instead: "the stored consent record no longer
+matches this configuration".
+
+**The `error`/`pass` rule was rewritten in the wrong direction.** Last round called the split
+"severity, not location". It is both: `pass` is a storage failure *out of the checkpoint*, and
+everything out of `processBatch` lands in `error`, storage or not — the catch there has no
+`isStorageError` test. Which surfaced a real inconsistency, filed as **#249**: a storage error
+raised inside `processBatch` exits 0 while the same error out of the checkpoint exits 3.
+
+**Declined.** (1) That the collapse hides the per-entry `covered`/`excluded` warnings and costs the
+user a second `doctor` run — it does, and that is the point: no target is attempted, so no
+per-target verdict is true, and the deleted combined recovery is exactly what the previous round's
+top finding said to delete. (2) That `consentMatches` recomputes `admittedChain` and a SHA-256 the
+function already has in hand — one hash in a one-shot CLI, against a branch that would have to be
+threaded through `resolvedObserver`; `allowanceClause`'s thunk exists because it can skip the work
+entirely, which this cannot.
+
+**Also pinned:** the unwritable-log test asserts its own preconditions now (the primary was called
+and failed, the batch is `applied` with two attempts), so its negative assertions cannot pass on a
+run that stopped earlier.
+
+Gate at this head: `npm test` 1571 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged; the lizard warning set
+differenced against `85d48437` adds nothing — `configuredProvider` crossed at 57 NLOC when the
+consent branch landed, and `uncredentialedPrimary` came out of it (44).
+
+### E9 follow-up — two Codex threads the earlier polling had not seen
+
+Both were `chatgpt-codex-connector` P2 inline comments, and both were missed the same way: the
+polling read `pulls/238/comments` without `--paginate`, so a finding on page two looked like
+silence. The connector's legend is explicit — it comments when it has suggestions and reacts 👍 only
+when every review finishes with none — and the missing 👍 was the signal, not the reaction that
+never came.
+
+**Consent belongs ahead of the missing credential, not behind it.** When a remote primary has
+neither a credential nor a matching consent record, the report named the credential and recommended
+exporting the variable — and the worker does the opposite: `attemptTargets` asks `consentOk()`
+before `providerCall` for exactly this reason, and its comment says so ("send the user to fix a
+credential when consent is what they must act on", `src/worker/observe-batch.ts`). Adding the
+credential would have left every batch stopping on `consent_changed`. Consent is tested first now;
+one existing fixture had both problems and was pinning the wrong half, so it takes a matching
+record, and a new test pins the order.
+
+**A Workers AI chain target was called ready without consulting the catalog.** `catalogItems`
+validates the *primary's* model and returns nothing at all when another preset is primary, so
+`fallback:1 … admitted as free-tier and ready` was printed for a model the account does not serve.
+`catalogTargetItem` now reads the same cached list under the same freshness rule, and says nothing
+unless that list could refuse the model — see the round below, which corrected both the failure code
+this item names and the states it was willing to speak in.
+
+Gate at this head: `npm test` 1573 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged; the lizard warning set
+differenced against `85d48437` adds nothing (`fallbackTargetItem` 39, `catalogTargetItem` 27,
+`configuredProvider` 44).
+
+### E9 follow-up — the catalog verdict was written for data that is never there
+
+Twelve findings on the round above; eleven adopted, one declined, and the worker-side gap behind the
+first one filed as #250. The two that matter are both about the check written to close a Codex
+finding, which is the shape `fix-can-be-worse-in-another-dimension` warns about.
+
+**The recovery it printed could never come true.** `refreshCatalog` fetches the Workers AI model
+list only when Workers AI is the **primary** (`src/worker/observe.ts`), so the configuration the
+check was written for — another preset primary, a `workers-ai` chain entry — never caches a list at
+all. Every run would have printed `no fresh catalog is cached` with "run `oboete observe`, then
+`oboete doctor` again", and the second run would print it again. The item is silent in every cache
+state that cannot refuse a model now, and speaks only when a current list for this account omits it.
+The worker-side gap is **#250**; when it closes, this item starts answering with no change of its
+own.
+
+**It named the wrong failure code.** An unserved Workers AI model returns a status
+`classifyApiError` has no row for, so the attempt records `unreachable`; `model_alias` is a
+*successful* call that answered with a different model id (`src/observer/llm.ts`). Corrected in the
+item, the contract and this document.
+
+**"Observer consent changed" for a record that never existed.** `consentMatches` also answers false
+when `[consent] hash` is absent, which is every install that has not run `setup --accept-egress`
+yet, so the first thing a half-configured install read was that a stored record no longer matched.
+Two sentences now, chosen by whether a hash exists, shared by the `provider` item and the collapsed
+`fallback` one. And the same item names the missing credential when both are missing — Codex's
+original finding asked for the order *or* both recoveries, and taking only the order left
+`initialProviderFailure` stamping `no_provider` on the batch while the report talked about consent.
+
+**Also adopted:** the catalog check runs ahead of the allowance one, because an unlisted model is
+wrong until the entry is edited while a spent allowance resets at midnight; `catalogIsStale` is one
+function shared with the primary's item instead of a second copy of the same two clauses; the
+credentials the caller already read are passed in rather than read again; `models(n)` makes it
+"1 model"; the modified fixture uses the file's own `consented()` helper instead of inlining it; and
+the healthy-case assertion binds its item once instead of building the same one twice.
+
+**Declined.** Mirroring the primary's paid-plan warning onto every chain entry: `hasPaidOnlyModels`
+is an account-level flag, not a property of the entry's model, so it would mark targets that are
+entirely free — and it can only be true in configurations where the primary is Workers AI, where the
+`catalog` item already says it once.
+
+Gate at this head: `npm test` 1573 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged; the lizard warning set
+differenced against `85d48437` adds nothing.
+
+### E9 follow-up — the merge gate's own two blockers
+
+`pr-merge-gatekeeper` returned **NO-GO** on the 7-item checklist with two blockers, both real and
+both mine.
+
+**SonarCloud had one new OPEN issue nobody had triaged.** `typescript:S6582` on
+`src/doctor/provider.ts`, from the commit two before: `cache === null || cache.accountId !== …` is
+the shape the rule asks to write as `cache?.accountId !== …`, which would stop narrowing `cache` for
+the three reads below it. The null test is its own statement instead — not the shape the rule looks
+for, and the narrowing survives. Reproduced locally with `@typescript-eslint/prefer-optional-chain`
+(the rule behind S6582): it fires on the disjunction and is silent on the split.
+
+**The recorded `ponytail-review` was six and a half hours stale.** It covered `main...de99b2ed`
+(3582/204) while the head was 4808/242 — 14 commits and +1398/-210 unreviewed by that lens,
+including this file's +408. Run over `de99b2ed..HEAD`, it found the delta lean apart from
+`CHAIN_TAKES_THE_FAILURE` and `EXCLUDED_FALLS_THROUGH`, one caller each, now inlined in the ternary
+that chose between them; `unverifiableTarget` moved to where its answer is read.
+
+`/code-review` on the resulting delta returned **no correctness findings**, having reproduced each
+claim rather than reading them: the inlined sentences are byte-identical to the constants, the moved
+call is pure, and the rule dodge was verified against the plugin. Its six quality findings, three
+adopted:
+
+- the primary's catalog comment still said a model missing from the list fails with `model_alias`;
+  it fails with `unreachable` for the same reason the chain's does, and `model_alias` needs a
+  *successful* call that named another model;
+- `catalogTargetItem`'s docstring justified its silence with "the worker replaces that cache on its
+  next batch", which is false for the chain-only configuration the function exists for — nothing
+  refreshes it there at all (#250);
+- the two inlined sentences were asserted by substring regexes that skipped the clause the inlining
+  had retyped by hand; both tests assert the whole sentence now.
+
+Declined: sharing one `usableCatalog(db, accountId, now)` between the chain and primary paths — the
+primary words a *different* item for each of the three states (absent, foreign account, stale) and a
+helper that answers `cache | null` would take that distinction away, so the shared piece is the age
+rule, which `catalogIsStale` already is. Also declined: enabling
+`@typescript-eslint/prefer-optional-chain` repo-wide (28 other sites, its own cleanup), and reading
+the catalog row once per report instead of once per entry (a one-shot CLI diagnostic).
+
+### E9 follow-up — a refused configuration is not a consent problem
+
+One P2 from the Codex connector on that head, adopted. The consent guard inside `attemptTargets`
+ran ahead of every target, including the one `resolveObserveModel` builds from a configuration the
+resolver refused — an empty model and an empty chain. With a stored record that no longer matched,
+such a batch recorded `consent_changed` and the recovery said `setup --accept-egress`, which would
+have changed nothing: accepting leaves the resolver error, and the next run fails `no_provider`.
+`oboete doctor` names the resolver refusal first, so the report and the pack disagreed as well.
+
+The first fix put the exception inside the target loop; the review of that commit put it where its
+sibling already lives. `processBatch` answers `preset = "none"` with `no_provider` before any request
+is built, and an empty model is the same state — so both are one condition now. That removes more
+than the guard: the whole pipeline (`revalidateNearby`, the request build, a detector pass over the
+serialized request, `markRequest`) no longer runs for a batch that cannot reach a provider, and no
+`provider attempt` line names a target with an empty model. The catalog walk is skipped too — a
+`workers-ai` primary under a refused configuration was still paginating `/models/search` with the
+account token for a list nothing in the run could use, and the test's host assertion had excluded the
+one counter that would have shown it.
+
+RED before the fix on `['consent_changed'] !== ['no_provider']`, and RED again on
+`catalog: 2 !== 0` once the test counted every host
+(`a configuration the resolver refuses says no_provider, not consent_changed`).
+
+Gate at this head: `npm test` 1574 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged; the lizard warning set
+differenced against `85d48437` adds nothing; SonarCloud PR 238 back to **0** OPEN issues.
+
+### E9 follow-up — checkpoint decisions in settlement order (#242)
+
+One P2 from the Codex connector on `9cc50a2f`, the same defect the defensive review had filed
+as issue #242 and left out of this pull request for want of a fixture. Adopted here, with the fixture.
+`oboete work` and `oboete why` chose the latest checkpoint decision by `claimed_at`, which this pull
+request made the reclaim fence: `reserveAttempt` restamps it with each attempt. A batch refused at
+its own reservation (`daily_cap`, `provider_exhausted`) is never restamped, keeps its creation
+stamp, and still settles after the batch ahead of it — with the `pending` decision `markRequest`
+wrote — so `work` showed the earlier provider decision as the latest.
+
+The connector's own mechanism does not occur as written: a `destination = 'fallback'` batch never
+carries a checkpoint decision (`markRequest` runs only on the provider path, and `prepareCheckpoint`
+returns null for any `fallbackReason`). The shape does, through the refused reservation above.
+
+Both queries now order by `completed_at DESC, claimed_at DESC, id DESC`, the order #242 named.
+`completed_at` is written in the same apply transaction as the settled decision
+(`src/observer/apply.ts`), and SQLite sorts NULL last under DESC, so an in-flight decision falls
+behind the settled ones. `reserveAttempt`'s docstring now says the column is the fence, not
+settlement order. RED on both consumers before the change, from one seeded fixture with the two
+stamps in the adverse order: `work` returned `'replace'` where `'pending'` settled last, and `why`
+listed `['settled-first', 'settled-last']`
+(`why and work order checkpoint decisions by settlement, not by the reclaim fence`).
+
+Gate at this head: `npm test` 1575 + 280 green on Node 24.16.0 and 22.23.1, first run each, no
+rerun; typecheck, lint and markdownlint clean; `semgrep scan --config auto` 0 findings in the four
+touched files; the lizard warning set over the three touched source files is unchanged against
+`9cc50a2f`. `github-advanced-security` still fails outside the required set, on its own model
+(`CAPIError: 400 The requested model is not supported`), as on the previous heads.
+
+Gate at the previous head: `npm test` 1570 + 280 green on Node 24.16.0 and 22.23.1, each after one
+load-only rerun — `grok-no-tool` saw `pending` where `omitted` was expected (issue #243, the same
+pair of states in the other direction; 6 of 6 on the isolated rerun), and `staleness.test.ts` hit
+`ENOTEMPTY … rmdir '…/work/.git'` (issue #206; 6 of 6 isolated). Typecheck, lint and markdownlint
+clean; `semgrep scan --config auto` 21 findings, unchanged against the round-12 baseline and none in
+a touched file; the lizard warning set differenced against `85d48437` adds nothing (113 of the
+base's 116, the three absences all counted in earlier rounds).

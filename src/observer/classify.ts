@@ -168,6 +168,28 @@ export const DEGRADED_PRECEDENCE = [
 
 export type DegradedReason = (typeof DEGRADED_PRECEDENCE)[number];
 
+/**
+ * The failures a later provider target cannot improve on: consent authorizes no destination at all,
+ * and an answer that arrived unusable already spent its target's allowance and owns its own retries
+ * (contracts/provider-fallback.md "Advance and stop"). Every other failure advances the chain.
+ *
+ * The contract's stop column has a third row, `language_mismatch`, which is deliberately not here:
+ * it is not a `FailureReason` at all (`src/observer/llm.ts`), and `retryOnLanguageMismatch` settles
+ * it as a `done` result before any code reads this set. A change that made it a `FailureReason`
+ * would have to add it here as well.
+ *
+ * It lives beside `DEGRADED_PRECEDENCE` because two surfaces read it — the worker's target loop
+ * decides whether to try the next target, and `oboete doctor` decides whether a probe failure means
+ * the queue waits or the chain takes the batch. A second copy is the one that would drift.
+ */
+export const CHAIN_STOPS = new Set<DegradedReason>(['consent_changed', 'unusable_output']);
+
+/** The reason a record keeps when several apply: the first match in `DEGRADED_PRECEDENCE`. */
+export function mostSevereReason(reasons: Iterable<DegradedReason>): DegradedReason | null {
+  const present = new Set(reasons);
+  return DEGRADED_PRECEDENCE.find((reason) => present.has(reason)) ?? null;
+}
+
 export const INSERT_MEMORY = `INSERT INTO memories
   (id, repo_id, type, title, body, concepts, cjk_bigrams, material_hash, content_hash,
    sensitivity, review_state, degraded_reason, source_session_id, source_batch_id,
@@ -347,7 +369,7 @@ function degradedReasonForSession(db: DatabaseSync, sessionId: string): Degraded
     .filter((reason): reason is DegradedReason =>
       DEGRADED_PRECEDENCE.includes(reason as DegradedReason),
     ));
-  return DEGRADED_PRECEDENCE.find((reason) => reasons.has(reason)) ?? null;
+  return mostSevereReason(reasons);
 }
 
 function insertSessionSummary(

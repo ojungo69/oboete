@@ -8,6 +8,7 @@ import {
   DAILY_CAP,
   SESSION_END_RESERVE,
   nextUtcMidnight,
+  presetExhaustedAt,
   recordExhausted,
   reserveAttempt,
   usageEstimate,
@@ -234,7 +235,7 @@ test('each accepted reservation updates provider_attempts and last_reservation_i
   });
 });
 
-test('usageEstimate reports capped calls, remaining calls, exhaustion, and reset', async () => {
+test('usageEstimate reports the shared capped calls and reset; exhaustion stays per preset', async () => {
   await withDatabase((db) => {
     seedUsage(db, 'workers-ai', 40, { exhaustedAt: NOW - 1 });
     seedUsage(db, 'nim', 2);
@@ -243,8 +244,41 @@ test('usageEstimate reports capped calls, remaining calls, exhaustion, and reset
       day: '2026-09-04',
       calls: 42,
       remaining: DAILY_CAP - 42,
-      exhausted: true,
       resetAt: Date.UTC(2026, 8, 5),
     });
+    // The shared call count says how much of the day is left, never which preset is out: one
+    // preset's stamp is read from that preset's own row.
+    assert.equal(presetExhaustedAt(db, 'workers-ai', NOW), NOW - 1);
+    assert.equal(presetExhaustedAt(db, 'nim', NOW), null);
+    assert.equal(presetExhaustedAt(db, 'workers-ai', nextUtcMidnight(NOW) + 1), null);
+  });
+});
+
+test("a same-day stamp whose reset has already passed is not exhaustion", async () => {
+  await withDatabase((db, token) => {
+    // `utc_day` and `reset_at` are not the same bound: a row can still be today's while its reset
+    // has passed, and then the preset may be reserved again.
+    seedUsage(db, 'workers-ai', 1, { exhaustedAt: NOW - 2, resetAt: NOW - 1 });
+    assert.equal(presetExhaustedAt(db, 'workers-ai', NOW), null);
+    seedBatch(db, 'batch-stale-reset', token);
+    const reserved = reserve(db, token, 'workers-ai', 'batch-stale-reset');
+    assert.equal(reserved.ok, true, reserved.ok ? '' : reserved.reason);
+  });
+});
+
+test('a reservation restamps claimed_at so the reclaim timer runs from the attempt', async () => {
+  await withDatabase((db, token) => {
+    seedBatch(db, 'batch-claimed-at', token);
+    // Created long before this attempt: `claimed_at` is stamped once at creation, so a reclaim
+    // window measured from it would already be spent the instant the batch starts running.
+    db.prepare("UPDATE observation_batches SET claimed_at = ? WHERE id = 'batch-claimed-at'")
+      .run(NOW - 600_000);
+    const reserved = reserve(db, token, 'workers-ai', 'batch-claimed-at');
+    if (!reserved.ok) assert.fail(`reservation failed: ${reserved.reason}`);
+    const batch = db
+      .prepare("SELECT state, claimed_at FROM observation_batches WHERE id = 'batch-claimed-at'")
+      .get();
+    assert.equal(batch?.state, 'running');
+    assert.equal(batch?.claimed_at, NOW);
   });
 });

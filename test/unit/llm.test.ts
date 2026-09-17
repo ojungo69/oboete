@@ -1,12 +1,10 @@
 import assert from 'node:assert/strict';
-import type { spawn } from 'node:child_process';
-import { EventEmitter } from 'node:events';
-import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 
 import { PRESET_CATALOG, type Credentials } from '../../src/config.js';
 import type { ObserverInput, ObserverOutput } from '../../src/observer/contract.js';
 import { buildSummarizerPrompt, summarizeWithProvider } from '../../src/observer/llm.js';
+import { cliSpawn } from '../helpers/agent-cli.js';
 
 const MODEL = PRESET_CATALOG.openrouter.defaultModel;
 const MAX_RESPONSE_CHARS = 1024 * 1024;
@@ -164,47 +162,6 @@ function httpHarness(
     },
     reservations: () => reservationCount,
     exhausted,
-  };
-}
-
-type FakeChild = EventEmitter & {
-  stdin: PassThrough;
-  stdout: PassThrough;
-  stderr: PassThrough;
-  kill: () => boolean;
-};
-
-function cliSpawn(texts: string[]): { spawn: typeof spawn; calls: () => number } {
-  let count = 0;
-  return {
-    spawn: ((_command: string, _args: readonly string[], options: { signal?: AbortSignal }) => {
-      const child = Object.assign(new EventEmitter(), {
-        stdin: new PassThrough(),
-        stdout: new PassThrough(),
-        stderr: new PassThrough(),
-        kill: () => true,
-      }) as FakeChild;
-      child.stdin.resume();
-      child.stdin.on('finish', () => {
-        const text = texts[count];
-        count += 1;
-        if (text === undefined) assert.fail('unexpected child process');
-        child.stdout.end(JSON.stringify({ result: text }));
-        child.stderr.end();
-        queueMicrotask(() => child.emit('close', 0, null));
-      });
-      options.signal?.addEventListener(
-        'abort',
-        () => {
-          const error = new Error('aborted');
-          error.name = 'AbortError';
-          child.emit('error', error);
-        },
-        { once: true },
-      );
-      return child;
-    }) as unknown as typeof spawn,
-    calls: () => count,
   };
 }
 
@@ -519,19 +476,40 @@ test('3036 persists exactly the reservation that observed exhaustion', async () 
   assert.deepEqual(harness.exhausted, ['reservation-1']);
 });
 
-test('agent-cli is uncapped, consented, and validates the CLI text as observer JSON', async () => {
+/**
+ * The agent-cli half of `httpHarness`: an uncapped target still takes a reservation, because the
+ * reservation is what puts the batch in `running` and fences a dead worker's in-flight child
+ * process (contracts/provider-fallback.md "For each target").
+ */
+function cliHarness(
+  cli: ReturnType<typeof cliSpawn>,
+  overrides: Partial<Parameters<typeof summarizeWithProvider>[1]> = {},
+): { ctx: Parameters<typeof summarizeWithProvider>[1]; reservations: () => number } {
+  let reservationCount = 0;
+  return {
+    ctx: {
+      preset: 'agent-cli',
+      model: 'agent-model',
+      agentCli: 'claude',
+      credentials: { kind: 'agent-login', present: true, source: 'test', values: {} },
+      consentOk: () => true,
+      reserve: () => {
+        reservationCount += 1;
+        return { ok: true, reservationId: `reservation-${reservationCount}` };
+      },
+      onExhausted: () => assert.fail('agent-cli cannot persist provider exhaustion'),
+      spawn: cli.spawn,
+      timeoutMs: 1000,
+      ...overrides,
+    },
+    reservations: () => reservationCount,
+  };
+}
+
+test('agent-cli is uncapped, consented, reserves its attempt and validates the CLI text as observer JSON', async () => {
   const cli = cliSpawn([JSON.stringify(output())]);
-  const result = await summarizeWithProvider(INPUT, {
-    preset: 'agent-cli',
-    model: 'agent-model',
-    agentCli: 'claude',
-    credentials: { kind: 'agent-login', present: true, source: 'test', values: {} },
-    consentOk: () => true,
-    reserve: () => assert.fail('agent-cli must not reserve'),
-    onExhausted: () => assert.fail('agent-cli cannot persist provider exhaustion'),
-    spawn: cli.spawn,
-    timeoutMs: 1000,
-  });
+  const harness = cliHarness(cli);
+  const result = await summarizeWithProvider(INPUT, harness.ctx);
   assert.deepEqual(result, {
     ok: true,
     output: output(),
@@ -540,23 +518,54 @@ test('agent-cli is uncapped, consented, and validates the CLI text as observer J
     attempts: 1,
   });
   assert.equal(cli.calls(), 1);
+  assert.equal(harness.reservations(), 1);
 });
 
 test('agent-cli retries one non-JSON model reply then returns unusable_output', async () => {
   const cli = cliSpawn(['not json', 'still not json']);
-  const result = await summarizeWithProvider(INPUT, {
-    preset: 'agent-cli',
-    model: 'agent-model',
-    agentCli: 'claude',
-    credentials: { kind: 'agent-login', present: true, source: 'test', values: {} },
-    consentOk: () => true,
-    reserve: () => assert.fail('agent-cli must not reserve'),
-    onExhausted: () => assert.fail('agent-cli cannot persist provider exhaustion'),
-    spawn: cli.spawn,
-    timeoutMs: 1000,
-  });
+  const harness = cliHarness(cli);
+  const result = await summarizeWithProvider(INPUT, harness.ctx);
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.reason, 'unusable_output');
   assert.equal(result.attempts, 2);
   assert.equal(cli.calls(), 2);
+  assert.equal(harness.reservations(), 2);
+});
+
+test('a refused reservation stops agent-cli before the paid child process runs', async () => {
+  const cli = cliSpawn([JSON.stringify(output())]);
+  const harness = cliHarness(cli, {
+    reserve: () => ({ ok: false, reason: 'provider_exhausted' }),
+  });
+  const result = await summarizeWithProvider(INPUT, harness.ctx);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, 'provider_exhausted');
+  assert.equal(result.attempts, 0);
+  assert.equal(cli.calls(), 0);
+});
+
+test('a consent change after the agent-cli reservation stops the chain before the child process', async () => {
+  const cli = cliSpawn([JSON.stringify(output())]);
+  let reservations = 0;
+  const result = await summarizeWithProvider(INPUT, cliHarness(cli, {
+    reserve: () => {
+      reservations += 1;
+      return { ok: true, reservationId: 'reservation-1' };
+    },
+    consentOk: () => reservations === 0,
+  }).ctx);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, 'consent_changed');
+  assert.equal(cli.calls(), 0);
+});
+
+/**
+ * The stub is handed to the product through slots typed `typeof spawn` (`deps.spawn` in
+ * `src/worker/observe.ts`, `src/doctor.ts` and `src/setup/probe.ts`), and that type permits
+ * `spawn(command, args)`. A stub that read `options.signal` unconditionally would fail such a call
+ * with a `TypeError` in the tests while the same call worked in production.
+ */
+test('the agent CLI stub answers a spawn call that omits options, as `typeof spawn` allows', () => {
+  const cli = cliSpawn([]);
+  assert.doesNotThrow(() => cli.spawn('claude', ['--version']));
 });

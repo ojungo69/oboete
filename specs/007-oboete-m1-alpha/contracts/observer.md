@@ -8,11 +8,15 @@ both identically except for `degraded_reason`.
 After classification, a session batch is split by destination; batch identity is
 (session, through event, destination). Every batch produces observations only. The session
 summary is never a provider output in M1: at session end the worker derives it deterministically
-from the session's rows and the observations just applied (rules below), so session end costs
-exactly one provider call (the observations batch) and the summary has one source. The matrix:
+from the session's rows and the observations just applied (rules below), so session end costs at
+most one *successful* provider call (the observations batch) and the summary has one source. The
+matrix:
 
-M1 enables exactly one observer preset at a time (the spec speaks of "the configured provider
-preset"); the matrix:
+M1 selects one observer preset as a batch's destination. A configured fallback chain may retry the
+same batch against further targets whose egress is narrower than or equal to that preset's, so the
+counts below are successful calls and the chain adds only failed attempts, never a second applied
+output ([009 provider-fallback.md](../../009-memory-core/contracts/provider-fallback.md)). The
+matrix:
 
 | configuration | session end provider calls | observations from | summary from |
 |---|---|---|---|

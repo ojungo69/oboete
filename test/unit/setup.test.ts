@@ -161,6 +161,30 @@ test('switching to a local preset re-records consent instead of leaving the remo
   });
 });
 
+test('adding a fallback target refuses --yes and is displayed before it is accepted', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    const accepted = loadConfig(context.paths);
+
+    // A target written in after consent was stored is a destination the reader never saw (US7 #4).
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "ollama"\nmodel = "qwen3:8b"\n`);
+    assert.equal(consentMatches(loadConfig(context.paths), { HOME: context.userHome }), false);
+
+    context.output = '';
+    assert.equal(await context.run(['--yes']), 2, context.output);
+    assert.match(context.output, /Fallback targets/);
+    assert.match(context.output, /ollama at 127\.0\.0\.1:11434/);
+    assert.equal(loadConfig(context.paths).consent.hash, accepted.consent.hash, 'the refused chain is not consented');
+
+    context.output = '';
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    const stored = loadConfig(context.paths);
+    assert.notEqual(stored.consent.hash, accepted.consent.hash);
+    assert.equal(consentMatches(stored, { HOME: context.userHome }), true);
+  });
+});
+
 test('a destination the run refuses is not written to the configuration', async () => {
   await harness(async (context) => {
     assert.equal(await context.run(['--accept-egress']), 0, context.output);
@@ -174,6 +198,131 @@ test('a destination the run refuses is not written to the configuration', async 
     assert.match(context.output, /generativelanguage\.googleapis\.com/, 'it still shows what it refused');
   });
 });
+
+test('a destination that would strip the chain of its admission is refused before anything is written', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    // A remote target is admitted under a remote primary and merely skipped by the default cost
+    // policy, so this configuration is accepted as it stands.
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "nim"\n`);
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    const before = loadConfig(context.paths);
+
+    // `--provider ollama` narrows the primary's egress, which turns that entry into a widening one.
+    context.output = '';
+    assert.equal(await context.run(['--provider', 'ollama', '--accept-egress']), 2, context.output);
+    assert.match(context.output, /Fallback target 1 sends further/);
+
+    const after = loadConfig(context.paths);
+    assert.equal(after.observer.preset, before.observer.preset, 'the refused destination is not enabled');
+    assert.equal(after.consent.hash, before.consent.hash);
+
+    // The gate is the destination's doing, so it must not take the recovery paths with it: going
+    // capture-only is a destination the user asked for, and `--remove` never reads the chain.
+    context.output = '';
+    assert.equal(await context.run(['--provider', 'ollama', '--accept-egress', '--remove']), 0, context.output);
+    assert.doesNotMatch(
+      readFileSync(join(context.userHome, '.claude', 'settings.json'), 'utf8'), /oboete/,
+      'the removal ran instead of stopping at the chain',
+    );
+  });
+});
+
+test('a chain the configuration cannot use blocks neither capture-only nor rewiring', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--provider', 'ollama', '--accept-egress']), 0, context.output);
+    // A widening entry written by hand: the observer has no provider until it is corrected.
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "nim"\n`);
+
+    context.output = '';
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    assert.ok(existsSync(join(context.userHome, '.claude', 'settings.json')), 'agents are still wired');
+
+    context.output = '';
+    assert.equal(await context.run(['--provider', 'none', '--accept-egress']), 0, context.output);
+    assert.equal(loadConfig(context.paths).observer.preset, 'none');
+  });
+});
+
+test('an uncredentialed primary with an admitted target says the chain is attempted, not the rules', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--provider', 'workers-ai', '--accept-egress']), 0, context.output);
+    // `ollama` needs no credential, so the worker advances past the primary's `no_provider` and
+    // applies this target's output (contracts/provider-fallback.md Verification 15). The report
+    // displayed that target and then said memories were written by rule alone in the same output.
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "ollama"\nmodel = "qwen3:8b"\n`);
+
+    context.output = '';
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    assert.match(context.output, /No credentials are set for the workers-ai preset/);
+    assert.match(context.output, /fallback targets shown above are attempted instead/);
+    assert.doesNotMatch(context.output, /memories are written by rule alone/);
+  });
+});
+
+test('a bare setup reports a chain the stored preset cannot use, and still succeeds', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--provider', 'workers-ai', '--accept-egress']), 0, context.output);
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "ollama"\n`);
+
+    // No `--provider`, so this run changes no destination — but the entry it leaves in place stops
+    // `resolveModel`, which takes the stored primary down with it, and a run that said nothing left
+    // the user to find that in `oboete doctor` or in rule-based memories.
+    context.output = '';
+    assert.equal(await context.run(['--accept-egress']), 0, context.output);
+    assert.match(context.output, /Fallback target 1 requires an observer model/);
+
+    // `--remove` is the recovery path and never reads the chain.
+    context.output = '';
+    assert.equal(await context.run(['--remove']), 0, context.output);
+    assert.doesNotMatch(context.output, /Fallback target/);
+  });
+});
+
+test('a fallback entry the destination cannot use is reported, and the destination is still written', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--provider', 'none', '--accept-egress']), 0, context.output);
+    // `[observer] model` is the primary's only, so an `ollama` entry without one can never resolve
+    // a model. It is inert while the primary is `none` — `admittedChain` reports the missing
+    // primary instead — and it stops the whole chain resolving once a real destination is selected,
+    // which leaves even the selected primary unusable.
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "ollama"\n`);
+
+    context.output = '';
+    assert.equal(await context.run(['--provider', 'workers-ai', '--accept-egress']), 0, context.output);
+    assert.match(context.output, /Fallback target 1 requires an observer model/);
+    assert.equal(loadConfig(context.paths).observer.preset, 'workers-ai',
+      'the destination the run selected is written; only a widening chain is refused');
+  });
+});
+
+test('selecting none reports the fallback chain without a primary and still writes the destination', async () => {
+  await harness(async (context) => {
+    assert.equal(await context.run(['--provider', 'workers-ai', '--accept-egress']), 0, context.output);
+    writeFileSync(context.paths.config,
+      `${readFileSync(context.paths.config, 'utf8')}\n[[observer.fallback]]\npreset = "ollama"\nmodel = "qwen3:8b"\n`);
+
+    context.output = '';
+    assert.equal(await context.run(['--provider', 'none']), 0, context.output);
+    assert.match(readFileSync(context.paths.config, 'utf8'), /preset = "none"/);
+    assert.match(context.output, /A fallback chain needs a selected observer preset\./,
+      'setup --provider none must report the fallback chain without a primary');
+    assert.ok(context.output.includes(
+      '`oboete setup --provider <preset>`, or remove the `[[observer.fallback]]` entries.',
+    ));
+    assert.doesNotMatch(context.output, /including the selected preset/);
+    // Setup reports the orphaned entries; it does not delete them. Removing configuration the user
+    // wrote is not something this command does anywhere else, and the note names the two commands
+    // that resolve it (contracts/provider-fallback.md Verification 18: this run succeeds).
+    assert.match(readFileSync(context.paths.config, 'utf8'), /\[\[observer\.fallback\]\]/);
+  });
+});
+
 
 test('a machine with no supported agent says that nothing was wired', async () => {
   await withTempHome(async (home) => {

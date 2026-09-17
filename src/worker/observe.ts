@@ -13,6 +13,7 @@ import {
   isPaused,
   loadConfig,
   readCredentials,
+  type ChainTarget,
   type OboeteConfig,
   type PresetName,
 } from '../config.js';
@@ -46,6 +47,7 @@ import {
   processBatch,
   type BatchDeps,
   type BatchResult,
+  type ProviderAttempt,
 } from './observe-batch.js';
 import {
   checkpoint,
@@ -414,18 +416,24 @@ function claimObserveLease(
   return { ok: true, token };
 }
 
-function resolveObserveModel(config: OboeteConfig): { preset: PresetName | 'none'; model: string } {
-  let resolved: { preset: PresetName | 'none'; model: string };
+type ResolvedObserver = { preset: PresetName | 'none'; model: string; chain: ChainTarget[] };
+
+function resolveObserveModel(config: OboeteConfig, observeLog: string): ResolvedObserver {
+  let resolved: ResolvedObserver;
   try {
     resolved = resolveModel(config);
-  } catch {
-    resolved = { preset: config.observer.preset, model: '' };
+  } catch (error) {
+    // A configuration the resolver refuses — including an unusable fallback chain — is a run with
+    // no provider, never a crash (contracts/provider-fallback.md "Admission"). The batches then say
+    // `no_provider`; this line is what names the configuration that took the provider away.
+    appendLogQuietly(observeLog, 'warn', 'observer configuration refused', { code: errorCode(error) });
+    resolved = { preset: config.observer.preset, model: '', chain: [] };
   }
   return resolved;
 }
 
 function initialProviderFailure(
-  resolved: { preset: PresetName | 'none'; model: string },
+  resolved: ResolvedObserver,
   credentials: ReturnType<typeof readCredentials> | null,
   config: OboeteConfig,
   env: NodeJS.ProcessEnv,
@@ -687,6 +695,10 @@ async function observeLifecycle(
       if (
         !catalogChecked &&
         resolved.preset === 'workers-ai' &&
+        // Not for a configuration the resolver refused: an empty model means no batch can reach a
+        // provider, so walking the account's model list would spend the token on a list nothing
+        // in this run can use.
+        resolved.model !== '' &&
         credentials?.present === true
       ) {
         catalogChecked = true;
@@ -733,24 +745,68 @@ async function observeLifecycle(
         }
       }
 
+      // One line per target the chain reached, in attempt order with the primary at position 0:
+      // the batch itself keeps only one reason. `fallback:N` in `oboete doctor` numbers the
+      // configuration's entries instead, so the model is what identifies a target across the two.
+      // Quietly, for two reasons. A pass that stops writes these and returns: a throw there escapes
+      // to `recordRunFailure`, which ends the run as `storage_error` instead of `stopped`, and
+      // `releaseForExit` clears the worker-stop sentinel only for `stopped` — so a full disk during
+      // a stop would leave the sentinel behind for the next resident, which reads it at startup,
+      // exits `stopped` without doing any work and clears it then. And the batch line below is what
+      // escalates a log that cannot be written; one attempt append must not take it with them.
+      function logAttempts(): void {
+        for (const attempt of attempts) {
+          appendLogQuietly(paths.observeLog, 'info', 'provider attempt', {
+            id: batch.id,
+            position: attempt.position,
+            preset: attempt.preset,
+            model: attempt.model,
+            reason: attempt.reason,
+          });
+        }
+      }
+
+      /**
+        * One line for every batch this pass reached, with one exception the contract states too: a
+        * pass that stops between targets writes its attempt lines and no batch line
+        * (contracts/provider-fallback.md "Diagnostics"). Otherwise the line is written even when the
+        * pass then fails, because the batch row may already be committed and a line that is simply
+        * absent leaves nothing in the log for a batch the database says is applied.
+        *
+        * `state` and `reason` are the batch's own; `error` and `pass` are the pass's — a batch that
+        * settled on a reason would otherwise hide the code of whatever failed after it. This is the
+        * write that escalates an unwritable log: `EACCES` and `ENOSPC` are `isStorageError`, so the
+        * throw reaches `recordRunFailure` and the run exits 3.
+        */
       function logBatch(): void {
-        appendLog(paths.observeLog, batchError === undefined ? 'info' : 'error', 'batch', {
+        logAttempts();
+        const failed = batchError !== undefined || passError !== undefined;
+        appendLog(paths.observeLog, failed ? 'error' : 'info', 'batch', {
           id: batch.id,
-          state: batchResult?.state ?? 'error',
-          reason: batchResult?.reason ?? (batchError === undefined ? 'none' : errorCode(batchError)),
+          // A lease taken by another worker is not an error of this batch's, and `BatchResult` has
+          // a state for it; `processBatch` just cannot return one, because it threw.
+          state: batchResult?.state ?? (leaseLost ? 'lease_lost' : 'error'),
+          reason: batchResult?.reason ?? 'none',
+          ...(batchError === undefined ? {} : { error: errorCode(batchError) }),
+          ...(passError === undefined ? {} : { pass: errorCode(passError) }),
           ...(batchResult?.detail === undefined ? {} : { detail: batchResult.detail.split(/[\r\n]/)[0] }),
         });
       }
 
+      const attempts: ProviderAttempt[] = [];
       let batchResult: BatchResult | null = null;
       let batchError: unknown;
+      let passError: unknown;
       try {
         batchResult = (await processBatch({
           db, token, batch, config, deps: batchDeps, detect, providerState,
-          initialProviderReason, resolved, consentOk,
+          initialProviderReason, resolved, consentOk, attempts,
         }));
         if (batchResult.state === 'done') {
           stopReason = batchResult.reason;
+          // A stop keeps no batch line, but the targets this pass already tried are the only
+          // record of what it spent before the stop arrived.
+          logAttempts();
           return;
         }
         const recorded = recordBatchResult(result, batchResult);
@@ -764,10 +820,24 @@ async function observeLifecycle(
         }
       }
 
-      if (!leaseLost) await checkpointBatch();
+      // `checkpointBatch` rethrows a storage error, which ends the run. It is held rather than
+      // thrown here so that the log is written for the batch either way: the batch row may already
+      // be committed, and `recordRunFailure` reports this error, never the `batchError` the call
+      // above may have recorded.
+      try {
+        if (!leaseLost) await checkpointBatch();
+      } catch (error) {
+        passError = error;
+      }
 
-      logBatch();
-
+      try {
+        logBatch();
+      } catch (logError) {
+        // A log the worker cannot write is itself a storage failure and is worth exit 3 — but not
+        // in place of the one already in flight, which is the one `recordRunFailure` should see.
+        if (passError === undefined) throw logError;
+      }
+      if (passError !== undefined) throw passError;
     }
 
     async function processPendingBatches(): Promise<void> {
@@ -948,7 +1018,7 @@ async function observeLifecycle(
       return;
     }
     const config = loadConfig(paths);
-    const resolved = resolveObserveModel(config);
+    const resolved = resolveObserveModel(config, paths.observeLog);
     const presetEntry = resolved.preset === 'none' ? null : PRESET_CATALOG[resolved.preset];
     const credentials =
       resolved.preset === 'none'
