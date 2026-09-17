@@ -488,7 +488,13 @@ async function attemptTargets(
     // answers `no_provider` for a target with no credentials before it ever asks whether consent
     // still holds, so a chain that ends on such a target would keep an earlier target's reason by
     // precedence and send the user to fix a credential when consent is what they must act on.
-    if (!consentOk()) {
+    //
+    // A target with no model is the exception: `resolveObserveModel` returns an empty model and an
+    // empty chain when the resolver refuses the configuration, and no acceptance makes that
+    // runnable — re-accepting egress would only change the next failure to `no_provider`, which is
+    // what `oboete doctor` names first. Nothing is sent either way, because `providerConfigured`
+    // is false for an empty model and `summarizeWithProvider` answers before any request.
+    if (target.model !== '' && !consentOk()) {
       attempts.push({ position, preset: target.preset, model: target.model,
         reason: 'consent_changed', detail: '' });
       return { answered: null };

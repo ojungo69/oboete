@@ -2321,7 +2321,22 @@ rule, which `catalogIsStale` already is. Also declined: enabling
 `@typescript-eslint/prefer-optional-chain` repo-wide (28 other sites, its own cleanup), and reading
 the catalog row once per report instead of once per entry (a one-shot CLI diagnostic).
 
-Gate at this head: `npm test` 1573 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
+### E9 follow-up — a refused configuration is not a consent problem
+
+One P2 from the Codex connector on that head, adopted. The consent guard inside `attemptTargets`
+ran ahead of every target, including the one `resolveObserveModel` builds from a configuration the
+resolver refused — an empty model and an empty chain. With a stored record that no longer matched,
+such a batch recorded `consent_changed` and the recovery said `setup --accept-egress`, which would
+have changed nothing: accepting leaves the resolver error, and the next run fails `no_provider`.
+`oboete doctor` names the resolver refusal first, so the report and the pack disagreed as well.
+
+A target with no model skips the consent step now and answers `no_provider`. Nothing is sent either
+way — `providerConfigured` is false for an empty model — so the guard gives nothing up. RED before
+the fix on `actual: ['consent_changed'] / expected: ['no_provider']`
+(`a configuration the resolver refuses says no_provider, not consent_changed`), and the contract's
+step 2 states the exception.
+
+Gate at this head: `npm test` 1574 + 280 green on Node 24.16.0 and 22.23.1; typecheck, lint and
 markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged; the lizard warning set
 differenced against `85d48437` adds nothing; SonarCloud PR 238 back to **0** OPEN issues.
 

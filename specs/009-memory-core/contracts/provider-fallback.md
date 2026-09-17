@@ -152,7 +152,11 @@ For each target, in order:
 1. `deps.shouldStop()` — a stop sentinel or a due exit ends the pass between targets, as it does
    today inside `providerCall`'s consent boundary.
 2. `currentConsent()` — the same closure the primary uses, so a consent, privacy-stamp, checkpoint
-   or nearby change between targets stops the send exactly as it stops a retry today.
+   or nearby change between targets stops the send exactly as it stops a retry today. **A target
+   with no model skips this step**: `resolveObserveModel` answers a refused configuration with an
+   empty model and an empty chain, and no acceptance makes that runnable — the batch must say
+   `no_provider`, which `summarizeWithProvider` answers without a request, rather than send the user
+   to `setup --accept-egress` for a failure that would still be there afterwards.
 3. `reserveAttempt(db, { preset, capped: PRESET_CATALOG[preset].capped, … })` for *that* target's
    preset. The daily allowance is summed over capped presets and `provider_usage.exhausted_at` is
    per-preset, so the reservation is what makes "shared quota versus per-target failure" (T048's

@@ -352,6 +352,40 @@ test('a consent change between targets stops the chain before the next host', as
   });
 });
 
+test('a configuration the resolver refuses says no_provider, not consent_changed', async () => {
+  await withFixture(async (fixture) => {
+    fixture.env = chainEnv(fixture);
+    // `ollama` has no default model, so an entry without one makes `resolveModel` refuse the whole
+    // configuration: `resolveObserveModel` returns an empty model and an empty chain. With a stored
+    // record that no longer matches, the consent guard used to answer first and send the user to
+    // `setup --accept-egress`, which would have changed nothing — accepting leaves the resolver
+    // error and the next run fails `no_provider`, which is what `oboete doctor` names first.
+    writeChainConfig(fixture, {
+      preset: 'workers-ai',
+      fallback: [{ preset: 'ollama' }],
+      env: fixture.env,
+      consent: 'invalid',
+    });
+    await captureEndedSession(fixture, {
+      sessionId: 'chain-refused',
+      prompts: ['Record that a refused configuration is not a consent problem.'],
+    });
+
+    const hosts = counters();
+    assert.equal(await runObserveForFixture(fixture, { fetch: chainFetch(hosts, {}) }), 1);
+
+    // The catalog refresh still runs — it belongs to the primary preset, not to a target — but no
+    // provider is called, because `providerConfigured` is false for an empty model.
+    assert.deepEqual({ cloudflare: hosts.cloudflare, ollama: hosts.ollama, nim: hosts.nim },
+      { cloudflare: 0, ollama: 0, nim: 0 });
+    fixture.withDb((db) => {
+      assert.deepEqual(db.prepare('SELECT DISTINCT degraded_reason FROM observation_batches').all()
+        .map((row) => row.degraded_reason), ['no_provider']);
+    });
+    assert.match(readFileSync(fixture.paths.observeLog, 'utf8'), /observer configuration refused/);
+  });
+});
+
 test('lease loss at the next reservation keeps the earlier provider attempt in the log', async () => {
   await withFixture(async (fixture) => {
     fixture.env = chainEnv(fixture);
