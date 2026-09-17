@@ -223,7 +223,7 @@ export function workStatus(db: DatabaseSync, location: WorkLocation, all = false
     checkpointOutcome: db.prepare(`SELECT o.checkpoint_decision AS decision, o.checkpoint_reason AS reason,
       o.checkpoint_parent_id AS parentId, o.checkpoint_memory_id AS memoryId FROM observation_batches o
       JOIN work_bindings b ON b.id = o.work_binding_id WHERE b.work_id = ? AND o.checkpoint_decision IS NOT NULL
-      ORDER BY o.claimed_at DESC, o.id DESC LIMIT 1`).get(work.id) ?? null,
+      ORDER BY o.completed_at DESC, o.claimed_at DESC, o.id DESC LIMIT 1`).get(work.id) ?? null,
   })), bindings: bindings.slice(0, MAX_CHOICES),
     hasMore: works.length > MAX_CHOICES || bindings.length > MAX_CHOICES };
 }

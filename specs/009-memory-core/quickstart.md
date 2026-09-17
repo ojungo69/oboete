@@ -2348,6 +2348,35 @@ Gate at this head: `npm test` 1574 + 280 green on Node 24.16.0 and 22.23.1; type
 markdownlint clean; `semgrep scan --config auto` 21 findings, unchanged; the lizard warning set
 differenced against `85d48437` adds nothing; SonarCloud PR 238 back to **0** OPEN issues.
 
+### E9 follow-up — checkpoint decisions in settlement order (#242)
+
+One P2 from the Codex connector on `9cc50a2f`, the same defect the defensive review had filed
+as issue #242 and left out of this pull request for want of a fixture. Adopted here, with the fixture.
+`oboete work` and `oboete why` chose the latest checkpoint decision by `claimed_at`, which this pull
+request made the reclaim fence: `reserveAttempt` restamps it with each attempt. A batch refused at
+its own reservation (`daily_cap`, `provider_exhausted`) is never restamped, keeps its creation
+stamp, and still settles after the batch ahead of it — with the `pending` decision `markRequest`
+wrote — so `work` showed the earlier provider decision as the latest.
+
+The connector's own mechanism does not occur as written: a `destination = 'fallback'` batch never
+carries a checkpoint decision (`markRequest` runs only on the provider path, and `prepareCheckpoint`
+returns null for any `fallbackReason`). The shape does, through the refused reservation above.
+
+Both queries now order by `completed_at DESC, claimed_at DESC, id DESC`, the order #242 named.
+`completed_at` is written in the same apply transaction as the settled decision
+(`src/observer/apply.ts`), and SQLite sorts NULL last under DESC, so an in-flight decision falls
+behind the settled ones. `reserveAttempt`'s docstring now says the column is the fence, not
+settlement order. RED on both consumers before the change, from one seeded fixture with the two
+stamps in the adverse order: `work` returned `'replace'` where `'pending'` settled last, and `why`
+listed `['settled-first', 'settled-last']`
+(`why and work order checkpoint decisions by settlement, not by the reclaim fence`).
+
+Gate at this head: `npm test` 1575 + 280 green on Node 24.16.0 and 22.23.1, first run each, no
+rerun; typecheck, lint and markdownlint clean; `semgrep scan --config auto` 0 findings in the four
+touched files; the lizard warning set over the three touched source files is unchanged against
+`9cc50a2f`. `github-advanced-security` still fails outside the required set, on its own model
+(`CAPIError: 400 The requested model is not supported`), as on the previous heads.
+
 Gate at the previous head: `npm test` 1570 + 280 green on Node 24.16.0 and 22.23.1, each after one
 load-only rerun — `grok-no-tool` saw `pending` where `omitted` was expected (issue #243, the same
 pair of states in the other direction; 6 of 6 on the isolated rerun), and `staleness.test.ts` hit

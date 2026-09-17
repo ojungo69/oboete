@@ -64,7 +64,9 @@ function cappedCalls(db: DatabaseSync, day: string): number {
  * One target's attempt on one batch. `claimed_at` is restamped here, not only at creation, because
  * `reclaimStale` measures its 120 s grace from that column: a batch created minutes before the
  * attempt would otherwise be reclaimable — and its provider call repeated — the instant it starts
- * running (`src/worker/batches.ts` RECLAIM_AFTER_MS).
+ * running (`src/worker/batches.ts` RECLAIM_AFTER_MS). That makes `claimed_at` the reclaim fence and
+ * not settlement order: a batch refused here keeps its older stamp and can still settle later, so
+ * a reader that wants the latest decision orders by `completed_at` (`src/work.ts`, `src/why.ts`).
  */
 export function reserveAttempt(
   db: DatabaseSync,
