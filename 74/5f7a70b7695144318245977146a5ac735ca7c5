@@ -1,0 +1,27 @@
+scripts/e2e/probe-lib/isolated-agent.mjs
+  s_d675408629836f::t_62a94c3fc052ad 366
+specs/007-oboete-m1-alpha/contracts/observer.md
+  s_d675408629836f::t_8529de2b444b44 137-146
+src/observer/classify.ts
+  s_d675408629836f::t_254d4cdee25107 18,22,116,121-123,125-128,131-132,136,157-162
+src/observer/contract.ts
+  s_d675408629836f::t_87e942bde24592 223-225,227-233,235,241-242,244-261
+test/unit/classify.test.ts
+  s_d675408629836f::t_7da8121e1255a4 158-189
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "745f7a70b7695144318245977146a5ac735ca7c5",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
