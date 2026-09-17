@@ -184,6 +184,33 @@ export type DegradedReason = (typeof DEGRADED_PRECEDENCE)[number];
  */
 export const CHAIN_STOPS = new Set<DegradedReason>(['consent_changed', 'unusable_output']);
 
+/** Why one source of a batch was put back rather than summarized. */
+export type SourceReason = 'detector_failed' | 'source_context_unknown' | 'consent_changed';
+
+/**
+ * What each deferral makes of the record that carries it. A lost consent is the consent reason, a
+ * detector that could not run is an unusable answer, and a source held for an origin this worker
+ * cannot verify leaves no summarizer reason at all. A new `SourceReason` has to choose here rather
+ * than fall into one of these by default; severity is `DEGRADED_PRECEDENCE`, not this key order.
+ *
+ * Holding is honest for one pass but is not a resting state: the sources that reach it in practice
+ * come from setup/doctor probes, which capture from a temporary root they delete (#279).
+ */
+export const SOURCE_OUTCOME = {
+  consent_changed: 'consent_changed',
+  detector_failed: 'unusable_output',
+  source_context_unknown: null,
+} satisfies Record<SourceReason, DegradedReason | null>;
+
+/** The outcome a set of deferral reasons makes, by the shared severity order. */
+export function deferralOutcome(reasons: readonly string[]): DegradedReason | null {
+  const mapped: (DegradedReason | null)[] = reasons.map((reason) => reason in SOURCE_OUTCOME
+    ? SOURCE_OUTCOME[reason as SourceReason]
+    // A reason this worker did not write is not a held origin; it is an answer we cannot use.
+    : 'unusable_output');
+  return mostSevereReason(mapped.filter((reason): reason is DegradedReason => reason !== null));
+}
+
 /** The reason a record keeps when several apply: the first match in `DEGRADED_PRECEDENCE`. */
 export function mostSevereReason(reasons: Iterable<DegradedReason>): DegradedReason | null {
   const present = new Set(reasons);
@@ -357,18 +384,36 @@ function sessionSummaryText(
 function degradedReasonForSession(db: DatabaseSync, sessionId: string): DegradedReason | null {
   // Only the latest outcome of still-unprocessed sources degrades current generation. A failed
   // historical attempt cannot keep a successfully recovered session degraded forever.
-  const reasons = new Set(db
-    .prepare(`SELECT DISTINCT b.degraded_reason FROM observation_batches b
+  //
+  // A deferred source carries its own reason, and the batch it was taken out of may have gone on to
+  // apply without one: when some sources of a batch fail detection and the rest summarize, the
+  // batch's own `degraded_reason` is NULL and only the receipt says the detector failed. Reading
+  // the batch alone would hide that behind the held-source default this function's caller applies.
+  const reasons = new Set<DegradedReason>();
+  for (const row of db
+    .prepare(`SELECT DISTINCT b.degraded_reason AS batch_reason, bs.outcome AS outcome,
+        bs.reason AS source_reason
+      FROM observation_batches b
       JOIN observation_batch_sources bs ON bs.batch_id = b.id
       JOIN raw_events r ON r.id = bs.raw_event_id
       WHERE b.session_id = ? AND r.processing_state <> 'processed'
         AND bs.recorded_at = (SELECT MAX(latest.recorded_at) FROM observation_batch_sources latest
           WHERE latest.raw_event_id = r.id)`)
-    .all(sessionId)
-    .map((row) => row.degraded_reason)
-    .filter((reason): reason is DegradedReason =>
-      DEGRADED_PRECEDENCE.includes(reason as DegradedReason),
-    ));
+    .all(sessionId)) {
+    if (DEGRADED_PRECEDENCE.includes(row.batch_reason as DegradedReason)) {
+      reasons.add(row.batch_reason as DegradedReason);
+    }
+    if (row.outcome !== 'deferred' || typeof row.source_reason !== 'string') continue;
+    // A provider failure is already written as the reason itself; a source this worker put back
+    // carries its own vocabulary. Anything else is a queue state (`partial_capture`,
+    // `work_selection_required`), which says nothing about generation health.
+    if (DEGRADED_PRECEDENCE.includes(row.source_reason as DegradedReason)) {
+      reasons.add(row.source_reason as DegradedReason);
+    } else if (row.source_reason in SOURCE_OUTCOME) {
+      const mapped = SOURCE_OUTCOME[row.source_reason as SourceReason];
+      if (mapped !== null) reasons.add(mapped);
+    }
+  }
   return mostSevereReason(reasons);
 }
 

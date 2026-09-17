@@ -13,7 +13,15 @@ import { contentHash } from '../events.js';
 import { checkpointHash, materialHash, memoryIdFor } from '../db/identity.js';
 import { promoteSensitivity } from '../privacy/classify.js';
 import { applyObservations, type ApplyResult } from '../observer/apply.js';
-import { CHAIN_STOPS, checkLanguage, mostSevereReason, rejectsDirectives, type DegradedReason } from '../observer/classify.js';
+import {
+  CHAIN_STOPS,
+  checkLanguage,
+  deferralOutcome,
+  mostSevereReason,
+  rejectsDirectives,
+  type DegradedReason,
+  type SourceReason,
+} from '../observer/classify.js';
 import { fallbackObserve, type FallbackEvent } from '../observer/fallback.js';
 import { summarizeWithProvider, type CallOutcome } from '../observer/llm.js';
 import { buildObserverRequest } from '../observer/request.js';
@@ -360,36 +368,10 @@ type PrivacyReader = (context: SourceContext | null, projectMemoryId?: string) =
  * these — `apply.ts` and `batches.ts` write their own, and the column has no CHECK — so this union
  * covers the reasons `revalidateSources` writes, not the column.
  */
-type SourceReason = 'detector_failed' | 'source_context_unknown' | 'consent_changed';
-
-/**
- * What each deferral makes of the batch it emptied. A lost consent is the consent reason, a
- * detector that could not run is an unusable answer, and a source held for an origin this worker
- * cannot verify leaves no summarizer reason at all. A new `SourceReason` has to choose here rather
- * than fall into one of these by default; severity is `DEGRADED_PRECEDENCE`, not this key order.
- *
- * Holding is honest for one pass but is not a resting state: the sources that reach it in practice
- * come from setup/doctor probes, which capture from a temporary root they delete (#279).
- */
-const BATCH_OUTCOME = {
-  consent_changed: 'consent_changed',
-  detector_failed: 'unusable_output',
-  source_context_unknown: null,
-} satisfies Record<SourceReason, DegradedReason | null>;
-
 /** The reasons of this batch's deferred sources, for a pass that re-checked none of them itself. */
 function recordedDeferrals(db: DatabaseSync, batchId: string): string[] {
   return db.prepare(`SELECT DISTINCT reason FROM observation_batch_sources
     WHERE batch_id = ? AND outcome = 'deferred'`).all(batchId).map((row) => String(row.reason));
-}
-
-/** The batch outcome a set of deferral reasons makes, by the shared severity order. */
-function batchOutcomeOf(reasons: readonly string[]): DegradedReason | null {
-  const mapped: (DegradedReason | null)[] = reasons.map((reason) => reason in BATCH_OUTCOME
-    ? BATCH_OUTCOME[reason as SourceReason]
-    // A reason this worker did not write is not a held origin; it is an answer we cannot use.
-    : 'unusable_output');
-  return mostSevereReason(mapped.filter((reason): reason is DegradedReason => reason !== null));
 }
 
 /** The reasons this pass deferred, or null when the lease was lost before they could be recorded. */
@@ -682,7 +664,7 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
     // nothing there is nothing of its own to read: either an earlier pass emptied the batch and its
     // receipts are the only record, or the sources left for something that is not a deferral at all
     // (quarantined as secret), which those receipts also say.
-    const reason = batchOutcomeOf(deferred.length > 0 ? deferred : recordedDeferrals(db, batch.id));
+    const reason = deferralOutcome(deferred.length > 0 ? deferred : recordedDeferrals(db, batch.id));
     transactionImmediate(db, () => {
       if (!assertLease(db, token, deps.now())) throw new LeaseLostError();
       db.prepare("UPDATE observation_batches SET state = 'fallback', completed_at = ?, degraded_reason = ? WHERE id = ? AND owner_token = ?")
