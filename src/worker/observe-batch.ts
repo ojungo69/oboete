@@ -363,6 +363,9 @@ type SourceReason = 'detector_failed' | 'source_context_unknown' | 'consent_chan
  * precedence). A lost consent is the consent reason, a detector that could not run is an unusable
  * answer, and a source held for an origin this worker cannot verify leaves no summarizer reason at
  * all. A new `SourceReason` has to choose here rather than fall into one of these by default.
+ *
+ * Holding is honest for one pass but is not a resting state: the sources that reach it in practice
+ * come from setup/doctor probes, which capture from a temporary root they delete (#279).
  */
 const BATCH_OUTCOME = {
   consent_changed: 'consent_changed',
