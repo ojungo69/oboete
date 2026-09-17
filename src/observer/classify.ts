@@ -207,12 +207,37 @@ export const SOURCE_OUTCOME = {
   source_context_unknown: null,
 } satisfies Record<SourceReason, DegradedReason | null>;
 
-/** The outcome a set of deferral reasons makes, by the shared severity order. */
+/**
+ * Reasons that say where a source is in the queue rather than what became of it: it was excerpted
+ * out of the request, only part of it was captured, or a migration parked it for an explicit choice.
+ * None of them is a generation failure.
+ */
+const QUEUED_REASONS = new Set(['not_sent', 'partial_capture', 'work_selection_required']);
+
+/**
+ * What one source's latest receipt says about generation health, or null when it says nothing.
+ *
+ * The default is fail-closed on purpose. A receipt exists only once something happened to the
+ * source, so a reason that is neither a provider failure, nor one of the worker's own deferrals, nor
+ * a queue state is an answer that came back and could not be used — `uncovered/unaccounted` and
+ * every `rejected` reason land here. The states where nothing has happened yet return null instead.
+ */
+export function sourceOutcome(outcome: string, reason: unknown): DegradedReason | null {
+  // `assigned` is a source waiting for its batch's first pass; `legacy_unknown` predates receipts;
+  // `processed` is a source the summarizer answered for, whether or not its last portion is in.
+  if (outcome === 'assigned' || outcome === 'legacy_unknown' || outcome === 'processed') return null;
+  if (typeof reason !== 'string') return null;
+  // A provider failure is written as the reason itself, and `secret` is a quarantine the design
+  // deliberately does not count against generation.
+  if (DEGRADED_PRECEDENCE.includes(reason as DegradedReason)) return reason as DegradedReason;
+  if (Object.hasOwn(SOURCE_OUTCOME, reason)) return SOURCE_OUTCOME[reason as SourceReason];
+  if (QUEUED_REASONS.has(reason) || reason === 'secret') return null;
+  return 'unusable_output';
+}
+
+/** The outcome a set of receipt reasons makes, by the shared severity order. */
 export function deferralOutcome(reasons: readonly string[]): DegradedReason | null {
-  const mapped: (DegradedReason | null)[] = reasons.map((reason) => reason in SOURCE_OUTCOME
-    ? SOURCE_OUTCOME[reason as SourceReason]
-    // A reason this worker did not write is not a held origin; it is an answer we cannot use.
-    : 'unusable_output');
+  const mapped = reasons.map((reason) => sourceOutcome('deferred', reason));
   return mostSevereReason(mapped.filter((reason): reason is DegradedReason => reason !== null));
 }
 
@@ -390,10 +415,11 @@ function degradedReasonForSession(db: DatabaseSync, sessionId: string): Degraded
   // Only the latest outcome of still-unprocessed sources degrades current generation. A failed
   // historical attempt cannot keep a successfully recovered session degraded forever.
   //
-  // A deferred source carries its own reason, and the batch it was taken out of may have gone on to
-  // apply without one: when some sources of a batch fail detection and the rest summarize, the
-  // batch's own `degraded_reason` is NULL and only the receipt says the detector failed. Reading
-  // the batch alone would hide that behind the held-source default this function's caller applies.
+  // Each source carries its own receipt, and the batch it was taken out of may have gone on to apply
+  // without a reason of its own: when some sources of a batch fail detection, come back unaccounted
+  // for or have their observation dropped while the rest summarize, the batch's `degraded_reason` is
+  // NULL and only the receipt says so. Reading the batch alone would hide every one of those behind
+  // the held-source default this function's caller applies.
   const reasons = new Set<DegradedReason>();
   for (const row of db
     .prepare(`SELECT DISTINCT b.degraded_reason AS batch_reason, bs.outcome AS outcome,
@@ -408,16 +434,8 @@ function degradedReasonForSession(db: DatabaseSync, sessionId: string): Degraded
     if (DEGRADED_PRECEDENCE.includes(row.batch_reason as DegradedReason)) {
       reasons.add(row.batch_reason as DegradedReason);
     }
-    if (row.outcome !== 'deferred' || typeof row.source_reason !== 'string') continue;
-    // A provider failure is already written as the reason itself; a source this worker put back
-    // carries its own vocabulary. Anything else is a queue state (`partial_capture`,
-    // `work_selection_required`), which says nothing about generation health.
-    if (DEGRADED_PRECEDENCE.includes(row.source_reason as DegradedReason)) {
-      reasons.add(row.source_reason as DegradedReason);
-    } else if (row.source_reason in SOURCE_OUTCOME) {
-      const mapped = SOURCE_OUTCOME[row.source_reason as SourceReason];
-      if (mapped !== null) reasons.add(mapped);
-    }
+    const fromSource = sourceOutcome(String(row.outcome), row.source_reason);
+    if (fromSource !== null) reasons.add(fromSource);
   }
   return mostSevereReason(reasons);
 }

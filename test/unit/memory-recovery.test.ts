@@ -147,8 +147,8 @@ test('a source whose captured root was removed is held as source_context_unknown
 
 // The other half of the same classifier: a source the detector could not scan is a summarizer
 // outcome, not a held origin. The two can also meet in one batch — `readSourcePrivacy` fails per
-// row, not per batch — and `batchOutcomeOf` then takes the more severe one through the shared
-// `DEGRADED_PRECEDENCE`; this pins the detector half on a batch of its own.
+// row, not per batch — and `deferralOutcome` (`src/observer/classify.ts`) then takes the more severe
+// one through the shared `DEGRADED_PRECEDENCE`; this pins the detector half on a batch of its own.
 test('a source the detector cannot scan leaves the batch as unusable_output, not held', async () => {
   await withFixture(async (fixture) => {
     fixture.env = cleanEnv(fixture.home, { OBOETE_OPENROUTER_API_KEY: 'detector-failure-fixture-key' });

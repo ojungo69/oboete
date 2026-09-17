@@ -265,17 +265,26 @@ function summaryDegraded(db: DatabaseSync, memoryId: string): string | null {
   return (row?.degraded_reason as string | null | undefined) ?? null;
 }
 
-test('a deferred source reports its own reason when the rest of its batch summarized', async () => {
-  // One source of an applied batch was deferred while the others went through the provider, so the
-  // batch's own `degraded_reason` is NULL and the receipt is the only record. Reading the batch
-  // alone reports rule-based notes for both, which hides the detector failure.
+test('an unprocessed source reports what its own receipt says, whatever the batch did', async () => {
+  // A batch can apply with `degraded_reason` NULL while one of its sources is still unprocessed and
+  // its receipt is the only record. Reading the batch alone reports rule-based notes for all of these.
   const cases = [
-    { reason: 'detector_failed', expect: 'unusable_output' },
-    { reason: 'source_context_unknown', expect: 'rule_based' },
+    { outcome: 'deferred', reason: 'detector_failed', expect: 'unusable_output' },
+    { outcome: 'deferred', reason: 'consent_changed', expect: 'consent_changed' },
+    { outcome: 'deferred', reason: 'unreachable', expect: 'unreachable' },
+    { outcome: 'uncovered', reason: 'unaccounted', expect: 'unusable_output' },
+    { outcome: 'rejected', reason: 'directive', expect: 'unusable_output' },
+    // Nothing happened to the source, or what happened says where it is in the queue.
+    { outcome: 'deferred', reason: 'source_context_unknown', expect: 'rule_based' },
+    { outcome: 'deferred', reason: 'partial_capture', expect: 'rule_based' },
+    { outcome: 'deferred', reason: 'work_selection_required', expect: 'rule_based' },
+    { outcome: 'uncovered', reason: 'not_sent', expect: 'rule_based' },
+    { outcome: 'rejected', reason: 'secret', expect: 'rule_based' },
+    { outcome: 'assigned', reason: null, expect: 'rule_based' },
   ];
-  for (const { reason, expect } of cases) {
+  for (const [index, { outcome, reason, expect }] of cases.entries()) {
     await withOpened((db, token) => {
-      const session = `sess-${reason}`;
+      const session = `sess-receipt-${index}`;
       seedSummaryFixture(db, session, 'Record the mixed source outcome.', [{ id: 'b-applied', degraded: null }]);
       db.prepare(`INSERT INTO raw_events
         (id, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at)
@@ -284,12 +293,12 @@ test('a deferred source reports its own reason when the rest of its batch summar
       db.prepare("UPDATE raw_events SET batch_id = 'b-applied', processing_state = 'waiting' WHERE id = ?")
         .run(`${session}-p2`);
       db.prepare(`INSERT INTO observation_batch_sources (batch_id, raw_event_id, outcome, reason, recorded_at)
-        VALUES ('b-applied', ?, 'deferred', ?, ?)`).run(`${session}-p2`, reason, NOW);
+        VALUES ('b-applied', ?, ?, ?, ?)`).run(`${session}-p2`, outcome, reason, NOW);
 
       const result = sessionSummary(db, token, session, NOW);
       assert.equal(result.state, 'waiting');
       if (result.memoryId === null) assert.fail('expected a summary memory');
-      assert.equal(summaryDegraded(db, result.memoryId), expect, reason);
+      assert.equal(summaryDegraded(db, result.memoryId), expect, `${outcome}/${reason}`);
     });
   }
 });
