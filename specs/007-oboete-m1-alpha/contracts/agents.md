@@ -200,20 +200,21 @@ spool).
   first; the detector runs in a `worker_threads` Worker that the main thread terminates at a
   hard cutoff (deadline minus the spool reserve minus a 20 ms row-build margin); a terminated
   detector yields a metadata-only row (`classification_state = failed`, reason `deadline`),
-  never unsanitized content. Each wait for a lock on a hook connection (opening it and each
-  write transaction) is bounded by wall clock at min(150 ms, remaining budget minus the spool
-  reserve), computed when the connection is opened. SQLite's own busy timeout is not used on
-  hook connections because it bounds requested sleep rather than elapsed time. When the
-  remaining budget after the detector is below the reserve the database is not opened and the
-  sanitized event goes straight to the spool; a storage failure after the detector → spool. A
-  wall-time test combines a slow detector with a busy database. The full detector must finish
-  the read bound inside the cutoff on Node 22.16 (R13 probe); if it cannot, no smaller bound
-  is introduced silently: the capture lane is blocked and the measured bound goes to the
+  never unsanitized content. Every lock wait on a hook connection (opening it and each
+  write transaction) is capped at 150 ms through `waitForLock`, and all of them together
+  at the remaining budget minus the spool reserve (`lockBudgetMs`), fixed when the
+  connection is opened. SQLite's own busy timeout is not used on hook connections because
+  it bounds requested sleep rather than elapsed time. When the remaining budget after the
+  detector is below the reserve the database is not opened and the sanitized event goes
+  straight to the spool; a storage failure after the detector → spool. A wall-time test
+  combines a slow detector with a busy database. The full detector must finish the read
+  bound inside the cutoff on Node 22.16 (R13 probe); if it cannot, no smaller bound is
+  introduced silently: the capture lane is blocked and the measured bound goes to the
   owner as A14. Measured on 2026-09-04: a secret-dense 1 MB payload takes 406-665 ms, above
   the 240 ms cutoff, so A14 set the read bound to 256 KiB, which keeps that worst case near
-  100-170 ms. Tests assert process wall time per event kind (worst-case input at the read bound
-  and a detector that never returns) and 100% in-deadline exits under every fault; the replay
-  p99 is an additional SC-002 measurement, not the guarantee.
+  100-170 ms. Tests assert process wall time per event kind (worst-case input at the
+  read bound and a detector that never returns) and 100% in-deadline exits under every
+  fault; the replay p99 is an additional SC-002 measurement, not the guarantee.
 - Injection hooks (`SessionStart`, `UserPromptSubmit`, Grok delivery hooks, Pi inject child):
   300 ms when the previous summary is ready; at session start only, the hook additionally waits
   up to 1 s while it is pending (1.3 s wall in total, `INJECTION_DEADLINE_MS`; the wait is capped

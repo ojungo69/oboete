@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
@@ -16,100 +17,49 @@ import {
 } from '../../src/worker/lease.js';
 import { WALL_CLOCK_IS_MEASURED, withTempHome } from '../helpers/home.js';
 
-function spawnLockHolder(dbPath: string): ChildProcess {
-  return spawn(
+function spawnLock(dbPath: string, setupSql: string, releaseDelayMs: number): ChildProcess {
+  const child = spawn(
     process.execPath,
     [
       '-e',
       `const { DatabaseSync } = require('node:sqlite');
 const db = new DatabaseSync(${JSON.stringify(dbPath)}, { timeout: 2000 });
-db.exec('BEGIN IMMEDIATE');
+${setupSql}
 process.stdout.write('held\\n');
 process.stdin.once('data', () => {
-  setTimeout(() => { try { db.exec('ROLLBACK'); } finally { db.close(); process.exit(0); } }, 80);
+  setTimeout(() => { try { db.exec('ROLLBACK'); } finally { db.close(); process.exit(0); } }, ${releaseDelayMs});
 });`,
     ],
     { stdio: ['pipe', 'pipe', 'pipe'] },
   );
+  child.stdin?.on('error', () => {});
+  return child;
 }
 
-function spawnExclusiveLock(dbPath: string): ChildProcess {
-  return spawn(
-    process.execPath,
-    [
-      '-e',
-      `const { DatabaseSync } = require('node:sqlite');
-const db = new DatabaseSync(${JSON.stringify(dbPath)}, { timeout: 2000 });
-db.exec('PRAGMA journal_mode = WAL');
-db.exec('PRAGMA locking_mode = EXCLUSIVE');
-db.exec('BEGIN IMMEDIATE');
-db.exec('CREATE TABLE IF NOT EXISTS lock_probe(x INTEGER)');
-db.exec('INSERT INTO lock_probe VALUES (1)');
-db.exec('COMMIT');
-process.stdout.write('held\\n');
-process.stdin.once('data', () => {
-  setTimeout(() => { db.close(); process.exit(0); }, 60);
-});`,
-    ],
-    { stdio: ['pipe', 'pipe', 'pipe'] },
-  );
-}
-
-function waitForHeld(child: ChildProcess): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let buf = '';
-    let err = '';
-    const onData = (chunk: Buffer | string): void => {
-      buf += String(chunk);
-      if (buf.includes('held')) {
-        cleanup();
-        resolve();
-      }
-    };
-    const onErr = (chunk: Buffer | string): void => {
-      err += String(chunk);
-    };
-    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
-      cleanup();
-      reject(new Error(`lock holder exited before reporting held (${code ?? signal}): ${err}`));
-    };
-    const onError = (error: Error): void => {
-      cleanup();
-      reject(error);
-    };
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error(`lock holder did not report held: ${err}`));
-    }, 5_000);
-    const cleanup = (): void => {
-      clearTimeout(timer);
-      child.stdout?.off('data', onData);
-      child.stderr?.off('data', onErr);
-      child.off('exit', onExit);
-      child.off('error', onError);
-    };
-    child.stdout?.on('data', onData);
-    child.stderr?.on('data', onErr);
-    child.on('exit', onExit);
-    child.on('error', onError);
-  });
+async function waitForHeld(child: ChildProcess): Promise<void> {
+  try {
+    await once(child.stdout!, 'data', { signal: AbortSignal.timeout(5_000) });
+  } catch {
+    const err = child.stderr?.read()?.toString() ?? '';
+    const reason = child.exitCode ?? child.signalCode;
+    throw new Error(
+      reason !== null
+        ? `lock holder exited before reporting held (${reason}): ${err}`
+        : `lock holder did not report held: ${err}`,
+    );
+  }
 }
 
 async function reap(child: ChildProcess | undefined): Promise<void> {
   if (child === undefined) return;
   if (child.exitCode !== null || child.signalCode !== null) return;
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(() => resolve(), 2_000);
-    child.once('exit', () => {
-      clearTimeout(timer);
-      resolve();
-    });
+  try {
+    const exited = once(child, 'exit', { signal: AbortSignal.timeout(2_000) });
     child.kill('SIGKILL');
-    if (child.exitCode !== null || child.signalCode !== null) {
-      clearTimeout(timer);
-      resolve();
-    }
-  });
+    await exited;
+  } catch {
+    // AbortSignal.timeout: child did not exit.
+  }
 }
 
 async function withOpened(fn: (db: DatabaseSync, home: string) => void | Promise<void>): Promise<void> {
@@ -286,55 +236,89 @@ test('claimLease returns null when another connection holds BEGIN IMMEDIATE', as
   });
 });
 
-test('transactionImmediate on a lockWaitMs connection throws busy after the wall-clock bound', async () => {
+test('transactionImmediate on a lockBudgetMs connection throws busy after the wall-clock bound', async () => {
   await withTempHome((home) => {
     const dbPath = oboetePaths(home).db;
     const migrated = openDatabase({ path: dbPath, timeoutMs: 2000 });
     migrated.db.close();
-    const holder = new DatabaseSync(dbPath, { timeout: 2000 });
-    holder.exec('PRAGMA journal_mode = WAL');
-    holder.exec('BEGIN IMMEDIATE');
-    const opened = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockWaitMs: 100 });
+    let holder: DatabaseSync | undefined;
+    let opened: ReturnType<typeof openDatabase> | undefined;
     try {
+      holder = new DatabaseSync(dbPath, { timeout: 2000 });
+      holder.exec('PRAGMA journal_mode = WAL');
+      holder.exec('BEGIN IMMEDIATE');
+      opened = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockBudgetMs: 100 });
+      const db = opened.db;
       const started = performance.now();
-      assert.throws(() => transactionImmediate(opened.db, () => 1), isBusyError);
+      assert.throws(() => transactionImmediate(db, () => 1), isBusyError);
       const elapsed = performance.now() - started;
       // Upper bound is the wait plus one scheduler wakeup and a generous runner-load
       // margin; Linux is tight, macOS short sleeps are several times longer without this loop.
       assert.ok(elapsed >= 95, `waited only ${elapsed.toFixed(1)} ms`);
       if (WALL_CLOCK_IS_MEASURED) {
-        assert.ok(elapsed < 100 + 150, `waited ${elapsed.toFixed(1)} ms`);
+        assert.ok(elapsed < 250, `waited ${elapsed.toFixed(1)} ms`);
       }
     } finally {
       try {
-        if (holder.isTransaction) holder.exec('ROLLBACK');
+        if (holder?.isTransaction) holder.exec('ROLLBACK');
       } catch {
         // Closing still runs.
       }
-      if (opened.db.isOpen) opened.db.close();
-      if (holder.isOpen) holder.close();
+      if (opened?.db.isOpen) opened.db.close();
+      if (holder?.isOpen) holder.close();
     }
   });
 });
 
-test('a lockWaitMs hook connection reports busy_timeout 0 and acquires after a child releases', async () => {
+test('open and write waits on a lockBudgetMs connection share one wall-clock budget', async () => {
+  await withTempHome((home) => {
+    const dbPath = oboetePaths(home).db;
+    const migrated = openDatabase({ path: dbPath, timeoutMs: 2000 });
+    migrated.db.close();
+    const sleep = new Int32Array(new SharedArrayBuffer(4));
+    const opened = performance.now();
+    const { db } = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockBudgetMs: 200 });
+    let holder: DatabaseSync | undefined;
+    try {
+      Atomics.wait(sleep, 0, 0, 120);
+      holder = new DatabaseSync(dbPath, { timeout: 0 });
+      holder.exec('BEGIN IMMEDIATE');
+      assert.throws(() => transactionImmediate(db, () => 1), isBusyError);
+      const elapsed = performance.now() - opened;
+      assert.ok(elapsed >= 190, `waited only ${elapsed.toFixed(1)} ms`);
+      if (WALL_CLOCK_IS_MEASURED) {
+        assert.ok(elapsed < 250, `waited ${elapsed.toFixed(1)} ms`);
+      }
+    } finally {
+      try {
+        if (holder?.isTransaction) holder.exec('ROLLBACK');
+      } catch {
+        // Closing still runs.
+      }
+      if (db.isOpen) db.close();
+      if (holder?.isOpen) holder.close();
+    }
+  });
+});
+
+test('a lockBudgetMs hook connection reports busy_timeout 0 and acquires after a child releases', async () => {
   await withTempHome(async (home) => {
     const dbPath = oboetePaths(home).db;
     const migrated = openDatabase({ path: dbPath, timeoutMs: 2000 });
     migrated.db.close();
-    const opened = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockWaitMs: 300 });
+    const opened = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockBudgetMs: 1000 });
     let child: ChildProcess | undefined;
     try {
       assert.equal(opened.db.prepare('PRAGMA busy_timeout').get()?.timeout, 0);
-      child = spawnLockHolder(dbPath);
+      child = spawnLock(dbPath, "db.exec('BEGIN IMMEDIATE');", 80);
       await waitForHeld(child);
-      child.stdin?.write('go\n');
       const probe = new DatabaseSync(dbPath, { timeout: 0 });
       try {
         assert.throws(() => probe.exec('BEGIN IMMEDIATE'), isBusyError);
       } finally {
         if (probe.isOpen) probe.close();
       }
+      child.stdin?.write('go\n');
       assert.equal(transactionImmediate(opened.db, () => 1), 1);
     } finally {
       await reap(child);
@@ -343,7 +327,7 @@ test('a lockWaitMs hook connection reports busy_timeout 0 and acquires after a c
   });
 });
 
-test('a lockWaitMs hook open waits out an exclusive lock that blocks the open step', async () => {
+test('a lockBudgetMs hook open waits out an exclusive lock that blocks the open step', async () => {
   await withTempHome(async (home) => {
     const dbPath = oboetePaths(home).db;
     const migrated = openDatabase({ path: dbPath, timeoutMs: 2000 });
@@ -351,7 +335,16 @@ test('a lockWaitMs hook open waits out an exclusive lock that blocks the open st
     let child: ChildProcess | undefined;
     let opened: ReturnType<typeof openDatabase> | undefined;
     try {
-      child = spawnExclusiveLock(dbPath);
+      child = spawnLock(
+        dbPath,
+        `db.exec('PRAGMA journal_mode = WAL');
+db.exec('PRAGMA locking_mode = EXCLUSIVE');
+db.exec('BEGIN IMMEDIATE');
+db.exec('CREATE TABLE IF NOT EXISTS lock_probe(x INTEGER)');
+db.exec('INSERT INTO lock_probe VALUES (1)');
+db.exec('COMMIT');`,
+        60,
+      );
       await waitForHeld(child);
       const probe = new DatabaseSync(dbPath, { timeout: 0 });
       try {
@@ -360,7 +353,7 @@ test('a lockWaitMs hook open waits out an exclusive lock that blocks the open st
         if (probe.isOpen) probe.close();
       }
       child.stdin?.write('go\n');
-      opened = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockWaitMs: 1000 });
+      opened = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockBudgetMs: 1000 });
       assert.equal(opened.db.isOpen, true);
     } finally {
       await reap(child);
@@ -369,7 +362,7 @@ test('a lockWaitMs hook open waits out an exclusive lock that blocks the open st
   });
 });
 
-test('a connection without lockWaitMs keeps the SQLite busy timeout it was opened with', async () => {
+test('a connection without lockBudgetMs keeps the SQLite busy timeout it was opened with', async () => {
   await withTempHome((home) => {
     const opened = openDatabase({ path: oboetePaths(home).db, timeoutMs: 1234 });
     try {

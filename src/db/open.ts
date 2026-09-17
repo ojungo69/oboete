@@ -109,24 +109,27 @@ export function isBusyError(error: unknown): boolean {
   return typeof info.errstr === 'string' && /database is locked|busy/.test(info.errstr);
 }
 
-const lockWaitMsByDb = new WeakMap<DatabaseSync, number>();
+const lockDeadlineByDb = new WeakMap<DatabaseSync, number>();
 const lockWaitSleep = new Int32Array(new SharedArrayBuffer(4));
+const LOCK_WAIT_CEILING_MS = 150;
 
 /**
- * Hook-budget connections (`lockWaitMs`) retry on SQLITE_BUSY until wall time passes the bound.
- * SQLite's busy handler sums requested sleeps and never reads a clock; on macOS those short
- * sleeps last several times longer, so `sqlite3_busy_timeout` is not a wall-time limit.
+ * Hook-budget connections (`lockBudgetMs`) retry on SQLITE_BUSY until wall time passes the
+ * per-connection deadline, and for at most `LOCK_WAIT_CEILING_MS` per wait. SQLite's busy
+ * handler sums requested sleeps and never reads a clock; on macOS those short sleeps last
+ * several times longer, so `sqlite3_busy_timeout` is not a wall-time limit.
  */
-function retryBusy<T>(db: DatabaseSync, fn: () => T): T {
-  const bound = lockWaitMsByDb.get(db);
-  if (bound === undefined) return fn();
+function waitForLock<T>(db: DatabaseSync, fn: () => T): T {
+  const deadline = lockDeadlineByDb.get(db);
+  if (deadline === undefined) return fn();
   const start = performance.now();
+  const until = start + Math.min(LOCK_WAIT_CEILING_MS, deadline - start);
   for (let attempt = 0; ; attempt++) {
     try {
       return fn();
     } catch (error) {
       if (!isBusyError(error)) throw error;
-      const left = bound - (performance.now() - start);
+      const left = until - performance.now();
       if (!(left > 0)) throw error;
       Atomics.wait(lockWaitSleep, 0, 0, Math.min(2 ** attempt, 10, left));
     }
@@ -134,7 +137,7 @@ function retryBusy<T>(db: DatabaseSync, fn: () => T): T {
 }
 
 export function beginImmediate(db: DatabaseSync): void {
-  retryBusy(db, () => db.exec('BEGIN IMMEDIATE'));
+  waitForLock(db, () => db.exec('BEGIN IMMEDIATE'));
 }
 
 export function openDatabase(options: {
@@ -142,7 +145,7 @@ export function openDatabase(options: {
   timeoutMs: number;
   hook?: boolean;
   readOnly?: boolean;
-  lockWaitMs?: number;
+  lockBudgetMs?: number;
 }): OpenedDatabase {
   const hook = options.hook === true;
   if ((hook || options.readOnly === true) && !existsSync(options.path)) {
@@ -249,18 +252,13 @@ function openConfiguredDatabase(
   options: Parameters<typeof openDatabase>[0],
   hook: boolean,
 ): OpenedDatabase {
-  const requested = options.lockWaitMs;
-  const lockWaitMs =
-    requested === undefined
-      ? undefined
-      : Number.isFinite(requested) && requested > 0
-        ? requested
-        : 1;
+  const deadline =
+    options.lockBudgetMs === undefined ? undefined : performance.now() + options.lockBudgetMs;
   const db = new (loadSqlite().DatabaseSync)(options.path, {
-    timeout: lockWaitMs === undefined ? options.timeoutMs : 0,
+    timeout: options.lockBudgetMs === undefined ? options.timeoutMs : 0,
     readOnly: options.readOnly === true,
   });
-  if (lockWaitMs !== undefined) lockWaitMsByDb.set(db, lockWaitMs);
+  if (deadline !== undefined) lockDeadlineByDb.set(db, deadline);
   try {
     if (options.readOnly === true) {
       const schemaVersion = readUserVersion(db);
@@ -268,11 +266,11 @@ function openConfiguredDatabase(
       verifyAppliedHashes(db);
       return { db, schemaVersion, schemaBehind: schemaVersion < LATEST_SCHEMA_VERSION };
     }
-    if (hook) {
-      return retryBusy(db, () => {
-        db.exec('PRAGMA journal_mode = WAL');
-        db.exec('PRAGMA foreign_keys = ON');
-        db.exec('PRAGMA synchronous = NORMAL');
+    const opened = waitForLock(db, () => {
+      db.exec('PRAGMA journal_mode = WAL');
+      db.exec('PRAGMA foreign_keys = ON');
+      db.exec('PRAGMA synchronous = NORMAL');
+      if (hook) {
         db.exec('PRAGMA wal_autocheckpoint = 0');
         const schemaVersion = readUserVersion(db);
         if (schemaVersion > LATEST_SCHEMA_VERSION) throw new SchemaAheadError(schemaVersion);
@@ -281,11 +279,9 @@ function openConfiguredDatabase(
           schemaVersion,
           schemaBehind: schemaVersion < LATEST_SCHEMA_VERSION,
         };
-      });
-    }
-    db.exec('PRAGMA journal_mode = WAL');
-    db.exec('PRAGMA foreign_keys = ON');
-    db.exec('PRAGMA synchronous = NORMAL');
+      }
+    });
+    if (opened !== undefined) return opened;
 
     const schemaVersion = migrate(db);
     return { db, schemaVersion, schemaBehind: false };

@@ -88,8 +88,11 @@ M1 source retention and completion rules.
   `PRAGMA journal_mode = WAL`, `PRAGMA foreign_keys = ON`; hook connections add
   `PRAGMA wal_autocheckpoint = 0`. Migrations are forward-only, one transaction each,
   `PRAGMA user_version` = the highest applied number. Hook-budget connections pass
-  `lockWaitMs` instead, open with timeout 0, and wait for locks by wall clock through
-  `retryBusy`, because SQLite's busy timeout counts requested sleep, not elapsed time.
+  `lockBudgetMs` instead, open with timeout 0, and wait for locks by wall clock through
+  `waitForLock`. Every lock wait on a hook connection (opening it and each write
+  transaction) is capped at 150 ms, and all of them together at the remaining
+  budget minus the spool reserve, fixed when the connection is opened. SQLite's
+  busy timeout is not used because it counts requested sleep, not elapsed time.
 - A read-then-write unit is one `BEGIN IMMEDIATE` transaction. Every worker write is fenced by
   `worker_lease.owner_token` (`... WHERE owner_token = ?`; zero rows changed means the lease was
   lost) except the exhaustion signal in `provider_usage`.
