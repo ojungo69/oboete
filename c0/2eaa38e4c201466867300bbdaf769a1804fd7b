@@ -1,0 +1,30 @@
+src/observer/reservation.ts
+  s_d675408629836f::t_4657fd6ffd0ce5 67-69
+src/work.ts
+  s_d675408629836f::t_a6650f9fddb0ac 226
+specs/009-memory-core/quickstart.md
+  s_d675408629836f::t_be8ac8868298e5 2351-2375
+  s_d675408629836f::t_fe955f95079b99 2376-2379
+src/why.ts
+  s_d675408629836f::t_a6650f9fddb0ac 154
+test/unit/why.test.ts
+  s_d675408629836f::t_0bcc778d0194bc 23,578-598,600-603
+  s_d675408629836f::t_f1cd605989f07c 599
+  s_d675408629836f::t_70490fef7287a5 604
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c02eaa38e4c201466867300bbdaf769a1804fd7b",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
