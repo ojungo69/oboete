@@ -200,10 +200,10 @@ spool).
   first; the detector runs in a `worker_threads` Worker that the main thread terminates at a
   hard cutoff (deadline minus the spool reserve minus a 20 ms row-build margin); a terminated
   detector yields a metadata-only row (`classification_state = failed`, reason `deadline`),
-  never unsanitized content. Every lock wait on a hook connection (opening it and each
-  write transaction) is capped at 150 ms through `waitForLock`, and all of them together
-  at the remaining budget minus the spool reserve (`lockBudgetMs`), fixed when the
-  connection is opened. SQLite's own busy timeout is not used on hook connections because
+  never unsanitized content. Each lock wait on a capture connection is capped at 150 ms
+  and every wait ends by a deadline fixed when the connection is opened (the remaining
+  budget minus the spool reserve); time spent between waits counts against that
+  deadline. SQLite's own busy timeout is not used on hook-budget connections because
   it bounds requested sleep rather than elapsed time. When the remaining budget after the
   detector is below the reserve the database is not opened and the sanitized event goes
   straight to the spool; a storage failure after the detector → spool. A wall-time test

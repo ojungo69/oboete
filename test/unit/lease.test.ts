@@ -27,7 +27,7 @@ const db = new DatabaseSync(${JSON.stringify(dbPath)}, { timeout: 2000 });
 ${setupSql}
 process.stdout.write('held\\n');
 process.stdin.once('data', () => {
-  setTimeout(() => { try { db.exec('ROLLBACK'); } finally { db.close(); process.exit(0); } }, ${releaseDelayMs});
+  setTimeout(() => { try { if (db.isTransaction) db.exec('ROLLBACK'); } finally { db.close(); process.exit(0); } }, ${releaseDelayMs});
 });`,
     ],
     { stdio: ['pipe', 'pipe', 'pipe'] },
@@ -37,15 +37,31 @@ process.stdin.once('data', () => {
 }
 
 async function waitForHeld(child: ChildProcess): Promise<void> {
+  let err = '';
+  child.stderr?.on('data', (chunk: Buffer | string) => {
+    err += String(chunk);
+  });
+  const exited = once(child, 'exit').then(([code, signal]) => {
+    throw new Error(`lock holder exited before reporting held (${code ?? signal}): ${err}`);
+  });
+  void exited.catch(() => undefined);
+  if (child.exitCode !== null || child.signalCode !== null) {
+    throw new Error(
+      `lock holder exited before reporting held (${child.exitCode ?? child.signalCode}): ${err}`,
+    );
+  }
   try {
-    await once(child.stdout!, 'data', { signal: AbortSignal.timeout(5_000) });
-  } catch {
-    const err = child.stderr?.read()?.toString() ?? '';
+    await Promise.race([once(child.stdout!, 'data', { signal: AbortSignal.timeout(5_000) }), exited]);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('lock holder exited before reporting held')) {
+      throw error;
+    }
     const reason = child.exitCode ?? child.signalCode;
     throw new Error(
       reason !== null
         ? `lock holder exited before reporting held (${reason}): ${err}`
         : `lock holder did not report held: ${err}`,
+      { cause: error },
     );
   }
 }
@@ -247,9 +263,9 @@ test('transactionImmediate on a lockBudgetMs connection throws busy after the wa
       holder = new DatabaseSync(dbPath, { timeout: 2000 });
       holder.exec('PRAGMA journal_mode = WAL');
       holder.exec('BEGIN IMMEDIATE');
+      const started = performance.now();
       opened = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockBudgetMs: 100 });
       const db = opened.db;
-      const started = performance.now();
       assert.throws(() => transactionImmediate(db, () => 1), isBusyError);
       const elapsed = performance.now() - started;
       // Upper bound is the wait plus one scheduler wakeup and a generous runner-load
@@ -270,7 +286,7 @@ test('transactionImmediate on a lockBudgetMs connection throws busy after the wa
   });
 });
 
-test('open and write waits on a lockBudgetMs connection share one wall-clock budget', async () => {
+test('idle time after the open spends the lock budget', async () => {
   await withTempHome((home) => {
     const dbPath = oboetePaths(home).db;
     const migrated = openDatabase({ path: dbPath, timeoutMs: 2000 });
@@ -306,12 +322,13 @@ test('a lockBudgetMs hook connection reports busy_timeout 0 and acquires after a
     const dbPath = oboetePaths(home).db;
     const migrated = openDatabase({ path: dbPath, timeoutMs: 2000 });
     migrated.db.close();
-    const opened = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockBudgetMs: 1000 });
     let child: ChildProcess | undefined;
+    let opened: ReturnType<typeof openDatabase> | undefined;
     try {
-      assert.equal(opened.db.prepare('PRAGMA busy_timeout').get()?.timeout, 0);
-      child = spawnLock(dbPath, "db.exec('BEGIN IMMEDIATE');", 80);
+      child = spawnLock(dbPath, "db.exec('BEGIN IMMEDIATE');", 10);
       await waitForHeld(child);
+      opened = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockBudgetMs: 1000 });
+      assert.equal(opened.db.prepare('PRAGMA busy_timeout').get()?.timeout, 0);
       const probe = new DatabaseSync(dbPath, { timeout: 0 });
       try {
         assert.throws(() => probe.exec('BEGIN IMMEDIATE'), isBusyError);
@@ -322,7 +339,7 @@ test('a lockBudgetMs hook connection reports busy_timeout 0 and acquires after a
       assert.equal(transactionImmediate(opened.db, () => 1), 1);
     } finally {
       await reap(child);
-      if (opened.db.isOpen) opened.db.close();
+      if (opened?.db.isOpen) opened.db.close();
     }
   });
 });
@@ -343,7 +360,7 @@ db.exec('BEGIN IMMEDIATE');
 db.exec('CREATE TABLE IF NOT EXISTS lock_probe(x INTEGER)');
 db.exec('INSERT INTO lock_probe VALUES (1)');
 db.exec('COMMIT');`,
-        60,
+        10,
       );
       await waitForHeld(child);
       const probe = new DatabaseSync(dbPath, { timeout: 0 });
@@ -362,6 +379,38 @@ db.exec('COMMIT');`,
   });
 });
 
+test('transactionImmediate on a lockBudgetMs connection caps each wait at 150 ms', async () => {
+  await withTempHome((home) => {
+    const dbPath = oboetePaths(home).db;
+    const migrated = openDatabase({ path: dbPath, timeoutMs: 2000 });
+    migrated.db.close();
+    let holder: DatabaseSync | undefined;
+    let opened: ReturnType<typeof openDatabase> | undefined;
+    try {
+      holder = new DatabaseSync(dbPath, { timeout: 2000 });
+      holder.exec('PRAGMA journal_mode = WAL');
+      holder.exec('BEGIN IMMEDIATE');
+      opened = openDatabase({ path: dbPath, timeoutMs: 0, hook: true, lockBudgetMs: 1000 });
+      const db = opened.db;
+      const started = performance.now();
+      assert.throws(() => transactionImmediate(db, () => 1), isBusyError);
+      const elapsed = performance.now() - started;
+      assert.ok(elapsed >= 140, `waited only ${elapsed.toFixed(1)} ms`);
+      if (WALL_CLOCK_IS_MEASURED) {
+        assert.ok(elapsed < 150 + 100, `waited ${elapsed.toFixed(1)} ms`);
+      }
+    } finally {
+      try {
+        if (holder?.isTransaction) holder.exec('ROLLBACK');
+      } catch {
+        // Closing still runs.
+      }
+      if (opened?.db.isOpen) opened.db.close();
+      if (holder?.isOpen) holder.close();
+    }
+  });
+});
+
 test('a connection without lockBudgetMs keeps the SQLite busy timeout it was opened with', async () => {
   await withTempHome((home) => {
     const opened = openDatabase({ path: oboetePaths(home).db, timeoutMs: 1234 });
@@ -371,4 +420,11 @@ test('a connection without lockBudgetMs keeps the SQLite busy timeout it was ope
       if (opened.db.isOpen) opened.db.close();
     }
   });
+});
+
+test('openDatabase throws when lockBudgetMs is given without hook: true', () => {
+  assert.throws(
+    () => openDatabase({ path: 'unused.db', timeoutMs: 0, lockBudgetMs: 100 }),
+    { message: /lockBudgetMs requires hook: true/ },
+  );
 });

@@ -115,9 +115,10 @@ const LOCK_WAIT_CEILING_MS = 150;
 
 /**
  * Hook-budget connections (`lockBudgetMs`) retry on SQLITE_BUSY until wall time passes the
- * per-connection deadline, and for at most `LOCK_WAIT_CEILING_MS` per wait. SQLite's busy
- * handler sums requested sleeps and never reads a clock; on macOS those short sleeps last
- * several times longer, so `sqlite3_busy_timeout` is not a wall-time limit.
+ * deadline fixed when the connection is opened, and for at most `LOCK_WAIT_CEILING_MS` per
+ * wait. Time spent between waits counts against that deadline. SQLite's busy handler sums
+ * requested sleeps and never reads a clock; on macOS those short sleeps last several times
+ * longer, so `sqlite3_busy_timeout` is not a wall-time limit.
  */
 function waitForLock<T>(db: DatabaseSync, fn: () => T): T {
   const deadline = lockDeadlineByDb.get(db);
@@ -148,6 +149,10 @@ export function openDatabase(options: {
   lockBudgetMs?: number;
 }): OpenedDatabase {
   const hook = options.hook === true;
+  // A migrating connection runs a raw BEGIN IMMEDIATE with timeout 0 and no retry.
+  if (options.lockBudgetMs !== undefined && !hook) {
+    throw new Error('lockBudgetMs requires hook: true');
+  }
   if ((hook || options.readOnly === true) && !existsSync(options.path)) {
     throw new DatabaseMissingError(`Database file does not exist: ${options.path}`);
   }
@@ -280,6 +285,7 @@ function openConfiguredDatabase(
           schemaBehind: schemaVersion < LATEST_SCHEMA_VERSION,
         };
       }
+      return undefined;
     });
     if (opened !== undefined) return opened;
 
