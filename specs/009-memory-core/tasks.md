@@ -175,7 +175,8 @@ writers require separate worktrees. No deployment follows merely from an increme
   captured but awaiting generation, with answer evaluation explicitly not run. C3's repeat removes
   the ineligible native-fork timing sample and passes worker RSS at 106.1 MiB. Ordinary hook timing,
   two unprinted Grok starts and real-model recall remain failed/unqualified, not reclassified as
-  successful evaluation. See `quickstart.md`; T023/T024/T040-T043 stay open.
+  successful evaluation. See `quickstart.md`; T023/T024/T040-T043 stayed open then (T040 closed
+  2026-09-17 in E10, T023 closed 2026-09-18 in E12).
 - T025-T028: D1 implements explicit work/project grants, exact personal proposals/projections,
   common source/visibility checks, and CLI/viewer approval plus work-preserving adoption. Both Node
   versions pass 1,097 + 202 checks; installed-browser actions, package validation, normal security,
