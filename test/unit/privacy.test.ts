@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { Worker } from 'node:worker_threads';
@@ -262,6 +262,9 @@ test('fail-closed: a path rule matches a path written through a symbolic link to
     // A file that no longer exists, below a directory that never did, still has a physical spelling.
     assert.equal(matchSecretPath(join(logical, 'gone/secrets/old.txt'), ['gone/**'], root), 'gone/**');
     assert.equal(matchSecretPath(join(logical, 'secrets/k.txt'), [join(root, 'secrets/**')], root), join(root, 'secrets/**'));
+    // A root spelled through the link pairs with the written path, its physical form with the physical one.
+    assert.equal(matchSecretPath(join(logical, 'secrets/k.txt'), ['secrets/**'], logical), 'secrets/**');
+    assert.equal(matchSecretPath(join(root, 'secrets/k.txt'), ['secrets/**'], logical), 'secrets/**');
     // A rule is matched as written, so a repository's `.oboete.toml` never makes the hook resolve a
     // path of its choosing; the user's own absolute rules get their physical form added once.
     assert.equal(matchSecretPath(join(root, 'secrets/k.txt'), [join(logical, 'secrets/**')], root), null);
@@ -269,6 +272,49 @@ test('fail-closed: a path rule matches a path written through a symbolic link to
     assert.deepEqual(expanded, [join(logical, 'secrets/**'), 'secrets/**', join(root, 'secrets/**')]);
     assert.equal(matchSecretPath(join(root, 'secrets/k.txt'), withPhysicalRules([join(logical, 'secrets/**')]), root), join(root, 'secrets/**'));
     assert.equal(matchSecretPath(join(logical, 'src/app.ts'), ['secrets/**', join(logical, 'secrets/**')], root), null);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('fail-closed: an absolute path rule matches a relative tool path, also through a link in the repository', () => {
+  // Codex patch paths and Pi read paths arrive relative to the agent's working directory; the user's rule may be absolute.
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'oboete-relative-rules-')));
+  try {
+    const root = join(base, 'repo');
+    const vault = join(base, 'vault');
+    mkdirSync(join(root, 'secrets'), { recursive: true });
+    mkdirSync(vault);
+    writeFileSync(join(root, 'secrets', 'a.txt'), 'x');
+    writeFileSync(join(vault, 'key.txt'), 'x');
+    symlinkSync(vault, join(root, 'protected'));
+    mkdirSync(join(vault, 'current'));
+    mkdirSync(join(root, 'app', 'secrets'), { recursive: true });
+    assert.equal(matchSecretPath('secrets/a.txt', [join(root, 'secrets/**')], root), join(root, 'secrets/**'));
+    assert.equal(matchSecretPath('protected/key.txt', [join(vault, '**')], root), join(vault, '**'));
+    assert.equal(matchSecretPath('src/app.ts', [join(root, 'secrets/**'), join(vault, '**')], root), null);
+    // A glob before the link: only the written absolute form still carries the link's own name.
+    assert.equal(matchSecretPath('protected/current/key.txt', [join(root, '*/current/key.txt')], root), join(root, '*/current/key.txt'));
+    // The agent's working directory is the base of a relative path, not the repository root.
+    const app = join(root, 'app');
+    assert.equal(matchSecretPath('secrets/b.txt', [join(app, 'secrets/**')], root, app), join(app, 'secrets/**'));
+    assert.equal(matchSecretPath('secrets/b.txt', [join(root, 'secrets/**')], root, app), null);
+    // Repository rules see the path relative to the repository, taken from the working directory too.
+    assert.equal(matchSecretPath('secrets/b.txt', ['app/secrets/**'], root, app), 'app/secrets/**');
+    assert.equal(matchSecretPath('./secrets/b.txt', ['secrets/**'], root, app), null);
+    // Through a link that leaves the repository, only the written form lies inside it.
+    assert.equal(matchSecretPath('key.txt', ['protected/**'], root, join(root, 'protected')), 'protected/**');
+    // Its physical form lies outside the repository, so no relative rule sees `../vault/key.txt`.
+    assert.equal(matchSecretPath('key.txt', [`**/${basename(vault)}/**`], root, join(root, 'protected')), null);
+    // `.` is the working directory, which a rule on a directory above it covers.
+    assert.equal(matchSecretPath('.', [join(root, '**')], root, app), join(root, '**'));
+    // A name that merely starts with two dots is inside the repository.
+    assert.equal(matchSecretPath(join(root, '..cache/x'), ['..cache/**'], root), '..cache/**');
+    // A relative rule never sees the absolute form of a relative path, so a directory above the
+    // repository that happens to share its name does not turn a relative tool path into a hit.
+    assert.equal(matchSecretPath('src/app.ts', [`**/${basename(base)}/**`], root), null);
+    // A path the agent wrote absolute keeps its physical form for relative rules too.
+    assert.equal(matchSecretPath(join(root, 'protected/key.txt'), [`**/${basename(vault)}/**`], root), `**/${basename(vault)}/**`);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

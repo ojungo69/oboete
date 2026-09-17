@@ -255,11 +255,16 @@ values) before the first write anywhere, including the spool. A detector throw, 
 malformed `.oboete.toml` stores metadata only (`classification_state = failed`) and never the
 unsanitized payload. Availability fails open: capture still exits 0.
 
-**Path rules and symbolic links.** A path from an agent is matched both as written and with its
-symbolic links resolved. An absolute rule in `~/.oboete/config.toml` is matched both as written
-and resolved too. A rule in a repository's `.oboete.toml` is matched only as written, because it
-arrives with a clone and oboete does not look up paths a commit chose. Write repository rules
-relative to the repository (`secrets/**`); put absolute rules in `config.toml`.
+**Path rules and symbolic links.** A path from an agent is matched as written and relative to the
+repository, both with and without its symbolic links resolved; a path written absolute is also
+matched in its resolved absolute form. At capture, an absolute rule is also compared with a relative
+path (a Codex patch, a Pi read) made absolute against the agent's working directory; a relative rule
+is not. The worker's later checks of
+stored sources still resolve a relative path against the repository root (#260). An absolute rule in
+`~/.oboete/config.toml` is matched both as written and resolved too. A rule in a repository's
+`.oboete.toml` is matched only as written, because it arrives with a clone and oboete does not look
+up paths a commit chose. Write repository rules relative to the repository (`secrets/**`); put
+absolute rules in `config.toml`.
 
 **Repository boundary.** Identity is the normalized git remote (userinfo, query, and fragment
 removed) or the realpath of `git rev-parse --git-common-dir`. Injection, search, timeline, get,

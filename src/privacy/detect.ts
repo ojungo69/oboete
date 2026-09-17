@@ -1,5 +1,5 @@
 import { Worker, parentPort, workerData } from 'node:worker_threads';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 import { lintSource } from '@secretlint/core';
 import { secretLintProfiler } from '@secretlint/profiler';
@@ -46,6 +46,8 @@ export type DetectorInput = {
   fields?: string[];
   paths: string[];
   repoRoot: string | null;
+  /** The agent's working directory, the base of a relative path; the repository root when absent. */
+  cwd?: string;
   secretPaths: string[];
   /**
    * The values of oboete's own credential variables (log.ts credentialValues), redacted whatever
@@ -252,39 +254,54 @@ export function globRuleError(rule: string): string | null {
   }
 }
 
+/** `path` relative to `root`, or null for the root itself or a path outside it (no repository-relative form). */
+function insideRoot(root: string, path: string): string | null {
+  const inside = relative(root, path);
+  return inside === '' || inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside) ? null : inside;
+}
+
 /**
- * The repository path rule that this path matches, or null. The path is tested in its
- * repository-relative form (when it lies inside the repository) and in its raw form; a match makes
- * the whole event a path-rule hit, which is stored as metadata only (R4).
+ * The path rule that this path matches, or null; a match makes the whole event a path-rule hit,
+ * which is stored as metadata only (R4). Every rule sees the path as written and its
+ * repository-relative form when it lies inside the repository. An absolute rule also sees the
+ * absolute form of a relative path, resolved against the agent's working directory (falling back
+ * to the repository root); a relative rule does not, so a `**` rule cannot match a directory above
+ * the repository through a path the agent wrote relative.
  *
- * The path is also compared in its physical spelling (`physicalPath`): the root is Git's resolved
- * `--show-toplevel` while a payload path keeps the symbolic links it was written with, and a rule
- * that misses its own file fails open. Rules are matched as written; the user's own absolute rules
- * arrive with their physical form already added (`withPhysicalRules`).
+ * Absolute and repository-relative forms are also compared in their physical spelling
+ * (`physicalPath`): the root is Git's resolved `--show-toplevel` while a payload path keeps the
+ * symbolic links it was written with, and a rule that misses its own file fails open. Rules are
+ * matched as written; the user's own absolute rules arrive with their physical form already added
+ * (`withPhysicalRules`).
  */
 export function matchSecretPath(
   pathValue: string,
   rules: string[],
   repoRoot: string | null,
+  cwd: string | null = repoRoot,
 ): string | null {
   if (rules.length === 0) return null;
 
-  const candidates = [withForwardSlashes(pathValue)];
-  if (isAbsolute(pathValue)) candidates.push(withForwardSlashes(physicalPath(pathValue)));
-  if (repoRoot !== null) {
-    const written = resolve(repoRoot, pathValue);
-    for (const [root, path] of [[resolve(repoRoot), written], [physicalPath(repoRoot), physicalPath(written)]]) {
-      const inside = relative(root, path);
-      // A path outside the repository has no repository-relative form to compare.
-      if (inside !== '' && !inside.startsWith('..') && !isAbsolute(inside)) {
-        candidates.push(withForwardSlashes(inside));
-      }
+  const forEveryRule = [pathValue];
+  const forAbsoluteRules: string[] = [];
+  let written = isAbsolute(pathValue) ? pathValue : null;
+  // A relative tool path (a Codex patch, a Pi read) is relative to where the agent runs.
+  if (cwd !== null) written = resolve(cwd, pathValue);
+  if (written !== null) {
+    const physical = physicalPath(written);
+    (isAbsolute(pathValue) ? forEveryRule : forAbsoluteRules).push(written, physical);
+    if (repoRoot !== null) {
+      const inside = [insideRoot(resolve(repoRoot), written), insideRoot(physicalPath(repoRoot), physical)];
+      forEveryRule.push(...inside.filter((form) => form !== null));
     }
   }
 
+  const relativeRuleForms = [...new Set(forEveryRule.map(withForwardSlashes))];
+  const absoluteRuleForms = [...new Set([...forEveryRule, ...forAbsoluteRules].map(withForwardSlashes))];
   for (const rule of rules) {
     const pattern = compileGlob(withForwardSlashes(rule));
-    if (candidates.some((candidate) => pattern.test(candidate))) return rule;
+    const forms = isAbsolute(rule) ? absoluteRuleForms : relativeRuleForms;
+    if (forms.some((form) => pattern.test(form))) return rule;
   }
   return null;
 }
@@ -444,7 +461,7 @@ export async function detectSync(
     for (const field of strippedFields) privateRemoved += field.removed;
 
     for (const path of input.paths) {
-      const pathRule = matchSecretPath(path, input.secretPaths, input.repoRoot);
+      const pathRule = matchSecretPath(path, input.secretPaths, input.repoRoot, input.cwd);
       // R4: a path-rule hit stores metadata only, so the content does not travel any further.
       if (pathRule !== null) {
         return {

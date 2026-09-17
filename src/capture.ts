@@ -988,6 +988,7 @@ async function captureAdapted(
     paths: adapted.contentForDetector.paths,
     identity,
     secretPaths: settings.secretPaths,
+    cwd: first.cwd,
   }, deadlineMs);
 
   return persistDetectedEvents(events, fields, detected, persist, identity, diagnostics, injection, adapted.contentForDetector.paths.length);
@@ -1170,6 +1171,8 @@ async function captureUnparsed(
     paths: scanned.paths,
     identity,
     secretPaths: settings.secretPaths,
+    // The payload was not parsed, so its `cwd` is unread; the hook runs where the agent does.
+    cwd: process.cwd(),
   }, deadlineMs);
   if (!detected.ok || (detected.pathRule === null && detected.texts.length !== scanned.paths.length + 1)) {
     const row = metadataRow({ ...base, payload: { ...metadata, failure_reason: detected.ok ? 'detector_error' : detected.reason } });
@@ -1234,7 +1237,7 @@ function readSettings(paths: OboetePaths, repoRoot: string): CaptureSettings | n
 
 async function runDetector(
   deps: CaptureDeps,
-  input: { fields: string[]; paths: string[]; identity: RepoIdentity; secretPaths: string[] },
+  input: { fields: string[]; paths: string[]; identity: RepoIdentity; secretPaths: string[]; cwd: string },
   deadlineMs: number,
 ): Promise<DetectorResult> {
   const cutoff = Math.floor(
@@ -1249,6 +1252,7 @@ async function runDetector(
         fields: input.fields,
         paths: input.paths,
         repoRoot: input.identity.root,
+        cwd: input.cwd,
         secretPaths: input.secretPaths,
         // FR-016: the hook's own credentials are secrets whatever they look like (log.ts).
         credentialValues: credentialValues(process.env),
