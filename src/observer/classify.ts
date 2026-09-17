@@ -146,7 +146,7 @@ function quotedCorpus(input: ObserverInput): QuotedCorpus {
 }
 
 function unescapeJson(text: string): string {
-  return text.replace(/\\(["\\/])/gu, '$1').replace(/\\n/gu, '\n').replace(/\\t/gu, '\t');
+  return text.replaceAll(/\\(["\\/])/gu, '$1').replaceAll('\\n', '\n').replaceAll('\\t', '\t');
 }
 
 /**
