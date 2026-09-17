@@ -1,0 +1,23 @@
+test/unit/memory-recovery.test.ts
+  s_d675408629836f::t_fb3448b9fb196f 132-133,140,176-177
+  s_d675408629836f::t_dadf8d93a4ea89 139,149-151,175
+src/worker/observe-batch.ts
+  s_d675408629836f::t_64c54be1f7dd35 358-362,366-369,380-387,389-390,392-394,401,680-685,691-696
+  s_d675408629836f::t_16d303c1f021ef 388,391
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d247149f89c68f6ad800d7ed41bdc8618e201cab",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
