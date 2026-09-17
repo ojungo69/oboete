@@ -2610,12 +2610,19 @@ facts; true paraphrase is T024's (#266).
 | `searchMemories hides a superseded fact unless history is requested` | default search omits the superseded row; `--history` returns both; `get --history --json` shows `valid_to` and `superseded_by` naming the current row |
 | `searchMemories returns two distinct facts that share a title when they are the only candidates` | both returned |
 | `searchMemories returns the fact-bearing memory of a five-row corpus` (skipped, #275) | the five rows of the `claude-to-codex` pair at pack time and that pair's recall prompt; un-skipped it fails with `returned m_confirm`, the receipt below |
-| `the pinned pair prompts are still the ones the probe library sends` | the artifact's three facts and its copied recall and seeding prompts, including the `printf` command, compared exactly against `scripts/e2e/probe-lib/isolated-agent.mjs` loaded at run time; runs whether or not the artifact is skipped |
+| `the pinned pair prompts are still the ones the probe library sends` | the artifact's stem, its three facts and its copied recall and seeding prompts, including the verbatim `printf` command, compared exactly against `scripts/e2e/probe-lib/isolated-agent.mjs`, plus one shell-quoted fact the pair's own facts cannot show; runs whether or not the artifact is skipped |
 
-All 36 runnable tests in the file pass on Node 24.16.0 and 22.23.1; the 37th is the #275 artifact, which is skipped until that fix. Each of the first six mutations edits the built test
-bundle, runs the named test, and restores the bundle (sha256 compared). The last three edit
-`scripts/e2e/probe-lib/isolated-agent.mjs`, which the prompt pin reads at run time, and restore it
-(`git status` clean afterwards):
+All 36 runnable tests in the file pass on Node 24.16.0 and 22.23.1; the 37th is the #275 artifact,
+which is skipped until that fix. Each of the first six mutations edits the built test bundle, runs
+the named test, and restores the bundle (sha256 compared). The last four edit
+`scripts/e2e/probe-lib/isolated-agent.mjs`, which the prompt pin imports, and restore it
+(`git status` clean afterwards).
+
+That import is a plain one. It became possible in this PR: `trusthash.mjs` ended in a
+`process.argv[1] === self` block, which esbuild's bundle made fire on the test runner's own
+arguments, so the six lines moved to `scripts/e2e/probe-lib/trusthash-cli.mjs` and
+`test/unit/codex-trust.test.ts` spawns that instead. `scripts/e2e` is outside the TypeScript
+program, so `isolated-agent.d.mts` declares the four functions a `.ts` file imports.
 
 | Mutation | Failing assertion |
 | --- | --- |
@@ -2628,6 +2635,7 @@ bundle, runs the named test, and restores the bundle (sha256 compared). The last
 | a space added before the `\|` in the seeding prompt's last line | prompts: `buildFactSeedingPrompt` differs from the pinned text |
 | `fact line` reworded to `fact-line` in the recall prompt | prompts: `recallPrompt('codex', false)` differs from the pinned text |
 | `cedar` capitalised in `factSet` | prompts: `factSet` differs from the pinned three facts |
+| `shellQuote(fact)` replaced with `` `'${fact}'` `` in `buildFactSeedingPrompt` | prompts: the shell-quoted fact's `printf` line differs |
 
 ### Limits
 
@@ -2641,14 +2649,17 @@ bundle, runs the named test, and restores the bundle (sha256 compared). The last
   to the best score, both fall to about 0.00001, below the 0.3 threshold, and the memory holding
   the three exact facts is omitted. The same prompt against the same rows one memory later includes
   all three. That is #275, and T023 stays open for it. Those five rows and that recall prompt are carried
-  verbatim in `test/unit/retrieval.test.ts` as a skipped test, which reproduces the same three raw scores,
-  so the fix un-skips a failing artifact rather than writing a new one. The artifact names the rows
+  verbatim in `test/unit/retrieval.test.ts` as a skipped test, so the fix un-skips a failing artifact
+  rather than writing a new one. The artifact names the rows
   `m_confirm`, `m_decision` and `m_fact` for `m_c2bfcff0`, `m_363fe065` and `m_9da36e8d`, plus
   `m_checkpoint` and `m_request` for the pair's two session summaries. Keep all five: the miss still
   reproduces on the three searchable rows alone, but the summaries are in the FTS index even though the
   scope hides them, and removing them takes the corpus to three documents, which lifts `m_decision`
   above the threshold — measuring the fix against a corpus the run never had. The receipt for the copied
-  rows is that pair's database from the run, `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`.
+  rows is that pair's database from the run,
+  `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`, verified row for row on
+  2026-09-17. That copy is the dogfood account's and the daily cron keeps writing to it (it holds six
+  memories now, not five), so the test file is the frozen one.
   The two prompts the artifact carries are not taken on trust: `the pinned pair prompts are still the ones
   the probe library sends` compares them exactly against `scripts/e2e/probe-lib/isolated-agent.mjs`, which
   it loads at run time.

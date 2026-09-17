@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
@@ -23,6 +22,12 @@ import {
   rankCandidates,
   rrfFuse,
 } from '../../src/retrieval/rank.js';
+import {
+  buildFactSeedingPrompt,
+  factSet,
+  factStem,
+  recallPrompt,
+} from '../../scripts/e2e/probe-lib/isolated-agent.mjs';
 import { repositoryRoot } from '../helpers/compile-cache.js';
 import { withTempHome } from '../helpers/home.js';
 
@@ -841,23 +846,12 @@ test('searchMemories returns two distinct facts that share a title when they are
   });
 });
 
-/** The pair the artifact below reproduces: the `claude-to-codex` leg of that run. */
-const PAIR_STEM = 'fact-2026-09-17T15-05-08-894Z-claude-to-codex';
-
 /**
- * `scripts/e2e/probe-lib/isolated-agent.mjs`, loaded at run time rather than imported. A static
- * import is bundled into this test file, where `trusthash.mjs`'s main-module guard compares
- * `process.argv[1]` with the bundle's own path, matches, and reads an argument the test runner does
- * not set. esbuild leaves a computed `import()` alone, and outside the bundle that guard stays shut.
+ * The pair the artifact below reproduces: the `claude-to-codex` leg of that run. Composed the way
+ * `scripts/e2e/isolated-user.mjs` composes it, so a change to that template moves this too rather
+ * than leaving the artifact pinned to a stem no run produces.
  */
-async function probeLibrary(): Promise<{
-  factSet: (stem: string) => string[];
-  buildFactSeedingPrompt: (facts: readonly string[]) => string;
-  recallPrompt: (agent: string, noCredentials: boolean) => string;
-}> {
-  const specifier = pathToFileURL(join(repositoryRoot(), 'scripts/e2e/probe-lib/isolated-agent.mjs')).href;
-  return await import(specifier);
-}
+const PAIR_STEM = factStem('2026-09-17T15-05-08-894Z', 'claude', 'codex');
 
 const PAIR_FACTS = [
   `${PAIR_STEM}-1: the build token is cedar.`,
@@ -878,33 +872,42 @@ const PAIR_SEEDING_PROMPT = [
   'These three exact strings are durable facts about this repository. Preserve them verbatim:',
   ...PAIR_FACTS,
   'Use exactly one tool call and no other tools. In that one call, use the shell tool to run:',
-  `printf '%s\\n' ${PAIR_FACTS.map((fact) => `'${fact}'`).join(' ')} >> NOTES.md`,
+  "printf '%s\\n' 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-1: the build token is cedar.'"
+    + " 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-2: the release bird is heron.'"
+    + " 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-3: 配布色は琥珀。' >> NOTES.md",
   'After the tool result, reply on one line with the same three exact strings joined by |.',
 ].join('\n');
 
 // Runs whether or not the artifact below is skipped: a reword in the probe library must not leave
 // that corpus reproducing a prompt no agent sends. The comparison is exact, against what the library
-// actually returns, so a reordered or added line fails it and a cosmetic edit does not.
-test('the pinned pair prompts are still the ones the probe library sends', async () => {
-  const probe = await probeLibrary();
-  assert.deepEqual(probe.factSet(PAIR_STEM), PAIR_FACTS);
-  assert.equal(probe.recallPrompt('codex', false), PAIR_RECALL_PROMPT);
-  assert.equal(probe.buildFactSeedingPrompt(PAIR_FACTS), PAIR_SEEDING_PROMPT);
+// actually returns, so any change to the prompt text fails it — only an edit to the source file that
+// leaves the returned strings alone is tolerated.
+test('the pinned pair prompts are still the ones the probe library sends', () => {
+  assert.deepEqual(factSet(PAIR_STEM), PAIR_FACTS);
+  assert.equal(recallPrompt('codex', false), PAIR_RECALL_PROMPT);
+  assert.equal(buildFactSeedingPrompt(PAIR_FACTS), PAIR_SEEDING_PROMPT);
+  // The pair's facts hold no apostrophe, so they cannot show whether the command is shell-quoted.
+  assert.equal(
+    buildFactSeedingPrompt(["it's a", 'b', 'c']).split('\n')[5],
+    String.raw`printf '%s\n' 'it'\''s a' 'b' 'c' >> NOTES.md`,
+  );
 });
 
 // Artifact for issue #275: the five memories of the `claude-to-codex` pair of the
 // 2026-09-17T15-05-08-894Z dogfood run (JST 2026-09-18) as they stood when the receiving prompt
 // pack was built, copied verbatim from that pair's database (the run's copy of it is
-// `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`). `m_fact` carries the three
-// facts the recall prompt asks for and the pack dropped it as `below_threshold`, keeping
-// `m_confirm`, which carries none of them. Un-skipped, the corpus reproduces the three raw `bm25()`
-// magnitudes quickstart E12 quotes for the run; skipped, nothing here measures them.
+// `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`, verified row for row on
+// 2026-09-17; that copy is the dogfood account's and the cron keeps writing to it, so these rows are
+// the frozen ones). `m_fact` carries the three facts the recall prompt asks for and the pack dropped
+// it as `below_threshold`, keeping `m_confirm`, which carries none of them.
 //
 // Keep all five rows; quickstart E12 Limits says what trimming the two summaries would change.
 //
 // What it does not model: the pair's checkpoint is work-scoped in production, while these rows take
-// the file's ordinary project grant and are excluded by `m.type <> 'session_summary'` alone; and all
-// five rows share one `created_at`, so nothing here can show a recency- or retirement-driven drop.
+// the file's ordinary project grant and are excluded by `m.type <> 'session_summary'` alone; the
+// three searchable rows were `feature`, `decision` and `feature` in the run and are `discovery`
+// here, which nothing in retrieval reads; and all five rows share one `created_at`, so nothing here
+// can show a recency- or retirement-driven drop.
 //
 // Skipped until #275 is fixed. Un-skip it with the fix, together with the counter-pin T023's
 // acceptance names: an unrelated memory in a five-row corpus must still be omitted, or a fix that

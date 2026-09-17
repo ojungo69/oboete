@@ -1,11 +1,9 @@
-#!/usr/bin/env node
 // Codex [hooks.state] trusted_hash rows. Corrected rule (recon 2026-09-03):
 //   async:false is part of the handler object (not omitted as None)
 //   the group's matcher is part of the preimage when present
 //   timeout is the normalized default (600, or 1 for session_end/interrupt)
 import fs from "node:fs";
 import crypto from "node:crypto";
-import { fileURLToPath } from "node:url";
 
 // Same order as the default sort (UTF-16 code units); localeCompare would make the hash locale-dependent.
 const byCodeUnit = (a, b) => {
@@ -39,13 +37,4 @@ export function trustedHashToml(hooksPath, file) {
     });
   }
   return rows.join("\n\n") + (rows.length ? "\n" : "");
-}
-
-const self = fileURLToPath(import.meta.url);
-if (process.argv[1] && fs.existsSync(process.argv[1]) && fs.realpathSync(process.argv[1]) === self) {
-  const p = process.argv[2];
-  const file = JSON.parse(fs.readFileSync(p, "utf8"));
-  const toml = trustedHashToml(p, file);
-  fs.writeFileSync(p, JSON.stringify(file, null, 2));
-  process.stdout.write(toml);
 }

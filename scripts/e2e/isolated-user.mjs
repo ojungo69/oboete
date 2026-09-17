@@ -9,20 +9,7 @@ import { fileURLToPath } from "node:url";
 import { finalText, redactValue } from "./probe-lib/agent-events.mjs";
 import { childEnv, gitInit, PreconditionError, runTimed } from "./probe-lib/process.mjs";
 import { tmux, tmuxSession } from "./probe-lib/tmux.mjs";
-import {
-  assertAgentOutput,
-  buildFactSeedingPrompt,
-  configureRemote,
-  factSet,
-  launchAgent,
-  observerLeaseIsFree,
-  prepareOboeteHome,
-  readIfPresent,
-  recallPrompt,
-  resolveSourceHomes,
-  runObserver,
-  waitForSummary,
-} from "./probe-lib/isolated-agent.mjs";
+import { assertAgentOutput, buildFactSeedingPrompt, configureRemote, factSet, factStem, launchAgent, observerLeaseIsFree, prepareOboeteHome, readIfPresent, recallPrompt, resolveSourceHomes, runObserver, waitForSummary } from './probe-lib/isolated-agent.mjs';
 import { runLifecycleAgent } from "./probe-lib/isolated-lifecycle.mjs";
 import { createLifecycleReport, lifecycleRows } from "./probe-lib/isolated-lifecycle-report.mjs";
 import { inspectLifecycle } from "./probe-lib/isolated-lifecycle-state.mjs";
@@ -260,7 +247,7 @@ async function runPair(pair, context) {
   const started = dependencies.now();
   const pairDir = path.join(runDir, `${pair.from}-to-${pair.to}`);
   const paths = resultPaths(pairDir);
-  const facts = factSet(`fact-${runId}-${pair.from}-to-${pair.to}`);
+  const facts = factSet(factStem(runId, pair.from, pair.to));
   const finish = (status, missingFacts, details = {}) => ({
     ...pair,
     elapsedMs: Math.max(0, dependencies.now() - started),
