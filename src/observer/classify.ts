@@ -208,11 +208,11 @@ export const SOURCE_OUTCOME = {
 } satisfies Record<SourceReason, DegradedReason | null>;
 
 /**
- * Reasons that say where a source is in the queue rather than what became of it: it was excerpted
- * out of the request, only part of it was captured, or a migration parked it for an explicit choice.
- * None of them is a generation failure.
+ * Reasons that say where a source is rather than what became of it: it was excerpted out of the
+ * request, only part of it was captured, a migration parked it for an explicit choice, or it is
+ * quarantined as secret and the design deliberately does not count it. None is a generation failure.
  */
-const QUEUED_REASONS = new Set(['not_sent', 'partial_capture', 'work_selection_required']);
+const QUIET_REASONS = new Set(['not_sent', 'partial_capture', 'work_selection_required', 'secret']);
 
 /**
  * What one source's latest receipt says about generation health, or null when it says nothing.
@@ -227,11 +227,10 @@ export function sourceOutcome(outcome: string, reason: unknown): DegradedReason 
   // `processed` is a source the summarizer answered for, whether or not its last portion is in.
   if (outcome === 'assigned' || outcome === 'legacy_unknown' || outcome === 'processed') return null;
   if (typeof reason !== 'string') return null;
-  // A provider failure is written as the reason itself, and `secret` is a quarantine the design
-  // deliberately does not count against generation.
+  // A provider failure is written as the reason itself.
   if (DEGRADED_PRECEDENCE.includes(reason as DegradedReason)) return reason as DegradedReason;
   if (Object.hasOwn(SOURCE_OUTCOME, reason)) return SOURCE_OUTCOME[reason as SourceReason];
-  if (QUEUED_REASONS.has(reason) || reason === 'secret') return null;
+  if (QUIET_REASONS.has(reason)) return null;
   return 'unusable_output';
 }
 
