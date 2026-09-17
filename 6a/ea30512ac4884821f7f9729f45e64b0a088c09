@@ -1,0 +1,21 @@
+src/observer/classify.ts
+  s_d675408629836f::t_71021c86fbdde7 187-192
+test/unit/degraded.test.ts
+  s_d675408629836f::t_71021c86fbdde7 268-287,289-294
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6aea30512ac4884821f7f9729f45e64b0a088c09",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
