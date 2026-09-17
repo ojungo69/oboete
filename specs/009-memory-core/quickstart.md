@@ -2648,8 +2648,11 @@ bundle, runs the named test, and restores the bundle (sha256 compared):
   `rankCandidates` score pin.
 - The pair's five rows live in `test/helpers/pair-275.ts` and are pinned three ways: through
   `searchMemories`, through `buildPromptPack` (the path the run actually dropped the row on, which
-  adds delivery filtering, retirement and the budget cut), and by an unrelated memory of a five-row
-  corpus staying omitted. The rescued row is also shown to arrive through the trigram index rather
+  adds delivery filtering, retirement and the budget cut), and by a smoke check that an unrelated
+  memory of a five-row corpus stays omitted. That last one is not a selectivity gate: a memory
+  sharing no term with the query never becomes a candidate, so no floor value admits it. Below the
+  floor there is no selectivity left by design — the limit, MMR and the character budget bound the
+  volume. The rescued row is also shown to arrive through the trigram index rather
   than the LIKE fallback, which `applyThreshold` admits without comparing it to the threshold. The
   helper names the rows `m_confirm`, `m_decision` and `m_fact` for `m_c2bfcff0`, `m_363fe065` and
   `m_9da36e8d`, plus `m_checkpoint` and `m_request` for the pair's two session summaries. Keep all

@@ -61,9 +61,10 @@ produce separately scored retention, retrieval, delivery and answer outcomes.
   dogfood run: FTS5 clamps the IDF of a term present in more than half the documents, so a candidate whose
   every matched term crosses that half scores around 1e-6 and its ratio to the best candidate collapses.
   `applyThreshold` now admits such a candidate on its rank, as it already does a LIKE-only match. Pinned by
-  the pair's own five rows through `searchMemories` and through `buildPromptPack`, by an unrelated memory of
-  a five-row corpus staying omitted, and by the rescued row arriving through the trigram index rather than
-  the LIKE fallback; the fixture pins and the threshold mutation stay green, and the clamp floor is killed
+  the pair's own five rows through `searchMemories` and through `buildPromptPack`, and by the rescued row
+  arriving through the trigram index rather than the LIKE fallback. A memory sharing no term with the query
+  is still omitted, but that holds because it is never a candidate: below the floor there is no selectivity
+  left, and the limit, MMR and the character budget bound the volume instead. the fixture pins and the threshold mutation stay green, and the clamp floor is killed
   in both directions. See `quickstart.md` E12.
 - [ ] T024 [US3] Qualify selected local/external profiles on the paraphrase corpus; add semantic retrieval in `src/retrieval/` only if the measured target requires it, documenting primary API/dependency evidence in `specs/009-memory-core/research.md`.
 

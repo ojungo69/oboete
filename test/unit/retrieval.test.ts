@@ -886,7 +886,11 @@ test('searchMemories returns the fact-bearing memory of a five-row corpus', asyn
   });
 });
 
-// The other direction of the same gate: admitting a clamped candidate must not admit the corpus.
+// What admitting clamped candidates does not do. Note what this pins and what it cannot: a memory
+// that shares no term with the query never becomes a candidate, so no clamp floor could admit it —
+// mutating the floor does not fail this test. Below the floor there is no selectivity left to pin:
+// a clamped match is admitted by design, and the limit, MMR and the character budget are what bound
+// the volume. This is the smoke check that the fix did not reach past the candidate set.
 test('searchMemories omits an unrelated memory of a five-row corpus', async () => {
   await withTempHome((home) => {
     const paths = oboetePaths(home);
