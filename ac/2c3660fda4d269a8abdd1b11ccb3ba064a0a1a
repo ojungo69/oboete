@@ -1,0 +1,37 @@
+docs/dev/conventions.md
+  s_a5ce556de34d57::t_738471be390d83 91-95
+specs/007-oboete-m1-alpha/contracts/agents.md
+  s_d675408629836f::t_f24e47a1cb2e71 203-212,215-217
+src/capture.ts
+  s_a5ce556de34d57::t_61eb6a42632ee4 752-754,781,784
+src/db/open.ts
+  s_a5ce556de34d57::t_dd0e4c902ae54b 112,114,117-120,122-124,126,132,140,148,255-256,258,261,269-273,282-284
+src/injection/pi.ts
+  s_a5ce556de34d57::t_d09e4e4736ef37 147,149-150
+test/unit/lease.test.ts
+  s_d675408629836f::t_35527f4a0624f3 3,20-21,27,30,35-36,39-50,56-57,59-62,239,244-245,247-251,253,259,263,267-268,273-304,309,313,321,330,338-347,356,365
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ac2c3660fda4d269a8abdd1b11ccb3ba064a0a1a",
+  "prompts": {},
+  "sessions": {
+    "s_a5ce556de34d57": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ae64-8c88-7661-8e62-e6208bebc8c3",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    },
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
