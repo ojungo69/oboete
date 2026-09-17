@@ -419,6 +419,11 @@ function degradedReasonForSession(db: DatabaseSync, sessionId: string): Degraded
   // for or have their observation dropped while the rest summarize, the batch's `degraded_reason` is
   // NULL and only the receipt says so. Reading the batch alone would hide every one of those behind
   // the held-source default this function's caller applies.
+  //
+  // `SUMMARY_SOURCE_SQL` is the same predicate the caller counts `generationPending` over, so a row
+  // the summary never treated as a source cannot label the summary. Without it a partial prompt row
+  // — which `revalidateSources` re-reads and defers by name — would blame the summarizer for text it
+  // was never sent.
   const reasons = new Set<DegradedReason>();
   for (const row of db
     .prepare(`SELECT DISTINCT b.degraded_reason AS batch_reason, bs.outcome AS outcome,
@@ -426,7 +431,7 @@ function degradedReasonForSession(db: DatabaseSync, sessionId: string): Degraded
       FROM observation_batches b
       JOIN observation_batch_sources bs ON bs.batch_id = b.id
       JOIN raw_events r ON r.id = bs.raw_event_id
-      WHERE b.session_id = ? AND r.processing_state <> 'processed'
+      WHERE b.session_id = ? AND r.processing_state <> 'processed' AND ${SUMMARY_SOURCE_SQL}
         AND bs.recorded_at = (SELECT MAX(latest.recorded_at) FROM observation_batch_sources latest
           WHERE latest.raw_event_id = r.id)`)
     .all(sessionId)) {

@@ -265,6 +265,30 @@ function summaryDegraded(db: DatabaseSync, memoryId: string): string | null {
   return (row?.degraded_reason as string | null | undefined) ?? null;
 }
 
+test('a row the summary never counted as a source cannot label the summary', async () => {
+  // `generationPending` counts sources through SUMMARY_SOURCE_SQL, which excludes a partial row that
+  // is not a tool call carrying paths. `revalidateSources` still re-reads and defers such a row by
+  // name, so without the same predicate its receipt would blame the summarizer for text it never saw.
+  await withOpened((db, token) => {
+    seedSummaryFixture(db, 'sess-excluded', 'Record the excluded source.', [{ id: 'b-applied', degraded: null }]);
+    db.prepare(`INSERT INTO raw_events
+      (id, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at)
+      SELECT ?, repo_id, session_id, turn_id, agent, 'prompt', content, sensitivity, 'partial', captured_at, expires_at
+      FROM raw_events WHERE id = 'sess-excluded-p1'`).run('sess-excluded-p2');
+    db.prepare("UPDATE raw_events SET batch_id = 'b-applied', processing_state = 'waiting' WHERE id = 'sess-excluded-p2'")
+      .run();
+    db.prepare(`INSERT INTO observation_batch_sources (batch_id, raw_event_id, outcome, reason, recorded_at)
+      VALUES ('b-applied', 'sess-excluded-p2', 'deferred', 'detector_failed', ?)`).run(NOW);
+    // An ordinary pending source, so the summary is still pending and a reason would be rendered.
+    db.prepare("UPDATE raw_events SET processing_state = 'pending' WHERE id = 'sess-excluded-p1'").run();
+
+    const result = sessionSummary(db, token, 'sess-excluded', NOW);
+    assert.equal(result.state, 'waiting');
+    if (result.memoryId === null) assert.fail('expected a summary memory');
+    assert.equal(summaryDegraded(db, result.memoryId), 'rule_based');
+  });
+});
+
 test('an unprocessed source reports what its own receipt says, whatever the batch did', async () => {
   // A batch can apply with `degraded_reason` NULL while one of its sources is still unprocessed and
   // its receipt is the only record. Reading the batch alone reports rule-based notes for all of these.
