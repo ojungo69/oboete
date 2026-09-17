@@ -1,0 +1,23 @@
+src/observer/classify.ts
+  s_d675408629836f::t_f8bc53eb038691 210-238,240,418-422,437-438
+test/unit/memory-recovery.test.ts
+  s_d675408629836f::t_f4e75687d56ee5 150-151
+test/unit/degraded.test.ts
+  s_d675408629836f::t_7ea40f26fa86ec 268-270,272-283,285,287,296,301
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3665284e5e21780947383938f5aac39877bfbe82",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
