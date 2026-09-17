@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
-import { isBusyError } from '../db/open.js';
+import { beginImmediate, isBusyError } from '../db/open.js';
 import { stale } from './lease-clock.js';
 
 export { STALE_AFTER_MS, FUTURE_SKEW_MS, stale } from './lease-clock.js';
@@ -11,7 +11,7 @@ function leaseRow(db: DatabaseSync): Record<string, unknown> | undefined {
 }
 
 export function transactionImmediate<T>(db: DatabaseSync, fn: () => T): T {
-  db.exec('BEGIN IMMEDIATE');
+  beginImmediate(db);
   try {
     const result = fn();
     if (db.isTransaction) db.exec('COMMIT');

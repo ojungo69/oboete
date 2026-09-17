@@ -144,8 +144,10 @@ function openForInject(
 ): ReturnType<typeof openDatabase> | null {
   let opened: ReturnType<typeof openDatabase>;
   try {
-    const timeoutMs = Math.max(1, Math.min(150, Math.floor(remainingBudget())));
-    opened = openDatabase({ path: paths.db, timeoutMs, hook: true });
+    // See beginImmediate / waitForLock in src/db/open.ts. sessionForPi writes through
+    // transactionImmediate on this handle.
+    const lockBudgetMs = Math.floor(remainingBudget());
+    opened = openDatabase({ path: paths.db, timeoutMs: 0, hook: true, lockBudgetMs });
   } catch {
     indexUnavailable({ agent: 'pi', eventName: kind, paths });
     return null;

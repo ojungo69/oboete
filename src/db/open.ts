@@ -109,13 +109,51 @@ export function isBusyError(error: unknown): boolean {
   return typeof info.errstr === 'string' && /database is locked|busy/.test(info.errstr);
 }
 
+const lockDeadlineByDb = new WeakMap<DatabaseSync, number>();
+const lockWaitSleep = new Int32Array(new SharedArrayBuffer(4));
+const LOCK_WAIT_CEILING_MS = 150;
+
+/**
+ * Hook-budget connections (`lockBudgetMs`) retry on SQLITE_BUSY until wall time passes the
+ * deadline fixed when the connection is opened, and for at most `LOCK_WAIT_CEILING_MS` per
+ * wait. Time spent between waits counts against that deadline. SQLite's busy handler sums
+ * requested sleeps and never reads a clock; on macOS those short sleeps last several times
+ * longer, so `sqlite3_busy_timeout` is not a wall-time limit.
+ */
+function waitForLock<T>(db: DatabaseSync, fn: () => T): T {
+  const deadline = lockDeadlineByDb.get(db);
+  if (deadline === undefined) return fn();
+  const start = performance.now();
+  const until = start + Math.min(LOCK_WAIT_CEILING_MS, deadline - start);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return fn();
+    } catch (error) {
+      if (!isBusyError(error)) throw error;
+      const left = until - performance.now();
+      if (!(left > 0)) throw error;
+      Atomics.wait(lockWaitSleep, 0, 0, Math.min(2 ** attempt, 10, left));
+      if (!(until - performance.now() > 0)) throw error;
+    }
+  }
+}
+
+export function beginImmediate(db: DatabaseSync): void {
+  waitForLock(db, () => db.exec('BEGIN IMMEDIATE'));
+}
+
 export function openDatabase(options: {
   path: string;
   timeoutMs: number;
   hook?: boolean;
   readOnly?: boolean;
+  lockBudgetMs?: number;
 }): OpenedDatabase {
   const hook = options.hook === true;
+  // A migrating connection runs a raw BEGIN IMMEDIATE with timeout 0 and no retry.
+  if (options.lockBudgetMs !== undefined && !hook) {
+    throw new Error('lockBudgetMs requires hook: true');
+  }
   if ((hook || options.readOnly === true) && !existsSync(options.path)) {
     throw new DatabaseMissingError(`Database file does not exist: ${options.path}`);
   }
@@ -220,9 +258,13 @@ function openConfiguredDatabase(
   options: Parameters<typeof openDatabase>[0],
   hook: boolean,
 ): OpenedDatabase {
+  const deadline =
+    options.lockBudgetMs === undefined ? undefined : performance.now() + options.lockBudgetMs;
   const db = new (loadSqlite().DatabaseSync)(options.path, {
-    timeout: options.timeoutMs, readOnly: options.readOnly === true,
+    timeout: options.lockBudgetMs === undefined ? options.timeoutMs : 0,
+    readOnly: options.readOnly === true,
   });
+  if (deadline !== undefined) lockDeadlineByDb.set(db, deadline);
   try {
     if (options.readOnly === true) {
       const schemaVersion = readUserVersion(db);
@@ -230,19 +272,23 @@ function openConfiguredDatabase(
       verifyAppliedHashes(db);
       return { db, schemaVersion, schemaBehind: schemaVersion < LATEST_SCHEMA_VERSION };
     }
-    db.exec('PRAGMA journal_mode = WAL');
-    db.exec('PRAGMA foreign_keys = ON');
-    db.exec('PRAGMA synchronous = NORMAL');
-    if (hook) {
-      db.exec('PRAGMA wal_autocheckpoint = 0');
-      const schemaVersion = readUserVersion(db);
-      if (schemaVersion > LATEST_SCHEMA_VERSION) throw new SchemaAheadError(schemaVersion);
-      return {
-        db,
-        schemaVersion,
-        schemaBehind: schemaVersion < LATEST_SCHEMA_VERSION,
-      };
-    }
+    const opened = waitForLock(db, () => {
+      db.exec('PRAGMA journal_mode = WAL');
+      db.exec('PRAGMA foreign_keys = ON');
+      db.exec('PRAGMA synchronous = NORMAL');
+      if (hook) {
+        db.exec('PRAGMA wal_autocheckpoint = 0');
+        const schemaVersion = readUserVersion(db);
+        if (schemaVersion > LATEST_SCHEMA_VERSION) throw new SchemaAheadError(schemaVersion);
+        return {
+          db,
+          schemaVersion,
+          schemaBehind: schemaVersion < LATEST_SCHEMA_VERSION,
+        };
+      }
+      return undefined;
+    });
+    if (opened !== undefined) return opened;
 
     const schemaVersion = migrate(db);
     return { db, schemaVersion, schemaBehind: false };

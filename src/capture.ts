@@ -63,7 +63,6 @@ export const DETECTOR_MIN_MS = 60;
 /** Initial due-by hint and metadata expiry; accepted sources retain data until processed + 30 days. */
 export const RAW_EVENT_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 
-const BUSY_TIMEOUT_CEILING_MS = 150;
 const SPAWN_MIN_REMAINING_MS = 10;
 const TURN_BATCH = 10;
 const UNKNOWN_SESSION = 'unknown';
@@ -750,11 +749,9 @@ async function write(options: WriteOptions): Promise<CaptureOutcome> {
   let spawnAfterSpool = false;
   // contracts/agents.md: below the spool reserve the database is not opened at all.
   if (remaining() >= SPOOL_RESERVE_MS) {
-    const timeoutMs = Math.max(
-      1,
-      Math.min(BUSY_TIMEOUT_CEILING_MS, Math.floor(remaining() - SPOOL_RESERVE_MS)),
-    );
-    const opened = openCaptureDatabase(paths, timeoutMs);
+    // Wall-clock lock wait: see beginImmediate / waitForLock in src/db/open.ts.
+    const lockBudgetMs = Math.floor(remaining() - SPOOL_RESERVE_MS);
+    const opened = openCaptureDatabase(paths, lockBudgetMs);
     if (opened !== null && opened !== true) {
       // The handle is closed where it was opened: nothing between the two can leak it.
       try {
@@ -781,10 +778,10 @@ async function write(options: WriteOptions): Promise<CaptureOutcome> {
 
 function openCaptureDatabase(
   paths: OboetePaths,
-  timeoutMs: number,
+  lockBudgetMs: number,
 ): DatabaseSync | true | null {
   try {
-    const opened = openDatabase({ path: paths.db, timeoutMs, hook: true });
+    const opened = openDatabase({ path: paths.db, timeoutMs: 0, hook: true, lockBudgetMs });
     // data-model: the hook never migrates, so an older file is left to the worker. The handle is
     // dropped before it is closed, so a throwing close cannot leave the caller writing through a
     // connection this function has already refused.
