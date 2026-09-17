@@ -299,6 +299,8 @@ test('fail-closed: an absolute path rule matches a relative tool path, also thro
     // Repository rules see the path relative to the repository, taken from the working directory too.
     assert.equal(matchSecretPath('secrets/b.txt', ['app/secrets/**'], root, app), 'app/secrets/**');
     assert.equal(matchSecretPath('./secrets/b.txt', ['secrets/**'], root, app), null);
+    // Through a link that leaves the repository, only the written form lies inside it.
+    assert.equal(matchSecretPath('key.txt', ['protected/**'], root, join(root, 'protected')), 'protected/**');
     // `.` is the working directory, which a rule on a directory above it covers.
     assert.equal(matchSecretPath('.', [join(root, '**')], root, app), join(root, '**'));
     // A name that merely starts with two dots is inside the repository.

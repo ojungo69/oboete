@@ -254,6 +254,12 @@ export function globRuleError(rule: string): string | null {
   }
 }
 
+/** `path` relative to `root`, or null outside it: such a path has no repository-relative form. */
+function insideRoot(root: string, path: string): string | null {
+  const inside = relative(root, path);
+  return inside === '' || inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside) ? null : inside;
+}
+
 /**
  * The path rule that this path matches, or null; a match makes the whole event a path-rule hit,
  * which is stored as metadata only (R4). Every rule sees the path as written and its
@@ -285,13 +291,8 @@ export function matchSecretPath(
     const physical = physicalPath(written);
     (isAbsolute(pathValue) ? forEveryRule : forAbsoluteRules).push(written, physical);
     if (repoRoot !== null) {
-      for (const [root, path] of [[resolve(repoRoot), written], [physicalPath(repoRoot), physical]]) {
-        const inside = relative(root, path);
-        // A path outside the repository has no repository-relative form to compare.
-        if (inside !== '' && inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside)) {
-          forEveryRule.push(inside);
-        }
-      }
+      const inside = [insideRoot(resolve(repoRoot), written), insideRoot(physicalPath(repoRoot), physical)];
+      forEveryRule.push(...inside.filter((form) => form !== null));
     }
   }
 
