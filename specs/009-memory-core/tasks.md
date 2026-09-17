@@ -119,7 +119,14 @@ Owner amendment, 2026-09-10:
 
 - [X] T040 Align accepted native capabilities and run actual Linux/WSL/macOS checks in `.github/workflows/` and `scripts/e2e/probes/`; preserve unsupported/unavailable verdicts (macOS agent probes stay unverified: #269).
 - [ ] T041 Run all twelve ordered agent pairs and selected real-model Japanese/English evaluations; record sanitized evidence under `docs/evidence/memory-core-2026-09/`.
-- [ ] T042 Measure 1,000/10,000/100,000-event resources and seven days of real use with `src/fixture/replay.ts` and `scripts/measure-cold-start.mjs`; include local-model consumption.
+- [ ] T042 Measure 1,000/10,000/100,000-event resources and seven days of real use with `src/fixture/replay.ts`
+  and `scripts/measure-cold-start.mjs`; include local-model consumption. Status: the 1,000-event leg is done
+  on both supported Node versions (`scripts/measure-resources.mjs`, receipts in
+  `docs/evidence/memory-core-2026-09/resource-sweep.md`): worker peak `VmHWM` 108.20 / 100.89 MiB against a
+  150 MiB bound, the WAL growing under a held reader and recycling to 0 after the product's own stop path,
+  no spool file at any sample, and every hook exiting 0. The 10,000- and 100,000-event legs are #267, the
+  seven-day soak is #268, and local-model consumption needs a model this task is not authorised to activate,
+  so the sweep runs with `[observer] preset = "none"` and reports SC-009 recall 0/40 rather than gating it.
 - [ ] T043 Run cohesive typecheck/lint/build/tests/pack and correctness/security, code-review and ponytail-review; record results in `specs/009-memory-core/quickstart.md`.
 - [ ] T044 Update `README.md` and user-facing help with only verified capabilities and remaining limitations.
 - [ ] T045 Run fresh-context verify-tasks for `specs/009-memory-core/tasks.md`, validating every completed marker against source and receipts.
@@ -390,6 +397,17 @@ writers require separate worktrees. No deployment follows merely from an increme
   #233 and #234 are recorded against the contract paragraphs that place them outside this task —
   a pre-existing pass-loop defect the resident inherits, two clock-and-retention findings from the
   delta reviews, and the post-release spawn hand-off the unconditional release leaves open.
+- T042 (open, 2026-09-18): the retained-history resource sweep is measured and recorded; the scale legs
+  and the soak are not. `scripts/measure-resources.mjs` drives the product's own binaries against a
+  temporary home and reads only what the product writes, in two phases: a replay of
+  `test/fixtures/events-1000.jsonl` through the real hooks and the resident worker, then a 20-second
+  hold of a read-only connection while 20 sessions keep capturing. Four gated checks pass on Node
+  24.16.0 and 22.23.1 — no missing, duplicate or failed-classification source; `pending=0`,
+  `liveBatches=0`, `endReason=stopped`; the WAL recycling to 0 after `wal_checkpoint(TRUNCATE)`; and
+  peak `VmHWM` under 150 MiB. Injection p99 (317.5 ms) and the two session-start packs without
+  `summary_pending` are reported, not gated, and belong to the timing work rather than this sweep.
+  What the run cannot say is stated in the evidence file: a 20-second hold shows no long-run growth
+  (#268), 1,051 events is not scale (#267), and `preset = "none"` exercises no provider at all.
 - T040 (open, 2026-09-17): the macOS leg now runs on a GitHub-hosted `macos-15` runner through
   `.github/workflows/platform.yml` instead of the M1 iMac. Four runs are recorded in E10 of
   `quickstart.md`: they found a fail-open `secret_paths` defect through symbolic links (fixed in
