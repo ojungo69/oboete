@@ -1,0 +1,30 @@
+src/privacy/detect.ts
+  s_d675408629836f::t_02e73ebd9fc0d3 282-285
+  s_d675408629836f::t_0ef59a0c0616cf 2,49-50,258-262,264-268,274,279-281,286-291,458
+test/unit/privacy.test.ts
+  s_d675408629836f::t_433254020bef33 277-295
+  s_d675408629836f::t_50e2bd6cf676bd 296-310
+README.md
+  s_d675408629836f::t_5297d61437fa94 259-260
+  s_d675408629836f::t_d87f6ddcb0d94c 258,261-263
+src/capture.ts
+  s_d675408629836f::t_24f24fbf137bea 994,1177-1178,1243,1258
+test/unit/capture.test.ts
+  s_d675408629836f::t_508a7a91433af4 2,8,446-474
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "affeb33bbe177ca341a15db6cda2d732e5d622d6",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
