@@ -128,6 +128,8 @@ test('a source whose captured root was removed is held as source_context_unknown
     fixture.withDb((db) => {
       const receipts = db.prepare("SELECT DISTINCT reason FROM observation_batch_sources WHERE outcome = 'deferred'").all().map((row) => row.reason);
       assert.deepEqual(receipts, ['source_context_unknown']);
+      assert.equal(db.prepare('SELECT degraded_reason FROM observation_batches').get()?.degraded_reason, null,
+        'a held origin is not a summarizer outcome');
       assert.equal(db.prepare("SELECT COUNT(*) AS n FROM observation_batches WHERE degraded_reason = 'consent_changed'").get()?.n, 0);
       assert.equal(db.prepare("SELECT COUNT(*) AS n FROM raw_events WHERE kind = 'prompt' AND processing_state = 'waiting'").get()?.n, 1);
     });

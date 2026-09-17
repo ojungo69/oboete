@@ -630,10 +630,14 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
   input = loadBatchInput(db, batch.id)!;
   if (input.batch.state !== 'pending') return { state: 'requeued', reason: null, memoryIds: [] };
   if (input.rows.length === 0) {
-    const deferred = db.prepare("SELECT 1 FROM observation_batch_sources WHERE batch_id = ? AND outcome = 'deferred' LIMIT 1").get(batch.id);
+    // The receipts say why each source left, so the batch reports what actually happened to them:
+    // a detector that could not run is an unusable answer, a lost consent is the consent reason, and
+    // sources held for an origin this worker cannot verify carry no summarizer reason at all.
+    const deferred = db.prepare(`SELECT DISTINCT reason FROM observation_batch_sources
+      WHERE batch_id = ? AND outcome = 'deferred'`).all(batch.id).map((row) => row.reason);
     let reason: DegradedReason | null = null;
-    if (deferred !== undefined && privacy !== null) reason = 'unusable_output';
-    else if (deferred !== undefined && !options.consentOk()) reason = 'consent_changed';
+    if (deferred.includes('consent_changed')) reason = 'consent_changed';
+    else if (deferred.some((row) => row !== 'source_context_unknown')) reason = 'unusable_output';
     transactionImmediate(db, () => {
       if (!assertLease(db, token, deps.now())) throw new LeaseLostError();
       db.prepare("UPDATE observation_batches SET state = 'fallback', completed_at = ?, degraded_reason = ? WHERE id = ? AND owner_token = ?")
