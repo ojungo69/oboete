@@ -1,0 +1,31 @@
+specs/007-oboete-m1-alpha/contracts/observer.md
+  s_d675408629836f::t_41c31e47ce52e1 134-137
+src/observer/classify.ts
+  s_d675408629836f::t_9669eeedf6d150 21,79,84-92,97-107
+src/observer/contract.ts
+  s_d675408629836f::t_a816d3175c29c1 222-232
+src/observer/llm.ts
+  s_d675408629836f::t_7e75b61bdf566e 191
+src/observer/request.ts
+  s_d675408629836f::t_1998015e44a9ac 19,225
+test/unit/classify.test.ts
+  s_d675408629836f::t_d3cf25c5ae92f4 50,55,85-125
+test/unit/llm.test.ts
+  s_d675408629836f::t_5cb79a64b3fac0 190-192
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2022287b6f64097f65f5a6d10fb3ea8d2b135714",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
