@@ -376,7 +376,7 @@ lines.push(
   `- Compile cache: \`${displayPath(compileCache)}\`, ${cacheWarm ? 'non-empty' : 'empty'} before this run, and used by the scenarios that run against this developer's own home. The hook scenarios each get a temporary \`OBOETE_HOME\`, so each starts on an empty cache that its warm-up runs fill. Either way this is what a directory held, not what the launcher did with it: Node keys entries by version, architecture and uid, and the launcher refuses the directory outright unless it is a real directory of this user's that nobody else can enter, so a non-empty directory means neither that the Node measured here found its own entries nor that any cache was enabled (issue #210: a cold cache costs the hook about 35 ms).`,
   `- Samples: ${RUNS} measured runs after ${WARM_UPS} warm-up runs per scenario`,
   `- Measurement attempts: ${attemptsText}; kept run ${kept.index} (lower 1-minute load average)`,
-  '- Percentiles: linear interpolation over the 30 measured runs; status is every hook landed and `max <= budget`',
+  '- Percentiles: linear interpolation over the 30 measured runs; status is `max <= budget` and all 33 hook events stored where the scenario puts them (the database, or the spool when it is absent)',
   '',
   `Load average next to this table (kept run ${kept.index}, before the measurement set): \`${kept.load.raw}\``,
   '',

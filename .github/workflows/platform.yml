@@ -29,7 +29,7 @@ jobs:
         with:
           persist-credentials: false
           # A pull_request's merge ref is a preview commit that exists nowhere else, and the cold-start
-          # table prints `git rev-parse HEAD` as its receipt.
+          # table prints `git rev-parse --short HEAD` as its receipt.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -48,21 +48,27 @@ jobs:
       - name: Build
         id: build
         run: npm run build
-      # Measured before the test suites load the VM.
-      - name: Hook cold start
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: node scripts/measure-cold-start.mjs --bundle dist/oboete.mjs --markdown
       # The two legs of `npm test`, split so a failure in one still records the other. Each verdict
       # is recorded, but only for a commit whose build succeeded.
       - name: Unit tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: npm run test:unit
+        run: >-
+          node --test --enable-source-maps --import ./build/test/helpers/compile-cache.mjs
+          'build/test/unit/**/*.test.mjs' 'build/test/migrations/**/*.test.mjs' 'scripts/e2e/**/*.test.mjs'
+          'scripts/dco-check.test.mjs' 'scripts/pack-check.test.mjs'
       - name: Serial end-to-end and fault tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: npm run test:serial
+        run: >-
+          node --test --enable-source-maps --import ./build/test/helpers/compile-cache.mjs --test-concurrency=1
+          'build/test/e2e-*.test.mjs' 'build/test/fault-*.test.mjs' 'scripts/quality-debt-record*.test.mjs'
       - name: Pack check
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm run pack-check
+      # Measured after the suites, not straight after the build: the 1-minute load average was 9 to 12
+      # after typecheck, lint and build (run 35210161686) and 2.5 to 4.9 here (run 35206343042).
+      - name: Hook cold start
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: node scripts/measure-cold-start.mjs --bundle dist/oboete.mjs --markdown
       - name: Packed engine in an isolated home
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # The installed package must support no-model setup in an isolated home on this platform.
