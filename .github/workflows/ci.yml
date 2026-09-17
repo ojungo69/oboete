@@ -3,9 +3,13 @@ name: CI
 on:
   workflow_dispatch:
   pull_request:
-  # Branch pushes are covered by the pull_request run. Without this filter both fire on the same
-  # commit, and the two SonarCloud scanners race on the same project analysis: the loser gets
-  # `Error 500 on .../batch/project.protobuf` and the required `check` context fails (#221).
+  # Branch pushes are covered once a pull request is open; before that only workflow_dispatch runs
+  # CI on a branch, and a dispatch on a PR branch still emits a second `check` on its head.
+  # Without this filter both events fire on the same commit, and the duplicate run costs twice: the
+  # two SonarCloud scanners race on the same project analysis, the loser getting
+  # `Error 500 on .../batch/project.protobuf` and failing the required `check` context, and the
+  # concurrent jobs starve the 300 ms hook bounds the timed tests carry, which is the half
+  # `platform.yml` cites (#221).
   push:
     branches: [main]
 
