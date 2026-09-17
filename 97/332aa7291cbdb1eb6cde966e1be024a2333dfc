@@ -1,0 +1,21 @@
+specs/009-memory-core/HANDOFF-claude-code.md
+  s_d675408629836f::t_853d1c07deaf39 158-161
+specs/009-memory-core/tasks.md
+  s_d675408629836f::t_9f5d53c0298f63 122-129,400-410
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "97332aa7291cbdb1eb6cde966e1be024a2333dfc",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
