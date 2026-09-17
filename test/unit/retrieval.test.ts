@@ -23,7 +23,14 @@ import {
   rrfFuse,
 } from '../../src/retrieval/rank.js';
 import { repositoryRoot } from '../helpers/compile-cache.js';
-import { PAIR_RECALL_PROMPT, PAIR_ROWS, PROBE_LIBRARY_LINES } from '../helpers/pair-275.js';
+import {
+  PAIR_FACTS,
+  PAIR_RECALL_PROMPT,
+  PAIR_ROWS,
+  PAIR_SEEDING_PROMPT,
+  PAIR_STEM,
+  probeLibrary,
+} from '../helpers/pair-275.js';
 import { withTempHome } from '../helpers/home.js';
 
 const SCOPE_A = { where: 'm.repo_id = ? AND m.deleted_at IS NULL', params: ['repo_a'] };
@@ -114,7 +121,7 @@ function fixtureFacts(): Array<FactTag & { sentence: string }> {
       .flatMap((text) => text.split('\n'))
       .find((entry) => entry.includes(fact.expect));
     assert.ok(sentence !== undefined,
-      `fact ${fact.id} has no payload line containing ${fact.expect}; if the fixture now carries it only as a tool output byte array, payloadStrings has to decode it`);
+      `fact ${fact.id} has no payload line containing ${fact.expect}: either that line no longer carries the sentence, or it now carries it only as a tool output byte array, which payloadStrings does not decode`);
     facts.push({ ...fact, sentence });
   }
   return facts;
@@ -841,20 +848,23 @@ test('searchMemories returns two distinct facts that share a title when they are
   });
 });
 
-// Runs whether or not the artifact below is skipped: a reword in the probe library must not leave
-// that corpus reproducing a prompt no agent sends. Substring checks, so a reordering or an added
-// line still passes; the whole-prompt shape is what `test/helpers/pair-275.ts` states.
-test('the pinned pair prompts are still the ones the probe library sends', () => {
-  const source = readFileSync(join(repositoryRoot(), 'scripts/e2e/probe-lib/isolated-agent.mjs'), 'utf8');
-  for (const line of PROBE_LIBRARY_LINES) {
-    assert.ok(source.includes(line), `probe library no longer states: ${line}`);
-  }
+// Runs whether or not the artifact below does: a reword in the probe library must not leave that
+// corpus reproducing a prompt no agent sends. The comparison is exact, against what the library
+// actually returns, so a reordered or added line fails it and a cosmetic edit does not.
+test('the pinned pair prompts are still the ones the probe library sends', async () => {
+  const probe = await probeLibrary();
+  assert.deepEqual(probe.factSet(PAIR_STEM), PAIR_FACTS);
+  assert.equal(probe.recallPrompt('codex', false), PAIR_RECALL_PROMPT);
+  assert.equal(probe.buildFactSeedingPrompt(PAIR_FACTS), PAIR_SEEDING_PROMPT);
 });
 
-// The reproduction of #275; see `test/helpers/pair-275.ts` for the corpus and why every row of it
-// matters. What it does not model: the pair's checkpoint is work-scoped in production, while these
-// rows take the file's ordinary project grant and are excluded by `m.type <> 'session_summary'`
-// alone; and all five share one `created_at`, so nothing here shows a recency-driven drop.
+// The reproduction of #275; see `test/helpers/pair-275.ts` for the corpus, its receipt and why every
+// row of it matters. It was skipped until the fix in this branch; the counter-pin below it keeps a
+// fix that simply admits everything from turning it green.
+//
+// What it does not model: the pair's checkpoint is work-scoped in production, while these rows take
+// the file's ordinary project grant and are excluded by `m.type <> 'session_summary'` alone; and all
+// five rows share one `created_at`, so nothing here can show a recency- or retirement-driven drop.
 test('searchMemories returns the fact-bearing memory of a five-row corpus', async () => {
   await withTempHome((home) => {
     const paths = oboetePaths(home);

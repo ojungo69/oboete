@@ -1,24 +1,31 @@
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+import { repositoryRoot } from './compile-cache.js';
+
 /**
  * The `claude-to-codex` pair of the 2026-09-17T15-05-08-894Z dogfood run (JST 2026-09-18), as it
  * stood when the receiving prompt pack was built: five memories, of which the two session summaries
  * are out of the search scope but still in the FTS index. It is the reproduction of #275 — the pack
  * dropped `m_fact`, which carries the three facts the recall prompt asks for, as `below_threshold`
- * while keeping `m_confirm`, which carries none of them.
+ * while keeping `m_confirm`, which carries none of them. The run's copy of that pair's database,
+ * `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`, is the receipt for the rows.
  *
  * Keep all five rows. The miss still reproduces on the three searchable ones, but removing the
  * summaries takes the corpus from five documents to three, which lifts `m_decision` above the
  * threshold and changes what comes back — measuring a fix against a corpus the run never had.
  *
- * The prompts are copied from `scripts/e2e/probe-lib/isolated-agent.mjs`, which cannot be imported:
- * esbuild bundles it into the test file, where `trusthash.mjs`'s main-module guard compares
- * `process.argv[1]` with the bundle's own path, matches, and reads `process.argv[2]`, which the test
- * runner does not set. `PROBE_LIBRARY_LINES` is what pins the copies against that source instead.
+ * The prompts below are copies of what `scripts/e2e/probe-lib/isolated-agent.mjs` builds. They are
+ * not taken on trust: `the pinned pair prompts are still the ones the probe library sends` compares
+ * them with that library's own output, through `probeLibrary()`.
  */
 
+export const PAIR_STEM = 'fact-2026-09-17T15-05-08-894Z-claude-to-codex';
+
 export const PAIR_FACTS = [
-  'fact-2026-09-17T15-05-08-894Z-claude-to-codex-1: the build token is cedar.',
-  'fact-2026-09-17T15-05-08-894Z-claude-to-codex-2: the release bird is heron.',
-  'fact-2026-09-17T15-05-08-894Z-claude-to-codex-3: 配布色は琥珀。',
+  `${PAIR_STEM}-1: the build token is cedar.`,
+  `${PAIR_STEM}-2: the release bird is heron.`,
+  `${PAIR_STEM}-3: 配布色は琥珀。`,
 ];
 
 /** `recallPrompt('codex', false)`: what the receiving agent was asked. */
@@ -34,23 +41,24 @@ export const PAIR_SEEDING_PROMPT = [
   'These three exact strings are durable facts about this repository. Preserve them verbatim:',
   ...PAIR_FACTS,
   'Use exactly one tool call and no other tools. In that one call, use the shell tool to run:',
-  "printf '%s\\n' 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-1: the build token is cedar.'"
-    + " 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-2: the release bird is heron.'"
-    + " 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-3: 配布色は琥珀。' >> NOTES.md",
+  `printf '%s\\n' ${PAIR_FACTS.map((fact) => `'${fact}'`).join(' ')} >> NOTES.md`,
   'After the tool result, reply on one line with the same three exact strings joined by |.',
 ].join('\n');
 
-/** Substrings `scripts/e2e/probe-lib/isolated-agent.mjs` must still contain for the copies to hold. */
-export const PROBE_LIBRARY_LINES = [
-  ...PAIR_RECALL_PROMPT.split('\n'),
-  'These three exact strings are durable facts about this repository. Preserve them verbatim:',
-  'Use exactly one tool call and no other tools. In that one call, use the shell tool to run:',
-  'After the tool result, reply on one line with the same three exact strings joined by |.',
-  String.raw`printf '%s\n' ${'$'}{facts.map((fact) => shellQuote(fact)).join(" ")} >> NOTES.md`,
-  '-1: the build token is cedar.',
-  '-2: the release bird is heron.',
-  '-3: 配布色は琥珀。',
-];
+/**
+ * `scripts/e2e/probe-lib/isolated-agent.mjs`, loaded at run time rather than imported. A static
+ * import is bundled into the test file, where `trusthash.mjs`'s main-module guard compares
+ * `process.argv[1]` with the bundle's own path, matches, and reads an argument the test runner does
+ * not set. esbuild leaves a computed `import()` alone, and outside the bundle that guard stays shut.
+ */
+export async function probeLibrary(): Promise<{
+  factSet: (stem: string) => string[];
+  buildFactSeedingPrompt: (facts: readonly string[]) => string;
+  recallPrompt: (agent: string, noCredentials: boolean) => string;
+}> {
+  const specifier = pathToFileURL(join(repositoryRoot(), 'scripts/e2e/probe-lib/isolated-agent.mjs')).href;
+  return await import(specifier);
+}
 
 /** The pair's five rows, in the order the run created them. */
 export const PAIR_ROWS: { id: string; type?: string; title: string; body: string }[] = [
