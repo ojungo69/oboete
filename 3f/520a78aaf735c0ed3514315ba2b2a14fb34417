@@ -1,0 +1,27 @@
+test/unit/memory-recovery.test.ts
+  s_d675408629836f::t_d712f7e41d0f77 111-121,123,125-126,128-136
+  s_d675408629836f::t_d7c233abb9584f 122,127
+  s_d675408629836f::t_2243bb6f95a2d7 124
+  s_d675408629836f::t_840f498c8be882 2
+test/unit/observe.test.ts
+  s_d675408629836f::t_d7c233abb9584f 342-343
+src/worker/observe-batch.ts
+  s_d675408629836f::t_ceca7550c00d78 376,633-634
+  s_d675408629836f::t_eba95423e65290 374-375,377
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3f520a78aaf735c0ed3514315ba2b2a14fb34417",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
