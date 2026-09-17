@@ -1,0 +1,19 @@
+test/unit/retrieval.test.ts
+  s_d675408629836f::t_80bf1ae0565ef1 2-3,8-10,12,25,69-122,622-839
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "dda3dd813304519e6a952653fd190377bdf7a56a",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
