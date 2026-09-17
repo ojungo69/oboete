@@ -371,8 +371,10 @@ async function revalidateSources(options: ProcessBatchOptions, input: BatchInput
     const result: DetectorResult = !available ? { ok: false, reason: 'detector_error' }
       : await deps.detect({ ...privacy.detector, text: row.content ?? '',
         fields: [row.id, row.kind, typeof payload?.tool_name === 'string' ? payload.tool_name : '', toolInputText(row), ...paths] });
-    checked.push({ row, result, context, reason: privacyFor(null) === null ? 'consent_changed'
-      : available ? 'detector_failed' : 'source_context_unknown' });
+    // An unreadable policy is a consent change only when consent itself no longer holds (for example
+    // an unparsable config); an unresolvable binding or root is a held origin (contracts/memory-core.md).
+    checked.push({ row, result, context, reason: available ? 'detector_failed'
+      : options.consentOk() ? 'source_context_unknown' : 'consent_changed' });
   }
   return transactionImmediate(db, () => {
     if (!assertLease(db, token, deps.now())) {
@@ -628,7 +630,8 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
   if (input.batch.state !== 'pending') return { state: 'requeued', reason: null, memoryIds: [] };
   if (input.rows.length === 0) {
     const deferred = db.prepare("SELECT 1 FROM observation_batch_sources WHERE batch_id = ? AND outcome = 'deferred' LIMIT 1").get(batch.id);
-    const reason = deferred === undefined ? null : privacy === null ? 'consent_changed' : 'unusable_output';
+    const reason = deferred === undefined ? null
+      : privacy === null ? (options.consentOk() ? null : 'consent_changed') : 'unusable_output';
     transactionImmediate(db, () => {
       if (!assertLease(db, token, deps.now())) throw new LeaseLostError();
       db.prepare("UPDATE observation_batches SET state = 'fallback', completed_at = ?, degraded_reason = ? WHERE id = ? AND owner_token = ?")

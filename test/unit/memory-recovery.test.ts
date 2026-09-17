@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, realpathSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -105,6 +105,32 @@ for (const at of ['before', 'send']) test(`a checkout replaced ${at} detection c
     });
     assert.equal(leaked, false);
     fixture.withDb((db) => assert.equal(db.prepare('SELECT processing_state FROM raw_events WHERE id = ?').get(sourceId)?.processing_state, 'waiting'));
+  });
+});
+
+// Doctor and setup probes capture from a temporary directory they remove afterwards, so every
+// probe session reaches the worker with a vanished root. Holding it is the contract; calling it a
+// consent change sends the user to re-accept a destination that never changed.
+test('a source whose captured root was removed is held as source_context_unknown, not consent_changed', async () => {
+  await withFixture(async (fixture) => {
+    fixture.env = cleanEnv(fixture.home, { OBOETE_OPENROUTER_API_KEY: 'removed-root-fixture-key' });
+    writeConfig(fixture, 'openrouter');
+    const root = fixtureRepo(fixture, 'removed-checkout');
+    await captureEndedSession(fixture, { sessionId: 'removed-root', cwd: root, prompts: ['Review the retry behavior.'] });
+    rmSync(root, { recursive: true, force: true });
+    let calls = 0;
+    const exit = await runObserveForFixture(fixture, { now: () => NOW, maxRunMs: 2_000, fetch: async () => {
+      calls += 1;
+      return openAiResponse(providerOutput('none'));
+    } });
+    assert.equal(calls, 0);
+    assert.equal(exit, 0, 'a held source is not a summarizer fallback');
+    fixture.withDb((db) => {
+      const receipts = db.prepare("SELECT DISTINCT reason FROM observation_batch_sources WHERE outcome = 'deferred'").all().map((row) => row.reason);
+      assert.deepEqual(receipts, ['source_context_unknown']);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM observation_batches WHERE degraded_reason = 'consent_changed'").get()?.n, 0);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM raw_events WHERE kind = 'prompt' AND processing_state = 'waiting'").get()?.n, 1);
+    });
   });
 });
 

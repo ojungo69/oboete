@@ -339,6 +339,8 @@ for (const variant of [
         );
         // The check runs before the reservation as well, so the refused batch never counts an attempt.
         assert.equal(db.prepare('SELECT calls FROM provider_usage').get()?.calls, 1);
+        const deferred = db.prepare("SELECT DISTINCT reason FROM observation_batch_sources WHERE outcome = 'deferred'").all().map((row) => row.reason);
+        assert.ok(deferred.every((reason) => reason === 'consent_changed'), JSON.stringify(deferred));
       });
     });
   });
