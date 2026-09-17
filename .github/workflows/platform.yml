@@ -72,6 +72,7 @@ jobs:
       - name: Packed engine in an isolated home
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # The installed package must support no-model setup in an isolated home on this platform.
+        # Every engine item must be present.
         # Every doctor item must be healthy except an unconfigured provider, which may be degraded
         # with reason "No observer provider is configured." (that reason only appears for preset none).
         run: |
@@ -87,10 +88,13 @@ jobs:
           echo "doctor exit $code"
           node -e '
             const items = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).items;
+            const missing = ["config", "paused", "storage", "fts", "migration", "worker", "generation", "spool", "sync", "provider", "allowance"]
+              .filter((name) => !items.some((item) => item.item === name));
             const bad = items
               .filter((item) => item.status !== "healthy" && !(item.item === "provider" && item.status === "degraded" && item.reason === "No observer provider is configured."))
               .map((item) => item.item);
             for (const item of items) console.log(item.item, item.status);
             if (bad.length > 0) console.error("not healthy:", bad.join(", "));
-            if (Number(process.argv[2]) > 1 || bad.length > 0) process.exitCode = 1;
+            if (missing.length > 0) console.error("missing:", missing.join(", "));
+            if (Number(process.argv[2]) > 1 || bad.length > 0 || missing.length > 0) process.exitCode = 1;
           ' "$RUNNER_TEMP/doctor.json" "$code"
