@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { grantVisibility } from '../../src/db/queries.js';
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { devNull } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -17,14 +16,7 @@ import { getMemory, memoryScope } from '../../src/db/queries.js';
 import { excludeSecretSource } from '../../src/worker/batches.js';
 
 import { NOW, captureEndedSession, cleanEnv, openAiResponse, providerOutput, runObserveForFixture, toggleDatabase, withFixture, writeConfig, type Fixture } from '../helpers/observe.js';
-
-function git(cwd: string, ...args: string[]): void {
-  const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: {
-    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
-    GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_SYSTEM: devNull, GIT_TERMINAL_PROMPT: '0',
-  } });
-  assert.equal(result.status, 0, result.stderr);
-}
+import { git } from '../helpers/git.js';
 
 function worktrees(fixture: Fixture): { main: string; linked: string } {
   const main = join(fixture.home, 'main');
