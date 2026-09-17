@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { configSchema, consentHash, consentMatches, consentTuple } from '../../src/config.js';
 import { openDatabase } from '../../src/db/open.js';
 import { nearbyCandidates } from '../../src/db/queries.js';
+import { eventText } from '../../src/observer/contract.js';
 import { buildObserverRequest } from '../../src/observer/request.js';
 import { oboetePaths } from '../../src/paths.js';
 import { loadDestinationRules } from '../../src/privacy/egress.js';
@@ -338,6 +339,29 @@ test('only the agent column changes and the outbound body stays byte-identical',
     const second = JSON.stringify(buildFromBatch(db, token, 'remote_observer').input);
 
     assert.equal(second, first);
+  });
+});
+
+test("a tool call's paths reach the request, so its language counts", async () => {
+  // `isSummarizableRow` treats command, text and paths as the three fields a tool call carries, and
+  // a file name is often the only foreign-script string an otherwise English event holds.
+  await withOpened((db, token) => {
+    seedRepoAndSession(db, 10);
+    seedEvent(db, {
+      id: 'p1',
+      kind: 'tool_call',
+      content: null,
+      payload: { tool_name: 'read', input: { paths: ['docs/配布手順の確認と再試行の設計.md'] } },
+      turn: 1,
+    });
+    for (let turn = 2; turn <= 10; turn += 1) {
+      seedEvent(db, { id: `p${turn}`, kind: 'prompt', content: 'ok', turn });
+    }
+
+    const built = buildFromBatch(db, token, 'remote_observer');
+    const texts = built.input.events.map(eventText);
+    assert.ok(texts.some((text) => text.includes('配布手順の確認')), texts.join(' | '));
+    assert.equal(built.input.language_hint, 'ja');
   });
 });
 

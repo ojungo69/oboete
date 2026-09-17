@@ -152,18 +152,27 @@ function unescapeJson(text: string): string {
 /**
  * `text` with every run of at least `MIN_QUOTED_RUN` characters that the request already carries
  * removed. Shorter coincidences stay: a single shared character must not exempt a one-word title.
+ *
+ * Where one run ends and the next begins with nothing between them, the join is the observer's:
+ * the request carries each piece but never that sentence, so a field tiled out of quoted fragments
+ * would otherwise exempt itself whole. One character of each such junction stays in the residual,
+ * which is enough for it to be scored. A field that quotes twice with words of its own between them
+ * has no junction, and neither has a field that is one quote.
  */
 function unquoted(text: string, corpus: QuotedCorpus): string {
   const subject = normalizeForIdentity(text);
   let residual = '';
   let index = 0;
+  let previousRunEnd = -1;
   while (index < subject.length) {
     // The n-gram set answers the common case in constant time; only a real candidate is extended.
     if (corpus.grams.has(subject.slice(index, index + MIN_QUOTED_RUN))) {
       let length = MIN_QUOTED_RUN;
       while (index + length + 1 <= subject.length
         && corpus.texts.some((part) => part.includes(subject.slice(index, index + length + 1)))) length += 1;
+      if (index === previousRunEnd) residual += subject[index];
       index += length;
+      previousRunEnd = index;
       continue;
     }
     residual += subject[index];

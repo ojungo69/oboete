@@ -82,6 +82,17 @@ test('an English answer to a Japanese input is a language mismatch', () => {
   assert.equal(checkLanguage(inputWithHint('en'), { observations: [], checkpoint }), 'ok');
 });
 
+test('a sentence tiled out of two quoted fragments is not treated as quoted', () => {
+  // The request carries `配布物の設定。` and `色は未定。`, never `配布物の色は未定。`. Removing each
+  // fragment leaves nothing, so the composed sentence would score as no text at all.
+  const events = [{ id: 'e1', kind: 'prompt', text: '配布物の設定。色は未定。' }];
+  const tiled = output(observation({ title: 'Colour', body: '配布物の色は未定。' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), tiled), 'mismatch');
+  // One quote with the observer's own words around it still passes: there is no junction.
+  const framed = output(observation({ title: 'Colour', body: 'The prompt recorded 配布物の設定。 as given.' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), framed), 'ok');
+});
+
 test('a run that only exists across two events is not treated as quoted', () => {
   // Neither event carries `配布色 は琥珀。`; it appears only where the two would be joined.
   const events = [

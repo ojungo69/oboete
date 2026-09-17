@@ -225,8 +225,12 @@ export type ObserverInput = z.infer<typeof observerInputSchema>;
  * from the same text whether an output field was quoted verbatim, so the two must read one list.
  */
 export function eventText(event: ObserverInput['events'][number]): string {
-  const input = event.input as { command?: string; text?: string } | undefined;
-  return [event.text, event.output, event.error, event.fragment?.text, input?.command, input?.text]
+  const input = event.input as { command?: string; text?: string; paths?: unknown } | undefined;
+  // `paths` is the third field a tool call carries (`isSummarizableRow` in `src/worker/batches.ts`
+  // joins exactly command, text and paths), and a file name is often the only foreign-script string
+  // an otherwise English event holds.
+  const paths = Array.isArray(input?.paths) ? input.paths : [];
+  return [event.text, event.output, event.error, event.fragment?.text, input?.command, input?.text, ...paths]
     .filter((value): value is string => typeof value === 'string')
     .join('\n');
 }
