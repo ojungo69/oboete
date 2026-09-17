@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
@@ -113,7 +114,7 @@ function fixtureFacts(): Array<FactTag & { sentence: string }> {
       .flatMap((text) => text.split('\n'))
       .find((entry) => entry.includes(fact.expect));
     assert.ok(sentence !== undefined,
-      `fact ${fact.id} has no payload line containing ${fact.expect}; if the fixture now carries it only as a tool output byte array, payloadStrings has to decode it`);
+      `fact ${fact.id} has no payload line containing ${fact.expect}: either that line no longer carries the sentence, or it now carries it only as a tool output byte array, which payloadStrings does not decode`);
     facts.push({ ...fact, sentence });
   }
   return facts;
@@ -840,15 +841,28 @@ test('searchMemories returns two distinct facts that share a title when they are
   });
 });
 
-// The `claude-to-codex` prompts of the 2026-09-17T15-05-08-894Z dogfood run, copied from
-// `scripts/e2e/probe-lib/isolated-agent.mjs`. That module cannot be imported: esbuild bundles it
-// into this test file, where `trusthash.mjs`'s main-module guard compares `process.argv[1]` with the
-// bundle's own path, matches, and reads `process.argv[2]`, which the test runner does not set. The
-// test below pins these copies against the source instead.
+/** The pair the artifact below reproduces: the `claude-to-codex` leg of that run. */
+const PAIR_STEM = 'fact-2026-09-17T15-05-08-894Z-claude-to-codex';
+
+/**
+ * `scripts/e2e/probe-lib/isolated-agent.mjs`, loaded at run time rather than imported. A static
+ * import is bundled into this test file, where `trusthash.mjs`'s main-module guard compares
+ * `process.argv[1]` with the bundle's own path, matches, and reads an argument the test runner does
+ * not set. esbuild leaves a computed `import()` alone, and outside the bundle that guard stays shut.
+ */
+async function probeLibrary(): Promise<{
+  factSet: (stem: string) => string[];
+  buildFactSeedingPrompt: (facts: readonly string[]) => string;
+  recallPrompt: (agent: string, noCredentials: boolean) => string;
+}> {
+  const specifier = pathToFileURL(join(repositoryRoot(), 'scripts/e2e/probe-lib/isolated-agent.mjs')).href;
+  return await import(specifier);
+}
+
 const PAIR_FACTS = [
-  'fact-2026-09-17T15-05-08-894Z-claude-to-codex-1: the build token is cedar.',
-  'fact-2026-09-17T15-05-08-894Z-claude-to-codex-2: the release bird is heron.',
-  'fact-2026-09-17T15-05-08-894Z-claude-to-codex-3: 配布色は琥珀。',
+  `${PAIR_STEM}-1: the build token is cedar.`,
+  `${PAIR_STEM}-2: the release bird is heron.`,
+  `${PAIR_STEM}-3: 配布色は琥珀。`,
 ];
 
 /** `recallPrompt('codex', false)`: what the receiving agent was asked. */
@@ -864,35 +878,27 @@ const PAIR_SEEDING_PROMPT = [
   'These three exact strings are durable facts about this repository. Preserve them verbatim:',
   ...PAIR_FACTS,
   'Use exactly one tool call and no other tools. In that one call, use the shell tool to run:',
-  "printf '%s\\n' 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-1: the build token is cedar.'"
-    + " 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-2: the release bird is heron.'"
-    + " 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-3: 配布色は琥珀。' >> NOTES.md",
+  `printf '%s\\n' ${PAIR_FACTS.map((fact) => `'${fact}'`).join(' ')} >> NOTES.md`,
   'After the tool result, reply on one line with the same three exact strings joined by |.',
 ].join('\n');
 
 // Runs whether or not the artifact below is skipped: a reword in the probe library must not leave
-// that corpus reproducing a prompt no agent sends. Substring checks, so a reordering or an added
-// line still passes; the whole-prompt shape is what the copies above state.
-test('the pinned pair prompts are still the ones the probe library sends', () => {
-  const source = readFileSync(join(repositoryRoot(), 'scripts/e2e/probe-lib/isolated-agent.mjs'), 'utf8');
-  const lines = [
-    ...PAIR_RECALL_PROMPT.split('\n'),
-    'These three exact strings are durable facts about this repository. Preserve them verbatim:',
-    'Use exactly one tool call and no other tools. In that one call, use the shell tool to run:',
-    'After the tool result, reply on one line with the same three exact strings joined by |.',
-    String.raw`printf '%s\n' ${'$'}{facts.map((fact) => shellQuote(fact)).join(" ")} >> NOTES.md`,
-    '-1: the build token is cedar.',
-    '-2: the release bird is heron.',
-    '-3: 配布色は琥珀。',
-  ];
-  for (const line of lines) assert.ok(source.includes(line), `probe library no longer states: ${line}`);
+// that corpus reproducing a prompt no agent sends. The comparison is exact, against what the library
+// actually returns, so a reordered or added line fails it and a cosmetic edit does not.
+test('the pinned pair prompts are still the ones the probe library sends', async () => {
+  const probe = await probeLibrary();
+  assert.deepEqual(probe.factSet(PAIR_STEM), PAIR_FACTS);
+  assert.equal(probe.recallPrompt('codex', false), PAIR_RECALL_PROMPT);
+  assert.equal(probe.buildFactSeedingPrompt(PAIR_FACTS), PAIR_SEEDING_PROMPT);
 });
 
 // Artifact for issue #275: the five memories of the `claude-to-codex` pair of the
 // 2026-09-17T15-05-08-894Z dogfood run (JST 2026-09-18) as they stood when the receiving prompt
-// pack was built, copied verbatim from that pair's database. The scores they produce are the ones
-// quickstart E12 records for the run. `m_fact` carries the three facts the recall prompt asks for
-// and the pack dropped it as `below_threshold`, keeping `m_confirm`, which carries none of them.
+// pack was built, copied verbatim from that pair's database (the run's copy of it is
+// `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`). `m_fact` carries the three
+// facts the recall prompt asks for and the pack dropped it as `below_threshold`, keeping
+// `m_confirm`, which carries none of them. Un-skipped, the corpus reproduces the three raw `bm25()`
+// magnitudes quickstart E12 quotes for the run; skipped, nothing here measures them.
 //
 // Keep all five rows: the defect still reproduces on the three searchable ones, but the two session
 // summaries are in the FTS index even though the scope hides them, and removing them takes the

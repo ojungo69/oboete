@@ -187,9 +187,10 @@ writers require separate worktrees. No deployment follows merely from an increme
   captured but awaiting generation, with answer evaluation explicitly not run. C3's repeat removes
   the ineligible native-fork timing sample and passes worker RSS at 106.1 MiB. Ordinary hook timing,
   two unprinted Grok starts and real-model recall remain failed/unqualified, not reclassified as
-  successful evaluation. See `quickstart.md`. As of C3 (2026-09-10) T023/T024/T040-T043 were all open; since then T040
-  closed on the E10 evidence and T023 closed on the E12 fixture replay, then reopened on the E13
-  dogfood run for #275.
+  successful evaluation. See `quickstart.md`. As of C3 (2026-09-10) T023/T024/T040-T043 were all open. T040 has since
+  closed on the macOS engine evidence (E10). T023 closed on the no-model `events-1000` replay
+  (E12) and reopened on 2026-09-18 for #275, which the first 009 dogfood run,
+  `2026-09-17T15-05-08-894Z` (E13), produced.
 - T025-T028: D1 implements explicit work/project grants, exact personal proposals/projections,
   common source/visibility checks, and CLI/viewer approval plus work-preserving adoption. Both Node
   versions pass 1,097 + 202 checks; installed-browser actions, package validation, normal security,
@@ -435,8 +436,8 @@ writers require separate worktrees. No deployment follows merely from an increme
   Stored verbatim as memories, all 40 rank within the first five for their own queries through
   `searchMemories`, 39 of them first. Nothing reproduced on that corpus.
   `test/unit/retrieval.test.ts` pins the corpus, age-neutral ranking, supersession (hidden by
-  default, marked historical in `get --history`) and a shared-title pair; each of six mutations fails
-  its test (E12). The MMR rule that drops distinct but similar facts deep in a candidate list is
+  default, marked historical in `get --history`) and a shared-title pair, and pins the artifact's
+  prompts against the probe library; each of nine mutations fails its test (E12). The MMR rule that drops distinct but similar facts deep in a candidate list is
   recorded as an observation without a failing corpus case in #272, and lambda is unchanged. The
   first daily run on the 009 bundle then reproduced a miss the fixture cannot: in a five-memory
   corpus FTS5 clamps the IDF of common trigrams, the ratio-to-best normalization drops every other

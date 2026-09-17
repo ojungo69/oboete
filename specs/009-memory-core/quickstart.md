@@ -2610,10 +2610,12 @@ facts; true paraphrase is T024's (#266).
 | `searchMemories hides a superseded fact unless history is requested` | default search omits the superseded row; `--history` returns both; `get --history --json` shows `valid_to` and `superseded_by` naming the current row |
 | `searchMemories returns two distinct facts that share a title when they are the only candidates` | both returned |
 | `searchMemories returns the fact-bearing memory of a five-row corpus` (skipped, #275) | the five rows of the `claude-to-codex` pair at pack time and that pair's recall prompt; un-skipped it fails with `returned m_confirm`, the receipt below |
-| `the pinned pair prompts are still the ones the probe library sends` | the copied recall and seeding prompts, including the `printf` command, against `scripts/e2e/probe-lib/isolated-agent.mjs`; runs whether or not the artifact is skipped |
+| `the pinned pair prompts are still the ones the probe library sends` | the artifact's three facts and its copied recall and seeding prompts, including the `printf` command, compared exactly against `scripts/e2e/probe-lib/isolated-agent.mjs` loaded at run time; runs whether or not the artifact is skipped |
 
-All 36 runnable tests in the file pass on Node 24.16.0 and 22.23.1; the 37th is the #275 artifact, which is skipped until that fix. Each mutation below edits the built test
-bundle, runs the named test, and restores the bundle (sha256 compared):
+All 36 runnable tests in the file pass on Node 24.16.0 and 22.23.1; the 37th is the #275 artifact, which is skipped until that fix. Each of the first six mutations edits the built test
+bundle, runs the named test, and restores the bundle (sha256 compared). The last three edit
+`scripts/e2e/probe-lib/isolated-agent.mjs`, which the prompt pin reads at run time, and restore it
+(`git status` clean afterwards):
 
 | Mutation | Failing assertion |
 | --- | --- |
@@ -2623,6 +2625,9 @@ bundle, runs the named test, and restores the bundle (sha256 compared):
 | `m.valid_to IS NULL` removed from `memoryScope` | supersession: default search returned the old row |
 | `superseded_by` dropped from history output | supersession: `get --history` `superseded_by` undefined |
 | MMR rejects everything after the first pick | shared title: `[m_hooks]` instead of both |
+| a space added before the `\|` in the seeding prompt's last line | prompts: `buildFactSeedingPrompt` differs from the pinned text |
+| `fact line` reworded to `fact-line` in the recall prompt | prompts: `recallPrompt('codex', false)` differs from the pinned text |
+| `cedar` capitalised in `factSet` | prompts: `factSet` differs from the pinned three facts |
 
 ### Limits
 
@@ -2642,8 +2647,11 @@ bundle, runs the named test, and restores the bundle (sha256 compared):
   `m_checkpoint` and `m_request` for the pair's two session summaries. Keep all five: the miss still
   reproduces on the three searchable rows alone, but the summaries are in the FTS index even though the
   scope hides them, and removing them takes the corpus to three documents, which lifts `m_decision`
-  above the threshold — measuring the fix against a corpus the run never had. The pair databases of the
-  run are the receipt for the copied text.
+  above the threshold — measuring the fix against a corpus the run never had. The receipt for the copied
+  rows is that pair's database from the run, `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`.
+  The two prompts the artifact carries are not taken on trust: `the pinned pair prompts are still the ones
+  the probe library sends` compares them exactly against `scripts/e2e/probe-lib/isolated-agent.mjs`, which
+  it loads at run time.
 - A memory injected once and then unused for 90 days is omitted from packs as `retired` (data model);
   it is still returned by search, which has no `last_injected_at` filter, so User Story 3's first
   acceptance scenario (age alone does not make a fact unavailable when asked about) holds.
