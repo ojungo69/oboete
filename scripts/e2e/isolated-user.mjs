@@ -299,7 +299,12 @@ async function runPair(pair, context) {
 
     const search = await waitForSummary(repo, path.join(pairDir, "search"), facts, options, dependencies, env);
     if (!search.found) {
-      return finish("fail", facts, { reason: "summary_not_found", searchAttempts: search.attempts });
+      // Name the facts that stayed unretrievable, not the whole set: with one observation per fact
+      // a partial miss is the common shape and says which fact the observer dropped.
+      return finish("fail", search.missingFacts, {
+        reason: "facts_not_retrievable",
+        searchAttempts: search.attempts,
+      });
     }
 
     // B must learn the facts from oboete, not from the required NOTES.md read itself.

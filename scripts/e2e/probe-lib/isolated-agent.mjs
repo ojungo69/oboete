@@ -309,40 +309,52 @@ export async function launchAgent(configuration
   return { ...proc, stdoutPath, stderrPath };
 }
 
-function searchContainsFacts(output, facts) {
+/** True when some returned memory carries `fact`. One row per fact is as good as one row for all. */
+export function searchContainsFact(output, fact) {
   let parsed;
   try {
     parsed = JSON.parse(output);
   } catch {
     return false;
   }
-  return (parsed?.memories ?? []).some((row) => assertAgentOutput(JSON.stringify(row), facts).pass);
+  return (parsed?.memories ?? []).some((row) => assertAgentOutput(JSON.stringify(row), [fact]).pass);
 }
 
+/**
+ * The precondition of the recall check: every seeded fact is retrievable before the receiving agent
+ * is asked for it. Each fact is searched for on its own, because the observer is asked to emit one
+ * observation per declared fact — requiring a single row to hold all three would fail on the shape
+ * the prompt asks for, while a row that does hold all three still satisfies every search.
+ */
 export async function waitForSummary(repo, directory, facts, options, dependencies, env) {
   fs.mkdirSync(directory, { recursive: true });
   const stdoutPath = path.join(directory, "stdout.txt");
   const stderrPath = path.join(directory, "stderr.txt");
   const deadline = dependencies.now() + options.timeoutMs;
   let attempts = 0;
+  const found = new Set();
   while (dependencies.now() < deadline) {
     attempts += 1;
-    const remaining = deadline - dependencies.now();
-    const result = await dependencies.runTimed(["oboete", "search", facts[0], "--json"], {
-      cwd: repo,
-      env,
-      stdoutPath,
-      stderrPath,
-      timeoutMs: Math.min(15_000, remaining),
-    });
-    if (result.exitCode === 0 && searchContainsFacts(result.stdout, facts)) {
-      return { found: true, attempts };
+    const missing = facts.filter((fact) => !found.has(fact));
+    for (const fact of missing) {
+      const remaining = deadline - dependencies.now();
+      if (remaining <= 0) break;
+      const result = await dependencies.runTimed(["oboete", "search", fact, "--json"], {
+        cwd: repo,
+        env,
+        stdoutPath,
+        stderrPath,
+        timeoutMs: Math.min(15_000, remaining),
+      });
+      // Exit 3 is "nothing is indexed for this repository yet", which no further waiting fixes.
+      if (result.exitCode === 3) return { found: false, attempts, missingFacts: missing };
+      if (result.exitCode === 0 && searchContainsFact(result.stdout, fact)) found.add(fact);
     }
-    if (result.exitCode === 3) return { found: false, attempts };
+    if (found.size === facts.length) return { found: true, attempts, missingFacts: [] };
     const wait = Math.min(1_000, deadline - dependencies.now());
     if (wait > 0) await dependencies.sleep(wait);
   }
-  return { found: false, attempts };
+  return { found: false, attempts, missingFacts: facts.filter((fact) => !found.has(fact)) };
 }
 
 export function configureRemote(repo, directory, options, dependencies) {

@@ -685,7 +685,7 @@ async function seedLifecycle(agent, context) {
   const observe = await runObserver(repo, root, oboeteHome, options, dependencies);
   if (![0, 1].includes(observe.exitCode)) throw new Error(`Oboete observe exited ${observe.exitCode}.`);
   const search = await waitForSummary(repo, path.join(root, "search"), facts, options, dependencies, observerEnv);
-  if (!search.found) throw new Error("The seed summary was not found.");
+  if (!search.found) throw new Error(`Seeded facts are not retrievable: ${search.missingFacts.join(", ")}.`);
 
   const snapshot = prepareLifecycleParent(oboeteHome, agent, dependencies, repo);
   // S1 owns the facts. S2 receives them only through its startup pack, so lifecycle actions

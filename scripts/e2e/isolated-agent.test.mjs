@@ -12,6 +12,7 @@ import {
   requireAgentSuccess,
   resolveSourceHomes,
   retargetCodexTrust,
+  waitForSummary,
 } from "./probe-lib/isolated-agent.mjs";
 import { credentialEntries, stageCredential } from "./probe-lib/agents.mjs";
 import { startLifecycleTui } from "./probe-lib/isolated-lifecycle.mjs";
@@ -341,4 +342,56 @@ test("staging a leg carries back a refresh an unsettled leg left in the director
   prepareAgent("grok", directory, homes, "prompt", path.join(root, "repo"));
   assert.equal(JSON.parse(fs.readFileSync(accountFile, "utf8")).account, "refreshed but stranded");
   assert.ok(fs.lstatSync(staged).isSymbolicLink());
+});
+
+// The recall check's precondition. The observer is asked for one observation per declared fact, so
+// requiring a single memory to hold all three would fail on the shape the prompt asks for.
+function summaryFixture(t, name, rowsFor) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `oboete-summary-${name}-`));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const searched = [];
+  let clock = 0;
+  return {
+    root,
+    searched,
+    dependencies: {
+      now: () => clock,
+      sleep: async () => {
+        clock += 1_000;
+      },
+      runTimed: async (argv) => {
+        const fact = argv[2];
+        searched.push(fact);
+        return { exitCode: 0, stdout: JSON.stringify({ memories: rowsFor(fact) }), stderr: "" };
+      },
+    },
+  };
+}
+
+test("waitForSummary accepts one memory per fact and searches for each", async (t) => {
+  const facts = ["f-1: cedar.", "f-2: heron.", "f-3: 琥珀."];
+  const fixture = summaryFixture(t, "per-fact", (fact) => [{ id: "m", title: fact, body: fact }]);
+  const result = await waitForSummary(fixture.root, path.join(fixture.root, "search"), facts,
+    { timeoutMs: 30_000 }, fixture.dependencies, {});
+  assert.deepEqual(result, { found: true, attempts: 1, missingFacts: [] });
+  assert.deepEqual(fixture.searched, facts, "every fact is searched for on its own");
+});
+
+test("waitForSummary still accepts one memory holding every fact", async (t) => {
+  const facts = ["f-1: cedar.", "f-2: heron.", "f-3: 琥珀."];
+  const fixture = summaryFixture(t, "one-row", () => [{ id: "m", title: "all", body: facts.join(" | ") }]);
+  const result = await waitForSummary(fixture.root, path.join(fixture.root, "search"), facts,
+    { timeoutMs: 30_000 }, fixture.dependencies, {});
+  assert.equal(result.found, true);
+});
+
+test("waitForSummary names the fact that never became retrievable", async (t) => {
+  const facts = ["f-1: cedar.", "f-2: heron.", "f-3: 琥珀."];
+  const fixture = summaryFixture(t, "partial", (fact) =>
+    fact === facts[1] ? [] : [{ id: "m", title: fact, body: fact }]);
+  const result = await waitForSummary(fixture.root, path.join(fixture.root, "search"), facts,
+    { timeoutMs: 3_000 }, fixture.dependencies, {});
+  assert.equal(result.found, false);
+  assert.deepEqual(result.missingFacts, [facts[1]], "a found fact is not searched for again");
+  assert.equal(fixture.searched.filter((fact) => fact === facts[0]).length, 1);
 });
