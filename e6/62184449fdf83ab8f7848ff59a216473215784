@@ -1,0 +1,25 @@
+README.md
+  s_d675408629836f::t_d8c8c89a106aa8 258-266
+src/privacy/detect.ts
+  s_d675408629836f::t_c155248d8c394e 258-263,265,279-280,286,292,298-299,302-303
+test/unit/capture.test.ts
+  s_d675408629836f::t_75780defa6b9e3 449-451
+test/unit/privacy.test.ts
+  s_d675408629836f::t_bcddf9722a28e9 6,306-308
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e662184449fdf83ab8f7848ff59a216473215784",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
