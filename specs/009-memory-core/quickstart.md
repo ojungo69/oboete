@@ -2399,7 +2399,7 @@ requests that change it, not on every push (#221).
 | --- | --- | --- | --- |
 | Linux | `ci.yml` on `main` `092807c9`, ubuntu-24.04, run 35185205588 | `engine` pass on 22.16.0 and 24.x; the `check` coverage job failed once on `matrix A1` (#213) | not run: no agent login on a hosted runner |
 | WSL | developer host, Node 24.16.0 and 22.23.1 | pass at `568155b7` (#254): 1579 + 280 on Node 24.16.0; the same on 22.23.1 one `src/paths.ts` edit earlier | the dogfood user runs all 12 ordered pairs daily (#244, 2026-09-17: 0 failing pairs) |
-| macOS | `platform.yml`, runs below | red: one deterministic product defect (#255) and five one-off timing failures (#256) | **unverified**: no agent login on a hosted runner |
+| macOS | `platform.yml`, runs below; one probe on an M1 iMac | red: one deterministic product defect (#255, fix in #262) and five one-off timing failures (#256) | **unverified**: no agent login on a hosted runner |
 
 ### macOS runs
 
@@ -2440,9 +2440,13 @@ on a WAL database and timed a second connection 20 times:
 | macOS, Node 22.16.0 | p50 419–452 ms, max 605 ms | p50 158–172 ms, max 189 ms | p50 5.0 ms |
 | macOS, Node 24.x | p50 634–674 ms, max 1011 ms | p50 172–179 ms, max 229 ms | p50 9.0 ms |
 | WSL host, Node 24.16.0 | p50 150.6–152.2 ms, max 165.6 ms | p50 150.1 ms, max 153.5 ms | p50 1.1 ms |
+| M1 iMac (macOS 26.6.2), Node 22.16.0, 22.23.2, 24.21.0 | p50 177–182 ms, max 187.7 ms | p50 150.5–151.9 ms, max 152.8 ms | p50 1.3 ms |
 
-The numbers do not change when six CPU-bound processes are added, so the cause is how long a short
-sleep lasts on the runner, not only CPU contention. SQLite's default busy handler stops when the
+The numbers do not change when CPU-bound processes are added, so the cause is how long a short
+sleep lasts, not CPU contention. The M1 iMac row (three runs per Node version, idle and loaded,
+measured over SSH the same afternoon) shows that the 3–6 times overrun belongs to the virtualised
+runner's timer granularity; real Apple Silicon overshoots by about 30 ms, which still takes a busy
+capture (hook startup plus the wait) past 300 ms. SQLite's default busy handler stops when the
 *requested* sleeps add up to the timeout and never reads a clock, so the contract's "busy timeout is
 min(150 ms, remaining budget minus the spool reserve)" (spec 007 `contracts/agents.md`) is a wall-clock
 bound on Linux and not on macOS. The event still spools and nothing is lost; the hook overruns its
@@ -2460,6 +2464,6 @@ end-to-end test have the shape of #203 and #213, a seed that runs out of its dea
 
 T040 stays open. Linux and WSL pass the engine gate. macOS runs the whole gate for the first time:
 it found and fixed a fail-open privacy defect (#254), measures the hook inside its budget, and leaves
-one deterministic defect (#255) whose fix needs its own macOS receipt. Agent probes on macOS are
-recorded as unverified, not as passing: a hosted runner has no agent login, and the iMac is not
-available.
+one deterministic defect (#255, fixed in #262) whose fix needs its own macOS receipt. Agent probes
+on macOS are recorded as unverified, not as passing: a hosted runner has no agent login, and the
+iMac was used only for the busy-wait probe.
