@@ -1,0 +1,22 @@
+specs/009-memory-core/quickstart.md
+  s_d675408629836f::t_32d659e86c6d4d 2387-2400,2402-2407,2409-2465
+  s_d675408629836f::t_291de7eef78c02 2401,2408
+specs/009-memory-core/tasks.md
+  s_d675408629836f::t_55c216a00e51c0 392-398
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "51e465fa5de1ec70d663a6ce604d0f11bffad2d7",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
