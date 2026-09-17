@@ -113,7 +113,10 @@ function run(file, args, options = {}) {
   };
   rmSync(capture, { recursive: true, force: true });
   if (output.status !== 0) {
-    const detail = output.error?.message ?? output.stderr.trim() ?? `exit ${String(output.status)}`;
+    const detail =
+      output.error?.message ||
+      output.stderr.trim() ||
+      `exit ${String(output.status)} signal ${String(output.signal)}`;
     throw new Error(`${file} ${args.join(' ')} failed: ${detail}`);
   }
   return output;
@@ -171,7 +174,10 @@ function measuredSpawn(node, args, options) {
   }
   const elapsed = performance.now() - started;
   if (result.status !== 0) {
-    const detail = result.error?.message ?? result.stderr.trim() ?? `exit ${String(result.status)}`;
+    const detail =
+      result.error?.message ||
+      result.stderr.trim() ||
+      `exit ${String(result.status)} signal ${String(result.signal)}`;
     throw new Error(`${node} ${args.join(' ')} failed: ${detail}`);
   }
   return elapsed;
@@ -189,6 +195,8 @@ function measureVersion(node) {
     ...stats(samples),
     hookP50: 'n/a',
     landed: 'n/a',
+    // `--version` writes nothing to land, so the timing is the whole check.
+    landedAll: true,
     budget: 100,
   };
 }
@@ -280,12 +288,18 @@ function measureHook(node, parent, key, description, content, databasePresent) {
     if (index >= WARM_UPS) samples.push(elapsed);
   }
 
+  const expectedLanded = WARM_UPS + RUNS;
   let landed;
+  let landedAll;
   if (databasePresent) {
-    landed = `raw_events=${rawEventCount(node, home)}`;
+    const events = rawEventCount(node, home);
+    landed = `raw_events=${events}`;
+    landedAll = events === expectedLanded;
   } else {
+    const files = spoolCount(home);
     const memoryDbAbsent = existsSync(join(home, 'memory.db')) ? 'no' : 'yes';
-    landed = `spool files=${spoolCount(home)}; memory.db absent=${memoryDbAbsent}`;
+    landed = `spool files=${files}; memory.db absent=${memoryDbAbsent}`;
+    landedAll = files === expectedLanded && memoryDbAbsent === 'yes';
   }
   return {
     scenario: description,
@@ -293,6 +307,7 @@ function measureHook(node, parent, key, description, content, databasePresent) {
     ...stats(samples),
     hookP50: hookLogP50(home),
     landed,
+    landedAll,
     budget: 300,
   };
 }
@@ -361,24 +376,24 @@ lines.push(
   `- Compile cache: \`${displayPath(compileCache)}\`, ${cacheWarm ? 'non-empty' : 'empty'} before this run, and used by the scenarios that run against this developer's own home. The hook scenarios each get a temporary \`OBOETE_HOME\`, so each starts on an empty cache that its warm-up runs fill. Either way this is what a directory held, not what the launcher did with it: Node keys entries by version, architecture and uid, and the launcher refuses the directory outright unless it is a real directory of this user's that nobody else can enter, so a non-empty directory means neither that the Node measured here found its own entries nor that any cache was enabled (issue #210: a cold cache costs the hook about 35 ms).`,
   `- Samples: ${RUNS} measured runs after ${WARM_UPS} warm-up runs per scenario`,
   `- Measurement attempts: ${attemptsText}; kept run ${kept.index} (lower 1-minute load average)`,
-  '- Percentiles: linear interpolation over the 30 measured runs; status is `max <= budget`',
+  '- Percentiles: linear interpolation over the 30 measured runs; status is every hook landed and `max <= budget`',
   '',
   `Load average next to this table (kept run ${kept.index}, before the measurement set): \`${kept.load.raw}\``,
   '',
   '| Node | Scenario | stdin bytes | p50 ms | p95 ms | max ms | hook.log wall p50 | Landed | Budget | Status |',
   '|---|---|---:|---:|---:|---:|---|---|---:|---|',
 );
-const withinBudget = (scenario) => scenario.max <= scenario.budget;
+const passes = (scenario) => scenario.landedAll && scenario.max <= scenario.budget;
 for (const result of kept.results) {
   for (const scenario of result.scenarios) {
     lines.push(
-      `| ${result.version} | ${scenario.scenario} | ${scenario.stdinBytes} | ${scenario.p50.toFixed(1)} | ${scenario.p95.toFixed(1)} | ${scenario.max.toFixed(1)} | ${scenario.hookP50} | ${scenario.landed} | ${scenario.budget} ms | ${withinBudget(scenario) ? 'pass' : 'fail'} |`,
+      `| ${result.version} | ${scenario.scenario} | ${scenario.stdinBytes} | ${scenario.p50.toFixed(1)} | ${scenario.p95.toFixed(1)} | ${scenario.max.toFixed(1)} | ${scenario.hookP50} | ${scenario.landed} | ${scenario.budget} ms | ${passes(scenario) ? 'pass' : 'fail'} |`,
     );
   }
 }
 if (values.markdown) lines.push('<!-- measure:end -->');
 
 process.stdout.write(`${lines.join('\n')}\n`);
-if (kept.results.some((result) => result.scenarios.some((scenario) => !withinBudget(scenario)))) {
+if (kept.results.some((result) => result.scenarios.some((scenario) => !passes(scenario)))) {
   process.exitCode = 1;
 }

@@ -2389,10 +2389,10 @@ base's 116, the three absences all counted in earlier rounds).
 
 2026-09-17. The M1 iMac runbook (`docs/evidence/memory-core-2026-09/macos-runbook.md`) is replaced,
 at the owner's direction, by a GitHub-hosted `macos-15` runner (macOS 15.7.9, arm64, 3 vCPU) through
-`.github/workflows/platform.yml`: typecheck, lint, build, the unit suite, the serial end-to-end and
-fault suites, pack-check, `scripts/measure-cold-start.mjs` and a no-model packed engine in an
-isolated home, on Node 22.16.0 and 24.x (24.20.0). Every step after the build runs even when an
-earlier one fails, so one red suite does not hide the rest. The workflow runs on demand and on pull
+`.github/workflows/platform.yml`: typecheck, lint, build, `scripts/measure-cold-start.mjs` (before
+the suites load the VM), the unit suite, the serial end-to-end and fault suites, pack-check and a
+no-model packed engine in an isolated home, on Node 22.16.0 and 24.x (24.20.0). Every step after a
+successful build runs even when an earlier one fails, so one red suite does not hide the rest. The workflow runs on demand and on pull
 requests that change it, not on every push (#221).
 
 | Platform | Where | Engine gate | Agent probes |
