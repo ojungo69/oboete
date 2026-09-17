@@ -53,7 +53,7 @@ produce separately scored retention, retrieval, delivery and answer outcomes.
 
 - [X] T021 [US3] Correct readiness/lease barriers and prior-delivery accounting in `src/fixture/replay.ts` and `src/fixture/replay-evaluate.ts`, with a focused `test/unit/replay-evaluate.test.ts` regression.
 - [X] T022 [US3] Add source-stage accounting and inspectable omission reasons in `src/fixture/replay-evaluate.ts`, `src/why.ts` and `src/fixture/replay-report.ts`.
-- [ ] T023 [US3] Reproduce and correct demonstrated lexical/MMR/supersession misses in `test/unit/rank.test.ts`, `src/retrieval/rank.ts` and `src/db/queries.ts`.
+- [X] T023 [US3] Investigate lexical, MMR and supersession misses and correct any that reproduce: none reproduced (the no-model replay stops every fact before ranking; stored verbatim, all 40 fixture facts rank within the first five), pinned in `test/unit/retrieval.test.ts`; the MMR depth observation is #272.
 - [ ] T024 [US3] Qualify selected local/external profiles on the paraphrase corpus; add semantic retrieval in `src/retrieval/` only if the measured target requires it, documenting primary API/dependency evidence in `specs/009-memory-core/research.md`.
 
 ## Phase 6: US4 — Share at the correct scope (P1)
@@ -415,3 +415,21 @@ writers require separate worktrees. No deployment follows merely from an increme
   `isolated-lifecycle*.mjs`) are #265; the harness's own tests run in `npm test`. The daily
   dogfood's twelve pairs (#244) run the M1 bundle (schema 3) and check fact recall only, so they are
   not SC-002 evidence.
+- T023 (closed 2026-09-18): an isolated no-model replay of `events-1000.jsonl` on `main` `6b683213`
+  stops all 40 tagged facts at coverage (`pending`, `no_range`) with application deferred, so none
+  reaches retention or retrieval; that is the no-model design of research.md R6, not a ranking miss.
+  Stored verbatim as memories, all 40 rank within the first five for their own queries through
+  `searchMemories`, 39 of them first. The task text is amended to what 009 found: nothing to correct.
+  `test/unit/retrieval.test.ts` pins the corpus, age-neutral ranking, supersession (hidden by
+  default, marked historical in `get --history`) and a shared-title pair; each of six mutations fails
+  its test (E12). The MMR rule that drops distinct but similar facts deep in a candidate list is
+  recorded as an observation without a failing corpus case in #272, and lambda is unchanged.
+- T024 (open, 2026-09-18): no local or external profile was qualified in 009, because activating a
+  real model is not authorised (handoff of 2026-09-10). The no-model replay gives no generated facts
+  to measure, and verbatim facts are all found lexically, so the measurement that would justify
+  semantic retrieval does not exist yet. Qualification and that decision are #266; search stays
+  lexical, with semantic search in M2 (`LEXICAL_NOTE` in `src/memories-cli.ts`).
+- T041 (open, 2026-09-18): the twelve native ordered pairs on the 009 bundle are #265 and real-model
+  Japanese and English evaluation is #266. The daily dogfood install moved from the schema 3 bundle
+  to the 009 bundle on 2026-09-17 (E13), so its runs from 2026-09-18 exercise the 009 bundle; they
+  still check fact recall only.
