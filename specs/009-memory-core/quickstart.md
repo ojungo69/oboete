@@ -2658,3 +2658,13 @@ exercises 009 (#244 was schema 3).
   backlog on upgrade.
 - Rollback, if needed: restore both the backed-up `~/.oboete` and the previous package together; the
   schema 3 bundle cannot open a schema 8 database.
+- First daily run on this bundle (`2026-09-17T15-05-08-894Z`, issue #274): 1 of 12 pairs pass,
+  against 12 of 12 on the M1 bundle the day before with the same preset and model. In every pair
+  the explicit `oboete observe` applied its batch, so this is not a provider or consent failure.
+  Six pairs never found the facts in `oboete search` because the observer answered `no_memory` for
+  the fact prompt, and the one row that still holds the verbatim request (the free session summary)
+  is outside ordinary retrieval by contract (`contracts/sharing.md`). Five pairs had a fact-bearing
+  memory, but the receiving start pack carried only the work checkpoint and the prompt pack left
+  that memory below threshold. The M1 start pack carried the free summary instead. Separately,
+  the dogfood home's `consent_changed` outcomes are held doctor-probe sources whose temporary
+  root is gone. The cause, the fixes and the gate's 009 form are tracked in #274.
