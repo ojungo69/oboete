@@ -1,0 +1,21 @@
+README.md
+  s_d675408629836f::t_d49baf5fb45c50 258-260,262
+test/unit/privacy.test.ts
+  s_d675408629836f::t_42ac24e893cfc6 307,309-310
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "082199d1ff36c30a6b3c960daf81666c79be3945",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
