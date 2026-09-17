@@ -368,13 +368,17 @@ lines.push(
   '| Node | Scenario | stdin bytes | p50 ms | p95 ms | max ms | hook.log wall p50 | Landed | Budget | Status |',
   '|---|---|---:|---:|---:|---:|---|---|---:|---|',
 );
+const withinBudget = (scenario) => scenario.max <= scenario.budget;
 for (const result of kept.results) {
   for (const scenario of result.scenarios) {
     lines.push(
-      `| ${result.version} | ${scenario.scenario} | ${scenario.stdinBytes} | ${scenario.p50.toFixed(1)} | ${scenario.p95.toFixed(1)} | ${scenario.max.toFixed(1)} | ${scenario.hookP50} | ${scenario.landed} | ${scenario.budget} ms | ${scenario.max <= scenario.budget ? 'pass' : 'fail'} |`,
+      `| ${result.version} | ${scenario.scenario} | ${scenario.stdinBytes} | ${scenario.p50.toFixed(1)} | ${scenario.p95.toFixed(1)} | ${scenario.max.toFixed(1)} | ${scenario.hookP50} | ${scenario.landed} | ${scenario.budget} ms | ${withinBudget(scenario) ? 'pass' : 'fail'} |`,
     );
   }
 }
 if (values.markdown) lines.push('<!-- measure:end -->');
 
 process.stdout.write(`${lines.join('\n')}\n`);
+if (kept.results.some((result) => result.scenarios.some((scenario) => !withinBudget(scenario)))) {
+  process.exitCode = 1;
+}
