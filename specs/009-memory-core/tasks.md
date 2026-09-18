@@ -53,19 +53,20 @@ produce separately scored retention, retrieval, delivery and answer outcomes.
 
 - [X] T021 [US3] Correct readiness/lease barriers and prior-delivery accounting in `src/fixture/replay.ts` and `src/fixture/replay-evaluate.ts`, with a focused `test/unit/replay-evaluate.test.ts` regression.
 - [X] T022 [US3] Add source-stage accounting and inspectable omission reasons in `src/fixture/replay-evaluate.ts`, `src/why.ts` and `src/fixture/replay-report.ts`.
-- [ ] T023 [US3] Reproduce and correct demonstrated lexical/MMR/supersession misses in `src/retrieval/rank.ts`,
-  `src/db/queries.ts` and `test/unit/retrieval.test.ts`. Status: none reproduce on the `events-1000` corpus
-  (the no-model replay stops every fact before ranking; stored verbatim, all 40 fixture facts rank within the
-  first five), pinned in `test/unit/retrieval.test.ts`; the MMR depth observation is #272. The open miss is the
-  small-corpus threshold drop #275, reproduced from the `2026-09-17T15-05-08-894Z` dogfood run (JST
-  2026-09-18) and carried as a skipped
-  five-row artifact in the same file. Acceptance: #275 fixed; that artifact un-skipped and passing; the
-  fixture pins and the threshold mutation still green; plus three pins the artifact alone does not give:
-  a small-corpus false-positive case (an unrelated memory in a five-row corpus stays omitted), the same
-  five rows through `buildPromptPack` (the pack path is where the dogfood run dropped the row, and it
-  adds delivery filtering, retirement and the budget cut on top of the shared ranker), and evidence that
-  the rescued row arrives through the trigram index rather than the LIKE fallback, which `applyThreshold`
-  admits without comparing it to the threshold.
+- [X] T023 [US3] Reproduce and correct demonstrated lexical/MMR/supersession misses in `src/retrieval/rank.ts`,
+  `src/db/queries.ts` and `test/unit/retrieval.test.ts`. None reproduce on the `events-1000` corpus (the
+  no-model replay stops every fact before ranking; stored verbatim, all 40 fixture facts rank within the
+  first five, 39 first), pinned in `test/unit/retrieval.test.ts`; the MMR depth observation is #272. The one
+  miss that did reproduce is the small-corpus threshold drop #275, from the `2026-09-17T15-05-08-894Z`
+  dogfood run: FTS5 clamps the IDF of a term present in more than half the documents, so a candidate whose
+  every matched term crosses that half scores around 1e-6 and its ratio to the best candidate collapses.
+  `applyThreshold` now admits such a candidate on its rank, as it already does a LIKE-only match. Pinned by
+  the pair's own five rows through `searchMemories` and through `buildPromptPack`, and by the rescued row
+  arriving through the trigram index rather than the LIKE fallback. A memory sharing no term with the query
+  is still omitted, but that holds because it is never a candidate: below the floor there is no selectivity
+  left, and the limit, MMR and the character budget bound the volume instead. The fixture pins and
+  the threshold mutation stay green, and the clamp floor is killed in both directions. See
+  `quickstart.md` E12.
 - [ ] T024 [US3] Qualify selected local/external profiles on the paraphrase corpus; add semantic retrieval in `src/retrieval/` only if the measured target requires it, documenting primary API/dependency evidence in `specs/009-memory-core/research.md`.
 
 ## Phase 6: US4 — Share at the correct scope (P1)
@@ -189,8 +190,8 @@ writers require separate worktrees. No deployment follows merely from an increme
   two unprinted Grok starts and real-model recall remain failed/unqualified, not reclassified as
   successful evaluation. See `quickstart.md`. As of C3 (2026-09-10) T023/T024/T040-T043 were all open. T040 has since
   closed on the macOS engine evidence (E10). T023 closed on the no-model `events-1000` replay
-  (E12) and reopened on 2026-09-18 for #275, which the first 009 dogfood run,
-  `2026-09-17T15-05-08-894Z` (E13), produced.
+  (E12), reopened on 2026-09-18 for #275, which the first 009 dogfood run,
+  `2026-09-17T15-05-08-894Z` (E13), produced, and closed again with that fix.
 - T025-T028: D1 implements explicit work/project grants, exact personal proposals/projections,
   common source/visibility checks, and CLI/viewer approval plus work-preserving adoption. Both Node
   versions pass 1,097 + 202 checks; installed-browser actions, package validation, normal security,
@@ -430,7 +431,7 @@ writers require separate worktrees. No deployment follows merely from an increme
   `isolated-lifecycle*.mjs`) are #265; the harness's own tests run in `npm test`. The daily
   dogfood's twelve pairs (#244) ran the M1 bundle (schema 3) until the 2026-09-17 move to the 009
   bundle (quickstart E13) and check fact recall only, so they are not SC-002 evidence.
-- T023 (open, 2026-09-18): an isolated no-model replay of `events-1000.jsonl` on `main` `6b683213`
+- T023 (closed, 2026-09-18): an isolated no-model replay of `events-1000.jsonl` on `main` `6b683213`
   stops all 40 tagged facts at coverage (`pending`, `no_range`) with application deferred, so none
   reaches retention or retrieval; that is the no-model design of research.md R6, not a ranking miss.
   Stored verbatim as memories, all 40 rank within the first five for their own queries through
@@ -443,7 +444,11 @@ writers require separate worktrees. No deployment follows merely from an increme
   first daily run on the 009 bundle then reproduced a miss the fixture cannot: in a five-memory
   corpus FTS5 clamps the IDF of common trigrams, the ratio-to-best normalization drops every other
   candidate below 0.3, and a fact-bearing memory is omitted from the prompt pack (#275, E12
-  Limits). T023 stays open for that fix.
+  Limits). That is fixed here: `applyThreshold` admits a candidate whose every raw `bm25()` falls
+  below a 1e-3 clamp floor on its rank, as it already admits a LIKE-only match, and the five rows are
+  pinned through `searchMemories` and through `buildPromptPack` (E12 Limits). T023's small-corpus
+  false-positive pin is still missing: a row matching only a corpus-wide term is admitted
+  unconditionally and can outrank the rescued row, which is the open P1 on #281.
 - T024 (open, 2026-09-18): no local or external profile was qualified in 009, because activating a
   real model is not authorised (handoff of 2026-09-10). The no-model replay gives no generated facts
   to measure, and verbatim facts are all found lexically, so the measurement that would justify

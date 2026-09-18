@@ -58,6 +58,25 @@ function bestNorm(row: RankRow): number {
   return Math.max(row.normTrigram ?? 0, row.normCjk ?? 0);
 }
 
+/**
+ * Below this, a raw `bm25()` is the FTS5 IDF clamp rather than a measurement. SQLite clamps the IDF
+ * of a term present in more than half the documents to 1e-6, so on a small corpus a candidate whose
+ * every matched term crosses that half scores around 1e-6 while one that matched a rarer term scores
+ * as usual. Dividing the first by the second gives about 1e-5 and drops it, however relevant it is —
+ * which is what a five-memory project's first day looks like (#275).
+ *
+ * The floor sits between the two regimes with room on both sides: two orders above the clamp, and
+ * three below the smallest raw score the `events-1000` corpus produces over its 40 probes (1.356,
+ * with runner-up ratios from 0.112 to 0.944).
+ */
+const CLAMP_FLOOR = 1e-3;
+
+/** True when every score this row has is the clamp, so its ratio to the best says nothing. */
+function isClampDegenerate(row: RankRow): boolean {
+  const scores = [row.scoreTrigram, row.scoreCjk].filter((score): score is number => score !== null);
+  return scores.length > 0 && scores.every((score) => Math.abs(score) < CLAMP_FLOOR);
+}
+
 export function applyThreshold(
   rows: readonly RankRow[],
   threshold = DEFAULT_THRESHOLD,
@@ -68,6 +87,12 @@ export function applyThreshold(
   for (const row of rows) {
     if (isLikeOnly(row)) {
       like.push({ ...row, score_bm25: 0 });
+      continue;
+    }
+    // A clamped candidate is admitted on its rank, like a LIKE-only match, instead of being measured
+    // against a ratio it cannot earn.
+    if (isClampDegenerate(row)) {
+      like.push({ ...row, score_bm25: bestNorm(row) });
       continue;
     }
     const score = bestNorm(row);

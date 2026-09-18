@@ -20,6 +20,7 @@ import { oboetePaths } from '../../src/paths.js';
 import { cjkBigrams } from '../../src/retrieval/fts.js';
 import { runtimeStateGet, runtimeStateSet } from '../../src/worker/purge.js';
 import { withTempHome } from '../helpers/home.js';
+import { PAIR_RECALL_PROMPT, PAIR_ROWS } from '../helpers/pair-275.js';
 
 const NOW = 1_700_000_000_000;
 const REPO = 'r1';
@@ -28,15 +29,16 @@ const CONVERSATION = 'c1';
 
 function insertMemory(
   db: DatabaseSync,
-  memory: { id: string; title: string; body: string },
+  memory: { id: string; title: string; body: string; type?: string },
 ): void {
   db.prepare(
     `INSERT INTO memories (id, repo_id, type, title, body, cjk_bigrams, material_hash,
        content_hash, sensitivity, review_state, created_at)
-     VALUES (?, ?, 'discovery', ?, ?, ?, ?, ?, 'eligible', 'unreviewed', ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'eligible', 'unreviewed', ?)`,
   ).run(
     memory.id,
     REPO,
+    memory.type ?? 'discovery',
     memory.title,
     memory.body,
     cjkBigrams(`${memory.title} ${memory.body}`),
@@ -72,7 +74,7 @@ function promptInput(overrides: Partial<PromptPackInput> = {}): PromptPackInput 
 
 async function withGrok(
   fn: (db: DatabaseSync) => Promise<void>,
-  seed: { id: string; title: string; body: string }[] = [
+  seed: { id: string; title: string; body: string; type?: string }[] = [
     { id: 'm_1', title: 'Retrieval note one', body: 'The ranking is lexical.' },
   ],
 ): Promise<void> {
@@ -789,4 +791,27 @@ test('a concurrent merge invalidates validation and omits only the unvalidated i
     { id: 'm_2', title: 'Lease note two', body: 'The owner token fences writes.' },
     { id: 'm_3', title: 'Migration note three', body: 'Schema changes are transactional.' },
   ]);
+});
+
+// #275 on the path that actually dropped the row: the prompt pack adds delivery filtering,
+// retirement and the budget cut on top of the shared ranker, so a fix measured only through
+// `searchMemories` would not say anything about it. The corpus is the run's own five rows.
+test('the prompt pack of a five-row corpus carries the fact-bearing memory', async () => {
+  await withGrok(async (db) => {
+    const pack = await buildPromptPack(db, promptInput({ prompt: PAIR_RECALL_PROMPT }));
+    assert.notEqual(pack, null, 'the prompt pack should have been built');
+    // The deferred channel plans its items and marks them included on delivery, so 'planned' is what
+    // survived the ranker here.
+    const fact = pack!.items.find((item) => item.memoryId === 'm_fact');
+    assert.equal(
+      fact?.decision,
+      'planned',
+      `the fact-bearing memory was ${fact === undefined ? 'absent' : `${fact.decision} as ${fact.reason}`}`,
+    );
+    assert.equal(
+      pack!.items.filter((item) => item.reason === 'below_threshold').length,
+      0,
+      'no row of a five-row corpus is measured against a ratio the FTS5 clamp decides',
+    );
+  }, PAIR_ROWS);
 });

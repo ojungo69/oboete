@@ -2600,7 +2600,7 @@ behind `f-ja-04`, which also mentions the key rotation, and `f-ja-01`: MMR moved
 top one down, and it is still returned. These are lexical questions that share words with their
 facts; true paraphrase is T024's (#266).
 
-### Pins in `test/unit/retrieval.test.ts` (PR #273)
+### Pins in `test/unit/retrieval.test.ts`, plus the pack pin in `test/unit/deferred.test.ts`
 
 | Test | Pins |
 | --- | --- |
@@ -2609,30 +2609,31 @@ facts; true paraphrase is T024's (#266).
 | `searchMemories returns a relevant older fact among newer unrelated memories` | a fact created at time 1 ranks first for its query |
 | `searchMemories hides a superseded fact unless history is requested` | default search omits the superseded row; `--history` returns both; `get --history --json` shows `valid_to` and `superseded_by` naming the current row |
 | `searchMemories returns two distinct facts that share a title when they are the only candidates` | both returned |
-| `searchMemories returns the fact-bearing memory of a five-row corpus` (skipped, #275) | the five rows of the `claude-to-codex` pair at pack time and that pair's recall prompt; un-skipped it fails with `returned m_confirm`, the receipt below |
-| `the pinned pair prompts are still the ones the probe library sends` | the artifact's three facts and its copied recall and seeding prompts, compared exactly against what `scripts/e2e/probe-lib/isolated-agent.mjs` returns, plus one shell-quoted fact the pair's own facts cannot show; runs whether or not the artifact is skipped. The `factSet` comparison is what kills mutation 9: the fact sentences are written out here and only the stem comes from `factStem`, so that line pins the text but not the stem. The stem is pinned by the seeding prompt's `printf` line, which spells it out |
+| `searchMemories returns the fact-bearing memory of a five-row corpus` | the five rows of the `claude-to-codex` pair at pack time and that pair's recall prompt; before the #275 fix it failed with `returned m_confirm` |
+| `the prompt pack of a five-row corpus carries the fact-bearing memory` (`deferred.test.ts`) | the same five rows through `buildPromptPack`, with no item omitted `below_threshold` |
+| `the pinned pair prompts are still the ones the probe library sends` | the artifact's three facts and its copied recall and seeding prompts, compared exactly against what `scripts/e2e/probe-lib/isolated-agent.mjs` returns, plus one shell-quoted fact the pair's own facts cannot show. The `factSet` comparison is what kills mutation 9: the fact sentences are written out in `test/helpers/pair-275.ts` and only the stem comes from `factStem`, so that line pins the text but not the stem. The stem is pinned by the seeding prompt's `printf` line, which spells it out |
 
-All 36 runnable tests in the file pass on Node 24.16.0 and 22.23.1, re-measured on both after the
-2026-09-18 edits to this file; the 37th is the #275 artifact, which is skipped until that fix. Each of the first six mutations edits the built test bundle, runs
-the named test, and restores the bundle (sha256 compared). The last four edit
-`scripts/e2e/probe-lib/isolated-agent.mjs`, which the prompt pin imports. That import is static and
-esbuild inlines it, so editing the source alone changes nothing: each of the four was re-run on
-2026-09-18 as `npm run build && node --test build/test/unit/retrieval.test.mjs`, and each left 35
-passing and one failing — `the pinned pair prompts are still the ones the probe library sends` in
-all four cases. The source was restored from a copy afterwards (`git status` clean, and the file
-compared byte for byte against that copy), and the bundle rebuilt from it — a restored source alone
-leaves the last mutation inside `build/`, which is why the six above compare the bundle's sha256
-instead.
+All 37 tests in the file pass on Node 24.16.0 and 22.23.1, measured on both after this merge. Each
+of the first six mutations edits the built test bundle, runs the named test, and restores the bundle
+(sha256 compared). The last four edit `scripts/e2e/probe-lib/isolated-agent.mjs`, which the prompt
+pin imports. That import is static and esbuild inlines it, so editing the source alone changes
+nothing: each of the four was re-run on 2026-09-18 as
+`npm run build && node --test build/test/unit/retrieval.test.mjs`, and each left 37 passing and one
+failing — `the pinned pair prompts are still the ones the probe library sends` in all four cases.
+The source was restored from a copy afterwards (`git status` clean, and the file compared byte for
+byte against that copy), and the bundle rebuilt from it — a restored source alone leaves the last
+mutation inside `build/`, which is why the six above compare the bundle's sha256 instead.
 
-That import is a plain one. It became possible in this PR: `trusthash.mjs` guarded its command
-block with `realpathSync(process.argv[1]) === self`, and esbuild collapses `import.meta.url` to the
+That import is a plain one. It became possible in #273: `trusthash.mjs` guarded its command block
+with `realpathSync(process.argv[1]) === self`, and esbuild collapses `import.meta.url` to the
 bundle, so the guard fired on the test runner's own entry and read an argument it does not set. The
-guard now checks this module's own name first — `basename(self)`, which is the bundle's name when it
+guard now checks that module's own name first — `basename(self)`, which is the bundle's name when it
 is inlined and `trusthash.mjs` when it is not, so the block runs only in the second case. Reading
 `self` rather than `process.argv[1]` keeps the symlink tolerance the realpath comparison exists for:
-a symlinked entry still runs the block, a renamed copy of the file does not.
-`scripts/e2e` is outside the TypeScript program, so
-`isolated-agent.d.mts` declares the four functions a `.ts` file imports.
+a symlinked entry still runs the block, a renamed copy of the file does not. `scripts/e2e` is
+outside the TypeScript program, so `isolated-agent.d.mts` declares the functions a `.ts` file
+imports. Before #273 this file loaded the library through a computed `import()`, which esbuild
+leaves alone; that workaround is gone.
 
 | Mutation | Failing assertion |
 | --- | --- |
@@ -2652,31 +2653,53 @@ a symlinked entry still runs the block, a renamed copy of the file does not.
 - The pins go through the search surface. The injection pack uses the same ranking with a character
   budget and filters already-delivered and retired rows (`src/injection/pack.ts`); the pack path is
   measured by the replay above, which needs a model to say anything about recall.
-- The fixture corpus is too large to show a small-corpus miss that the first 009 dogfood run did
+- The fixture corpus is too large to show the small-corpus miss the first 009 dogfood run did
   (E13, #274). In pair `claude-to-codex` at pack time (five memories, session summaries excluded),
   FTS5 clamps the IDF of trigrams in more than half the documents to 1e-6, so one row matching a
-  rare trigram scores -0.436 and the other two -0.0000064 and -0.0000047. Normalized by the ratio
-  to the best score, both fall to about 0.00001, below the 0.3 threshold, and the memory holding
-  the three exact facts is omitted. The same prompt against the same rows one memory later includes
-  all three. That is #275, and T023 stays open for it. Those five rows and that recall prompt are carried
-  verbatim in `test/unit/retrieval.test.ts` as a skipped test, so the fix un-skips a failing artifact
-  rather than writing a new one. The artifact names the rows
-  `m_confirm`, `m_decision` and `m_fact` for `m_c2bfcff0`, `m_363fe065` and `m_9da36e8d`, plus
-  `m_checkpoint` and `m_request` for the pair's two session summaries. Keep all five. Measured on
-  2026-09-18 by inserting each corpus and calling `searchMemories` with the pair's recall prompt: the
-  five rows return `m_confirm` alone, and the three searchable rows alone return `m_confirm` and
-  `m_decision`. So the miss is not an artefact of the summaries — `m_fact` is absent either way — but
-  the summaries are in the FTS index even though the scope hides them, and removing them takes the
-  corpus to three documents, which lifts `m_decision` above the threshold. Fixing against three rows
-  would be measuring against a corpus the run never had. The counter-pin the fix has to land with is
-  recorded on #275. The receipt for the copied rows is that pair's database from the run,
-  `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`, verified row for row on
+  rare trigram scores -0.4361279 and the other two -0.0000064033 and -0.0000046696. Normalized by
+  the ratio to the best score, both fall to about 1e-5, below the 0.3 threshold, and the memory
+  holding the three exact facts is omitted. The same prompt against the same rows one memory later
+  includes all three. That was #275.
+- The fix, measured on this branch: a candidate whose every raw `bm25()` is below a clamp floor of
+  1e-3 is admitted on its rank, as `applyThreshold` already admits a LIKE-only match, instead of
+  being measured against a ratio the clamp decides. The floor sits between the two regimes with room
+  on both sides — two orders above the clamp, and three below the smallest raw score the fixture
+  produces (1.356 over its 40 probes, with runner-up ratios from 0.112 to 0.944), so no fixture probe
+  changes and the threshold mutation still fails the corpus pin. The floor is killed in both
+  directions, re-measured on 2026-09-18: 0 fails both five-row pins (`searchMemories returns the
+  fact-bearing memory of a five-row corpus` and `the prompt pack of a five-row corpus carries the
+  fact-bearing memory`), and 1e9 fails `applyThreshold drops a row below 0.3 and keeps LIKE-only
+  last` and `rankCandidates returns bm25, rrf and mmr scores on included rows`. Both directions say
+  the floor is load-bearing; neither says it is selective.
+- The pair's five rows live in `test/helpers/pair-275.ts` and are pinned two ways: through
+  `searchMemories` and through `buildPromptPack` (the path the run actually dropped the row on,
+  which adds delivery filtering, retirement and the budget cut). **The small-corpus false-positive
+  pin T023 asked for is not supplied, and the fix is not finished.** A pin using a memory that
+  shares no term with the query was written and then deleted: such a row never becomes a candidate,
+  so no floor value admits it and the assertion held for every possible fix, including one that
+  returns everything. Measuring the case that does reach the clamp branch shows the gap is real, not
+  only untested — on this corpus a row whose only query term is `NOTES.md`, which four of the five
+  rows also carry, scores -0.0000028 and is admitted unconditionally, ranking above `m_fact`, the
+  row the fix exists to rescue. That is the P1 on PR #281 and the open design question on #275; the
+  two floor mutations below still fail, so what is pinned is that the floor is load-bearing, not
+  that it is selective. The rescued row is also shown to arrive through the trigram index rather
+  than the LIKE fallback, which `applyThreshold` admits without comparing it to the threshold. The
+  helper names the rows `m_confirm`, `m_decision` and `m_fact` for `m_c2bfcff0`, `m_363fe065` and
+  `m_9da36e8d`, plus `m_checkpoint` and `m_request` for the pair's two session summaries. Keep all
+  five. Measured on 2026-09-18 by inserting each corpus and calling `searchMemories` with the pair's
+  recall prompt, against the code as it stood before the fix: the five rows return `m_confirm`
+  alone, and the three searchable rows alone return `m_confirm` and `m_decision`. So the miss was
+  not an artefact of the summaries — `m_fact` was absent either way — but the summaries are in the
+  FTS index even though the scope hides them, and removing them takes the corpus to three documents,
+  which lifts `m_decision` above the threshold. Fixing against three rows would have been measuring
+  against a corpus the run never had. The receipt for those rows is that pair's database from the
+  run, `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`, verified row for row on
   2026-09-17. That copy is the dogfood account's and the daily cron keeps writing to it (it holds six
-  memories now, not five), so the test file is the frozen one.
-  Neither the two prompts the artifact carries nor its three facts are taken on trust: `the pinned pair
-  prompts are still the ones the probe library sends` compares all three against what
-  `scripts/e2e/probe-lib/isolated-agent.mjs` returns. It imports that module statically, so esbuild inlines it into the test bundle and an edit to
-  the source only reaches the pin through a rebuild — `npm test` rebuilds, a bare
+  memories now, not five), so the helper is the frozen one. Neither the two prompts the helper
+  carries nor its three facts are taken on trust: `the pinned pair prompts are still the ones the
+  probe library sends` compares all three against what `scripts/e2e/probe-lib/isolated-agent.mjs`
+  returns. It imports that module statically, so esbuild inlines it into the test bundle and an edit
+  to the source only reaches the pin through a rebuild — `npm test` rebuilds, a bare
   `node --test build/...` does not.
 - A memory injected once and then unused for 90 days is omitted from packs as `retired` (data model);
   it is still returned by search, which has no `last_injected_at` filter, so User Story 3's first
