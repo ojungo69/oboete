@@ -474,10 +474,10 @@ test('a stored offset that sits inside an escape backs off to before it', async 
     // resumed page opening on what reads as an escape the value never held.
     const unicode = original.indexOf(String.raw`\u0001`);
     assert.ok(unicode > 0, 'the fixture holds a \\uXXXX escape to cut');
-    for (const [inside, back] of [[2, 2], [3, 3], [4, 4], [5, 5]] as const) {
+    for (const inside of [2, 3, 4, 5]) {
       Object.assign(rows[0], { processing_offset: unicode + inside, processing_hash: sourceHash });
       assert.equal(build(db, 'remote_observer', rows, session, []).coverage[0].start, unicode,
-        `a cut ${back} characters into the escape backs off to its start`);
+        `a cut ${inside} characters into the escape backs off to its start`);
     }
 
     // An aligned offset still resumes where it left off.
