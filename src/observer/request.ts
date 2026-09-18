@@ -192,7 +192,11 @@ export function buildObserverRequest(request: ObserverRequestInput): ObserverReq
     const text = canonicalJson(event);
     const sourceHash = `event-json-v1:${contentHash(text)}`;
     const row = rows.get(event.id)!;
-    const start = row.processing_hash === sourceHash ? row.processing_offset ?? 0 : 0;
+    // A stored offset from a version that predates the escape guard below can itself sit inside an
+    // escape, and guarding `end` cannot reach it. Restarting the source is the recovery this line
+    // already takes when the content changed, and one page is enough to realign it.
+    const resume = row.processing_hash === sourceHash ? row.processing_offset ?? 0 : 0;
+    const start = incompleteEscape(text, resume) > 0 ? 0 : resume;
     const portion: SourcePortion = {
       rowId: event.id, state: 'omitted', start, end: start, total: text.length, sourceHash, text: '',
     };

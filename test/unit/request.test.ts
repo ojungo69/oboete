@@ -440,6 +440,33 @@ test('oversized sources page without losing escaped text or splitting surrogate 
   });
 });
 
+test('a stored offset that sits inside an escape restarts the source', async () => {
+  // The guard above only shapes the ends this version chooses. An offset persisted by a version
+  // that predates it can already sit between the two backslashes of a literal `\n`, and the resumed
+  // page would then begin with what reads as an escape of its own.
+  await withOpened((db) => {
+    seedRepoAndSession(db, 1);
+    const text = `FIRST ${'quoted "text" \\ line\n😀 '.repeat(2_000)} LAST`;
+    seedEvent(db, { id: 'large', kind: 'last_assistant_message', content: text });
+    const rows = db.prepare('SELECT * FROM raw_events').all() as unknown as RawEventRow[];
+    const session = db.prepare('SELECT * FROM sessions').get() as unknown as SessionRow;
+    const original = JSON.stringify({ captured_at: rows[0].captured_at, id: 'large', kind: 'last_assistant_message', text });
+
+    const first = build(db, 'remote_observer', rows, session, []);
+    const sourceHash = first.coverage[0].sourceHash;
+    const half = original.indexOf('\\\\') + 1;
+    assert.ok(half > 0 && original[half] === '\\', 'the fixture holds an escaped backslash to cut');
+
+    Object.assign(rows[0], { processing_offset: half, processing_hash: sourceHash });
+    const resumed = build(db, 'remote_observer', rows, session, []);
+    assert.equal(resumed.coverage[0].start, 0, 'a misaligned offset restarts rather than resuming');
+
+    // An aligned offset still resumes where it left off.
+    Object.assign(rows[0], { processing_offset: first.coverage[0].end, processing_hash: sourceHash });
+    assert.equal(build(db, 'remote_observer', rows, session, []).coverage[0].start, first.coverage[0].end);
+  });
+});
+
 test('a full event waits for the next page instead of losing its tail', async () => {
   await withOpened((db) => {
     seedRepoAndSession(db, 1);
