@@ -881,8 +881,9 @@ const PAIR_SEEDING_PROMPT = [
 
 // Runs whether or not the artifact below is skipped: a reword in the probe library must not leave
 // that corpus reproducing a prompt no agent sends. The comparison is exact, against what the library
-// actually returns, so any change to the prompt text fails it — only an edit to the source file that
-// leaves the returned strings alone is tolerated.
+// actually returns, so a change to the prompt text fails it — but only once the change is built.
+// The import is static and esbuild inlines it, so `npm test` sees an edit to the source and a bare
+// `node --test build/...` does not.
 test('the pinned pair prompts are still the ones the probe library sends', () => {
   assert.deepEqual(factSet(PAIR_STEM), PAIR_FACTS);
   assert.equal(recallPrompt('codex', false), PAIR_RECALL_PROMPT);

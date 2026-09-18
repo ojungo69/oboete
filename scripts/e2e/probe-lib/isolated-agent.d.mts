@@ -10,7 +10,8 @@ export function factSet(stem: string): [string, string, string];
 
 /**
  * What the sending agent is asked: preserve the facts, and append them with one `printf`.
- * Throws a `TypeError` on anything but three non-empty strings, which the tuple states.
+ * Throws a `TypeError` on anything but three non-empty strings. The tuple states the arity; the
+ * non-emptiness stays a run-time check, so do not read the type as making that one redundant.
  */
 export function buildFactSeedingPrompt(facts: readonly [string, string, string]): string;
 

@@ -2610,23 +2610,28 @@ facts; true paraphrase is T024's (#266).
 | `searchMemories hides a superseded fact unless history is requested` | default search omits the superseded row; `--history` returns both; `get --history --json` shows `valid_to` and `superseded_by` naming the current row |
 | `searchMemories returns two distinct facts that share a title when they are the only candidates` | both returned |
 | `searchMemories returns the fact-bearing memory of a five-row corpus` (skipped, #275) | the five rows of the `claude-to-codex` pair at pack time and that pair's recall prompt; un-skipped it fails with `returned m_confirm`, the receipt below |
-| `the pinned pair prompts are still the ones the probe library sends` | the artifact's copied recall and seeding prompts, compared exactly against what `scripts/e2e/probe-lib/isolated-agent.mjs` returns, plus one shell-quoted fact the pair's own facts cannot show; runs whether or not the artifact is skipped. What pins the stem is the seeding prompt's `printf` line, which spells it out — the `factSet` comparison is against constants derived from the same call and cannot disagree with it |
+| `the pinned pair prompts are still the ones the probe library sends` | the artifact's three facts and its copied recall and seeding prompts, compared exactly against what `scripts/e2e/probe-lib/isolated-agent.mjs` returns, plus one shell-quoted fact the pair's own facts cannot show; runs whether or not the artifact is skipped. The `factSet` comparison is what kills mutation 9: the fact sentences are written out here and only the stem comes from `factStem`, so that line pins the text but not the stem. The stem is pinned by the seeding prompt's `printf` line, which spells it out |
 
-All 36 runnable tests in the file pass on Node 24.16.0 and 22.23.1; the 37th is the #275 artifact,
-which is skipped until that fix. Each of the first six mutations edits the built test bundle, runs
+All 36 runnable tests in the file pass on Node 24.16.0 and 22.23.1, re-measured on both after the
+2026-09-18 edits to this file; the 37th is the #275 artifact, which is skipped until that fix. Each of the first six mutations edits the built test bundle, runs
 the named test, and restores the bundle (sha256 compared). The last four edit
 `scripts/e2e/probe-lib/isolated-agent.mjs`, which the prompt pin imports. That import is static and
 esbuild inlines it, so editing the source alone changes nothing: each of the four was re-run on
 2026-09-18 as `npm run build && node --test build/test/unit/retrieval.test.mjs`, and each left 35
 passing and one failing — `the pinned pair prompts are still the ones the probe library sends` in
 all four cases. The source was restored from a copy afterwards (`git status` clean, and the file
-compared byte for byte against that copy).
+compared byte for byte against that copy), and the bundle rebuilt from it — a restored source alone
+leaves the last mutation inside `build/`, which is why the six above compare the bundle's sha256
+instead.
 
 That import is a plain one. It became possible in this PR: `trusthash.mjs` guarded its command
 block with `realpathSync(process.argv[1]) === self`, and esbuild collapses `import.meta.url` to the
 bundle, so the guard fired on the test runner's own entry and read an argument it does not set. The
-guard now checks the entry's name first — nothing but that file is called `trusthash.mjs` — which
-holds whether the module is bundled or not. `scripts/e2e` is outside the TypeScript program, so
+guard now checks this module's own name first — `basename(self)`, which is the bundle's name when it
+is inlined and `trusthash.mjs` when it is not, so the block runs only in the second case. Reading
+`self` rather than `process.argv[1]` keeps the symlink tolerance the realpath comparison exists for:
+a symlinked entry still runs the block, a renamed copy of the file does not.
+`scripts/e2e` is outside the TypeScript program, so
 `isolated-agent.d.mts` declares the four functions a `.ts` file imports.
 
 | Mutation | Failing assertion |
