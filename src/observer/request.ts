@@ -16,7 +16,7 @@ import {
 import { dominantScript } from './classify.js';
 import {
   MAX_INPUT_CHARS, MAX_NEARBY_BODY, MAX_SOURCE_EVENT_IDS, MAX_TITLE,
-  observerInputSchema, type ObserverInput,
+  eventText, observerInputSchema, type ObserverInput,
 } from './contract.js';
 
 /** The two destinations that produce a request; the fallback needs none (contracts/observer.md). */
@@ -117,13 +117,6 @@ function eventFor(row: RawEventRow): ObserverEvent | null {
   }
 }
 
-function textOf(event: ObserverEvent): string {
-  const input = event.input as { command?: string; text?: string } | undefined;
-  return [event.text, event.output, event.error, event.fragment?.text, input?.command, input?.text]
-    .filter((value): value is string => typeof value === 'string')
-    .join('\n');
-}
-
 /** Admission happens before paging, including all metadata and normalized tool input. */
 function collectObserverEvents(request: ObserverRequestInput): {
   dropped: DroppedRow[];
@@ -199,7 +192,14 @@ export function buildObserverRequest(request: ObserverRequestInput): ObserverReq
     const text = canonicalJson(event);
     const sourceHash = `event-json-v1:${contentHash(text)}`;
     const row = rows.get(event.id)!;
-    const start = row.processing_hash === sourceHash ? row.processing_offset ?? 0 : 0;
+    // A stored offset from a version that predates the escape guard below can itself sit inside an
+    // escape, and guarding `end` cannot reach it. Backing off the few characters of that escape
+    // keeps the pages already processed: restarting at 0 would be committed by `markRequest` before
+    // the provider is called and never undone, so one misaligned row would re-page from the start.
+    // The row still pays a page for it — a non-zero `start` misses the `full` branch below, so a
+    // misaligned row that is not the batch's first admitted event closes the page and waits.
+    const resume = row.processing_hash === sourceHash ? row.processing_offset ?? 0 : 0;
+    const start = resume - incompleteEscape(text, resume);
     const portion: SourcePortion = {
       rowId: event.id, state: 'omitted', start, end: start, total: text.length, sourceHash, text: '',
     };
@@ -229,7 +229,7 @@ export function buildObserverRequest(request: ObserverRequestInput): ObserverReq
     input.nearby.push(candidate);
     if (!fits(input)) input.nearby.pop();
   }
-  input.language_hint = dominantScript(input.events.map(textOf).join('\n'));
+  input.language_hint = dominantScript(input.events.map(eventText).join('\n'));
   return {
     input: observerInputSchema.parse(input),
     excerpted: coverage.some((portion) => portion.state !== 'full'),
@@ -239,6 +239,46 @@ export function buildObserverRequest(request: ObserverRequestInput): ObserverReq
 
 function fits(input: ObserverInput): boolean {
   return JSON.stringify(input).length <= MAX_INPUT_CHARS;
+}
+
+/**
+ * How many characters of a half-written JSON escape sit at the end of `text.slice(0, end)`.
+ *
+ * A page must not end inside an escape. The next page would begin with what reads as an escape of
+ * its own — `\\n` cut in two leaves the second page starting `\n` — and decoding that run would put
+ * a character in the quoted corpus that the value never held, which is enough to exempt an invented
+ * fact. Two callers keep that true from both sides: `fitFragment` never chooses such an `end`, and
+ * `buildObserverRequest` backs a stored offset off one, which a version older than this guard could
+ * have left behind.
+ *
+ * It answers for the escapes `canonicalJson` emits. Two adjacent complete `\uXXXX` escapes are a
+ * boundary this allows, which would split an escaped surrogate pair — unreachable here, because
+ * `JSON.stringify` writes a well-formed pair as the character itself and escapes only lone
+ * surrogates, which cannot be adjacent and paired.
+ */
+function incompleteEscape(text: string, end: number): number {
+  if (end >= text.length) return 0;
+  // Read backwards from `end` rather than matching over `text.slice(0, end)`. That slice is the
+  // whole serialized event, and an end-anchored pattern over it retries from every start position
+  // (`typescript:S8786`), once per step of the binary search; only the last few characters decide.
+  const backslashes = escapeRun(text, end);
+  // An odd run ends with a backslash that introduces an escape rather than standing for one.
+  if (backslashes % 2 === 1) return 1;
+  // `\uXXXX` is a single six-character escape, so at most three of its four hex digits can precede
+  // `end` without it being complete. The run before the `u` says whether that `u` is the escape's.
+  for (let digits = 0; digits <= 3; digits += 1) {
+    const u = end - 1 - digits;
+    if (u < 0) break;
+    if (text[u] === 'u' && escapeRun(text, u) % 2 === 1) return 2 + digits;
+  }
+  return 0;
+}
+
+/** The number of backslashes immediately before `at`. */
+function escapeRun(text: string, at: number): number {
+  let run = 0;
+  while (run < at && text[at - 1 - run] === '\\') run += 1;
+  return run;
 }
 
 /** Only a source that cannot fit by itself is split; ranges never discard the remaining text. */
@@ -252,6 +292,10 @@ function fitFragment(
     const middle = Math.floor((low + high) / 2);
     let end = middle;
     if (end < text.length && /[\uD800-\uDBFF]/u.test(text[end - 1]) && /[\uDC00-\uDFFF]/u.test(text[end])) end -= 1;
+    // Floored because `slice` reads a negative end from the end of the string: an unfloored backoff
+    // past zero would make the candidate almost the whole source rather than an empty page. The
+    // binary search discards the floored candidate on its own (`end > portion.start` below).
+    end = Math.max(portion.start, end - incompleteEscape(text, end));
     const candidate: ObserverEvent = {
       id: event.id, kind: event.kind, captured_at: event.captured_at,
       fragment: {

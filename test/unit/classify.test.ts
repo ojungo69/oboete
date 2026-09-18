@@ -12,6 +12,7 @@ import {
   sessionSummary,
 } from '../../src/observer/classify.js';
 import {
+  eventParts,
   observerInputSchema,
   type ObserverInput,
 } from '../../src/observer/contract.js';
@@ -47,12 +48,12 @@ test('every phrase of the directive corpus is rejected and ordinary prose is not
   assert.equal(rejectsDirectives('アップローダーは三回まで再試行します。'), null);
 });
 
-function inputWithHint(hint: 'ja' | 'en' | 'other'): ObserverInput {
+function inputWithHint(hint: 'ja' | 'en' | 'other', events: unknown[] = []): ObserverInput {
   return observerInputSchema.parse({
     repo_ref: REPO_ID,
     checkpoint_context: { state: 'none' },
     session: { started_at: NOW, turns: [] },
-    events: [],
+    events,
     free_summaries: {},
     nearby: [],
     language_hint: hint,
@@ -80,6 +81,249 @@ test('an English answer to a Japanese input is a language mismatch', () => {
     decisions: [], outstanding: ['Check the timeout.'], source_event_ids: ['e1'], reason: 'Progress changed.' };
   assert.equal(checkLanguage(inputWithHint('ja'), { observations: [], checkpoint }), 'mismatch');
   assert.equal(checkLanguage(inputWithHint('en'), { observations: [], checkpoint }), 'ok');
+});
+
+test('a sentence tiled out of two quoted fragments is not treated as quoted', () => {
+  // The request carries `配布物の設定。` and `色は未定。`, never `配布物の色は未定。`. Removing each
+  // fragment leaves nothing, so the composed sentence would score as no text at all.
+  const events = [{ id: 'e1', kind: 'prompt', text: '配布物の設定。色は未定。' }];
+  const tiled = output(observation({ title: 'Colour', body: '配布物の色は未定。' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), tiled), 'mismatch');
+  // One quote with the observer's own words around it still passes: there is no junction.
+  const framed = output(observation({ title: 'Colour', body: 'The prompt recorded 配布物の設定。 as given.' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), framed), 'ok');
+});
+
+test('a run that only exists across two events is not treated as quoted', () => {
+  // Neither event carries `配布色 は琥珀。`; it appears only where the two would be joined.
+  const events = [
+    { id: 'e1', kind: 'prompt', text: 'The colour field ends the sentence: 配布色' },
+    { id: 'e2', kind: 'prompt', text: 'は琥珀。 That is the recorded value.' },
+  ];
+  const straddling = output(observation({ title: 'Colour', body: '配布色 は琥珀。' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), straddling), 'mismatch');
+});
+
+test('a fact quoted verbatim from the input keeps its own script', () => {
+  const fact = '配布色は琥珀。';
+  const events = [{ id: 'e1', kind: 'prompt', text: `Record these durable facts: the build token is cedar. ${fact}` }];
+  const otherFields = [
+    { id: 'e2', kind: 'tool_result', output: `wrote ${fact} to NOTES.md` },
+    { id: 'e3', kind: 'tool_call', tool_name: 'Bash', input: { command: `printf '%s' '${fact}' >> NOTES.md` } },
+  ];
+  const quoted = output(observation({ title: 'fact-3', body: fact }));
+  const invented = output(observation({ title: '色', body: '配布物の色は決まっていません。' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), quoted), 'ok');
+  assert.equal(checkLanguage(inputWithHint('en', events), invented), 'mismatch');
+  // With no such text in the events there is nothing to have quoted.
+  assert.equal(checkLanguage(inputWithHint('en'), quoted), 'mismatch');
+  // The same text reaches the check through every field the request carries, not only `text`.
+  for (const event of otherFields) {
+    assert.equal(checkLanguage(inputWithHint('en', [event]), quoted), 'ok', JSON.stringify(event));
+  }
+  // The mirror case: an English identifier quoted into a Japanese session.
+  const jaEvents = [{ id: 'e1', kind: 'prompt', text: '配布の設定を確認しました。値は release-bird-heron です。' }];
+  const enQuote = output(observation({ title: 'release-bird-heron', body: 'release-bird-heron' }));
+  const enInvented = output(observation({ title: 'Release settings', body: 'The release configuration was reviewed.' }));
+  assert.equal(checkLanguage(inputWithHint('ja', jaEvents), enQuote), 'ok');
+  assert.equal(checkLanguage(inputWithHint('ja', jaEvents), enInvented), 'mismatch');
+  // A checkpoint item the request carried back is quotable in a later batch with other events.
+  const carried = observerInputSchema.parse({
+    repo_ref: REPO_ID,
+    checkpoint_context: { state: 'provided', id: 'm_1', title: 'Record the facts', body: `決定\n- ${fact}` },
+    session: { started_at: NOW, turns: [] },
+    events: [{ id: 'e9', kind: 'prompt', text: 'Continue with the release checklist.' }],
+    free_summaries: {},
+    nearby: [],
+    language_hint: 'en',
+  });
+  assert.equal(checkLanguage(carried, quoted), 'ok');
+  const constraint = { decision: 'replace' as const, purpose: 'Record the facts', constraints: [fact],
+    decisions: [], outstanding: [], source_event_ids: ['e1'], reason: 'Progress changed.' };
+  assert.equal(checkLanguage(inputWithHint('en', events), { observations: [], checkpoint: constraint }), 'ok');
+  assert.equal(checkLanguage(inputWithHint('en', events),
+    { observations: [], checkpoint: { ...constraint, constraints: ['配布物の色を決める。'] } }), 'mismatch');
+});
+
+test('a quote keeps its script inside the framing the prompt asks for', () => {
+  const fact = '配布色は琥珀。';
+  const events = [{ id: 'e1', kind: 'prompt', text: `Record these durable facts: the build token is cedar. ${fact}` }];
+  // buildSummarizerPrompt asks for a title and body that *contain* the string, not that are it.
+  const framed = output(observation({ title: `Durable fact: ${fact}`, body: `The developer asked to keep ${fact} exactly.` }));
+  assert.equal(checkLanguage(inputWithHint('en', events), framed), 'ok');
+  // Framing around an invented Japanese phrase is still the observer's own words.
+  const invented = output(observation({ title: 'Durable fact: 配布物の色は未定。', body: 'The colour is undecided.' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), invented), 'mismatch');
+});
+
+test('a fact shorter than a run is exempt when the request carries it whole', () => {
+  const events = [{ id: 'e1', kind: 'prompt', text: 'Keep this value exactly: 琥珀色' }];
+  const kept = output(observation({ title: '琥珀色', body: '琥珀色' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), kept), 'ok');
+});
+
+test('the worker\'s own omission marker does not vote', () => {
+  // A Japanese session whose oversized body was trimmed: the English left in it is the marker.
+  const quote = 'The uploader retries three times before it gives up.';
+  const events = [{ id: 'e1', kind: 'prompt', text: `記録してください: ${quote}` }];
+  const trimmed = output(observation({ title: '再試行の記録', body: `${quote}\n... (+3 omitted)` }));
+  assert.equal(checkLanguage(inputWithHint('ja', events), trimmed), 'ok');
+});
+
+test('a value that literally contains a backslash-n is not decoded into the corpus', () => {
+  // `eventText` already holds the text an ordinary event stands for. Decoding it again would put a
+  // real newline in the corpus and exempt a value the request never carried.
+  const events = [{ id: 'e1', kind: 'prompt', text: String.raw`the literal value is 配布色\n琥珀 here` }];
+  const invented = output(observation({ title: 'Colour', body: '配布色\n琥珀' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), invented), 'mismatch');
+});
+
+/**
+ * A fragment as `request.ts` builds one: `fitFragment` slices `canonicalJson(event)`, so a page
+ * carries the object's own structure and not just the contents of one value. `slice` picks the page.
+ */
+function pagedEvent(event: object, slice: (canonical: string) => string): ObserverInput['events'][number] {
+  const canonical = JSON.stringify(event);
+  const text = slice(canonical);
+  const start = canonical.indexOf(text);
+  assert.notEqual(start, -1, 'the slice has to come from the canonical JSON');
+  return observerInputSchema.shape.events.element.parse({
+    id: 'e1', kind: 'prompt',
+    fragment: { format: 'event-json-v1', source_hash: 'h1',
+      start, end: start + text.length, total: canonical.length, text },
+  });
+}
+
+// A fact that carries a JSON escape is the case the decode exists for: `\r\n` reaches the page as
+// the two-character sequences, so it is absent from the corpus unless something decodes it. Each
+// test below is one page shape; only `wholly inside one value` worked before this fix.
+const ESCAPED_FACT = '配布色\r\n琥珀値';
+const ESCAPED_FACT_EVENT = { id: 'e1', kind: 'prompt', captured_at: 1,
+  text: `the developer said ${ESCAPED_FACT} keep it` };
+// How the fact is spelled inside the canonical JSON: `配布色\r\n琥珀値` with the escapes as two
+// characters each. A page is cut from that spelling, so it is what locates one.
+const ESCAPED_FACT_ON_THE_WIRE = JSON.stringify(ESCAPED_FACT).slice(1, -1);
+
+test('a first page decodes its quote although the slice opens with the object', () => {
+  // `start` is 0, so the page begins `{"` and the slice's own quotes are structure. Wrapping the
+  // whole slice in one more pair of quotes cannot parse it.
+  const paged = pagedEvent(ESCAPED_FACT_EVENT, (canonical) =>
+    canonical.slice(0, canonical.indexOf(ESCAPED_FACT_ON_THE_WIRE) + ESCAPED_FACT_ON_THE_WIRE.length));
+  assert.ok(paged.fragment!.text.startsWith('{"'), 'this is the first-page shape');
+  assert.ok(eventParts(paged).some((part) => part.includes(ESCAPED_FACT)),
+    'the fact is in the corpus with a real CR and LF');
+});
+
+test('a page that ends its value decodes its quote although the slice closes the object', () => {
+  // The mirror image: the page runs to the end, so it carries the closing `"` and the `}` after it.
+  const paged = pagedEvent(ESCAPED_FACT_EVENT, (canonical) =>
+    canonical.slice(canonical.indexOf('the developer')));
+  assert.ok(paged.fragment!.text.endsWith('"}'), 'this is the last-page shape');
+  assert.ok(eventParts(paged).some((part) => part.includes(ESCAPED_FACT)),
+    'the fact is in the corpus with a real CR and LF');
+});
+
+test('an escaped quote inside the value does not end the run it sits in', () => {
+  // `\"` is content, not the boundary of a string run. Reading it as a boundary splits the run and
+  // leaves a lone `\` at its end, so the piece carrying the fact stops parsing and the fact is lost
+  // from the corpus — for a fact that also carries a control escape, nothing else puts it back.
+  const fact = '配布色は"琥珀"\r\n値';
+  const event = { id: 'e1', kind: 'prompt', captured_at: 1, text: `the developer said ${fact} keep it` };
+  const onTheWire = JSON.stringify(fact).slice(1, -1);
+  const paged = pagedEvent(event, (canonical) =>
+    canonical.slice(0, canonical.indexOf(onTheWire) + onTheWire.length));
+  assert.ok(paged.fragment!.text.includes(String.raw`\"`), 'the page carries an escaped quote');
+  assert.ok(eventParts(paged).some((part) => part.includes(fact)),
+    'the fact is in the corpus with its quotes and a real CR and LF');
+});
+
+test('a page that lies wholly inside one value decodes its quote', () => {
+  // The one shape that worked before: no structural quote falls in the page at all.
+  const paged = pagedEvent(ESCAPED_FACT_EVENT, (canonical) => {
+    const from = canonical.indexOf('the developer');
+    return canonical.slice(from, canonical.indexOf(' keep it', from));
+  });
+  assert.ok(!paged.fragment!.text.includes('"'), 'this page holds no structural quote');
+  const quoted = output(observation({ title: 'Colour', body: ESCAPED_FACT }));
+  assert.equal(checkLanguage(inputWithHint('en', [paged]), quoted), 'ok');
+});
+
+test("a tool call's own name is not a quote, so it cannot exempt an English title", () => {
+  // `TOOL_NAMES` is oboete's normalized vocabulary (`read`, `write`, `edit`, `bash`, ...), not
+  // anything the developer wrote. Putting it in the corpus would make a title equal to one of those
+  // words wholly exempt from the language gate in every batch that called a tool — measured: with
+  // `read` in the corpus, an observation titled `Read` passed a `ja` check.
+  const events = [
+    { id: 'e1', kind: 'prompt', text: '配布の設定を確認しました。' },
+    { id: 'e2', kind: 'tool_call', tool_name: 'read', input: { paths: [] } },
+  ];
+  const titled = output(observation({ title: 'Read', body: 'Read' }));
+  assert.equal(checkLanguage(inputWithHint('ja', events), titled), 'mismatch');
+  assert.equal(eventParts(observerInputSchema.shape.events.element.parse(events[1])).includes('read'), false);
+
+  // An MCP name is no safer, because `unquoted` exempts any field a corpus entry contains:
+  // `mcp:serena/read_file` would exempt `Read` just as `read` does, and the tool half of the name is
+  // free text the server supplies rather than anything the project wrote. Both halves stay out.
+  const mcp = { id: 'e3', kind: 'tool_call', tool_name: 'mcp:serena/read_file', input: { paths: [] } };
+  assert.equal(eventParts(observerInputSchema.shape.events.element.parse(mcp)).length, 0);
+  assert.equal(checkLanguage(inputWithHint('ja', [events[0], mcp]), titled), 'mismatch');
+
+  // `other` is what `eventFor` writes for an event that named no tool, and it is nobody's quote
+  // either; the assertion above covers every shape because no `tool_name` reaches the corpus.
+  const untooled = { id: 'e4', kind: 'tool_call', tool_name: 'other', input: { paths: [] } };
+  assert.equal(eventParts(observerInputSchema.shape.events.element.parse(untooled)).length, 0);
+});
+
+test('a short coincidence does not exempt a field', () => {
+  // '色' appears inside the quoted fact, but one shared character is not a quotation.
+  const fact = '配布色は琥珀。';
+  const events = [{ id: 'e1', kind: 'prompt', text: `Record these durable facts: ${fact}` }];
+  const short = output(observation({ title: '色', body: 'The colour of the distribution is not decided.' }));
+  assert.equal(checkLanguage(inputWithHint('en', events), short), 'mismatch');
+});
+
+test('a quote survives the paged and trimmed shapes it arrives in', () => {
+  const fact = '配布色は琥珀。';
+  // The paged path carries a slice of the canonical JSON, where a quote and a newline are escaped.
+  const escaped = String.raw`{"id":"e1","text":"the developer said \"` + fact + String.raw`\"\nkeep it"}`;
+  const fragment = [{ id: 'e1', kind: 'prompt',
+    fragment: { format: 'event-json-v1', source_hash: 'h1', start: 0, end: escaped.length,
+      total: escaped.length * 2, text: escaped } }];
+  const quoted = output(observation({ title: 'fact-3', body: fact }));
+  assert.equal(checkLanguage(inputWithHint('en', fragment), quoted), 'ok');
+
+  // A body over MAX_BODY comes back with an omission marker appended, so it is no longer the whole
+  // quote. The marker is the observer's own words, and they are Latin.
+  const long = `${fact.repeat(40)}\n... (+3 omitted)`;
+  const events = [{ id: 'e1', kind: 'prompt', text: `Record: ${fact.repeat(40)}` }];
+  assert.equal(checkLanguage(inputWithHint('en', events), output(observation({ title: 'fact-3', body: long }))), 'ok');
+});
+
+test('an update may carry the nearby title it targets', () => {
+  const nearby = [{ id: 'm_1', type: 'discovery', title: '配布色の決定', body: '配布色は琥珀に決まりました。', deleted: false }];
+  const input = observerInputSchema.parse({
+    repo_ref: REPO_ID,
+    checkpoint_context: { state: 'none' },
+    session: { started_at: NOW, turns: [] },
+    events: [{ id: 'e1', kind: 'prompt', text: 'Confirm the release colour decision.' }],
+    free_summaries: {},
+    nearby,
+    language_hint: 'en',
+  });
+  const update = output(observation({ title: '配布色の決定', body: '配布色は琥珀に決まりました。' }));
+  assert.equal(checkLanguage(input, update), 'ok');
+  const invented = output(observation({ title: '配布色の再検討', body: '配布色をもう一度検討します。' }));
+  assert.equal(checkLanguage(input, invented), 'mismatch');
+});
+
+test('a checkpoint purpose is never exempted by quoting', () => {
+  const fact = '配布色は琥珀。';
+  const events = [{ id: 'e1', kind: 'prompt', text: `Record these durable facts: ${fact}` }];
+  // `checkpointText` picks all four section headings from the purpose, so a purpose that is only a
+  // quote renders the whole checkpoint in the wrong language.
+  const checkpoint = { decision: 'replace' as const, purpose: fact, constraints: [], decisions: [],
+    outstanding: [], source_event_ids: ['e1'], reason: 'Progress changed.' };
+  assert.equal(checkLanguage(inputWithHint('en', events), { observations: [], checkpoint }), 'mismatch');
 });
 
 test('the session summary preserves a roughly 600-character first prompt verbatim', async () => {

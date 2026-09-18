@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { configSchema, consentHash, consentMatches, consentTuple } from '../../src/config.js';
 import { openDatabase } from '../../src/db/open.js';
 import { nearbyCandidates } from '../../src/db/queries.js';
+import { eventText } from '../../src/observer/contract.js';
 import { buildObserverRequest } from '../../src/observer/request.js';
 import { oboetePaths } from '../../src/paths.js';
 import { loadDestinationRules } from '../../src/privacy/egress.js';
@@ -341,6 +342,29 @@ test('only the agent column changes and the outbound body stays byte-identical',
   });
 });
 
+test("a tool call's paths reach the request, so its language counts", async () => {
+  // `isSummarizableRow` treats command, text and paths as the three fields a tool call carries, and
+  // a file name is often the only foreign-script string an otherwise English event holds.
+  await withOpened((db, token) => {
+    seedRepoAndSession(db, 10);
+    seedEvent(db, {
+      id: 'p1',
+      kind: 'tool_call',
+      content: null,
+      payload: { tool_name: 'read', input: { paths: ['docs/配布手順の確認と再試行の設計.md'] } },
+      turn: 1,
+    });
+    for (let turn = 2; turn <= 10; turn += 1) {
+      seedEvent(db, { id: `p${turn}`, kind: 'prompt', content: 'ok', turn });
+    }
+
+    const built = buildFromBatch(db, token, 'remote_observer');
+    const texts = built.input.events.map(eventText);
+    assert.ok(texts.some((text) => text.includes('配布手順の確認')), texts.join(' | '));
+    assert.equal(built.input.language_hint, 'ja');
+  });
+});
+
 test('a Japanese batch is labelled ja and an oversized batch is excerpted', async () => {
   await withOpened((db, token) => {
     seedRepoAndSession(db, 10);
@@ -385,11 +409,14 @@ test('the consent gate refuses a stored hash that no longer describes the config
 test('oversized sources page without losing escaped text or splitting surrogate pairs', async () => {
   await withOpened((db) => {
     seedRepoAndSession(db, 1);
-    const text = `FIRST ${'quoted "text" \\ line\n😀 '.repeat(2_000)} LAST`;
+    // `\u0001` is written by `JSON.stringify` as a six-character `\uXXXX` escape, which is the other
+    // arm of `incompleteEscape`; without one the fixture exercises only the backslash-run arm.
+    const text = `FIRST ${'quoted "text" \\ line\n\u0001 😀 '.repeat(2_000)} LAST`;
     seedEvent(db, { id: 'large', kind: 'last_assistant_message', content: text });
     const rows = db.prepare('SELECT * FROM raw_events').all() as unknown as RawEventRow[];
     const session = db.prepare('SELECT * FROM sessions').get() as unknown as SessionRow;
     const original = JSON.stringify({ captured_at: rows[0].captured_at, id: 'large', kind: 'last_assistant_message', text });
+    assert.ok(original.includes(String.raw`\u0001`), 'the fixture reaches the \\uXXXX arm');
     const chunks: string[] = [];
     let offset = 0;
     for (let page = 0; offset < original.length && page < 30; page += 1) {
@@ -402,12 +429,60 @@ test('oversized sources page without losing escaped text or splitting surrogate 
       assert.equal(portion.total, original.length);
       assert.equal(portion.text, original.slice(portion.start, portion.end));
       assert.equal(/[\uD800-\uDBFF]$/u.test(portion.text), false);
+      // A page that ended inside an escape would make the next one start with what reads as an
+      // escape of its own: `\\n` cut in two leaves `\n`, which decodes to a newline the value never
+      // held. The corpus would then carry a string nobody wrote.
+      assert.equal(/\\*$/u.exec(portion.text)![0].length % 2, 0, 'no page ends on a half escape');
+      // Same parity rule as the backslash assertion: an even run before `u` is a completed `\\`
+      // escape followed by the literal letter, and ending there is correct.
+      const split = /(\\+)u[0-9a-fA-F]{0,3}$/u.exec(portion.text);
+      assert.equal(split === null || split[1].length % 2 === 0, true, 'no page splits a \\uXXXX');
       chunks.push(portion.text);
       offset = portion.end;
       Object.assign(rows[0], { processing_offset: offset, processing_hash: portion.sourceHash });
     }
     assert.equal(chunks.join(''), original);
     assert.ok(chunks.length > 1);
+  });
+});
+
+test('a stored offset that sits inside an escape backs off to before it', async () => {
+  // The guard above only shapes the ends this version chooses. An offset persisted by a version
+  // that predates it can already sit between the two backslashes of a literal `\n`, and the resumed
+  // page would then begin with what reads as an escape of its own. Backing off keeps the pages
+  // already processed; restarting at 0 would throw them away for the sake of a few characters.
+  await withOpened((db) => {
+    seedRepoAndSession(db, 1);
+    const text = `FIRST ${'quoted "text" \\ line\n\u0001 😀 '.repeat(2_000)} LAST`;
+    seedEvent(db, { id: 'large', kind: 'last_assistant_message', content: text });
+    const rows = db.prepare('SELECT * FROM raw_events').all() as unknown as RawEventRow[];
+    const session = db.prepare('SELECT * FROM sessions').get() as unknown as SessionRow;
+    const original = JSON.stringify({ captured_at: rows[0].captured_at, id: 'large', kind: 'last_assistant_message', text });
+
+    const first = build(db, 'remote_observer', rows, session, []);
+    const sourceHash = first.coverage[0].sourceHash;
+    const half = original.indexOf('\\\\') + 1;
+    assert.ok(half > 0 && original[half] === '\\', 'the fixture holds an escaped backslash to cut');
+
+    Object.assign(rows[0], { processing_offset: half, processing_hash: sourceHash });
+    const resumed = build(db, 'remote_observer', rows, session, []);
+    assert.equal(resumed.coverage[0].start, half - 1,
+      'a misaligned offset backs off the escape rather than restarting or resuming inside it');
+
+    // The other arm: a cut placed inside the four hex digits of a `\uXXXX` escape backs off the
+    // whole escape, not one character. Without this, an off-by-one in that branch leaves the
+    // resumed page opening on what reads as an escape the value never held.
+    const unicode = original.indexOf(String.raw`\u0001`);
+    assert.ok(unicode > 0, 'the fixture holds a \\uXXXX escape to cut');
+    for (const inside of [2, 3, 4, 5]) {
+      Object.assign(rows[0], { processing_offset: unicode + inside, processing_hash: sourceHash });
+      assert.equal(build(db, 'remote_observer', rows, session, []).coverage[0].start, unicode,
+        `a cut ${inside} characters into the escape backs off to its start`);
+    }
+
+    // An aligned offset still resumes where it left off.
+    Object.assign(rows[0], { processing_offset: first.coverage[0].end, processing_hash: sourceHash });
+    assert.equal(build(db, 'remote_observer', rows, session, []).coverage[0].start, first.coverage[0].end);
   });
 });
 

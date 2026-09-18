@@ -219,6 +219,79 @@ type RawObservation = z.infer<typeof rawObservationSchema>;
 export const observerOutputJsonSchema = z.toJSONSchema(observerOutputSchema);
 
 export type ObserverInput = z.infer<typeof observerInputSchema>;
+
+/** The omission marker `trimBody` appends, which the worker writes and the provider never sends. */
+export const TRIM_MARKER = /\n?\.\.\. \(\+\d+ omitted\)$/u;
+
+/**
+ * Each string an event carries, one field per entry. `classify.ts` decides from these whether an
+ * output field was quoted verbatim, so they stay separate: joining them first would let a quote
+ * straddle two fields the request never wrote side by side.
+ *
+ * Only `fragment.text` is decoded, and the raw slice stays beside what it decodes to. It is a slice
+ * of the canonical JSON, so a quote or a control character reaches it escaped, while every other
+ * field is already the text it stands for — decoding those again would invent a variant of a value
+ * that literally contains `\n`.
+ */
+export function eventParts(event: ObserverInput['events'][number]): string[] {
+  const input = event.input as { command?: string; text?: string; paths?: unknown } | undefined;
+  // `paths` is the third field a tool call carries (`isSummarizableRow` in `src/worker/batches.ts`
+  // joins exactly command, text and paths), and a file name is often the only foreign-script string
+  // an otherwise English event holds.
+  const paths = Array.isArray(input?.paths) ? input.paths : [];
+  // `tool_name` is deliberately absent, in both halves of the vocabulary. `TOOL_NAMES` is oboete's
+  // own normalized set — `read`, `write`, `edit`, `bash` — so quoting it exempts those English words
+  // from the language gate, and an `mcp:<server>/<tool>` name does the same through `unquoted`'s
+  // whole-containment rule: measured on #278, `mcp:serena/read_file` in the corpus let a title of
+  // `Read` pass a `ja` check, and `MCP_TOOL_NAME_PATTERN` puts no bound on the tool half, which the
+  // server supplies as free text. Admitting a name safely needs a token boundary in `unquoted`
+  // rather than a narrower filter here (#291).
+  const fragment = event.fragment?.text;
+  return [event.text, event.output, event.error, input?.command, input?.text, ...paths]
+    .filter((value): value is string => typeof value === 'string')
+    .concat(typeof fragment === 'string' ? [fragment, ...decodeFragment(fragment)] : []);
+}
+
+/**
+ * The text a canonical-JSON slice stands for, one entry per string run it holds.
+ *
+ * `fitFragment` in `request.ts` slices `canonicalJson(event)`, so a page carries the object's own
+ * structure: a first page opens `{"`, and a page that reaches the end of a value carries the closing
+ * `"` and what follows it. Parsing the whole slice as one string therefore fails on all but the
+ * pages that lie wholly inside a single value, and the escapes in the rest — which is where a
+ * verbatim `\r\n` lives — never come back as the characters they stand for.
+ *
+ * A page that starts mid-value cannot tell whether its first run is inside a string, so both
+ * parities are decoded. That adds no exemption the corpus did not already carry: a run is either
+ * string content, which is the point, or a structural run, which holds no escape and so comes back
+ * from `JSON.parse` unchanged — and an unchanged run is a substring of the raw slice, which
+ * `eventParts` keeps beside this either way.
+ */
+function decodeFragment(text: string): string[] {
+  const runs: string[] = [];
+  let start = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    // Skip the escaped character itself, so `\"` is content rather than a run boundary.
+    if (text[index] === '\\') index += 1;
+    else if (text[index] === '"') {
+      runs.push(text.slice(start, index));
+      start = index + 1;
+    }
+  }
+  runs.push(text.slice(start));
+  // A run the page cut mid-escape cannot be decoded; the raw slice is what is left of it.
+  return runs
+    .flatMap((run) => { try { return [JSON.parse(`"${run}"`) as string]; } catch { return []; } })
+    .filter((run) => run.length > 0);
+}
+
+/**
+ * The text an event carries. `request.ts` derives `language_hint` from it, which is one judgement
+ * over the whole event, so this is the parts joined.
+ */
+export function eventText(event: ObserverInput['events'][number]): string {
+  return eventParts(event).join('\n');
+}
 export type ObserverOutput = z.infer<typeof observerOutputSchema>;
 export type Observation = z.infer<typeof observationSchema>;
 export type ObservationType = z.infer<typeof observationTypeSchema>;
