@@ -8,13 +8,11 @@ import { isBusyError, openDatabase } from '../../src/db/open.js';
 import {
   DEGRADED_PRECEDENCE,
   checkLanguage,
-  dominantScript,
   rejectsDirectives,
   sessionSummary,
 } from '../../src/observer/classify.js';
 import {
   eventParts,
-  eventText,
   observerInputSchema,
   type ObserverInput,
 } from '../../src/observer/contract.js';
