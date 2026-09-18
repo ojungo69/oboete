@@ -234,12 +234,12 @@ export const TRIM_MARKER = /\n?\.\.\. \(\+\d+ omitted\)$/u;
  * that literally contains `\n`.
  */
 export function eventParts(event: ObserverInput['events'][number]): string[] {
-  const input = event.input as { tool_name?: unknown } | undefined;
-  // The tool's name is quotable — the prompt asks for identifiers character for character — but it
-  // is a fixed vocabulary rather than anything the developer wrote, so it stays out of `eventText`
-  // and casts no vote on the language. `request.ts` writes `other` when an event named no tool, and
-  // that placeholder is nobody's quote.
-  const tool = typeof input?.tool_name === 'string' && input.tool_name !== 'other' ? [input.tool_name] : [];
+  // `tool_name` is a field of the event, not of `input` — `eventFor` in `request.ts` writes it
+  // beside `kind`. It is quotable, because the prompt asks for identifiers character for character,
+  // but it is a fixed vocabulary rather than anything the developer wrote, so it stays out of
+  // `eventText` and casts no vote on the language. `eventFor` writes `other` when the event named
+  // no tool, and that placeholder is nobody's quote.
+  const tool = typeof event.tool_name === 'string' && event.tool_name !== 'other' ? [event.tool_name] : [];
   return [...eventLanguageParts(event), ...tool];
 }
 
