@@ -438,8 +438,9 @@ writers require separate worktrees. No deployment follows merely from an increme
   `searchMemories`, 39 of them first. Nothing reproduced on that corpus.
   `test/unit/retrieval.test.ts` pins the corpus, age-neutral ranking, supersession (hidden by
   default, marked historical in `get --history`) and a shared-title pair, and pins the artifact's
-  prompts against the probe library; each of nine mutations fails its test (E12). The MMR rule that drops distinct but similar facts deep in a candidate list is
-  recorded as an observation without a failing corpus case in #272, and lambda is unchanged. The
+  facts and prompts against the probe library; each of ten mutations fails its test (E12). The MMR rule that
+  drops distinct but similar facts deep in a candidate list is recorded as an observation without a
+  failing corpus case in #272, and lambda is unchanged. The
   first daily run on the 009 bundle then reproduced a miss the fixture cannot: in a five-memory
   corpus FTS5 clamps the IDF of common trigrams, the ratio-to-best normalization drops every other
   candidate below 0.3, and a fact-bearing memory is omitted from the prompt pack (#275, E12

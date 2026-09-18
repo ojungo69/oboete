@@ -2612,12 +2612,29 @@ facts; true paraphrase is T024's (#266).
 | `searchMemories returns the fact-bearing memory of a five-row corpus` | the five rows of the `claude-to-codex` pair at pack time and that pair's recall prompt; before the #275 fix it failed with `returned m_confirm` |
 | `searchMemories omits an unrelated memory of a five-row corpus` | admitting a clamped candidate does not admit the corpus |
 | `the prompt pack of a five-row corpus carries the fact-bearing memory` (`deferred.test.ts`) | the same five rows through `buildPromptPack`, with no item omitted `below_threshold` |
-| `the pinned pair prompts are still the ones the probe library sends` | the artifact's three facts and its copied recall and seeding prompts, including the `printf` command, compared exactly against `scripts/e2e/probe-lib/isolated-agent.mjs` loaded at run time |
+| `the pinned pair prompts are still the ones the probe library sends` | the artifact's three facts and its copied recall and seeding prompts, compared exactly against what `scripts/e2e/probe-lib/isolated-agent.mjs` returns, plus one shell-quoted fact the pair's own facts cannot show. The `factSet` comparison is what kills mutation 9: the fact sentences are written out in `test/helpers/pair-275.ts` and only the stem comes from `factStem`, so that line pins the text but not the stem. The stem is pinned by the seeding prompt's `printf` line, which spells it out |
 
-All 38 tests in the file pass on Node 24.16.0 and 22.23.1. Each of the first six mutations edits the
-built test bundle, runs the named test, and restores the bundle (sha256 compared). The last three
-edit `scripts/e2e/probe-lib/isolated-agent.mjs`, which the prompt pin reads at run time, and restore
-it (`git status` clean afterwards):
+All 38 tests in the file pass on Node 24.16.0 and 22.23.1, measured on both after this merge. Each
+of the first six mutations edits the built test bundle, runs the named test, and restores the bundle
+(sha256 compared). The last four edit `scripts/e2e/probe-lib/isolated-agent.mjs`, which the prompt
+pin imports. That import is static and esbuild inlines it, so editing the source alone changes
+nothing: each of the four was re-run on 2026-09-18 as
+`npm run build && node --test build/test/unit/retrieval.test.mjs`, and each left 37 passing and one
+failing — `the pinned pair prompts are still the ones the probe library sends` in all four cases.
+The source was restored from a copy afterwards (`git status` clean, and the file compared byte for
+byte against that copy), and the bundle rebuilt from it — a restored source alone leaves the last
+mutation inside `build/`, which is why the six above compare the bundle's sha256 instead.
+
+That import is a plain one. It became possible in #273: `trusthash.mjs` guarded its command block
+with `realpathSync(process.argv[1]) === self`, and esbuild collapses `import.meta.url` to the
+bundle, so the guard fired on the test runner's own entry and read an argument it does not set. The
+guard now checks that module's own name first — `basename(self)`, which is the bundle's name when it
+is inlined and `trusthash.mjs` when it is not, so the block runs only in the second case. Reading
+`self` rather than `process.argv[1]` keeps the symlink tolerance the realpath comparison exists for:
+a symlinked entry still runs the block, a renamed copy of the file does not. `scripts/e2e` is
+outside the TypeScript program, so `isolated-agent.d.mts` declares the functions a `.ts` file
+imports. Before #273 this file loaded the library through a computed `import()`, which esbuild
+leaves alone; that workaround is gone.
 
 | Mutation | Failing assertion |
 | --- | --- |
@@ -2630,6 +2647,8 @@ it (`git status` clean afterwards):
 | a space added before the `\|` in the seeding prompt's last line | prompts: `buildFactSeedingPrompt` differs from the pinned text |
 | `fact line` reworded to `fact-line` in the recall prompt | prompts: `recallPrompt('codex', false)` differs from the pinned text |
 | `cedar` capitalised in `factSet` | prompts: `factSet` differs from the pinned three facts |
+| `shellQuote(fact)` replaced with `` `'${fact}'` `` in `buildFactSeedingPrompt` | prompts: the shell-quoted fact's `printf` line differs |
+| `shellQuote(fact)` replaced with `` `'${fact}'` `` in `buildFactSeedingPrompt` | prompts: the shell-quoted fact's `printf` line differs |
 
 ### Limits
 
@@ -2648,9 +2667,11 @@ it (`git status` clean afterwards):
   being measured against a ratio the clamp decides. The floor sits between the two regimes with room
   on both sides — two orders above the clamp, and three below the smallest raw score the fixture
   produces (1.356 over its 40 probes, with runner-up ratios from 0.112 to 0.944), so no fixture probe
-  changes and the threshold mutation still fails the corpus pin. Mutating the floor to 0 fails the
-  five-row pins; mutating it to 1e9 fails `applyThreshold drops a row below 0.3` and the
-  `rankCandidates` score pin.
+  changes and the threshold mutation still fails the corpus pin. The floor is killed in both
+  directions, re-measured on 2026-09-18 after this branch merged `main`: 0 fails all three five-row
+  pins (`searchMemories` fact-bearing, unrelated omitted, and the pack pin in `deferred.test.ts`),
+  and 1e9 fails `applyThreshold drops a row below 0.3 and keeps LIKE-only last` and `rankCandidates
+  returns bm25, rrf and mmr scores on included rows`.
 - The pair's five rows live in `test/helpers/pair-275.ts` and are pinned three ways: through
   `searchMemories`, through `buildPromptPack` (the path the run actually dropped the row on, which
   adds delivery filtering, retirement and the budget cut), and by a smoke check that an unrelated
@@ -2661,13 +2682,21 @@ it (`git status` clean afterwards):
   than the LIKE fallback, which `applyThreshold` admits without comparing it to the threshold. The
   helper names the rows `m_confirm`, `m_decision` and `m_fact` for `m_c2bfcff0`, `m_363fe065` and
   `m_9da36e8d`, plus `m_checkpoint` and `m_request` for the pair's two session summaries. Keep all
-  five: the miss reproduces on the three searchable rows alone, but the summaries are in the FTS
-  index even though the scope hides them, and removing them takes the corpus to three documents,
-  which lifts `m_decision` above the threshold — measuring the fix against a corpus the run never
-  had. The receipt for those rows is that pair's database from the run,
-  `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`; the two prompts the helper
-  carries are compared exactly against `scripts/e2e/probe-lib/isolated-agent.mjs`, loaded at run
-  time.
+  five. Measured on 2026-09-18 by inserting each corpus and calling `searchMemories` with the pair's
+  recall prompt, against the code as it stood before the fix: the five rows return `m_confirm`
+  alone, and the three searchable rows alone return `m_confirm` and `m_decision`. So the miss was
+  not an artefact of the summaries — `m_fact` was absent either way — but the summaries are in the
+  FTS index even though the scope hides them, and removing them takes the corpus to three documents,
+  which lifts `m_decision` above the threshold. Fixing against three rows would have been measuring
+  against a corpus the run never had. The receipt for those rows is that pair's database from the
+  run, `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`, verified row for row on
+  2026-09-17. That copy is the dogfood account's and the daily cron keeps writing to it (it holds six
+  memories now, not five), so the helper is the frozen one. Neither the two prompts the helper
+  carries nor its three facts are taken on trust: `the pinned pair prompts are still the ones the
+  probe library sends` compares all three against what `scripts/e2e/probe-lib/isolated-agent.mjs`
+  returns. It imports that module statically, so esbuild inlines it into the test bundle and an edit
+  to the source only reaches the pin through a rebuild — `npm test` rebuilds, a bare
+  `node --test build/...` does not.
 - A memory injected once and then unused for 90 days is omitted from packs as `retired` (data model);
   it is still returned by search, which has no `last_injected_at` filter, so User Story 3's first
   acceptance scenario (age alone does not make a fact unavailable when asked about) holds.

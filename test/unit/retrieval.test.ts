@@ -22,6 +22,11 @@ import {
   rankCandidates,
   rrfFuse,
 } from '../../src/retrieval/rank.js';
+import {
+  buildFactSeedingPrompt,
+  factSet,
+  recallPrompt,
+} from '../../scripts/e2e/probe-lib/isolated-agent.mjs';
 import { repositoryRoot } from '../helpers/compile-cache.js';
 import {
   PAIR_FACTS,
@@ -29,7 +34,6 @@ import {
   PAIR_ROWS,
   PAIR_SEEDING_PROMPT,
   PAIR_STEM,
-  probeLibrary,
 } from '../helpers/pair-275.js';
 import { withTempHome } from '../helpers/home.js';
 
@@ -850,12 +854,20 @@ test('searchMemories returns two distinct facts that share a title when they are
 
 // Runs whether or not the artifact below does: a reword in the probe library must not leave that
 // corpus reproducing a prompt no agent sends. The comparison is exact, against what the library
-// actually returns, so a reordered or added line fails it and a cosmetic edit does not.
-test('the pinned pair prompts are still the ones the probe library sends', async () => {
-  const probe = await probeLibrary();
-  assert.deepEqual(probe.factSet(PAIR_STEM), PAIR_FACTS);
-  assert.equal(probe.recallPrompt('codex', false), PAIR_RECALL_PROMPT);
-  assert.equal(probe.buildFactSeedingPrompt(PAIR_FACTS), PAIR_SEEDING_PROMPT);
+// actually returns, so a change to the prompt text fails it — but only once the change is built.
+// The import is static and esbuild inlines it, so `npm test` sees an edit to the source and a bare
+// `node --test build/...` does not.
+test('the pinned pair prompts are still the ones the probe library sends', () => {
+  assert.deepEqual(factSet(PAIR_STEM), PAIR_FACTS);
+  assert.equal(recallPrompt('codex', false), PAIR_RECALL_PROMPT);
+  assert.equal(buildFactSeedingPrompt(PAIR_FACTS), PAIR_SEEDING_PROMPT);
+  // The pair's facts hold no apostrophe, so they cannot show whether the command is shell-quoted.
+  // Find the line rather than index it: a line added above the command would otherwise fail this
+  // with a diff between two unrelated prompt lines instead of naming the quoting rule.
+  assert.equal(
+    buildFactSeedingPrompt(["it's a", 'b', 'c'] as const).split('\n').find((line) => line.startsWith('printf ')),
+    String.raw`printf '%s\n' 'it'\''s a' 'b' 'c' >> NOTES.md`,
+  );
 });
 
 // The reproduction of #275; see `test/helpers/pair-275.ts` for the corpus, its receipt and why every
@@ -863,8 +875,10 @@ test('the pinned pair prompts are still the ones the probe library sends', async
 // fix that simply admits everything from turning it green.
 //
 // What it does not model: the pair's checkpoint is work-scoped in production, while these rows take
-// the file's ordinary project grant and are excluded by `m.type <> 'session_summary'` alone; and all
-// five rows share one `created_at`, so nothing here can show a recency- or retirement-driven drop.
+// the file's ordinary project grant and are excluded by `m.type <> 'session_summary'` alone; the
+// three searchable rows were `feature`, `decision` and `feature` in the run and are `discovery`
+// here, which nothing in retrieval reads; and all five rows share one `created_at`, so nothing here
+// can show a recency- or retirement-driven drop.
 test('searchMemories returns the fact-bearing memory of a five-row corpus', async () => {
   await withTempHome((home) => {
     const paths = oboetePaths(home);

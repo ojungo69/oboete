@@ -1,7 +1,4 @@
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
-
-import { repositoryRoot } from './compile-cache.js';
+import { factStem } from '../../scripts/e2e/probe-lib/isolated-agent.mjs';
 
 /**
  * The `claude-to-codex` pair of the 2026-09-17T15-05-08-894Z dogfood run (JST 2026-09-18), as it
@@ -15,14 +12,19 @@ import { repositoryRoot } from './compile-cache.js';
  * summaries takes the corpus from five documents to three, which lifts `m_decision` above the
  * threshold and changes what comes back — measuring a fix against a corpus the run never had.
  *
- * The prompts below are copies of what `scripts/e2e/probe-lib/isolated-agent.mjs` builds. They are
- * not taken on trust: `the pinned pair prompts are still the ones the probe library sends` compares
- * them with that library's own output, through `probeLibrary()`.
+ * The prompts and facts below are copies of what `scripts/e2e/probe-lib/isolated-agent.mjs` builds.
+ * They are not taken on trust: `the pinned pair prompts are still the ones the probe library sends`
+ * compares all three against that library's own output.
  */
 
-export const PAIR_STEM = 'fact-2026-09-17T15-05-08-894Z-claude-to-codex';
+/**
+ * Named the way `scripts/e2e/isolated-user.mjs` names it. This does not migrate if `factStem`
+ * changes — the seeding prompt below spells the stem out, so a change there fails this file
+ * instead. That is the behaviour a frozen run record wants: it must keep saying what the run said.
+ */
+export const PAIR_STEM = factStem('2026-09-17T15-05-08-894Z', 'claude', 'codex');
 
-export const PAIR_FACTS = [
+export const PAIR_FACTS: [string, string, string] = [
   `${PAIR_STEM}-1: the build token is cedar.`,
   `${PAIR_STEM}-2: the release bird is heron.`,
   `${PAIR_STEM}-3: 配布色は琥珀。`,
@@ -41,24 +43,11 @@ export const PAIR_SEEDING_PROMPT = [
   'These three exact strings are durable facts about this repository. Preserve them verbatim:',
   ...PAIR_FACTS,
   'Use exactly one tool call and no other tools. In that one call, use the shell tool to run:',
-  `printf '%s\\n' ${PAIR_FACTS.map((fact) => `'${fact}'`).join(' ')} >> NOTES.md`,
+  "printf '%s\\n' 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-1: the build token is cedar.'"
+    + " 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-2: the release bird is heron.'"
+    + " 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-3: 配布色は琥珀。' >> NOTES.md",
   'After the tool result, reply on one line with the same three exact strings joined by |.',
 ].join('\n');
-
-/**
- * `scripts/e2e/probe-lib/isolated-agent.mjs`, loaded at run time rather than imported. A static
- * import is bundled into the test file, where `trusthash.mjs`'s main-module guard compares
- * `process.argv[1]` with the bundle's own path, matches, and reads an argument the test runner does
- * not set. esbuild leaves a computed `import()` alone, and outside the bundle that guard stays shut.
- */
-export async function probeLibrary(): Promise<{
-  factSet: (stem: string) => string[];
-  buildFactSeedingPrompt: (facts: readonly string[]) => string;
-  recallPrompt: (agent: string, noCredentials: boolean) => string;
-}> {
-  const specifier = pathToFileURL(join(repositoryRoot(), 'scripts/e2e/probe-lib/isolated-agent.mjs')).href;
-  return await import(specifier);
-}
 
 /** The pair's five rows, in the order the run created them. */
 export const PAIR_ROWS: { id: string; type?: string; title: string; body: string }[] = [
