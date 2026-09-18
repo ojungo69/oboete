@@ -258,13 +258,27 @@ function fits(input: ObserverInput): boolean {
  */
 function incompleteEscape(text: string, end: number): number {
   if (end >= text.length) return 0;
-  const head = text.slice(0, end);
-  // An odd run of backslashes ends with one that introduces an escape rather than standing for one.
-  if (/\\*$/u.exec(head)![0].length % 2 === 1) return 1;
-  // `\uXXXX` is a single six-character escape; a page holding only part of it leaves the rest as text.
-  const unicode = /(\\+)u([0-9a-fA-F]{0,3})$/u.exec(head);
-  if (unicode === null || unicode[1].length % 2 === 0) return 0;
-  return 2 + unicode[2].length;
+  // Read backwards from `end` rather than matching over `text.slice(0, end)`. That slice is the
+  // whole serialized event, and an end-anchored pattern over it retries from every start position
+  // (`typescript:S8786`), once per step of the binary search; only the last few characters decide.
+  const backslashes = escapeRun(text, end);
+  // An odd run ends with a backslash that introduces an escape rather than standing for one.
+  if (backslashes % 2 === 1) return 1;
+  // `\uXXXX` is a single six-character escape, so at most three of its four hex digits can precede
+  // `end` without it being complete. The run before the `u` says whether that `u` is the escape's.
+  for (let digits = 0; digits <= 3; digits += 1) {
+    const u = end - 1 - digits;
+    if (u < 0) break;
+    if (text[u] === 'u' && escapeRun(text, u) % 2 === 1) return 2 + digits;
+  }
+  return 0;
+}
+
+/** The number of backslashes immediately before `at`. */
+function escapeRun(text: string, at: number): number {
+  let run = 0;
+  while (run < at && text[at - 1 - run] === '\\') run += 1;
+  return run;
 }
 
 /** Only a source that cannot fit by itself is split; ranges never discard the remaining text. */
