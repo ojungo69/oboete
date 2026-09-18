@@ -238,15 +238,15 @@ function fits(input: ObserverInput): boolean {
   return JSON.stringify(input).length <= MAX_INPUT_CHARS;
 }
 
-/** Only a source that cannot fit by itself is split; ranges never discard the remaining text. */
 /**
  * How many characters of a half-written JSON escape sit at the end of `text.slice(0, end)`.
  *
  * A page must not end inside an escape. The next page would begin with what reads as an escape of
  * its own — `\\n` cut in two leaves the second page starting `\n` — and decoding that run would put
  * a character in the quoted corpus that the value never held, which is enough to exempt an invented
- * fact. Every non-zero `processing_offset` is a previous page's `end` (`apply.ts` writes
- * `portion.end`; `observe.ts` only ever resets it to 0), so guarding `end` guards both sides.
+ * fact. Two callers keep that true from both sides: `fitFragment` never chooses such an `end`, and
+ * `buildObserverRequest` restarts a source whose stored offset is one, which a version older than
+ * this guard could have left behind.
  */
 function incompleteEscape(text: string, end: number): number {
   if (end >= text.length) return 0;
@@ -259,6 +259,7 @@ function incompleteEscape(text: string, end: number): number {
   return 2 + unicode[2].length;
 }
 
+/** Only a source that cannot fit by itself is split; ranges never discard the remaining text. */
 function fitFragment(
   input: ObserverInput, event: ObserverEvent, text: string, portion: SourcePortion,
 ): ObserverEvent | null {
