@@ -322,6 +322,47 @@ test('a batch that failed is reported even when every row it left behind is excl
   }
 });
 
+test('receipts tied on the same millisecond are all read, not just the last one', async () => {
+  // This selection has been flipped twice on this branch with nothing observing it. Picking one
+  // receipt per source by `rowid` is what `oboete why` does, but here it drops the failed batch
+  // whenever a fresh `assigned` receipt lands in the same millisecond. Reading every tied receipt is
+  // the fail-closed side, and this is what tells the two apart.
+  await withOpened((db, token) => {
+    seedSummaryFixture(db, 'sess-tie', 'Record the tied receipts.', [
+      { id: 'b-failed', degraded: 'unreachable' },
+      { id: 'b-fresh', degraded: null },
+    ]);
+    // The source of the failed batch is re-batched into the fresh one at the same instant, so both
+    // receipts are newest. `b-fresh` has the higher rowid and would win a one-row pick.
+    db.prepare(`INSERT INTO observation_batch_sources (batch_id, raw_event_id, outcome, reason, recorded_at)
+      VALUES ('b-fresh', 'sess-tie-p1', 'assigned', NULL, ?)`).run(NOW);
+
+    const result = sessionSummary(db, token, 'sess-tie', NOW);
+    assert.equal(result.state, 'waiting');
+    if (result.memoryId === null) assert.fail('expected a summary memory');
+    assert.equal(summaryDegraded(db, result.memoryId), 'unreachable');
+  });
+});
+
+test('a consent change is reported even though its receipt reason is not mapped', async () => {
+  // `reconcilePendingDestinations` writes `destination_changed` on the source at the same moment it
+  // marks the batch `consent_changed`. The reason itself is deliberately unmapped and falls to the
+  // fail-closed default, so what the user sees rests on the batch outranking it. If that pairing
+  // ever drifts apart, a consent change starts reading as an unusable answer; this is the pin.
+  await withOpened((db, token) => {
+    seedSummaryFixture(db, 'sess-destination', 'Record the destination change.', [
+      { id: 'b-consent', degraded: 'consent_changed' },
+    ]);
+    db.prepare(`UPDATE observation_batch_sources SET reason = 'destination_changed'
+      WHERE batch_id = 'b-consent' AND raw_event_id = 'sess-destination-p1'`).run();
+
+    const result = sessionSummary(db, token, 'sess-destination', NOW);
+    assert.equal(result.state, 'waiting');
+    if (result.memoryId === null) assert.fail('expected a summary memory');
+    assert.equal(summaryDegraded(db, result.memoryId), 'consent_changed');
+  });
+});
+
 test('an unprocessed source reports what its own receipt says, whatever the batch did', async () => {
   // A batch can apply with `degraded_reason` NULL while one of its sources is still unprocessed and
   // its receipt is the only record. Reading the batch alone reports rule-based notes for all of these.

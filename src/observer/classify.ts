@@ -214,9 +214,10 @@ const SOURCE_OUTCOME = {
  *
  * Two of them, `work_selection_required` and `request_page_limit`, are written by
  * `reconcilePendingDestinations` beside a batch it marks `rule_based`, so surfacing either would
- * contradict the batch's own verdict. The other three carry no such guarantee: `not_sent` and
- * `partial_capture` are written by `settleSources` beside whatever reason that apply had, including
- * none, and `secret` is written by `revalidateSources` before the batch has a reason at all.
+ * contradict the batch's own verdict. The other three carry no such guarantee: `not_sent` comes
+ * from `outcomeForSource` and `partial_capture` from `settleSources`'s short-circuit, both beside
+ * whatever reason that apply had, including none, and `secret` is written by `revalidateSources`
+ * before the batch has a reason at all.
  *
  * `secret` is unreachable on both paths: `SUMMARIZABLE_ROW_SQL` excludes `sensitivity = 'secret'`,
  * so the session reader never counts such a receipt, and `recordedDeferrals` reads only
@@ -448,11 +449,18 @@ function degradedReasonForSession(db: DatabaseSync, sessionId: string): Degraded
   //
   // Every receipt tied on the newest `recorded_at`, not one of them. Two passes in the same
   // millisecond leave two, and reading both is the fail-closed side of that tie: the severer verdict
-  // wins rather than whichever row sorts last. `oboete why` picks exactly one instead, so the two can
-  // name different receipts for the same source under a tie — #289.
+  // wins rather than whichever row sorts last. It is not free — a source re-batched in the same
+  // millisecond still reports the failed batch it just left, which is the invariant above bending —
+  // but the other direction loses a real failure, and `receipts tied on the same millisecond are all
+  // read` is what holds the choice in place. `oboete why` and `replay-evaluate.ts` both pick exactly
+  // one instead, so the readers can name different receipts for the same source under a tie (#289).
+  //
+  // The subquery is correlated on `r.id` alone. A receipt on another session's batch would be picked
+  // and then dropped by the outer `b.session_id`, losing the source's degradation — unreachable,
+  // because `raw_events.session_id` is never updated and cohorts are selected per session.
   const reasons = new Set<DegradedReason>();
   for (const row of db
-    .prepare(`SELECT DISTINCT b.degraded_reason AS batch_reason, bs.outcome AS outcome,
+    .prepare(`SELECT b.degraded_reason AS batch_reason, bs.outcome AS outcome,
         bs.reason AS source_reason,
         CASE WHEN ${SUMMARY_SOURCE_SQL} THEN 1 ELSE 0 END AS is_summary_source
       FROM observation_batches b
