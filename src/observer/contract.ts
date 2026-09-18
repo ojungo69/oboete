@@ -1,5 +1,7 @@
 import * as z from 'zod';
 
+import { MCP_TOOL_NAME_PATTERN } from '../events.js';
+
 export const OBSERVATION_TYPES = [
   'bugfix',
   'feature',
@@ -237,12 +239,18 @@ export function eventParts(event: ObserverInput['events'][number]): string[] {
   const input = event.input as { command?: string; text?: string; paths?: unknown } | undefined;
   // `paths` is the third field a tool call carries (`isSummarizableRow` in `src/worker/batches.ts`
   // joins exactly command, text and paths), and a file name is often the only foreign-script string
-  // an otherwise English event holds. `tool_name` is deliberately not here: `TOOL_NAMES` is oboete's
-  // own normalized vocabulary — `read`, `write`, `edit`, `bash` — so quoting it would exempt those
-  // English words from the language gate for every batch that called a tool (#278 review).
+  // an otherwise English event holds.
   const paths = Array.isArray(input?.paths) ? input.paths : [];
+  // Only an MCP tool's name, which the project's own config named and the prompt asks to keep
+  // verbatim. The rest of `TOOL_NAMES` is oboete's normalized vocabulary — `read`, `write`, `edit`,
+  // `bash` — and quoting those would exempt the English words themselves from the language gate for
+  // every batch that called a tool (measured on #278: a title of `Read` passed a `ja` check).
+  // An MCP name can still carry such a word as a substring, exactly as `src/read.ts` does among the
+  // paths; that is the corpus's existing shape, not something this line introduces.
+  const tool = typeof event.tool_name === 'string' && MCP_TOOL_NAME_PATTERN.test(event.tool_name)
+    ? [event.tool_name] : [];
   const fragment = event.fragment?.text;
-  return [event.text, event.output, event.error, input?.command, input?.text, ...paths]
+  return [event.text, event.output, event.error, input?.command, input?.text, ...paths, ...tool]
     .filter((value): value is string => typeof value === 'string')
     .concat(typeof fragment === 'string' ? [fragment, ...decodeFragment(fragment)] : []);
 }

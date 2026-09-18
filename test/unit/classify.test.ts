@@ -260,6 +260,14 @@ test("a tool call's own name is not a quote, so it cannot exempt an English titl
   const titled = output(observation({ title: 'Read', body: 'Read' }));
   assert.equal(checkLanguage(inputWithHint('ja', events), titled), 'mismatch');
   assert.equal(eventParts(observerInputSchema.shape.events.element.parse(events[1])).includes('read'), false);
+
+  // An MCP tool's name is the other half: the project's own config named it and the prompt asks for
+  // identifiers character for character, so an observation titled with one is a quote.
+  const mcp = { id: 'e3', kind: 'tool_call', tool_name: 'mcp:oboete/search', input: { paths: [] } };
+  assert.ok(eventParts(observerInputSchema.shape.events.element.parse(mcp)).includes('mcp:oboete/search'));
+  const quoted = output(observation({ title: 'mcp:oboete/search', body: 'mcp:oboete/search' }));
+  assert.equal(checkLanguage(inputWithHint('ja', [events[0], mcp]), quoted), 'ok');
+  assert.equal(checkLanguage(inputWithHint('ja', [events[0]]), quoted), 'mismatch');
 });
 
 test('a short coincidence does not exempt a field', () => {
