@@ -1,0 +1,21 @@
+src/observer/contract.ts
+  s_d675408629836f::t_6db083293ed75c 3-4,242,244-251,253
+test/unit/classify.test.ts
+  s_d675408629836f::t_cc84e69e5ce169 263-270
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8f5e0b58e0e8a0fe580c63c6b62ee4bdbfddd5e4",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
