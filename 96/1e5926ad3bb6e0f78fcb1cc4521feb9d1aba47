@@ -1,0 +1,37 @@
+specs/009-memory-core/research.md
+  s_d675408629836f::t_47892bff7b2a32 76-81
+scripts/e2e/probe-lib/trusthash.mjs
+  s_d675408629836f::t_47892bff7b2a32 8,46-53
+.github/workflows/ci.yml
+  s_d675408629836f::t_47892bff7b2a32 6-8,10
+scripts/e2e/probe-lib/isolated-agent.d.mts
+  s_d675408629836f::t_47892bff7b2a32 1-19
+specs/009-memory-core/quickstart.md
+  s_d675408629836f::t_47892bff7b2a32 2565-2566,2569-2721
+specs/009-memory-core/tasks.md
+  s_d675408629836f::t_47892bff7b2a32 56-68,190-193,431-455
+test/unit/retrieval.test.ts
+  s_d675408629836f::t_47892bff7b2a32 2-3,8-10,12,25-31,58,63,67,76-127,627-980
+scripts/e2e/probe-lib/isolated-agent.mjs
+  s_d675408629836f::t_47892bff7b2a32 67-71
+specs/009-memory-core/HANDOFF-claude-code.md
+  s_d675408629836f::t_47892bff7b2a32 156
+scripts/e2e/isolated-user.mjs
+  s_d675408629836f::t_47892bff7b2a32 17,264
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "961e5926ad3bb6e0f78fcb1cc4521feb9d1aba47",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "unknown"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
