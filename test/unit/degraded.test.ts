@@ -337,16 +337,16 @@ test('an unprocessed source reports what its own receipt says, whatever the batc
     { outcome: 'deferred', reason: 'work_selection_required', expect: 'rule_based' },
     { outcome: 'uncovered', reason: 'not_sent', expect: 'rule_based' },
     { outcome: 'rejected', reason: 'secret', expect: 'rule_based' },
-    // `reconcilePendingDestinations` writes these two beside a batch it marks `rule_based` and
-    // `consent_changed` respectively. Left to the fail-closed default both would read as an unusable
-    // answer, which contradicts the batch's own verdict for the first and only survives severity
-    // order for the second.
+    // `reconcilePendingDestinations` writes this beside a batch it marks `rule_based`, so the
+    // fail-closed default would have the receipt contradict its own batch: a request that was never
+    // sent, because it was too large, reported as an answer that came back unusable.
     { outcome: 'deferred', reason: 'request_page_limit', expect: 'rule_based' },
-    { outcome: 'deferred', reason: 'destination_changed', expect: 'consent_changed' },
-    // The three outcomes that return before the reason is read. Each carries a reason the default
-    // would turn into `unusable_output`, so dropping its arm from the early return fails here:
-    // `assigned` beside a stale reason, `processed` the way `settleSources` leaves a partial row,
-    // and `legacy_unknown` the way migration 0004 writes every pre-receipt source.
+    // The three outcomes that return before the reason is read at all. The first row does not pin
+    // that: a null reason is caught one line later by the `typeof` check, so the `assigned` arm can
+    // be deleted and it stays green. The three below it each carry a reason the default would turn
+    // into `unusable_output`, so each fails when its own arm is removed — `assigned` beside a stale
+    // reason, `processed` as `outcomeForSource` writes a de-duplicated item, and `legacy_unknown`
+    // as migration 0004 writes every pre-receipt source.
     { outcome: 'assigned', reason: null, expect: 'rule_based' },
     { outcome: 'assigned', reason: 'detector_failed', expect: 'rule_based' },
     { outcome: 'processed', reason: 'deduplicated', expect: 'rule_based' },

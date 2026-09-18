@@ -185,15 +185,11 @@ export type DegradedReason = (typeof DEGRADED_PRECEDENCE)[number];
 export const CHAIN_STOPS = new Set<DegradedReason>(['consent_changed', 'unusable_output']);
 
 /**
- * The reasons a receipt carries that `sourceOutcome` maps by name rather than by its fail-closed
- * default. `observation_batch_sources.reason` holds more values than these and the column has no
- * CHECK; `src/why.ts`'s `SOURCE_REASONS` is the full vocabulary. A reason belongs here when the
- * default would be wrong for it: `revalidateSources` writes the first three, and
- * `reconcilePendingDestinations` writes `destination_changed` beside a batch that already says
- * `consent_changed`, so naming it keeps the two agreeing even if the batch row is ever missed.
+ * What `revalidateSources` writes when one pass puts a source back. `observation_batch_sources.reason`
+ * holds more values than these and the column has no CHECK; `src/why.ts`'s `SOURCE_REASONS` is the
+ * full vocabulary, and keeping the two in step is #289.
  */
-export type SourceReason = 'detector_failed' | 'source_context_unknown' | 'consent_changed'
-  | 'destination_changed';
+export type SourceReason = 'detector_failed' | 'source_context_unknown' | 'consent_changed';
 
 /**
  * What each deferral makes of the record that carries it. A lost consent is the consent reason, a
@@ -206,7 +202,6 @@ export type SourceReason = 'detector_failed' | 'source_context_unknown' | 'conse
  */
 const SOURCE_OUTCOME = {
   consent_changed: 'consent_changed',
-  destination_changed: 'consent_changed',
   detector_failed: 'unusable_output',
   source_context_unknown: null,
 } satisfies Record<SourceReason, DegradedReason | null>;
@@ -214,14 +209,19 @@ const SOURCE_OUTCOME = {
 /**
  * Reasons that say where a source is rather than what became of it: it was excerpted out of the
  * request, only part of it was captured, a migration parked it for an explicit choice, or the
- * request it was assigned to was too large to send. None is a generation failure, and each is
- * written beside a batch the worker itself marks `rule_based`, so surfacing them would contradict
- * the batch's own verdict.
+ * request it was assigned to was too large to send. None is a generation failure, so none should
+ * reach the fail-closed default.
  *
- * `secret` is here for the same reason but is unreachable on both paths: `SUMMARIZABLE_ROW_SQL`
- * excludes `sensitivity = 'secret'`, so the session reader never evaluates such a receipt, and
- * `recordedDeferrals` reads only `outcome = 'deferred'` while a secret source is written `rejected`.
- * It stays because the fail-closed default would be wrong if either changed.
+ * Two of them, `work_selection_required` and `request_page_limit`, are written by
+ * `reconcilePendingDestinations` beside a batch it marks `rule_based`, so surfacing either would
+ * contradict the batch's own verdict. The other three carry no such guarantee: `not_sent` and
+ * `partial_capture` are written by `settleSources` beside whatever reason that apply had, including
+ * none, and `secret` is written by `revalidateSources` before the batch has a reason at all.
+ *
+ * `secret` is unreachable on both paths: `SUMMARIZABLE_ROW_SQL` excludes `sensitivity = 'secret'`,
+ * so the session reader never counts such a receipt, and `recordedDeferrals` reads only
+ * `outcome = 'deferred'` while a secret source is written `rejected`. It stays because the default
+ * would be wrong if either changed, not because anything exercises it.
  */
 const QUIET_REASONS = new Set([
   'not_sent', 'partial_capture', 'work_selection_required', 'request_page_limit', 'secret',
@@ -446,20 +446,21 @@ function degradedReasonForSession(db: DatabaseSync, sessionId: string): Degraded
   // attempt, not the row, so a batch that really failed still has to be reported even when every
   // row it left behind is one the summary would not have quoted.
   //
-  // One receipt per source, picked the way `oboete why` picks it (`src/why.ts`), so the two cannot
-  // disagree: two passes in the same millisecond tie on `recorded_at` and `b.rowid` breaks it.
+  // Every receipt tied on the newest `recorded_at`, not one of them. Two passes in the same
+  // millisecond leave two, and reading both is the fail-closed side of that tie: the severer verdict
+  // wins rather than whichever row sorts last. `oboete why` picks exactly one instead, so the two can
+  // name different receipts for the same source under a tie — #289.
   const reasons = new Set<DegradedReason>();
   for (const row of db
-    .prepare(`SELECT b.degraded_reason AS batch_reason, bs.outcome AS outcome, bs.reason AS source_reason,
+    .prepare(`SELECT DISTINCT b.degraded_reason AS batch_reason, bs.outcome AS outcome,
+        bs.reason AS source_reason,
         CASE WHEN ${SUMMARY_SOURCE_SQL} THEN 1 ELSE 0 END AS is_summary_source
       FROM observation_batches b
       JOIN observation_batch_sources bs ON bs.batch_id = b.id
       JOIN raw_events r ON r.id = bs.raw_event_id
       WHERE b.session_id = ? AND r.processing_state <> 'processed'
-        AND bs.rowid = (SELECT latest.rowid FROM observation_batch_sources latest
-          JOIN observation_batches lb ON lb.id = latest.batch_id
-          WHERE latest.raw_event_id = r.id AND lb.session_id = b.session_id
-          ORDER BY latest.recorded_at DESC, lb.rowid DESC LIMIT 1)`)
+        AND bs.recorded_at = (SELECT MAX(latest.recorded_at) FROM observation_batch_sources latest
+          WHERE latest.raw_event_id = r.id)`)
     .all(sessionId)) {
     if (DEGRADED_PRECEDENCE.includes(row.batch_reason as DegradedReason)) {
       reasons.add(row.batch_reason as DegradedReason);
