@@ -234,26 +234,12 @@ export const TRIM_MARKER = /\n?\.\.\. \(\+\d+ omitted\)$/u;
  * that literally contains `\n`.
  */
 export function eventParts(event: ObserverInput['events'][number]): string[] {
-  // `tool_name` is a field of the event, not of `input` — `eventFor` in `request.ts` writes it
-  // beside `kind`. It is quotable, because the prompt asks for identifiers character for character,
-  // but it is a fixed vocabulary rather than anything the developer wrote, so it stays out of
-  // `eventText` and casts no vote on the language. `eventFor` writes `other` when the event named
-  // no tool, and that placeholder is nobody's quote.
-  const tool = typeof event.tool_name === 'string' && event.tool_name !== 'other' ? [event.tool_name] : [];
-  return [...eventLanguageParts(event), ...tool];
-}
-
-/**
- * The parts of an event that are written in a language, which is what `eventText` judges.
- *
- * `paths` is the third field a tool call carries (`isSummarizableRow` in `src/worker/batches.ts`
- * joins exactly command, text and paths), and it votes: a file name is often the only foreign-script
- * string an otherwise English event holds. That is per batch, not per event — `request.ts` joins
- * every event before asking — so a path only decides the hint when its script is over 30% of the
- * letters in the whole batch.
- */
-function eventLanguageParts(event: ObserverInput['events'][number]): string[] {
   const input = event.input as { command?: string; text?: string; paths?: unknown } | undefined;
+  // `paths` is the third field a tool call carries (`isSummarizableRow` in `src/worker/batches.ts`
+  // joins exactly command, text and paths), and a file name is often the only foreign-script string
+  // an otherwise English event holds. `tool_name` is deliberately not here: `TOOL_NAMES` is oboete's
+  // own normalized vocabulary — `read`, `write`, `edit`, `bash` — so quoting it would exempt those
+  // English words from the language gate for every batch that called a tool (#278 review).
   const paths = Array.isArray(input?.paths) ? input.paths : [];
   const fragment = event.fragment?.text;
   return [event.text, event.output, event.error, input?.command, input?.text, ...paths]
@@ -295,12 +281,11 @@ function decodeFragment(text: string): string[] {
 }
 
 /**
- * The text an event was written in. `request.ts` derives `language_hint` from it, which is one
- * judgement over the whole event, so this is those parts joined — everything `eventParts` adds on
- * top is a name rather than something written in a language.
+ * The text an event carries. `request.ts` derives `language_hint` from it, which is one judgement
+ * over the whole event, so this is the parts joined.
  */
 export function eventText(event: ObserverInput['events'][number]): string {
-  return eventLanguageParts(event).join('\n');
+  return eventParts(event).join('\n');
 }
 export type ObserverOutput = z.infer<typeof observerOutputSchema>;
 export type Observation = z.infer<typeof observationSchema>;

@@ -193,10 +193,11 @@ export function buildObserverRequest(request: ObserverRequestInput): ObserverReq
     const sourceHash = `event-json-v1:${contentHash(text)}`;
     const row = rows.get(event.id)!;
     // A stored offset from a version that predates the escape guard below can itself sit inside an
-    // escape, and guarding `end` cannot reach it. Restarting the source is the recovery this line
-    // already takes when the content changed, and one page is enough to realign it.
+    // escape, and guarding `end` cannot reach it. Backing off the few characters of that escape is
+    // enough, and it keeps the progress: restarting at 0 would be committed by `markRequest` before
+    // the provider is called and never undone, so one misaligned row would re-page from the start.
     const resume = row.processing_hash === sourceHash ? row.processing_offset ?? 0 : 0;
-    const start = incompleteEscape(text, resume) > 0 ? 0 : resume;
+    const start = resume - incompleteEscape(text, resume);
     const portion: SourcePortion = {
       rowId: event.id, state: 'omitted', start, end: start, total: text.length, sourceHash, text: '',
     };
@@ -245,8 +246,13 @@ function fits(input: ObserverInput): boolean {
  * its own — `\\n` cut in two leaves the second page starting `\n` — and decoding that run would put
  * a character in the quoted corpus that the value never held, which is enough to exempt an invented
  * fact. Two callers keep that true from both sides: `fitFragment` never chooses such an `end`, and
- * `buildObserverRequest` restarts a source whose stored offset is one, which a version older than
- * this guard could have left behind.
+ * `buildObserverRequest` backs a stored offset off one, which a version older than this guard could
+ * have left behind.
+ *
+ * It answers for the escapes `canonicalJson` emits. Two adjacent complete `\uXXXX` escapes are a
+ * boundary this allows, which would split an escaped surrogate pair — unreachable here, because
+ * `JSON.stringify` writes a well-formed pair as the character itself and escapes only lone
+ * surrogates, which cannot be adjacent and paired.
  */
 function incompleteEscape(text: string, end: number): number {
   if (end >= text.length) return 0;
@@ -270,7 +276,7 @@ function fitFragment(
     const middle = Math.floor((low + high) / 2);
     let end = middle;
     if (end < text.length && /[\uD800-\uDBFF]/u.test(text[end - 1]) && /[\uDC00-\uDFFF]/u.test(text[end])) end -= 1;
-    end -= incompleteEscape(text, end);
+    end = Math.max(portion.start, end - incompleteEscape(text, end));
     const candidate: ObserverEvent = {
       id: event.id, kind: event.kind, captured_at: event.captured_at,
       fragment: {

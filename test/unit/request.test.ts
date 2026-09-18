@@ -430,7 +430,10 @@ test('oversized sources page without losing escaped text or splitting surrogate 
       // escape of its own: `\\n` cut in two leaves `\n`, which decodes to a newline the value never
       // held. The corpus would then carry a string nobody wrote.
       assert.equal(/\\*$/u.exec(portion.text)![0].length % 2, 0, 'no page ends on a half escape');
-      assert.equal(/(\\+)u[0-9a-fA-F]{0,3}$/u.test(portion.text), false, 'no page splits a \\uXXXX');
+      // Same parity rule as the backslash assertion: an even run before `u` is a completed `\\`
+      // escape followed by the literal letter, and ending there is correct.
+      const split = /(\\+)u[0-9a-fA-F]{0,3}$/u.exec(portion.text);
+      assert.equal(split === null || split[1].length % 2 === 0, true, 'no page splits a \\uXXXX');
       chunks.push(portion.text);
       offset = portion.end;
       Object.assign(rows[0], { processing_offset: offset, processing_hash: portion.sourceHash });
@@ -459,7 +462,8 @@ test('a stored offset that sits inside an escape restarts the source', async () 
 
     Object.assign(rows[0], { processing_offset: half, processing_hash: sourceHash });
     const resumed = build(db, 'remote_observer', rows, session, []);
-    assert.equal(resumed.coverage[0].start, 0, 'a misaligned offset restarts rather than resuming');
+    assert.equal(resumed.coverage[0].start, half - 1,
+      'a misaligned offset backs off the escape rather than restarting or resuming inside it');
 
     // An aligned offset still resumes where it left off.
     Object.assign(rows[0], { processing_offset: first.coverage[0].end, processing_hash: sourceHash });

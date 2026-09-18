@@ -250,26 +250,18 @@ test('a page that lies wholly inside one value decodes its quote', () => {
   assert.equal(checkLanguage(inputWithHint('en', [paged]), quoted), 'ok');
 });
 
-test("a tool call's name is quotable but casts no vote on the language", () => {
-  // The prompt asks for identifiers character for character, so a title that is the tool's own name
-  // is a quote and not an invention. It stays out of `eventText`: the name is a fixed vocabulary,
-  // not something the developer wrote, so it must not pull the hint towards Latin.
-  // The shape `eventFor` emits: `tool_name` beside `kind`, never inside `input`. `input` is
-  // `z.unknown()`, so a fixture that puts it there parses and passes without production ever
-  // producing it.
-  const event = observerInputSchema.shape.events.element.parse({
-    id: 'e1', kind: 'tool_call', tool_name: 'mcp__serena__find_symbol',
-    input: { paths: ['シンボル一覧.md'] },
-  });
-  assert.ok(eventParts(event).includes('mcp__serena__find_symbol'), 'the name is in the corpus');
-  assert.equal(eventText(event).includes('mcp__serena__find_symbol'), false, 'and not in the hint text');
-  assert.equal(dominantScript(eventText(event)), 'ja', 'so the path still decides the language');
-
-  // `other` is what `eventFor` writes for an event that named no tool, so it is nobody's quote.
-  const untooled = observerInputSchema.shape.events.element.parse({
-    id: 'e2', kind: 'tool_call', tool_name: 'other', input: { paths: [] }, text: 'ok',
-  });
-  assert.equal(eventParts(untooled).includes('other'), false);
+test("a tool call's own name is not a quote, so it cannot exempt an English title", () => {
+  // `TOOL_NAMES` is oboete's normalized vocabulary (`read`, `write`, `edit`, `bash`, ...), not
+  // anything the developer wrote. Putting it in the corpus would make a title equal to one of those
+  // words wholly exempt from the language gate in every batch that called a tool — measured: with
+  // `read` in the corpus, an observation titled `Read` passed a `ja` check.
+  const events = [
+    { id: 'e1', kind: 'prompt', text: '配布の設定を確認しました。' },
+    { id: 'e2', kind: 'tool_call', tool_name: 'read', input: { paths: [] } },
+  ];
+  const titled = output(observation({ title: 'Read', body: 'Read' }));
+  assert.equal(checkLanguage(inputWithHint('ja', events), titled), 'mismatch');
+  assert.equal(eventParts(observerInputSchema.shape.events.element.parse(events[1])).includes('read'), false);
 });
 
 test('a short coincidence does not exempt a field', () => {
