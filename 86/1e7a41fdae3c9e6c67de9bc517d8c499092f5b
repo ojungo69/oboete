@@ -1,0 +1,25 @@
+src/observer/contract.ts
+  s_d675408629836f::t_9099d5eda710a3 238-242,284-285,288
+src/observer/request.ts
+  s_d675408629836f::t_0e7557ccb580a6 196-198,200,249-255,279
+test/unit/classify.test.ts
+  s_d675408629836f::t_2fd5ae69cf6595 253-264
+test/unit/request.test.ts
+  s_d675408629836f::t_dc4589a55ed77f 433-436,465-466
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "861e7a41fdae3c9e6c67de9bc517d8c499092f5b",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
