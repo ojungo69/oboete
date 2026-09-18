@@ -241,12 +241,10 @@ export function eventParts(event: ObserverInput['events'][number]): string[] {
   // joins exactly command, text and paths), and a file name is often the only foreign-script string
   // an otherwise English event holds.
   const paths = Array.isArray(input?.paths) ? input.paths : [];
-  // Only an MCP tool's name, which the project's own config named and the prompt asks to keep
-  // verbatim. The rest of `TOOL_NAMES` is oboete's normalized vocabulary — `read`, `write`, `edit`,
-  // `bash` — and quoting those would exempt the English words themselves from the language gate for
-  // every batch that called a tool (measured on #278: a title of `Read` passed a `ja` check).
-  // An MCP name can still carry such a word as a substring, exactly as `src/read.ts` does among the
-  // paths; that is the corpus's existing shape, not something this line introduces.
+  // Only an MCP tool's name, which the project's own config named. The rest of `TOOL_NAMES` is
+  // oboete's normalized vocabulary — `read`, `write`, `edit`, `bash` — and quoting those exempted
+  // the English words themselves from the language gate (#278: a title of `Read` passed a `ja`
+  // check). An MCP name can still carry one as a substring, as `src/read.ts` does among the paths.
   const tool = typeof event.tool_name === 'string' && MCP_TOOL_NAME_PATTERN.test(event.tool_name)
     ? [event.tool_name] : [];
   const fragment = event.fragment?.text;

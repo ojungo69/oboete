@@ -443,10 +443,11 @@ test('oversized sources page without losing escaped text or splitting surrogate 
   });
 });
 
-test('a stored offset that sits inside an escape restarts the source', async () => {
+test('a stored offset that sits inside an escape backs off to before it', async () => {
   // The guard above only shapes the ends this version chooses. An offset persisted by a version
   // that predates it can already sit between the two backslashes of a literal `\n`, and the resumed
-  // page would then begin with what reads as an escape of its own.
+  // page would then begin with what reads as an escape of its own. Backing off keeps the pages
+  // already processed; restarting at 0 would throw them away for the sake of a few characters.
   await withOpened((db) => {
     seedRepoAndSession(db, 1);
     const text = `FIRST ${'quoted "text" \\ line\n😀 '.repeat(2_000)} LAST`;
