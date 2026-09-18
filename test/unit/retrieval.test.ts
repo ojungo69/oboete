@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
 import { openDatabase } from '../../src/db/open.js';
+import { grantVisibility } from '../../src/db/queries.js';
+import type { Line } from '../../src/fixture/replay.js';
+import { runGet, searchMemories } from '../../src/memories-cli.js';
 import { oboetePaths } from '../../src/paths.js';
+import { resolveRepoIdentity } from '../../src/repo-identity.js';
 import { buildMatch, cjkBigrams, isCjk, segmentQuery } from '../../src/retrieval/fts.js';
 import { searchCandidates } from '../../src/retrieval/query.js';
 import type { RankRow } from '../../src/retrieval/rank.js';
@@ -16,6 +22,13 @@ import {
   rankCandidates,
   rrfFuse,
 } from '../../src/retrieval/rank.js';
+import {
+  buildFactSeedingPrompt,
+  factSet,
+  factStem,
+  recallPrompt,
+} from '../../scripts/e2e/probe-lib/isolated-agent.mjs';
+import { repositoryRoot } from '../helpers/compile-cache.js';
 import { withTempHome } from '../helpers/home.js';
 
 const SCOPE_A = { where: 'm.repo_id = ? AND m.deleted_at IS NULL', params: ['repo_a'] };
@@ -42,21 +55,74 @@ function insertRepo(db: DatabaseSync, id: string, identity: string): void {
 
 function insertMemory(
   db: DatabaseSync,
-  memory: { id: string; repoId: string; title: string; body: string; createdAt?: number },
+  memory: { id: string; repoId: string; title: string; body: string; createdAt?: number; type?: string },
 ): void {
   const cjk = cjkBigrams(`${memory.title} ${memory.body}`);
   db.prepare(
     `INSERT INTO memories (id, repo_id, type, title, body, cjk_bigrams, content_hash, sensitivity, created_at)
-     VALUES (?, ?, 'discovery', ?, ?, ?, ?, 'local_only', ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'local_only', ?)`,
   ).run(
     memory.id,
     memory.repoId,
+    memory.type ?? 'discovery',
     memory.title,
     memory.body,
     cjk,
     `hash_${memory.id}`,
     memory.createdAt ?? 1,
   );
+}
+
+function insertSearchable(
+  db: DatabaseSync,
+  memory: {
+    id: string;
+    repoId: string;
+    title: string;
+    body: string;
+    createdAt?: number;
+    type?: string;
+    validTo?: number | null;
+    supersededBy?: string | null;
+  },
+): void {
+  insertMemory(db, memory);
+  grantVisibility(db, memory.id, { audience: 'project', repoId: memory.repoId }, 'migration', memory.createdAt ?? 1);
+  db.prepare('UPDATE memories SET valid_to = ?, superseded_by = ? WHERE id = ?').run(
+    memory.validTo ?? null,
+    memory.supersededBy ?? null,
+    memory.id,
+  );
+}
+
+type FactTag = NonNullable<NonNullable<Line['tags']>['fact']>;
+
+// Plain strings only. 15 fixture lines carry a tool result as `output: [byte, ...]` and two of them
+// are fact-tagged, but each of those also carries the same sentence as a string, so decoding the
+// bytes changes no fact's sentence. The assertion below names this helper if that ever stops being
+// true, rather than sending the reader to the fixture.
+function payloadStrings(payload: unknown): string[] {
+  if (typeof payload === 'string') return [payload];
+  if (payload === null || typeof payload !== 'object') return [];
+  return Object.values(payload).flatMap(payloadStrings);
+}
+
+function fixtureFacts(): Array<FactTag & { sentence: string }> {
+  const facts: Array<FactTag & { sentence: string }> = [];
+  for (const raw of readFileSync(join(repositoryRoot(), 'test/fixtures/events-1000.jsonl'), 'utf8')
+    .trim()
+    .split('\n')) {
+    const line = JSON.parse(raw) as Line;
+    const fact = line.tags?.fact;
+    if (fact === undefined) continue;
+    const sentence = payloadStrings(line.payload)
+      .flatMap((text) => text.split('\n'))
+      .find((entry) => entry.includes(fact.expect));
+    assert.ok(sentence !== undefined,
+      `fact ${fact.id} has no payload line containing ${fact.expect}: either that line no longer carries the sentence, or it now carries it only as a tool output byte array, which payloadStrings does not decode`);
+    facts.push({ ...fact, sentence });
+  }
+  return facts;
 }
 
 function seedSearchDb(db: DatabaseSync): void {
@@ -557,4 +623,358 @@ test('rankCandidates returns bm25, rrf and mmr scores on included rows', () => {
   assert.ok(result.included.every((item) => item.id !== 'weak'));
   assert.ok(result.omitted.some((item) => item.id === 'weak' && item.reason === 'below_threshold'));
   assert.ok(result.omitted.some((item) => item.id === 'dup' && item.reason === 'mmr_redundant'));
+});
+
+// Pin: measured on current product code (title = fact id, body = sentence) through searchMemories.
+const MEASURED_FIRST_RANK_COUNT = 39;
+
+test('searchMemories returns each events-1000 fact among the first five through the search surface', async () => {
+  const facts = fixtureFacts();
+  assert.equal(facts.length, 40);
+  assert.equal(facts.filter((fact) => fact.lang === 'ja').length, 20);
+  assert.equal(facts.filter((fact) => fact.lang === 'en').length, 20);
+
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    const opened = openDatabase({ path: paths.db, timeoutMs: 1000 });
+    try {
+      insertRepo(opened.db, 'repo_a', '/tmp/oboete-a');
+      for (const fact of facts) {
+        insertSearchable(opened.db, {
+          id: fact.id,
+          repoId: 'repo_a',
+          title: fact.id,
+          body: fact.sentence,
+        });
+      }
+      const placements = facts.map((fact) => {
+        const ranked = searchMemories(opened.db, {
+          repoId: 'repo_a',
+          paths,
+          query: fact.query,
+          limit: 50,
+        });
+        const position = ranked.findIndex((row) => row.id === fact.id);
+        const above = position > 0 ? ranked.slice(0, position).map((row) => row.id) : [];
+        return { id: fact.id, query: fact.query, position, above };
+      });
+      for (const fact of placements) {
+        assert.ok(
+          fact.position >= 0 && fact.position < 5,
+          `fact ${fact.id} query ${fact.query} position ${fact.position < 0 ? 'absent' : String(fact.position)} above [${fact.above.join(', ')}]`,
+        );
+      }
+      const notFirst = placements.filter((fact) => fact.position !== 0);
+      const firstCount = facts.length - notFirst.length;
+      const notFirstText =
+        notFirst.length === 0
+          ? '(none)'
+          : notFirst
+              .map((fact) => `${fact.id} query ${fact.query} position ${fact.position} above [${fact.above.join(', ')}]`)
+              .join('; ');
+      assert.ok(
+        firstCount >= MEASURED_FIRST_RANK_COUNT,
+        `first-rank count ${firstCount} (measured ${MEASURED_FIRST_RANK_COUNT}); not first: ${notFirstText}`,
+      );
+    } finally {
+      opened.db.close();
+    }
+  });
+});
+
+test('rankCandidates ignores created_at when trigram and cjk scores are equal', () => {
+  const older = 1;
+  const newer = Date.now();
+  const alpha = row({
+    id: 'a_old',
+    title: 'Hydrazine tank',
+    body: 'The hydrazine tank uses a burst disk.',
+    scoreTrigram: -2,
+    scoreCjk: -2,
+    created_at: older,
+  });
+  const omega = row({
+    id: 'z_new',
+    title: 'Kerosene pump',
+    body: 'The kerosene pump runs at two thousand RPM.',
+    scoreTrigram: -2,
+    scoreCjk: -2,
+    created_at: newer,
+  });
+  const options = { threshold: 0.3, lambda: 0.5, budgetChars: 10_000, limit: 10 };
+  const first = rankCandidates([alpha, omega], options);
+  const swapped = rankCandidates(
+    [
+      { ...alpha, created_at: newer },
+      { ...omega, created_at: older },
+    ],
+    options,
+  );
+  const expected = [alpha.id, omega.id].sort();
+  assert.deepEqual(first.included.map((item) => item.id), expected);
+  assert.deepEqual(swapped.included.map((item) => item.id), expected);
+});
+
+test('searchMemories returns a relevant older fact among newer unrelated memories', async () => {
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    const opened = openDatabase({ path: paths.db, timeoutMs: 1000 });
+    try {
+      insertRepo(opened.db, 'repo_a', '/tmp/oboete-a');
+      insertSearchable(opened.db, {
+        id: 'm_old',
+        repoId: 'repo_a',
+        title: 'Busy timeout',
+        body: 'The busy timeout for hooks is 150 ms.',
+        createdAt: 1,
+      });
+      insertSearchable(opened.db, {
+        id: 'm_new',
+        repoId: 'repo_a',
+        title: 'SQLite',
+        body: 'SQLite stores application data.',
+        createdAt: Date.now(),
+      });
+      insertSearchable(opened.db, {
+        id: 'm_newer',
+        repoId: 'repo_a',
+        title: 'WAL journal',
+        body: 'Write-ahead logging is ok for readers.',
+        createdAt: Date.now(),
+      });
+      const found = searchMemories(opened.db, {
+        repoId: 'repo_a',
+        paths,
+        query: 'What is the SQLite busy timeout?',
+        limit: 10,
+      });
+      assert.equal(
+        found[0]?.id,
+        'm_old',
+        `older fact not first; returned ${found.map((row) => row.id).join(', ') || '(none)'}`,
+      );
+    } finally {
+      opened.db.close();
+    }
+  });
+});
+
+test('searchMemories hides a superseded fact unless history is requested', async () => {
+  await withTempHome(async (home) => {
+    const repo = join(home, 'repos', 'current');
+    mkdirSync(repo, { recursive: true });
+    const identity = resolveRepoIdentity(repo);
+    const paths = oboetePaths(home);
+    const opened = openDatabase({ path: paths.db, timeoutMs: 1000 });
+    try {
+      insertRepo(opened.db, identity.id, identity.normalizedIdentity);
+      insertSearchable(opened.db, {
+        id: 'm_current',
+        repoId: identity.id,
+        title: 'Busy timeout',
+        body: 'The busy timeout is 2000 ms.',
+        createdAt: 20,
+      });
+      insertSearchable(opened.db, {
+        id: 'm_old',
+        repoId: identity.id,
+        title: 'Busy timeout',
+        body: 'The busy timeout is 150 ms.',
+        createdAt: 10,
+        validTo: 15,
+        supersededBy: 'm_current',
+      });
+      const query = 'busy timeout';
+      const current = searchMemories(opened.db, { repoId: identity.id, paths, query, limit: 10 });
+      const currentIds = current.map((row) => row.id).join(', ') || '(none)';
+      assert.ok(current.some((row) => row.id === 'm_current'), `current fact absent: ${currentIds}`);
+      assert.equal(current.some((row) => row.id === 'm_old'), false, `superseded fact returned: ${currentIds}`);
+      const withHistory = searchMemories(opened.db, {
+        repoId: identity.id,
+        paths,
+        query,
+        limit: 10,
+        history: true,
+      });
+      const withHistoryIds = withHistory.map((row) => row.id).join(', ') || '(none)';
+      assert.ok(withHistory.some((row) => row.id === 'm_current'), `current fact absent with history: ${withHistoryIds}`);
+      assert.ok(withHistory.some((row) => row.id === 'm_old'), `superseded fact absent with history: ${withHistoryIds}`);
+    } finally {
+      opened.db.close();
+    }
+    let stdout = '';
+    let stderr = '';
+    const status = await runGet(['m_old', '--history', '--json'], {
+      cwd: repo,
+      writeOut: (text) => {
+        stdout += text;
+      },
+      writeError: (text) => {
+        stderr += text;
+      },
+    });
+    assert.equal(status, 0, stderr || stdout);
+    const historical = JSON.parse(stdout) as { valid_to?: number | null; superseded_by?: string | null };
+    assert.ok(historical.valid_to != null, `valid_to missing or null in get --history --json: ${stdout}`);
+    assert.equal(historical.superseded_by, 'm_current', `superseded_by in get --history --json: ${stdout}`);
+  });
+});
+
+test('searchMemories returns two distinct facts that share a title when they are the only candidates', async () => {
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    const opened = openDatabase({ path: paths.db, timeoutMs: 1000 });
+    try {
+      insertRepo(opened.db, 'repo_a', '/tmp/oboete-a');
+      insertSearchable(opened.db, {
+        id: 'm_hooks',
+        repoId: 'repo_a',
+        title: 'Busy timeout',
+        body: 'The busy timeout for hooks is 150 ms.',
+      });
+      insertSearchable(opened.db, {
+        id: 'm_cli',
+        repoId: 'repo_a',
+        title: 'Busy timeout',
+        body: 'The busy timeout for the CLI is 2000 ms.',
+      });
+      const found = searchMemories(opened.db, { repoId: 'repo_a', paths, query: 'busy timeout', limit: 10 });
+      assert.deepEqual(found.map((row) => row.id).sort(), ['m_cli', 'm_hooks']);
+    } finally {
+      opened.db.close();
+    }
+  });
+});
+
+/**
+ * The pair the artifact below reproduces: the `claude-to-codex` leg of that run, named the way
+ * `scripts/e2e/isolated-user.mjs` names it. This does not migrate if `factStem` changes — the
+ * seeding prompt below spells the stem out, so a change there fails this file instead. That is the
+ * behaviour a frozen run record wants: the artifact must keep saying what the run said.
+ */
+const PAIR_STEM = factStem('2026-09-17T15-05-08-894Z', 'claude', 'codex');
+
+const PAIR_FACTS: [string, string, string] = [
+  `${PAIR_STEM}-1: the build token is cedar.`,
+  `${PAIR_STEM}-2: the release bird is heron.`,
+  `${PAIR_STEM}-3: 配布色は琥珀。`,
+];
+
+/** `recallPrompt('codex', false)`: what the receiving agent was asked. */
+const PAIR_RECALL_PROMPT = [
+  'Before the tool call, remember the fact lines already present inside the oboete memory context markers.',
+  "Use the shell tool exactly once to run: sed -n '1,20p' NOTES.md",
+  'Make no other tool call.',
+  'After the result, reply with every remembered fact line verbatim, joined by |. Do not derive the answer from NOTES.md.',
+].join('\n');
+
+/** `buildFactSeedingPrompt(PAIR_FACTS)`: what the sending agent was asked, and what its free summary quotes. */
+const PAIR_SEEDING_PROMPT = [
+  'These three exact strings are durable facts about this repository. Preserve them verbatim:',
+  ...PAIR_FACTS,
+  'Use exactly one tool call and no other tools. In that one call, use the shell tool to run:',
+  "printf '%s\\n' 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-1: the build token is cedar.'"
+    + " 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-2: the release bird is heron.'"
+    + " 'fact-2026-09-17T15-05-08-894Z-claude-to-codex-3: 配布色は琥珀。' >> NOTES.md",
+  'After the tool result, reply on one line with the same three exact strings joined by |.',
+].join('\n');
+
+// Runs whether or not the artifact below is skipped: a reword in the probe library must not leave
+// that corpus reproducing a prompt no agent sends. The comparison is exact, against what the library
+// actually returns, so a change to the prompt text fails it — but only once the change is built.
+// The import is static and esbuild inlines it, so `npm test` sees an edit to the source and a bare
+// `node --test build/...` does not.
+test('the pinned pair prompts are still the ones the probe library sends', () => {
+  assert.deepEqual(factSet(PAIR_STEM), PAIR_FACTS);
+  assert.equal(recallPrompt('codex', false), PAIR_RECALL_PROMPT);
+  assert.equal(buildFactSeedingPrompt(PAIR_FACTS), PAIR_SEEDING_PROMPT);
+  // The pair's facts hold no apostrophe, so they cannot show whether the command is shell-quoted.
+  // Find the line rather than index it: a line added above the command would otherwise fail this
+  // with a diff between two unrelated prompt lines instead of naming the quoting rule.
+  assert.equal(
+    buildFactSeedingPrompt(["it's a", 'b', 'c'] as const).split('\n').find((line) => line.startsWith('printf ')),
+    String.raw`printf '%s\n' 'it'\''s a' 'b' 'c' >> NOTES.md`,
+  );
+});
+
+// Artifact for issue #275: the five memories of the `claude-to-codex` pair of the
+// 2026-09-17T15-05-08-894Z dogfood run (JST 2026-09-18) as they stood when the receiving prompt
+// pack was built, copied verbatim from that pair's database (the run's copy of it is
+// `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`, verified row for row on
+// 2026-09-17; that copy is the dogfood account's and the cron keeps writing to it, so these rows are
+// the frozen ones). `m_fact` carries the three facts the recall prompt asks for and the pack dropped
+// it as `below_threshold`, keeping `m_confirm`, which carries none of them.
+//
+// Keep all five rows; quickstart E12 Limits says what trimming the two summaries would change.
+//
+// What it does not model: the pair's checkpoint is work-scoped in production, while these rows take
+// the file's ordinary project grant and are excluded by `m.type <> 'session_summary'` alone; the
+// three searchable rows were `feature`, `decision` and `feature` in the run and are `discovery`
+// here, which nothing in retrieval reads; and all five rows share one `created_at`, so nothing here
+// can show a recency- or retirement-driven drop.
+//
+// Skipped until #275 is fixed. Un-skip it with the fix. On its own this test cannot tell a real
+// fix from one that lowers the threshold until everything is admitted, so #275 carries the
+// counter-pin it has to land with: an unrelated memory in the same corpus must still be omitted.
+// The counter-pin is not written here because it is the fix's evidence, not this artifact's.
+test('searchMemories returns the fact-bearing memory of a five-row corpus', { skip: 'issue #275' }, async () => {
+  await withTempHome((home) => {
+    const paths = oboetePaths(home);
+    const opened = openDatabase({ path: paths.db, timeoutMs: 1000 });
+    try {
+      insertRepo(opened.db, 'repo_a', '/tmp/oboete-a');
+      insertSearchable(opened.db, {
+        id: 'm_checkpoint',
+        repoId: 'repo_a',
+        type: 'session_summary',
+        title: 'Record three exact strings as durable facts in NOTES.md.',
+        body:
+          'Purpose\nRecord three exact strings as durable facts in NOTES.md.\n\nConstraints\n' +
+          '- Preserve the three exact strings verbatim.\n- Use exactly one tool call.\n' +
+          '- Append the strings to NOTES.md.\n\nDecisions\n' +
+          '- The three exact strings will be appended to NOTES.md.\n\nOutstanding\n' +
+          '- Verify the contents of NOTES.md to ensure the strings were written correctly.',
+      });
+      insertSearchable(opened.db, {
+        id: 'm_fact',
+        repoId: 'repo_a',
+        title: 'Durable facts recorded to NOTES.md',
+        body:
+          'Three exact strings were written to NOTES.md to serve as durable facts about the repository. ' +
+          `The strings are: '${PAIR_FACTS[0]}', '${PAIR_FACTS[1]}', and '${PAIR_FACTS[2]}'.`,
+      });
+      insertSearchable(opened.db, {
+        id: 'm_decision',
+        repoId: 'repo_a',
+        title: 'Use NOTES.md for durable facts',
+        body: 'A decision was made to append the three exact strings to NOTES.md to preserve them as durable facts about the repository.',
+      });
+      insertSearchable(opened.db, {
+        id: 'm_confirm',
+        repoId: 'repo_a',
+        title: 'Assistant message confirms fact strings',
+        body: "The assistant's final message contained the three exact strings joined by a pipe character (|), confirming the successful execution of the tool call.",
+      });
+      // The sending session's free summary: the seeding prompt the agent received, with the batch's
+      // empty accounting tail, and the truncated title the summariser gave it.
+      insertSearchable(opened.db, {
+        id: 'm_request',
+        repoId: 'repo_a',
+        type: 'session_summary',
+        title:
+          'These three exact strings are durable facts about this repository. Preserve them verbatim:\n' +
+          'fact-2026-09-17T15-05-08-894Z',
+        body:
+          `request: ${PAIR_SEEDING_PROMPT}\ninvestigated:\nlearned: Assistant message confirms fact strings, ` +
+          'Durable facts recorded to NOTES.md, Use NOTES.md for durable facts\ncompleted:\nnext_steps:',
+      });
+      const found = searchMemories(opened.db, { repoId: 'repo_a', paths, query: PAIR_RECALL_PROMPT, limit: 10 });
+      assert.ok(
+        found.some((row) => row.id === 'm_fact'),
+        `fact-bearing memory absent; returned ${found.map((row) => row.id).join(', ') || '(none)'}`,
+      );
+    } finally {
+      opened.db.close();
+    }
+  });
 });

@@ -73,6 +73,12 @@ Semantic-index and remote-encryption integration details are refined in their ow
 against current primary APIs before dependency additions. No unresolved product decision blocks
 the source-recovery increment.
 
+**009 outcome (2026-09-18)**: no local or external profile was qualified, because model activation
+was not authorised. With no model, the replay stops every tagged fact at generation (quickstart E12),
+so SC-009 recall is 0/40 by design and says nothing about retrieval quality; the same facts stored
+verbatim are all found lexically. Qualification on the paraphrase corpus and the semantic-retrieval
+decision move to #266.
+
 ## R7. Migration input formats
 
 **Decision**: Support one explicitly selected external adapter in the first migration increment.
