@@ -12,15 +12,18 @@ import { factStem } from '../../scripts/e2e/probe-lib/isolated-agent.mjs';
  * summaries takes the corpus from five documents to three, which lifts `m_decision` above the
  * threshold and changes what comes back — measuring a fix against a corpus the run never had.
  *
- * The prompts and facts below are copies of what `scripts/e2e/probe-lib/isolated-agent.mjs` builds.
- * They are not taken on trust: `the pinned pair prompts are still the ones the probe library sends`
- * compares all three against that library's own output.
+ * The prompts and facts below track what `scripts/e2e/probe-lib/isolated-agent.mjs` builds, and are
+ * not taken on trust: `the pinned pair prompts are still the ones the probe library sends` compares
+ * all three against that library's own output.
  */
 
 /**
- * Named the way `scripts/e2e/isolated-user.mjs` names it. This does not migrate if `factStem`
- * changes — the seeding prompt below spells the stem out, so a change there fails this file
- * instead. That is the behaviour a frozen run record wants: it must keep saying what the run said.
+ * Named the way `scripts/e2e/isolated-user.mjs` names it. Because it is a live call, a change to
+ * `factStem` rewrites this stem and with it `PAIR_FACTS`, `m_fact`'s body and `m_request`'s title
+ * and body — the corpus this file exists to freeze. What stops that from happening silently is the
+ * seeding prompt below, which spells the stem out: the two disagree and
+ * `the pinned pair prompts are still the ones the probe library sends` fails. Read a failure there
+ * as "the stem moved", not only as "the prompt text moved".
  */
 export const PAIR_STEM = factStem('2026-09-17T15-05-08-894Z', 'claude', 'codex');
 
@@ -38,7 +41,13 @@ export const PAIR_RECALL_PROMPT = [
   'After the result, reply with every remembered fact line verbatim, joined by |. Do not derive the answer from NOTES.md.',
 ].join('\n');
 
-/** `buildFactSeedingPrompt(PAIR_FACTS)`: what the sending agent was asked, and what its free summary quotes. */
+/**
+ * `buildFactSeedingPrompt(PAIR_FACTS)`: what the sending agent was asked, and what its free summary
+ * quotes. The `printf` line is written out rather than derived from `PAIR_FACTS` so that it pins the
+ * stem literally; it says nothing about shell quoting, because these three facts hold no apostrophe
+ * and `shellQuote(fact)` and a bare `'${fact}'` produce the same bytes for them. The quoting rule is
+ * pinned separately, by the `it's a` case in `retrieval.test.ts`.
+ */
 export const PAIR_SEEDING_PROMPT = [
   'These three exact strings are durable facts about this repository. Preserve them verbatim:',
   ...PAIR_FACTS,

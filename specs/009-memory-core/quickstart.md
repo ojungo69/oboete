@@ -2600,7 +2600,7 @@ behind `f-ja-04`, which also mentions the key rotation, and `f-ja-01`: MMR moved
 top one down, and it is still returned. These are lexical questions that share words with their
 facts; true paraphrase is T024's (#266).
 
-### Pins in `test/unit/retrieval.test.ts` (PR #273)
+### Pins in `test/unit/retrieval.test.ts`, plus the pack pin in `test/unit/deferred.test.ts`
 
 | Test | Pins |
 | --- | --- |
@@ -2610,11 +2610,10 @@ facts; true paraphrase is T024's (#266).
 | `searchMemories hides a superseded fact unless history is requested` | default search omits the superseded row; `--history` returns both; `get --history --json` shows `valid_to` and `superseded_by` naming the current row |
 | `searchMemories returns two distinct facts that share a title when they are the only candidates` | both returned |
 | `searchMemories returns the fact-bearing memory of a five-row corpus` | the five rows of the `claude-to-codex` pair at pack time and that pair's recall prompt; before the #275 fix it failed with `returned m_confirm` |
-| `searchMemories omits an unrelated memory of a five-row corpus` | admitting a clamped candidate does not admit the corpus |
 | `the prompt pack of a five-row corpus carries the fact-bearing memory` (`deferred.test.ts`) | the same five rows through `buildPromptPack`, with no item omitted `below_threshold` |
 | `the pinned pair prompts are still the ones the probe library sends` | the artifact's three facts and its copied recall and seeding prompts, compared exactly against what `scripts/e2e/probe-lib/isolated-agent.mjs` returns, plus one shell-quoted fact the pair's own facts cannot show. The `factSet` comparison is what kills mutation 9: the fact sentences are written out in `test/helpers/pair-275.ts` and only the stem comes from `factStem`, so that line pins the text but not the stem. The stem is pinned by the seeding prompt's `printf` line, which spells it out |
 
-All 38 tests in the file pass on Node 24.16.0 and 22.23.1, measured on both after this merge. Each
+All 37 tests in the file pass on Node 24.16.0 and 22.23.1, measured on both after this merge. Each
 of the first six mutations edits the built test bundle, runs the named test, and restores the bundle
 (sha256 compared). The last four edit `scripts/e2e/probe-lib/isolated-agent.mjs`, which the prompt
 pin imports. That import is static and esbuild inlines it, so editing the source alone changes
@@ -2648,7 +2647,6 @@ leaves alone; that workaround is gone.
 | `fact line` reworded to `fact-line` in the recall prompt | prompts: `recallPrompt('codex', false)` differs from the pinned text |
 | `cedar` capitalised in `factSet` | prompts: `factSet` differs from the pinned three facts |
 | `shellQuote(fact)` replaced with `` `'${fact}'` `` in `buildFactSeedingPrompt` | prompts: the shell-quoted fact's `printf` line differs |
-| `shellQuote(fact)` replaced with `` `'${fact}'` `` in `buildFactSeedingPrompt` | prompts: the shell-quoted fact's `printf` line differs |
 
 ### Limits
 
@@ -2668,17 +2666,23 @@ leaves alone; that workaround is gone.
   on both sides — two orders above the clamp, and three below the smallest raw score the fixture
   produces (1.356 over its 40 probes, with runner-up ratios from 0.112 to 0.944), so no fixture probe
   changes and the threshold mutation still fails the corpus pin. The floor is killed in both
-  directions, re-measured on 2026-09-18 after this branch merged `main`: 0 fails all three five-row
-  pins (`searchMemories` fact-bearing, unrelated omitted, and the pack pin in `deferred.test.ts`),
-  and 1e9 fails `applyThreshold drops a row below 0.3 and keeps LIKE-only last` and `rankCandidates
-  returns bm25, rrf and mmr scores on included rows`.
-- The pair's five rows live in `test/helpers/pair-275.ts` and are pinned three ways: through
-  `searchMemories`, through `buildPromptPack` (the path the run actually dropped the row on, which
-  adds delivery filtering, retirement and the budget cut), and by a smoke check that an unrelated
-  memory of a five-row corpus stays omitted. That last one is not a selectivity gate: a memory
-  sharing no term with the query never becomes a candidate, so no floor value admits it. Below the
-  floor there is no selectivity left by design — the limit, MMR and the character budget bound the
-  volume. The rescued row is also shown to arrive through the trigram index rather
+  directions, re-measured on 2026-09-18: 0 fails both five-row pins (`searchMemories returns the
+  fact-bearing memory of a five-row corpus` and `the prompt pack of a five-row corpus carries the
+  fact-bearing memory`), and 1e9 fails `applyThreshold drops a row below 0.3 and keeps LIKE-only
+  last` and `rankCandidates returns bm25, rrf and mmr scores on included rows`. Both directions say
+  the floor is load-bearing; neither says it is selective.
+- The pair's five rows live in `test/helpers/pair-275.ts` and are pinned two ways: through
+  `searchMemories` and through `buildPromptPack` (the path the run actually dropped the row on,
+  which adds delivery filtering, retirement and the budget cut). **The small-corpus false-positive
+  pin T023 asked for is not supplied, and the fix is not finished.** A pin using a memory that
+  shares no term with the query was written and then deleted: such a row never becomes a candidate,
+  so no floor value admits it and the assertion held for every possible fix, including one that
+  returns everything. Measuring the case that does reach the clamp branch shows the gap is real, not
+  only untested — on this corpus a row whose only query term is `NOTES.md`, which four of the five
+  rows also carry, scores -0.0000028 and is admitted unconditionally, ranking above `m_fact`, the
+  row the fix exists to rescue. That is the P1 on PR #281 and the open design question on #275; the
+  two floor mutations below still fail, so what is pinned is that the floor is load-bearing, not
+  that it is selective. The rescued row is also shown to arrive through the trigram index rather
   than the LIKE fallback, which `applyThreshold` admits without comparing it to the threshold. The
   helper names the rows `m_confirm`, `m_decision` and `m_fact` for `m_c2bfcff0`, `m_363fe065` and
   `m_9da36e8d`, plus `m_checkpoint` and `m_request` for the pair's two session summaries. Keep all

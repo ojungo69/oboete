@@ -852,8 +852,8 @@ test('searchMemories returns two distinct facts that share a title when they are
   });
 });
 
-// Runs whether or not the artifact below does: a reword in the probe library must not leave that
-// corpus reproducing a prompt no agent sends. The comparison is exact, against what the library
+// A reword in the probe library must not leave the artifact below reproducing a prompt no agent
+// sends, nor move the stem the artifact is frozen on. The comparison is exact, against what the library
 // actually returns, so a change to the prompt text fails it — but only once the change is built.
 // The import is static and esbuild inlines it, so `npm test` sees an edit to the source and a bare
 // `node --test build/...` does not.
@@ -905,38 +905,3 @@ test('searchMemories returns the fact-bearing memory of a five-row corpus', asyn
   });
 });
 
-// What admitting clamped candidates does not do. Note what this pins and what it cannot: a memory
-// that shares no term with the query never becomes a candidate, so no clamp floor could admit it —
-// mutating the floor does not fail this test. Below the floor there is no selectivity left to pin:
-// a clamped match is admitted by design, and the limit, MMR and the character budget are what bound
-// the volume. This is the smoke check that the fix did not reach past the candidate set.
-test('searchMemories omits an unrelated memory of a five-row corpus', async () => {
-  await withTempHome((home) => {
-    const paths = oboetePaths(home);
-    const opened = openDatabase({ path: paths.db, timeoutMs: 1000 });
-    try {
-      insertRepo(opened.db, 'repo_a', '/tmp/oboete-a');
-      for (const memory of PAIR_ROWS.slice(0, 4)) insertSearchable(opened.db, { ...memory, repoId: 'repo_a' });
-      insertSearchable(opened.db, {
-        id: 'm_unrelated',
-        repoId: 'repo_a',
-        title: 'Espresso grind size',
-        body: 'Finer grounds pull a slower shot; 18 grams filled the basket evenly.',
-      });
-      const found = searchMemories(opened.db, {
-        repoId: 'repo_a',
-        paths,
-        query: PAIR_RECALL_PROMPT,
-        limit: 10,
-      });
-      assert.ok(found.some((row) => row.id === 'm_fact'), 'the fact-bearing memory is still returned');
-      assert.equal(
-        found.some((row) => row.id === 'm_unrelated'),
-        false,
-        `an unrelated memory was admitted; returned ${found.map((row) => row.id).join(', ')}`,
-      );
-    } finally {
-      opened.db.close();
-    }
-  });
-});

@@ -446,8 +446,9 @@ writers require separate worktrees. No deployment follows merely from an increme
   candidate below 0.3, and a fact-bearing memory is omitted from the prompt pack (#275, E12
   Limits). That is fixed here: `applyThreshold` admits a candidate whose every raw `bm25()` falls
   below a 1e-3 clamp floor on its rank, as it already admits a LIKE-only match, and the five rows are
-  pinned through `searchMemories`, through `buildPromptPack` and against an unrelated memory that
-  must stay omitted (E12 Limits).
+  pinned through `searchMemories` and through `buildPromptPack` (E12 Limits). T023's small-corpus
+  false-positive pin is still missing: a row matching only a corpus-wide term is admitted
+  unconditionally and can outrank the rescued row, which is the open P1 on #281.
 - T024 (open, 2026-09-18): no local or external profile was qualified in 009, because activating a
   real model is not authorised (handoff of 2026-09-10). The no-model replay gives no generated facts
   to measure, and verbatim facts are all found lexically, so the measurement that would justify
