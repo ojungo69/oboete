@@ -64,6 +64,11 @@ export function assertAgentOutput(output, facts, { requireDegraded = false } = {
   };
 }
 
+/** The stem a run's ordered pair seeds its facts with. */
+export function factStem(runId, from, to) {
+  return `fact-${runId}-${from}-to-${to}`;
+}
+
 export function factSet(stem) {
   return [
     `${stem}-1: the build token is cedar.`,
