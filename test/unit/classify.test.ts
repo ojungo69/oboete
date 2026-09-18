@@ -261,13 +261,17 @@ test("a tool call's own name is not a quote, so it cannot exempt an English titl
   assert.equal(checkLanguage(inputWithHint('ja', events), titled), 'mismatch');
   assert.equal(eventParts(observerInputSchema.shape.events.element.parse(events[1])).includes('read'), false);
 
-  // An MCP tool's name is the other half: the project's own config named it and the prompt asks for
-  // identifiers character for character, so an observation titled with one is a quote.
-  const mcp = { id: 'e3', kind: 'tool_call', tool_name: 'mcp:oboete/search', input: { paths: [] } };
-  assert.ok(eventParts(observerInputSchema.shape.events.element.parse(mcp)).includes('mcp:oboete/search'));
-  const quoted = output(observation({ title: 'mcp:oboete/search', body: 'mcp:oboete/search' }));
-  assert.equal(checkLanguage(inputWithHint('ja', [events[0], mcp]), quoted), 'ok');
-  assert.equal(checkLanguage(inputWithHint('ja', [events[0]]), quoted), 'mismatch');
+  // An MCP name is no safer, because `unquoted` exempts any field a corpus entry contains:
+  // `mcp:serena/read_file` would exempt `Read` just as `read` does, and the tool half of the name is
+  // free text the server supplies rather than anything the project wrote. Both halves stay out.
+  const mcp = { id: 'e3', kind: 'tool_call', tool_name: 'mcp:serena/read_file', input: { paths: [] } };
+  assert.equal(eventParts(observerInputSchema.shape.events.element.parse(mcp)).length, 0);
+  assert.equal(checkLanguage(inputWithHint('ja', [events[0], mcp]), titled), 'mismatch');
+
+  // `other` is what `eventFor` writes for an event that named no tool, and it is nobody's quote
+  // either; the assertion above covers every shape because no `tool_name` reaches the corpus.
+  const untooled = { id: 'e4', kind: 'tool_call', tool_name: 'other', input: { paths: [] } };
+  assert.equal(eventParts(observerInputSchema.shape.events.element.parse(untooled)).length, 0);
 });
 
 test('a short coincidence does not exempt a field', () => {

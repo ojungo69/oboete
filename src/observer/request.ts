@@ -193,9 +193,11 @@ export function buildObserverRequest(request: ObserverRequestInput): ObserverReq
     const sourceHash = `event-json-v1:${contentHash(text)}`;
     const row = rows.get(event.id)!;
     // A stored offset from a version that predates the escape guard below can itself sit inside an
-    // escape, and guarding `end` cannot reach it. Backing off the few characters of that escape is
-    // enough, and it keeps the progress: restarting at 0 would be committed by `markRequest` before
+    // escape, and guarding `end` cannot reach it. Backing off the few characters of that escape
+    // keeps the pages already processed: restarting at 0 would be committed by `markRequest` before
     // the provider is called and never undone, so one misaligned row would re-page from the start.
+    // The row still pays a page for it — a non-zero `start` misses the `full` branch below, so a
+    // misaligned row that is not the batch's first admitted event closes the page and waits.
     const resume = row.processing_hash === sourceHash ? row.processing_offset ?? 0 : 0;
     const start = resume - incompleteEscape(text, resume);
     const portion: SourcePortion = {
@@ -276,6 +278,9 @@ function fitFragment(
     const middle = Math.floor((low + high) / 2);
     let end = middle;
     if (end < text.length && /[\uD800-\uDBFF]/u.test(text[end - 1]) && /[\uDC00-\uDFFF]/u.test(text[end])) end -= 1;
+    // Floored because `slice` reads a negative end from the end of the string: an unfloored backoff
+    // past zero would make the candidate almost the whole source rather than an empty page. The
+    // binary search discards the floored candidate on its own (`end > portion.start` below).
     end = Math.max(portion.start, end - incompleteEscape(text, end));
     const candidate: ObserverEvent = {
       id: event.id, kind: event.kind, captured_at: event.captured_at,

@@ -409,11 +409,14 @@ test('the consent gate refuses a stored hash that no longer describes the config
 test('oversized sources page without losing escaped text or splitting surrogate pairs', async () => {
   await withOpened((db) => {
     seedRepoAndSession(db, 1);
-    const text = `FIRST ${'quoted "text" \\ line\n😀 '.repeat(2_000)} LAST`;
+    // `\u0001` is written by `JSON.stringify` as a six-character `\uXXXX` escape, which is the other
+    // arm of `incompleteEscape`; without one the fixture exercises only the backslash-run arm.
+    const text = `FIRST ${'quoted "text" \\ line\n\u0001 😀 '.repeat(2_000)} LAST`;
     seedEvent(db, { id: 'large', kind: 'last_assistant_message', content: text });
     const rows = db.prepare('SELECT * FROM raw_events').all() as unknown as RawEventRow[];
     const session = db.prepare('SELECT * FROM sessions').get() as unknown as SessionRow;
     const original = JSON.stringify({ captured_at: rows[0].captured_at, id: 'large', kind: 'last_assistant_message', text });
+    assert.ok(original.includes(String.raw`\u0001`), 'the fixture reaches the \\uXXXX arm');
     const chunks: string[] = [];
     let offset = 0;
     for (let page = 0; offset < original.length && page < 30; page += 1) {
@@ -450,7 +453,7 @@ test('a stored offset that sits inside an escape backs off to before it', async 
   // already processed; restarting at 0 would throw them away for the sake of a few characters.
   await withOpened((db) => {
     seedRepoAndSession(db, 1);
-    const text = `FIRST ${'quoted "text" \\ line\n😀 '.repeat(2_000)} LAST`;
+    const text = `FIRST ${'quoted "text" \\ line\n\u0001 😀 '.repeat(2_000)} LAST`;
     seedEvent(db, { id: 'large', kind: 'last_assistant_message', content: text });
     const rows = db.prepare('SELECT * FROM raw_events').all() as unknown as RawEventRow[];
     const session = db.prepare('SELECT * FROM sessions').get() as unknown as SessionRow;
@@ -465,6 +468,17 @@ test('a stored offset that sits inside an escape backs off to before it', async 
     const resumed = build(db, 'remote_observer', rows, session, []);
     assert.equal(resumed.coverage[0].start, half - 1,
       'a misaligned offset backs off the escape rather than restarting or resuming inside it');
+
+    // The other arm: a cut placed inside the four hex digits of a `\uXXXX` escape backs off the
+    // whole escape, not one character. Without this, an off-by-one in that branch leaves the
+    // resumed page opening on what reads as an escape the value never held.
+    const unicode = original.indexOf(String.raw`\u0001`);
+    assert.ok(unicode > 0, 'the fixture holds a \\uXXXX escape to cut');
+    for (const [inside, back] of [[2, 2], [3, 3], [4, 4], [5, 5]] as const) {
+      Object.assign(rows[0], { processing_offset: unicode + inside, processing_hash: sourceHash });
+      assert.equal(build(db, 'remote_observer', rows, session, []).coverage[0].start, unicode,
+        `a cut ${back} characters into the escape backs off to its start`);
+    }
 
     // An aligned offset still resumes where it left off.
     Object.assign(rows[0], { processing_offset: first.coverage[0].end, processing_hash: sourceHash });

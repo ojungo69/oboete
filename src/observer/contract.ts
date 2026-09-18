@@ -1,7 +1,5 @@
 import * as z from 'zod';
 
-import { MCP_TOOL_NAME_PATTERN } from '../events.js';
-
 export const OBSERVATION_TYPES = [
   'bugfix',
   'feature',
@@ -241,14 +239,15 @@ export function eventParts(event: ObserverInput['events'][number]): string[] {
   // joins exactly command, text and paths), and a file name is often the only foreign-script string
   // an otherwise English event holds.
   const paths = Array.isArray(input?.paths) ? input.paths : [];
-  // Only an MCP tool's name, which the project's own config named. The rest of `TOOL_NAMES` is
-  // oboete's normalized vocabulary — `read`, `write`, `edit`, `bash` — and quoting those exempted
-  // the English words themselves from the language gate (#278: a title of `Read` passed a `ja`
-  // check). An MCP name can still carry one as a substring, as `src/read.ts` does among the paths.
-  const tool = typeof event.tool_name === 'string' && MCP_TOOL_NAME_PATTERN.test(event.tool_name)
-    ? [event.tool_name] : [];
+  // `tool_name` is deliberately absent, in both halves of the vocabulary. `TOOL_NAMES` is oboete's
+  // own normalized set — `read`, `write`, `edit`, `bash` — so quoting it exempts those English words
+  // from the language gate, and an `mcp:<server>/<tool>` name does the same through `unquoted`'s
+  // whole-containment rule: measured on #278, `mcp:serena/read_file` in the corpus let a title of
+  // `Read` pass a `ja` check, and `MCP_TOOL_NAME_PATTERN` puts no bound on the tool half, which the
+  // server supplies as free text. Admitting a name safely needs a token boundary in `unquoted`
+  // rather than a narrower filter here (#291).
   const fragment = event.fragment?.text;
-  return [event.text, event.output, event.error, input?.command, input?.text, ...paths, ...tool]
+  return [event.text, event.output, event.error, input?.command, input?.text, ...paths]
     .filter((value): value is string => typeof value === 'string')
     .concat(typeof fragment === 'string' ? [fragment, ...decodeFragment(fragment)] : []);
 }
