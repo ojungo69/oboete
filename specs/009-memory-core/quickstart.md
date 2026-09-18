@@ -2610,13 +2610,17 @@ facts; true paraphrase is T024's (#266).
 | `searchMemories hides a superseded fact unless history is requested` | default search omits the superseded row; `--history` returns both; `get --history --json` shows `valid_to` and `superseded_by` naming the current row |
 | `searchMemories returns two distinct facts that share a title when they are the only candidates` | both returned |
 | `searchMemories returns the fact-bearing memory of a five-row corpus` (skipped, #275) | the five rows of the `claude-to-codex` pair at pack time and that pair's recall prompt; un-skipped it fails with `returned m_confirm`, the receipt below |
-| `the pinned pair prompts are still the ones the probe library sends` | the artifact's stem, its three facts and its copied recall and seeding prompts, including the verbatim `printf` command, compared exactly against `scripts/e2e/probe-lib/isolated-agent.mjs`, plus one shell-quoted fact the pair's own facts cannot show; runs whether or not the artifact is skipped |
+| `the pinned pair prompts are still the ones the probe library sends` | the artifact's copied recall and seeding prompts, compared exactly against what `scripts/e2e/probe-lib/isolated-agent.mjs` returns, plus one shell-quoted fact the pair's own facts cannot show; runs whether or not the artifact is skipped. What pins the stem is the seeding prompt's `printf` line, which spells it out — the `factSet` comparison is against constants derived from the same call and cannot disagree with it |
 
 All 36 runnable tests in the file pass on Node 24.16.0 and 22.23.1; the 37th is the #275 artifact,
 which is skipped until that fix. Each of the first six mutations edits the built test bundle, runs
 the named test, and restores the bundle (sha256 compared). The last four edit
-`scripts/e2e/probe-lib/isolated-agent.mjs`, which the prompt pin imports, and restore it
-(`git status` clean afterwards).
+`scripts/e2e/probe-lib/isolated-agent.mjs`, which the prompt pin imports. That import is static and
+esbuild inlines it, so editing the source alone changes nothing: each of the four was re-run on
+2026-09-18 as `npm run build && node --test build/test/unit/retrieval.test.mjs`, and each left 35
+passing and one failing — `the pinned pair prompts are still the ones the probe library sends` in
+all four cases. The source was restored from a copy afterwards (`git status` clean, and the file
+compared byte for byte against that copy).
 
 That import is a plain one. It became possible in this PR: `trusthash.mjs` guarded its command
 block with `realpathSync(process.argv[1]) === self`, and esbuild collapses `import.meta.url` to the
@@ -2653,17 +2657,22 @@ holds whether the module is bundled or not. `scripts/e2e` is outside the TypeScr
   verbatim in `test/unit/retrieval.test.ts` as a skipped test, so the fix un-skips a failing artifact
   rather than writing a new one. The artifact names the rows
   `m_confirm`, `m_decision` and `m_fact` for `m_c2bfcff0`, `m_363fe065` and `m_9da36e8d`, plus
-  `m_checkpoint` and `m_request` for the pair's two session summaries. Keep all five: the miss still
-  reproduces on the three searchable rows alone, but the summaries are in the FTS index even though the
-  scope hides them, and removing them takes the corpus to three documents, which lifts `m_decision`
-  above the threshold — measuring the fix against a corpus the run never had. The receipt for the copied
-  rows is that pair's database from the run,
+  `m_checkpoint` and `m_request` for the pair's two session summaries. Keep all five. Measured on
+  2026-09-18 by inserting each corpus and calling `searchMemories` with the pair's recall prompt: the
+  five rows return `m_confirm` alone, and the three searchable rows alone return `m_confirm` and
+  `m_decision`. So the miss is not an artefact of the summaries — `m_fact` is absent either way — but
+  the summaries are in the FTS index even though the scope hides them, and removing them takes the
+  corpus to three documents, which lifts `m_decision` above the threshold. Fixing against three rows
+  would be measuring against a corpus the run never had. The counter-pin the fix has to land with is
+  recorded on #275. The receipt for the copied rows is that pair's database from the run,
   `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`, verified row for row on
   2026-09-17. That copy is the dogfood account's and the daily cron keeps writing to it (it holds six
   memories now, not five), so the test file is the frozen one.
   The two prompts the artifact carries are not taken on trust: `the pinned pair prompts are still the ones
-  the probe library sends` compares them exactly against `scripts/e2e/probe-lib/isolated-agent.mjs`, which
-  it loads at run time.
+  the probe library sends` compares them exactly against what `scripts/e2e/probe-lib/isolated-agent.mjs`
+  returns. It imports that module statically, so esbuild inlines it into the test bundle and an edit to
+  the source only reaches the pin through a rebuild — `npm test` rebuilds, a bare
+  `node --test build/...` does not.
 - A memory injected once and then unused for 90 days is omitted from packs as `retired` (data model);
   it is still returned by search, which has no `last_injected_at` filter, so User Story 3's first
   acceptance scenario (age alone does not make a fact unavailable when asked about) holds.

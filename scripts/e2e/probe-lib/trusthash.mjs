@@ -44,9 +44,11 @@ export function trustedHashToml(hooksPath, file) {
 
 const self = fileURLToPath(import.meta.url);
 // A bundler that inlines this module collapses `import.meta.url` to the bundle, which makes the
-// realpath comparison below true for whatever the bundle is — a unit test's own entry, say. The
-// entry's name settles it first: nothing but this file is called `trusthash.mjs`.
-if (process.argv[1] && basename(process.argv[1]) === "trusthash.mjs"
+// realpath comparison below true for whatever the bundle is — a unit test's own entry, say. This
+// module's own name settles it first: nothing but this file is called `trusthash.mjs`. Name `self`
+// rather than `process.argv[1]`, so a symlinked or renamed entry still runs the block — that
+// tolerance is the whole reason the realpath comparison is here.
+if (process.argv[1] && basename(self) === "trusthash.mjs"
   && fs.existsSync(process.argv[1]) && fs.realpathSync(process.argv[1]) === self) {
   const p = process.argv[2];
   const file = JSON.parse(fs.readFileSync(p, "utf8"));

@@ -6,10 +6,13 @@
 export function factStem(runId: string, from: string, to: string): string;
 
 /** The three fact lines of one ordered pair, from that pair's stem. */
-export function factSet(stem: string): string[];
+export function factSet(stem: string): [string, string, string];
 
-/** What the sending agent is asked: preserve the facts, and append them with one `printf`. */
-export function buildFactSeedingPrompt(facts: readonly string[]): string;
+/**
+ * What the sending agent is asked: preserve the facts, and append them with one `printf`.
+ * Throws a `TypeError` on anything but three non-empty strings, which the tuple states.
+ */
+export function buildFactSeedingPrompt(facts: readonly [string, string, string]): string;
 
 /** What the receiving agent is asked: recall the fact lines already in its memory context. */
 export function recallPrompt(agent: string, noCredentials: boolean): string;

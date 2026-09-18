@@ -847,13 +847,14 @@ test('searchMemories returns two distinct facts that share a title when they are
 });
 
 /**
- * The pair the artifact below reproduces: the `claude-to-codex` leg of that run. Composed the way
- * `scripts/e2e/isolated-user.mjs` composes it, so a change to that template moves this too rather
- * than leaving the artifact pinned to a stem no run produces.
+ * The pair the artifact below reproduces: the `claude-to-codex` leg of that run, named the way
+ * `scripts/e2e/isolated-user.mjs` names it. This does not migrate if `factStem` changes — the
+ * seeding prompt below spells the stem out, so a change there fails this file instead. That is the
+ * behaviour a frozen run record wants: the artifact must keep saying what the run said.
  */
 const PAIR_STEM = factStem('2026-09-17T15-05-08-894Z', 'claude', 'codex');
 
-const PAIR_FACTS = [
+const PAIR_FACTS: [string, string, string] = [
   `${PAIR_STEM}-1: the build token is cedar.`,
   `${PAIR_STEM}-2: the release bird is heron.`,
   `${PAIR_STEM}-3: 配布色は琥珀。`,
@@ -887,8 +888,10 @@ test('the pinned pair prompts are still the ones the probe library sends', () =>
   assert.equal(recallPrompt('codex', false), PAIR_RECALL_PROMPT);
   assert.equal(buildFactSeedingPrompt(PAIR_FACTS), PAIR_SEEDING_PROMPT);
   // The pair's facts hold no apostrophe, so they cannot show whether the command is shell-quoted.
+  // Find the line rather than index it: a line added above the command would otherwise fail this
+  // with a diff between two unrelated prompt lines instead of naming the quoting rule.
   assert.equal(
-    buildFactSeedingPrompt(["it's a", 'b', 'c']).split('\n')[5],
+    buildFactSeedingPrompt(["it's a", 'b', 'c'] as const).split('\n').find((line) => line.startsWith('printf ')),
     String.raw`printf '%s\n' 'it'\''s a' 'b' 'c' >> NOTES.md`,
   );
 });
@@ -909,9 +912,10 @@ test('the pinned pair prompts are still the ones the probe library sends', () =>
 // here, which nothing in retrieval reads; and all five rows share one `created_at`, so nothing here
 // can show a recency- or retirement-driven drop.
 //
-// Skipped until #275 is fixed. Un-skip it with the fix, together with the counter-pin T023's
-// acceptance names: an unrelated memory in a five-row corpus must still be omitted, or a fix that
-// simply admits everything turns this green.
+// Skipped until #275 is fixed. Un-skip it with the fix. On its own this test cannot tell a real
+// fix from one that lowers the threshold until everything is admitted, so #275 carries the
+// counter-pin it has to land with: an unrelated memory in the same corpus must still be omitted.
+// The counter-pin is not written here because it is the fix's evidence, not this artifact's.
 test('searchMemories returns the fact-bearing memory of a five-row corpus', { skip: 'issue #275' }, async () => {
   await withTempHome((home) => {
     const paths = oboetePaths(home);
