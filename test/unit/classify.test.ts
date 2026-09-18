@@ -195,8 +195,8 @@ function pagedEvent(event: object, slice: (canonical: string) => string): Observ
 }
 
 // A fact that carries a JSON escape is the case the decode exists for: `\r\n` reaches the page as
-// the two-character sequences, so it is absent from the corpus unless something decodes it. The
-// three tests below are the three page shapes, and only the last one worked before this fix.
+// the two-character sequences, so it is absent from the corpus unless something decodes it. Each
+// test below is one page shape; only `wholly inside one value` worked before this fix.
 const ESCAPED_FACT = '配布色\r\n琥珀値';
 const ESCAPED_FACT_EVENT = { id: 'e1', kind: 'prompt', captured_at: 1,
   text: `the developer said ${ESCAPED_FACT} keep it` };

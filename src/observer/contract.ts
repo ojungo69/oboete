@@ -272,12 +272,10 @@ function decodeFragment(text: string): string[] {
     }
   }
   runs.push(text.slice(start));
-  const decoded: string[] = [];
-  for (const run of runs) {
-    // A run the page cut mid-escape cannot be decoded; the raw slice is what is left of it.
-    try { decoded.push(JSON.parse(`"${run}"`) as string); } catch { /* not a complete run */ }
-  }
-  return decoded.filter((run) => run.length > 0);
+  // A run the page cut mid-escape cannot be decoded; the raw slice is what is left of it.
+  return runs
+    .flatMap((run) => { try { return [JSON.parse(`"${run}"`) as string]; } catch { return []; } })
+    .filter((run) => run.length > 0);
 }
 
 /**
