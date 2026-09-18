@@ -185,12 +185,15 @@ export type DegradedReason = (typeof DEGRADED_PRECEDENCE)[number];
 export const CHAIN_STOPS = new Set<DegradedReason>(['consent_changed', 'unusable_output']);
 
 /**
- * Why one pass of the worker put a source back rather than summarizing it.
- * `observation_batch_sources.reason` carries more values than these — `apply.ts` and `batches.ts`
- * write their own, and the column has no CHECK — so this union covers what `revalidateSources`
- * writes, not the column.
+ * The reasons a receipt carries that `sourceOutcome` maps by name rather than by its fail-closed
+ * default. `observation_batch_sources.reason` holds more values than these and the column has no
+ * CHECK; `src/why.ts`'s `SOURCE_REASONS` is the full vocabulary. A reason belongs here when the
+ * default would be wrong for it: `revalidateSources` writes the first three, and
+ * `reconcilePendingDestinations` writes `destination_changed` beside a batch that already says
+ * `consent_changed`, so naming it keeps the two agreeing even if the batch row is ever missed.
  */
-export type SourceReason = 'detector_failed' | 'source_context_unknown' | 'consent_changed';
+export type SourceReason = 'detector_failed' | 'source_context_unknown' | 'consent_changed'
+  | 'destination_changed';
 
 /**
  * What each deferral makes of the record that carries it. A lost consent is the consent reason, a
@@ -201,36 +204,52 @@ export type SourceReason = 'detector_failed' | 'source_context_unknown' | 'conse
  * Holding is honest for one pass but is not a resting state: the sources that reach it in practice
  * come from setup/doctor probes, which capture from a temporary root they delete (#279).
  */
-export const SOURCE_OUTCOME = {
+const SOURCE_OUTCOME = {
   consent_changed: 'consent_changed',
+  destination_changed: 'consent_changed',
   detector_failed: 'unusable_output',
   source_context_unknown: null,
 } satisfies Record<SourceReason, DegradedReason | null>;
 
 /**
  * Reasons that say where a source is rather than what became of it: it was excerpted out of the
- * request, only part of it was captured, a migration parked it for an explicit choice, or it is
- * quarantined as secret and the design deliberately does not count it. None is a generation failure.
+ * request, only part of it was captured, a migration parked it for an explicit choice, or the
+ * request it was assigned to was too large to send. None is a generation failure, and each is
+ * written beside a batch the worker itself marks `rule_based`, so surfacing them would contradict
+ * the batch's own verdict.
+ *
+ * `secret` is here for the same reason but is unreachable on both paths: `SUMMARIZABLE_ROW_SQL`
+ * excludes `sensitivity = 'secret'`, so the session reader never evaluates such a receipt, and
+ * `recordedDeferrals` reads only `outcome = 'deferred'` while a secret source is written `rejected`.
+ * It stays because the fail-closed default would be wrong if either changed.
  */
-const QUIET_REASONS = new Set(['not_sent', 'partial_capture', 'work_selection_required', 'secret']);
+const QUIET_REASONS = new Set([
+  'not_sent', 'partial_capture', 'work_selection_required', 'request_page_limit', 'secret',
+]);
 
 /**
  * What one source's latest receipt says about generation health, or null when it says nothing.
  *
  * The default is fail-closed on purpose. A receipt exists only once something happened to the
- * source, so a reason that is neither a provider failure, nor one of the worker's own deferrals, nor
- * a queue state is an answer that came back and could not be used — `uncovered/unaccounted` and
- * every `rejected` reason land here. The states where nothing has happened yet return null instead.
+ * source, so a reason that is neither named below nor a provider failure nor a queue state is an
+ * answer that came back and could not be used — `uncovered/unaccounted` lands here. The states
+ * where nothing has happened yet return null instead. `rejected/secret` is the one exception to
+ * that reading of `rejected`, and it is unreachable; see `QUIET_REASONS`.
+ *
+ * The named tables are consulted before `DEGRADED_PRECEDENCE`, so a reason that is spelled like a
+ * provider failure still gets the mapping this module chose for it. `consent_changed` is in both
+ * and maps to itself, which is why the order is not observable today — but a future `SourceReason`
+ * that collides would otherwise be silently dead.
  */
-export function sourceOutcome(outcome: string, reason: unknown): DegradedReason | null {
+function sourceOutcome(outcome: string, reason: unknown): DegradedReason | null {
   // `assigned` is a source waiting for its batch's first pass; `legacy_unknown` predates receipts;
   // `processed` is a source the summarizer answered for, whether or not its last portion is in.
   if (outcome === 'assigned' || outcome === 'legacy_unknown' || outcome === 'processed') return null;
   if (typeof reason !== 'string') return null;
-  // A provider failure is written as the reason itself.
-  if (DEGRADED_PRECEDENCE.includes(reason as DegradedReason)) return reason as DegradedReason;
   if (Object.hasOwn(SOURCE_OUTCOME, reason)) return SOURCE_OUTCOME[reason as SourceReason];
   if (QUIET_REASONS.has(reason)) return null;
+  // A provider failure is written as the reason itself.
+  if (DEGRADED_PRECEDENCE.includes(reason as DegradedReason)) return reason as DegradedReason;
   return 'unusable_output';
 }
 
@@ -420,24 +439,32 @@ function degradedReasonForSession(db: DatabaseSync, sessionId: string): Degraded
   // NULL and only the receipt says so. Reading the batch alone would hide every one of those behind
   // the held-source default this function's caller applies.
   //
-  // `SUMMARY_SOURCE_SQL` is the same predicate the caller counts `generationPending` over, so a row
-  // the summary never treated as a source cannot label the summary. Without it a partial prompt row
-  // — which `revalidateSources` re-reads and defers by name — would blame the summarizer for text it
-  // was never sent.
+  // `SUMMARY_SOURCE_SQL` gates the receipt only, not the batch. A receipt is that row's own verdict,
+  // so a row the summary never treated as a source must not label the summary — without this a
+  // partial prompt row, which `revalidateSources` re-reads and defers by name, would blame the
+  // summarizer for text it was never sent. `degraded_reason` is the opposite: it describes the
+  // attempt, not the row, so a batch that really failed still has to be reported even when every
+  // row it left behind is one the summary would not have quoted.
+  //
+  // One receipt per source, picked the way `oboete why` picks it (`src/why.ts`), so the two cannot
+  // disagree: two passes in the same millisecond tie on `recorded_at` and `b.rowid` breaks it.
   const reasons = new Set<DegradedReason>();
   for (const row of db
-    .prepare(`SELECT DISTINCT b.degraded_reason AS batch_reason, bs.outcome AS outcome,
-        bs.reason AS source_reason
+    .prepare(`SELECT b.degraded_reason AS batch_reason, bs.outcome AS outcome, bs.reason AS source_reason,
+        CASE WHEN ${SUMMARY_SOURCE_SQL} THEN 1 ELSE 0 END AS is_summary_source
       FROM observation_batches b
       JOIN observation_batch_sources bs ON bs.batch_id = b.id
       JOIN raw_events r ON r.id = bs.raw_event_id
-      WHERE b.session_id = ? AND r.processing_state <> 'processed' AND ${SUMMARY_SOURCE_SQL}
-        AND bs.recorded_at = (SELECT MAX(latest.recorded_at) FROM observation_batch_sources latest
-          WHERE latest.raw_event_id = r.id)`)
+      WHERE b.session_id = ? AND r.processing_state <> 'processed'
+        AND bs.rowid = (SELECT latest.rowid FROM observation_batch_sources latest
+          JOIN observation_batches lb ON lb.id = latest.batch_id
+          WHERE latest.raw_event_id = r.id AND lb.session_id = b.session_id
+          ORDER BY latest.recorded_at DESC, lb.rowid DESC LIMIT 1)`)
     .all(sessionId)) {
     if (DEGRADED_PRECEDENCE.includes(row.batch_reason as DegradedReason)) {
       reasons.add(row.batch_reason as DegradedReason);
     }
+    if (row.is_summary_source !== 1) continue;
     const fromSource = sourceOutcome(String(row.outcome), row.source_reason);
     if (fromSource !== null) reasons.add(fromSource);
   }

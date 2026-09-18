@@ -289,6 +289,39 @@ test('a row the summary never counted as a source cannot label the summary', asy
   });
 });
 
+test('a batch that failed is reported even when every row it left behind is excluded', async () => {
+  // The other side of the predicate above. A receipt is that row's own verdict, so an excluded row
+  // must not label the summary — but `degraded_reason` describes the attempt, not the row. Gating
+  // both on `SUMMARY_SOURCE_SQL` turns a real provider or consent failure into `rule_based`, which
+  // tells the user the notes were written by the built-in rules and hides why.
+  for (const batchReason of ['provider_exhausted', 'consent_changed'] as const) {
+    await withOpened((db, token) => {
+      const session = `sess-failed-${batchReason}`;
+      seedSummaryFixture(db, session, 'Record the failed batch.', [{ id: 'b-failed', degraded: batchReason }]);
+      // The only row the failed batch still holds is a partial prompt, which SUMMARY_SOURCE_SQL
+      // excludes: the summary never counted it, but the batch it belonged to did fail.
+      db.prepare(`INSERT INTO raw_events
+        (id, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at)
+        SELECT ?, repo_id, session_id, turn_id, agent, 'prompt', content, sensitivity, 'partial', captured_at, expires_at
+        FROM raw_events WHERE id = ?`).run(`${session}-p2`, `${session}-p1`);
+      db.prepare("UPDATE raw_events SET batch_id = 'b-failed', processing_state = 'waiting' WHERE id = ?")
+        .run(`${session}-p2`);
+      db.prepare(`INSERT INTO observation_batch_sources (batch_id, raw_event_id, outcome, reason, recorded_at)
+        VALUES ('b-failed', ?, 'deferred', ?, ?)`).run(`${session}-p2`, batchReason, NOW);
+      // Detach the fixture's own source so the excluded partial is the only row the failed batch
+      // still holds; it stays pending and unbatched, which is what keeps the summary generating.
+      db.prepare('DELETE FROM observation_batch_sources WHERE raw_event_id = ?').run(`${session}-p1`);
+      db.prepare("UPDATE raw_events SET batch_id = NULL, processing_state = 'pending' WHERE id = ?")
+        .run(`${session}-p1`);
+
+      const result = sessionSummary(db, token, session, NOW);
+      assert.equal(result.state, 'waiting');
+      if (result.memoryId === null) assert.fail('expected a summary memory');
+      assert.equal(summaryDegraded(db, result.memoryId), batchReason);
+    });
+  }
+});
+
 test('an unprocessed source reports what its own receipt says, whatever the batch did', async () => {
   // A batch can apply with `degraded_reason` NULL while one of its sources is still unprocessed and
   // its receipt is the only record. Reading the batch alone reports rule-based notes for all of these.
@@ -304,7 +337,20 @@ test('an unprocessed source reports what its own receipt says, whatever the batc
     { outcome: 'deferred', reason: 'work_selection_required', expect: 'rule_based' },
     { outcome: 'uncovered', reason: 'not_sent', expect: 'rule_based' },
     { outcome: 'rejected', reason: 'secret', expect: 'rule_based' },
+    // `reconcilePendingDestinations` writes these two beside a batch it marks `rule_based` and
+    // `consent_changed` respectively. Left to the fail-closed default both would read as an unusable
+    // answer, which contradicts the batch's own verdict for the first and only survives severity
+    // order for the second.
+    { outcome: 'deferred', reason: 'request_page_limit', expect: 'rule_based' },
+    { outcome: 'deferred', reason: 'destination_changed', expect: 'consent_changed' },
+    // The three outcomes that return before the reason is read. Each carries a reason the default
+    // would turn into `unusable_output`, so dropping its arm from the early return fails here:
+    // `assigned` beside a stale reason, `processed` the way `settleSources` leaves a partial row,
+    // and `legacy_unknown` the way migration 0004 writes every pre-receipt source.
     { outcome: 'assigned', reason: null, expect: 'rule_based' },
+    { outcome: 'assigned', reason: 'detector_failed', expect: 'rule_based' },
+    { outcome: 'processed', reason: 'deduplicated', expect: 'rule_based' },
+    { outcome: 'legacy_unknown', reason: 'legacy_processing_unknown', expect: 'rule_based' },
   ];
   for (const [index, { outcome, reason, expect }] of cases.entries()) {
     await withOpened((db, token) => {
