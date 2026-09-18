@@ -53,7 +53,19 @@ produce separately scored retention, retrieval, delivery and answer outcomes.
 
 - [X] T021 [US3] Correct readiness/lease barriers and prior-delivery accounting in `src/fixture/replay.ts` and `src/fixture/replay-evaluate.ts`, with a focused `test/unit/replay-evaluate.test.ts` regression.
 - [X] T022 [US3] Add source-stage accounting and inspectable omission reasons in `src/fixture/replay-evaluate.ts`, `src/why.ts` and `src/fixture/replay-report.ts`.
-- [ ] T023 [US3] Reproduce and correct demonstrated lexical/MMR/supersession misses in `test/unit/rank.test.ts`, `src/retrieval/rank.ts` and `src/db/queries.ts`.
+- [ ] T023 [US3] Reproduce and correct demonstrated lexical/MMR/supersession misses in `src/retrieval/rank.ts`,
+  `src/db/queries.ts` and `test/unit/retrieval.test.ts`. Status: none reproduce on the `events-1000` corpus
+  (the no-model replay stops every fact before ranking; stored verbatim, all 40 fixture facts rank within the
+  first five), pinned in `test/unit/retrieval.test.ts`; the MMR depth observation is #272. The open miss is the
+  small-corpus threshold drop #275, reproduced from the `2026-09-17T15-05-08-894Z` dogfood run (JST
+  2026-09-18) and carried as a skipped
+  five-row artifact in the same file. Acceptance: #275 fixed; that artifact un-skipped and passing; the
+  fixture pins and the threshold mutation still green; plus three pins the artifact alone does not give:
+  a small-corpus false-positive case (an unrelated memory in a five-row corpus stays omitted), the same
+  five rows through `buildPromptPack` (the pack path is where the dogfood run dropped the row, and it
+  adds delivery filtering, retirement and the budget cut on top of the shared ranker), and evidence that
+  the rescued row arrives through the trigram index rather than the LIKE fallback, which `applyThreshold`
+  admits without comparing it to the threshold.
 - [ ] T024 [US3] Qualify selected local/external profiles on the paraphrase corpus; add semantic retrieval in `src/retrieval/` only if the measured target requires it, documenting primary API/dependency evidence in `specs/009-memory-core/research.md`.
 
 ## Phase 6: US4 — Share at the correct scope (P1)
@@ -175,7 +187,10 @@ writers require separate worktrees. No deployment follows merely from an increme
   captured but awaiting generation, with answer evaluation explicitly not run. C3's repeat removes
   the ineligible native-fork timing sample and passes worker RSS at 106.1 MiB. Ordinary hook timing,
   two unprinted Grok starts and real-model recall remain failed/unqualified, not reclassified as
-  successful evaluation. See `quickstart.md`; T023/T024/T040-T043 stay open.
+  successful evaluation. See `quickstart.md`. As of C3 (2026-09-10) T023/T024/T040-T043 were all open. T040 has since
+  closed on the macOS engine evidence (E10). T023 closed on the no-model `events-1000` replay
+  (E12) and reopened on 2026-09-18 for #275, which the first 009 dogfood run,
+  `2026-09-17T15-05-08-894Z` (E13), produced.
 - T025-T028: D1 implements explicit work/project grants, exact personal proposals/projections,
   common source/visibility checks, and CLI/viewer approval plus work-preserving adoption. Both Node
   versions pass 1,097 + 202 checks; installed-browser actions, package validation, normal security,
@@ -413,5 +428,28 @@ writers require separate worktrees. No deployment follows merely from an increme
   fail all thirteen tests; see E11 in `quickstart.md`. `contracts/work.md` B3 keeps real agents a
   separate acceptance gate, so the native harness runs (`isolated-user.mjs`,
   `isolated-lifecycle*.mjs`) are #265; the harness's own tests run in `npm test`. The daily
-  dogfood's twelve pairs (#244) run the M1 bundle (schema 3) and check fact recall only, so they are
-  not SC-002 evidence.
+  dogfood's twelve pairs (#244) ran the M1 bundle (schema 3) until the 2026-09-17 move to the 009
+  bundle (quickstart E13) and check fact recall only, so they are not SC-002 evidence.
+- T023 (open, 2026-09-18): an isolated no-model replay of `events-1000.jsonl` on `main` `6b683213`
+  stops all 40 tagged facts at coverage (`pending`, `no_range`) with application deferred, so none
+  reaches retention or retrieval; that is the no-model design of research.md R6, not a ranking miss.
+  Stored verbatim as memories, all 40 rank within the first five for their own queries through
+  `searchMemories`, 39 of them first. Nothing reproduced on that corpus.
+  `test/unit/retrieval.test.ts` pins the corpus, age-neutral ranking, supersession (hidden by
+  default, marked historical in `get --history`) and a shared-title pair, and pins the artifact's
+  facts and prompts against the probe library; each of ten mutations fails its test (E12). The MMR rule that
+  drops distinct but similar facts deep in a candidate list is recorded as an observation without a
+  failing corpus case in #272, and lambda is unchanged. The
+  first daily run on the 009 bundle then reproduced a miss the fixture cannot: in a five-memory
+  corpus FTS5 clamps the IDF of common trigrams, the ratio-to-best normalization drops every other
+  candidate below 0.3, and a fact-bearing memory is omitted from the prompt pack (#275, E12
+  Limits). T023 stays open for that fix.
+- T024 (open, 2026-09-18): no local or external profile was qualified in 009, because activating a
+  real model is not authorised (handoff of 2026-09-10). The no-model replay gives no generated facts
+  to measure, and verbatim facts are all found lexically, so the measurement that would justify
+  semantic retrieval does not exist yet. Qualification and that decision are #266; search stays
+  lexical, with semantic search in M2 (`LEXICAL_NOTE` in `src/memories-cli.ts`).
+- T041 (open, 2026-09-18): the twelve native ordered pairs on the 009 bundle are #265 and real-model
+  Japanese and English evaluation is #266. The daily dogfood install moved from the schema 3 bundle
+  to the 009 bundle on 2026-09-17 (E13), so its runs from 2026-09-18 exercise the 009 bundle; they
+  still check fact recall only.

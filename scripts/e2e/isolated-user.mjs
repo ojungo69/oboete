@@ -14,6 +14,7 @@ import {
   buildFactSeedingPrompt,
   configureRemote,
   factSet,
+  factStem,
   launchAgent,
   observerLeaseIsFree,
   prepareOboeteHome,
@@ -260,7 +261,7 @@ async function runPair(pair, context) {
   const started = dependencies.now();
   const pairDir = path.join(runDir, `${pair.from}-to-${pair.to}`);
   const paths = resultPaths(pairDir);
-  const facts = factSet(`fact-${runId}-${pair.from}-to-${pair.to}`);
+  const facts = factSet(factStem(runId, pair.from, pair.to));
   const finish = (status, missingFacts, details = {}) => ({
     ...pair,
     elapsedMs: Math.max(0, dependencies.now() - started),

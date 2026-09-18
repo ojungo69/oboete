@@ -2562,7 +2562,160 @@ the bundle from a copy. Each one fails all thirteen, on the assertion named:
 
 - `contracts/work.md` B3 keeps real agents and platforms separate acceptance gates. The native runs
   through `scripts/e2e/isolated-user.mjs` and `isolated-lifecycle*.mjs` are #265.
-- The daily dogfood's twelve pairs (#244) run the schema 3 bundle and check fact recall only; they
-  are not SC-002 evidence.
+- The daily dogfood's twelve pairs (#244) ran the schema 3 bundle until 2026-09-17 (E13) and check
+  fact recall only; they are not SC-002 evidence.
 - The older twelve-pair loop in `work-readers.test.ts` (one work per corpus) stays; it covers
   checkpoint delivery per receiver, not sibling isolation.
+
+## E12 — retrieval misses investigated on the fixture corpus (T023)
+
+### The no-model replay
+
+`node dist/oboete.mjs fixture replay test/fixtures/events-1000.jsonl --json` on `main` `6b683213`,
+Node 24.16.0, under `env -i` with a temporary `HOME` and `OBOETE_HOME` and `[observer] preset =
+"none"`, at a 1-minute load of 0.24.
+
+| Stage (40 tagged facts, 20 ja and 20 en) | Outcome |
+| --- | --- |
+| capture | pass, 40 |
+| coverage | pending, `no_range`, 40 (the first failing stage for every fact) |
+| application | pending, `deferred`, 40 |
+| retention | fail: `no_linked_fact` 32, `temporary_only` 8 |
+| retrieval | fail, `no_candidate`, 40 |
+| delivery | fail, `missing`, 40 |
+| answer | not run, 40 |
+
+Its other bounds: capture p99 164.1 ms with 100% of 717 samples within 300 ms (pass); injection p99
+263.6 ms with 100% of 378 within 300 ms (pass); worker VmHWM 107.6 MiB over 38 observe runs (pass);
+session start fails because 2 of its 48 pending packs lack `summary_pending` (46 carry it); SC-009 recall 0/40
+fails. With no model nothing is generated (research.md R6), so the replay cannot show a ranking
+miss: no fact reaches retrieval.
+
+### The same facts stored verbatim
+
+Each tagged fact's sentence (the payload line containing its expected value) stored as a memory,
+all 40 in one repository, and each fact's own query run through `searchMemories`: all 40 within
+the first five, 39 first. The one that is not first, `f-ja-19` (「鍵ローテは月のいつ？」), is third
+behind `f-ja-04`, which also mentions the key rotation, and `f-ja-01`: MMR moved a row similar to the
+top one down, and it is still returned. These are lexical questions that share words with their
+facts; true paraphrase is T024's (#266).
+
+### Pins in `test/unit/retrieval.test.ts` (PR #273)
+
+| Test | Pins |
+| --- | --- |
+| `searchMemories returns each events-1000 fact among the first five through the search surface` | 40 facts derived from the fixture's `tags.fact`, 20 ja and 20 en; each within the first five; at least 39 first |
+| `rankCandidates ignores created_at when trigram and cjk scores are equal` | equal scores order by id, and swapping `created_at` changes nothing |
+| `searchMemories returns a relevant older fact among newer unrelated memories` | a fact created at time 1 ranks first for its query |
+| `searchMemories hides a superseded fact unless history is requested` | default search omits the superseded row; `--history` returns both; `get --history --json` shows `valid_to` and `superseded_by` naming the current row |
+| `searchMemories returns two distinct facts that share a title when they are the only candidates` | both returned |
+| `searchMemories returns the fact-bearing memory of a five-row corpus` (skipped, #275) | the five rows of the `claude-to-codex` pair at pack time and that pair's recall prompt; un-skipped it fails with `returned m_confirm`, the receipt below |
+| `the pinned pair prompts are still the ones the probe library sends` | the artifact's three facts and its copied recall and seeding prompts, compared exactly against what `scripts/e2e/probe-lib/isolated-agent.mjs` returns, plus one shell-quoted fact the pair's own facts cannot show; runs whether or not the artifact is skipped. The `factSet` comparison is what kills mutation 9: the fact sentences are written out here and only the stem comes from `factStem`, so that line pins the text but not the stem. The stem is pinned by the seeding prompt's `printf` line, which spells it out |
+
+All 36 runnable tests in the file pass on Node 24.16.0 and 22.23.1, re-measured on both after the
+2026-09-18 edits to this file; the 37th is the #275 artifact, which is skipped until that fix. Each of the first six mutations edits the built test bundle, runs
+the named test, and restores the bundle (sha256 compared). The last four edit
+`scripts/e2e/probe-lib/isolated-agent.mjs`, which the prompt pin imports. That import is static and
+esbuild inlines it, so editing the source alone changes nothing: each of the four was re-run on
+2026-09-18 as `npm run build && node --test build/test/unit/retrieval.test.mjs`, and each left 35
+passing and one failing — `the pinned pair prompts are still the ones the probe library sends` in
+all four cases. The source was restored from a copy afterwards (`git status` clean, and the file
+compared byte for byte against that copy), and the bundle rebuilt from it — a restored source alone
+leaves the last mutation inside `build/`, which is why the six above compare the bundle's sha256
+instead.
+
+That import is a plain one. It became possible in this PR: `trusthash.mjs` guarded its command
+block with `realpathSync(process.argv[1]) === self`, and esbuild collapses `import.meta.url` to the
+bundle, so the guard fired on the test runner's own entry and read an argument it does not set. The
+guard now checks this module's own name first — `basename(self)`, which is the bundle's name when it
+is inlined and `trusthash.mjs` when it is not, so the block runs only in the second case. Reading
+`self` rather than `process.argv[1]` keeps the symlink tolerance the realpath comparison exists for:
+a symlinked entry still runs the block, a renamed copy of the file does not.
+`scripts/e2e` is outside the TypeScript program, so
+`isolated-agent.d.mts` declares the four functions a `.ts` file imports.
+
+| Mutation | Failing assertion |
+| --- | --- |
+| `injection.threshold` config default raised to 0.99 (the live path; `DEFAULT_THRESHOLD` in `rank.ts` is only the fallback and mutating it changes nothing) | corpus: `fact f-ja-19 query 鍵ローテは月のいつ？ position absent above []` |
+| equal scores prefer the newer `created_at` | age: `[z_new, a_old]` instead of `[a_old, z_new]` |
+| normalized score × 0.6 for rows older than a day | age: the same |
+| `m.valid_to IS NULL` removed from `memoryScope` | supersession: default search returned the old row |
+| `superseded_by` dropped from history output | supersession: `get --history` `superseded_by` undefined |
+| MMR rejects everything after the first pick | shared title: `[m_hooks]` instead of both |
+| a space added before the `\|` in the seeding prompt's last line | prompts: `buildFactSeedingPrompt` differs from the pinned text |
+| `fact line` reworded to `fact-line` in the recall prompt | prompts: `recallPrompt('codex', false)` differs from the pinned text |
+| `cedar` capitalised in `factSet` | prompts: `factSet` differs from the pinned three facts |
+| `shellQuote(fact)` replaced with `` `'${fact}'` `` in `buildFactSeedingPrompt` | prompts: the shell-quoted fact's `printf` line differs |
+
+### Limits
+
+- The pins go through the search surface. The injection pack uses the same ranking with a character
+  budget and filters already-delivered and retired rows (`src/injection/pack.ts`); the pack path is
+  measured by the replay above, which needs a model to say anything about recall.
+- The fixture corpus is too large to show a small-corpus miss that the first 009 dogfood run did
+  (E13, #274). In pair `claude-to-codex` at pack time (five memories, session summaries excluded),
+  FTS5 clamps the IDF of trigrams in more than half the documents to 1e-6, so one row matching a
+  rare trigram scores -0.436 and the other two -0.0000064 and -0.0000047. Normalized by the ratio
+  to the best score, both fall to about 0.00001, below the 0.3 threshold, and the memory holding
+  the three exact facts is omitted. The same prompt against the same rows one memory later includes
+  all three. That is #275, and T023 stays open for it. Those five rows and that recall prompt are carried
+  verbatim in `test/unit/retrieval.test.ts` as a skipped test, so the fix un-skips a failing artifact
+  rather than writing a new one. The artifact names the rows
+  `m_confirm`, `m_decision` and `m_fact` for `m_c2bfcff0`, `m_363fe065` and `m_9da36e8d`, plus
+  `m_checkpoint` and `m_request` for the pair's two session summaries. Keep all five. Measured on
+  2026-09-18 by inserting each corpus and calling `searchMemories` with the pair's recall prompt: the
+  five rows return `m_confirm` alone, and the three searchable rows alone return `m_confirm` and
+  `m_decision`. So the miss is not an artefact of the summaries — `m_fact` is absent either way — but
+  the summaries are in the FTS index even though the scope hides them, and removing them takes the
+  corpus to three documents, which lifts `m_decision` above the threshold. Fixing against three rows
+  would be measuring against a corpus the run never had. The counter-pin the fix has to land with is
+  recorded on #275. The receipt for the copied rows is that pair's database from the run,
+  `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`, verified row for row on
+  2026-09-17. That copy is the dogfood account's and the daily cron keeps writing to it (it holds six
+  memories now, not five), so the test file is the frozen one.
+  Neither the two prompts the artifact carries nor its three facts are taken on trust: `the pinned pair
+  prompts are still the ones the probe library sends` compares all three against what
+  `scripts/e2e/probe-lib/isolated-agent.mjs` returns. It imports that module statically, so esbuild inlines it into the test bundle and an edit to
+  the source only reaches the pin through a rebuild — `npm test` rebuilds, a bare
+  `node --test build/...` does not.
+- A memory injected once and then unused for 90 days is omitted from packs as `retired` (data model);
+  it is still returned by search, which has no `last_injected_at` filter, so User Story 3's first
+  acceptance scenario (age alone does not make a fact unavailable when asked about) holds.
+- The MMR rule rejects a candidate once its similarity to a selected row reaches its normalized
+  relevance, 61 / (60 + rank). A probe drops "The busy timeout for the CLI is 2000 ms." once 15
+  candidates rank above it and above its sibling about hooks. With no failing corpus case, lambda is
+  unchanged and this is #272.
+
+## E13 — the daily dogfood install moves to the 009 bundle
+
+On 2026-09-17, with the owner's approval, the isolated dogfood account's install moved from the M1
+bundle (schema 3) to the 009 bundle packed from `main` `6b683213`, so the daily run from 2026-09-18
+exercises 009 (#244 was schema 3).
+
+- Before: no worker running; `wal_checkpoint(TRUNCATE)`; the whole `~/.oboete` and the previous
+  global package copied to a dated backup in that account's home; the backup's `quick_check` ok with
+  125 memories and the same sha256 as the live database.
+- Install: `npm run build && npm pack` on a clean `main`, `npm install -g` of that tarball; the
+  installed engine contains the #264 change.
+- Migration: hooks never migrate (they spool and start the worker) and `doctor` opens the database
+  read-only, so the migration ran on an explicit read-write open (`oboete work status --json`):
+  `user_version` 3 → 8, migrations 1–8 recorded, `quick_check` ok, 125 memories.
+- `oboete doctor` afterwards: storage, fts, migration, worker, spool, sync, allowance and the
+  claude, codex and pi agent items healthy; provider and catalog unverified (not probed);
+  `agent:grok` degraded because Grok dropped the managed
+  markers (#178, already reported by the run before the upgrade); `generation` warning with 4 parked
+  and 27 legacy sources. Migration 0005 parks unbatched prompts from before work continuity for an
+  explicit choice, and 0004 keeps rows of old applied batches as legacy instead of starting a provider
+  backlog on upgrade.
+- Rollback, if needed: restore both the backed-up `~/.oboete` and the previous package together; the
+  schema 3 bundle cannot open a schema 8 database.
+- First daily run on this bundle (`2026-09-17T15-05-08-894Z`, issue #274): 1 of 12 pairs pass,
+  against 12 of 12 on the M1 bundle the day before with the same preset and model. In every pair
+  the explicit `oboete observe` applied its batch, so this is not a provider or consent failure.
+  Six pairs never found the facts in `oboete search` because the observer answered `no_memory` for
+  the fact prompt, and the one row that still holds the verbatim request (the free session summary)
+  is outside ordinary retrieval by contract (`contracts/sharing.md`). Five pairs had a fact-bearing
+  memory, but the receiving start pack carried only the work checkpoint and the prompt pack left
+  that memory below threshold. The M1 start pack carried the free summary instead. Separately,
+  the dogfood home's `consent_changed` outcomes are held doctor-probe sources whose temporary
+  root is gone. The cause, the fixes and the gate's 009 form are tracked in #274.

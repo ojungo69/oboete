@@ -3,7 +3,11 @@ name: CI
 on:
   workflow_dispatch:
   pull_request:
+  # Without this filter a push starts a second run of this workflow on a commit that already has a
+  # pull_request run. What that duplicate costs is #221; the duplicate is also one source of the
+  # SonarCloud 500 in #283, which this filter does not close.
   push:
+    branches: [main]
 
 permissions:
   contents: read
