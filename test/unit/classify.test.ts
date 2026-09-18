@@ -12,6 +12,7 @@ import {
   sessionSummary,
 } from '../../src/observer/classify.js';
 import {
+  eventParts,
   observerInputSchema,
   type ObserverInput,
 } from '../../src/observer/contract.js';
@@ -177,14 +178,74 @@ test('a value that literally contains a backslash-n is not decoded into the corp
   assert.equal(checkLanguage(inputWithHint('en', events), invented), 'mismatch');
 });
 
-test('a paged quote carrying a carriage return is decoded from its fragment', () => {
-  const fact = '配布色\r\n琥珀値';
-  const escaped = JSON.stringify(`the developer said ${fact} keep it`).slice(1, -1);
-  const fragment = [{ id: 'e1', kind: 'prompt',
-    fragment: { format: 'event-json-v1', source_hash: 'h1', start: 0, end: escaped.length,
-      total: escaped.length * 2, text: escaped } }];
-  const quoted = output(observation({ title: 'Colour', body: fact }));
-  assert.equal(checkLanguage(inputWithHint('en', fragment), quoted), 'ok');
+/**
+ * A fragment as `request.ts` builds one: `fitFragment` slices `canonicalJson(event)`, so a page
+ * carries the object's own structure and not just the contents of one value. `slice` picks the page.
+ */
+function pagedEvent(event: object, slice: (canonical: string) => string): ObserverInput['events'][number] {
+  const canonical = JSON.stringify(event);
+  const text = slice(canonical);
+  const start = canonical.indexOf(text);
+  assert.notEqual(start, -1, 'the slice has to come from the canonical JSON');
+  return observerInputSchema.shape.events.element.parse({
+    id: 'e1', kind: 'prompt',
+    fragment: { format: 'event-json-v1', source_hash: 'h1',
+      start, end: start + text.length, total: canonical.length, text },
+  });
+}
+
+// A fact that carries a JSON escape is the case the decode exists for: `\r\n` reaches the page as
+// the two-character sequences, so it is absent from the corpus unless something decodes it. The
+// three tests below are the three page shapes, and only the last one worked before this fix.
+const ESCAPED_FACT = '配布色\r\n琥珀値';
+const ESCAPED_FACT_EVENT = { id: 'e1', kind: 'prompt', captured_at: 1,
+  text: `the developer said ${ESCAPED_FACT} keep it` };
+// How the fact is spelled inside the canonical JSON: `配布色\r\n琥珀値` with the escapes as two
+// characters each. A page is cut from that spelling, so it is what locates one.
+const ESCAPED_FACT_ON_THE_WIRE = JSON.stringify(ESCAPED_FACT).slice(1, -1);
+
+test('a first page decodes its quote although the slice opens with the object', () => {
+  // `start` is 0, so the page begins `{"` and the slice's own quotes are structure. Wrapping the
+  // whole slice in one more pair of quotes cannot parse it.
+  const paged = pagedEvent(ESCAPED_FACT_EVENT, (canonical) =>
+    canonical.slice(0, canonical.indexOf(ESCAPED_FACT_ON_THE_WIRE) + ESCAPED_FACT_ON_THE_WIRE.length));
+  assert.ok(paged.fragment!.text.startsWith('{"'), 'this is the first-page shape');
+  assert.ok(eventParts(paged).some((part) => part.includes(ESCAPED_FACT)),
+    'the fact is in the corpus with a real CR and LF');
+});
+
+test('a page that ends its value decodes its quote although the slice closes the object', () => {
+  // The mirror image: the page runs to the end, so it carries the closing `"` and the `}` after it.
+  const paged = pagedEvent(ESCAPED_FACT_EVENT, (canonical) =>
+    canonical.slice(canonical.indexOf('the developer')));
+  assert.ok(paged.fragment!.text.endsWith('"}'), 'this is the last-page shape');
+  assert.ok(eventParts(paged).some((part) => part.includes(ESCAPED_FACT)),
+    'the fact is in the corpus with a real CR and LF');
+});
+
+test('an escaped quote inside the value does not end the run it sits in', () => {
+  // `\"` is content, not the boundary of a string run. Reading it as a boundary splits the run and
+  // leaves a lone `\` at its end, so the piece carrying the fact stops parsing and the fact is lost
+  // from the corpus — for a fact that also carries a control escape, nothing else puts it back.
+  const fact = '配布色は"琥珀"\r\n値';
+  const event = { id: 'e1', kind: 'prompt', captured_at: 1, text: `the developer said ${fact} keep it` };
+  const onTheWire = JSON.stringify(fact).slice(1, -1);
+  const paged = pagedEvent(event, (canonical) =>
+    canonical.slice(0, canonical.indexOf(onTheWire) + onTheWire.length));
+  assert.ok(paged.fragment!.text.includes(String.raw`\"`), 'the page carries an escaped quote');
+  assert.ok(eventParts(paged).some((part) => part.includes(fact)),
+    'the fact is in the corpus with its quotes and a real CR and LF');
+});
+
+test('a page that lies wholly inside one value decodes its quote', () => {
+  // The one shape that worked before: no structural quote falls in the page at all.
+  const paged = pagedEvent(ESCAPED_FACT_EVENT, (canonical) => {
+    const from = canonical.indexOf('the developer');
+    return canonical.slice(from, canonical.indexOf(' keep it', from));
+  });
+  assert.ok(!paged.fragment!.text.includes('"'), 'this page holds no structural quote');
+  const quoted = output(observation({ title: 'Colour', body: ESCAPED_FACT }));
+  assert.equal(checkLanguage(inputWithHint('en', [paged]), quoted), 'ok');
 });
 
 test('a short coincidence does not exempt a field', () => {

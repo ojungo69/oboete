@@ -228,9 +228,10 @@ export const TRIM_MARKER = /\n?\.\.\. \(\+\d+ omitted\)$/u;
  * output field was quoted verbatim, so they stay separate: joining them first would let a quote
  * straddle two fields the request never wrote side by side.
  *
- * Only `fragment.text` is decoded. It is a slice of the canonical JSON, so a quote or a control
- * character reaches it escaped, while every other field is already the text it stands for —
- * decoding those again would invent a variant of a value that literally contains `\n`.
+ * Only `fragment.text` is decoded, and the raw slice stays beside what it decodes to. It is a slice
+ * of the canonical JSON, so a quote or a control character reaches it escaped, while every other
+ * field is already the text it stands for — decoding those again would invent a variant of a value
+ * that literally contains `\n`.
  */
 export function eventParts(event: ObserverInput['events'][number]): string[] {
   const input = event.input as { command?: string; text?: string; paths?: unknown } | undefined;
@@ -241,16 +242,42 @@ export function eventParts(event: ObserverInput['events'][number]): string[] {
   const fragment = event.fragment?.text;
   return [event.text, event.output, event.error, input?.command, input?.text, ...paths]
     .filter((value): value is string => typeof value === 'string')
-    .concat(typeof fragment === 'string' ? [fragment, decodeFragment(fragment)] : []);
+    .concat(typeof fragment === 'string' ? [fragment, ...decodeFragment(fragment)] : []);
 }
 
-/** A JSON slice as the text it stands for, or the slice itself when it does not parse alone. */
-function decodeFragment(text: string): string {
-  try {
-    return JSON.parse(`"${text}"`) as string;
-  } catch {
-    return text;
+/**
+ * The text a canonical-JSON slice stands for, one entry per string run it holds.
+ *
+ * `fitFragment` in `request.ts` slices `canonicalJson(event)`, so a page carries the object's own
+ * structure: a first page opens `{"`, and a page that reaches the end of a value carries the closing
+ * `"` and what follows it. Parsing the whole slice as one string therefore fails on all but the
+ * pages that lie wholly inside a single value, and the escapes in the rest — which is where a
+ * verbatim `\r\n` lives — never come back as the characters they stand for.
+ *
+ * A page that starts mid-value cannot tell whether its first run is inside a string, so both
+ * parities are decoded. That adds no exemption the corpus did not already carry: a run is either
+ * string content, which is the point, or a structural run, which holds no escape and so comes back
+ * from `JSON.parse` unchanged — and an unchanged run is a substring of the raw slice, which
+ * `eventParts` keeps beside this either way.
+ */
+function decodeFragment(text: string): string[] {
+  const runs: string[] = [];
+  let start = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    // Skip the escaped character itself, so `\"` is content rather than a run boundary.
+    if (text[index] === '\\') index += 1;
+    else if (text[index] === '"') {
+      runs.push(text.slice(start, index));
+      start = index + 1;
+    }
   }
+  runs.push(text.slice(start));
+  const decoded: string[] = [];
+  for (const run of runs) {
+    // A run the page cut mid-escape cannot be decoded; the raw slice is what is left of it.
+    try { decoded.push(JSON.parse(`"${run}"`) as string); } catch { /* not a complete run */ }
+  }
+  return decoded.filter((run) => run.length > 0);
 }
 
 /**
