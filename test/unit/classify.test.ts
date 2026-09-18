@@ -8,11 +8,13 @@ import { isBusyError, openDatabase } from '../../src/db/open.js';
 import {
   DEGRADED_PRECEDENCE,
   checkLanguage,
+  dominantScript,
   rejectsDirectives,
   sessionSummary,
 } from '../../src/observer/classify.js';
 import {
   eventParts,
+  eventText,
   observerInputSchema,
   type ObserverInput,
 } from '../../src/observer/contract.js';
@@ -246,6 +248,25 @@ test('a page that lies wholly inside one value decodes its quote', () => {
   assert.ok(!paged.fragment!.text.includes('"'), 'this page holds no structural quote');
   const quoted = output(observation({ title: 'Colour', body: ESCAPED_FACT }));
   assert.equal(checkLanguage(inputWithHint('en', [paged]), quoted), 'ok');
+});
+
+test("a tool call's name is quotable but casts no vote on the language", () => {
+  // The prompt asks for identifiers character for character, so a title that is the tool's own name
+  // is a quote and not an invention. It stays out of `eventText`: the name is a fixed vocabulary,
+  // not something the developer wrote, so it must not pull the hint towards Latin.
+  const event = observerInputSchema.shape.events.element.parse({
+    id: 'e1', kind: 'tool_call', input: { tool_name: 'mcp__serena__find_symbol', paths: [] },
+    text: 'シンボルを探しました。',
+  });
+  assert.ok(eventParts(event).includes('mcp__serena__find_symbol'), 'the name is in the corpus');
+  assert.equal(eventText(event).includes('mcp__serena__find_symbol'), false, 'and not in the hint text');
+  assert.equal(dominantScript(eventText(event)), 'ja');
+
+  // `other` is what `request.ts` writes for an event that named no tool, so it is nobody's quote.
+  const untooled = observerInputSchema.shape.events.element.parse({
+    id: 'e2', kind: 'tool_call', input: { tool_name: 'other', paths: [] }, text: 'ok',
+  });
+  assert.equal(eventParts(untooled).includes('other'), false);
 });
 
 test('a short coincidence does not exempt a field', () => {

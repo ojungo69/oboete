@@ -426,6 +426,11 @@ test('oversized sources page without losing escaped text or splitting surrogate 
       assert.equal(portion.total, original.length);
       assert.equal(portion.text, original.slice(portion.start, portion.end));
       assert.equal(/[\uD800-\uDBFF]$/u.test(portion.text), false);
+      // A page that ended inside an escape would make the next one start with what reads as an
+      // escape of its own: `\\n` cut in two leaves `\n`, which decodes to a newline the value never
+      // held. The corpus would then carry a string nobody wrote.
+      assert.equal(/\\*$/u.exec(portion.text)![0].length % 2, 0, 'no page ends on a half escape');
+      assert.equal(/(\\+)u[0-9a-fA-F]{0,3}$/u.test(portion.text), false, 'no page splits a \\uXXXX');
       chunks.push(portion.text);
       offset = portion.end;
       Object.assign(rows[0], { processing_offset: offset, processing_hash: portion.sourceHash });

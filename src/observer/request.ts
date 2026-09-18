@@ -235,6 +235,26 @@ function fits(input: ObserverInput): boolean {
 }
 
 /** Only a source that cannot fit by itself is split; ranges never discard the remaining text. */
+/**
+ * How many characters of a half-written JSON escape sit at the end of `text.slice(0, end)`.
+ *
+ * A page must not end inside an escape. The next page would begin with what reads as an escape of
+ * its own — `\\n` cut in two leaves the second page starting `\n` — and decoding that run would put
+ * a character in the quoted corpus that the value never held, which is enough to exempt an invented
+ * fact. Every non-zero `processing_offset` is a previous page's `end` (`apply.ts` writes
+ * `portion.end`; `observe.ts` only ever resets it to 0), so guarding `end` guards both sides.
+ */
+function incompleteEscape(text: string, end: number): number {
+  if (end >= text.length) return 0;
+  const head = text.slice(0, end);
+  // An odd run of backslashes ends with one that introduces an escape rather than standing for one.
+  if (/\\*$/u.exec(head)![0].length % 2 === 1) return 1;
+  // `\uXXXX` is a single six-character escape; a page holding only part of it leaves the rest as text.
+  const unicode = /(\\+)u([0-9a-fA-F]{0,3})$/u.exec(head);
+  if (unicode === null || unicode[1].length % 2 === 0) return 0;
+  return 2 + unicode[2].length;
+}
+
 function fitFragment(
   input: ObserverInput, event: ObserverEvent, text: string, portion: SourcePortion,
 ): ObserverEvent | null {
@@ -245,6 +265,7 @@ function fitFragment(
     const middle = Math.floor((low + high) / 2);
     let end = middle;
     if (end < text.length && /[\uD800-\uDBFF]/u.test(text[end - 1]) && /[\uDC00-\uDFFF]/u.test(text[end])) end -= 1;
+    end -= incompleteEscape(text, end);
     const candidate: ObserverEvent = {
       id: event.id, kind: event.kind, captured_at: event.captured_at,
       fragment: {
