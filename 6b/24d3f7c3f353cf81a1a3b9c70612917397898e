@@ -1,0 +1,35 @@
+.github/workflows/ci.yml
+  s_d675408629836f::t_e41f13787e6521 6-8,10
+scripts/e2e/isolated-user.mjs
+  s_d675408629836f::t_aba7e790915c34 17,264
+scripts/e2e/probe-lib/isolated-agent.d.mts
+  s_d675408629836f::t_a300e72dec03b3 1-19
+scripts/e2e/probe-lib/trusthash.mjs
+  s_d675408629836f::t_e6cc76d71ad9ee 8,46-53
+specs/009-memory-core/quickstart.md
+  s_d675408629836f::t_0a771a1e657ee3 2615-2637,2650-2651,2670-2674,2685-2699
+specs/009-memory-core/tasks.md
+  s_d675408629836f::t_a0e6b4c8f35ef9 441-443
+test/helpers/pair-275.ts
+  s_d675408629836f::t_807ef0183b78e1 1,15-17,20-25,27,46-48
+test/unit/retrieval.test.ts
+  s_d675408629836f::t_8dad31054e9ccf 25-29,857-870,878-881
+scripts/e2e/probe-lib/isolated-agent.mjs
+  s_d675408629836f::t_7e98ca1e5e5b03 67-71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6b24d3f7c3f353cf81a1a3b9c70612917397898e",
+  "prompts": {},
+  "sessions": {
+    "s_d675408629836f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "013b3113-c398-43a2-ad21-9186864add5e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "ojungo69 <210335670+ojungo69@users.noreply.github.com>"
+    }
+  }
+}
