@@ -2673,9 +2673,9 @@ a symlinked entry still runs the block, a renamed copy of the file does not.
   `/var/tmp/oboete-dogfood-upgrade/all0917/claude-to-codex/memory.db`, verified row for row on
   2026-09-17. That copy is the dogfood account's and the daily cron keeps writing to it (it holds six
   memories now, not five), so the test file is the frozen one.
-  The two prompts the artifact carries are not taken on trust: `the pinned pair prompts are still the ones
-  the probe library sends` compares them exactly against what `scripts/e2e/probe-lib/isolated-agent.mjs`
-  returns. It imports that module statically, so esbuild inlines it into the test bundle and an edit to
+  Neither the two prompts the artifact carries nor its three facts are taken on trust: `the pinned pair
+  prompts are still the ones the probe library sends` compares all three against what
+  `scripts/e2e/probe-lib/isolated-agent.mjs` returns. It imports that module statically, so esbuild inlines it into the test bundle and an edit to
   the source only reaches the pin through a rebuild — `npm test` rebuilds, a bare
   `node --test build/...` does not.
 - A memory injected once and then unused for 90 days is omitted from packs as `retired` (data model);
