@@ -265,6 +265,155 @@ function summaryDegraded(db: DatabaseSync, memoryId: string): string | null {
   return (row?.degraded_reason as string | null | undefined) ?? null;
 }
 
+test('a row the summary never counted as a source cannot label the summary', async () => {
+  // `generationPending` counts sources through SUMMARY_SOURCE_SQL, which excludes a partial row that
+  // is not a tool call carrying paths. `revalidateSources` still re-reads and defers such a row by
+  // name, so without the same predicate its receipt would blame the summarizer for text it never saw.
+  await withOpened((db, token) => {
+    seedSummaryFixture(db, 'sess-excluded', 'Record the excluded source.', [{ id: 'b-applied', degraded: null }]);
+    db.prepare(`INSERT INTO raw_events
+      (id, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at)
+      SELECT ?, repo_id, session_id, turn_id, agent, 'prompt', content, sensitivity, 'partial', captured_at, expires_at
+      FROM raw_events WHERE id = 'sess-excluded-p1'`).run('sess-excluded-p2');
+    db.prepare("UPDATE raw_events SET batch_id = 'b-applied', processing_state = 'waiting' WHERE id = 'sess-excluded-p2'")
+      .run();
+    db.prepare(`INSERT INTO observation_batch_sources (batch_id, raw_event_id, outcome, reason, recorded_at)
+      VALUES ('b-applied', 'sess-excluded-p2', 'deferred', 'detector_failed', ?)`).run(NOW);
+    // An ordinary pending source, so the summary is still pending and a reason would be rendered.
+    db.prepare("UPDATE raw_events SET processing_state = 'pending' WHERE id = 'sess-excluded-p1'").run();
+
+    const result = sessionSummary(db, token, 'sess-excluded', NOW);
+    assert.equal(result.state, 'waiting');
+    if (result.memoryId === null) assert.fail('expected a summary memory');
+    assert.equal(summaryDegraded(db, result.memoryId), 'rule_based');
+  });
+});
+
+test('a batch that failed is reported even when every row it left behind is excluded', async () => {
+  // The other side of the predicate above. A receipt is that row's own verdict, so an excluded row
+  // must not label the summary — but `degraded_reason` describes the attempt, not the row. Gating
+  // both on `SUMMARY_SOURCE_SQL` turns a real provider or consent failure into `rule_based`, which
+  // tells the user the notes were written by the built-in rules and hides why.
+  for (const batchReason of ['provider_exhausted', 'consent_changed'] as const) {
+    await withOpened((db, token) => {
+      const session = `sess-failed-${batchReason}`;
+      seedSummaryFixture(db, session, 'Record the failed batch.', [{ id: 'b-failed', degraded: batchReason }]);
+      // The only row the failed batch still holds is a partial prompt, which SUMMARY_SOURCE_SQL
+      // excludes: the summary never counted it, but the batch it belonged to did fail.
+      db.prepare(`INSERT INTO raw_events
+        (id, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at)
+        SELECT ?, repo_id, session_id, turn_id, agent, 'prompt', content, sensitivity, 'partial', captured_at, expires_at
+        FROM raw_events WHERE id = ?`).run(`${session}-p2`, `${session}-p1`);
+      db.prepare("UPDATE raw_events SET batch_id = 'b-failed', processing_state = 'waiting' WHERE id = ?")
+        .run(`${session}-p2`);
+      db.prepare(`INSERT INTO observation_batch_sources (batch_id, raw_event_id, outcome, reason, recorded_at)
+        VALUES ('b-failed', ?, 'deferred', ?, ?)`).run(`${session}-p2`, batchReason, NOW);
+      // Detach the fixture's own source so the excluded partial is the only row the failed batch
+      // still holds; it stays pending and unbatched, which is what keeps the summary generating.
+      db.prepare('DELETE FROM observation_batch_sources WHERE raw_event_id = ?').run(`${session}-p1`);
+      db.prepare("UPDATE raw_events SET batch_id = NULL, processing_state = 'pending' WHERE id = ?")
+        .run(`${session}-p1`);
+
+      const result = sessionSummary(db, token, session, NOW);
+      assert.equal(result.state, 'waiting');
+      if (result.memoryId === null) assert.fail('expected a summary memory');
+      assert.equal(summaryDegraded(db, result.memoryId), batchReason);
+    });
+  }
+});
+
+test('receipts tied on the same millisecond are all read, not just the last one', async () => {
+  // This selection has been flipped twice on this branch with nothing observing it. Picking one
+  // receipt per source by `rowid` is what `oboete why` does, but here it drops the failed batch
+  // whenever a fresh `assigned` receipt lands in the same millisecond. Reading every tied receipt is
+  // the fail-closed side, and this is what tells the two apart.
+  await withOpened((db, token) => {
+    seedSummaryFixture(db, 'sess-tie', 'Record the tied receipts.', [
+      { id: 'b-failed', degraded: 'unreachable' },
+      { id: 'b-fresh', degraded: null },
+    ]);
+    // The source of the failed batch is re-batched into the fresh one at the same instant, so both
+    // receipts are newest. `b-fresh` has the higher rowid and would win a one-row pick.
+    db.prepare(`INSERT INTO observation_batch_sources (batch_id, raw_event_id, outcome, reason, recorded_at)
+      VALUES ('b-fresh', 'sess-tie-p1', 'assigned', NULL, ?)`).run(NOW);
+
+    const result = sessionSummary(db, token, 'sess-tie', NOW);
+    assert.equal(result.state, 'waiting');
+    if (result.memoryId === null) assert.fail('expected a summary memory');
+    assert.equal(summaryDegraded(db, result.memoryId), 'unreachable');
+  });
+});
+
+test('a consent change is reported even though its receipt reason is not mapped', async () => {
+  // `reconcilePendingDestinations` writes `destination_changed` on the source at the same moment it
+  // marks the batch `consent_changed`. The reason itself is deliberately unmapped and falls to the
+  // fail-closed default, so what the user sees rests on the batch outranking it. If that pairing
+  // ever drifts apart, a consent change starts reading as an unusable answer; this is the pin.
+  await withOpened((db, token) => {
+    seedSummaryFixture(db, 'sess-destination', 'Record the destination change.', [
+      { id: 'b-consent', degraded: 'consent_changed' },
+    ]);
+    db.prepare(`UPDATE observation_batch_sources SET reason = 'destination_changed'
+      WHERE batch_id = 'b-consent' AND raw_event_id = 'sess-destination-p1'`).run();
+
+    const result = sessionSummary(db, token, 'sess-destination', NOW);
+    assert.equal(result.state, 'waiting');
+    if (result.memoryId === null) assert.fail('expected a summary memory');
+    assert.equal(summaryDegraded(db, result.memoryId), 'consent_changed');
+  });
+});
+
+test('an unprocessed source reports what its own receipt says, whatever the batch did', async () => {
+  // A batch can apply with `degraded_reason` NULL while one of its sources is still unprocessed and
+  // its receipt is the only record. Reading the batch alone reports rule-based notes for all of these.
+  const cases = [
+    { outcome: 'deferred', reason: 'detector_failed', expect: 'unusable_output' },
+    { outcome: 'deferred', reason: 'consent_changed', expect: 'consent_changed' },
+    { outcome: 'deferred', reason: 'unreachable', expect: 'unreachable' },
+    { outcome: 'uncovered', reason: 'unaccounted', expect: 'unusable_output' },
+    { outcome: 'rejected', reason: 'directive', expect: 'unusable_output' },
+    // Nothing happened to the source, or what happened says where it is in the queue.
+    { outcome: 'deferred', reason: 'source_context_unknown', expect: 'rule_based' },
+    { outcome: 'deferred', reason: 'partial_capture', expect: 'rule_based' },
+    { outcome: 'deferred', reason: 'work_selection_required', expect: 'rule_based' },
+    { outcome: 'uncovered', reason: 'not_sent', expect: 'rule_based' },
+    { outcome: 'rejected', reason: 'secret', expect: 'rule_based' },
+    // `reconcilePendingDestinations` writes this beside a batch it marks `rule_based`, so the
+    // fail-closed default would have the receipt contradict its own batch: a request that was never
+    // sent, because it was too large, reported as an answer that came back unusable.
+    { outcome: 'deferred', reason: 'request_page_limit', expect: 'rule_based' },
+    // The three outcomes that return before the reason is read at all. The first row does not pin
+    // that: a null reason is caught one line later by the `typeof` check, so the `assigned` arm can
+    // be deleted and it stays green. The three below it each carry a reason the default would turn
+    // into `unusable_output`, so each fails when its own arm is removed — `assigned` beside a stale
+    // reason, `processed` as `outcomeForSource` writes a de-duplicated item, and `legacy_unknown`
+    // as migration 0004 writes every pre-receipt source.
+    { outcome: 'assigned', reason: null, expect: 'rule_based' },
+    { outcome: 'assigned', reason: 'detector_failed', expect: 'rule_based' },
+    { outcome: 'processed', reason: 'deduplicated', expect: 'rule_based' },
+    { outcome: 'legacy_unknown', reason: 'legacy_processing_unknown', expect: 'rule_based' },
+  ];
+  for (const [index, { outcome, reason, expect }] of cases.entries()) {
+    await withOpened((db, token) => {
+      const session = `sess-receipt-${index}`;
+      seedSummaryFixture(db, session, 'Record the mixed source outcome.', [{ id: 'b-applied', degraded: null }]);
+      db.prepare(`INSERT INTO raw_events
+        (id, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at)
+        SELECT ?, repo_id, session_id, turn_id, agent, kind, content, sensitivity, classification_state, captured_at, expires_at
+        FROM raw_events WHERE id = ?`).run(`${session}-p2`, `${session}-p1`);
+      db.prepare("UPDATE raw_events SET batch_id = 'b-applied', processing_state = 'waiting' WHERE id = ?")
+        .run(`${session}-p2`);
+      db.prepare(`INSERT INTO observation_batch_sources (batch_id, raw_event_id, outcome, reason, recorded_at)
+        VALUES ('b-applied', ?, ?, ?, ?)`).run(`${session}-p2`, outcome, reason, NOW);
+
+      const result = sessionSummary(db, token, session, NOW);
+      assert.equal(result.state, 'waiting');
+      if (result.memoryId === null) assert.fail('expected a summary memory');
+      assert.equal(summaryDegraded(db, result.memoryId), expect, `${outcome}/${reason}`);
+    });
+  }
+});
+
 test('session summary reflects unresolved source outcomes and complete processing clears degradation', async () => {
   await withOpened((db, token) => {
     seedSummaryFixture(db, 'sess-severe', 'Record the mixed fallback reasons.', [

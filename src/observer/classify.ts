@@ -184,6 +184,82 @@ export type DegradedReason = (typeof DEGRADED_PRECEDENCE)[number];
  */
 export const CHAIN_STOPS = new Set<DegradedReason>(['consent_changed', 'unusable_output']);
 
+/**
+ * What `revalidateSources` writes when one pass puts a source back. `observation_batch_sources.reason`
+ * holds more values than these and the column has no CHECK; `src/why.ts`'s `SOURCE_REASONS` is the
+ * full vocabulary, and keeping the two in step is #289.
+ */
+export type SourceReason = 'detector_failed' | 'source_context_unknown' | 'consent_changed';
+
+/**
+ * What each deferral makes of the record that carries it. A lost consent is the consent reason, a
+ * detector that could not run is an unusable answer, and a source held for an origin this worker
+ * cannot verify leaves no summarizer reason at all. A new `SourceReason` has to choose here rather
+ * than fall into one of these by default; severity is `DEGRADED_PRECEDENCE`, not this key order.
+ *
+ * Holding is honest for one pass but is not a resting state: the sources that reach it in practice
+ * come from setup/doctor probes, which capture from a temporary root they delete (#279).
+ */
+const SOURCE_OUTCOME = {
+  consent_changed: 'consent_changed',
+  detector_failed: 'unusable_output',
+  source_context_unknown: null,
+} satisfies Record<SourceReason, DegradedReason | null>;
+
+/**
+ * Reasons that say where a source is rather than what became of it: it was excerpted out of the
+ * request, only part of it was captured, a migration parked it for an explicit choice, or the
+ * request it was assigned to was too large to send. None is a generation failure, so none should
+ * reach the fail-closed default.
+ *
+ * Two of them, `work_selection_required` and `request_page_limit`, are written by
+ * `reconcilePendingDestinations` beside a batch it marks `rule_based`, so surfacing either would
+ * contradict the batch's own verdict. The other three carry no such guarantee: `not_sent` comes
+ * from `outcomeForSource` and `partial_capture` from `settleSources`'s short-circuit, both beside
+ * whatever reason that apply had, including none, and `secret` is written by `revalidateSources`
+ * before the batch has a reason at all.
+ *
+ * `secret` is unreachable on both paths: `SUMMARIZABLE_ROW_SQL` excludes `sensitivity = 'secret'`,
+ * so the session reader never counts such a receipt, and `recordedDeferrals` reads only
+ * `outcome = 'deferred'` while a secret source is written `rejected`. It stays because the default
+ * would be wrong if either changed, not because anything exercises it.
+ */
+const QUIET_REASONS = new Set([
+  'not_sent', 'partial_capture', 'work_selection_required', 'request_page_limit', 'secret',
+]);
+
+/**
+ * What one source's latest receipt says about generation health, or null when it says nothing.
+ *
+ * The default is fail-closed on purpose. A receipt exists only once something happened to the
+ * source, so a reason that is neither named below nor a provider failure nor a queue state is an
+ * answer that came back and could not be used — `uncovered/unaccounted` lands here. The states
+ * where nothing has happened yet return null instead. `rejected/secret` is the one exception to
+ * that reading of `rejected`, and it is unreachable; see `QUIET_REASONS`.
+ *
+ * The named tables are consulted before `DEGRADED_PRECEDENCE`, so a reason that is spelled like a
+ * provider failure still gets the mapping this module chose for it. `consent_changed` is in both
+ * and maps to itself, which is why the order is not observable today — but a future `SourceReason`
+ * that collides would otherwise be silently dead.
+ */
+function sourceOutcome(outcome: string, reason: unknown): DegradedReason | null {
+  // `assigned` is a source waiting for its batch's first pass; `legacy_unknown` predates receipts;
+  // `processed` is a source the summarizer answered for, whether or not its last portion is in.
+  if (outcome === 'assigned' || outcome === 'legacy_unknown' || outcome === 'processed') return null;
+  if (typeof reason !== 'string') return null;
+  if (Object.hasOwn(SOURCE_OUTCOME, reason)) return SOURCE_OUTCOME[reason as SourceReason];
+  if (QUIET_REASONS.has(reason)) return null;
+  // A provider failure is written as the reason itself.
+  if (DEGRADED_PRECEDENCE.includes(reason as DegradedReason)) return reason as DegradedReason;
+  return 'unusable_output';
+}
+
+/** The outcome a set of receipt reasons makes, by the shared severity order. */
+export function deferralOutcome(reasons: readonly string[]): DegradedReason | null {
+  const mapped = reasons.map((reason) => sourceOutcome('deferred', reason));
+  return mostSevereReason(mapped.filter((reason): reason is DegradedReason => reason !== null));
+}
+
 /** The reason a record keeps when several apply: the first match in `DEGRADED_PRECEDENCE`. */
 export function mostSevereReason(reasons: Iterable<DegradedReason>): DegradedReason | null {
   const present = new Set(reasons);
@@ -357,18 +433,50 @@ function sessionSummaryText(
 function degradedReasonForSession(db: DatabaseSync, sessionId: string): DegradedReason | null {
   // Only the latest outcome of still-unprocessed sources degrades current generation. A failed
   // historical attempt cannot keep a successfully recovered session degraded forever.
-  const reasons = new Set(db
-    .prepare(`SELECT DISTINCT b.degraded_reason FROM observation_batches b
+  //
+  // Each source carries its own receipt, and the batch it was taken out of may have gone on to apply
+  // without a reason of its own: when some sources of a batch fail detection, come back unaccounted
+  // for or have their observation dropped while the rest summarize, the batch's `degraded_reason` is
+  // NULL and only the receipt says so. Reading the batch alone would hide every one of those behind
+  // the held-source default this function's caller applies.
+  //
+  // `SUMMARY_SOURCE_SQL` gates the receipt only, not the batch. A receipt is that row's own verdict,
+  // so a row the summary never treated as a source must not label the summary — without this a
+  // partial prompt row, which `revalidateSources` re-reads and defers by name, would blame the
+  // summarizer for text it was never sent. `degraded_reason` is the opposite: it describes the
+  // attempt, not the row, so a batch that really failed still has to be reported even when every
+  // row it left behind is one the summary would not have quoted.
+  //
+  // Every receipt tied on the newest `recorded_at`, not one of them. Two passes in the same
+  // millisecond leave two, and reading both is the fail-closed side of that tie: the severer verdict
+  // wins rather than whichever row sorts last. It is not free — a source re-batched in the same
+  // millisecond still reports the failed batch it just left, which is the invariant above bending —
+  // but the other direction loses a real failure, and `receipts tied on the same millisecond are all
+  // read` is what holds the choice in place. `oboete why` and `replay-evaluate.ts` both pick exactly
+  // one instead, so the readers can name different receipts for the same source under a tie (#289).
+  //
+  // The subquery is correlated on `r.id` alone. A receipt on another session's batch would be picked
+  // and then dropped by the outer `b.session_id`, losing the source's degradation — unreachable,
+  // because `raw_events.session_id` is never updated and cohorts are selected per session.
+  const reasons = new Set<DegradedReason>();
+  for (const row of db
+    .prepare(`SELECT b.degraded_reason AS batch_reason, bs.outcome AS outcome,
+        bs.reason AS source_reason,
+        CASE WHEN ${SUMMARY_SOURCE_SQL} THEN 1 ELSE 0 END AS is_summary_source
+      FROM observation_batches b
       JOIN observation_batch_sources bs ON bs.batch_id = b.id
       JOIN raw_events r ON r.id = bs.raw_event_id
       WHERE b.session_id = ? AND r.processing_state <> 'processed'
         AND bs.recorded_at = (SELECT MAX(latest.recorded_at) FROM observation_batch_sources latest
           WHERE latest.raw_event_id = r.id)`)
-    .all(sessionId)
-    .map((row) => row.degraded_reason)
-    .filter((reason): reason is DegradedReason =>
-      DEGRADED_PRECEDENCE.includes(reason as DegradedReason),
-    ));
+    .all(sessionId)) {
+    if (DEGRADED_PRECEDENCE.includes(row.batch_reason as DegradedReason)) {
+      reasons.add(row.batch_reason as DegradedReason);
+    }
+    if (row.is_summary_source !== 1) continue;
+    const fromSource = sourceOutcome(String(row.outcome), row.source_reason);
+    if (fromSource !== null) reasons.add(fromSource);
+  }
   return mostSevereReason(reasons);
 }
 
@@ -531,7 +639,10 @@ function summarizeSession(
     FROM raw_events WHERE session_id = ? AND ${SUMMARY_SOURCE_SQL}`).get(sessionId)!;
   const generationPending = sourceState.pending === 1;
   const sensitivity = strictest(learnedSensitivity, (['eligible', 'local_only', 'private'] as const)[Number(sourceState.sensitivity)]);
-  const degraded = generationPending ? degradedReasonForSession(db, sessionId) ?? 'unusable_output' : null;
+  // A pending source whose batch recorded no failure has not been refused by a summarizer: it is
+  // held (an origin this worker cannot verify) or still queued, so the notes are rule-based and
+  // say only that. Blaming the summarizer here re-labels every held batch as an unusable answer.
+  const degraded = generationPending ? degradedReasonForSession(db, sessionId) ?? 'rule_based' : null;
   const material = materialHash(title, body);
   const content = workId === null ? contentHash(repoId, material) : sha256Json(['work-session-summary-v1', repoId, workId, material]);
   const memoryId = memoryIdFor(content);

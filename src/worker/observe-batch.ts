@@ -13,7 +13,15 @@ import { contentHash } from '../events.js';
 import { checkpointHash, materialHash, memoryIdFor } from '../db/identity.js';
 import { promoteSensitivity } from '../privacy/classify.js';
 import { applyObservations, type ApplyResult } from '../observer/apply.js';
-import { CHAIN_STOPS, checkLanguage, mostSevereReason, rejectsDirectives, type DegradedReason } from '../observer/classify.js';
+import {
+  CHAIN_STOPS,
+  checkLanguage,
+  deferralOutcome,
+  mostSevereReason,
+  rejectsDirectives,
+  type DegradedReason,
+  type SourceReason,
+} from '../observer/classify.js';
 import { fallbackObserve, type FallbackEvent } from '../observer/fallback.js';
 import { summarizeWithProvider, type CallOutcome } from '../observer/llm.js';
 import { buildObserverRequest } from '../observer/request.js';
@@ -355,10 +363,20 @@ function nearbyForBatch(db: DatabaseSync, input: BatchInput): NearbyCandidate[] 
 
 type PrivacyReader = (context: SourceContext | null, projectMemoryId?: string) => ReturnType<typeof readSourcePrivacy>;
 
+/** The reasons of this batch's deferred sources, for a pass that re-checked none of them itself. */
+function recordedDeferrals(db: DatabaseSync, batchId: string): string[] {
+  return db.prepare(`SELECT DISTINCT reason FROM observation_batch_sources
+    WHERE batch_id = ? AND outcome = 'deferred'`).all(batchId).map((row) => String(row.reason));
+}
+
+/** The reasons this pass deferred, or null when the lease was lost before they could be recorded. */
 async function revalidateSources(options: ProcessBatchOptions, input: BatchInput,
-  privacyFor: PrivacyReader): Promise<boolean> {
+  privacyFor: PrivacyReader): Promise<SourceReason[] | null> {
   const { db, token, deps } = options;
-  const checked: { row: RawEventRow; result: DetectorResult; context: SourceContext; reason: string }[] = [];
+  const checked: { row: RawEventRow; result: DetectorResult; context: SourceContext; reason: SourceReason }[] = [];
+  // Consent is a property of the repository, not of one source, and reading it parses the config
+  // file: one answer for this batch, taken only if some source needs it.
+  let consentHolds: boolean | null = null;
   for (const selected of input.rows) {
     // Generation receives only partial metadata; privacy also checks the retained prefix itself.
     const row = selected.classification_state === 'partial'
@@ -371,13 +389,21 @@ async function revalidateSources(options: ProcessBatchOptions, input: BatchInput
     const result: DetectorResult = !available ? { ok: false, reason: 'detector_error' }
       : await deps.detect({ ...privacy.detector, text: row.content ?? '',
         fields: [row.id, row.kind, typeof payload?.tool_name === 'string' ? payload.tool_name : '', toolInputText(row), ...paths] });
-    checked.push({ row, result, context, reason: privacyFor(null) === null ? 'consent_changed'
-      : available ? 'detector_failed' : 'source_context_unknown' });
+    // An unreadable policy is a consent change only when the caller's `consentOk` says consent no
+    // longer holds; an unresolvable binding or root is a held origin (contracts/memory-core.md).
+    // What that callback covers is the caller's: the worker re-reads the file, so an unparsable
+    // config reads as a consent change there, while doctor closes over an already-parsed config.
+    let reason: SourceReason = 'detector_failed';
+    if (!available) {
+      consentHolds ??= options.consentOk();
+      reason = consentHolds ? 'source_context_unknown' : 'consent_changed';
+    }
+    checked.push({ row, result, context, reason });
   }
   return transactionImmediate(db, () => {
     if (!assertLease(db, token, deps.now())) {
       db.exec('ROLLBACK');
-      return false;
+      return null;
     }
     const receipt = db.prepare(`UPDATE observation_batch_sources SET outcome = ?, reason = ?, recorded_at = ?
       WHERE batch_id = ? AND raw_event_id = ?`);
@@ -401,7 +427,7 @@ async function revalidateSources(options: ProcessBatchOptions, input: BatchInput
           .run(sensitivity, JSON.stringify(payload), row.id, input.batch.id);
       }
     }
-    return true;
+    return checked.filter((entry) => !entry.result.ok).map((entry) => entry.reason);
   });
 }
 
@@ -620,21 +646,31 @@ export async function processBatch(options: ProcessBatchOptions): Promise<BatchR
     return policies.get(key)!.policy;
   };
   const privacy = privacyFor(null);
-  if (!(await revalidateSources(options, input, privacyFor))) return { state: 'lease_lost', reason: null, memoryIds: [] };
+  const deferred = await revalidateSources(options, input, privacyFor);
+  if (deferred === null) return { state: 'lease_lost', reason: null, memoryIds: [] };
   const reconciled = reconcilePendingDestinations(db, token, deps.now(),
     resolved.preset === 'none' ? 'none' : PRESET_CATALOG[resolved.preset].egress);
   if (reconciled.leaseLost) return { state: 'lease_lost', reason: null, memoryIds: [] };
   input = loadBatchInput(db, batch.id)!;
   if (input.batch.state !== 'pending') return { state: 'requeued', reason: null, memoryIds: [] };
   if (input.rows.length === 0) {
-    const deferred = db.prepare("SELECT 1 FROM observation_batch_sources WHERE batch_id = ? AND outcome = 'deferred' LIMIT 1").get(batch.id);
-    const reason = deferred === undefined ? null : privacy === null ? 'consent_changed' : 'unusable_output';
+    // What this pass did to the sources decides the batch's own outcome, so an earlier pass over the
+    // same batch — whose cause the user may since have fixed — does not. When this pass deferred
+    // nothing there is nothing of its own to read: either an earlier pass emptied the batch and its
+    // receipts are the only record, or the sources left for something that is not a deferral at all
+    // (quarantined as secret), which those receipts also say.
+    const reason = deferralOutcome(deferred.length > 0 ? deferred : recordedDeferrals(db, batch.id));
     transactionImmediate(db, () => {
       if (!assertLease(db, token, deps.now())) throw new LeaseLostError();
       db.prepare("UPDATE observation_batches SET state = 'fallback', completed_at = ?, degraded_reason = ? WHERE id = ? AND owner_token = ?")
         .run(deps.now(), reason, batch.id, token);
     });
-    return { state: reason === null ? 'requeued' : 'fallback', reason, memoryIds: [] };
+    // The row is terminal either way. A batch that emptied without a reason did no work and must not
+    // read as activity: counting it would keep a resident worker awake across a held source's own
+    // retries (#279), so it is reported as requeued, with the detail on the log line.
+    return reason === null
+      ? { state: 'requeued', reason: null, detail: 'held', memoryIds: [] }
+      : { state: 'fallback', reason, memoryIds: [] };
   }
   const nearby = privacy === null ? [] : await revalidateNearby(options, nearbyForBatch(db, input), privacyFor);
 
