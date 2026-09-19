@@ -947,3 +947,65 @@ copied-credential hypothesis and its remediation.
 
 
 - Filed against the release (SC-007): https://github.com/ojungo69/oboete/issues/239
+
+## 2026-09-17 daily run (SC-007, day 12)
+
+- bundle 0.1.0-alpha.0, node v24.21.0, pairs `all`, 1-minute load at start 0.20, started 2026-09-16T15:05:05Z
+
+### Pairs (harness section, exit 0)
+
+#### 2026-09-16 run 2026-09-16T15-05-05-546Z
+
+- 12 of 12 pairs pass
+- No provider credentials: no
+- Report: <run>/report.json
+
+| seed | receive | status | elapsed ms | missing facts |
+|---|---|---:|---:|---|
+| claude | codex | pass | 72144 | none |
+| claude | grok | pass | 49023 | none |
+| claude | pi | pass | 58402 | none |
+| codex | claude | pass | 59607 | none |
+| codex | grok | pass | 43573 | none |
+| codex | pi | pass | 43239 | none |
+| grok | claude | pass | 63682 | none |
+| grok | codex | pass | 62833 | none |
+| grok | pi | pass | 46026 | none |
+| pi | claude | pass | 38102 | none |
+| pi | codex | pass | 62721 | none |
+| pi | grok | pass | 64512 | none |
+
+### Doctor (credentials sourced)
+
+| item | status | reason |
+|---|---|---|
+| config | healthy | Configuration at /home/oboete-dogfood/.oboete/config.toml loaded (mode 0o600). |
+| paused | healthy | Not paused. |
+| storage | healthy | `/home/oboete-dogfood/.oboete/memory.db` opened; PRAGMA quick_check returned ok; 122 memories. |
+| fts | healthy | Full-text search is available (lexical in M1). |
+| migration | healthy | The schema is at version 3, the latest this bundle knows. |
+| worker | healthy | No worker is running; a hook starts one when work is queued. |
+| spool | healthy | Spool is writable and empty. |
+| provider | unverified | Not probed this run; last worker outcome: fallback/no_provider/2026-09-16T04:12:28.020Z. |
+| allowance | healthy | Estimated 150 of 150 calls remaining today (2026-09-16); resets at 2026-09-17T00:00:00.000Z. |
+| catalog | unverified | The cached catalog is stale; the worker refreshes it on the next batch. |
+| agent:claude | healthy | The hook fired and the event was stored (2611 milliseconds); trust: n/a. |
+| native-memory:claude | warning | claude: its own memory feature (claude_auto_memory) is enabled. oboete neither reads it nor changes it; the two run side by side. |
+| agent:codex | healthy | The hook fired and the event was stored (5806 milliseconds); trust: trusted. |
+| agent:grok | degraded | Grok rewrote its config.toml and dropped the oboete markers; the MCP table is still there. |
+| agent:pi | healthy | The hook fired and the event was stored (4859 milliseconds); trust: wired. |
+| unrecognized-agents | healthy | No invocation from an unrecognized agent. |
+| pi | healthy | No Pi diagnostics. |
+
+### Metrics
+
+- Provider usage (UTC 2026-09-16): no calls recorded
+- Memories: 125 total, 125 live, 31 sharing a material hash (duplicates)
+- Injection items omitted as duplicate_in_conversation: 5 (cumulative)
+- Raw events failed: 0 of 99 (cumulative)
+- Spool backlog: 0 files (0 failed)
+- Viewer GET /api/memories: median 3 ms, max 39 ms over 5 requests, 13 memories listed (budget 2000 ms)
+- finished 2026-09-16T15:16:15Z, 1-minute load 0.50
+
+
+- Filed against the release (SC-007): https://github.com/ojungo69/oboete/issues/244
