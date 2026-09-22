@@ -13,6 +13,9 @@ use crate::{config, db, inject, redact, repo};
 
 /// Largest text kept per field. Tool outputs beyond this are clipped with a marker.
 const MAX_FIELD: usize = 8_000;
+/// Redaction looks this far past the clip point, so a secret straddling it (a PEM block is
+/// under 4,000 chars) is masked whole instead of stored as a near-complete prefix.
+const REDACT_OVERLAP: usize = 4_000;
 /// Set on the CLIs observe spawns, so the summarizer's own session is never captured.
 pub const SKIP_ENV: &str = "OBOETE_SKIP";
 
@@ -160,19 +163,16 @@ fn compact(v: &Value) -> String {
     }
 }
 
-/// Clip to MAX_FIELD characters (on a char boundary), then redact what is kept: scanning the
+/// Redact the head (plus the overlap) and keep MAX_FIELD characters of it: scanning the
 /// discarded tail of a megabyte tool output would only cost hook time.
 fn clip(s: &str) -> String {
     let total = s.chars().count();
     if total <= MAX_FIELD {
         return redact::redact(s);
     }
-    let head: String = s.chars().take(MAX_FIELD).collect();
-    format!(
-        "{}\n…[clipped {} chars]",
-        redact::redact(&head),
-        total - MAX_FIELD
-    )
+    let window: String = s.chars().take(MAX_FIELD + REDACT_OVERLAP).collect();
+    let head: String = redact::redact(&window).chars().take(MAX_FIELD).collect();
+    format!("{head}\n…[clipped {} chars]", total - MAX_FIELD)
 }
 
 /// Last assistant `output_text` in a Codex rollout JSONL, reading only the file's tail.
@@ -254,6 +254,19 @@ mod tests {
         let outside = json!({"cwd": home.join("projects").join("x").to_string_lossy()});
         assert!(!is_agent_internal(&outside));
         assert!(!is_agent_internal(&json!({})));
+    }
+
+    #[test]
+    fn secret_straddling_the_clip_boundary_is_masked() {
+        let key = "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";
+        let s = format!("{} {key} {}", "a".repeat(MAX_FIELD - 20), "b".repeat(3_000));
+        let out = clip(&s);
+        assert!(!out.contains("gsk_") && out.contains("[REDACTED]"));
+        assert!(out.contains("…[clipped 3038 chars]"), "{}", out.len());
+        assert_eq!(
+            clip("x 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 y"),
+            "x [REDACTED] y"
+        );
     }
 
     #[test]

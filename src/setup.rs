@@ -219,8 +219,7 @@ fn codex(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     let mut root = read_json_object(&hooks_file)?;
     backup_once(&hooks_file)?;
     backup_once(&config_file)?;
-    // Trust rows are keyed by position, so the rows of the groups being replaced go first.
-    let mut stale = codex_trust_keys(&hooks_file, &root);
+    let before = codex_trust_keys(&hooks_file, &root);
     let wanted = if remove {
         vec![]
     } else {
@@ -242,14 +241,13 @@ fn codex(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     };
     merge_groups(&mut root, wanted);
     write_json(&hooks_file, &root)?;
-    let fresh = codex_trust_keys(&hooks_file, &root);
-    stale.retain(|(k, _)| !fresh.iter().any(|(f, _)| f == k));
+    let delta = codex_trust_delta(&before, &codex_trust_keys(&hooks_file, &root));
 
     let text = std::fs::read_to_string(&config_file).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = text
         .parse()
         .with_context(|| format!("parse {}", config_file.display()))?;
-    codex_write_trust(&mut doc, &stale, &fresh);
+    codex_write_trust(&mut doc, &delta);
     if let Some(dir) = config_file.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -261,8 +259,14 @@ fn codex(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     ])
 }
 
-/// `[hooks.state."<hooks.json>:<event>:<group>:<handler>"]` keys and hashes of our groups.
-fn codex_trust_keys(hooks_file: &Path, root: &Value) -> Vec<(String, String)> {
+struct TrustKey {
+    key: String,
+    hash: String,
+    ours: bool,
+}
+
+/// `[hooks.state."<hooks.json>:<event>:<group>:<handler>"]` key and hash of every handler.
+fn codex_trust_keys(hooks_file: &Path, root: &Value) -> Vec<TrustKey> {
     let path = hooks_file.to_string_lossy();
     let mut out = Vec::new();
     let Some(hooks) = root["hooks"].as_object() else {
@@ -270,28 +274,61 @@ fn codex_trust_keys(hooks_file: &Path, root: &Value) -> Vec<(String, String)> {
     };
     for (event, groups) in hooks {
         for (gi, group) in groups.as_array().into_iter().flatten().enumerate() {
-            if !is_ours(group) {
-                continue;
-            }
+            let ours = is_ours(group);
             for (hi, handler) in group["hooks"].as_array().into_iter().flatten().enumerate() {
-                let key = format!("{path}:{}:{gi}:{hi}", snake(event));
-                out.push((
-                    key,
-                    codex_trust_hash(event, group["matcher"].as_str(), handler),
-                ));
+                out.push(TrustKey {
+                    key: format!("{path}:{}:{gi}:{hi}", snake(event)),
+                    hash: codex_trust_hash(event, group["matcher"].as_str(), handler),
+                    ours,
+                });
             }
         }
     }
     out
 }
 
-fn codex_write_trust(
-    doc: &mut toml_edit::DocumentMut,
-    stale: &[(String, String)],
-    fresh: &[(String, String)],
-) {
+#[derive(Debug, Default, PartialEq)]
+struct TrustDelta {
+    /// Our rows at positions we no longer occupy.
+    stale: Vec<String>,
+    /// Other groups' rows whose position shifted: (old key, new key).
+    moved: Vec<(String, String)>,
+    /// Our rows at their current positions.
+    fresh: Vec<(String, String)>,
+}
+
+/// Trust rows are keyed by position, so dropping or re-appending our groups shifts the groups
+/// after them; their rows (matched by hash) follow them to the new key.
+fn codex_trust_delta(before: &[TrustKey], after: &[TrustKey]) -> TrustDelta {
+    TrustDelta {
+        stale: before
+            .iter()
+            .filter(|b| b.ours && !after.iter().any(|a| a.ours && a.key == b.key))
+            .map(|b| b.key.clone())
+            .collect(),
+        moved: after
+            .iter()
+            .filter(|a| !a.ours)
+            .filter_map(|a| {
+                before
+                    .iter()
+                    .find(|b| !b.ours && b.hash == a.hash && b.key != a.key)
+                    .map(|b| (b.key.clone(), a.key.clone()))
+            })
+            .collect(),
+        fresh: after
+            .iter()
+            .filter(|a| a.ours)
+            .map(|a| (a.key.clone(), a.hash.clone()))
+            .collect(),
+    }
+}
+
+/// Applies a delta in order: drop stale, move shifted, write fresh (a moved row may land on a
+/// key that was ours, and our new key may be one a moved row just left).
+fn codex_write_trust(doc: &mut toml_edit::DocumentMut, delta: &TrustDelta) {
     let root = doc.as_table_mut();
-    if fresh.is_empty() && !root.contains_key("hooks") {
+    if delta.fresh.is_empty() && !root.contains_key("hooks") {
         return;
     }
     let hooks = root
@@ -311,10 +348,15 @@ fn codex_write_trust(
         return;
     };
     state.set_implicit(true);
-    for (key, _) in stale {
+    for key in &delta.stale {
         state.remove(key);
     }
-    for (key, hash) in fresh {
+    for (old, new) in &delta.moved {
+        if let Some(row) = state.remove(old) {
+            state[new.as_str()] = row;
+        }
+    }
+    for (key, hash) in &delta.fresh {
         let mut row = toml_edit::Table::new();
         row["trusted_hash"] = toml_edit::value(hash.as_str());
         state[key.as_str()] = toml_edit::Item::Table(row);
@@ -486,13 +528,16 @@ pub fn doctor(home: &Path) -> Result<()> {
     let codex_hooks = codex_home().join("hooks.json");
     let mut codex_line = wired(&codex_hooks, "codex");
     if let Ok(root) = read_json_object(&codex_hooks) {
-        let keys = codex_trust_keys(&codex_hooks, &root);
+        let keys: Vec<_> = codex_trust_keys(&codex_hooks, &root)
+            .into_iter()
+            .filter(|k| k.ours)
+            .collect();
         if !keys.is_empty() {
             let text =
                 std::fs::read_to_string(codex_home().join("config.toml")).unwrap_or_default();
             let trusted = keys
                 .iter()
-                .filter(|(k, h)| text.contains(&format!("\"{k}\"")) && text.contains(h.as_str()))
+                .filter(|k| text.contains(&format!("\"{}\"", k.key)) && text.contains(&k.hash))
                 .count();
             codex_line.push_str(&format!(", trust rows {trusted}/{}", keys.len()));
         }
@@ -584,7 +629,13 @@ mod tests {
             "/h/hooks.json:session_start:1:0".to_string(),
             "sha256:bb".to_string(),
         )];
-        codex_write_trust(&mut doc, &[], &fresh);
+        codex_write_trust(
+            &mut doc,
+            &TrustDelta {
+                fresh: fresh.clone(),
+                ..Default::default()
+            },
+        );
         let out = doc.to_string();
         assert!(
             out.contains(
@@ -594,9 +645,74 @@ mod tests {
         );
         assert!(out.contains("[hooks.state.\"/h/hooks.json:stop:0:0\"]"));
         assert!(out.contains("[mcp_servers.x]"));
-        codex_write_trust(&mut doc, &fresh, &[]);
+        codex_write_trust(
+            &mut doc,
+            &TrustDelta {
+                stale: vec![fresh[0].0.clone()],
+                ..Default::default()
+            },
+        );
         let out = doc.to_string();
         assert!(!out.contains("session_start:1:0"), "{out}");
         assert!(out.contains("[features]\nmemories = true"));
+    }
+
+    #[test]
+    fn trust_rows_follow_user_groups_that_shift() {
+        let file = Path::new("/h/hooks.json");
+        let ours = json!({"hooks": [{"type": "command", "command": "/x/oboete hook codex Stop", "timeout": 5}]});
+        let user = json!({"hooks": [{"type": "command", "command": "echo hi", "timeout": 5}]});
+        let keys = |groups: Vec<Value>| codex_trust_keys(file, &json!({"hooks": {"Stop": groups}}));
+        let before = keys(vec![ours.clone(), user.clone()]);
+        let toml = "[hooks.state.\"/h/hooks.json:stop:0:0\"]\ntrusted_hash = \"sha256:ours-old\"\n\n[hooks.state.\"/h/hooks.json:stop:1:0\"]\ntrusted_hash = \"sha256:user\"\n";
+        let k = |g: usize| format!("/h/hooks.json:stop:{g}:0");
+
+        // Rerun: ours is re-appended after the user's group, which moves from 1 to 0.
+        let d = codex_trust_delta(&before, &keys(vec![user.clone(), ours.clone()]));
+        assert_eq!(d.stale, vec![k(0)]);
+        assert_eq!(d.moved, vec![(k(1), k(0))]);
+        assert_eq!(d.fresh.len(), 1);
+        assert_eq!(d.fresh[0].0, k(1));
+        let mut doc: toml_edit::DocumentMut = toml.parse().unwrap();
+        codex_write_trust(&mut doc, &d);
+        let out = doc.to_string();
+        assert!(
+            out.contains(
+                "[hooks.state.\"/h/hooks.json:stop:0:0\"]\ntrusted_hash = \"sha256:user\""
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "[hooks.state.\"/h/hooks.json:stop:1:0\"]\ntrusted_hash = \"{}\"",
+                d.fresh[0].1
+            )),
+            "{out}"
+        );
+        assert!(!out.contains("ours-old"));
+
+        // Remove: the user's group moves from 1 to 0 and keeps its row; ours is gone.
+        let d = codex_trust_delta(&before, &keys(vec![user.clone()]));
+        assert_eq!(d.stale, vec![k(0)]);
+        assert_eq!(d.moved, vec![(k(1), k(0))]);
+        assert!(d.fresh.is_empty());
+        let mut doc: toml_edit::DocumentMut = toml.parse().unwrap();
+        codex_write_trust(&mut doc, &d);
+        let out = doc.to_string();
+        assert!(
+            out.contains(
+                "[hooks.state.\"/h/hooks.json:stop:0:0\"]\ntrusted_hash = \"sha256:user\""
+            ),
+            "{out}"
+        );
+        assert!(
+            !out.contains("stop:1:0") && !out.contains("ours-old"),
+            "{out}"
+        );
+
+        // Nothing shifts when ours already sits last.
+        let last = keys(vec![user.clone(), ours.clone()]);
+        let d = codex_trust_delta(&last, &last);
+        assert!(d.stale.is_empty() && d.moved.is_empty() && d.fresh.len() == 1);
     }
 }
