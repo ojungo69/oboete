@@ -271,6 +271,26 @@ fn retry_after_in_body(body: &str) -> Option<f64> {
     rest[num.len()..].starts_with('s').then_some(secs)
 }
 
+/// A fresh private directory for one CLI run. The name is random and the directory must not
+/// exist yet, so nobody else on the machine can plant one under a guessable name (the pid) and
+/// read what the CLI writes there; on Unix it is also created mode 0700.
+fn scratch_dir() -> Result<std::path::PathBuf, CallError> {
+    let mut raw = [0u8; 8];
+    getrandom::fill(&mut raw).map_err(|e| CallError::other(format!("scratch dir: {e}")))?;
+    let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let dir = std::env::temp_dir().join(format!("oboete-cli-{name}"));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&dir)
+        .map_err(|e| CallError::other(format!("scratch dir: {e}")))?;
+    Ok(dir)
+}
+
 /// Run a subscription CLI headless, with the smallest configuration each one allows: no hooks,
 /// no tools, no session persistence, no user settings or MCP servers where the CLI can skip them.
 fn cli_headless(
@@ -281,8 +301,7 @@ fn cli_headless(
     schema: &Value,
 ) -> Result<Value, CallError> {
     let schema_text = schema.to_string();
-    let scratch = std::env::temp_dir().join(format!("oboete-cli-{}", std::process::id()));
-    std::fs::create_dir_all(&scratch).map_err(|e| CallError::other(format!("scratch dir: {e}")))?;
+    let scratch = scratch_dir()?;
     let last = scratch.join("last.json");
     let mut cmd = Command::new(cli);
     match cli {
