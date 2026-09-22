@@ -274,10 +274,7 @@ fn write_atomic(file: &Path, text: &str) -> Result<()> {
             Err(_) => file.to_path_buf(),
         },
     };
-    // A rename would replace a file the developer locked with chmod 444; stop instead.
-    if std::fs::metadata(&target).is_ok_and(|m| m.permissions().readonly()) {
-        anyhow::bail!("{} is read-only", target.display());
-    }
+    refuse_read_only(&target)?;
     let dir = target
         .parent()
         .with_context(|| format!("no directory for {}", file.display()))?;
@@ -302,6 +299,14 @@ fn write_atomic(file: &Path, text: &str) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     written.with_context(|| format!("write {}", file.display()))
+}
+
+/// A rename would replace a file the developer locked with chmod 444; stop instead.
+fn refuse_read_only(file: &Path) -> Result<()> {
+    if std::fs::metadata(file).is_ok_and(|m| m.permissions().readonly()) {
+        anyhow::bail!("{} is read-only", file.display());
+    }
+    Ok(())
 }
 
 /// Drop our handlers from every event (a group that held only ours goes; one shared with the
@@ -362,16 +367,16 @@ fn claude_mcp(cmd: &HookCommand, remove: bool) -> Result<String> {
         return Ok("skipped: `claude` is not on PATH".into());
     }
     let file = claude_mcp_file();
-    let current = read_json_object(&file)?["mcpServers"]
+    let present = read_json_object(&file)?["mcpServers"]
         .get(MCP_NAME)
-        .filter(|v| v.is_object())
         .cloned();
+    let current = present.clone().filter(Value::is_object);
     backup_once(&file)?;
     let verb = if remove { "removed from" } else { "written to" };
     let done = format!("{verb} {} (by `claude mcp`)", file.display());
     let remove_cmd = ["mcp", "remove", "--scope", "user", MCP_NAME];
     if remove {
-        if current.is_some() {
+        if present.is_some() {
             claude_cli(&remove_cmd)?;
         }
         return Ok(done);
@@ -394,8 +399,17 @@ fn claude_mcp(cmd: &HookCommand, remove: bool) -> Result<String> {
     };
     if let Err(e) = add(&entry) {
         // Put the developer's entry back rather than leave nothing registered.
-        if let Some(old) = &current {
-            let _ = add(old);
+        if let Some(old) = &current
+            && let Err(r) = add(old)
+        {
+            // Name the lost entry without printing `env` values (tokens live there).
+            let mut shown = old.clone();
+            if let Some(env) = shown["env"].as_object_mut() {
+                env.values_mut().for_each(|v| *v = json!("…"));
+            }
+            return Err(e.context(format!(
+                "the previous {MCP_NAME} entry could not be put back either ({r:#}); it was {shown}"
+            )));
         }
         return Err(e);
     }
@@ -540,11 +554,14 @@ fn codex(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     let hooks_file = codex_home().join("hooks.json");
     let config_file = codex_home().join("config.toml");
     let mut root = read_json_object(&hooks_file)?;
-    // Both files are read before either is written: a config.toml that cannot be read or
-    // parsed stops setup with hooks.json untouched.
+    // Both files are read and checked before either is written: the trust rows in config.toml
+    // follow handler positions in hooks.json, so one written without the other cannot be repaired
+    // by a rerun.
     let mut doc: toml_edit::DocumentMut = read_text(&config_file)?
         .parse()
         .with_context(|| format!("parse {}", config_file.display()))?;
+    refuse_read_only(&hooks_file)?;
+    refuse_read_only(&config_file)?;
     backup_once(&hooks_file)?;
     backup_once(&config_file)?;
     let before = codex_trust_keys(&hooks_file, &root);

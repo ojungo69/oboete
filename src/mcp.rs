@@ -35,7 +35,7 @@ pub struct SearchArgs {
     /// A repository root to search instead of the current one.
     #[serde(default)]
     repo: Option<String>,
-    /// Maximum number of hits (default 10).
+    /// Maximum number of hits (default 10, at most 100).
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -54,10 +54,13 @@ pub struct TimelineArgs {
     /// A repository root instead of the current one.
     #[serde(default)]
     repo: Option<String>,
-    /// Maximum number of sessions (default 20).
+    /// Maximum number of sessions (default 20, at most 100).
     #[serde(default)]
     limit: Option<usize>,
 }
+
+/// A model can ask for any `limit`; the store is not dumped into one reply.
+const MAX_LIMIT: usize = 100;
 
 fn text(s: String) -> Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![ContentBlock::text(s)]))
@@ -100,8 +103,13 @@ impl Oboete {
     fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, ErrorData> {
         let conn = db::open(&self.home).map_err(internal)?;
         let scope = self.scope(a.all, a.repo.as_deref())?;
-        let hits = search::search(&conn, &a.query, scope.as_deref(), a.limit.unwrap_or(10))
-            .map_err(internal)?;
+        let hits = search::search(
+            &conn,
+            &a.query,
+            scope.as_deref(),
+            a.limit.unwrap_or(10).min(MAX_LIMIT),
+        )
+        .map_err(internal)?;
         let terms: Vec<&str> = a.query.split_whitespace().collect();
         let mut out = String::new();
         for h in hits {
@@ -158,8 +166,12 @@ impl Oboete {
     ) -> Result<CallToolResult, ErrorData> {
         let conn = db::open(&self.home).map_err(internal)?;
         let scope = self.scope(a.all, a.repo.as_deref())?;
-        let rows =
-            search::timeline(&conn, scope.as_deref(), a.limit.unwrap_or(20)).map_err(internal)?;
+        let rows = search::timeline(
+            &conn,
+            scope.as_deref(),
+            a.limit.unwrap_or(20).min(MAX_LIMIT),
+        )
+        .map_err(internal)?;
         let mut out = String::new();
         for r in rows {
             let summary = if r.summary.is_empty() {

@@ -79,10 +79,15 @@ pub fn search(
     };
     let mut sql = format!("SELECT {COLUMNS} FROM fts WHERE {}", clauses.join(" AND "));
     sql.push_str(&format!(" ORDER BY {order} LIMIT ?"));
-    args.push(Value::Integer(limit as i64));
+    args.push(Value::Integer(sql_limit(limit)));
     let mut stmt = conn.prepare(&sql)?;
     let hits = stmt.query_map(params_from_iter(args), hit)?;
     Ok(hits.collect::<Result<_, _>>()?)
+}
+
+/// `as i64` would wrap a huge `--limit` negative, which SQLite reads as "no limit".
+fn sql_limit(limit: usize) -> i64 {
+    i64::try_from(limit).unwrap_or(i64::MAX)
 }
 
 pub fn get(conn: &Connection, doc: &str) -> Result<Option<Hit>> {
@@ -112,7 +117,7 @@ pub fn timeline(conn: &Connection, repo: Option<&str>, limit: usize) -> Result<V
          FROM sessions s WHERE ?1 IS NULL OR s.repo = ?1
          ORDER BY s.started_at DESC LIMIT ?2",
     )?;
-    let rows = stmt.query_map(params![repo, limit as i64], |r| {
+    let rows = stmt.query_map(params![repo, sql_limit(limit)], |r| {
         Ok(SessionRow {
             id: r.get(0)?,
             agent: r.get(1)?,
