@@ -452,22 +452,36 @@ fn snake(event: &str) -> String {
     out
 }
 
+/// Grok reads every `~/.grok/hooks/*.json`; ours is `oboete.json`. Anything the developer put
+/// into it is kept, like the other agents' files; the file goes only when nothing else is left
+/// (hook.rs reads its presence as "Grok delivers its own events").
 fn grok(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     let file = crate::hook::grok_hooks_file();
-    if remove {
+    let mut root = read_json_object(&file)?;
+    backup_once(&file)?;
+    let wanted = if remove {
+        vec![]
+    } else {
+        GROK_EVENTS
+            .iter()
+            .map(|(event, timeout)| {
+                let handler = json!({"type": "command", "command": cmd.line("grok", event), "timeout": timeout});
+                (event.to_string(), json!({"hooks": [handler]}))
+            })
+            .collect()
+    };
+    merge_groups(&mut root, wanted);
+    let empty = root.as_object().is_some_and(|o| {
+        o.iter()
+            .all(|(k, v)| k == "hooks" && v.as_object().is_some_and(|h| h.is_empty()))
+    });
+    if empty {
         if file.exists() {
             std::fs::remove_file(&file)?;
         }
-        return Ok(vec![file.display().to_string()]);
+    } else {
+        write_json(&file, &root)?;
     }
-    let mut hooks = serde_json::Map::new();
-    for (event, timeout) in GROK_EVENTS {
-        hooks.insert(
-            event.to_string(),
-            json!([{"hooks": [{"type": "command", "command": cmd.line("grok", event), "timeout": timeout}]}]),
-        );
-    }
-    write_json(&file, &json!({"hooks": hooks}))?;
     Ok(vec![file.display().to_string()])
 }
 

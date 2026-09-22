@@ -103,9 +103,11 @@ impl<'a> Chain<'a> {
             } else {
                 call(p, prompt, schema)
             };
+            // The retry is a second request: only when the daily budget has room for it.
             if let Err(e) = &result
                 && e.status == Some(429)
                 && p.retry_429()
+                && used + 1 < p.daily_budget()
                 && let Some(wait) = e.retry_after_s
                 && wait <= MAX_WAIT_S
             {
