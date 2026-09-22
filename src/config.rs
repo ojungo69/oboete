@@ -11,6 +11,24 @@ pub struct Config {
     pub providers: Vec<Provider>,
     #[serde(default)]
     pub summary: Summary,
+    #[serde(default)]
+    pub embedding: Embedding,
+}
+
+/// Semantic search is a provider slot (docs/plan.md 2b): `none` (full-text only, the default),
+/// later `workers-ai` (bge-m3) and `local` (fastembed). One model per store; switching reindexes.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Embedding {
+    #[serde(default = "default_embedding")]
+    pub provider: String,
+}
+
+impl Default for Embedding {
+    fn default() -> Self {
+        Self {
+            provider: default_embedding(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -100,6 +118,9 @@ fn default_true() -> bool {
 }
 fn default_language() -> String {
     "Japanese".into()
+}
+fn default_embedding() -> String {
+    "none".into()
 }
 
 pub fn home_dir() -> PathBuf {
@@ -203,11 +224,19 @@ pub fn load(home: &Path) -> Result<Config> {
         return Ok(Config {
             providers: default_providers(),
             summary: Summary::default(),
+            embedding: Embedding::default(),
         });
     }
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
+    let cfg: Config = toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    anyhow::ensure!(
+        cfg.embedding.provider == "none",
+        "{}: [embedding] provider = \"{}\" does not exist yet; only \"none\" (full-text search) does",
+        path.display(),
+        cfg.embedding.provider
+    );
+    Ok(cfg)
 }
 
 /// Read an API key from the owner's key-file convention (token on line 2).
@@ -232,6 +261,7 @@ mod tests {
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.providers.len(), 9);
         assert_eq!(cfg.summary.language, "Japanese");
+        assert_eq!(cfg.embedding.provider, "none");
         let cfg: Config = toml::from_str(
             r#"
 [summary]
@@ -262,5 +292,25 @@ model = "haiku"
             _ => panic!("expected openai"),
         }
         assert!(!cfg.providers[1].retry_429());
+    }
+
+    #[test]
+    fn unknown_embedding_provider_is_refused_at_load() {
+        let dir = std::env::temp_dir().join(format!("oboete-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            "[embedding]\nprovider = \"local\"\n",
+        )
+        .unwrap();
+        let err = load(&dir).unwrap_err().to_string();
+        assert!(err.contains("does not exist yet"), "{err}");
+        std::fs::write(
+            dir.join("config.toml"),
+            "[embedding]\nprovider = \"none\"\n",
+        )
+        .unwrap();
+        assert!(load(&dir).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

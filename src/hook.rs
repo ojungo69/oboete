@@ -384,8 +384,12 @@ mod tests {
         // Something to inject exists for this repo …
         db::apply_batch(
             &mut db::open(&dir).unwrap(),
-            "g1",
-            &repo::key(Path::new(&cwd)),
+            &db::PendingSession {
+                id: "g1".into(),
+                agent: "grok".into(),
+                repo: repo::key(Path::new(&cwd)),
+                last_event_at: db::now_ms(),
+            },
             "test",
             "earlier summary",
             &[],
