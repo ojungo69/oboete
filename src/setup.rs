@@ -80,8 +80,12 @@ struct HookCommand {
 impl HookCommand {
     fn current(home: &Path) -> Result<Self> {
         let exe = std::env::current_exe()?.canonicalize()?;
+        // Hooks run from the agent's working directory: a custom home is stored absolute.
+        let home = home
+            .canonicalize()
+            .with_context(|| format!("resolve home {}", home.display()))?;
         let default_home = config::home_dir().join(".oboete");
-        let home = (home.canonicalize().ok() != default_home.canonicalize().ok())
+        let home = (Some(&home) != default_home.canonicalize().ok().as_ref())
             .then(|| home.to_string_lossy().into_owned());
         Ok(Self {
             exe: exe.to_string_lossy().into_owned(),
@@ -108,12 +112,68 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
-/// A handler is ours when it runs this program's hook command. No marker key: an agent that
-/// rejected unknown keys in hook groups would take the developer's other hooks down with ours.
+/// A handler is ours when its command has exactly the shape `HookCommand::line` writes:
+/// `<path ending in oboete[.exe]> [--home <dir>] hook <agent> <Event>`. No marker key: an
+/// agent that rejected unknown keys in hook groups would take the developer's other hooks
+/// down with ours. A developer's script that merely mentions oboete and hook is not ours.
 fn is_our_handler(h: &Value) -> bool {
-    h["command"]
-        .as_str()
-        .is_some_and(|c| c.contains("oboete") && c.contains(" hook "))
+    let Some(cmd) = h["command"].as_str() else {
+        return false;
+    };
+    let words = shell_words(cmd);
+    let Some((exe, rest)) = words.split_first() else {
+        return false;
+    };
+    let is_exe = Path::new(exe)
+        .file_name()
+        .is_some_and(|f| f == "oboete" || f == "oboete.exe");
+    let rest = match rest {
+        [flag, _dir, tail @ ..] if flag == "--home" => tail,
+        tail => tail,
+    };
+    is_exe
+        && matches!(rest, [hook, agent, _event] if hook == "hook" && AGENTS.contains(&agent.as_str()))
+}
+
+/// Inverse of `shell_quote` for the lines we write: whitespace-separated words, single-quoted
+/// segments (with `'\''` for a literal quote) kept whole.
+fn shell_words(s: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                in_word = true;
+                for q in chars.by_ref() {
+                    if q == '\'' {
+                        break;
+                    }
+                    cur.push(q);
+                }
+            }
+            '\\' if chars.peek() == Some(&'\'') => {
+                chars.next();
+                cur.push('\'');
+                in_word = true;
+            }
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut cur));
+                    in_word = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(cur);
+    }
+    words
 }
 
 pub(crate) fn has_ours(group: &Value) -> bool {
@@ -633,6 +693,31 @@ mod tests {
             codex_trust_hash("UserPromptSubmit", None, &h),
             "sha256:d3b11f4d6ea1ff2411c3bc9953d9cac72e4f0cde061a95ffadb488139516289e"
         );
+    }
+
+    #[test]
+    fn ownership_is_the_exact_hook_command_shape() {
+        let ours = |c: &str| is_our_handler(&json!({"type": "command", "command": c}));
+        assert!(ours("/x/oboete hook claude Stop"));
+        assert!(ours("/x/oboete --home /h hook codex SessionStart"));
+        assert!(ours(
+            "'/my dir/it'\\''s/oboete' --home '/h o/me' hook grok PostToolUse"
+        ));
+        assert!(ours("C:/Users/x/.cargo/bin/oboete.exe hook claude Stop"));
+        assert!(!ours("python /tools/oboete_report.py hook audit"));
+        assert!(!ours("/x/oboete hook audit Stop"));
+        assert!(!ours("/x/oboete observe"));
+        assert!(!ours("/x/oboete hook claude"));
+        assert!(!ours("/x/oboete-old hook claude Stop"));
+        assert_eq!(
+            shell_words("a 'b c' 'd'\\''e'  f"),
+            vec!["a", "b c", "d'e", "f"]
+        );
+        let cmd = HookCommand {
+            exe: "/my dir/oboete".into(),
+            home: Some("/h o/me".into()),
+        };
+        assert!(ours(&cmd.line("codex", "Stop")));
     }
 
     #[test]
