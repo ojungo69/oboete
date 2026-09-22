@@ -52,9 +52,10 @@ function applyTheme() {
 
 // --- Cards ----------------------------------------------------------------------------------
 
-const GLYPH = {
-  summary: '🎯', decision: '⚖', bugfix: '●', feature: '◆', discovery: '○', change: '✓', preference: '★',
-};
+const GLYPH = new Map([
+  ['summary', '🎯'], ['decision', '⚖'], ['bugfix', '●'], ['feature', '◆'],
+  ['discovery', '○'], ['change', '✓'], ['preference', '★'],
+]);
 
 function badge(kind) {
   return el('span', `badge ${kind}`, kind);
@@ -142,7 +143,7 @@ function card(d, extra = []) {
   const kind = d.kind || 'summary';
   const li = el('li', `card ${kind}`);
   const head = el('div', 'head',
-    el('span', 'glyph', GLYPH[kind] || '·'),
+    el('span', 'glyph', GLYPH.get(kind) || '·'),
     badge(kind),
     el('span', 'title', kind === 'summary' ? 'Session summary' : d.title));
   const meta = el('div', 'meta', el('span', null, d.when), ...extra, el('span', null, d.doc));

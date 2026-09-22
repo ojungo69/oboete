@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS observations(
   provider TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS observations_repo ON observations(repo, ts);
+CREATE INDEX IF NOT EXISTS observations_session ON observations(session_id);
 CREATE TABLE IF NOT EXISTS summaries(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS summaries(
   provider TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS summaries_repo ON summaries(repo, ts);
+CREATE INDEX IF NOT EXISTS summaries_session ON summaries(session_id, ts);
 CREATE TABLE IF NOT EXISTS provider_calls(
   id INTEGER PRIMARY KEY,
   ts INTEGER NOT NULL,
@@ -118,10 +120,11 @@ fn ensure_autoincrement(conn: &mut Connection) -> Result<()> {
             "CREATE TABLE {table}_new(id INTEGER PRIMARY KEY AUTOINCREMENT, {columns});
              INSERT INTO {table}_new({list}) SELECT {list} FROM {table};
              DROP TABLE {table};
-             ALTER TABLE {table}_new RENAME TO {table};
-             CREATE INDEX IF NOT EXISTS {table}_repo ON {table}(repo, ts);"
+             ALTER TABLE {table}_new RENAME TO {table};"
         ))?;
     }
+    // The rebuilt tables get their indexes back (every statement is IF NOT EXISTS).
+    tx.execute_batch(SCHEMA)?;
     tx.commit()?;
     Ok(())
 }
@@ -561,6 +564,15 @@ mod tests {
         assert_eq!(title, "seven");
         assert!(autoincrements(&conn, "observations").unwrap());
         assert!(autoincrements(&conn, "summaries").unwrap());
+        let indexes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN
+                 ('observations_repo', 'observations_session', 'summaries_repo', 'summaries_session')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexes, 4);
         // Delete the newest of each, store again: the ids move on.
         assert!(delete_doc(&mut conn, "o7").unwrap());
         assert!(delete_doc(&mut conn, "s3").unwrap());
