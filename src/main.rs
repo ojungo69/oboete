@@ -15,6 +15,7 @@ mod replay;
 mod repo;
 mod search;
 mod setup;
+mod view;
 
 use std::path::PathBuf;
 
@@ -78,6 +79,12 @@ enum Cmd {
     },
     /// Report hook wiring, stored data and provider readiness
     Doctor,
+    /// Browse the memory in a browser: a read-only page on 127.0.0.1 (prints its URL)
+    View {
+        /// Port to listen on (0 = any free port)
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+    },
     /// Replay a JSONL fixture through the hook path and measure
     Replay {
         fixture: PathBuf,
@@ -215,6 +222,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         }
         Cmd::Setup { agent, remove } => setup::run(&home, &agent, remove),
         Cmd::Doctor => setup::doctor(&home),
+        Cmd::View { port } => view::run(&home, port),
         Cmd::Replay {
             fixture,
             repo_root,
