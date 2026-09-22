@@ -47,6 +47,22 @@
 - **M3**: Pi / agy / OpenCode / Cursor、Private MCP link、意味検索の調整、レポート(価値があれば)。
 - **M4**: OSS 公開(README、インストーラ)。
 
+## M0 結果 (2026-09-22 夜、debug build、commit 480b761) — **GO**
+
+`events-1000.jsonl` の Claude Code 分 (255 イベント、12 セッション) を replay:
+
+| 指標 | 目標 | 実測 | 参考 (TS 版 / claude-mem) |
+| --- | --- | --- | --- |
+| hook 1 回 (プロセス起動込み) | ≤ 20 ms | p50 7 ms / p95 8 ms / max 9 ms | TS 161 ms p50 |
+| hook 1 回 (プロセス内) | — | p50 79 µs / max 230 µs | — |
+| observe の最大常駐 (VmHWM) | < 50 MB | 13 MB | TS 106〜163 MB / claude-mem worker 120 MB + Chroma 4.65 GB |
+| 要約成功 | 全セッション | 12/12、観測 61 件、生イベント残 0 | — |
+| フォールバック | 実証 | Groq 失敗 4 回 (429 ×3、400 schema ×1) → 全部 agy が救済 (平均 23 s) | — |
+| 冒頭注入 | 動く | 3,864 字、`hookSpecificOutput.additionalContext` で出力 | — |
+| DB サイズ | — | 124 KB | — |
+
+学び: 中身の無いセッション (同じプロンプトの繰り返し) からも観測が 1 件出た → M1 のプロンプトで「覚える価値が無ければ observations は空」を明示する。agy は英語セッションでも日本語で書くことがある → 出力言語をプロンプトで固定する。Groq の strict schema は稀に 400 を返す → 連鎖で吸収できているが、`additionalProperties:false` の付け方を M1 で見直す。
+
 ## 手順(この repo 用、軽量版)
 
 - 仕様 = この文書 1 枚 + マイルストーンごとの checklist。Spec Kit の 48 タスク儀式は使わない。
