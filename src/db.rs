@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS events(
 );
 CREATE INDEX IF NOT EXISTS events_session ON events(session_id, id);
 CREATE TABLE IF NOT EXISTS observations(
-  id INTEGER PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
   repo TEXT NOT NULL,
   ts INTEGER NOT NULL,
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS observations(
 );
 CREATE INDEX IF NOT EXISTS observations_repo ON observations(repo, ts);
 CREATE TABLE IF NOT EXISTS summaries(
-  id INTEGER PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
   repo TEXT NOT NULL,
   ts INTEGER NOT NULL,
@@ -77,8 +77,63 @@ pub fn open(home: &Path) -> Result<Connection> {
     // are filled in here. ponytail: idempotent column checks; PRAGMA user_version once a migration
     // needs more than ADD COLUMN.
     ensure_column(&mut conn, "sessions", "injected_at", "INTEGER").context("migrate columns")?;
+    ensure_autoincrement(&mut conn).context("migrate doc ids")?;
     ensure_fts(&mut conn).context("search index")?;
     Ok(conn)
+}
+
+/// Document ids (`o<id>`, `s<id>`) are handed to agents and pages, so a deleted id must never
+/// come back for another row. A table from a build before delete existed lacks AUTOINCREMENT,
+/// and SQLite reuses the highest id once its row is gone; it is rebuilt here with the same rows
+/// and ids, which also seeds `sqlite_sequence` past the highest one. Same guard pattern as
+/// `ensure_fts`: read check first, re-check inside the write transaction.
+fn ensure_autoincrement(conn: &mut Connection) -> Result<()> {
+    const DOCS: [(&str, &str, &str); 2] = [
+        (
+            "observations",
+            "session_id TEXT NOT NULL, repo TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL,
+             title TEXT NOT NULL, body TEXT NOT NULL, provider TEXT NOT NULL",
+            "id, session_id, repo, ts, kind, title, body, provider",
+        ),
+        (
+            "summaries",
+            "session_id TEXT NOT NULL, repo TEXT NOT NULL, ts INTEGER NOT NULL, body TEXT NOT NULL,
+             provider TEXT NOT NULL",
+            "id, session_id, repo, ts, body, provider",
+        ),
+    ];
+    if DOCS
+        .iter()
+        .all(|(t, _, _)| autoincrements(conn, t).unwrap_or(true))
+    {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    for (table, columns, list) in DOCS {
+        if autoincrements(&tx, table)? {
+            continue;
+        }
+        tx.execute_batch(&format!(
+            "CREATE TABLE {table}_new(id INTEGER PRIMARY KEY AUTOINCREMENT, {columns});
+             INSERT INTO {table}_new({list}) SELECT {list} FROM {table};
+             DROP TABLE {table};
+             ALTER TABLE {table}_new RENAME TO {table};
+             CREATE INDEX IF NOT EXISTS {table}_repo ON {table}(repo, ts);"
+        ))?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn autoincrements(conn: &Connection, table: &str) -> Result<bool> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+            params![table],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(sql.is_some_and(|s| s.contains("AUTOINCREMENT")))
 }
 
 /// The search index (FTS5 trigram: substring matching, CJK by character), built from what
@@ -275,6 +330,19 @@ pub fn apply_batch(
 ) -> Result<()> {
     let (session_id, repo, ts) = (&s.id, &s.repo, s.last_event_at);
     let tx = conn.transaction()?;
+    // The viewer may have deleted the session while the provider was summarizing it; then its
+    // knowledge must not come back as rows without a session.
+    let alive = tx
+        .query_row(
+            "SELECT 1 FROM sessions WHERE id=?1",
+            params![session_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !alive {
+        return Ok(());
+    }
     if !summary.trim().is_empty() {
         tx.execute(
             "INSERT INTO summaries(session_id, repo, ts, body, provider) VALUES(?1,?2,?3,?4,?5)",
@@ -297,6 +365,47 @@ pub fn apply_batch(
     )?;
     tx.commit()?;
     Ok(())
+}
+
+/// Remove one observation (`o<id>`) or summary (`s<id>`) together with its search row.
+/// Only the exact id form is accepted (`o+5`, `o05` would leave the search row behind).
+pub fn delete_doc(conn: &mut Connection, doc: &str) -> Result<bool> {
+    let (table, id) = match doc.split_at_checked(1) {
+        Some(("o", n)) => ("observations", n),
+        Some(("s", n)) => ("summaries", n),
+        _ => return Ok(false),
+    };
+    let Ok(id) = id.parse::<i64>() else {
+        return Ok(false);
+    };
+    if doc != format!("{}{id}", &doc[..1]) {
+        return Ok(false);
+    }
+    let tx = conn.transaction()?;
+    let n = tx.execute(&format!("DELETE FROM {table} WHERE id=?1"), params![id])?;
+    tx.execute("DELETE FROM fts WHERE doc=?1", params![doc])?;
+    tx.commit()?;
+    Ok(n > 0)
+}
+
+/// Remove a session with everything it left: raw events, observations, summaries, search rows.
+/// A session whose agent is still running comes back on its next event.
+pub fn delete_session(conn: &mut Connection, id: &str) -> Result<bool> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM fts WHERE doc IN (SELECT 'o' || id FROM observations WHERE session_id=?1
+                                       UNION ALL SELECT 's' || id FROM summaries WHERE session_id=?1)",
+        params![id],
+    )?;
+    for table in ["observations", "summaries", "events"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE session_id=?1"),
+            params![id],
+        )?;
+    }
+    let n = tx.execute("DELETE FROM sessions WHERE id=?1", params![id])?;
+    tx.commit()?;
+    Ok(n > 0)
 }
 
 pub fn record_call(
@@ -362,6 +471,128 @@ mod tests {
         // Reopening a current database is a no-op.
         drop(conn);
         assert!(injected(&open(&dir).unwrap(), "s1").unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delete_takes_the_search_rows_along() {
+        let dir = std::env::temp_dir().join(format!("oboete-db-delete-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut conn = open(&dir).unwrap();
+        let s = PendingSession {
+            id: "s1".into(),
+            agent: "claude".into(),
+            repo: "/r".into(),
+            last_event_at: 1,
+        };
+        upsert_session(&conn, "s1", "claude", "/r", "/r", 1).unwrap();
+        insert_event(&conn, "s1", "Stop", 1, "{}").unwrap();
+        let obs = |t: &str| Observation {
+            kind: "change".into(),
+            title: t.into(),
+            body: "body".into(),
+        };
+        apply_batch(
+            &mut conn,
+            &s,
+            "test",
+            "summary one",
+            &[obs("a"), obs("b")],
+            0,
+        )
+        .unwrap();
+        insert_event(&conn, "s1", "Stop", 2, "{}").unwrap();
+        let count =
+            |c: &Connection, sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert!(delete_doc(&mut conn, "o1").unwrap());
+        assert!(!delete_doc(&mut conn, "o1").unwrap());
+        for bad in ["o+2", "o02", "x2", "o", "2", ""] {
+            assert!(!delete_doc(&mut conn, bad).unwrap(), "{bad}");
+        }
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM observations"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM fts WHERE doc='o1'"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM fts"), 2);
+        assert!(delete_session(&mut conn, "s1").unwrap());
+        assert!(!delete_session(&mut conn, "s1").unwrap());
+        for table in ["sessions", "events", "observations", "summaries", "fts"] {
+            assert_eq!(
+                count(&conn, &format!("SELECT COUNT(*) FROM {table}")),
+                0,
+                "{table}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn doc_ids_are_never_reused_and_old_tables_are_rebuilt() {
+        let dir = std::env::temp_dir().join(format!("oboete-db-autoinc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A store from a build before delete existed: plain INTEGER PRIMARY KEY, rows in place.
+        Connection::open(dir.join("oboete.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE observations(id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
+                   repo TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL,
+                   body TEXT NOT NULL, provider TEXT NOT NULL);
+                 CREATE TABLE summaries(id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
+                   repo TEXT NOT NULL, ts INTEGER NOT NULL, body TEXT NOT NULL, provider TEXT NOT NULL);
+                 INSERT INTO observations VALUES(7, 's1', '/r', 1, 'change', 'seven', 'b', 'p');
+                 INSERT INTO summaries VALUES(3, 's1', '/r', 1, 'three', 'p');",
+            )
+            .unwrap();
+        let openers: Vec<_> = (0..4)
+            .map(|_| {
+                let d = dir.clone();
+                std::thread::spawn(move || open(&d).map(drop))
+            })
+            .collect();
+        for h in openers {
+            h.join().unwrap().unwrap();
+        }
+        let mut conn = open(&dir).unwrap();
+        let title: String = conn
+            .query_row("SELECT title FROM observations WHERE id=7", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(title, "seven");
+        assert!(autoincrements(&conn, "observations").unwrap());
+        assert!(autoincrements(&conn, "summaries").unwrap());
+        // Delete the newest of each, store again: the ids move on.
+        assert!(delete_doc(&mut conn, "o7").unwrap());
+        assert!(delete_doc(&mut conn, "s3").unwrap());
+        let s = PendingSession {
+            id: "s1".into(),
+            agent: "claude".into(),
+            repo: "/r".into(),
+            last_event_at: 2,
+        };
+        upsert_session(&conn, "s1", "claude", "/r", "/r", 2).unwrap();
+        let obs = Observation {
+            kind: "change".into(),
+            title: "eight".into(),
+            body: "b".into(),
+        };
+        apply_batch(&mut conn, &s, "p", "four", std::slice::from_ref(&obs), 0).unwrap();
+        let ids =
+            |c: &Connection, sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(ids(&conn, "SELECT MAX(id) FROM observations"), 8);
+        assert_eq!(ids(&conn, "SELECT MAX(id) FROM summaries"), 4);
+        assert_eq!(
+            ids(&conn, "SELECT COUNT(*) FROM fts WHERE doc IN ('o8', 's4')"),
+            2
+        );
+        // A session deleted while its summary was being written leaves nothing behind.
+        assert!(delete_session(&mut conn, "s1").unwrap());
+        apply_batch(&mut conn, &s, "p", "late", std::slice::from_ref(&obs), 0).unwrap();
+        for table in ["observations", "summaries", "fts"] {
+            assert_eq!(
+                ids(&conn, &format!("SELECT COUNT(*) FROM {table}")),
+                0,
+                "{table}"
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

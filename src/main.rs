@@ -84,6 +84,9 @@ enum Cmd {
         /// Port to listen on (0 = any free port)
         #[arg(long, default_value_t = 0)]
         port: u16,
+        /// Also open the page in the default browser
+        #[arg(long)]
+        open: bool,
     },
     /// Replay a JSONL fixture through the hook path and measure
     Replay {
@@ -222,7 +225,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         }
         Cmd::Setup { agent, remove } => setup::run(&home, &agent, remove),
         Cmd::Doctor => setup::doctor(&home),
-        Cmd::View { port } => view::run(&home, port),
+        Cmd::View { port, open } => view::run(&home, port, open),
         Cmd::Replay {
             fixture,
             repo_root,
