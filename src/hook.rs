@@ -145,14 +145,19 @@ fn compact(v: &Value) -> String {
     }
 }
 
-/// Redact secrets, then clip to MAX_FIELD characters (on a char boundary).
+/// Clip to MAX_FIELD characters (on a char boundary), then redact what is kept: scanning the
+/// discarded tail of a megabyte tool output would only cost hook time.
 fn clip(s: &str) -> String {
-    let s = redact::redact(s);
-    if s.chars().count() <= MAX_FIELD {
-        return s;
+    let total = s.chars().count();
+    if total <= MAX_FIELD {
+        return redact::redact(s);
     }
     let head: String = s.chars().take(MAX_FIELD).collect();
-    format!("{head}\n…[clipped {} chars]", s.chars().count() - MAX_FIELD)
+    format!(
+        "{}\n…[clipped {} chars]",
+        redact::redact(&head),
+        total - MAX_FIELD
+    )
 }
 
 /// Last assistant `output_text` in a Codex rollout JSONL, reading only the file's tail.
@@ -194,20 +199,26 @@ fn last_assistant_in_transcript(path: &Path) -> String {
     last
 }
 
-/// Detached `oboete observe`; the lock inside observe makes duplicates harmless.
+/// Detached `oboete observe` in its own process group, so the agent exiting right after
+/// SessionEnd does not take it down; the lock inside observe makes duplicates harmless.
 fn spawn_observe(home: &Path) {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,
     };
-    let _ = std::process::Command::new(exe)
-        .arg("--home")
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--home")
         .arg(home)
         .arg("observe")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let _ = cmd.spawn();
 }
 
 #[cfg(test)]

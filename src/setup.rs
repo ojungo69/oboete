@@ -108,16 +108,16 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
-/// Our marker on a hook group, and a fallback on the command for entries written by older builds.
+/// A group is ours when it runs this program's hook command. No marker key: an agent that
+/// rejected unknown keys in hook groups would take the developer's other hooks down with ours.
 fn is_ours(group: &Value) -> bool {
-    group["oboete"] == true
-        || group["hooks"].as_array().is_some_and(|hs| {
-            hs.iter().any(|h| {
-                h["command"]
-                    .as_str()
-                    .is_some_and(|c| c.contains("oboete") && c.contains(" hook "))
-            })
+    group["hooks"].as_array().is_some_and(|hs| {
+        hs.iter().any(|h| {
+            h["command"]
+                .as_str()
+                .is_some_and(|c| c.contains("oboete") && c.contains(" hook "))
         })
+    })
 }
 
 fn backup_once(file: &Path) -> Result<()> {
@@ -197,7 +197,7 @@ fn claude(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
             .map(|(event, timeout)| {
                 (
                     event.to_string(),
-                    json!({"hooks": [{"type": "command", "command": cmd.line("claude", event), "timeout": timeout}], "oboete": true}),
+                    json!({"hooks": [{"type": "command", "command": cmd.line("claude", event), "timeout": timeout}]}),
                 )
             })
             .collect()
@@ -232,7 +232,7 @@ fn codex(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
                     // 0 = no spill of long context to a file the model never reads.
                     handler["additionalContextLimit"] = json!(0);
                 }
-                let mut group = json!({"hooks": [handler], "oboete": true});
+                let mut group = json!({"hooks": [handler]});
                 if let Some(m) = matcher {
                     group["matcher"] = json!(m);
                 }
@@ -563,7 +563,7 @@ mod tests {
         let ours = || {
             vec![(
                 "Stop".to_string(),
-                json!({"hooks": [{"type": "command", "command": "/x/oboete hook claude Stop"}], "oboete": true}),
+                json!({"hooks": [{"type": "command", "command": "/x/oboete hook claude Stop"}]}),
             )]
         };
         merge_groups(&mut root, ours());
