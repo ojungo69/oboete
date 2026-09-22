@@ -55,16 +55,33 @@ pub fn grok_hooks_file() -> PathBuf {
 }
 
 /// Grok Build runs Claude Code's hooks too, with its own camelCase payload: such an event is
-/// Grok's, and a duplicate when Grok's own hook file is installed (`None` = drop it).
+/// Grok's, and a duplicate when Grok's own hook file carries our handler (`None` = drop it).
 pub fn resolve_agent<'a>(agent: &'a str, payload: &Value, grok_hooks: &Path) -> Option<&'a str> {
     if agent == "claude" && payload.get("hookEventName").is_some() {
-        return if grok_hooks.exists() {
+        return if grok_delivers(grok_hooks) {
             None
         } else {
             Some("grok")
         };
     }
     Some(agent)
+}
+
+/// Grok delivers our events itself while its hook file holds our handler. The file may also
+/// hold the developer's own entries (setup keeps them), which prove nothing.
+fn grok_delivers(grok_hooks: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(grok_hooks) else {
+        return false;
+    };
+    let Ok(root) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    root["hooks"].as_object().is_some_and(|events| {
+        events
+            .values()
+            .flat_map(|groups| groups.as_array().into_iter().flatten())
+            .any(crate::setup::has_ours)
+    })
 }
 
 /// Directories (under the home) where agents run housekeeping sessions of their own: Codex's
@@ -132,7 +149,8 @@ pub fn handle(
     }
 
     // Claude Code and Codex read context at SessionStart (not on resume: the transcript already
-    // has it). Grok ignores SessionStart stdout, so its context rides on the first tool call.
+    // has it; after a compaction it is gone, so `compact` gets it again). Grok ignores
+    // SessionStart stdout, so its context rides on the first tool call.
     let inject_now = match event {
         "SessionStart" => agent != "grok" && payload["source"].as_str() != Some("resume"),
         "PreToolUse" => agent == "grok" && !db::injected(conn, session_id)?,
@@ -301,7 +319,14 @@ mod tests {
         let missing = Path::new("/nonexistent/oboete.json");
         assert_eq!(resolve_agent("claude", &grok, missing), Some("grok"));
         let installed = tmp("grok").join("oboete.json");
-        std::fs::write(&installed, "{}").unwrap();
+        // The developer's own entries in our file do not mean Grok delivers our events.
+        std::fs::write(
+            &installed,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(resolve_agent("claude", &grok, &installed), Some("grok"));
+        std::fs::write(&installed, r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]},{"hooks":[{"type":"command","command":"/x/oboete hook grok Stop"}]}]}}"#).unwrap();
         assert_eq!(resolve_agent("claude", &grok, &installed), None);
         assert_eq!(
             resolve_agent("claude", &json!({"session_id": "c1"}), &installed),

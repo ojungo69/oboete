@@ -57,26 +57,37 @@ CREATE INDEX IF NOT EXISTS provider_calls_day ON provider_calls(provider, ts);
 
 pub fn open(home: &Path) -> Result<Connection> {
     let path = home.join("oboete.db");
-    let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+    let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
     conn.execute_batch(SCHEMA)?;
     // CREATE TABLE IF NOT EXISTS leaves a table from an older build as it was; columns added since
     // are filled in here. ponytail: idempotent column checks; PRAGMA user_version once a migration
     // needs more than ADD COLUMN.
-    ensure_column(&conn, "sessions", "injected_at", "INTEGER")?;
+    ensure_column(&mut conn, "sessions", "injected_at", "INTEGER")?;
     Ok(conn)
 }
 
-fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+/// The read check keeps the hook path free of write locks; the write transaction re-checks,
+/// so hooks that open an old database at the same moment do not race on the ALTER.
+fn ensure_column(conn: &mut Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    if has_column(conn, table, column)? {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if !has_column(&tx, table, column)? {
+        tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let exists = stmt
+    let found = stmt
         .query_map([], |r| r.get::<_, String>(1))?
         .any(|c| c.as_deref() == Ok(column));
-    if !exists {
-        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
-    }
-    Ok(())
+    Ok(found)
 }
 
 pub fn now_ms() -> i64 {
@@ -275,6 +286,16 @@ mod tests {
                  cwd TEXT, started_at INTEGER NOT NULL, ended_at INTEGER, last_event_at INTEGER NOT NULL);",
             )
             .unwrap();
+        // Several agents' hooks can open the old database at the same moment.
+        let openers: Vec<_> = (0..4)
+            .map(|_| {
+                let d = dir.clone();
+                std::thread::spawn(move || open(&d).map(drop))
+            })
+            .collect();
+        for h in openers {
+            h.join().unwrap().unwrap();
+        }
         let conn = open(&dir).unwrap();
         upsert_session(&conn, "s1", "claude", "/r", "/r", 1).unwrap();
         assert!(!injected(&conn, "s1").unwrap());

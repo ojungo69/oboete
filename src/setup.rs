@@ -116,7 +116,7 @@ fn is_our_handler(h: &Value) -> bool {
         .is_some_and(|c| c.contains("oboete") && c.contains(" hook "))
 }
 
-fn has_ours(group: &Value) -> bool {
+pub(crate) fn has_ours(group: &Value) -> bool {
     group["hooks"]
         .as_array()
         .is_some_and(|hs| hs.iter().any(is_our_handler))
