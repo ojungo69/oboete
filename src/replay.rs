@@ -1,0 +1,115 @@
+//! Replay a JSONL fixture (one `{seq, agent, event, session, payload}` per line) through the
+//! hook path, then run observe, and report what the spike must prove: hook latency, resident
+//! size, summarizer success and fallback counts.
+
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+use serde_json::{Value, json};
+
+use crate::{db, hook, observe};
+
+const ROOT_PLACEHOLDER: &str = "__OBOETE_REPLAY_ROOT__";
+
+pub fn run(
+    home: &Path,
+    fixture: &Path,
+    repo_root: Option<PathBuf>,
+    spawn_sample: usize,
+    agent: &str,
+) -> Result<()> {
+    let root = match repo_root {
+        Some(r) => r,
+        None => {
+            let r = home.join("replay-repo");
+            std::fs::create_dir_all(r.join(".git"))?;
+            r
+        }
+    };
+    let root_str = root.canonicalize()?.to_string_lossy().into_owned();
+    let text =
+        std::fs::read_to_string(fixture).with_context(|| format!("read {}", fixture.display()))?;
+    let conn = db::open(home)?;
+
+    // 1. In-process hook path: pure store cost per event.
+    let mut micros: Vec<u128> = Vec::new();
+    let mut injected = 0u32;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let line = line.replace(ROOT_PLACEHOLDER, &root_str);
+        let v: Value = serde_json::from_str(&line)?;
+        if v["agent"].as_str() != Some(agent) {
+            continue;
+        }
+        let event = v["event"].as_str().unwrap_or("");
+        let started = Instant::now();
+        let out = hook::handle(&conn, agent, event, &v["payload"])?;
+        micros.push(started.elapsed().as_micros());
+        if out.is_some() {
+            injected += 1;
+        }
+    }
+    drop(conn);
+
+    // 2. Real process spawns: startup + open + insert, what the agent actually waits for.
+    let spawn_ms = if spawn_sample > 0 {
+        sample_spawns(home, &root_str, spawn_sample)?
+    } else {
+        Vec::new()
+    };
+
+    // 3. Summarize everything that was captured (in-process; nothing spawns here).
+    let stats = observe::run(home, 0)?;
+
+    micros.sort_unstable();
+    let report = json!({
+        "events": micros.len(),
+        "hook_in_process_us": {"p50": pct(&micros, 50), "p95": pct(&micros, 95), "max": micros.last().copied().unwrap_or(0)},
+        "hook_spawn_ms": {"n": spawn_ms.len(), "p50": pct(&spawn_ms, 50), "p95": pct(&spawn_ms, 95), "max": spawn_ms.last().copied().unwrap_or(0)},
+        "session_start_injections": injected,
+        "observe": stats,
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn sample_spawns(home: &Path, root: &str, n: usize) -> Result<Vec<u128>> {
+    let exe = std::env::current_exe()?;
+    let payload = json!({
+        "session_id": "spawn-sample",
+        "cwd": root,
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "spawn sample prompt: measure process start plus one insert"
+    })
+    .to_string();
+    let mut ms = Vec::with_capacity(n);
+    for _ in 0..n {
+        let started = Instant::now();
+        let mut child = std::process::Command::new(&exe)
+            .arg("--home")
+            .arg(home)
+            .args(["hook", "claude", "UserPromptSubmit"])
+            .env("OBOETE_NO_SPAWN", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()?;
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(payload.as_bytes())?;
+        }
+        child.wait()?;
+        ms.push(started.elapsed().as_millis());
+    }
+    ms.sort_unstable();
+    Ok(ms)
+}
+
+fn pct(sorted: &[u128], p: usize) -> u128 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = (sorted.len() * p / 100).min(sorted.len() - 1);
+    sorted[idx]
+}
