@@ -419,7 +419,10 @@ fn cli_headless(
             Err(e) => return Err(CallError::other(format!("wait {cli}: {e}"))),
         }
         if Instant::now() > deadline {
+            // Reap it before the scratch directory goes: a killed child still holds that
+            // directory as its cwd until it is waited for (Windows refuses the removal).
             child.kill().ok();
+            child.wait().ok();
             return Err(CallError::other(format!(
                 "{cli} timed out after {timeout_s}s"
             )));
