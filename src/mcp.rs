@@ -66,6 +66,12 @@ fn text(s: String) -> Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![ContentBlock::text(s)]))
 }
 
+/// A failure the model can act on (a wrong argument, an unknown id) is a tool result with
+/// `isError`, not a protocol error, so the client hands it back to the model.
+fn failed(s: String) -> Result<CallToolResult, ErrorData> {
+    Ok(CallToolResult::error(vec![ContentBlock::text(s)]))
+}
+
 fn internal(e: anyhow::Error) -> ErrorData {
     ErrorData::internal_error(format!("{e:#}"), None)
 }
@@ -82,16 +88,15 @@ impl Oboete {
 
     /// `None` = every repository. Models send `null` and `""` for arguments they mean to leave
     /// out; a `repo` that is not a directory is an error, not a scope that matches nothing.
-    fn scope(&self, all: Option<bool>, repo: Option<&str>) -> Result<Option<String>, ErrorData> {
+    fn scope(&self, all: Option<bool>, repo: Option<&str>) -> Result<Option<String>, String> {
         if all == Some(true) {
             return Ok(None);
         }
         match repo.filter(|r| !r.is_empty()) {
             None => Ok(Some(self.cwd_repo.clone())),
             Some(r) if Path::new(r).is_dir() => Ok(Some(crate::repo::key(Path::new(r)))),
-            Some(r) => Err(ErrorData::invalid_params(
-                format!("repo {r:?} is not a directory: pass a repository's absolute path"),
-                None,
+            Some(r) => Err(format!(
+                "repo {r:?} is not a directory: pass a repository's absolute path"
             )),
         }
     }
@@ -102,7 +107,10 @@ impl Oboete {
     )]
     fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, ErrorData> {
         let conn = db::open(&self.home).map_err(internal)?;
-        let scope = self.scope(a.all, a.repo.as_deref())?;
+        let scope = match self.scope(a.all, a.repo.as_deref()) {
+            Ok(s) => s,
+            Err(m) => return failed(m),
+        };
         let hits = search::search(
             &conn,
             &a.query,
@@ -149,10 +157,7 @@ impl Oboete {
                 },
                 h.body
             )),
-            None => Err(ErrorData::invalid_params(
-                format!("no document {} (ids come from search)", a.id),
-                None,
-            )),
+            None => failed(format!("no document {} (ids come from search)", a.id)),
         }
     }
 
@@ -165,7 +170,10 @@ impl Oboete {
         Parameters(a): Parameters<TimelineArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let conn = db::open(&self.home).map_err(internal)?;
-        let scope = self.scope(a.all, a.repo.as_deref())?;
+        let scope = match self.scope(a.all, a.repo.as_deref()) {
+            Ok(s) => s,
+            Err(m) => return failed(m),
+        };
         let rows = search::timeline(
             &conn,
             scope.as_deref(),
@@ -290,10 +298,19 @@ mod tests {
             search(None, Some(elsewhere.to_str().unwrap())).unwrap(),
             "no hits"
         );
-        assert!(search(None, Some("/elsewhere/not/a/dir")).is_err());
+        let bad = s
+            .search(Parameters(SearchArgs {
+                query: "trigram".into(),
+                all: None,
+                repo: Some("/elsewhere/not/a/dir".into()),
+                limit: None,
+            }))
+            .unwrap();
+        assert_eq!(bad.is_error, Some(true));
         let doc = body(s.get(Parameters(GetArgs { id: "s1".into() })).unwrap());
         assert!(doc.contains("要約: 検索を実装した"), "{doc}");
-        assert!(s.get(Parameters(GetArgs { id: "o9".into() })).is_err());
+        let missing = s.get(Parameters(GetArgs { id: "o9".into() })).unwrap();
+        assert_eq!(missing.is_error, Some(true));
         let tl = body(
             s.timeline(Parameters(TimelineArgs {
                 all: Some(true),

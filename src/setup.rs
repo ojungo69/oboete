@@ -249,7 +249,11 @@ fn read_json_object(file: &Path) -> Result<Value> {
 }
 
 fn write_json(file: &Path, v: &Value) -> Result<()> {
-    write_atomic(file, &format!("{}\n", serde_json::to_string_pretty(v)?))
+    write_atomic(file, &json_text(v)?)
+}
+
+fn json_text(v: &Value) -> Result<String> {
+    Ok(format!("{}\n", serde_json::to_string_pretty(v)?))
 }
 
 /// A missing file reads as empty; any other read error stops setup before it writes anything
@@ -265,15 +269,54 @@ fn read_text(file: &Path) -> Result<String> {
 /// next to the target, then a rename. A symlinked file (dotfile managers) is written through to
 /// its target; the target's mode is kept and a new file gets 0600.
 fn write_atomic(file: &Path, text: &str) -> Result<()> {
+    stage(file, text)?.commit()
+}
+
+/// Where a write to `file` lands: through its symlinks, also to a target that does not exist yet.
+fn resolve_links(file: &Path) -> PathBuf {
+    if let Ok(t) = std::fs::canonicalize(file) {
+        return t;
+    }
+    let mut p = file.to_path_buf();
+    for _ in 0..40 {
+        match std::fs::read_link(&p) {
+            Ok(to) => p = p.parent().map(|d| d.join(&to)).unwrap_or(to),
+            Err(_) => break,
+        }
+    }
+    p
+}
+
+/// The new content written and synced next to its target, not yet renamed over it. Everything
+/// that can fail (a read-only file or directory, a full disk) fails here, so several files can
+/// be staged first and committed together. Dropped uncommitted, the temp file goes.
+struct Staged {
+    file: PathBuf,
+    target: PathBuf,
+    tmp: PathBuf,
+    done: bool,
+}
+
+impl Staged {
+    fn commit(mut self) -> Result<()> {
+        std::fs::rename(&self.tmp, &self.target)
+            .with_context(|| format!("write {}", self.file.display()))?;
+        self.done = true;
+        Ok(())
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if !self.done {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+    }
+}
+
+fn stage(file: &Path, text: &str) -> Result<Staged> {
     use std::io::Write;
-    let target = match std::fs::canonicalize(file) {
-        Ok(t) => t,
-        // A symlink to a file that does not exist yet: create its target, keep the link.
-        Err(_) => match std::fs::read_link(file) {
-            Ok(to) => file.parent().map(|d| d.join(&to)).unwrap_or(to),
-            Err(_) => file.to_path_buf(),
-        },
-    };
+    let target = resolve_links(file);
     refuse_read_only(&target)?;
     let dir = target
         .parent()
@@ -282,23 +325,26 @@ fn write_atomic(file: &Path, text: &str) -> Result<()> {
     let name = target.file_name().unwrap_or_default().to_string_lossy();
     let tmp = dir.join(format!(".{name}.{}.oboete-tmp", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
+    let staged = Staged {
+        file: file.to_path_buf(),
+        target,
+        tmp,
+        done: false,
+    };
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    let written = (|| -> std::io::Result<()> {
-        let mut f = opts.open(&tmp)?;
+    (|| -> std::io::Result<()> {
+        let mut f = opts.open(&staged.tmp)?;
         f.write_all(text.as_bytes())?;
-        if let Ok(m) = std::fs::metadata(&target) {
+        if let Ok(m) = std::fs::metadata(&staged.target) {
             f.set_permissions(m.permissions())?;
         }
-        f.sync_all()?;
-        std::fs::rename(&tmp, &target)
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    written.with_context(|| format!("write {}", file.display()))
+        f.sync_all()
+    })()
+    .with_context(|| format!("write {}", file.display()))?;
+    Ok(staged)
 }
 
 /// A rename would replace a file the developer locked with chmod 444; stop instead.
@@ -367,53 +413,64 @@ fn claude_mcp(cmd: &HookCommand, remove: bool) -> Result<String> {
         return Ok("skipped: `claude` is not on PATH".into());
     }
     let file = claude_mcp_file();
-    let present = read_json_object(&file)?["mcpServers"]
-        .get(MCP_NAME)
-        .cloned();
-    let current = present.clone().filter(Value::is_object);
-    backup_once(&file)?;
-    let verb = if remove { "removed from" } else { "written to" };
-    let done = format!("{verb} {} (by `claude mcp`)", file.display());
-    let remove_cmd = ["mcp", "remove", "--scope", "user", MCP_NAME];
-    if remove {
-        if present.is_some() {
-            claude_cli(&remove_cmd)?;
-        }
-        return Ok(done);
-    }
-    // `add-json` refuses an existing name. A failed remove shows up as add-json's error.
-    let _ = claude_cli(&remove_cmd);
-    let mut entry = current.clone().unwrap_or_else(|| json!({"env": {}}));
-    entry["type"] = json!("stdio");
-    entry["command"] = json!(cmd.exe);
-    entry["args"] = json!(cmd.mcp_args());
-    let add = |e: &Value| {
-        claude_cli(&[
-            "mcp",
-            "add-json",
-            "--scope",
-            "user",
-            MCP_NAME,
-            &e.to_string(),
-        ])
+    let entry_now = || -> Result<Option<Value>> {
+        Ok(read_json_object(&file)?["mcpServers"]
+            .get(MCP_NAME)
+            .cloned())
     };
-    if let Err(e) = add(&entry) {
-        // Put the developer's entry back rather than leave nothing registered.
-        if let Some(old) = &current
-            && let Err(r) = add(old)
-        {
-            // Name the lost entry without printing `env` values (tokens live there).
-            let mut shown = old.clone();
-            if let Some(env) = shown["env"].as_object_mut() {
-                env.values_mut().for_each(|v| *v = json!("…"));
-            }
-            return Err(e.context(format!(
-                "the previous {MCP_NAME} entry could not be put back either ({r:#}); it was {shown}"
-            )));
-        }
-        return Err(e);
+    let present = entry_now()?;
+    backup_once(&file)?;
+    // `add-json` refuses an existing name, so whatever sits under it goes first.
+    if present.is_some() {
+        claude_cli(&["mcp", "remove", "--scope", "user", MCP_NAME])?;
     }
-    Ok(done)
+    if !remove {
+        let old = present.filter(Value::is_object);
+        let mut entry = old.clone().unwrap_or_else(|| json!({"env": {}}));
+        entry["type"] = json!("stdio");
+        entry["command"] = json!(cmd.exe);
+        entry["args"] = json!(cmd.mcp_args());
+        let add = |e: &Value| {
+            claude_cli(&[
+                "mcp",
+                "add-json",
+                "--scope",
+                "user",
+                MCP_NAME,
+                &e.to_string(),
+            ])
+        };
+        if let Err(e) = add(&entry) {
+            // Put the developer's entry back rather than leave nothing registered.
+            if let Some(old) = &old {
+                let _ = add(old);
+                if entry_now()?.is_none() {
+                    // Name the lost entry without printing `env` values (tokens live there).
+                    let mut shown = old.clone();
+                    if let Some(env) = shown["env"].as_object_mut() {
+                        env.values_mut().for_each(|v| *v = json!("…"));
+                    }
+                    return Err(e.context(format!(
+                        "the previous {MCP_NAME} entry could not be put back; it was {shown}"
+                    )));
+                }
+            }
+            return Err(e);
+        }
+    }
+    // `claude mcp` exits 0 also when it could not save (a read-only config): check the file.
+    let landed = if remove {
+        entry_now()?.is_none()
+    } else {
+        mcp_command(&file) == Some((cmd.exe.clone(), cmd.mcp_args()))
+    };
+    anyhow::ensure!(
+        landed,
+        "`claude mcp` did not update {} (is it writable?)",
+        file.display()
+    );
+    let verb = if remove { "removed from" } else { "written to" };
+    Ok(format!("{verb} {} (by `claude mcp`)", file.display()))
 }
 
 fn claude_cli(args: &[&str]) -> Result<()> {
@@ -554,14 +611,11 @@ fn codex(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     let hooks_file = codex_home().join("hooks.json");
     let config_file = codex_home().join("config.toml");
     let mut root = read_json_object(&hooks_file)?;
-    // Both files are read and checked before either is written: the trust rows in config.toml
-    // follow handler positions in hooks.json, so one written without the other cannot be repaired
-    // by a rerun.
+    // The trust rows in config.toml follow handler positions in hooks.json, so one written
+    // without the other cannot be repaired by a rerun: both are read first and staged together.
     let mut doc: toml_edit::DocumentMut = read_text(&config_file)?
         .parse()
         .with_context(|| format!("parse {}", config_file.display()))?;
-    refuse_read_only(&hooks_file)?;
-    refuse_read_only(&config_file)?;
     backup_once(&hooks_file)?;
     backup_once(&config_file)?;
     let before = codex_trust_keys(&hooks_file, &root);
@@ -585,11 +639,12 @@ fn codex(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
             .collect()
     };
     merge_groups(&mut root, wanted);
-    write_json(&hooks_file, &root)?;
     let delta = codex_trust_delta(&before, &codex_trust_keys(&hooks_file, &root));
-
     codex_write_trust(&mut doc, &delta);
-    write_atomic(&config_file, &doc.to_string())?;
+    let hooks = stage(&hooks_file, &json_text(&root)?)?;
+    let config = stage(&config_file, &doc.to_string())?;
+    hooks.commit()?;
+    config.commit()?;
     Ok(vec![
         hooks_file.display().to_string(),
         config_file.display().to_string(),
@@ -1106,6 +1161,8 @@ mod tests {
         write_atomic(&new, "{}\n").unwrap();
         assert_eq!(mode(&new), 0o600);
         assert_eq!(std::fs::read_dir(dir.join("sub")).unwrap().count(), 1);
+        let chain = dir.join("chain.json");
+        std::os::unix::fs::symlink("dangling.json", &chain).unwrap();
         // A link whose target does not exist yet: the target is created, the link stays.
         let dangling = dir.join("dangling.json");
         std::os::unix::fs::symlink("sub/later.json", &dangling).unwrap();
@@ -1121,6 +1178,23 @@ mod tests {
             std::fs::read_to_string(dir.join("sub/later.json")).unwrap(),
             "{}\n"
         );
+        // Through a chain of links, too.
+        std::fs::remove_file(dir.join("sub/later.json")).unwrap();
+        write_atomic(&chain, "[]\n").unwrap();
+        assert!(
+            dangling
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("sub/later.json")).unwrap(),
+            "[]\n"
+        );
+        // A staged file that is never committed leaves nothing behind.
+        drop(stage(&dir.join("sub/never.json"), "{}").unwrap());
+        assert_eq!(std::fs::read_dir(dir.join("sub")).unwrap().count(), 2);
         // A file locked read-only is not replaced.
         std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o444)).unwrap();
         assert!(write_atomic(&real, "{}").is_err());
