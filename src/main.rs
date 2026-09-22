@@ -7,6 +7,7 @@ mod config;
 mod db;
 mod hook;
 mod inject;
+mod mcp;
 mod observe;
 mod provider;
 mod redact;
@@ -47,6 +48,8 @@ enum Cmd {
     },
     /// Print the context that would be injected for the current directory
     Inject,
+    /// Serve the memory as an MCP server on stdin/stdout (search / get / timeline tools)
+    Mcp,
     /// Full-text search over observations and summaries (this repository unless --all)
     Search {
         /// Terms, all required. One under 3 characters matches as a literal substring
@@ -146,6 +149,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             print!("{}", inject::context(&conn, &repo)?);
             Ok(())
         }
+        Cmd::Mcp => mcp::run(&home),
         Cmd::Search { query, all, limit } => {
             let conn = db::open(&home)?;
             let query = query.join(" ");

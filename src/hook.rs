@@ -48,10 +48,14 @@ pub fn run_stdin(home: &Path, agent: &str, event: &str) -> Result<()> {
 
 /// The hook file `oboete setup grok` writes. While it exists, Grok delivers its own events.
 pub fn grok_hooks_file() -> PathBuf {
-    config::home_dir()
-        .join(".grok")
-        .join("hooks")
-        .join("oboete.json")
+    grok_home().join("hooks").join("oboete.json")
+}
+
+/// Grok Build's config directory: `$GROK_HOME`, else `~/.grok`.
+pub fn grok_home() -> PathBuf {
+    std::env::var_os("GROK_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config::home_dir().join(".grok"))
 }
 
 /// Grok Build runs Claude Code's hooks too, with its own camelCase payload: such an event is
