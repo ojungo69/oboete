@@ -15,6 +15,9 @@ pub const AGENTS: [&str; 3] = ["claude", "codex", "grok"];
 const BACKUP_SUFFIX: &str = ".oboete.bak";
 
 /// (event, timeout seconds). Timeouts only bound a stalled hook; the hook itself takes ~10 ms.
+/// The name each agent knows our MCP server by (tools show up as `oboete__search` and so on).
+const MCP_NAME: &str = "oboete";
+
 const CLAUDE_EVENTS: &[(&str, u32)] = &[
     ("SessionStart", 10),
     ("UserPromptSubmit", 5),
@@ -64,6 +67,24 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         };
         let verb = if remove { "removed from" } else { "written to" };
         println!("{a}: hooks {verb} {}", files.join(", "));
+        let mcp_file = match a {
+            "claude" => {
+                let f = claude_mcp_file();
+                claude_mcp(&f, &cmd, remove)?;
+                f
+            }
+            "codex" => {
+                let f = codex_home().join("config.toml");
+                toml_mcp(&f, &cmd, remove)?;
+                f
+            }
+            _ => {
+                let f = grok_config_file();
+                toml_mcp(&f, &cmd, remove)?;
+                f
+            }
+        };
+        println!("{a}: mcp server {verb} {}", mcp_file.display());
     }
     if !remove {
         println!("Hook files are read when an agent starts: restart running sessions.");
@@ -71,7 +92,8 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
     Ok(())
 }
 
-/// The command line every hook entry runs: this binary's absolute path plus `hook <agent> <event>`.
+/// The command line every hook entry runs: this binary's absolute path plus `hook <agent> <event>`;
+/// the MCP registration is the same binary with `mcp`.
 struct HookCommand {
     exe: String,
     home: Option<String>,
@@ -91,6 +113,16 @@ impl HookCommand {
             exe: exe.to_string_lossy().into_owned(),
             home,
         })
+    }
+    /// `[--home <dir>] mcp`, the arguments after the binary in an MCP server entry.
+    fn mcp_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(h) = &self.home {
+            args.push("--home".to_string());
+            args.push(h.clone());
+        }
+        args.push("mcp".to_string());
+        args
     }
     fn line(&self, agent: &str, event: &str) -> String {
         let mut s = shell_quote(&self.exe);
@@ -263,6 +295,90 @@ fn merge_groups(root: &mut Value, wanted: Vec<(String, Value)>) {
     }
     hooks.retain(|_, v| !v.as_array().is_some_and(Vec::is_empty));
     root["hooks"] = Value::Object(hooks);
+}
+
+/// User-scope MCP servers of Claude Code live in `~/.claude.json` under `mcpServers` (the
+/// file Claude Code also keeps its own state in; only our key is touched).
+fn claude_mcp_file() -> PathBuf {
+    config::home_dir().join(".claude.json")
+}
+
+fn claude_mcp(file: &Path, cmd: &HookCommand, remove: bool) -> Result<()> {
+    let mut root = read_json_object(file)?;
+    backup_once(file)?;
+    if !root["mcpServers"].is_object() {
+        root["mcpServers"] = json!({});
+    }
+    let servers = root["mcpServers"].as_object_mut().expect("object");
+    if remove {
+        servers.remove(MCP_NAME);
+    } else {
+        servers.insert(
+            MCP_NAME.to_string(),
+            json!({"type": "stdio", "command": cmd.exe, "args": cmd.mcp_args(), "env": {}}),
+        );
+    }
+    write_json(file, &root)
+}
+
+/// Codex and Grok Build both take `[mcp_servers.<name>]` with `command` and `args` in their
+/// `config.toml`. Other servers and the rest of the file are left as they are.
+fn toml_mcp(file: &Path, cmd: &HookCommand, remove: bool) -> Result<()> {
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("parse {}", file.display()))?;
+    backup_once(file)?;
+    let root = doc.as_table_mut();
+    if remove {
+        if let Some(servers) = root
+            .get_mut("mcp_servers")
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            servers.remove(MCP_NAME);
+            if servers.is_empty() {
+                root.remove("mcp_servers");
+            }
+        }
+    } else {
+        let servers = root
+            .entry("mcp_servers")
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(servers) = servers.as_table_mut() else {
+            anyhow::bail!("{}: mcp_servers is not a table", file.display());
+        };
+        servers.set_implicit(true);
+        let mut row = toml_edit::Table::new();
+        row["command"] = toml_edit::value(cmd.exe.as_str());
+        row["args"] = toml_edit::value(cmd.mcp_args().iter().collect::<toml_edit::Array>());
+        servers[MCP_NAME] = toml_edit::Item::Table(row);
+    }
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(file, doc.to_string()).with_context(|| format!("write {}", file.display()))
+}
+
+/// The `command` registered under our name, if any: `~/.claude.json` (JSON) or a `config.toml`.
+fn mcp_command(file: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(file).ok()?;
+    if file.extension().is_some_and(|e| e == "toml") {
+        let doc: toml_edit::DocumentMut = text.parse().ok()?;
+        doc.get("mcp_servers")?
+            .get(MCP_NAME)?
+            .get("command")?
+            .as_str()
+            .map(String::from)
+    } else {
+        let v: Value = serde_json::from_str(&text).ok()?;
+        v["mcpServers"][MCP_NAME]["command"]
+            .as_str()
+            .map(String::from)
+    }
+}
+
+fn grok_config_file() -> PathBuf {
+    config::home_dir().join(".grok").join("config.toml")
 }
 
 fn claude_settings_file() -> PathBuf {
@@ -648,6 +764,17 @@ pub fn doctor(home: &Path) -> Result<()> {
         "  grok    {}",
         wired(&crate::hook::grok_hooks_file(), "grok")
     );
+    let mcp = |file: &Path| -> &str {
+        match mcp_command(file) {
+            Some(c) if c == exe_str => "registered",
+            Some(_) => "registered with another binary (rerun `oboete setup`)",
+            None => "not registered (run `oboete setup`)",
+        }
+    };
+    println!("mcp server `{MCP_NAME}`:");
+    println!("  claude  {}", mcp(&claude_mcp_file()));
+    println!("  codex   {}", mcp(&codex_home().join("config.toml")));
+    println!("  grok    {}", mcp(&grok_config_file()));
     println!("providers (chain order):");
     for p in config::load(home)?.providers {
         let state = match &p {
@@ -721,6 +848,62 @@ mod tests {
             home: Some("/h o/me".into()),
         };
         assert!(ours(&cmd.line("codex", "Stop")));
+    }
+
+    #[test]
+    fn mcp_registrations_round_trip_and_leave_other_servers() {
+        let dir = std::env::temp_dir().join(format!("oboete-mcp-setup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cmd = HookCommand {
+            exe: "/x/oboete".into(),
+            home: Some("/h".into()),
+        };
+        // TOML (Codex, Grok): other servers and sections survive, ours comes and goes.
+        let toml = dir.join("config.toml");
+        std::fs::write(&toml, "model = \"x\"\n\n[mcp_servers.other]\ncommand = \"o\"\n\n[hooks.state.\"k\"]\ntrusted_hash = \"h\"\n").unwrap();
+        toml_mcp(&toml, &cmd, false).unwrap();
+        let text = std::fs::read_to_string(&toml).unwrap();
+        assert!(text.contains("[mcp_servers.oboete]\ncommand = \"/x/oboete\"\nargs = [\"--home\", \"/h\", \"mcp\"]"), "{text}");
+        assert!(
+            text.contains("[mcp_servers.other]")
+                && text.contains("model = \"x\"")
+                && text.contains("[hooks.state.\"k\"]")
+        );
+        assert!(!text.contains("\n[mcp_servers]\n"), "{text}");
+        assert_eq!(mcp_command(&toml).as_deref(), Some("/x/oboete"));
+        toml_mcp(&toml, &cmd, true).unwrap();
+        let text = std::fs::read_to_string(&toml).unwrap();
+        assert!(
+            !text.contains("oboete") && text.contains("[mcp_servers.other]"),
+            "{text}"
+        );
+        assert!(mcp_command(&toml).is_none());
+        // An empty file gains only our table; removing it leaves the file without mcp_servers.
+        let fresh = dir.join("fresh.toml");
+        toml_mcp(&fresh, &cmd, false).unwrap();
+        assert_eq!(mcp_command(&fresh).as_deref(), Some("/x/oboete"));
+        toml_mcp(&fresh, &cmd, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap().trim(), "");
+        // JSON (Claude Code): `mcpServers.oboete` next to the file's other state.
+        let json_file = dir.join("claude.json");
+        std::fs::write(
+            &json_file,
+            "{\"numStartups\": 3, \"mcpServers\": {\"other\": {\"command\": \"o\"}}}",
+        )
+        .unwrap();
+        claude_mcp(&json_file, &cmd, false).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&json_file).unwrap()).unwrap();
+        assert_eq!(
+            v["mcpServers"]["oboete"],
+            json!({"type": "stdio", "command": "/x/oboete", "args": ["--home", "/h", "mcp"], "env": {}})
+        );
+        assert_eq!(v["mcpServers"]["other"]["command"], "o");
+        assert_eq!(v["numStartups"], 3);
+        assert_eq!(mcp_command(&json_file).as_deref(), Some("/x/oboete"));
+        claude_mcp(&json_file, &cmd, true).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&json_file).unwrap()).unwrap();
+        assert!(v["mcpServers"]["oboete"].is_null() && v["mcpServers"]["other"].is_object());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
