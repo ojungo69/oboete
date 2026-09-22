@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS sessions(
   cwd TEXT,
   started_at INTEGER NOT NULL,
   ended_at INTEGER,
-  last_event_at INTEGER NOT NULL
+  last_event_at INTEGER NOT NULL,
+  injected_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY,
@@ -56,11 +57,37 @@ CREATE INDEX IF NOT EXISTS provider_calls_day ON provider_calls(provider, ts);
 
 pub fn open(home: &Path) -> Result<Connection> {
     let path = home.join("oboete.db");
-    let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+    let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
     conn.execute_batch(SCHEMA)?;
+    // CREATE TABLE IF NOT EXISTS leaves a table from an older build as it was; columns added since
+    // are filled in here. ponytail: idempotent column checks; PRAGMA user_version once a migration
+    // needs more than ADD COLUMN.
+    ensure_column(&mut conn, "sessions", "injected_at", "INTEGER")?;
     Ok(conn)
+}
+
+/// The read check keeps the hook path free of write locks; the write transaction re-checks,
+/// so hooks that open an old database at the same moment do not race on the ALTER.
+fn ensure_column(conn: &mut Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    if has_column(conn, table, column)? {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if !has_column(&tx, table, column)? {
+        tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let found = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .any(|c| c.as_deref() == Ok(column));
+    Ok(found)
 }
 
 pub fn now_ms() -> i64 {
@@ -84,6 +111,27 @@ pub fn upsert_session(
         params![id, agent, repo, cwd, ts],
     )?;
     Ok(())
+}
+
+/// Context was handed to this session (Claude/Codex at SessionStart, Grok at its first tool call).
+pub fn mark_injected(conn: &Connection, id: &str, ts: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE sessions SET injected_at=?2 WHERE id=?1",
+        params![id, ts],
+    )?;
+    Ok(())
+}
+
+pub fn injected(conn: &Connection, id: &str) -> Result<bool> {
+    let v: Option<i64> = conn
+        .query_row(
+            "SELECT injected_at FROM sessions WHERE id=?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(v.is_some())
 }
 
 pub fn end_session(conn: &Connection, id: &str, ts: i64) -> Result<()> {
@@ -207,17 +255,67 @@ pub fn record_call(
     Ok(())
 }
 
-/// Calls made to `provider` since the last UTC midnight (the per-provider daily budget window).
+/// Requests sent to `provider` since the last UTC midnight (the per-provider daily budget window).
+/// A 429 that was waited out still counts: the budget bounds our requests, not our successes.
 pub fn calls_today(conn: &Connection, provider: &str) -> Result<u32> {
     let day_ms: i64 = 86_400_000;
     let midnight = now_ms() / day_ms * day_ms;
     let n: u32 = conn
         .query_row(
-            "SELECT COUNT(*) FROM provider_calls WHERE provider=?1 AND ts>=?2 AND outcome IN ('ok','error','invalid')",
+            "SELECT COUNT(*) FROM provider_calls WHERE provider=?1 AND ts>=?2 AND outcome IN ('ok','error','invalid','wait')",
             params![provider, midnight],
             |r| r.get(0),
         )
         .optional()?
         .unwrap_or(0);
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sessions_table_from_m0_gains_injected_at() {
+        let dir = std::env::temp_dir().join(format!("oboete-db-m0-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Connection::open(dir.join("oboete.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE sessions(id TEXT PRIMARY KEY, agent TEXT NOT NULL, repo TEXT NOT NULL,
+                 cwd TEXT, started_at INTEGER NOT NULL, ended_at INTEGER, last_event_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+        // Several agents' hooks can open the old database at the same moment.
+        let openers: Vec<_> = (0..4)
+            .map(|_| {
+                let d = dir.clone();
+                std::thread::spawn(move || open(&d).map(drop))
+            })
+            .collect();
+        for h in openers {
+            h.join().unwrap().unwrap();
+        }
+        let conn = open(&dir).unwrap();
+        upsert_session(&conn, "s1", "claude", "/r", "/r", 1).unwrap();
+        assert!(!injected(&conn, "s1").unwrap());
+        mark_injected(&conn, "s1", 2).unwrap();
+        assert!(injected(&conn, "s1").unwrap());
+        // Reopening a current database is a no-op.
+        drop(conn);
+        assert!(injected(&open(&dir).unwrap(), "s1").unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn waited_429_counts_against_the_daily_budget() {
+        let dir = std::env::temp_dir().join(format!("oboete-db-budget-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = open(&dir).unwrap();
+        record_call(&conn, "groq", "wait", 1, None).unwrap();
+        record_call(&conn, "groq", "ok", 1, None).unwrap();
+        record_call(&conn, "groq", "budget", 0, None).unwrap();
+        assert_eq!(calls_today(&conn, "groq").unwrap(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
