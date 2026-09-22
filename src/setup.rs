@@ -298,7 +298,8 @@ struct TrustDelta {
 }
 
 /// Trust rows are keyed by position, so dropping or re-appending our groups shifts the groups
-/// after them; their rows (matched by hash) follow them to the new key.
+/// after them; their rows follow them to the new key. merge_groups only drops ours and appends
+/// ours, so the k-th other handler before the merge is the k-th other handler after it.
 fn codex_trust_delta(before: &[TrustKey], after: &[TrustKey]) -> TrustDelta {
     TrustDelta {
         stale: before
@@ -306,15 +307,12 @@ fn codex_trust_delta(before: &[TrustKey], after: &[TrustKey]) -> TrustDelta {
             .filter(|b| b.ours && !after.iter().any(|a| a.ours && a.key == b.key))
             .map(|b| b.key.clone())
             .collect(),
-        moved: after
+        moved: before
             .iter()
-            .filter(|a| !a.ours)
-            .filter_map(|a| {
-                before
-                    .iter()
-                    .find(|b| !b.ours && b.hash == a.hash && b.key != a.key)
-                    .map(|b| (b.key.clone(), a.key.clone()))
-            })
+            .filter(|b| !b.ours)
+            .zip(after.iter().filter(|a| !a.ours))
+            .filter(|(b, a)| b.key != a.key)
+            .map(|(b, a)| (b.key.clone(), a.key.clone()))
             .collect(),
         fresh: after
             .iter()
@@ -351,8 +349,14 @@ fn codex_write_trust(doc: &mut toml_edit::DocumentMut, delta: &TrustDelta) {
     for key in &delta.stale {
         state.remove(key);
     }
-    for (old, new) in &delta.moved {
-        if let Some(row) = state.remove(old) {
+    // Take every moved row out before putting any back: moves can chain or swap.
+    let rows: Vec<_> = delta
+        .moved
+        .iter()
+        .map(|(old, new)| (new, state.remove(old)))
+        .collect();
+    for (new, row) in rows {
+        if let Some(row) = row {
             state[new.as_str()] = row;
         }
     }
@@ -666,6 +670,7 @@ mod tests {
         let before = keys(vec![ours.clone(), user.clone()]);
         let toml = "[hooks.state.\"/h/hooks.json:stop:0:0\"]\ntrusted_hash = \"sha256:ours-old\"\n\n[hooks.state.\"/h/hooks.json:stop:1:0\"]\ntrusted_hash = \"sha256:user\"\n";
         let k = |g: usize| format!("/h/hooks.json:stop:{g}:0");
+        let kh = |g: usize, h: usize| format!("/h/hooks.json:stop:{g}:{h}");
 
         // Rerun: ours is re-appended after the user's group, which moves from 1 to 0.
         let d = codex_trust_delta(&before, &keys(vec![user.clone(), ours.clone()]));
@@ -714,5 +719,24 @@ mod tests {
         let last = keys(vec![user.clone(), ours.clone()]);
         let d = codex_trust_delta(&last, &last);
         assert!(d.stale.is_empty() && d.moved.is_empty() && d.fresh.len() == 1);
+
+        // Two identical user handlers (same hash) each keep their own row, by position.
+        let twins = json!({"hooks": [
+            {"type": "command", "command": "echo hi", "timeout": 5},
+            {"type": "command", "command": "echo hi", "timeout": 5}
+        ]});
+        let same = keys(vec![twins.clone()]);
+        assert_eq!(codex_trust_delta(&same, &same), TrustDelta::default());
+        let d = codex_trust_delta(&keys(vec![ours.clone(), twins.clone()]), &same);
+        assert_eq!(d.moved, vec![(kh(1, 0), kh(0, 0)), (kh(1, 1), kh(0, 1))]);
+        let mut doc: toml_edit::DocumentMut = "[hooks.state.\"/h/hooks.json:stop:1:0\"]\ntrusted_hash = \"sha256:t0\"\n\n[hooks.state.\"/h/hooks.json:stop:1:1\"]\ntrusted_hash = \"sha256:t1\"\n".parse().unwrap();
+        codex_write_trust(&mut doc, &d);
+        let out = doc.to_string();
+        assert!(
+            out.contains("stop:0:0\"]\ntrusted_hash = \"sha256:t0\"")
+                && out.contains("stop:0:1\"]\ntrusted_hash = \"sha256:t1\"")
+                && !out.contains("stop:1:"),
+            "{out}"
+        );
     }
 }

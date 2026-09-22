@@ -134,8 +134,9 @@ impl<'a> Chain<'a> {
                     db::record_call(conn, &name, outcome, ms, Some(&e.message))?;
                     let cooldown = match e.status {
                         Some(429) => Some(COOLDOWN_429),
-                        // A rejected key or forbidden model fails every request of the pass.
-                        Some(401 | 403) => Some(COOLDOWN_OUTAGE),
+                        // A rejected key fails every request of the pass. 403 stays per answer:
+                        // OpenRouter uses it for moderation of one prompt.
+                        Some(401) => Some(COOLDOWN_OUTAGE),
                         Some(400..=499) => None,
                         _ if e.invalid() => None,
                         _ => Some(COOLDOWN_OUTAGE),
