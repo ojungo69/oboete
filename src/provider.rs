@@ -271,6 +271,35 @@ fn retry_after_in_body(body: &str) -> Option<f64> {
     rest[num.len()..].starts_with('s').then_some(secs)
 }
 
+/// A fresh private directory for one CLI run, removed again when dropped (on every return
+/// path, so failed attempts leave nothing behind). The name is random and the directory must
+/// not exist yet, so nobody else on the machine can plant one under a guessable name (the pid)
+/// and read what the CLI writes there; on Unix it is also created mode 0700.
+struct Scratch(std::path::PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+fn scratch_dir() -> Result<Scratch, CallError> {
+    let mut raw = [0u8; 8];
+    getrandom::fill(&mut raw).map_err(|e| CallError::other(format!("scratch dir: {e}")))?;
+    let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let dir = std::env::temp_dir().join(format!("oboete-cli-{name}"));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&dir)
+        .map_err(|e| CallError::other(format!("scratch dir: {e}")))?;
+    Ok(Scratch(dir))
+}
+
 /// Run a subscription CLI headless, with the smallest configuration each one allows: no hooks,
 /// no tools, no session persistence, no user settings or MCP servers where the CLI can skip them.
 fn cli_headless(
@@ -281,9 +310,8 @@ fn cli_headless(
     schema: &Value,
 ) -> Result<Value, CallError> {
     let schema_text = schema.to_string();
-    let scratch = std::env::temp_dir().join(format!("oboete-cli-{}", std::process::id()));
-    std::fs::create_dir_all(&scratch).map_err(|e| CallError::other(format!("scratch dir: {e}")))?;
-    let last = scratch.join("last.json");
+    let scratch = scratch_dir()?;
+    let last = scratch.0.join("last.json");
     let mut cmd = Command::new(cli);
     match cli {
         "agy" => {
@@ -340,7 +368,7 @@ fn cli_headless(
             }
         }
         "codex" => {
-            let schema_file = scratch.join("schema.json");
+            let schema_file = scratch.0.join("schema.json");
             std::fs::write(&schema_file, &schema_text)
                 .map_err(|e| CallError::other(format!("write schema: {e}")))?;
             cmd.args(["exec", prompt, "--output-schema"])
@@ -365,7 +393,7 @@ fn cli_headless(
     }
     // Keep the CLI out of the user's repo and away from the parent's secrets-bearing env, and
     // make sure our own hooks ignore the summarizer's session.
-    cmd.current_dir(&scratch)
+    cmd.current_dir(&scratch.0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -391,7 +419,10 @@ fn cli_headless(
             Err(e) => return Err(CallError::other(format!("wait {cli}: {e}"))),
         }
         if Instant::now() > deadline {
+            // Reap it before the scratch directory goes: a killed child still holds that
+            // directory as its cwd until it is waited for (Windows refuses the removal).
             child.kill().ok();
+            child.wait().ok();
             return Err(CallError::other(format!(
                 "{cli} timed out after {timeout_s}s"
             )));
@@ -414,7 +445,6 @@ fn cli_headless(
     } else {
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
-    std::fs::remove_dir_all(&scratch).ok();
     extract_structured(cli, &text)
 }
 
