@@ -1,7 +1,8 @@
-//! `oboete view`: a read-only viewer on 127.0.0.1 for a browser. std `TcpListener` + `httparse`,
-//! one thread per connection, one bundled page and a small JSON API over `search`. Every `/api`
-//! request carries the per-launch token, which the page reads from the URL fragment and sends as a
-//! header. docs/m1.md decision 11 has the reasons (tiny_http's open CVEs) and the threat model.
+//! `oboete view`: the memory in a browser, on 127.0.0.1. std `TcpListener` + `httparse`, one
+//! thread per connection, one bundled page and a small JSON API over `search` (reads) plus two
+//! delete endpoints. Every `/api` request carries the per-launch token, which the page reads from
+//! the URL fragment and sends as a header. docs/m1.md decisions 11 and 14 have the reasons
+//! (tiny_http's open CVEs) and the threat model.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -11,10 +12,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use rusqlite::params;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{db, repo, search};
+use crate::{db, inject, repo, search};
 
 const INDEX: &str = include_str!("../assets/viewer/index.html");
 const APP_JS: &str = include_str!("../assets/viewer/app.js");
@@ -85,7 +87,7 @@ impl Response {
 }
 
 /// Serve until interrupted.
-pub fn run(home: &Path, port: u16) -> Result<()> {
+pub fn run(home: &Path, port: u16, open: bool) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let port = listener.local_addr()?.port();
     let mut raw = [0u8; 16];
@@ -96,10 +98,11 @@ pub fn run(home: &Path, port: u16) -> Result<()> {
         port,
         token: raw.iter().map(|b| format!("{b:02x}")).collect(),
     });
-    println!(
-        "http://127.0.0.1:{port}/#t={}\n(open it in a browser; Ctrl-C stops the viewer)",
-        viewer.token
-    );
+    let url = format!("http://127.0.0.1:{port}/#t={}", viewer.token);
+    println!("{url}\n(open it in a browser; Ctrl-C stops the viewer)");
+    if open {
+        open_browser(&url);
+    }
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let v = Arc::clone(&viewer);
@@ -108,6 +111,39 @@ pub fn run(home: &Path, port: u16) -> Result<()> {
         std::thread::spawn(move || v.serve(stream));
     }
     Ok(())
+}
+
+/// Best effort. The address (token included) goes on the opener's command line, where this
+/// machine's users can read it for the opener's lifetime; the page is theirs anyway.
+fn open_browser(url: &str) {
+    let wsl = std::fs::read_to_string("/proc/version")
+        .is_ok_and(|v| v.to_ascii_lowercase().contains("microsoft"));
+    let openers: &[&[&str]] = if cfg!(target_os = "macos") {
+        &[&["open"]]
+    } else if cfg!(windows) {
+        &[&["cmd", "/C", "start", ""]]
+    } else if wsl {
+        &[&["wslview"], &["explorer.exe"]]
+    } else {
+        &[&["xdg-open"]]
+    };
+    let launched = openers.iter().any(|o| {
+        std::process::Command::new(o[0])
+            .args(&o[1..])
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|mut child| {
+                // Reap it, or it sits as a zombie for as long as the viewer runs.
+                std::thread::spawn(move || child.wait());
+            })
+            .is_ok()
+    });
+    if !launched {
+        eprintln!("(no browser opener found; paste the address into one)");
+    }
 }
 
 impl Viewer {
@@ -151,11 +187,19 @@ impl Viewer {
                 .find(|(n, _)| n.eq_ignore_ascii_case(name))
                 .map(|(_, v)| *v)
         };
-        if method != "GET" && method != "HEAD" {
-            return Response::text(405, "read-only viewer");
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        // Reads everywhere; the two delete endpoints are the only writes. OPTIONS stays 405, so
+        // a cross-site DELETE (its custom header forces a preflight) never gets through.
+        let deleting = method == "DELETE" && matches!(path, "/api/doc" | "/api/session");
+        if method != "GET" && method != "HEAD" && !deleting {
+            return Response::text(405, "method not allowed");
         }
-        // No request here has a body; refusing framing headers outright leaves nothing to smuggle.
-        if header("content-length").is_some() || header("transfer-encoding").is_some() {
+        // No request here has a body; refusing framing headers outright leaves nothing to
+        // smuggle. A browser may still declare the empty body of its DELETE.
+        let empty_body = |l: &str| deleting && l.trim() == "0";
+        if header("transfer-encoding").is_some()
+            || header("content-length").is_some_and(|l| !empty_body(l))
+        {
             return Response::text(400, "requests carry no body");
         }
         // DNS rebinding: a page on another name that resolves to 127.0.0.1 sends its own Host.
@@ -168,7 +212,6 @@ impl Viewer {
         if !host_ok {
             return Response::text(403, "open the viewer through 127.0.0.1 or localhost");
         }
-        let (path, query) = target.split_once('?').unwrap_or((target, ""));
         match path {
             "/" => return Response::new(200, "text/html; charset=utf-8", INDEX),
             "/app.js" => return Response::new(200, "text/javascript; charset=utf-8", APP_JS),
@@ -182,10 +225,31 @@ impl Viewer {
             return Response::text(401, "missing or wrong token");
         }
         let q = params(query);
-        match self.api(&path["/api/".len()..], &q) {
+        let name = &path["/api/".len()..];
+        let result = if deleting {
+            self.delete(name, &q)
+        } else {
+            self.api(name, &q)
+        };
+        match result {
             Ok(r) => r,
             Err(e) => Response::text(500, &format!("{e:#}")),
         }
+    }
+
+    fn delete(&self, name: &str, q: &HashMap<String, String>) -> Result<Response> {
+        let mut conn = db::open(&self.home)?;
+        let id = q.get("id").map(String::as_str).unwrap_or("");
+        let gone = match name {
+            "doc" => db::delete_doc(&mut conn, id)?,
+            "session" => db::delete_session(&mut conn, id)?,
+            _ => false,
+        };
+        Ok(if gone {
+            Response::new(204, "text/plain", "")
+        } else {
+            Response::text(404, "no such document")
+        })
     }
 
     fn api(&self, name: &str, q: &HashMap<String, String>) -> Result<Response> {
@@ -206,6 +270,19 @@ impl Viewer {
                     .map(|r| json!({"repo": r.repo, "sessions": r.sessions, "last": r.last}))
                     .collect();
                 json!({"current": self.cwd_repo, "repos": repos})
+            }
+            "version" => json!({"v": version(&conn)?}),
+            "feed" => {
+                let rows: Vec<Value> = search::feed(&conn, repo, limit(50))?
+                    .iter()
+                    .map(|r| {
+                        let mut v = doc(&r.hit, &r.hit.body);
+                        v["session"] = json!(r.session);
+                        v["agent"] = json!(r.agent);
+                        v
+                    })
+                    .collect();
+                json!(rows)
             }
             "timeline" => {
                 let rows: Vec<Value> = search::timeline(&conn, repo, limit(50))?
@@ -234,9 +311,103 @@ impl Viewer {
                 Some(h) => doc(&h, &h.body),
                 None => return Ok(Response::text(404, "no such document")),
             },
+            // What a session starting in this repository is handed (the page's "All" means the
+            // repository the viewer was started in).
+            "context" => {
+                let repo = repo.unwrap_or(&self.cwd_repo);
+                let text = inject::context(&conn, repo)?;
+                json!({"repo": repo, "chars": text.chars().count(), "text": text})
+            }
+            "stats" => stats(&conn, &self.home, repo)?,
             _ => return Ok(Response::text(404, "not found")),
         }))
     }
+}
+
+/// Changes when what the page shows changes: sessions appear or go, knowledge is stored or
+/// deleted. Raw events arriving do not move it, so an open session does not redraw the page.
+/// Doc ids never repeat (AUTOINCREMENT), and a session that replaces a deleted one has a newer
+/// `started_at`, so a delete followed by an insert cannot land on the same marker.
+fn version(conn: &rusqlite::Connection) -> Result<String> {
+    Ok(conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM sessions) || ':' || (SELECT COALESCE(MAX(started_at), 0) FROM sessions)
+             || ':' || (SELECT COUNT(*) FROM observations) || ':' || (SELECT COALESCE(MAX(id), 0) FROM observations)
+             || ':' || (SELECT COUNT(*) FROM summaries) || ':' || (SELECT COALESCE(MAX(id), 0) FROM summaries)",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// Counts for one repository (or all), plus the store-wide database size and provider outcomes
+/// of the last seven days.
+fn stats(conn: &rusqlite::Connection, home: &Path, repo: Option<&str>) -> Result<Value> {
+    let sessions: (i64, i64, i64, i64, Option<String>, Option<String>) = conn.query_row(
+        "SELECT COUNT(*),
+                SUM(EXISTS (SELECT 1 FROM summaries m WHERE m.session_id = s.id)),
+                SUM(EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id)),
+                SUM(injected_at IS NOT NULL),
+                strftime('%Y-%m-%d %H:%M', MIN(started_at) / 1000, 'unixepoch', 'localtime'),
+                strftime('%Y-%m-%d %H:%M', MAX(last_event_at) / 1000, 'unixepoch', 'localtime')
+         FROM sessions s WHERE ?1 IS NULL OR repo = ?1",
+        params![repo],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        },
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT kind, COUNT(*) FROM observations WHERE ?1 IS NULL OR repo = ?1
+         GROUP BY kind ORDER BY COUNT(*) DESC, kind",
+    )?;
+    let kinds: Vec<Value> = stmt
+        .query_map(params![repo], |r| {
+            Ok(json!({"kind": r.get::<_, String>(0)?, "count": r.get::<_, i64>(1)?}))
+        })?
+        .collect::<Result<_, _>>()?;
+    let summaries: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM summaries WHERE ?1 IS NULL OR repo = ?1",
+        params![repo],
+        |r| r.get(0),
+    )?;
+    // What the store takes on disk: the file plus the WAL not yet checkpointed into it.
+    // (`page_count` would already include pages that only exist in the WAL.)
+    let bytes = |name: &str| {
+        std::fs::metadata(home.join(name))
+            .map(|m| m.len() as i64)
+            .unwrap_or(0)
+    };
+    let db_bytes = bytes("oboete.db") + bytes("oboete.db-wal");
+    let mut stmt = conn.prepare(
+        "SELECT provider, SUM(outcome = 'ok'), SUM(outcome IN ('error', 'invalid')),
+                SUM(outcome = 'wait'), CAST(AVG(CASE WHEN outcome = 'ok' THEN ms END) AS INTEGER)
+         FROM provider_calls WHERE ts >= ?1 GROUP BY provider ORDER BY 2 DESC, provider",
+    )?;
+    let providers: Vec<Value> = stmt
+        .query_map(params![db::now_ms() - 7 * 86_400_000], |r| {
+            Ok(json!({
+                "provider": r.get::<_, String>(0)?,
+                "ok": r.get::<_, i64>(1)?,
+                "failed": r.get::<_, i64>(2)?,
+                "waited": r.get::<_, i64>(3)?,
+                "avg_ms": r.get::<_, Option<i64>>(4)?,
+            }))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(json!({
+        "sessions": {"total": sessions.0, "summarized": sessions.1, "pending": sessions.2,
+                     "injected": sessions.3, "first": sessions.4, "last": sessions.5},
+        "observations": {"total": kinds.iter().map(|k| k["count"].as_i64().unwrap_or(0)).sum::<i64>(),
+                         "kinds": kinds},
+        "summaries": summaries,
+        "db_bytes": db_bytes,
+        "providers": providers,
+    }))
 }
 
 /// `a=1&b=x+y` with percent-decoding (`+` is a space, as `URLSearchParams` writes it).
@@ -280,6 +451,10 @@ mod tests {
             i64::MAX,
         )
         .unwrap();
+        db::upsert_session(&conn, "s2", "codex", "/r", "/r", 1_700_000_100_000).unwrap();
+        db::insert_event(&conn, "s2", "Stop", 1_700_000_100_000, "{}").unwrap();
+        db::record_call(&conn, "groq", "ok", 800, None).unwrap();
+        db::record_call(&conn, "groq", "error", 100, Some("429")).unwrap();
         let v = Viewer {
             home: dir.clone(),
             cwd_repo: "/r".into(),
@@ -304,6 +479,43 @@ mod tests {
         assert_eq!(status("GET", "/", &[HOST]), 200);
         assert_eq!(status("GET", "/", &[("host", "localhost:4321")]), 200);
         assert_eq!(status("POST", "/api/repos", &[HOST, TOKEN]), 405);
+        // DELETE only where something can be deleted; a preflight (OPTIONS) never succeeds.
+        assert_eq!(status("DELETE", "/api/repos", &[HOST, TOKEN]), 405);
+        assert_eq!(status("DELETE", "/", &[HOST, TOKEN]), 405);
+        assert_eq!(status("OPTIONS", "/api/doc?id=o1", &[HOST, TOKEN]), 405);
+        assert_eq!(status("DELETE", "/api/doc?id=o1", &[HOST]), 401);
+        assert_eq!(
+            status(
+                "DELETE",
+                "/api/doc?id=o1",
+                &[("Host", "evil.example:4321"), TOKEN]
+            ),
+            403
+        );
+        assert_eq!(
+            status(
+                "DELETE",
+                "/api/doc?id=o1",
+                &[HOST, TOKEN, ("Content-Length", "0")]
+            ),
+            204
+        );
+        assert_eq!(
+            status(
+                "DELETE",
+                "/api/doc?id=o1",
+                &[HOST, TOKEN, ("Content-Length", "2")]
+            ),
+            400
+        );
+        assert_eq!(
+            status(
+                "DELETE",
+                "/api/doc?id=s1",
+                &[HOST, TOKEN, ("Transfer-Encoding", "chunked")]
+            ),
+            400
+        );
         assert_eq!(
             status(
                 "GET",
@@ -351,10 +563,12 @@ mod tests {
                 repos["current"].as_str(),
                 repos["repos"][0]["sessions"].as_i64()
             ),
-            (Some("/r"), Some(1))
+            (Some("/r"), Some(2))
         );
+        // Newest first: s2 (no summary yet), then s1.
         let tl = get("/api/timeline?repo=&limit=5");
-        assert!(tl[0]["summary"].as_str().unwrap().starts_with("要約"));
+        assert_eq!(tl[0]["summary"], "");
+        assert!(tl[1]["summary"].as_str().unwrap().starts_with("要約"));
         assert_eq!(
             get("/api/timeline?repo=%2Fother").as_array().unwrap().len(),
             0
@@ -377,13 +591,79 @@ mod tests {
     }
 
     #[test]
+    fn feed_context_stats_and_delete() {
+        let (dir, v) = viewer("parity");
+        let get = |t: &str| json_of(&v.route("GET", t, &[HOST, TOKEN]));
+        // Newest session first; within one, the summary before its observations.
+        let feed = get("/api/feed?repo=%2Fr");
+        assert_eq!(
+            (
+                feed[0]["doc"].as_str(),
+                feed[1]["doc"].as_str(),
+                feed[1]["agent"].as_str()
+            ),
+            (Some("s1"), Some("o1"), Some("claude"))
+        );
+        assert_eq!(feed[1]["session"], "s1");
+        assert_eq!(get("/api/feed?repo=%2Fother").as_array().unwrap().len(), 0);
+        let ctx = get("/api/context?repo=");
+        assert_eq!(ctx["repo"], "/r");
+        assert!(
+            ctx["text"]
+                .as_str()
+                .unwrap()
+                .contains("use the trigram tokenizer")
+        );
+        assert_eq!(get("/api/context?repo=%2Fother")["chars"], 0);
+        let st = get("/api/stats?repo=%2Fr");
+        assert_eq!(
+            (
+                st["sessions"]["total"].as_i64(),
+                st["sessions"]["summarized"].as_i64(),
+                st["sessions"]["pending"].as_i64(),
+                st["observations"]["total"].as_i64(),
+                st["summaries"].as_i64()
+            ),
+            (Some(2), Some(1), Some(1), Some(1), Some(1))
+        );
+        assert_eq!(st["observations"]["kinds"][0]["kind"], "decision");
+        assert!(st["db_bytes"].as_i64().unwrap() > 0);
+        assert_eq!(
+            (
+                st["providers"][0]["ok"].as_i64(),
+                st["providers"][0]["failed"].as_i64(),
+                st["providers"][0]["avg_ms"].as_i64()
+            ),
+            (Some(1), Some(1), Some(800))
+        );
+        // The version marker moves on knowledge and sessions, not on raw events.
+        let v0 = get("/api/version")["v"].as_str().unwrap().to_string();
+        let conn = db::open(&dir).unwrap();
+        db::insert_event(&conn, "s2", "Stop", 1_700_000_100_001, "{}").unwrap();
+        assert_eq!(get("/api/version")["v"], v0);
+        let del = |t: &str| v.route("DELETE", t, &[HOST, TOKEN]).status;
+        assert_eq!(del("/api/doc?id=o1"), 204);
+        assert_eq!(del("/api/doc?id=o1"), 404);
+        assert_eq!(del("/api/doc?id=o%2B1"), 404);
+        assert_eq!(v.route("GET", "/api/doc?id=o1", &[HOST, TOKEN]).status, 404);
+        let v1 = get("/api/version")["v"].as_str().unwrap().to_string();
+        assert_ne!(v1, v0);
+        assert_eq!(del("/api/session?id=s1"), 204);
+        assert_eq!(del("/api/session?id=s1"), 404);
+        assert_eq!(get("/api/timeline?repo=").as_array().unwrap().len(), 1);
+        assert_eq!(get("/api/feed?repo=").as_array().unwrap().len(), 0);
+        assert_ne!(get("/api/version")["v"], v1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn socket_round_trip() {
         let (dir, mut v) = viewer("socket");
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         v.port = listener.local_addr().unwrap().port();
         let port = v.port;
         let server = std::thread::spawn(move || {
-            for _ in 0..2 {
+            for _ in 0..3 {
                 let (s, _) = listener.accept().unwrap();
                 v.serve(s);
             }
@@ -404,6 +684,11 @@ mod tests {
             ok.contains("Content-Security-Policy: default-src 'none'")
                 && ok.contains("\"current\":\"/r\"")
         );
+        let gone = ask(format!(
+            "DELETE /api/doc?id=o1 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Oboete-Token: t0k\r\nContent-Length: 0\r\n\r\n"
+        )
+        .as_bytes());
+        assert!(gone.starts_with("HTTP/1.1 204 No Content\r\n"), "{gone}");
         let mut huge = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Pad: ").into_bytes();
         // Exactly the cap: every byte is read before the 400, so the close is a FIN, not a RST.
         huge.resize(MAX_HEAD, b'a');

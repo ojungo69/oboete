@@ -10,7 +10,11 @@
 </head>
 <body>
 <header class="bar">
-  <h1>oboete</h1>
+  <div class="top">
+    <h1>oboete</h1>
+    <span id="live" class="live" title="Checks for new memory every few seconds">Live</span>
+    <button type="button" id="theme" class="quiet small" title="Follow the system, or force light or dark">Theme: auto</button>
+  </div>
   <form id="controls" role="search">
     <label class="field">
       <span>Repository</span>
@@ -23,11 +27,18 @@
     <button type="submit">Search</button>
     <button type="button" id="refresh" class="quiet">Refresh</button>
   </form>
+  <nav id="tabs" aria-label="Views">
+    <button type="button" data-view="feed" class="tab">Feed</button>
+    <button type="button" data-view="sessions" class="tab">Sessions</button>
+    <button type="button" data-view="context" class="tab">Context</button>
+    <button type="button" data-view="stats" class="tab">Stats</button>
+  </nav>
 </header>
 <main>
   <p id="status" role="status" aria-live="polite"></p>
-  <h2 id="heading">Sessions</h2>
+  <h2 id="heading">Feed</h2>
   <ol id="list" class="entries"></ol>
+  <div id="panel"></div>
 </main>
 <noscript><p class="notice">The viewer needs JavaScript.</p></noscript>
 </body>

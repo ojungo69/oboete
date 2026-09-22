@@ -168,6 +168,37 @@ pub fn session_docs(conn: &Connection, session_id: &str) -> Result<Vec<Hit>> {
     Ok(hits.collect::<Result<_, _>>()?)
 }
 
+pub struct FeedRow {
+    pub hit: Hit,
+    pub session: String,
+    pub agent: String,
+}
+
+/// Every summary and observation, newest session first; within a session the summary, then the
+/// observations in stored order. A session deleted while observe was writing leaves rows with
+/// no session row, so its agent comes back empty rather than the rows vanishing.
+pub fn feed(conn: &Connection, repo: Option<&str>, limit: usize) -> Result<Vec<FeedRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT d.doc, d.kind, d.repo, strftime('%Y-%m-%d %H:%M', d.ts / 1000, 'unixepoch', 'localtime'),
+                d.title, d.body, d.session_id, COALESCE(s.agent, '')
+         FROM (SELECT 0 AS g, id, 's' || id AS doc, 'summary' AS kind, repo, ts, '' AS title, body, session_id
+                 FROM summaries
+               UNION ALL
+               SELECT 1, id, 'o' || id, kind, repo, ts, title, body, session_id FROM observations) d
+         LEFT JOIN sessions s ON s.id = d.session_id
+         WHERE ?1 IS NULL OR d.repo = ?1
+         ORDER BY d.ts DESC, d.session_id, d.g, d.id LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![repo, sql_limit(limit)], |r| {
+        Ok(FeedRow {
+            hit: hit(r)?,
+            session: r.get(6)?,
+            agent: r.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// One line of `body`, `width` characters around the first term found (case-insensitive).
 pub fn snippet(body: &str, terms: &[&str], width: usize) -> String {
     let flat = body.replace('\n', " ");
