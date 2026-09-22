@@ -449,8 +449,12 @@ fn claude_mcp(cmd: &HookCommand, remove: bool) -> Result<String> {
         };
         if let Err(e) = add(&entry) {
             // Put the developer's entry back rather than leave nothing registered.
-            if let Some(old) = &old {
-                let _ = add(old);
+            if let Some(old) = &old
+                && let Err(r) = add(old)
+            {
+                return Err(e.context(format!(
+                    "the previous {MCP_NAME} entry is removed and could not be put back: {r:#}"
+                )));
             }
             return Err(e);
         }
