@@ -266,7 +266,18 @@ fn read_text(file: &Path) -> Result<String> {
 /// its target; the target's mode is kept and a new file gets 0600.
 fn write_atomic(file: &Path, text: &str) -> Result<()> {
     use std::io::Write;
-    let target = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    let target = match std::fs::canonicalize(file) {
+        Ok(t) => t,
+        // A symlink to a file that does not exist yet: create its target, keep the link.
+        Err(_) => match std::fs::read_link(file) {
+            Ok(to) => file.parent().map(|d| d.join(&to)).unwrap_or(to),
+            Err(_) => file.to_path_buf(),
+        },
+    };
+    // A rename would replace a file the developer locked with chmod 444; stop instead.
+    if std::fs::metadata(&target).is_ok_and(|m| m.permissions().readonly()) {
+        anyhow::bail!("{} is read-only", target.display());
+    }
     let dir = target
         .parent()
         .with_context(|| format!("no directory for {}", file.display()))?;
@@ -322,41 +333,73 @@ fn merge_groups(root: &mut Value, wanted: Vec<(String, Value)>) {
     root["hooks"] = Value::Object(hooks);
 }
 
-/// User-scope MCP servers of Claude Code live in `~/.claude.json` under `mcpServers`.
-fn claude_mcp_file() -> PathBuf {
-    config::home_dir().join(".claude.json")
+/// Claude Code's config directory: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
+fn claude_dir() -> PathBuf {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config::home_dir().join(".claude"))
 }
 
-/// `~/.claude.json` is Claude Code's state file, rewritten all the time under its own lock; a
-/// write from outside races it (a session that reads the file mid-write "repairs" it from its
-/// cache, dropping our entry). So Claude Code's own CLI makes the change. Keys the developer
-/// added to our entry (`env`, ...) are carried over; `add-json` refuses an existing name, hence
-/// remove first.
+/// The file `claude mcp --scope user` edits, found the way Claude Code 2.1 finds it: a legacy
+/// `<config dir>/.config.json` if one exists, else `.claude.json` in `$CLAUDE_CONFIG_DIR` or home.
+fn claude_mcp_file() -> PathBuf {
+    let legacy = claude_dir().join(".config.json");
+    if legacy.exists() {
+        return legacy;
+    }
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(config::home_dir)
+        .join(".claude.json")
+}
+
+/// That file is Claude Code's state file, rewritten all the time under its own lock; a write
+/// from outside races it (a session that reads the file mid-write "repairs" it from its cache,
+/// dropping our entry). So Claude Code's own CLI makes the change. Keys the developer added to
+/// our entry (`env`, ...) are carried over.
 fn claude_mcp(cmd: &HookCommand, remove: bool) -> Result<String> {
     if !on_path("claude") {
         return Ok("skipped: `claude` is not on PATH".into());
     }
-    let current = read_json_object(&claude_mcp_file())?["mcpServers"]
+    let file = claude_mcp_file();
+    let current = read_json_object(&file)?["mcpServers"]
         .get(MCP_NAME)
+        .filter(|v| v.is_object())
         .cloned();
-    if current.is_some() {
-        claude_cli(&["mcp", "remove", "--scope", "user", MCP_NAME])?;
-    }
-    if !remove {
-        let mut entry = current
-            .filter(Value::is_object)
-            .unwrap_or_else(|| json!({"env": {}}));
-        entry["type"] = json!("stdio");
-        entry["command"] = json!(cmd.exe);
-        entry["args"] = json!(cmd.mcp_args());
-        let entry = entry.to_string();
-        claude_cli(&["mcp", "add-json", "--scope", "user", MCP_NAME, &entry])?;
-    }
+    backup_once(&file)?;
     let verb = if remove { "removed from" } else { "written to" };
-    Ok(format!(
-        "{verb} {} (by `claude mcp`)",
-        claude_mcp_file().display()
-    ))
+    let done = format!("{verb} {} (by `claude mcp`)", file.display());
+    let remove_cmd = ["mcp", "remove", "--scope", "user", MCP_NAME];
+    if remove {
+        if current.is_some() {
+            claude_cli(&remove_cmd)?;
+        }
+        return Ok(done);
+    }
+    // `add-json` refuses an existing name. A failed remove shows up as add-json's error.
+    let _ = claude_cli(&remove_cmd);
+    let mut entry = current.clone().unwrap_or_else(|| json!({"env": {}}));
+    entry["type"] = json!("stdio");
+    entry["command"] = json!(cmd.exe);
+    entry["args"] = json!(cmd.mcp_args());
+    let add = |e: &Value| {
+        claude_cli(&[
+            "mcp",
+            "add-json",
+            "--scope",
+            "user",
+            MCP_NAME,
+            &e.to_string(),
+        ])
+    };
+    if let Err(e) = add(&entry) {
+        // Put the developer's entry back rather than leave nothing registered.
+        if let Some(old) = &current {
+            let _ = add(old);
+        }
+        return Err(e);
+    }
+    Ok(done)
 }
 
 fn claude_cli(args: &[&str]) -> Result<()> {
@@ -385,14 +428,22 @@ fn toml_mcp(file: &Path, cmd: &HookCommand, remove: bool) -> Result<String> {
     backup_once(file)?;
     let root = doc.as_table_mut();
     if remove {
-        if let Some(servers) = root
+        let emptied = root
             .get_mut("mcp_servers")
             .and_then(toml_edit::Item::as_table_like_mut)
+            .is_some_and(|servers| {
+                servers.remove(MCP_NAME);
+                servers.is_empty()
+            });
+        // Only a header setup created (implicit) or a dotted prefix goes with our entry; an
+        // explicit `[mcp_servers]` the developer wrote stays, with its comments.
+        if emptied
+            && root
+                .get("mcp_servers")
+                .and_then(toml_edit::Item::as_table)
+                .is_some_and(|t| t.is_implicit() || t.is_dotted())
         {
-            servers.remove(MCP_NAME);
-            if servers.is_empty() {
-                root.remove("mcp_servers");
-            }
+            root.remove("mcp_servers");
         }
     } else {
         if !root.contains_key("mcp_servers") {
@@ -429,21 +480,23 @@ fn toml_mcp(file: &Path, cmd: &HookCommand, remove: bool) -> Result<String> {
     Ok(format!("{verb} {}", file.display()))
 }
 
-/// The `command` registered under our name, if any: `~/.claude.json` (JSON) or a `config.toml`.
-fn mcp_command(file: &Path) -> Option<String> {
+/// The command and args registered under our name, if any: Claude's JSON or a `config.toml`.
+fn mcp_command(file: &Path) -> Option<(String, Vec<String>)> {
     let text = std::fs::read_to_string(file).ok()?;
     if file.extension().is_some_and(|e| e == "toml") {
         let doc: toml_edit::DocumentMut = text.parse().ok()?;
-        doc.get("mcp_servers")?
-            .get(MCP_NAME)?
-            .get("command")?
-            .as_str()
-            .map(String::from)
+        let row = doc.get("mcp_servers")?.get(MCP_NAME)?;
+        let args = row.get("args").and_then(|a| a.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        });
+        Some((row.get("command")?.as_str()?.to_string(), args?))
     } else {
         let v: Value = serde_json::from_str(&text).ok()?;
-        v["mcpServers"][MCP_NAME]["command"]
-            .as_str()
-            .map(String::from)
+        let row = &v["mcpServers"][MCP_NAME];
+        let args = serde_json::from_value(row["args"].clone()).ok()?;
+        Some((row["command"].as_str()?.to_string(), args))
     }
 }
 
@@ -452,7 +505,7 @@ fn grok_config_file() -> PathBuf {
 }
 
 fn claude_settings_file() -> PathBuf {
-    config::home_dir().join(".claude").join("settings.json")
+    claude_dir().join("settings.json")
 }
 
 fn claude(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
@@ -831,10 +884,11 @@ pub fn doctor(home: &Path) -> Result<()> {
         "  grok    {}",
         wired(&crate::hook::grok_hooks_file(), "grok")
     );
+    let want = HookCommand::current(home)?;
     let mcp = |file: &Path| -> &str {
         match mcp_command(file) {
-            Some(c) if c == exe_str => "registered",
-            Some(_) => "registered with another binary (rerun `oboete setup`)",
+            Some((c, args)) if c == want.exe && args == want.mcp_args() => "registered",
+            Some(_) => "registered with another binary or home (rerun `oboete setup`)",
             None => "not registered (run `oboete setup`)",
         }
     };
@@ -925,6 +979,19 @@ mod tests {
             exe: "/x/oboete".into(),
             home: Some("/h".into()),
         };
+        let registered = |f: &Path| mcp_command(f).map(|(c, _)| c);
+        assert_eq!(
+            {
+                let f = dir.join("args.toml");
+                std::fs::write(
+                    &f,
+                    "[mcp_servers.oboete]\ncommand = \"/x/oboete\"\nargs = [\"mcp\"]\n",
+                )
+                .unwrap();
+                mcp_command(&f)
+            },
+            Some(("/x/oboete".to_string(), vec!["mcp".to_string()]))
+        );
         // TOML (Codex, Grok): other servers and sections survive, ours comes and goes.
         let toml = dir.join("config.toml");
         std::fs::write(&toml, "model = \"x\"\n\n[mcp_servers.other]\ncommand = \"o\"\n\n[hooks.state.\"k\"]\ntrusted_hash = \"h\"\n").unwrap();
@@ -937,7 +1004,7 @@ mod tests {
                 && text.contains("[hooks.state.\"k\"]")
         );
         assert!(!text.contains("\n[mcp_servers]\n"), "{text}");
-        assert_eq!(mcp_command(&toml).as_deref(), Some("/x/oboete"));
+        assert_eq!(registered(&toml).as_deref(), Some("/x/oboete"));
         toml_mcp(&toml, &cmd, true).unwrap();
         let text = std::fs::read_to_string(&toml).unwrap();
         assert!(
@@ -948,7 +1015,7 @@ mod tests {
         // An empty file gains only our table; removing it leaves the file without mcp_servers.
         let fresh = dir.join("fresh.toml");
         toml_mcp(&fresh, &cmd, false).unwrap();
-        assert_eq!(mcp_command(&fresh).as_deref(), Some("/x/oboete"));
+        assert_eq!(registered(&fresh).as_deref(), Some("/x/oboete"));
         toml_mcp(&fresh, &cmd, true).unwrap();
         assert_eq!(std::fs::read_to_string(&fresh).unwrap().trim(), "");
         // A rerun sets only command/args: keys the developer put on our entry stay.
@@ -975,10 +1042,22 @@ mod tests {
         let inline = dir.join("inline.toml");
         std::fs::write(&inline, "mcp_servers = { other = { command = \"o\" } }\n").unwrap();
         toml_mcp(&inline, &cmd, false).unwrap();
-        assert_eq!(mcp_command(&inline).as_deref(), Some("/x/oboete"));
+        assert_eq!(registered(&inline).as_deref(), Some("/x/oboete"));
         assert!(std::fs::read_to_string(&inline).unwrap().contains("other"));
         toml_mcp(&inline, &cmd, true).unwrap();
         assert!(mcp_command(&inline).is_none());
+        // Remove keeps an explicit [mcp_servers] header; a dotted prefix goes with our entry.
+        std::fs::write(&header, "# my servers\n[mcp_servers]\n").unwrap();
+        toml_mcp(&header, &cmd, false).unwrap();
+        toml_mcp(&header, &cmd, true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&header).unwrap(),
+            "# my servers\n[mcp_servers]\n"
+        );
+        let dotted = dir.join("dotted.toml");
+        std::fs::write(&dotted, "a = 1\nmcp_servers.oboete.command = \"/old\"\n").unwrap();
+        toml_mcp(&dotted, &cmd, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&dotted).unwrap(), "a = 1\n");
         // A file that cannot be read stops setup and stays as it was.
         let latin = dir.join("latin.toml");
         std::fs::write(&latin, b"# caf\xe9\n[cli]\nfoo = 1\n").unwrap();
@@ -1010,6 +1089,25 @@ mod tests {
         write_atomic(&new, "{}\n").unwrap();
         assert_eq!(mode(&new), 0o600);
         assert_eq!(std::fs::read_dir(dir.join("sub")).unwrap().count(), 1);
+        // A link whose target does not exist yet: the target is created, the link stays.
+        let dangling = dir.join("dangling.json");
+        std::os::unix::fs::symlink("sub/later.json", &dangling).unwrap();
+        write_atomic(&dangling, "{}\n").unwrap();
+        assert!(
+            dangling
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("sub/later.json")).unwrap(),
+            "{}\n"
+        );
+        // A file locked read-only is not replaced.
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o444)).unwrap();
+        assert!(write_atomic(&real, "{}").is_err());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "{\"a\": 1}\n");
         std::fs::remove_dir_all(&dir).ok();
     }
 
