@@ -1,0 +1,45 @@
+# Extra rules in gitleaks' schema for key shapes the bundled gitleaks.toml lacks (the owner's
+# providers). Same evaluation: keywords gate the regex, first capture group is the secret.
+
+[[rules]]
+id = "groq-api-key"
+description = "Groq API key"
+regex = '''\b(gsk_[A-Za-z0-9]{40,64})\b'''
+keywords = ["gsk_"]
+
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API key"
+regex = '''\b(sk-ant-[A-Za-z0-9_-]{40,200})\b'''
+keywords = ["sk-ant-"]
+
+[[rules]]
+id = "openrouter-api-key"
+description = "OpenRouter API key"
+regex = '''\b(sk-or-v1-[a-f0-9]{48,96})\b'''
+keywords = ["sk-or-v1-"]
+
+[[rules]]
+id = "nvidia-nim-api-key"
+description = "NVIDIA NIM / build.nvidia.com API key"
+regex = '''\b(nvapi-[A-Za-z0-9_-]{40,120})\b'''
+keywords = ["nvapi-"]
+
+[[rules]]
+id = "xai-api-key"
+description = "xAI API key"
+regex = '''\b(xai-[A-Za-z0-9]{40,120})\b'''
+keywords = ["xai-"]
+
+[[rules]]
+id = "tavily-api-key"
+description = "Tavily API key"
+regex = '''\b(tvly-[A-Za-z0-9_-]{20,80})\b'''
+keywords = ["tvly-"]
+
+[[rules]]
+id = "generic-bearer-token"
+description = "Bearer token in an Authorization header"
+regex = '''(?i)\bbearer\s+([A-Za-z0-9_\-.=+/]{20,})'''
+keywords = ["bearer"]
+entropy = 3.0
