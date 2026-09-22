@@ -324,11 +324,13 @@ async function show() {
         : view === 'context' ? await showContext(repo)
           : view === 'stats' ? await showStats(repo)
             : await showFeed(repo);
-    if (mine !== generation) return;
+    if (mine !== generation) return false;
     render();
     if (version === null) drawnWithoutBaseline = true;
+    return true;
   } catch (e) {
     if (mine === generation) setStatus(e.message, true);
+    return false;
   }
 }
 
@@ -349,14 +351,15 @@ async function loadRepos(first) {
   $('repo').value = repos.some((r) => r.repo === keep) ? keep : '';
 }
 
+// True when the page now shows the store as it is.
 async function refresh() {
   try {
     await loadRepos(false);
   } catch (e) {
     setStatus(e.message, true);
-    return;
+    return false;
   }
-  show();
+  return show();
 }
 
 // --- Live: redraw when the store changes -----------------------------------------------------
@@ -368,16 +371,19 @@ async function poll() {
   if (document.visibilityState !== 'visible') return;
   try {
     const { v } = await api('version');
-    const changed = version === null ? drawnWithoutBaseline : v !== version;
-    version = v;
-    drawnWithoutBaseline = false;
     if ($('live').classList.contains('off')) {
       $('live').classList.remove('off');
       if ($('status').textContent === UNREACHABLE) setStatus('');
     }
+    const changed = version === null ? drawnWithoutBaseline : v !== version;
     // Stats also counts raw events, provider calls and handed-over context, which the marker
     // leaves out on purpose; that view is cheap, so it just follows every poll.
-    if (changed || (view === 'stats' && !$('q').value.trim())) refresh();
+    const wanted = changed || (view === 'stats' && !$('q').value.trim());
+    // The marker moves on only once the page shows that state; a failed redraw is retried by
+    // the next poll.
+    if (wanted && !(await refresh())) return;
+    version = v;
+    drawnWithoutBaseline = false;
   } catch {
     // The dot is for the eye; the status line is the page's live region.
     $('live').classList.add('off');
