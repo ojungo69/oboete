@@ -582,14 +582,9 @@ pub fn doctor(home: &Path) -> Result<()> {
         }
     }
     println!("  codex   {codex_line}");
-    let grok_file = crate::hook::grok_hooks_file();
     println!(
         "  grok    {}",
-        if grok_file.exists() {
-            "hooks wired (Claude-compat duplicates are dropped)"
-        } else {
-            "not wired (run `oboete setup`)"
-        }
+        wired(&crate::hook::grok_hooks_file(), "grok")
     );
     println!("providers (chain order):");
     for p in config::load(home)?.providers {

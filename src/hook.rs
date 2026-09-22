@@ -67,14 +67,17 @@ pub fn resolve_agent<'a>(agent: &'a str, payload: &Value, grok_hooks: &Path) -> 
     Some(agent)
 }
 
-/// Agents run housekeeping sessions of their own (Codex's memory consolidation works in
-/// `~/.codex/memories`); those are not the developer's work and are not captured.
+/// Directories (under the home) where agents run housekeeping sessions of their own: Codex's
+/// memory consolidation works in `~/.codex/memories`. Only these are skipped; a repository the
+/// developer keeps elsewhere under `~/.codex` or `~/.claude` (a plugin, say) is real work.
+const HOUSEKEEPING_DIRS: &[&str] = &[".codex/memories"];
+
 fn is_agent_internal(payload: &Value) -> bool {
     let Some(cwd) = str_field(payload, &["cwd", "workspaceRoot"]) else {
         return false;
     };
     let home = config::home_dir();
-    [".codex", ".claude", ".grok"]
+    HOUSEKEEPING_DIRS
         .iter()
         .any(|d| Path::new(cwd).starts_with(home.join(d)))
 }
@@ -261,6 +264,9 @@ mod tests {
         assert!(is_agent_internal(&inside));
         let outside = json!({"cwd": home.join("projects").join("x").to_string_lossy()});
         assert!(!is_agent_internal(&outside));
+        let plugin =
+            json!({"cwd": home.join(".claude").join("plugins").join("p").to_string_lossy()});
+        assert!(!is_agent_internal(&plugin));
         assert!(!is_agent_internal(&json!({})));
     }
 

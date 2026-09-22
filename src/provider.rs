@@ -134,16 +134,7 @@ impl<'a> Chain<'a> {
                 Err(e) => {
                     let outcome = if e.invalid() { "invalid" } else { "error" };
                     db::record_call(conn, &name, outcome, ms, Some(&e.message))?;
-                    let cooldown = match e.status {
-                        Some(429) => Some(COOLDOWN_429),
-                        // A rejected key fails every request of the pass. 403 stays per answer:
-                        // OpenRouter uses it for moderation of one prompt.
-                        Some(401) => Some(COOLDOWN_OUTAGE),
-                        Some(400..=499) => None,
-                        _ if e.invalid() => None,
-                        _ => Some(COOLDOWN_OUTAGE),
-                    };
-                    if let Some(c) = cooldown {
+                    if let Some(c) = cooldown_for(&e) {
                         self.down_until.insert(name.clone(), Instant::now() + c);
                     }
                     fallbacks.push((name, e.message));
@@ -158,6 +149,24 @@ impl<'a> Chain<'a> {
                 .collect::<Vec<_>>()
                 .join(" | ")
         ))
+    }
+}
+
+/// How long to skip a provider after this failure. Per-answer failures (schema mismatch, an
+/// unparsable reply, OpenRouter's moderation 403) get none: the next session may pass.
+/// A rejected key or an outage fails every request of the pass, so it is skipped for a while.
+fn cooldown_for(e: &CallError) -> Option<Duration> {
+    let moderation = {
+        let m = e.message.to_ascii_lowercase();
+        m.contains("moderat") || m.contains("flagged")
+    };
+    match e.status {
+        Some(429) => Some(COOLDOWN_429),
+        Some(401) => Some(COOLDOWN_OUTAGE),
+        Some(403) if !moderation => Some(COOLDOWN_OUTAGE),
+        Some(400..=499) => None,
+        _ if e.invalid() => None,
+        _ => Some(COOLDOWN_OUTAGE),
     }
 }
 
@@ -436,6 +445,35 @@ fn extract_structured(cli: &str, text: &str) -> Result<Value, CallError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cooldown_depends_on_status_and_moderation() {
+        let err = |status: Option<u16>, msg: &str| CallError {
+            status,
+            retry_after_s: None,
+            message: msg.into(),
+        };
+        assert_eq!(cooldown_for(&err(Some(429), "")), Some(COOLDOWN_429));
+        assert_eq!(
+            cooldown_for(&err(Some(401), "invalid api key")),
+            Some(COOLDOWN_OUTAGE)
+        );
+        assert_eq!(
+            cooldown_for(&err(Some(403), "forbidden")),
+            Some(COOLDOWN_OUTAGE)
+        );
+        assert_eq!(
+            cooldown_for(&err(Some(403), "Your input was flagged for violence")),
+            None
+        );
+        assert_eq!(cooldown_for(&err(Some(403), "blocked by moderation")), None);
+        assert_eq!(
+            cooldown_for(&err(Some(400), "Generated JSON does not match")),
+            None
+        );
+        assert_eq!(cooldown_for(&err(Some(503), "")), Some(COOLDOWN_OUTAGE));
+        assert_eq!(cooldown_for(&err(None, "timed out")), Some(COOLDOWN_OUTAGE));
+    }
 
     #[test]
     fn retry_after_is_read_from_groq_bodies() {
