@@ -1,4 +1,4 @@
-//! `<home>/config.toml` — provider chain. Missing file = built-in default chain.
+//! `<home>/config.toml` — provider chain and summary options. Missing file = built-in defaults.
 
 use std::path::{Path, PathBuf};
 
@@ -9,6 +9,23 @@ use serde::Deserialize;
 pub struct Config {
     #[serde(default = "default_providers")]
     pub providers: Vec<Provider>,
+    #[serde(default)]
+    pub summary: Summary,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Summary {
+    /// Language of observations and summaries, as written into the prompt. Never inferred.
+    #[serde(default = "default_language")]
+    pub language: String,
+}
+
+impl Default for Summary {
+    fn default() -> Self {
+        Self {
+            language: default_language(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -18,19 +35,29 @@ pub enum Provider {
     Openai {
         name: String,
         base_url: String,
-        /// File whose second line is the API key (owner convention: ~/X_KEY.md).
-        key_file: PathBuf,
+        /// File whose second line is the API key (owner convention: ~/X_KEY.md). None = no auth.
+        #[serde(default)]
+        key_file: Option<PathBuf>,
         model: String,
         #[serde(default = "default_budget")]
         daily_budget: u32,
         #[serde(default = "default_timeout")]
         timeout_s: u64,
+        /// On 429 with a near reset, wait and retry once. Off where failed calls count
+        /// against the quota (OpenRouter).
+        #[serde(default = "default_true")]
+        retry_429: bool,
+        /// Extra request-body fields merged in (OpenRouter's `models` fallback, `provider`).
+        #[serde(default)]
+        extra: serde_json::Map<String, serde_json::Value>,
     },
     /// A subscription CLI run headless (`agy`, `claude`, `grok`, `codex`).
     Cli {
         name: String,
         /// Which CLI; decides the argument shape.
         cli: String,
+        #[serde(default)]
+        model: Option<String>,
         #[serde(default = "default_budget")]
         daily_budget: u32,
         #[serde(default = "default_cli_timeout")]
@@ -51,6 +78,12 @@ impl Provider {
             }
         }
     }
+    pub fn retry_429(&self) -> bool {
+        match self {
+            Provider::Openai { retry_429, .. } => *retry_429,
+            Provider::Cli { .. } => false,
+        }
+    }
 }
 
 fn default_budget() -> u32 {
@@ -62,6 +95,12 @@ fn default_timeout() -> u64 {
 fn default_cli_timeout() -> u64 {
     180
 }
+fn default_true() -> bool {
+    true
+}
+fn default_language() -> String {
+    "Japanese".into()
+}
 
 pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
@@ -70,23 +109,91 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Default chain (docs/plan.md): Groq free → agy. The rest of the chain lands in M1.
+fn openai(
+    name: &str,
+    base_url: &str,
+    key: &str,
+    model: &str,
+    daily_budget: u32,
+    retry_429: bool,
+    extra: serde_json::Value,
+) -> Provider {
+    Provider::Openai {
+        name: name.into(),
+        base_url: base_url.into(),
+        key_file: Some(home_dir().join(key)),
+        model: model.into(),
+        daily_budget,
+        timeout_s: default_timeout(),
+        retry_429,
+        extra: extra.as_object().cloned().unwrap_or_default(),
+    }
+}
+
+fn cli(name: &str, model: Option<&str>, daily_budget: u32) -> Provider {
+    Provider::Cli {
+        name: name.into(),
+        cli: name.into(),
+        model: model.map(Into::into),
+        daily_budget,
+        timeout_s: default_cli_timeout(),
+    }
+}
+
+/// Default chain (docs/plan.md, verified by probes 2026-09-23): the two Groq strict-schema models
+/// (separate 8k-TPM buckets) → subscription CLIs → OpenRouter free → NIM → Mistral → codex → grok.
 fn default_providers() -> Vec<Provider> {
+    let groq = "https://api.groq.com/openai/v1";
     vec![
-        Provider::Openai {
-            name: "groq".into(),
-            base_url: "https://api.groq.com/openai/v1".into(),
-            key_file: home_dir().join("GROQ_API_KEY.md"),
-            model: "openai/gpt-oss-120b".into(),
-            daily_budget: 800,
-            timeout_s: 90,
-        },
-        Provider::Cli {
-            name: "agy".into(),
-            cli: "agy".into(),
-            daily_budget: 200,
-            timeout_s: 180,
-        },
+        openai(
+            "groq",
+            groq,
+            "GROQ_API_KEY.md",
+            "openai/gpt-oss-120b",
+            800,
+            true,
+            serde_json::json!({}),
+        ),
+        openai(
+            "groq-20b",
+            groq,
+            "GROQ_API_KEY.md",
+            "openai/gpt-oss-20b",
+            800,
+            true,
+            serde_json::json!({}),
+        ),
+        cli("agy", None, 200),
+        cli("claude", Some("sonnet"), 200),
+        openai(
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            "OPENROUTER_API_KEY.md",
+            "nvidia/nemotron-3-super-120b-a12b:free",
+            300,
+            false,
+            serde_json::json!({"models": ["qwen/qwen3.8-27b:free"], "provider": {"require_parameters": true}}),
+        ),
+        openai(
+            "nim",
+            "https://integrate.api.nvidia.com/v1",
+            "NVIDIA_NIM_KEY.md",
+            "nvidia/nemotron-3-super-120b-a12b",
+            500,
+            true,
+            serde_json::json!({"max_tokens": 2000}),
+        ),
+        openai(
+            "mistral",
+            "https://api.mistral.ai/v1",
+            "MISTRAL_API_KEY.md",
+            "mistral-small-latest",
+            300,
+            true,
+            serde_json::json!({}),
+        ),
+        cli("codex", None, 200),
+        cli("grok", None, 200),
     ]
 }
 
@@ -95,6 +202,7 @@ pub fn load(home: &Path) -> Result<Config> {
     if !path.exists() {
         return Ok(Config {
             providers: default_providers(),
+            summary: Summary::default(),
         });
     }
     let text =
@@ -113,4 +221,46 @@ pub fn read_key(path: &Path) -> Result<String> {
         path.display()
     );
     Ok(key.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_and_toml_extra_fields_parse() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.providers.len(), 9);
+        assert_eq!(cfg.summary.language, "Japanese");
+        let cfg: Config = toml::from_str(
+            r#"
+[summary]
+language = "English"
+[[providers]]
+kind = "openai"
+name = "ollama"
+base_url = "http://127.0.0.1:11434/v1"
+model = "qwen3:8b"
+[providers.extra]
+options = { num_ctx = 16000 }
+[[providers]]
+kind = "cli"
+name = "claude"
+cli = "claude"
+model = "haiku"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.summary.language, "English");
+        match &cfg.providers[0] {
+            Provider::Openai {
+                key_file, extra, ..
+            } => {
+                assert!(key_file.is_none());
+                assert_eq!(extra["options"]["num_ctx"], 16000);
+            }
+            _ => panic!("expected openai"),
+        }
+        assert!(!cfg.providers[1].retry_429());
+    }
 }

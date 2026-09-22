@@ -35,9 +35,10 @@ pub fn run(home: &Path, settle_ms: u64) -> Result<Stats> {
     let cfg = config::load(home)?;
     let mut conn = db::open(home)?;
     let mut stats = Stats::default();
+    let mut chain = provider::Chain::new(&cfg.providers);
     let pending = db::pending_sessions(&conn, db::now_ms(), settle_ms)?;
     for s in pending {
-        match process_session(&mut conn, &cfg, &s, &mut stats) {
+        match process_session(&mut conn, &cfg, &mut chain, &s, &mut stats) {
             Ok(()) => stats.sessions_done += 1,
             Err(e) => {
                 stats.sessions_failed += 1;
@@ -52,6 +53,7 @@ pub fn run(home: &Path, settle_ms: u64) -> Result<Stats> {
 fn process_session(
     conn: &mut rusqlite::Connection,
     cfg: &config::Config,
+    chain: &mut provider::Chain,
     s: &db::PendingSession,
     stats: &mut Stats,
 ) -> Result<()> {
@@ -66,8 +68,8 @@ fn process_session(
         db::apply_batch(conn, &s.id, &s.repo, "none", "", &[], last_id)?;
         return Ok(());
     }
-    let prompt = build_prompt(&s.agent, &transcript);
-    let result = provider::summarize(conn, &cfg.providers, &prompt, &schema())?;
+    let prompt = build_prompt(&s.agent, &cfg.summary.language, &transcript);
+    let result = chain.summarize(conn, &prompt, &schema())?;
     stats.fallbacks += result.fallbacks.len() as u32;
     let observations = parse_observations(&result.output)?;
     let summary = result.output["summary"].as_str().unwrap_or("").to_string();
@@ -152,14 +154,16 @@ fn short(s: &str, max: usize) -> String {
     }
 }
 
-fn build_prompt(agent: &str, transcript: &str) -> String {
+fn build_prompt(agent: &str, language: &str, transcript: &str) -> String {
     format!(
-        "You are the memory of a software developer. Below is one coding session with the `{agent}` agent.\n\
-         Extract what is worth remembering for future sessions in this repository, then write a short summary.\n\
-         Rules: observations are facts, decisions, bug fixes, discoveries, changes or the developer's stated preferences.\n\
-         Each observation: kind, a specific title (max 80 chars), a body (1-3 sentences, concrete: file paths, names, numbers).\n\
-         Skip routine tool noise. Write in the language the developer used. At most {MAX_OBSERVATIONS} observations.\n\
-         The summary is 2-4 sentences: what was worked on, what was decided, what is still open.\n\n\
+        "You are the long-term memory of a software developer. Below is one coding session with the `{agent}` agent.\n\
+         Extract only what is worth remembering in future sessions of this repository, then write a short summary.\n\
+         Observations are facts, decisions, bug fixes, discoveries, changes or the developer's stated preferences: \
+         concrete, with file paths, names and numbers. Skip routine tool noise, restated instructions and anything \
+         the code itself already shows. If nothing is worth remembering, return an empty observations array. \
+         At most {MAX_OBSERVATIONS} observations, each with a kind, a specific title (max 80 chars) and a body of 1-3 sentences.\n\
+         The summary is 2-4 sentences: what was worked on, what was decided, what is still open.\n\
+         Write every title, body and the summary in {language}.\n\n\
          --- SESSION ---\n{}\n--- END ---",
         redact::redact(transcript)
     )
