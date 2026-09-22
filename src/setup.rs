@@ -272,7 +272,7 @@ fn write_atomic(file: &Path, text: &str) -> Result<()> {
         .with_context(|| format!("no directory for {}", file.display()))?;
     std::fs::create_dir_all(dir)?;
     let name = target.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = dir.join(format!(".{name}.oboete-tmp"));
+    let tmp = dir.join(format!(".{name}.{}.oboete-tmp", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
