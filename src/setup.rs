@@ -66,7 +66,11 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
             _ => grok(&cmd, remove)?,
         };
         let verb = if remove { "removed from" } else { "written to" };
-        println!("{a}: hooks {verb} {}", files.join(", "));
+        if files.is_empty() {
+            println!("{a}: hooks: nothing to remove");
+        } else {
+            println!("{a}: hooks {verb} {}", files.join(", "));
+        }
         let mcp = match a {
             "claude" => claude_mcp(&cmd, remove)?,
             "codex" => toml_mcp(&codex_home().join("config.toml"), &cmd, remove)?,
@@ -419,6 +423,9 @@ fn claude_mcp(cmd: &HookCommand, remove: bool) -> Result<String> {
             .cloned())
     };
     let present = entry_now()?;
+    if remove && present.is_none() {
+        return Ok("nothing to remove".into());
+    }
     backup_once(&file)?;
     // `add-json` refuses an existing name, so whatever sits under it goes first.
     if present.is_some() {
@@ -444,16 +451,6 @@ fn claude_mcp(cmd: &HookCommand, remove: bool) -> Result<String> {
             // Put the developer's entry back rather than leave nothing registered.
             if let Some(old) = &old {
                 let _ = add(old);
-                if entry_now()?.is_none() {
-                    // Name the lost entry without printing `env` values (tokens live there).
-                    let mut shown = old.clone();
-                    if let Some(env) = shown["env"].as_object_mut() {
-                        env.values_mut().for_each(|v| *v = json!("…"));
-                    }
-                    return Err(e.context(format!(
-                        "the previous {MCP_NAME} entry could not be put back; it was {shown}"
-                    )));
-                }
             }
             return Err(e);
         }
@@ -493,6 +490,9 @@ fn claude_cli(args: &[&str]) -> Result<()> {
 /// `config.toml`. Only those two keys are ours: other servers, the rest of the file and keys the
 /// developer set on our entry (`enabled`, timeouts, `env`) are left as they are.
 fn toml_mcp(file: &Path, cmd: &HookCommand, remove: bool) -> Result<String> {
+    if remove && !file.exists() {
+        return Ok("nothing to remove".into());
+    }
     let mut doc: toml_edit::DocumentMut = read_text(file)?
         .parse()
         .with_context(|| format!("parse {}", file.display()))?;
@@ -571,6 +571,19 @@ fn mcp_command(file: &Path) -> Option<(String, Vec<String>)> {
     }
 }
 
+/// Codex and Grok keep a turned-off server's table, with `enabled = false`.
+fn mcp_disabled(file: &Path) -> bool {
+    let doc = std::fs::read_to_string(file)
+        .ok()
+        .and_then(|t| t.parse::<toml_edit::DocumentMut>().ok());
+    doc.and_then(|d| {
+        d.get("mcp_servers")?
+            .get(MCP_NAME)?
+            .get("enabled")?
+            .as_bool()
+    }) == Some(false)
+}
+
 fn grok_config_file() -> PathBuf {
     crate::hook::grok_home().join("config.toml")
 }
@@ -581,6 +594,9 @@ fn claude_settings_file() -> PathBuf {
 
 fn claude(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     let file = claude_settings_file();
+    if remove && !file.exists() {
+        return Ok(vec![]);
+    }
     let mut root = read_json_object(&file)?;
     backup_once(&file)?;
     let wanted = if remove {
@@ -610,6 +626,9 @@ fn codex_home() -> PathBuf {
 fn codex(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     let hooks_file = codex_home().join("hooks.json");
     let config_file = codex_home().join("config.toml");
+    if remove && !hooks_file.exists() {
+        return Ok(vec![]);
+    }
     let mut root = read_json_object(&hooks_file)?;
     // The trust rows in config.toml follow handler positions in hooks.json, so one written
     // without the other cannot be repaired by a rerun: both are read first and staged together.
@@ -827,6 +846,9 @@ fn snake(event: &str) -> String {
 /// (hook.rs reads its presence as "Grok delivers its own events").
 fn grok(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     let file = crate::hook::grok_hooks_file();
+    if remove && !file.exists() {
+        return Ok(vec![]);
+    }
     let mut root = read_json_object(&file)?;
     backup_once(&file)?;
     let wanted = if remove {
@@ -959,6 +981,7 @@ pub fn doctor(home: &Path) -> Result<()> {
     let want = HookCommand::current(home)?;
     let mcp = |file: &Path| -> &str {
         match mcp_command(file) {
+            Some(_) if mcp_disabled(file) => "registered but turned off (`enabled = false`)",
             Some((c, args)) if c == want.exe && args == want.mcp_args() => "registered",
             Some(_) => "registered with another binary or home (rerun `oboete setup`)",
             None => "not registered (run `oboete setup`)",
@@ -994,7 +1017,10 @@ pub fn doctor(home: &Path) -> Result<()> {
 fn on_path(bin: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths)
-            .any(|d| d.join(bin).is_file() || d.join(format!("{bin}.exe")).is_file())
+            // `.exe` only on Windows: WSL puts Windows' `claude.exe` on PATH, which `claude` does not run.
+            .any(|d| {
+                d.join(bin).is_file() || (cfg!(windows) && d.join(format!("{bin}.exe")).is_file())
+            })
     })
 }
 
@@ -1094,6 +1120,11 @@ mod tests {
         let own = dir.join("own.toml");
         std::fs::write(&own, "[mcp_servers.oboete]\ncommand = \"/old/oboete\"\nargs = [\"mcp\"]\nenabled = false\nstartup_timeout_sec = 60\n").unwrap();
         toml_mcp(&own, &cmd, false).unwrap();
+        assert!(mcp_disabled(&own) && !mcp_disabled(&toml));
+        // Removing from a config that does not exist creates nothing.
+        let absent = dir.join("absent").join("config.toml");
+        toml_mcp(&absent, &cmd, true).unwrap();
+        assert!(!absent.exists() && !dir.join("absent").exists());
         let text = std::fs::read_to_string(&own).unwrap();
         assert!(
             text.contains("command = \"/x/oboete\"")
