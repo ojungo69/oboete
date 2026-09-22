@@ -129,6 +129,45 @@ pub fn timeline(conn: &Connection, repo: Option<&str>, limit: usize) -> Result<V
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+pub struct RepoRow {
+    pub repo: String,
+    pub sessions: i64,
+    pub last: String,
+}
+
+/// Every repository with sessions, most recently active first.
+pub fn repos(conn: &Connection) -> Result<Vec<RepoRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT repo, COUNT(*),
+                strftime('%Y-%m-%d %H:%M', MAX(started_at) / 1000, 'unixepoch', 'localtime')
+         FROM sessions GROUP BY repo ORDER BY MAX(started_at) DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(RepoRow {
+            repo: r.get(0)?,
+            sessions: r.get(1)?,
+            last: r.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// What one session left: its summaries, then its observations, each in the order stored.
+pub fn session_docs(conn: &Connection, session_id: &str) -> Result<Vec<Hit>> {
+    let mut stmt = conn.prepare(
+        "SELECT doc, kind, repo, strftime('%Y-%m-%d %H:%M', ts / 1000, 'unixepoch', 'localtime'),
+                title, body
+         FROM (SELECT 0 AS g, id, 's' || id AS doc, 'summary' AS kind, repo, ts, '' AS title, body
+                 FROM summaries WHERE session_id = ?1
+               UNION ALL
+               SELECT 1, id, 'o' || id, kind, repo, ts, title, body
+                 FROM observations WHERE session_id = ?1)
+         ORDER BY g, id",
+    )?;
+    let hits = stmt.query_map(params![session_id], hit)?;
+    Ok(hits.collect::<Result<_, _>>()?)
+}
+
 /// One line of `body`, `width` characters around the first term found (case-insensitive).
 pub fn snippet(body: &str, terms: &[&str], width: usize) -> String {
     let flat = body.replace('\n', " ");
@@ -248,6 +287,16 @@ mod tests {
         );
         assert!(rows[0].summary.starts_with("セッションの要約"));
         assert!(timeline(&conn, Some("/other"), 10).unwrap().is_empty());
+
+        let r = repos(&conn).unwrap();
+        assert_eq!((r.len(), r[0].repo.as_str(), r[0].sessions), (1, "/r", 1));
+        let docs: Vec<String> = session_docs(&conn, "s1")
+            .unwrap()
+            .into_iter()
+            .map(|h| h.doc)
+            .collect();
+        assert_eq!(docs, ["s1", "o1", "o2", "o3"]);
+        assert!(session_docs(&conn, "nope").unwrap().is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 
