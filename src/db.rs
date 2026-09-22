@@ -102,10 +102,11 @@ fn ensure_autoincrement(conn: &mut Connection) -> Result<()> {
             "id, session_id, repo, ts, body, provider",
         ),
     ];
-    if DOCS
-        .iter()
-        .all(|(t, _, _)| autoincrements(conn, t).unwrap_or(true))
-    {
+    let mut done = true;
+    for (table, _, _) in DOCS {
+        done &= autoincrements(conn, table)?;
+    }
+    if done {
         return Ok(());
     }
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
