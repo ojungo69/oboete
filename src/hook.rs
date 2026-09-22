@@ -30,6 +30,9 @@ pub fn run_stdin(home: &Path, agent: &str, event: &str) -> Result<()> {
     let Some(agent) = resolve_agent(agent, &payload, &grok_hooks_file()) else {
         return Ok(());
     };
+    if is_agent_internal(&payload) {
+        return Ok(());
+    }
     let conn = db::open(home)?;
     if let Some(out) = handle(&conn, agent, event, &payload)? {
         println!("{out}");
@@ -59,6 +62,18 @@ pub fn resolve_agent<'a>(agent: &'a str, payload: &Value, grok_hooks: &Path) -> 
         };
     }
     Some(agent)
+}
+
+/// Agents run housekeeping sessions of their own (Codex's memory consolidation works in
+/// `~/.codex/memories`); those are not the developer's work and are not captured.
+fn is_agent_internal(payload: &Value) -> bool {
+    let Some(cwd) = str_field(payload, &["cwd", "workspaceRoot"]) else {
+        return false;
+    };
+    let home = config::home_dir();
+    [".codex", ".claude", ".grok"]
+        .iter()
+        .any(|d| Path::new(cwd).starts_with(home.join(d)))
 }
 
 /// Store the event. Returns the hook's stdout JSON (context injection) when there is one.
@@ -229,6 +244,16 @@ mod tests {
         let d = std::env::temp_dir().join(format!("oboete-hook-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn agent_housekeeping_sessions_are_ignored() {
+        let home = config::home_dir();
+        let inside = json!({"cwd": home.join(".codex").join("memories").to_string_lossy()});
+        assert!(is_agent_internal(&inside));
+        let outside = json!({"cwd": home.join("projects").join("x").to_string_lossy()});
+        assert!(!is_agent_internal(&outside));
+        assert!(!is_agent_internal(&json!({})));
     }
 
     #[test]
