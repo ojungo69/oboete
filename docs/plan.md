@@ -1,0 +1,60 @@
+# oboete v2 (Rust) — 進め方の案 (draft, 2026-09-22)
+
+## 合意済みの「作りたいもの」(owner, 12 項目 + 修正)
+
+1. 目的: claude-mem を消して困らない。全 agent・全端末で同じ記憶。スマホ参照は「できたら」。
+2. 場面: セッション冒頭の自動コンテキスト、agent からの検索、viewer。レポート系は価値が分かれば入れる。
+3. agent: 必須 Claude Code / Codex / Grok Build。順次 Pi / Antigravity / OpenCode / Cursor。Gemini CLI は対象外。
+4. 要約の頭脳: サブスク CLI (agy / claude / codex / grok)、無料クラウド (OpenRouter free / NIM / Groq / Mistral)、ローカル (Ollama)、有料 API (明示時のみ)。フォールバック連鎖必須。要約が止まらない = 記録漏れ事故ゼロ。
+5. 置き場所: 使い勝手が良ければクラウド正本。暗号化/平文は私が決める。有料は都度確認。
+6. 覚えるもの: claude-mem / cmem 相当 + 類似 OSS の良い部分。repo 間共有は私が決める。
+7. 軽さ: 上限数値は不要。メモリ食い潰しバグが無いこと。
+8. 言語: Rust 希望。軽くて壊れなければ言語不問。
+9. 公開: 自分用が第一、動いたら OSS。
+10. 費用: 基本自由、有料は都度確認、サブスク枠は使ってよい。
+11. 完璧: 全 agent・全端末で同じ記憶が本線。スマホはおまけ。
+12. 今の TS 版は無駄になってよい。
+
+## 裏取りの要点
+
+- 規約: `claude -p` を hook から呼ぶのは Anthropic の規約で明示許可 (code.claude.com/docs/en/legal-and-compliance)。codex は規約に記載なし。
+- claude-mem の実態: 対応 agent = CC / Codex / OpenClaw / OpenCode / Antigravity / Grok Bot(ログ監視)。Pi・Grok Build hook 無し。provider = Claude サブスク / Gemini / OpenRouter のみ。常駐 bun worker + Chroma(Python)。リーク報告 13〜65 GB、ディスク 51〜634 GB の事故。この PC: Chroma 4.65 GB RSS、データ 5.9 GB、観測 15 万件。Chroma は `CLAUDE_MEM_CHROMA_ENABLED=false` で切れる(FTS のみになる)。
+- Rust 部品: rusqlite(bundled, FTS5 trigram 内蔵)、sqlite-vec 0.1.9、rmcp 3.4(公式 MCP SDK)、async-openai(base_url 差し替え)、axum + rust-embed、fastembed 7(ONNX, 多言語 e5 可)、cargo-dist、toml。全部保守中。
+- 類似 Rust OSS 9 件: 単独で土台にできるものは無し。部品取り: memori-core(FTS5+vec RRF 検索、2.8k 行)、icm `summarizer.rs`(CLI 自動検出)、remem `src/ai/cli.rs`(`claude -p` 起動)、palace-rs `hooks.rs`(CC/Codex/Cursor の hook 方言表)、sessiongrep `providers/*`(CC/Codex/Cursor/Antigravity/Pi のセッション読取)、memory-forge `platforms/grok.rs`、funes の送信前 redaction 二重ゲート、leteo の replication spec。全部 MIT/Apache-2.0。
+- 無料枠: Groq 1,000 回/日・strict json_schema(最安定)。OpenRouter free 50 回/日(生涯 $10 購入で 1,000/日)。NIM 約 40 回/分・上限非公開・構造化出力は `nvext.guided_json`。Mistral 約 30 回/分。Gemini free は入力を学習・人間レビュー(規約) → 既定から外す。Workers AI 1 万 neuron/日で窮屈。Ollama local は `response_format` 対応。
+- CLI: `claude -p --json-schema --system-prompt --model` / `grok -p --json-schema --system-prompt` / `agy -p --json-schema`(system prompt 無し) / `codex exec --output-schema -o`(system prompt 無し、`--json`)。
+- hook: CC / Codex / Grok は同じ JSON 方言 + `hookSpecificOutput.additionalContext`(Grok は UserPromptSubmit で注入不可 → SessionStart/PostToolUse 経由)。Codex は `~/.codex/hooks.json` か plugin manifest `.codex-plugin/plugin.json` の `hooks`。agy は `.agents/hooks.json` / `~/.gemini/config/hooks.json`、PreInvocation/PostInvocation の `injectSteps` で注入。Cursor は `~/.cursor/hooks.json`、`additional_context`。Pi は TS 拡張 `before_agent_start` / `context_with_system`。OpenCode は TS plugin `experimental.chat.system.transform`。
+
+## 方針 (案)
+
+1. **新 repo `oboete`(Rust、clean start + 部品移植)**。`free-mem` は参照用に残す(archive)。TS 版から引き継ぐのは仕様として: 4 agent の hook 形式、要約プロンプト/スキーマ、秘密検出規則、1,000 event fixture、bake-off の数字。コードは持ち込まない。
+2. **1 バイナリ** `oboete`: `hook <agent> <event>`(stdin JSON → SQLite 追記、目標 ≤ 20 ms)/ `observe`(pending を要約。Stop hook から detached 起動、単一 lease、終わったら exit。常駐なし)/ `inject`(SessionStart / prompt)/ `search|get|timeline` / `mcp`(rmcp stdio)/ `view`(axum + 埋め込み SPA)/ `setup <agent>` / `doctor` / `sync`(M2)。
+3. **データ = SQLite 1 ファイル** `~/.oboete/oboete.db`: sessions / events(生。要約成功後 30 日で削除)/ observations(claude-mem の型)/ summaries / prompts / fts(trigram + CJK bigram)/ vec(sqlite-vec + fastembed multilingual-e5-small)/ injections / provider_calls。約 9 表。work item・共有承認・移行記録は作らない。
+4. **要約 = provider chain + fallback**。設定は順序付きリスト。既定: Groq free → agy → claude → OpenRouter free → NIM → Mistral free → codex → grok → (有料 API は明示設定時のみ末尾)。理由: Groq は 1,000 回/日で最安定、サブスク枠は owner が「腐っている」ので次、OpenRouter free は $10 未購入だと 50 回/日、NIM は上限非公開。429/5xx/timeout → その provider を cooldown して次へ。JSON schema 検証失敗 → 次へ。全滅 → pending のまま次回。生イベントは要約成功まで保持。**provider ごとに日次予算**(fallback 自体が暴走しないため。TS 版 #352 の教訓を仕様として引き継ぐ)。Gemini free は opt-in。codex / agy は system prompt フラグが無いので指示は user prompt に同梱。
+5. **注入**: SessionStart = 直近セッション要約 + この repo の上位 observation(新しさ加重)+ personal prefs。UserPromptSubmit = hybrid 検索(FTS + vec, RRF)上位を予算内で。同一セッション再注入なし。注入文は再要約しない印付き。CC / Codex は SessionStart と UserPromptSubmit の両方で `additionalContext` 可(CC はバイナリで確認済み)。**Grok Build は UserPromptSubmit で注入不可**(仕様上 discard)→ Grok はセッション冒頭のみ、既知の非対称として扱う。agy は `injectSteps`、Cursor は `additional_context`、Pi / OpenCode は TS shim から system prompt に push。
+6. **秘密**: gitleaks 規則(Rust regex)で保存前に伏せ字。外部送信(要約 API / sync)直前にもう一度ゲート(funes 方式)。`.oboete.toml` の path glob で secret 扱い強制。
+7. **軽さ**: 常駐プロセスなし。hook は起動 5 ms 級。observe の RSS 目標 < 50 MB(計測して記録)。Chroma のような外部プロセス無し。
+8. **同期 (M2)**: Cloudflare Worker + D1 を hub。append-only op log を device が push/pull。content-hash id + tombstone、CRDT 無し。自アカウント内に平文(秘密は伏せ字済み)。**Private MCP link (M3)** = 同じ Worker が MCP over HTTP + token を出す → iMac/スマホ/Claude アプリから検索。暗号化は将来の opt-in。
+9. **viewer**: 既存 oboete の Preact viewer を移植、rust-embed で同梱。Pi/OpenCode の shim は TS 数十行。
+10. **repo 間共有**: personal prefs(明示的な好み・ルール)だけ全 repo に注入。他は repo 内。
+
+## マイルストーン
+
+- **M0 spike(2〜3 日)**: CC hook → SQLite → **2 段の provider chain(Groq free → agy)、1 段目を強制失敗させてフォールバックを実証** → SessionStart 注入。既存 1,000 event fixture を replay。hook 時間 / RSS / 要約成功率 / フォールバック回数を計測 → go/no-go。必要なキーは Groq 1 つ(agy はサブスク)。
+- **M1(約 2 週)**: CC / Codex / Grok Build、fallback 連鎖、伏せ字、hybrid 検索、MCP 検索、viewer、setup/doctor。本環境に claude-mem と併用で導入 → **owner 1 週間実使用で判定**。
+- **M2**: iMac / Windows / VPS ビルド(cargo-dist)、Cloudflare 同期。
+- **M3**: Pi / agy / OpenCode / Cursor、Private MCP link、意味検索の調整、レポート(価値があれば)。
+- **M4**: OSS 公開(README、インストーラ)。
+
+## 手順(この repo 用、軽量版)
+
+- 仕様 = この文書 1 枚 + マイルストーンごとの checklist。Spec Kit の 48 タスク儀式は使わない。
+- 実装 = Claude Code が spike と芯を直接書く(品質と速度で有利)。部品移植・adapter など並列可能なものは Codex / Grok。
+- レビュー = PR ごと Codex 1 巡 + 修正後 1 巡。CI = `cargo fmt --check` / `clippy` / `test`。bot は CodeQL のみ。
+- 完了 = owner 実使用 1 週間(M1)。
+
+## owner に聞くこと
+
+1. 新 repo 名 `oboete`(GitHub 作成)、`free-mem` は archive でよいか。
+2. 無料キーの取得(Groq / NIM / Mistral / OpenRouter)は owner 作業。OpenRouter に $10 一度だけ入れて 1,000 回/日にするか(任意)。
+3. spike の頭脳: agy と claude のどちらを先に試すか(agy = 腐っている枠、claude = 品質)。
