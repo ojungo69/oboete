@@ -1,7 +1,8 @@
 //! Search over what observe stored. One FTS5 trigram table (`fts`) keeps a copy of every
 //! observation and summary, so a query is one SQL statement and CJK text is indexed by
-//! character. A term shorter than three characters cannot hit a trigram index, so a query
-//! containing one falls back to LIKE (index-assisted for the longer runs, a scan otherwise).
+//! character. Terms of three or more characters go through MATCH (bm25 order, Unicode case
+//! folding); a shorter term cannot hit a trigram index and is ANDed on as a literal LIKE
+//! (ASCII case folding only), which is a scan the small tables can afford.
 
 use anyhow::Result;
 use rusqlite::types::Value;
@@ -38,34 +39,45 @@ pub fn search(
     repo: Option<&str>,
     limit: usize,
 ) -> Result<Vec<Hit>> {
-    let terms: Vec<&str> = query.split_whitespace().collect();
-    if terms.is_empty() {
+    let (long, short): (Vec<&str>, Vec<&str>) = query
+        .split_whitespace()
+        .partition(|t| t.chars().count() >= 3);
+    if long.is_empty() && short.is_empty() {
         return Ok(Vec::new());
     }
+    let mut clauses: Vec<String> = Vec::new();
     let mut args: Vec<Value> = Vec::new();
-    let (filter, order) = if terms.iter().all(|t| t.chars().count() >= 3) {
-        // Each term as an FTS5 string (quotes doubled), implicit AND, best bm25 first.
-        let q = terms
+    if !long.is_empty() {
+        // Each term as an FTS5 string (quotes doubled), implicit AND between them.
+        let q = long
             .iter()
             .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(" ");
+        clauses.push("fts MATCH ?".into());
         args.push(Value::Text(q));
-        ("fts MATCH ?".to_string(), "rank, ts DESC")
-    } else {
-        // `%` and `_` inside a term act as wildcards: an ESCAPE clause would forfeit the index.
-        for t in &terms {
-            args.push(Value::Text(format!("%{t}%")));
-            args.push(Value::Text(format!("%{t}%")));
-        }
-        let likes = vec!["(title LIKE ? OR body LIKE ?)"; terms.len()].join(" AND ");
-        (likes, "ts DESC")
-    };
-    let mut sql = format!("SELECT {COLUMNS} FROM fts WHERE {filter}");
+    }
+    for t in &short {
+        let pattern = format!(
+            "%{}%",
+            t.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        clauses.push("(title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')".into());
+        args.push(Value::Text(pattern.clone()));
+        args.push(Value::Text(pattern));
+    }
     if let Some(r) = repo {
-        sql.push_str(" AND repo = ?");
+        clauses.push("repo = ?".into());
         args.push(Value::Text(r.to_string()));
     }
+    let order = if long.is_empty() {
+        "ts DESC"
+    } else {
+        "rank, ts DESC"
+    };
+    let mut sql = format!("SELECT {COLUMNS} FROM fts WHERE {}", clauses.join(" AND "));
     sql.push_str(&format!(" ORDER BY {order} LIMIT ?"));
     args.push(Value::Integer(limit as i64));
     let mut stmt = conn.prepare(&sql)?;
@@ -169,6 +181,11 @@ mod tests {
                     title: "use the trigram tokenizer".into(),
                     body: "FTS5 trigram indexes CJK text by character".into(),
                 },
+                db::Observation {
+                    kind: "change".into(),
+                    title: "ÉCOLE coverage".into(),
+                    body: "coverage 50% done, ÄÖÜ".into(),
+                },
             ],
             i64::MAX,
         )
@@ -192,11 +209,16 @@ mod tests {
         assert_eq!(docs("クエリ", None), vec!["o1"]);
         assert_eq!(docs("検索 要約", None), vec!["s1"]);
         assert_eq!(docs("trigram \"quoted\"", None), Vec::<String>::new());
-        // A term under 3 characters: LIKE, still case-insensitive for ASCII, all terms required.
+        // A term under 3 characters is a literal LIKE (ASCII case folding), ANDed with the
+        // MATCH of the longer ones; `%` and `_` are not wildcards.
         assert_eq!(docs("接続", None), vec!["o1"]);
         assert_eq!(docs("db", None), vec!["o1"]);
         assert_eq!(docs("接続 クエリ", None), vec!["o1"]);
         assert_eq!(docs("接続 trigram", None), Vec::<String>::new());
+        assert_eq!(docs("éco ÄÖ", None), vec!["o3"]);
+        assert_eq!(docs("50%", None), vec!["o3"]);
+        assert_eq!(docs("0%", None), vec!["o3"]);
+        assert_eq!(docs("0_", None), Vec::<String>::new());
         assert_eq!(docs("", None), Vec::<String>::new());
         // Repository filter.
         assert_eq!(docs("trigram", Some("/r")), vec!["o2"]);
@@ -247,7 +269,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM fts", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 3);
+        assert_eq!(n, 4);
         std::fs::remove_dir_all(&dir).ok();
     }
 
