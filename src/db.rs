@@ -61,7 +61,22 @@ pub fn open(home: &Path) -> Result<Connection> {
     conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
     conn.execute_batch(SCHEMA)?;
+    // CREATE TABLE IF NOT EXISTS leaves a table from an older build as it was; columns added since
+    // are filled in here. ponytail: idempotent column checks; PRAGMA user_version once a migration
+    // needs more than ADD COLUMN.
+    ensure_column(&conn, "sessions", "injected_at", "INTEGER")?;
     Ok(conn)
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .any(|c| c.as_deref() == Ok(column));
+    if !exists {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+    }
+    Ok(())
 }
 
 pub fn now_ms() -> i64 {
@@ -229,17 +244,57 @@ pub fn record_call(
     Ok(())
 }
 
-/// Calls made to `provider` since the last UTC midnight (the per-provider daily budget window).
+/// Requests sent to `provider` since the last UTC midnight (the per-provider daily budget window).
+/// A 429 that was waited out still counts: the budget bounds our requests, not our successes.
 pub fn calls_today(conn: &Connection, provider: &str) -> Result<u32> {
     let day_ms: i64 = 86_400_000;
     let midnight = now_ms() / day_ms * day_ms;
     let n: u32 = conn
         .query_row(
-            "SELECT COUNT(*) FROM provider_calls WHERE provider=?1 AND ts>=?2 AND outcome IN ('ok','error','invalid')",
+            "SELECT COUNT(*) FROM provider_calls WHERE provider=?1 AND ts>=?2 AND outcome IN ('ok','error','invalid','wait')",
             params![provider, midnight],
             |r| r.get(0),
         )
         .optional()?
         .unwrap_or(0);
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sessions_table_from_m0_gains_injected_at() {
+        let dir = std::env::temp_dir().join(format!("oboete-db-m0-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Connection::open(dir.join("oboete.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE sessions(id TEXT PRIMARY KEY, agent TEXT NOT NULL, repo TEXT NOT NULL,
+                 cwd TEXT, started_at INTEGER NOT NULL, ended_at INTEGER, last_event_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+        let conn = open(&dir).unwrap();
+        upsert_session(&conn, "s1", "claude", "/r", "/r", 1).unwrap();
+        assert!(!injected(&conn, "s1").unwrap());
+        mark_injected(&conn, "s1", 2).unwrap();
+        assert!(injected(&conn, "s1").unwrap());
+        // Reopening a current database is a no-op.
+        drop(conn);
+        assert!(injected(&open(&dir).unwrap(), "s1").unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn waited_429_counts_against_the_daily_budget() {
+        let dir = std::env::temp_dir().join(format!("oboete-db-budget-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = open(&dir).unwrap();
+        record_call(&conn, "groq", "wait", 1, None).unwrap();
+        record_call(&conn, "groq", "ok", 1, None).unwrap();
+        record_call(&conn, "groq", "budget", 0, None).unwrap();
+        assert_eq!(calls_today(&conn, "groq").unwrap(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
