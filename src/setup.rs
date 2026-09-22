@@ -151,7 +151,7 @@ fn is_our_handler(h: &Value) -> bool {
     // The canonical path setup writes may be versioned or renamed (`oboete-0.1`, `oboete.exe`).
     let is_exe = Path::new(exe)
         .file_name()
-        .and_then(|f| f.to_str())
+        .and_then(std::ffi::OsStr::to_str)
         .is_some_and(|f| f.starts_with("oboete"));
     let rest = match rest {
         [flag, _dir, tail @ ..] if flag == "--home" => tail,

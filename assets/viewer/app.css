@@ -138,7 +138,7 @@ main { max-width: 60rem; padding: 8px 24px 64px; }
 #heading { font-size: 13px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); margin: 16px 0 4px; }
 #heading .query { text-transform: none; letter-spacing: normal; }
 
-#status { margin: 8px 0 0; color: var(--muted); }
+#status { display: block; margin: 8px 0 0; color: var(--muted); }
 #status:empty { margin: 0; }
 #status.error { color: var(--red); }
 
