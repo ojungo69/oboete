@@ -375,15 +375,14 @@ fn stats(conn: &rusqlite::Connection, home: &Path, repo: Option<&str>) -> Result
         params![repo],
         |r| r.get(0),
     )?;
-    // Pages in the file plus the WAL not yet checkpointed into it.
-    let pages: i64 = conn.query_row(
-        "SELECT (SELECT page_count FROM pragma_page_count) * (SELECT page_size FROM pragma_page_size)",
-        [],
-        |r| r.get(0),
-    )?;
-    let wal = std::fs::metadata(home.join("oboete.db-wal"))
-        .map(|m| m.len() as i64)
-        .unwrap_or(0);
+    // What the store takes on disk: the file plus the WAL not yet checkpointed into it.
+    // (`page_count` would already include pages that only exist in the WAL.)
+    let bytes = |name: &str| {
+        std::fs::metadata(home.join(name))
+            .map(|m| m.len() as i64)
+            .unwrap_or(0)
+    };
+    let db_bytes = bytes("oboete.db") + bytes("oboete.db-wal");
     let mut stmt = conn.prepare(
         "SELECT provider, SUM(outcome = 'ok'), SUM(outcome IN ('error', 'invalid')),
                 SUM(outcome = 'wait'), CAST(AVG(CASE WHEN outcome = 'ok' THEN ms END) AS INTEGER)
@@ -406,7 +405,7 @@ fn stats(conn: &rusqlite::Connection, home: &Path, repo: Option<&str>) -> Result
         "observations": {"total": kinds.iter().map(|k| k["count"].as_i64().unwrap_or(0)).sum::<i64>(),
                          "kinds": kinds},
         "summaries": summaries,
-        "db_bytes": pages + wal,
+        "db_bytes": db_bytes,
         "providers": providers,
     }))
 }

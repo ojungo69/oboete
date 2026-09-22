@@ -375,7 +375,9 @@ async function poll() {
       $('live').classList.remove('off');
       if ($('status').textContent === UNREACHABLE) setStatus('');
     }
-    if (changed) refresh();
+    // Stats also counts raw events, provider calls and handed-over context, which the marker
+    // leaves out on purpose; that view is cheap, so it just follows every poll.
+    if (changed || (view === 'stats' && !$('q').value.trim())) refresh();
   } catch {
     // The dot is for the eye; the status line is the page's live region.
     $('live').classList.add('off');
