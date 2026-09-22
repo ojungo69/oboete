@@ -477,6 +477,9 @@ fn claude_mcp(cmd: &HookCommand, remove: bool) -> Result<String> {
 fn claude_cli(args: &[&str]) -> Result<()> {
     let out = std::process::Command::new("claude")
         .args(args)
+        // `claude mcp ...` runs the SessionStart hooks too; without this each call is an empty
+        // captured session.
+        .env("OBOETE_SKIP", "1")
         .stdin(std::process::Stdio::null())
         .output()
         .context("run claude")?;
