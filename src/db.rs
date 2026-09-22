@@ -59,13 +59,62 @@ pub fn open(home: &Path) -> Result<Connection> {
     let path = home.join("oboete.db");
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
-    conn.execute_batch(SCHEMA)?;
+    // Switching a file to WAL takes an exclusive lock that the busy handler does not cover:
+    // openers racing on a fresh or pre-WAL file wait for each other here instead.
+    let mut tries = 0;
+    loop {
+        match conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;") {
+            Ok(()) => break,
+            Err(e) if tries < 50 && e.to_string().contains("locked") => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => return Err(e).context("journal mode"),
+        }
+    }
+    conn.execute_batch(SCHEMA).context("schema")?;
     // CREATE TABLE IF NOT EXISTS leaves a table from an older build as it was; columns added since
     // are filled in here. ponytail: idempotent column checks; PRAGMA user_version once a migration
     // needs more than ADD COLUMN.
-    ensure_column(&mut conn, "sessions", "injected_at", "INTEGER")?;
+    ensure_column(&mut conn, "sessions", "injected_at", "INTEGER").context("migrate columns")?;
+    ensure_fts(&mut conn).context("search index")?;
     Ok(conn)
+}
+
+/// The search index (FTS5 trigram: substring matching, CJK by character), built from what
+/// observe already stored. The read check keeps the hook path free of write locks; the write
+/// transaction re-checks, so concurrent first opens build it once and a killed one leaves
+/// nothing behind.
+fn ensure_fts(conn: &mut Connection) -> Result<()> {
+    if table_exists(conn, "fts")? {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if !table_exists(&tx, "fts")? {
+        tx.execute_batch(
+            "CREATE VIRTUAL TABLE fts USING fts5(
+               title, body, doc UNINDEXED, kind UNINDEXED, repo UNINDEXED, ts UNINDEXED,
+               tokenize='trigram'
+             );
+             INSERT INTO fts(title, body, doc, kind, repo, ts)
+               SELECT title, body, 'o' || id, kind, repo, ts FROM observations;
+             INSERT INTO fts(title, body, doc, kind, repo, ts)
+               SELECT '', body, 's' || id, 'summary', repo, ts FROM summaries;",
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+            params![table],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 /// The read check keeps the hook path free of write locks; the write transaction re-checks,
@@ -160,6 +209,7 @@ pub struct PendingSession {
     pub id: String,
     pub agent: String,
     pub repo: String,
+    pub last_event_at: i64,
 }
 
 /// Sessions with raw events, ended or idle for `settle_ms`, oldest first.
@@ -169,7 +219,7 @@ pub fn pending_sessions(
     settle_ms: u64,
 ) -> Result<Vec<PendingSession>> {
     let mut stmt = conn.prepare(
-        "SELECT s.id, s.agent, s.repo FROM sessions s
+        "SELECT s.id, s.agent, s.repo, s.last_event_at FROM sessions s
          WHERE EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id)
            AND (s.ended_at IS NOT NULL OR s.last_event_at <= ?1)
          ORDER BY s.last_event_at ASC LIMIT 20",
@@ -179,6 +229,7 @@ pub fn pending_sessions(
             id: r.get(0)?,
             agent: r.get(1)?,
             repo: r.get(2)?,
+            last_event_at: r.get(3)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -209,29 +260,36 @@ pub struct Observation {
     pub body: String,
 }
 
-/// One transaction: store the batch's knowledge and drop its raw events.
+const FTS_INSERT: &str =
+    "INSERT INTO fts(title, body, doc, kind, repo, ts) VALUES(?1,?2,?3,?4,?5,?6)";
+
+/// One transaction: store the batch's knowledge (and its search rows) and drop its raw events.
+/// Rows carry the session's time (`last_event_at`), not the time they were summarized.
 pub fn apply_batch(
     conn: &mut Connection,
-    session_id: &str,
-    repo: &str,
+    s: &PendingSession,
     provider: &str,
     summary: &str,
     observations: &[Observation],
     last_event_id: i64,
 ) -> Result<()> {
-    let ts = now_ms();
+    let (session_id, repo, ts) = (&s.id, &s.repo, s.last_event_at);
     let tx = conn.transaction()?;
     if !summary.trim().is_empty() {
         tx.execute(
             "INSERT INTO summaries(session_id, repo, ts, body, provider) VALUES(?1,?2,?3,?4,?5)",
             params![session_id, repo, ts, summary, provider],
         )?;
+        let doc = format!("s{}", tx.last_insert_rowid());
+        tx.execute(FTS_INSERT, params!["", summary, doc, "summary", repo, ts])?;
     }
     for o in observations {
         tx.execute(
             "INSERT INTO observations(session_id, repo, ts, kind, title, body, provider) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![session_id, repo, ts, o.kind, o.title, o.body, provider],
         )?;
+        let doc = format!("o{}", tx.last_insert_rowid());
+        tx.execute(FTS_INSERT, params![o.title, o.body, doc, o.kind, repo, ts])?;
     }
     tx.execute(
         "DELETE FROM events WHERE session_id=?1 AND id<=?2",

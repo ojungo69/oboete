@@ -12,6 +12,7 @@ mod provider;
 mod redact;
 mod replay;
 mod repo;
+mod search;
 mod setup;
 
 use std::path::PathBuf;
@@ -46,6 +47,25 @@ enum Cmd {
     },
     /// Print the context that would be injected for the current directory
     Inject,
+    /// Full-text search over observations and summaries (this repository unless --all)
+    Search {
+        /// Terms, all required; one under 3 characters switches to substring matching.
+        /// Put `--` before a term that starts with `-`
+        query: Vec<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Print one document in full by its id from `search` (o12 = observation, s5 = summary)
+    Get { id: String },
+    /// Sessions newest first with their summaries (this repository unless --all)
+    Timeline {
+        #[arg(long)]
+        all: bool,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Wire this binary into an agent's hooks (claude | codex | grok | all)
     Setup {
         agent: String,
@@ -85,6 +105,21 @@ fn main() {
     std::process::exit(code);
 }
 
+/// The current directory's repository key, or every repository with `--all`.
+fn repo_filter(all: bool) -> Result<Option<String>> {
+    Ok(if all {
+        None
+    } else {
+        Some(repo::key(&std::env::current_dir()?))
+    })
+}
+
+/// Listing output. Piped into `head`, stdout closes early; that is not worth a panic.
+fn emit(text: &str) {
+    use std::io::Write;
+    let _ = std::io::stdout().lock().write_all(text.as_bytes());
+}
+
 fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
     std::fs::create_dir_all(&home)?;
     match cmd {
@@ -105,6 +140,55 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let conn = db::open(&home)?;
             let repo = repo::key(&cwd);
             print!("{}", inject::context(&conn, &repo)?);
+            Ok(())
+        }
+        Cmd::Search { query, all, limit } => {
+            let conn = db::open(&home)?;
+            let query = query.join(" ");
+            let terms: Vec<&str> = query.split_whitespace().collect();
+            let mut out = String::new();
+            for h in search::search(&conn, &query, repo_filter(all)?.as_deref(), limit)? {
+                let text = search::snippet(&h.body, &terms, 110);
+                out.push_str(&if h.title.is_empty() {
+                    format!("{:<5} {}  {:<10} {text}\n", h.doc, h.when, h.kind)
+                } else {
+                    format!(
+                        "{:<5} {}  {:<10} {}\n      {text}\n",
+                        h.doc, h.when, h.kind, h.title
+                    )
+                });
+            }
+            emit(&out);
+            Ok(())
+        }
+        Cmd::Get { id } => {
+            let conn = db::open(&home)?;
+            let h = search::get(&conn, &id)?.ok_or_else(|| {
+                anyhow::anyhow!("no document {id} (ids come from `oboete search`)")
+            })?;
+            let title = if h.title.is_empty() {
+                String::new()
+            } else {
+                format!("{}\n", h.title)
+            };
+            emit(&format!(
+                "{} {} {} {}\n{title}\n{}\n",
+                h.doc, h.when, h.kind, h.repo, h.body
+            ));
+            Ok(())
+        }
+        Cmd::Timeline { all, limit } => {
+            let conn = db::open(&home)?;
+            let mut out = String::new();
+            for r in search::timeline(&conn, repo_filter(all)?.as_deref(), limit)? {
+                let id: String = r.id.chars().take(8).collect();
+                let summary: String = r.summary.replace('\n', " ").chars().take(120).collect();
+                out.push_str(&format!(
+                    "{}  {:<6} {id}  {}  {summary}\n",
+                    r.when, r.agent, r.repo
+                ));
+            }
+            emit(&out);
             Ok(())
         }
         Cmd::Setup { agent, remove } => setup::run(&home, &agent, remove),

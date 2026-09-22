@@ -65,7 +65,7 @@ fn process_session(
     let transcript = render(&events);
     if transcript.trim().is_empty() {
         // Nothing worth a model call (e.g. only SessionStart/SessionEnd): drop the raw rows.
-        db::apply_batch(conn, &s.id, &s.repo, "none", "", &[], last_id)?;
+        db::apply_batch(conn, s, "none", "", &[], last_id)?;
         return Ok(());
     }
     let prompt = build_prompt(&s.agent, &cfg.summary.language, &transcript);
@@ -78,15 +78,7 @@ fn process_session(
         .by_provider
         .entry(result.provider.clone())
         .or_default() += 1;
-    db::apply_batch(
-        conn,
-        &s.id,
-        &s.repo,
-        &result.provider,
-        &summary,
-        &observations,
-        last_id,
-    )?;
+    db::apply_batch(conn, s, &result.provider, &summary, &observations, last_id)?;
     Ok(())
 }
 
