@@ -12,7 +12,7 @@ rmcp = { version = "3.4", default-features = false, features = ["server", "macro
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.151", features = ["preserve_order"] }
+serde_json = { version = "1.0.151", features = ["preserve_order", "float_roundtrip"] }
 sha2 = "0.10"
 toml = "1.1.6"
 tokio = { version = "1", features = ["rt", "io-std"] }

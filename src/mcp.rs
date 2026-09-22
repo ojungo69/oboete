@@ -31,7 +31,7 @@ pub struct SearchArgs {
     query: String,
     /// Search every repository instead of the current one.
     #[serde(default)]
-    all: bool,
+    all: Option<bool>,
     /// A repository root to search instead of the current one.
     #[serde(default)]
     repo: Option<String>,
@@ -50,7 +50,7 @@ pub struct GetArgs {
 pub struct TimelineArgs {
     /// Every repository instead of the current one.
     #[serde(default)]
-    all: bool,
+    all: Option<bool>,
     /// A repository root instead of the current one.
     #[serde(default)]
     repo: Option<String>,
@@ -77,14 +77,19 @@ impl Oboete {
         }
     }
 
-    fn scope(&self, all: bool, repo: Option<&str>) -> Option<String> {
-        if all {
-            None
-        } else {
-            Some(match repo {
-                Some(r) => crate::repo::key(Path::new(r)),
-                None => self.cwd_repo.clone(),
-            })
+    /// `None` = every repository. Models send `null` and `""` for arguments they mean to leave
+    /// out; a `repo` that is not a directory is an error, not a scope that matches nothing.
+    fn scope(&self, all: Option<bool>, repo: Option<&str>) -> Result<Option<String>, ErrorData> {
+        if all == Some(true) {
+            return Ok(None);
+        }
+        match repo.filter(|r| !r.is_empty()) {
+            None => Ok(Some(self.cwd_repo.clone())),
+            Some(r) if Path::new(r).is_dir() => Ok(Some(crate::repo::key(Path::new(r)))),
+            Some(r) => Err(ErrorData::invalid_params(
+                format!("repo {r:?} is not a directory: pass a repository's absolute path"),
+                None,
+            )),
         }
     }
 
@@ -94,7 +99,7 @@ impl Oboete {
     )]
     fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, ErrorData> {
         let conn = db::open(&self.home).map_err(internal)?;
-        let scope = self.scope(a.all, a.repo.as_deref());
+        let scope = self.scope(a.all, a.repo.as_deref())?;
         let hits = search::search(&conn, &a.query, scope.as_deref(), a.limit.unwrap_or(10))
             .map_err(internal)?;
         let terms: Vec<&str> = a.query.split_whitespace().collect();
@@ -152,7 +157,7 @@ impl Oboete {
         Parameters(a): Parameters<TimelineArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let conn = db::open(&self.home).map_err(internal)?;
-        let scope = self.scope(a.all, a.repo.as_deref());
+        let scope = self.scope(a.all, a.repo.as_deref())?;
         let rows =
             search::timeline(&conn, scope.as_deref(), a.limit.unwrap_or(20)).map_err(internal)?;
         let mut out = String::new();
@@ -250,35 +255,36 @@ mod tests {
     #[test]
     fn tools_answer_from_the_store() {
         let (dir, s) = seeded();
-        let hits = body(
+        let search = |all: Option<bool>, repo: Option<&str>| {
             s.search(Parameters(SearchArgs {
                 query: "trigram".into(),
-                all: false,
-                repo: None,
+                all,
+                repo: repo.map(String::from),
                 limit: None,
             }))
-            .unwrap(),
-        );
+            .map(body)
+        };
+        let hits = search(None, None).unwrap();
         assert!(
             hits.starts_with("o1 ") && hits.contains("use the trigram tokenizer"),
             "{hits}"
         );
-        let none = body(
-            s.search(Parameters(SearchArgs {
-                query: "trigram".into(),
-                all: false,
-                repo: Some("/elsewhere".into()),
-                limit: None,
-            }))
-            .unwrap(),
+        // `null` / `""` stand for "left out"; another existing directory is another scope; a
+        // path that is not a directory is an error rather than a scope that matches nothing.
+        assert_eq!(search(Some(false), Some("")).unwrap(), hits);
+        assert!(search(Some(true), None).unwrap().starts_with("o1 "));
+        let elsewhere = std::env::temp_dir();
+        assert_eq!(
+            search(None, Some(elsewhere.to_str().unwrap())).unwrap(),
+            "no hits"
         );
-        assert_eq!(none, "no hits");
+        assert!(search(None, Some("/elsewhere/not/a/dir")).is_err());
         let doc = body(s.get(Parameters(GetArgs { id: "s1".into() })).unwrap());
         assert!(doc.contains("要約: 検索を実装した"), "{doc}");
         assert!(s.get(Parameters(GetArgs { id: "o9".into() })).is_err());
         let tl = body(
             s.timeline(Parameters(TimelineArgs {
-                all: true,
+                all: Some(true),
                 repo: None,
                 limit: None,
             }))

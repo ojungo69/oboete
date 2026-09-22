@@ -14,10 +14,10 @@ use crate::{config, db};
 pub const AGENTS: [&str; 3] = ["claude", "codex", "grok"];
 const BACKUP_SUFFIX: &str = ".oboete.bak";
 
-/// (event, timeout seconds). Timeouts only bound a stalled hook; the hook itself takes ~10 ms.
 /// The name each agent knows our MCP server by (tools show up as `oboete__search` and so on).
 const MCP_NAME: &str = "oboete";
 
+/// (event, timeout seconds). Timeouts only bound a stalled hook; the hook itself takes ~10 ms.
 const CLAUDE_EVENTS: &[(&str, u32)] = &[
     ("SessionStart", 10),
     ("UserPromptSubmit", 5),
@@ -67,24 +67,12 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         };
         let verb = if remove { "removed from" } else { "written to" };
         println!("{a}: hooks {verb} {}", files.join(", "));
-        let mcp_file = match a {
-            "claude" => {
-                let f = claude_mcp_file();
-                claude_mcp(&f, &cmd, remove)?;
-                f
-            }
-            "codex" => {
-                let f = codex_home().join("config.toml");
-                toml_mcp(&f, &cmd, remove)?;
-                f
-            }
-            _ => {
-                let f = grok_config_file();
-                toml_mcp(&f, &cmd, remove)?;
-                f
-            }
+        let mcp = match a {
+            "claude" => claude_mcp(&cmd, remove)?,
+            "codex" => toml_mcp(&codex_home().join("config.toml"), &cmd, remove)?,
+            _ => toml_mcp(&grok_config_file(), &cmd, remove)?,
         };
-        println!("{a}: mcp server {verb} {}", mcp_file.display());
+        println!("{a}: mcp server {mcp}");
     }
     if !remove {
         println!("Hook files are read when an agent starts: restart running sessions.");
@@ -261,11 +249,48 @@ fn read_json_object(file: &Path) -> Result<Value> {
 }
 
 fn write_json(file: &Path, v: &Value) -> Result<()> {
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir)?;
+    write_atomic(file, &format!("{}\n", serde_json::to_string_pretty(v)?))
+}
+
+/// A missing file reads as empty; any other read error stops setup before it writes anything
+/// (an unreadable config must not be replaced by one holding only our entries).
+fn read_text(file: &Path) -> Result<String> {
+    match std::fs::read_to_string(file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        r => r.with_context(|| format!("read {}", file.display())),
     }
-    std::fs::write(file, format!("{}\n", serde_json::to_string_pretty(v)?))
-        .with_context(|| format!("write {}", file.display()))
+}
+
+/// Agents read these files while they run, so a write never leaves one truncated: a temp file
+/// next to the target, then a rename. A symlinked file (dotfile managers) is written through to
+/// its target; the target's mode is kept and a new file gets 0600.
+fn write_atomic(file: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    let target = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    let dir = target
+        .parent()
+        .with_context(|| format!("no directory for {}", file.display()))?;
+    std::fs::create_dir_all(dir)?;
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = dir.join(format!(".{name}.oboete-tmp"));
+    let _ = std::fs::remove_file(&tmp);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let written = (|| -> std::io::Result<()> {
+        let mut f = opts.open(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        if let Ok(m) = std::fs::metadata(&target) {
+            f.set_permissions(m.permissions())?;
+        }
+        f.sync_all()?;
+        std::fs::rename(&tmp, &target)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.with_context(|| format!("write {}", file.display()))
 }
 
 /// Drop our handlers from every event (a group that held only ours goes; one shared with the
@@ -297,35 +322,64 @@ fn merge_groups(root: &mut Value, wanted: Vec<(String, Value)>) {
     root["hooks"] = Value::Object(hooks);
 }
 
-/// User-scope MCP servers of Claude Code live in `~/.claude.json` under `mcpServers` (the
-/// file Claude Code also keeps its own state in; only our key is touched).
+/// User-scope MCP servers of Claude Code live in `~/.claude.json` under `mcpServers`.
 fn claude_mcp_file() -> PathBuf {
     config::home_dir().join(".claude.json")
 }
 
-fn claude_mcp(file: &Path, cmd: &HookCommand, remove: bool) -> Result<()> {
-    let mut root = read_json_object(file)?;
-    backup_once(file)?;
-    if !root["mcpServers"].is_object() {
-        root["mcpServers"] = json!({});
+/// `~/.claude.json` is Claude Code's state file, rewritten all the time under its own lock; a
+/// write from outside races it (a session that reads the file mid-write "repairs" it from its
+/// cache, dropping our entry). So Claude Code's own CLI makes the change. Keys the developer
+/// added to our entry (`env`, ...) are carried over; `add-json` refuses an existing name, hence
+/// remove first.
+fn claude_mcp(cmd: &HookCommand, remove: bool) -> Result<String> {
+    if !on_path("claude") {
+        return Ok("skipped: `claude` is not on PATH".into());
     }
-    let servers = root["mcpServers"].as_object_mut().expect("object");
-    if remove {
-        servers.remove(MCP_NAME);
-    } else {
-        servers.insert(
-            MCP_NAME.to_string(),
-            json!({"type": "stdio", "command": cmd.exe, "args": cmd.mcp_args(), "env": {}}),
-        );
+    let current = read_json_object(&claude_mcp_file())?["mcpServers"]
+        .get(MCP_NAME)
+        .cloned();
+    if current.is_some() {
+        claude_cli(&["mcp", "remove", "--scope", "user", MCP_NAME])?;
     }
-    write_json(file, &root)
+    if !remove {
+        let mut entry = current
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({"env": {}}));
+        entry["type"] = json!("stdio");
+        entry["command"] = json!(cmd.exe);
+        entry["args"] = json!(cmd.mcp_args());
+        let entry = entry.to_string();
+        claude_cli(&["mcp", "add-json", "--scope", "user", MCP_NAME, &entry])?;
+    }
+    let verb = if remove { "removed from" } else { "written to" };
+    Ok(format!(
+        "{verb} {} (by `claude mcp`)",
+        claude_mcp_file().display()
+    ))
+}
+
+fn claude_cli(args: &[&str]) -> Result<()> {
+    let out = std::process::Command::new("claude")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .context("run claude")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "claude {}: {}{}",
+        args[..2].join(" "),
+        String::from_utf8_lossy(&out.stderr).trim(),
+        String::from_utf8_lossy(&out.stdout).trim()
+    );
+    Ok(())
 }
 
 /// Codex and Grok Build both take `[mcp_servers.<name>]` with `command` and `args` in their
-/// `config.toml`. Other servers and the rest of the file are left as they are.
-fn toml_mcp(file: &Path, cmd: &HookCommand, remove: bool) -> Result<()> {
-    let text = std::fs::read_to_string(file).unwrap_or_default();
-    let mut doc: toml_edit::DocumentMut = text
+/// `config.toml`. Only those two keys are ours: other servers, the rest of the file and keys the
+/// developer set on our entry (`enabled`, timeouts, `env`) are left as they are.
+fn toml_mcp(file: &Path, cmd: &HookCommand, remove: bool) -> Result<String> {
+    let mut doc: toml_edit::DocumentMut = read_text(file)?
         .parse()
         .with_context(|| format!("parse {}", file.display()))?;
     backup_once(file)?;
@@ -333,7 +387,7 @@ fn toml_mcp(file: &Path, cmd: &HookCommand, remove: bool) -> Result<()> {
     if remove {
         if let Some(servers) = root
             .get_mut("mcp_servers")
-            .and_then(toml_edit::Item::as_table_mut)
+            .and_then(toml_edit::Item::as_table_like_mut)
         {
             servers.remove(MCP_NAME);
             if servers.is_empty() {
@@ -341,22 +395,38 @@ fn toml_mcp(file: &Path, cmd: &HookCommand, remove: bool) -> Result<()> {
             }
         }
     } else {
-        let servers = root
-            .entry("mcp_servers")
-            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
-        let Some(servers) = servers.as_table_mut() else {
+        if !root.contains_key("mcp_servers") {
+            let mut servers = toml_edit::Table::new();
+            servers.set_implicit(true);
+            root.insert("mcp_servers", toml_edit::Item::Table(servers));
+        }
+        let Some(servers) = root
+            .get_mut("mcp_servers")
+            .and_then(toml_edit::Item::as_table_like_mut)
+        else {
             anyhow::bail!("{}: mcp_servers is not a table", file.display());
         };
-        servers.set_implicit(true);
-        let mut row = toml_edit::Table::new();
-        row["command"] = toml_edit::value(cmd.exe.as_str());
-        row["args"] = toml_edit::value(cmd.mcp_args().iter().collect::<toml_edit::Array>());
-        servers[MCP_NAME] = toml_edit::Item::Table(row);
+        let command = toml_edit::value(cmd.exe.as_str());
+        let args = toml_edit::value(cmd.mcp_args().iter().collect::<toml_edit::Array>());
+        match servers
+            .get_mut(MCP_NAME)
+            .and_then(toml_edit::Item::as_table_like_mut)
+        {
+            Some(row) => {
+                row.insert("command", command);
+                row.insert("args", args);
+            }
+            None => {
+                let mut row = toml_edit::Table::new();
+                row["command"] = command;
+                row["args"] = args;
+                servers.insert(MCP_NAME, toml_edit::Item::Table(row));
+            }
+        }
     }
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(file, doc.to_string()).with_context(|| format!("write {}", file.display()))
+    write_atomic(file, &doc.to_string())?;
+    let verb = if remove { "removed from" } else { "written to" };
+    Ok(format!("{verb} {}", file.display()))
 }
 
 /// The `command` registered under our name, if any: `~/.claude.json` (JSON) or a `config.toml`.
@@ -378,7 +448,7 @@ fn mcp_command(file: &Path) -> Option<String> {
 }
 
 fn grok_config_file() -> PathBuf {
-    config::home_dir().join(".grok").join("config.toml")
+    crate::hook::grok_home().join("config.toml")
 }
 
 fn claude_settings_file() -> PathBuf {
@@ -417,6 +487,11 @@ fn codex(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     let hooks_file = codex_home().join("hooks.json");
     let config_file = codex_home().join("config.toml");
     let mut root = read_json_object(&hooks_file)?;
+    // Both files are read before either is written: a config.toml that cannot be read or
+    // parsed stops setup with hooks.json untouched.
+    let mut doc: toml_edit::DocumentMut = read_text(&config_file)?
+        .parse()
+        .with_context(|| format!("parse {}", config_file.display()))?;
     backup_once(&hooks_file)?;
     backup_once(&config_file)?;
     let before = codex_trust_keys(&hooks_file, &root);
@@ -443,16 +518,8 @@ fn codex(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     write_json(&hooks_file, &root)?;
     let delta = codex_trust_delta(&before, &codex_trust_keys(&hooks_file, &root));
 
-    let text = std::fs::read_to_string(&config_file).unwrap_or_default();
-    let mut doc: toml_edit::DocumentMut = text
-        .parse()
-        .with_context(|| format!("parse {}", config_file.display()))?;
     codex_write_trust(&mut doc, &delta);
-    if let Some(dir) = config_file.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(&config_file, doc.to_string())
-        .with_context(|| format!("write {}", config_file.display()))?;
+    write_atomic(&config_file, &doc.to_string())?;
     Ok(vec![
         hooks_file.display().to_string(),
         config_file.display().to_string(),
@@ -884,25 +951,65 @@ mod tests {
         assert_eq!(mcp_command(&fresh).as_deref(), Some("/x/oboete"));
         toml_mcp(&fresh, &cmd, true).unwrap();
         assert_eq!(std::fs::read_to_string(&fresh).unwrap().trim(), "");
-        // JSON (Claude Code): `mcpServers.oboete` next to the file's other state.
-        let json_file = dir.join("claude.json");
+        // A rerun sets only command/args: keys the developer put on our entry stay.
+        let own = dir.join("own.toml");
+        std::fs::write(&own, "[mcp_servers.oboete]\ncommand = \"/old/oboete\"\nargs = [\"mcp\"]\nenabled = false\nstartup_timeout_sec = 60\n").unwrap();
+        toml_mcp(&own, &cmd, false).unwrap();
+        let text = std::fs::read_to_string(&own).unwrap();
+        assert!(
+            text.contains("command = \"/x/oboete\"")
+                && text.contains("enabled = false")
+                && text.contains("startup_timeout_sec = 60"),
+            "{text}"
+        );
+        // An explicit [mcp_servers] header keeps its comment; the inline form is edited in place.
+        let header = dir.join("header.toml");
         std::fs::write(
-            &json_file,
-            "{\"numStartups\": 3, \"mcpServers\": {\"other\": {\"command\": \"o\"}}}",
+            &header,
+            "# my servers\n[mcp_servers]\n\n[mcp_servers.a]\ncommand = \"x\"\n",
         )
         .unwrap();
-        claude_mcp(&json_file, &cmd, false).unwrap();
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(&json_file).unwrap()).unwrap();
+        toml_mcp(&header, &cmd, false).unwrap();
+        let text = std::fs::read_to_string(&header).unwrap();
+        assert!(text.starts_with("# my servers\n[mcp_servers]\n"), "{text}");
+        let inline = dir.join("inline.toml");
+        std::fs::write(&inline, "mcp_servers = { other = { command = \"o\" } }\n").unwrap();
+        toml_mcp(&inline, &cmd, false).unwrap();
+        assert_eq!(mcp_command(&inline).as_deref(), Some("/x/oboete"));
+        assert!(std::fs::read_to_string(&inline).unwrap().contains("other"));
+        toml_mcp(&inline, &cmd, true).unwrap();
+        assert!(mcp_command(&inline).is_none());
+        // A file that cannot be read stops setup and stays as it was.
+        let latin = dir.join("latin.toml");
+        std::fs::write(&latin, b"# caf\xe9\n[cli]\nfoo = 1\n").unwrap();
+        assert!(toml_mcp(&latin, &cmd, false).is_err());
         assert_eq!(
-            v["mcpServers"]["oboete"],
-            json!({"type": "stdio", "command": "/x/oboete", "args": ["--home", "/h", "mcp"], "env": {}})
+            std::fs::read(&latin).unwrap(),
+            b"# caf\xe9\n[cli]\nfoo = 1\n"
         );
-        assert_eq!(v["mcpServers"]["other"]["command"], "o");
-        assert_eq!(v["numStartups"], 3);
-        assert_eq!(mcp_command(&json_file).as_deref(), Some("/x/oboete"));
-        claude_mcp(&json_file, &cmd, true).unwrap();
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(&json_file).unwrap()).unwrap();
-        assert!(v["mcpServers"]["oboete"].is_null() && v["mcpServers"]["other"].is_object());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_mode_and_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("oboete-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.json");
+        std::fs::write(&real, "{}").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let link = dir.join("link.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_atomic(&link, "{\"a\": 1}\n").unwrap();
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "{\"a\": 1}\n");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&real), 0o640);
+        let new = dir.join("sub").join("new.json");
+        write_atomic(&new, "{}\n").unwrap();
+        assert_eq!(mode(&new), 0o600);
+        assert_eq!(std::fs::read_dir(dir.join("sub")).unwrap().count(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 
