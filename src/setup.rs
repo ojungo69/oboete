@@ -124,9 +124,11 @@ fn is_our_handler(h: &Value) -> bool {
     let Some((exe, rest)) = words.split_first() else {
         return false;
     };
+    // The canonical path setup writes may be versioned or renamed (`oboete-0.1`, `oboete.exe`).
     let is_exe = Path::new(exe)
         .file_name()
-        .is_some_and(|f| f == "oboete" || f == "oboete.exe");
+        .and_then(|f| f.to_str())
+        .is_some_and(|f| f.starts_with("oboete"));
     let rest = match rest {
         [flag, _dir, tail @ ..] if flag == "--home" => tail,
         tail => tail,
@@ -704,11 +706,12 @@ mod tests {
             "'/my dir/it'\\''s/oboete' --home '/h o/me' hook grok PostToolUse"
         ));
         assert!(ours("C:/Users/x/.cargo/bin/oboete.exe hook claude Stop"));
+        assert!(ours("/opt/oboete-0.1 hook claude Stop"));
         assert!(!ours("python /tools/oboete_report.py hook audit"));
         assert!(!ours("/x/oboete hook audit Stop"));
         assert!(!ours("/x/oboete observe"));
         assert!(!ours("/x/oboete hook claude"));
-        assert!(!ours("/x/oboete-old hook claude Stop"));
+        assert!(!ours("/x/my-oboete hook claude Stop"));
         assert_eq!(
             shell_words("a 'b c' 'd'\\''e'  f"),
             vec!["a", "b c", "d'e", "f"]
