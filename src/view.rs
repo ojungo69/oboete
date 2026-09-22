@@ -159,8 +159,11 @@ impl Viewer {
             return Response::text(400, "requests carry no body");
         }
         // DNS rebinding: a page on another name that resolves to 127.0.0.1 sends its own Host.
+        // Browsers leave port 80 out of Host.
         let host_ok = header("host").is_some_and(|h| {
-            h == format!("127.0.0.1:{}", self.port) || h == format!("localhost:{}", self.port)
+            h == format!("127.0.0.1:{}", self.port)
+                || h == format!("localhost:{}", self.port)
+                || (self.port == 80 && (h == "127.0.0.1" || h == "localhost"))
         });
         if !host_ok {
             return Response::text(403, "open the viewer through 127.0.0.1 or localhost");
@@ -318,6 +321,15 @@ mod tests {
             403
         );
         assert_eq!(status("GET", "/", &[]), 403);
+        assert_eq!(status("GET", "/", &[("Host", "127.0.0.1")]), 403);
+        let (dir80, mut v80) = viewer("guards80");
+        v80.port = 80;
+        assert_eq!(v80.route("GET", "/", &[("Host", "127.0.0.1")]).status, 200);
+        assert_eq!(
+            v80.route("GET", "/", &[("Host", "localhost:80")]).status,
+            200
+        );
+        std::fs::remove_dir_all(&dir80).ok();
         assert_eq!(status("GET", "/api/repos", &[HOST]), 401);
         assert_eq!(
             status("GET", "/api/repos", &[HOST, ("x-oboete-token", "t0")]),

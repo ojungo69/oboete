@@ -111,40 +111,60 @@ function hitEntry(h) {
     full);
 }
 
+// The API returns at most this many rows; the page says so when a list is cut there.
+const LIMIT = 100;
+
+// Only the latest request may draw: an earlier, slower one must not overwrite it.
+let generation = 0;
+
 async function show() {
+  const mine = ++generation;
   const repo = $('repo').value;
   const q = $('q').value.trim();
   setStatus('Loading…');
   try {
     if (q) {
-      const hits = await api('search', { q, repo, limit: 100 });
+      const hits = await api('search', { q, repo, limit: LIMIT });
+      if (mine !== generation) return;
       $('heading').replaceChildren('Search: ', el('span', 'query', q));
       $('list').replaceChildren(...hits.map(hitEntry));
-      setStatus(hits.length ? `${hits.length} found` : 'Nothing found.');
+      setStatus(hits.length === LIMIT
+        ? `The ${LIMIT} best matches. Add words to narrow the search.`
+        : hits.length ? `${hits.length} found` : 'Nothing found.');
     } else {
-      const sessions = await api('timeline', { repo, limit: 100 });
+      const sessions = await api('timeline', { repo, limit: LIMIT });
+      if (mine !== generation) return;
       $('heading').textContent = 'Sessions';
       $('list').replaceChildren(...sessions.map(sessionEntry));
-      setStatus(sessions.length ? '' : 'No sessions recorded yet.');
+      setStatus(sessions.length === LIMIT
+        ? `The newest ${LIMIT} sessions. Search to find older ones.`
+        : sessions.length ? '' : 'No sessions recorded yet.');
     }
   } catch (e) {
-    setStatus(e.message, true);
+    if (mine === generation) setStatus(e.message, true);
   }
+}
+
+// The picker: every repository with sessions. The first load selects the one the viewer was
+// started in; later loads (Refresh) keep the current choice.
+async function loadRepos(first) {
+  const { current, repos } = await api('repos');
+  const keep = first ? current : $('repo').value;
+  const all = el('option', null, 'All repositories');
+  all.value = '';
+  const options = repos.map((r) => {
+    const o = el('option', null, `${base(r.repo)} (${r.sessions})`);
+    o.value = r.repo;
+    o.title = r.repo;
+    return o;
+  });
+  $('repo').replaceChildren(all, ...options);
+  $('repo').value = repos.some((r) => r.repo === keep) ? keep : '';
 }
 
 async function start() {
   try {
-    const { current, repos } = await api('repos');
-    const all = el('option', null, 'All repositories');
-    all.value = '';
-    const options = repos.map((r) => {
-      const o = el('option', null, `${base(r.repo)} (${r.sessions})`);
-      o.value = r.repo;
-      o.title = r.repo;
-      return o;
-    });
-    $('repo').replaceChildren(all, ...options);
-    $('repo').value = repos.some((r) => r.repo === current) ? current : '';
+    await loadRepos(true);
   } catch (e) {
     setStatus(e.message, true);
     return;
@@ -154,7 +174,15 @@ async function start() {
     show();
   });
   $('repo').addEventListener('change', show);
-  $('refresh').addEventListener('click', show);
+  $('refresh').addEventListener('click', async () => {
+    try {
+      await loadRepos(false);
+    } catch (e) {
+      setStatus(e.message, true);
+      return;
+    }
+    show();
+  });
   // Clearing the search box (its x button included) goes back to the timeline.
   $('q').addEventListener('search', () => {
     if (!$('q').value) show();
