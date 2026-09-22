@@ -160,12 +160,17 @@ pub fn redact(text: &str) -> String {
         return text.to_string();
     }
     spans.sort_unstable();
+    // Overlapping matches (a short and a long rule on one token) mask their union.
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in spans {
+        match merged.last_mut() {
+            Some((_, last_end)) if start <= *last_end => *last_end = (*last_end).max(end),
+            _ => merged.push((start, end)),
+        }
+    }
     let mut out = String::with_capacity(text.len());
     let mut pos = 0;
-    for (start, end) in spans {
-        if start < pos {
-            continue; // nested inside an earlier mask
-        }
+    for (start, end) in merged {
         out.push_str(&text[pos..start]);
         out.push_str(MASK);
         pos = end;
@@ -301,6 +306,16 @@ mod tests {
                 "ANTHROPIC_API_KEY=sk-ant-api03-q9Zx8mL2vB4nR7tY1wK3pS6dq9Zx8mL2vB4nR7tY1wK3pS6d-AA"
             ),
             "ANTHROPIC_API_KEY=[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn overlapping_rules_mask_the_whole_token() {
+        // gitlab-pat (20 chars after the prefix) and gitlab-pat-routable (the full token)
+        // start at the same place; the longer match must win, not leave a suffix.
+        assert_eq!(
+            redact("token glpat-Q9zX8mL2vB4nR7tY1wK3pS6dJ0a.1a2b3c4d5 end"),
+            "token [REDACTED] end"
         );
     }
 

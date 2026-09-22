@@ -108,16 +108,37 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
-/// A group is ours when it runs this program's hook command. No marker key: an agent that
+/// A handler is ours when it runs this program's hook command. No marker key: an agent that
 /// rejected unknown keys in hook groups would take the developer's other hooks down with ours.
-fn is_ours(group: &Value) -> bool {
-    group["hooks"].as_array().is_some_and(|hs| {
-        hs.iter().any(|h| {
-            h["command"]
-                .as_str()
-                .is_some_and(|c| c.contains("oboete") && c.contains(" hook "))
-        })
-    })
+fn is_our_handler(h: &Value) -> bool {
+    h["command"]
+        .as_str()
+        .is_some_and(|c| c.contains("oboete") && c.contains(" hook "))
+}
+
+fn has_ours(group: &Value) -> bool {
+    group["hooks"]
+        .as_array()
+        .is_some_and(|hs| hs.iter().any(is_our_handler))
+}
+
+/// The group without our handlers; `None` when nothing else was in it.
+fn without_ours(group: &Value) -> Option<Value> {
+    let handlers = group["hooks"].as_array()?;
+    let theirs: Vec<Value> = handlers
+        .iter()
+        .filter(|h| !is_our_handler(h))
+        .cloned()
+        .collect();
+    if theirs.len() == handlers.len() {
+        return Some(group.clone());
+    }
+    if theirs.is_empty() {
+        return None;
+    }
+    let mut g = group.clone();
+    g["hooks"] = Value::Array(theirs);
+    Some(g)
 }
 
 fn backup_once(file: &Path) -> Result<()> {
@@ -153,7 +174,8 @@ fn write_json(file: &Path, v: &Value) -> Result<()> {
         .with_context(|| format!("write {}", file.display()))
 }
 
-/// Drop our groups from every event, then (unless removing) append the wanted ones.
+/// Drop our handlers from every event (a group that held only ours goes; one shared with the
+/// developer's handlers keeps theirs), then (unless removing) append the wanted groups.
 fn merge_groups(root: &mut Value, wanted: Vec<(String, Value)>) {
     let hooks = root["hooks"]
         .as_object_mut()
@@ -164,7 +186,7 @@ fn merge_groups(root: &mut Value, wanted: Vec<(String, Value)>) {
         .map(|(event, groups)| {
             let kept: Vec<Value> = groups
                 .as_array()
-                .map(|g| g.iter().filter(|g| !is_ours(g)).cloned().collect())
+                .map(|g| g.iter().filter_map(without_ours).collect())
                 .unwrap_or_default();
             (event, Value::Array(kept))
         })
@@ -274,12 +296,11 @@ fn codex_trust_keys(hooks_file: &Path, root: &Value) -> Vec<TrustKey> {
     };
     for (event, groups) in hooks {
         for (gi, group) in groups.as_array().into_iter().flatten().enumerate() {
-            let ours = is_ours(group);
             for (hi, handler) in group["hooks"].as_array().into_iter().flatten().enumerate() {
                 out.push(TrustKey {
                     key: format!("{path}:{}:{gi}:{hi}", snake(event)),
                     hash: codex_trust_hash(event, group["matcher"].as_str(), handler),
-                    ours,
+                    ours: is_our_handler(handler),
                 });
             }
         }
@@ -507,7 +528,7 @@ pub fn doctor(home: &Path) -> Result<()> {
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .filter(|g| is_ours(g))
+                        .filter(|g| has_ours(g))
                     {
                         n += 1;
                         let cmd = g["hooks"][0]["command"].as_str().unwrap_or("");
@@ -623,6 +644,25 @@ mod tests {
         merge_groups(&mut root, vec![]);
         assert_eq!(root["hooks"]["Stop"].as_array().unwrap().len(), 1);
         assert_eq!(root["env"]["A"], "1");
+
+        // A group shared with the developer's handler keeps that handler in place.
+        let mixed = json!({"matcher": "Bash", "hooks": [
+            {"type": "command", "command": "/x/oboete hook claude Stop"},
+            {"type": "command", "command": "echo hi"}
+        ]});
+        let mut root = json!({"hooks": {"Stop": [mixed]}});
+        merge_groups(&mut root, ours());
+        let stop = root["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 2);
+        assert_eq!(
+            stop[0]["hooks"],
+            json!([{"type": "command", "command": "echo hi"}])
+        );
+        assert_eq!(stop[0]["matcher"], "Bash");
+        assert!(has_ours(&stop[1]));
+        merge_groups(&mut root, vec![]);
+        assert_eq!(root["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert!(!has_ours(&root["hooks"]["Stop"][0]));
     }
 
     #[test]
@@ -719,6 +759,16 @@ mod tests {
         let last = keys(vec![user.clone(), ours.clone()]);
         let d = codex_trust_delta(&last, &last);
         assert!(d.stale.is_empty() && d.moved.is_empty() && d.fresh.len() == 1);
+
+        // A handler of the developer's inside our group moves from 0:1 to 0:0 when ours leaves.
+        let shared = json!({"hooks": [
+            {"type": "command", "command": "/x/oboete hook codex Stop", "timeout": 5},
+            {"type": "command", "command": "echo hi", "timeout": 5}
+        ]});
+        let d = codex_trust_delta(&keys(vec![shared]), &keys(vec![user.clone(), ours.clone()]));
+        assert_eq!(d.stale, vec![kh(0, 0)]);
+        assert_eq!(d.moved, vec![(kh(0, 1), kh(0, 0))]);
+        assert_eq!(d.fresh[0].0, kh(1, 0));
 
         // Two identical user handlers (same hash) each keep their own row, by position.
         let twins = json!({"hooks": [
