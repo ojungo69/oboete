@@ -332,11 +332,12 @@ pub fn apply_batch(
     let (session_id, repo, ts) = (&s.id, &s.repo, s.last_event_at);
     let tx = conn.transaction()?;
     // The viewer may have deleted the session while the provider was summarizing it; then its
-    // knowledge must not come back as rows without a session.
+    // knowledge must not come back, neither as rows without a session nor into a row the agent's
+    // next event recreated (that one started after this batch's last event).
     let alive = tx
         .query_row(
-            "SELECT 1 FROM sessions WHERE id=?1",
-            params![session_id],
+            "SELECT 1 FROM sessions WHERE id=?1 AND started_at <= ?2",
+            params![session_id, ts],
             |_| Ok(()),
         )
         .optional()?
@@ -584,9 +585,12 @@ mod tests {
             ids(&conn, "SELECT COUNT(*) FROM fts WHERE doc IN ('o8', 's4')"),
             2
         );
-        // A session deleted while its summary was being written leaves nothing behind.
+        // A session deleted while its summary was being written leaves nothing behind, also
+        // when the agent's next event has recreated the session in the meantime.
         assert!(delete_session(&mut conn, "s1").unwrap());
         apply_batch(&mut conn, &s, "p", "late", std::slice::from_ref(&obs), 0).unwrap();
+        upsert_session(&conn, "s1", "claude", "/r", "/r", 3).unwrap();
+        apply_batch(&mut conn, &s, "p", "later", std::slice::from_ref(&obs), 0).unwrap();
         for table in ["observations", "summaries", "fts"] {
             assert_eq!(
                 ids(&conn, &format!("SELECT COUNT(*) FROM {table}")),
@@ -594,6 +598,13 @@ mod tests {
                 "{table}"
             );
         }
+        // The recreated session is a live one of its own: a batch of its time is stored.
+        let s3 = PendingSession {
+            last_event_at: 3,
+            ..s
+        };
+        apply_batch(&mut conn, &s3, "p", "own", std::slice::from_ref(&obs), 0).unwrap();
+        assert_eq!(ids(&conn, "SELECT COUNT(*) FROM summaries"), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 

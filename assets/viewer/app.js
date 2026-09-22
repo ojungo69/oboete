@@ -310,6 +310,8 @@ async function showStats(repo) {
 
 // Only the latest request may draw: an earlier, slower one must not overwrite it.
 let generation = 0;
+// A view drawn before the live baseline was taken may already be stale.
+let drawnWithoutBaseline = false;
 
 async function show() {
   const mine = ++generation;
@@ -324,6 +326,7 @@ async function show() {
             : await showFeed(repo);
     if (mine !== generation) return;
     render();
+    if (version === null) drawnWithoutBaseline = true;
   } catch (e) {
     if (mine === generation) setStatus(e.message, true);
   }
@@ -365,8 +368,9 @@ async function poll() {
   if (document.visibilityState !== 'visible') return;
   try {
     const { v } = await api('version');
-    const changed = version !== null && v !== version;
+    const changed = version === null ? drawnWithoutBaseline : v !== version;
     version = v;
+    drawnWithoutBaseline = false;
     if ($('live').classList.contains('off')) {
       $('live').classList.remove('off');
       if ($('status').textContent === UNREACHABLE) setStatus('');
@@ -410,8 +414,9 @@ async function start() {
   $('q').addEventListener('search', () => {
     if (!$('q').value) show();
   });
+  // Baseline first, then draw: a change between the two is caught by the next poll.
+  await poll();
   show();
-  poll();
   setInterval(poll, 3000);
   document.addEventListener('visibilitychange', poll);
 }

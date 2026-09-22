@@ -115,7 +115,6 @@ pub fn handle(
     let cwd = str_field(payload, &["cwd", "workspaceRoot"]).unwrap_or(".");
     let repo_key = repo::key(Path::new(cwd));
     let ts = db::now_ms();
-    db::upsert_session(conn, session_id, agent, &repo_key, cwd, ts)?;
 
     let stored = match event {
         "SessionStart" => Some(json!({"source": payload.get("source")})),
@@ -142,15 +141,20 @@ pub fn handle(
         "PostCompact" => str_field(payload, &["compact_summary"])
             .filter(|s| !s.trim().is_empty())
             .map(|s| json!({"summary": clip(s)})),
-        "SessionEnd" => {
-            db::end_session(conn, session_id, ts)?;
-            Some(json!({"reason": payload.get("reason")}))
-        }
+        "SessionEnd" => Some(json!({"reason": payload.get("reason")})),
         _ => None, // PreToolUse and the rest carry nothing a summary needs
     };
-    if let Some(v) = stored {
-        db::insert_event(conn, session_id, event, ts, &v.to_string())?;
+    // One transaction: the viewer deleting this session between the two writes would otherwise
+    // leave an event that belongs to no session and never gets summarized or removed.
+    let tx = conn.unchecked_transaction()?;
+    db::upsert_session(&tx, session_id, agent, &repo_key, cwd, ts)?;
+    if event == "SessionEnd" {
+        db::end_session(&tx, session_id, ts)?;
     }
+    if let Some(v) = stored {
+        db::insert_event(&tx, session_id, event, ts, &v.to_string())?;
+    }
+    tx.commit()?;
 
     // Claude Code and Codex read context at SessionStart (not on resume: the transcript already
     // has it; after a compaction it is gone, so `compact` gets it again). Grok ignores
