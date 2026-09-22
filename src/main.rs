@@ -12,6 +12,7 @@ mod provider;
 mod redact;
 mod replay;
 mod repo;
+mod setup;
 
 use std::path::PathBuf;
 
@@ -45,6 +46,15 @@ enum Cmd {
     },
     /// Print the context that would be injected for the current directory
     Inject,
+    /// Wire this binary into an agent's hooks (claude | codex | grok | all)
+    Setup {
+        agent: String,
+        /// Take oboete's hook entries out again
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Report hook wiring, stored data and provider readiness
+    Doctor,
     /// Replay a JSONL fixture through the hook path and measure
     Replay {
         fixture: PathBuf,
@@ -97,6 +107,8 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             print!("{}", inject::context(&conn, &repo)?);
             Ok(())
         }
+        Cmd::Setup { agent, remove } => setup::run(&home, &agent, remove),
+        Cmd::Doctor => setup::doctor(&home),
         Cmd::Replay {
             fixture,
             repo_root,

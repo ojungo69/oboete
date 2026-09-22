@@ -110,11 +110,19 @@ pub fn handle(
         db::insert_event(conn, session_id, event, ts, &v.to_string())?;
     }
 
-    // A resumed session already has the earlier injection in its transcript.
-    if event == "SessionStart" && payload["source"].as_str() != Some("resume") {
+    // Claude Code and Codex read context at SessionStart (not on resume: the transcript already
+    // has it). Grok ignores SessionStart stdout, so its context rides on the first tool call.
+    let inject_now = match event {
+        "SessionStart" => agent != "grok" && payload["source"].as_str() != Some("resume"),
+        "PreToolUse" => agent == "grok" && !db::injected(conn, session_id)?,
+        _ => false,
+    };
+    if inject_now {
         let text = inject::context(conn, &repo_key)?;
         if !text.is_empty() {
-            let out = json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}});
+            db::mark_injected(conn, session_id, ts)?;
+            let out =
+                json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}});
             return Ok(Some(out.to_string()));
         }
     }
@@ -291,9 +299,28 @@ mod tests {
                 .is_some()
         );
         // … but a resumed session already carries it.
-        let resumed = json!({"session_id": "g2", "cwd": cwd, "source": "resume"});
+        let resumed = json!({"session_id": "g3", "cwd": cwd, "source": "resume"});
         assert!(
             handle(&conn, "claude", "SessionStart", &resumed)
+                .unwrap()
+                .is_none()
+        );
+        // Grok: nothing at SessionStart, once at the first tool call, never again.
+        let g_start = json!({"sessionId": "g4", "workspaceRoot": cwd, "hookEventName": "SessionStart", "source": "startup"});
+        assert!(
+            handle(&conn, "grok", "SessionStart", &g_start)
+                .unwrap()
+                .is_none()
+        );
+        let g_tool = json!({"sessionId": "g4", "workspaceRoot": cwd, "hookEventName": "PreToolUse", "toolName": "Read"});
+        let out = handle(&conn, "grok", "PreToolUse", &g_tool)
+            .unwrap()
+            .unwrap();
+        assert!(
+            out.contains("\"hookEventName\":\"PreToolUse\"") && out.contains("earlier summary")
+        );
+        assert!(
+            handle(&conn, "grok", "PreToolUse", &g_tool)
                 .unwrap()
                 .is_none()
         );

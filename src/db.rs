@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS sessions(
   cwd TEXT,
   started_at INTEGER NOT NULL,
   ended_at INTEGER,
-  last_event_at INTEGER NOT NULL
+  last_event_at INTEGER NOT NULL,
+  injected_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY,
@@ -84,6 +85,27 @@ pub fn upsert_session(
         params![id, agent, repo, cwd, ts],
     )?;
     Ok(())
+}
+
+/// Context was handed to this session (Claude/Codex at SessionStart, Grok at its first tool call).
+pub fn mark_injected(conn: &Connection, id: &str, ts: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE sessions SET injected_at=?2 WHERE id=?1",
+        params![id, ts],
+    )?;
+    Ok(())
+}
+
+pub fn injected(conn: &Connection, id: &str) -> Result<bool> {
+    let v: Option<i64> = conn
+        .query_row(
+            "SELECT injected_at FROM sessions WHERE id=?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(v.is_some())
 }
 
 pub fn end_session(conn: &Connection, id: &str, ts: i64) -> Result<()> {
