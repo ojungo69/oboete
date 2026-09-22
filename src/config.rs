@@ -63,8 +63,9 @@ fn default_cli_timeout() -> u64 {
     180
 }
 
-fn home_dir() -> PathBuf {
+pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }

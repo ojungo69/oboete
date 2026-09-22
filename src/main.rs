@@ -54,7 +54,7 @@ enum Cmd {
         /// Also time N real `oboete hook` process spawns (startup + insert)
         #[arg(long, default_value_t = 30)]
         spawn_sample: usize,
-        /// Only replay events of this agent (default: claude)
+        /// Only replay events of this agent: claude | codex | grok | all
         #[arg(long, default_value = "claude")]
         agent: String,
     },
@@ -62,7 +62,9 @@ enum Cmd {
 
 fn main() {
     let cli = Cli::parse();
-    let home = cli.home.unwrap_or_else(|| dirs_home().join(".oboete"));
+    let home = cli
+        .home
+        .unwrap_or_else(|| config::home_dir().join(".oboete"));
     let code = match run(cli.cmd, home) {
         Ok(()) => 0,
         Err(e) => {
@@ -102,11 +104,4 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             agent,
         } => replay::run(&home, &fixture, repo_root, spawn_sample, &agent),
     }
-}
-
-fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
 }

@@ -115,6 +115,14 @@ fn render(events: &[db::RawEvent]) -> String {
                     lines.push(format!("ASSISTANT: {}", short(a.trim(), 1_500)));
                 }
             }
+            "PostCompact" => {
+                if let Some(s) = v["summary"].as_str().filter(|s| !s.trim().is_empty()) {
+                    lines.push(format!(
+                        "COMPACTED EARLIER PART: {}",
+                        short(s.trim(), 1_500)
+                    ));
+                }
+            }
             _ => {}
         }
     }
