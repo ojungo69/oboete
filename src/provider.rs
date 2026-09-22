@@ -271,10 +271,19 @@ fn retry_after_in_body(body: &str) -> Option<f64> {
     rest[num.len()..].starts_with('s').then_some(secs)
 }
 
-/// A fresh private directory for one CLI run. The name is random and the directory must not
-/// exist yet, so nobody else on the machine can plant one under a guessable name (the pid) and
-/// read what the CLI writes there; on Unix it is also created mode 0700.
-fn scratch_dir() -> Result<std::path::PathBuf, CallError> {
+/// A fresh private directory for one CLI run, removed again when dropped (on every return
+/// path, so failed attempts leave nothing behind). The name is random and the directory must
+/// not exist yet, so nobody else on the machine can plant one under a guessable name (the pid)
+/// and read what the CLI writes there; on Unix it is also created mode 0700.
+struct Scratch(std::path::PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+fn scratch_dir() -> Result<Scratch, CallError> {
     let mut raw = [0u8; 8];
     getrandom::fill(&mut raw).map_err(|e| CallError::other(format!("scratch dir: {e}")))?;
     let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
@@ -288,7 +297,7 @@ fn scratch_dir() -> Result<std::path::PathBuf, CallError> {
     builder
         .create(&dir)
         .map_err(|e| CallError::other(format!("scratch dir: {e}")))?;
-    Ok(dir)
+    Ok(Scratch(dir))
 }
 
 /// Run a subscription CLI headless, with the smallest configuration each one allows: no hooks,
@@ -302,7 +311,7 @@ fn cli_headless(
 ) -> Result<Value, CallError> {
     let schema_text = schema.to_string();
     let scratch = scratch_dir()?;
-    let last = scratch.join("last.json");
+    let last = scratch.0.join("last.json");
     let mut cmd = Command::new(cli);
     match cli {
         "agy" => {
@@ -359,7 +368,7 @@ fn cli_headless(
             }
         }
         "codex" => {
-            let schema_file = scratch.join("schema.json");
+            let schema_file = scratch.0.join("schema.json");
             std::fs::write(&schema_file, &schema_text)
                 .map_err(|e| CallError::other(format!("write schema: {e}")))?;
             cmd.args(["exec", prompt, "--output-schema"])
@@ -384,7 +393,7 @@ fn cli_headless(
     }
     // Keep the CLI out of the user's repo and away from the parent's secrets-bearing env, and
     // make sure our own hooks ignore the summarizer's session.
-    cmd.current_dir(&scratch)
+    cmd.current_dir(&scratch.0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -433,7 +442,6 @@ fn cli_headless(
     } else {
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
-    std::fs::remove_dir_all(&scratch).ok();
     extract_structured(cli, &text)
 }
 
