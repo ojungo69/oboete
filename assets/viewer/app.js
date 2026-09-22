@@ -1,6 +1,5 @@
-'use strict';
-// Everything from the store is rendered with text nodes only: bodies are model-written text
-// that may contain HTML.
+// Loaded as a module (strict, deferred, top-level await). Everything from the store is rendered
+// with text nodes only: bodies are model-written text that may contain HTML.
 
 const token = new URLSearchParams(location.hash.slice(1)).get('t') || '';
 const $ = (id) => document.getElementById(id);
@@ -29,7 +28,7 @@ async function api(name, params = {}, method = 'GET') {
   return res.status === 204 ? null : res.json();
 }
 
-const base = (path) => path.split('/').filter(Boolean).pop() || path;
+const base = (path) => path.split('/').findLast(Boolean) || path;
 
 // localStorage is a convenience: a private window or blocked storage just forgets.
 function remember(key, value) {
@@ -83,7 +82,7 @@ function expander(label, key, load) {
       panel = await load();
       // Below the whole button row when the button sits in one.
       const row = button.parentElement;
-      (row && row.classList.contains('actions') ? row : button).after(panel);
+      (row?.classList.contains('actions') ? row : button).after(panel);
       button.setAttribute('aria-expanded', 'true');
       opened.add(key);
     } catch (e) {
@@ -250,9 +249,9 @@ async function showSearch(repo, q) {
   const hits = await api('search', { q, repo, limit: LIMIT });
   return () => {
     draw(['Search: ', el('span', 'query', q)], hits.map(hitEntry), []);
-    setStatus(hits.length === LIMIT
-      ? `The ${LIMIT} best matches. Add words to narrow the search.`
-      : hits.length ? `${hits.length} found` : 'Nothing found.');
+    if (hits.length === LIMIT) setStatus(`The ${LIMIT} best matches. Add words to narrow the search.`);
+    else if (hits.length) setStatus(`${hits.length} found`);
+    else setStatus('Nothing found.');
   };
 }
 
@@ -309,6 +308,10 @@ async function showStats(repo) {
   };
 }
 
+const LOADERS = new Map([
+  ['feed', showFeed], ['sessions', showSessions], ['context', showContext], ['stats', showStats],
+]);
+
 // Only the latest request may draw: an earlier, slower one must not overwrite it.
 let generation = 0;
 // A view drawn before the live baseline was taken may already be stale.
@@ -320,11 +323,7 @@ async function show() {
   const q = $('q').value.trim();
   setStatus('Loading…');
   try {
-    const render = q ? await showSearch(repo, q)
-      : view === 'sessions' ? await showSessions(repo)
-        : view === 'context' ? await showContext(repo)
-          : view === 'stats' ? await showStats(repo)
-            : await showFeed(repo);
+    const render = q ? await showSearch(repo, q) : await (LOADERS.get(view) || showFeed)(repo);
     if (mine !== generation) return false;
     render();
     if (version === null) drawnWithoutBaseline = true;
@@ -433,4 +432,4 @@ async function start() {
 // A restarted viewer prints a new key; pasting its address into this tab only changes the part
 // after #, which does not reload the page by itself.
 window.addEventListener('hashchange', () => location.reload());
-start();
+await start();
