@@ -34,7 +34,7 @@
 10. **端末**: この PC (WSL)、Windows 本体、M1 iMac。VPS は使うか未定で、決まるまで設定しない。スマホは保留。
 11. **同期から repo ごとに外せる** (repo の `.oboete.toml` に `sync = false`、または `oboete sync exclude <repo>` で oboete の設定に書く)。**判定は送る直前に行います**: 各 session が触れた repo をすべて記録しておき (session の途中で入れ子の repo に移った場合も含む)、そのどれか 1 つでも除外なら、その session の行は送りません。書き込み時の印ではなく送信時の判定なので、除外を後から足した場合も、同期を初めて有効にしたときの古い行にも効きます。同期を初めて有効にするときは、送る repo と件数の一覧を出して確認を求めます。除外が止めるのは中身を運ぶ op (文書・`vec`・prompt・session) だけで、**削除の tombstone は除外に関係なく必ず送ります**。すでに同期した repo を後から除外するときは、`oboete sync exclude` がその repo の session を hub と他の端末から消す (tombstone を送る) かどうかを聞きます。既定は全部同期する。外す前に送った分は残るので、消したいときは viewer で削除する (決定 17 で全端末から消える)。
 12. **プロンプトごとの自動注入** (`oboete inject`) は、評価で無関係な注入が 10% 以下のときだけ既定で ON にする。
-13. **個人の好み** (`preference` の観測) は全 repo のセッションに注入する。ただし全 repo に広げるのは、ユーザー自身の言葉で確かめられた好みだけ (PR-K1 の `user_quote` が、要約器に渡した USER 行にそのまま含まれるもの)。確かめられない好みは、その repo の中だけに注入する (repo のファイルや道具の出力から書かれた「好み」が、関係ない repo の agent に渡らないように)。
+13. **個人の好み** (`preference` の観測) は全 repo のセッションに注入する。ただし全 repo に広げるのは、**ユーザーが明示したものだけ**です (`oboete pref add "..."` か、viewer の「全 repo に広げる」ボタン)。要約が見つけた好みはその repo の中だけに注入し、viewer に「広げる候補」として出します。要約器が選んだ引用が prompt の中にあるかどうかでは広げません (貼り付けた issue や README の一文も prompt の中にあるため)。
 14. **費用**: 月 $5 までは owner に聞かずに使ってよい。Vectorize の月 $1.5 の停止線 (決定 3) はそのまま。
 15. **更新**: 新しい版が出たら知らせ、`oboete update` の 1 コマンドで入れ替える。自動では入れ替えない (壊れた版が全端末に一度に入らないように)。
 16. **同期を始める前に owner が Cloudflare の二段階認証を ON にする** (2026-09-23 時点で OFF)。同期に使う鍵は全権限キーではなく、端末ごとに取り消せる専用のもの (§4.4)。
@@ -340,6 +340,16 @@ fastembed 7.1.0 が固定する ort 2.0.0-rc.13 には、4 つとも ONNX Runtim
 - **鍵をコマンドの引数に出さない**: header で認証するクライアントをあとで足す場合も、`claude mcp add --header <秘密>` のように秘密をコマンドの引数に書きません (同じ機械の別ユーザーが `/proc` から読める)。Claude Code なら設定ファイルに `headersHelper` を書き、その helper が本人だけが読める鍵ファイル (0600) から header を出す形にします ([Claude Code MCP](https://code.claude.com/docs/en/mcp)。helper の header が送られない不具合の報告があるので、使うときに実際の送信を確かめる: [#64894](https://github.com/anthropics/claude-code/issues/64894))。
 - **viewer**: 手元の viewer は同期された全端末分を表示します (追加の作業はありません)。クラウド版の viewer は、スマホを対象にするときに同じ静的ファイルを Worker から配り、Access の後ろに置きます。
 
+### 4.8 外へ出す口は 1 つ
+
+要約 (provider chain)、文書の埋め込み (Workers AI)、問い合わせの埋め込み (CLI・MCP・viewer・`oboete inject`)、同期 (hub)、外部の判定モデル (§2.10) など、oboete の外へ出るものはすべて同じ 1 つの関門を通します。
+
+1. `<private>` などの除去 (`strip_blocks`) と harness 通知の除外
+2. gitleaks 規則の伏せ字 (plan.md §6 の 2 つ目の関門)
+3. 同期除外の判定 (決定 11): その文書や問い合わせの session が触れた repo のどれかが除外なら、外部の埋め込み・判定・同期には出しません。埋め込みは手元のモデルがあれば手元で作り、無ければベクトル無し (全文検索だけ) にします。tombstone だけはこの判定を通らずに送ります (§4.3)。
+
+通したあとに何も残らなければ、外への要求自体をしません。PR-C でこの関門を 1 つの関数にし、それより後の PR は、この関数を通らない経路で外へ出しません。回帰テスト: 秘密や `<private>` を含む文書・問い合わせと、除外した repo の文書・問い合わせで、外への要求の中身に秘密が無いこと、除外分は要求が 0 件であること。
+
 ---
 
 ## 5. 暗号化は必要か
@@ -389,15 +399,15 @@ fastembed 7.1.0 が固定する ort 2.0.0-rc.13 には、4 つとも ONNX Runtim
 |---|---|---|---|
 | PR-A | 計測 spike (出荷しないコード) | Workers AI と fastembed の bge-m3 を実データ 100 件で比べる (cos と上位 10 件の一致)。8,000 字の prompt で Workers AI の入力上限と `truncate_inputs` を見る。日本からの往復の p50 / p95。oboete と claude-mem の実際のトークン数。DO / D1 で trigram FTS5 を作る 1 文。M1 での手元モデルの読み込み時間・RAM と、実ベクトル 15 万件の走査時間 (VPS は使うと決まったら) | §2・§4 の未確認の数字をすべて実測に置き換える。一致しなければ手元の問い合わせを無効にする (§2.3 の 3) |
 | PR-B | 評価器 | `oboete eval` が qrels から TREC 形式の結果を出し、ranx で報告する。claude-mem DB は読み取り専用の写しを使う。全文検索だけの基準値を出す | 測れる状態になったこと。基準の数字 |
-| PR-C | id と repo キー | 端末 id 付きの `uid`、origin URL の repo キーと移し替え、`"unknown"` session の修正、`embedder_id` とベクトル表 (`producer` 列つき)、各行の `synced_at` 列と変更用の outbox 表。本人の設定の repo 別名 (`oboete repo alias`) と `.oboete.toml` の `sync = false` の読み取り、session が触れた repo の記録 (hook がイベントごとの cwd の repo を足す) | WSL と Windows で同じ repo が同じキーになる (テスト)。入れ子の repo に移ったイベントで、その repo が session の記録に足される (テスト)。replay で hook 時間が変わらない |
-| PR-D | 意味検索の本体 | observe で文書の埋め込み: クラウドを使う形は Workers AI (100 件ずつ、日次 neuron 予算付き)、ローカルだけの形 (§0 の 5) は手元の fastembed。sqlite-vec の索引、search / MCP / viewer の hybrid RRF、オフライン時の手元の問い合わせ (fastembed)、`oboete reindex` | §3.3 の「意味検索そのもの」の合格線。落ちたら既定は `none` のまま |
+| PR-C | id と repo キー | 外へ出す関門 (§4.8) を 1 つの関数にする。端末 id 付きの `uid`、origin URL の repo キーと移し替え、`"unknown"` session の修正、`embedder_id` とベクトル表 (`producer` 列つき)、各行の `synced_at` 列と変更用の outbox 表。本人の設定の repo 別名 (`oboete repo alias`) と `.oboete.toml` の `sync = false` の読み取り、session が触れた repo の記録 (hook がイベントごとの cwd の repo を足す) | WSL と Windows で同じ repo が同じキーになる (テスト)。入れ子の repo に移ったイベントで、その repo が session の記録に足される (テスト)。replay で hook 時間が変わらない |
+| PR-D | 意味検索の本体 | 文書も問い合わせ (CLI・MCP・viewer) も §4.8 の関門を通してから埋め込む。observe で文書の埋め込み: クラウドを使う形は Workers AI (100 件ずつ、日次 neuron 予算付き)、ローカルだけの形 (§0 の 5) は手元の fastembed。sqlite-vec の索引、search / MCP / viewer の hybrid RRF、オフライン時の手元の問い合わせ (fastembed)、`oboete reindex` | §3.3 の「意味検索そのもの」の合格線。落ちたら既定は `none` のまま |
 | PR-E1〜E6 | 精度の工夫 (1 つ 1 PR) | E1 `since` / `until`、E2 要約の `keys`、E3 重複の間引き、E4 MCP 検索の reranker (xsmall-v2 と v2-m3 の比較)、E5 prompt の先頭か分割か、E6 M1 での int8 / bit | それぞれが合格線を越えたものだけ残す。越えなければその PR は閉じる |
-| PR-F | prompt ごとの自動注入 | UserPromptSubmit に別の hook として `oboete inject` を登録する (予算 300 ms、timeout 1 秒、超えたら全文検索だけ)。問い合わせ文は記録と同じ処理を通してから使う: `<private>` などの除去 (`strip_blocks`)、harness 通知の除外、伏せ字。何も残らなければ注入も外部への埋め込み要求もしない。Grok は最初の PreToolUse。しきい値を答えの無い問いで較正する。予算に収まらない端末だけ detached `recall` → PreToolUse の代案に切り替える | 誤注入 10% 以下、注入 hook の p95 300 ms 以内、timeout の割合 2% 以下。記録 hook の時間は変わらない (replay) |
+| PR-F | prompt ごとの自動注入 | UserPromptSubmit に別の hook として `oboete inject` を登録する (予算 300 ms、timeout 1 秒、超えたら全文検索だけ)。問い合わせ文は §4.8 の関門を通してから使い、何も残らなければ注入も外部への埋め込み要求もしない。Grok は最初の PreToolUse。しきい値を答えの無い問いで較正する。予算に収まらない端末だけ detached `recall` → PreToolUse の代案に切り替える | 誤注入 10% 以下、注入 hook の p95 300 ms 以内、timeout の割合 2% 以下。記録 hook の時間は変わらない (replay) |
 | PR-G | hub (Worker + DO) | `/push` と `/pull` (seq のカーソル)、op の冪等、tombstone、Access の service token、書き出しの口 | `--home` を 2 つ使ったテストで、順番を入れ替えても削除が勝ち、最後に文書とベクトルが一致する |
 | PR-H | 端末側の同期 | 未送信の行と outbox の送信 (observe の最後)、SessionStart からの detached pull、`oboete sync`、初回のページ送り、claude-mem の取り込み (決定 1。取り込み時と送信・埋め込みの直前の 2 回、伏せ字を通す)。送る直前に、session が触れた repo のどれかが除外なら、その session の文書・`vec`・prompt を送らない (決定 11)。初回は送る repo と件数を出して確認を求める | WSL と Windows の実機で往復する。同期を有効にする前からあった記憶が、2 台目の端末に全部届く (テスト)。`sync = false` の repo で作業しても、その repo に途中で移った session でも、同期を有効にする前からあった行でも、hub に 1 件も入らない (テスト)。hook の時間が変わらない |
 | PR-I | 3 台への配布と `oboete update` | cargo-dist で WSL / Windows / M1 iMac のビルド対象を作り、各端末で setup・hook・同期・検索を実行する。`oboete update` (決定 15): detached の observe / sync が 1 日 1 回 GitHub Releases の最新版を見て DB に記録し、次の SessionStart の注入と `oboete doctor` に 1 行だけ知らせる (hook 自体は通信しない)。入れ替えは owner が `oboete update` を打ったときだけ行う。実行中の exe を上書きできない Windows の扱いは cargo-dist の updater (axoupdater) で確かめる | 3 台で同じ記憶が見える。3 台それぞれで古い版から `oboete update` で入れ替わり、hook と MCP が動き続ける。M1 の RAM と速さの記録。VPS は owner が使うと決めたときに、同じ条件で 4 台目として足す (決定 10) |
 | PR-J | クラウド検索とリモート MCP | DO の FTS5、Vectorize (決定 4)、同じ RRF、`createMcpHandler`、Access、Claude アプリの custom connector 用の OAuth (workers-oauth-provider、§4.7) | 評価セットでクラウドと手元の上位 10 件が 9 件以上一致する。Claude アプリから検索できる |
-| PR-K1 | 提案と決定を分け、好みの出所を確かめる | 要約の JSON の decision / preference に `status` (`decided` / `proposed`) と `user_quote` (決めたユーザー自身の言葉) を足す (既存の行は `status` 不明のまま扱い、書き換えない)。保存前に `user_quote` が要約器に渡した USER 行にそのまま含まれるかを Rust で確かめ、無ければ `proposed` に下げる。SessionStart は `decided` だけを決定として出す。全 repo への好みの注入 (決定 13) もここで作り、確かめられた好みだけを全 repo に、それ以外はその repo の中だけに出す | 道具の出力やファイルにだけ書かれた「好み」が他の repo に注入されない (回帰テスト)。「提案と決定の取り違え」の割合が下がる (p < 0.05)、本物の決定の取りこぼしが 5 ポイントを超えて増えない、検索の区画が 0.02 を超えて下がらない |
+| PR-K1 | 提案と決定を分け、全 repo の好みは明示したものだけにする | 要約の JSON の decision / preference に `status` (`decided` / `proposed`) と `user_quote` (決めたユーザー自身の言葉) を足す (既存の行は `status` 不明のまま扱い、書き換えない)。保存前に `user_quote` が要約器に渡した USER 行にそのまま含まれるかを Rust で確かめ、無ければ `proposed` に下げる。SessionStart は `decided` だけを決定として出す。全 repo への好みの注入 (決定 13) もここで作る。全 repo に広げるのは `oboete pref add` か viewer の「全 repo に広げる」で明示したものだけで、要約が見つけた好みはその repo の中だけ | 道具の出力やファイルにだけ書かれた「好み」が他の repo に注入されない (回帰テスト)。「提案と決定の取り違え」の割合が下がる (p < 0.05)、本物の決定の取りこぼしが 5 ポイントを超えて増えない、検索の区画が 0.02 を超えて下がらない |
 | 後回し | クラウド viewer、スマホ、Ruri への入れ替え、暗号化の「中継のみ」モード | — | 必要になったときに、同じ合格線で判断する |
 
 **docs の直し (PR-C で一緒に):** plan.md §2b・§3・§8 をこの案に合わせます。削るものは EmbeddingGemma / e5-small / CJK bigram、「内容ハッシュ id」、D1、「Vectorize 月 $0.07」です。m1.md の「fastembed 5.17 (7.x は無い)」も直します。m1.md 決定 9 の `[embedding] provider = none|workers-ai|local` は、ベクトル空間を 1 つにしたことで「意味検索のオン / オフ」と「オフライン時の手元の問い合わせ (`local_queries`) のオン / オフ」の 2 つに畳みます。
