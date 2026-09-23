@@ -9,7 +9,7 @@
 
 §6 の 4 点と、そのとき owner が足した問いへの答え。以下の本文とずれるところは、この節が優先する。
 
-1. **claude-mem の過去の記憶を取り込む** (§6 決定 1、推奨どおり)。`source = claude-mem` を付け、検索には出し、冒頭の自動注入には出さない。
+1. **claude-mem の過去の記憶を取り込む** (§6 決定 1、推奨どおり)。取り込む行は oboete の記録と同じ処理 (`strip_blocks` と gitleaks 規則の伏せ字) を通してから保存し、同期・埋め込みで外に出す直前にも、plan.md §6 の 2 つ目の伏せ字の関門を通す (取り込んだ秘密が外に出ないことを回帰テストで確かめる)。`source = claude-mem` を付け、検索には出し、冒頭の自動注入には出さない。
 2. **prompt も同期する** (§6 決定 3、推奨どおり)。
 3. **クラウドの意味検索に Vectorize を使う** (§6 決定 4、推奨どおり)。初月の請求で実額を確かめ、月 $1.5 を超えたら止める。
 4. **有料の埋め込み (Gemini 有料版など) は使わない** (§6 決定 2)。評価で bge-m3 の hybrid が合格線に届かなければ再相談する。
@@ -25,7 +25,7 @@
 7. **別の端末で clone した同じ repo は、ディレクトリ名に関係なく同じ repo として扱う** (owner の問い:「WSL の A を Mac や Windows で clone して引き継ぐとき、どう同じ A だと判別するのか」への答え)。
    - 今のコードは repo をディレクトリの絶対パスで見分けている (`src/repo.rs`)。このままだと別物として扱ってしまう。
    - §4.2 の 1 (PR-C) で、repo の見分け方を `.git/config` に書かれた GitHub などの取得元 URL (例 `github.com/ojungo69/oboete`) に変える。置き場所やフォルダ名が違っても、取得元が同じなら同じ repo になる。
-   - 取得元の無い repo はこれまでどおりパスで見分け、`.oboete.toml` の `repo = "名前"` で同じ名前を付けられるようにする。
+   - 取得元の無い repo はこれまでどおりパスで見分け、同じ名前を付けたいときは本人の oboete 設定 (`oboete repo alias <path> <名前>`) に書く。repo の中の `.oboete.toml` では名前を付けられない (信用できない repo が、別のプロジェクトの名前を名乗ってその記憶を読み出せないように)。repo の中の `.oboete.toml` が効くのは、送らない・伏せ字にする方向の設定 (`sync = false` など) だけ。
 
 ### 0.1 仕様のすり合わせ (2026-09-23 夜、3 ラウンド)
 
@@ -34,7 +34,7 @@
 10. **端末**: この PC (WSL)、Windows 本体、M1 iMac。VPS は使うか未定で、決まるまで設定しない。スマホは保留。
 11. **同期から repo ごとに外せる** (repo の `.oboete.toml` に `sync = false`、または `oboete sync exclude <repo>` で oboete の設定に書く)。**判定は送る直前に行います**: 各 session が触れた repo をすべて記録しておき (session の途中で入れ子の repo に移った場合も含む)、そのどれか 1 つでも除外なら、その session の行は送りません。書き込み時の印ではなく送信時の判定なので、除外を後から足した場合も、同期を初めて有効にしたときの古い行にも効きます。同期を初めて有効にするときは、送る repo と件数の一覧を出して確認を求めます。除外が止めるのは中身を運ぶ op (文書・`vec`・prompt・session) だけで、**削除の tombstone は除外に関係なく必ず送ります**。すでに同期した repo を後から除外するときは、`oboete sync exclude` がその repo の session を hub と他の端末から消す (tombstone を送る) かどうかを聞きます。既定は全部同期する。外す前に送った分は残るので、消したいときは viewer で削除する (決定 17 で全端末から消える)。
 12. **プロンプトごとの自動注入** (`oboete inject`) は、評価で無関係な注入が 10% 以下のときだけ既定で ON にする。
-13. **個人の好み** (`preference` の観測) は全 repo のセッションに注入する。
+13. **個人の好み** (`preference` の観測) は全 repo のセッションに注入する。ただし全 repo に広げるのは、ユーザー自身の言葉で確かめられた好みだけ (PR-K1 の `user_quote` が、要約器に渡した USER 行にそのまま含まれるもの)。確かめられない好みは、その repo の中だけに注入する (repo のファイルや道具の出力から書かれた「好み」が、関係ない repo の agent に渡らないように)。
 14. **費用**: 月 $5 までは owner に聞かずに使ってよい。Vectorize の月 $1.5 の停止線 (決定 3) はそのまま。
 15. **更新**: 新しい版が出たら知らせ、`oboete update` の 1 コマンドで入れ替える。自動では入れ替えない (壊れた版が全端末に一度に入らないように)。
 16. **同期を始める前に owner が Cloudflare の二段階認証を ON にする** (2026-09-23 時点で OFF)。同期に使う鍵は全権限キーではなく、端末ごとに取り消せる専用のもの (§4.4)。
@@ -264,7 +264,7 @@ Jev ([TypeSafe](https://typesafe.ai/blog/introducing-system-one-models-and-jev)�
 
 ### 4.2 先に直すもの (今のコードの障害)
 
-1. **repo のキーが絶対パスです** (`src/repo.rs` の `key()`)。WSL の `/home/jura/...`、macOS の `/Users/...`、Windows の `C:\...` で同じ repo が別物になります。これを、`.git/config` の origin URL を正規化したもの (例 `github.com/ojungo69/oboete`、git は起動しない) に変えます。remote が無い repo は従来どおりパスにし、`.oboete.toml` の `repo = "..."` で名前を付けられるようにします。既存の行も移し替えます。
+1. **repo のキーが絶対パスです** (`src/repo.rs` の `key()`)。WSL の `/home/jura/...`、macOS の `/Users/...`、Windows の `C:\...` で同じ repo が別物になります。これを、`.git/config` の origin URL を正規化したもの (例 `github.com/ojungo69/oboete`、git は起動しない) に変えます。remote が無い repo は従来どおりパスにし、本人の oboete 設定 (`oboete repo alias`) でだけ名前を付けられるようにします (repo の中のファイルには名前を決めさせない。決定 7)。既存の行も移し替えます。
 2. **session id が取れないときに `"unknown"` になります** (`src/hook.rs` 129 行)。これは端末をまたいで衝突します。取れないときは端末 id 付きの一意な値を作ります。
 3. **文書 id が端末ローカルの連番 (`o12`) です。** 同期用に `uid` 列を足します。形は `{端末 id 8 桁}:{種類}{連番}` (例 `7f3a9c21:o123`) で、cmem の `sha256(device, kind, local_id)` と同じ考え方です ([METADATA-CONTRACT](https://github.com/thedotmack/claude-mem/blob/main/workers/sync-hub/METADATA-CONTRACT.md))。
    - 連番は AUTOINCREMENT なので使い回されません (m1.md 決定 14)。
@@ -389,12 +389,12 @@ fastembed 7.1.0 が固定する ort 2.0.0-rc.13 には、4 つとも ONNX Runtim
 |---|---|---|---|
 | PR-A | 計測 spike (出荷しないコード) | Workers AI と fastembed の bge-m3 を実データ 100 件で比べる (cos と上位 10 件の一致)。8,000 字の prompt で Workers AI の入力上限と `truncate_inputs` を見る。日本からの往復の p50 / p95。oboete と claude-mem の実際のトークン数。DO / D1 で trigram FTS5 を作る 1 文。M1 での手元モデルの読み込み時間・RAM と、実ベクトル 15 万件の走査時間 (VPS は使うと決まったら) | §2・§4 の未確認の数字をすべて実測に置き換える。一致しなければ手元の問い合わせを無効にする (§2.3 の 3) |
 | PR-B | 評価器 | `oboete eval` が qrels から TREC 形式の結果を出し、ranx で報告する。claude-mem DB は読み取り専用の写しを使う。全文検索だけの基準値を出す | 測れる状態になったこと。基準の数字 |
-| PR-C | id と repo キー | 端末 id 付きの `uid`、origin URL の repo キーと移し替え、`"unknown"` session の修正、`embedder_id` とベクトル表 (`producer` 列つき)、各行の `synced_at` 列と変更用の outbox 表。`.oboete.toml` の読み取り (`repo = "名前"` と `sync = false`)、session が触れた repo の記録 (hook がイベントごとの cwd の repo を足す) | WSL と Windows で同じ repo が同じキーになる (テスト)。入れ子の repo に移ったイベントで、その repo が session の記録に足される (テスト)。replay で hook 時間が変わらない |
+| PR-C | id と repo キー | 端末 id 付きの `uid`、origin URL の repo キーと移し替え、`"unknown"` session の修正、`embedder_id` とベクトル表 (`producer` 列つき)、各行の `synced_at` 列と変更用の outbox 表。本人の設定の repo 別名 (`oboete repo alias`) と `.oboete.toml` の `sync = false` の読み取り、session が触れた repo の記録 (hook がイベントごとの cwd の repo を足す) | WSL と Windows で同じ repo が同じキーになる (テスト)。入れ子の repo に移ったイベントで、その repo が session の記録に足される (テスト)。replay で hook 時間が変わらない |
 | PR-D | 意味検索の本体 | observe で文書の埋め込み: クラウドを使う形は Workers AI (100 件ずつ、日次 neuron 予算付き)、ローカルだけの形 (§0 の 5) は手元の fastembed。sqlite-vec の索引、search / MCP / viewer の hybrid RRF、オフライン時の手元の問い合わせ (fastembed)、`oboete reindex` | §3.3 の「意味検索そのもの」の合格線。落ちたら既定は `none` のまま |
 | PR-E1〜E6 | 精度の工夫 (1 つ 1 PR) | E1 `since` / `until`、E2 要約の `keys`、E3 重複の間引き、E4 MCP 検索の reranker (xsmall-v2 と v2-m3 の比較)、E5 prompt の先頭か分割か、E6 M1 での int8 / bit | それぞれが合格線を越えたものだけ残す。越えなければその PR は閉じる |
 | PR-F | prompt ごとの自動注入 | UserPromptSubmit に別の hook として `oboete inject` を登録する (予算 300 ms、timeout 1 秒、超えたら全文検索だけ)。問い合わせ文は記録と同じ処理を通してから使う: `<private>` などの除去 (`strip_blocks`)、harness 通知の除外、伏せ字。何も残らなければ注入も外部への埋め込み要求もしない。Grok は最初の PreToolUse。しきい値を答えの無い問いで較正する。予算に収まらない端末だけ detached `recall` → PreToolUse の代案に切り替える | 誤注入 10% 以下、注入 hook の p95 300 ms 以内、timeout の割合 2% 以下。記録 hook の時間は変わらない (replay) |
 | PR-G | hub (Worker + DO) | `/push` と `/pull` (seq のカーソル)、op の冪等、tombstone、Access の service token、書き出しの口 | `--home` を 2 つ使ったテストで、順番を入れ替えても削除が勝ち、最後に文書とベクトルが一致する |
-| PR-H | 端末側の同期 | 未送信の行と outbox の送信 (observe の最後)、SessionStart からの detached pull、`oboete sync`、初回のページ送り、claude-mem の取り込み (決定 1)。送る直前に、session が触れた repo のどれかが除外なら、その session の文書・`vec`・prompt を送らない (決定 11)。初回は送る repo と件数を出して確認を求める | WSL と Windows の実機で往復する。同期を有効にする前からあった記憶が、2 台目の端末に全部届く (テスト)。`sync = false` の repo で作業しても、その repo に途中で移った session でも、同期を有効にする前からあった行でも、hub に 1 件も入らない (テスト)。hook の時間が変わらない |
+| PR-H | 端末側の同期 | 未送信の行と outbox の送信 (observe の最後)、SessionStart からの detached pull、`oboete sync`、初回のページ送り、claude-mem の取り込み (決定 1。取り込み時と送信・埋め込みの直前の 2 回、伏せ字を通す)。送る直前に、session が触れた repo のどれかが除外なら、その session の文書・`vec`・prompt を送らない (決定 11)。初回は送る repo と件数を出して確認を求める | WSL と Windows の実機で往復する。同期を有効にする前からあった記憶が、2 台目の端末に全部届く (テスト)。`sync = false` の repo で作業しても、その repo に途中で移った session でも、同期を有効にする前からあった行でも、hub に 1 件も入らない (テスト)。hook の時間が変わらない |
 | PR-I | 3 台への配布と `oboete update` | cargo-dist で WSL / Windows / M1 iMac のビルド対象を作り、各端末で setup・hook・同期・検索を実行する。`oboete update` (決定 15): detached の observe / sync が 1 日 1 回 GitHub Releases の最新版を見て DB に記録し、次の SessionStart の注入と `oboete doctor` に 1 行だけ知らせる (hook 自体は通信しない)。入れ替えは owner が `oboete update` を打ったときだけ行う。実行中の exe を上書きできない Windows の扱いは cargo-dist の updater (axoupdater) で確かめる | 3 台で同じ記憶が見える。3 台それぞれで古い版から `oboete update` で入れ替わり、hook と MCP が動き続ける。M1 の RAM と速さの記録。VPS は owner が使うと決めたときに、同じ条件で 4 台目として足す (決定 10) |
 | PR-J | クラウド検索とリモート MCP | DO の FTS5、Vectorize (決定 4)、同じ RRF、`createMcpHandler`、Access、Claude アプリの custom connector 用の OAuth (workers-oauth-provider、§4.7) | 評価セットでクラウドと手元の上位 10 件が 9 件以上一致する。Claude アプリから検索できる |
 | 後回し | クラウド viewer、スマホ、Ruri への入れ替え、暗号化の「中継のみ」モード | — | 必要になったときに、同じ合格線で判断する |
