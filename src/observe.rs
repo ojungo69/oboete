@@ -81,13 +81,7 @@ fn process_session(
     let result = chain.summarize(conn, &prompt, &schema())?;
     stats.fallbacks += result.fallbacks.len() as u32;
     let observations = parse_observations(&result.output)?;
-    // A provider can return any length; synced summaries must stay bounded.
-    let summary: String = result.output["summary"]
-        .as_str()
-        .unwrap_or("")
-        .chars()
-        .take(MAX_SUMMARY_CHARS)
-        .collect();
+    let summary = parse_summary(&result.output);
     stats.observations += observations.len() as u32;
     *stats
         .by_provider
@@ -206,6 +200,16 @@ fn schema() -> Value {
     })
 }
 
+/// A provider can return any length; synced summaries must stay bounded.
+fn parse_summary(v: &Value) -> String {
+    v["summary"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(MAX_SUMMARY_CHARS)
+        .collect()
+}
+
 fn parse_observations(v: &Value) -> Result<Vec<db::Observation>> {
     let arr = v["observations"]
         .as_array()
@@ -259,6 +263,18 @@ mod tests {
             .map(|o| o.kind)
             .collect();
         assert_eq!(kinds, ["decision", "discovery", "discovery", "discovery"]);
+        // Every kind the schema offers survives the check.
+        let offered =
+            &schema()["properties"]["observations"]["items"]["properties"]["kind"]["enum"];
+        assert_eq!(offered, &json!(KINDS));
+    }
+
+    #[test]
+    fn summaries_are_cut_to_the_cap() {
+        let long = "要".repeat(MAX_SUMMARY_CHARS + 500);
+        let summary = parse_summary(&json!({"summary": long}));
+        assert_eq!(summary.chars().count(), MAX_SUMMARY_CHARS);
+        assert_eq!(parse_summary(&json!({})), "");
     }
 
     #[test]
