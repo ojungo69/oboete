@@ -32,7 +32,7 @@
 8. **claude-mem には触らない** (owner:「claude-mem は勝手に消さないでね」)。停止・削除・設定変更は owner が決める。取り込み (決定 1) は claude-mem の DB を読むだけ。Windows 側の claude-mem データ (`C:\Users\jura\.claude-mem`) も取り込む。iMac にあれば同じ。
 9. **残り 4 agent の対応順**: agy → OpenCode → Pi → Cursor (`docs/research/agent-adapters-2026-09-23.md`)。
 10. **端末**: この PC (WSL)、Windows 本体、M1 iMac。VPS は使うか未定で、決まるまで設定しない。スマホは保留。
-11. **同期から repo ごとに外せる** (repo の `.oboete.toml` に `sync = false`、または `oboete sync exclude <repo>` で oboete の設定に書く)。**判定は送る直前に行います**: 各 session が触れた repo をすべて記録しておき (session の途中で入れ子の repo に移った場合も含む)、そのどれか 1 つでも除外なら、その session の行は送りません。書き込み時の印ではなく送信時の判定なので、除外を後から足した場合も、同期を初めて有効にしたときの古い行にも効きます。同期を初めて有効にするときは、送る repo と件数の一覧を出して確認を求めます。除外が止めるのは中身を運ぶ op (文書・`vec`・prompt・session) だけで、**削除の tombstone は除外に関係なく必ず送ります**。すでに同期した repo を後から除外するときは、`oboete sync exclude` がその repo の session を hub と他の端末から消す (tombstone を送る) かどうかを聞きます。既定は全部同期する。外す前に送った分は残るので、消したいときは viewer で削除する (決定 17 で全端末から消える)。
+11. **同期から repo ごとに外せる** (repo の `.oboete.toml` に `sync = false`、または `oboete sync exclude <repo>` で oboete の設定に書く)。**判定は送る直前に行います**: 各 session が触れた repo をすべて記録しておき (session の途中で入れ子の repo に移った場合も含む)、そのどれか 1 つでも除外なら、その session の行は送りません。書き込み時の印ではなく送信時の判定なので、除外を後から足した場合も、同期を初めて有効にしたときの古い行にも効きます。同期を初めて有効にするときは、送る repo と件数の一覧を出して確認を求めます。PR-C より前に記録された session は、途中で触れた repo が残っていない (hook は最初の repo しか持たず、生イベントも要約後に消える) ので「触れた repo が分からない」扱いにし、除外が 1 つでも設定されていれば、この確認で owner が承認した分だけを送ります (除外が無ければ全部送ってよい)。PR-A・PR-B の実データの実験も同じ扱いにします。除外が止めるのは中身を運ぶ op (文書・`vec`・prompt・session) だけで、**削除の tombstone は除外に関係なく必ず送ります**。すでに同期した repo を後から除外するときは、`oboete sync exclude` がその repo の session を hub と他の端末から消す (tombstone を送る) かどうかを聞きます。既定は全部同期する。外す前に送った分は残るので、消したいときは viewer で削除する (決定 17 で全端末から消える)。
 12. **プロンプトごとの自動注入** (`oboete inject`) は、評価で無関係な注入が 10% 以下のときだけ既定で ON にする。
 13. **個人の好み** (`preference` の観測) は全 repo のセッションに注入する。ただし全 repo に広げるのは、**ユーザーが明示したものだけ**です (`oboete pref add "..."` か、viewer の「全 repo に広げる」ボタン)。要約が見つけた好みはその repo の中だけに注入し、viewer に「広げる候補」として出します。要約器が選んだ引用が prompt の中にあるかどうかでは広げません (貼り付けた issue や README の一文も prompt の中にあるため)。
 14. **費用**: 月 $5 までは owner に聞かずに使ってよい。Vectorize の月 $1.5 の停止線 (決定 3) はそのまま。
@@ -277,7 +277,7 @@ Jev ([TypeSafe](https://typesafe.ai/blog/introducing-system-one-models-and-jev)�
 
 | 表 | 同期 | 合わせ方 |
 |---|---|---|
-| sessions (id、agent、repo、端末、開始、最終イベント) | する | 開始は小さいほう、最終イベントは大きいほう。注入済みの印は端末ローカル |
+| sessions (id、agent、repo、触れた repo の集合、端末、開始、最終イベント) | する | 開始は小さいほう、最終イベントは大きいほう、触れた repo の集合は和 (増えるだけ)。どの端末でも除外と削除 (決定 11) をこの集合で判定できるようにする。注入済みの印は端末ローカル |
 | observations / summaries / prompts | する (prompt は §6 決定 3) | 追加のみ。同じ uid の op が 2 回来ても 1 回分 (op の uid で冪等) |
 | 文書のベクトル | する (文書とは別の `vec` op。`embedder_id` 付きの fp32、1 件 4 KB) | 文書の uid と `embedder_id` の組で冪等 (同じ組が 2 回来ても 1 回分)。正規か準備中 (§2.3 の 4) の `embedder_id` 以外は hub が受け取らない。tombstone 済みの文書の `vec` は捨てる (削除が勝つ)。送信は文書を先、`vec` を後に並べるので、同じ端末の `vec` が文書より先に届くことはない。オフライン後の埋め込み (§2.6) も reindex の新しい世代もこの op で送る |
 | 削除 (tombstone = 消した印) | する | **削除が常に勝つ** (届く順番に関係なく)。文書の削除は文書の tombstone、session の削除は **session 自体の tombstone** を作る。hub はその session を指す op を、あとから届いたもの (別の端末でまだ送っていなかった文書) も含めて全部捨てる。印は小さいので永久に保持する |
