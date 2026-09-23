@@ -42,6 +42,14 @@
 18. **viewer は常駐させない**。見たいときに `oboete view --open` で開く。
 19. **普段の環境では claude-mem と oboete の両方が記録・注入する** (二重注入を受け入れる)。実作業の中でしか両者の欠点は見えないため (例: 2026-09-23、claude-mem は owner が答える前の推奨を「owner の決定」として記録し、oboete は取り消し済みの「1 週間の試用」を注入した)。新しい機能 (4 agent、同期、更新) は、普段の環境に入れる前に隔離ユーザー `oboete-dogfood` で試す。そのユーザーに残っていた旧 TS 版と日次 cron は片付ける。
 20. **要約用の API キーのファイルは iMac と Windows にもコピーする** (owner 選択。権限は本人だけが読める形)。VPS は使うと決めたときに改めて決める。
+21. **部分ごとに、質が高くなるほうを選ぶ** (owner:「自分で設計・実装したほうがクオリティが高くなるならそれでも良い」、2026-09-24)。
+   - 同期の決まり (uid、rev、tombstone、送信順、ack) は claude-mem の実装を土台にする。PR-G の前に [CloudSync.ts](https://github.com/thedotmack/claude-mem/blob/main/src/services/sync/CloudSync.ts)・[SyncHub.ts](https://github.com/thedotmack/claude-mem/blob/main/workers/sync-hub/src/do/SyncHub.ts)・[canonical-content.ts](https://github.com/thedotmack/claude-mem/blob/main/workers/sync-hub/src/canonical-content.ts) を読み、本書の §4.3 と食い違うところは claude-mem の形に寄せる。移さないのは cmem.ai Pro の token 検証 (`TOKEN_VERIFY_URL`) と Pro への転送。
+   - 検索と記録の仕組み (常駐なし) は本書の設計のまま。claude-mem の検索は §2.9 のとおり弱く、常駐 worker と Chroma は重いため。
+   - agent との接続は claude-mem の installer を参考にし、agent の公式の説明で確かめてから移す (`docs/research/agent-adapters-2026-09-23.md`)。
+   - claude-mem は Apache-2.0。コードを移したときは出典を `NOTICE` に書く。
+22. **検索の精度は claude-mem を下回らない**。§3.3 の「claude-mem との比較」を合格線に足す。
+23. **他のメモリ系 OSS の良い設計も、評価で効果が出たものから順次取り入れる** (owner、2026-09-24)。候補の調査は `docs/research/` に 1 本にまとめ、1 つの工夫を 1 PR にして §3.3 の「個々の工夫」と同じ合格線にかける。
+24. **Jev / Laya などの判定モデルは、使う場所ごとに候補として評価する** (§2.10)。検索と保存の中心には入れない。
 
 ---
 
@@ -180,6 +188,16 @@ bge-m3 は手元の fastembed なら密ベクトルと疎ベクトルを 1 回�
 - claude-mem 13.25.3 の検索は Chroma だけで行います。Chroma が落ちたか 0 件のときだけ FTS5 に切り替え、RRF の要望は採用されずに閉じられました ([#2000](https://github.com/thedotmack/claude-mem/issues/2000)、[#1789](https://github.com/thedotmack/claude-mem/issues/1789))。90 日の窓は `RECENCY_WINDOW_MS:7776e6` です (`~/.claude/plugins/cache/thedotmack/claude-mem/13.25.3/scripts/worker-service.cjs`)。モデルは Chroma 既定の all-MiniLM-L6-v2 で ([HF](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2))、変更できません ([#3029](https://github.com/thedotmack/claude-mem/issues/3029))。この PC ではベクトル 1,010,427 本に対し観測 151,543 件 (1 件あたり約 6.7 本)、chroma.sqlite3 が 3.3 GB、ディレクトリ全体が 4.8 GB でした (読み取り専用で集計)。メモリ肥大の報告も続いています ([#3684](https://github.com/thedotmack/claude-mem/issues/3684)、[#3905](https://github.com/thedotmack/claude-mem/issues/3905))。日本語の問い合わせは順位付けの無い LIKE になります。
 - cmem Pro はユーザーごとに 1 つの SQLite Durable Object を持ち、上限は 64 台 ([SyncHub.ts](https://github.com/thedotmack/claude-mem/blob/main/workers/sync-hub/src/do/SyncHub.ts))。中身は Turbopuffer に写しますが、埋め込みモデルは公開されていません ([launch plan](https://github.com/thedotmack/claude-mem/blob/main/plans/2026-07-22-cmem-launch.md))。料金はトップが月 $20、/pro が 30 日無料の後に月 $30 と表記が食い違っています ([cmem.ai](https://cmem.ai)、[cmem.ai/pro](https://cmem.ai/pro))。hosted-server 版の検索は英語設定の Postgres 全文検索だけです ([hosted-server](https://docs.claude-mem.ai/hosted-server))。
 
+### 2.10 判定モデル (Jev / Laya など) の使い道 (候補)
+
+Jev ([TypeSafe](https://typesafe.ai/blog/introducing-system-one-models-and-jev)、2026-09-15 early access、Workers AI では `typesafe/jev`) と Laya ([convaiinnovations/laya](https://huggingface.co/convaiinnovations/laya)、Apache-2.0 の open weights) は、文章を書かずに「はい/いいえの確率・選択肢・点数」だけを返すモデルです。oboete で効きそうな場所は 3 つで、どれも評価で効果が出たときだけ入れます。
+
+- (a) prompt ごとの自動注入 (PR-F) で、拾った記憶が本当に関係あるかを判定して絞る。注入 hook の予算 300 ms に収まるかが条件。
+- (b) 要約の点検 (observe、時間の制約なし): 「決定か提案か」「後の決定で上書きされたか」を見分ける (`docs/m1.md`「実使用で見えたこと」の 2026-09-23 の 2 件)。まず要約の指示文で直し、残った分にだけ使う。
+- (c) 評価の採点役 (PR-B): 人が付けた正解との一致で、claude / codex の採点と比べる。(a) に使うモデルは採点役にしない (自分で自分を採点することになる)。
+
+同じ役目を持つ別の種類のモデル (多言語の reranker、NLI の分類器、小さな LLM の採点役) とあわせた比較は、調査 (`docs/research/`) の結果で本節を書き直します。
+
 ---
 
 ## 3. 精度の測り方
@@ -197,7 +215,7 @@ bge-m3 は手元の fastembed なら密ベクトルと疎ベクトルを 1 回�
 
 データの言語の偏り (全件集計): claude-mem の観測タイトルで日本語を含むのは 2.94%、本文 (narrative) は 5.24%、prompt は 63.76% (15,220 件中)、oboete の観測は 53 件すべてです (読み取り専用で集計)。つまり **claude-mem だけで作った評価は日英をまたぐ検索しか測れません**。日本語 → 日本語の区画を別に持つのはこのためです。
 
-**正解の付け方:** 各方式 (全文のみ、bge-m3、対抗馬、hybrid) の上位 50 件を合わせて候補の束にします (JQaRA と同じ作り方。§3.2 で recall@50 を測るので、判定の深さも 50 にそろえる。判定しなかった順位を「関係なし」と数える偏りを作らない)。これを UMBRELA の 0〜3 段階の LLM 判定で採点します ([UMBRELA](https://arxiv.org/abs/2406.06519))。判定には要約器と別系統のモデルを使い (サブスクの claude か codex。無料の Gemini は入力を学習に使うので使いません)、約 50 組を人が付けた正解と照らします。一致が低ければ (Cohen の κ が 0.6 未満を目安) LLM 判定は信用しません。
+**正解の付け方:** 各方式 (全文のみ、bge-m3、対抗馬、hybrid) の上位 50 件を合わせて候補の束にします (JQaRA と同じ作り方。§3.2 で recall@50 を測るので、判定の深さも 50 にそろえる。判定しなかった順位を「関係なし」と数える偏りを作らない)。これを UMBRELA の 0〜3 段階の LLM 判定で採点します ([UMBRELA](https://arxiv.org/abs/2406.06519))。判定には要約器と別系統のモデルを使い (サブスクの claude か codex。無料の Gemini は入力を学習に使うので使いません)、約 50 組を人が付けた正解と照らします。一致が低ければ (Cohen の κ が 0.6 未満を目安) LLM 判定は信用しません。**束は実験ごとに足します。** PR-E の各工夫や新しいモデルを合格線にかける前に、その方式の上位 50 件のうち未判定の文書を同じ判定器で採点して束に加えます (判定済みの組は使い回す)。最初の束に無かった文書を「関係なし」と数えて、良い工夫を落とす偏りを作らないためです。
 
 ### 3.2 指標
 
@@ -217,6 +235,7 @@ bge-m3 は手元の fastembed なら密ベクトルと疎ベクトルを 1 回�
 | モデルの入れ替え (Ruri など) | 日→日で nDCG@10 +0.03 以上、他の区画で 0.02 を超える低下がない。そのうえで §2.3 の 5 の費用を owner が受け入れた場合だけ |
 | 自動注入 | 答えの無い問いへの誤注入が 10% 以下になるしきい値で、正解のある問いの 50% 以上に注入できること。注入 hook の p95 が 300 ms 以内で、timeout で捨てられる割合が 2% 以下 (提案値)。できなければ prompt ごとの注入は出さない |
 | クラウドと手元の一致 | Workers AI と手元 ONNX で cos の最小が 0.99 以上、上位 10 件が 9 件以上一致 |
+| claude-mem との比較 (決定 22) | この PC で動いている claude-mem の検索 (worker の検索 API を読み取りだけで呼ぶ。claude-mem の設定とデータは変えない) を、同じ評価セットの test 分で測る。oboete の既定の検索が、どの区画でも nDCG@10 と recall@10 で claude-mem を下回らない。下回れば既定にせず、§2.4 の工夫・reranker・モデルの見直しを続ける |
 
 - 調整に使うのは dev 分 (70%) だけで、合否は手を付けていない test 分 (30%) で決めます。小さな評価セットで重みを合わせ込みすぎるのを防ぐためです。
 - 1 回の比較で決めます。「直して測り直す」を合格まで繰り返すことはしません。
@@ -273,7 +292,7 @@ bge-m3 は手元の fastembed なら密ベクトルと疎ベクトルを 1 回�
 - **削除した中身は log からも消します。** hub は tombstone を受け取った時点で、対象の文書の op から本文を、その `vec` op からベクトルを消し、`seq` と uid と「削除済み」の印だけを残します (session の tombstone ならその中の全 op)。新しい端末が最初から取っても、消した prompt の本文やベクトルは届きません。端末側も、受け取った tombstone に合わせて手元の本文・fts・ベクトルを消します (既存の `delete_doc` / `delete_session` と同じ)。
 - hub は op を受け取ったら順序付きで保存し、表に反映して、FTS5 も更新します。
 
-**Vectorize** (§6 決定 4 で承認された場合) は DO が表に反映するときに一緒に upsert / delete します。
+**Vectorize** (§6 決定 4 で承認された場合) への upsert / delete は、DO の SQLite の外にあるので同じトランザクションに入れられません。そこで DO は、op を保存して表に反映するのと同じトランザクションで、Vectorize への送信待ち (`vectorize_outbox`: uid と upsert / delete) に 1 行書きます。DO の alarm がそれを冪等に送り (upsert は同じ id の上書き、delete は無ければ何もしない)、成功した行だけ消します。timeout や Worker の終了で送れなかった行は残り、次の alarm で送り直されるので、DO の表と Vectorize がずれたままになりません。
 
 - 絞り込みに使う metadata の索引 (repo、kind、agent、source) は、**最初の挿入より前に**作っておく必要があります。索引は最大 10 個、文字列は先頭 64 byte だけが索引に入ります ([metadata filtering](https://developers.cloudflare.com/vectorize/reference/metadata-filtering/))。そこで索引に入れる repo は、repo キー (origin URL) の SHA-256 の先頭 16 桁 (16 進) にします。長い URL の先頭が同じ 2 つの repo も区別でき、表示用の URL は別の metadata に持ちます。
 - 書き込みが検索に出るまでの時間は、中央値 30 秒未満、p99 は 2 分未満です ([changelog](https://developers.cloudflare.com/changelog/post/2026-06-30-improved-wal-throughput/))。
@@ -376,7 +395,7 @@ fastembed 7.1.0 が固定する ort 2.0.0-rc.13 には、4 つとも ONNX Runtim
 | PR-F | prompt ごとの自動注入 | UserPromptSubmit に別の hook として `oboete inject` を登録する (予算 300 ms、timeout 1 秒、超えたら全文検索だけ)。Grok は最初の PreToolUse。しきい値を答えの無い問いで較正する。予算に収まらない端末だけ detached `recall` → PreToolUse の代案に切り替える | 誤注入 10% 以下、注入 hook の p95 300 ms 以内、timeout の割合 2% 以下。記録 hook の時間は変わらない (replay) |
 | PR-G | hub (Worker + DO) | `/push` と `/pull` (seq のカーソル)、op の冪等、tombstone、Access の service token、書き出しの口 | `--home` を 2 つ使ったテストで、順番を入れ替えても削除が勝ち、最後に文書とベクトルが一致する |
 | PR-H | 端末側の同期 | 未送信の行と outbox の送信 (observe の最後)、SessionStart からの detached pull、`oboete sync`、初回のページ送り、claude-mem の取り込み (決定 1)。同期除外の印がある session の文書・`vec`・prompt は送信の対象から外す (印は書き込み時に session に付く) | WSL と Windows の実機で往復する。同期を有効にする前からあった記憶が、2 台目の端末に全部届く (テスト)。`sync = false` の repo で作業しても hub に 1 件も入らない (テスト)。hook の時間が変わらない |
-| PR-I | 3 台への配布 | cargo-dist で WSL / Windows / M1 iMac のビルド対象を作り、各端末で setup・hook・同期・検索を実行する | 3 台で同じ記憶が見える。M1 の RAM と速さの記録。VPS は owner が使うと決めたときに、同じ条件で 4 台目として足す (決定 10) |
+| PR-I | 3 台への配布と `oboete update` | cargo-dist で WSL / Windows / M1 iMac のビルド対象を作り、各端末で setup・hook・同期・検索を実行する。`oboete update` (決定 15): detached の observe / sync が 1 日 1 回 GitHub Releases の最新版を見て DB に記録し、次の SessionStart の注入と `oboete doctor` に 1 行だけ知らせる (hook 自体は通信しない)。入れ替えは owner が `oboete update` を打ったときだけ行う。実行中の exe を上書きできない Windows の扱いは cargo-dist の updater (axoupdater) で確かめる | 3 台で同じ記憶が見える。3 台それぞれで古い版から `oboete update` で入れ替わり、hook と MCP が動き続ける。M1 の RAM と速さの記録。VPS は owner が使うと決めたときに、同じ条件で 4 台目として足す (決定 10) |
 | PR-J | クラウド検索とリモート MCP | DO の FTS5、Vectorize (決定 4)、同じ RRF、`createMcpHandler`、Access | 評価セットでクラウドと手元の上位 10 件が 9 件以上一致する。Claude アプリから検索できる |
 | 後回し | クラウド viewer、スマホ、OAuth、Ruri への入れ替え、暗号化の「中継のみ」モード | — | 必要になったときに、同じ合格線で判断する |
 
