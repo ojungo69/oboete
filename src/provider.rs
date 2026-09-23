@@ -474,14 +474,7 @@ fn cli_headless(
     let text = match cli {
         "codex" => std::fs::read_to_string(&last)
             .map_err(|_| CallError::other("invalid output: codex wrote no last message"))?,
-        // stream-json: one event per line; the answer is in the last `result` event.
-        "agy" => stdout
-            .lines()
-            .rev()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .find(|v| v["event"] == "result")
-            .map(|v| v["result"].to_string())
-            .ok_or_else(|| CallError::other("invalid output: agy printed no result event"))?,
+        "agy" => agy_result(&stdout)?,
         _ => stdout.into_owned(),
     };
     extract_structured(cli, &text)
@@ -489,6 +482,17 @@ fn cli_headless(
 
 /// The schema-validated object out of a CLI's JSON envelope: `structured_output` (claude, agy),
 /// `structuredOutput` (grok), or the answer text itself when the envelope is the answer (codex).
+/// agy's stream-json output: one event per line; the answer is in the last `result` event.
+fn agy_result(stdout: &str) -> Result<String, CallError> {
+    stdout
+        .lines()
+        .rev()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["event"] == "result")
+        .map(|v| v["result"].to_string())
+        .ok_or_else(|| CallError::other("invalid output: agy printed no result event"))
+}
+
 fn extract_structured(cli: &str, text: &str) -> Result<Value, CallError> {
     let v: Value = serde_json::from_str(text.trim())
         .map_err(|e| CallError::other(format!("invalid output: {cli} output is not JSON ({e})")))?;
@@ -540,6 +544,21 @@ mod tests {
             std::fs::remove_file(&file).ok();
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn agy_answer_is_the_last_result_event() {
+        let out = concat!(
+            "{\"event\":\"init\",\"session\":\"s\"}\n",
+            "not json\n",
+            "{\"event\":\"result\",\"result\":{\"structured_output\":{\"summary\":\"x\"}}}\n",
+        );
+        let text = agy_result(out).unwrap();
+        assert_eq!(
+            extract_structured("agy", &text).unwrap(),
+            json!({"summary": "x"})
+        );
+        assert!(agy_result("{\"event\":\"init\"}\n").is_err());
     }
 
     #[test]
