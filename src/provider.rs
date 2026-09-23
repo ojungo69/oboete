@@ -428,52 +428,27 @@ fn cli_headless(
             cmd.env_remove(&k);
         }
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| CallError::other(format!("spawn {cli}: {e}")))?;
-    // Feed stdin from a thread: the prompt can exceed the pipe buffer while the child is still
-    // starting up, and a child that exits without reading just makes the write fail.
-    let feeder = child.stdin.take().zip(stdin).map(|(mut w, text)| {
-        std::thread::spawn(move || {
-            use std::io::Write;
-            w.write_all(text.as_bytes()).ok();
-        })
-    });
-    let deadline = Instant::now() + Duration::from_secs(timeout_s);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) => {}
-            Err(e) => return Err(CallError::other(format!("wait {cli}: {e}"))),
-        }
-        if Instant::now() > deadline {
-            // Reap it before the scratch directory goes: a killed child still holds that
-            // directory as its cwd until it is waited for (Windows refuses the removal).
-            child.kill().ok();
-            child.wait().ok();
-            return Err(CallError::other(format!(
-                "{cli} timed out after {timeout_s}s"
-            )));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    let out = child
-        .wait_with_output()
-        .map_err(|e| CallError::other(format!("output {cli}: {e}")))?;
-    if let Some(f) = feeder {
-        f.join().ok();
-    }
-    if !status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(CallError::other(format!(
-            "{cli} exit {status}: {}",
-            err.chars().take(300).collect::<String>()
-        )));
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let out = run_cli(cmd, stdin, Duration::from_secs(timeout_s)).map_err(|e| {
+        let tagged = if e.invalid() {
+            format!(
+                "invalid output: {cli}: {}",
+                &e.message["invalid output: ".len()..]
+            )
+        } else {
+            format!("{cli} {}", e.message)
+        };
+        CallError::other(tagged)
+    })?;
+    let stdout = String::from_utf8_lossy(&out);
     let text = match cli {
-        "codex" => std::fs::read_to_string(&last)
-            .map_err(|_| CallError::other("invalid output: codex wrote no last message"))?,
+        "codex" => {
+            use std::io::Read;
+            let mut text = String::new();
+            std::fs::File::open(&last)
+                .and_then(|f| f.take(MAX_CLI_OUTPUT).read_to_string(&mut text))
+                .map_err(|_| CallError::other("invalid output: codex wrote no last message"))?;
+            text
+        }
         "agy" => agy_result(&stdout)?,
         _ => stdout.into_owned(),
     };
@@ -482,6 +457,81 @@ fn cli_headless(
 
 /// The schema-validated object out of a CLI's JSON envelope: `structured_output` (claude, agy),
 /// `structuredOutput` (grok), or the answer text itself when the envelope is the answer (codex).
+/// Most a CLI may print before its answer is dropped: a broken or hijacked provider must not
+/// fill memory (the summaries it returns are capped much lower anyway).
+const MAX_CLI_OUTPUT: u64 = 1 << 20;
+
+/// Spawn `cmd`, feed it `stdin`, and return its stdout if it exits 0 within `timeout`.
+/// stdin, stdout and stderr each get a thread: a prompt larger than the pipe buffer, or an
+/// answer larger than it, must not deadlock against a child that has not read or exited yet.
+fn run_cli(
+    mut cmd: Command,
+    stdin: Option<String>,
+    timeout: Duration,
+) -> Result<Vec<u8>, CallError> {
+    use std::io::{Read, Write};
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| CallError::other(format!("spawn: {e}")))?;
+    let feeder = child.stdin.take().zip(stdin).map(|(mut w, text)| {
+        // A child that exits without reading just makes the write fail.
+        std::thread::spawn(move || w.write_all(text.as_bytes()).ok())
+    });
+    let drain = |r: Option<Box<dyn Read + Send>>| {
+        r.map(|r| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let mut r = r.take(MAX_CLI_OUTPUT + 1);
+                r.read_to_end(&mut buf).ok();
+                // Keep reading past the cap so the child is never blocked on a full pipe.
+                std::io::copy(r.get_mut(), &mut std::io::sink()).ok();
+                buf
+            })
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|r| Box::new(r) as _));
+    let stderr = drain(child.stderr.take().map(|r| Box::new(r) as _));
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {}
+            Err(e) => return Err(CallError::other(format!("wait: {e}"))),
+        }
+        if Instant::now() > deadline {
+            // Reap it before the scratch directory goes: a killed child still holds that
+            // directory as its cwd until it is waited for (Windows refuses the removal).
+            child.kill().ok();
+            child.wait().ok();
+            return Err(CallError::other(format!(
+                "timed out after {}s",
+                timeout.as_secs()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    if let Some(f) = feeder {
+        f.join().ok();
+    }
+    let join = |h: Option<std::thread::JoinHandle<Vec<u8>>>| {
+        h.and_then(|h| h.join().ok()).unwrap_or_default()
+    };
+    let (out, err) = (join(stdout), join(stderr));
+    if !status.success() {
+        let err = String::from_utf8_lossy(&err);
+        return Err(CallError::other(format!(
+            "exit {status}: {}",
+            err.chars().take(300).collect::<String>()
+        )));
+    }
+    if out.len() as u64 > MAX_CLI_OUTPUT {
+        return Err(CallError::other(format!(
+            "invalid output: more than {MAX_CLI_OUTPUT} bytes"
+        )));
+    }
+    Ok(out)
+}
+
 /// agy's stream-json output: one event per line; the answer is in the last `result` event.
 fn agy_result(stdout: &str) -> Result<String, CallError> {
     stdout
@@ -521,11 +571,11 @@ mod tests {
 
     #[test]
     fn cli_prompts_stay_off_the_command_line() {
-        let dir = std::env::temp_dir().join(format!("oboete-argv-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = scratch_dir().unwrap();
+        let dir = &scratch.0;
         let prompt = "SECRET-SESSION-TEXT 秘密";
         for cli in ["agy", "claude", "grok", "codex"] {
-            let (cmd, stdin) = headless_command(cli, Some("m"), &dir, prompt, "{}").unwrap();
+            let (cmd, stdin) = headless_command(cli, Some("m"), dir, prompt, "{}").unwrap();
             let on_stdin = stdin.is_some_and(|t| t.contains(prompt));
             let args: Vec<String> = cmd
                 .get_args()
@@ -543,7 +593,36 @@ mod tests {
             );
             std::fs::remove_file(&file).ok();
         }
-        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_runs_neither_deadlock_nor_outlive_the_timeout() {
+        let sh = |script: &str| {
+            let mut c = Command::new("sh");
+            c.args(["-c", script])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            c
+        };
+        // Larger than any pipe buffer in both directions.
+        let big = "x".repeat(300_000);
+        let out = run_cli(sh("cat"), Some(big.clone()), Duration::from_secs(10)).unwrap();
+        assert_eq!(out, big.as_bytes());
+        let err = run_cli(
+            sh("head -c 1100000 /dev/zero"),
+            None,
+            Duration::from_secs(10),
+        )
+        .unwrap_err();
+        assert!(err.message.contains("more than"), "{}", err.message);
+        let err = run_cli(sh("echo boom >&2; exit 3"), None, Duration::from_secs(10)).unwrap_err();
+        assert!(err.message.contains("boom"), "{}", err.message);
+        let start = Instant::now();
+        let err = run_cli(sh("sleep 5"), None, Duration::from_secs(1)).unwrap_err();
+        assert!(err.message.contains("timed out"), "{}", err.message);
+        assert!(start.elapsed() < Duration::from_secs(4));
     }
 
     #[test]
