@@ -32,7 +32,7 @@
 8. **claude-mem には触らない** (owner:「claude-mem は勝手に消さないでね」)。停止・削除・設定変更は owner が決める。取り込み (決定 1) は claude-mem の DB を読むだけ。Windows 側の claude-mem データ (`C:\Users\jura\.claude-mem`) も取り込む。iMac にあれば同じ。
 9. **残り 4 agent の対応順**: agy → OpenCode → Pi → Cursor (`docs/research/agent-adapters-2026-09-23.md`)。
 10. **端末**: この PC (WSL)、Windows 本体、M1 iMac。VPS は使うか未定で、決まるまで設定しない。スマホは保留。
-11. **同期から repo ごとに外せる** (repo の `.oboete.toml` に `sync = false`。PR-C で読み、PR-H で outbox に入れる前に止める)。既定は全部同期する。外す前に送った分は残るので、消したいときは viewer で削除する (決定 17 で全端末から消える)。
+11. **同期から repo ごとに外せる** (repo の `.oboete.toml` に `sync = false`。PR-C で読んで session に印を付け、PR-H で印のある session の行を送信から外す)。既定は全部同期する。外す前に送った分は残るので、消したいときは viewer で削除する (決定 17 で全端末から消える)。
 12. **プロンプトごとの自動注入** (`oboete inject`) は、評価で無関係な注入が 10% 以下のときだけ既定で ON にする。
 13. **個人の好み** (`preference` の観測) は全 repo のセッションに注入する。
 14. **費用**: 月 $5 までは owner に聞かずに使ってよい。Vectorize の月 $1.5 の停止線 (決定 3) はそのまま。
@@ -115,8 +115,8 @@ AI Search が持つ精度の工夫は、すべて §2.4 の検索手順に入れ
 
 ### 2.3 ベクトル空間は 1 つだけ: 決まりごと
 
-1. **アカウントごとに正規の埋め込み器を 1 つ決めます。** hub がそれを記録します。`embedder_id` は、モデル名・実行環境・精度・pooling・前置き文・次元をつないだ文字列です (例 `bge-m3/dense/fp32/cls/noprefix/1024`)。bge-m3 は前置き文が要りません ([HF](https://huggingface.co/BAAI/bge-m3))。
-2. **文書のベクトルは Workers AI だけで作ります。** 要約と同じ detached の observe で作ります。手元モデルで作った文書ベクトルは混ぜません。オフライン中にできた文書はベクトル無しで保存し (全文検索にはすぐ出る)、次にオンラインで observe が走ったときに作ります。
+1. **アカウントごとに正規の埋め込み器を 1 つ決めます。** hub がそれを記録します。`embedder_id` はベクトル空間の名前で、モデル名・精度・pooling・前置き文・次元をつないだ文字列です (例 `bge-m3/dense/fp32/cls/noprefix/1024`)。作った実行環境 (Workers AI か fastembed か) は含めず、ベクトルごとの `producer` 列に診断用として記録します。3 の一致検査に通った実行環境は同じ `embedder_id` を名乗れ、通らなかった実行環境は文書のベクトルも問い合わせのベクトルも作りません。bge-m3 は前置き文が要りません ([HF](https://huggingface.co/BAAI/bge-m3))。
+2. **クラウドを使う形では、文書のベクトルは Workers AI で作ります。** 要約と同じ detached の observe で作ります。オフライン中にできた文書はベクトル無しで保存し (全文検索にはすぐ出る)、次にオンラインで observe が走ったときに作ります。手元の fastembed が 3 の一致検査に通った端末だけは、オフライン中の文書も手元で作ってよく、同じ `embedder_id` で送ります (§0 の 5)。ローカルだけの形は全部を手元で作ります。
 3. **手元モデルの役目は、オフライン時に問い合わせ文をベクトルにすることだけです。** 同じ重みでも、精度・pooling・切り詰めが違えば数字は変わります。EmbeddingGemma では int8 版で cos 0.987 まで下がりました (実測・未再現)。そこで、Workers AI と手元 ONNX で同じ文 100 件を変換し、**cos の最小が 0.99 以上、評価クエリの上位 10 件が 9 件以上一致**したときだけ、手元の問い合わせを有効にします (一致の度合いはまだ未計測、§7 の PR-A)。
 4. **モデルを変えるときは全件作り直しです** (`oboete reindex`)。hub は正規の `embedder_id` のほかに「準備中」の `embedder_id` を 1 つだけ登録でき、準備中のベクトルも受け取って別に保持します (検索には使わない)。準備中のベクトルが全件そろったら hub の正規を切り替え、古い世代を捨てます。それまでの検索は古い世代のままなので、切り替えで検索が止まる時間はありません。各端末は切り替えのあとにベクトルを pull し直します。
 5. **Ruri が評価で勝った場合**、文書ベクトルは手元か VPS で作れます。ただしクラウド側の問い合わせ (リモート MCP、スマホ) のために、Cloudflare Containers か VPS で Ruri を常に動かす必要が出ます。Containers は Workers Paid の含み枠が月 25 GiB 時間なので、常時起動なら 1 GiB の instance で約 25 時間分しかありません ([Containers 料金](https://developers.cloudflare.com/containers/pricing/))。この費用と手間が、日本語の上積みに見合うかで判断します。
@@ -167,7 +167,7 @@ bge-m3 は手元の fastembed なら密ベクトルと疎ベクトルを 1 回�
   - 開発者から見える変化は、prompt を送ってから答えが始まるまでが最大で約 0.3 秒 (timeout 時は 1 秒) 延びることです。PR-F で実測します。
   - 長さの上限: Claude Code は 10,000 字です。Codex は約 2,500 トークンを超えるとファイルに退避され、先頭と末尾だけがモデルに見えます (`additionalContextLimit`: [Codex hooks](https://developers.openai.com/codex/hooks)) ので、Codex への注入文はそれより短くします。
   - Grok は UserPromptSubmit の出力を捨てるので、M1 と同じく最初の PreToolUse の経路で渡します (m1.md 決定 3)。
-  - M1 / A1 で予算に収まらない場合の代案として、detached の `recall` が結果を DB に置き、次の PreToolUse で渡す方式を残します。このとき結果は (session id、prompt id) で引き、同じ prompt のときだけ注入します。遅れた前の prompt の結果が次の prompt に混ざらないようにするためです。ただしこの代案は、tool 実行の後に届き、tool を呼ばない turn では届きません。
+  - M1 (VPS を使うならそれも) で予算に収まらない場合の代案として、detached の `recall` が結果を DB に置き、次の PreToolUse で渡す方式を残します。このとき結果は (session id、prompt id) で引き、同じ prompt のときだけ注入します。遅れた前の prompt の結果が次の prompt に混ざらないようにするためです。ただしこの代案は、tool 実行の後に届き、tool を呼ばない turn では届きません。
   - `async: true` の hook は出力が次の turn に回るので、この用途には使えません ([hooks](https://code.claude.com/docs/en/hooks))。
 
 ### 2.8 端末ごとの手元索引
@@ -204,7 +204,7 @@ bge-m3 は手元の fastembed なら密ベクトルと疎ベクトルを 1 回�
 - 候補を集める段: recall@10 / @50
 - 最終の並び: nDCG@10、MRR@10
 - 誤りの段: 1 位が外れた割合、答えの無い問いに注入してしまう率
-- 重さ: 端末ごとの p50 / p95 の遅さ、最大 RSS。WSL、M1、A1 で測ります
+- 重さ: 端末ごとの p50 / p95 の遅さ、最大 RSS。WSL、Windows、M1 で測ります (VPS は使うと決まったら足す)
 - 区画: 日→日、日→英、英→日、識別子・パス
 - 道具: oboete が TREC 形式の結果ファイルを出し、ranx で指標と有意差検定を計算します ([ranx](https://github.com/AmenRa/ranx))。測るのは実際に出荷するコードです
 
@@ -260,13 +260,13 @@ bge-m3 は手元の fastembed なら密ベクトルと疎ベクトルを 1 回�
 |---|---|---|
 | sessions (id、agent、repo、端末、開始、最終イベント) | する | 開始は小さいほう、最終イベントは大きいほう。注入済みの印は端末ローカル |
 | observations / summaries / prompts | する (prompt は §6 決定 3) | 追加のみ。同じ uid の op が 2 回来ても 1 回分 (op の uid で冪等) |
-| 文書のベクトル | する (文書とは別の `vec` op。`embedder_id` 付きの fp32、1 件 4 KB) | 文書の uid と `embedder_id` の組で冪等 (同じ組が 2 回来ても 1 回分)。正規か準備中 (§2.3 の 4) の `embedder_id` 以外は hub が受け取らない。tombstone 済みの文書の `vec` は捨てる (削除が勝つ)。outbox は書いた順に送るので、同じ端末の `vec` が文書より先に届くことはない。オフライン後の埋め込み (§2.6) も reindex の新しい世代もこの op で送る |
+| 文書のベクトル | する (文書とは別の `vec` op。`embedder_id` 付きの fp32、1 件 4 KB) | 文書の uid と `embedder_id` の組で冪等 (同じ組が 2 回来ても 1 回分)。正規か準備中 (§2.3 の 4) の `embedder_id` 以外は hub が受け取らない。tombstone 済みの文書の `vec` は捨てる (削除が勝つ)。送信は文書を先、`vec` を後に並べるので、同じ端末の `vec` が文書より先に届くことはない。オフライン後の埋め込み (§2.6) も reindex の新しい世代もこの op で送る |
 | 削除 (tombstone = 消した印) | する | **削除が常に勝つ** (届く順番に関係なく)。文書の削除は文書の tombstone、session の削除は **session 自体の tombstone** を作る。hub はその session を指す op を、あとから届いたもの (別の端末でまだ送っていなかった文書) も含めて全部捨てる。印は小さいので永久に保持する |
 | events / injections / provider_calls / fts / vec 索引 | しない | 端末ローカル。fts と vec は受け取った文書から各端末が作り直す |
 
 **通信の流れ (常駐プロセスなし):**
 
-- 書き込みと同じトランザクションで、送信待ちの表 (outbox) にも書きます。
+- **送信待ちは、各行の `synced_at` 列 (NULL = まだ hub に無い) と、削除などの変更だけを入れる小さな outbox 表の 2 つです。** claude-mem の同期クライアントと同じ形です ([CloudSync.ts](https://github.com/thedotmack/claude-mem/blob/main/src/services/sync/CloudSync.ts))。送るのは `synced_at IS NULL` で、自分の端末で作った行だけです (hub から受け取った行は送り返さない)。同期を初めて有効にしたときや、ローカルだけの形からクラウドを使う形に移ったときは、それまでの行もすべて NULL なので、別の移行手順なしに全部送られます。uid で冪等なので、途中で止まっても再実行で続きから送れます。
 - **送信**: detached の observe の最後と `oboete sync` で送ります。
 - **受信**: SessionStart hook が detached の `oboete sync` を起動します (hook 自体は通信しません)。受け取った内容は次の検索から効きます。望めば cron / launchd / タスク スケジューラで定期実行もできます。
 - 受信は `GET /ops?after=<seq>&limit=500` のページ送りです。新しい端末も同じ口で最初から取ります。16.5 万件でベクトル込み約 0.8 GB (推計) で、遅ければ R2 のスナップショットを足します。
@@ -307,7 +307,7 @@ bge-m3 は手元の fastembed なら密ベクトルと疎ベクトルを 1 回�
 | この PC の WSL2 (x86_64) | x86_64-unknown-linux-gnu | 全件 fp32 | あり (オフライン時だけ読む) | — |
 | 同じ PC の Windows (WSL の外) | x86_64-pc-windows-msvc | 全件 | あり | WSL とは**別の端末**として同期する。DB ファイルを `/mnt/c` 越しに共有しない (ネットワーク FS 越しのロックは SQLite が保証しない: [How to corrupt](https://www.sqlite.org/howtocorrupt.html))。origin URL の repo キーで同じ repo として扱う |
 | M1 iMac 8 GB | aarch64-apple-darwin | 全件。遅ければ int8 | あり。読み込み時に最大 1.8 GB (x86 での実測・未再現、M1 は未計測) | 走査の速さと RAM を PR-A で測る |
-| VPS (OCI A1 arm64、本番と同居) | aarch64-unknown-linux-gnu | 全件 (ディスク上、走査時だけ page cache) | **なし** (常に Workers AI) | 箱の stop / resize は絶対にしない。RAM の取り合いは PR-I で計測する |
+| VPS (OCI A1 arm64、本番と同居。**使うか未定**、決定 10) | aarch64-unknown-linux-gnu | 全件 (ディスク上、走査時だけ page cache) | **なし** (常に Workers AI) | 箱の stop / resize は絶対にしない。RAM の取り合いは PR-I で計測する |
 
 fastembed 7.1.0 が固定する ort 2.0.0-rc.13 には、4 つとも ONNX Runtime 1.28.0 のビルド済み版があります ([ort-sys 2.0.0-rc.13](https://crates.io/crates/ort-sys/2.0.0-rc.13))。ort が release candidate に固定されている点と、ビルド時に pyke の CDN から取ってくる点は、依存のリスクとして記録しておきます。
 
@@ -368,15 +368,15 @@ fastembed 7.1.0 が固定する ort 2.0.0-rc.13 には、4 つとも ONNX Runtim
 
 | # | PR | 中身 | 証明すること |
 |---|---|---|---|
-| PR-A | 計測 spike (出荷しないコード) | Workers AI と fastembed の bge-m3 を実データ 100 件で比べる (cos と上位 10 件の一致)。8,000 字の prompt で Workers AI の入力上限と `truncate_inputs` を見る。日本からの往復の p50 / p95。oboete と claude-mem の実際のトークン数。DO / D1 で trigram FTS5 を作る 1 文。M1 と A1 での手元モデルの読み込み時間・RAM と、実ベクトル 15 万件の走査時間 | §2・§4 の未確認の数字をすべて実測に置き換える。一致しなければ手元の問い合わせを無効にする (§2.3 の 3) |
+| PR-A | 計測 spike (出荷しないコード) | Workers AI と fastembed の bge-m3 を実データ 100 件で比べる (cos と上位 10 件の一致)。8,000 字の prompt で Workers AI の入力上限と `truncate_inputs` を見る。日本からの往復の p50 / p95。oboete と claude-mem の実際のトークン数。DO / D1 で trigram FTS5 を作る 1 文。M1 での手元モデルの読み込み時間・RAM と、実ベクトル 15 万件の走査時間 (VPS は使うと決まったら) | §2・§4 の未確認の数字をすべて実測に置き換える。一致しなければ手元の問い合わせを無効にする (§2.3 の 3) |
 | PR-B | 評価器 | `oboete eval` が qrels から TREC 形式の結果を出し、ranx で報告する。claude-mem DB は読み取り専用の写しを使う。全文検索だけの基準値を出す | 測れる状態になったこと。基準の数字 |
-| PR-C | id と repo キー | 端末 id 付きの `uid`、origin URL の repo キーと移し替え、`"unknown"` session の修正、`embedder_id` とベクトル表、outbox 表。`.oboete.toml` の読み取り (`repo = "名前"` と `sync = false`)、session に同期除外の印を記録 | WSL と Windows で同じ repo が同じキーになる (テスト)。`sync = false` の repo の session に印が付く (テスト)。replay で hook 時間が変わらない |
+| PR-C | id と repo キー | 端末 id 付きの `uid`、origin URL の repo キーと移し替え、`"unknown"` session の修正、`embedder_id` とベクトル表 (`producer` 列つき)、各行の `synced_at` 列と変更用の outbox 表。`.oboete.toml` の読み取り (`repo = "名前"` と `sync = false`)、session に同期除外の印を記録 | WSL と Windows で同じ repo が同じキーになる (テスト)。`sync = false` の repo の session に印が付く (テスト)。replay で hook 時間が変わらない |
 | PR-D | 意味検索の本体 | observe で文書の埋め込み: クラウドを使う形は Workers AI (100 件ずつ、日次 neuron 予算付き)、ローカルだけの形 (§0 の 5) は手元の fastembed。sqlite-vec の索引、search / MCP / viewer の hybrid RRF、オフライン時の手元の問い合わせ (fastembed)、`oboete reindex` | §3.3 の「意味検索そのもの」の合格線。落ちたら既定は `none` のまま |
-| PR-E1〜E6 | 精度の工夫 (1 つ 1 PR) | E1 `since` / `until`、E2 要約の `keys`、E3 重複の間引き、E4 MCP 検索の reranker (xsmall-v2 と v2-m3 の比較)、E5 prompt の先頭か分割か、E6 M1 / A1 での int8 / bit | それぞれが合格線を越えたものだけ残す。越えなければその PR は閉じる |
+| PR-E1〜E6 | 精度の工夫 (1 つ 1 PR) | E1 `since` / `until`、E2 要約の `keys`、E3 重複の間引き、E4 MCP 検索の reranker (xsmall-v2 と v2-m3 の比較)、E5 prompt の先頭か分割か、E6 M1 での int8 / bit | それぞれが合格線を越えたものだけ残す。越えなければその PR は閉じる |
 | PR-F | prompt ごとの自動注入 | UserPromptSubmit に別の hook として `oboete inject` を登録する (予算 300 ms、timeout 1 秒、超えたら全文検索だけ)。Grok は最初の PreToolUse。しきい値を答えの無い問いで較正する。予算に収まらない端末だけ detached `recall` → PreToolUse の代案に切り替える | 誤注入 10% 以下、注入 hook の p95 300 ms 以内、timeout の割合 2% 以下。記録 hook の時間は変わらない (replay) |
 | PR-G | hub (Worker + DO) | `/push` と `/pull` (seq のカーソル)、op の冪等、tombstone、Access の service token、書き出しの口 | `--home` を 2 つ使ったテストで、順番を入れ替えても削除が勝ち、最後に文書とベクトルが一致する |
-| PR-H | 端末側の同期 | outbox の送信 (observe の最後)、SessionStart からの detached pull、`oboete sync`、初回のページ送り、claude-mem の取り込み (決定 1)。同期除外の印がある session の文書・`vec`・prompt は outbox に入れない (送信時ではなく書き込み時に止める) | WSL と Windows の実機で往復する。`sync = false` の repo で作業しても outbox と hub に 1 件も入らない (テスト)。hook の時間が変わらない |
-| PR-I | 4 台への配布 | cargo-dist で 4 つのビルド対象を作り、各端末で setup・hook・同期・検索を実行する | 4 台で同じ記憶が見える。M1 / A1 の RAM と速さの記録 |
+| PR-H | 端末側の同期 | 未送信の行と outbox の送信 (observe の最後)、SessionStart からの detached pull、`oboete sync`、初回のページ送り、claude-mem の取り込み (決定 1)。同期除外の印がある session の文書・`vec`・prompt は送信の対象から外す (印は書き込み時に session に付く) | WSL と Windows の実機で往復する。同期を有効にする前からあった記憶が、2 台目の端末に全部届く (テスト)。`sync = false` の repo で作業しても hub に 1 件も入らない (テスト)。hook の時間が変わらない |
+| PR-I | 3 台への配布 | cargo-dist で WSL / Windows / M1 iMac のビルド対象を作り、各端末で setup・hook・同期・検索を実行する | 3 台で同じ記憶が見える。M1 の RAM と速さの記録。VPS は owner が使うと決めたときに、同じ条件で 4 台目として足す (決定 10) |
 | PR-J | クラウド検索とリモート MCP | DO の FTS5、Vectorize (決定 4)、同じ RRF、`createMcpHandler`、Access | 評価セットでクラウドと手元の上位 10 件が 9 件以上一致する。Claude アプリから検索できる |
 | 後回し | クラウド viewer、スマホ、OAuth、Ruri への入れ替え、暗号化の「中継のみ」モード | — | 必要になったときに、同じ合格線で判断する |
 
