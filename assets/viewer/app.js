@@ -139,8 +139,8 @@ function deleteDoc(d, card) {
 }
 
 // Long text (a pasted log, a task written for another agent) starts folded to its head: the
-// first lines, at most so many characters. `key` (the doc id) keeps an unfolded card unfolded
-// when the page redraws.
+// first lines, at most so many characters. `unfolded` holds the doc ids opened in full (here or
+// through a search hit's Full text), so a redraw keeps them open.
 const FOLD_LINES = 8;
 const FOLD_CHARS = 600;
 const unfolded = new Set();
@@ -203,19 +203,22 @@ function sessionEntry(s) {
 
 function hitEntry(h) {
   const text = el('p', 'text', h.text);
-  // The snippet becomes the full text in place.
+  // The snippet becomes the full text in place, and stays so when the page redraws.
   const full = el('button', null, 'Full text');
   full.type = 'button';
-  full.addEventListener('click', async () => {
+  const expand = async () => {
     full.disabled = true;
     try {
       text.textContent = (await api('doc', { id: h.doc })).text;
       full.remove();
+      unfolded.add(h.doc);
     } catch (e) {
       setStatus(e.message, true);
       full.disabled = false;
     }
-  });
+  };
+  full.addEventListener('click', expand);
+  if (unfolded.has(h.doc)) expand();
   const li = el('li', 'entry');
   li.append(
     el('div', 'meta', badge(h.kind), el('span', null, h.doc), el('span', null, h.when), el('span', null, base(h.repo))),
