@@ -375,11 +375,17 @@ pub fn handle(
 /// `unclosed_private_hides_rest` (a typed prompt); anywhere else the tag is just text an agent
 /// read or wrote, and cutting there would drop the rest of the session.
 pub fn strip_blocks(s: &str, unclosed_private_hides_rest: bool) -> String {
+    without_blocks(s, unclosed_private_hides_rest)
+        .trim()
+        .to_string()
+}
+
+fn without_blocks(s: &str, unclosed_private_hides_rest: bool) -> String {
     let mut out = s.to_string();
     for tag in STRIP_BLOCKS {
         out = strip_tag(&out, tag, unclosed_private_hides_rest && *tag == "private");
     }
-    out.trim().to_string()
+    out
 }
 
 /// One pass over `<tag` openers and `</tag>` closers: each closer pairs with the nearest open
@@ -452,6 +458,9 @@ fn compact(v: &Value) -> String {
 /// Redact the head (plus the overlap) and keep MAX_FIELD characters of it: scanning the
 /// discarded tail of a megabyte tool output would only cost hook time.
 fn clip(s: &str) -> String {
+    // Closed `<private>`-style blocks go before the cut: a block cut in half would leave an
+    // opener that the outbound gate keeps as text, with the private content right after it.
+    let s = &without_blocks(s, false);
     let total = s.chars().count();
     if total <= MAX_FIELD {
         return redact::redact(s);
@@ -1087,6 +1096,25 @@ mod tests {
             clip("x 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 y"),
             "x [REDACTED] y"
         );
+    }
+
+    #[test]
+    fn a_private_block_cut_by_the_clip_is_not_stored() {
+        let dir = tmp("clip-private");
+        let conn = db::open(&dir).unwrap();
+        let output = format!(
+            "{} <private>{}</private> tail",
+            "h".repeat(7_900),
+            "S".repeat(9_000)
+        );
+        let payload = json!({"session_id": "c1", "cwd": dir, "tool_name": "Read",
+                             "tool_input": {}, "tool_response": output});
+        handle(&conn, "claude", "PostToolUse", &payload).unwrap();
+        let stored = &db::session_events(&conn, "c1").unwrap()[0].payload;
+        assert!(!stored.contains("SSS"), "private content stored");
+        assert!(!stored.contains("<private>"), "{stored}");
+        assert!(stored.contains("tail"));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
