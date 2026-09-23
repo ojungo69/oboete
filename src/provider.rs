@@ -641,6 +641,17 @@ mod tests {
     }
 
     #[test]
+    fn unusable_cli_answers_are_invalid_output() {
+        let dir = scratch_dir().unwrap();
+        let e = headless_command("nano", None, &dir.0, "p", "{}").unwrap_err();
+        assert!(e.message.contains("unsupported"), "{}", e.message);
+        for bad in [r#"{"result": "not json"}"#, r#"{"other": 1}"#, "plain text"] {
+            let e = extract_structured("claude", bad).unwrap_err();
+            assert!(e.invalid(), "{bad}: {}", e.message);
+        }
+    }
+
+    #[test]
     fn cooldown_depends_on_status_and_moderation() {
         let err = |status: Option<u16>, msg: &str| CallError {
             status,
