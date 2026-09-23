@@ -18,6 +18,21 @@ const MAX_FIELD: usize = 8_000;
 const REDACT_OVERLAP: usize = 4_000;
 /// Set on the CLIs observe spawns, so the summarizer's own session is never captured.
 pub const SKIP_ENV: &str = "OBOETE_SKIP";
+/// Blocks inside a prompt that are not part of what was asked, removed before anything is
+/// stored, in this order: context an IDE or another memory tool puts in front of the text (it may
+/// quote `<private>`), then `<private>`, the developer's opt-out (claude-mem's tag; unclosed, it
+/// hides the rest, where claude-mem would keep it all).
+const STRIP_BLOCKS: &[&str] = &["ide_opened_file", "hook_context", "private"];
+/// Prompts that are harness traffic, not typed: background task and teammate notifications and
+/// the /loop sentinel (13.5% of the 15,218 prompts claude-mem stored on this machine).
+/// ponytail: fixed prefix list; add one when a new envelope shows up as a prompt card.
+const ENVELOPES: &[&str] = &[
+    "<task-notification",
+    "<agent-message",
+    "<system_notification",
+    "<bash-notification",
+    "<<autonomous-loop",
+];
 
 pub fn run_stdin(home: &Path, agent: &str, event: &str) -> Result<()> {
     if std::env::var_os(SKIP_ENV).is_some() {
@@ -116,11 +131,12 @@ pub fn handle(
     let repo_key = repo::key(Path::new(cwd));
     let ts = db::now_ms();
 
+    let prompt = (event == "UserPromptSubmit")
+        .then(|| clip(&strip_blocks(str_field(payload, &["prompt"]).unwrap_or(""))))
+        .filter(|p| !p.is_empty());
     let stored = match event {
         "SessionStart" => Some(json!({"source": payload.get("source")})),
-        "UserPromptSubmit" => {
-            Some(json!({"prompt": clip(str_field(payload, &["prompt"]).unwrap_or(""))}))
-        }
+        "UserPromptSubmit" => prompt.as_ref().map(|p| json!({"prompt": p})),
         "PostToolUse" | "PostToolUseFailure" => Some(json!({
             "tool": str_field(payload, &["tool_name", "toolName"]).unwrap_or("?"),
             "input": clip(&compact(field(payload, &["tool_input", "toolInput"]))),
@@ -154,6 +170,10 @@ pub fn handle(
     if let Some(v) = stored {
         db::insert_event(&tx, session_id, event, ts, &v.to_string())?;
     }
+    // The event feeds the summary and goes with it; the prompt itself is kept as a document.
+    if let Some(p) = prompt.as_deref().filter(|p| !is_envelope(p)) {
+        db::insert_prompt(&tx, session_id, ts, p)?;
+    }
     tx.commit()?;
 
     // Claude Code and Codex read context at SessionStart (not on resume: the transcript already
@@ -174,6 +194,64 @@ pub fn handle(
         }
     }
     Ok(None)
+}
+
+/// The prompt without the blocks in `STRIP_BLOCKS` (`<tag>` or `<tag attr…>` up to its own
+/// `</tag>`, nesting counted), trimmed.
+fn strip_blocks(s: &str) -> String {
+    let mut out = s.to_string();
+    for tag in STRIP_BLOCKS {
+        let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
+        let mut from = 0;
+        while let Some(at) = out[from..].find(&open).map(|i| from + i) {
+            let rest = &out[at + open.len()..];
+            if !opens(rest) {
+                from = at + open.len();
+                continue;
+            }
+            match block_end(rest, &open, &close) {
+                Some(end) => out.replace_range(at..at + open.len() + end, ""),
+                None if *tag == "private" => out.truncate(at),
+                None => break,
+            }
+            from = at;
+        }
+    }
+    out.trim().to_string()
+}
+
+/// What follows `<tag` makes it the tag (`<privateer>` is not `<private`).
+fn opens(after: &str) -> bool {
+    after.starts_with(|c: char| c == '>' || c.is_whitespace())
+}
+
+/// The end (past `close`) of the block whose opener comes just before `rest`, or `None` when it
+/// never closes. An inner opener needs its own close first.
+fn block_end(rest: &str, open: &str, close: &str) -> Option<usize> {
+    let (mut depth, mut i) = (1, 0);
+    while depth > 0 {
+        let c = i + rest[i..].find(close)?;
+        let inner = rest[i..c]
+            .match_indices(open)
+            .map(|(j, _)| i + j)
+            .find(|&o| opens(&rest[o + open.len()..]));
+        match inner {
+            Some(o) => {
+                depth += 1;
+                i = o + open.len();
+            }
+            None => {
+                depth -= 1;
+                i = c + close.len();
+            }
+        }
+    }
+    Some(i)
+}
+
+/// A prompt the harness sent rather than the developer typed (see `ENVELOPES`).
+pub fn is_envelope(prompt: &str) -> bool {
+    ENVELOPES.iter().any(|e| prompt.starts_with(e))
 }
 
 fn field<'a>(v: &'a Value, keys: &[&str]) -> &'a Value {
@@ -319,6 +397,82 @@ mod tests {
             clip("x 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 y"),
             "x [REDACTED] y"
         );
+    }
+
+    #[test]
+    fn typed_prompts_are_kept_without_private_blocks_and_harness_traffic() {
+        let dir = tmp("prompts");
+        let conn = db::open(&dir).unwrap();
+        let cwd = dir.to_string_lossy().to_string();
+        let submit = |prompt: &str| {
+            let p = json!({"session_id": "c1", "cwd": cwd, "prompt": prompt});
+            assert!(
+                handle(&conn, "claude", "UserPromptSubmit", &p)
+                    .unwrap()
+                    .is_none()
+            );
+        };
+        submit("検索を直して <private>pw hunter2</private> お願い");
+        submit(
+            "<task-notification>\n<summary>Background command done</summary>\n</task-notification>\nRead the output file to retrieve the result: /tmp/x.output",
+        );
+        submit("<private reason=\"mine\">only this</private>");
+        submit("<ide_opened_file>The user opened a.rs</ide_opened_file>\n再開して");
+        submit("before <private>unclosed hunter3");
+        submit("<privateer> is not the tag");
+        // Nested: an inner close does not end the outer block.
+        submit("x <private>a <private>b</private> hunter5</private> y");
+        submit("keep <private>outer <private>inner</private> hunter6");
+        // Another tool's context may quote the tag; it goes first, whole.
+        submit(
+            "<hook_context>- bugfix: text after an unclosed <private> tag\n</hook_context>\n\nテストを足して",
+        );
+        let bodies: Vec<String> = conn
+            .prepare("SELECT body FROM prompts ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            bodies,
+            [
+                "検索を直して  お願い",
+                "再開して",
+                "before",
+                "<privateer> is not the tag",
+                "x  y",
+                "keep",
+                "テストを足して"
+            ]
+        );
+        // The summarizer still reads the notification; nothing private reaches it either, and
+        // a prompt that was all private leaves no event.
+        let ev = db::session_events(&conn, "c1").unwrap();
+        assert_eq!(ev.len(), 8);
+        assert!(ev[1].payload.contains("task-notification"));
+        assert!(ev.iter().all(|e| !e.payload.contains("hunter")
+            && !e.payload.contains("only this")
+            && !e.payload.contains("opened a.rs")));
+        // Prompts are documents: searchable, readable in full.
+        let hits = crate::search::search(&conn, "お願い", None, 10).unwrap();
+        assert_eq!(
+            (hits.len(), hits[0].doc.as_str(), hits[0].kind.as_str()),
+            (1, "p1", "prompt")
+        );
+        // The agent moved into a nested repository: the prompt stays with its session's.
+        std::fs::create_dir_all(dir.join("sub/.git")).unwrap();
+        let moved = json!({"session_id": "c1", "cwd": dir.join("sub").to_string_lossy(), "prompt": "nested ask"});
+        handle(&conn, "claude", "UserPromptSubmit", &moved).unwrap();
+        let repo: String = conn
+            .query_row(
+                "SELECT repo FROM prompts WHERE body = 'nested ask'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(repo, repo::key(&dir));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

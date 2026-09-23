@@ -1,5 +1,5 @@
-//! Search over what observe stored. One FTS5 trigram table (`fts`) keeps a copy of every
-//! observation and summary, so a query is one SQL statement and CJK text is indexed by
+//! Search over what is stored. One FTS5 trigram table (`fts`) keeps a copy of every
+//! observation, summary and prompt, so a query is one SQL statement and CJK text is indexed by
 //! character. Terms of three or more characters go through MATCH (bm25 order, Unicode case
 //! folding); a shorter term cannot hit a trigram index and is ANDed on as a literal LIKE
 //! (ASCII case folding only), which is a scan the small tables can afford.
@@ -8,7 +8,8 @@ use anyhow::Result;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
-/// `doc` is `o<id>` for an observation, `s<id>` for a summary; `when` is local time.
+/// `doc` is `o<id>` for an observation, `s<id>` for a summary, `p<id>` for a prompt; `when` is
+/// local time.
 pub struct Hit {
     pub doc: String,
     pub kind: String,
@@ -32,7 +33,8 @@ fn hit(r: &rusqlite::Row) -> rusqlite::Result<Hit> {
     })
 }
 
-/// Whitespace-separated terms, all required. `repo = None` searches every repository.
+/// Whitespace-separated terms, all required. `repo = None` searches every repository. Prompts
+/// come after observations and summaries.
 pub fn search(
     conn: &Connection,
     query: &str,
@@ -72,10 +74,12 @@ pub fn search(
         clauses.push("repo = ?".into());
         args.push(Value::Text(r.to_string()));
     }
+    // Knowledge before prompts: bm25 favours short documents, and a prompt is usually a short
+    // question where an observation is the answer.
     let order = if long.is_empty() {
-        "ts DESC"
+        "kind = 'prompt', ts DESC"
     } else {
-        "rank, ts DESC"
+        "kind = 'prompt', rank, ts DESC"
     };
     let mut sql = format!("SELECT {COLUMNS} FROM fts WHERE {}", clauses.join(" AND "));
     sql.push_str(&format!(" ORDER BY {order} LIMIT ?"));
@@ -152,7 +156,8 @@ pub fn repos(conn: &Connection) -> Result<Vec<RepoRow>> {
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// What one session left: its summaries, then its observations, each in the order stored.
+/// What one session left: its summaries, its prompts, then its observations, each in the order
+/// stored.
 pub fn session_docs(conn: &Connection, session_id: &str) -> Result<Vec<Hit>> {
     let mut stmt = conn.prepare(
         "SELECT doc, kind, repo, strftime('%Y-%m-%d %H:%M', ts / 1000, 'unixepoch', 'localtime'),
@@ -160,7 +165,10 @@ pub fn session_docs(conn: &Connection, session_id: &str) -> Result<Vec<Hit>> {
          FROM (SELECT 0 AS g, id, 's' || id AS doc, 'summary' AS kind, repo, ts, '' AS title, body
                  FROM summaries WHERE session_id = ?1
                UNION ALL
-               SELECT 1, id, 'o' || id, kind, repo, ts, title, body
+               SELECT 1, id, 'p' || id, 'prompt', repo, ts, '', body
+                 FROM prompts WHERE session_id = ?1
+               UNION ALL
+               SELECT 2, id, 'o' || id, kind, repo, ts, title, body
                  FROM observations WHERE session_id = ?1)
          ORDER BY g, id",
     )?;
@@ -174,9 +182,11 @@ pub struct FeedRow {
     pub agent: String,
 }
 
-/// Every summary and observation, newest session first; within a session the summary, then the
-/// observations in stored order. A session deleted while observe was writing leaves rows with
-/// no session row, so its agent comes back empty rather than the rows vanishing.
+/// Every summary, observation and prompt, newest first. Summaries and observations carry their
+/// session's last event and come as a block (the summary, then the observations in stored
+/// order); a prompt carries the moment it was typed, so it shows up while its session runs and
+/// sits below what the session left. A session deleted while observe was writing leaves rows
+/// with no session row, so its agent comes back empty rather than the rows vanishing.
 pub fn feed(conn: &Connection, repo: Option<&str>, limit: usize) -> Result<Vec<FeedRow>> {
     let mut stmt = conn.prepare(
         "SELECT d.doc, d.kind, d.repo, strftime('%Y-%m-%d %H:%M', d.ts / 1000, 'unixepoch', 'localtime'),
@@ -184,7 +194,9 @@ pub fn feed(conn: &Connection, repo: Option<&str>, limit: usize) -> Result<Vec<F
          FROM (SELECT 0 AS g, id, 's' || id AS doc, 'summary' AS kind, repo, ts, '' AS title, body, session_id
                  FROM summaries
                UNION ALL
-               SELECT 1, id, 'o' || id, kind, repo, ts, title, body, session_id FROM observations) d
+               SELECT 1, id, 'o' || id, kind, repo, ts, title, body, session_id FROM observations
+               UNION ALL
+               SELECT 2, id, 'p' || id, 'prompt', repo, ts, '', body, session_id FROM prompts) d
          LEFT JOIN sessions s ON s.id = d.session_id
          WHERE ?1 IS NULL OR d.repo = ?1
          ORDER BY d.ts DESC, d.session_id, d.g, d.id LIMIT ?2",
@@ -265,6 +277,7 @@ mod tests {
             i64::MAX,
         )
         .unwrap();
+        db::insert_prompt(conn, "s1", 1_699_999_990_000, "trigram 検索を足して").unwrap();
     }
 
     #[test]
@@ -280,7 +293,8 @@ mod tests {
                 .collect()
         };
         // 3+ characters: trigram MATCH, English and Japanese alike, case-insensitive.
-        assert_eq!(docs("Trigram", None), vec!["o2"]);
+        assert_eq!(docs("Trigram", None), vec!["o2", "p1"]);
+        assert_eq!(docs("足して", None), vec!["p1"]);
         assert_eq!(docs("クエリ", None), vec!["o1"]);
         assert_eq!(docs("検索 要約", None), vec!["s1"]);
         assert_eq!(docs("trigram \"quoted\"", None), Vec::<String>::new());
@@ -290,13 +304,14 @@ mod tests {
         assert_eq!(docs("db", None), vec!["o1"]);
         assert_eq!(docs("接続 クエリ", None), vec!["o1"]);
         assert_eq!(docs("接続 trigram", None), Vec::<String>::new());
+        assert_eq!(docs("use trigram", None), vec!["o2"]);
         assert_eq!(docs("éco ÄÖ", None), vec!["o3"]);
         assert_eq!(docs("50%", None), vec!["o3"]);
         assert_eq!(docs("0%", None), vec!["o3"]);
         assert_eq!(docs("0_", None), Vec::<String>::new());
         assert_eq!(docs("", None), Vec::<String>::new());
         // Repository filter.
-        assert_eq!(docs("trigram", Some("/r")), vec!["o2"]);
+        assert_eq!(docs("tokenizer", Some("/r")), vec!["o2"]);
         assert_eq!(docs("trigram", Some("/other")), Vec::<String>::new());
         assert_eq!(search(&conn, "trigram", None, 0).unwrap().len(), 0);
 
@@ -326,7 +341,9 @@ mod tests {
             .into_iter()
             .map(|h| h.doc)
             .collect();
-        assert_eq!(docs, ["s1", "o1", "o2", "o3"]);
+        assert_eq!(docs, ["s1", "p1", "o1", "o2", "o3"]);
+        let p = get(&conn, "p1").unwrap().unwrap();
+        assert_eq!((p.kind.as_str(), p.title.as_str()), ("prompt", ""));
         assert!(session_docs(&conn, "nope").unwrap().is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -349,12 +366,13 @@ mod tests {
             h.join().unwrap().unwrap();
         }
         let conn = db::open(&dir).unwrap();
-        assert_eq!(search(&conn, "trigram", None, 10).unwrap().len(), 1);
+        assert_eq!(search(&conn, "trigram", None, 10).unwrap().len(), 2);
         assert_eq!(search(&conn, "要約", None, 10).unwrap().len(), 1);
+        assert_eq!(search(&conn, "足して", None, 10).unwrap()[0].doc, "p1");
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM fts", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 4);
+        assert_eq!(n, 5);
         std::fs::remove_dir_all(&dir).ok();
     }
 

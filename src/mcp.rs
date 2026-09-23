@@ -42,7 +42,7 @@ pub struct SearchArgs {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct GetArgs {
-    /// A document id from `search`: `o12` (observation) or `s5` (session summary).
+    /// A document id from `search`: `o12` (observation), `s5` (session summary) or `p7` (prompt).
     id: String,
 }
 
@@ -103,7 +103,7 @@ impl Oboete {
 
     #[tool(
         name = "search",
-        description = "Full-text search over what oboete remembers about this repository: observations (decisions, bug fixes, discoveries, preferences) and session summaries from earlier coding sessions. Returns one hit per line: id, local time, kind, title, snippet. Use `get` for the full text."
+        description = "Full-text search over what oboete remembers about this repository: observations (decisions, bug fixes, discoveries, preferences), session summaries and the developer's prompts from earlier coding sessions. Returns one hit per line: id, local time, kind, title, snippet. Use `get` for the full text."
     )]
     fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, ErrorData> {
         let conn = db::open(&self.home).map_err(internal)?;
@@ -139,7 +139,7 @@ impl Oboete {
 
     #[tool(
         name = "get",
-        description = "The full text of one remembered document by the id `search` returned (o12 = observation, s5 = session summary)."
+        description = "The full text of one remembered document by the id `search` returned (o12 = observation, s5 = session summary, p7 = prompt)."
     )]
     fn get(&self, Parameters(a): Parameters<GetArgs>) -> Result<CallToolResult, ErrorData> {
         let conn = db::open(&self.home).map_err(internal)?;

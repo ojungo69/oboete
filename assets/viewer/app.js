@@ -52,9 +52,10 @@ function applyTheme() {
 // --- Cards ----------------------------------------------------------------------------------
 
 const GLYPH = new Map([
-  ['summary', '🎯'], ['decision', '⚖'], ['bugfix', '●'], ['feature', '◆'],
+  ['summary', '🎯'], ['prompt', '💬'], ['decision', '⚖'], ['bugfix', '●'], ['feature', '◆'],
   ['discovery', '○'], ['change', '✓'], ['preference', '★'],
 ]);
+const HEADINGS = new Map([['summary', 'Session summary'], ['prompt', 'User prompt']]);
 
 function badge(kind) {
   return el('span', `badge ${kind}`, kind);
@@ -137,16 +138,38 @@ function deleteDoc(d, card) {
   });
 }
 
-// One observation or summary. `extra` are meta cells shown before the id (agent, repository).
+// Long text (a pasted log, a task written for another agent) starts folded to its head: the
+// first lines, at most so many characters. `key` (the doc id) keeps an unfolded card unfolded
+// when the page redraws.
+const FOLD_LINES = 8;
+const FOLD_CHARS = 600;
+const unfolded = new Set();
+
+function folded(text, key) {
+  const head = Array.from(text.split('\n').slice(0, FOLD_LINES).join('\n')).slice(0, FOLD_CHARS).join('');
+  if (head === text || unfolded.has(key)) return [el('p', 'text', text)];
+  const p = el('p', 'text', `${head}…`);
+  const all = el('button', 'quiet small', 'Show all');
+  all.type = 'button';
+  all.addEventListener('click', () => {
+    p.textContent = text;
+    all.remove();
+    unfolded.add(key);
+  });
+  return [p, all];
+}
+
+// One summary, prompt or observation. `extra` are meta cells shown before the id (agent,
+// repository).
 function card(d, extra = []) {
   const kind = d.kind || 'summary';
   const li = el('li', `card ${kind}`);
   const head = el('div', 'head',
     el('span', 'glyph', GLYPH.get(kind) || '·'),
     badge(kind),
-    el('span', 'title', kind === 'summary' ? 'Session summary' : d.title));
+    el('span', 'title', HEADINGS.get(kind) || d.title));
   const meta = el('div', 'meta', el('span', null, d.when), ...extra, el('span', null, d.doc));
-  li.append(head, el('p', 'text', d.text), meta, deleteDoc(d, li));
+  li.append(head, ...folded(d.text, d.doc), meta, deleteDoc(d, li));
   return li;
 }
 
@@ -155,12 +178,12 @@ function sessionEntry(s) {
     ? el('p', 'text', s.summary)
     : el('p', 'text pending', 'Not summarized yet.');
   const li = el('li', 'entry');
-  const more = expander('Observations', s.id, async () => {
+  const more = expander('Prompts and observations', s.id, async () => {
     const docs = await api('session', { id: s.id });
     const rows = docs.filter((d) => d.kind !== 'summary');
     return rows.length
       ? el('ul', 'cards', ...rows.map((d) => card(d)))
-      : el('p', 'text pending', 'No observations for this session.');
+      : el('p', 'text pending', 'No prompts or observations for this session.');
   });
   const del = deleter('Delete session', async () => {
     await api('session', { id: s.id }, 'DELETE');
@@ -298,7 +321,8 @@ async function showStats(repo) {
         ...row('Last activity', s.sessions.last || '–'))),
       el('section', 'stat', el('h3', null, 'Knowledge'), el('dl', null,
         ...row('Observations', s.observations.total),
-        ...row('Summaries', s.summaries)),
+        ...row('Summaries', s.summaries),
+        ...row('Prompts', s.prompts)),
         kinds.length ? el('ul', 'kinds', ...kinds) : null),
       el('section', 'stat', el('h3', null, 'Store'), el('dl', null,
         ...row('Database', `${(s.db_bytes / 1048576).toFixed(1)} MB (all repositories)`))),
