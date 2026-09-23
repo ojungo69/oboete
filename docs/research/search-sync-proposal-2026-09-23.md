@@ -126,7 +126,7 @@ AI Search が持つ精度の工夫は、すべて §2.4 の検索手順に入れ
 1. **アカウントごとに正規の埋め込み器を 1 つ決めます。** hub がそれを記録します。`embedder_id` はベクトル空間の名前で、モデル名・精度・pooling・前置き文・次元をつないだ文字列です (例 `bge-m3/dense/fp32/cls/noprefix/1024`)。作った実行環境 (Workers AI か fastembed か) は含めず、ベクトルごとの `producer` 列に診断用として記録します。3 の一致検査に通った実行環境は同じ `embedder_id` を名乗れ、通らなかった実行環境は文書のベクトルも問い合わせのベクトルも作りません。bge-m3 は前置き文が要りません ([HF](https://huggingface.co/BAAI/bge-m3))。
 2. **クラウドを使う形では、文書のベクトルは Workers AI で作ります。** 要約と同じ detached の observe で作ります。オフライン中にできた文書はベクトル無しで保存し (全文検索にはすぐ出る)、次にオンラインで observe が走ったときに作ります。手元の fastembed が 3 の一致検査に通った端末だけは、オフライン中の文書も手元で作ってよく、同じ `embedder_id` で送ります (§0 の 5)。ローカルだけの形は全部を手元で作ります。
 3. **手元モデルの役目は、オフライン時に問い合わせ文をベクトルにすることだけです。** 同じ重みでも、精度・pooling・切り詰めが違えば数字は変わります。EmbeddingGemma では int8 版で cos 0.987 まで下がりました (実測・未再現)。そこで、Workers AI と手元 ONNX で同じ文 100 件を変換し、**cos の最小が 0.99 以上、評価クエリの上位 10 件が 9 件以上一致**したときだけ、手元の問い合わせを有効にします (一致の度合いはまだ未計測、§7 の PR-A)。
-4. **モデルを変えるときは全件作り直しです** (`oboete reindex`)。hub は正規の `embedder_id` のほかに「準備中」の `embedder_id` を 1 つだけ登録でき、準備中のベクトルも受け取って別に保持します (検索には使わない)。準備中のベクトルが全件そろったら hub の正規を切り替え、古い世代を捨てます。それまでの検索は古い世代のままなので、切り替えで検索が止まる時間はありません。各端末は切り替えのあとにベクトルを pull し直します。
+4. **モデルを変えるときは全件作り直しです** (`oboete reindex`)。hub は正規の `embedder_id` のほかに「準備中」の `embedder_id` を 1 つだけ登録でき、準備中のベクトルも受け取って別に保持します (検索には使わない)。準備中のベクトルも `vec` op として op log に入るので、各端末は受け取った準備中のベクトルを検索に使わずに別に保持します。準備中のベクトルが全件そろったら、hub は切り替えを表す `activate` op (新しい `embedder_id`) を op log に追記します。端末はその op を pull した時点で検索を新しい世代に切り替え、古い世代を捨てます。seq の順に届くので、切り替えより前に準備中のベクトルがそろっていることが保証され、あとから参加した端末も seq 0 から同じ順で受け取って同じ状態になります。切り替えのあと、hub は古い世代の `vec` op の中身を tombstone と同じ形で消します。それまでの検索は古い世代のままなので、切り替えで検索が止まる時間はありません。
 5. **Ruri が評価で勝った場合**、文書ベクトルは手元か VPS で作れます。ただしクラウド側の問い合わせ (リモート MCP、スマホ) のために、Cloudflare Containers か VPS で Ruri を常に動かす必要が出ます。Containers は Workers Paid の含み枠が月 25 GiB 時間なので、常時起動なら 1 GiB の instance で約 25 時間分しかありません ([Containers 料金](https://developers.cloudflare.com/containers/pricing/))。この費用と手間が、日本語の上積みに見合うかで判断します。
 
 ### 2.4 検索の手順 (期待できる効果と費用)
@@ -294,6 +294,7 @@ Jev ([TypeSafe](https://typesafe.ai/blog/introducing-system-one-models-and-jev)�
 
 **Vectorize** (§6 決定 4 で承認された場合) への upsert / delete は、DO の SQLite の外にあるので同じトランザクションに入れられません。そこで DO は、op を保存して表に反映するのと同じトランザクションで、Vectorize への送信待ち (`vectorize_outbox`: uid と upsert / delete) に 1 行書きます。DO の alarm がそれを冪等に送り (upsert は同じ id の上書き、delete は無ければ何もしない)、成功した行だけ消します。timeout や Worker の終了で送れなかった行は残り、次の alarm で送り直されるので、DO の表と Vectorize がずれたままになりません。
 
+- **Vectorize の索引は世代ごとに分けます** (索引名に `embedder_id` の短い印を付ける。次元も世代で変わりうるため)。準備中の世代のベクトルは準備中の索引にだけ入れ、検索は DO が記録した正規の索引だけを見ます。`activate` op を反映するときに DO がこの記録を切り替え、古い索引は後で消します。同じ索引に 2 つの世代が混ざることも、準備中のベクトルが正規のベクトルを上書きすることもありません。
 - 絞り込みに使う metadata の索引 (repo、kind、agent、source) は、**最初の挿入より前に**作っておく必要があります。索引は最大 10 個、文字列は先頭 64 byte だけが索引に入ります ([metadata filtering](https://developers.cloudflare.com/vectorize/reference/metadata-filtering/))。そこで索引に入れる repo は、repo キー (origin URL) の SHA-256 の先頭 16 桁 (16 進) にします。長い URL の先頭が同じ 2 つの repo も区別でき、表示用の URL は別の metadata に持ちます。
 - 書き込みが検索に出るまでの時間は、中央値 30 秒未満、p99 は 2 分未満です ([changelog](https://developers.cloudflare.com/changelog/post/2026-06-30-improved-wal-throughput/))。
 - 検索は近似で、IVF と直積量子化の後に精密化して 95% 超です ([Cloudflare blog](https://blog.cloudflare.com/building-vectorize-a-distributed-vector-database-on-cloudflare-developer-platform/))。
