@@ -75,7 +75,13 @@ pub fn grok_home() -> PathBuf {
 
 /// Grok Build runs Claude Code's hooks too, with its own camelCase payload: such an event is
 /// Grok's, and a duplicate when Grok's own hook file carries our handler (`None` = drop it).
+/// Cursor imports them as well; its payload names no cwd, so the session would land in the
+/// hook's own directory and be handed that repository's context. Dropped until oboete has a
+/// Cursor adapter (docs/research/agent-adapters-2026-09-23.md).
 pub fn resolve_agent<'a>(agent: &'a str, payload: &Value, grok_hooks: &Path) -> Option<&'a str> {
+    if agent == "claude" && payload.get("cursor_version").is_some() {
+        return None;
+    }
     if agent == "claude" && payload.get("hookEventName").is_some() {
         return if grok_delivers(grok_hooks) {
             None
@@ -498,6 +504,8 @@ mod tests {
             resolve_agent("codex", &json!({}), &installed),
             Some("codex")
         );
+        let cursor = json!({"conversation_id": "k1", "cursor_version": "2026.09.15", "workspace_roots": ["/r"]});
+        assert_eq!(resolve_agent("claude", &cursor, missing), None);
     }
 
     #[test]
