@@ -208,11 +208,13 @@ function hitEntry(h) {
   full.type = 'button';
   const expand = async () => {
     full.disabled = true;
+    // Before the await: a redraw landing while the text loads must expand this hit too.
+    unfolded.add(h.doc);
     try {
       text.textContent = (await api('doc', { id: h.doc })).text;
       full.remove();
-      unfolded.add(h.doc);
     } catch (e) {
+      unfolded.delete(h.doc);
       setStatus(e.message, true);
       full.disabled = false;
     }
