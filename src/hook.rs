@@ -237,7 +237,7 @@ pub fn handle(
         .or_else(|| {
             (event == "UserPromptSubmit").then(|| str_field(payload, &["prompt"]).unwrap_or(""))
         })
-        .map(|p| clip(&strip_blocks(p)))
+        .map(|p| clip(&strip_blocks(p, true)))
         .filter(|p| !p.is_empty());
     let tool_step = payload["stepIdx"].as_i64().and_then(|index| {
         steps
@@ -370,9 +370,11 @@ pub fn handle(
     Ok(out)
 }
 
-/// The prompt without the blocks in `STRIP_BLOCKS` (`<tag>` or `<tag attr…>` up to its own
-/// `</tag>`, nesting counted), trimmed.
-fn strip_blocks(s: &str) -> String {
+/// The text without the blocks in `STRIP_BLOCKS` (`<tag>` or `<tag attr…>` up to its own
+/// `</tag>`, nesting counted), trimmed. An unclosed `<private>` hides the rest only when
+/// `unclosed_private_hides_rest` (a typed prompt); anywhere else the tag is just text an agent
+/// read or wrote, and cutting there would drop the rest of the session.
+pub fn strip_blocks(s: &str, unclosed_private_hides_rest: bool) -> String {
     let mut out = s.to_string();
     for tag in STRIP_BLOCKS {
         let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
@@ -385,7 +387,7 @@ fn strip_blocks(s: &str) -> String {
             }
             match block_end(rest, &open, &close) {
                 Some(end) => out.replace_range(at..at + open.len() + end, ""),
-                None if *tag == "private" => out.truncate(at),
+                None if unclosed_private_hides_rest && *tag == "private" => out.truncate(at),
                 None => break,
             }
             from = at;
