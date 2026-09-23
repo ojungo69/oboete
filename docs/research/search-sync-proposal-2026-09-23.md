@@ -102,7 +102,7 @@ AI Search が持つ精度の工夫は、すべて §2.4 の検索手順に入れ
 1. **アカウントごとに正規の埋め込み器を 1 つ決めます。** hub がそれを記録します。`embedder_id` は、モデル名・実行環境・精度・pooling・前置き文・次元をつないだ文字列です (例 `bge-m3/dense/fp32/cls/noprefix/1024`)。bge-m3 は前置き文が要りません ([HF](https://huggingface.co/BAAI/bge-m3))。
 2. **文書のベクトルは Workers AI だけで作ります。** 要約と同じ detached の observe で作ります。手元モデルで作った文書ベクトルは混ぜません。オフライン中にできた文書はベクトル無しで保存し (全文検索にはすぐ出る)、次にオンラインで observe が走ったときに作ります。
 3. **手元モデルの役目は、オフライン時に問い合わせ文をベクトルにすることだけです。** 同じ重みでも、精度・pooling・切り詰めが違えば数字は変わります。EmbeddingGemma では int8 版で cos 0.987 まで下がりました (実測・未再現)。そこで、Workers AI と手元 ONNX で同じ文 100 件を変換し、**cos の最小が 0.99 以上、評価クエリの上位 10 件が 9 件以上一致**したときだけ、手元の問い合わせを有効にします (一致の度合いはまだ未計測、§7 の PR-A)。
-4. **モデルを変えるときは全件作り直しです** (`oboete reindex`)。新しい `embedder_id` のベクトルが全件そろうまでは古いものを使い、そろったら hub の正規を切り替えます。各端末はベクトルを pull し直します。
+4. **モデルを変えるときは全件作り直しです** (`oboete reindex`)。hub は正規の `embedder_id` のほかに「準備中」の `embedder_id` を 1 つだけ登録でき、準備中のベクトルも受け取って別に保持します (検索には使わない)。準備中のベクトルが全件そろったら hub の正規を切り替え、古い世代を捨てます。それまでの検索は古い世代のままなので、切り替えで検索が止まる時間はありません。各端末は切り替えのあとにベクトルを pull し直します。
 5. **Ruri が評価で勝った場合**、文書ベクトルは手元か VPS で作れます。ただしクラウド側の問い合わせ (リモート MCP、スマホ) のために、Cloudflare Containers か VPS で Ruri を常に動かす必要が出ます。Containers は Workers Paid の含み枠が月 25 GiB 時間なので、常時起動なら 1 GiB の instance で約 25 時間分しかありません ([Containers 料金](https://developers.cloudflare.com/containers/pricing/))。この費用と手間が、日本語の上積みに見合うかで判断します。
 
 ### 2.4 検索の手順 (期待できる効果と費用)
@@ -244,8 +244,8 @@ bge-m3 は手元の fastembed なら密ベクトルと疎ベクトルを 1 回�
 |---|---|---|
 | sessions (id、agent、repo、端末、開始、最終イベント) | する | 開始は小さいほう、最終イベントは大きいほう。注入済みの印は端末ローカル |
 | observations / summaries / prompts | する (prompt は §6 決定 3) | 追加のみ。同じ uid の op が 2 回来ても 1 回分 (op の uid で冪等) |
-| 文書のベクトル | する (文書の op の一部として `embedder_id` 付きの fp32、1 件 4 KB) | 正規の `embedder_id` と違うものは hub が受け取らない |
-| 削除 (tombstone = 消した印) | する | **削除が常に勝つ** (届く順番に関係なく)。session の削除は、その中の全文書の tombstone を作る。印は小さいので永久に保持する |
+| 文書のベクトル | する (文書の op の一部として `embedder_id` 付きの fp32、1 件 4 KB) | 正規か準備中 (§2.3 の 4) の `embedder_id` 以外は hub が受け取らない |
+| 削除 (tombstone = 消した印) | する | **削除が常に勝つ** (届く順番に関係なく)。文書の削除は文書の tombstone、session の削除は **session 自体の tombstone** を作る。hub はその session を指す op を、あとから届いたもの (別の端末でまだ送っていなかった文書) も含めて全部捨てる。印は小さいので永久に保持する |
 | events / injections / provider_calls / fts / vec 索引 | しない | 端末ローカル。fts と vec は受け取った文書から各端末が作り直す |
 
 **通信の流れ (常駐プロセスなし):**
@@ -254,11 +254,12 @@ bge-m3 は手元の fastembed なら密ベクトルと疎ベクトルを 1 回�
 - **送信**: detached の observe の最後と `oboete sync` で送ります。
 - **受信**: SessionStart hook が detached の `oboete sync` を起動します (hook 自体は通信しません)。受け取った内容は次の検索から効きます。望めば cron / launchd / タスク スケジューラで定期実行もできます。
 - 受信は `GET /ops?after=<seq>&limit=500` のページ送りです。新しい端末も同じ口で最初から取ります。16.5 万件でベクトル込み約 0.8 GB (推計) で、遅ければ R2 のスナップショットを足します。
+- **削除した中身は log からも消します。** hub は tombstone を受け取った時点で、対象の op から本文とベクトルを消し、`seq` と uid と「削除済み」の印だけを残します (session の tombstone ならその中の全 op)。新しい端末が最初から取っても、消した prompt の本文やベクトルは届きません。端末側も、受け取った tombstone に合わせて手元の本文・fts・ベクトルを消します (既存の `delete_doc` / `delete_session` と同じ)。
 - hub は op を受け取ったら順序付きで保存し、表に反映して、FTS5 も更新します。
 
 **Vectorize** (§6 決定 4 で承認された場合) は DO が表に反映するときに一緒に upsert / delete します。
 
-- 絞り込みに使う metadata の索引 (repo、kind、agent、source) は、**最初の挿入より前に**作っておく必要があります。索引は最大 10 個、文字列は先頭 64 byte だけが索引に入ります ([metadata filtering](https://developers.cloudflare.com/vectorize/reference/metadata-filtering/))。
+- 絞り込みに使う metadata の索引 (repo、kind、agent、source) は、**最初の挿入より前に**作っておく必要があります。索引は最大 10 個、文字列は先頭 64 byte だけが索引に入ります ([metadata filtering](https://developers.cloudflare.com/vectorize/reference/metadata-filtering/))。そこで索引に入れる repo は、repo キー (origin URL) の SHA-256 の先頭 16 桁 (16 進) にします。長い URL の先頭が同じ 2 つの repo も区別でき、表示用の URL は別の metadata に持ちます。
 - 書き込みが検索に出るまでの時間は、中央値 30 秒未満、p99 は 2 分未満です ([changelog](https://developers.cloudflare.com/changelog/post/2026-06-30-improved-wal-throughput/))。
 - 検索は近似で、IVF と直積量子化の後に精密化して 95% 超です ([Cloudflare blog](https://blog.cloudflare.com/building-vectorize-a-distributed-vector-database-on-cloudflare-developer-platform/))。
 
@@ -354,7 +355,7 @@ fastembed 7.1.0 が固定する ort 2.0.0-rc.13 には、4 つとも ONNX Runtim
 | PR-A | 計測 spike (出荷しないコード) | Workers AI と fastembed の bge-m3 を実データ 100 件で比べる (cos と上位 10 件の一致)。8,000 字の prompt で Workers AI の入力上限と `truncate_inputs` を見る。日本からの往復の p50 / p95。oboete と claude-mem の実際のトークン数。DO / D1 で trigram FTS5 を作る 1 文。M1 と A1 での手元モデルの読み込み時間・RAM と、実ベクトル 15 万件の走査時間 | §2・§4 の未確認の数字をすべて実測に置き換える。一致しなければ手元の問い合わせを無効にする (§2.3 の 3) |
 | PR-B | 評価器 | `oboete eval` が qrels から TREC 形式の結果を出し、ranx で報告する。claude-mem DB は読み取り専用の写しを使う。全文検索だけの基準値を出す | 測れる状態になったこと。基準の数字 |
 | PR-C | id と repo キー | 端末 id 付きの `uid`、origin URL の repo キーと移し替え、`"unknown"` session の修正、`embedder_id` とベクトル表、outbox 表 | WSL と Windows で同じ repo が同じキーになる (テスト)。replay で hook 時間が変わらない |
-| PR-D | 意味検索の本体 | observe で Workers AI の埋め込み (100 件ずつ、日次 neuron 予算付き)、sqlite-vec の索引、search / MCP / viewer の hybrid RRF、オフライン時の手元の問い合わせ (fastembed)、`oboete reindex` | §3.3 の「意味検索そのもの」の合格線。落ちたら既定は `none` のまま |
+| PR-D | 意味検索の本体 | observe で文書の埋め込み: クラウドを使う形は Workers AI (100 件ずつ、日次 neuron 予算付き)、ローカルだけの形 (§0 の 5) は手元の fastembed。sqlite-vec の索引、search / MCP / viewer の hybrid RRF、オフライン時の手元の問い合わせ (fastembed)、`oboete reindex` | §3.3 の「意味検索そのもの」の合格線。落ちたら既定は `none` のまま |
 | PR-E1〜E6 | 精度の工夫 (1 つ 1 PR) | E1 `since` / `until`、E2 要約の `keys`、E3 重複の間引き、E4 MCP 検索の reranker (xsmall-v2 と v2-m3 の比較)、E5 prompt の先頭か分割か、E6 M1 / A1 での int8 / bit | それぞれが合格線を越えたものだけ残す。越えなければその PR は閉じる |
 | PR-F | prompt ごとの自動注入 | UserPromptSubmit に別の hook として `oboete inject` を登録する (予算 300 ms、timeout 1 秒、超えたら全文検索だけ)。Grok は最初の PreToolUse。しきい値を答えの無い問いで較正する。予算に収まらない端末だけ detached `recall` → PreToolUse の代案に切り替える | 誤注入 10% 以下、注入 hook の p95 300 ms 以内、timeout の割合 2% 以下。記録 hook の時間は変わらない (replay) |
 | PR-G | hub (Worker + DO) | `/push` と `/pull` (seq のカーソル)、op の冪等、tombstone、Access の service token、書き出しの口 | `--home` を 2 つ使ったテストで、順番を入れ替えても削除が勝ち、最後に文書とベクトルが一致する |
