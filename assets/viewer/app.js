@@ -138,13 +138,15 @@ function deleteDoc(d, card) {
   });
 }
 
-// Long text (a pasted log, a task written for another agent) starts folded to its head.
-const FOLD = 600;
+// Long text (a pasted log, a task written for another agent) starts folded to its head: the
+// first lines, at most so many characters.
+const FOLD_LINES = 8;
+const FOLD_CHARS = 600;
 
 function folded(text) {
-  const chars = Array.from(text);
-  if (chars.length <= FOLD) return [el('p', 'text', text)];
-  const p = el('p', 'text', `${chars.slice(0, FOLD).join('')}…`);
+  const head = Array.from(text.split('\n').slice(0, FOLD_LINES).join('\n')).slice(0, FOLD_CHARS).join('');
+  if (head === text) return [el('p', 'text', text)];
+  const p = el('p', 'text', `${head}…`);
   const all = el('button', 'quiet small', 'Show all');
   all.type = 'button';
   all.addEventListener('click', () => {
