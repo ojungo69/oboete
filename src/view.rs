@@ -324,15 +324,17 @@ impl Viewer {
     }
 }
 
-/// Changes when what the page shows changes: sessions appear or go, knowledge is stored or
-/// deleted. Raw events arriving do not move it, so an open session does not redraw the page.
-/// Doc ids never repeat (AUTOINCREMENT), and a session that replaces a deleted one has a newer
-/// `started_at`, so a delete followed by an insert cannot land on the same marker.
+/// Changes when what the page shows changes: sessions appear or go, a prompt is typed,
+/// knowledge is stored or deleted. Other raw events (tool calls, replies) do not move it, so a
+/// working agent does not redraw the page between prompts. Doc ids never repeat (AUTOINCREMENT),
+/// and a session that replaces a deleted one has a newer `started_at`, so a delete followed by
+/// an insert cannot land on the same marker.
 fn version(conn: &rusqlite::Connection) -> Result<String> {
     Ok(conn.query_row(
         "SELECT (SELECT COUNT(*) FROM sessions) || ':' || (SELECT COALESCE(MAX(started_at), 0) FROM sessions)
              || ':' || (SELECT COUNT(*) FROM observations) || ':' || (SELECT COALESCE(MAX(id), 0) FROM observations)
-             || ':' || (SELECT COUNT(*) FROM summaries) || ':' || (SELECT COALESCE(MAX(id), 0) FROM summaries)",
+             || ':' || (SELECT COUNT(*) FROM summaries) || ':' || (SELECT COALESCE(MAX(id), 0) FROM summaries)
+             || ':' || (SELECT COUNT(*) FROM prompts) || ':' || (SELECT COALESCE(MAX(id), 0) FROM prompts)",
         [],
         |r| r.get(0),
     )?)
@@ -370,11 +372,13 @@ fn stats(conn: &rusqlite::Connection, home: &Path, repo: Option<&str>) -> Result
             Ok(json!({"kind": r.get::<_, String>(0)?, "count": r.get::<_, i64>(1)?}))
         })?
         .collect::<Result<_, _>>()?;
-    let summaries: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM summaries WHERE ?1 IS NULL OR repo = ?1",
-        params![repo],
-        |r| r.get(0),
-    )?;
+    let count = |table: &str| -> Result<i64> {
+        Ok(conn.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE ?1 IS NULL OR repo = ?1"),
+            params![repo],
+            |r| r.get(0),
+        )?)
+    };
     // What the store takes on disk: the file plus the WAL not yet checkpointed into it.
     // (`page_count` would already include pages that only exist in the WAL.)
     let bytes = |name: &str| {
@@ -404,7 +408,8 @@ fn stats(conn: &rusqlite::Connection, home: &Path, repo: Option<&str>) -> Result
                      "injected": sessions.3, "first": sessions.4, "last": sessions.5},
         "observations": {"total": kinds.iter().map(|k| k["count"].as_i64().unwrap_or(0)).sum::<i64>(),
                          "kinds": kinds},
-        "summaries": summaries,
+        "summaries": count("summaries")?,
+        "prompts": count("prompts")?,
         "db_bytes": db_bytes,
         "providers": providers,
     }))
@@ -636,12 +641,30 @@ mod tests {
             ),
             (Some(1), Some(1), Some(800))
         );
-        // The version marker moves on knowledge and sessions, not on raw events.
+        let del = |t: &str| v.route("DELETE", t, &[HOST, TOKEN]).status;
+        // The version marker moves on knowledge, prompts and sessions, not on other raw events.
         let v0 = get("/api/version")["v"].as_str().unwrap().to_string();
         let conn = db::open(&dir).unwrap();
         db::insert_event(&conn, "s2", "Stop", 1_700_000_100_001, "{}").unwrap();
         assert_eq!(get("/api/version")["v"], v0);
-        let del = |t: &str| v.route("DELETE", t, &[HOST, TOKEN]).status;
+        db::insert_prompt(&conn, "s2", "/r", 1_700_000_100_002, "直近の依頼").unwrap();
+        let typed = get("/api/version")["v"].as_str().unwrap().to_string();
+        assert_ne!(typed, v0);
+        // A running session's prompt tops the feed; stats count it.
+        let feed = get("/api/feed?repo=%2Fr");
+        assert_eq!(
+            (
+                feed[0]["doc"].as_str(),
+                feed[0]["kind"].as_str(),
+                feed[0]["agent"].as_str()
+            ),
+            (Some("p1"), Some("prompt"), Some("codex"))
+        );
+        assert_eq!(get("/api/stats?repo=%2Fr")["prompts"], 1);
+        assert_eq!(get("/api/stats?repo=%2Fother")["prompts"], 0);
+        assert_eq!(del("/api/doc?id=p1"), 204);
+        assert_ne!(get("/api/version")["v"], typed);
+        let v0 = get("/api/version")["v"].as_str().unwrap().to_string();
         assert_eq!(del("/api/doc?id=o1"), 204);
         assert_eq!(del("/api/doc?id=o1"), 404);
         assert_eq!(del("/api/doc?id=o%2B1"), 404);

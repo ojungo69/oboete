@@ -46,6 +46,15 @@ CREATE TABLE IF NOT EXISTS summaries(
 );
 CREATE INDEX IF NOT EXISTS summaries_repo ON summaries(repo, ts);
 CREATE INDEX IF NOT EXISTS summaries_session ON summaries(session_id, ts);
+CREATE TABLE IF NOT EXISTS prompts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  body TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS prompts_repo ON prompts(repo, ts);
+CREATE INDEX IF NOT EXISTS prompts_session ON prompts(session_id);
 CREATE TABLE IF NOT EXISTS provider_calls(
   id INTEGER PRIMARY KEY,
   ts INTEGER NOT NULL,
@@ -84,8 +93,9 @@ pub fn open(home: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Document ids (`o<id>`, `s<id>`) are handed to agents and pages, so a deleted id must never
-/// come back for another row. A table from a build before delete existed lacks AUTOINCREMENT,
+/// Document ids (`o<id>`, `s<id>`, `p<id>`) are handed to agents and pages, so a deleted id must
+/// never come back for another row (`prompts` had AUTOINCREMENT from the start). A table from a
+/// build before delete existed lacks AUTOINCREMENT,
 /// and SQLite reuses the highest id once its row is gone; it is rebuilt here with the same rows
 /// and ids, which also seeds `sqlite_sequence` past the highest one. Same guard pattern as
 /// `ensure_fts`: read check first, re-check inside the write transaction.
@@ -140,8 +150,8 @@ fn autoincrements(conn: &Connection, table: &str) -> Result<bool> {
     Ok(sql.is_some_and(|s| s.contains("AUTOINCREMENT")))
 }
 
-/// The search index (FTS5 trigram: substring matching, CJK by character), built from what
-/// observe already stored. The read check keeps the hook path free of write locks; the write
+/// The search index (FTS5 trigram: substring matching, CJK by character), built from what is
+/// already stored. The read check keeps the hook path free of write locks; the write
 /// transaction re-checks, so concurrent first opens build it once and a killed one leaves
 /// nothing behind.
 fn ensure_fts(conn: &mut Connection) -> Result<()> {
@@ -158,7 +168,9 @@ fn ensure_fts(conn: &mut Connection) -> Result<()> {
              INSERT INTO fts(title, body, doc, kind, repo, ts)
                SELECT title, body, 'o' || id, kind, repo, ts FROM observations;
              INSERT INTO fts(title, body, doc, kind, repo, ts)
-               SELECT '', body, 's' || id, 'summary', repo, ts FROM summaries;",
+               SELECT '', body, 's' || id, 'summary', repo, ts FROM summaries;
+             INSERT INTO fts(title, body, doc, kind, repo, ts)
+               SELECT '', body, 'p' || id, 'prompt', repo, ts FROM prompts;",
         )?;
     }
     tx.commit()?;
@@ -261,6 +273,23 @@ pub fn insert_event(
         "INSERT INTO events(session_id, event, ts, payload) VALUES(?1,?2,?3,?4)",
         params![session_id, event, ts, payload],
     )?;
+    Ok(())
+}
+
+/// A prompt the developer typed, with its search row. Kept after observe drops the raw events.
+pub fn insert_prompt(
+    conn: &Connection,
+    session_id: &str,
+    repo: &str,
+    ts: i64,
+    body: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO prompts(session_id, repo, ts, body) VALUES(?1,?2,?3,?4)",
+        params![session_id, repo, ts, body],
+    )?;
+    let doc = format!("p{}", conn.last_insert_rowid());
+    conn.execute(FTS_INSERT, params!["", body, doc, "prompt", repo, ts])?;
     Ok(())
 }
 
@@ -372,12 +401,13 @@ pub fn apply_batch(
     Ok(())
 }
 
-/// Remove one observation (`o<id>`) or summary (`s<id>`) together with its search row.
-/// Only the exact id form is accepted (`o+5`, `o05` would leave the search row behind).
+/// Remove one observation (`o<id>`), summary (`s<id>`) or prompt (`p<id>`) together with its
+/// search row. Only the exact id form is accepted (`o+5`, `o05` would leave the search row behind).
 pub fn delete_doc(conn: &mut Connection, doc: &str) -> Result<bool> {
     let (table, id) = match doc.split_at_checked(1) {
         Some(("o", n)) => ("observations", n),
         Some(("s", n)) => ("summaries", n),
+        Some(("p", n)) => ("prompts", n),
         _ => return Ok(false),
     };
     let Ok(id) = id.parse::<i64>() else {
@@ -393,16 +423,17 @@ pub fn delete_doc(conn: &mut Connection, doc: &str) -> Result<bool> {
     Ok(n > 0)
 }
 
-/// Remove a session with everything it left: raw events, observations, summaries, search rows.
-/// A session whose agent is still running comes back on its next event.
+/// Remove a session with everything it left: raw events, prompts, observations, summaries,
+/// search rows. A session whose agent is still running comes back on its next event.
 pub fn delete_session(conn: &mut Connection, id: &str) -> Result<bool> {
     let tx = conn.transaction()?;
     tx.execute(
         "DELETE FROM fts WHERE doc IN (SELECT 'o' || id FROM observations WHERE session_id=?1
-                                       UNION ALL SELECT 's' || id FROM summaries WHERE session_id=?1)",
+                                       UNION ALL SELECT 's' || id FROM summaries WHERE session_id=?1
+                                       UNION ALL SELECT 'p' || id FROM prompts WHERE session_id=?1)",
         params![id],
     )?;
-    for table in ["observations", "summaries", "events"] {
+    for table in ["observations", "summaries", "prompts", "events"] {
         tx.execute(
             &format!("DELETE FROM {table} WHERE session_id=?1"),
             params![id],
@@ -507,19 +538,33 @@ mod tests {
         )
         .unwrap();
         insert_event(&conn, "s1", "Stop", 2, "{}").unwrap();
+        insert_prompt(&conn, "s1", "/r", 2, "first prompt").unwrap();
+        insert_prompt(&conn, "s1", "/r", 3, "second prompt").unwrap();
         let count =
             |c: &Connection, sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap() };
         assert!(delete_doc(&mut conn, "o1").unwrap());
         assert!(!delete_doc(&mut conn, "o1").unwrap());
-        for bad in ["o+2", "o02", "x2", "o", "2", ""] {
+        assert!(delete_doc(&mut conn, "p1").unwrap());
+        for bad in ["o+2", "o02", "p+2", "x2", "o", "p", "2", ""] {
             assert!(!delete_doc(&mut conn, bad).unwrap(), "{bad}");
         }
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM observations"), 1);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM fts WHERE doc='o1'"), 0);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM fts"), 2);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM prompts"), 1);
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM fts WHERE doc IN ('o1', 'p1')"),
+            0
+        );
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM fts"), 3);
         assert!(delete_session(&mut conn, "s1").unwrap());
         assert!(!delete_session(&mut conn, "s1").unwrap());
-        for table in ["sessions", "events", "observations", "summaries", "fts"] {
+        for table in [
+            "sessions",
+            "events",
+            "observations",
+            "summaries",
+            "prompts",
+            "fts",
+        ] {
             assert_eq!(
                 count(&conn, &format!("SELECT COUNT(*) FROM {table}")),
                 0,

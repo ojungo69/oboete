@@ -157,7 +157,7 @@ main { max-width: 60rem; padding: 8px 24px 64px; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .entry button, .card button { font-size: 13px; padding: 4px 10px; }
 
-/* Cards: one observation or summary, in the feed and under a session. */
+/* Cards: one summary, prompt or observation, in the feed and under a session. */
 .card {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -173,6 +173,7 @@ main { max-width: 60rem; padding: 8px 24px 64px; }
 .card.bugfix { border-left: 3px solid var(--red); }
 .card.discovery, .card.feature { border-left: 3px solid var(--green); }
 .card.preference, .card.change { border-left: 3px solid var(--gray); }
+.card.prompt { border-left: 3px solid var(--accent); }
 .card .meta { margin-top: 8px; }
 .card button { margin-top: 8px; }
 .cards { margin: 12px 0 0; padding: 0 0 0 16px; border-left: 1px solid var(--line); }

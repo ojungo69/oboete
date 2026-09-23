@@ -51,7 +51,7 @@ enum Cmd {
     Inject,
     /// Serve the memory as an MCP server on stdin/stdout (search / get / timeline tools)
     Mcp,
-    /// Full-text search over observations and summaries (this repository unless --all)
+    /// Full-text search over observations, summaries and prompts (this repository unless --all)
     Search {
         /// Terms, all required. One under 3 characters matches as a literal substring
         /// (ASCII case folding only). Put `--` before a term that starts with `-`
@@ -61,7 +61,8 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
-    /// Print one document in full by its id from `search` (o12 = observation, s5 = summary)
+    /// Print one document in full by its id from `search` (o12 = observation, s5 = summary,
+    /// p7 = prompt)
     Get { id: String },
     /// Sessions newest first with their summaries (this repository unless --all)
     Timeline {

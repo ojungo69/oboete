@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{config, db, provider, redact};
+use crate::{config, db, hook, provider, redact};
 
 /// Characters of transcript sent to the model per batch.
 const MAX_PROMPT_CHARS: usize = 16_000;
@@ -90,7 +90,13 @@ fn render(events: &[db::RawEvent]) -> String {
         match e.event.as_str() {
             "UserPromptSubmit" => {
                 if let Some(p) = v["prompt"].as_str().filter(|p| !p.trim().is_empty()) {
-                    lines.push(format!("USER: {}", p.trim()));
+                    // A task report is worth summarizing, but it is not the developer speaking.
+                    let who = if hook::is_envelope(p.trim()) {
+                        "NOTIFICATION"
+                    } else {
+                        "USER"
+                    };
+                    lines.push(format!("{who}: {}", p.trim()));
                 }
             }
             "PostToolUse" | "PostToolUseFailure" => {
@@ -213,4 +219,29 @@ fn vmhwm_kb() -> Option<u64> {
         .find(|l| l.starts_with("VmHWM:"))
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|n| n.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn harness_notifications_are_not_the_developer_speaking() {
+        let ev = |event: &str, payload: Value| db::RawEvent {
+            id: 0,
+            event: event.into(),
+            payload: payload.to_string(),
+        };
+        let text = render(&[
+            ev("UserPromptSubmit", json!({"prompt": "fix the search"})),
+            ev(
+                "UserPromptSubmit",
+                json!({"prompt": "<task-notification>\n<summary>Review done: 2 findings</summary>\n</task-notification>"}),
+            ),
+        ]);
+        assert!(
+            text.starts_with("USER: fix the search\nNOTIFICATION: <task-notification>"),
+            "{text}"
+        );
+    }
 }
