@@ -32,7 +32,7 @@
 8. **claude-mem には触らない** (owner:「claude-mem は勝手に消さないでね」)。停止・削除・設定変更は owner が決める。取り込み (決定 1) は claude-mem の DB を読むだけ。Windows 側の claude-mem データ (`C:\Users\jura\.claude-mem`) も取り込む。iMac にあれば同じ。
 9. **残り 4 agent の対応順**: agy → OpenCode → Pi → Cursor (`docs/research/agent-adapters-2026-09-23.md`)。
 10. **端末**: この PC (WSL)、Windows 本体、M1 iMac。VPS は使うか未定で、決まるまで設定しない。スマホは保留。
-11. **同期から repo ごとに外せる** (repo の `.oboete.toml` に `sync = false`、または `oboete sync exclude <repo>` で oboete の設定に書く)。**判定は送る直前に行います**: 各 session が触れた repo をすべて記録しておき (session の途中で入れ子の repo に移った場合も含む)、そのどれか 1 つでも除外なら、その session の行は送りません。書き込み時の印ではなく送信時の判定なので、除外を後から足した場合も、同期を初めて有効にしたときの古い行にも効きます。同期を初めて有効にするときは、送る repo と件数の一覧を出して確認を求めます。既定は全部同期する。外す前に送った分は残るので、消したいときは viewer で削除する (決定 17 で全端末から消える)。
+11. **同期から repo ごとに外せる** (repo の `.oboete.toml` に `sync = false`、または `oboete sync exclude <repo>` で oboete の設定に書く)。**判定は送る直前に行います**: 各 session が触れた repo をすべて記録しておき (session の途中で入れ子の repo に移った場合も含む)、そのどれか 1 つでも除外なら、その session の行は送りません。書き込み時の印ではなく送信時の判定なので、除外を後から足した場合も、同期を初めて有効にしたときの古い行にも効きます。同期を初めて有効にするときは、送る repo と件数の一覧を出して確認を求めます。除外が止めるのは中身を運ぶ op (文書・`vec`・prompt・session) だけで、**削除の tombstone は除外に関係なく必ず送ります**。すでに同期した repo を後から除外するときは、`oboete sync exclude` がその repo の session を hub と他の端末から消す (tombstone を送る) かどうかを聞きます。既定は全部同期する。外す前に送った分は残るので、消したいときは viewer で削除する (決定 17 で全端末から消える)。
 12. **プロンプトごとの自動注入** (`oboete inject`) は、評価で無関係な注入が 10% 以下のときだけ既定で ON にする。
 13. **個人の好み** (`preference` の観測) は全 repo のセッションに注入する。
 14. **費用**: 月 $5 までは owner に聞かずに使ってよい。Vectorize の月 $1.5 の停止線 (決定 3) はそのまま。
@@ -285,7 +285,7 @@ Jev ([TypeSafe](https://typesafe.ai/blog/introducing-system-one-models-and-jev)�
 
 **通信の流れ (常駐プロセスなし):**
 
-- **送信待ちは、各行の `synced_at` 列 (NULL = まだ hub に無い) と、削除などの変更だけを入れる小さな outbox 表の 2 つです。** claude-mem の同期クライアントと同じ形です ([CloudSync.ts](https://github.com/thedotmack/claude-mem/blob/main/src/services/sync/CloudSync.ts))。送るのは `synced_at IS NULL` で、自分の端末で作った行だけです (hub から受け取った行は送り返さない)。同期を初めて有効にしたときや、ローカルだけの形からクラウドを使う形に移ったときは、それまでの行もすべて NULL なので、別の移行手順なしに全部送られます。uid で冪等なので、途中で止まっても再実行で続きから送れます。 送る前に、その行の session が触れた repo のどれかが除外されていないかを毎回確かめます (決定 11)。
+- **送信待ちは、各行の `synced_at` 列 (NULL = まだ hub に無い) と、削除などの変更だけを入れる小さな outbox 表の 2 つです。** claude-mem の同期クライアントと同じ形です ([CloudSync.ts](https://github.com/thedotmack/claude-mem/blob/main/src/services/sync/CloudSync.ts))。送るのは `synced_at IS NULL` で、自分の端末で作った行だけです (hub から受け取った行は送り返さない)。同期を初めて有効にしたときや、ローカルだけの形からクラウドを使う形に移ったときは、それまでの行もすべて NULL なので、別の移行手順なしに全部送られます。uid で冪等なので、途中で止まっても再実行で続きから送れます。 送る前に、その行の session が触れた repo のどれかが除外されていないかを毎回確かめます (決定 11)。tombstone はこの確認をせずに送ります (除外した repo の記憶を消した知らせが届かないと、クラウドと他の端末に中身が残るため)。
 - **送信**: detached の observe の最後と `oboete sync` で送ります。
 - **受信**: SessionStart hook が detached の `oboete sync` を起動します (hook 自体は通信しません)。受け取った内容は次の検索から効きます。望めば cron / launchd / タスク スケジューラで定期実行もできます。
 - 受信は `GET /ops?after=<seq>&limit=500` のページ送りです。新しい端末も同じ口で最初から取ります。16.5 万件でベクトル込み約 0.8 GB (推計) で、遅ければ R2 のスナップショットを足します。
