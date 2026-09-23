@@ -1,4 +1,4 @@
-//! `oboete setup <agent>` wires Claude Code, Codex and Grok Build hooks to this binary and
+//! `oboete setup <agent>` wires agent hooks to this binary and
 //! `--remove` takes exactly those entries out again; `oboete doctor` reports the state.
 //! Only oboete's own entries are ever touched. The first write to a file the developer owned
 //! leaves a `.oboete.bak` copy next to it.
@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{config, db};
 
-pub const AGENTS: [&str; 3] = ["claude", "codex", "grok"];
+pub const AGENTS: [&str; 4] = ["claude", "codex", "grok", "agy"];
 const BACKUP_SUFFIX: &str = ".oboete.bak";
 
 /// The name each agent knows our MCP server by (tools show up as `oboete__search` and so on).
@@ -47,6 +47,7 @@ const GROK_EVENTS: &[(&str, u32)] = &[
     ("PostCompact", 5),
     ("SessionEnd", 3),
 ];
+const AGY_FLAT_EVENTS: [&str; 3] = ["SessionStart", "PreInvocation", "Stop"];
 
 pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
     let agents: Vec<&str> = if agent == "all" {
@@ -55,7 +56,7 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         vec![agent]
     } else {
         return Err(anyhow!(
-            "unknown agent {agent}: use claude | codex | grok | all"
+            "unknown agent {agent}: use claude | codex | grok | agy | all"
         ));
     };
     let cmd = HookCommand::current(home)?;
@@ -63,7 +64,13 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         let files = match a {
             "claude" => claude(&cmd, remove)?,
             "codex" => codex(&cmd, remove)?,
-            _ => grok(&cmd, remove)?,
+            "grok" => grok(&cmd, remove)?,
+            "agy" if !agy_available(&agy_dir(), on_path("agy")) => {
+                println!("agy: skipped (`~/.gemini` and `agy` on PATH are absent)");
+                continue;
+            }
+            "agy" => agy_files(&agy_dir(), &cmd, remove, cfg!(windows))?,
+            _ => unreachable!(),
         };
         let verb = if remove { "removed from" } else { "written to" };
         if files.is_empty() {
@@ -74,7 +81,14 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         let mcp = match a {
             "claude" => claude_mcp(&cmd, remove)?,
             "codex" => toml_mcp(&codex_home().join("config.toml"), &cmd, remove)?,
-            _ => toml_mcp(&grok_config_file(), &cmd, remove)?,
+            "grok" => toml_mcp(&grok_config_file(), &cmd, remove)?,
+            "agy" => (if remove {
+                "removed with hooks above"
+            } else {
+                "written with hooks above"
+            })
+            .to_string(),
+            _ => unreachable!(),
         };
         println!("{a}: mcp server {mcp}");
     }
@@ -123,6 +137,27 @@ impl HookCommand {
             s.push_str(&shell_quote(h));
         }
         format!("{s} hook {agent} {event}")
+    }
+
+    fn agy_line(&self, event: &str, windows: bool) -> Result<String> {
+        if !windows {
+            return Ok(self.line("agy", event));
+        }
+        // agy on Windows splits the command on spaces without removing quotes.
+        for path in std::iter::once(&self.exe).chain(self.home.iter()) {
+            anyhow::ensure!(
+                !path
+                    .chars()
+                    .any(|c| c.is_whitespace() || "&|<>()^%!\"'".contains(c)),
+                "agy on Windows needs a space-free executable and --home path (got {path}); use a space-free path"
+            );
+        }
+        let home = self
+            .home
+            .as_ref()
+            .map(|h| format!(" --home {h}"))
+            .unwrap_or_default();
+        Ok(format!("{}{home} hook agy {event}", self.exe))
     }
 }
 
@@ -884,6 +919,118 @@ fn grok(cmd: &HookCommand, remove: bool) -> Result<Vec<String>> {
     Ok(vec![file.display().to_string()])
 }
 
+fn agy_dir() -> PathBuf {
+    config::home_dir().join(".gemini")
+}
+
+fn agy_available(dir: &Path, on_path: bool) -> bool {
+    dir.is_dir() || on_path
+}
+
+fn agy_spec(cmd: &HookCommand, windows: bool) -> Result<Value> {
+    let mut spec = serde_json::Map::new();
+    for event in AGY_FLAT_EVENTS {
+        spec.insert(
+            event.to_string(),
+            json!([{"type":"command", "command":cmd.agy_line(event, windows)?, "timeout":10}]),
+        );
+    }
+    spec.insert(
+        "PostToolUse".to_string(),
+        json!([{"matcher":"*", "hooks":[{"type":"command", "command":cmd.agy_line("PostToolUse", windows)?, "timeout":10}]}]),
+    );
+    Ok(Value::Object(spec))
+}
+
+/// agy reads two shared JSON files; only the named hook `oboete` and `mcpServers.oboete` are
+/// ours. Both are staged before either is replaced. An `oboete` server entry keeps the fields
+/// the developer set on it (`disabled`); an emptied file stays as `{}`.
+fn agy_files(dir: &Path, cmd: &HookCommand, remove: bool, windows: bool) -> Result<Vec<String>> {
+    let hooks = dir.join("config/hooks.json");
+    let mcp = dir.join("config/mcp_config.json");
+    let spec = if remove {
+        None
+    } else {
+        Some(agy_spec(cmd, windows)?)
+    };
+    let mut hooks_root = read_json_object(&hooks)?;
+    let mut mcp_root = read_json_object(&mcp)?;
+    let (old_hooks, old_mcp) = (hooks_root.clone(), mcp_root.clone());
+
+    let named = hooks_root.as_object_mut().expect("checked JSON object");
+    match spec {
+        Some(spec) => named.insert(MCP_NAME.to_string(), spec),
+        None => named.remove(MCP_NAME),
+    };
+    let root = mcp_root.as_object_mut().expect("checked JSON object");
+    if remove {
+        if let Some(servers) = root.get_mut("mcpServers").and_then(Value::as_object_mut) {
+            servers.remove(MCP_NAME);
+        }
+    } else {
+        let servers = root
+            .entry("mcpServers")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("{}: mcpServers is not a JSON object", mcp.display()))?;
+        let entry = servers.entry(MCP_NAME).or_insert_with(|| json!({}));
+        anyhow::ensure!(
+            entry.is_object(),
+            "{}: oboete server is not a JSON object",
+            mcp.display()
+        );
+        entry["command"] = json!(cmd.exe);
+        entry["args"] = json!(cmd.mcp_args());
+    }
+
+    let mut staged = Vec::new();
+    for (file, new, old) in [
+        (&hooks, &hooks_root, &old_hooks),
+        (&mcp, &mcp_root, &old_mcp),
+    ] {
+        if new != old {
+            staged.push((file, stage(file, &json_text(new)?)?));
+        }
+    }
+    for (file, _) in &staged {
+        backup_once(file)?;
+    }
+    let mut changed = Vec::new();
+    for (file, s) in staged {
+        s.commit()?;
+        changed.push(file.display().to_string());
+    }
+    Ok(changed)
+}
+
+fn agy_hooks_status(file: &Path, cmd: &HookCommand, windows: bool) -> String {
+    let root = match read_json_object(file) {
+        Ok(root) => root,
+        Err(e) => return format!("unreadable: {e}"),
+    };
+    let Some(ours) = root.get(MCP_NAME) else {
+        return "not wired (run `oboete setup agy`)".into();
+    };
+    if ours["enabled"] == false {
+        return "registered but turned off (`enabled: false`)".into();
+    }
+    let wanted = match agy_spec(cmd, windows) {
+        Ok(wanted) => wanted,
+        Err(e) => return format!("cannot run: {e}"),
+    };
+    if ours != &wanted {
+        "hooks differ from expected (rerun `oboete setup agy`)".into()
+    } else {
+        "4 hooks wired".into()
+    }
+}
+
+fn agy_mcp_disabled(file: &Path) -> bool {
+    read_json_object(file)
+        .ok()
+        .is_some_and(|v| v["mcpServers"][MCP_NAME]["disabled"] == true)
+}
+
 /// `oboete doctor`: one screen of what is wired, what is stored and whether providers can run.
 pub fn doctor(home: &Path) -> Result<()> {
     let exe = std::env::current_exe()?;
@@ -961,6 +1108,7 @@ pub fn doctor(home: &Path) -> Result<()> {
             Err(e) => format!("unreadable: {e}"),
         }
     };
+    let want = HookCommand::current(home)?;
     println!("agents:");
     println!("  claude  {}", wired(&claude_settings_file(), "claude"));
     let codex_hooks = codex_home().join("hooks.json");
@@ -985,7 +1133,10 @@ pub fn doctor(home: &Path) -> Result<()> {
         "  grok    {}",
         wired(&crate::hook::grok_hooks_file(), "grok")
     );
-    let want = HookCommand::current(home)?;
+    println!(
+        "  agy     {}",
+        agy_hooks_status(&agy_dir().join("config/hooks.json"), &want, cfg!(windows))
+    );
     let mcp = |file: &Path| -> &str {
         match mcp_command(file) {
             Some(_) if mcp_disabled(file) => "registered but turned off (`enabled = false`)",
@@ -998,6 +1149,13 @@ pub fn doctor(home: &Path) -> Result<()> {
     println!("  claude  {}", mcp(&claude_mcp_file()));
     println!("  codex   {}", mcp(&codex_home().join("config.toml")));
     println!("  grok    {}", mcp(&grok_config_file()));
+    let agy_mcp = agy_dir().join("config/mcp_config.json");
+    let agy_status = if agy_mcp_disabled(&agy_mcp) {
+        "registered but turned off (`disabled: true`)"
+    } else {
+        mcp(&agy_mcp)
+    };
+    println!("  agy     {agy_status}");
     println!("providers (chain order):");
     for p in config::load(home)?.providers {
         let state = match &p {
@@ -1034,6 +1192,176 @@ fn on_path(bin: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agy_setup_round_trip_preserves_other_entries() {
+        let dir = std::env::temp_dir().join(format!("oboete-agy-setup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hooks = dir.join("config/hooks.json");
+        let mcp = dir.join("config/mcp_config.json");
+        std::fs::create_dir_all(hooks.parent().unwrap()).unwrap();
+        std::fs::write(&hooks, "{\"other\":{\"Stop\":[]}}\n").unwrap();
+        std::fs::write(&mcp, "{\"mcpServers\":{\"other\":{\"command\":\"x\"}}}\n").unwrap();
+        let cmd = HookCommand {
+            exe: "/x/oboete".into(),
+            home: Some("/h".into()),
+        };
+        agy_files(&dir, &cmd, false, false).unwrap();
+        let h = read_json_object(&hooks).unwrap();
+        assert_eq!(h["other"], json!({"Stop": []}));
+        assert!(h["oboete"].get("PreToolUse").is_none());
+        assert_eq!(
+            h["oboete"]["SessionStart"][0],
+            json!({"type":"command","command":"/x/oboete --home /h hook agy SessionStart","timeout":10})
+        );
+        assert_eq!(h["oboete"]["PreInvocation"][0]["timeout"], 10);
+        assert_eq!(h["oboete"]["Stop"][0]["timeout"], 10);
+        assert_eq!(h["oboete"]["PostToolUse"][0]["matcher"], "*");
+        assert_eq!(
+            h["oboete"]["PostToolUse"][0]["hooks"][0]["command"],
+            "/x/oboete --home /h hook agy PostToolUse"
+        );
+        let m = read_json_object(&mcp).unwrap();
+        assert_eq!(m["mcpServers"]["other"], json!({"command":"x"}));
+        assert_eq!(
+            m["mcpServers"]["oboete"],
+            json!({"command":"/x/oboete","args":["--home","/h","mcp"]})
+        );
+        let first_hooks = std::fs::read(&hooks).unwrap();
+        let first_mcp = std::fs::read(&mcp).unwrap();
+        agy_files(&dir, &cmd, false, false).unwrap();
+        assert_eq!(std::fs::read(&hooks).unwrap(), first_hooks);
+        assert_eq!(std::fs::read(&mcp).unwrap(), first_mcp);
+        assert_eq!(
+            std::fs::read_to_string(hooks.with_file_name("hooks.json.oboete.bak")).unwrap(),
+            "{\"other\":{\"Stop\":[]}}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(mcp.with_file_name("mcp_config.json.oboete.bak")).unwrap(),
+            "{\"mcpServers\":{\"other\":{\"command\":\"x\"}}}\n"
+        );
+        agy_files(&dir, &cmd, true, false).unwrap();
+        assert_eq!(
+            read_json_object(&hooks).unwrap(),
+            json!({"other":{"Stop":[]}})
+        );
+        assert_eq!(
+            read_json_object(&mcp).unwrap(),
+            json!({"mcpServers":{"other":{"command":"x"}}})
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agy_remove_refuses_read_only_owned_files_before_touching_either_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("oboete-agy-locked-{}", std::process::id()));
+        let cmd = HookCommand {
+            exe: "/x/oboete".into(),
+            home: None,
+        };
+        for locked in ["hooks.json", "mcp_config.json"] {
+            let _ = std::fs::remove_dir_all(&dir);
+            agy_files(&dir, &cmd, false, false).unwrap();
+            let hooks = dir.join("config/hooks.json");
+            let mcp = dir.join("config/mcp_config.json");
+            let before_hooks = std::fs::read(&hooks).unwrap();
+            let before_mcp = std::fs::read(&mcp).unwrap();
+            let target = if locked == "hooks.json" { &hooks } else { &mcp };
+            std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o444)).unwrap();
+            assert!(agy_files(&dir, &cmd, true, false).is_err());
+            assert_eq!(std::fs::read(&hooks).unwrap(), before_hooks);
+            assert_eq!(std::fs::read(&mcp).unwrap(), before_mcp);
+            std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agy_fresh_install_removes_to_empty_objects_and_missing_install_skips() {
+        let dir = std::env::temp_dir().join(format!("oboete-agy-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!agy_available(&dir, false));
+        assert!(agy_available(&dir, true));
+        let cmd = HookCommand {
+            exe: "/x/oboete".into(),
+            home: None,
+        };
+        let written = agy_files(&dir, &cmd, false, false).unwrap();
+        assert_eq!(written.len(), 2);
+        agy_files(&dir, &cmd, true, false).unwrap();
+        assert_eq!(
+            read_json_object(&dir.join("config/hooks.json")).unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            read_json_object(&dir.join("config/mcp_config.json")).unwrap(),
+            json!({"mcpServers": {}})
+        );
+        assert!(agy_files(&dir, &cmd, true, false).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agy_windows_command_is_raw_and_rejects_spaces_before_writing() {
+        let dir = std::env::temp_dir().join(format!("oboete-agy-windows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cmd = HookCommand {
+            exe: "C:/tools/oboete.exe".into(),
+            home: Some("C:/data/oboete".into()),
+        };
+        agy_files(&dir, &cmd, false, true).unwrap();
+        let hooks = read_json_object(&dir.join("config/hooks.json")).unwrap();
+        assert_eq!(
+            hooks["oboete"]["Stop"][0]["command"],
+            "C:/tools/oboete.exe --home C:/data/oboete hook agy Stop"
+        );
+        let bad = HookCommand {
+            exe: "C:/Program Files/oboete.exe".into(),
+            home: None,
+        };
+        assert!(
+            agy_files(&dir, &bad, false, true)
+                .unwrap_err()
+                .to_string()
+                .contains("space-free")
+        );
+        assert_eq!(
+            read_json_object(&dir.join("config/hooks.json")).unwrap(),
+            hooks
+        );
+        let bad_home = HookCommand {
+            exe: "C:/tools/oboete.exe".into(),
+            home: Some("C:/My Data".into()),
+        };
+        assert!(agy_files(&dir, &bad_home, false, true).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agy_doctor_checks_expected_hooks_and_disabled_mcp() {
+        let dir = std::env::temp_dir().join(format!("oboete-agy-doctor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cmd = HookCommand {
+            exe: "/x/oboete".into(),
+            home: None,
+        };
+        agy_files(&dir, &cmd, false, false).unwrap();
+        let hooks = dir.join("config/hooks.json");
+        let mcp = dir.join("config/mcp_config.json");
+        assert_eq!(agy_hooks_status(&hooks, &cmd, false), "4 hooks wired");
+        assert!(!agy_mcp_disabled(&mcp));
+        let mut root = read_json_object(&hooks).unwrap();
+        root["oboete"]["PreInvocation"][0]["timeout"] = json!(10000);
+        write_json(&hooks, &root).unwrap();
+        assert!(agy_hooks_status(&hooks, &cmd, false).contains("rerun"));
+        let mut root = read_json_object(&mcp).unwrap();
+        root["mcpServers"]["oboete"]["disabled"] = json!(true);
+        write_json(&mcp, &root).unwrap();
+        assert!(agy_mcp_disabled(&mcp));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Rows Codex 0.155.1 itself wrote into the owner's config.toml for these two handlers.
     #[test]

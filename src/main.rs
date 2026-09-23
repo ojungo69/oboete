@@ -36,9 +36,9 @@ struct Cli {
 enum Cmd {
     /// Receive one agent hook event on stdin and store it (fail-open, always exit 0)
     Hook {
-        /// Agent name: claude | codex | grok
+        /// Agent name: claude | codex | grok | agy
         agent: String,
-        /// Hook event name (e.g. SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd)
+        /// Hook event name (e.g. SessionStart, PreInvocation, UserPromptSubmit, PostToolUse, Stop, SessionEnd)
         event: String,
     },
     /// Summarize pending sessions through the provider chain
@@ -46,6 +46,9 @@ enum Cmd {
         /// Only process sessions idle for at least this long
         #[arg(long, default_value_t = 60_000)]
         settle_ms: u64,
+        /// Sleep this long first (hooks of agents without a session-end event)
+        #[arg(long, default_value_t = 0)]
+        wait_ms: u64,
     },
     /// Print the context that would be injected for the current directory
     Inject,
@@ -71,7 +74,7 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// Wire this binary into an agent's hooks (claude | codex | grok | all)
+    /// Wire this binary into an agent's hooks (claude | codex | grok | agy | all)
     Setup {
         agent: String,
         /// Take oboete's hook entries out again
@@ -98,7 +101,7 @@ enum Cmd {
         /// Also time N real `oboete hook` process spawns (startup + insert)
         #[arg(long, default_value_t = 30)]
         spawn_sample: usize,
-        /// Only replay events of this agent: claude | codex | grok | all
+        /// Only replay events of this agent: claude | codex | grok | agy | all
         #[arg(long, default_value = "claude")]
         agent: String,
     },
@@ -139,7 +142,10 @@ fn emit(text: &str) -> Result<()> {
 }
 
 fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
-    std::fs::create_dir_all(&home)?;
+    // Hooks create storage after the skip guards, inside their fail-open boundary.
+    if !matches!(&cmd, Cmd::Hook { .. }) {
+        std::fs::create_dir_all(&home)?;
+    }
     match cmd {
         Cmd::Hook { agent, event } => {
             // Fail-open: a hook must never break the agent.
@@ -148,7 +154,8 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Observe { settle_ms } => {
+        Cmd::Observe { settle_ms, wait_ms } => {
+            std::thread::sleep(std::time::Duration::from_millis(wait_ms));
             let stats = observe::run(&home, settle_ms)?;
             println!("{}", serde_json::to_string(&stats)?);
             Ok(())

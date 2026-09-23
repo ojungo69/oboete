@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS sessions(
   started_at INTEGER NOT NULL,
   ended_at INTEGER,
   last_event_at INTEGER NOT NULL,
-  injected_at INTEGER
+  injected_at INTEGER,
+  last_prompt_step INTEGER
 );
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY,
@@ -88,6 +89,8 @@ pub fn open(home: &Path) -> Result<Connection> {
     // are filled in here. ponytail: idempotent column checks; PRAGMA user_version once a migration
     // needs more than ADD COLUMN.
     ensure_column(&mut conn, "sessions", "injected_at", "INTEGER").context("migrate columns")?;
+    ensure_column(&mut conn, "sessions", "last_prompt_step", "INTEGER")
+        .context("migrate prompt cursor")?;
     ensure_autoincrement(&mut conn).context("migrate doc ids")?;
     ensure_fts(&mut conn).context("search index")?;
     Ok(conn)
@@ -233,7 +236,8 @@ pub fn upsert_session(
     Ok(())
 }
 
-/// Context was handed to this session (Claude/Codex at SessionStart, Grok at its first tool call).
+/// Context was handed to this session (Claude/Codex at SessionStart, Grok at its first tool call,
+/// agy at PreInvocation).
 pub fn mark_injected(conn: &Connection, id: &str, ts: i64) -> Result<()> {
     conn.execute(
         "UPDATE sessions SET injected_at=?2 WHERE id=?1",
@@ -252,6 +256,16 @@ pub fn injected(conn: &Connection, id: &str) -> Result<bool> {
         .optional()?
         .flatten();
     Ok(v.is_some())
+}
+
+/// Claim an agy USER_INPUT step inside the transaction that stores its prompt and raw event.
+/// The cursor survives observe deleting raw events; an older transcript cannot move it back.
+pub fn claim_prompt_step(conn: &Connection, id: &str, step: i64) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE sessions SET last_prompt_step=?2 WHERE id=?1
+         AND (last_prompt_step IS NULL OR last_prompt_step < ?2)",
+        params![id, step],
+    )? > 0)
 }
 
 pub fn end_session(conn: &Connection, id: &str, ts: i64) -> Result<()> {
@@ -480,7 +494,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sessions_table_from_m0_gains_injected_at() {
+    fn sessions_table_from_m0_gains_injection_and_prompt_cursors() {
         let dir = std::env::temp_dir().join(format!("oboete-db-m0-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         Connection::open(dir.join("oboete.db"))
@@ -505,9 +519,15 @@ mod tests {
         assert!(!injected(&conn, "s1").unwrap());
         mark_injected(&conn, "s1", 2).unwrap();
         assert!(injected(&conn, "s1").unwrap());
+        assert!(claim_prompt_step(&conn, "s1", 0).unwrap());
+        assert!(!claim_prompt_step(&conn, "s1", 0).unwrap());
+        assert!(claim_prompt_step(&conn, "s1", 3).unwrap());
+        assert!(!claim_prompt_step(&conn, "s1", 1).unwrap());
         // Reopening a current database is a no-op.
         drop(conn);
-        assert!(injected(&open(&dir).unwrap(), "s1").unwrap());
+        let conn = open(&dir).unwrap();
+        assert!(injected(&conn, "s1").unwrap());
+        assert!(!claim_prompt_step(&conn, "s1", 3).unwrap());
         std::fs::remove_dir_all(&dir).ok();
     }
 

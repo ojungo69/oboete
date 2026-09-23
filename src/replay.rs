@@ -39,8 +39,8 @@ pub fn run(
         let line = line.replace(ROOT_PLACEHOLDER, &root_str);
         let v: Value = serde_json::from_str(&line)?;
         let ev_agent = v["agent"].as_str().unwrap_or("");
-        let wanted = ev_agent == agent
-            || (agent == "all" && matches!(ev_agent, "claude" | "codex" | "grok"));
+        let wanted =
+            ev_agent == agent || (agent == "all" && crate::setup::AGENTS.contains(&ev_agent));
         if !wanted {
             continue;
         }
@@ -48,7 +48,7 @@ pub fn run(
         let started = Instant::now();
         let out = hook::handle(&conn, ev_agent, event, &v["payload"])?;
         micros.push(started.elapsed().as_micros());
-        if out.is_some() {
+        if out.as_deref().is_some_and(|s| s != "{}") {
             injected += 1;
         }
     }

@@ -9,6 +9,27 @@ correction wins. Points marked uncertain must be confirmed in one live session b
 
 Installed: 1.2.9 (`agy --version`; binary /home/jura/.local/bin/agy is a stripped Go ELF, go1.28 RC03; language server log says "Language server version: 1.2.9")
 
+### Verified live (2026-09-24, agy 1.2.9)
+
+A throwaway named hook in `~/.gemini/config/hooks.json` dumped every payload of four `agy --print` runs to files and was removed right after (the owner's global file did not exist before and does not now). Results override the rest of this section:
+
+- **Payloads carry only the common fields.** Every event had `conversationId`, `workspacePaths`, `transcriptPath` (always `…/brain/<id>/.system_generated/logs/transcript_full.jsonl`, the untruncated one), `artifactDirectoryPath`, `modelName`. Event extras: PreInvocation/PostInvocation `invocationNum` (0-based, counts up across the whole run) and `initialNumSteps`; PostToolUse `stepIdx`, `toolCall{name,args}`, `error`; Stop `executionNum`, `fullyIdle`, `terminationReason` (seen: `NO_TOOL_CALL`), `error`. **There is no `lastUserInput`, `executionId`, `result`, `finalModelOutput` or `parentConversationId`** (the binary's proto fields are not filled). So the prompt, tool output and assistant text must come from `transcriptPath`.
+- **transcript_full.jsonl** lines are steps: `{"step_index", "source", "type", "status", "created_at", "content", "thinking"?, "tool_calls"?}`. Lines are not in `step_index` order. The prompt is the `USER_INPUT` step (`source: USER_EXPLICIT`), wrapped in `<USER_REQUEST>…</USER_REQUEST><ADDITIONAL_METADATA>…` (plus `<USER_SETTINGS_CHANGE>` on the first turn). A tool's output is the step whose `step_index` equals the PostToolUse `stepIdx` (`content` like `The command exited with code 2.\nOutput:\n…`). A failed tool call can show up as a `GENERIC` step with `status: ERROR` and an `error` field while the hook's `error` is empty. The assistant's answer is the last `PLANNER_RESPONSE` with `content` (some have only `tool_calls`).
+- **`workspacePaths` is empty in `agy --print` without `--new-project`**, and then the model's tools run in `$HOME`, not the launch directory. With `--new-project` it is `["/abs/launch/dir"]`, a plain path. `conversation_summaries.db` shows interactive and `--new-project` conversations with a workspace URI. oboete should skip events with no workspace (no repo to file them under) rather than guess.
+- **SessionStart fires** (flat array works), once, before the first PreInvocation.
+- **PreInvocation injection works**: printing `{"injectSteps":[{"ephemeralMessage":"…"}]}` made the model answer from that text on the first invocation. Printing `{}` is accepted for every event registered here.
+- **Do not register PreToolUse**: a PreToolUse handler that prints `{}` made agy refuse the tool call ("Pre-tool hook rejected").
+- **`OBOETE_SKIP=1` set on the `agy` process reaches the hook** (inherited through the language server and `sh -c`), next to `ANTIGRAVITY_CONVERSATION_ID`. The self-capture guard can rely on it.
+- **Hooks run with the working directory `~/.gemini/config`**, as documented. A hook command under the Claude Code scratch directory (`/tmp/claude-1000/…`) did not run at all; one under `$HOME` did. Register the oboete binary by its absolute path.
+- **Workspace `.agents/hooks.json` was not picked up** by `agy --print` in a git-initialized directory under a trusted root (`/hooks` listed only the plugin hook). Use the global file.
+- Not verified: interactive TUI sessions (a tmux attempt produced no output), resume, and whether an ephemeral message is still visible on later turns.
+
+### Implemented (2026-09-24)
+
+- Implemented SessionStart, PreInvocation prompt capture, PostToolUse/failure, and Stop capture with prompt recovery. Workspace paths and `file://` URIs identify the repo; empty workspaces are skipped. Transcript reads use a single 256 KiB tail and step indices. Prompts reuse privacy/redaction handling; the transactional `sessions.last_prompt_step` cursor survives raw-event cleanup.
+- PreInvocation injects once through `injected_at` and `injectSteps[].ephemeralMessage`; all other responses, including skips and errors, are `{}`. Setup/`--remove`/`all` and doctor cover hooks and MCP with merge, one backup, and both files staged before either is replaced (an emptied file stays `{}`). PreToolUse is never registered. Windows rejects spaces and shell metacharacters in executable/custom-home paths.
+- Tests use the anonymized fixtures and temporary directories. Still unverified: interactive TUI sessions, resume, ephemeral-message visibility on later turns, and native Windows execution.
+
 ### Mechanism
 
 JSON command hooks in a `hooks.json` file. Global path: `~/.gemini/config/hooks.json`. It does not exist on this PC yet. Changelog: "/hooks wrote to ~/.gemini/antigravity-cli/hooks.json instead of the shared ~/.gemini/config/hooks.json", fixed. Other places agy loads hooks from: workspace `<repo>/.agents/hooks.json` (also `.agent/`, `_agents/`, `_agent/`; only after the folder is trusted) and plugin `plugins/<name>/hooks.json`. Do not use `~/.gemini/settings.json`, which is the Gemini CLI path.

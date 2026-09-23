@@ -2,7 +2,7 @@
 //! Claude Code, Codex and Grok Build share one JSON dialect; Grok also sends camelCase copies and
 //! runs Claude Code's hooks as a compatibility layer, which is handled in `resolve_agent`.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -35,30 +35,56 @@ const ENVELOPES: &[&str] = &[
 ];
 
 pub fn run_stdin(home: &Path, agent: &str, event: &str) -> Result<()> {
-    if std::env::var_os(SKIP_ENV).is_some() {
-        return Ok(());
+    run_io(
+        home,
+        agent,
+        event,
+        std::io::stdin().lock(),
+        std::io::stdout().lock(),
+    )
+}
+
+fn run_io(
+    home: &Path,
+    agent: &str,
+    event: &str,
+    mut input: impl Read,
+    mut output: impl Write,
+) -> Result<()> {
+    let result: Result<Option<String>> = (|| {
+        if std::env::var_os(SKIP_ENV).is_some() {
+            return Ok(None);
+        }
+        let mut raw = String::new();
+        input.read_to_string(&mut raw)?;
+        let payload: Value = if raw.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&raw)?
+        };
+        let Some(agent) = resolve_agent(agent, &payload, &grok_hooks_file()) else {
+            return Ok(None);
+        };
+        if (agent == "agy" && agy_workspace(&payload).is_none()) || is_agent_internal(&payload) {
+            return Ok(None);
+        }
+        std::fs::create_dir_all(home)?;
+        let conn = db::open(home)?;
+        let out = handle(&conn, agent, event, &payload)?;
+        if matches!(event, "Stop" | "SessionEnd") && std::env::var_os("OBOETE_NO_SPAWN").is_none() {
+            // agy has no SessionEnd: its last turn only becomes pending once it has settled, so
+            // this observer waits out the settle window instead of finding nothing now.
+            spawn_observe(home, (agent == "agy").then_some(AGY_OBSERVE_WAIT_MS));
+        }
+        Ok(out)
+    })();
+    if let Ok(Some(out)) = &result {
+        writeln!(output, "{out}")?;
+    } else if agent == "agy" {
+        // Strict protojson: no Claude-shaped output, including skip and error paths.
+        writeln!(output, "{{}}")?;
     }
-    let mut raw = String::new();
-    std::io::stdin().read_to_string(&mut raw)?;
-    let payload: Value = if raw.trim().is_empty() {
-        json!({})
-    } else {
-        serde_json::from_str(&raw)?
-    };
-    let Some(agent) = resolve_agent(agent, &payload, &grok_hooks_file()) else {
-        return Ok(());
-    };
-    if is_agent_internal(&payload) {
-        return Ok(());
-    }
-    let conn = db::open(home)?;
-    if let Some(out) = handle(&conn, agent, event, &payload)? {
-        println!("{out}");
-    }
-    if matches!(event, "Stop" | "SessionEnd") && std::env::var_os("OBOETE_NO_SPAWN").is_none() {
-        spawn_observe(home);
-    }
-    Ok(())
+    result.map(|_| ())
 }
 
 /// The hook file `oboete setup grok` writes. While it exists, Grok delivers its own events.
@@ -115,40 +141,162 @@ fn grok_delivers(grok_hooks: &Path) -> bool {
 const HOUSEKEEPING_DIRS: &[&str] = &[".codex/memories"];
 
 fn is_agent_internal(payload: &Value) -> bool {
-    let Some(cwd) = str_field(payload, &["cwd", "workspaceRoot"]) else {
+    let Some(cwd) = str_field(payload, &["cwd", "workspaceRoot"])
+        .map(str::to_owned)
+        .or_else(|| agy_workspace(payload))
+    else {
         return false;
     };
     let home = config::home_dir();
     HOUSEKEEPING_DIRS
         .iter()
-        .any(|d| Path::new(cwd).starts_with(home.join(d)))
+        .any(|d| Path::new(&cwd).starts_with(home.join(d)))
 }
 
-/// Store the event. Returns the hook's stdout JSON (context injection) when there is one.
+/// agy's hook cwd is its config directory, so only its explicit workspace can identify a repo.
+fn agy_workspace(payload: &Value) -> Option<String> {
+    let workspace = payload["workspacePaths"].as_array()?.first()?.as_str()?;
+    let path = if let Some(uri) = workspace.strip_prefix("file://") {
+        let uri = uri
+            .strip_prefix("localhost/")
+            .map_or_else(|| uri.to_string(), |path| format!("/{path}"));
+        let decoded = percent_encoding::percent_decode_str(&uri)
+            .decode_utf8()
+            .ok()?;
+        #[cfg(windows)]
+        let decoded = decoded
+            .strip_prefix('/')
+            .filter(|p| p.as_bytes().get(1) == Some(&b':'))
+            .unwrap_or(&decoded);
+        decoded.to_string()
+    } else {
+        workspace.to_string()
+    };
+    Path::new(&path).is_absolute().then_some(path)
+}
+
+/// Store the event. Returns stdout JSON for context injection, or an empty object for agy.
 pub fn handle(
     conn: &Connection,
     agent: &str,
     event: &str,
     payload: &Value,
 ) -> Result<Option<String>> {
-    let session_id =
-        str_field(payload, &["session_id", "sessionId", "conversation_id"]).unwrap_or("unknown");
-    let cwd = str_field(payload, &["cwd", "workspaceRoot"]).unwrap_or(".");
+    let workspace = (agent == "agy").then(|| agy_workspace(payload)).flatten();
+    if agent == "agy" && workspace.is_none() {
+        return Ok(Some("{}".into()));
+    }
+    let session_id = str_field(
+        payload,
+        &[
+            "session_id",
+            "sessionId",
+            "conversation_id",
+            "conversationId",
+        ],
+    )
+    .unwrap_or("unknown");
+    let cwd = workspace
+        .as_deref()
+        .or_else(|| str_field(payload, &["cwd", "workspaceRoot"]))
+        .unwrap_or(".");
     let repo_key = repo::key(Path::new(cwd));
     let ts = db::now_ms();
 
-    let prompt = (event == "UserPromptSubmit")
-        .then(|| clip(&strip_blocks(str_field(payload, &["prompt"]).unwrap_or(""))))
+    // agy has no prompt/output fields. Parse at most one bounded transcript tail per hook.
+    let steps: Vec<Value> =
+        if agent == "agy" && matches!(event, "PreInvocation" | "PostToolUse" | "Stop") {
+            str_field(payload, &["transcriptPath"])
+                .map(|p| transcript_tail(Path::new(p)))
+                .unwrap_or_default()
+                .lines()
+                .rev()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect()
+        } else {
+            Vec::new()
+        };
+    // File order is not step order. Select the newest explicit user step, then unwrap only
+    // USER_REQUEST: metadata and settings changes must never become part of the prompt.
+    let agy_prompt = if matches!(event, "PreInvocation" | "Stop") {
+        steps
+            .iter()
+            .filter(|s| s["type"] == "USER_INPUT" && s["source"] == "USER_EXPLICIT")
+            .max_by_key(|s| s["step_index"].as_i64())
+            .and_then(|s| {
+                let step = s["step_index"].as_i64().filter(|i| *i >= 0)?;
+                let (_, request) = s["content"].as_str()?.split_once("<USER_REQUEST>")?;
+                let (request, _) = request.split_once("</USER_REQUEST>")?;
+                Some((step, request))
+            })
+    } else {
+        None
+    };
+    let mut prompt = agy_prompt
+        .map(|(_, p)| p)
+        .or_else(|| {
+            (event == "UserPromptSubmit").then(|| str_field(payload, &["prompt"]).unwrap_or(""))
+        })
+        .map(|p| clip(&strip_blocks(p)))
         .filter(|p| !p.is_empty());
+    let tool_step = payload["stepIdx"].as_i64().and_then(|index| {
+        steps
+            .iter()
+            .find(|s| s["step_index"].as_i64() == Some(index))
+    });
+    let event = if agent == "agy"
+        && event == "PostToolUse"
+        && (payload["error"].as_str().is_some_and(|s| !s.is_empty())
+            || tool_step.is_some_and(|s| s["status"] == "ERROR"))
+    {
+        "PostToolUseFailure"
+    } else {
+        event
+    };
     let stored = match event {
         "SessionStart" => Some(json!({"source": payload.get("source")})),
-        "UserPromptSubmit" => prompt.as_ref().map(|p| json!({"prompt": p})),
-        "PostToolUse" | "PostToolUseFailure" => Some(json!({
-            "tool": str_field(payload, &["tool_name", "toolName"]).unwrap_or("?"),
-            "input": clip(&compact(field(payload, &["tool_input", "toolInput"]))),
-            "output": clip(&compact(field(payload, &["tool_response", "toolResult", "tool_output", "error"]))),
-            "failed": event == "PostToolUseFailure",
-        })),
+        "PostToolUse" | "PostToolUseFailure" => {
+            let tool = if agent == "agy" {
+                &payload["toolCall"]
+            } else {
+                payload
+            };
+            let output = if agent == "agy" {
+                tool_step
+                    .map(|s| {
+                        s.get("content")
+                            .filter(|v| v.as_str().is_some_and(|t| !t.is_empty()))
+                            .unwrap_or(&s["error"])
+                    })
+                    .unwrap_or(&Value::Null)
+            } else {
+                field(
+                    payload,
+                    &["tool_response", "toolResult", "tool_output", "error"],
+                )
+            };
+            Some(json!({
+                "tool": str_field(tool, &["tool_name", "toolName", "name"]).unwrap_or("?"),
+                "input": clip(&compact(field(tool, &["tool_input", "toolInput", "args"]))),
+                "output": clip(&compact(output)),
+                "failed": event == "PostToolUseFailure",
+            }))
+        }
+        "Stop" if agent == "agy" => {
+            // Only this turn's answer: a turn that ended without one must not reuse the last.
+            let turn_start = agy_prompt.map_or(-1, |(step, _)| step);
+            let text = steps
+                .iter()
+                .filter(|s| {
+                    s["type"] == "PLANNER_RESPONSE"
+                        && s["step_index"].as_i64().is_some_and(|i| i > turn_start)
+                        && s["content"].as_str().is_some_and(|t| !t.trim().is_empty())
+                })
+                .max_by_key(|s| s["step_index"].as_i64())
+                .and_then(|s| s["content"].as_str())
+                .unwrap_or("");
+            Some(json!({"assistant": clip(text)}))
+        }
         "Stop" => {
             let text = match str_field(payload, &["last_assistant_message", "lastAssistantMessage"])
             {
@@ -170,36 +318,56 @@ pub fn handle(
     // leave an event that belongs to no session and never gets summarized or removed.
     let tx = conn.unchecked_transaction()?;
     db::upsert_session(&tx, session_id, agent, &repo_key, cwd, ts)?;
+    if let Some((step, _)) = agy_prompt
+        && !db::claim_prompt_step(&tx, session_id, step)?
+    {
+        prompt = None;
+    }
     if event == "SessionEnd" {
         db::end_session(&tx, session_id, ts)?;
+    }
+    // The event feeds the summary and goes with it; the prompt itself is kept as a document.
+    if let Some(p) = prompt.as_deref() {
+        db::insert_event(
+            &tx,
+            session_id,
+            "UserPromptSubmit",
+            ts,
+            &json!({"prompt": p}).to_string(),
+        )?;
+        if !is_envelope(p) {
+            db::insert_prompt(&tx, session_id, ts, p)?;
+        }
     }
     if let Some(v) = stored {
         db::insert_event(&tx, session_id, event, ts, &v.to_string())?;
     }
-    // The event feeds the summary and goes with it; the prompt itself is kept as a document.
-    if let Some(p) = prompt.as_deref().filter(|p| !is_envelope(p)) {
-        db::insert_prompt(&tx, session_id, ts, p)?;
-    }
-    tx.commit()?;
-
     // Claude Code and Codex read context at SessionStart (not on resume: the transcript already
     // has it; after a compaction it is gone, so `compact` gets it again). Grok ignores
-    // SessionStart stdout, so its context rides on the first tool call.
+    // SessionStart stdout, so its context rides on the first tool call. agy reads PreInvocation.
+    // The check and marker share the write transaction so simultaneous hooks cannot inject twice.
     let inject_now = match event {
-        "SessionStart" => agent != "grok" && payload["source"].as_str() != Some("resume"),
-        "PreToolUse" => agent == "grok" && !db::injected(conn, session_id)?,
+        "SessionStart" => {
+            !matches!(agent, "grok" | "agy") && payload["source"].as_str() != Some("resume")
+        }
+        "PreToolUse" => agent == "grok" && !db::injected(&tx, session_id)?,
+        "PreInvocation" => agent == "agy" && !db::injected(&tx, session_id)?,
         _ => false,
     };
+    let mut out = (agent == "agy").then(|| "{}".into());
     if inject_now {
-        let text = inject::context(conn, &repo_key)?;
+        let text = inject::context(&tx, &repo_key)?;
         if !text.is_empty() {
-            db::mark_injected(conn, session_id, ts)?;
-            let out =
-                json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}});
-            return Ok(Some(out.to_string()));
+            db::mark_injected(&tx, session_id, ts)?;
+            out = Some(if agent == "agy" {
+                json!({"injectSteps": [{"ephemeralMessage": text}]})
+            } else {
+                json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
+            }.to_string());
         }
     }
-    Ok(None)
+    tx.commit()?;
+    Ok(out)
 }
 
 /// The prompt without the blocks in `STRIP_BLOCKS` (`<tag>` or `<tag attr…>` up to its own
@@ -296,8 +464,8 @@ fn clip(s: &str) -> String {
     format!("{head}\n…[clipped, {total} chars in full]")
 }
 
-/// Last assistant `output_text` in a Codex rollout JSONL, reading only the file's tail.
-fn last_assistant_in_transcript(path: &Path) -> String {
+/// A fixed-size tail even if the agent appends while we read. Discard the first partial line.
+fn transcript_tail(path: &Path) -> String {
     const TAIL: u64 = 256 * 1024;
     let Ok(mut f) = std::fs::File::open(path) else {
         return String::new();
@@ -310,10 +478,21 @@ fn last_assistant_in_transcript(path: &Path) -> String {
         }
     }
     let mut bytes = Vec::new();
-    if f.read_to_end(&mut bytes).is_err() {
+    if f.take(TAIL).read_to_end(&mut bytes).is_err() {
         return String::new();
     }
-    let text = String::from_utf8_lossy(&bytes);
+    if len > TAIL {
+        let Some(newline) = bytes.iter().position(|b| *b == b'\n') else {
+            return String::new();
+        };
+        bytes.drain(..=newline);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Last assistant `output_text` in a Codex rollout JSONL, reading only the file's tail.
+fn last_assistant_in_transcript(path: &Path) -> String {
+    let text = transcript_tail(path);
     let mut last = String::new();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -337,16 +516,20 @@ fn last_assistant_in_transcript(path: &Path) -> String {
 
 /// Detached `oboete observe` in its own process group, so the agent exiting right after
 /// SessionEnd does not take it down; the lock inside observe makes duplicates harmless.
-fn spawn_observe(home: &Path) {
+/// The observe settle window (60 s by default) plus a margin.
+const AGY_OBSERVE_WAIT_MS: u64 = 65_000;
+
+fn spawn_observe(home: &Path, wait_ms: Option<u64>) {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,
     };
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--home")
-        .arg(home)
-        .arg("observe")
-        .stdin(std::process::Stdio::null())
+    cmd.arg("--home").arg(home).arg("observe");
+    if let Some(ms) = wait_ms {
+        cmd.arg("--wait-ms").arg(ms.to_string());
+    }
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     #[cfg(unix)]
@@ -362,9 +545,505 @@ mod tests {
     use super::*;
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("oboete-hook-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!(
+            "oboete-hook-{name}-{}-{}",
+            std::process::id(),
+            db::now_ms()
+        ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    fn agy_fixture(dir: &Path) -> Value {
+        let transcript = dir.join("transcript_full.jsonl");
+        std::fs::write(
+            &transcript,
+            include_str!("testdata/agy/transcript_full.jsonl"),
+        )
+        .unwrap();
+        let mut payloads: Value =
+            serde_json::from_str(include_str!("testdata/agy/payloads.json")).unwrap();
+        for payload in payloads.as_object_mut().unwrap().values_mut() {
+            payload["transcriptPath"] = json!(transcript);
+            payload["workspacePaths"] = json!([dir]);
+        }
+        payloads
+    }
+
+    #[test]
+    fn agy_session_start_uses_conversation_and_workspace_without_injection() {
+        let dir = tmp("agy-start");
+        let conn = db::open(&dir).unwrap();
+        let payloads = agy_fixture(&dir);
+        let payload = &payloads["SessionStart"];
+        assert_eq!(
+            handle(&conn, "agy", "SessionStart", payload).unwrap(),
+            Some("{}".into())
+        );
+        let id = payload["conversationId"].as_str().unwrap();
+        let events = db::session_events(&conn, id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "SessionStart");
+        let (agent, cwd, repo): (String, String, String) = conn
+            .query_row(
+                "SELECT agent, cwd, repo FROM sessions WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(agent, "agy");
+        assert_eq!(cwd, dir.to_string_lossy());
+        assert_eq!(repo, repo::key(&dir));
+        assert!(!db::injected(&conn, id).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agy_prompt_is_captured_once_even_after_observe_deletes_raw_events() {
+        let dir = tmp("agy-prompt");
+        let mut conn = db::open(&dir).unwrap();
+        let mut payloads = agy_fixture(&dir);
+        let id = payloads["PreInvocation"]["conversationId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // A failed prompt insert must not advance the durable cursor or leave its raw event.
+        conn.execute_batch(
+            "CREATE TRIGGER refuse_prompt BEFORE INSERT ON prompts
+            BEGIN SELECT RAISE(ABORT, 'test insert failure'); END;",
+        )
+        .unwrap();
+        assert!(handle(&conn, "agy", "PreInvocation", &payloads["PreInvocation"]).is_err());
+        conn.execute_batch("DROP TRIGGER refuse_prompt;").unwrap();
+        for invocation in 0..3 {
+            payloads["PreInvocation"]["invocationNum"] = json!(invocation);
+            handle(&conn, "agy", "PreInvocation", &payloads["PreInvocation"]).unwrap();
+        }
+        handle(&conn, "agy", "Stop", &payloads["Stop"]).unwrap();
+        let expected = "Read the file hello.txt with your file viewing tool, then run the shell command 'ls /nonexistent-dir' and tell me the secret word and the error.";
+        let prompts: Vec<String> = conn
+            .prepare("SELECT body FROM prompts")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(prompts, [expected]);
+        let events = db::session_events(&conn, &id).unwrap();
+        let prompts: Vec<_> = events
+            .iter()
+            .filter(|e| e.event == "UserPromptSubmit")
+            .collect();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&prompts[0].payload).unwrap(),
+            json!({"prompt":expected})
+        );
+        assert_eq!(
+            crate::search::search(&conn, "nonexistent-dir", None, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        db::apply_batch(
+            &mut conn,
+            &db::PendingSession {
+                id: id.clone(),
+                agent: "agy".into(),
+                repo: repo::key(&dir),
+                last_event_at: db::now_ms(),
+            },
+            "test",
+            "",
+            &[],
+            i64::MAX,
+        )
+        .unwrap();
+        assert!(db::session_events(&conn, &id).unwrap().is_empty());
+        drop(conn);
+        let conn = db::open(&dir).unwrap();
+        handle(&conn, "agy", "PreInvocation", &payloads["PreInvocation"]).unwrap();
+        handle(&conn, "agy", "Stop", &payloads["Stop"]).unwrap();
+        assert!(
+            db::session_events(&conn, &id)
+                .unwrap()
+                .iter()
+                .all(|e| e.event != "UserPromptSubmit")
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM prompts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agy_stop_without_an_answer_does_not_reuse_the_previous_turns() {
+        let dir = tmp("agy-noanswer");
+        let conn = db::open(&dir).unwrap();
+        let payloads = agy_fixture(&dir);
+        let transcript = dir.join("transcript_full.jsonl");
+        let mut text = std::fs::read_to_string(&transcript).unwrap();
+        text.push_str(&format!(
+            "{}\n",
+            json!({"step_index": 11, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE",
+                   "content": "<USER_REQUEST>\nsecond question\n</USER_REQUEST>"})
+        ));
+        std::fs::write(&transcript, text).unwrap();
+        handle(&conn, "agy", "Stop", &payloads["Stop"]).unwrap();
+        let id = payloads["Stop"]["conversationId"].as_str().unwrap();
+        let events = db::session_events(&conn, id).unwrap();
+        let stop = events.iter().find(|e| e.event == "Stop").unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&stop.payload).unwrap(),
+            json!({"assistant": ""})
+        );
+        assert!(events.iter().any(|e| e.payload.contains("second question")));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agy_tool_outputs_match_step_indices_and_failures_have_both_signals() {
+        let dir = tmp("agy-tool");
+        let conn = db::open(&dir).unwrap();
+        let payloads = agy_fixture(&dir);
+        let mut payload = payloads["PostToolUse"].clone();
+        let id = payload["conversationId"].as_str().unwrap().to_owned();
+        assert_eq!(
+            handle(&conn, "agy", "PostToolUse", &payload).unwrap(),
+            Some("{}".into())
+        );
+        // Step 2 is before step 1 in the real fixture; the hook itself reports no error.
+        payload["stepIdx"] = json!(2);
+        handle(&conn, "agy", "PostToolUse", &payload).unwrap();
+        // A hook error also fails a step that the transcript calls DONE.
+        payload["stepIdx"] = json!(3);
+        payload["error"] = json!("tool hook failed");
+        handle(&conn, "agy", "PostToolUse", &payload).unwrap();
+        let events = db::session_events(&conn, &id).unwrap();
+        assert_eq!(
+            events.iter().map(|e| e.event.as_str()).collect::<Vec<_>>(),
+            ["PostToolUse", "PostToolUseFailure", "PostToolUseFailure"]
+        );
+        let value: Value = serde_json::from_str(&events[0].payload).unwrap();
+        assert_eq!(value["tool"], "run_command");
+        assert_eq!(value["input"], payload["toolCall"]["args"].to_string());
+        assert_eq!(
+            value["output"],
+            "Created At: 2026-09-24T06:55:35+09:00\nCompleted At: 2026-09-24T06:55:35+09:00\n\nThe command exited with code 2.\nOutput:\nls: cannot access '/nonexistent-dir': No such file or directory\r\n\n"
+        );
+        assert_eq!(value["failed"], false);
+        let failure: Value = serde_json::from_str(&events[1].payload).unwrap();
+        assert_eq!(failure["failed"], true);
+        assert!(
+            failure["output"]
+                .as_str()
+                .unwrap()
+                .contains("Encountered error in step execution")
+        );
+
+        // Some error steps have no content at all.
+        std::fs::write(
+            dir.join("transcript_full.jsonl"),
+            "{\"step_index\":3,\"status\":\"ERROR\",\"error\":\"permission denied\"}\n",
+        )
+        .unwrap();
+        payload["error"] = json!("");
+        handle(&conn, "agy", "PostToolUse", &payload).unwrap();
+        let events = db::session_events(&conn, &id).unwrap();
+        assert_eq!(events[3].event, "PostToolUseFailure");
+        let failure: Value = serde_json::from_str(&events[3].payload).unwrap();
+        assert_eq!(failure["output"], "permission denied");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agy_stop_recovers_unflushed_prompt_before_the_assistant_answer() {
+        let dir = tmp("agy-stop");
+        let conn = db::open(&dir).unwrap();
+        let payloads = agy_fixture(&dir);
+        let transcript = dir.join("transcript_full.jsonl");
+        std::fs::remove_file(&transcript).unwrap();
+        handle(&conn, "agy", "PreInvocation", &payloads["PreInvocation"]).unwrap();
+        std::fs::write(
+            &transcript,
+            include_str!("testdata/agy/transcript_full.jsonl"),
+        )
+        .unwrap();
+        assert_eq!(
+            handle(&conn, "agy", "Stop", &payloads["Stop"]).unwrap(),
+            Some("{}".into())
+        );
+        let id = payloads["Stop"]["conversationId"].as_str().unwrap();
+        let events = db::session_events(&conn, id).unwrap();
+        assert_eq!(
+            events.iter().map(|e| e.event.as_str()).collect::<Vec<_>>(),
+            ["UserPromptSubmit", "Stop"]
+        );
+        let answer: Value = serde_json::from_str(&events[1].payload).unwrap();
+        assert_eq!(
+            answer["assistant"],
+            "[hello.txt](file:///home/dev/proj/hello.txt) の確認およびコマンド実行結果は以下のとおりです。\n\n- **秘密の言葉（secret word）**: `pineapple`\n- **コマンド実行時のエラー**:\n  ```text\n  ls: cannot access '/nonexistent-dir': No such file or directory\n  ```"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agy_injects_context_once_at_preinvocation_in_its_own_json_shape() {
+        let dir = tmp("agy-inject");
+        let mut conn = db::open(&dir).unwrap();
+        let payloads = agy_fixture(&dir);
+        assert_eq!(
+            handle(&conn, "agy", "PreInvocation", &payloads["PreInvocation"]).unwrap(),
+            Some("{}".into())
+        );
+        let id = payloads["PreInvocation"]["conversationId"]
+            .as_str()
+            .unwrap();
+        assert!(!db::injected(&conn, id).unwrap());
+        db::apply_batch(
+            &mut conn,
+            &db::PendingSession {
+                id: id.into(),
+                agent: "agy".into(),
+                repo: repo::key(&dir),
+                last_event_at: db::now_ms(),
+            },
+            "test",
+            "earlier summary",
+            &[],
+            i64::MAX,
+        )
+        .unwrap();
+        assert_eq!(
+            handle(&conn, "agy", "SessionStart", &payloads["SessionStart"]).unwrap(),
+            Some("{}".into())
+        );
+        let out = handle(&conn, "agy", "PreInvocation", &payloads["PreInvocation"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&out).unwrap(),
+            json!({
+                "injectSteps": [{"ephemeralMessage": "# oboete: what happened before in this repository\n\n## Recent sessions (newest first)\n- earlier summary\n"}]
+            })
+        );
+        assert!(db::injected(&conn, id).unwrap());
+        drop(conn);
+        let conn = db::open(&dir).unwrap();
+        for event in ["PreInvocation", "Stop", "SessionStart", "PreInvocation"] {
+            assert_eq!(
+                handle(&conn, "agy", event, &payloads[event]).unwrap(),
+                Some("{}".into())
+            );
+        }
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let dir = dir.clone();
+                let mut payload = payloads["PreInvocation"].clone();
+                payload["conversationId"] = json!("simultaneous");
+                std::thread::spawn(move || {
+                    handle(&db::open(&dir).unwrap(), "agy", "PreInvocation", &payload)
+                        .unwrap()
+                        .unwrap()
+                })
+            })
+            .collect();
+        let responses: Vec<_> = workers.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(responses.iter().filter(|s| s.as_str() != "{}").count(), 1);
+        let events = db::session_events(&conn, "simultaneous").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "UserPromptSubmit");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agy_stdout_is_an_object_even_when_input_or_storage_fails() {
+        let dir = tmp("agy-fail-open");
+        let payloads = agy_fixture(&dir);
+        let mut output = Vec::new();
+        assert!(
+            run_io(
+                &dir,
+                "agy",
+                "SessionStart",
+                &b"invalid JSON"[..],
+                &mut output
+            )
+            .is_err()
+        );
+        assert_eq!(output, b"{}\n");
+        let blocked_home = dir.join("not-a-directory");
+        std::fs::write(&blocked_home, "x").unwrap();
+        output.clear();
+        assert!(
+            run_io(
+                &blocked_home,
+                "agy",
+                "SessionStart",
+                payloads["SessionStart"].to_string().as_bytes(),
+                &mut output
+            )
+            .is_err()
+        );
+        assert_eq!(output, b"{}\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agy_empty_workspaces_do_not_create_storage_and_file_uris_are_accepted() {
+        let dir = tmp("agy-workspaces");
+        let conn = db::open(&dir).unwrap();
+        let mut payloads = agy_fixture(&dir);
+        let unused_home = dir.join("unused");
+        for (event, payload) in payloads.as_object_mut().unwrap() {
+            payload["workspacePaths"] = json!([]);
+            // Neither a Claude-shaped field nor the process cwd can stand in for a workspace.
+            payload["cwd"] = json!(dir);
+            assert_eq!(
+                handle(&conn, "agy", event, payload).unwrap(),
+                Some("{}".into())
+            );
+            let mut output = Vec::new();
+            run_io(
+                &unused_home,
+                "agy",
+                event,
+                payload.to_string().as_bytes(),
+                &mut output,
+            )
+            .unwrap();
+            assert_eq!(output, b"{}\n");
+        }
+        assert!(!unused_home.exists());
+        for table in ["sessions", "events", "prompts", "fts"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0, "{table}");
+        }
+        let workspace = dir.join("workspace with spaces");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let payload = &mut payloads["SessionStart"];
+        let uri_path = workspace
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace(' ', "%20");
+        payload["workspacePaths"] = json!([format!(
+            "file://{}{uri_path}",
+            if cfg!(windows) { "/" } else { "" }
+        )]);
+        handle(&conn, "agy", "SessionStart", payload).unwrap();
+        let cwd: String = conn
+            .query_row("SELECT cwd FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(Path::new(&cwd), workspace);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agy_later_steps_use_the_shared_prompt_privacy_and_envelope_rules() {
+        use std::io::Write;
+        let dir = tmp("agy-prompt-rules");
+        let conn = db::open(&dir).unwrap();
+        let payloads = agy_fixture(&dir);
+        let payload = &payloads["PreInvocation"];
+        let transcript = dir.join("transcript_full.jsonl");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        for (index, request) in [
+            (11, "same request"),
+            (12, "same request"),
+            (13, "<private>private only</private>"),
+            (14, "<task-notification>done</task-notification>"),
+            (
+                15,
+                "<hook_context>not asked</hook_context>key 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",
+            ),
+        ] {
+            writeln!(file, "{}", json!({"step_index":index, "type":"USER_INPUT", "source":"USER_EXPLICIT",
+                "content":format!("<USER_REQUEST>{request}</USER_REQUEST><ADDITIONAL_METADATA>not asked</ADDITIONAL_METADATA>")})).unwrap();
+            // Later file lines can have lower indices; implicit input is never the user's turn.
+            writeln!(
+                file,
+                "{}",
+                include_str!("testdata/agy/transcript_full.jsonl")
+                    .lines()
+                    .next()
+                    .unwrap()
+            )
+            .unwrap();
+            writeln!(file, "{}", json!({"step_index":99, "type":"USER_INPUT", "source":"MODEL", "content":"<USER_REQUEST>not asked</USER_REQUEST>"})).unwrap();
+            for _ in 0..2 {
+                handle(&conn, "agy", "PreInvocation", payload).unwrap();
+            }
+        }
+        let prompts: Vec<String> = conn
+            .prepare("SELECT body FROM prompts ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(prompts, ["same request", "same request", "key [REDACTED]"]);
+        let events =
+            db::session_events(&conn, payload["conversationId"].as_str().unwrap()).unwrap();
+        assert_eq!(events.len(), 4);
+        assert!(events.iter().all(|e| !e.payload.contains("private only")
+            && !e.payload.contains("not asked")
+            && !e.payload.contains("gsk_")));
+        assert!(events[2].payload.contains("task-notification"));
+        drop(file);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agy_reads_only_a_bounded_tail_and_uses_step_order_for_the_last_answer() {
+        use std::io::Write;
+        let dir = tmp("agy-tail");
+        let conn = db::open(&dir).unwrap();
+        let payloads = agy_fixture(&dir);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("transcript_full.jsonl"))
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"step_index":11, "type":"GENERIC", "content":"x".repeat(2 * 1024 * 1024)})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"step_index":14, "type":"PLANNER_RESPONSE", "content":"latest answer"})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"step_index":12, "type":"PLANNER_RESPONSE", "content":"earlier answer"})
+        )
+        .unwrap();
+        writeln!(file, "{}", json!({"step_index":15, "type":"PLANNER_RESPONSE", "content":"  ", "thinking":"never captured"})).unwrap();
+        // A partial final write must not hide the last complete response.
+        write!(file, "{{\"step_index\":16").unwrap();
+        for event in ["PreInvocation", "PostToolUse", "Stop"] {
+            handle(&conn, "agy", event, &payloads[event]).unwrap();
+        }
+        let events =
+            db::session_events(&conn, payloads["Stop"]["conversationId"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(events.len(), 2); // The prompt and old tool output are outside the tail.
+        let tool: Value = serde_json::from_str(&events[0].payload).unwrap();
+        assert_eq!(tool["output"], "");
+        let answer: Value = serde_json::from_str(&events[1].payload).unwrap();
+        assert_eq!(answer, json!({"assistant":"latest answer"}));
+        drop(file);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
