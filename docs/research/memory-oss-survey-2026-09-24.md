@@ -114,7 +114,7 @@
 
 - Jev / Laya と類似モデルの比較は、提案書 §2.10 に書きました (この 6 観点とは別に、一次情報で確認)。§2.10 (b) の「まず要約の指示文で直す」段が、本書の候補 3・4 にあたります。
 - claude-mem の decision 3,902 件のうち提案らしい語を含むのが約 40%、上書きらしい語を含むのが約 26%、`type` に XML が漏れた行が 141 件という数字は、依頼文にある正規表現での見積りで、この調査では再現していません。
-- **`kind` の検査が無い (oboete のコードで確認した事実)**: `src/observe.rs` の `parse_observations` は、要約器が返した `kind` を決められた種類と照らさずにそのまま保存しています (JSON schema には種類の一覧がありますが、Groq の strict 以外の CLI の provider がそれを必ず守るかは未確認)。claude-mem の 141 行と同じ種類の事故を防ぐ数行の修正で、評価の合否は要りません。反証役の確認を通っていない案なので候補表には入れていません。
+- **`kind` の検査 (この調査で見つけ、同じ PR で直した)**: `src/observe.rs` の `parse_observations` は、要約器が返した `kind` を決められた種類と照らさずに保存していた (JSON schema の一覧を CLI の provider が守る保証は無い)。PR #31 で、一覧に無い `kind` は `discovery` として保存するようにし、テストを 1 本足した。claude-mem の 141 行と同じ種類の事故を防ぐため。
 - 反証役が確認していない案 (調査担当が挙げたが、一次情報で確かめていないもの):
   - 「覚えておいて」と明示された訂正だけを、要約を通さずすぐ書く道 ([LangMem](https://langchain-ai.github.io/langmem/concepts/conceptual_guide/) の hot path と background の区別)。
   - 書き込み時に LLM が 1〜10 の重要度を付ける ([Generative Agents](https://arxiv.org/pdf/2304.03442))。
