@@ -72,7 +72,9 @@ fn run_io(
         let conn = db::open(home)?;
         let out = handle(&conn, agent, event, &payload)?;
         if matches!(event, "Stop" | "SessionEnd") && std::env::var_os("OBOETE_NO_SPAWN").is_none() {
-            spawn_observe(home);
+            // agy has no SessionEnd: its last turn only becomes pending once it has settled, so
+            // this observer waits out the settle window instead of finding nothing now.
+            spawn_observe(home, (agent == "agy").then_some(AGY_OBSERVE_WAIT_MS));
         }
         Ok(out)
     })();
@@ -281,10 +283,13 @@ pub fn handle(
             }))
         }
         "Stop" if agent == "agy" => {
+            // Only this turn's answer: a turn that ended without one must not reuse the last.
+            let turn_start = agy_prompt.map_or(-1, |(step, _)| step);
             let text = steps
                 .iter()
                 .filter(|s| {
                     s["type"] == "PLANNER_RESPONSE"
+                        && s["step_index"].as_i64().is_some_and(|i| i > turn_start)
                         && s["content"].as_str().is_some_and(|t| !t.trim().is_empty())
                 })
                 .max_by_key(|s| s["step_index"].as_i64())
@@ -511,16 +516,20 @@ fn last_assistant_in_transcript(path: &Path) -> String {
 
 /// Detached `oboete observe` in its own process group, so the agent exiting right after
 /// SessionEnd does not take it down; the lock inside observe makes duplicates harmless.
-fn spawn_observe(home: &Path) {
+/// The observe settle window (60 s by default) plus a margin.
+const AGY_OBSERVE_WAIT_MS: u64 = 65_000;
+
+fn spawn_observe(home: &Path, wait_ms: Option<u64>) {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,
     };
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--home")
-        .arg(home)
-        .arg("observe")
-        .stdin(std::process::Stdio::null())
+    cmd.arg("--home").arg(home).arg("observe");
+    if let Some(ms) = wait_ms {
+        cmd.arg("--wait-ms").arg(ms.to_string());
+    }
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     #[cfg(unix)]
@@ -666,6 +675,31 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM prompts", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agy_stop_without_an_answer_does_not_reuse_the_previous_turns() {
+        let dir = tmp("agy-noanswer");
+        let conn = db::open(&dir).unwrap();
+        let payloads = agy_fixture(&dir);
+        let transcript = dir.join("transcript_full.jsonl");
+        let mut text = std::fs::read_to_string(&transcript).unwrap();
+        text.push_str(&format!(
+            "{}\n",
+            json!({"step_index": 11, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE",
+                   "content": "<USER_REQUEST>\nsecond question\n</USER_REQUEST>"})
+        ));
+        std::fs::write(&transcript, text).unwrap();
+        handle(&conn, "agy", "Stop", &payloads["Stop"]).unwrap();
+        let id = payloads["Stop"]["conversationId"].as_str().unwrap();
+        let events = db::session_events(&conn, id).unwrap();
+        let stop = events.iter().find(|e| e.event == "Stop").unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&stop.payload).unwrap(),
+            json!({"assistant": ""})
+        );
+        assert!(events.iter().any(|e| e.payload.contains("second question")));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -46,6 +46,9 @@ enum Cmd {
         /// Only process sessions idle for at least this long
         #[arg(long, default_value_t = 60_000)]
         settle_ms: u64,
+        /// Sleep this long first (hooks of agents without a session-end event)
+        #[arg(long, default_value_t = 0)]
+        wait_ms: u64,
     },
     /// Print the context that would be injected for the current directory
     Inject,
@@ -151,7 +154,8 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Observe { settle_ms } => {
+        Cmd::Observe { settle_ms, wait_ms } => {
+            std::thread::sleep(std::time::Duration::from_millis(wait_ms));
             let stats = observe::run(&home, settle_ms)?;
             println!("{}", serde_json::to_string(&stats)?);
             Ok(())
