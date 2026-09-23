@@ -300,42 +300,48 @@ fn scratch_dir() -> Result<Scratch, CallError> {
     Ok(Scratch(dir))
 }
 
-/// Run a subscription CLI headless, with the smallest configuration each one allows: no hooks,
-/// no tools, no session persistence, no user settings or MCP servers where the CLI can skip them.
-fn cli_headless(
+/// The command for one headless CLI run, with the smallest configuration each one allows: no
+/// hooks, no tools, no session persistence, no user settings or MCP servers where the CLI can skip
+/// them. The prompt never goes on the command line (any local user can read another process's
+/// arguments): it is piped to stdin (claude, codex, and agy as one stream-json turn) or written
+/// into the private scratch directory (grok's --prompt-file). Returns what to write to stdin.
+fn headless_command(
     cli: &str,
     model: Option<&str>,
-    timeout_s: u64,
+    dir: &Path,
     prompt: &str,
-    schema: &Value,
-) -> Result<Value, CallError> {
-    let schema_text = schema.to_string();
-    let scratch = scratch_dir()?;
-    let last = scratch.0.join("last.json");
+    schema_text: &str,
+) -> Result<(Command, Option<String>), CallError> {
+    let write = |name: &str, text: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, text).map_err(|e| CallError::other(format!("write {name}: {e}")))?;
+        Ok::<_, CallError>(path)
+    };
     let mut cmd = Command::new(cli);
-    match cli {
+    let stdin = match cli {
         "agy" => {
+            // `--print=` keeps -p from taking the next flag as its prompt; the turn comes on stdin.
+            cmd.args(["--print=", "--input-format", "stream-json"]);
             cmd.args([
-                "-p",
-                prompt,
                 "--output-format",
-                "json",
+                "stream-json",
                 "--json-schema",
-                &schema_text,
+                schema_text,
             ]);
             cmd.args(["--new-project", "--dangerously-skip-permissions"]);
             if let Some(m) = model {
                 cmd.args(["--model", m]);
             }
+            let turn = json!({"event": "user", "message": {"role": "user", "content": prompt}});
+            Some(format!("{turn}\n"))
         }
         "claude" => {
             cmd.args([
                 "-p",
-                prompt,
                 "--output-format",
                 "json",
                 "--json-schema",
-                &schema_text,
+                schema_text,
             ]);
             cmd.args([
                 "--setting-sources",
@@ -352,28 +358,23 @@ fn cli_headless(
             if let Some(m) = model {
                 cmd.args(["--model", m]);
             }
+            Some(prompt.to_owned())
         }
         "grok" => {
-            cmd.args([
-                "-p",
-                prompt,
-                "--output-format",
-                "json",
-                "--json-schema",
-                &schema_text,
-            ]);
+            cmd.arg("--prompt-file").arg(write("task.md", prompt)?);
+            cmd.args(["--output-format", "json", "--json-schema", schema_text]);
             cmd.args(["--tools", "", "--max-turns", "1"]);
             if let Some(m) = model {
                 cmd.args(["--model", m]);
             }
+            None
         }
         "codex" => {
-            let schema_file = scratch.0.join("schema.json");
-            std::fs::write(&schema_file, &schema_text)
-                .map_err(|e| CallError::other(format!("write schema: {e}")))?;
-            cmd.args(["exec", prompt, "--output-schema"])
-                .arg(&schema_file);
-            cmd.arg("-o").arg(&last);
+            // Without a PROMPT argument, codex exec reads the instructions from stdin.
+            cmd.arg("exec")
+                .arg("--output-schema")
+                .arg(write("schema.json", schema_text)?);
+            cmd.arg("-o").arg(dir.join("last.json"));
             cmd.args([
                 "--ephemeral",
                 "--skip-git-repo-check",
@@ -384,17 +385,36 @@ fn cli_headless(
             if let Some(m) = model {
                 cmd.args(["-c", &format!("model={m}")]);
             }
+            Some(prompt.to_owned())
         }
         other => {
             return Err(CallError::other(format!(
                 "unsupported cli provider {other}"
             )));
         }
-    }
+    };
+    Ok((cmd, stdin))
+}
+
+/// Run a subscription CLI headless (see `headless_command`) and return its structured answer.
+fn cli_headless(
+    cli: &str,
+    model: Option<&str>,
+    timeout_s: u64,
+    prompt: &str,
+    schema: &Value,
+) -> Result<Value, CallError> {
+    let scratch = scratch_dir()?;
+    let last = scratch.0.join("last.json");
+    let (mut cmd, stdin) = headless_command(cli, model, &scratch.0, prompt, &schema.to_string())?;
     // Keep the CLI out of the user's repo and away from the parent's secrets-bearing env, and
     // make sure our own hooks ignore the summarizer's session.
     cmd.current_dir(&scratch.0)
-        .stdin(Stdio::null())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env(hook::SKIP_ENV, "1")
@@ -411,6 +431,14 @@ fn cli_headless(
     let mut child = cmd
         .spawn()
         .map_err(|e| CallError::other(format!("spawn {cli}: {e}")))?;
+    // Feed stdin from a thread: the prompt can exceed the pipe buffer while the child is still
+    // starting up, and a child that exits without reading just makes the write fail.
+    let feeder = child.stdin.take().zip(stdin).map(|(mut w, text)| {
+        std::thread::spawn(move || {
+            use std::io::Write;
+            w.write_all(text.as_bytes()).ok();
+        })
+    });
     let deadline = Instant::now() + Duration::from_secs(timeout_s);
     let status = loop {
         match child.try_wait() {
@@ -432,6 +460,9 @@ fn cli_headless(
     let out = child
         .wait_with_output()
         .map_err(|e| CallError::other(format!("output {cli}: {e}")))?;
+    if let Some(f) = feeder {
+        f.join().ok();
+    }
     if !status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(CallError::other(format!(
@@ -439,11 +470,19 @@ fn cli_headless(
             err.chars().take(300).collect::<String>()
         )));
     }
-    let text = if cli == "codex" {
-        std::fs::read_to_string(&last)
-            .map_err(|_| CallError::other("invalid output: codex wrote no last message"))?
-    } else {
-        String::from_utf8_lossy(&out.stdout).into_owned()
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let text = match cli {
+        "codex" => std::fs::read_to_string(&last)
+            .map_err(|_| CallError::other("invalid output: codex wrote no last message"))?,
+        // stream-json: one event per line; the answer is in the last `result` event.
+        "agy" => stdout
+            .lines()
+            .rev()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| v["event"] == "result")
+            .map(|v| v["result"].to_string())
+            .ok_or_else(|| CallError::other("invalid output: agy printed no result event"))?,
+        _ => stdout.into_owned(),
     };
     extract_structured(cli, &text)
 }
@@ -475,6 +514,33 @@ fn extract_structured(cli: &str, text: &str) -> Result<Value, CallError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_prompts_stay_off_the_command_line() {
+        let dir = std::env::temp_dir().join(format!("oboete-argv-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prompt = "SECRET-SESSION-TEXT 秘密";
+        for cli in ["agy", "claude", "grok", "codex"] {
+            let (cmd, stdin) = headless_command(cli, Some("m"), &dir, prompt, "{}").unwrap();
+            let on_stdin = stdin.is_some_and(|t| t.contains(prompt));
+            let args: Vec<String> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                args.iter().all(|a| !a.contains("SECRET-SESSION-TEXT")),
+                "{cli}: {args:?}"
+            );
+            let file = dir.join("task.md");
+            let in_file = std::fs::read_to_string(&file).is_ok_and(|t| t == prompt);
+            assert!(
+                on_stdin != in_file,
+                "{cli}: exactly one of stdin / task.md carries it"
+            );
+            std::fs::remove_file(&file).ok();
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn cooldown_depends_on_status_and_moderation() {
