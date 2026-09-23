@@ -11,6 +11,15 @@ use crate::{config, db, hook, provider, redact};
 /// Characters of transcript sent to the model per batch.
 const MAX_PROMPT_CHARS: usize = 16_000;
 const MAX_OBSERVATIONS: usize = 12;
+const MAX_SUMMARY_CHARS: usize = 2_000;
+const KINDS: [&str; 6] = [
+    "decision",
+    "bugfix",
+    "feature",
+    "discovery",
+    "change",
+    "preference",
+];
 
 #[derive(Default, Serialize)]
 pub struct Stats {
@@ -72,7 +81,13 @@ fn process_session(
     let result = chain.summarize(conn, &prompt, &schema())?;
     stats.fallbacks += result.fallbacks.len() as u32;
     let observations = parse_observations(&result.output)?;
-    let summary = result.output["summary"].as_str().unwrap_or("").to_string();
+    // A provider can return any length; synced summaries must stay bounded.
+    let summary: String = result.output["summary"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(MAX_SUMMARY_CHARS)
+        .collect();
     stats.observations += observations.len() as u32;
     *stats
         .by_provider
@@ -176,7 +191,7 @@ fn schema() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "kind": {"type": "string", "enum": ["decision", "bugfix", "feature", "discovery", "change", "preference"]},
+                        "kind": {"type": "string", "enum": KINDS},
                         "title": {"type": "string"},
                         "body": {"type": "string"}
                     },
@@ -203,7 +218,12 @@ fn parse_observations(v: &Value) -> Result<Vec<db::Observation>> {
             continue;
         }
         out.push(db::Observation {
-            kind: o["kind"].as_str().unwrap_or("discovery").to_string(),
+            // CLI providers do not enforce the schema enum (claude-mem stored 141 kinds with XML in them).
+            kind: o["kind"]
+                .as_str()
+                .filter(|k| KINDS.contains(k))
+                .unwrap_or("discovery")
+                .to_string(),
             title: title.chars().take(120).collect(),
             body: body.chars().take(1_000).collect(),
         });
@@ -224,6 +244,22 @@ fn vmhwm_kb() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kinds_outside_the_schema_fall_back_to_discovery() {
+        let out = json!({"observations": [
+            {"kind": "decision", "title": "t1", "body": "b1"},
+            {"kind": "discovery>\n    <title>leak</title>", "title": "t2", "body": "b2"},
+            {"kind": "Decision", "title": "t3", "body": "b3"},
+            {"title": "t4", "body": "b4"}
+        ]});
+        let kinds: Vec<String> = parse_observations(&out)
+            .unwrap()
+            .into_iter()
+            .map(|o| o.kind)
+            .collect();
+        assert_eq!(kinds, ["decision", "discovery", "discovery", "discovery"]);
+    }
 
     #[test]
     fn harness_notifications_are_not_the_developer_speaking() {
