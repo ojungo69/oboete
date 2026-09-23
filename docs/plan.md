@@ -42,8 +42,8 @@
 ## マイルストーン
 
 - **M0 spike(2〜3 日)**: CC hook → SQLite → **2 段の provider chain(Groq free → agy)、1 段目を強制失敗させてフォールバックを実証** → SessionStart 注入。既存 1,000 event fixture を replay。hook 時間 / RSS / 要約成功率 / フォールバック回数を計測 → go/no-go。必要なキーは Groq 1 つ(agy はサブスク)。
-- **M1(約 2 週)**: CC / Codex / Grok Build、fallback 連鎖、伏せ字、hybrid 検索、MCP 検索、viewer、setup/doctor。本環境に claude-mem と併用で導入 → **owner 1 週間実使用で判定**。
-- **M2**: iMac / Windows / VPS ビルド(cargo-dist)、Cloudflare 同期。
+- **M1(約 2 週)**: CC / Codex / Grok Build、fallback 連鎖、伏せ字、hybrid 検索、MCP 検索、viewer、setup/doctor。本環境に claude-mem と併用で導入 (2026-09-23)。1 週間の実使用判定は owner の決定で廃止 (2026-09-23)、判定を待たずに M2 / M3 へ進む。
+- **M2**: iMac / Windows ビルド(cargo-dist。VPS は使うと決まったら)、Cloudflare 同期。
 - **M3**: Pi / agy / OpenCode / Cursor、Private MCP link、意味検索の調整、レポート(価値があれば)。
 - **M4**: OSS 公開(README、インストーラ)。
 
@@ -68,7 +68,7 @@
 - 仕様 = この文書 1 枚 + マイルストーンごとの checklist。Spec Kit の 48 タスク儀式は使わない。
 - 実装 = Claude Code が spike と芯を直接書く(品質と速度で有利)。部品移植・adapter など並列可能なものは Codex / Grok。
 - レビュー = PR ごと Codex 1 巡 + 修正後 1 巡。CI = `cargo fmt --check` / `clippy` / `test`。bot は CodeQL のみ。
-- 完了 = owner 実使用 1 週間(M1)。
+- 完了 = 全機能 (M2 / M3) が 3 台 (WSL / Windows / M1 iMac) で動くこと。arm64 VPS は owner が使うと決めたときに同じ条件で足す (提案書 §0.1 決定 10)。OSS 公開は後で別に決める (owner 2026-09-23)。意味検索と同期の設計は `docs/research/search-sync-proposal-2026-09-23.md` で見直し中で、§2b・§3・§8 はそれで置き換える。
 
 ## owner に聞くこと
 
