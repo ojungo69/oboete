@@ -335,10 +335,9 @@ fastembed 7.1.0 が固定する ort 2.0.0-rc.13 には、4 つとも ONNX Runtim
 
 - **リモート MCP**: 同じ Worker に Agents SDK の `createMcpHandler` (状態を持たない Streamable HTTP) を置きます。tool は `search` / `get` / `timeline` で、手元と同じ意味を持たせます ([handler API](https://developers.cloudflare.com/agents/model-context-protocol/apis/handler-api/))。
 - 検索は DO の FTS5、Vectorize、同じ RRF の組み合わせです。手元と同じ問い合わせベクトルで上位 10 件が 9 件以上一致することを、評価セットで確かめます。
-- 登録方法:
-  - Claude Code: `claude mcp add --transport http --scope user ... --header ...`。project の `.mcp.json` に `${VAR}` で秘密を書くと、決まった名前の変数が空として読まれることがあるので、user scope で登録します ([Claude Code MCP](https://code.claude.com/docs/en/mcp))。
-  - Codex: `bearer_token_env_var` / `env_http_headers` を使います ([Codex MCP](https://developers.openai.com/codex/mcp))。
-  - claude.ai の Web / スマホの custom connector に OAuth が必須かどうかは未確認です。スマホは保留中なので、そのときに workers-oauth-provider で対応します。
+- **誰がリモート MCP を使うか**: 手元に oboete がある端末の agent は、今と同じ手元の `oboete mcp` (stdio) を使います。同期で全件が手元にあるので、リモート MCP は要りません。リモート MCP を使うのは、手元に oboete が無いクライアント (Claude アプリの custom connector、将来のスマホ) だけです。
+- **認証**: Claude アプリの custom connector には OAuth が要るので、PR-J で Cloudflare の [workers-oauth-provider](https://github.com/cloudflare/workers-oauth-provider) を組み、ログインは Access に任せます (Access を OAuth の入口にする形が custom connector で動くかは、PR-J の最初に 1 回つないで確かめる)。
+- **鍵をコマンドの引数に出さない**: header で認証するクライアントをあとで足す場合も、`claude mcp add --header <秘密>` のように秘密をコマンドの引数に書きません (同じ機械の別ユーザーが `/proc` から読める)。Claude Code なら設定ファイルに `headersHelper` を書き、その helper が本人だけが読める鍵ファイル (0600) から header を出す形にします ([Claude Code MCP](https://code.claude.com/docs/en/mcp)。helper の header が送られない不具合の報告があるので、使うときに実際の送信を確かめる: [#64894](https://github.com/anthropics/claude-code/issues/64894))。
 - **viewer**: 手元の viewer は同期された全端末分を表示します (追加の作業はありません)。クラウド版の viewer は、スマホを対象にするときに同じ静的ファイルを Worker から配り、Access の後ろに置きます。
 
 ---
@@ -393,11 +392,11 @@ fastembed 7.1.0 が固定する ort 2.0.0-rc.13 には、4 つとも ONNX Runtim
 | PR-C | id と repo キー | 端末 id 付きの `uid`、origin URL の repo キーと移し替え、`"unknown"` session の修正、`embedder_id` とベクトル表 (`producer` 列つき)、各行の `synced_at` 列と変更用の outbox 表。`.oboete.toml` の読み取り (`repo = "名前"` と `sync = false`)、session が触れた repo の記録 (hook がイベントごとの cwd の repo を足す) | WSL と Windows で同じ repo が同じキーになる (テスト)。入れ子の repo に移ったイベントで、その repo が session の記録に足される (テスト)。replay で hook 時間が変わらない |
 | PR-D | 意味検索の本体 | observe で文書の埋め込み: クラウドを使う形は Workers AI (100 件ずつ、日次 neuron 予算付き)、ローカルだけの形 (§0 の 5) は手元の fastembed。sqlite-vec の索引、search / MCP / viewer の hybrid RRF、オフライン時の手元の問い合わせ (fastembed)、`oboete reindex` | §3.3 の「意味検索そのもの」の合格線。落ちたら既定は `none` のまま |
 | PR-E1〜E6 | 精度の工夫 (1 つ 1 PR) | E1 `since` / `until`、E2 要約の `keys`、E3 重複の間引き、E4 MCP 検索の reranker (xsmall-v2 と v2-m3 の比較)、E5 prompt の先頭か分割か、E6 M1 での int8 / bit | それぞれが合格線を越えたものだけ残す。越えなければその PR は閉じる |
-| PR-F | prompt ごとの自動注入 | UserPromptSubmit に別の hook として `oboete inject` を登録する (予算 300 ms、timeout 1 秒、超えたら全文検索だけ)。Grok は最初の PreToolUse。しきい値を答えの無い問いで較正する。予算に収まらない端末だけ detached `recall` → PreToolUse の代案に切り替える | 誤注入 10% 以下、注入 hook の p95 300 ms 以内、timeout の割合 2% 以下。記録 hook の時間は変わらない (replay) |
+| PR-F | prompt ごとの自動注入 | UserPromptSubmit に別の hook として `oboete inject` を登録する (予算 300 ms、timeout 1 秒、超えたら全文検索だけ)。問い合わせ文は記録と同じ処理を通してから使う: `<private>` などの除去 (`strip_blocks`)、harness 通知の除外、伏せ字。何も残らなければ注入も外部への埋め込み要求もしない。Grok は最初の PreToolUse。しきい値を答えの無い問いで較正する。予算に収まらない端末だけ detached `recall` → PreToolUse の代案に切り替える | 誤注入 10% 以下、注入 hook の p95 300 ms 以内、timeout の割合 2% 以下。記録 hook の時間は変わらない (replay) |
 | PR-G | hub (Worker + DO) | `/push` と `/pull` (seq のカーソル)、op の冪等、tombstone、Access の service token、書き出しの口 | `--home` を 2 つ使ったテストで、順番を入れ替えても削除が勝ち、最後に文書とベクトルが一致する |
 | PR-H | 端末側の同期 | 未送信の行と outbox の送信 (observe の最後)、SessionStart からの detached pull、`oboete sync`、初回のページ送り、claude-mem の取り込み (決定 1)。送る直前に、session が触れた repo のどれかが除外なら、その session の文書・`vec`・prompt を送らない (決定 11)。初回は送る repo と件数を出して確認を求める | WSL と Windows の実機で往復する。同期を有効にする前からあった記憶が、2 台目の端末に全部届く (テスト)。`sync = false` の repo で作業しても、その repo に途中で移った session でも、同期を有効にする前からあった行でも、hub に 1 件も入らない (テスト)。hook の時間が変わらない |
 | PR-I | 3 台への配布と `oboete update` | cargo-dist で WSL / Windows / M1 iMac のビルド対象を作り、各端末で setup・hook・同期・検索を実行する。`oboete update` (決定 15): detached の observe / sync が 1 日 1 回 GitHub Releases の最新版を見て DB に記録し、次の SessionStart の注入と `oboete doctor` に 1 行だけ知らせる (hook 自体は通信しない)。入れ替えは owner が `oboete update` を打ったときだけ行う。実行中の exe を上書きできない Windows の扱いは cargo-dist の updater (axoupdater) で確かめる | 3 台で同じ記憶が見える。3 台それぞれで古い版から `oboete update` で入れ替わり、hook と MCP が動き続ける。M1 の RAM と速さの記録。VPS は owner が使うと決めたときに、同じ条件で 4 台目として足す (決定 10) |
-| PR-J | クラウド検索とリモート MCP | DO の FTS5、Vectorize (決定 4)、同じ RRF、`createMcpHandler`、Access | 評価セットでクラウドと手元の上位 10 件が 9 件以上一致する。Claude アプリから検索できる |
-| 後回し | クラウド viewer、スマホ、OAuth、Ruri への入れ替え、暗号化の「中継のみ」モード | — | 必要になったときに、同じ合格線で判断する |
+| PR-J | クラウド検索とリモート MCP | DO の FTS5、Vectorize (決定 4)、同じ RRF、`createMcpHandler`、Access、Claude アプリの custom connector 用の OAuth (workers-oauth-provider、§4.7) | 評価セットでクラウドと手元の上位 10 件が 9 件以上一致する。Claude アプリから検索できる |
+| 後回し | クラウド viewer、スマホ、Ruri への入れ替え、暗号化の「中継のみ」モード | — | 必要になったときに、同じ合格線で判断する |
 
 **docs の直し (PR-C で一緒に):** plan.md §2b・§3・§8 をこの案に合わせます。削るものは EmbeddingGemma / e5-small / CJK bigram、「内容ハッシュ id」、D1、「Vectorize 月 $0.07」です。m1.md の「fastembed 5.17 (7.x は無い)」も直します。m1.md 決定 9 の `[embedding] provider = none|workers-ai|local` は、ベクトル空間を 1 つにしたことで「意味検索のオン / オフ」と「オフライン時の手元の問い合わせ (`local_queries`) のオン / オフ」の 2 つに畳みます。
