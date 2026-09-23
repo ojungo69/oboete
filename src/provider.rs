@@ -215,13 +215,16 @@ fn openai_compat(
     for (k, v) in extra {
         body[k] = v.clone();
     }
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let mut agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(timeout_s)))
         .http_status_as_error(false)
-        .user_agent(concat!("oboete/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into();
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+        .user_agent(concat!("oboete/", env!("CARGO_PKG_VERSION")));
+    // A provider on this machine (Ollama) is never reached through the environment's proxy.
+    if is_loopback(&url) {
+        agent = agent.proxy(None);
+    }
+    let agent: ureq::Agent = agent.build().into();
     let mut req = agent.post(&url);
     if let Some(key_file) = key_file {
         let key = config::read_key(key_file).map_err(|e| CallError::other(format!("{e:#}")))?;
@@ -264,6 +267,20 @@ fn openai_compat(
         .ok_or_else(|| CallError::other("invalid output: no choices[0].message.content"))?;
     serde_json::from_str(content)
         .map_err(|e| CallError::other(format!("invalid output: content is not JSON ({e})")))
+}
+
+fn is_loopback(url: &str) -> bool {
+    let host = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let host = host.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.split(':').next().unwrap_or(""),
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Groq spells the reset out in the body: "Please try again in 17.28s".
@@ -682,6 +699,24 @@ mod tests {
             conn.write_all(&body).ok();
         });
         format!("http://{addr}")
+    }
+
+    #[test]
+    fn only_loopback_urls_skip_the_proxy() {
+        for url in [
+            "http://127.0.0.1:11434/v1",
+            "http://localhost/v1",
+            "http://[::1]:8080",
+        ] {
+            assert!(is_loopback(url), "{url}");
+        }
+        for url in [
+            "https://api.groq.com/openai/v1",
+            "http://127.0.0.1.evil.example/v1",
+            "http://localhost@evil.example/",
+        ] {
+            assert!(!is_loopback(url), "{url}");
+        }
     }
 
     #[test]
