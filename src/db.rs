@@ -277,13 +277,14 @@ pub fn insert_event(
 }
 
 /// A prompt the developer typed, with its search row. Kept after observe drops the raw events.
-pub fn insert_prompt(
-    conn: &Connection,
-    session_id: &str,
-    repo: &str,
-    ts: i64,
-    body: &str,
-) -> Result<()> {
+/// Filed under its session's repository, like the summaries and observations: the agent may have
+/// moved into another repository (`cd`) since the session started.
+pub fn insert_prompt(conn: &Connection, session_id: &str, ts: i64, body: &str) -> Result<()> {
+    let repo: String = conn.query_row(
+        "SELECT repo FROM sessions WHERE id=?1",
+        params![session_id],
+        |r| r.get(0),
+    )?;
     conn.execute(
         "INSERT INTO prompts(session_id, repo, ts, body) VALUES(?1,?2,?3,?4)",
         params![session_id, repo, ts, body],
@@ -538,8 +539,8 @@ mod tests {
         )
         .unwrap();
         insert_event(&conn, "s1", "Stop", 2, "{}").unwrap();
-        insert_prompt(&conn, "s1", "/r", 2, "first prompt").unwrap();
-        insert_prompt(&conn, "s1", "/r", 3, "second prompt").unwrap();
+        insert_prompt(&conn, "s1", 2, "first prompt").unwrap();
+        insert_prompt(&conn, "s1", 3, "second prompt").unwrap();
         let count =
             |c: &Connection, sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap() };
         assert!(delete_doc(&mut conn, "o1").unwrap());

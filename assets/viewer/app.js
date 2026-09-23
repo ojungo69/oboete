@@ -139,19 +139,22 @@ function deleteDoc(d, card) {
 }
 
 // Long text (a pasted log, a task written for another agent) starts folded to its head: the
-// first lines, at most so many characters.
+// first lines, at most so many characters. `key` (the doc id) keeps an unfolded card unfolded
+// when the page redraws.
 const FOLD_LINES = 8;
 const FOLD_CHARS = 600;
+const unfolded = new Set();
 
-function folded(text) {
+function folded(text, key) {
   const head = Array.from(text.split('\n').slice(0, FOLD_LINES).join('\n')).slice(0, FOLD_CHARS).join('');
-  if (head === text) return [el('p', 'text', text)];
+  if (head === text || unfolded.has(key)) return [el('p', 'text', text)];
   const p = el('p', 'text', `${head}…`);
   const all = el('button', 'quiet small', 'Show all');
   all.type = 'button';
   all.addEventListener('click', () => {
     p.textContent = text;
     all.remove();
+    unfolded.add(key);
   });
   return [p, all];
 }
@@ -166,7 +169,7 @@ function card(d, extra = []) {
     badge(kind),
     el('span', 'title', HEADINGS.get(kind) || d.title));
   const meta = el('div', 'meta', el('span', null, d.when), ...extra, el('span', null, d.doc));
-  li.append(head, ...folded(d.text), meta, deleteDoc(d, li));
+  li.append(head, ...folded(d.text, d.doc), meta, deleteDoc(d, li));
   return li;
 }
 

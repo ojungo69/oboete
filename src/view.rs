@@ -647,7 +647,7 @@ mod tests {
         let conn = db::open(&dir).unwrap();
         db::insert_event(&conn, "s2", "Stop", 1_700_000_100_001, "{}").unwrap();
         assert_eq!(get("/api/version")["v"], v0);
-        db::insert_prompt(&conn, "s2", "/r", 1_700_000_100_002, "直近の依頼").unwrap();
+        db::insert_prompt(&conn, "s2", 1_700_000_100_002, "直近の依頼").unwrap();
         let typed = get("/api/version")["v"].as_str().unwrap().to_string();
         assert_ne!(typed, v0);
         // A running session's prompt tops the feed; stats count it.

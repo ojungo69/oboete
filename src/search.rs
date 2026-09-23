@@ -277,7 +277,7 @@ mod tests {
             i64::MAX,
         )
         .unwrap();
-        db::insert_prompt(conn, "s1", "/r", 1_699_999_990_000, "trigram 検索を足して").unwrap();
+        db::insert_prompt(conn, "s1", 1_699_999_990_000, "trigram 検索を足して").unwrap();
     }
 
     #[test]
