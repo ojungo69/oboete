@@ -111,7 +111,7 @@ fn render(events: &[db::RawEvent]) -> String {
                 }
             }
             "PostToolUse" | "PostToolUseFailure" => {
-                let tool = v["tool"].as_str().unwrap_or("?");
+                let tool = redact::outbound(v["tool"].as_str().unwrap_or("?"));
                 let input = short(&redact::outbound(v["input"].as_str().unwrap_or("")), 300);
                 let output = short(&redact::outbound(v["output"].as_str().unwrap_or("")), 600);
                 let mark = if v["failed"].as_bool().unwrap_or(false) {
@@ -296,7 +296,7 @@ mod tests {
                 ),
                 ev(
                     "PostToolUse",
-                    json!({"tool": "Read", "input": "src/hook.rs", "output": format!("/// quote `<private>`, the opt-out\ntoken {key}")}),
+                    json!({"tool": format!("mcp__{key}"), "input": "src/hook.rs", "output": format!("/// quote `<private>`, the opt-out\ntoken {key}")}),
                 ),
                 ev("Stop", json!({"assistant": "TAIL-MARKER done"})),
             ]),

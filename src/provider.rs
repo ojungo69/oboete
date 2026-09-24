@@ -239,17 +239,19 @@ fn openai_compat(
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<f64>().ok());
-    let text = resp
-        .body_mut()
-        .with_config()
-        .limit(MAX_RESPONSE_BYTES)
-        .read_to_string()
-        .map_err(|e| match e {
-            ureq::Error::BodyExceedsLimit(_) => CallError::other(format!(
-                "invalid output: response larger than {MAX_RESPONSE_BYTES} bytes"
-            )),
-            e => CallError::other(format!("read body: {e}")),
-        })?;
+    // Capped after decoding: a gzip answer of a few KB on the wire can decode to far more.
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(resp.body_mut().as_reader(), MAX_RESPONSE_BYTES + 1),
+        &mut raw,
+    )
+    .map_err(|e| CallError::other(format!("read body: {e}")))?;
+    if raw.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(CallError::other(format!(
+            "invalid output: response larger than {MAX_RESPONSE_BYTES} bytes"
+        )));
+    }
+    let text = String::from_utf8_lossy(&raw);
     if status != 200 {
         return Err(CallError {
             status: Some(status),
@@ -665,7 +667,7 @@ mod tests {
     }
 
     /// One-shot HTTP server on localhost that answers any request with `body`.
-    fn serve_once(body: Vec<u8>) -> String {
+    fn serve_once(body: Vec<u8>, extra_headers: &'static str) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -692,7 +694,7 @@ mod tests {
                 }
             }
             let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             conn.write_all(head.as_bytes()).ok();
@@ -722,13 +724,19 @@ mod tests {
     #[test]
     fn http_answers_are_parsed_and_capped() {
         let answer = json!({"choices": [{"message": {"content": "{\"summary\":\"s\",\"observations\":[]}"}}]});
-        let url = serve_once(answer.to_string().into_bytes());
+        let url = serve_once(answer.to_string().into_bytes(), "");
         let v = openai_compat(&url, None, "m", 10, &Default::default(), "p", &json!({})).unwrap();
         assert_eq!(v["summary"], "s");
-        let url = serve_once(vec![b' '; MAX_RESPONSE_BYTES as usize + 10]);
+        let url = serve_once(vec![b' '; MAX_RESPONSE_BYTES as usize + 10], "");
         let e =
             openai_compat(&url, None, "m", 10, &Default::default(), "p", &json!({})).unwrap_err();
         assert!(e.invalid(), "{}", e.message);
+        // 2 KB on the wire, 2 MiB once decoded.
+        let bomb = include_bytes!("testdata/two-mib-of-spaces.gz").to_vec();
+        let url = serve_once(bomb, "Content-Encoding: gzip\r\n");
+        let e =
+            openai_compat(&url, None, "m", 10, &Default::default(), "p", &json!({})).unwrap_err();
+        assert!(e.message.contains("larger than"), "{}", e.message);
     }
 
     #[test]
