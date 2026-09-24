@@ -11,7 +11,7 @@ are reported as a count, not scored). Unjudged documents count as not relevant, 
 comparable to the runs that fed the pool. Documents of the question's own session are left out
 of every run first (the same rule as `oboete eval`).
 """
-import json, os, sqlite3, sys, time
+import functools, json, os, sqlite3, sys, time
 from collections import defaultdict
 
 from ranx import Qrels, Run, compare
@@ -75,11 +75,10 @@ TS = {
 }
 
 
-def ts(doc, cache={}):
-    if doc not in cache:
-        row = db.execute(TS[doc[0]], (int(doc[1:]),)).fetchone()
-        cache[doc] = row[0] if row else 0
-    return cache[doc]
+@functools.cache
+def ts(doc):
+    row = db.execute(TS[doc[0]], (int(doc[1:]),)).fetchone()
+    return row[0] if row else 0
 
 
 # When a developer prompt was typed (agent searches carry no time).
