@@ -80,19 +80,8 @@ pub fn terms(query: &str) -> Vec<String> {
     }
 }
 
-/// Ranked search. `repo = None` searches every repository. Prompts come after observations and
-/// summaries.
-/// Full-text search. Knowledge (observations, summaries) before prompts.
-pub fn search(
-    conn: &Connection,
-    query: &str,
-    repo: Option<&str>,
-    limit: usize,
-) -> Result<Vec<Hit>> {
-    lexical(conn, query, repo, None, limit)
-}
-
-/// Candidates per side and kind for the hybrid (docs/pr-d.md, #46).
+/// Candidates per side for the hybrid (docs/pr-d.md, #46): the full-text list's top 100, split by
+/// kind, and each kind's 100 nearest vectors.
 const HYBRID_DEPTH: usize = 100;
 
 /// Ranked search as every surface uses it: the hybrid of docs/pr-d.md (`hybrid-kf`) when semantic
@@ -111,10 +100,8 @@ pub fn find(
     let depth = limit.max(HYBRID_DEPTH);
     let (lexical, qvec) = std::thread::scope(|s| {
         let q = s.spawn(|| crate::embed::query(embedding, query));
-        let lexical = [false, true].map(|prompts| lexical(conn, query, repo, Some(prompts), depth));
-        (lexical, q.join())
+        (search(conn, query, repo, depth), q.join())
     });
-    let [knowledge, prompts] = lexical;
     let qvec = match qvec {
         Ok(Ok(v)) => Some(v),
         Ok(Err(e)) => {
@@ -123,21 +110,23 @@ pub fn find(
         }
         Err(_) => None,
     };
-    fuse(conn, [knowledge?, prompts?], qvec.as_deref(), repo, limit)
+    fuse(conn, lexical?, qvec.as_deref(), repo, limit)
 }
 
 /// Knowledge first, then prompts; within each kind the full-text ranking and the vector ranking
 /// (when there is a query vector) fused by reciprocal rank, k = 60.
 fn fuse(
     conn: &Connection,
-    lexical: [Vec<Hit>; 2],
+    lexical: Vec<Hit>,
     qvec: Option<&[f32]>,
     repo: Option<&str>,
     limit: usize,
 ) -> Result<Vec<Hit>> {
     let depth = limit.max(HYBRID_DEPTH);
     let mut out = Vec::new();
-    for (hits, prompts) in lexical.into_iter().zip([false, true]) {
+    let (knowledge, prompts): (Vec<Hit>, Vec<Hit>) =
+        lexical.into_iter().partition(|h| h.kind != "prompt");
+    for (hits, prompts) in [(knowledge, false), (prompts, true)] {
         let dense = match qvec {
             Some(q) => crate::embed::nearest(conn, q, repo, prompts, depth)?,
             None => Vec::new(),
@@ -171,13 +160,12 @@ fn fuse(
     Ok(out)
 }
 
-/// Full-text candidates: every kind (`None`, knowledge first), knowledge only (`Some(false)`) or
-/// prompts only (`Some(true)`).
-fn lexical(
+/// Ranked search. `repo = None` searches every repository. Prompts come after observations and
+/// summaries.
+pub fn search(
     conn: &Connection,
     query: &str,
     repo: Option<&str>,
-    prompts: Option<bool>,
     limit: usize,
 ) -> Result<Vec<Hit>> {
     let grams = trigrams(query);
@@ -215,11 +203,6 @@ fn lexical(
     if let Some(r) = repo {
         clauses.push("repo = ?".into());
         args.push(Value::Text(r.to_string()));
-    }
-    match prompts {
-        Some(true) => clauses.push("kind = 'prompt'".into()),
-        Some(false) => clauses.push("kind != 'prompt'".into()),
-        None => {}
     }
     // Knowledge before prompts: bm25 favours short documents, and a prompt is usually a short
     // question where an observation is the answer.
@@ -275,10 +258,8 @@ pub fn trec_run(
         let kept = loop {
             let hits = match &qvec {
                 Some(q) => {
-                    let lex = [false, true]
-                        .map(|p| lexical(conn, text, None, Some(p), limit.max(HYBRID_DEPTH)));
-                    let [k, p] = lex;
-                    fuse(conn, [k?, p?], Some(q), None, limit)?
+                    let lex = search(conn, text, None, limit.max(HYBRID_DEPTH))?;
+                    fuse(conn, lex, Some(q), None, limit)?
                 }
                 None => search(conn, text, None, limit)?,
             };
@@ -546,8 +527,7 @@ mod tests {
         crate::embed::index_pending(&mut conn).unwrap();
         let q = unit(&[(0, 1.0)]);
         let docs = |qvec: Option<&[f32]>, repo: Option<&str>, limit: usize| -> Vec<String> {
-            let lex =
-                [false, true].map(|p| lexical(&conn, "tokenizer", repo, Some(p), 100).unwrap());
+            let lex = search(&conn, "tokenizer", repo, 100).unwrap();
             fuse(&conn, lex, qvec, repo, limit)
                 .unwrap()
                 .into_iter()
