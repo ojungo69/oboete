@@ -110,16 +110,18 @@ pub fn find(
         }
         Err(_) => None,
     };
-    fuse(conn, lexical?, qvec.as_deref(), repo, limit)
+    fuse(conn, lexical?, qvec.as_deref(), repo, None, limit)
 }
 
 /// Knowledge first, then prompts; within each kind the full-text ranking and the vector ranking
-/// (when there is a query vector) fused by reciprocal rank, k = 60.
+/// (when there is a query vector) fused by reciprocal rank, k = 60. `skip_session` (evaluation
+/// only) keeps that session's documents out of the vector side; `lexical` comes without them.
 fn fuse(
     conn: &Connection,
     lexical: Vec<Hit>,
     qvec: Option<&[f32]>,
     repo: Option<&str>,
+    skip_session: Option<&str>,
     limit: usize,
 ) -> Result<Vec<Hit>> {
     let depth = limit.max(HYBRID_DEPTH);
@@ -128,7 +130,7 @@ fn fuse(
         lexical.into_iter().partition(|h| h.kind != "prompt");
     for (hits, prompts) in [(knowledge, false), (prompts, true)] {
         let dense = match qvec {
-            Some(q) => crate::embed::nearest(conn, q, repo, prompts, depth)?,
+            Some(q) => crate::embed::nearest(conn, q, repo, prompts, skip_session, depth)?,
             None => Vec::new(),
         };
         let mut order: Vec<String> = Vec::new();
@@ -219,6 +221,34 @@ pub fn search(
     Ok(hits.collect::<Result<_, _>>()?)
 }
 
+/// The first `want` hits outside `session`, asking `hits` for more until there are enough or the
+/// search runs out.
+fn outside(
+    conn: &Connection,
+    session: Option<&str>,
+    want: usize,
+    hits: impl Fn(usize) -> Result<Vec<Hit>>,
+) -> Result<Vec<Hit>> {
+    let mut n = want;
+    loop {
+        let all = hits(n)?;
+        let got = all.len();
+        let mut kept = Vec::new();
+        for h in all {
+            if kept.len() < want
+                && (session.is_none()
+                    || crate::db::doc_session(conn, &h.doc)?.as_deref() != session)
+            {
+                kept.push(h);
+            }
+        }
+        if kept.len() == want || got < n {
+            return Ok(kept);
+        }
+        n *= 2;
+    }
+}
+
 /// `oboete eval`: run each `{"qid","text"}` line through `search` over every repository and
 /// print the hits as a TREC run (`qid Q0 doc rank score method`), ranks from 1. The score only
 /// restates the order; the evaluator ranks by it. A line's optional `session` is the conversation
@@ -254,29 +284,18 @@ pub fn trec_run(
             Some(e) => Some(crate::embed::query(e, text).with_context(|| format!("embed {qid}"))?),
             None => None,
         };
-        let mut limit = depth;
-        let kept = loop {
-            let hits = match &qvec {
-                Some(q) => {
-                    let lex = search(conn, text, None, limit.max(HYBRID_DEPTH))?;
-                    fuse(conn, lex, Some(q), None, limit)?
-                }
-                None => search(conn, text, None, limit)?,
-            };
-            let mut kept = Vec::new();
-            for h in &hits {
-                if kept.len() < depth
-                    && (session.is_none()
-                        || crate::db::doc_session(conn, &h.doc)?.as_deref() != session)
-                {
-                    kept.push(h.doc.clone());
-                }
+        let hits = match &qvec {
+            // The session leaves both candidate lists before fusion (as in the spike's
+            // `runs_kf.py`), so its documents neither take ranks nor crowd others out.
+            Some(q) => {
+                let lex = outside(conn, session, depth.max(HYBRID_DEPTH), |n| {
+                    search(conn, text, None, n)
+                })?;
+                fuse(conn, lex, Some(q), None, session, depth)?
             }
-            if kept.len() == depth || hits.len() < limit {
-                break kept;
-            }
-            limit *= 2;
+            None => outside(conn, session, depth, |n| search(conn, text, None, n))?,
         };
+        let kept: Vec<String> = hits.into_iter().map(|h| h.doc).collect();
         for (i, doc) in kept.iter().enumerate() {
             out.push_str(&format!(
                 "{qid} Q0 {doc} {} {} {method}\n",
@@ -528,7 +547,7 @@ mod tests {
         let q = unit(&[(0, 1.0)]);
         let docs = |qvec: Option<&[f32]>, repo: Option<&str>, limit: usize| -> Vec<String> {
             let lex = search(&conn, "tokenizer", repo, 100).unwrap();
-            fuse(&conn, lex, qvec, repo, limit)
+            fuse(&conn, lex, qvec, repo, None, limit)
                 .unwrap()
                 .into_iter()
                 .map(|h| h.doc)
@@ -539,6 +558,12 @@ mod tests {
         assert_eq!(docs(Some(&q), Some("/r"), 2), ["o2", "o1"]);
         assert_eq!(docs(Some(&q), Some("/elsewhere"), 10), Vec::<String>::new());
         assert_eq!(docs(Some(&q), None, 5_000).len(), 5);
+        // An evaluation question's own session leaves the vector side before the cut.
+        let near = |skip: Option<&str>, k: usize| {
+            crate::embed::nearest(&conn, &q, None, false, skip, k).unwrap()
+        };
+        assert!(near(Some("s1"), 5).is_empty());
+        assert_eq!(near(Some("elsewhere"), 1), ["o1"]);
         // Without a query vector the ranking is the full-text one.
         assert_eq!(docs(None, None, 10), ["o2"]);
         // Semantic search switched on but unusable (no account): full-text, not an error.

@@ -87,12 +87,14 @@ pub fn query(cfg: &config::Embedding, text: &str) -> Result<Vec<f32>> {
 
 /// Up to `k` documents of one shard (a repository or all; knowledge or prompts) nearest to `q`:
 /// 4k candidates by Hamming distance on the sign bits, rescored by fp32 cosine from
-/// `embeddings` (docs/pr-d.md: top-10 agreement 0.987 with the exact ranking).
+/// `embeddings` (docs/pr-d.md: top-10 agreement 0.987 with the exact ranking). `skip_session`
+/// (evaluation only) drops that session's documents before the cut to `k`.
 pub fn nearest(
     conn: &Connection,
     q: &[f32],
     repo: Option<&str>,
     prompts: bool,
+    skip_session: Option<&str>,
     k: usize,
 ) -> Result<Vec<String>> {
     let kind = if prompts { "p" } else { "k" };
@@ -132,7 +134,16 @@ pub fn nearest(
         scored.push((dot, doc));
     }
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
-    Ok(scored.into_iter().take(k).map(|(_, d)| d).collect())
+    let mut out = Vec::with_capacity(k);
+    for (_, doc) in scored {
+        if out.len() == k {
+            break;
+        }
+        if skip_session.is_none() || db::doc_session(conn, &doc)?.as_deref() != skip_session {
+            out.push(doc);
+        }
+    }
+    Ok(out)
 }
 
 fn backlog_at(conn: &mut Connection, url: &str, key: &str, cap: Option<u32>) -> Result<Stats> {
