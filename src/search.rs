@@ -48,7 +48,8 @@ fn trigrams(query: &str) -> Vec<String> {
     for run in query.split(|c: char| c.is_whitespace() || SEPARATORS.contains(c)) {
         let chars: Vec<char> = run.chars().collect();
         for w in chars.windows(3) {
-            let g: String = w.iter().collect();
+            // The index folds case, so `HTTP` and `http` are one piece (else bm25 counts it twice).
+            let g: String = w.iter().collect::<String>().to_lowercase();
             if !w.iter().all(hiragana) && !out.contains(&g) && out.len() < 64 {
                 out.push(g);
             }
@@ -525,6 +526,7 @@ mod tests {
     fn trigrams_skip_hiragana_split_at_punctuation_and_stop_at_64() {
         assert_eq!(trigrams("検索をしてください。"), ["検索を", "索をし"]);
         assert_eq!(trigrams("abcd, abc"), ["abc", "bcd"]);
+        assert_eq!(trigrams("HTTP http"), ["htt", "ttp"]);
         assert_eq!(trigrams("db 接続"), Vec::<String>::new());
         let long: String = ('a'..='z').cycle().take(200).collect();
         assert_eq!(trigrams(&long).len(), 26);
