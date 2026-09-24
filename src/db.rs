@@ -131,36 +131,36 @@ fn ensure_repo_keys(conn: &mut Connection) -> Result<()> {
 /// Rows filed under a path that is still a directory on this machine and now has another key
 /// (a repository that got an origin after it was used) move to that key; a path that is gone, or
 /// a key that is no path (`claude-mem:<project>`), stays. Run at open for older stores and by
-/// every observe run, off the hook path, in one transaction so no table is left behind. Returns
-/// the number of paths moved.
+/// every observe run, off the hook path. The scan takes no write lock (hooks keep writing); the
+/// moves run in one transaction so no table is left behind. Returns the number of paths moved.
 pub fn rekey_paths(conn: &mut Connection) -> Result<usize> {
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let old: Vec<String> = tx
+    let repos: Vec<String> = conn
         .prepare(
             "SELECT repo FROM sessions UNION SELECT repo FROM observations
              UNION SELECT repo FROM summaries UNION SELECT repo FROM prompts",
         )?
         .query_map([], |r| r.get(0))?
         .collect::<Result<_, _>>()?;
-    let mut moved = 0;
-    for old in old {
-        let path = Path::new(&old);
-        if !path.is_absolute() || !path.is_dir() {
-            continue;
-        }
-        let new = crate::repo::key(path);
-        if new != old {
-            for table in ["sessions", "observations", "summaries", "prompts", "fts"] {
-                tx.execute(
-                    &format!("UPDATE {table} SET repo=?1 WHERE repo=?2"),
-                    params![new, old],
-                )?;
-            }
-            moved += 1;
+    let moves: Vec<(String, String)> = repos
+        .into_iter()
+        .filter(|old| Path::new(old).is_absolute() && Path::new(old).is_dir())
+        .map(|old| (crate::repo::key(Path::new(&old)), old))
+        .filter(|(new, old)| new != old)
+        .collect();
+    if moves.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    for (new, old) in &moves {
+        for table in ["sessions", "observations", "summaries", "prompts", "fts"] {
+            tx.execute(
+                &format!("UPDATE {table} SET repo=?1 WHERE repo=?2"),
+                params![new, old],
+            )?;
         }
     }
     tx.commit()?;
-    Ok(moved)
+    Ok(moves.len())
 }
 
 /// Document ids (`o<id>`, `s<id>`, `p<id>`) are handed to agents and pages, so a deleted id must
