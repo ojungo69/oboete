@@ -591,8 +591,8 @@ fn transcript_tail(path: &Path) -> String {
 
 /// (prompt, last answer) per turn in a Cursor agent transcript's tail. Lines are
 /// `{"role", "message": {"content": [{"type": "text", "text"}, {"type": "tool_use"}…]}}`
-/// (agent-transcript in the cursor-agent bundle); the user text wraps the typed prompt in
-/// `<user_query>`, and metadata / `turn_ended` lines have no role.
+/// (agent-transcript in the cursor-agent bundle). The user text may wrap the typed prompt in
+/// `<user_query>` (unverified); metadata / `turn_ended` lines have no role.
 fn cursor_turns(path: &Path) -> Vec<(String, String)> {
     let mut turns: Vec<(String, String)> = Vec::new();
     for line in transcript_tail(path).lines() {
