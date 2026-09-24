@@ -14,7 +14,10 @@ import concurrent.futures, json, os, re, sqlite3, subprocess, sys, tempfile, tim
 E = os.path.expanduser('~/.oboete/eval')
 POOL_DEPTH = 20
 BATCH = 10
-MAX_DOC_CHARS = 1200
+# Enough for 99.8% of the pooled documents; the rest are clipped and marked. Grades written
+# before `chars` was recorded saw 1,200 characters.
+MAX_DOC_CHARS = 4000
+OLD_CHARS = 1200
 JUDGE = 'claude-sonnet'
 
 PROMPT = """You grade how useful stored memories are for a coding agent that just received a developer's message.
@@ -60,12 +63,43 @@ DOC_TEXT = {
 
 
 def doc_text(db, doc):
+    """(what the judge is shown, session, full length); (None, None, 0) for a deleted document."""
     row = db.execute(DOC_TEXT[doc[0]], (int(doc[1:]),)).fetchone()
     if row is None:
-        return None, None
+        return None, None, 0
     title, body, session = row
     text = (title + '\n' + body).strip() if title else body
-    return text[:MAX_DOC_CHARS], session
+    shown = text if len(text) <= MAX_DOC_CHARS else text[:MAX_DOC_CHARS] + '\n…[clipped]'
+    return shown, session, len(text)
+
+
+def covers(j, length):
+    """A grade counts only if the judge saw as much of the document as this version shows."""
+    return j.get('chars', OLD_CHARS) >= min(length, MAX_DOC_CHARS)
+
+
+def pool(db, runs, q):
+    """(doc, shown text, length): each run's top POOL_DEPTH after leaving out the question's session."""
+    out = {}
+    for per in runs.values():
+        kept = 0
+        for doc in per.get(q['qid'], []):
+            if kept == POOL_DEPTH:
+                break
+            text, session, length = doc_text(db, doc)
+            if text is None or session == q['session']:
+                continue
+            kept += 1
+            out.setdefault(doc, (doc, text, length))
+    return list(out.values())
+
+
+def latest(judge=JUDGE):
+    """The last grade per (question, document) from this judge."""
+    path = f'{E}/judgments.jsonl'
+    if not os.path.exists(path):
+        return {}
+    return {(j['qid'], j['doc']): j for j in map(json.loads, open(path)) if j['judge'] == judge}
 
 
 def ask(query, docs):
@@ -98,25 +132,12 @@ def main():
     queries = [json.loads(l) for l in open(f'{E}/queries.jsonl')]
     queries = [q for q in queries if q['split'] == split][:max_questions]
     runs = load_runs()
-    done = set()
+    done = latest()
     path = f'{E}/judgments.jsonl'
-    if os.path.exists(path):
-        done = {(j['qid'], j['doc']) for j in map(json.loads, open(path)) if j['judge'] == JUDGE}
     jobs = []
     for q in queries:
-        pool = []
-        for per in runs.values():
-            kept = 0
-            for doc in per.get(q['qid'], []):
-                if kept == POOL_DEPTH:
-                    break
-                text, session = doc_text(db, doc)
-                if text is None or session == q['session']:
-                    continue
-                kept += 1
-                if doc not in [d for d, _ in pool]:
-                    pool.append((doc, text))
-        todo = [(d, t) for d, t in pool if (q['qid'], d) not in done]
+        todo = [(d, t) for d, t, n in pool(db, runs, q)
+                if not ((q['qid'], d) in done and covers(done[(q['qid'], d)], n))]
         for i in range(0, len(todo), BATCH):
             jobs.append((q, todo[i:i + BATCH]))
     print(f'{len(queries)} questions, {len(jobs)} calls needed, running {min(len(jobs), max_calls)}', flush=True)
@@ -133,7 +154,8 @@ def main():
                 print(f'failed {q["qid"]}: {str(e)[:120]}', flush=True)
                 continue
             for doc, grade in grades.items():
-                w.write(json.dumps({'qid': q['qid'], 'doc': doc, 'grade': grade, 'judge': JUDGE, 'ts': int(time.time())}) + '\n')
+                w.write(json.dumps({'qid': q['qid'], 'doc': doc, 'grade': grade, 'judge': JUDGE,
+                                    'chars': MAX_DOC_CHARS, 'ts': int(time.time())}) + '\n')
             w.flush()
             if n % 10 == 0:
                 print(f'{n}/{len(jobs)} calls', flush=True)

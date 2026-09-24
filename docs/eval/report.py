@@ -13,19 +13,27 @@ from collections import defaultdict
 
 from ranx import Qrels, Run, compare
 
-E = os.path.expanduser('~/.oboete/eval')
+import judge as J
+
+E = J.E
 split = sys.argv[1]
-judge = sys.argv[2] if len(sys.argv) > 2 else 'claude-sonnet'
+judge = sys.argv[2] if len(sys.argv) > 2 else J.JUDGE
 db = sqlite3.connect(f'file:{E}/home/oboete.db?mode=ro', uri=True)
 queries = {q['qid']: q for q in map(json.loads, open(f'{E}/queries.jsonl')) if q['split'] == split}
+latest = J.latest(judge)
 
-grades = {}
-for j in map(json.loads, open(f'{E}/judgments.jsonl')):
-    if j['judge'] == judge and j['qid'] in queries:
-        grades[(j['qid'], j['doc'])] = j['grade']
+# A partly judged pool would score whichever questions happened to be judged first.
+pooled = J.load_runs()
+missing = sum(1 for q in queries.values() for doc, _, n in J.pool(db, pooled, q)
+              if not ((q['qid'], doc) in latest and J.covers(latest[(q['qid'], doc)], n)))
+if missing:
+    sys.exit(f'{missing} pooled pairs have no grade for the text the judge now sees; '
+             f'run judge.py {split} {len(queries)} first')
+
 judged = defaultdict(dict)
-for (qid, doc), g in grades.items():
-    judged[qid][doc] = g
+for (qid, doc), j in latest.items():
+    if qid in queries:
+        judged[qid][doc] = j['grade']
 answerable = {q for q, d in judged.items() if max(d.values()) >= 2}
 
 
