@@ -31,7 +31,9 @@ PR は 3 つに分ける。
    - **文書は 4,000 字まで見せる** (束の文書の 99.8%。長いものは切ったと明示する)。検索は本文全体で順位を付けるので、判定器が見る文が短いと、後ろの方で当たった文書を不当に 0 点にする。最初は 1,200 字で採点していたので (束の 17% が超える)、判定の記録に見せた字数 (`chars`) を残し、見せた字数が足りない組は採点し直す。
    - **`report.py` は束が全部採点されるまで数字を出さない**: 各方式の上位 20 件 (同じ session を除いた後) のうち、今の字数で採点されていない組が 1 件でもあれば件数を出して止まる。呼び出し上限で途中まで採点した束で数字を出すと、先に採点した問いに偏るため。
    - **送り先**: 判定器は Anthropic。問いと文書の大半を占める claude-mem の記憶は、元の会話も claude-mem の要約も Anthropic を通っている。repo ごとの除外 (決定 11、PR-C の `sync = false` と除外一覧) はまだ無く、除外された repo も無い。PR-C の後は、除外された repo の問いと文書を `judge.py` も送らない。
-   - **hook を動かさない**: 判定の `claude` は scratch の cwd から `--setting-sources project --strict-mcp-config --no-session-persistence` を付け、`OBOETE_SKIP=1` で呼ぶ。A2 の注入トークンの計測と同じ形で、user 設定を読まないので oboete と claude-mem の hook が動かない (claude-mem の session 数が変わらないことを確認済み)。
+   - **hook も道具も動かさない**: 判定の `claude` は scratch の cwd から、要約器 (`src/provider.rs`) と同じ `--setting-sources "" --tools "" --strict-mcp-config --no-session-persistence --settings '{"disableAllHooks":true}'` を付け、`OBOETE_SKIP=1` で、鍵・token を含む環境変数を外して呼ぶ。oboete と claude-mem の hook は動かず (claude-mem の session 数が変わらないことを確認済み)、記憶の中の文が指示を含んでいても道具は使えない (できるのは採点を変えることだけで、答えの形は検査する)。2026-09-24 の最初の判定 (約 7,400 組) は `--setting-sources project --strict-mcp-config` だけで呼んでいて、道具は切っていなかった。
+   - **判定器の版を固定する**: `--model claude-sonnet-5` を渡し、答えの `modelUsage` がそのモデルだけかを確かめる。判定の記録の `judge` はモデル名。`sonnet` の別名で付けた `claude-sonnet` の記録 (2026-09-24、別名はこの日 claude-sonnet-5 を指していた) は同じ判定器として使う。
+   - 評価のファイル (`~/.oboete/eval` の下) は本人だけが読める権限 (0700 / 0600) で作る。
    - **予算**: 1 回の実行は 600 回の呼び出し (約 6,000 組、約 300 万トークン) で止め、翌日に続きから再開する。判定済みの組は `~/.oboete/eval/judgments.jsonl` に (問い, 文書, 判定器) で記録して使い回す。同時に走らせるのは 2 本まで。Codex への委譲や PR のレビュー待ちと同じ時間帯に回しても、この PC の作業を止めない量にする。
    - 最初の束は、dev 分の問い全部 (312 件) × 方式ごとの上位 20 件 (全文検索と claude-mem を合わせて最大 40 件)。recall@50 のための深さ 50 は、判定器を信用できると決まってから足す (§3.1 の「束は実験ごとに足す」)。
 
@@ -57,7 +59,7 @@ PR は 3 つに分ける。
 
 ## B2 の結果 (2026-09-24、dev 分)
 
-スクリプトは `docs/eval/` にある。手順 (新しく作り直すときは空の `--home` に取り込む。今の `~/.oboete/eval/home` は取り込み元の名前付け (`claude-mem:<id>`) より前に取り込んだもので、元の名前は `claude-mem`): `oboete --home ~/.oboete/eval/home import claude-mem <写し> --eval-store` → `build_queries.py` → `oboete --home ~/.oboete/eval/home eval queries.jsonl --depth 50 > runs/fts.trec` → `run_claude_mem.py` → `judge.py dev <問いの数>` → `uv run --with ranx python report.py dev`。
+スクリプトは `docs/eval/` にある。手順 (新しく作り直すときは空の `--home` に取り込む。今の `~/.oboete/eval/home` は取り込み元の名前付け (`claude-mem:<id>`) より前に取り込んだもので、元の名前は `claude-mem`): `oboete --home ~/.oboete/eval/home import claude-mem <写し> --eval-store` → `build_queries.py` → `oboete --home ~/.oboete/eval/home eval queries.jsonl --depth 50 > runs/fts.trec` → `run_claude_mem.py` → `judge.py dev <問いの数>` → `uv run --with ranx python report.py dev`。`report.py` は `runs/` にある run どうしを比べ、その束の判定だけを正解にする (この表は `fts` と `claude-mem` の 2 つの束)。
 
 **問いの束**: 424 件 (dev 312 / test 112。session のハッシュで分けたので 70 / 30 ちょうどにはならない)。developer の prompt 400 件と agent の検索語 24 件が dev と test に分かれ、日本語 377 件・英語 47 件。test 分は開けていない。
 

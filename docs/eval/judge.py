@@ -2,8 +2,11 @@
 
 Pool: for each question, the top POOL_DEPTH of every run in ~/.oboete/eval/runs, after leaving
 out documents of the question's own session. Pairs already in judgments.jsonl are reused.
-Judge: `claude -p --model sonnet` from a scratch cwd with user settings off, so neither oboete's
-nor claude-mem's hooks run (OBOETE_SKIP=1 as well). Questions and documents were gated on the
+Judge: `claude -p` pinned to one model, from a scratch cwd, inference only: no settings, tools,
+MCP servers or hooks (oboete's and claude-mem's hooks do not run; OBOETE_SKIP=1 as well), and no
+secret-bearing environment variables, the same isolation as the summarizer in src/provider.rs.
+Stored text may carry instructions; with no tools they can only change a grade, which the
+answer's validation bounds. Questions and documents were gated on the
 way into the evaluation store (agent questions through `oboete gate`), so what is sent here
 already passed the outbound gate.
 
@@ -12,13 +15,19 @@ usage: judge.py <split> <max questions> [max calls]
 import concurrent.futures, json, os, re, sqlite3, subprocess, sys, tempfile, time
 
 E = os.path.expanduser('~/.oboete/eval')
+# The questions, documents and grades are the developer's own records: owner-only files.
+os.umask(0o077)
 POOL_DEPTH = 20
 BATCH = 10
 # Enough for 99.8% of the pooled documents; the rest are clipped and marked. Grades written
 # before `chars` was recorded saw 1,200 characters.
 MAX_DOC_CHARS = 4000
 OLD_CHARS = 1200
-JUDGE = 'claude-sonnet'
+# A concrete model, checked against each answer's modelUsage, so grades reused across runs come
+# from one model. Grades recorded as `claude-sonnet` (2026-09-24, before the pin) came from the
+# `sonnet` alias, which resolved to claude-sonnet-5 that day.
+MODEL = 'claude-sonnet-5'
+JUDGE = MODEL
 
 PROMPT = """You grade how useful stored memories are for a coding agent that just received a developer's message.
 The memories are notes written by earlier sessions of coding agents (observations, session summaries, or earlier developer prompts).
@@ -99,29 +108,37 @@ def latest(judge=JUDGE):
     path = f'{E}/judgments.jsonl'
     if not os.path.exists(path):
         return {}
-    return {(j['qid'], j['doc']): j for j in map(json.loads, open(path)) if j['judge'] == judge}
+    names = {judge, 'claude-sonnet'} if judge == MODEL else {judge}
+    return {(j['qid'], j['doc']): j for j in map(json.loads, open(path)) if j['judge'] in names}
 
 
 def ask(query, docs):
     listing = '\n\n'.join(f'[{d}]\n{t}' for d, t in docs)
     prompt = PROMPT.format(query=query, docs=listing)
-    env = dict(os.environ, OBOETE_SKIP='1')
+    env = {k: v for k, v in os.environ.items()
+           if k != 'CLAUDECODE' and not any(s in k for s in ('TOKEN', 'KEY', 'SECRET', 'PASSWORD'))}
+    env['OBOETE_SKIP'] = '1'
     with tempfile.TemporaryDirectory() as cwd:
         r = subprocess.run(
-            ['claude', '-p', '--model', 'sonnet', '--setting-sources', 'project', '--strict-mcp-config',
-             '--no-session-persistence', '--output-format', 'json'],
+            ['claude', '-p', '--model', MODEL, '--setting-sources', '', '--tools', '', '--strict-mcp-config',
+             '--no-session-persistence', '--settings', '{"disableAllHooks":true}', '--output-format', 'json'],
             input=prompt, capture_output=True, text=True, cwd=cwd, env=env, timeout=300)
     if r.returncode != 0:
         raise RuntimeError(r.stderr[-300:] or r.stdout[-300:])
-    result = json.loads(r.stdout)['result']
+    answer = json.loads(r.stdout)
+    used = sorted((answer.get('modelUsage') or {}).keys())
+    if used != [MODEL]:
+        raise RuntimeError(f'answered by {used}, not {MODEL}')
+    result = answer['result']
     m = re.search(r'\{.*\}', result, re.S)
     if not m:
         raise RuntimeError(f'no JSON in answer: {result[:120]}')
     grades = json.loads(m.group(0))['grades']
     want = {d for d, _ in docs}
     out = {g['id'].strip('[]'): int(g['grade']) for g in grades if g['id'].strip('[]') in want}
-    if set(out) != want or not all(0 <= v <= 3 for v in out.values()):
-        raise RuntimeError(f'incomplete grades: {len(out)}/{len(want)}')
+    if not out or not all(0 <= v <= 3 for v in out.values()):
+        raise RuntimeError(f'no usable grades: {len(out)}/{len(want)}')
+    # A skipped document stays unjudged and goes into a smaller batch on the next run.
     return out
 
 
@@ -146,13 +163,15 @@ def main():
     with open(path, 'a') as w, concurrent.futures.ThreadPoolExecutor(2) as ex:
         futures = {ex.submit(ask, q['text'], docs): (q, docs) for q, docs in jobs}
         for n, f in enumerate(concurrent.futures.as_completed(futures), 1):
-            q, _ = futures[f]
+            q, batch = futures[f]
             try:
                 grades = f.result()
             except Exception as e:
                 failed += 1
                 print(f'failed {q["qid"]}: {str(e)[:120]}', flush=True)
                 continue
+            if len(grades) < len(batch):
+                print(f"partial {q['qid']}: {len(grades)}/{len(batch)}", flush=True)
             for doc, grade in grades.items():
                 w.write(json.dumps({'qid': q['qid'], 'doc': doc, 'grade': grade, 'judge': JUDGE,
                                     'chars': MAX_DOC_CHARS, 'ts': int(time.time())}) + '\n')

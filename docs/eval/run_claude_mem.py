@@ -4,6 +4,10 @@ evaluation store's docs through `imports`, and drops (and counts) ids newer than
 import json, os, sqlite3, sys, urllib.parse, urllib.request
 
 E = os.path.expanduser('~/.oboete/eval')
+# The questions and runs are the developer's own records: owner-only files.
+os.umask(0o077)
+os.makedirs(E, mode=0o700, exist_ok=True)
+os.chmod(E, 0o700)
 DEPTH = 50
 db = sqlite3.connect(f'file:{E}/home/oboete.db?mode=ro', uri=True)
 # One claude-mem database per evaluation store: `oboete import` names it claude-mem:<id>.

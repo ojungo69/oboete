@@ -2,6 +2,9 @@
 
     uv run --with ranx python report.py <split> [judge]
 
+Compares the runs in ~/.oboete/eval/runs; to compare another method, put its run there and judge
+the new pooled pairs first.
+
 Relevant = grade 2 or 3 (UMBRELA "has an answer"); nDCG uses the grades. A question counts only
 if the judge found at least one relevant document for it (the rest have no answer in the pool and
 are reported as a count, not scored). Unjudged documents count as not relevant, so a run is only
@@ -23,17 +26,20 @@ queries = {q['qid']: q for q in map(json.loads, open(f'{E}/queries.jsonl')) if q
 latest = J.latest(judge)
 
 # A partly judged pool would score whichever questions happened to be judged first.
-pooled = J.load_runs()
-missing = sum(1 for q in queries.values() for doc, _, n in J.pool(db, pooled, q)
-              if not ((q['qid'], doc) in latest and J.covers(latest[(q['qid'], doc)], n)))
+runs_now = J.load_runs()
+pools = {qid: J.pool(db, runs_now, q) for qid, q in queries.items()}
+missing = sum(1 for qid, pool in pools.items() for doc, _, n in pool
+              if not ((qid, doc) in latest and J.covers(latest[(qid, doc)], n)))
 if missing:
     sys.exit(f'{missing} pooled pairs have no grade for the text the judge now sees; '
              f'run judge.py {split} {len(queries)} first')
 
+# Qrels are the grades of this pool: the runs in runs/ now. Grades kept from other experiments'
+# pools would change which questions count and the recall denominators.
 judged = defaultdict(dict)
-for (qid, doc), j in latest.items():
-    if qid in queries:
-        judged[qid][doc] = j['grade']
+for qid, pool in pools.items():
+    for doc, _, _ in pool:
+        judged[qid][doc] = latest[(qid, doc)]['grade']
 answerable = {q for q, d in judged.items() if max(d.values()) >= 2}
 
 
