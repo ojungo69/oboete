@@ -1,10 +1,15 @@
 import { execFile, spawn } from "node:child_process";
 
 // setup.rs prefixes this template with JSON-escaped exe and home constants.
+/* global exe, home */
+
+// oboete's own failures are dropped: the agent must never break because of them.
+const ignore = () => undefined;
+
 export default {
   id: "oboete",
   async setup(ctx) {
-    if (process.env.OBOETE_SKIP !== undefined) return () => {};
+    if (process.env.OBOETE_SKIP !== undefined) return ignore;
 
     const args = home === null ? [] : ["--home", home];
     const sessions = new Map();
@@ -20,19 +25,30 @@ export default {
         });
         child.once("error", resolve);
         child.once("close", resolve);
-        child.stdin.on("error", () => {});
+        child.stdin.on("error", ignore);
         child.stdin.end(JSON.stringify(payload));
         child.unref();
-      })).catch(() => {});
+      })).catch(ignore);
+    }
+
+    function toolText(e) {
+      const content = e.result?.content;
+      if (typeof content === "string") return content;
+      const parts = Array.isArray(content)
+        ? content.filter((p) => p.type === "text" && typeof p.text === "string")
+        : [];
+      if (parts.length) return parts.map((p) => p.text).join("\n");
+      if (e.result?.output !== undefined) return JSON.stringify(e.result.output);
+      return e.error?.message ?? "";
     }
 
     function session(id, location) {
-      if (typeof id !== "string" || !id) return;
-      if (location && location.directory !== ctx.location.directory) return;
+      if (typeof id !== "string" || !id) return null;
+      if (location && location.directory !== ctx.location.directory) return null;
       let state = sessions.get(id);
       if (!state) {
         // Unlocated bus events can belong to another plugin instance's sessions.
-        if (!location) return;
+        if (!location) return null;
         state = { dir: location.directory, started: false, message: null, parts: [] };
         sessions.set(id, state);
       }
@@ -48,23 +64,12 @@ export default {
     ctx.tool.hook("execute.after", (e) => {
       const state = session(e.sessionID, ctx.location);
       if (!state || !["completed", "error"].includes(e.status)) return;
-      const content = e.result?.content;
-      const parts = typeof content === "string"
-        ? [{ text: content }]
-        : Array.isArray(content)
-          ? content.filter((p) => p.type === "text" && typeof p.text === "string")
-          : [];
-      const response = parts.length
-        ? parts.map((p) => p.text).join("\n")
-        : e.result?.output !== undefined
-          ? JSON.stringify(e.result.output)
-          : e.error?.message ?? "";
       send(e.status === "error" ? "PostToolUseFailure" : "PostToolUse", {
         session_id: e.sessionID,
         cwd: state.dir,
         tool_name: e.tool,
         tool_input: e.input,
-        tool_response: response,
+        tool_response: toolText(e),
       });
     });
 
@@ -115,7 +120,7 @@ export default {
             break;
         }
       }
-    })().catch(() => {});
+    })().catch(ignore);
 
     return () => abort.abort();
   },

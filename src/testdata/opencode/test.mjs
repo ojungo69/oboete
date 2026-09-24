@@ -10,7 +10,8 @@ const [file, expectedExe, expectedHome] = process.argv.slice(2);
 const homeArgs = expectedHome === undefined ? [] : ["--home", expectedHome];
 const captures = [];
 const injections = [];
-let failSpawn = false;
+// "ok", "error" (the child reports an error) or "throw" (spawn itself throws).
+let spawnMode = "ok";
 let active = 0;
 let maxActive = 0;
 childProcess.spawn = (exe, args, options) => {
@@ -18,7 +19,7 @@ childProcess.spawn = (exe, args, options) => {
   assert.deepEqual(args.slice(0, -1), [...homeArgs, "hook", "opencode"]);
   assert.deepEqual(options.stdio, ["pipe", "ignore", "ignore"]);
   assert.equal(options.shell, undefined);
-  if (failSpawn === "throw") throw new Error("spawn failed");
+  if (spawnMode === "throw") throw new Error("spawn failed");
   const child = new EventEmitter();
   child.stdin = new EventEmitter();
   child.unref = () => { child.unrefed = true; };
@@ -29,7 +30,7 @@ childProcess.spawn = (exe, args, options) => {
     setImmediate(() => {
       assert.equal(child.unrefed, true);
       active -= 1;
-      if (failSpawn) {
+      if (spawnMode === "error") {
         child.stdin.emit("error", new Error("EPIPE"));
         child.emit("error", new Error("ENOENT"));
       }
@@ -167,12 +168,12 @@ assert.equal(injections.length, 3);
 assert.deepEqual(empty.system, []);
 await drain();
 
-for (const failure of [true, "throw"]) {
-  failSpawn = failure;
+for (const mode of ["error", "throw"]) {
+  spawnMode = mode;
   await local.emit("session.inbox.enqueued", user("one", "failed spawn"));
   await drain();
 }
-failSpawn = false;
+spawnMode = "ok";
 await local.emit("session.inbox.enqueued", user("one", "queue recovered"));
 await drain();
 assert.equal(captures.at(-1).payload.prompt, "queue recovered");
