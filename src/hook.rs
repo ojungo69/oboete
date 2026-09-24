@@ -354,7 +354,8 @@ pub fn handle(
         _ => None, // PreToolUse and the rest carry nothing a summary needs
     };
     // `cursor-agent -p` fires no prompt or response hook, so SessionEnd recovers those turns
-    // from the transcript. A turn whose prompt is already stored came through the hooks.
+    // from the transcript. The n-th turn with a given prompt is new when fewer than n are
+    // stored: the others came through the hooks (the TUI) or an earlier `-p` run's SessionEnd.
     let recovered = if agent == "cursor" && event == "SessionEnd" {
         str_field(payload, &["transcript_path"])
             .map(|p| cursor_turns(Path::new(p)))
@@ -390,9 +391,15 @@ pub fn handle(
             db::insert_prompt(&tx, session_id, ts, p)?;
         }
     }
+    let mut nth = std::collections::HashMap::new();
     for (p, answer) in recovered {
         let p = clip(&strip_blocks(&p, true));
-        if p.is_empty() || is_envelope(&p) || db::has_prompt(&tx, session_id, &p)? {
+        if p.is_empty() || is_envelope(&p) {
+            continue;
+        }
+        let n = nth.entry(p.clone()).or_insert(0);
+        *n += 1;
+        if *n <= db::count_prompts(&tx, session_id, &p)? {
             continue;
         }
         let prompt = json!({"prompt": p}).to_string();
@@ -852,6 +859,8 @@ mod tests {
             json!({"role":"user","message":{"content":[{"type":"text","text":"Read hello.txt and explain the result."}]}}),
             json!({"role":"assistant","message":{"content":[{"type":"text","text":"Seen."}]}}),
             json!({"role":"user","message":{"content":[{"type":"text","text":"Keep <private>sk-secret</private> out"}]}}),
+            json!({"role":"user","message":{"content":[{"type":"text","text":"Say hi."}]}}),
+            json!({"role":"assistant","message":{"content":[{"type":"text","text":"Hi again."}]}}),
         ];
         let body: Vec<String> = lines.iter().map(Value::to_string).collect();
         std::fs::write(&transcript, body.join("\n") + "\n").unwrap();
@@ -882,6 +891,8 @@ mod tests {
                 prompt("Say hi."),
                 ("Stop".into(), json!({"assistant":"Hi."})),
                 prompt("Keep  out"),
+                prompt("Say hi."),
+                ("Stop".into(), json!({"assistant":"Hi again."})),
                 end_event.clone(),
                 end_event,
             ]
@@ -889,7 +900,7 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT count(*) FROM prompts", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 3);
+        assert_eq!(count, 4);
         drop(conn);
         std::fs::remove_dir_all(dir).unwrap();
     }
