@@ -354,7 +354,9 @@ fn headless_command(
                 "--json-schema",
                 schema_text,
             ]);
-            cmd.args(["--new-project", "--dangerously-skip-permissions"]);
+            // No --dangerously-skip-permissions: the curator never needs a tool, and without the
+            // flag headless agy soft-denies the tools that its settings put behind approval.
+            cmd.arg("--new-project");
             if let Some(m) = model {
                 cmd.args(["--model", m]);
             }
@@ -609,6 +611,10 @@ mod tests {
                 .collect();
             assert!(
                 args.iter().all(|a| !a.contains("SECRET-SESSION-TEXT")),
+                "{cli}: {args:?}"
+            );
+            assert!(
+                args.iter().all(|a| a != "--dangerously-skip-permissions"),
                 "{cli}: {args:?}"
             );
             let file = dir.join("task.md");
