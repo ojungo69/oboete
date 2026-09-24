@@ -8,8 +8,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::db::{self, Doc};
 use crate::{hook, observe, redact};
@@ -40,6 +41,7 @@ pub fn claude_mem(conn: &mut Connection, path: &Path) -> Result<Stats> {
         .with_context(|| format!("open {} read-only", path.display()))?;
     // One read transaction: a consistent snapshot while claude-mem keeps writing.
     src.execute_batch("BEGIN")?;
+    let source = source_name(&src)?;
     let tx = conn.transaction()?;
     let mut stats = Stats::default();
 
@@ -72,22 +74,6 @@ pub fn claude_mem(conn: &mut Connection, path: &Path) -> Result<Stats> {
     }
     drop(rows);
     drop(stmt);
-    // A row whose session claude-mem no longer lists keeps its own session id.
-    let session_of =
-        |known: Option<&Session>, id: &str, project: &str, ts: i64| -> Result<String> {
-            let (id, agent, project, started, ended) = match known {
-                Some(s) => (
-                    s.id.as_str(),
-                    s.agent.as_str(),
-                    s.project.as_str(),
-                    s.started,
-                    s.ended,
-                ),
-                None => (id, "claude", project, ts, None),
-            };
-            db::import_session(&tx, id, agent, &repo(project), started, ended)?;
-            Ok(id.to_string())
-        };
 
     let mut stmt = src.prepare(
         "SELECT id, COALESCE(memory_session_id, ''), COALESCE(project, ''), created_at_epoch, COALESCE(type, ''), COALESCE(title, ''),
@@ -97,7 +83,6 @@ pub fn claude_mem(conn: &mut Connection, path: &Path) -> Result<Stats> {
     while let Some(r) = rows.next()? {
         let (id, memory, project, ts): (i64, String, String, i64) =
             (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-        let kind = kind(&r.get::<_, String>(4)?);
         let title = redact::outbound(&r.get::<_, String>(5)?);
         let body = redact::outbound(&observation_body(
             &r.get::<_, String>(6)?,
@@ -107,18 +92,18 @@ pub fn claude_mem(conn: &mut Connection, path: &Path) -> Result<Stats> {
             stats.empty += 1;
             continue;
         }
-        let session = session_of(by_memory.get(&memory), &memory, &project, ts)?;
-        let repo = repo(&project);
-        let doc = Doc {
-            session_id: &session,
-            repo: &repo,
+        let row = Row {
+            key: format!("o{id}"),
+            session: by_memory.get(&memory),
+            session_id: &memory,
+            project: &project,
             ts,
-            kind,
+            kind: kind(&r.get::<_, String>(4)?),
             title: &title,
             body: &body,
         };
         count(
-            db::import_doc(&tx, SOURCE, &format!("o{id}"), &doc)?,
+            put(&tx, &source, row)?,
             &mut stats.observations,
             &mut stats.seen,
         );
@@ -156,18 +141,18 @@ pub fn claude_mem(conn: &mut Connection, path: &Path) -> Result<Stats> {
             stats.empty += 1;
             continue;
         }
-        let session = session_of(by_memory.get(&memory), &memory, &project, ts)?;
-        let repo = repo(&project);
-        let doc = Doc {
-            session_id: &session,
-            repo: &repo,
+        let row = Row {
+            key: format!("s{id}"),
+            session: by_memory.get(&memory),
+            session_id: &memory,
+            project: &project,
             ts,
             kind: "summary",
             title: "",
             body: &body,
         };
         count(
-            db::import_doc(&tx, SOURCE, &format!("s{id}"), &doc)?,
+            put(&tx, &source, row)?,
             &mut stats.summaries,
             &mut stats.seen,
         );
@@ -191,26 +176,95 @@ pub fn claude_mem(conn: &mut Connection, path: &Path) -> Result<Stats> {
         }
         let known = by_content.get(&content);
         let project = known.map(|s| s.project.clone()).unwrap_or_default();
-        let session = session_of(known, &content, &project, ts)?;
-        let repo = repo(&project);
-        let doc = Doc {
-            session_id: &session,
-            repo: &repo,
+        let row = Row {
+            key: format!("p{id}"),
+            session: known,
+            session_id: &content,
+            project: &project,
             ts,
             kind: "prompt",
             title: "",
             body: &body,
         };
-        count(
-            db::import_doc(&tx, SOURCE, &format!("p{id}"), &doc)?,
-            &mut stats.prompts,
-            &mut stats.seen,
-        );
+        count(put(&tx, &source, row)?, &mut stats.prompts, &mut stats.seen);
     }
     drop(rows);
     drop(stmt);
     tx.commit()?;
     Ok(stats)
+}
+
+/// claude-mem's ids restart in every database (the Windows copy and the WSL one both have an
+/// observation 1), so the import key names the database by its first session, which a backup or a
+/// move keeps: importing a snapshot and later the live file adds only what is new.
+fn source_name(src: &Connection) -> Result<String> {
+    let first: Option<(String, i64)> = src
+        .query_row(
+            "SELECT content_session_id, COALESCE(started_at_epoch, 0) FROM sdk_sessions ORDER BY id LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match first {
+        Some((id, ts)) => {
+            let hash = Sha256::digest(format!("{id}:{ts}").as_bytes());
+            let hex: String = hash[..6].iter().map(|b| format!("{b:02x}")).collect();
+            format!("{SOURCE}:{hex}")
+        }
+        None => SOURCE.to_string(),
+    })
+}
+
+/// One claude-mem row on its way in.
+struct Row<'a> {
+    key: String,
+    /// Its session in `sdk_sessions`, if claude-mem still lists it.
+    session: Option<&'a Session>,
+    /// The session id the row names (possibly empty).
+    session_id: &'a str,
+    project: &'a str,
+    ts: i64,
+    kind: &'a str,
+    title: &'a str,
+    body: &'a str,
+}
+
+/// Store a row with its session. A row an earlier run imported is skipped before its session is
+/// written, so a session the developer deleted since does not come back empty. False = seen.
+fn put(tx: &Connection, source: &str, r: Row) -> Result<bool> {
+    if db::imported(tx, source, &r.key)? {
+        return Ok(false);
+    }
+    let (id, agent, project, started, ended) = match r.session {
+        Some(s) => (
+            s.id.clone(),
+            s.agent.as_str(),
+            s.project.as_str(),
+            s.started,
+            s.ended,
+        ),
+        // No session id at all: a session of its own, so unrelated rows do not merge.
+        None if r.session_id.is_empty() => (
+            format!("{source}/{}", r.key),
+            "claude",
+            r.project,
+            r.ts,
+            None,
+        ),
+        // A session claude-mem no longer lists keeps its id.
+        None => (r.session_id.to_string(), "claude", r.project, r.ts, None),
+    };
+    db::import_session(tx, &id, agent, &repo(project), started, ended)?;
+    let repo = repo(r.project);
+    let doc = Doc {
+        session_id: &id,
+        repo: &repo,
+        ts: r.ts,
+        kind: r.kind,
+        title: r.title,
+        body: r.body,
+    };
+    db::import_doc(tx, source, &r.key, &doc)
 }
 
 fn repo(project: &str) -> String {
@@ -256,7 +310,8 @@ mod tests {
     }
 
     /// The columns of claude-mem's tables that the import reads.
-    fn claude_mem_db(path: &Path) {
+    /// `started` changes the database's first session, so two calls stand for two databases.
+    fn claude_mem_db(path: &Path, started: i64) {
         let c = Connection::open(path).unwrap();
         c.execute_batch(
             "CREATE TABLE sdk_sessions(id INTEGER PRIMARY KEY, content_session_id TEXT NOT NULL,
@@ -269,9 +324,22 @@ mod tests {
                learned TEXT, completed TEXT, next_steps TEXT);
              CREATE TABLE user_prompts(id INTEGER PRIMARY KEY, content_session_id TEXT,
                created_at_epoch INTEGER, prompt_text TEXT);
-             INSERT INTO sdk_sessions VALUES(1, 'agent-1', 'mem-1', 'free-mem', 'codex', 1000, 2000);",
+             ",
         )
         .unwrap();
+        c.execute(
+            "INSERT INTO sdk_sessions VALUES(1, 'agent-1', 'mem-1', 'free-mem', 'codex', ?1, 2000)",
+            [started],
+        )
+        .unwrap();
+        // Two rows without any session id: unrelated, so they must not share a session.
+        for id in [15, 16] {
+            c.execute(
+                "INSERT INTO observations VALUES(?1, NULL, 'free-mem', 1600, 'change', 'Loose', 'No session.', '')",
+                [id],
+            )
+            .unwrap();
+        }
         let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
         let obs: [(i64, &str, &str, &str, &str, &str); 5] = [
             (
@@ -343,7 +411,7 @@ mod tests {
     fn claude_mem_rows_arrive_gated_mapped_and_once() {
         let dir = tmp("claude-mem");
         let src = dir.join("claude-mem.db");
-        claude_mem_db(&src);
+        claude_mem_db(&src, 1000);
         let mut conn = db::open(&dir).unwrap();
         let stats = claude_mem(&mut conn, &src).unwrap();
         assert_eq!(
@@ -354,7 +422,7 @@ mod tests {
                 stats.seen,
                 stats.empty
             ),
-            (4, 1, 1, 0, 2)
+            (6, 1, 1, 0, 2)
         );
 
         let obs: Vec<(String, String, String, String, String)> = conn
@@ -407,22 +475,28 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
+        assert_eq!(sessions.len(), 4);
         assert_eq!(
-            sessions,
-            [
-                (
-                    "agent-1".into(),
-                    "codex".into(),
-                    "claude-mem:free-mem".into()
-                ),
-                ("gone".into(), "claude".into(), "claude-mem:free-mem".into()),
-            ]
+            sessions[0],
+            (
+                "agent-1".into(),
+                "codex".into(),
+                "claude-mem:free-mem".into()
+            )
         );
+        assert_eq!(
+            sessions[3],
+            ("gone".into(), "claude".into(), "claude-mem:free-mem".into())
+        );
+        let source = source_name(&Connection::open(&src).unwrap()).unwrap();
+        assert!(source.starts_with("claude-mem:"));
+        assert_eq!(sessions[1].0, format!("{source}/o15"));
+        assert_eq!(sessions[2].0, format!("{source}/o16"));
         // Every document is searchable and traceable to its claude-mem row.
         let hits = crate::search::search(&conn, "trigram", None, 10).unwrap();
         let mapped: String = conn
             .query_row(
-                "SELECT doc FROM imports WHERE source='claude-mem' AND source_id='s20'",
+                "SELECT doc FROM imports WHERE source LIKE 'claude-mem:%' AND source_id='s20'",
                 [],
                 |r| r.get(0),
             )
@@ -438,7 +512,7 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!((fts, imports), (6, 6));
+        assert_eq!((fts, imports), (8, 8));
 
         // A second run adds nothing.
         let again = claude_mem(&mut conn, &src).unwrap();
@@ -449,12 +523,36 @@ mod tests {
                 again.prompts,
                 again.seen
             ),
-            (0, 0, 0, 6)
+            (0, 0, 0, 8)
         );
         let fts: i64 = conn
             .query_row("SELECT count(*) FROM fts", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(fts, 6);
+        assert_eq!(fts, 8);
+
+        // A session the developer deleted stays deleted when the same database comes again.
+        assert!(db::delete_session(&mut conn, "gone").unwrap());
+        claude_mem(&mut conn, &src).unwrap();
+        let gone: i64 = conn
+            .query_row("SELECT count(*) FROM sessions WHERE id='gone'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(gone, 0);
+
+        // Another claude-mem database reuses the same row ids; its rows are not "seen".
+        let other = dir.join("other.db");
+        claude_mem_db(&other, 5000);
+        let second = claude_mem(&mut conn, &other).unwrap();
+        assert_eq!(
+            (
+                second.observations,
+                second.summaries,
+                second.prompts,
+                second.seen
+            ),
+            (6, 1, 1, 0)
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -91,7 +91,9 @@ pub fn search(
 
 /// `oboete eval`: run each `{"qid","text"}` line through `search` over every repository and
 /// print the hits as a TREC run (`qid Q0 doc rank score method`), ranks from 1. The score only
-/// restates the order; the evaluator ranks by it.
+/// restates the order; the evaluator ranks by it. A line's optional `session` is the conversation
+/// the question came from: its documents hold the answer written after it, so they are left out
+/// before ranking (proposal §3.1) and the next hits move up.
 pub fn trec_run(conn: &Connection, queries: &str, depth: usize) -> Result<String> {
     let mut out = String::new();
     for line in queries.lines().filter(|l| !l.trim().is_empty()) {
@@ -99,8 +101,31 @@ pub fn trec_run(conn: &Connection, queries: &str, depth: usize) -> Result<String
         let (Some(qid), Some(text)) = (q["qid"].as_str(), q["text"].as_str()) else {
             anyhow::bail!("each line needs string qid and text: {line}");
         };
-        for (i, h) in search(conn, text, None, depth)?.iter().enumerate() {
-            out.push_str(&format!("{qid} Q0 {} {} {} fts\n", h.doc, i + 1, depth - i));
+        // A TREC run is whitespace-separated columns.
+        anyhow::ensure!(
+            !qid.is_empty() && !qid.contains(char::is_whitespace),
+            "qid must be one token without whitespace: {qid:?}"
+        );
+        let session = q["session"].as_str();
+        let mut limit = depth;
+        let kept = loop {
+            let hits = search(conn, text, None, limit)?;
+            let mut kept = Vec::new();
+            for h in &hits {
+                if kept.len() < depth
+                    && (session.is_none()
+                        || crate::db::doc_session(conn, &h.doc)?.as_deref() != session)
+                {
+                    kept.push(h.doc.clone());
+                }
+            }
+            if kept.len() == depth || hits.len() < limit {
+                break kept;
+            }
+            limit *= 2;
+        };
+        for (i, doc) in kept.iter().enumerate() {
+            out.push_str(&format!("{qid} Q0 {doc} {} {} fts\n", i + 1, depth - i));
         }
     }
     Ok(out)
@@ -309,6 +334,21 @@ mod tests {
         );
         assert_eq!(trec_run(&conn, queries, 1).unwrap(), "q1 Q0 o2 1 1 fts\n");
         assert!(trec_run(&conn, "{\"qid\":1,\"text\":\"x\"}", 5).is_err());
+        assert!(trec_run(&conn, "{\"qid\":\"q 1\",\"text\":\"x\"}", 5).is_err());
+        // The question's own session is left out and the next hit moves up.
+        let own = "{\"qid\":\"q1\",\"text\":\"Trigram\",\"session\":\"s1\"}\n";
+        assert_eq!(trec_run(&conn, own, 1).unwrap(), "");
+        let other = "{\"qid\":\"q1\",\"text\":\"Trigram\",\"session\":\"elsewhere\"}\n";
+        assert_eq!(trec_run(&conn, other, 1).unwrap(), "q1 Q0 o2 1 1 fts\n");
+        db::upsert_session(&conn, "s2", "claude", "/r", "/r", 1_700_000_000_000).unwrap();
+        db::insert_prompt(
+            &conn,
+            "s2",
+            1_700_000_100_000,
+            "trigram from another session",
+        )
+        .unwrap();
+        assert_eq!(trec_run(&conn, own, 1).unwrap(), "q1 Q0 p2 1 1 fts\n");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

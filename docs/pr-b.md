@@ -14,12 +14,13 @@ PR は 3 つに分ける。
 
 2. **claude-mem の記憶は `oboete import claude-mem <db>` で評価用の home に入れる。** 取り込みは決定 1 で出荷する機能 (普段の store へは PR-H)。同じコードを評価に使えば、測るのは出荷するコードになる (§3.2)。
    - 取り込む文は関門 `redact::outbound` を通す (決定 1 の「取り込み時」の 1 回目)。
-   - 元の id は新しい表 `imports(source, source_id, doc)` に残す。再取り込みで二重にならず、claude-mem の検索結果を oboete の doc id に直すのにも使う。
+   - 元の id は新しい表 `imports(source, source_id, doc)` に残す。再取り込みで二重にならず、claude-mem の検索結果を oboete の doc id に直すのにも使う。claude-mem の id は DB ごとに 1 から始まる (Windows の写しにも observation 1 がある) ので、`source` は `claude-mem:<その DB の最初の session のハッシュ>` にする。写しや移動では変わらないので、写しを取り込んだ後に本体を取り込んでも増えた分だけが入る。
+   - 取り込み済みの行は session を書く前に飛ばす (developer が消した session を空の行で戻さない)。session id の無い行は 1 行ずつ別の session にする (無関係な行が 1 つにまとまらない)。
    - 対応: 観測は `type` → `kind` (`KINDS` の外、たとえば壊れた `discovery>` は `discovery`)、`title`、本文は `narrative` に `facts` を 1 行ずつ足したもの (`narrative` が空の 1,926 行は `facts` だけ、両方空なら取り込まない)。要約は `request` / `investigated` / `learned` / `completed` / `next_steps` を見出し付きでつないだもの。prompt は hook と同じ正規化 (harness 通知は捨て、`<private>` などを外す)。session は `sdk_sessions` から。
    - repo は `claude-mem:<project>` にする。claude-mem の project は `free-mem` や `公式サイト` のような名前で、oboete の repo キー (PR-C で origin URL) に機械的には直せない。直すのは PR-H (PR-C の repo 別名を使う)。
    - **B1 では既定の home (`~/.oboete`) への取り込みを断る** (`--home` 必須)。repo の対応が決まる前に普段の store に入ると、注入が repo ごとに引けない行が 16 万件入るため。PR-H でこの制限を外す。
 
-3. **`oboete eval <問いの JSONL>` は隠しコマンドにして出荷する。** feature flag にすると CI で別のビルドが要り、放っておくと壊れる。コードは 1 画面で、出荷している検索関数をそのまま呼ぶ。入力は 1 行 1 問の JSONL (`{"qid","text"}`)、出力は TREC の run (`qid Q0 doc rank score method`)。方式は今は `fts` (今の `search::search` を全 repo で) だけで、PR-D で `vec` / `hybrid`、PR-E で各工夫を足す。
+3. **`oboete eval <問いの JSONL>` は隠しコマンドにして出荷する。** feature flag にすると CI で別のビルドが要り、放っておくと壊れる。コードは 1 画面で、出荷している検索関数をそのまま呼ぶ。入力は 1 行 1 問の JSONL (`{"qid","text"}`、任意で `session`)。`session` があれば、その会話の文書 (問いの後に書かれた答えを含む) を順位を付ける前に除いて次の文書を繰り上げる (§3.1)。qid は空白を含まない 1 語に限る。出力は TREC の run (`qid Q0 doc rank score method`)。方式は今は `fts` (今の `search::search` を全 repo で) だけで、PR-D で `vec` / `hybrid`、PR-E で各工夫を足す。
    - もう 1 つの隠しコマンド **`oboete gate`** は、標準入力を関門 (`redact::outbound`) に通して標準出力に出す。評価のスクリプトが外 (判定器) へ送る文のうち、store を通っていないもの (transcript から拾った agent の検索語) をこれに通す。関門の実装を Python に写さないため。
 
 4. **指標は ranx (Python) で出す。** `docs/eval/report.py` が run と qrels を読み、nDCG@10・recall@10/50・MRR@10 と有意差を出す (出荷しない)。ranx は `uv` の一時環境で入れる。
