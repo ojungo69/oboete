@@ -30,6 +30,9 @@ const MAX_CHARS: usize = 12_000;
 const PROMPT_CHARS: usize = 1_000;
 /// Documents read per round of a backlog.
 const PAGE: i64 = 2_000;
+/// A batch of up to 100 texts; a search query waits for its vector (MCP budget p95 1.5 s).
+const BATCH_TIMEOUT: Duration = Duration::from_secs(180);
+const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// One answer holds up to 100 × 1,024 floats as JSON (about 2 MB).
 const MAX_RESPONSE_BYTES: u64 = 8 << 20;
 /// Requests per observe run: observe holds its lock while embedding, and other sessions' summaries
@@ -51,13 +54,7 @@ pub fn backlog(
     cfg: &config::Embedding,
     max_requests: Option<u32>,
 ) -> Result<Stats> {
-    let account = cfg
-        .account_id
-        .as_deref()
-        .ok_or_else(|| anyhow!("[embedding] account_id is not set"))?;
-    let url =
-        format!("https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/@cf/baai/bge-m3");
-    let key = config::read_key(&cfg.key_file)?;
+    let (url, key) = endpoint(cfg)?;
     let cap = max_requests.map(|n| {
         n.min(
             cfg.daily_requests
@@ -65,6 +62,76 @@ pub fn backlog(
         )
     });
     backlog_at(conn, &url, &key, cap)
+}
+
+/// The model's URL and the token.
+fn endpoint(cfg: &config::Embedding) -> Result<(String, String)> {
+    let account = cfg
+        .account_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("[embedding] account_id is not set"))?;
+    let url =
+        format!("https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/@cf/baai/bge-m3");
+    Ok((url, config::read_key(&cfg.key_file)?))
+}
+
+/// A search query's vector, gated like the documents. A search waits for it, so the call gets a
+/// short timeout; the caller falls back to full-text search when it fails.
+pub fn query(cfg: &config::Embedding, text: &str) -> Result<Vec<f32>> {
+    let (url, key) = endpoint(cfg)?;
+    let gated: String = redact::outbound(text).chars().take(MAX_CHARS).collect();
+    anyhow::ensure!(!gated.trim().is_empty(), "empty query");
+    let mut v = run_model(&url, &key, &[&gated], QUERY_TIMEOUT)?;
+    Ok(v.remove(0))
+}
+
+/// Up to `k` documents of one shard (a repository or all; knowledge or prompts) nearest to `q`:
+/// 4k candidates by Hamming distance on the sign bits, rescored by fp32 cosine from
+/// `embeddings` (docs/pr-d.md: top-10 agreement 0.987 with the exact ranking).
+pub fn nearest(
+    conn: &Connection,
+    q: &[f32],
+    repo: Option<&str>,
+    prompts: bool,
+    k: usize,
+) -> Result<Vec<String>> {
+    let kind = if prompts { "p" } else { "k" };
+    let candidates = (4 * k) as i64;
+    let mut sql = String::from(
+        "SELECT doc FROM vec_docs WHERE embedding MATCH vec_bit(?1) AND k = ?2 AND kind = ?3",
+    );
+    if repo.is_some() {
+        sql.push_str(" AND repo = ?4");
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let docs: Vec<String> = match repo {
+        Some(r) => stmt
+            .query_map(params![bits(q), candidates, kind, r], |r| r.get(0))?
+            .collect::<Result<_, _>>()?,
+        None => stmt
+            .query_map(params![bits(q), candidates, kind], |r| r.get(0))?
+            .collect::<Result<_, _>>()?,
+    };
+    let mut get = conn.prepare("SELECT vec FROM embeddings WHERE doc = ?1")?;
+    let mut scored = Vec::with_capacity(docs.len());
+    for doc in docs {
+        let Some(bytes) = get
+            .query_row(params![doc], |r| r.get::<_, Vec<u8>>(0))
+            .optional()?
+        else {
+            continue;
+        };
+        let dot: f32 = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(q)
+            .map(|(b, x)| f32::from_le_bytes(*b) * x)
+            .sum();
+        scored.push((dot, doc));
+    }
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    Ok(scored.into_iter().take(k).map(|(_, d)| d).collect())
 }
 
 fn backlog_at(conn: &mut Connection, url: &str, key: &str, cap: Option<u32>) -> Result<Stats> {
@@ -107,7 +174,7 @@ fn embed_page(
         }
         let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
         let started = Instant::now();
-        let result = run_model(url, key, &texts);
+        let result = run_model(url, key, &texts, BATCH_TIMEOUT);
         let ms = started.elapsed().as_millis() as i64;
         stats.requests += 1;
         let vecs = match result {
@@ -173,9 +240,9 @@ fn batches(todo: &[(String, String)]) -> Vec<&[(String, String)]> {
 }
 
 /// One Workers AI call: the texts' vectors, in order.
-fn run_model(url: &str, key: &str, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+fn run_model(url: &str, key: &str, texts: &[&str], timeout: Duration) -> Result<Vec<Vec<f32>>> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(180)))
+        .timeout_global(Some(timeout))
         .http_status_as_error(false)
         .user_agent(concat!("oboete/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -267,7 +334,7 @@ fn store(conn: &mut Connection, batch: &[(String, String)], vecs: &[Vec<f32>]) -
 
 /// Index the vectors `vec_docs` does not have (a re-key drops a repository's rows; `reindex`
 /// drops them all), a page per transaction so a whole store's vectors are never in memory at once.
-fn index_pending(conn: &mut Connection) -> Result<usize> {
+pub(crate) fn index_pending(conn: &mut Connection) -> Result<usize> {
     let mut n = 0;
     loop {
         let tx = conn.transaction()?;

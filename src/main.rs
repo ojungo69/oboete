@@ -56,7 +56,8 @@ enum Cmd {
     Inject,
     /// Serve the memory as an MCP server on stdin/stdout (search / get / timeline tools)
     Mcp,
-    /// Full-text search over observations, summaries and prompts (this repository unless --all)
+    /// Search observations, summaries and prompts (this repository unless --all): by words, and
+    /// by meaning too when `[embedding] provider = "workers-ai"`
     Search {
         /// Words or a sentence. Ranked by the 3-character pieces they share; a query too short
         /// for that matches its terms as literal substrings, all required. Put `--` before a
@@ -117,6 +118,9 @@ enum Cmd {
         queries: PathBuf,
         #[arg(long, default_value_t = 50)]
         depth: usize,
+        /// fts (full-text) or hybrid (full-text and vectors, needs [embedding])
+        #[arg(long, default_value = "fts")]
+        method: String,
     },
     /// Replay a JSONL fixture through the hook path and measure
     Replay {
@@ -204,7 +208,9 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let query = query.join(" ");
             let terms = search::terms(&query);
             let mut out = String::new();
-            for h in search::search(&conn, &query, repo_filter(all)?.as_deref(), limit)? {
+            let embedding = config::load(&home)?.embedding;
+            let scope = repo_filter(all)?;
+            for h in search::find(&conn, &embedding, &query, scope.as_deref(), limit)? {
                 let text = search::snippet(&h.body, &terms, 110);
                 let repo = if all {
                     let name = std::path::Path::new(&h.repo)
@@ -293,12 +299,22 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
             emit(&redact::outbound(&text))
         }
-        Cmd::Eval { queries, depth } => {
+        Cmd::Eval {
+            queries,
+            depth,
+            method,
+        } => {
+            let embedding = match method.as_str() {
+                "fts" => None,
+                "hybrid" => Some(config::load(&home)?.embedding),
+                other => anyhow::bail!("--method {other}: use fts or hybrid"),
+            };
             let conn = db::open(&home)?;
             emit(&search::trec_run(
                 &conn,
                 &std::fs::read_to_string(queries)?,
                 depth,
+                embedding.as_ref(),
             )?)
         }
         Cmd::Doctor => setup::doctor(&home),
