@@ -236,7 +236,7 @@ pub fn handle(
     let steps: Vec<Value> =
         if agent == "agy" && matches!(event, "PreInvocation" | "PostToolUse" | "Stop") {
             str_field(payload, &["transcriptPath"])
-                .map(|p| transcript_tail(Path::new(p)))
+                .map(|p| transcript_tail(Path::new(p), TAIL))
                 .unwrap_or_default()
                 .lines()
                 .rev()
@@ -570,24 +570,27 @@ pub fn clip(s: &str) -> String {
     format!("{head}\n…[clipped, {total} chars in full]")
 }
 
-/// A fixed-size tail even if the agent appends while we read. Discard the first partial line.
-fn transcript_tail(path: &Path) -> String {
-    const TAIL: u64 = 256 * 1024;
+/// Tail read by the hooks that run during a turn.
+const TAIL: u64 = 256 * 1024;
+
+/// At most `tail` bytes from the end, even if the agent appends while we read. Discard the first
+/// partial line.
+fn transcript_tail(path: &Path, tail: u64) -> String {
     let Ok(mut f) = std::fs::File::open(path) else {
         return String::new();
     };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    if len > TAIL {
+    if len > tail {
         use std::io::Seek;
-        if f.seek(std::io::SeekFrom::Start(len - TAIL)).is_err() {
+        if f.seek(std::io::SeekFrom::Start(len - tail)).is_err() {
             return String::new();
         }
     }
     let mut bytes = Vec::new();
-    if f.take(TAIL).read_to_end(&mut bytes).is_err() {
+    if f.take(tail).read_to_end(&mut bytes).is_err() {
         return String::new();
     }
-    if len > TAIL {
+    if len > tail {
         let Some(newline) = bytes.iter().position(|b| *b == b'\n') else {
             return String::new();
         };
@@ -596,13 +599,16 @@ fn transcript_tail(path: &Path) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// (prompt, last answer) per turn in a Cursor agent transcript's tail. Lines are
+/// (prompt, last answer) per turn in a Cursor agent transcript. Lines are
 /// `{"role", "message": {"content": [{"type": "text", "text"}, {"type": "tool_use"}…]}}`
 /// (agent-transcript in the cursor-agent bundle). The user text may wrap the typed prompt in
 /// `<user_query>` (unverified); metadata / `turn_ended` lines have no role.
 fn cursor_turns(path: &Path) -> Vec<(String, String)> {
     let mut turns: Vec<(String, String)> = Vec::new();
-    for line in transcript_tail(path).lines() {
+    // The whole conversation, so a turn pushed out by large tool calls is still found and the
+    // n-th repeat of a prompt is counted from the start (SessionEnd is off the hot path).
+    // ponytail: past 16 MiB only the tail is read; repeats before it are then not counted.
+    for line in transcript_tail(path, 16 << 20).lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -635,7 +641,7 @@ fn cursor_turns(path: &Path) -> Vec<(String, String)> {
 
 /// Last assistant `output_text` in a Codex rollout JSONL, reading only the file's tail.
 fn last_assistant_in_transcript(path: &Path) -> String {
-    let text = transcript_tail(path);
+    let text = transcript_tail(path, TAIL);
     let mut last = String::new();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -853,7 +859,8 @@ mod tests {
         let lines = [
             json!({"type":"metadata","metadata":{"overview":"x"}}),
             json!({"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nSay hi.\n</user_query>"}]}}),
-            json!({"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"ls"}}]}}),
+            // A large tool call pushes the first turn out of the hot-path tail window.
+            json!({"role":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"text":"x".repeat(300_000)}}]}}),
             json!({"role":"assistant","message":{"content":[{"type":"text","text":"Hi."}]}}),
             json!({"type":"turn_ended","status":"success"}),
             json!({"role":"user","message":{"content":[{"type":"text","text":"Read hello.txt and explain the result."}]}}),
