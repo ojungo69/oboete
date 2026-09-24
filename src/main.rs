@@ -57,8 +57,9 @@ enum Cmd {
     Mcp,
     /// Full-text search over observations, summaries and prompts (this repository unless --all)
     Search {
-        /// Terms, all required. One under 3 characters matches as a literal substring
-        /// (ASCII case folding only). Put `--` before a term that starts with `-`
+        /// Words or a sentence. Ranked by the 3-character pieces they share; a query too short
+        /// for that matches its terms as literal substrings, all required. Put `--` before a
+        /// term that starts with `-`
         query: Vec<String>,
         #[arg(long)]
         all: bool,
@@ -192,7 +193,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         Cmd::Search { query, all, limit } => {
             let conn = db::open(&home)?;
             let query = query.join(" ");
-            let terms: Vec<&str> = query.split_whitespace().collect();
+            let terms = search::terms(&query);
             let mut out = String::new();
             for h in search::search(&conn, &query, repo_filter(all)?.as_deref(), limit)? {
                 let text = search::snippet(&h.body, &terms, 110);

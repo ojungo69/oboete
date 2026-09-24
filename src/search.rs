@@ -1,8 +1,10 @@
 //! Search over what is stored. One FTS5 trigram table (`fts`) keeps a copy of every
 //! observation, summary and prompt, so a query is one SQL statement and CJK text is indexed by
-//! character. Terms of three or more characters go through MATCH (bm25 order, Unicode case
-//! folding); a shorter term cannot hit a trigram index and is ANDed on as a literal LIKE
-//! (ASCII case folding only), which is a scan the small tables can afford.
+//! character. A query is cut into character trigrams, ORed and ranked by bm25 (Unicode case
+//! folding), so a Japanese sentence or a question in the developer's own words still finds the
+//! documents that share the most of its rarer pieces (PR-E0, measured in `docs/pr-e0.md`). A
+//! query too short for any trigram falls back to literal LIKE terms, all required (ASCII case
+//! folding only), which is a scan the small tables can afford.
 
 use anyhow::Result;
 use rusqlite::types::Value;
@@ -33,29 +35,77 @@ fn hit(r: &rusqlite::Row) -> rusqlite::Result<Hit> {
     })
 }
 
-/// Whitespace-separated terms, all required. `repo = None` searches every repository. Prompts
-/// come after observations and summaries.
+/// The query's trigrams: each run between whitespace and punctuation gives its overlapping
+/// three-character pieces, except all-hiragana ones (particles and verb endings match almost
+/// every Japanese document). Deduplicated, at most 64 so a pasted page stays one quick query.
+// ponytail: every trigram is ORed, so a common one scans a long posting list (180k documents:
+// p50 0.3 s, p95 0.8 s). Fine for MCP and the viewer; the injection hook (PR-F, 300 ms) should
+// keep only the rarest trigrams (measured in docs/pr-e0.md).
+fn trigrams(query: &str) -> Vec<String> {
+    const SEPARATORS: &str = "、。，．,.!?！？「」『』()（）[]{}:;：；\"'`<>";
+    let hiragana = |c: &char| ('\u{3040}'..='\u{309f}').contains(c);
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for run in query.split(|c: char| c.is_whitespace() || SEPARATORS.contains(c)) {
+        let chars: Vec<char> = run.chars().collect();
+        for w in chars.windows(3) {
+            // The index folds case, so `HTTP` and `http` are one piece (else bm25 counts it twice).
+            // The query keeps its spelling: SQLite folds it as it folded the index, and a char
+            // whose lowercase is longer (`İ`) would no longer be one trigram.
+            let folded: String = w.iter().map(|&c| fold(c)).collect();
+            if !w.iter().all(hiragana) && !seen.contains(&folded) && out.len() < 64 {
+                seen.push(folded);
+                out.push(w.iter().collect());
+            }
+        }
+    }
+    out
+}
+
+/// One char's case fold for dedup and the snippet: ASCII only, which SQLite's tokenizer folds too.
+/// ponytail: under-folds other scripts (`Σ`/`ς` stay two keys, so a query holding both counts
+/// that piece twice in bm25) but never merges what SQLite keeps apart (`ı` and `i`), which would
+/// drop a branch; exact parity means porting SQLite's Unicode fold table.
+fn fold(c: char) -> char {
+    c.to_ascii_lowercase()
+}
+
+/// What a hit is matched on, for `snippet`: the query's trigrams, or its terms when it has none.
+pub fn terms(query: &str) -> Vec<String> {
+    let grams = trigrams(query);
+    if grams.is_empty() {
+        query.split_whitespace().map(String::from).collect()
+    } else {
+        grams
+    }
+}
+
+/// Ranked search. `repo = None` searches every repository. Prompts come after observations and
+/// summaries.
 pub fn search(
     conn: &Connection,
     query: &str,
     repo: Option<&str>,
     limit: usize,
 ) -> Result<Vec<Hit>> {
-    let (long, short): (Vec<&str>, Vec<&str>) = query
-        .split_whitespace()
-        .partition(|t| t.chars().count() >= 3);
-    if long.is_empty() && short.is_empty() {
+    let grams = trigrams(query);
+    let short: Vec<&str> = if grams.is_empty() {
+        query.split_whitespace().collect()
+    } else {
+        Vec::new()
+    };
+    if grams.is_empty() && short.is_empty() {
         return Ok(Vec::new());
     }
     let mut clauses: Vec<String> = Vec::new();
     let mut args: Vec<Value> = Vec::new();
-    if !long.is_empty() {
-        // Each term as an FTS5 string (quotes doubled), implicit AND between them.
-        let q = long
+    if !grams.is_empty() {
+        // Each trigram as an FTS5 string (quotes doubled), ORed.
+        let q = grams
             .iter()
             .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
             .collect::<Vec<_>>()
-            .join(" ");
+            .join(" OR ");
         clauses.push("fts MATCH ?".into());
         args.push(Value::Text(q));
     }
@@ -76,7 +126,7 @@ pub fn search(
     }
     // Knowledge before prompts: bm25 favours short documents, and a prompt is usually a short
     // question where an observation is the answer.
-    let order = if long.is_empty() {
+    let order = if grams.is_empty() {
         "kind = 'prompt', ts DESC"
     } else {
         "kind = 'prompt', rank, ts DESC"
@@ -258,17 +308,41 @@ pub fn feed(conn: &Connection, repo: Option<&str>, limit: usize) -> Result<Vec<F
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// One line of `body`, `width` characters around the first term found (case-insensitive).
-pub fn snippet(body: &str, terms: &[&str], width: usize) -> String {
+/// One line of `body`, `width` characters around the passage with the most different `terms`
+/// (case-insensitive; `terms` from [`terms`]).
+pub fn snippet(body: &str, terms: &[String], width: usize) -> String {
     let flat = body.replace('\n', " ");
-    let lower = flat.to_lowercase();
-    let at = terms
-        .iter()
-        .filter_map(|t| lower.find(&t.to_lowercase()))
-        .min()
-        .unwrap_or(0);
     let chars: Vec<char> = flat.chars().collect();
-    let at = lower[..at].chars().count().min(chars.len());
+    let lower: Vec<char> = chars.iter().map(|&c| fold(c)).collect();
+    // Every (char position, term) where a term occurs; the passage is the window that holds the
+    // most different terms, so a hit found by a few rare trigrams shows them.
+    let mut found: Vec<(usize, usize)> = Vec::new();
+    for (i, t) in terms.iter().enumerate() {
+        let t: Vec<char> = t.chars().map(fold).collect();
+        if t.is_empty() || t.len() > lower.len() {
+            continue;
+        }
+        found.extend(
+            (0..=lower.len() - t.len())
+                .filter(|&p| lower[p..p + t.len()] == t[..])
+                .map(|p| (p, i)),
+        );
+    }
+    found.sort_unstable();
+    let mut at = found.first().map_or(0, |f| f.0);
+    let mut best = 0;
+    for (k, &(p, _)) in found.iter().enumerate() {
+        let mut seen: Vec<usize> = found[k..]
+            .iter()
+            .take_while(|f| f.0 < p + width * 2 / 3)
+            .map(|f| f.1)
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        if seen.len() > best {
+            (best, at) = (seen.len(), p);
+        }
+    }
     let start = at.saturating_sub(width / 3);
     let end = (start + width).min(chars.len());
     let mut s: String = chars[start..end].iter().collect();
@@ -318,7 +392,7 @@ mod tests {
                 db::Observation {
                     kind: "change".into(),
                     title: "ÉCOLE coverage".into(),
-                    body: "coverage 50% done, ÄÖÜ".into(),
+                    body: "coverage 50% done, ÄÖÜ İSTANBUL".into(),
                 },
             ],
             i64::MAX,
@@ -370,20 +444,25 @@ mod tests {
                 .map(|h| h.doc)
                 .collect()
         };
-        // 3+ characters: trigram MATCH, English and Japanese alike, case-insensitive.
+        // Trigrams, ORed: English and Japanese alike, case-insensitive; a part that matches
+        // nothing does not empty the result, and a sentence finds what shares its pieces.
         assert_eq!(docs("Trigram", None), vec!["o2", "p1"]);
         assert_eq!(docs("足して", None), vec!["p1"]);
         assert_eq!(docs("クエリ", None), vec!["o1"]);
+        assert_eq!(docs("trigram \"quoted\"", None), vec!["o2", "p1"]);
+        assert_eq!(docs("接続 trigram", None), vec!["o2", "p1"]);
+        assert_eq!(docs("use trigram", None), vec!["o2", "p1"]);
+        assert_eq!(docs("クエリの接続を調べてください", None), vec!["o1"]);
+        assert_eq!(docs("éco ÄÖ", None), vec!["o3"]);
+        // `İ` lowercases to two code points; the query keeps its spelling for SQLite to fold.
+        assert_eq!(docs("İST", None), vec!["o3"]);
+        // A query with no trigram falls back to literal LIKE terms, all required (ASCII case
+        // folding); `%` and `_` are not wildcards.
         assert_eq!(docs("検索 要約", None), vec!["s1"]);
-        assert_eq!(docs("trigram \"quoted\"", None), Vec::<String>::new());
-        // A term under 3 characters is a literal LIKE (ASCII case folding), ANDed with the
-        // MATCH of the longer ones; `%` and `_` are not wildcards.
         assert_eq!(docs("接続", None), vec!["o1"]);
         assert_eq!(docs("db", None), vec!["o1"]);
-        assert_eq!(docs("接続 クエリ", None), vec!["o1"]);
-        assert_eq!(docs("接続 trigram", None), Vec::<String>::new());
-        assert_eq!(docs("use trigram", None), vec!["o2"]);
-        assert_eq!(docs("éco ÄÖ", None), vec!["o3"]);
+        assert_eq!(docs("接続 db", None), vec!["o1"]);
+        assert_eq!(docs("接続 要約", None), Vec::<String>::new());
         assert_eq!(docs("50%", None), vec!["o3"]);
         assert_eq!(docs("0%", None), vec!["o3"]);
         assert_eq!(docs("0_", None), Vec::<String>::new());
@@ -455,14 +534,35 @@ mod tests {
     }
 
     #[test]
-    fn snippet_centres_on_the_first_term() {
+    fn trigrams_skip_hiragana_split_at_punctuation_and_stop_at_64() {
+        assert_eq!(trigrams("検索をしてください。"), ["検索を", "索をし"]);
+        assert_eq!(trigrams("abcd, abc"), ["abc", "bcd"]);
+        assert_eq!(trigrams("HTTP http"), ["HTT", "TTP"]);
+        assert_eq!(trigrams("iii ııı III"), ["iii", "ııı"]);
+        assert_eq!(trigrams("db 接続"), Vec::<String>::new());
+        let long: String = ('a'..='z').cycle().take(200).collect();
+        assert_eq!(trigrams(&long).len(), 26);
+        let many: String = (0..100).map(|i| format!("x{i:02} ")).collect();
+        assert_eq!(trigrams(&many).len(), 64);
+    }
+
+    #[test]
+    fn snippet_shows_the_passage_with_the_most_terms() {
+        let t = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let body = "aaaaaaaaaa bbbbbbbbbb cccccccccc TARGET dddddddddd eeeeeeeeee";
-        let s = snippet(body, &["zzz", "target"], 24);
+        let s = snippet(body, &t(&["zzz", "target"]), 24);
         assert!(
             s.contains("TARGET") && s.starts_with('…') && s.ends_with('…'),
             "{s}"
         );
-        assert_eq!(snippet("short\nline", &["nothing"], 40), "short line");
-        assert_eq!(snippet("日本語の本文です", &["本文"], 4), "…の本文で…");
+        assert_eq!(snippet("short\nline", &t(&["nothing"]), 40), "short line");
+        assert_eq!(snippet("日本語の本文です", &t(&["本文"]), 4), "…の本文で…");
+        // A common trigram early on loses to the passage where the rarer ones meet.
+        let body = format!(
+            "the start {} the trigram tokenizer indexes CJK",
+            "x".repeat(200)
+        );
+        let s = snippet(&body, &terms("the trigram tokenizer"), 40);
+        assert!(s.contains("trigram tokenizer"), "{s}");
     }
 }

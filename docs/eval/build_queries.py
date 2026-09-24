@@ -14,7 +14,7 @@ import glob, hashlib, json, os, re, sqlite3, subprocess, sys
 E = os.path.expanduser('~/.oboete/eval')
 # The questions and runs are the developer's own records: owner-only files.
 os.umask(0o077)
-os.makedirs(E, mode=0o700, exist_ok=True)
+os.makedirs(f'{E}/runs', mode=0o700, exist_ok=True)
 os.chmod(E, 0o700)
 OBOETE = sys.argv[1] if len(sys.argv) > 1 else 'oboete'
 JA = re.compile(r'[぀-ヿ㐀-鿿]')

@@ -300,7 +300,7 @@ impl Viewer {
             }
             "search" => {
                 let query = q.get("q").map(String::as_str).unwrap_or("");
-                let terms: Vec<&str> = query.split_whitespace().collect();
+                let terms = search::terms(query);
                 let hits: Vec<Value> = search::search(&conn, query, repo, limit(50))?
                     .iter()
                     .map(|h| doc(h, &search::snippet(&h.body, &terms, 160)))
