@@ -193,7 +193,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         Cmd::Search { query, all, limit } => {
             let conn = db::open(&home)?;
             let query = query.join(" ");
-            let terms: Vec<&str> = query.split_whitespace().collect();
+            let terms = search::terms(&query);
             let mut out = String::new();
             for h in search::search(&conn, &query, repo_filter(all)?.as_deref(), limit)? {
                 let text = search::snippet(&h.body, &terms, 110);

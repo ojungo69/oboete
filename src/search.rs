@@ -57,6 +57,16 @@ fn trigrams(query: &str) -> Vec<String> {
     out
 }
 
+/// What a hit is matched on, for `snippet`: the query's trigrams, or its terms when it has none.
+pub fn terms(query: &str) -> Vec<String> {
+    let grams = trigrams(query);
+    if grams.is_empty() {
+        query.split_whitespace().map(String::from).collect()
+    } else {
+        grams
+    }
+}
+
 /// Ranked search. `repo = None` searches every repository. Prompts come after observations and
 /// summaries.
 pub fn search(
@@ -285,17 +295,44 @@ pub fn feed(conn: &Connection, repo: Option<&str>, limit: usize) -> Result<Vec<F
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// One line of `body`, `width` characters around the first term found (case-insensitive).
-pub fn snippet(body: &str, terms: &[&str], width: usize) -> String {
+/// One line of `body`, `width` characters around the passage with the most different `terms`
+/// (case-insensitive; `terms` from [`terms`]).
+pub fn snippet(body: &str, terms: &[String], width: usize) -> String {
     let flat = body.replace('\n', " ");
-    let lower = flat.to_lowercase();
-    let at = terms
-        .iter()
-        .filter_map(|t| lower.find(&t.to_lowercase()))
-        .min()
-        .unwrap_or(0);
     let chars: Vec<char> = flat.chars().collect();
-    let at = lower[..at].chars().count().min(chars.len());
+    let lower: Vec<char> = chars
+        .iter()
+        .map(|c| c.to_lowercase().next().unwrap_or(*c))
+        .collect();
+    // Every (char position, term) where a term occurs; the passage is the window that holds the
+    // most different terms, so a hit found by a few rare trigrams shows them.
+    let mut found: Vec<(usize, usize)> = Vec::new();
+    for (i, t) in terms.iter().enumerate() {
+        let t: Vec<char> = t.to_lowercase().chars().collect();
+        if t.is_empty() || t.len() > lower.len() {
+            continue;
+        }
+        found.extend(
+            (0..=lower.len() - t.len())
+                .filter(|&p| lower[p..p + t.len()] == t[..])
+                .map(|p| (p, i)),
+        );
+    }
+    found.sort_unstable();
+    let mut at = found.first().map_or(0, |f| f.0);
+    let mut best = 0;
+    for (k, &(p, _)) in found.iter().enumerate() {
+        let mut seen: Vec<usize> = found[k..]
+            .iter()
+            .take_while(|f| f.0 < p + width * 2 / 3)
+            .map(|f| f.1)
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        if seen.len() > best {
+            (best, at) = (seen.len(), p);
+        }
+    }
     let start = at.saturating_sub(width / 3);
     let end = (start + width).min(chars.len());
     let mut s: String = chars[start..end].iter().collect();
@@ -496,14 +533,22 @@ mod tests {
     }
 
     #[test]
-    fn snippet_centres_on_the_first_term() {
+    fn snippet_shows_the_passage_with_the_most_terms() {
+        let t = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let body = "aaaaaaaaaa bbbbbbbbbb cccccccccc TARGET dddddddddd eeeeeeeeee";
-        let s = snippet(body, &["zzz", "target"], 24);
+        let s = snippet(body, &t(&["zzz", "target"]), 24);
         assert!(
             s.contains("TARGET") && s.starts_with('…') && s.ends_with('…'),
             "{s}"
         );
-        assert_eq!(snippet("short\nline", &["nothing"], 40), "short line");
-        assert_eq!(snippet("日本語の本文です", &["本文"], 4), "…の本文で…");
+        assert_eq!(snippet("short\nline", &t(&["nothing"]), 40), "short line");
+        assert_eq!(snippet("日本語の本文です", &t(&["本文"]), 4), "…の本文で…");
+        // A common trigram early on loses to the passage where the rarer ones meet.
+        let body = format!(
+            "the start {} the trigram tokenizer indexes CJK",
+            "x".repeat(200)
+        );
+        let s = snippet(&body, &terms("the trigram tokenizer"), 40);
+        assert!(s.contains("trigram tokenizer"), "{s}");
     }
 }

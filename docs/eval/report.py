@@ -112,7 +112,9 @@ def table(label, keep, drop=lambda qid, doc: False):
     if len(qrels) < 5:
         print(f'\n## {label}: {len(qrels)} questions (too few to score)')
         return
-    rs = [Run({q: {d: 1000 - i for i, d in enumerate([d for d in r.get(q, []) if not drop(q, d)][:50])}
+    # Filter inside each run's judged top 20: a document lifted from below it would be unjudged
+    # and count as not relevant. A run that loses many of its 20 then shows fewer than 10.
+    rs = [Run({q: {d: 1000 - i for i, d in enumerate([d for d in r.get(q, [])[:J.POOL_DEPTH] if not drop(q, d)])}
                for q in qrels}, name=m) for m, r in runs.items()]
     print(f'\n## {label}: {len(qrels)} questions')
     print(compare(Qrels(qrels), rs, metrics=metrics, max_p=0.05, make_comparable=True))

@@ -119,7 +119,7 @@ impl Oboete {
             a.limit.unwrap_or(10).min(MAX_LIMIT),
         )
         .map_err(internal)?;
-        let terms: Vec<&str> = a.query.split_whitespace().collect();
+        let terms = search::terms(&a.query);
         let mut out = String::new();
         for h in hits {
             let snippet = search::snippet(&h.body, &terms, 160);
