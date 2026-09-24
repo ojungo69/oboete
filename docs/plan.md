@@ -4,7 +4,7 @@
 
 1. 目的: claude-mem を消して困らない。全 agent・全端末で同じ記憶。スマホ参照は「できたら」。
 2. 場面: セッション冒頭の自動コンテキスト、agent からの検索、viewer。レポート系は価値が分かれば入れる。
-3. agent: 必須 Claude Code / Codex / Grok Build。Antigravity CLI (`agy`)・OpenCode v2・Pi の adapter も実装済み (2026-09-24、残る実環境確認は `docs/research/agent-adapters-2026-09-23.md` を参照)。順次 Cursor。Gemini CLI は対象外。
+3. agent: 必須 Claude Code / Codex / Grok Build。Antigravity CLI (`agy`)・OpenCode v2・Pi・Cursor (CLI / IDE 共通) の adapter も実装済み (2026-09-24、残る実環境確認は `docs/research/agent-adapters-2026-09-23.md` を参照)。Gemini CLI は対象外。
 4. 要約の頭脳: サブスク CLI (agy / claude / codex / grok)、無料クラウド (OpenRouter free / NIM / Groq / Mistral)、ローカル (Ollama)、有料 API (明示時のみ)。フォールバック連鎖必須。要約が止まらない = 記録漏れ事故ゼロ。
 5. 置き場所: 使い勝手が良ければクラウド正本。暗号化/平文は私が決める。有料は都度確認。
 6. 覚えるもの: claude-mem / cmem 相当 + 類似 OSS の良い部分。repo 間共有は私が決める。

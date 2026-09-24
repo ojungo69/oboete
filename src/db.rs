@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS sessions(
   ended_at INTEGER,
   last_event_at INTEGER NOT NULL,
   injected_at INTEGER,
-  last_prompt_step INTEGER
+  last_prompt_step INTEGER,
+  reinject_pending INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY,
@@ -101,6 +102,13 @@ pub fn open(home: &Path) -> Result<Connection> {
     ensure_column(&mut conn, "sessions", "injected_at", "INTEGER").context("migrate columns")?;
     ensure_column(&mut conn, "sessions", "last_prompt_step", "INTEGER")
         .context("migrate prompt cursor")?;
+    ensure_column(
+        &mut conn,
+        "sessions",
+        "reinject_pending",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .context("migrate reinjection flag")?;
     ensure_autoincrement(&mut conn).context("migrate doc ids")?;
     ensure_fts(&mut conn).context("search index")?;
     Ok(conn)
@@ -278,6 +286,20 @@ pub fn claim_prompt_step(conn: &Connection, id: &str, step: i64) -> Result<bool>
     )? > 0)
 }
 
+/// Compaction drops context; keep this flag outside the raw events that observe deletes.
+pub fn mark_compacted(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("UPDATE sessions SET reinject_pending=1 WHERE id=?1", [id])?;
+    Ok(())
+}
+
+/// Consume the flag inside the prompt's write transaction, including when context is empty.
+pub fn claim_reinjection(conn: &Connection, id: &str) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE sessions SET reinject_pending=0 WHERE id=?1 AND reinject_pending=1",
+        [id],
+    )? > 0)
+}
+
 pub fn end_session(conn: &Connection, id: &str, ts: i64) -> Result<()> {
     conn.execute(
         "UPDATE sessions SET ended_at=?2, last_event_at=?2 WHERE id=?1",
@@ -303,6 +325,14 @@ pub fn insert_event(
 /// A prompt the developer typed, with its search row. Kept after observe drops the raw events.
 /// Filed under its session's repository, like the summaries and observations: the agent may have
 /// moved into another repository (`cd`) since the session started.
+pub fn count_prompts(conn: &Connection, session_id: &str, body: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT count(*) FROM prompts WHERE session_id=?1 AND body=?2",
+        params![session_id, body],
+        |r| r.get(0),
+    )?)
+}
+
 pub fn insert_prompt(conn: &Connection, session_id: &str, ts: i64, body: &str) -> Result<()> {
     let repo: String = conn.query_row(
         "SELECT repo FROM sessions WHERE id=?1",
@@ -685,11 +715,15 @@ mod tests {
         assert!(!claim_prompt_step(&conn, "s1", 0).unwrap());
         assert!(claim_prompt_step(&conn, "s1", 3).unwrap());
         assert!(!claim_prompt_step(&conn, "s1", 1).unwrap());
+        assert!(!claim_reinjection(&conn, "s1").unwrap());
+        mark_compacted(&conn, "s1").unwrap();
         // Reopening a current database is a no-op.
         drop(conn);
         let conn = open(&dir).unwrap();
         assert!(injected(&conn, "s1").unwrap());
         assert!(!claim_prompt_step(&conn, "s1", 3).unwrap());
+        assert!(claim_reinjection(&conn, "s1").unwrap());
+        assert!(!claim_reinjection(&conn, "s1").unwrap());
         std::fs::remove_dir_all(&dir).ok();
     }
 
