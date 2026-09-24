@@ -13,11 +13,11 @@ for i, t, b in o.execute('select id, title, body from observations order by id')
 rows += [(f's{i}', b) for i, b in o.execute('select id, body from summaries order by id')]
 for i, b in o.execute('select id, body from prompts order by id'):
     rows += [(f'p{i}', b[:1000]), (f'q:p{i}', b[:200])]
-H = '(id * 2654435761) % 4294967296'
-for n, (i, t, b) in enumerate(c.execute(f"select id, title, narrative from observations where coalesce(narrative,'') != '' and coalesce(title,'') != '' order by {H} limit 100")):
+# Fixed pseudo-random order by id (the same sample every run).
+for n, (i, t, b) in enumerate(c.execute("select id, title, narrative from observations where coalesce(narrative,'') != '' and coalesce(title,'') != '' order by (id * 2654435761) % 4294967296 limit 100")):
     rows.append((f'c{i}', f'{t}\n{b}'))
     if n % 4 == 0: rows.append((f'q:c{i}', t))
-rows += [(f'cp{i}', b[:1000]) for i, b in c.execute(f'select id, prompt_text from user_prompts where length(prompt_text) between 20 and 2000 order by {H} limit 30')]
-rows += [(f'cl{i}', b[:8000]) for i, b in c.execute(f'select id, prompt_text from user_prompts where length(prompt_text) > 3000 order by {H} limit 10')]
+rows += [(f'cp{i}', b[:1000]) for i, b in c.execute('select id, prompt_text from user_prompts where length(prompt_text) between 20 and 2000 order by (id * 2654435761) % 4294967296 limit 30')]
+rows += [(f'cl{i}', b[:8000]) for i, b in c.execute('select id, prompt_text from user_prompts where length(prompt_text) > 3000 order by (id * 2654435761) % 4294967296 limit 10')]
 for i, t in rows:
     print(json.dumps({'id': i, 'text': t}, ensure_ascii=False))

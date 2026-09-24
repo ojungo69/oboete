@@ -19,7 +19,7 @@ for x in sorted(rows, key=lambda y: len(y['text'])):
 batches.append(cur)
 for batch in batches:
     t = time.time(); st, res = cf.call('POST', URL, {'text': [x['text'] for x in batch]}, timeout=180)
-    lat.append(round((time.time() - t) * 1000)); assert st == 200 and res.get('success'), json.dumps(res.get('errors'))[:300]
+    lat.append(round((time.time() - t) * 1000)); cf.need(st == 200 and res.get('success'), json.dumps(res.get('errors'))[:300])
     for x, v in zip(batch, res['result']['data']): wa[x['id']] = v
 print('Workers AI ms per batch:', lat, 'sizes', [len(b) for b in batches])
 def norm(v):

@@ -1,8 +1,8 @@
 """PR-A2: does D1 accept an FTS5 trigram table? Creates a throwaway D1 database and deletes it."""
-import cf, json
+import cf
 s, r = cf.call('GET', '/accounts'); A = r['result'][0]['id']
 s, r = cf.call('POST', f'/accounts/{A}/d1/database', {'name': 'oboete-spike-trigram'})
-assert s == 200, r
+cf.need(s == 200, r)
 db = r['result']['uuid']
 try:
     def q(sql, params=None):
