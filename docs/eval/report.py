@@ -84,7 +84,8 @@ def ts(doc, cache={}):
 
 # When a developer prompt was typed (agent searches carry no time).
 asked = {q: ts(q) for q in queries if queries[q]['set'] == 'prompt'}
-now = time.time() * 1000
+# claude-mem's window counts back from when its run was collected, not from this report.
+now = os.path.getmtime(f'{E}/runs/claude-mem.trec') * 1000 if os.path.exists(f'{E}/runs/claude-mem.trec') else time.time() * 1000
 DAY = 86_400_000
 shown = {doc: text for pool in pools.values() for doc, text, _ in pool}
 
