@@ -19,8 +19,9 @@ use crate::{db, repo, search};
 #[derive(Clone)]
 pub struct Oboete {
     home: PathBuf,
-    /// The repository key of the directory the agent launched us from.
-    cwd_repo: String,
+    /// The directory the agent launched us from. Its repository key is read per call: it
+    /// changes when the repository gets an origin (and `observe` re-keys the rows).
+    cwd: PathBuf,
     tool_router: ToolRouter<Self>,
 }
 
@@ -33,7 +34,8 @@ pub struct SearchArgs {
     /// Search every repository instead of the current one.
     #[serde(default)]
     all: Option<bool>,
-    /// A repository root to search instead of the current one.
+    /// A repository to search instead of the current one: its path, or its key as results show
+    /// it (e.g. `github.com/owner/name`).
     #[serde(default)]
     repo: Option<String>,
     /// Maximum number of hits (default 10, at most 100).
@@ -52,7 +54,7 @@ pub struct TimelineArgs {
     /// Every repository instead of the current one.
     #[serde(default)]
     all: Option<bool>,
-    /// A repository root instead of the current one.
+    /// A repository instead of the current one: its path or its key.
     #[serde(default)]
     repo: Option<String>,
     /// Maximum number of sessions (default 20, at most 100).
@@ -82,22 +84,36 @@ impl Oboete {
     pub fn new(home: &Path, cwd: &Path) -> Self {
         Self {
             home: home.to_path_buf(),
-            cwd_repo: repo::key(cwd),
+            cwd: cwd.to_path_buf(),
             tool_router: Self::tool_router(),
         }
     }
 
     /// `None` = every repository. Models send `null` and `""` for arguments they mean to leave
-    /// out; a `repo` that is not a directory is an error, not a scope that matches nothing.
-    fn scope(&self, all: Option<bool>, repo: Option<&str>) -> Result<Option<String>, String> {
+    /// out. `repo` is a directory or a repository key the store knows (as `timeline --all` and
+    /// hits show it); anything else is an error, not a scope that matches nothing.
+    fn scope(
+        &self,
+        conn: &rusqlite::Connection,
+        all: Option<bool>,
+        repo: Option<&str>,
+    ) -> Result<Option<String>, String> {
         if all == Some(true) {
             return Ok(None);
         }
         match repo.filter(|r| !r.is_empty()) {
-            None => Ok(Some(self.cwd_repo.clone())),
+            None => Ok(Some(repo::key(&self.cwd))),
             Some(r) if Path::new(r).is_dir() => Ok(Some(crate::repo::key(Path::new(r)))),
+            Some(r)
+                if search::repos(conn)
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|row| row.repo == r) =>
+            {
+                Ok(Some(r.to_string()))
+            }
             Some(r) => Err(format!(
-                "repo {r:?} is not a directory: pass a repository's absolute path"
+                "repo {r:?} is neither a directory nor a repository oboete knows: pass a repository's path or key"
             )),
         }
     }
@@ -108,7 +124,7 @@ impl Oboete {
     )]
     fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, ErrorData> {
         let conn = db::open(&self.home).map_err(internal)?;
-        let scope = match self.scope(a.all, a.repo.as_deref()) {
+        let scope = match self.scope(&conn, a.all, a.repo.as_deref()) {
             Ok(s) => s,
             Err(m) => return failed(m),
         };
@@ -171,7 +187,7 @@ impl Oboete {
         Parameters(a): Parameters<TimelineArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let conn = db::open(&self.home).map_err(internal)?;
-        let scope = match self.scope(a.all, a.repo.as_deref()) {
+        let scope = match self.scope(&conn, a.all, a.repo.as_deref()) {
             Ok(s) => s,
             Err(m) => return failed(m),
         };
@@ -232,7 +248,13 @@ mod tests {
     fn seeded() -> (PathBuf, Oboete) {
         let dir = std::env::temp_dir().join(format!("oboete-mcp-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("r/.git")).unwrap();
+        std::fs::write(
+            dir.join("r/.git/config"),
+            "[remote \"origin\"]\n\turl = git@github.com:o/r.git\n",
+        )
+        .unwrap();
         let repo_key = repo::key(&dir.join("r"));
+        assert_eq!(repo_key, "github.com/o/r");
         let mut conn = db::open(&dir).unwrap();
         db::upsert_session(
             &conn,
@@ -291,8 +313,11 @@ mod tests {
             "{hits}"
         );
         // `null` / `""` stand for "left out"; another existing directory is another scope; a
-        // path that is not a directory is an error rather than a scope that matches nothing.
+        // known key names its repository; anything else is an error rather than a scope that
+        // matches nothing.
         assert_eq!(search(Some(false), Some("")).unwrap(), hits);
+        assert_eq!(search(None, Some("github.com/o/r")).unwrap(), hits);
+
         assert!(search(Some(true), None).unwrap().starts_with("o1 "));
         let elsewhere = std::env::temp_dir();
         assert_eq!(
@@ -308,6 +333,15 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(bad.is_error, Some(true));
+        let unknown = s
+            .search(Parameters(SearchArgs {
+                query: "trigram".into(),
+                all: None,
+                repo: Some("github.com/o/unknown".into()),
+                limit: None,
+            }))
+            .unwrap();
+        assert_eq!(unknown.is_error, Some(true));
         let doc = body(s.get(Parameters(GetArgs { id: "s1".into() })).unwrap());
         assert!(doc.contains("要約: 検索を実装した"), "{doc}");
         let missing = s.get(Parameters(GetArgs { id: "o9".into() })).unwrap();

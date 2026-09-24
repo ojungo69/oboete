@@ -111,7 +111,56 @@ pub fn open(home: &Path) -> Result<Connection> {
     .context("migrate reinjection flag")?;
     ensure_autoincrement(&mut conn).context("migrate doc ids")?;
     ensure_fts(&mut conn).context("search index")?;
+    ensure_repo_keys(&mut conn).context("migrate repository keys")?;
     Ok(conn)
+}
+
+/// Repository keys moved from paths to the origin URL (`repo::key`, PR-C): rows filed under paths
+/// get their key once when the store is opened. `user_version` 1 marks it done. Two first opens
+/// may both run it; the second finds nothing left to move.
+fn ensure_repo_keys(conn: &mut Connection) -> Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version >= 1 {
+        return Ok(());
+    }
+    rekey_paths(conn)?;
+    conn.execute_batch("PRAGMA user_version = 1")?;
+    Ok(())
+}
+
+/// Rows filed under a path that is still a directory on this machine and now has another key
+/// (a repository that got an origin after it was used) move to that key; a path that is gone, or
+/// a key that is no path (`claude-mem:<project>`), stays. Run at open for older stores and by
+/// every observe run, off the hook path. The scan takes no write lock (hooks keep writing); the
+/// moves run in one transaction so no table is left behind. Returns the number of paths moved.
+pub fn rekey_paths(conn: &mut Connection) -> Result<usize> {
+    let repos: Vec<String> = conn
+        .prepare(
+            "SELECT repo FROM sessions UNION SELECT repo FROM observations
+             UNION SELECT repo FROM summaries UNION SELECT repo FROM prompts",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    let moves: Vec<(String, String)> = repos
+        .into_iter()
+        .filter(|old| Path::new(old).is_absolute() && Path::new(old).is_dir())
+        .map(|old| (crate::repo::key(Path::new(&old)), old))
+        .filter(|(new, old)| new != old)
+        .collect();
+    if moves.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    for (new, old) in &moves {
+        for table in ["sessions", "observations", "summaries", "prompts", "fts"] {
+            tx.execute(
+                &format!("UPDATE {table} SET repo=?1 WHERE repo=?2"),
+                params![new, old],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(moves.len())
 }
 
 /// Document ids (`o<id>`, `s<id>`, `p<id>`) are handed to agents and pages, so a deleted id must
@@ -653,6 +702,76 @@ pub fn calls_today(conn: &Connection, provider: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_keys_move_to_the_origin_key_once() {
+        let dir = std::env::temp_dir().join(format!("oboete-db-keys-{}", std::process::id()));
+        let repo_dir = dir.join("r");
+        std::fs::create_dir_all(repo_dir.join(".git")).unwrap();
+        std::fs::write(
+            repo_dir.join(".git/config"),
+            "[remote \"origin\"]\n\turl = https://github.com/o/r.git\n",
+        )
+        .unwrap();
+        let path_key = repo_dir
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let conn = open(&dir).unwrap();
+        // Rows an older build filed under paths.
+        for (session, repo) in [
+            ("a", path_key.as_str()),
+            ("b", "/gone/repo"),
+            ("c", "claude-mem:x"),
+        ] {
+            upsert_session(&conn, session, "claude", repo, repo, 1).unwrap();
+            insert_prompt(&conn, session, 1, "a prompt about keys").unwrap();
+        }
+        conn.execute_batch("PRAGMA user_version = 0").unwrap();
+        drop(conn);
+        let mut conn = open(&dir).unwrap();
+        let repos = |conn: &Connection, table: &str| -> Vec<String> {
+            conn.prepare(&format!("SELECT repo FROM {table} ORDER BY repo"))
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        // A path still here gets its origin key; one that is gone, or no path, stays.
+        let want = ["/gone/repo", "claude-mem:x", "github.com/o/r"];
+        for table in ["sessions", "prompts", "fts"] {
+            assert_eq!(repos(&conn, table), want, "{table}");
+        }
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+
+        // A repository used before it had an origin moves when an observe run sees one.
+        let late = dir.join("late");
+        std::fs::create_dir_all(late.join(".git")).unwrap();
+        let late_key = crate::repo::key(&late);
+        upsert_session(&conn, "d", "claude", &late_key, &late_key, 1).unwrap();
+        insert_prompt(&conn, "d", 1, "before the remote").unwrap();
+        assert_eq!(rekey_paths(&mut conn).unwrap(), 0);
+        std::fs::write(
+            late.join(".git/config"),
+            "[remote \"origin\"]\n\turl = https://github.com/o/late\n",
+        )
+        .unwrap();
+        assert_eq!(rekey_paths(&mut conn).unwrap(), 1);
+        for table in ["sessions", "prompts", "fts"] {
+            assert!(
+                repos(&conn, table).contains(&"github.com/o/late".to_string()),
+                "{table}"
+            );
+            assert!(!repos(&conn, table).contains(&late_key), "{table}");
+        }
+        drop(conn);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[cfg(unix)]
     #[test]
