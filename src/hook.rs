@@ -72,9 +72,8 @@ fn run_io(
         let conn = db::open(home)?;
         let out = handle(&conn, agent, event, &payload)?;
         if matches!(event, "Stop" | "SessionEnd") && std::env::var_os("OBOETE_NO_SPAWN").is_none() {
-            // agy has no SessionEnd: its last turn only becomes pending once it has settled, so
-            // this observer waits out the settle window instead of finding nothing now.
-            spawn_observe(home, (agent == "agy").then_some(AGY_OBSERVE_WAIT_MS));
+            // Agents without a reliable SessionEnd need their last turn to settle first.
+            spawn_observe(home, observe_wait_ms(agent));
         }
         Ok(out)
     })();
@@ -531,7 +530,11 @@ fn last_assistant_in_transcript(path: &Path) -> String {
 /// Detached `oboete observe` in its own process group, so the agent exiting right after
 /// SessionEnd does not take it down; the lock inside observe makes duplicates harmless.
 /// The observe settle window (60 s by default) plus a margin.
-const AGY_OBSERVE_WAIT_MS: u64 = 65_000;
+const NO_SESSION_END_OBSERVE_WAIT_MS: u64 = 65_000;
+
+fn observe_wait_ms(agent: &str) -> Option<u64> {
+    matches!(agent, "agy" | "opencode").then_some(NO_SESSION_END_OBSERVE_WAIT_MS)
+}
 
 fn spawn_observe(home: &Path, wait_ms: Option<u64>) {
     let exe = match std::env::current_exe() {
@@ -1238,6 +1241,85 @@ mod tests {
         );
         let cursor = json!({"conversation_id": "k1", "cursor_version": "2026.09.15", "workspace_roots": ["/r"]});
         assert_eq!(resolve_agent("claude", &cursor, missing), None);
+        let opencode = json!({"session_id": "oc1", "cwd": "/tmp/project"});
+        assert_eq!(
+            resolve_agent("opencode", &opencode, &installed),
+            Some("opencode")
+        );
+    }
+
+    #[test]
+    fn opencode_claude_fields_store_session_prompt_tools_and_stop() {
+        let dir = tmp("opencode-events");
+        let conn = db::open(&dir).unwrap();
+        let cwd = dir.to_string_lossy().to_string();
+        let base = json!({"session_id": "oc1", "cwd": cwd});
+        assert!(
+            handle(&conn, "opencode", "SessionStart", &base)
+                .unwrap()
+                .is_none()
+        );
+        let prompt = json!({"session_id": "oc1", "cwd": cwd, "prompt": "keep <private>secret text</private> this"});
+        handle(&conn, "opencode", "UserPromptSubmit", &prompt).unwrap();
+        let success = json!({"session_id": "oc1", "cwd": cwd, "tool_name": "read", "tool_input": {"filePath": "a.rs"}, "tool_response": "file content"});
+        handle(&conn, "opencode", "PostToolUse", &success).unwrap();
+        let failure = json!({"session_id": "oc1", "cwd": cwd, "tool_name": "bash", "tool_input": {"command": "false"}, "tool_response": "exit 1"});
+        handle(&conn, "opencode", "PostToolUseFailure", &failure).unwrap();
+        let stop = json!({"session_id": "oc1", "cwd": cwd, "last_assistant_message": "Done"});
+        handle(&conn, "opencode", "Stop", &stop).unwrap();
+
+        let (agent, stored_cwd): (String, String) = conn
+            .query_row("SELECT agent, cwd FROM sessions WHERE id='oc1'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(
+            (agent.as_str(), stored_cwd.as_str()),
+            ("opencode", cwd.as_str())
+        );
+        let body: String = conn
+            .query_row("SELECT body FROM prompts WHERE session_id='oc1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(body, "keep  this");
+        let events = db::session_events(&conn, "oc1").unwrap();
+        let names: Vec<_> = events.iter().map(|e| e.event.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "SessionStart",
+                "UserPromptSubmit",
+                "PostToolUse",
+                "PostToolUseFailure",
+                "Stop"
+            ]
+        );
+        let payloads: Vec<Value> = events
+            .iter()
+            .map(|e| serde_json::from_str(&e.payload).unwrap())
+            .collect();
+        assert_eq!(payloads[1], json!({"prompt": "keep  this"}));
+        assert_eq!(
+            payloads[2],
+            json!({"tool": "read", "input": "{\"filePath\":\"a.rs\"}", "output": "file content", "failed": false})
+        );
+        assert_eq!(
+            payloads[3],
+            json!({"tool": "bash", "input": "{\"command\":\"false\"}", "output": "exit 1", "failed": true})
+        );
+        assert_eq!(payloads[4], json!({"assistant": "Done"}));
+        assert!(events.iter().all(|e| !e.payload.contains("secret text")));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agents_without_session_end_wait_for_stop_to_settle() {
+        assert_eq!(observe_wait_ms("agy"), Some(65_000));
+        assert_eq!(observe_wait_ms("opencode"), Some(65_000));
+        for agent in ["claude", "codex", "grok"] {
+            assert_eq!(observe_wait_ms(agent), None, "{agent}");
+        }
     }
 
     #[test]
