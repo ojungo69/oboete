@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{config, db};
 
-pub const AGENTS: [&str; 4] = ["claude", "codex", "grok", "agy"];
+pub const AGENTS: [&str; 5] = ["claude", "codex", "grok", "agy", "opencode"];
 const BACKUP_SUFFIX: &str = ".oboete.bak";
 
 /// The name each agent knows our MCP server by (tools show up as `oboete__search` and so on).
@@ -56,7 +56,7 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         vec![agent]
     } else {
         return Err(anyhow!(
-            "unknown agent {agent}: use claude | codex | grok | agy | all"
+            "unknown agent {agent}: use claude | codex | grok | agy | opencode | all"
         ));
     };
     let cmd = HookCommand::current(home)?;
@@ -70,6 +70,21 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
                 continue;
             }
             "agy" => agy_files(&agy_dir(), &cmd, remove, cfg!(windows))?,
+            "opencode" => {
+                let dir = opencode_dir();
+                // npm installs a .cmd launcher on Windows before a config directory exists.
+                let installed = on_path("opencode") || (cfg!(windows) && on_path("opencode.cmd"));
+                if !dir.is_dir() && !installed {
+                    println!(
+                        "opencode: skipped (config directory and `opencode` on PATH are absent)"
+                    );
+                    continue;
+                }
+                let (plugin, mcp) = opencode_files(&dir, &cmd, remove)?;
+                println!("opencode: plugin {plugin}");
+                println!("opencode: mcp server {mcp}");
+                continue;
+            }
             _ => unreachable!(),
         };
         let verb = if remove { "removed from" } else { "written to" };
@@ -1031,6 +1046,194 @@ fn agy_mcp_disabled(file: &Path) -> bool {
         .is_some_and(|v| v["mcpServers"][MCP_NAME]["disabled"] == true)
 }
 
+/// OpenCode v2 uses XDG-style config directories on every OS, including Windows and macOS.
+fn opencode_dir() -> PathBuf {
+    std::env::var_os("OPENCODE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| config::home_dir().join(".config"))
+                .join("opencode")
+        })
+}
+
+fn opencode_plugin(cmd: &HookCommand) -> Result<String> {
+    Ok(format!(
+        "const exe = {};\nconst home = {};\n{}",
+        serde_json::to_string(&cmd.exe)?,
+        serde_json::to_string(&cmd.home)?,
+        include_str!("opencode.js")
+    ))
+}
+
+/// JSONC is the owner's to edit: do not create a JSON file that could mask its settings.
+fn opencode_config(dir: &Path) -> Result<Value> {
+    let file = dir.join("opencode.json");
+    anyhow::ensure!(
+        !dir.join("opencode.jsonc").exists(),
+        "{} is JSONC; automatic MCP editing is unavailable",
+        dir.join("opencode.jsonc").display()
+    );
+    anyhow::ensure!(
+        !file.exists() || !read_text(&file)?.trim().is_empty(),
+        "{} is empty, not valid JSON",
+        file.display()
+    );
+    read_json_object(&file)
+}
+
+fn opencode_mcp_add(cmd: &HookCommand) -> String {
+    let args = std::iter::once(cmd.exe.clone())
+        .chain(cmd.mcp_args())
+        .map(|a| {
+            if cfg!(windows) {
+                format!("'{}'", a.replace('\'', "''"))
+            } else {
+                shell_quote(&a)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("opencode mcp add oboete --global -- {args}")
+}
+
+/// Stage the plugin and MCP config before replacing either. Only MCP's type and command
+/// belong to us; optional fields such as disabled and timeout survive another setup.
+fn opencode_files(dir: &Path, cmd: &HookCommand, remove: bool) -> Result<(String, String)> {
+    let plugin = dir.join("plugins/oboete.js");
+    let mcp = dir.join("opencode.json");
+    let update = (|| -> Result<Option<String>> {
+        let mut root = opencode_config(dir)?;
+        let old = root.clone();
+        if remove {
+            if let Some(servers) = root
+                .get_mut("mcp")
+                .and_then(|mcp| mcp.get_mut("servers"))
+                .and_then(Value::as_object_mut)
+            {
+                servers.remove(MCP_NAME);
+            }
+        } else {
+            let mcp_root = root
+                .as_object_mut()
+                .expect("checked JSON object")
+                .entry("mcp")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("{}: mcp is not a JSON object", mcp.display()))?;
+            let servers = mcp_root
+                .entry("servers")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("{}: mcp.servers is not a JSON object", mcp.display()))?;
+            let entry = servers.entry(MCP_NAME).or_insert_with(|| json!({}));
+            anyhow::ensure!(
+                entry.is_object(),
+                "{}: oboete server is not a JSON object",
+                mcp.display()
+            );
+            entry["type"] = json!("local");
+            entry["command"] = json!(
+                std::iter::once(cmd.exe.clone())
+                    .chain(cmd.mcp_args())
+                    .collect::<Vec<_>>()
+            );
+        }
+        (root != old).then(|| json_text(&root)).transpose()
+    })();
+    let verb = if remove { "removed from" } else { "written to" };
+    let (mcp_text, mcp_status) = match update {
+        Ok(Some(text)) => (Some(text), format!("{verb} {}", mcp.display())),
+        Ok(None) => (
+            None,
+            if remove {
+                "nothing to remove".into()
+            } else {
+                opencode_mcp_status(dir, cmd)
+            },
+        ),
+        Err(e) => {
+            let action = if remove {
+                "remove mcp.servers.oboete manually from that file".into()
+            } else {
+                format!("run `{}` to register it", opencode_mcp_add(cmd))
+            };
+            (None, format!("left untouched: {e:#}; {action}"))
+        }
+    };
+    let plugin_present = std::fs::symlink_metadata(&plugin).is_ok();
+    let plugin_stage = if remove {
+        refuse_read_only(&plugin)?;
+        None
+    } else {
+        let text = opencode_plugin(cmd)?;
+        (read_text(&plugin)? != text)
+            .then(|| stage(&plugin, &text))
+            .transpose()?
+    };
+    let mcp_stage = mcp_text
+        .as_ref()
+        .map(|text| stage(&mcp, text))
+        .transpose()?;
+    if mcp_stage.is_some() {
+        backup_once(&mcp)?;
+    }
+    let plugin_status = if let Some(staged) = plugin_stage {
+        staged.commit()?;
+        format!("written to {}", plugin.display())
+    } else if remove && plugin_present {
+        std::fs::remove_file(&plugin)?;
+        format!("removed from {}", plugin.display())
+    } else if remove {
+        "nothing to remove".into()
+    } else {
+        format!("already current at {}", plugin.display())
+    };
+    if let Some(staged) = mcp_stage {
+        staged.commit()?;
+    }
+    Ok((plugin_status, mcp_status))
+}
+
+fn opencode_plugin_status(dir: &Path, cmd: &HookCommand) -> String {
+    let file = dir.join("plugins/oboete.js");
+    match std::fs::read_to_string(&file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            "missing (run `oboete setup opencode`)".into()
+        }
+        Err(e) => format!("unreadable: {e}"),
+        Ok(text) if opencode_plugin(cmd).is_ok_and(|wanted| text == wanted) => {
+            "present, matches current binary and home".into()
+        }
+        Ok(_) => {
+            "present, differs from expected binary, home or plugin (rerun `oboete setup opencode`)"
+                .into()
+        }
+    }
+}
+
+fn opencode_mcp_status(dir: &Path, cmd: &HookCommand) -> String {
+    let root = match opencode_config(dir) {
+        Ok(root) => root,
+        Err(e) => return format!("unverified: {e:#}"),
+    };
+    let Some(entry) = root["mcp"]["servers"].get(MCP_NAME) else {
+        return "not registered (run `oboete setup opencode`)".into();
+    };
+    if entry["disabled"] == true {
+        return "registered but turned off (`disabled: true`)".into();
+    }
+    let command: Vec<_> = std::iter::once(cmd.exe.clone())
+        .chain(cmd.mcp_args())
+        .collect();
+    if entry["type"] == "local" && entry["command"] == json!(command) {
+        "registered".into()
+    } else {
+        "registered with another command or type (rerun `oboete setup opencode`)".into()
+    }
+}
+
 /// `oboete doctor`: one screen of what is wired, what is stored and whether providers can run.
 pub fn doctor(home: &Path) -> Result<()> {
     let exe = std::env::current_exe()?;
@@ -1137,6 +1340,10 @@ pub fn doctor(home: &Path) -> Result<()> {
         "  agy     {}",
         agy_hooks_status(&agy_dir().join("config/hooks.json"), &want, cfg!(windows))
     );
+    println!(
+        "  opencode plugin {}",
+        opencode_plugin_status(&opencode_dir(), &want)
+    );
     let mcp = |file: &Path| -> &str {
         match mcp_command(file) {
             Some(_) if mcp_disabled(file) => "registered but turned off (`enabled = false`)",
@@ -1156,6 +1363,7 @@ pub fn doctor(home: &Path) -> Result<()> {
         mcp(&agy_mcp)
     };
     println!("  agy     {agy_status}");
+    println!("  opencode {}", opencode_mcp_status(&opencode_dir(), &want));
     println!("providers (chain order):");
     for p in config::load(home)?.providers {
         let state = match &p {
@@ -1192,6 +1400,237 @@ fn on_path(bin: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_setup_round_trip_preserves_config_and_other_plugins() {
+        let dir =
+            std::env::temp_dir().join(format!("oboete-opencode-setup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("plugins")).unwrap();
+        let file = dir.join("opencode.json");
+        let original = "{\"theme\":\"dark\",\"mcp\":{\"servers\":{\"other\":{\"type\":\"remote\",\"url\":\"https://example.test\"},\"oboete\":{\"disabled\":true,\"timeout\":42}}}}\n";
+        std::fs::write(&file, original).unwrap();
+        std::fs::write(dir.join("plugins/other.js"), "export default {};\n").unwrap();
+        let cmd = HookCommand {
+            exe: "/tools with spaces/oboete".into(),
+            home: Some("/memory with spaces".into()),
+        };
+        opencode_files(&dir, &cmd, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("plugins/oboete.js")).unwrap(),
+            opencode_plugin(&cmd).unwrap()
+        );
+        let root = read_json_object(&file).unwrap();
+        assert_eq!(root["theme"], "dark");
+        assert_eq!(
+            root["mcp"]["servers"]["other"]["url"],
+            "https://example.test"
+        );
+        assert_eq!(
+            root["mcp"]["servers"]["oboete"],
+            json!({"disabled":true,"timeout":42,"type":"local","command":["/tools with spaces/oboete","--home","/memory with spaces","mcp"]})
+        );
+        let installed = std::fs::read(&file).unwrap();
+        opencode_files(&dir, &cmd, false).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), installed);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("opencode.json.oboete.bak")).unwrap(),
+            original
+        );
+        opencode_files(&dir, &cmd, true).unwrap();
+        assert!(!dir.join("plugins/oboete.js").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("plugins/other.js")).unwrap(),
+            "export default {};\n"
+        );
+        assert_eq!(
+            read_json_object(&file).unwrap(),
+            json!({"theme":"dark","mcp":{"servers":{"other":{"type":"remote","url":"https://example.test"}}}})
+        );
+        opencode_files(&dir, &cmd, true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("opencode.json.oboete.bak")).unwrap(),
+            original
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn opencode_jsonc_and_invalid_json_are_untouched_while_plugin_is_managed() {
+        let dir =
+            std::env::temp_dir().join(format!("oboete-opencode-jsonc-{}", std::process::id()));
+        let cmd = HookCommand {
+            exe: "/x/oboete".into(),
+            home: Some("/h space".into()),
+        };
+        for (name, text) in [
+            ("opencode.jsonc", "{ // owner comment\n\"mcp\": {}}\n"),
+            // OpenCode merges both files: with a JSONC next to it, the JSON is not ours to edit.
+            ("both", "{\"mcp\": {}}\n"),
+            ("opencode.json", "{ // owner comment\n\"mcp\": {}}\n"),
+            ("opencode.json", "{broken"),
+            ("opencode.json", ""),
+            ("opencode.json", "[]"),
+        ] {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join(if name == "both" {
+                "opencode.json"
+            } else {
+                name
+            });
+            std::fs::write(&file, text).unwrap();
+            if name == "both" {
+                std::fs::write(dir.join("opencode.jsonc"), "{}\n").unwrap();
+            }
+            let (_, status) = opencode_files(&dir, &cmd, false).unwrap();
+            assert!(status.contains("left untouched"));
+            let command = if cfg!(windows) {
+                "opencode mcp add oboete --global -- '/x/oboete' '--home' '/h space' 'mcp'"
+            } else {
+                "opencode mcp add oboete --global -- /x/oboete --home '/h space' mcp"
+            };
+            assert!(status.contains(command));
+            assert!(dir.join("plugins/oboete.js").is_file());
+            assert!(opencode_mcp_status(&dir, &cmd).starts_with("unverified:"));
+            opencode_files(&dir, &cmd, true).unwrap();
+            assert!(!dir.join("plugins/oboete.js").exists());
+            assert_eq!(std::fs::read_to_string(file).unwrap(), text);
+            if name.ends_with("jsonc") {
+                assert!(!dir.join("opencode.json").exists());
+            }
+            assert!(!dir.join("opencode.json.oboete.bak").exists());
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn opencode_doctor_checks_plugin_binary_home_and_disabled_mcp() {
+        let dir =
+            std::env::temp_dir().join(format!("oboete-opencode-doctor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cmd = HookCommand {
+            exe: "/x/oboete".into(),
+            home: None,
+        };
+        assert!(opencode_plugin_status(&dir, &cmd).starts_with("missing"));
+        opencode_files(&dir, &cmd, true).unwrap();
+        assert!(!dir.exists());
+        opencode_files(&dir, &cmd, false).unwrap();
+        assert!(opencode_plugin_status(&dir, &cmd).contains("matches current"));
+        assert_eq!(opencode_mcp_status(&dir, &cmd), "registered");
+        cmd.home = Some("/different home".into());
+        assert!(opencode_plugin_status(&dir, &cmd).contains("differs"));
+        assert!(opencode_mcp_status(&dir, &cmd).contains("another command"));
+        cmd.home = None;
+        cmd.exe = "/different/oboete".into();
+        assert!(opencode_plugin_status(&dir, &cmd).contains("differs"));
+        let file = dir.join("opencode.json");
+        let mut root = read_json_object(&file).unwrap();
+        root["mcp"]["servers"]["oboete"]["disabled"] = json!(true);
+        write_json(&file, &root).unwrap();
+        assert!(opencode_mcp_status(&dir, &cmd).contains("turned off"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_stages_both_files_before_install_or_remove() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("oboete-opencode-locked-{}", std::process::id()));
+        let cmd = HookCommand {
+            exe: "/x/oboete".into(),
+            home: None,
+        };
+        let other = HookCommand {
+            exe: "/new/oboete".into(),
+            home: None,
+        };
+        for remove in [false, true] {
+            for locked in ["plugins/oboete.js", "opencode.json"] {
+                let _ = std::fs::remove_dir_all(&dir);
+                opencode_files(&dir, &cmd, false).unwrap();
+                let plugin = dir.join("plugins/oboete.js");
+                let mcp = dir.join("opencode.json");
+                let before = (
+                    std::fs::read(&plugin).unwrap(),
+                    std::fs::read(&mcp).unwrap(),
+                );
+                let target = dir.join(locked);
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
+                assert!(opencode_files(&dir, &other, remove).is_err());
+                assert_eq!(std::fs::read(&plugin).unwrap(), before.0);
+                assert_eq!(std::fs::read(&mcp).unwrap(), before.1);
+                assert!(!dir.join("opencode.json.oboete.bak").exists());
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn opencode_plugin_escapes_paths_and_runs_on_node() {
+        let dir = std::env::temp_dir().join(format!("oboete-opencode-node-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("oboete.js");
+        let cmd = HookCommand {
+            exe: "C:\\Program Files\\quote\"'\\oboete.exe".into(),
+            home: Some("C:\\Users\\Jane Doe\\\"memory\"\\back\\slash\nline".into()),
+        };
+        let plugin = opencode_plugin(&cmd).unwrap();
+        let constants: Vec<&str> = plugin.lines().take(2).collect();
+        for (line, prefix, expected) in [
+            (constants[0], "const exe = ", json!(cmd.exe)),
+            (constants[1], "const home = ", json!(cmd.home)),
+        ] {
+            let literal = line
+                .strip_prefix(prefix)
+                .unwrap()
+                .strip_suffix(';')
+                .unwrap();
+            assert_eq!(serde_json::from_str::<Value>(literal).unwrap(), expected);
+        }
+        std::fs::write(&file, &plugin).unwrap();
+        if on_path("node") {
+            // Node versions before syntax detection need an ESM package for a .js file.
+            std::fs::write(dir.join("package.json"), "{\"type\":\"module\"}").unwrap();
+            let out = std::process::Command::new("node")
+                .arg("--check")
+                .arg(&file)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let harness = dir.join("test.mjs");
+            std::fs::write(&harness, include_str!("testdata/opencode/test.mjs")).unwrap();
+            for home in [cmd.home.clone(), None] {
+                let cmd = HookCommand {
+                    exe: cmd.exe.clone(),
+                    home,
+                };
+                std::fs::write(&file, opencode_plugin(&cmd).unwrap()).unwrap();
+                let out = std::process::Command::new("node")
+                    .arg(&harness)
+                    .arg(&file)
+                    .arg(&cmd.exe)
+                    .args(&cmd.home)
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+        } else {
+            eprintln!("node not on PATH: skipping generated plugin syntax and runtime checks");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn agy_setup_round_trip_preserves_other_entries() {

@@ -4,7 +4,7 @@
 
 1. 目的: claude-mem を消して困らない。全 agent・全端末で同じ記憶。スマホ参照は「できたら」。
 2. 場面: セッション冒頭の自動コンテキスト、agent からの検索、viewer。レポート系は価値が分かれば入れる。
-3. agent: 必須 Claude Code / Codex / Grok Build。Antigravity CLI (`agy`) adapter も実装済み (2026-09-24、対話 TUI・resume・後続ターンの注入持続は未検証)。順次 Pi / OpenCode / Cursor。Gemini CLI は対象外。
+3. agent: 必須 Claude Code / Codex / Grok Build。Antigravity CLI (`agy`) と OpenCode v2 の adapter も実装済み (2026-09-24、残る実環境確認は `docs/research/agent-adapters-2026-09-23.md` を参照)。順次 Pi / Cursor。Gemini CLI は対象外。
 4. 要約の頭脳: サブスク CLI (agy / claude / codex / grok)、無料クラウド (OpenRouter free / NIM / Groq / Mistral)、ローカル (Ollama)、有料 API (明示時のみ)。フォールバック連鎖必須。要約が止まらない = 記録漏れ事故ゼロ。
 5. 置き場所: 使い勝手が良ければクラウド正本。暗号化/平文は私が決める。有料は都度確認。
 6. 覚えるもの: claude-mem / cmem 相当 + 類似 OSS の良い部分。repo 間共有は私が決める。
@@ -23,7 +23,7 @@
 - 類似 Rust OSS 9 件: 単独で土台にできるものは無し。部品取り: memori-core(FTS5+vec RRF 検索、2.8k 行)、icm `summarizer.rs`(CLI 自動検出)、remem `src/ai/cli.rs`(`claude -p` 起動)、palace-rs `hooks.rs`(CC/Codex/Cursor の hook 方言表)、sessiongrep `providers/*`(CC/Codex/Cursor/Antigravity/Pi のセッション読取)、memory-forge `platforms/grok.rs`、funes の送信前 redaction 二重ゲート、leteo の replication spec。全部 MIT/Apache-2.0。
 - 無料枠: Groq 1,000 回/日・strict json_schema(最安定)。OpenRouter free 50 回/日(生涯 $10 購入で 1,000/日)。NIM 約 40 回/分・上限非公開・構造化出力は `nvext.guided_json`。Mistral 約 30 回/分。Gemini free は入力を学習・人間レビュー(規約) → 既定から外す。Workers AI 1 万 neuron/日で窮屈。Ollama local は `response_format` 対応。
 - CLI: `claude -p --json-schema --system-prompt --model` / `grok -p --json-schema --system-prompt` / `agy -p --json-schema`(system prompt 無し) / `codex exec --output-schema -o`(system prompt 無し、`--json`)。
-- hook: CC / Codex / Grok は同じ JSON 方言 + `hookSpecificOutput.additionalContext`(Grok は UserPromptSubmit で注入不可 → SessionStart/PostToolUse 経由)。Codex は `~/.codex/hooks.json` か plugin manifest `.codex-plugin/plugin.json` の `hooks`。agy は `.agents/hooks.json` / `~/.gemini/config/hooks.json`、PreInvocation/PostInvocation の `injectSteps` で注入。Cursor は `~/.cursor/hooks.json`、`additional_context`。Pi は TS 拡張 `before_agent_start` / `context_with_system`。OpenCode は TS plugin `experimental.chat.system.transform`。
+- hook: CC / Codex / Grok は同じ JSON 方言 + `hookSpecificOutput.additionalContext`(Grok は UserPromptSubmit で注入不可 → SessionStart/PostToolUse 経由)。Codex は `~/.codex/hooks.json` か plugin manifest `.codex-plugin/plugin.json` の `hooks`。agy は `.agents/hooks.json` / `~/.gemini/config/hooks.json`、PreInvocation/PostInvocation の `injectSteps` で注入。Cursor は `~/.cursor/hooks.json`、`additional_context`。Pi は TS 拡張 `before_agent_start` / `context_with_system`。OpenCode v2 は生成した JS plugin の `ctx.session.hook("context", ...)` で注入する。
 
 ## 方針 (案)
 
@@ -32,11 +32,11 @@
 2b. **意味検索(owner 合意 2026-09-22 夜)**: 埋め込みモデルは差し替え可能な provider にする。`[embedding] provider = "workers-ai" | "local" | "none"`。クラウド派は Workers AI `@cf/baai/bge-m3`(1024 次元、300 件/日で約 100 neuron = 無料枠の 1%)、ローカル完結派は fastembed の EmbeddingGemma-300m(768 次元、約 300 MB、オフライン)。索引は手元の sqlite-vec。クラウド索引は M2〜M3 で Vectorize(REST upsert、15 万件で月約 $0.07)に同じベクトルを流す。AI Search は使わない(短い構造化メモには自動変換の価値が無く、索引の二重化と非公開の遅延が残る)。**制約**: 1 つの store に埋め込みモデルは 1 つ(モデルが違うベクトルは比べられない)。モデル名と次元を DB に記録し、切り替えは `oboete reindex` で全件作り直す(15 万件でも Workers AI なら約 $0.5、ローカルなら数時間)。既定は `none`(全文検索のみ)で、setup が 1 回だけ「ローカル / Workers AI / なし」を聞く。Jev / Laya は評価・分類モデルで検索用途ではないため不採用。Ruri v3(日本語 JMTEB 74.5〜77.2、fastembed 未対応)は追跡し、読める形にできたら候補に足す。M3 で bge-reranker を検討。
 3. **データ = SQLite 1 ファイル** `~/.oboete/oboete.db`: sessions / events(生。要約成功後 30 日で削除)/ observations(claude-mem の型)/ summaries / prompts / fts(trigram + CJK bigram)/ vec(sqlite-vec + fastembed multilingual-e5-small)/ injections / provider_calls。約 9 表。work item・共有承認・移行記録は作らない。
 4. **要約 = provider chain + fallback**。設定は順序付きリスト。既定: Groq free → agy → claude → OpenRouter free → NIM → Mistral free → codex → grok → (有料 API は明示設定時のみ末尾)。理由: Groq は 1,000 回/日で最安定、サブスク枠は owner が「腐っている」ので次、OpenRouter free は $10 未購入だと 50 回/日、NIM は上限非公開。429/5xx/timeout → その provider を cooldown して次へ。JSON schema 検証失敗 → 次へ。全滅 → pending のまま次回。生イベントは要約成功まで保持。**provider ごとに日次予算**(fallback 自体が暴走しないため。TS 版 #352 の教訓を仕様として引き継ぐ)。Gemini free は opt-in。codex / agy は system prompt フラグが無いので指示は user prompt に同梱。
-5. **注入**: SessionStart = 直近セッション要約 + この repo の上位 observation(新しさ加重)+ personal prefs。UserPromptSubmit = hybrid 検索(FTS + vec, RRF)上位を予算内で。同一セッション再注入なし。注入文は再要約しない印付き。CC / Codex は SessionStart と UserPromptSubmit の両方で `additionalContext` 可(CC はバイナリで確認済み)。**Grok Build は UserPromptSubmit で注入不可**(仕様上 discard)→ Grok はセッション冒頭のみ、既知の非対称として扱う。agy は `injectSteps`、Cursor は `additional_context`、Pi / OpenCode は TS shim から system prompt に push。
+5. **注入**: SessionStart = 直近セッション要約 + この repo の上位 observation(新しさ加重)+ personal prefs。UserPromptSubmit = hybrid 検索(FTS + vec, RRF)上位を予算内で。同一セッション再注入なし。注入文は再要約しない印付き。CC / Codex は SessionStart と UserPromptSubmit の両方で `additionalContext` 可(CC はバイナリで確認済み)。**Grok Build は UserPromptSubmit で注入不可**(仕様上 discard)→ Grok はセッション冒頭のみ、既知の非対称として扱う。agy は `injectSteps`、Cursor は `additional_context`、Pi は TS shim、OpenCode v2 は JS plugin から system prompt に push (OpenCode は非永続なので呼び出しごとに再注入)。
 6. **秘密**: gitleaks 規則(Rust regex)で保存前に伏せ字。外部送信(要約 API / sync)直前にもう一度ゲート(funes 方式)。`.oboete.toml` の path glob で secret 扱い強制。
 7. **軽さ**: 常駐プロセスなし。hook は起動 5 ms 級。observe の RSS 目標 < 50 MB(計測して記録)。Chroma のような外部プロセス無し。
 8. **同期 (M2)**: Cloudflare Worker + D1 を hub。append-only op log を device が push/pull。content-hash id + tombstone、CRDT 無し。自アカウント内に平文(秘密は伏せ字済み)。**Private MCP link (M3)** = 同じ Worker が MCP over HTTP + token を出す → iMac/スマホ/Claude アプリから検索。暗号化は将来の opt-in。
-9. **viewer**: 既存 oboete の Preact viewer を移植、rust-embed で同梱。Pi/OpenCode の shim は TS 数十行。
+9. **viewer**: 既存 oboete の Preact viewer を移植、rust-embed で同梱。Pi は TS shim、OpenCode v2 は依存なしの生成 JS plugin。
 10. **repo 間共有**: personal prefs(明示的な好み・ルール)だけ全 repo に注入。他は repo 内。
 
 ## マイルストーン
