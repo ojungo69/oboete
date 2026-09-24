@@ -11,7 +11,7 @@ are reported as a count, not scored). Unjudged documents count as not relevant, 
 comparable to the runs that fed the pool. Documents of the question's own session are left out
 of every run first (the same rule as `oboete eval`).
 """
-import json, os, sqlite3, sys
+import json, os, sqlite3, sys, time
 from collections import defaultdict
 
 from ranx import Qrels, Run, compare
@@ -61,31 +61,61 @@ runs = {}
 for name in sorted(os.listdir(f'{E}/runs')):
     if not name.endswith('.trec'):
         continue
-    scores = defaultdict(dict)
+    ranked = defaultdict(list)
     for line in open(f'{E}/runs/{name}'):
         qid, _, doc, rank, _, _ = line.split()
-        if qid in answerable and session_of(doc) != queries[qid]['session']:
-            scores[qid][doc] = 1000 - int(rank)
-    for qid in answerable:
-        scores.setdefault(qid, {})
-    runs[name[:-5]] = scores
+        if qid in queries and session_of(doc) != queries[qid]['session']:
+            ranked[qid].append((int(rank), doc))
+    runs[name[:-5]] = {q: [d for _, d in sorted(v)] for q, v in ranked.items()}
 
-qrels = Qrels({q: {d: g for d, g in judged[q].items() if g > 0} for q in answerable})
+TS = {
+    'o': 'SELECT ts FROM observations WHERE id=?',
+    's': 'SELECT ts FROM summaries WHERE id=?',
+    'p': 'SELECT ts FROM prompts WHERE id=?',
+}
+
+
+def ts(doc, cache={}):
+    if doc not in cache:
+        row = db.execute(TS[doc[0]], (int(doc[1:]),)).fetchone()
+        cache[doc] = row[0] if row else 0
+    return cache[doc]
+
+
+# When a developer prompt was typed (agent searches carry no time).
+asked = {q: ts(q) for q in queries if queries[q]['set'] == 'prompt'}
+now = time.time() * 1000
+DAY = 86_400_000
+shown = {doc: text for pool in pools.values() for doc, text, _ in pool}
+
+
+def near_copy(qid, doc):
+    """The document holds 80% of the question's trigrams: it quotes the question."""
+    a, b = queries[qid]['text'], shown.get(doc, '')
+    grams = {a[i:i + 3] for i in range(len(a) - 2)}
+    return len(grams & {b[i:i + 3] for i in range(len(b) - 2)}) > 0.8 * max(1, len(grams))
+
+
 # `-l2`: only grade 2 and 3 count as relevant; nDCG uses the grades themselves.
 metrics = ['ndcg@10', 'mrr@10-l2', 'recall@10-l2', 'hit_rate@10-l2']
 print(f'split={split} judge={judge} questions={len(queries)} judged={len(judged)} '
       f'with an answer={len(answerable)} without={len(judged) - len(answerable)}')
 
 
-def table(label, keep):
-    qs = [q for q in answerable if keep(queries[q])]
-    if len(qs) < 5:
-        print(f'\n## {label}: {len(qs)} questions (too few to score)')
+def table(label, keep, drop=lambda qid, doc: False):
+    """Questions that `keep` accepts; `drop` removes documents from the runs and the qrels alike."""
+    qrels = {}
+    for q in filter(lambda q: keep(queries[q]), queries):
+        grades = {d: g for d, g in judged[q].items() if g > 0 and not drop(q, d)}
+        if grades and max(grades.values()) >= 2:
+            qrels[q] = grades
+    if len(qrels) < 5:
+        print(f'\n## {label}: {len(qrels)} questions (too few to score)')
         return
-    sub = Qrels({q: qrels.to_dict()[q] for q in qs if q in qrels.to_dict()})
-    rs = [Run({q: runs[m].get(q, {}) for q in qs}, name=m) for m in runs]
-    print(f'\n## {label}: {len(qs)} questions')
-    print(compare(sub, rs, metrics=metrics, max_p=0.05, make_comparable=True))
+    rs = [Run({q: {d: 1000 - i for i, d in enumerate([d for d in r.get(q, []) if not drop(q, d)][:50])}
+               for q in qrels}, name=m) for m, r in runs.items()]
+    print(f'\n## {label}: {len(qrels)} questions')
+    print(compare(Qrels(qrels), rs, metrics=metrics, max_p=0.05, make_comparable=True))
 
 
 table('all', lambda q: True)
@@ -93,3 +123,14 @@ table('question in Japanese', lambda q: q['lang'] == 'ja')
 table('question in English', lambda q: q['lang'] == 'en')
 table('developer prompts', lambda q: q['set'] == 'prompt')
 table('agent searches', lambda q: q['set'] == 'agent')
+# claude-mem's default search drops what is older than 90 days, counted from today.
+table('prompts typed within 90 days', lambda q: q['qid'] in asked and now - asked[q['qid']] < 90 * DAY)
+table('prompts typed 90 days ago or earlier', lambda q: q['qid'] in asked and now - asked[q['qid']] >= 90 * DAY)
+# What a search at the time of the question could have found.
+table('prompts, documents written before them only', lambda q: q['qid'] in asked,
+      drop=lambda qid, doc: ts(doc) >= asked[qid])
+# A document that quotes the question matches it word for word, which favours full-text search.
+table('documents quoting the question removed', lambda q: True, drop=near_copy)
+# claude-mem's run returns observations only (`type=observations`); oboete also returns summaries
+# and prompts.
+table('observations only', lambda q: True, drop=lambda qid, doc: doc[0] != 'o')
