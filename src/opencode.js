@@ -6,6 +6,10 @@ import { execFile, spawn } from "node:child_process";
 // oboete's own failures are dropped: the agent must never break because of them.
 const ignore = () => undefined;
 
+// A long-lived service sees many sessions: keep the most recently active ones. A session that
+// comes back after eviction is started again (SessionStart is an upsert).
+const MAX_SESSIONS = 256;
+
 export default {
   id: "oboete",
   async setup(ctx) {
@@ -46,12 +50,15 @@ export default {
       if (typeof id !== "string" || !id) return null;
       if (location && location.directory !== ctx.location.directory) return null;
       let state = sessions.get(id);
-      if (!state) {
+      if (state) {
+        sessions.delete(id);
+      } else {
         // Unlocated bus events can belong to another plugin instance's sessions.
         if (!location) return null;
+        if (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
         state = { dir: location.directory, started: false, message: null, parts: [] };
-        sessions.set(id, state);
       }
+      sessions.set(id, state);
       if (!state.started) {
         state.started = true;
         send("SessionStart", { session_id: id, cwd: state.dir, source: "startup" });

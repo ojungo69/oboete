@@ -177,6 +177,16 @@ spawnMode = "ok";
 await local.emit("session.inbox.enqueued", user("one", "queue recovered"));
 await drain();
 assert.equal(captures.at(-1).payload.prompt, "queue recovered");
+// The session table is bounded: after 256 newer sessions, "one" is started again.
+const starts = () => captures.filter((c) => c.event === "SessionStart" && c.payload.session_id === "one").length;
+const startsBefore = starts();
+for (let i = 0; i < 256; i += 1) {
+  await local.emit("session.inbox.enqueued", user(`bulk${i}`, "x"), location);
+  await drain();
+}
+await local.emit("session.inbox.enqueued", user("one", "back again"), location);
+await drain();
+assert.equal(starts(), startsBefore + 1);
 cleanup();
 assert.equal(local.signal.aborted, true);
 
