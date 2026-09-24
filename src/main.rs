@@ -100,6 +100,9 @@ enum Cmd {
         /// Its database file (read-only; e.g. ~/.claude-mem/claude-mem.db)
         db: PathBuf,
     },
+    /// Evaluation: pass stdin through the outbound gate (what may leave the machine) to stdout
+    #[command(hide = true)]
+    Gate,
     /// Evaluation: run `{"qid","text"}` JSONL queries through search, print a TREC run
     #[command(hide = true)]
     Eval {
@@ -264,6 +267,11 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let stats = import::claude_mem(&mut conn, &db)?;
             println!("{}", serde_json::to_string(&stats)?);
             Ok(())
+        }
+        Cmd::Gate => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+            emit(&redact::outbound(&text))
         }
         Cmd::Eval { queries, depth } => {
             let conn = db::open(&home)?;

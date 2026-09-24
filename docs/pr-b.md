@@ -20,6 +20,7 @@ PR は 3 つに分ける。
    - **B1 では既定の home (`~/.oboete`) への取り込みを断る** (`--home` 必須)。repo の対応が決まる前に普段の store に入ると、注入が repo ごとに引けない行が 16 万件入るため。PR-H でこの制限を外す。
 
 3. **`oboete eval <問いの JSONL>` は隠しコマンドにして出荷する。** feature flag にすると CI で別のビルドが要り、放っておくと壊れる。コードは 1 画面で、出荷している検索関数をそのまま呼ぶ。入力は 1 行 1 問の JSONL (`{"qid","text"}`)、出力は TREC の run (`qid Q0 doc rank score method`)。方式は今は `fts` (今の `search::search` を全 repo で) だけで、PR-D で `vec` / `hybrid`、PR-E で各工夫を足す。
+   - もう 1 つの隠しコマンド **`oboete gate`** は、標準入力を関門 (`redact::outbound`) に通して標準出力に出す。評価のスクリプトが外 (判定器) へ送る文のうち、store を通っていないもの (transcript から拾った agent の検索語) をこれに通す。関門の実装を Python に写さないため。
 
 4. **指標は ranx (Python) で出す。** `docs/eval/report.py` が run と qrels を読み、nDCG@10・recall@10/50・MRR@10 と有意差を出す (出荷しない)。ranx は `uv` の一時環境で入れる。
 
