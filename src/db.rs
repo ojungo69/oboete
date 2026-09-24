@@ -65,10 +65,17 @@ CREATE TABLE IF NOT EXISTS provider_calls(
   detail TEXT
 );
 CREATE INDEX IF NOT EXISTS provider_calls_day ON provider_calls(provider, ts);
+CREATE TABLE IF NOT EXISTS imports(
+  source TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  doc TEXT NOT NULL,
+  PRIMARY KEY(source, source_id)
+);
 ";
 
 pub fn open(home: &Path) -> Result<Connection> {
     let path = home.join("oboete.db");
+    private(home, 0o700);
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
     // Switching a file to WAL takes an exclusive lock that the busy handler does not cover:
@@ -85,6 +92,9 @@ pub fn open(home: &Path) -> Result<Connection> {
         }
     }
     conn.execute_batch(SCHEMA).context("schema")?;
+    for file in ["oboete.db", "oboete.db-wal", "oboete.db-shm"] {
+        private(&home.join(file), 0o600);
+    }
     // CREATE TABLE IF NOT EXISTS leaves a table from an older build as it was; columns added since
     // are filled in here. ponytail: idempotent column checks; PRAGMA user_version once a migration
     // needs more than ADD COLUMN.
@@ -366,6 +376,127 @@ pub struct Observation {
 const FTS_INSERT: &str =
     "INSERT INTO fts(title, body, doc, kind, repo, ts) VALUES(?1,?2,?3,?4,?5,?6)";
 
+/// The store holds prompts and tool output from every project: owner-only whatever the umask
+/// (the directory first, so the file SQLite creates is never reachable at 0644). Best effort: a
+/// filesystem without Unix modes (a Windows drive under WSL) keeps its own rules.
+fn private(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+}
+
+/// Which session a document (`o<id>`, `s<id>`, `p<id>`) belongs to.
+pub fn doc_session(conn: &Connection, doc: &str) -> Result<Option<String>> {
+    let table = match doc.get(..1) {
+        Some("o") => "observations",
+        Some("s") => "summaries",
+        Some("p") => "prompts",
+        _ => return Ok(None),
+    };
+    let Ok(id) = doc[1..].parse::<i64>() else {
+        return Ok(None);
+    };
+    Ok(conn
+        .query_row(
+            &format!("SELECT session_id FROM {table} WHERE id=?1"),
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// Whether a source row was imported before (the document may since have been deleted).
+pub fn imported(conn: &Connection, source: &str, source_id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM imports WHERE source=?1 AND source_id=?2",
+            params![source, source_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// A session another memory tool recorded. An existing row (the same agent session captured by
+/// oboete itself) is left as it is.
+pub fn import_session(
+    conn: &Connection,
+    id: &str,
+    agent: &str,
+    repo: &str,
+    started_at: i64,
+    ended_at: Option<i64>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO sessions(id, agent, repo, started_at, ended_at, last_event_at)
+         VALUES(?1,?2,?3,?4,?5,?6)",
+        params![
+            id,
+            agent,
+            repo,
+            started_at,
+            ended_at,
+            ended_at.unwrap_or(started_at)
+        ],
+    )?;
+    Ok(())
+}
+
+/// One document from another memory tool: `kind` is `prompt`, `summary` or an observation kind.
+pub struct Doc<'a> {
+    pub session_id: &'a str,
+    pub repo: &'a str,
+    pub ts: i64,
+    pub kind: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+}
+
+/// Store an imported document with its search row, and remember its source row in `imports` so
+/// a later import skips it (also after the developer deleted the document). False = seen before.
+pub fn import_doc(conn: &Connection, source: &str, source_id: &str, d: &Doc) -> Result<bool> {
+    if imported(conn, source, source_id)? {
+        return Ok(false);
+    }
+    let prefix = match d.kind {
+        "prompt" => {
+            conn.execute(
+                "INSERT INTO prompts(session_id, repo, ts, body) VALUES(?1,?2,?3,?4)",
+                params![d.session_id, d.repo, d.ts, d.body],
+            )?;
+            "p"
+        }
+        "summary" => {
+            conn.execute(
+                "INSERT INTO summaries(session_id, repo, ts, body, provider) VALUES(?1,?2,?3,?4,?5)",
+                params![d.session_id, d.repo, d.ts, d.body, source],
+            )?;
+            "s"
+        }
+        _ => {
+            conn.execute(
+                "INSERT INTO observations(session_id, repo, ts, kind, title, body, provider) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![d.session_id, d.repo, d.ts, d.kind, d.title, d.body, source],
+            )?;
+            "o"
+        }
+    };
+    let doc = format!("{prefix}{}", conn.last_insert_rowid());
+    conn.execute(
+        FTS_INSERT,
+        params![d.title, d.body, doc, d.kind, d.repo, d.ts],
+    )?;
+    conn.execute(
+        "INSERT INTO imports(source, source_id, doc) VALUES(?1,?2,?3)",
+        params![source, source_id, doc],
+    )?;
+    Ok(true)
+}
+
 /// One transaction: store the batch's knowledge (and its search rows) and drop its raw events.
 /// Rows carry the session's time (`last_event_at`), not the time they were summarized.
 pub fn apply_batch(
@@ -492,6 +623,37 @@ pub fn calls_today(conn: &Connection, provider: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_store_is_private_whatever_the_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("oboete-db-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // An existing store created world-readable is tightened too.
+        std::fs::write(dir.join("oboete.db"), b"").unwrap();
+        std::fs::set_permissions(
+            dir.join("oboete.db"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let conn = open(&dir).unwrap();
+        upsert_session(&conn, "s1", "claude", "/r", "/r", 1).unwrap();
+        drop(conn);
+        let conn = open(&dir).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        for f in ["oboete.db", "oboete.db-wal", "oboete.db-shm"] {
+            let path = dir.join(f);
+            if path.exists() {
+                assert_eq!(mode(&path), 0o600, "{f}");
+            }
+        }
+        drop(conn);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn sessions_table_from_m0_gains_injection_and_prompt_cursors() {

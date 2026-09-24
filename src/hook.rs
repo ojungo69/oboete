@@ -456,7 +456,7 @@ fn compact(v: &Value) -> String {
 
 /// Redact the head (plus the overlap) and keep MAX_FIELD characters of it: scanning the
 /// discarded tail of a megabyte tool output would only cost hook time.
-fn clip(s: &str) -> String {
+pub fn clip(s: &str) -> String {
     // Closed `<private>`-style blocks go before the cut: a block cut in half would leave an
     // opener that the outbound gate keeps as text, with the private content right after it.
     let s = &without_blocks(s, false);
