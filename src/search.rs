@@ -38,6 +38,9 @@ fn hit(r: &rusqlite::Row) -> rusqlite::Result<Hit> {
 /// The query's trigrams: each run between whitespace and punctuation gives its overlapping
 /// three-character pieces, except all-hiragana ones (particles and verb endings match almost
 /// every Japanese document). Deduplicated, at most 64 so a pasted page stays one quick query.
+// ponytail: every trigram is ORed, so a common one scans a long posting list (180k documents:
+// p50 0.3 s, p95 0.8 s). Fine for MCP and the viewer; the injection hook (PR-F, 300 ms) should
+// keep only the rarest trigrams (measured in docs/pr-e0.md).
 fn trigrams(query: &str) -> Vec<String> {
     const SEPARATORS: &str = "、。，．,.!?！？「」『』()（）[]{}:;：；\"'`<>";
     let hiragana = |c: &char| ('\u{3040}'..='\u{309f}').contains(c);
