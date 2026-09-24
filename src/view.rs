@@ -347,7 +347,8 @@ fn stats(conn: &rusqlite::Connection, home: &Path, repo: Option<&str>) -> Result
     let sessions: (i64, i64, i64, i64, Option<String>, Option<String>) = conn.query_row(
         "SELECT COUNT(*),
                 SUM(EXISTS (SELECT 1 FROM summaries m WHERE m.session_id = s.id)),
-                SUM(EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id)),
+                SUM(EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id
+                            AND e.id > s.observed_event_id)),
                 SUM(injected_at IS NOT NULL),
                 strftime('%Y-%m-%d %H:%M', MIN(started_at) / 1000, 'unixepoch', 'localtime'),
                 strftime('%Y-%m-%d %H:%M', MAX(last_event_at) / 1000, 'unixepoch', 'localtime')

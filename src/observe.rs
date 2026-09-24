@@ -84,7 +84,7 @@ fn process_session(
     let last_id = last.id;
     let transcript = render(&events);
     if transcript.trim().is_empty() {
-        // Nothing worth a model call (e.g. only SessionStart/SessionEnd): drop the raw rows.
+        // Nothing worth a model call (e.g. only SessionStart/SessionEnd): mark the rows read.
         db::apply_batch(conn, s, "none", "", &[], last_id)?;
         return Ok(());
     }

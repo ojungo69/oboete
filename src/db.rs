@@ -1,4 +1,5 @@
-//! One SQLite file: `<home>/oboete.db` (WAL). Raw events live only until summarized.
+//! One SQLite file: `<home>/oboete.db` (WAL). Raw events are kept after summarizing;
+//! `sessions.observed_event_id` marks how far observe has read each session.
 
 use std::path::Path;
 
@@ -16,7 +17,8 @@ CREATE TABLE IF NOT EXISTS sessions(
   last_event_at INTEGER NOT NULL,
   injected_at INTEGER,
   last_prompt_step INTEGER,
-  reinject_pending INTEGER NOT NULL DEFAULT 0
+  reinject_pending INTEGER NOT NULL DEFAULT 0,
+  observed_event_id INTEGER NOT NULL DEFAULT 0
 );
 -- key/value facts about this store: `device_id`, `store_file` (see `ensure_device`).
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -129,6 +131,13 @@ pub fn open(home: &Path) -> Result<Connection> {
         "INTEGER NOT NULL DEFAULT 0",
     )
     .context("migrate reinjection flag")?;
+    ensure_column(
+        &mut conn,
+        "sessions",
+        "observed_event_id",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .context("migrate observe cursor")?;
     ensure_autoincrement(&mut conn).context("migrate doc ids")?;
     ensure_fts(&mut conn).context("search index")?;
     ensure_vec(&mut conn).context("vector index")?;
@@ -551,7 +560,7 @@ pub fn injected(conn: &Connection, id: &str) -> Result<bool> {
 }
 
 /// Claim an agy USER_INPUT step inside the transaction that stores its prompt and raw event.
-/// The cursor survives observe deleting raw events; an older transcript cannot move it back.
+/// The cursor lives on the session, not in the raw events; an older transcript cannot move it back.
 pub fn claim_prompt_step(conn: &Connection, id: &str, step: i64) -> Result<bool> {
     Ok(conn.execute(
         "UPDATE sessions SET last_prompt_step=?2 WHERE id=?1
@@ -560,7 +569,7 @@ pub fn claim_prompt_step(conn: &Connection, id: &str, step: i64) -> Result<bool>
     )? > 0)
 }
 
-/// Compaction drops context; keep this flag outside the raw events that observe deletes.
+/// Compaction drops context; the flag lives on the session, outside the raw events.
 pub fn mark_compacted(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("UPDATE sessions SET reinject_pending=1 WHERE id=?1", [id])?;
     Ok(())
@@ -596,7 +605,7 @@ pub fn insert_event(
     Ok(())
 }
 
-/// A prompt the developer typed, with its search row. Kept after observe drops the raw events.
+/// A prompt the developer typed, with its search row, searchable apart from the raw events.
 /// Filed under its session's repository, like the summaries and observations: the agent may have
 /// moved into another repository (`cd`) since the session started.
 pub fn count_prompts(conn: &Connection, session_id: &str, body: &str) -> Result<i64> {
@@ -629,7 +638,7 @@ pub struct PendingSession {
     pub last_event_at: i64,
 }
 
-/// Sessions with raw events, ended or idle for `settle_ms`, oldest first.
+/// Sessions with raw events observe has not read yet, ended or idle for `settle_ms`, oldest first.
 pub fn pending_sessions(
     conn: &Connection,
     now: i64,
@@ -637,7 +646,7 @@ pub fn pending_sessions(
 ) -> Result<Vec<PendingSession>> {
     let mut stmt = conn.prepare(
         "SELECT s.id, s.agent, s.repo, s.last_event_at FROM sessions s
-         WHERE EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id)
+         WHERE EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.id > s.observed_event_id)
            AND (s.ended_at IS NOT NULL OR s.last_event_at <= ?1)
          ORDER BY s.last_event_at ASC LIMIT 20",
     )?;
@@ -658,9 +667,13 @@ pub struct RawEvent {
     pub payload: String,
 }
 
+/// The session's raw events that observe has not read yet, oldest first.
 pub fn session_events(conn: &Connection, session_id: &str) -> Result<Vec<RawEvent>> {
-    let mut stmt =
-        conn.prepare("SELECT id, event, payload FROM events WHERE session_id=?1 ORDER BY id")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, event, payload FROM events WHERE session_id=?1
+           AND id > COALESCE((SELECT observed_event_id FROM sessions WHERE id=?1), 0)
+         ORDER BY id",
+    )?;
     let rows = stmt.query_map(params![session_id], |r| {
         Ok(RawEvent {
             id: r.get(0)?,
@@ -802,7 +815,8 @@ pub fn import_doc(conn: &Connection, source: &str, source_id: &str, d: &Doc) -> 
     Ok(true)
 }
 
-/// One transaction: store the batch's knowledge (and its search rows) and drop its raw events.
+/// One transaction: store the batch's knowledge (and its search rows) and move the session's
+/// observe cursor past its raw events, which stay stored.
 /// Rows carry the session's time (`last_event_at`), not the time they were summarized.
 pub fn apply_batch(
     conn: &mut Connection,
@@ -844,8 +858,11 @@ pub fn apply_batch(
         let doc = format!("o{}", tx.last_insert_rowid());
         tx.execute(FTS_INSERT, params![o.title, o.body, doc, o.kind, repo, ts])?;
     }
+    // Clamped to the events that exist, so `i64::MAX` means "everything stored so far".
     tx.execute(
-        "DELETE FROM events WHERE session_id=?1 AND id<=?2",
+        "UPDATE sessions SET observed_event_id = MAX(observed_event_id, COALESCE(
+           (SELECT MAX(id) FROM events WHERE session_id=?1 AND id<=?2), 0))
+         WHERE id=?1",
         params![session_id, last_event_id],
     )?;
     tx.commit()?;
@@ -1313,6 +1330,43 @@ mod tests {
         };
         apply_batch(&mut conn, &s3, "p", "own", std::slice::from_ref(&obs), 0).unwrap();
         assert_eq!(ids(&conn, "SELECT COUNT(*) FROM summaries"), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn summarized_raw_events_stay_and_only_new_ones_are_pending() {
+        let dir = std::env::temp_dir().join(format!("oboete-db-keep-raw-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut conn = open(&dir).unwrap();
+        upsert_session(&conn, "k1", "claude", "/r", "/r", 1).unwrap();
+        insert_event(&conn, "k1", "UserPromptSubmit", 1, "{}").unwrap();
+        insert_event(&conn, "k1", "Stop", 1, "{}").unwrap();
+        let s = PendingSession {
+            id: "k1".into(),
+            agent: "claude".into(),
+            repo: "/r".into(),
+            last_event_at: 1,
+        };
+        assert_eq!(pending_sessions(&conn, 10, 0).unwrap().len(), 1);
+        let last = session_events(&conn, "k1").unwrap().last().unwrap().id;
+        apply_batch(&mut conn, &s, "p", "sum", &[], last).unwrap();
+        let count = |c: &Connection| -> i64 {
+            c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(count(&conn), 2, "summarized raw events are kept");
+        assert!(session_events(&conn, "k1").unwrap().is_empty());
+        assert!(pending_sessions(&conn, 10, 0).unwrap().is_empty());
+        // The next event is pending on its own; `i64::MAX` covers only what is stored.
+        insert_event(&conn, "k1", "Stop", 2, "{\"n\":2}").unwrap();
+        let fresh = session_events(&conn, "k1").unwrap();
+        assert_eq!(fresh.len(), 1);
+        apply_batch(&mut conn, &s, "p", "sum2", &[], i64::MAX).unwrap();
+        insert_event(&conn, "k1", "Stop", 3, "{}").unwrap();
+        assert_eq!(session_events(&conn, "k1").unwrap().len(), 1);
+        assert_eq!(count(&conn), 4);
+        drop(conn);
         std::fs::remove_dir_all(&dir).ok();
     }
 
