@@ -62,15 +62,12 @@ fn trigrams(query: &str) -> Vec<String> {
     out
 }
 
-/// One char's case fold, kept one char long so positions do not move: the lowercase of the
-/// uppercase, so `ς` and `σ`, `ſ` and `s` meet as they do in SQLite's tokenizer.
+/// One char's case fold for dedup and the snippet: ASCII only, which SQLite's tokenizer folds too.
+/// ponytail: under-folds other scripts (`Σ`/`ς` stay two keys, so a query holding both counts
+/// that piece twice in bm25) but never merges what SQLite keeps apart (`ı` and `i`), which would
+/// drop a branch; exact parity means porting SQLite's Unicode fold table.
 fn fold(c: char) -> char {
-    let mut up = c.to_uppercase();
-    let u = match (up.next(), up.next()) {
-        (Some(u), None) => u,
-        _ => c,
-    };
-    u.to_lowercase().next().unwrap_or(c)
+    c.to_ascii_lowercase()
 }
 
 /// What a hit is matched on, for `snippet`: the query's trigrams, or its terms when it has none.
@@ -541,7 +538,7 @@ mod tests {
         assert_eq!(trigrams("検索をしてください。"), ["検索を", "索をし"]);
         assert_eq!(trigrams("abcd, abc"), ["abc", "bcd"]);
         assert_eq!(trigrams("HTTP http"), ["HTT", "TTP"]);
-        assert_eq!(trigrams("ΣΣΣ ςςς σσσ"), ["ΣΣΣ"]);
+        assert_eq!(trigrams("iii ııı III"), ["iii", "ııı"]);
         assert_eq!(trigrams("db 接続"), Vec::<String>::new());
         let long: String = ('a'..='z').cycle().take(200).collect();
         assert_eq!(trigrams(&long).len(), 26);
@@ -560,7 +557,6 @@ mod tests {
         );
         assert_eq!(snippet("short\nline", &t(&["nothing"]), 40), "short line");
         assert_eq!(snippet("日本語の本文です", &t(&["本文"]), 4), "…の本文で…");
-        assert!(snippet("abcdefgh ςςς", &t(&["ΣΣΣ"]), 3).contains('ς'));
         // A common trigram early on loses to the passage where the rarer ones meet.
         let body = format!(
             "the start {} the trigram tokenizer indexes CJK",
