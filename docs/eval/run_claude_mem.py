@@ -12,7 +12,8 @@ if len(sources) != 1:
     sys.exit(f'expected one imported claude-mem database, found {sources}')
 doc_of = dict(db.execute("SELECT source_id, doc FROM imports WHERE source=? AND source_id LIKE 'o%'", sources))
 missing = errors = 0
-with open(f'{E}/runs/claude-mem.trec', 'w') as out:
+# A failed query would look like a search that found nothing, so a run with failures is not kept.
+with open(f'{E}/runs/claude-mem.trec.part', 'w') as out:
     for line in open(f'{E}/queries.jsonl'):
         q = json.loads(line)
         url = 'http://127.0.0.1:37777/api/search?' + urllib.parse.urlencode(
@@ -33,3 +34,6 @@ with open(f'{E}/runs/claude-mem.trec', 'w') as out:
             rank += 1
             out.write(f"{q['qid']} Q0 {doc} {rank} {DEPTH - rank + 1} claude-mem\n")
 print(f'ids newer than the copy (dropped): {missing}; failed queries: {errors}')
+if errors:
+    sys.exit('not kept: run it again')
+os.replace(f'{E}/runs/claude-mem.trec.part', f'{E}/runs/claude-mem.trec')

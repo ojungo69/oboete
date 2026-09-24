@@ -30,6 +30,10 @@ def split(session):
 def gate(text):
     return subprocess.run([OBOETE, 'gate'], input=text, capture_output=True, text=True, check=True).stdout
 
+# Runs and judgments are keyed by qid, and agent qids are numbered in transcript order, so a
+# rebuilt set could hand old grades to different questions. One set per evaluation directory.
+if os.path.exists(f'{E}/queries.jsonl'):
+    sys.exit(f'{E}/queries.jsonl exists; its runs and judgments belong to it. Move the directory aside to build a new set.')
 db = sqlite3.connect(f'file:{E}/home/oboete.db?mode=ro', uri=True)
 out = []
 # Prompts: typed questions and requests, not one-word replies or pasted walls of text.
