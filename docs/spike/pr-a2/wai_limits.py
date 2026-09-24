@@ -19,7 +19,9 @@ for name, unit in (('ja', ja), ('en', en)):
 print('## round trip, 1 short text, 30 calls')
 lat = []
 for i in range(30):
-    t = time.time(); st, res = cf.call('POST', URL, {'text': [f'{ja} {i}']}); lat.append((time.time() - t) * 1000)
+    t = time.time(); st, res = cf.call('POST', URL, {'text': [f'{ja} {i}']})
+    assert st == 200 and res.get('success'), res.get('errors')  # a failed call is not an inference latency
+    lat.append((time.time() - t) * 1000)
 lat.sort(); print(f'p50 {statistics.median(lat):.0f} ms  p95 {lat[int(len(lat)*0.95)-1]:.0f} ms  max {lat[-1]:.0f} ms')
 print('## batch of 100 texts of ~300 chars, 5 calls')
 lat = []

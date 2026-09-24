@@ -29,7 +29,9 @@ pub fn embed(cache: PathBuf, max_length: usize) -> Result<()> {
     eprintln!("load_ms {}", t.elapsed().as_millis());
     let t = Instant::now();
     let texts: Vec<&str> = rows.iter().map(|(_, t)| t.as_str()).collect();
-    let vecs = model.embed(&texts, Some(8))?;
+    // One text per batch: batching long texts pads them all to the longest and peaked at
+    // 17.8 GB with 8 per batch, more than an 8 GB M1 has.
+    let vecs = model.embed(&texts, Some(1))?;
     eprintln!("embed_ms {} docs {}", t.elapsed().as_millis(), rows.len());
     for ((id, text), vec) in rows.iter().zip(vecs) {
         println!("{}", json!({"id": id, "text": text, "vec": vec}));
