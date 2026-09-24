@@ -325,6 +325,14 @@ pub fn insert_event(
 /// A prompt the developer typed, with its search row. Kept after observe drops the raw events.
 /// Filed under its session's repository, like the summaries and observations: the agent may have
 /// moved into another repository (`cd`) since the session started.
+pub fn has_prompt(conn: &Connection, session_id: &str, body: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM prompts WHERE session_id=?1 AND body=?2)",
+        params![session_id, body],
+        |r| r.get(0),
+    )?)
+}
+
 pub fn insert_prompt(conn: &Connection, session_id: &str, ts: i64, body: &str) -> Result<()> {
     let repo: String = conn.query_row(
         "SELECT repo FROM sessions WHERE id=?1",

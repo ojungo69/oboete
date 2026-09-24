@@ -353,6 +353,15 @@ pub fn handle(
         "SessionEnd" => Some(json!({"reason": payload.get("reason")})),
         _ => None, // PreToolUse and the rest carry nothing a summary needs
     };
+    // `cursor-agent -p` fires no prompt or response hook, so SessionEnd recovers those turns
+    // from the transcript. A turn whose prompt is already stored came through the hooks.
+    let recovered = if agent == "cursor" && event == "SessionEnd" {
+        str_field(payload, &["transcript_path"])
+            .map(|p| cursor_turns(Path::new(p)))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     // One transaction: the viewer deleting this session between the two writes would otherwise
     // leave an event that belongs to no session and never gets summarized or removed.
     let tx = conn.unchecked_transaction()?;
@@ -379,6 +388,19 @@ pub fn handle(
         )?;
         if !is_envelope(p) {
             db::insert_prompt(&tx, session_id, ts, p)?;
+        }
+    }
+    for (p, answer) in recovered {
+        let p = clip(&strip_blocks(&p, true));
+        if p.is_empty() || is_envelope(&p) || db::has_prompt(&tx, session_id, &p)? {
+            continue;
+        }
+        let prompt = json!({"prompt": p}).to_string();
+        db::insert_event(&tx, session_id, "UserPromptSubmit", ts, &prompt)?;
+        db::insert_prompt(&tx, session_id, ts, &p)?;
+        if !answer.trim().is_empty() {
+            let stop = json!({"assistant": clip(&answer)}).to_string();
+            db::insert_event(&tx, session_id, "Stop", ts, &stop)?;
         }
     }
     if let Some(v) = stored {
@@ -565,6 +587,43 @@ fn transcript_tail(path: &Path) -> String {
         bytes.drain(..=newline);
     }
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// (prompt, last answer) per turn in a Cursor agent transcript's tail. Lines are
+/// `{"role", "message": {"content": [{"type": "text", "text"}, {"type": "tool_use"}…]}}`
+/// (agent-transcript in the cursor-agent bundle); the user text wraps the typed prompt in
+/// `<user_query>`, and metadata / `turn_ended` lines have no role.
+fn cursor_turns(path: &Path) -> Vec<(String, String)> {
+    let mut turns: Vec<(String, String)> = Vec::new();
+    for line in transcript_tail(path).lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let text = v["message"]["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|c| c["type"] == "text")
+            .filter_map(|c| c["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        match v["role"].as_str() {
+            Some("user") => {
+                let query = text
+                    .split_once("<user_query>")
+                    .and_then(|(_, rest)| rest.split_once("</user_query>"))
+                    .map_or(text.as_str(), |(query, _)| query);
+                turns.push((query.to_string(), String::new()));
+            }
+            Some("assistant") if !text.trim().is_empty() => {
+                if let Some(turn) = turns.last_mut() {
+                    turn.1 = text;
+                }
+            }
+            _ => {}
+        }
+    }
+    turns
 }
 
 /// Last assistant `output_text` in a Codex rollout JSONL, reading only the file's tail.
@@ -774,6 +833,63 @@ mod tests {
             )
             .unwrap();
         assert!(ended);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cursor_print_mode_session_end_recovers_turns_from_the_transcript() {
+        let dir = tmp("cursor-print");
+        let payloads = cursor_fixture(&dir);
+        let conn = db::open(&dir).unwrap();
+        let transcript = dir.join("transcript.jsonl");
+        let lines = [
+            json!({"type":"metadata","metadata":{"overview":"x"}}),
+            json!({"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nSay hi.\n</user_query>"}]}}),
+            json!({"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"ls"}}]}}),
+            json!({"role":"assistant","message":{"content":[{"type":"text","text":"Hi."}]}}),
+            json!({"type":"turn_ended","status":"success"}),
+            json!({"role":"user","message":{"content":[{"type":"text","text":"Read hello.txt and explain the result."}]}}),
+            json!({"role":"assistant","message":{"content":[{"type":"text","text":"Seen."}]}}),
+            json!({"role":"user","message":{"content":[{"type":"text","text":"Keep <private>sk-secret</private> out"}]}}),
+        ];
+        let body: Vec<String> = lines.iter().map(Value::to_string).collect();
+        std::fs::write(&transcript, body.join("\n") + "\n").unwrap();
+        // The middle turn came through the prompt hook (the TUI), so only the others are new.
+        handle(
+            &conn,
+            "cursor",
+            "UserPromptSubmit",
+            &payloads["UserPromptSubmit"],
+        )
+        .unwrap();
+        let mut end = payloads["SessionEnd"].clone();
+        end["transcript_path"] = json!(transcript);
+        handle(&conn, "cursor", "SessionEnd", &end).unwrap();
+        // A resumed `-p` run ends again with the same transcript: nothing is added twice.
+        handle(&conn, "cursor", "SessionEnd", &end).unwrap();
+        let stored: Vec<(String, Value)> = db::session_events(&conn, "cursor-session")
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.event, serde_json::from_str(&e.payload).unwrap()))
+            .collect();
+        let prompt = |p: &str| ("UserPromptSubmit".to_string(), json!({"prompt": p}));
+        let end_event = ("SessionEnd".to_string(), json!({"reason":"user_close"}));
+        assert_eq!(
+            stored,
+            [
+                prompt("Read hello.txt and explain the result."),
+                prompt("Say hi."),
+                ("Stop".into(), json!({"assistant":"Hi."})),
+                prompt("Keep  out"),
+                end_event.clone(),
+                end_event,
+            ]
+        );
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM prompts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 3);
         drop(conn);
         std::fs::remove_dir_all(dir).unwrap();
     }
