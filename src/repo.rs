@@ -69,11 +69,32 @@ fn origin_url(config: &str) -> Option<String> {
             && let Some((name, value)) = line.split_once('=')
             && name.trim().eq_ignore_ascii_case("url")
         {
-            let value = value.split(" #").next()?.split(" ;").next()?;
-            return Some(value.trim().trim_matches('"').to_string());
+            return Some(config_value(value));
         }
     }
     None
+}
+
+/// A git config value: `#` or `;` outside double quotes starts a comment, the quotes are dropped,
+/// a backslash escapes the next character, surrounding whitespace is trimmed.
+fn config_value(raw: &str) -> String {
+    let mut out = String::new();
+    let mut quoted = false;
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => quoted = !quoted,
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(x) => out.push(x),
+                None => {}
+            },
+            '#' | ';' if !quoted => break,
+            _ => out.push(c),
+        }
+    }
+    out.trim().to_string()
 }
 
 /// `[remote "origin"]`, in any case for the section name, with a trailing comment, or in the old
@@ -207,6 +228,15 @@ mod tests {
             );
         }
         assert_eq!(origin_url("[remote \"Origin\"]\nurl = x\n"), None);
+        for value in [
+            "https://x.org/o/r;comment",
+            "https://x.org/o/r\t# comment",
+            "\"https://x.org/o/r\" ; c",
+            "  https://x.org/o/r  ",
+        ] {
+            assert_eq!(config_value(value), "https://x.org/o/r", "{value:?}");
+        }
+        assert_eq!(config_value("\"a#b\" # c"), "a#b");
     }
 
     #[test]
