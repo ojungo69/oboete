@@ -89,6 +89,23 @@ pub fn search(
     Ok(hits.collect::<Result<_, _>>()?)
 }
 
+/// `oboete eval`: run each `{"qid","text"}` line through `search` over every repository and
+/// print the hits as a TREC run (`qid Q0 doc rank score method`), ranks from 1. The score only
+/// restates the order; the evaluator ranks by it.
+pub fn trec_run(conn: &Connection, queries: &str, depth: usize) -> Result<String> {
+    let mut out = String::new();
+    for line in queries.lines().filter(|l| !l.trim().is_empty()) {
+        let q: serde_json::Value = serde_json::from_str(line)?;
+        let (Some(qid), Some(text)) = (q["qid"].as_str(), q["text"].as_str()) else {
+            anyhow::bail!("each line needs string qid and text: {line}");
+        };
+        for (i, h) in search(conn, text, None, depth)?.iter().enumerate() {
+            out.push_str(&format!("{qid} Q0 {} {} {} fts\n", h.doc, i + 1, depth - i));
+        }
+    }
+    Ok(out)
+}
+
 /// `as i64` would wrap a huge `--limit` negative, which SQLite reads as "no limit".
 fn sql_limit(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
@@ -278,6 +295,21 @@ mod tests {
         )
         .unwrap();
         db::insert_prompt(conn, "s1", 1_699_999_990_000, "trigram 検索を足して").unwrap();
+    }
+
+    #[test]
+    fn eval_prints_a_trec_run_ranked_from_one() {
+        let dir = home("trec");
+        let mut conn = db::open(&dir).unwrap();
+        seed(&mut conn);
+        let queries = "{\"qid\":\"q1\",\"text\":\"Trigram\"}\n\n{\"qid\":\"q2\",\"text\":\"nothing matches this\"}\n";
+        assert_eq!(
+            trec_run(&conn, queries, 50).unwrap(),
+            "q1 Q0 o2 1 50 fts\nq1 Q0 p1 2 49 fts\n"
+        );
+        assert_eq!(trec_run(&conn, queries, 1).unwrap(), "q1 Q0 o2 1 1 fts\n");
+        assert!(trec_run(&conn, "{\"qid\":1,\"text\":\"x\"}", 5).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

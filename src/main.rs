@@ -6,6 +6,7 @@
 mod config;
 mod db;
 mod hook;
+mod import;
 mod inject;
 mod mcp;
 mod observe;
@@ -91,6 +92,20 @@ enum Cmd {
         /// Also open the page in the default browser
         #[arg(long)]
         open: bool,
+    },
+    /// Copy another memory tool's store into this one (claude-mem's SQLite database)
+    Import {
+        /// Source tool: claude-mem
+        source: String,
+        /// Its database file (read-only; e.g. ~/.claude-mem/claude-mem.db)
+        db: PathBuf,
+    },
+    /// Evaluation: run `{"qid","text"}` JSONL queries through search, print a TREC run
+    #[command(hide = true)]
+    Eval {
+        queries: PathBuf,
+        #[arg(long, default_value_t = 50)]
+        depth: usize,
     },
     /// Replay a JSONL fixture through the hook path and measure
     Replay {
@@ -232,6 +247,32 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             emit(&out)
         }
         Cmd::Setup { agent, remove } => setup::run(&home, &agent, remove),
+        Cmd::Import { source, db } => {
+            if source != "claude-mem" {
+                anyhow::bail!("unknown source {source}: use claude-mem");
+            }
+            // Until repositories map onto claude-mem's project names (PR-H), the rows would
+            // reach no repository's injection; keep them out of the store the hooks write.
+            if std::path::absolute(&home)?
+                == std::path::absolute(config::home_dir().join(".oboete"))?
+            {
+                anyhow::bail!(
+                    "importing into the everyday store waits for the repository mapping (PR-H); pass --home <dir> for an evaluation store"
+                );
+            }
+            let mut conn = db::open(&home)?;
+            let stats = import::claude_mem(&mut conn, &db)?;
+            println!("{}", serde_json::to_string(&stats)?);
+            Ok(())
+        }
+        Cmd::Eval { queries, depth } => {
+            let conn = db::open(&home)?;
+            emit(&search::trec_run(
+                &conn,
+                &std::fs::read_to_string(queries)?,
+                depth,
+            )?)
+        }
         Cmd::Doctor => setup::doctor(&home),
         Cmd::View { port, open } => view::run(&home, port, open),
         Cmd::Replay {

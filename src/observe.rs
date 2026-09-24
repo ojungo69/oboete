@@ -12,7 +12,7 @@ use crate::{config, db, hook, provider, redact};
 const MAX_PROMPT_CHARS: usize = 16_000;
 const MAX_OBSERVATIONS: usize = 12;
 const MAX_SUMMARY_CHARS: usize = 2_000;
-const KINDS: [&str; 6] = [
+pub const KINDS: [&str; 6] = [
     "decision",
     "bugfix",
     "feature",

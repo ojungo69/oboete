@@ -65,6 +65,12 @@ CREATE TABLE IF NOT EXISTS provider_calls(
   detail TEXT
 );
 CREATE INDEX IF NOT EXISTS provider_calls_day ON provider_calls(provider, ts);
+CREATE TABLE IF NOT EXISTS imports(
+  source TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  doc TEXT NOT NULL,
+  PRIMARY KEY(source, source_id)
+);
 ";
 
 pub fn open(home: &Path) -> Result<Connection> {
@@ -365,6 +371,90 @@ pub struct Observation {
 
 const FTS_INSERT: &str =
     "INSERT INTO fts(title, body, doc, kind, repo, ts) VALUES(?1,?2,?3,?4,?5,?6)";
+
+/// A session another memory tool recorded. An existing row (the same agent session captured by
+/// oboete itself) is left as it is.
+pub fn import_session(
+    conn: &Connection,
+    id: &str,
+    agent: &str,
+    repo: &str,
+    started_at: i64,
+    ended_at: Option<i64>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO sessions(id, agent, repo, started_at, ended_at, last_event_at)
+         VALUES(?1,?2,?3,?4,?5,?6)",
+        params![
+            id,
+            agent,
+            repo,
+            started_at,
+            ended_at,
+            ended_at.unwrap_or(started_at)
+        ],
+    )?;
+    Ok(())
+}
+
+/// One document from another memory tool: `kind` is `prompt`, `summary` or an observation kind.
+pub struct Doc<'a> {
+    pub session_id: &'a str,
+    pub repo: &'a str,
+    pub ts: i64,
+    pub kind: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+}
+
+/// Store an imported document with its search row, and remember its source row in `imports` so
+/// a later import skips it (also after the developer deleted the document). False = seen before.
+pub fn import_doc(conn: &Connection, source: &str, source_id: &str, d: &Doc) -> Result<bool> {
+    let seen = conn
+        .query_row(
+            "SELECT 1 FROM imports WHERE source=?1 AND source_id=?2",
+            params![source, source_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if seen {
+        return Ok(false);
+    }
+    let prefix = match d.kind {
+        "prompt" => {
+            conn.execute(
+                "INSERT INTO prompts(session_id, repo, ts, body) VALUES(?1,?2,?3,?4)",
+                params![d.session_id, d.repo, d.ts, d.body],
+            )?;
+            "p"
+        }
+        "summary" => {
+            conn.execute(
+                "INSERT INTO summaries(session_id, repo, ts, body, provider) VALUES(?1,?2,?3,?4,?5)",
+                params![d.session_id, d.repo, d.ts, d.body, source],
+            )?;
+            "s"
+        }
+        _ => {
+            conn.execute(
+                "INSERT INTO observations(session_id, repo, ts, kind, title, body, provider) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![d.session_id, d.repo, d.ts, d.kind, d.title, d.body, source],
+            )?;
+            "o"
+        }
+    };
+    let doc = format!("{prefix}{}", conn.last_insert_rowid());
+    conn.execute(
+        FTS_INSERT,
+        params![d.title, d.body, doc, d.kind, d.repo, d.ts],
+    )?;
+    conn.execute(
+        "INSERT INTO imports(source, source_id, doc) VALUES(?1,?2,?3)",
+        params![source, source_id, doc],
+    )?;
+    Ok(true)
+}
 
 /// One transaction: store the batch's knowledge (and its search rows) and drop its raw events.
 /// Rows carry the session's time (`last_event_at`), not the time they were summarized.
