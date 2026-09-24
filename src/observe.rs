@@ -43,6 +43,9 @@ pub fn run(home: &Path, settle_ms: u64) -> Result<Stats> {
     }
     let cfg = config::load(home)?;
     let mut conn = db::open(home)?;
+    if let Err(e) = db::rekey_paths(&conn) {
+        eprintln!("oboete observe: re-key repositories: {e:#}");
+    }
     let mut stats = Stats::default();
     let mut chain = provider::Chain::new(&cfg.providers);
     let pending = db::pending_sessions(&conn, db::now_ms(), settle_ms)?;

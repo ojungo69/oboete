@@ -11,8 +11,7 @@ pub fn key(cwd: &Path) -> String {
     let Some((root, git_dir)) = find(&start) else {
         return start.to_string_lossy().into_owned();
     };
-    std::fs::read_to_string(git_dir.join("config"))
-        .ok()
+    read_config(&git_dir.join("config"), 0)
         .and_then(|config| origin_url(&config))
         .and_then(|url| normalize(&url))
         .unwrap_or_else(|| root.to_string_lossy().into_owned())
@@ -97,17 +96,56 @@ fn config_value(raw: &str) -> String {
     out.trim().to_string()
 }
 
+/// A git config file with the files its `[include] path = ...` lines name spliced in where they
+/// appear, as git reads them: a relative path is from the including file's directory, `~/` is the
+/// home directory, at most 10 levels (git's limit). `includeIf` is not evaluated.
+fn read_config(path: &Path, depth: u8) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut out = String::with_capacity(text.len());
+    let mut in_include = false;
+    for line in text.lines() {
+        out.push_str(line);
+        out.push('\n');
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_include = header(line).is_some_and(|h| h.eq_ignore_ascii_case("include"));
+        } else if in_include
+            && depth < 10
+            && let Some((name, value)) = line.split_once('=')
+            && name.trim().eq_ignore_ascii_case("path")
+        {
+            let value = config_value(value);
+            let target = match value.strip_prefix("~/") {
+                Some(rest) => crate::config::home_dir().join(rest),
+                None => path.parent().unwrap_or(Path::new("")).join(&value),
+            };
+            if let Some(included) = read_config(&target, depth + 1) {
+                // The rest of this file is still in `[include]`, not the included file's last section.
+                out.push_str(&included);
+                out.push_str("[include]\n");
+            }
+        }
+    }
+    Some(out)
+}
+
+/// The text between `[` and `]` of a section header line.
+fn header(line: &str) -> Option<&str> {
+    let (header, _) = line.strip_prefix('[')?.split_once(']')?;
+    Some(header.trim())
+}
+
 /// `[remote "origin"]`, in any case for the section name, with a trailing comment, or in the old
 /// `[remote.origin]` form (git reads all of them).
 fn origin_header(line: &str) -> bool {
-    let Some((header, _)) = line.strip_prefix('[').and_then(|l| l.split_once(']')) else {
+    let Some(header) = header(line) else {
         return false;
     };
-    match header.trim().split_once(char::is_whitespace) {
+    match header.split_once(char::is_whitespace) {
         Some((section, name)) => {
             section.eq_ignore_ascii_case("remote") && name.trim() == "\"origin\""
         }
-        None => header.trim().eq_ignore_ascii_case("remote.origin"),
+        None => header.eq_ignore_ascii_case("remote.origin"),
     }
 }
 
@@ -277,6 +315,35 @@ mod tests {
         for dir in [main.join("src/deep"), wt.clone(), clone] {
             assert_eq!(key(&dir), "github.com/o/r", "{}", dir.display());
         }
+
+        // An origin that `.git/config` pulls in with `[include]`, relative to the git directory.
+        let inc = tmp.join("inc");
+        std::fs::create_dir_all(inc.join(".git")).unwrap();
+        std::fs::write(
+            inc.join(".git/config"),
+            "[core]\n\tbare = false\n[include]\n\tpath = remotes.inc # c\n\tpath = loop\n",
+        )
+        .unwrap();
+        std::fs::write(
+            inc.join(".git/remotes.inc"),
+            "[remote \"origin\"]\n\turl = git@github.com:o/inc.git\n",
+        )
+        .unwrap();
+        // A file that includes itself stops at the depth limit.
+        std::fs::write(inc.join(".git/loop"), "[include]\n\tpath = loop\n").unwrap();
+        assert_eq!(key(&inc), "github.com/o/inc");
+        // The parent's lines after the include are not in the included file's section.
+        std::fs::write(
+            inc.join(".git/config"),
+            "[include]\n\tpath = upstream.inc\n\turl = https://x.org/not/origin\n",
+        )
+        .unwrap();
+        std::fs::write(
+            inc.join(".git/upstream.inc"),
+            "[remote \"origin\"]\n\tfetch = x\n",
+        )
+        .unwrap();
+        assert_eq!(key(&inc), inc.canonicalize().unwrap().to_string_lossy());
 
         let plain = tmp.join("plain");
         std::fs::create_dir_all(&plain).unwrap();
