@@ -60,22 +60,30 @@ fn common_dir(gitdir: &Path) -> Option<PathBuf> {
 
 /// `url` of `[remote "origin"]` in a git config file.
 fn origin_url(config: &str) -> Option<String> {
+    let config = config.replace("\r\n", "\n");
     let mut in_origin = false;
-    for line in config.lines().map(str::trim) {
-        if line.starts_with('[') {
-            in_origin = origin_header(line);
+    let mut at = 0;
+    for line in config.split_inclusive('\n') {
+        let start = at;
+        at += line.len();
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_origin = origin_header(trimmed);
         } else if in_origin
-            && let Some((name, value)) = line.split_once('=')
+            && let Some((name, _)) = trimmed.split_once('=')
             && name.trim().eq_ignore_ascii_case("url")
         {
-            return Some(config_value(value));
+            // From after `=` on: the value may continue past this line (`config_value`).
+            let eq = start + line.find('=')?;
+            return Some(config_value(&config[eq + 1..]));
         }
     }
     None
 }
 
 /// A git config value: `#` or `;` outside double quotes starts a comment, the quotes are dropped,
-/// a backslash escapes the next character, surrounding whitespace is trimmed.
+/// a backslash escapes the next character and one at the end of a line continues the value on the
+/// next, the value ends at the end of the line, surrounding whitespace is trimmed.
 fn config_value(raw: &str) -> String {
     let mut out = String::new();
     let mut quoted = false;
@@ -86,9 +94,10 @@ fn config_value(raw: &str) -> String {
             '\\' => match chars.next() {
                 Some('n') => out.push('\n'),
                 Some('t') => out.push('\t'),
+                Some('\n') | None => {}
                 Some(x) => out.push(x),
-                None => {}
             },
+            '\n' => break,
             '#' | ';' if !quoted => break,
             _ => out.push(c),
         }
@@ -275,6 +284,18 @@ mod tests {
             assert_eq!(config_value(value), "https://x.org/o/r", "{value:?}");
         }
         assert_eq!(config_value("\"a#b\" # c"), "a#b");
+        // A trailing backslash continues the value on the next line; the value ends at the line.
+        assert_eq!(
+            origin_url(
+                "[remote \"origin\"]\r\n\turl = https://github.com/owner/\\\r\nrepo.git\r\n"
+            )
+            .as_deref(),
+            Some("https://github.com/owner/repo.git")
+        );
+        assert_eq!(
+            origin_url("[remote \"origin\"]\n\turl = https://x.org/o/r\n\tfetch = y\n").as_deref(),
+            Some("https://x.org/o/r")
+        );
     }
 
     #[test]

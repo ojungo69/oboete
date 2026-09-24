@@ -43,7 +43,7 @@ pub fn run(home: &Path, settle_ms: u64) -> Result<Stats> {
     }
     let cfg = config::load(home)?;
     let mut conn = db::open(home)?;
-    if let Err(e) = db::rekey_paths(&conn) {
+    if let Err(e) = db::rekey_paths(&mut conn) {
         eprintln!("oboete observe: re-key repositories: {e:#}");
     }
     let mut stats = Stats::default();

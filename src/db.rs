@@ -116,28 +116,26 @@ pub fn open(home: &Path) -> Result<Connection> {
 }
 
 /// Repository keys moved from paths to the origin URL (`repo::key`, PR-C): rows filed under paths
-/// get their key once when the store is opened. `user_version` 1 marks it done. Same guard pattern
-/// as `ensure_fts`.
+/// get their key once when the store is opened. `user_version` 1 marks it done. Two first opens
+/// may both run it; the second finds nothing left to move.
 fn ensure_repo_keys(conn: &mut Connection) -> Result<()> {
-    let version = |c: &Connection| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0));
-    if version(conn)? >= 1 {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version >= 1 {
         return Ok(());
     }
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    if version(&tx)? < 1 {
-        rekey_paths(&tx)?;
-        tx.execute_batch("PRAGMA user_version = 1")?;
-    }
-    tx.commit()?;
+    rekey_paths(conn)?;
+    conn.execute_batch("PRAGMA user_version = 1")?;
     Ok(())
 }
 
 /// Rows filed under a path that is still a directory on this machine and now has another key
 /// (a repository that got an origin after it was used) move to that key; a path that is gone, or
 /// a key that is no path (`claude-mem:<project>`), stays. Run at open for older stores and by
-/// every observe run, off the hook path. Returns the number of paths moved.
-pub fn rekey_paths(conn: &Connection) -> Result<usize> {
-    let old: Vec<String> = conn
+/// every observe run, off the hook path, in one transaction so no table is left behind. Returns
+/// the number of paths moved.
+pub fn rekey_paths(conn: &mut Connection) -> Result<usize> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let old: Vec<String> = tx
         .prepare(
             "SELECT repo FROM sessions UNION SELECT repo FROM observations
              UNION SELECT repo FROM summaries UNION SELECT repo FROM prompts",
@@ -153,7 +151,7 @@ pub fn rekey_paths(conn: &Connection) -> Result<usize> {
         let new = crate::repo::key(path);
         if new != old {
             for table in ["sessions", "observations", "summaries", "prompts", "fts"] {
-                conn.execute(
+                tx.execute(
                     &format!("UPDATE {table} SET repo=?1 WHERE repo=?2"),
                     params![new, old],
                 )?;
@@ -161,6 +159,7 @@ pub fn rekey_paths(conn: &Connection) -> Result<usize> {
             moved += 1;
         }
     }
+    tx.commit()?;
     Ok(moved)
 }
 
@@ -731,8 +730,8 @@ mod tests {
         }
         conn.execute_batch("PRAGMA user_version = 0").unwrap();
         drop(conn);
-        let conn = open(&dir).unwrap();
-        let repos = |table: &str| -> Vec<String> {
+        let mut conn = open(&dir).unwrap();
+        let repos = |conn: &Connection, table: &str| -> Vec<String> {
             conn.prepare(&format!("SELECT repo FROM {table} ORDER BY repo"))
                 .unwrap()
                 .query_map([], |r| r.get(0))
@@ -743,7 +742,7 @@ mod tests {
         // A path still here gets its origin key; one that is gone, or no path, stays.
         let want = ["/gone/repo", "claude-mem:x", "github.com/o/r"];
         for table in ["sessions", "prompts", "fts"] {
-            assert_eq!(repos(table), want, "{table}");
+            assert_eq!(repos(&conn, table), want, "{table}");
         }
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -756,19 +755,19 @@ mod tests {
         let late_key = crate::repo::key(&late);
         upsert_session(&conn, "d", "claude", &late_key, &late_key, 1).unwrap();
         insert_prompt(&conn, "d", 1, "before the remote").unwrap();
-        assert_eq!(rekey_paths(&conn).unwrap(), 0);
+        assert_eq!(rekey_paths(&mut conn).unwrap(), 0);
         std::fs::write(
             late.join(".git/config"),
             "[remote \"origin\"]\n\turl = https://github.com/o/late\n",
         )
         .unwrap();
-        assert_eq!(rekey_paths(&conn).unwrap(), 1);
+        assert_eq!(rekey_paths(&mut conn).unwrap(), 1);
         for table in ["sessions", "prompts", "fts"] {
             assert!(
-                repos(table).contains(&"github.com/o/late".to_string()),
+                repos(&conn, table).contains(&"github.com/o/late".to_string()),
                 "{table}"
             );
-            assert!(!repos(table).contains(&late_key), "{table}");
+            assert!(!repos(&conn, table).contains(&late_key), "{table}");
         }
         drop(conn);
         std::fs::remove_dir_all(&dir).ok();
