@@ -47,7 +47,7 @@
 
 | 部分 | この PC (WSL x86) p50 / p95 | M1 iMac (8 GB) p50 / p95 |
 |---|---|---|
-| 全文検索 (e0、`oboete search --all`、起動込み) | 308 / 767 ms | 未計測 (D2 で macOS 版を作って測る) |
+| 全文検索 (e0、`oboete search --all`、起動込み) | 308 / 767 ms | 258〜270 / 889〜951 ms (D2、test 分の 112 問) |
 | 問いのベクトル化 (Workers AI、PR-A2) | 128〜171 / 161〜692 ms | (回線しだい) |
 | sqlite-vec 全件 fp32、k=100 | 285〜307 / 292〜323 ms | 294〜298 / 306〜315 ms |
 | sqlite-vec 全件 int8、k=100 | 282〜287 / 286〜305 ms | 215 / 224〜226 ms |
@@ -56,7 +56,7 @@
 
 - 17.8 万件 × 1,024 次元、100 問、Python の sqlite3 + sqlite-vec 0.1.9 (`vecbench.py`)。幅は 2 回の実行の値。「全体」は bit の候補を引き、その 400 件の fp32 を 1 件ずつ読み、cos で並べ直すまで。上位 10 件の fp32 全件との一致は 0.986〜0.987、上位 100 件は 0.905〜0.906。int8 の上位 10 件の一致は 0.990。
 - sqlite-vec の表はベクトルを塊で持つので、1 件ずつ読み戻すと遅い。並べ直しに使う fp32 は、1 行に 1 ベクトルの普通の表に置く。
-- M1 でもベクトル検索は fp32 の全件のままで予算に収まる。全文検索とベクトル検索を並行に走らせれば、MCP 検索はこの PC で p95 約 1 秒 (ベクトル化 692 + 全件 323 ms が長いほう) になり、予算 (最も遅い端末で p95 1.5 秒) に収まる。M1 の全文検索は D2 で測って確かめる。
+- M1 でもベクトル検索は fp32 の全件のままで予算に収まる。全文検索とベクトル検索を並行に走らせれば、MCP 検索はこの PC で p95 約 1 秒 (ベクトル化 692 + 全件 323 ms が長いほう) になり、予算 (最も遅い端末で p95 1.5 秒) に収まる。M1 の全文検索は D2 で測った (p95 889〜951 ms、「D2 の確かめ」)。
 - bit + 並べ直しは fp32 全件の 3 分の 1 前後の時間で、上位 10 件はほぼ同じ。int8 は M1 で 3 割速いだけ。PR-F の自動注入 (予算 300 ms) ではこの形を使う。MCP 検索も同じ形にするかは D2 で nDCG を比べて決める。
 - M1 の計測中、メモリ 8 GB のうち 7.4 GB が使われ、2.7 GB が圧縮に回っていた (ほかのアプリを含む。計測の DB は 3 つの表で 954 MB)。18 万件の store を検索するたびに 730 MB を読む形で、8 GB の端末が苦しくならないかは D1 の実装で測る。
 - 大きさ: fp32 のベクトルは 17.8 万件で約 730 MB。今の普段の store (数千件) では数 MB。claude-mem を普段の store に取り込む PR-H の後に 730 MB になる。bit の索引は 23 MB の上乗せ (並べ直し用の fp32 は残る)。fp32 の全件索引を sqlite-vec にも持つと、同じ 730 MB がもう 1 つ要る。
@@ -93,6 +93,29 @@
 - 単体テスト: 1 回の要求は 100 件以下かつ件数 × 最長 5 万字以下 / bit は符号で先頭の bit から / 2 回目の observe は要求を出さない / 保存したベクトルの長さが 1 / repo の移し替えの後、要求なしで新しいキーの索引に入る / 文書を消すとベクトルと索引の行も消える / 1 日の上限が 0 なら要求しない / 送る文から秘密が伏せられる。
 - 本物の Workers AI で (普段の store の写し、観測 129・要約 16・prompt 12): 3 回の要求 (100・53・4 件) で 157 件、4.6 秒。保存したベクトルと、同じ文を送り直したベクトルの cos は 0.999998。「リポジトリのキーを取得元のURLにする話」を bit の候補 20 件から fp32 で並べ直すと、1 位は「リポジトリキーは絶対パスから正規化URLへ」の観測。
 
+## D2 で決めたこと
+
+1. **検索の入口 (MCP・CLI・viewer) はすべて同じ `search::find` を通る**。`provider = "workers-ai"` なら `hybrid-kf`、それ以外は今までの全文検索。問いのベクトル化は全文検索と並行に走らせる。ベクトルが作れないとき (オフライン、鍵が無い、3 秒の timeout) は、全文検索だけの結果を返し、stderr に 1 行出す。
+2. **全文検索は 1 回だけ引き、上位 100 件を種類で分ける** (#46)。最初は知識と prompt を別々に引いていたが、それだと bm25 の順位付けを 2 回、全件に対してすることになる。17.8 万件の store で p95 1.3〜1.4 秒かかった (全文検索だけなら 0.85〜0.88 秒)。spike と同じ形 (e0 の 1 本を分ける) に戻して p95 1.03 秒。知識が先に並ぶので、全文検索側の 100 件はほぼ知識で埋まる。prompt はほぼベクトル側だけで並ぶ (spike の `hybrid-kf` と同じ)。
+3. **ベクトル側は種類ごとに、bit で 400 件を引き、fp32 で並べ直して上位 100 件**。repo を絞るときは partition key で絞る。spike で残した「MCP 検索も bit + 並べ直しにするか」は、test 分の測定がこの形そのものなので、その結果で決める。
+4. **文書 1 件の取り出し (`get`) は、元の表から id で引く**。`fts` は `doc` を索引の無い列として持つので、`WHERE doc = ?` は索引を頭から全部読む。17.8 万件の store で 1 件 119 ms かかった。hybrid はベクトルだけで見つかった文書を最大 `limit` 件取り出すので、1 回の検索が 1.0〜1.4 秒になっていた。MCP の `get` と viewer も同じ関数なので、そちらも速くなる。
+5. **`oboete eval --method hybrid`** は、問いを 1 回ずつベクトルにする。作れなければ run を止める (黙って全文検索の run にならないように)。
+
+### D2 の確かめ
+
+速さ (17.8 万件の評価用 store、test 分の 112 問、`oboete search --all --limit 10`、起動込み、`latency.py`):
+
+| | この PC p50 / p95 | M1 iMac p50 / p95 |
+|---|---|---|
+| 全文検索だけ | 305〜312 / 852〜914 ms | 258〜270 / 889〜951 ms |
+| hybrid (全文検索 2 回の形) | 610〜611 / 1,302〜1,404 ms | — |
+| hybrid (全文検索 1 回、既定) | 448 / 1,029 ms | 約 1.1 s (見積もり) |
+
+- M1 の hybrid は測っていない。測るには Workers AI の鍵を iMac に置くことになり、鍵の置き場所が 1 つ増えるため。見積もりは、M1 の全文検索 p95 (889〜951 ms) に、D0 で測ったベクトル側の全体 (M1 p95 113 ms) を足したもの。問いのベクトル化 (p95 161〜692 ms) は全文検索と並行に走るので、全文検索の時間に隠れる。予算 (最も遅い端末で p95 1.5 秒) の内側。
+- 評価用の store には spike のベクトルをそのまま入れた (`load_vectors.py`、Workers AI は呼ばない)。`text_sha` は spike の文 (prompt は 1,000 字で切ってから関門) から作ったもので、D1 の c1ac296 以降 (関門を通してから切る) とは違うことがある。`text_sha` は今は照合に使っていないので、測定には影響しない。
+
+精度 (test 分、判定は 4 方式の上位 50 件の束): 測定中。
+
 ## 再現
 
 ```sh
@@ -110,6 +133,22 @@ uv run --with numpy --with sqlite-vec python vecbench.py <作業用の DB のパ
 ```
 
 `runs-d0/` に分けて書くのは、判定の前に run を見比べられるように。`runs/` に写した時点で、束は 8 方式になる。
+
+D2 の test 分 (評価用 store の写し `<home>` で。`config.toml` に `[embedding] provider = "workers-ai"` と `account_id`):
+
+```sh
+oboete --home <home> search x                     # 一度開いて表を作る
+uv run --with numpy python docs/spike/pr-d/load_vectors.py <home>/oboete.db
+oboete --home <home> reindex                      # 索引だけ作る (要求 0 件)
+R=~/.oboete/eval/runs-test
+oboete --home <home> eval ~/.oboete/eval/queries.jsonl --depth 50 --method hybrid > $R/hybrid-d2.trec
+oboete --home <home> eval ~/.oboete/eval/queries.jsonl --depth 50 --method fts > $R/e0-trigram.trec
+cp -p ~/.oboete/eval/runs/claude-mem*.trec $R/     # -p: report.py は claude-mem の run の時刻を「今」にする
+cd docs/eval
+OBOETE_EVAL_DEPTH=50 OBOETE_EVAL_RUNS=$R python3 judge.py test 112 2000
+OBOETE_EVAL_DEPTH=50 OBOETE_EVAL_RUNS=$R uv run --with ranx python report.py test
+python3 ../spike/pr-d/latency.py "$(command -v oboete)" <home> ~/.oboete/eval/queries.jsonl test
+```
 
 ## 限界
 

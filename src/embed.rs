@@ -96,7 +96,8 @@ pub fn nearest(
     k: usize,
 ) -> Result<Vec<String>> {
     let kind = if prompts { "p" } else { "k" };
-    let candidates = (4 * k) as i64;
+    // sqlite-vec refuses k above 4,096 (a large `--limit`).
+    let candidates = (4 * k).min(4_096) as i64;
     let mut sql = String::from(
         "SELECT doc FROM vec_docs WHERE embedding MATCH vec_bit(?1) AND k = ?2 AND kind = ?3",
     );

@@ -538,6 +538,7 @@ mod tests {
         assert_eq!(docs(Some(&q), None, 10), ["o2", "o1", "o3", "s1", "p1"]);
         assert_eq!(docs(Some(&q), Some("/r"), 2), ["o2", "o1"]);
         assert_eq!(docs(Some(&q), Some("/elsewhere"), 10), Vec::<String>::new());
+        assert_eq!(docs(Some(&q), None, 5_000).len(), 5);
         // Without a query vector the ranking is the full-text one.
         assert_eq!(docs(None, None, 10), ["o2"]);
         // Semantic search switched on but unusable (no account): full-text, not an error.
