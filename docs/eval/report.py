@@ -93,7 +93,7 @@ def near_copy(qid, doc):
     """The document holds 80% of the question's trigrams: it quotes the question."""
     a, b = queries[qid]['text'], shown.get(doc, '')
     grams = {a[i:i + 3] for i in range(len(a) - 2)}
-    return len(grams & {b[i:i + 3] for i in range(len(b) - 2)}) > 0.8 * max(1, len(grams))
+    return len(grams & {b[i:i + 3] for i in range(len(b) - 2)}) >= 0.8 * max(1, len(grams))
 
 
 # `-l2`: only grade 2 and 3 count as relevant; nDCG uses the grades themselves.
