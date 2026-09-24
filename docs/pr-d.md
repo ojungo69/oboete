@@ -73,6 +73,26 @@
   - test 分で §3.3 の合格線を 1 回だけ測り、通れば `workers-ai` の store では hybrid を既定にする。この測定の束は §3.1 どおり各方式の上位 50 件にする (dev の spike は PR-B2 と同じ上位 20 件の束。`docs/pr-b.md` の決定 6: 深さ 50 は判定器の信用が決まってから足す)。
 - **D3 = 手元のモデル**: fastembed の bge-m3 で、オフライン時の問い合わせと、ローカルだけの形 (決定 5) の文書のベクトルを作る。`provider = "local"` を足す。
 
+## D1 で決めたこと
+
+1. **ベクトルの正本は普通の表 `embeddings`** (文書ごとに 1 行: 文書の id、モデル名 `bge-m3`、埋め込んだ文の SHA-256、長さ 1 にそろえた fp32 1,024 個、索引に入れたかの印)。sqlite-vec の `vec_docs` はここから作り直せる派生の索引で、fp32 ではなく符号の bit だけを持つ (上の計測: fp32 は sqlite-vec から読み戻すと遅い)。
+   - `vec_docs` は repo と種類 (知識 `k` = 観測・要約、prompt `p`) で分けて持つ (sqlite-vec の partition key)。MCP の既定の範囲は今の repo で、PR-F の自動注入は 300 ms の予算なので、repo の中だけを引けるようにする。
+   - partition key は書き換えられない (sqlite-vec 0.1.9: `UPDATE on partition key columns are not supported yet`)。repo の移し替え (C1 の `rekey_paths`) は古いキーの索引の行を消し、印を戻す。次の observe が `embeddings` から索引だけを作り直す (Workers AI は呼ばない)。
+   - モデル名は「どこで動かしたか」ではなく「どのモデルか」。Workers AI と手元の同じ重み (D3) は同じ空間なので作り直さない (決定 5)。
+2. **observe の最後に、ベクトルの無い文書を新しい順にベクトルにする** (`provider = "workers-ai"` のときだけ)。埋め込む文は spike と同じ (観測は `kind: title` と本文、要約は本文、prompt は先頭 1,000 字) で、送る前に関門 (`redact::outbound`) を通す。prompt は関門を通してから 1,000 字で切る (先に切ると、切れ目をまたぐ鍵が規則に合わなくなり、ほぼ全体が送られる)。
+   - 1 回の observe で 20 リクエスト (2,000 件) まで。observe はロックを持ったまま動くので、ほかの session の要約を長く待たせない。
+   - 1 日 200 リクエストまで (`daily_requests`)。spike の文で 1 件 0.46 neuron なので約 9,000 neuron、無料の 1 日 10,000 の内側。claude-mem を取り込んだ後の 18 万件は、`oboete reindex` を打たなければ約 9 日で埋まる。
+   - 文書を消す (`delete_doc`・`delete_session`) と、そのベクトルと索引の行も同じトランザクションで消える。消した記憶のベクトルは残さない。
+   - 文書を書き換える経路は今は無い。書き換えを足す PR は、そのベクトルも消す (#46)。
+3. **`oboete reindex`**: 索引を `embeddings` から作り直し、ベクトルの無い文書を 1 日の上限なしで全部ベクトルにする。
+4. **鍵は Workers AI の読み取りだけの token** (`key_file`、既定 `~/CF_WORKERS_AI_KEY.md` の 2 行目)。アカウント全体の鍵は使わない (提案の 334 行目)。この権限だけでモデルを呼べることを確かめた。`account_id` は `config.toml` に書く。
+5. **sqlite-vec はバイナリに組み込み**、store を開く前に全接続へ登録する (`sqlite3_auto_extension`)。記録 hook の速さは変わらない (`oboete replay` の fixture: プロセス内 p50 51 µs、起動込み p50 9 ms / p95 12 ms)。バイナリは 10.9 MB → 11.0 MB。
+
+### D1 の確かめ
+
+- 単体テスト: 1 回の要求は 100 件以下かつ件数 × 最長 5 万字以下 / bit は符号で先頭の bit から / 2 回目の observe は要求を出さない / 保存したベクトルの長さが 1 / repo の移し替えの後、要求なしで新しいキーの索引に入る / 文書を消すとベクトルと索引の行も消える / 1 日の上限が 0 なら要求しない / 送る文から秘密が伏せられる。
+- 本物の Workers AI で (普段の store の写し、観測 129・要約 16・prompt 12): 3 回の要求 (100・53・4 件) で 157 件、4.6 秒。保存したベクトルと、同じ文を送り直したベクトルの cos は 0.999998。「リポジトリのキーを取得元のURLにする話」を bit の候補 20 件から fp32 で並べ直すと、1 位は「リポジトリキーは絶対パスから正規化URLへ」の観測。
+
 ## 再現
 
 ```sh

@@ -15,20 +15,42 @@ pub struct Config {
     pub embedding: Embedding,
 }
 
-/// Semantic search is a provider slot (docs/plan.md 2b): `none` (full-text only, the default),
-/// later `workers-ai` (bge-m3) and `local` (fastembed). One model per store; switching reindexes.
+/// Semantic search is a provider slot (docs/plan.md 2b, docs/pr-d.md): `none` (full-text only,
+/// the default), `workers-ai` (bge-m3 on Cloudflare), later `local` (fastembed). One model per
+/// store; switching reindexes.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Embedding {
     #[serde(default = "default_embedding")]
     pub provider: String,
+    /// Workers AI: the Cloudflare account that runs the model.
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Workers AI: file whose second line is an API token limited to Workers AI (owner
+    /// convention), not the account's global key.
+    #[serde(default = "default_embedding_key")]
+    pub key_file: PathBuf,
+    /// Workers AI requests per day (up to 100 documents each). 200 is about 9,000 neurons with
+    /// the texts measured in docs/pr-d.md, inside the free 10,000 a day.
+    #[serde(default = "default_embedding_requests")]
+    pub daily_requests: u32,
 }
 
 impl Default for Embedding {
     fn default() -> Self {
         Self {
             provider: default_embedding(),
+            account_id: None,
+            key_file: default_embedding_key(),
+            daily_requests: default_embedding_requests(),
         }
     }
+}
+
+fn default_embedding_key() -> PathBuf {
+    home_dir().join("CF_WORKERS_AI_KEY.md")
+}
+fn default_embedding_requests() -> u32 {
+    200
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -230,12 +252,18 @@ pub fn load(home: &Path) -> Result<Config> {
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let cfg: Config = toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
-    anyhow::ensure!(
-        cfg.embedding.provider == "none",
-        "{}: [embedding] provider = \"{}\" does not exist yet; only \"none\" (full-text search) does",
-        path.display(),
-        cfg.embedding.provider
-    );
+    match cfg.embedding.provider.as_str() {
+        "none" => {}
+        "workers-ai" => anyhow::ensure!(
+            cfg.embedding.account_id.is_some(),
+            "{}: [embedding] provider = \"workers-ai\" needs account_id",
+            path.display()
+        ),
+        other => anyhow::bail!(
+            "{}: [embedding] provider = \"{other}\" does not exist yet; use \"none\" (full-text search) or \"workers-ai\"",
+            path.display()
+        ),
+    }
     Ok(cfg)
 }
 
@@ -311,6 +339,22 @@ model = "haiku"
         )
         .unwrap();
         assert!(load(&dir).is_ok());
+        // Workers AI needs the account; the token file and the daily cap have defaults.
+        std::fs::write(
+            dir.join("config.toml"),
+            "[embedding]\nprovider = \"workers-ai\"\n",
+        )
+        .unwrap();
+        let err = load(&dir).unwrap_err().to_string();
+        assert!(err.contains("needs account_id"), "{err}");
+        std::fs::write(
+            dir.join("config.toml"),
+            "[embedding]\nprovider = \"workers-ai\"\naccount_id = \"abc\"\n",
+        )
+        .unwrap();
+        let cfg = load(&dir).unwrap();
+        assert_eq!(cfg.embedding.daily_requests, 200);
+        assert!(cfg.embedding.key_file.ends_with("CF_WORKERS_AI_KEY.md"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

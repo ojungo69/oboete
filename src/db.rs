@@ -81,11 +81,22 @@ CREATE TABLE IF NOT EXISTS imports(
   doc TEXT NOT NULL,
   PRIMARY KEY(source, source_id)
 );
+-- Document vectors (PR-D): normalized fp32, one per document, with the model and a hash of the
+-- text they were made from. `vec_docs` is derived from these rows; `indexed` = 0 until it is.
+CREATE TABLE IF NOT EXISTS embeddings(
+  doc TEXT PRIMARY KEY,
+  embedder TEXT NOT NULL,
+  text_sha TEXT NOT NULL,
+  vec BLOB NOT NULL,
+  indexed INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS embeddings_unindexed ON embeddings(doc) WHERE indexed = 0;
 ";
 
 pub fn open(home: &Path) -> Result<Connection> {
     let path = home.join("oboete.db");
     private(home, 0o700);
+    register_sqlite_vec();
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
     // Switching a file to WAL takes an exclusive lock that the busy handler does not cover:
@@ -120,6 +131,7 @@ pub fn open(home: &Path) -> Result<Connection> {
     .context("migrate reinjection flag")?;
     ensure_autoincrement(&mut conn).context("migrate doc ids")?;
     ensure_fts(&mut conn).context("search index")?;
+    ensure_vec(&mut conn).context("vector index")?;
     ensure_repo_keys(&mut conn).context("migrate repository keys")?;
     ensure_device(&conn, &path).context("device id")?;
     ensure_uids(&mut conn).context("migrate document uids")?;
@@ -320,6 +332,16 @@ pub fn rekey_paths(conn: &mut Connection) -> Result<usize> {
             params![new, old],
         )?;
         tx.execute("DELETE FROM session_repos WHERE repo=?1", params![old])?;
+        // The partition key cannot be updated: drop the old rows, and the next `embed::backlog`
+        // indexes the moved documents under the new key.
+        tx.execute("DELETE FROM vec_docs WHERE repo=?1", params![old])?;
+        tx.execute(
+            "UPDATE embeddings SET indexed = 0 WHERE doc IN (
+               SELECT 'o' || id FROM observations WHERE repo=?1
+               UNION ALL SELECT 's' || id FROM summaries WHERE repo=?1
+               UNION ALL SELECT 'p' || id FROM prompts WHERE repo=?1)",
+            params![new],
+        )?;
     }
     tx.commit()?;
     Ok(moves.len())
@@ -404,6 +426,47 @@ fn ensure_fts(conn: &mut Connection) -> Result<()> {
              INSERT INTO fts(title, body, doc, kind, repo, ts)
                SELECT '', body, 'p' || id, 'prompt', repo, ts FROM prompts;",
         )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// sqlite-vec, compiled in and registered for every connection this process opens (`vec_docs`
+/// is a `vec0` table, which a connection without the module cannot read).
+fn register_sqlite_vec() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        type Init = unsafe extern "C" fn(
+            *mut rusqlite::ffi::sqlite3,
+            *mut *mut std::os::raw::c_char,
+            *const rusqlite::ffi::sqlite3_api_routines,
+        ) -> std::os::raw::c_int;
+        // SAFETY: sqlite3_vec_init is the extension's entry point with exactly this signature;
+        // the crate declares it as `fn()` only to avoid depending on SQLite's types.
+        unsafe {
+            let init =
+                std::mem::transmute::<*const (), Init>(sqlite_vec::sqlite3_vec_init as *const ());
+            rusqlite::ffi::sqlite3_auto_extension(Some(init));
+        }
+    });
+}
+
+/// The bit index over `embeddings` (PR-D): one row per document, sharded by repository (the MCP
+/// default scope) and by knowledge (`k`, observations and summaries) or prompt (`p`), searched by
+/// Hamming distance and rescored from the fp32 rows (docs/pr-d.md). Same guard as `ensure_fts`.
+fn ensure_vec(conn: &mut Connection) -> Result<()> {
+    if table_exists(conn, "vec_docs")? {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if !table_exists(&tx, "vec_docs")? {
+        tx.execute_batch(&format!(
+            "CREATE VIRTUAL TABLE vec_docs USING vec0(
+               doc TEXT PRIMARY KEY, repo TEXT PARTITION KEY, kind TEXT PARTITION KEY,
+               embedding bit[{}]
+             );",
+            crate::embed::DIM
+        ))?;
     }
     tx.commit()?;
     Ok(())
@@ -806,7 +869,9 @@ pub fn delete_doc(conn: &mut Connection, doc: &str) -> Result<bool> {
     }
     let tx = conn.transaction()?;
     let n = tx.execute(&format!("DELETE FROM {table} WHERE id=?1"), params![id])?;
-    tx.execute("DELETE FROM fts WHERE doc=?1", params![doc])?;
+    for index in ["fts", "embeddings", "vec_docs"] {
+        tx.execute(&format!("DELETE FROM {index} WHERE doc=?1"), params![doc])?;
+    }
     tx.commit()?;
     Ok(n > 0)
 }
@@ -815,12 +880,16 @@ pub fn delete_doc(conn: &mut Connection, doc: &str) -> Result<bool> {
 /// search rows. A session whose agent is still running comes back on its next event.
 pub fn delete_session(conn: &mut Connection, id: &str) -> Result<bool> {
     let tx = conn.transaction()?;
-    tx.execute(
-        "DELETE FROM fts WHERE doc IN (SELECT 'o' || id FROM observations WHERE session_id=?1
-                                       UNION ALL SELECT 's' || id FROM summaries WHERE session_id=?1
-                                       UNION ALL SELECT 'p' || id FROM prompts WHERE session_id=?1)",
-        params![id],
-    )?;
+    for index in ["fts", "embeddings", "vec_docs"] {
+        tx.execute(
+            &format!(
+                "DELETE FROM {index} WHERE doc IN (SELECT 'o' || id FROM observations WHERE session_id=?1
+                   UNION ALL SELECT 's' || id FROM summaries WHERE session_id=?1
+                   UNION ALL SELECT 'p' || id FROM prompts WHERE session_id=?1)"
+            ),
+            params![id],
+        )?;
+    }
     for table in [
         "observations",
         "summaries",

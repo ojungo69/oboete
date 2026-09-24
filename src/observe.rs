@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{config, db, hook, provider, redact};
+use crate::{config, db, embed, hook, provider, redact};
 
 /// Characters of transcript sent to the model per batch.
 const MAX_PROMPT_CHARS: usize = 16_000;
@@ -29,6 +29,8 @@ pub struct Stats {
     pub fallbacks: u32,
     pub by_provider: std::collections::BTreeMap<String, u32>,
     pub vmhwm_kb: Option<u64>,
+    /// Documents given a vector this run (`[embedding] provider = "workers-ai"`).
+    pub embedded: usize,
 }
 
 pub fn run(home: &Path, settle_ms: u64) -> Result<Stats> {
@@ -56,6 +58,12 @@ pub fn run(home: &Path, settle_ms: u64) -> Result<Stats> {
                 stats.sessions_failed += 1;
                 eprintln!("oboete observe: session {}: {e:#}", s.id);
             }
+        }
+    }
+    if cfg.embedding.provider == "workers-ai" {
+        match embed::backlog(&mut conn, &cfg.embedding, Some(embed::PER_RUN)) {
+            Ok(e) => stats.embedded = e.embedded,
+            Err(e) => eprintln!("oboete observe: embed: {e:#}"),
         }
     }
     stats.vmhwm_kb = vmhwm_kb();
