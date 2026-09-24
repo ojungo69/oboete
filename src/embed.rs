@@ -88,7 +88,7 @@ pub fn query(cfg: &config::Embedding, text: &str) -> Result<Vec<f32>> {
 /// Up to `k` documents of one shard (a repository or all; knowledge or prompts) nearest to `q`:
 /// 4k candidates by Hamming distance on the sign bits, rescored by fp32 cosine from
 /// `embeddings` (docs/pr-d.md: top-10 agreement 0.987 with the exact ranking). `skip_session`
-/// (evaluation only) drops that session's documents before the cut to `k`.
+/// (evaluation only) is left out of the candidates, which are fetched deeper until 4k remain.
 pub fn nearest(
     conn: &Connection,
     q: &[f32],
@@ -98,26 +98,44 @@ pub fn nearest(
     k: usize,
 ) -> Result<Vec<String>> {
     let kind = if prompts { "p" } else { "k" };
-    // sqlite-vec refuses k above 4,096 (a large `--limit`).
-    let candidates = (4 * k).min(4_096) as i64;
     let mut sql = String::from(
         "SELECT doc FROM vec_docs WHERE embedding MATCH vec_bit(?1) AND k = ?2 AND kind = ?3",
     );
     if repo.is_some() {
         sql.push_str(" AND repo = ?4");
     }
+    sql.push_str(" ORDER BY distance");
     let mut stmt = conn.prepare(&sql)?;
-    let docs: Vec<String> = match repo {
-        Some(r) => stmt
-            .query_map(params![bits(q), candidates, kind, r], |r| r.get(0))?
-            .collect::<Result<_, _>>()?,
-        None => stmt
-            .query_map(params![bits(q), candidates, kind], |r| r.get(0))?
-            .collect::<Result<_, _>>()?,
+    let want = 4 * k;
+    // sqlite-vec refuses k above 4,096 (a large `--limit`, or a big skipped session).
+    let mut n = want.min(4_096);
+    let candidates = loop {
+        let docs: Vec<String> = match repo {
+            Some(r) => stmt
+                .query_map(params![bits(q), n as i64, kind, r], |r| r.get(0))?
+                .collect::<Result<_, _>>()?,
+            None => stmt
+                .query_map(params![bits(q), n as i64, kind], |r| r.get(0))?
+                .collect::<Result<_, _>>()?,
+        };
+        let fetched = docs.len();
+        let mut kept = Vec::with_capacity(want.min(fetched));
+        for doc in docs {
+            if kept.len() < want
+                && (skip_session.is_none()
+                    || db::doc_session(conn, &doc)?.as_deref() != skip_session)
+            {
+                kept.push(doc);
+            }
+        }
+        if kept.len() == want || fetched < n || n == 4_096 {
+            break kept;
+        }
+        n = (n * 2).min(4_096);
     };
     let mut get = conn.prepare("SELECT vec FROM embeddings WHERE doc = ?1")?;
-    let mut scored = Vec::with_capacity(docs.len());
-    for doc in docs {
+    let mut scored = Vec::with_capacity(candidates.len());
+    for doc in candidates {
         let Some(bytes) = get
             .query_row(params![doc], |r| r.get::<_, Vec<u8>>(0))
             .optional()?
@@ -134,16 +152,7 @@ pub fn nearest(
         scored.push((dot, doc));
     }
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let mut out = Vec::with_capacity(k);
-    for (_, doc) in scored {
-        if out.len() == k {
-            break;
-        }
-        if skip_session.is_none() || db::doc_session(conn, &doc)?.as_deref() != skip_session {
-            out.push(doc);
-        }
-    }
-    Ok(out)
+    Ok(scored.into_iter().take(k).map(|(_, d)| d).collect())
 }
 
 fn backlog_at(conn: &mut Connection, url: &str, key: &str, cap: Option<u32>) -> Result<Stats> {

@@ -558,12 +558,6 @@ mod tests {
         assert_eq!(docs(Some(&q), Some("/r"), 2), ["o2", "o1"]);
         assert_eq!(docs(Some(&q), Some("/elsewhere"), 10), Vec::<String>::new());
         assert_eq!(docs(Some(&q), None, 5_000).len(), 5);
-        // An evaluation question's own session leaves the vector side before the cut.
-        let near = |skip: Option<&str>, k: usize| {
-            crate::embed::nearest(&conn, &q, None, false, skip, k).unwrap()
-        };
-        assert!(near(Some("s1"), 5).is_empty());
-        assert_eq!(near(Some("elsewhere"), 1), ["o1"]);
         // Without a query vector the ranking is the full-text one.
         assert_eq!(docs(None, None, 10), ["o2"]);
         // Semantic search switched on but unusable (no account): full-text, not an error.
@@ -577,6 +571,29 @@ mod tests {
             .map(|h| h.doc)
             .collect();
         assert_eq!(hits, ["o2"]);
+        // An evaluation question's own session leaves the vector candidates, which are then
+        // fetched deeper: s1's four knowledge documents are nearer than o4 of another session.
+        db::upsert_session(&conn, "s2", "claude", "/r", "/r", 1_700_000_000_000).unwrap();
+        conn.execute(
+            "INSERT INTO observations(session_id, repo, ts, kind, title, body, provider)
+             VALUES('s2', '/r', 1, 'change', 'far', 'far', 'test')",
+            [],
+        )
+        .unwrap();
+        // Every sign bit but the first set: the farthest a document can be from q in Hamming.
+        let far: Vec<u8> = (0..crate::embed::DIM)
+            .map(|i| if i == 0 { -1.0f32 / 32.0 } else { 1.0 / 32.0 })
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+        conn.execute(
+            "INSERT INTO embeddings(doc, embedder, text_sha, vec) VALUES('o4', ?1, '', ?2)",
+            rusqlite::params![crate::embed::EMBEDDER, far],
+        )
+        .unwrap();
+        crate::embed::index_pending(&mut conn).unwrap();
+        let near = |skip: Option<&str>| crate::embed::nearest(&conn, &q, None, false, skip, 1);
+        assert_eq!(near(None).unwrap(), ["o1"]);
+        assert_eq!(near(Some("s1")).unwrap(), ["o4"]);
         drop(conn);
         std::fs::remove_dir_all(&dir).ok();
     }
