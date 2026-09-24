@@ -99,6 +99,9 @@ enum Cmd {
         source: String,
         /// Its database file (read-only; e.g. ~/.claude-mem/claude-mem.db)
         db: PathBuf,
+        /// The --home store is for evaluation, not the one the hooks write (required until PR-H)
+        #[arg(long)]
+        eval_store: bool,
     },
     /// Evaluation: pass stdin through the outbound gate (what may leave the machine) to stdout
     #[command(hide = true)]
@@ -250,18 +253,24 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             emit(&out)
         }
         Cmd::Setup { agent, remove } => setup::run(&home, &agent, remove),
-        Cmd::Import { source, db } => {
+        Cmd::Import {
+            source,
+            db,
+            eval_store,
+        } => {
             if source != "claude-mem" {
                 anyhow::bail!("unknown source {source}: use claude-mem");
             }
             // Until repositories map onto claude-mem's project names (PR-H), the rows would
             // reach no repository's injection; keep them out of the store the hooks write.
-            // Compare resolved paths: `~/.oboete/../.oboete` or a symlink is the same store.
+            // The hooks may write a custom home (OBOETE_HOME), so the caller has to say the store
+            // is for evaluation; the default home is refused even then. Resolved paths:
+            // `~/.oboete/../.oboete` or a symlink is the same store.
             let resolved =
                 |p: &std::path::Path| std::fs::canonicalize(p).or_else(|_| std::path::absolute(p));
-            if resolved(&home)? == resolved(&config::home_dir().join(".oboete"))? {
+            if !eval_store || resolved(&home)? == resolved(&config::home_dir().join(".oboete"))? {
                 anyhow::bail!(
-                    "importing into the everyday store waits for the repository mapping (PR-H); pass --home <dir> for an evaluation store"
+                    "importing into the everyday store waits for the repository mapping (PR-H); for an evaluation store pass --home <dir> --eval-store"
                 );
             }
             let mut conn = db::open(&home)?;

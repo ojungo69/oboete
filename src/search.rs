@@ -106,7 +106,12 @@ pub fn trec_run(conn: &Connection, queries: &str, depth: usize) -> Result<String
             !qid.is_empty() && !qid.contains(char::is_whitespace),
             "qid must be one token without whitespace: {qid:?}"
         );
-        let session = q["session"].as_str();
+        // A malformed session must not quietly turn the same-session exclusion off.
+        let session = match &q["session"] {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => Some(s.as_str()),
+            _ => anyhow::bail!("session must be a string: {line}"),
+        };
         let mut limit = depth;
         let kept = loop {
             let hits = search(conn, text, None, limit)?;
@@ -335,6 +340,7 @@ mod tests {
         assert_eq!(trec_run(&conn, queries, 1).unwrap(), "q1 Q0 o2 1 1 fts\n");
         assert!(trec_run(&conn, "{\"qid\":1,\"text\":\"x\"}", 5).is_err());
         assert!(trec_run(&conn, "{\"qid\":\"q 1\",\"text\":\"x\"}", 5).is_err());
+        assert!(trec_run(&conn, "{\"qid\":\"q1\",\"text\":\"x\",\"session\":7}", 5).is_err());
         // The question's own session is left out and the next hit moves up.
         let own = "{\"qid\":\"q1\",\"text\":\"Trigram\",\"session\":\"s1\"}\n";
         assert_eq!(trec_run(&conn, own, 1).unwrap(), "");

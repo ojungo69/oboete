@@ -18,7 +18,7 @@ PR は 3 つに分ける。
    - 取り込み済みの行は session を書く前に飛ばす (developer が消した session を空の行で戻さない)。session id の無い行は 1 行ずつ別の session にする (無関係な行が 1 つにまとまらない)。
    - 対応: 観測は `type` → `kind` (`KINDS` の外、たとえば壊れた `discovery>` は `discovery`)、`title`、本文は `narrative` に `facts` を 1 行ずつ足したもの (`narrative` が空の 1,926 行は `facts` だけ、両方空なら取り込まない)。要約は `request` / `investigated` / `learned` / `completed` / `next_steps` を見出し付きでつないだもの。prompt は hook と同じ正規化 (harness 通知は捨て、`<private>` などを外す)。session は `sdk_sessions` から。
    - repo は `claude-mem:<project>` にする。claude-mem の project は `free-mem` や `公式サイト` のような名前で、oboete の repo キー (PR-C で origin URL) に機械的には直せない。直すのは PR-H (PR-C の repo 別名を使う)。
-   - **B1 では既定の home (`~/.oboete`) への取り込みを断る** (`--home` 必須)。repo の対応が決まる前に普段の store に入ると、注入が repo ごとに引けない行が 16 万件入るため。PR-H でこの制限を外す。
+   - **B1 では評価用の store にしか取り込まない**: `oboete --home <dir> import claude-mem <db> --eval-store` の形だけを受け付ける。repo の対応が決まる前に普段の store に入ると、注入が repo ごとに引けない行が 16 万件入るため。hook は `OBOETE_HOME` で別の場所に書いていることもあるので、場所で見分けず、呼ぶ側に `--eval-store` で評価用だと言わせる。既定の home (`~/.oboete`) は `--eval-store` があっても断る。PR-H でこの制限を外す。
 
 3. **`oboete eval <問いの JSONL>` は隠しコマンドにして出荷する。** feature flag にすると CI で別のビルドが要り、放っておくと壊れる。コードは 1 画面で、出荷している検索関数をそのまま呼ぶ。入力は 1 行 1 問の JSONL (`{"qid","text"}`、任意で `session`)。`session` があれば、その会話の文書 (問いの後に書かれた答えを含む) を順位を付ける前に除いて次の文書を繰り上げる (§3.1)。qid は空白を含まない 1 語に限る。出力は TREC の run (`qid Q0 doc rank score method`)。方式は今は `fts` (今の `search::search` を全 repo で) だけで、PR-D で `vec` / `hybrid`、PR-E で各工夫を足す。
    - もう 1 つの隠しコマンド **`oboete gate`** は、標準入力を関門 (`redact::outbound`) に通して標準出力に出す。評価のスクリプトが外 (判定器) へ送る文のうち、store を通っていないもの (transcript から拾った agent の検索語) をこれに通す。関門の実装を Python に写さないため。
@@ -45,7 +45,8 @@ PR は 3 つに分ける。
 - claude-mem の形の小さな DB (観測・要約・prompt・session 各数行、壊れた type、`narrative` が空の行、harness 通知の prompt、偽の鍵と `<private>` を含む行) を取り込み、件数、kind、本文、repo、fts の行、`imports` の対応を確かめる。鍵と private の中身が store に無いことも確かめる。
 - 同じ DB を 2 回取り込んでも行が増えない。
 - `eval` が TREC の形で順位 1 から出し、問いごとの件数が深さ以下で、形の壊れた行はエラーになる。
-- 既定の home への取り込みを断るのは `main.rs` の 1 行の比較で、手で確かめた。
+- 取り込みを断る条件 (`--eval-store` が無い、または既定の home) は `main.rs` の 1 行で、手で確かめた。
+- `eval` の `session` が文字列でも null でもない行はエラーになる (同じ会話の除外が黙って外れない)。
 
 ## B1 の結果
 
