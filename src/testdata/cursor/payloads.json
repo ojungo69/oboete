@@ -1,0 +1,85 @@
+{
+  "SessionStart": {
+    "session_id": "cursor-session",
+    "conversation_id": "cursor-session",
+    "generation_id": "turn-1",
+    "hook_event_name": "sessionStart",
+    "cursor_version": "2026.09.15-d2fe57e",
+    "workspace_roots": ["/fixture/repo"],
+    "transcript_path": null,
+    "is_background_agent": false,
+    "composer_mode": "agent"
+  },
+  "UserPromptSubmit": {
+    "session_id": "cursor-session",
+    "conversation_id": "cursor-session",
+    "hook_event_name": "beforeSubmitPrompt",
+    "cursor_version": "2026.09.15-d2fe57e",
+    "workspace_roots": ["/fixture/repo"],
+    "prompt": "Read hello.txt and explain the result.",
+    "attachments": []
+  },
+  "PostToolUse": {
+    "session_id": "cursor-session",
+    "conversation_id": "cursor-session",
+    "hook_event_name": "postToolUse",
+    "cursor_version": "2026.09.15-d2fe57e",
+    "workspace_roots": ["/fixture/repo"],
+    "cwd": "/fixture/repo",
+    "tool_name": "Shell",
+    "tool_input": {"command": "cat hello.txt"},
+    "tool_output": "{\"exitCode\":0,\"stdout\":\"hello\\n\"}",
+    "tool_use_id": "tool-1",
+    "duration": 12
+  },
+  "PostToolUseFailure": {
+    "session_id": "cursor-session",
+    "conversation_id": "cursor-session",
+    "hook_event_name": "postToolUseFailure",
+    "cursor_version": "2026.09.15-d2fe57e",
+    "workspace_roots": ["/fixture/repo"],
+    "cwd": "/fixture/repo",
+    "tool_name": "Read",
+    "tool_input": {"path": "missing.txt"},
+    "error_message": "File not found: missing.txt",
+    "failure_type": "error",
+    "tool_use_id": "tool-2",
+    "is_interrupt": false,
+    "duration": 2
+  },
+  "Stop": {
+    "session_id": "cursor-session",
+    "conversation_id": "cursor-session",
+    "hook_event_name": "afterAgentResponse",
+    "cursor_version": "2026.09.15-d2fe57e",
+    "workspace_roots": ["/fixture/repo"],
+    "text": "hello.txt contains hello; missing.txt does not exist.",
+    "input_tokens": 100,
+    "output_tokens": 20
+  },
+  "PreCompact": {
+    "session_id": "cursor-session",
+    "conversation_id": "cursor-session",
+    "hook_event_name": "preCompact",
+    "cursor_version": "2026.09.15-d2fe57e",
+    "workspace_roots": ["/fixture/repo"],
+    "trigger": "auto",
+    "context_usage_percent": 80,
+    "context_tokens": 160000,
+    "context_window_size": 200000,
+    "message_count": 50,
+    "messages_to_compact": 40,
+    "is_first_compaction": true
+  },
+  "SessionEnd": {
+    "session_id": "cursor-session",
+    "conversation_id": "cursor-session",
+    "hook_event_name": "sessionEnd",
+    "cursor_version": "2026.09.15-d2fe57e",
+    "workspace_roots": ["/fixture/repo"],
+    "reason": "user_close",
+    "duration_ms": 5000,
+    "is_background_agent": false,
+    "final_status": "completed"
+  }
+}

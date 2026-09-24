@@ -57,15 +57,18 @@ fn run_io(
         }
         let mut raw = String::new();
         input.read_to_string(&mut raw)?;
+        let raw = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
         let payload: Value = if raw.trim().is_empty() {
             json!({})
         } else {
-            serde_json::from_str(&raw)?
+            serde_json::from_str(raw)?
         };
         let Some(agent) = resolve_agent(agent, &payload, &grok_hooks_file()) else {
             return Ok(None);
         };
-        if (agent == "agy" && agy_workspace(&payload).is_none()) || is_agent_internal(&payload) {
+        if (matches!(agent, "agy" | "cursor") && agent_workspace(agent, &payload).is_none())
+            || is_agent_internal(agent, &payload)
+        {
             return Ok(None);
         }
         std::fs::create_dir_all(home)?;
@@ -79,8 +82,8 @@ fn run_io(
     })();
     if let Ok(Some(out)) = &result {
         writeln!(output, "{out}")?;
-    } else if agent == "agy" {
-        // Strict protojson: no Claude-shaped output, including skip and error paths.
+    } else if matches!(agent, "agy" | "cursor") {
+        // Each adapter returns its own JSON shape, including skip and error paths.
         writeln!(output, "{{}}")?;
     }
     result.map(|_| ())
@@ -100,9 +103,8 @@ pub fn grok_home() -> PathBuf {
 
 /// Grok Build runs Claude Code's hooks too, with its own camelCase payload: such an event is
 /// Grok's, and a duplicate when Grok's own hook file carries our handler (`None` = drop it).
-/// Cursor imports them as well; its payload names no cwd, so the session would land in the
-/// hook's own directory and be handed that repository's context. Dropped until oboete has a
-/// Cursor adapter (docs/research/agent-adapters-2026-09-23.md).
+/// Cursor imports them as well; drop those copies so only its dedicated adapter captures and
+/// injects context (docs/research/agent-adapters-2026-09-23.md).
 pub fn resolve_agent<'a>(agent: &'a str, payload: &Value, grok_hooks: &Path) -> Option<&'a str> {
     if agent == "claude" && payload.get("cursor_version").is_some() {
         return None;
@@ -139,10 +141,9 @@ fn grok_delivers(grok_hooks: &Path) -> bool {
 /// developer keeps elsewhere under `~/.codex` or `~/.claude` (a plugin, say) is real work.
 const HOUSEKEEPING_DIRS: &[&str] = &[".codex/memories"];
 
-fn is_agent_internal(payload: &Value) -> bool {
-    let Some(cwd) = str_field(payload, &["cwd", "workspaceRoot"])
-        .map(str::to_owned)
-        .or_else(|| agy_workspace(payload))
+fn is_agent_internal(agent: &str, payload: &Value) -> bool {
+    let Some(cwd) = agent_workspace(agent, payload)
+        .or_else(|| str_field(payload, &["cwd", "workspaceRoot"]).map(str::to_owned))
     else {
         return false;
     };
@@ -150,6 +151,31 @@ fn is_agent_internal(payload: &Value) -> bool {
     HOUSEKEEPING_DIRS
         .iter()
         .any(|d| Path::new(&cwd).starts_with(home.join(d)))
+}
+
+fn agent_workspace(agent: &str, payload: &Value) -> Option<String> {
+    match agent {
+        "agy" => agy_workspace(payload),
+        "cursor" => cursor_workspace(payload, std::env::var_os("CURSOR_PROJECT_DIR").as_deref()),
+        _ => None,
+    }
+}
+
+/// Cursor's process cwd is the config directory, never a fallback for a missing workspace.
+fn cursor_workspace(payload: &Value, project_dir: Option<&std::ffi::OsStr>) -> Option<String> {
+    [
+        payload["cwd"].as_str().map(Path::new),
+        payload["workspace_roots"]
+            .as_array()
+            .and_then(|roots| roots.first())
+            .and_then(Value::as_str)
+            .map(Path::new),
+        project_dir.map(Path::new),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|path| path.is_absolute())
+    .map(|path| path.to_string_lossy().into_owned())
 }
 
 /// agy's hook cwd is its config directory, so only its explicit workspace can identify a repo.
@@ -174,25 +200,29 @@ fn agy_workspace(payload: &Value) -> Option<String> {
     Path::new(&path).is_absolute().then_some(path)
 }
 
-/// Store the event. Returns stdout JSON for context injection, or an empty object for agy.
+/// Store the event. Returns stdout JSON for context injection, or an empty object for agy/Cursor.
 pub fn handle(
     conn: &Connection,
     agent: &str,
     event: &str,
     payload: &Value,
 ) -> Result<Option<String>> {
-    let workspace = (agent == "agy").then(|| agy_workspace(payload)).flatten();
-    if agent == "agy" && workspace.is_none() {
+    let workspace = agent_workspace(agent, payload);
+    if matches!(agent, "agy" | "cursor") && workspace.is_none() {
         return Ok(Some("{}".into()));
     }
     let session_id = str_field(
         payload,
-        &[
-            "session_id",
-            "sessionId",
-            "conversation_id",
-            "conversationId",
-        ],
+        if agent == "cursor" {
+            &["session_id", "conversation_id"]
+        } else {
+            &[
+                "session_id",
+                "sessionId",
+                "conversation_id",
+                "conversationId",
+            ]
+        },
     )
     .unwrap_or("unknown");
     let cwd = workspace
@@ -268,6 +298,8 @@ pub fn handle(
                             .unwrap_or(&s["error"])
                     })
                     .unwrap_or(&Value::Null)
+            } else if agent == "cursor" && event == "PostToolUseFailure" {
+                &payload["error_message"]
             } else {
                 field(
                     payload,
@@ -297,9 +329,16 @@ pub fn handle(
             Some(json!({"assistant": clip(text)}))
         }
         "Stop" => {
-            let text = match str_field(payload, &["last_assistant_message", "lastAssistantMessage"])
-            {
+            let text = match str_field(
+                payload,
+                if agent == "cursor" {
+                    &["text"]
+                } else {
+                    &["last_assistant_message", "lastAssistantMessage"]
+                },
+            ) {
                 Some(t) => t.to_string(),
+                None if agent == "cursor" => String::new(),
                 // Codex's Stop carries no message; its rollout transcript does.
                 None => str_field(payload, &["transcript_path"])
                     .map(|p| last_assistant_in_transcript(Path::new(p)))
@@ -310,6 +349,7 @@ pub fn handle(
         "PostCompact" => str_field(payload, &["compact_summary"])
             .filter(|s| !s.trim().is_empty())
             .map(|s| json!({"summary": clip(s)})),
+        "PreCompact" if agent == "cursor" => Some(json!({})),
         "SessionEnd" => Some(json!({"reason": payload.get("reason")})),
         _ => None, // PreToolUse and the rest carry nothing a summary needs
     };
@@ -324,6 +364,9 @@ pub fn handle(
     }
     if event == "SessionEnd" {
         db::end_session(&tx, session_id, ts)?;
+    }
+    if agent == "cursor" && event == "PreCompact" {
+        db::mark_compacted(&tx, session_id)?;
     }
     // The event feeds the summary and goes with it; the prompt itself is kept as a document.
     if let Some(p) = prompt.as_deref() {
@@ -344,22 +387,30 @@ pub fn handle(
     // Claude Code and Codex read context at SessionStart (not on resume: the transcript already
     // has it; after a compaction it is gone, so `compact` gets it again). Grok ignores
     // SessionStart stdout, so its context rides on the first tool call. agy reads PreInvocation.
+    // Cursor also restores context on the first prompt after its compaction marker.
     // The check and marker share the write transaction so simultaneous hooks cannot inject twice.
     let inject_now = match event {
         "SessionStart" => {
-            !matches!(agent, "grok" | "agy") && payload["source"].as_str() != Some("resume")
+            agent == "cursor"
+                || (!matches!(agent, "grok" | "agy")
+                    && payload["source"].as_str() != Some("resume"))
         }
         "PreToolUse" => agent == "grok" && !db::injected(&tx, session_id)?,
         "PreInvocation" => agent == "agy" && !db::injected(&tx, session_id)?,
+        "UserPromptSubmit" => agent == "cursor" && db::claim_reinjection(&tx, session_id)?,
         _ => false,
     };
-    let mut out = (agent == "agy").then(|| "{}".into());
+    let mut out = matches!(agent, "agy" | "cursor").then(|| "{}".into());
     if inject_now {
         let text = inject::context(&tx, &repo_key)?;
         if !text.is_empty() {
             db::mark_injected(&tx, session_id, ts)?;
+        }
+        if !text.is_empty() || agent == "cursor" {
             out = Some(if agent == "agy" {
                 json!({"injectSteps": [{"ephemeralMessage": text}]})
+            } else if agent == "cursor" {
+                cursor_injection(&text)
             } else {
                 json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
             }.to_string());
@@ -367,6 +418,19 @@ pub fn handle(
     }
     tx.commit()?;
     Ok(out)
+}
+
+fn cursor_injection(text: &str) -> Value {
+    // Cursor measures JS string length and drops the whole field above 10,000 units.
+    let mut units = 0;
+    let text: String = text
+        .chars()
+        .take_while(|c| {
+            units += c.len_utf16();
+            units <= 9_500
+        })
+        .collect();
+    json!({"additional_context": text})
 }
 
 /// The text without the blocks in `STRIP_BLOCKS` (`<tag>` or `<tag attr…>` up to its own
@@ -569,6 +633,503 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// Payload shapes from the Cursor event table, with all paths kept inside the test repo.
+    fn cursor_fixture(dir: &Path) -> Value {
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let mut payloads: Value =
+            serde_json::from_str(include_str!("testdata/cursor/payloads.json")).unwrap();
+        for payload in payloads.as_object_mut().unwrap().values_mut() {
+            payload["workspace_roots"] = json!([dir]);
+            if payload.get("cwd").is_some() {
+                payload["cwd"] = json!(dir);
+            }
+        }
+        payloads
+    }
+
+    #[test]
+    fn cursor_session_start_uses_workspace_and_prints_flat_context() {
+        let dir = tmp("cursor-start");
+        let payloads = cursor_fixture(&dir);
+        let mut conn = db::open(&dir).unwrap();
+        let ts = db::now_ms();
+        let repo = repo::key(&dir);
+        db::upsert_session(&conn, "prior", "cursor", &repo, dir.to_str().unwrap(), ts).unwrap();
+        db::apply_batch(
+            &mut conn,
+            &db::PendingSession {
+                id: "prior".into(),
+                agent: "cursor".into(),
+                repo: repo.clone(),
+                last_event_at: ts,
+            },
+            "test",
+            "earlier Cursor summary",
+            &[],
+            i64::MAX,
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        run_io(
+            &dir,
+            "cursor",
+            "SessionStart",
+            payloads["SessionStart"].to_string().as_bytes(),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output).unwrap(),
+            json!({
+                "additional_context": "# oboete: what happened before in this repository\n\n## Recent sessions (newest first)\n- earlier Cursor summary\n"
+            })
+        );
+        let stored: (String, String, String) = conn
+            .query_row(
+                "SELECT agent, repo, cwd FROM sessions WHERE id='cursor-session'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            ("cursor".into(), repo, dir.to_str().unwrap().into())
+        );
+        assert_eq!(
+            db::session_events(&conn, "cursor-session").unwrap()[0].event,
+            "SessionStart"
+        );
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cursor_events_capture_prompt_tool_text_and_session_end() {
+        let dir = tmp("cursor-events");
+        let mut payloads = cursor_fixture(&dir);
+        let conn = db::open(&dir).unwrap();
+        let events = [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "Stop",
+            "SessionEnd",
+        ];
+        for event in events {
+            let payload = &mut payloads[event];
+            // session_id wins; a conversation-only event still belongs to the same session.
+            if event == "SessionEnd" {
+                payload.as_object_mut().unwrap().remove("session_id");
+                payload["sessionId"] = json!("not-a-cursor-field");
+            } else {
+                payload["conversation_id"] = json!("not-the-session");
+            }
+            let out = handle(&conn, "cursor", event, payload).unwrap().unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&out).unwrap(),
+                if event == "SessionStart" {
+                    json!({"additional_context":""})
+                } else {
+                    json!({})
+                }
+            );
+        }
+        let stored = db::session_events(&conn, "cursor-session").unwrap();
+        assert_eq!(
+            stored.iter().map(|e| e.event.as_str()).collect::<Vec<_>>(),
+            events
+        );
+        let bodies: Vec<Value> = stored
+            .iter()
+            .map(|e| serde_json::from_str(&e.payload).unwrap())
+            .collect();
+        assert_eq!(
+            bodies[1],
+            json!({"prompt":"Read hello.txt and explain the result."})
+        );
+        assert_eq!(
+            bodies[2],
+            json!({"tool":"Shell", "input":"{\"command\":\"cat hello.txt\"}", "output":"{\"exitCode\":0,\"stdout\":\"hello\\n\"}", "failed":false})
+        );
+        assert_eq!(
+            bodies[3],
+            json!({"tool":"Read", "input":"{\"path\":\"missing.txt\"}", "output":"File not found: missing.txt", "failed":true})
+        );
+        assert_eq!(
+            bodies[4],
+            json!({"assistant":"hello.txt contains hello; missing.txt does not exist."})
+        );
+        assert_eq!(bodies[5], json!({"reason":"user_close"}));
+        let prompts = crate::search::search(&conn, "explain", Some(&repo::key(&dir)), 10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].body, "Read hello.txt and explain the result.");
+        let ended: bool = conn
+            .query_row(
+                "SELECT ended_at IS NOT NULL FROM sessions WHERE id='cursor-session'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(ended);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cursor_compaction_reinjects_once_after_cleanup_even_with_concurrent_prompts() {
+        let dir = tmp("cursor-compact");
+        let payloads = cursor_fixture(&dir);
+        let mut conn = db::open(&dir).unwrap();
+        handle(&conn, "cursor", "SessionStart", &payloads["SessionStart"]).unwrap();
+        assert_eq!(
+            handle(
+                &conn,
+                "cursor",
+                "UserPromptSubmit",
+                &payloads["UserPromptSubmit"]
+            )
+            .unwrap(),
+            Some("{}".into())
+        );
+        assert_eq!(
+            handle(&conn, "cursor", "PreCompact", &payloads["PreCompact"]).unwrap(),
+            Some("{}".into())
+        );
+        let events = db::session_events(&conn, "cursor-session").unwrap();
+        let marker = events
+            .iter()
+            .find(|e| e.event == "PreCompact")
+            .expect("compaction marker");
+        assert_eq!(marker.payload, "{}");
+        db::apply_batch(
+            &mut conn,
+            &db::PendingSession {
+                id: "cursor-session".into(),
+                agent: "cursor".into(),
+                repo: repo::key(&dir),
+                last_event_at: db::now_ms(),
+            },
+            "test",
+            "context after compaction",
+            &[],
+            i64::MAX,
+        )
+        .unwrap();
+        assert!(
+            db::session_events(&conn, "cursor-session")
+                .unwrap()
+                .is_empty()
+        );
+        drop(conn);
+        let conn = db::open(&dir).unwrap();
+        conn.execute_batch("CREATE TRIGGER refuse_cursor_prompt BEFORE INSERT ON events WHEN NEW.event='UserPromptSubmit'
+            BEGIN SELECT RAISE(ABORT, 'test insert failure'); END;").unwrap();
+        assert!(
+            handle(
+                &conn,
+                "cursor",
+                "UserPromptSubmit",
+                &payloads["UserPromptSubmit"]
+            )
+            .is_err()
+        );
+        conn.execute_batch("DROP TRIGGER refuse_cursor_prompt")
+            .unwrap();
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let dir = dir.clone();
+                let payload = payloads["UserPromptSubmit"].clone();
+                std::thread::spawn(move || {
+                    handle(
+                        &db::open(&dir).unwrap(),
+                        "cursor",
+                        "UserPromptSubmit",
+                        &payload,
+                    )
+                    .unwrap()
+                    .unwrap()
+                })
+            })
+            .collect();
+        let responses: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        assert_eq!(responses.iter().filter(|s| s.as_str() != "{}").count(), 1);
+        let injected: Value =
+            serde_json::from_str(responses.iter().find(|s| s.as_str() != "{}").unwrap()).unwrap();
+        assert!(
+            injected["additional_context"]
+                .as_str()
+                .unwrap()
+                .contains("context after compaction")
+        );
+        assert_eq!(injected.as_object().unwrap().len(), 1);
+        assert_eq!(
+            handle(
+                &conn,
+                "cursor",
+                "UserPromptSubmit",
+                &payloads["UserPromptSubmit"]
+            )
+            .unwrap(),
+            Some("{}".into())
+        );
+        // A second compaction permits exactly one more injection, scoped to its session.
+        handle(&conn, "cursor", "PreCompact", &payloads["PreCompact"]).unwrap();
+        let mut other = payloads["UserPromptSubmit"].clone();
+        other["session_id"] = json!("other-session");
+        assert_eq!(
+            handle(&conn, "cursor", "UserPromptSubmit", &other).unwrap(),
+            Some("{}".into())
+        );
+        assert_ne!(
+            handle(
+                &conn,
+                "cursor",
+                "UserPromptSubmit",
+                &payloads["UserPromptSubmit"]
+            )
+            .unwrap(),
+            Some("{}".into())
+        );
+        assert_eq!(
+            handle(
+                &conn,
+                "cursor",
+                "UserPromptSubmit",
+                &payloads["UserPromptSubmit"]
+            )
+            .unwrap(),
+            Some("{}".into())
+        );
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cursor_injection_limit_counts_utf16_without_splitting_non_bmp_characters() {
+        for (input, expected) in [
+            ("界".repeat(9_501), "界".repeat(9_500)),
+            ("🚀".repeat(4_751), "🚀".repeat(4_750)),
+            (
+                format!("x{}", "🚀".repeat(4_750)),
+                format!("x{}", "🚀".repeat(4_749)),
+            ),
+            ("context\n\"quoted\"".into(), "context\n\"quoted\"".into()),
+        ] {
+            let out = cursor_injection(&input);
+            assert_eq!(out["additional_context"], expected);
+            assert!(
+                out["additional_context"]
+                    .as_str()
+                    .unwrap()
+                    .encode_utf16()
+                    .count()
+                    <= 9_500
+            );
+            assert_eq!(out.as_object().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn leading_bom_is_accepted_for_every_agent() {
+        let dir = tmp("bom");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        for agent in crate::setup::AGENTS {
+            let payload = json!({"session_id":agent, "conversationId":agent, "cwd":dir, "workspacePaths":[dir], "workspace_roots":[dir]});
+            let raw = format!("\u{feff}{payload}\r\n");
+            let mut output = Vec::new();
+            run_io(&dir, agent, "SessionStart", raw.as_bytes(), &mut output).unwrap();
+            let conn = db::open(&dir).unwrap();
+            let events = db::session_events(&conn, agent).unwrap();
+            assert_eq!(events.len(), 1, "{agent}");
+            assert_eq!(events[0].event, "SessionStart");
+            if agent == "cursor" {
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&output).unwrap(),
+                    json!({"additional_context":""})
+                );
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cursor_workspace_precedence_and_missing_paths_never_use_process_cwd() {
+        let dir = tmp("cursor-paths");
+        let cwd = dir.join("tool-repo");
+        let root = dir.join("workspace");
+        let env = dir.join("environment");
+        let expected = |p: &Path| Some(p.to_string_lossy().into_owned());
+        assert_eq!(
+            cursor_workspace(
+                &json!({"cwd":cwd, "workspace_roots":[root]}),
+                Some(env.as_os_str())
+            ),
+            expected(&cwd)
+        );
+        assert_eq!(
+            cursor_workspace(&json!({"workspace_roots":[root]}), Some(env.as_os_str())),
+            expected(&root)
+        );
+        assert_eq!(
+            cursor_workspace(&json!({"workspace_roots":[]}), Some(env.as_os_str())),
+            expected(&env)
+        );
+        assert_eq!(cursor_workspace(&json!({}), None), None);
+        for invalid in ["", ".", "relative/repo"] {
+            assert_eq!(cursor_workspace(&json!({"cwd":invalid}), None), None);
+            assert_eq!(
+                cursor_workspace(
+                    &json!({"cwd":invalid, "workspace_roots":[root]}),
+                    Some(env.as_os_str())
+                ),
+                expected(&root)
+            );
+            assert_eq!(
+                cursor_workspace(
+                    &json!({"cwd":invalid, "workspace_roots":[invalid]}),
+                    Some(env.as_os_str())
+                ),
+                expected(&env)
+            );
+            assert_eq!(
+                cursor_workspace(&json!({"workspace_roots":[invalid]}), None),
+                None
+            );
+            assert_eq!(
+                cursor_workspace(&json!({}), Some(std::ffi::OsStr::new(invalid))),
+                None
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cursor_missing_workspace_and_environment_fallback_use_isolated_processes() {
+        // Child test processes isolate environment changes from the parallel Rust test runner.
+        const CASE_DIR: &str = "OBOETE_CURSOR_WORKSPACE_TEST_DIR";
+        if let Some(dir) = std::env::var_os(CASE_DIR) {
+            let dir = PathBuf::from(dir);
+            let home = dir.join("store");
+            let mut output = Vec::new();
+            run_io(
+                &home,
+                "cursor",
+                "SessionStart",
+                &b"{\"conversation_id\":\"env-session\"}"[..],
+                &mut output,
+            )
+            .unwrap();
+            if let Some(workspace) = std::env::var_os("CURSOR_PROJECT_DIR") {
+                let conn = db::open(&home).unwrap();
+                let (cwd, repo): (String, String) = conn
+                    .query_row(
+                        "SELECT cwd, repo FROM sessions WHERE id='env-session'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(cwd, workspace.to_string_lossy());
+                assert_eq!(repo, repo::key(Path::new(&workspace)));
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&output).unwrap(),
+                    json!({"additional_context":""})
+                );
+            } else {
+                assert_eq!(output, b"{}\n");
+                assert!(
+                    !home.exists(),
+                    "missing workspace must not even create storage"
+                );
+            }
+            return;
+        }
+        let dir = tmp("cursor-env");
+        for fallback in [false, true] {
+            let case = dir.join(if fallback { "fallback" } else { "missing" });
+            std::fs::create_dir_all(case.join("repo/.git")).unwrap();
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "hook::tests::cursor_missing_workspace_and_environment_fallback_use_isolated_processes"])
+                .env(CASE_DIR, &case).env_remove(SKIP_ENV).env_remove("CURSOR_PROJECT_DIR");
+            if fallback {
+                command.env("CURSOR_PROJECT_DIR", case.join("repo"));
+            }
+            let result = command.output().unwrap();
+            assert!(
+                result.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cursor_stdout_is_empty_object_when_parsing_or_storage_fails() {
+        let dir = tmp("cursor-fail-open");
+        let payloads = cursor_fixture(&dir);
+        let blocked = dir.join("not-a-directory");
+        std::fs::write(&blocked, "x").unwrap();
+        for input in ["invalid JSON".into(), payloads["SessionStart"].to_string()] {
+            let mut output = Vec::new();
+            assert!(
+                run_io(
+                    &blocked,
+                    "cursor",
+                    "SessionStart",
+                    input.as_bytes(),
+                    &mut output
+                )
+                .is_err()
+            );
+            assert_eq!(output, b"{}\n");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cursor_empty_reinjection_is_consumed_and_prompts_keep_privacy_rules() {
+        let dir = tmp("cursor-empty");
+        let mut payloads = cursor_fixture(&dir);
+        let conn = db::open(&dir).unwrap();
+        handle(&conn, "cursor", "PreCompact", &payloads["PreCompact"]).unwrap();
+        payloads["UserPromptSubmit"]["prompt"] = json!("<private>private only</private>");
+        let out = handle(
+            &conn,
+            "cursor",
+            "UserPromptSubmit",
+            &payloads["UserPromptSubmit"],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&out).unwrap(),
+            json!({"additional_context":""})
+        );
+        payloads["UserPromptSubmit"]["prompt"] = json!(
+            "<hook_context>not asked</hook_context>save this <private>private text</private>"
+        );
+        assert_eq!(
+            handle(
+                &conn,
+                "cursor",
+                "UserPromptSubmit",
+                &payloads["UserPromptSubmit"]
+            )
+            .unwrap(),
+            Some("{}".into())
+        );
+        let events = db::session_events(&conn, "cursor-session").unwrap();
+        assert_eq!(events.len(), 2); // Marker and public prompt only.
+        assert_eq!(events[1].payload, "{\"prompt\":\"save this\"}");
+        let hits = crate::search::search(&conn, "save this", None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].body, "save this");
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn agy_fixture(dir: &Path) -> Value {
@@ -1214,13 +1775,13 @@ mod tests {
     fn agent_housekeeping_sessions_are_ignored() {
         let home = config::home_dir();
         let inside = json!({"cwd": home.join(".codex").join("memories").to_string_lossy()});
-        assert!(is_agent_internal(&inside));
+        assert!(is_agent_internal("codex", &inside));
         let outside = json!({"cwd": home.join("projects").join("x").to_string_lossy()});
-        assert!(!is_agent_internal(&outside));
+        assert!(!is_agent_internal("codex", &outside));
         let plugin =
             json!({"cwd": home.join(".claude").join("plugins").join("p").to_string_lossy()});
-        assert!(!is_agent_internal(&plugin));
-        assert!(!is_agent_internal(&json!({})));
+        assert!(!is_agent_internal("claude", &plugin));
+        assert!(!is_agent_internal("claude", &json!({})));
     }
 
     #[test]
