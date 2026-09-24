@@ -329,10 +329,28 @@ pub fn get(conn: &Connection, doc: &str) -> Result<Option<Hit>> {
     let Some(local) = local else {
         return Ok(None);
     };
+    // From the document's own table by id: `fts` keeps `doc` UNINDEXED, so a lookup there scans
+    // the whole index (119 ms a document on the 178k-document evaluation store).
+    let Some((table, Ok(id))) = local
+        .split_at_checked(1)
+        .map(|(t, id)| (t, id.parse::<i64>()))
+    else {
+        return Ok(None);
+    };
+    let from = match table {
+        "o" => "SELECT 'o' || id AS doc, kind, repo, ts, title, body FROM observations",
+        "s" => {
+            "SELECT 's' || id AS doc, 'summary' AS kind, repo, ts, '' AS title, body FROM summaries"
+        }
+        "p" => {
+            "SELECT 'p' || id AS doc, 'prompt' AS kind, repo, ts, '' AS title, body FROM prompts"
+        }
+        _ => return Ok(None),
+    };
     Ok(conn
         .query_row(
-            &format!("SELECT {COLUMNS} FROM fts WHERE doc = ?1"),
-            params![local],
+            &format!("SELECT {COLUMNS} FROM ({from} WHERE id = ?1)"),
+            params![id],
             hit,
         )
         .optional()?)
@@ -687,6 +705,9 @@ mod tests {
         let uid = format!("{}:o1", db::device_id(&conn).unwrap());
         assert_eq!(get(&conn, &uid).unwrap().unwrap().doc, "o1");
         assert!(get(&conn, "nobody:o1").unwrap().is_none());
+        for bad in ["x1", "o", "oabc", ""] {
+            assert!(get(&conn, bad).unwrap().is_none(), "{bad}");
+        }
         assert_eq!(
             (h.kind.as_str(), h.title.as_str()),
             ("change", "src/db.rs を更新")
