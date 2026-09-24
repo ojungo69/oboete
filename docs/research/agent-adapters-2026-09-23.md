@@ -155,6 +155,28 @@ All Windows/macOS details are doc- or claude-mem-sourced, not tested here.
 
 Installed: 0.87.1 (`pi --version`; package.json of the installed package). It has not been used on this PC yet: ~/.pi/agent holds only auth.json and models-store.json (both 2 bytes, meaning no provider is logged in), plus skills/. There is no settings.json, no extensions/ and no sessions/.
 
+### Verified live (2026-09-24, pi 0.87.1)
+
+Two `pi -p` runs with `PI_CODING_AGENT_DIR` pointed at a temp dir (a `models.json` with the local Ollama model `qwen3.5:9b`, `apiKey: "ollama"`, and a probe extension in `extensions/probe.ts` that logged every event). The owner's `~/.pi/agent` was not touched. Results override the rest of this section where they differ:
+
+- **Factory shape works**: `export default function (pi) { pi.on(event, (e, ctx) => …) }`, loaded from `<agent dir>/extensions/*.ts` with no build and no imports beyond `node:`. `pi` has `on, registerTool, exec, sendMessage, …`.
+- **Order in print mode**: `session_start` (`reason: "startup"`), `input` (`text`, `source: "interactive"` for the `-p` prompt), `before_agent_start` (`prompt`), `message_end` (system, user, custom, assistant), `turn_end`, `agent_end` (`messages`), `session_shutdown` (`reason: "quit"`).
+- `ctx` gives `cwd` (the launch directory), `mode` (`"print"`), `hasUI` (false), `sessionManager.getSessionId()`, `sessionManager.getSessionFile()` (JSONL under `<agent dir>/sessions/…`) and `getEntries()`.
+- **Injection works**: returning `{message: {customType: "oboete", content, display: false}}` from `before_agent_start` put the text in front of the model (it answered with the injected codename). The custom message is stored in the session.
+- **`tool_result`** = `{type, toolName, toolCallId, input, content: [{type: "text", text}], isError}`.
+- **`OBOETE_SKIP=1` on the `pi` process is visible in the extension** (`process.env.OBOETE_SKIP`).
+- `~/.pi/agent/extensions/` now exists and holds a third-party `git-ai.ts` (installed 2026-09-24 01:02, not by oboete).
+- Not verified: interactive mode, `--continue`/`--resume`, compaction, and whether a tool registered with `pi.registerTool` reaches the model.
+
+### Implemented (2026-09-24)
+
+- `oboete setup pi` and `setup all` generate `<agent-dir>/extensions/oboete.ts` from `src/pi.ts` via `include_str!`. The prefix contains only the executable and optional `--home` arguments, encoded with `serde_json::to_string`. The agent directory follows tilde-expanded `PI_CODING_AGENT_DIR`, otherwise `~/.pi/agent`; setup skips when both the directory and `pi` on PATH are absent. Writes reuse atomic staging and the first-write backup. `--remove` deletes only the marked extension, preserving other extensions such as `git-ai.ts`. Doctor distinguishes missing, current, and stale content, including the binary and home. No MCP configuration is written.
+- The extension sends Claude-shaped SessionStart, UserPromptSubmit, PostToolUse/failure, Stop, PostCompact, and SessionEnd payloads through one ordered subprocess chain, with session identity captured before enqueueing. Hook failures are swallowed. Context fetches and shutdown wait at most two seconds including the queue; each subprocess also has a two-second timeout. Startup context is returned once as a hidden `before_agent_start` custom message, with a new stash after compaction. Reload events and extension-generated input are skipped; existing message entries select resume. `OBOETE_SKIP` registers neither handlers nor tools. Pi's SessionEnd uses the existing observer path with no delayed observer.
+- Native `oboete_search`, `oboete_get`, and `oboete_timeline` tools use Pi 0.87.1's `registerTool` and `exec` signatures and the virtual `typebox` module. CLI calls receive the current cwd, abort signal, and a ten-second timeout. Search and timeline limits are capped at 100, matching the MCP tools. Query and document-id arguments follow `--`, so user text cannot become CLI options. Nonzero exits and killed commands become tool errors.
+- Rust tests cover setup, escaping, removal, doctor, and hook storage/injection. A Node harness loads the generated file with stubbed Pi and subprocess APIs; it is skipped only when Node is absent. Tests and CLI checks use temporary directories. OpenCode PR #35 was still open at implementation start, so the Pi template follows the same generation pattern without depending on that branch.
+- **Checked live with this adapter (2026-09-24, pi 0.87.1, print mode, temp agent dir and temp `--home`, Ollama `qwen3.5:9b`)**: one `read` call stored SessionStart (`startup`), UserPromptSubmit, PostToolUse, Stop and SessionEnd in order under agent `pi` and the workspace's repo. With a seeded summary, the injected context reached the model (it answered the seeded codename) and was stored in the session as the `oboete` custom message. The model called `oboete_search` and used its result. `OBOETE_SKIP=1` stored nothing. `--continue` kept Pi's session id, sent SessionStart with `source: "resume"` and injected nothing.
+- Still unverified: interactive mode, live compaction, and Windows/macOS.
+
 ### Mechanism
 
 Pi has no command hooks. It integrates through an in-process TypeScript extension. Pi loads it with jiti, so there is no build step. An extension is a module whose default export is a factory `(pi: ExtensionAPI) => void | Promise<void>`, and the factory calls `pi.on(event, handler)`.
