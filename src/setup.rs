@@ -701,8 +701,14 @@ fn mcp_command(file: &Path) -> Option<(String, Vec<String>)> {
     }
 }
 
-/// Codex and Grok keep a turned-off server's table, with `enabled = false`.
+/// A server the developer turned off but kept: Codex and Grok (TOML) write `enabled = false`,
+/// the JSON configs (agy, Cursor) `"disabled": true`.
 fn mcp_disabled(file: &Path) -> bool {
+    if !file.extension().is_some_and(|e| e == "toml") {
+        return read_json_object(file)
+            .ok()
+            .is_some_and(|v| v["mcpServers"][MCP_NAME]["disabled"] == true);
+    }
     let doc = std::fs::read_to_string(file)
         .ok()
         .and_then(|t| t.parse::<toml_edit::DocumentMut>().ok());
@@ -1111,12 +1117,6 @@ fn agy_hooks_status(file: &Path, cmd: &HookCommand, windows: bool) -> String {
     } else {
         "4 hooks wired".into()
     }
-}
-
-fn agy_mcp_disabled(file: &Path) -> bool {
-    read_json_object(file)
-        .ok()
-        .is_some_and(|v| v["mcpServers"][MCP_NAME]["disabled"] == true)
 }
 
 /// OpenCode v2 uses XDG-style config directories on every OS, including Windows and macOS.
@@ -1724,7 +1724,7 @@ pub fn doctor(home: &Path) -> Result<()> {
     );
     let mcp = |file: &Path| -> &str {
         match mcp_command(file) {
-            Some(_) if mcp_disabled(file) => "registered but turned off (`enabled = false`)",
+            Some(_) if mcp_disabled(file) => "registered but turned off",
             Some((c, args)) if c == want.exe && args == want.mcp_args() => "registered",
             Some(_) => "registered with another binary or home (rerun `oboete setup`)",
             None => "not registered (run `oboete setup`)",
@@ -1735,12 +1735,7 @@ pub fn doctor(home: &Path) -> Result<()> {
     println!("  codex   {}", mcp(&codex_home().join("config.toml")));
     println!("  grok    {}", mcp(&grok_config_file()));
     let agy_mcp = agy_dir().join("config/mcp_config.json");
-    let agy_status = if agy_mcp_disabled(&agy_mcp) {
-        "registered but turned off (`disabled: true`)"
-    } else {
-        mcp(&agy_mcp)
-    };
-    println!("  agy     {agy_status}");
+    println!("  agy     {}", mcp(&agy_mcp));
     println!("  opencode {}", opencode_mcp_status(&opencode_dir(), &want));
     println!("  pi      native tools in the extension (no MCP client)");
     println!("  cursor  {}", mcp(&cursor_dir().join("mcp.json")));
@@ -2191,6 +2186,8 @@ mod tests {
         assert_eq!(m["mcpServers"]["oboete"]["env"], json!({"KEEP":"1"}));
         assert_eq!(m["mcpServers"]["oboete"]["disabled"], true);
         assert_eq!(mcp_command(&mcp), Some((cmd.exe.clone(), cmd.mcp_args())));
+        // Doctor reads the kept `disabled: true` as turned off, not as registered.
+        assert!(mcp_disabled(&mcp));
         let first_h = std::fs::read(&hooks).unwrap();
         let first_m = std::fs::read(&mcp).unwrap();
         cursor_files(&dir, &cmd, false, false).unwrap();
@@ -2515,7 +2512,7 @@ mod tests {
         let hooks = dir.join("config/hooks.json");
         let mcp = dir.join("config/mcp_config.json");
         assert_eq!(agy_hooks_status(&hooks, &cmd, false), "4 hooks wired");
-        assert!(!agy_mcp_disabled(&mcp));
+        assert!(!mcp_disabled(&mcp));
         let mut root = read_json_object(&hooks).unwrap();
         root["oboete"]["PreInvocation"][0]["timeout"] = json!(10000);
         write_json(&hooks, &root).unwrap();
@@ -2523,7 +2520,7 @@ mod tests {
         let mut root = read_json_object(&mcp).unwrap();
         root["mcpServers"]["oboete"]["disabled"] = json!(true);
         write_json(&mcp, &root).unwrap();
-        assert!(agy_mcp_disabled(&mcp));
+        assert!(mcp_disabled(&mcp));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
