@@ -49,27 +49,47 @@
 |---|---|---|
 | 全文検索 (e0、`oboete search --all`、起動込み) | 308 / 767 ms | 未計測 (D2 で macOS 版を作って測る) |
 | 問いのベクトル化 (Workers AI、PR-A2) | 128〜171 / 161〜692 ms | (回線しだい) |
-| sqlite-vec 全件 fp32、k=100 | 307 / 323 ms | 298 / 315 ms |
-| sqlite-vec 全件 int8 | 287 / 305 ms | 215 / 224 ms |
-| sqlite-vec 全件 bit、k=400 | 76 / 80 ms | 60 / 67 ms |
+| sqlite-vec 全件 fp32、k=100 | 285〜307 / 292〜323 ms | 294〜298 / 306〜315 ms |
+| sqlite-vec 全件 int8、k=100 | 282〜287 / 286〜305 ms | 215 / 224〜226 ms |
+| bit の候補 400 件 + fp32 の並べ直し、fp32 を普通の表から読む (全体) | 81 / 82 ms | 90 / 113 ms |
+| 同じく fp32 を sqlite-vec の表から読む (全体) | 269 / 285 ms | 188 / 208 ms |
 
-- 17.8 万件 × 1,024 次元、100 問、Python の sqlite3 + sqlite-vec 0.1.9 (`vecbench.py`)。bit の 400 件を fp32 で並べ直すと、上位 10 件の fp32 との一致は 0.987 (両方の機械で同じ)、上位 100 件は 0.905。int8 の上位 10 件の一致は 0.990。
-- M1 でもベクトル検索は fp32 のままで予算に収まる。全文検索とベクトル検索を並行に走らせれば、MCP 検索はこの PC で p95 約 1 秒 (ベクトル化 692 + 全件 323 ms が長いほう) になり、予算 (最も遅い端末で p95 1.5 秒) に収まる。M1 の全文検索は D2 で測って確かめる。
-- 速さが足りない端末や経路 (PR-F の自動注入、予算 300 ms) では **bit + fp32 の並べ直し** に切り替える (E6)。int8 は M1 で 3 割速いだけで、bit には遠い。
+- 17.8 万件 × 1,024 次元、100 問、Python の sqlite3 + sqlite-vec 0.1.9 (`vecbench.py`)。幅は 2 回の実行の値。「全体」は bit の候補を引き、その 400 件の fp32 を 1 件ずつ読み、cos で並べ直すまで。上位 10 件の fp32 全件との一致は 0.986〜0.987、上位 100 件は 0.905〜0.906。int8 の上位 10 件の一致は 0.990。
+- sqlite-vec の表はベクトルを塊で持つので、1 件ずつ読み戻すと遅い。並べ直しに使う fp32 は、1 行に 1 ベクトルの普通の表に置く。
+- M1 でもベクトル検索は fp32 の全件のままで予算に収まる。全文検索とベクトル検索を並行に走らせれば、MCP 検索はこの PC で p95 約 1 秒 (ベクトル化 692 + 全件 323 ms が長いほう) になり、予算 (最も遅い端末で p95 1.5 秒) に収まる。M1 の全文検索は D2 で測って確かめる。
+- bit + 並べ直しは fp32 全件の 3 分の 1 前後の時間で、上位 10 件はほぼ同じ。int8 は M1 で 3 割速いだけ。PR-F の自動注入 (予算 300 ms) ではこの形を使う。MCP 検索も同じ形にするかは D2 で nDCG を比べて決める。
 - M1 の計測中、メモリ 8 GB のうち 7.4 GB が使われ、2.7 GB が圧縮に回っていた (ほかのアプリを含む。計測の DB は 3 つの表で 954 MB)。18 万件の store を検索するたびに 730 MB を読む形で、8 GB の端末が苦しくならないかは D1 の実装で測る。
-- 大きさ: fp32 のベクトルは 17.8 万件で約 730 MB。今の普段の store (数千件) では数 MB。claude-mem を普段の store に取り込む PR-H の後に 730 MB になる。bit なら 23 MB。
+- 大きさ: fp32 のベクトルは 17.8 万件で約 730 MB。今の普段の store (数千件) では数 MB。claude-mem を普段の store に取り込む PR-H の後に 730 MB になる。bit の索引は 23 MB の上乗せ (並べ直し用の fp32 は残る)。fp32 の全件索引を sqlite-vec にも持つと、同じ 730 MB がもう 1 つ要る。
 
 ## 分け方
 
 - **D1 = 文書のベクトル**:
-  - 表 `vec_docs` (sqlite-vec の `vec0`、fp32 1,024 次元、種類で分けて引ける形) と、store の埋め込み器を記録する `embedder_id`。
+  - fp32 のベクトルは 1 行 1 ベクトルの普通の表に置き (並べ直しと `reindex` の元)、sqlite-vec の `vec0` には種類で分けて引ける索引を置く (fp32 の全件か bit かは D2 の比較で決める)。store の埋め込み器を記録する `embedder_id`。
   - observe が新しい文書を関門に通して Workers AI でベクトルにする (1 回 100 件、1 日の neuron の上限付き)。
   - `oboete reindex` で全件を作り直す。
   - 設定は `[embedding] provider = "workers-ai"` を足す (既定は `none` のまま)。
 - **D2 = hybrid 検索**:
   - CLI・MCP・viewer の検索を `hybrid-kf` の形にする。問いを関門に通して Workers AI でベクトルにし、sqlite-vec で種類ごとに上位 100 件を取る。全文検索と並行に走らせ、種類ごとに RRF でまとめ、知識を先にする。
-  - test 分で §3.3 の合格線を 1 回だけ測り、通れば `workers-ai` の store では hybrid を既定にする。
+  - test 分で §3.3 の合格線を 1 回だけ測り、通れば `workers-ai` の store では hybrid を既定にする。この測定の束は §3.1 どおり各方式の上位 50 件にする (dev の spike は PR-B2 と同じ上位 20 件の束。`docs/pr-b.md` の決定 6: 深さ 50 は判定器の信用が決まってから足す)。
 - **D3 = 手元のモデル**: fastembed の bge-m3 で、オフライン時の問い合わせと、ローカルだけの形 (決定 5) の文書のベクトルを作る。`provider = "local"` を足す。
+
+## 再現
+
+```sh
+cd docs/spike/pr-d
+python3 export.py "$(command -v oboete)"          # ~/.oboete/eval/vec/docs.jsonl (関門を通した文)
+uv run --with numpy python embed.py               # docs.npy / queries.npy (約 14 分、約 $0.80)
+uv run --with numpy python runs.py                # runs-d0/vec-bge-m3.trec, hybrid-rrf.trec
+uv run --with numpy python runs_kf.py             # runs-d0/vec-kf.trec, hybrid-kf.trec
+cp ~/.oboete/eval/runs-d0/*.trec ~/.oboete/eval/runs/   # judge.py と report.py は runs/ だけを読む
+cd ../../eval
+python3 judge.py dev 312 1400                     # 足りない組だけ判定する。0 件になるまで繰り返す
+uv run --with ranx python report.py dev
+cd ../spike/pr-d
+uv run --with numpy --with sqlite-vec python vecbench.py <作業用の DB のパス>   # 約 1.7 GB
+```
+
+`runs-d0/` に分けて書くのは、判定の前に run を見比べられるように。`runs/` に写した時点で、束は 8 方式になる。
 
 ## 限界
 
