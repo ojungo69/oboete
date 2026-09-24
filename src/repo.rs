@@ -60,30 +60,61 @@ fn common_dir(gitdir: &Path) -> Option<PathBuf> {
 
 /// `url` of `[remote "origin"]` in a git config file.
 fn origin_url(config: &str) -> Option<String> {
-    let config = config.replace("\r\n", "\n");
     let mut in_origin = false;
-    let mut at = 0;
-    for line in config.split_inclusive('\n') {
-        let start = at;
-        at += line.len();
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_origin = origin_header(trimmed);
+    for line in logical_lines(config) {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_origin = origin_header(line);
         } else if in_origin
-            && let Some((name, _)) = trimmed.split_once('=')
+            && let Some((name, value)) = line.split_once('=')
             && name.trim().eq_ignore_ascii_case("url")
         {
-            // From after `=` on: the value may continue past this line (`config_value`).
-            let eq = start + line.find('=')?;
-            return Some(config_value(&config[eq + 1..]));
+            return Some(config_value(value));
         }
     }
     None
 }
 
+/// A git config file as logical lines: a backslash at the end of a line outside a comment joins
+/// the next line (git reads a value across them; a comment ends at its line). CRLF reads as LF.
+fn logical_lines(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let (mut quoted, mut comment) = (false, false);
+    let mut chars = text.chars().filter(|&c| c != '\r');
+    while let Some(c) = chars.next() {
+        match c {
+            '\n' => {
+                lines.push(std::mem::take(&mut line));
+                (quoted, comment) = (false, false);
+            }
+            '\\' if !comment => match chars.next() {
+                Some('\n') => {}
+                Some(x) => {
+                    line.push('\\');
+                    line.push(x);
+                }
+                None => line.push('\\'),
+            },
+            '"' if !comment => {
+                quoted = !quoted;
+                line.push(c);
+            }
+            '#' | ';' if !quoted => {
+                comment = true;
+                line.push(c);
+            }
+            _ => line.push(c),
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
 /// A git config value: `#` or `;` outside double quotes starts a comment, the quotes are dropped,
-/// a backslash escapes the next character and one at the end of a line continues the value on the
-/// next, the value ends at the end of the line, surrounding whitespace is trimmed.
+/// a backslash escapes the next character, surrounding whitespace is trimmed.
 fn config_value(raw: &str) -> String {
     let mut out = String::new();
     let mut quoted = false;
@@ -94,10 +125,9 @@ fn config_value(raw: &str) -> String {
             '\\' => match chars.next() {
                 Some('n') => out.push('\n'),
                 Some('t') => out.push('\t'),
-                Some('\n') | None => {}
                 Some(x) => out.push(x),
+                None => {}
             },
-            '\n' => break,
             '#' | ';' if !quoted => break,
             _ => out.push(c),
         }
@@ -112,8 +142,8 @@ fn read_config(path: &Path, depth: u8) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut out = String::with_capacity(text.len());
     let mut in_include = false;
-    for line in text.lines() {
-        out.push_str(line);
+    for line in logical_lines(&text) {
+        out.push_str(&line);
         out.push('\n');
         let line = line.trim();
         if line.starts_with('[') {
@@ -342,7 +372,7 @@ mod tests {
         std::fs::create_dir_all(inc.join(".git")).unwrap();
         std::fs::write(
             inc.join(".git/config"),
-            "[core]\n\tbare = false\n[include]\n\tpath = remotes.inc # c\n\tpath = loop\n",
+            "[core]\n\tbare = false # c \\\n[include]\n\tpath = remo\\\ntes.inc # c\n\tpath = loop\n",
         )
         .unwrap();
         std::fs::write(
