@@ -57,8 +57,9 @@ enum Cmd {
     Mcp,
     /// Full-text search over observations, summaries and prompts (this repository unless --all)
     Search {
-        /// Terms, all required. One under 3 characters matches as a literal substring
-        /// (ASCII case folding only). Put `--` before a term that starts with `-`
+        /// Words or a sentence. Ranked by the 3-character pieces they share; a query too short
+        /// for that matches its terms as literal substrings, all required. Put `--` before a
+        /// term that starts with `-`
         query: Vec<String>,
         #[arg(long)]
         all: bool,

@@ -26,8 +26,9 @@ pub struct Oboete {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct SearchArgs {
-    /// Terms, all required. A term of 3+ characters matches as a substring with Unicode case
-    /// folding; a shorter one as a literal substring.
+    /// Words or a sentence, in any language. Results that share the most of its 3-character
+    /// pieces come first (Unicode case folding); a query too short for that matches its terms
+    /// as literal substrings, all required.
     query: String,
     /// Search every repository instead of the current one.
     #[serde(default)]

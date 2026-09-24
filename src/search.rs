@@ -1,8 +1,10 @@
 //! Search over what is stored. One FTS5 trigram table (`fts`) keeps a copy of every
 //! observation, summary and prompt, so a query is one SQL statement and CJK text is indexed by
-//! character. Terms of three or more characters go through MATCH (bm25 order, Unicode case
-//! folding); a shorter term cannot hit a trigram index and is ANDed on as a literal LIKE
-//! (ASCII case folding only), which is a scan the small tables can afford.
+//! character. A query is cut into character trigrams, ORed and ranked by bm25 (Unicode case
+//! folding), so a Japanese sentence or a question in the developer's own words still finds the
+//! documents that share the most of its rarer pieces (PR-E0, measured in `docs/pr-e0.md`). A
+//! query too short for any trigram falls back to literal LIKE terms, all required (ASCII case
+//! folding only), which is a scan the small tables can afford.
 
 use anyhow::Result;
 use rusqlite::types::Value;
@@ -33,29 +35,51 @@ fn hit(r: &rusqlite::Row) -> rusqlite::Result<Hit> {
     })
 }
 
-/// Whitespace-separated terms, all required. `repo = None` searches every repository. Prompts
-/// come after observations and summaries.
+/// The query's trigrams: each run between whitespace and punctuation gives its overlapping
+/// three-character pieces, except all-hiragana ones (particles and verb endings match almost
+/// every Japanese document). Deduplicated, at most 64 so a pasted page stays one quick query.
+fn trigrams(query: &str) -> Vec<String> {
+    const SEPARATORS: &str = "、。，．,.!?！？「」『』()（）[]{}:;：；\"'`<>";
+    let hiragana = |c: &char| ('\u{3040}'..='\u{309f}').contains(c);
+    let mut out: Vec<String> = Vec::new();
+    for run in query.split(|c: char| c.is_whitespace() || SEPARATORS.contains(c)) {
+        let chars: Vec<char> = run.chars().collect();
+        for w in chars.windows(3) {
+            let g: String = w.iter().collect();
+            if !w.iter().all(hiragana) && !out.contains(&g) && out.len() < 64 {
+                out.push(g);
+            }
+        }
+    }
+    out
+}
+
+/// Ranked search. `repo = None` searches every repository. Prompts come after observations and
+/// summaries.
 pub fn search(
     conn: &Connection,
     query: &str,
     repo: Option<&str>,
     limit: usize,
 ) -> Result<Vec<Hit>> {
-    let (long, short): (Vec<&str>, Vec<&str>) = query
-        .split_whitespace()
-        .partition(|t| t.chars().count() >= 3);
-    if long.is_empty() && short.is_empty() {
+    let grams = trigrams(query);
+    let short: Vec<&str> = if grams.is_empty() {
+        query.split_whitespace().collect()
+    } else {
+        Vec::new()
+    };
+    if grams.is_empty() && short.is_empty() {
         return Ok(Vec::new());
     }
     let mut clauses: Vec<String> = Vec::new();
     let mut args: Vec<Value> = Vec::new();
-    if !long.is_empty() {
-        // Each term as an FTS5 string (quotes doubled), implicit AND between them.
-        let q = long
+    if !grams.is_empty() {
+        // Each trigram as an FTS5 string (quotes doubled), ORed.
+        let q = grams
             .iter()
             .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
             .collect::<Vec<_>>()
-            .join(" ");
+            .join(" OR ");
         clauses.push("fts MATCH ?".into());
         args.push(Value::Text(q));
     }
@@ -76,7 +100,7 @@ pub fn search(
     }
     // Knowledge before prompts: bm25 favours short documents, and a prompt is usually a short
     // question where an observation is the answer.
-    let order = if long.is_empty() {
+    let order = if grams.is_empty() {
         "kind = 'prompt', ts DESC"
     } else {
         "kind = 'prompt', rank, ts DESC"
@@ -370,20 +394,23 @@ mod tests {
                 .map(|h| h.doc)
                 .collect()
         };
-        // 3+ characters: trigram MATCH, English and Japanese alike, case-insensitive.
+        // Trigrams, ORed: English and Japanese alike, case-insensitive; a part that matches
+        // nothing does not empty the result, and a sentence finds what shares its pieces.
         assert_eq!(docs("Trigram", None), vec!["o2", "p1"]);
         assert_eq!(docs("足して", None), vec!["p1"]);
         assert_eq!(docs("クエリ", None), vec!["o1"]);
+        assert_eq!(docs("trigram \"quoted\"", None), vec!["o2", "p1"]);
+        assert_eq!(docs("接続 trigram", None), vec!["o2", "p1"]);
+        assert_eq!(docs("use trigram", None), vec!["o2", "p1"]);
+        assert_eq!(docs("クエリの接続を調べてください", None), vec!["o1"]);
+        assert_eq!(docs("éco ÄÖ", None), vec!["o3"]);
+        // A query with no trigram falls back to literal LIKE terms, all required (ASCII case
+        // folding); `%` and `_` are not wildcards.
         assert_eq!(docs("検索 要約", None), vec!["s1"]);
-        assert_eq!(docs("trigram \"quoted\"", None), Vec::<String>::new());
-        // A term under 3 characters is a literal LIKE (ASCII case folding), ANDed with the
-        // MATCH of the longer ones; `%` and `_` are not wildcards.
         assert_eq!(docs("接続", None), vec!["o1"]);
         assert_eq!(docs("db", None), vec!["o1"]);
-        assert_eq!(docs("接続 クエリ", None), vec!["o1"]);
-        assert_eq!(docs("接続 trigram", None), Vec::<String>::new());
-        assert_eq!(docs("use trigram", None), vec!["o2"]);
-        assert_eq!(docs("éco ÄÖ", None), vec!["o3"]);
+        assert_eq!(docs("接続 db", None), vec!["o1"]);
+        assert_eq!(docs("接続 要約", None), Vec::<String>::new());
         assert_eq!(docs("50%", None), vec!["o3"]);
         assert_eq!(docs("0%", None), vec!["o3"]);
         assert_eq!(docs("0_", None), Vec::<String>::new());
@@ -452,6 +479,17 @@ mod tests {
             .unwrap();
         assert_eq!(n, 5);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trigrams_skip_hiragana_split_at_punctuation_and_stop_at_64() {
+        assert_eq!(trigrams("検索をしてください。"), ["検索を", "索をし"]);
+        assert_eq!(trigrams("abcd, abc"), ["abc", "bcd"]);
+        assert_eq!(trigrams("db 接続"), Vec::<String>::new());
+        let long: String = ('a'..='z').cycle().take(200).collect();
+        assert_eq!(trigrams(&long).len(), 26);
+        let many: String = (0..100).map(|i| format!("x{i:02} ")).collect();
+        assert_eq!(trigrams(&many).len(), 64);
     }
 
     #[test]
