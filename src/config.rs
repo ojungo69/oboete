@@ -240,6 +240,15 @@ fn default_providers() -> Vec<Provider> {
     ]
 }
 
+/// The `[embedding]` section for a search: a config.toml that does not load falls back to
+/// full-text search with a line on stderr, like every other reason the hybrid cannot run.
+pub fn search_embedding(home: &Path) -> Embedding {
+    load(home).map(|c| c.embedding).unwrap_or_else(|e| {
+        eprintln!("oboete: full-text search only: {e:#}");
+        Embedding::default()
+    })
+}
+
 pub fn load(home: &Path) -> Result<Config> {
     let path = home.join("config.toml");
     if !path.exists() {

@@ -28,8 +28,9 @@ pub struct Oboete {
 #[derive(Deserialize, JsonSchema)]
 pub struct SearchArgs {
     /// Words or a sentence, in any language. Results that share the most of its 3-character
-    /// pieces come first (Unicode case folding); a query too short for that matches its terms
-    /// as literal substrings, all required.
+    /// pieces come first (Unicode case folding), fused with results close in meaning when
+    /// semantic search is on; a query too short for pieces matches its terms as literal
+    /// substrings, all required.
     query: String,
     /// Search every repository instead of the current one.
     #[serde(default)]
@@ -121,7 +122,7 @@ impl Oboete {
 
     #[tool(
         name = "search",
-        description = "Full-text search over what oboete remembers about this repository: observations (decisions, bug fixes, discoveries, preferences), session summaries and the developer's prompts from earlier coding sessions. Returns one hit per line: id, local time, kind, title, snippet. Use `get` for the full text."
+        description = "Search what oboete remembers about this repository: observations (decisions, bug fixes, discoveries, preferences), session summaries and the developer's prompts from earlier coding sessions. Matches words and, when semantic search is on, meaning. Returns one hit per line: id, local time, kind, title, snippet. Use `get` for the full text."
     )]
     fn search(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, ErrorData> {
         let conn = db::open(&self.home).map_err(internal)?;
@@ -129,8 +130,10 @@ impl Oboete {
             Ok(s) => s,
             Err(m) => return failed(m),
         };
-        let hits = search::search(
+        let embedding = crate::config::search_embedding(&self.home);
+        let hits = search::find(
             &conn,
+            &embedding,
             &a.query,
             scope.as_deref(),
             a.limit.unwrap_or(10).min(MAX_LIMIT),

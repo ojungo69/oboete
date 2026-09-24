@@ -1,7 +1,7 @@
 """PR-B2: grade pooled (question, document) pairs 0-3 with an LLM judge (docs/pr-b.md item 6).
 
-Pool: for each question, the top POOL_DEPTH of every run in ~/.oboete/eval/runs, after leaving
-out documents of the question's own session. Pairs already in judgments.jsonl are reused.
+Pool: for each question, the top POOL_DEPTH of every run in RUNS (below), after leaving out
+documents of the question's own session. Pairs already in judgments.jsonl are reused.
 Judge: `claude -p` pinned to one model, from a scratch cwd, inference only: no settings, tools,
 MCP servers or hooks (oboete's and claude-mem's hooks do not run; OBOETE_SKIP=1 as well), and no
 secret-bearing environment variables, the same isolation as the summarizer in src/provider.rs.
@@ -17,7 +17,11 @@ import concurrent.futures, json, os, re, sqlite3, subprocess, sys, tempfile, tim
 E = os.path.expanduser('~/.oboete/eval')
 # The questions, documents and grades are the developer's own records: owner-only files.
 os.umask(0o077)
-POOL_DEPTH = 20
+# The pool: each run's top POOL_DEPTH. Dev comparisons use 20 (docs/pr-b.md decision 6); the one
+# test-split measurement of a PR uses 50 over its own set of runs (proposal §3.1, #46):
+# OBOETE_EVAL_DEPTH=50 OBOETE_EVAL_RUNS=~/.oboete/eval/runs-test.
+POOL_DEPTH = int(os.environ.get('OBOETE_EVAL_DEPTH', '20'))
+RUNS = os.path.expanduser(os.environ.get('OBOETE_EVAL_RUNS', f'{E}/runs'))
 BATCH = 10
 # Enough for 99.8% of the pooled documents; the rest are clipped and marked. Grades written
 # before `chars` was recorded saw 1,200 characters.
@@ -54,11 +58,11 @@ Answer with JSON only, no prose: {{"grades": [{{"id": "<memory id>", "grade": <0
 
 def load_runs():
     runs = {}
-    for name in os.listdir(f'{E}/runs'):
+    for name in os.listdir(RUNS):
         if not name.endswith('.trec'):
             continue
         per = runs.setdefault(name[:-5], {})
-        for line in open(f'{E}/runs/{name}'):
+        for line in open(f'{RUNS}/{name}'):
             qid, _, doc, rank, _, _ = line.split()
             per.setdefault(qid, []).append((int(rank), doc))
     return {m: {q: [d for _, d in sorted(v)] for q, v in per.items()} for m, per in runs.items()}

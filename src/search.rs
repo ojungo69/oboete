@@ -6,7 +6,7 @@
 //! query too short for any trigram falls back to literal LIKE terms, all required (ASCII case
 //! folding only), which is a scan the small tables can afford.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
@@ -80,6 +80,88 @@ pub fn terms(query: &str) -> Vec<String> {
     }
 }
 
+/// Candidates per side for the hybrid (docs/pr-d.md, #46): the full-text list's top 100, split by
+/// kind, and each kind's 100 nearest vectors.
+const HYBRID_DEPTH: usize = 100;
+
+/// Ranked search as every surface uses it: the hybrid of docs/pr-d.md (`hybrid-kf`) when semantic
+/// search is on, else full-text. The query's vector is fetched while the full-text side runs; when
+/// it cannot be had (offline, no token), the result is the full-text one.
+pub fn find(
+    conn: &Connection,
+    embedding: &crate::config::Embedding,
+    query: &str,
+    repo: Option<&str>,
+    limit: usize,
+) -> Result<Vec<Hit>> {
+    if embedding.provider != "workers-ai" || limit == 0 {
+        return search(conn, query, repo, limit);
+    }
+    let depth = limit.max(HYBRID_DEPTH);
+    let (lexical, qvec) = std::thread::scope(|s| {
+        let q = s.spawn(|| crate::embed::query(embedding, query));
+        (search(conn, query, repo, depth), q.join())
+    });
+    let qvec = match qvec {
+        Ok(Ok(v)) => Some(v),
+        Ok(Err(e)) => {
+            eprintln!("oboete: full-text search only: {e:#}");
+            None
+        }
+        Err(_) => None,
+    };
+    fuse(conn, lexical?, qvec.as_deref(), repo, None, limit)
+}
+
+/// Knowledge first, then prompts; within each kind the full-text ranking and the vector ranking
+/// (when there is a query vector) fused by reciprocal rank, k = 60. `skip_session` (evaluation
+/// only) keeps that session's documents out of the vector side; `lexical` comes without them.
+fn fuse(
+    conn: &Connection,
+    lexical: Vec<Hit>,
+    qvec: Option<&[f32]>,
+    repo: Option<&str>,
+    skip_session: Option<&str>,
+    limit: usize,
+) -> Result<Vec<Hit>> {
+    let depth = limit.max(HYBRID_DEPTH);
+    let mut out = Vec::new();
+    let (knowledge, prompts): (Vec<Hit>, Vec<Hit>) =
+        lexical.into_iter().partition(|h| h.kind != "prompt");
+    for (hits, prompts) in [(knowledge, false), (prompts, true)] {
+        let dense = match qvec {
+            Some(q) => crate::embed::nearest(conn, q, repo, prompts, skip_session, depth)?,
+            None => Vec::new(),
+        };
+        let mut order: Vec<String> = Vec::new();
+        let mut score: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        let ranked = hits.iter().map(|h| &h.doc).chain(dense.iter());
+        let ranks = (0..hits.len()).chain(0..dense.len());
+        for (doc, rank) in ranked.zip(ranks) {
+            let s = score.entry(doc.clone()).or_insert_with(|| {
+                order.push(doc.clone());
+                0.0
+            });
+            *s += 1.0 / (61.0 + rank as f64);
+        }
+        // Stable: equal scores keep the order they were first seen in (full-text first).
+        order.sort_by(|a, b| score[b].total_cmp(&score[a]));
+        let mut by_doc: std::collections::HashMap<String, Hit> =
+            hits.into_iter().map(|h| (h.doc.clone(), h)).collect();
+        for doc in order {
+            if out.len() == limit {
+                return Ok(out);
+            }
+            let hit = match by_doc.remove(&doc) {
+                Some(h) => Some(h),
+                None => get(conn, &doc)?,
+            };
+            out.extend(hit);
+        }
+    }
+    Ok(out)
+}
+
 /// Ranked search. `repo = None` searches every repository. Prompts come after observations and
 /// summaries.
 pub fn search(
@@ -139,12 +221,46 @@ pub fn search(
     Ok(hits.collect::<Result<_, _>>()?)
 }
 
+/// The first `want` hits outside `session`, asking `hits` for more until there are enough or the
+/// search runs out.
+fn outside(
+    conn: &Connection,
+    session: Option<&str>,
+    want: usize,
+    hits: impl Fn(usize) -> Result<Vec<Hit>>,
+) -> Result<Vec<Hit>> {
+    let mut n = want;
+    loop {
+        let all = hits(n)?;
+        let got = all.len();
+        let mut kept = Vec::new();
+        for h in all {
+            if kept.len() < want
+                && (session.is_none()
+                    || crate::db::doc_session(conn, &h.doc)?.as_deref() != session)
+            {
+                kept.push(h);
+            }
+        }
+        if kept.len() == want || got < n {
+            return Ok(kept);
+        }
+        n *= 2;
+    }
+}
+
 /// `oboete eval`: run each `{"qid","text"}` line through `search` over every repository and
 /// print the hits as a TREC run (`qid Q0 doc rank score method`), ranks from 1. The score only
 /// restates the order; the evaluator ranks by it. A line's optional `session` is the conversation
 /// the question came from: its documents hold the answer written after it, so they are left out
 /// before ranking (proposal §3.1) and the next hits move up.
-pub fn trec_run(conn: &Connection, queries: &str, depth: usize) -> Result<String> {
+pub fn trec_run(
+    conn: &Connection,
+    queries: &str,
+    depth: usize,
+    embedding: Option<&crate::config::Embedding>,
+) -> Result<String> {
+    let method = if embedding.is_some() { "hybrid" } else { "fts" };
     let mut out = String::new();
     for line in queries.lines().filter(|l| !l.trim().is_empty()) {
         let q: serde_json::Value = serde_json::from_str(line)?;
@@ -162,25 +278,30 @@ pub fn trec_run(conn: &Connection, queries: &str, depth: usize) -> Result<String
             serde_json::Value::String(s) => Some(s.as_str()),
             _ => anyhow::bail!("session must be a string: {line}"),
         };
-        let mut limit = depth;
-        let kept = loop {
-            let hits = search(conn, text, None, limit)?;
-            let mut kept = Vec::new();
-            for h in &hits {
-                if kept.len() < depth
-                    && (session.is_none()
-                        || crate::db::doc_session(conn, &h.doc)?.as_deref() != session)
-                {
-                    kept.push(h.doc.clone());
-                }
-            }
-            if kept.len() == depth || hits.len() < limit {
-                break kept;
-            }
-            limit *= 2;
+        // A hybrid run must not quietly become a full-text one: a query that cannot be embedded
+        // stops the run.
+        let qvec = match embedding {
+            Some(e) => Some(crate::embed::query(e, text).with_context(|| format!("embed {qid}"))?),
+            None => None,
         };
+        let hits = match &qvec {
+            // The session leaves both candidate lists before fusion (as in the spike's
+            // `runs_kf.py`), so its documents neither take ranks nor crowd others out.
+            Some(q) => {
+                let lex = outside(conn, session, depth.max(HYBRID_DEPTH), |n| {
+                    search(conn, text, None, n)
+                })?;
+                fuse(conn, lex, Some(q), None, session, depth)?
+            }
+            None => outside(conn, session, depth, |n| search(conn, text, None, n))?,
+        };
+        let kept: Vec<String> = hits.into_iter().map(|h| h.doc).collect();
         for (i, doc) in kept.iter().enumerate() {
-            out.push_str(&format!("{qid} Q0 {doc} {} {} fts\n", i + 1, depth - i));
+            out.push_str(&format!(
+                "{qid} Q0 {doc} {} {} {method}\n",
+                i + 1,
+                depth - i
+            ));
         }
     }
     Ok(out)
@@ -208,10 +329,28 @@ pub fn get(conn: &Connection, doc: &str) -> Result<Option<Hit>> {
     let Some(local) = local else {
         return Ok(None);
     };
+    // From the document's own table by id: `fts` keeps `doc` UNINDEXED, so a lookup there scans
+    // the whole index (119 ms a document on the 178k-document evaluation store).
+    let Some((table, Ok(id))) = local
+        .split_at_checked(1)
+        .map(|(t, id)| (t, id.parse::<i64>()))
+    else {
+        return Ok(None);
+    };
+    let from = match table {
+        "o" => "SELECT 'o' || id AS doc, kind, repo, ts, title, body FROM observations",
+        "s" => {
+            "SELECT 's' || id AS doc, 'summary' AS kind, repo, ts, '' AS title, body FROM summaries"
+        }
+        "p" => {
+            "SELECT 'p' || id AS doc, 'prompt' AS kind, repo, ts, '' AS title, body FROM prompts"
+        }
+        _ => return Ok(None),
+    };
     Ok(conn
         .query_row(
-            &format!("SELECT {COLUMNS} FROM fts WHERE doc = ?1"),
-            params![local],
+            &format!("SELECT {COLUMNS} FROM ({from} WHERE id = ?1)"),
+            params![id],
             hit,
         )
         .optional()?)
@@ -376,6 +515,89 @@ mod tests {
     use super::*;
     use crate::db;
 
+    #[test]
+    fn hybrid_fuses_meaning_with_words_knowledge_first() {
+        let dir = home("hybrid");
+        let mut conn = db::open(&dir).unwrap();
+        seed(&mut conn);
+        // o1..o3 and s1 are knowledge, p1 a prompt. Only o2 has the word; o1 and p1 point where
+        // the query vector points.
+        let unit = |pairs: &[(usize, f32)]| {
+            let mut v = vec![0.0f32; crate::embed::DIM];
+            for &(i, x) in pairs {
+                v[i] = x;
+            }
+            v
+        };
+        for (doc, v) in [
+            ("o1", unit(&[(0, 1.0)])),
+            ("o2", unit(&[(0, 0.6), (1, 0.8)])),
+            ("o3", unit(&[(2, 1.0)])),
+            ("s1", unit(&[(0, -1.0)])),
+            ("p1", unit(&[(0, 1.0)])),
+        ] {
+            let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+            conn.execute(
+                "INSERT INTO embeddings(doc, embedder, text_sha, vec) VALUES(?1, ?2, '', ?3)",
+                rusqlite::params![doc, crate::embed::EMBEDDER, bytes],
+            )
+            .unwrap();
+        }
+        crate::embed::index_pending(&mut conn).unwrap();
+        let q = unit(&[(0, 1.0)]);
+        let docs = |qvec: Option<&[f32]>, repo: Option<&str>, limit: usize| -> Vec<String> {
+            let lex = search(&conn, "tokenizer", repo, 100).unwrap();
+            fuse(&conn, lex, qvec, repo, None, limit)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.doc)
+                .collect()
+        };
+        // o2: word (rank 1) + vector (rank 2) beats o1: vector only (rank 1); prompts come last.
+        assert_eq!(docs(Some(&q), None, 10), ["o2", "o1", "o3", "s1", "p1"]);
+        assert_eq!(docs(Some(&q), Some("/r"), 2), ["o2", "o1"]);
+        assert_eq!(docs(Some(&q), Some("/elsewhere"), 10), Vec::<String>::new());
+        assert_eq!(docs(Some(&q), None, 5_000).len(), 5);
+        // Without a query vector the ranking is the full-text one.
+        assert_eq!(docs(None, None, 10), ["o2"]);
+        // Semantic search switched on but unusable (no account): full-text, not an error.
+        let broken = crate::config::Embedding {
+            provider: "workers-ai".into(),
+            ..Default::default()
+        };
+        let hits: Vec<String> = find(&conn, &broken, "tokenizer", None, 10)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.doc)
+            .collect();
+        assert_eq!(hits, ["o2"]);
+        // An evaluation question's own session leaves the vector candidates, which are then
+        // fetched deeper: s1's four knowledge documents are nearer than o4 of another session.
+        db::upsert_session(&conn, "s2", "claude", "/r", "/r", 1_700_000_000_000).unwrap();
+        conn.execute(
+            "INSERT INTO observations(session_id, repo, ts, kind, title, body, provider)
+             VALUES('s2', '/r', 1, 'change', 'far', 'far', 'test')",
+            [],
+        )
+        .unwrap();
+        // Every sign bit but the first set: the farthest a document can be from q in Hamming.
+        let far: Vec<u8> = (0..crate::embed::DIM)
+            .map(|i| if i == 0 { -1.0f32 / 32.0 } else { 1.0 / 32.0 })
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+        conn.execute(
+            "INSERT INTO embeddings(doc, embedder, text_sha, vec) VALUES('o4', ?1, '', ?2)",
+            rusqlite::params![crate::embed::EMBEDDER, far],
+        )
+        .unwrap();
+        crate::embed::index_pending(&mut conn).unwrap();
+        let near = |skip: Option<&str>| crate::embed::nearest(&conn, &q, None, false, skip, 1);
+        assert_eq!(near(None).unwrap(), ["o1"]);
+        assert_eq!(near(Some("s1")).unwrap(), ["o4"]);
+        drop(conn);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     fn home(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("oboete-search-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
@@ -424,18 +646,32 @@ mod tests {
         seed(&mut conn);
         let queries = "{\"qid\":\"q1\",\"text\":\"Trigram\"}\n\n{\"qid\":\"q2\",\"text\":\"nothing matches this\"}\n";
         assert_eq!(
-            trec_run(&conn, queries, 50).unwrap(),
+            trec_run(&conn, queries, 50, None).unwrap(),
             "q1 Q0 o2 1 50 fts\nq1 Q0 p1 2 49 fts\n"
         );
-        assert_eq!(trec_run(&conn, queries, 1).unwrap(), "q1 Q0 o2 1 1 fts\n");
-        assert!(trec_run(&conn, "{\"qid\":1,\"text\":\"x\"}", 5).is_err());
-        assert!(trec_run(&conn, "{\"qid\":\"q 1\",\"text\":\"x\"}", 5).is_err());
-        assert!(trec_run(&conn, "{\"qid\":\"q1\",\"text\":\"x\",\"session\":7}", 5).is_err());
+        assert_eq!(
+            trec_run(&conn, queries, 1, None).unwrap(),
+            "q1 Q0 o2 1 1 fts\n"
+        );
+        assert!(trec_run(&conn, "{\"qid\":1,\"text\":\"x\"}", 5, None).is_err());
+        assert!(trec_run(&conn, "{\"qid\":\"q 1\",\"text\":\"x\"}", 5, None).is_err());
+        assert!(
+            trec_run(
+                &conn,
+                "{\"qid\":\"q1\",\"text\":\"x\",\"session\":7}",
+                5,
+                None
+            )
+            .is_err()
+        );
         // The question's own session is left out and the next hit moves up.
         let own = "{\"qid\":\"q1\",\"text\":\"Trigram\",\"session\":\"s1\"}\n";
-        assert_eq!(trec_run(&conn, own, 1).unwrap(), "");
+        assert_eq!(trec_run(&conn, own, 1, None).unwrap(), "");
         let other = "{\"qid\":\"q1\",\"text\":\"Trigram\",\"session\":\"elsewhere\"}\n";
-        assert_eq!(trec_run(&conn, other, 1).unwrap(), "q1 Q0 o2 1 1 fts\n");
+        assert_eq!(
+            trec_run(&conn, other, 1, None).unwrap(),
+            "q1 Q0 o2 1 1 fts\n"
+        );
         db::upsert_session(&conn, "s2", "claude", "/r", "/r", 1_700_000_000_000).unwrap();
         db::insert_prompt(
             &conn,
@@ -444,7 +680,7 @@ mod tests {
             "trigram from another session",
         )
         .unwrap();
-        assert_eq!(trec_run(&conn, own, 1).unwrap(), "q1 Q0 p2 1 1 fts\n");
+        assert_eq!(trec_run(&conn, own, 1, None).unwrap(), "q1 Q0 p2 1 1 fts\n");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -492,6 +728,9 @@ mod tests {
         let uid = format!("{}:o1", db::device_id(&conn).unwrap());
         assert_eq!(get(&conn, &uid).unwrap().unwrap().doc, "o1");
         assert!(get(&conn, "nobody:o1").unwrap().is_none());
+        for bad in ["x1", "o", "oabc", ""] {
+            assert!(get(&conn, bad).unwrap().is_none(), "{bad}");
+        }
         assert_eq!(
             (h.kind.as_str(), h.title.as_str()),
             ("change", "src/db.rs を更新")
