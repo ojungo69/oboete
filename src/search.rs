@@ -45,17 +45,26 @@ fn trigrams(query: &str) -> Vec<String> {
     const SEPARATORS: &str = "、。，．,.!?！？「」『』()（）[]{}:;：；\"'`<>";
     let hiragana = |c: &char| ('\u{3040}'..='\u{309f}').contains(c);
     let mut out: Vec<String> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     for run in query.split(|c: char| c.is_whitespace() || SEPARATORS.contains(c)) {
         let chars: Vec<char> = run.chars().collect();
         for w in chars.windows(3) {
             // The index folds case, so `HTTP` and `http` are one piece (else bm25 counts it twice).
-            let g: String = w.iter().collect::<String>().to_lowercase();
-            if !w.iter().all(hiragana) && !out.contains(&g) && out.len() < 64 {
-                out.push(g);
+            // The query keeps its spelling: SQLite folds it as it folded the index, and a char
+            // whose lowercase is longer (`İ`) would no longer be one trigram.
+            let folded: String = w.iter().map(|&c| fold(c)).collect();
+            if !w.iter().all(hiragana) && !seen.contains(&folded) && out.len() < 64 {
+                seen.push(folded);
+                out.push(w.iter().collect());
             }
         }
     }
     out
+}
+
+/// One char's lowercase, kept one char long so positions do not move.
+fn fold(c: char) -> char {
+    c.to_lowercase().next().unwrap_or(c)
 }
 
 /// What a hit is matched on, for `snippet`: the query's trigrams, or its terms when it has none.
@@ -301,15 +310,12 @@ pub fn feed(conn: &Connection, repo: Option<&str>, limit: usize) -> Result<Vec<F
 pub fn snippet(body: &str, terms: &[String], width: usize) -> String {
     let flat = body.replace('\n', " ");
     let chars: Vec<char> = flat.chars().collect();
-    let lower: Vec<char> = chars
-        .iter()
-        .map(|c| c.to_lowercase().next().unwrap_or(*c))
-        .collect();
+    let lower: Vec<char> = chars.iter().map(|&c| fold(c)).collect();
     // Every (char position, term) where a term occurs; the passage is the window that holds the
     // most different terms, so a hit found by a few rare trigrams shows them.
     let mut found: Vec<(usize, usize)> = Vec::new();
     for (i, t) in terms.iter().enumerate() {
-        let t: Vec<char> = t.to_lowercase().chars().collect();
+        let t: Vec<char> = t.chars().map(fold).collect();
         if t.is_empty() || t.len() > lower.len() {
             continue;
         }
@@ -383,7 +389,7 @@ mod tests {
                 db::Observation {
                     kind: "change".into(),
                     title: "ÉCOLE coverage".into(),
-                    body: "coverage 50% done, ÄÖÜ".into(),
+                    body: "coverage 50% done, ÄÖÜ İSTANBUL".into(),
                 },
             ],
             i64::MAX,
@@ -445,6 +451,8 @@ mod tests {
         assert_eq!(docs("use trigram", None), vec!["o2", "p1"]);
         assert_eq!(docs("クエリの接続を調べてください", None), vec!["o1"]);
         assert_eq!(docs("éco ÄÖ", None), vec!["o3"]);
+        // `İ` lowercases to two code points; the query keeps its spelling for SQLite to fold.
+        assert_eq!(docs("İST", None), vec!["o3"]);
         // A query with no trigram falls back to literal LIKE terms, all required (ASCII case
         // folding); `%` and `_` are not wildcards.
         assert_eq!(docs("検索 要約", None), vec!["s1"]);
@@ -526,7 +534,7 @@ mod tests {
     fn trigrams_skip_hiragana_split_at_punctuation_and_stop_at_64() {
         assert_eq!(trigrams("検索をしてください。"), ["検索を", "索をし"]);
         assert_eq!(trigrams("abcd, abc"), ["abc", "bcd"]);
-        assert_eq!(trigrams("HTTP http"), ["htt", "ttp"]);
+        assert_eq!(trigrams("HTTP http"), ["HTT", "TTP"]);
         assert_eq!(trigrams("db 接続"), Vec::<String>::new());
         let long: String = ('a'..='z').cycle().take(200).collect();
         assert_eq!(trigrams(&long).len(), 26);
