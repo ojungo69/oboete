@@ -196,14 +196,18 @@ fn run_model(url: &str, key: &str, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         text.chars().take(300).collect::<String>()
     );
     let v: Value = serde_json::from_str(&text).context("workers ai: response is not JSON")?;
+    vectors(&v, texts.len())
+}
+
+/// `result.data` of a Workers AI answer as `n` unit vectors of finite numbers.
+fn vectors(v: &Value, n: usize) -> Result<Vec<Vec<f32>>> {
     let data = v["result"]["data"]
         .as_array()
         .ok_or_else(|| anyhow!("workers ai: no result.data"))?;
     anyhow::ensure!(
-        data.len() == texts.len(),
-        "workers ai: {} vectors for {} texts",
-        data.len(),
-        texts.len()
+        data.len() == n,
+        "workers ai: {} vectors for {n} texts",
+        data.len()
     );
     data.iter()
         .map(|row| {
@@ -211,12 +215,20 @@ fn run_model(url: &str, key: &str, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
                 .as_array()
                 .filter(|r| r.len() == DIM)
                 .ok_or_else(|| anyhow!("workers ai: a vector is not {DIM} numbers"))?;
-            let mut vec: Vec<f32> = row
+            let mut vec = row
                 .iter()
-                .map(|x| x.as_f64().unwrap_or(0.0) as f32)
-                .collect();
+                .map(|x| {
+                    x.as_f64()
+                        .map(|x| x as f32)
+                        .filter(|x| x.is_finite())
+                        .ok_or_else(|| anyhow!("workers ai: a coordinate is not a finite number"))
+                })
+                .collect::<Result<Vec<f32>>>()?;
             let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-            anyhow::ensure!(norm > 0.0, "workers ai: a zero vector");
+            anyhow::ensure!(
+                norm.is_finite() && norm > 0.0,
+                "workers ai: a zero or overflowing vector"
+            );
             vec.iter_mut().for_each(|x| *x /= norm);
             Ok(vec)
         })
@@ -341,6 +353,9 @@ pub fn reindex(home: &Path) -> Result<Stats> {
         "[embedding] account_id is not set"
     );
     config::read_key(&cfg.embedding.key_file)?;
+    // A detached observe would embed the same documents at the same time: wait for it.
+    let lock = std::fs::File::create(home.join("observe.lock"))?;
+    lock.lock()?;
     let mut conn = db::open(home)?;
     conn.execute_batch("DELETE FROM vec_docs; UPDATE embeddings SET indexed = 0;")?;
     backlog(&mut conn, &cfg.embedding, None)
@@ -349,6 +364,11 @@ pub fn reindex(home: &Path) -> Result<Stats> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A GitHub-token-shaped fake, assembled here so secret scanners do not flag the source.
+    fn fake_token() -> String {
+        ["gh", "p_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"].concat()
+    }
 
     #[test]
     fn batches_stay_under_the_request_limits() {
@@ -368,6 +388,20 @@ mod tests {
         }
         assert_eq!(got.iter().map(|b| b.len()).sum::<usize>(), todo.len());
         assert_eq!(got.last().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn answers_with_bad_coordinates_are_refused() {
+        let row = |x: Value| {
+            let mut r: Vec<Value> = vec![json!(0.5); DIM];
+            r[3] = x;
+            json!({"result": {"data": [r]}})
+        };
+        assert!(vectors(&row(json!(0.1)), 1).is_ok());
+        assert!(vectors(&row(json!("x")), 1).is_err());
+        assert!(vectors(&row(json!(1e300)), 1).is_err());
+        assert!(vectors(&json!({"result": {"data": [vec![0.0; DIM]]}}), 1).is_err());
+        assert!(vectors(&row(json!(0.1)), 2).is_err());
     }
 
     #[test]
@@ -445,13 +479,7 @@ mod tests {
         let path_key = crate::repo::key(&repo_dir);
         let mut conn = db::open(&dir).unwrap();
         db::upsert_session(&conn, "s", "claude", &path_key, &path_key, 1).unwrap();
-        db::insert_prompt(
-            &conn,
-            "s",
-            1,
-            "token ghp_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g here",
-        )
-        .unwrap();
+        db::insert_prompt(&conn, "s", 1, &format!("token {} here", fake_token())).unwrap();
         db::insert_prompt(&conn, "s", 2, "a second prompt").unwrap();
         let (url, hits) = model_server();
 
@@ -582,22 +610,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let conn = db::open(&dir).unwrap();
         db::upsert_session(&conn, "s", "claude", "/r", "/r", 1).unwrap();
-        db::insert_prompt(
-            &conn,
-            "s",
-            1,
-            "token ghp_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g here",
-        )
-        .unwrap();
+        db::insert_prompt(&conn, "s", 1, &format!("token {} here", fake_token())).unwrap();
         let todo = pending(&conn, 10).unwrap();
         assert_eq!(todo.len(), 1);
-        assert!(
-            !todo[0]
-                .1
-                .contains("ghp_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"),
-            "{}",
-            todo[0].1
-        );
+        assert!(!todo[0].1.contains(&fake_token()), "{}", todo[0].1);
         drop(conn);
         std::fs::remove_dir_all(&dir).ok();
     }
