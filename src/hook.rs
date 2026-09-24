@@ -1,6 +1,6 @@
 //! Hook path: one agent event in on stdin, one row out. Must be fast and must never fail the agent.
-//! Claude Code, Codex and Grok Build share one JSON dialect; Grok also sends camelCase copies and
-//! runs Claude Code's hooks as a compatibility layer, which is handled in `resolve_agent`.
+//! Claude Code, Codex, Grok Build, and Pi share one JSON dialect; Grok also sends camelCase copies
+//! and runs Claude Code's hooks as a compatibility layer, which is handled in `resolve_agent`.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -585,6 +585,153 @@ mod tests {
             payload["workspacePaths"] = json!([dir]);
         }
         payloads
+    }
+
+    #[test]
+    fn pi_captures_prompt_tools_answer_and_session_end() {
+        let dir = tmp("pi-capture");
+        std::fs::create_dir(dir.join(".git")).unwrap();
+        let conn = db::open(&dir).unwrap();
+        let mut payload = json!({
+            "session_id": "pi1",
+            "cwd": dir,
+            "transcript_path": dir.join("session.jsonl"),
+            "source": "startup",
+        });
+        assert!(
+            handle(&conn, "pi", "SessionStart", &payload)
+                .unwrap()
+                .is_none()
+        );
+        payload["prompt"] = json!("Fix <private>client token</private> this");
+        handle(&conn, "pi", "UserPromptSubmit", &payload).unwrap();
+        payload["tool_name"] = json!("read");
+        payload["tool_input"] = json!({"path":"notes.txt"});
+        payload["tool_response"] = json!("ok <private>secret output</private>");
+        handle(&conn, "pi", "PostToolUse", &payload).unwrap();
+        payload["tool_name"] = json!("bash");
+        payload["tool_input"] = json!({"command":"false"});
+        payload["tool_response"] = json!("command failed");
+        handle(&conn, "pi", "PostToolUseFailure", &payload).unwrap();
+        payload["last_assistant_message"] = json!("Fixed it");
+        handle(&conn, "pi", "Stop", &payload).unwrap();
+        payload["reason"] = json!("quit");
+        handle(&conn, "pi", "SessionEnd", &payload).unwrap();
+
+        let events = db::session_events(&conn, "pi1").unwrap();
+        assert_eq!(
+            events.iter().map(|e| e.event.as_str()).collect::<Vec<_>>(),
+            [
+                "SessionStart",
+                "UserPromptSubmit",
+                "PostToolUse",
+                "PostToolUseFailure",
+                "Stop",
+                "SessionEnd",
+            ]
+        );
+        let body: String = conn
+            .query_row("SELECT body FROM prompts WHERE session_id='pi1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(body, "Fix  this");
+        let stored: Vec<Value> = events
+            .iter()
+            .map(|e| serde_json::from_str(&e.payload).unwrap())
+            .collect();
+        assert_eq!(stored[1], json!({"prompt":"Fix  this"}));
+        assert_eq!(stored[2]["tool"], "read");
+        assert_eq!(stored[2]["failed"], false);
+        assert!(
+            !stored[2]["output"]
+                .as_str()
+                .unwrap()
+                .contains("secret output")
+        );
+        assert_eq!(stored[3]["tool"], "bash");
+        assert_eq!(stored[3]["failed"], true);
+        assert_eq!(stored[3]["output"], "command failed");
+        assert_eq!(stored[4], json!({"assistant":"Fixed it"}));
+        assert_eq!(stored[5], json!({"reason":"quit"}));
+        let (agent, repo, ended): (String, String, Option<i64>) = conn
+            .query_row(
+                "SELECT agent, repo, ended_at FROM sessions WHERE id='pi1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(agent, "pi");
+        assert_eq!(repo, repo::key(&dir));
+        assert!(ended.is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pi_injects_on_start_and_compact_but_not_resume() {
+        let dir = tmp("pi-injection");
+        std::fs::create_dir(dir.join(".git")).unwrap();
+        let mut conn = db::open(&dir).unwrap();
+        let repo_key = repo::key(&dir);
+        let now = db::now_ms();
+        db::upsert_session(&conn, "old", "pi", &repo_key, dir.to_str().unwrap(), now).unwrap();
+        db::apply_batch(
+            &mut conn,
+            &db::PendingSession {
+                id: "old".into(),
+                agent: "pi".into(),
+                repo: repo_key,
+                last_event_at: now,
+            },
+            "test",
+            "earlier Pi summary",
+            &[],
+            i64::MAX,
+        )
+        .unwrap();
+        let start = json!({"session_id":"new", "cwd":dir, "source":"startup"});
+        let output: Value = serde_json::from_str(
+            &handle(&conn, "pi", "SessionStart", &start)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            output["hookSpecificOutput"]["hookEventName"],
+            "SessionStart"
+        );
+        assert!(
+            output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("earlier Pi summary")
+        );
+        assert!(db::injected(&conn, "new").unwrap());
+
+        let resumed = json!({"session_id":"resumed", "cwd":dir, "source":"resume"});
+        assert!(
+            handle(&conn, "pi", "SessionStart", &resumed)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!db::injected(&conn, "resumed").unwrap());
+
+        let compact = json!({"session_id":"new", "cwd":dir, "compact_summary":"recent work", "trigger":"manual"});
+        handle(&conn, "pi", "PostCompact", &compact).unwrap();
+        let reinject = json!({"session_id":"new", "cwd":dir, "source":"compact"});
+        assert!(
+            handle(&conn, "pi", "SessionStart", &reinject)
+                .unwrap()
+                .unwrap()
+                .contains("earlier Pi summary")
+        );
+        let events = db::session_events(&conn, "new").unwrap();
+        assert_eq!(events[1].event, "PostCompact");
+        assert_eq!(
+            serde_json::from_str::<Value>(&events[1].payload).unwrap(),
+            json!({"summary":"recent work"})
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

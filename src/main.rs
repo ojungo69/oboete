@@ -36,7 +36,7 @@ struct Cli {
 enum Cmd {
     /// Receive one agent hook event on stdin and store it (fail-open, always exit 0)
     Hook {
-        /// Agent name: claude | codex | grok | agy | opencode
+        /// Agent name: claude | codex | grok | agy | opencode | pi
         agent: String,
         /// Hook event name (e.g. SessionStart, PreInvocation, UserPromptSubmit, PostToolUse, Stop, SessionEnd)
         event: String,
@@ -74,7 +74,7 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// Wire this binary into an agent's hooks (claude | codex | grok | agy | opencode | all)
+    /// Wire this binary into an agent's hooks (claude | codex | grok | agy | opencode | pi | all)
     Setup {
         agent: String,
         /// Take oboete's hook entries out again
@@ -101,7 +101,7 @@ enum Cmd {
         /// Also time N real `oboete hook` process spawns (startup + insert)
         #[arg(long, default_value_t = 30)]
         spawn_sample: usize,
-        /// Only replay events of this agent: claude | codex | grok | agy | opencode | all
+        /// Only replay events of this agent: claude | codex | grok | agy | opencode | pi | all
         #[arg(long, default_value = "claude")]
         agent: String,
     },
