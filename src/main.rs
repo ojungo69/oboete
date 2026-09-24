@@ -5,6 +5,7 @@
 
 mod config;
 mod db;
+mod embed;
 mod hook;
 mod import;
 mod inject;
@@ -94,6 +95,9 @@ enum Cmd {
         #[arg(long)]
         open: bool,
     },
+    /// Semantic search: embed every document that has no vector yet (without the daily cap)
+    /// and rebuild the vector index. Needs `[embedding] provider = "workers-ai"`
+    Reindex,
     /// Copy another memory tool's store into this one (claude-mem's SQLite database)
     Import {
         /// Source tool: claude-mem
@@ -179,6 +183,11 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         Cmd::Observe { settle_ms, wait_ms } => {
             std::thread::sleep(std::time::Duration::from_millis(wait_ms));
             let stats = observe::run(&home, settle_ms)?;
+            println!("{}", serde_json::to_string(&stats)?);
+            Ok(())
+        }
+        Cmd::Reindex => {
+            let stats = embed::reindex(&home)?;
             println!("{}", serde_json::to_string(&stats)?);
             Ok(())
         }
