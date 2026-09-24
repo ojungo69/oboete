@@ -301,9 +301,7 @@ impl Viewer {
             "search" => {
                 let query = q.get("q").map(String::as_str).unwrap_or("");
                 let terms = search::terms(query);
-                let embedding = crate::config::load(&self.home)
-                    .map(|c| c.embedding)
-                    .unwrap_or_default();
+                let embedding = crate::config::search_embedding(&self.home);
                 let hits: Vec<Value> = search::find(&conn, &embedding, query, repo, limit(50))?
                     .iter()
                     .map(|h| doc(h, &search::snippet(&h.body, &terms, 160)))

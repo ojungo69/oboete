@@ -208,7 +208,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let query = query.join(" ");
             let terms = search::terms(&query);
             let mut out = String::new();
-            let embedding = config::load(&home)?.embedding;
+            let embedding = config::search_embedding(&home);
             let scope = repo_filter(all)?;
             for h in search::find(&conn, &embedding, &query, scope.as_deref(), limit)? {
                 let text = search::snippet(&h.body, &terms, 110);

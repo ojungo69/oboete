@@ -130,9 +130,7 @@ impl Oboete {
             Ok(s) => s,
             Err(m) => return failed(m),
         };
-        let embedding = crate::config::load(&self.home)
-            .map(|c| c.embedding)
-            .unwrap_or_default();
+        let embedding = crate::config::search_embedding(&self.home);
         let hits = search::find(
             &conn,
             &embedding,
