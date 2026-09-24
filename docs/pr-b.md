@@ -14,7 +14,7 @@ PR は 3 つに分ける。
 
 2. **claude-mem の記憶は `oboete import claude-mem <db>` で評価用の home に入れる。** 取り込みは決定 1 で出荷する機能 (普段の store へは PR-H)。同じコードを評価に使えば、測るのは出荷するコードになる (§3.2)。
    - 取り込む文は関門 `redact::outbound` を通す (決定 1 の「取り込み時」の 1 回目)。
-   - 元の id は新しい表 `imports(source, source_id, doc)` に残す。再取り込みで二重にならず、claude-mem の検索結果を oboete の doc id に直すのにも使う。claude-mem の id は DB ごとに 1 から始まる (Windows の写しにも observation 1 がある) ので、`source` は `claude-mem:<その DB の最初の session のハッシュ>` にする。写しや移動では変わらないので、写しを取り込んだ後に本体を取り込んでも増えた分だけが入る。
+   - 元の id は新しい表 `imports(source, source_id, doc)` に残す。再取り込みで二重にならず、claude-mem の検索結果を oboete の doc id に直すのにも使う。claude-mem の id は DB ごとに 1 から始まる (Windows の写しにも observation 1 がある) ので、`source` は `claude-mem:<その DB の migration 記録 (`schema_versions`) の最初の時刻のハッシュ>` にする。DB を作った時刻なので、session が消されても写しや移動でも変わらず、写しを取り込んだ後に本体を取り込んでも増えた分だけが入る。
    - 取り込み済みの行は session を書く前に飛ばす (developer が消した session を空の行で戻さない)。session id の無い行は 1 行ずつ別の session にする (無関係な行が 1 つにまとまらない)。
    - 対応: 観測は `type` → `kind` (`KINDS` の外、たとえば壊れた `discovery>` は `discovery`)、`title`、本文は `narrative` に `facts` を 1 行ずつ足したもの (`narrative` が空の 1,926 行は `facts` だけ、両方空なら取り込まない)。要約は `request` / `investigated` / `learned` / `completed` / `next_steps` を見出し付きでつないだもの。prompt は hook と同じ正規化 (harness 通知は捨て、`<private>` などを外す)。session は `sdk_sessions` から。
    - repo は `claude-mem:<project>` にする。claude-mem の project は `free-mem` や `公式サイト` のような名前で、oboete の repo キー (PR-C で origin URL) に機械的には直せない。直すのは PR-H (PR-C の repo 別名を使う)。

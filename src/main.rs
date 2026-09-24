@@ -256,9 +256,10 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             }
             // Until repositories map onto claude-mem's project names (PR-H), the rows would
             // reach no repository's injection; keep them out of the store the hooks write.
-            if std::path::absolute(&home)?
-                == std::path::absolute(config::home_dir().join(".oboete"))?
-            {
+            // Compare resolved paths: `~/.oboete/../.oboete` or a symlink is the same store.
+            let resolved =
+                |p: &std::path::Path| std::fs::canonicalize(p).or_else(|_| std::path::absolute(p));
+            if resolved(&home)? == resolved(&config::home_dir().join(".oboete"))? {
                 anyhow::bail!(
                     "importing into the everyday store waits for the repository mapping (PR-H); pass --home <dir> for an evaluation store"
                 );

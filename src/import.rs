@@ -195,19 +195,25 @@ pub fn claude_mem(conn: &mut Connection, path: &Path) -> Result<Stats> {
 }
 
 /// claude-mem's ids restart in every database (the Windows copy and the WSL one both have an
-/// observation 1), so the import key names the database by its first session, which a backup or a
-/// move keeps: importing a snapshot and later the live file adds only what is new.
+/// observation 1), so the import key names the database by when it was created: the first row of
+/// its migration log, which pruning never touches and a backup or a move keeps. Importing a
+/// snapshot and later the live file then adds only what is new.
 fn source_name(src: &Connection) -> Result<String> {
-    let first: Option<(String, i64)> = src
+    let created: Option<String> = src
         .query_row(
-            "SELECT content_session_id, COALESCE(started_at_epoch, 0) FROM sdk_sessions ORDER BY id LIMIT 1",
+            "SELECT applied_at FROM schema_versions ORDER BY id LIMIT 1",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
-        .optional()?;
-    Ok(match first {
-        Some((id, ts)) => {
-            let hash = Sha256::digest(format!("{id}:{ts}").as_bytes());
+        .optional()
+        .or_else(|e| match e {
+            // A database without the log (not one claude-mem wrote) gets the bare name.
+            rusqlite::Error::SqliteFailure(_, Some(m)) if m.contains("no such table") => Ok(None),
+            e => Err(e),
+        })?;
+    Ok(match created {
+        Some(created) => {
+            let hash = Sha256::digest(created.as_bytes());
             let hex: String = hash[..6].iter().map(|b| format!("{b:02x}")).collect();
             format!("{SOURCE}:{hex}")
         }
@@ -310,8 +316,8 @@ mod tests {
     }
 
     /// The columns of claude-mem's tables that the import reads.
-    /// `started` changes the database's first session, so two calls stand for two databases.
-    fn claude_mem_db(path: &Path, started: i64) {
+    /// `created` is the database's first migration time, so two values stand for two databases.
+    fn claude_mem_db(path: &Path, created: &str) {
         let c = Connection::open(path).unwrap();
         c.execute_batch(
             "CREATE TABLE sdk_sessions(id INTEGER PRIMARY KEY, content_session_id TEXT NOT NULL,
@@ -327,11 +333,13 @@ mod tests {
              ",
         )
         .unwrap();
-        c.execute(
-            "INSERT INTO sdk_sessions VALUES(1, 'agent-1', 'mem-1', 'free-mem', 'codex', ?1, 2000)",
-            [started],
+        c.execute_batch(
+            "CREATE TABLE schema_versions(id INTEGER PRIMARY KEY, version INTEGER, applied_at TEXT);
+             INSERT INTO sdk_sessions VALUES(1, 'agent-1', 'mem-1', 'free-mem', 'codex', 1000, 2000);",
         )
         .unwrap();
+        c.execute("INSERT INTO schema_versions VALUES(1, 4, ?1)", [created])
+            .unwrap();
         // Two rows without any session id: unrelated, so they must not share a session.
         for id in [15, 16] {
             c.execute(
@@ -411,7 +419,7 @@ mod tests {
     fn claude_mem_rows_arrive_gated_mapped_and_once() {
         let dir = tmp("claude-mem");
         let src = dir.join("claude-mem.db");
-        claude_mem_db(&src, 1000);
+        claude_mem_db(&src, "2025-12-14T16:09:58.769Z");
         let mut conn = db::open(&dir).unwrap();
         let stats = claude_mem(&mut conn, &src).unwrap();
         assert_eq!(
@@ -540,9 +548,20 @@ mod tests {
             .unwrap();
         assert_eq!(gone, 0);
 
+        // claude-mem pruning its first session does not rename the database.
+        Connection::open(&src)
+            .unwrap()
+            .execute("DELETE FROM sdk_sessions", [])
+            .unwrap();
+        let pruned = claude_mem(&mut conn, &src).unwrap();
+        assert_eq!(
+            (pruned.observations, pruned.summaries, pruned.prompts),
+            (0, 0, 0)
+        );
+
         // Another claude-mem database reuses the same row ids; its rows are not "seen".
         let other = dir.join("other.db");
-        claude_mem_db(&other, 5000);
+        claude_mem_db(&other, "2026-06-26T18:19:21.955Z");
         let second = claude_mem(&mut conn, &other).unwrap();
         assert_eq!(
             (
