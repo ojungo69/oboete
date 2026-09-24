@@ -58,11 +58,11 @@ def session_of(doc, cache={}):
 
 
 runs = {}
-for name in sorted(os.listdir(f'{E}/runs')):
+for name in sorted(os.listdir(J.RUNS)):
     if not name.endswith('.trec'):
         continue
     ranked = defaultdict(list)
-    for line in open(f'{E}/runs/{name}'):
+    for line in open(f'{J.RUNS}/{name}'):
         qid, _, doc, rank, _, _ = line.split()
         if qid in queries and session_of(doc) != queries[qid]['session']:
             ranked[qid].append((int(rank), doc))
@@ -84,7 +84,7 @@ def ts(doc):
 # When a developer prompt was typed (agent searches carry no time).
 asked = {q: ts(q) for q in queries if queries[q]['set'] == 'prompt'}
 # claude-mem's window counts back from when its run was collected, not from this report.
-now = os.path.getmtime(f'{E}/runs/claude-mem.trec') * 1000 if os.path.exists(f'{E}/runs/claude-mem.trec') else time.time() * 1000
+now = os.path.getmtime(f'{J.RUNS}/claude-mem.trec') * 1000 if os.path.exists(f'{J.RUNS}/claude-mem.trec') else time.time() * 1000
 DAY = 86_400_000
 shown = {doc: text for pool in pools.values() for doc, text, _ in pool}
 
