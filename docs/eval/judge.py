@@ -52,10 +52,15 @@ def load_runs():
     return {m: {q: [d for _, d in sorted(v)] for q, v in per.items()} for m, per in runs.items()}
 
 
+DOC_TEXT = {
+    'o': 'SELECT title, body, session_id FROM observations WHERE id=?',
+    's': "SELECT '', body, session_id FROM summaries WHERE id=?",
+    'p': "SELECT '', body, session_id FROM prompts WHERE id=?",
+}
+
+
 def doc_text(db, doc):
-    table = {'o': 'observations', 's': 'summaries', 'p': 'prompts'}[doc[0]]
-    cols = 'title, body' if table == 'observations' else "'', body"
-    row = db.execute(f'SELECT {cols}, session_id FROM {table} WHERE id=?', (int(doc[1:]),)).fetchone()
+    row = db.execute(DOC_TEXT[doc[0]], (int(doc[1:]),)).fetchone()
     if row is None:
         return None, None
     title, body, session = row

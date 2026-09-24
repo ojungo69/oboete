@@ -54,11 +54,11 @@ PR は 3 つに分ける。
 
 ## B2 の結果 (2026-09-24、dev 分)
 
-スクリプトは `docs/eval/` にある。手順: `oboete --home ~/.oboete/eval/home import claude-mem <写し> --eval-store` → `build_queries.py` → `oboete --home ~/.oboete/eval/home eval queries.jsonl --depth 50 > runs/fts.trec` → `run_claude_mem.py` → `judge.py dev <問いの数>` → `uv run --with ranx python report.py dev`。
+スクリプトは `docs/eval/` にある。手順 (新しく作り直すときは空の `--home` に取り込む。今の `~/.oboete/eval/home` は取り込み元の名前付け (`claude-mem:<id>`) より前に取り込んだもので、元の名前は `claude-mem`): `oboete --home ~/.oboete/eval/home import claude-mem <写し> --eval-store` → `build_queries.py` → `oboete --home ~/.oboete/eval/home eval queries.jsonl --depth 50 > runs/fts.trec` → `run_claude_mem.py` → `judge.py dev <問いの数>` → `uv run --with ranx python report.py dev`。
 
 **問いの束**: 424 件 (dev 312 / test 112。session のハッシュで分けたので 70 / 30 ちょうどにはならない)。developer の prompt 400 件と agent の検索語 24 件が dev と test に分かれ、日本語 377 件・英語 47 件。test 分は開けていない。
 
-**判定**: dev の 312 問について、両方式の上位 20 件 (同じ session の文書を除いた後) を sonnet で採点した。6,343 組、呼び出し 659 回、失敗 0 回。0 点 3,847・1 点 1,858・2 点 501・3 点 137。2 点以上の文書が 1 件でもある問いは 152 件で、残り 160 件はどちらの方式の上位 20 件にも答えが無かった (答えの無い問いか、両方が取り逃した問い。B3 で分ける)。指標はこの 152 件で出す。
+**判定**: dev の 312 問について、両方式の上位 20 件 (同じ session の文書を除いた後) を sonnet で採点した。6,343 組、3 回の実行で合計 659 回の呼び出し (1 回の実行はどれも 600 回以下)、失敗 0 回。0 点 3,847・1 点 1,858・2 点 501・3 点 137。2 点以上の文書が 1 件でもある問いは 152 件で、残り 160 件はどちらの方式の上位 20 件にも答えが無かった (答えの無い問いか、両方が取り逃した問い。B3 で分ける)。指標はこの 152 件で出す。
 
 claude-mem の run は写しより新しい観測 6 件を捨てた。claude-mem の検索は同じ session の文書を除かないので、除いた分だけ深さが減る (claude-mem に不利な向き)。
 
@@ -81,9 +81,10 @@ claude-mem の run は写しより新しい観測 6 件を捨てた。claude-mem
 
 - 束は今の 2 方式の上位 20 件だけで作った。判定していない文書は関連なしとして数えるので、この表どうしは比べられるが、束に入っていない方式 (意味検索・hybrid) を比べるときは、その方式の上位 20 件を先に判定して束に足す (`judge.py` は判定済みの組を使い回すので、足りない組だけを呼ぶ)。
 - 判定器 (sonnet) をどこまで信用できるかはまだ測っていない (B3 の人の正解 50 組)。
+- claude-mem の run は観測だけ (`type=observations`、決定 5) で、全文検索は要約と prompt も返す。束に入る文書の種類が違うが、oboete に有利な向きなので、差の結論は変わらない。
 - 決定 22 の線 (oboete の既定の検索が claude-mem を下回らない) の目安は、dev で nDCG@10 0.547・recall@10 0.560。合否は test 分で 1 回だけ測る (§3.3)。
 
 **わかったこと**
 
 - 今の全文検索は日本語の問いでほぼ役に立たない (hit@10 0.086)。問いの文全体が 1 語の完全一致になるため (前の節の見込みどおり)。英語でも claude-mem に大きく負ける。
-- §3.3 の「意味検索が全文検索だけに比べ +0.03」は、今の AND の全文検索を相手にすると意味が無いほど低い線になる。前の節の決め方どおり、比べる相手は強いほうの全文検索にする。そのため、語の OR と bm25 で並べる全文検索を次の PR (PR-E0、`search::search` の置き換え) で作り、この束に足して測る。MCP の `search` もそれで良くなる。
+- §3.3 の「意味検索が全文検索だけに比べ +0.03」は、今の AND の全文検索を相手にすると意味が無いほど低い線になる。前の節の決め方どおり、比べる相手は強いほうの全文検索にする。そのため、語の OR と bm25 で並べる全文検索を PR-E の最初の工夫 (PR-E0、`search::search` の置き換え) として PR-D より先に作り、この束に足して測る (提案 §7 の表に行を足した)。MCP の `search` もそれで良くなる。

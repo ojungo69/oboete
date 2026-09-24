@@ -29,10 +29,16 @@ for (qid, doc), g in grades.items():
 answerable = {q for q, d in judged.items() if max(d.values()) >= 2}
 
 
+SESSION_OF = {
+    'o': 'SELECT session_id FROM observations WHERE id=?',
+    's': 'SELECT session_id FROM summaries WHERE id=?',
+    'p': 'SELECT session_id FROM prompts WHERE id=?',
+}
+
+
 def session_of(doc, cache={}):
     if doc not in cache:
-        table = {'o': 'observations', 's': 'summaries', 'p': 'prompts'}[doc[0]]
-        row = db.execute(f'SELECT session_id FROM {table} WHERE id=?', (int(doc[1:]),)).fetchone()
+        row = db.execute(SESSION_OF[doc[0]], (int(doc[1:]),)).fetchone()
         cache[doc] = row[0] if row else None
     return cache[doc]
 
