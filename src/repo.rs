@@ -64,7 +64,7 @@ fn origin_url(config: &str) -> Option<String> {
     let mut in_origin = false;
     for line in config.lines().map(str::trim) {
         if line.starts_with('[') {
-            in_origin = line.split_whitespace().collect::<String>() == "[remote\"origin\"]";
+            in_origin = origin_header(line);
         } else if in_origin
             && let Some((name, value)) = line.split_once('=')
             && name.trim().eq_ignore_ascii_case("url")
@@ -74,6 +74,20 @@ fn origin_url(config: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// `[remote "origin"]`, in any case for the section name, with a trailing comment, or in the old
+/// `[remote.origin]` form (git reads all of them).
+fn origin_header(line: &str) -> bool {
+    let Some((header, _)) = line.strip_prefix('[').and_then(|l| l.split_once(']')) else {
+        return false;
+    };
+    match header.trim().split_once(char::is_whitespace) {
+        Some((section, name)) => {
+            section.eq_ignore_ascii_case("remote") && name.trim() == "\"origin\""
+        }
+        None => header.trim().eq_ignore_ascii_case("remote.origin"),
+    }
 }
 
 /// `host[:port]/path` from a remote URL: the scheme, credentials, query, fragment, the scheme's
@@ -181,6 +195,18 @@ mod tests {
             Some("git@github.com:o/r.git")
         );
         assert_eq!(origin_url("[remote \"upstream\"]\nurl = x\n"), None);
+        for header in [
+            "[REMOTE \"origin\"]",
+            "[remote.origin]",
+            "[remote \"origin\"] # comment",
+        ] {
+            assert_eq!(
+                origin_url(&format!("{header}\n\turl = https://x.org/o/r\n")).as_deref(),
+                Some("https://x.org/o/r"),
+                "{header}"
+            );
+        }
+        assert_eq!(origin_url("[remote \"Origin\"]\nurl = x\n"), None);
     }
 
     #[test]
