@@ -91,27 +91,29 @@ fn process_session(
     Ok(())
 }
 
-/// Plain-text transcript from stored events, oldest first; middle dropped when too long.
+/// Plain-text transcript from stored events, oldest first; middle dropped when too long. Every
+/// field passes `redact::outbound` here: this text goes to an external provider.
 fn render(events: &[db::RawEvent]) -> String {
     let mut lines: Vec<String> = Vec::new();
     for e in events {
         let v: Value = serde_json::from_str(&e.payload).unwrap_or(Value::Null);
         match e.event.as_str() {
             "UserPromptSubmit" => {
-                if let Some(p) = v["prompt"].as_str().filter(|p| !p.trim().is_empty()) {
+                let p = redact::outbound(v["prompt"].as_str().unwrap_or(""));
+                if !p.is_empty() {
                     // A task report is worth summarizing, but it is not the developer speaking.
-                    let who = if hook::is_envelope(p.trim()) {
+                    let who = if hook::is_envelope(&p) {
                         "NOTIFICATION"
                     } else {
                         "USER"
                     };
-                    lines.push(format!("{who}: {}", p.trim()));
+                    lines.push(format!("{who}: {p}"));
                 }
             }
             "PostToolUse" | "PostToolUseFailure" => {
-                let tool = v["tool"].as_str().unwrap_or("?");
-                let input = short(v["input"].as_str().unwrap_or(""), 300);
-                let output = short(v["output"].as_str().unwrap_or(""), 600);
+                let tool = redact::outbound(v["tool"].as_str().unwrap_or("?"));
+                let input = short(&redact::outbound(v["input"].as_str().unwrap_or("")), 300);
+                let output = short(&redact::outbound(v["output"].as_str().unwrap_or("")), 600);
                 let mark = if v["failed"].as_bool().unwrap_or(false) {
                     " (failed)"
                 } else {
@@ -120,16 +122,15 @@ fn render(events: &[db::RawEvent]) -> String {
                 lines.push(format!("TOOL {tool}{mark}: {input}\n  -> {output}"));
             }
             "Stop" => {
-                if let Some(a) = v["assistant"].as_str().filter(|a| !a.trim().is_empty()) {
-                    lines.push(format!("ASSISTANT: {}", short(a.trim(), 1_500)));
+                let a = redact::outbound(v["assistant"].as_str().unwrap_or(""));
+                if !a.is_empty() {
+                    lines.push(format!("ASSISTANT: {}", short(&a, 1_500)));
                 }
             }
             "PostCompact" => {
-                if let Some(s) = v["summary"].as_str().filter(|s| !s.trim().is_empty()) {
-                    lines.push(format!(
-                        "COMPACTED EARLIER PART: {}",
-                        short(s.trim(), 1_500)
-                    ));
+                let s = redact::outbound(v["summary"].as_str().unwrap_or(""));
+                if !s.is_empty() {
+                    lines.push(format!("COMPACTED EARLIER PART: {}", short(&s, 1_500)));
                 }
             }
             _ => {}
@@ -171,8 +172,7 @@ fn build_prompt(agent: &str, language: &str, transcript: &str) -> String {
          At most {MAX_OBSERVATIONS} observations, each with a kind, a specific title (max 80 chars) and a body of 1-3 sentences.\n\
          The summary is 2-4 sentences: what was worked on, what was decided, what is still open.\n\
          Write every title, body and the summary in {language}.\n\n\
-         --- SESSION ---\n{}\n--- END ---",
-        redact::redact(transcript)
+         --- SESSION ---\n{transcript}\n--- END ---"
     )
 }
 
@@ -275,6 +275,37 @@ mod tests {
         let summary = parse_summary(&json!({"summary": long}));
         assert_eq!(summary.chars().count(), MAX_SUMMARY_CHARS);
         assert_eq!(parse_summary(&json!({})), "");
+    }
+
+    #[test]
+    fn what_goes_to_the_summarizer_passes_the_gate() {
+        // Built at run time so secret scanners do not flag the test source.
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let ev = |event: &str, payload: Value| db::RawEvent {
+            id: 0,
+            event: event.into(),
+            payload: payload.to_string(),
+        };
+        let prompt = build_prompt(
+            "claude",
+            "English",
+            &render(&[
+                ev(
+                    "UserPromptSubmit",
+                    json!({"prompt": format!("deploy with {key} <private>PRIVATE-TEXT</private>")}),
+                ),
+                ev(
+                    "PostToolUse",
+                    json!({"tool": format!("mcp__{key}"), "input": "src/hook.rs", "output": format!("/// quote `<private>`, the opt-out\ntoken {key}")}),
+                ),
+                ev("Stop", json!({"assistant": "TAIL-MARKER done"})),
+            ]),
+        );
+        assert!(!prompt.contains(&key), "{prompt}");
+        assert!(!prompt.contains("PRIVATE-TEXT"), "{prompt}");
+        // A tag an agent merely read does not swallow the rest of the session.
+        assert!(prompt.contains("the opt-out"), "{prompt}");
+        assert!(prompt.contains("TAIL-MARKER"), "{prompt}");
     }
 
     #[test]

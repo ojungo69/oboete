@@ -237,7 +237,7 @@ pub fn handle(
         .or_else(|| {
             (event == "UserPromptSubmit").then(|| str_field(payload, &["prompt"]).unwrap_or(""))
         })
-        .map(|p| clip(&strip_blocks(p)))
+        .map(|p| clip(&strip_blocks(p, true)))
         .filter(|p| !p.is_empty());
     let tool_step = payload["stepIdx"].as_i64().and_then(|index| {
         steps
@@ -370,57 +370,68 @@ pub fn handle(
     Ok(out)
 }
 
-/// The prompt without the blocks in `STRIP_BLOCKS` (`<tag>` or `<tag attr…>` up to its own
-/// `</tag>`, nesting counted), trimmed.
-fn strip_blocks(s: &str) -> String {
+/// The text without the blocks in `STRIP_BLOCKS` (`<tag>` or `<tag attr…>` up to its own
+/// `</tag>`, nesting counted), trimmed. An unclosed `<private>` hides the rest only when
+/// `unclosed_private_hides_rest` (a typed prompt); anywhere else the tag is just text an agent
+/// read or wrote, and cutting there would drop the rest of the session.
+pub fn strip_blocks(s: &str, unclosed_private_hides_rest: bool) -> String {
+    without_blocks(s, unclosed_private_hides_rest)
+        .trim()
+        .to_string()
+}
+
+fn without_blocks(s: &str, unclosed_private_hides_rest: bool) -> String {
     let mut out = s.to_string();
     for tag in STRIP_BLOCKS {
-        let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
-        let mut from = 0;
-        while let Some(at) = out[from..].find(&open).map(|i| from + i) {
-            let rest = &out[at + open.len()..];
-            if !opens(rest) {
-                from = at + open.len();
-                continue;
-            }
-            match block_end(rest, &open, &close) {
-                Some(end) => out.replace_range(at..at + open.len() + end, ""),
-                None if *tag == "private" => out.truncate(at),
-                None => break,
-            }
-            from = at;
+        out = strip_tag(&out, tag, unclosed_private_hides_rest && *tag == "private");
+    }
+    out
+}
+
+/// One pass over `<tag` openers and `</tag>` closers: each closer pairs with the nearest open
+/// opener, and every paired block goes (nested ones inside their outer block). An opener left
+/// without a closer is kept as text, except with `hide_unclosed`, where the text stops at the
+/// first one. Linear in the input, so a prompt full of stray openers cannot stall the hook.
+fn strip_tag(s: &str, tag: &str, hide_unclosed: bool) -> String {
+    let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
+    let mut marks: Vec<(usize, bool)> = s
+        .match_indices(&open)
+        .filter(|(i, _)| opens(&s[i + open.len()..]))
+        .map(|(i, _)| (i, true))
+        .chain(s.match_indices(&close).map(|(i, _)| (i, false)))
+        .collect();
+    marks.sort_unstable();
+    let (mut stack, mut blocks) = (Vec::new(), Vec::new());
+    for (i, is_open) in marks {
+        if is_open {
+            stack.push(i);
+        } else if let Some(start) = stack.pop() {
+            blocks.push((start, i + close.len()));
         }
     }
-    out.trim().to_string()
+    // No paired block spans a leftover opener: the closer would have paired with it instead.
+    let end = match stack.first() {
+        Some(&first) if hide_unclosed => first,
+        _ => s.len(),
+    };
+    blocks.sort_unstable();
+    let (mut out, mut pos) = (String::with_capacity(s.len()), 0);
+    for (start, stop) in blocks {
+        if start >= end {
+            break;
+        }
+        if start >= pos {
+            out.push_str(&s[pos..start]);
+            pos = stop;
+        }
+    }
+    out.push_str(&s[pos.min(end)..end]);
+    out
 }
 
 /// What follows `<tag` makes it the tag (`<privateer>` is not `<private`).
 fn opens(after: &str) -> bool {
     after.starts_with(|c: char| c == '>' || c.is_whitespace())
-}
-
-/// The end (past `close`) of the block whose opener comes just before `rest`, or `None` when it
-/// never closes. An inner opener needs its own close first.
-fn block_end(rest: &str, open: &str, close: &str) -> Option<usize> {
-    let (mut depth, mut i) = (1, 0);
-    while depth > 0 {
-        let c = i + rest[i..].find(close)?;
-        let inner = rest[i..c]
-            .match_indices(open)
-            .map(|(j, _)| i + j)
-            .find(|&o| opens(&rest[o + open.len()..]));
-        match inner {
-            Some(o) => {
-                depth += 1;
-                i = o + open.len();
-            }
-            None => {
-                depth -= 1;
-                i = c + close.len();
-            }
-        }
-    }
-    Some(i)
 }
 
 /// A prompt the harness sent rather than the developer typed (see `ENVELOPES`).
@@ -447,6 +458,9 @@ fn compact(v: &Value) -> String {
 /// Redact the head (plus the overlap) and keep MAX_FIELD characters of it: scanning the
 /// discarded tail of a megabyte tool output would only cost hook time.
 fn clip(s: &str) -> String {
+    // Closed `<private>`-style blocks go before the cut: a block cut in half would leave an
+    // opener that the outbound gate keeps as text, with the private content right after it.
+    let s = &without_blocks(s, false);
     let total = s.chars().count();
     if total <= MAX_FIELD {
         return redact::redact(s);
@@ -1082,6 +1096,45 @@ mod tests {
             clip("x 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 y"),
             "x [REDACTED] y"
         );
+    }
+
+    #[test]
+    fn a_private_block_cut_by_the_clip_is_not_stored() {
+        let dir = tmp("clip-private");
+        let conn = db::open(&dir).unwrap();
+        let output = format!(
+            "{} <private>{}</private> tail",
+            "h".repeat(7_900),
+            "S".repeat(9_000)
+        );
+        let payload = json!({"session_id": "c1", "cwd": dir, "tool_name": "Read",
+                             "tool_input": {}, "tool_response": output});
+        handle(&conn, "claude", "PostToolUse", &payload).unwrap();
+        let stored = &db::session_events(&conn, "c1").unwrap()[0].payload;
+        assert!(!stored.contains("SSS"), "private content stored");
+        assert!(!stored.contains("<private>"), "{stored}");
+        assert!(stored.contains("tail"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn stray_openers_do_not_shield_later_blocks() {
+        let text = "mentions <private>, then <private>CUSTOMER DATA</private> end";
+        assert_eq!(strip_blocks(text, false), "mentions <private>, then  end");
+        assert_eq!(strip_blocks(text, true), "mentions");
+        assert_eq!(
+            strip_blocks("a <private>x <private>y</private> z</private> b", false),
+            "a  b"
+        );
+        assert_eq!(
+            strip_blocks("a </private> b <private>c</private>", false),
+            "a </private> b"
+        );
+        // Linear: a prompt of stray openers is cheap.
+        let many = "<hook_context ".repeat(50_000) + "</hook_context>";
+        let start = std::time::Instant::now();
+        strip_blocks(&many, true);
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]

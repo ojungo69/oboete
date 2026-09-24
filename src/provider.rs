@@ -215,13 +215,16 @@ fn openai_compat(
     for (k, v) in extra {
         body[k] = v.clone();
     }
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let mut agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(timeout_s)))
         .http_status_as_error(false)
-        .user_agent(concat!("oboete/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into();
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+        .user_agent(concat!("oboete/", env!("CARGO_PKG_VERSION")));
+    // A provider on this machine (Ollama) is never reached through the environment's proxy.
+    if is_loopback(&url) {
+        agent = agent.proxy(None);
+    }
+    let agent: ureq::Agent = agent.build().into();
     let mut req = agent.post(&url);
     if let Some(key_file) = key_file {
         let key = config::read_key(key_file).map_err(|e| CallError::other(format!("{e:#}")))?;
@@ -236,10 +239,19 @@ fn openai_compat(
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<f64>().ok());
-    let text = resp
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| CallError::other(format!("read body: {e}")))?;
+    // Capped after decoding: a gzip answer of a few KB on the wire can decode to far more.
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(resp.body_mut().as_reader(), MAX_RESPONSE_BYTES + 1),
+        &mut raw,
+    )
+    .map_err(|e| CallError::other(format!("read body: {e}")))?;
+    if raw.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(CallError::other(format!(
+            "invalid output: response larger than {MAX_RESPONSE_BYTES} bytes"
+        )));
+    }
+    let text = String::from_utf8_lossy(&raw);
     if status != 200 {
         return Err(CallError {
             status: Some(status),
@@ -257,6 +269,20 @@ fn openai_compat(
         .ok_or_else(|| CallError::other("invalid output: no choices[0].message.content"))?;
     serde_json::from_str(content)
         .map_err(|e| CallError::other(format!("invalid output: content is not JSON ({e})")))
+}
+
+fn is_loopback(url: &str) -> bool {
+    let host = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let host = host.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.split(':').next().unwrap_or(""),
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Groq spells the reset out in the body: "Please try again in 17.28s".
@@ -445,7 +471,7 @@ fn cli_headless(
             use std::io::Read;
             let mut text = String::new();
             std::fs::File::open(&last)
-                .and_then(|f| f.take(MAX_CLI_OUTPUT).read_to_string(&mut text))
+                .and_then(|f| f.take(MAX_RESPONSE_BYTES).read_to_string(&mut text))
                 .map_err(|_| CallError::other("invalid output: codex wrote no last message"))?;
             text
         }
@@ -457,9 +483,9 @@ fn cli_headless(
 
 /// The schema-validated object out of a CLI's JSON envelope: `structured_output` (claude, agy),
 /// `structuredOutput` (grok), or the answer text itself when the envelope is the answer (codex).
-/// Most a CLI may print before its answer is dropped: a broken or hijacked provider must not
-/// fill memory (the summaries it returns are capped much lower anyway).
-const MAX_CLI_OUTPUT: u64 = 1 << 20;
+/// Most a provider may send (HTTP body or CLI output) before its answer is dropped: a broken or
+/// hijacked provider must not fill memory (the summaries it returns are capped much lower anyway).
+const MAX_RESPONSE_BYTES: u64 = 1 << 20;
 
 /// Spawn `cmd`, feed it `stdin`, and return its stdout if it exits 0 within `timeout`.
 /// stdin, stdout and stderr each get a thread: a prompt larger than the pipe buffer, or an
@@ -481,7 +507,7 @@ fn run_cli(
         r.map(|r| {
             std::thread::spawn(move || {
                 let mut buf = Vec::new();
-                let mut r = r.take(MAX_CLI_OUTPUT + 1);
+                let mut r = r.take(MAX_RESPONSE_BYTES + 1);
                 r.read_to_end(&mut buf).ok();
                 // Keep reading past the cap so the child is never blocked on a full pipe.
                 std::io::copy(r.get_mut(), &mut std::io::sink()).ok();
@@ -524,9 +550,9 @@ fn run_cli(
             err.chars().take(300).collect::<String>()
         )));
     }
-    if out.len() as u64 > MAX_CLI_OUTPUT {
+    if out.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(CallError::other(format!(
-            "invalid output: more than {MAX_CLI_OUTPUT} bytes"
+            "invalid output: more than {MAX_RESPONSE_BYTES} bytes"
         )));
     }
     Ok(out)
@@ -638,6 +664,79 @@ mod tests {
             json!({"summary": "x"})
         );
         assert!(agy_result("{\"event\":\"init\"}\n").is_err());
+    }
+
+    /// One-shot HTTP server on localhost that answers any request with `body`.
+    fn serve_once(body: Vec<u8>, extra_headers: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            // Read the headers and the JSON body (its length is in Content-Length).
+            while let Ok(n) = conn.read(&mut buf) {
+                req.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&req).to_lowercase();
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let len = text
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if req.len() >= end + 4 + len {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            conn.write_all(head.as_bytes()).ok();
+            conn.write_all(&body).ok();
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn only_loopback_urls_skip_the_proxy() {
+        for url in [
+            "http://127.0.0.1:11434/v1",
+            "http://localhost/v1",
+            "http://[::1]:8080",
+        ] {
+            assert!(is_loopback(url), "{url}");
+        }
+        for url in [
+            "https://api.groq.com/openai/v1",
+            "http://127.0.0.1.evil.example/v1",
+            "http://localhost@evil.example/",
+        ] {
+            assert!(!is_loopback(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn http_answers_are_parsed_and_capped() {
+        let answer = json!({"choices": [{"message": {"content": "{\"summary\":\"s\",\"observations\":[]}"}}]});
+        let url = serve_once(answer.to_string().into_bytes(), "");
+        let v = openai_compat(&url, None, "m", 10, &Default::default(), "p", &json!({})).unwrap();
+        assert_eq!(v["summary"], "s");
+        let url = serve_once(vec![b' '; MAX_RESPONSE_BYTES as usize + 10], "");
+        let e =
+            openai_compat(&url, None, "m", 10, &Default::default(), "p", &json!({})).unwrap_err();
+        assert!(e.invalid(), "{}", e.message);
+        // 2 KB on the wire, 2 MiB once decoded.
+        let bomb = include_bytes!("testdata/two-mib-of-spaces.gz").to_vec();
+        let url = serve_once(bomb, "Content-Encoding: gzip\r\n");
+        let e =
+            openai_compat(&url, None, "m", 10, &Default::default(), "p", &json!({})).unwrap_err();
+        assert!(e.message.contains("larger than"), "{}", e.message);
     }
 
     #[test]

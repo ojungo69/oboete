@@ -119,6 +119,14 @@ fn compiled(pattern: &str) -> Option<Regex> {
     })
 }
 
+/// The one gate for text that leaves this machine: summary providers now; embeddings, sync and
+/// judges later (docs/research/search-sync-proposal-2026-09-23.md §4.8). Closed `<private>`-style
+/// blocks go, then gitleaks redaction. Apply it per field, not to a joined transcript: a stray
+/// `<private>` in one tool output must not pair with a `</private>` many events later.
+pub fn outbound(text: &str) -> String {
+    redact(&crate::hook::strip_blocks(text, false))
+}
+
 pub fn redact(text: &str) -> String {
     let r = rules();
     let mut hit = vec![false; r.rules.len()];
