@@ -199,9 +199,14 @@ pub fn normalize(url: &str) -> Option<String> {
             let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
             (scheme.to_ascii_lowercase(), authority, path)
         }
-        // scp-style `[user@]host:path`. One letter before the colon is a Windows drive.
+        // scp-style `[user@]host:path`, the host maybe `[ipv6]`. One letter before the colon is
+        // a Windows drive.
         None => {
-            let (authority, path) = url.split_once(':')?;
+            let colon = match url.find('[') {
+                Some(open) if !url[..open].contains(':') => open + url[open..].find("]:")? + 1,
+                _ => url.find(':')?,
+            };
+            let (authority, path) = (&url[..colon], &url[colon + 1..]);
             if authority.contains(['/', '\\']) || authority.chars().count() < 2 {
                 return None;
             }
@@ -270,6 +275,18 @@ mod tests {
             normalize("ssh://git@git.example.com:2222/team/app.git").as_deref(),
             Some("git.example.com:2222/team/app")
         );
+        // A bracketed IPv6 host, scp-style or ssh://, with and without the default port.
+        for url in [
+            "git@[2001:db8::1]:team/app.git",
+            "ssh://git@[2001:db8::1]/team/app.git",
+            "ssh://git@[2001:db8::1]:22/team/app",
+        ] {
+            assert_eq!(
+                normalize(url).as_deref(),
+                Some("[2001:db8::1]/team/app"),
+                "{url}"
+            );
+        }
         for local in [
             "/srv/git/app.git",
             "../app",

@@ -19,8 +19,9 @@ use crate::{db, repo, search};
 #[derive(Clone)]
 pub struct Oboete {
     home: PathBuf,
-    /// The repository key of the directory the agent launched us from.
-    cwd_repo: String,
+    /// The directory the agent launched us from. Its repository key is read per call: it
+    /// changes when the repository gets an origin (and `observe` re-keys the rows).
+    cwd: PathBuf,
     tool_router: ToolRouter<Self>,
 }
 
@@ -82,7 +83,7 @@ impl Oboete {
     pub fn new(home: &Path, cwd: &Path) -> Self {
         Self {
             home: home.to_path_buf(),
-            cwd_repo: repo::key(cwd),
+            cwd: cwd.to_path_buf(),
             tool_router: Self::tool_router(),
         }
     }
@@ -100,7 +101,7 @@ impl Oboete {
             return Ok(None);
         }
         match repo.filter(|r| !r.is_empty()) {
-            None => Ok(Some(self.cwd_repo.clone())),
+            None => Ok(Some(repo::key(&self.cwd))),
             Some(r) if Path::new(r).is_dir() => Ok(Some(crate::repo::key(Path::new(r)))),
             Some(r)
                 if search::repos(conn)
