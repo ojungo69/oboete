@@ -1071,7 +1071,7 @@ fn opencode_plugin(cmd: &HookCommand) -> Result<String> {
 fn opencode_config(dir: &Path) -> Result<Value> {
     let file = dir.join("opencode.json");
     anyhow::ensure!(
-        file.exists() || !dir.join("opencode.jsonc").exists(),
+        !dir.join("opencode.jsonc").exists(),
         "{} is JSONC; automatic MCP editing is unavailable",
         dir.join("opencode.jsonc").display()
     );
@@ -1465,6 +1465,8 @@ mod tests {
         };
         for (name, text) in [
             ("opencode.jsonc", "{ // owner comment\n\"mcp\": {}}\n"),
+            // OpenCode merges both files: with a JSONC next to it, the JSON is not ours to edit.
+            ("both", "{\"mcp\": {}}\n"),
             ("opencode.json", "{ // owner comment\n\"mcp\": {}}\n"),
             ("opencode.json", "{broken"),
             ("opencode.json", ""),
@@ -1472,8 +1474,15 @@ mod tests {
         ] {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            let file = dir.join(name);
+            let file = dir.join(if name == "both" {
+                "opencode.json"
+            } else {
+                name
+            });
             std::fs::write(&file, text).unwrap();
+            if name == "both" {
+                std::fs::write(dir.join("opencode.jsonc"), "{}\n").unwrap();
+            }
             let (_, status) = opencode_files(&dir, &cmd, false).unwrap();
             assert!(status.contains("left untouched"));
             let command = if cfg!(windows) {

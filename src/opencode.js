@@ -33,7 +33,7 @@ export default {
       if (!state) {
         // Unlocated bus events can belong to another plugin instance's sessions.
         if (!location) return;
-        state = { dir: location.directory, started: false, lastText: "" };
+        state = { dir: location.directory, started: false, message: null, parts: [] };
         sessions.set(id, state);
       }
       if (!state.started) {
@@ -48,9 +48,12 @@ export default {
     ctx.tool.hook("execute.after", (e) => {
       const state = session(e.sessionID, ctx.location);
       if (!state || !["completed", "error"].includes(e.status)) return;
-      const parts = Array.isArray(e.result?.content)
-        ? e.result.content.filter((p) => p.type === "text" && typeof p.text === "string")
-        : [];
+      const content = e.result?.content;
+      const parts = typeof content === "string"
+        ? [{ text: content }]
+        : Array.isArray(content)
+          ? content.filter((p) => p.type === "text" && typeof p.text === "string")
+          : [];
       const response = parts.length
         ? parts.map((p) => p.text).join("\n")
         : e.result?.output !== undefined
@@ -93,13 +96,19 @@ export default {
             }
             break;
           case "session.text.ended":
-            state.lastText = data.text ?? "";
+            // One event per text part: keep every part of the newest assistant message.
+            if (data.assistantMessageID !== state.message) {
+              state.message = data.assistantMessageID;
+              state.parts = [];
+            }
+            state.parts[data.ordinal ?? state.parts.length] = data.text ?? "";
             break;
           case "session.execution.succeeded":
           case "session.execution.failed":
           case "session.execution.interrupted":
-            send("Stop", { ...payload, last_assistant_message: state.lastText });
-            state.lastText = "";
+            send("Stop", { ...payload, last_assistant_message: state.parts.filter(Boolean).join("\n") });
+            state.message = null;
+            state.parts = [];
             break;
           case "session.compaction.ended":
             send("PostCompact", { ...payload, compact_summary: data.text });

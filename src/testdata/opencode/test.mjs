@@ -116,7 +116,8 @@ assert.equal(local.hooks["execute.after"]({ sessionID: "one", tool: "read", inpu
 local.hooks["execute.after"]({ sessionID: "one", tool: "object", input: {}, status: "completed", result: { output: { ok: true } } });
 local.hooks["execute.after"]({ sessionID: "one", tool: "shell", input: {}, status: "error", error: { message: "denied" } });
 await local.emit("session.text.ended", { sessionID: "one", assistantMessageID: "old", text: "earlier step" }, location);
-await local.emit("session.text.ended", { sessionID: "one", assistantMessageID: "new", text: "final answer" }, location);
+await local.emit("session.text.ended", { sessionID: "one", assistantMessageID: "new", ordinal: 0, text: "final" }, location);
+await local.emit("session.text.ended", { sessionID: "one", assistantMessageID: "new", ordinal: 1, text: "answer" }, location);
 await local.emit("session.text.ended", { sessionID: "two", text: "other answer" }, location);
 await local.emit("session.text.ended", { sessionID: "one", text: "wrong repo" }, { directory: "/other" });
 await local.emit("session.execution.succeeded", { sessionID: "one" });
@@ -132,16 +133,17 @@ assert.equal(captures[1].payload.prompt, "first prompt");
 assert.equal(captures[4].payload.tool_response, "a\nb");
 assert.equal(captures[5].payload.tool_response, '{"ok":true}');
 assert.equal(captures[6].payload.tool_response, "denied");
-assert.deepEqual(captures.filter((c) => c.event === "Stop").map((c) => c.payload.last_assistant_message), ["final answer", "other answer", ""]);
+assert.deepEqual(captures.filter((c) => c.event === "Stop").map((c) => c.payload.last_assistant_message), ["final\nanswer", "other answer", ""]);
 assert.equal(captures.at(-1).payload.compact_summary, "compacted");
 assert(captures.every((c) => c.cwd === location.directory && c.payload.cwd === location.directory));
 
 // A hook can be the first sign of a session (its bus event not read yet): it is still captured,
 // in this instance's directory, after its SessionStart.
 const beforeHookFirst = captures.length;
-local.hooks["execute.after"]({ sessionID: "hook-first", tool: "read", input: {}, status: "completed", result: { output: "x" } });
+local.hooks["execute.after"]({ sessionID: "hook-first", tool: "read", input: {}, status: "completed", result: { content: "string form" } });
 await drain();
 assert.deepEqual(captures.slice(beforeHookFirst).map((c) => c.event), ["SessionStart", "PostToolUse"]);
+assert.equal(captures.at(-1).payload.tool_response, "string form");
 assert(captures.slice(beforeHookFirst).every((c) => c.cwd === location.directory));
 
 const calls = Array.from({ length: 3 }, () => ({ sessionID: "one", system: [] }));
