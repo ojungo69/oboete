@@ -191,11 +191,27 @@ fn sql_limit(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
 }
 
+/// A document by its local id (`o123`) or its uid (`7f3a9c21:o123`, `claude-mem:<db>:o5`).
 pub fn get(conn: &Connection, doc: &str) -> Result<Option<Hit>> {
+    let local: Option<String> = if doc.contains(':') {
+        conn.query_row(
+            "SELECT 'o' || id FROM observations WHERE uid = ?1
+             UNION ALL SELECT 's' || id FROM summaries WHERE uid = ?1
+             UNION ALL SELECT 'p' || id FROM prompts WHERE uid = ?1",
+            params![doc],
+            |r| r.get(0),
+        )
+        .optional()?
+    } else {
+        Some(doc.to_string())
+    };
+    let Some(local) = local else {
+        return Ok(None);
+    };
     Ok(conn
         .query_row(
             &format!("SELECT {COLUMNS} FROM fts WHERE doc = ?1"),
-            params![doc],
+            params![local],
             hit,
         )
         .optional()?)
@@ -473,6 +489,9 @@ mod tests {
         assert_eq!(search(&conn, "trigram", None, 0).unwrap().len(), 0);
 
         let h = get(&conn, "o1").unwrap().unwrap();
+        let uid = format!("{}:o1", db::device_id(&conn).unwrap());
+        assert_eq!(get(&conn, &uid).unwrap().unwrap().doc, "o1");
+        assert!(get(&conn, "nobody:o1").unwrap().is_none());
         assert_eq!(
             (h.kind.as_str(), h.title.as_str()),
             ("change", "src/db.rs を更新")
