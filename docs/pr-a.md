@@ -23,13 +23,28 @@ PR は 2 つに分ける: **A1 = 関門 (出荷するコード)**、**A2 = 計�
 
 ## A2: 計測 spike
 
-§2・§4 の未確認の数字を実測に置き換える。コードは出荷しない (結果とスクリプトの置き場は A2 の PR で決める)。
+§2・§4 の未確認の数字を実測に置き換える。コードは出荷しない (スクリプトは `docs/spike/pr-a2/`、結果はこの表)。
 
 | 計測 | 結果 |
 |---|---|
-| Workers AI と fastembed の bge-m3 を実データ 100 件で比べる (cos の最小、上位 10 件の一致) | 未 |
+| Workers AI と fastembed の bge-m3 を実データ 100 件で比べる (cos の最小、上位 10 件の一致) | **一致検査に通る (この PC、WSL の x86_64)**。関門を通した実データ 271 件 (oboete の観測・要約・prompt 全部と、claude-mem の観測 100 件・prompt 40 件。30〜8,000 字) と問い合わせ 57 件で、同じ文の cos は最小 0.99995・中央値 1.00000。上位 10 件の一致は、手元の問い合わせ × Workers AI の文書 (オフライン時の問い合わせ) で最小 9・平均 9.98、全部手元 (ローカルだけの形) で最小 9・平均 9.95。9 件を下回った問いは 0 件。関門で変わった文は 328 件中 4 件 (2026-09-24、fastembed 7.1.0・`max_length` 8,192) |
 | 8,000 字の文での Workers AI の入力上限と `truncate_inputs` | **上限は 8,192 トークン**。日本語はおよそ 0.6 トークン / 字で、16,000 字 (9,687 トークン) は `Sequence too long: 9687 > 8192` の 400。`truncate_inputs: true` なら 32,000 字でも 200 で先頭を使う。8,000 字までは切らずに通る。8,000 字全体 (切らずに通る長さ) のベクトルと先頭 1,000 / 2,000 / 4,000 字のベクトルの cos は 0.910 / 0.941 / 0.973 (合成文での値)。出力は 1,024 次元、pooling は `cls` (2026-09-24、合成文) |
 | 日本から Workers AI への往復 p50 / p95 | 短文 1 件: **p50 128 ms、p95 161 ms**、最大 240 ms (30 回)。300 字 × 100 件の一括: 507〜878 ms (5 回)。WSL の自宅回線から REST で直接 (2026-09-24、合成文) |
-| oboete と claude-mem の注入の実トークン数 | 未 |
+| oboete と claude-mem の注入の実トークン数 | この repo で **oboete 1,955 トークン (2,791 字)、claude-mem 2,393 トークン (5,835 字、観測 50 件)**。claude CLI (opus) の `usage` を、注入文あり / なしの同じ指示で引き算した値 (なしは 31,755)。oboete は日本語で 0.70 トークン / 字。今の 2,791 字は要約 3 件・観測 12 件の件数の上限で決まっていて、字数の上限 4,000 字 (約 2,800 トークン) には届いていない (2026-09-24) |
 | DO / D1 で trigram FTS5 を作る 1 文 | **D1 は使える**: `CREATE VIRTUAL TABLE fts USING fts5(body, tokenize='trigram')` が通り、日本語の部分一致 (`MATCH '精度を上'`)・`snippet()`・`bm25()` も動く (使い捨ての D1 を作って消した)。DO の SQLite は Worker を置かないと試せないので PR-G で確かめる |
 | M1 iMac での手元モデルの読み込み時間と RAM | 未 (iMac の電源が入ってから) |
+
+### A2 でわかったこと (後の PR への入力)
+
+1. **この PC では手元の fastembed が Workers AI と同じ `embedder_id` を名乗れる** (§2.3 の 3)。一致検査は端末の実行環境ごとなので、M1 (arm64 の ONNX Runtime) は iMac の電源が入ってから同じスクリプトで確かめる。
+2. **Workers AI の bge-m3 は 1 回の要求で「件数 × いちばん長い文のトークン数」が 60,000 まで** (モデルの context window。短い文も一番長い文の長さまで詰め物をして数える)。20 件の束が `Max context reached 116200 tokens but model supports only 60000` で落ちた。PR-D の一括送信は「100 件まで」だけでなく、長さの近い文でまとめて、件数 × 最長の長さを抑える。
+3. **手元の bge-m3 の重さ** (WSL、32 スレッド、2 回目以降の読み込み): 問い合わせ 1 件は読み込み 2.1〜2.5 秒 + 変換 95〜142 ms、ピークの RAM 1.79 GB。8,000 字の文 1 件は 5.3 秒・2.79 GB。1,000 字以下の 100 件 (8 件ずつ) は 10.1 秒・1.89 GB。**長い文を 8 件ずつ束ねると 17.8 GB** まで膨らんだので、手元で文書を作るときは長い文を 1 件ずつにする (初回はモデルの取得込みで 46 秒、約 2.3 GB)。
+4. **fastembed を入れると oboete のバイナリは 10.7 MB から 36.1 MB** (rustls、ONNX Runtime を静的に同梱。提案書の 29.65 MB は別構成の値)。
+
+### 再現
+
+スクリプトは `docs/spike/pr-a2/` に置いた (出荷しない)。Cloudflare の鍵は `cf.py` が `~/CF_API.md` から読み、表示しない。
+
+- `wai_limits.py` (入力上限と往復時間)、`d1_trigram.py` (使い捨ての D1 を作って消す): 合成文だけを送る。
+- 一致検査: `python3 a2_corpus.py > raw.jsonl` (oboete と claude-mem の DB を読み取り専用で開く) → `spike.rs` を `spike-wiring.diff` の 3 か所で crate に一時的に足し、`cargo build --release --features spike` → `oboete spike-embed --cache <dir> < raw.jsonl > local.jsonl` (関門を通した文と手元のベクトル) → `python3 a2_compare.py <dir>`。Workers AI へ送るのは `local.jsonl` の関門を通した文だけ。
+- 注入のトークン数: `oboete inject` と claude-mem の `GET /api/context/inject?project=oboete` の出力を、scratch の cwd から `claude -p --model opus --setting-sources project --strict-mcp-config --no-session-persistence --output-format json` に渡し、`usage` の入力トークンの合計を注入なしの値と引き算する (`OBOETE_SKIP=1`。user 設定を読まないので oboete と claude-mem の hook は動かず、claude-mem の session 数が変わらないことも確かめた)。

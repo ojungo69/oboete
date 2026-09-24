@@ -1,0 +1,53 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 98c12fc..0602688 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -21,6 +21,11 @@ toml = "1.1.6"
+ tokio = { version = "1", features = ["rt", "io-std"] }
+ toml_edit = "0.23"
+ ureq = { version = "3.4.2", features = ["json"] }
++fastembed = { version = "7.1", optional = true, default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
++
++[features]
++# PR-A2 measurement spike (`oboete spike-embed`); not part of the shipped binary.
++spike = ["dep:fastembed"]
+ 
+ [profile.release]
+ strip = true
+diff --git a/src/main.rs b/src/main.rs
+index 100c068..c18588e 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -15,6 +15,8 @@ mod replay;
+ mod repo;
+ mod search;
+ mod setup;
++#[cfg(feature = "spike")]
++mod spike;
+ mod view;
+ 
+ use std::path::PathBuf;
+@@ -92,6 +94,14 @@ enum Cmd {
+         #[arg(long)]
+         open: bool,
+     },
++    /// PR-A2 spike: gate and embed `{"id","text"}` lines from stdin with the local bge-m3
++    #[cfg(feature = "spike")]
++    SpikeEmbed {
++        #[arg(long)]
++        cache: PathBuf,
++        #[arg(long, default_value_t = 8192)]
++        max_length: usize,
++    },
+     /// Replay a JSONL fixture through the hook path and measure
+     Replay {
+         fixture: PathBuf,
+@@ -232,6 +242,8 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
+             emit(&out)
+         }
+         Cmd::Setup { agent, remove } => setup::run(&home, &agent, remove),
++        #[cfg(feature = "spike")]
++        Cmd::SpikeEmbed { cache, max_length } => spike::embed(cache, max_length),
+         Cmd::Doctor => setup::doctor(&home),
+         Cmd::View { port, open } => view::run(&home, port, open),
+         Cmd::Replay {
