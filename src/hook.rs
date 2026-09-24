@@ -211,7 +211,10 @@ pub fn handle(
     if matches!(agent, "agy" | "cursor") && workspace.is_none() {
         return Ok(Some("{}".into()));
     }
-    let session_id = str_field(
+    // An event without one goes to this device's catch-all session: a bare "unknown" would be
+    // the same session on every device once they sync.
+    let unknown;
+    let session_id = match str_field(
         payload,
         if agent == "cursor" {
             &["session_id", "conversation_id"]
@@ -223,8 +226,13 @@ pub fn handle(
                 "conversationId",
             ]
         },
-    )
-    .unwrap_or("unknown");
+    ) {
+        Some(id) => id,
+        None => {
+            unknown = format!("unknown-{}", db::device_id(conn)?);
+            &unknown
+        }
+    };
     let cwd = workspace
         .as_deref()
         .or_else(|| str_field(payload, &["cwd", "workspaceRoot"]))
@@ -367,6 +375,7 @@ pub fn handle(
     // leave an event that belongs to no session and never gets summarized or removed.
     let tx = conn.unchecked_transaction()?;
     db::upsert_session(&tx, session_id, agent, &repo_key, cwd, ts)?;
+    db::touch_repo(&tx, session_id, &repo_key)?;
     if let Some((step, _)) = agy_prompt
         && !db::claim_prompt_step(&tx, session_id, step)?
     {
@@ -848,6 +857,44 @@ mod tests {
         assert!(ended);
         drop(conn);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sessions_record_every_repo_and_idless_events_stay_on_this_device() {
+        let dir = tmp("touched");
+        std::fs::create_dir_all(dir.join("outer/.git")).unwrap();
+        std::fs::create_dir_all(dir.join("outer/inner/.git")).unwrap();
+        let conn = db::open(&dir).unwrap();
+        for cwd in ["outer", "outer/inner", "outer"] {
+            let payload = json!({"session_id": "s", "cwd": dir.join(cwd), "prompt": "go on"});
+            handle(&conn, "claude", "UserPromptSubmit", &payload).unwrap();
+        }
+        let repos: Vec<String> = conn
+            .prepare("SELECT repo FROM session_repos WHERE session_id='s' ORDER BY repo")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let mut want = vec![
+            repo::key(&dir.join("outer")),
+            repo::key(&dir.join("outer/inner")),
+        ];
+        want.sort();
+        assert_eq!(repos, want);
+        let idless = json!({"cwd": dir.join("outer"), "prompt": "no id"});
+        handle(&conn, "claude", "UserPromptSubmit", &idless).unwrap();
+        let device = db::device_id(&conn).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE id=?1",
+                [format!("unknown-{device}")],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        drop(conn);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

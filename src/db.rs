@@ -18,6 +18,15 @@ CREATE TABLE IF NOT EXISTS sessions(
   last_prompt_step INTEGER,
   reinject_pending INTEGER NOT NULL DEFAULT 0
 );
+-- key/value facts about this store: `device_id`, `store_file` (see `ensure_device`).
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- Every repository a session's events came from (decision 11: a session that touched an excluded
+-- repository is not synced). Sessions recorded before this table existed have no rows here.
+CREATE TABLE IF NOT EXISTS session_repos(
+  session_id TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  PRIMARY KEY(session_id, repo)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -112,7 +121,79 @@ pub fn open(home: &Path) -> Result<Connection> {
     ensure_autoincrement(&mut conn).context("migrate doc ids")?;
     ensure_fts(&mut conn).context("search index")?;
     ensure_repo_keys(&mut conn).context("migrate repository keys")?;
+    ensure_device(&conn, &path).context("device id")?;
     Ok(conn)
+}
+
+/// The store file's identity: a copy on another machine (or a restored backup) is another file.
+/// ponytail: file identity instead of host name + OS machine id (proposal §4.2 3), which needs no
+/// new dependency; a restore on the same machine also gets a new id, which costs nothing.
+fn store_file(path: &Path) -> String {
+    std::fs::metadata(path).map_or_else(|_| String::new(), |m| file_identity(&m))
+}
+
+#[cfg(unix)]
+fn file_identity(meta: &std::fs::Metadata) -> String {
+    use std::os::unix::fs::MetadataExt;
+    format!("{}:{}", meta.dev(), meta.ino())
+}
+
+#[cfg(windows)]
+fn file_identity(meta: &std::fs::Metadata) -> String {
+    use std::os::windows::fs::MetadataExt;
+    meta.creation_time().to_string()
+}
+
+/// This device's id, 8 hex digits, chosen when the store is created and again when the store
+/// turns up as another file (a `~/.oboete` copied to another machine), so two devices never share
+/// one. It prefixes ids that must be unique across devices.
+fn ensure_device(conn: &Connection, path: &Path) -> Result<()> {
+    let here = store_file(path);
+    let known: Option<String> = conn
+        .query_row("SELECT value FROM meta WHERE key='store_file'", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    if known.as_deref() == Some(here.as_str()) {
+        return Ok(());
+    }
+    let mut raw = [0u8; 4];
+    getrandom::fill(&mut raw).map_err(|e| anyhow::anyhow!("random device id: {e}"))?;
+    let id: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    // Two first opens may race: the one whose update finds the old identity still in place wins,
+    // the other keeps what it reads back.
+    let tx = conn.unchecked_transaction()?;
+    let changed = tx.execute(
+        "INSERT INTO meta(key, value) VALUES('store_file', ?1)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value IS NOT excluded.value",
+        params![here],
+    )?;
+    if changed > 0 {
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES('device_id', ?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn device_id(conn: &Connection) -> Result<String> {
+    Ok(
+        conn.query_row("SELECT value FROM meta WHERE key='device_id'", [], |r| {
+            r.get(0)
+        })?,
+    )
+}
+
+/// The session's events came from `repo` too (a no-op after the first time).
+pub fn touch_repo(conn: &Connection, session_id: &str, repo: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO session_repos(session_id, repo) VALUES(?1, ?2)",
+        params![session_id, repo],
+    )?;
+    Ok(())
 }
 
 /// Repository keys moved from paths to the origin URL (`repo::key`, PR-C): rows filed under paths
@@ -137,7 +218,8 @@ pub fn rekey_paths(conn: &mut Connection) -> Result<usize> {
     let repos: Vec<String> = conn
         .prepare(
             "SELECT repo FROM sessions UNION SELECT repo FROM observations
-             UNION SELECT repo FROM summaries UNION SELECT repo FROM prompts",
+             UNION SELECT repo FROM summaries UNION SELECT repo FROM prompts
+             UNION SELECT repo FROM session_repos",
         )?
         .query_map([], |r| r.get(0))?
         .collect::<Result<_, _>>()?;
@@ -158,6 +240,12 @@ pub fn rekey_paths(conn: &mut Connection) -> Result<usize> {
                 params![new, old],
             )?;
         }
+        // A session that already touched the new key keeps one row.
+        tx.execute(
+            "UPDATE OR IGNORE session_repos SET repo=?1 WHERE repo=?2",
+            params![new, old],
+        )?;
+        tx.execute("DELETE FROM session_repos WHERE repo=?1", params![old])?;
     }
     tx.commit()?;
     Ok(moves.len())
@@ -658,7 +746,13 @@ pub fn delete_session(conn: &mut Connection, id: &str) -> Result<bool> {
                                        UNION ALL SELECT 'p' || id FROM prompts WHERE session_id=?1)",
         params![id],
     )?;
-    for table in ["observations", "summaries", "prompts", "events"] {
+    for table in [
+        "observations",
+        "summaries",
+        "prompts",
+        "events",
+        "session_repos",
+    ] {
         tx.execute(
             &format!("DELETE FROM {table} WHERE session_id=?1"),
             params![id],
@@ -702,6 +796,28 @@ pub fn calls_today(conn: &Connection, provider: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_id_stays_with_the_file_and_changes_on_a_copy() {
+        let dir = std::env::temp_dir().join(format!("oboete-db-device-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = open(&dir).unwrap();
+        let first = device_id(&conn).unwrap();
+        assert!(
+            first.len() == 8 && first.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{first}"
+        );
+        drop(conn);
+        assert_eq!(device_id(&open(&dir).unwrap()).unwrap(), first);
+        // The same store copied elsewhere (another machine's `~/.oboete`) is another device.
+        let copy = dir.join("copy");
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::copy(dir.join("oboete.db"), copy.join("oboete.db")).unwrap();
+        let other = device_id(&open(&copy).unwrap()).unwrap();
+        assert_ne!(other, first);
+        assert_eq!(device_id(&open(&copy).unwrap()).unwrap(), other);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn path_keys_move_to_the_origin_key_once() {
@@ -754,6 +870,7 @@ mod tests {
         std::fs::create_dir_all(late.join(".git")).unwrap();
         let late_key = crate::repo::key(&late);
         upsert_session(&conn, "d", "claude", &late_key, &late_key, 1).unwrap();
+        touch_repo(&conn, "d", &late_key).unwrap();
         insert_prompt(&conn, "d", 1, "before the remote").unwrap();
         assert_eq!(rekey_paths(&mut conn).unwrap(), 0);
         std::fs::write(
@@ -762,7 +879,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rekey_paths(&mut conn).unwrap(), 1);
-        for table in ["sessions", "prompts", "fts"] {
+        for table in ["sessions", "prompts", "fts", "session_repos"] {
             assert!(
                 repos(&conn, table).contains(&"github.com/o/late".to_string()),
                 "{table}"
