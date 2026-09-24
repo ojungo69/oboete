@@ -111,7 +111,46 @@ pub fn open(home: &Path) -> Result<Connection> {
     .context("migrate reinjection flag")?;
     ensure_autoincrement(&mut conn).context("migrate doc ids")?;
     ensure_fts(&mut conn).context("search index")?;
+    ensure_repo_keys(&mut conn).context("migrate repository keys")?;
     Ok(conn)
+}
+
+/// Repository keys moved from paths to the origin URL (`repo::key`, PR-C). Rows filed under a
+/// path are re-keyed once if that directory is still on this machine; the rest keep their path.
+/// `user_version` 1 marks it done. Same guard pattern as `ensure_fts`.
+fn ensure_repo_keys(conn: &mut Connection) -> Result<()> {
+    let version = |c: &Connection| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0));
+    if version(conn)? >= 1 {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if version(&tx)? < 1 {
+        let old: Vec<String> = tx
+            .prepare(
+                "SELECT repo FROM sessions UNION SELECT repo FROM observations
+                 UNION SELECT repo FROM summaries UNION SELECT repo FROM prompts",
+            )?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for old in old {
+            let path = Path::new(&old);
+            if !path.is_absolute() || !path.is_dir() {
+                continue;
+            }
+            let new = crate::repo::key(path);
+            if new != old {
+                for table in ["sessions", "observations", "summaries", "prompts", "fts"] {
+                    tx.execute(
+                        &format!("UPDATE {table} SET repo=?1 WHERE repo=?2"),
+                        params![new, old],
+                    )?;
+                }
+            }
+        }
+        tx.execute_batch("PRAGMA user_version = 1")?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// Document ids (`o<id>`, `s<id>`, `p<id>`) are handed to agents and pages, so a deleted id must
@@ -653,6 +692,55 @@ pub fn calls_today(conn: &Connection, provider: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_keys_move_to_the_origin_key_once() {
+        let dir = std::env::temp_dir().join(format!("oboete-db-keys-{}", std::process::id()));
+        let repo_dir = dir.join("r");
+        std::fs::create_dir_all(repo_dir.join(".git")).unwrap();
+        std::fs::write(
+            repo_dir.join(".git/config"),
+            "[remote \"origin\"]\n\turl = https://github.com/o/r.git\n",
+        )
+        .unwrap();
+        let path_key = repo_dir
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let conn = open(&dir).unwrap();
+        // Rows an older build filed under paths.
+        for (session, repo) in [
+            ("a", path_key.as_str()),
+            ("b", "/gone/repo"),
+            ("c", "claude-mem:x"),
+        ] {
+            upsert_session(&conn, session, "claude", repo, repo, 1).unwrap();
+            insert_prompt(&conn, session, 1, "a prompt about keys").unwrap();
+        }
+        conn.execute_batch("PRAGMA user_version = 0").unwrap();
+        drop(conn);
+        let conn = open(&dir).unwrap();
+        let repos = |table: &str| -> Vec<String> {
+            conn.prepare(&format!("SELECT repo FROM {table} ORDER BY repo"))
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        // A path still here gets its origin key; one that is gone, or no path, stays.
+        let want = ["/gone/repo", "claude-mem:x", "github.com/o/r"];
+        for table in ["sessions", "prompts", "fts"] {
+            assert_eq!(repos(table), want, "{table}");
+        }
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        drop(conn);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[cfg(unix)]
     #[test]
