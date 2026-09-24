@@ -155,37 +155,47 @@ fn ensure_uids(conn: &mut Connection) -> Result<()> {
              WHERE id = NEW.id;
            END;",
     )?;
-    let version = |c: &Connection| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0));
-    if version(conn)? >= 2 {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version >= 2 {
         return Ok(());
     }
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    if version(&tx)? < 2 {
-        let imported: Vec<(String, String)> = tx
-            .prepare("SELECT source || ':' || source_id, doc FROM imports")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<Result<_, _>>()?;
-        for (uid, doc) in imported {
-            let table = match &doc[..1] {
-                "o" => "observations",
-                "s" => "summaries",
-                _ => "prompts",
+    // Filled in short transactions, so a hook opening the store meanwhile waits for one chunk,
+    // not the whole backfill (2.1 s on the 180k-document evaluation store, past the 2 s busy
+    // timeout). Every step only fills NULLs: two first opens may both run it, and new rows get
+    // theirs from the trigger. Imports go first, so none of them gets this device's uid.
+    let imported: Vec<(String, String)> = conn
+        .prepare("SELECT source || ':' || source_id, doc FROM imports")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    for chunk in imported.chunks(5_000) {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        for (uid, doc) in chunk {
+            let (table, id) = match doc.split_at_checked(1) {
+                Some(("o", id)) => ("observations", id),
+                Some(("s", id)) => ("summaries", id),
+                Some(("p", id)) => ("prompts", id),
+                // A malformed mapping names no document.
+                _ => continue,
+            };
+            let Ok(id) = id.parse::<i64>() else {
+                continue;
             };
             tx.execute(
                 &format!("UPDATE {table} SET uid = ?1 WHERE id = ?2 AND uid IS NULL"),
-                params![uid, doc[1..].parse::<i64>().unwrap_or(-1)],
+                params![uid, id],
             )?;
         }
-        let device = device_id(&tx)?;
-        for (table, prefix) in [("observations", "o"), ("summaries", "s"), ("prompts", "p")] {
-            tx.execute(
-                &format!("UPDATE {table} SET uid = ?1 || ':{prefix}' || id WHERE uid IS NULL"),
-                params![device],
-            )?;
-        }
-        tx.execute_batch("PRAGMA user_version = 2")?;
+        tx.commit()?;
     }
-    tx.commit()?;
+    let device = device_id(conn)?;
+    for (table, prefix) in [("observations", "o"), ("summaries", "s"), ("prompts", "p")] {
+        let fill = format!(
+            "UPDATE {table} SET uid = ?1 || ':{prefix}' || id
+             WHERE id IN (SELECT id FROM {table} WHERE uid IS NULL LIMIT 5000)"
+        );
+        while conn.execute(&fill, params![device])? > 0 {}
+    }
+    conn.execute_batch("PRAGMA user_version = 2")?;
     Ok(())
 }
 
@@ -891,7 +901,8 @@ mod tests {
         // from this device.
         insert_prompt(&conn, "s", 3, "another").unwrap();
         conn.execute_batch(
-            "UPDATE prompts SET uid = NULL; UPDATE observations SET uid = NULL; PRAGMA user_version = 1",
+            "UPDATE prompts SET uid = NULL; UPDATE observations SET uid = NULL; PRAGMA user_version = 1;
+             INSERT INTO imports(source, source_id, doc) VALUES ('x', '1', ''), ('x', '2', 'o'), ('x', '3', 'q9');",
         )
         .unwrap();
         drop(conn);
