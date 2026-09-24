@@ -26,6 +26,8 @@ const BATCH: usize = 100;
 const BATCH_CHARS: usize = 50_000;
 /// The model cuts beyond 8,192 tokens (`truncate_inputs`); sending more is wasted bytes.
 const MAX_CHARS: usize = 12_000;
+/// A prompt is embedded by its opening (the spike's texts).
+const PROMPT_CHARS: usize = 1_000;
 /// Documents read per round of a backlog.
 const PAGE: i64 = 2_000;
 /// One answer holds up to 100 × 1,024 floats as JSON (about 2 MB).
@@ -125,14 +127,14 @@ fn embed_page(
 
 /// Documents without a vector from this model, newest first, as the gated text to embed: an
 /// observation's kind and title over its body, a summary's body, a prompt's first 1,000
-/// characters (the spike's texts).
+/// characters (the spike's texts). Cut after the gate: a secret across the cut is redacted whole.
 fn pending(conn: &Connection, limit: i64) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT d.doc, d.text FROM (
            SELECT 'o' || id AS doc, kind || ': ' || title || char(10) || body AS text, ts
              FROM observations
            UNION ALL SELECT 's' || id, body, ts FROM summaries
-           UNION ALL SELECT 'p' || id, substr(body, 1, 1000), ts FROM prompts
+           UNION ALL SELECT 'p' || id, body, ts FROM prompts
          ) d LEFT JOIN embeddings e ON e.doc = d.doc AND e.embedder = ?1
          WHERE e.doc IS NULL AND trim(d.text) != '' ORDER BY d.ts DESC LIMIT ?2",
     )?;
@@ -141,7 +143,12 @@ fn pending(conn: &Connection, limit: i64) -> Result<Vec<(String, String)>> {
     })?;
     rows.map(|r| {
         let (doc, text) = r?;
-        let gated: String = redact::outbound(&text).chars().take(MAX_CHARS).collect();
+        let keep = if doc.starts_with('p') {
+            PROMPT_CHARS
+        } else {
+            MAX_CHARS
+        };
+        let gated: String = redact::outbound(&text).chars().take(keep).collect();
         Ok((doc, gated))
     })
     .collect()
@@ -611,9 +618,15 @@ mod tests {
         let conn = db::open(&dir).unwrap();
         db::upsert_session(&conn, "s", "claude", "/r", "/r", 1).unwrap();
         db::insert_prompt(&conn, "s", 1, &format!("token {} here", fake_token())).unwrap();
+        // A token across the 1,000-character cut is redacted whole, not cut first.
+        let long = format!("{} {} tail", "x".repeat(975), fake_token());
+        db::insert_prompt(&conn, "s", 2, &long).unwrap();
         let todo = pending(&conn, 10).unwrap();
-        assert_eq!(todo.len(), 1);
-        assert!(!todo[0].1.contains(&fake_token()), "{}", todo[0].1);
+        assert_eq!(todo.len(), 2);
+        for (_, text) in &todo {
+            assert!(!text.contains(&fake_token()[..20]), "{text}");
+            assert!(text.chars().count() <= 1_000);
+        }
         drop(conn);
         std::fs::remove_dir_all(&dir).ok();
     }

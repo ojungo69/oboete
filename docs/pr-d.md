@@ -79,7 +79,7 @@
    - `vec_docs` は repo と種類 (知識 `k` = 観測・要約、prompt `p`) で分けて持つ (sqlite-vec の partition key)。MCP の既定の範囲は今の repo で、PR-F の自動注入は 300 ms の予算なので、repo の中だけを引けるようにする。
    - partition key は書き換えられない (sqlite-vec 0.1.9: `UPDATE on partition key columns are not supported yet`)。repo の移し替え (C1 の `rekey_paths`) は古いキーの索引の行を消し、印を戻す。次の observe が `embeddings` から索引だけを作り直す (Workers AI は呼ばない)。
    - モデル名は「どこで動かしたか」ではなく「どのモデルか」。Workers AI と手元の同じ重み (D3) は同じ空間なので作り直さない (決定 5)。
-2. **observe の最後に、ベクトルの無い文書を新しい順にベクトルにする** (`provider = "workers-ai"` のときだけ)。埋め込む文は spike と同じ (観測は `kind: title` と本文、要約は本文、prompt は先頭 1,000 字) で、送る前に関門 (`redact::outbound`) を通す。
+2. **observe の最後に、ベクトルの無い文書を新しい順にベクトルにする** (`provider = "workers-ai"` のときだけ)。埋め込む文は spike と同じ (観測は `kind: title` と本文、要約は本文、prompt は先頭 1,000 字) で、送る前に関門 (`redact::outbound`) を通す。prompt は関門を通してから 1,000 字で切る (先に切ると、切れ目をまたぐ鍵が規則に合わなくなり、ほぼ全体が送られる)。
    - 1 回の observe で 20 リクエスト (2,000 件) まで。observe はロックを持ったまま動くので、ほかの session の要約を長く待たせない。
    - 1 日 200 リクエストまで (`daily_requests`)。spike の文で 1 件 0.46 neuron なので約 9,000 neuron、無料の 1 日 10,000 の内側。claude-mem を取り込んだ後の 18 万件は、`oboete reindex` を打たなければ約 9 日で埋まる。
    - 文書を消す (`delete_doc`・`delete_session`) と、そのベクトルと索引の行も同じトランザクションで消える。消した記憶のベクトルは残さない。
