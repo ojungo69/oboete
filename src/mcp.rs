@@ -45,7 +45,8 @@ pub struct SearchArgs {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct GetArgs {
-    /// A document id from `search`: `o12` (observation), `s5` (session summary) or `p7` (prompt).
+    /// A document id from `search`: `o12` (observation), `s5` (session summary) or `p7` (prompt),
+    /// or a document's uid (`<device>:o12`).
     id: String,
 }
 

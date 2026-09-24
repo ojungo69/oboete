@@ -122,7 +122,71 @@ pub fn open(home: &Path) -> Result<Connection> {
     ensure_fts(&mut conn).context("search index")?;
     ensure_repo_keys(&mut conn).context("migrate repository keys")?;
     ensure_device(&conn, &path).context("device id")?;
+    ensure_uids(&mut conn).context("migrate document uids")?;
     Ok(conn)
+}
+
+/// Every document's `uid`, unique across devices (proposal §4.2 3): `<device id>:<doc>` for what
+/// this device recorded (a trigger fills it on insert, so every insert path gets one), and
+/// `<source>:<source row>` for an import, so two devices importing one claude-mem database agree.
+/// Rows from before are filled once (`user_version` 2). Local ids (`o123`) stay what pages and
+/// agents see; `get` takes either.
+fn ensure_uids(conn: &mut Connection) -> Result<()> {
+    for table in ["observations", "summaries", "prompts"] {
+        ensure_column(conn, table, "uid", "TEXT")?;
+    }
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS observations_uid ON observations(uid);
+         CREATE UNIQUE INDEX IF NOT EXISTS summaries_uid ON summaries(uid);
+         CREATE UNIQUE INDEX IF NOT EXISTS prompts_uid ON prompts(uid);
+         CREATE TRIGGER IF NOT EXISTS observations_uid_fill AFTER INSERT ON observations
+           WHEN NEW.uid IS NULL BEGIN
+             UPDATE observations SET uid = (SELECT value FROM meta WHERE key = 'device_id') || ':o' || NEW.id
+             WHERE id = NEW.id;
+           END;
+         CREATE TRIGGER IF NOT EXISTS summaries_uid_fill AFTER INSERT ON summaries
+           WHEN NEW.uid IS NULL BEGIN
+             UPDATE summaries SET uid = (SELECT value FROM meta WHERE key = 'device_id') || ':s' || NEW.id
+             WHERE id = NEW.id;
+           END;
+         CREATE TRIGGER IF NOT EXISTS prompts_uid_fill AFTER INSERT ON prompts
+           WHEN NEW.uid IS NULL BEGIN
+             UPDATE prompts SET uid = (SELECT value FROM meta WHERE key = 'device_id') || ':p' || NEW.id
+             WHERE id = NEW.id;
+           END;",
+    )?;
+    let version = |c: &Connection| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0));
+    if version(conn)? >= 2 {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if version(&tx)? < 2 {
+        let imported: Vec<(String, String)> = tx
+            .prepare("SELECT source || ':' || source_id, doc FROM imports")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        for (uid, doc) in imported {
+            let table = match &doc[..1] {
+                "o" => "observations",
+                "s" => "summaries",
+                _ => "prompts",
+            };
+            tx.execute(
+                &format!("UPDATE {table} SET uid = ?1 WHERE id = ?2 AND uid IS NULL"),
+                params![uid, doc[1..].parse::<i64>().unwrap_or(-1)],
+            )?;
+        }
+        let device = device_id(&tx)?;
+        for (table, prefix) in [("observations", "o"), ("summaries", "s"), ("prompts", "p")] {
+            tx.execute(
+                &format!("UPDATE {table} SET uid = ?1 || ':{prefix}' || id WHERE uid IS NULL"),
+                params![device],
+            )?;
+        }
+        tx.execute_batch("PRAGMA user_version = 2")?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// The store file's identity: a copy on another machine (or a restored backup) is another file.
@@ -629,25 +693,26 @@ pub fn import_doc(conn: &Connection, source: &str, source_id: &str, d: &Doc) -> 
     if imported(conn, source, source_id)? {
         return Ok(false);
     }
+    let uid = format!("{source}:{source_id}");
     let prefix = match d.kind {
         "prompt" => {
             conn.execute(
-                "INSERT INTO prompts(session_id, repo, ts, body) VALUES(?1,?2,?3,?4)",
-                params![d.session_id, d.repo, d.ts, d.body],
+                "INSERT INTO prompts(session_id, repo, ts, body, uid) VALUES(?1,?2,?3,?4,?5)",
+                params![d.session_id, d.repo, d.ts, d.body, uid],
             )?;
             "p"
         }
         "summary" => {
             conn.execute(
-                "INSERT INTO summaries(session_id, repo, ts, body, provider) VALUES(?1,?2,?3,?4,?5)",
-                params![d.session_id, d.repo, d.ts, d.body, source],
+                "INSERT INTO summaries(session_id, repo, ts, body, provider, uid) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![d.session_id, d.repo, d.ts, d.body, source, uid],
             )?;
             "s"
         }
         _ => {
             conn.execute(
-                "INSERT INTO observations(session_id, repo, ts, kind, title, body, provider) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                params![d.session_id, d.repo, d.ts, d.kind, d.title, d.body, source],
+                "INSERT INTO observations(session_id, repo, ts, kind, title, body, provider, uid) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![d.session_id, d.repo, d.ts, d.kind, d.title, d.body, source, uid],
             )?;
             "o"
         }
@@ -798,6 +863,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn documents_get_uids_unique_across_devices_and_imports_agree() {
+        let dir = std::env::temp_dir().join(format!("oboete-db-uid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = open(&dir).unwrap();
+        let device = device_id(&conn).unwrap();
+        upsert_session(&conn, "s", "claude", "/r", "/r", 1).unwrap();
+        insert_prompt(&conn, "s", 1, "a prompt").unwrap();
+        let doc = Doc {
+            session_id: "s",
+            repo: "/r",
+            ts: 2,
+            kind: "decision",
+            title: "t",
+            body: "imported",
+        };
+        assert!(import_doc(&conn, "claude-mem:abc", "o7", &doc).unwrap());
+        let uid = |table: &str, id: i64| -> String {
+            conn.query_row(&format!("SELECT uid FROM {table} WHERE id=?1"), [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(uid("prompts", 1), format!("{device}:p1"));
+        assert_eq!(uid("observations", 1), "claude-mem:abc:o7");
+        // Rows from before uids existed are filled once: imports from their source, the rest
+        // from this device.
+        insert_prompt(&conn, "s", 3, "another").unwrap();
+        conn.execute_batch(
+            "UPDATE prompts SET uid = NULL; UPDATE observations SET uid = NULL; PRAGMA user_version = 1",
+        )
+        .unwrap();
+        drop(conn);
+        let conn = open(&dir).unwrap();
+        let uids: Vec<String> = conn
+            .prepare("SELECT uid FROM prompts UNION ALL SELECT uid FROM observations")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            uids,
+            [
+                format!("{device}:p1"),
+                format!("{device}:p2"),
+                "claude-mem:abc:o7".into()
+            ]
+        );
+        drop(conn);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn device_id_stays_with_the_file_and_changes_on_a_copy() {
         let dir = std::env::temp_dir().join(format!("oboete-db-device-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -863,7 +981,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert!(version >= 1);
 
         // A repository used before it had an origin moves when an observe run sees one.
         let late = dir.join("late");
