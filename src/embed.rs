@@ -246,33 +246,42 @@ fn store(conn: &mut Connection, batch: &[(String, String)], vecs: &[Vec<f32>]) -
     Ok(n)
 }
 
-/// Index the vectors `vec_docs` does not have (a re-key drops a repository's rows).
+/// Index the vectors `vec_docs` does not have (a re-key drops a repository's rows; `reindex`
+/// drops them all), a page per transaction so a whole store's vectors are never in memory at once.
 fn index_pending(conn: &mut Connection) -> Result<usize> {
-    let tx = conn.transaction()?;
-    let rows: Vec<(String, Vec<u8>)> = tx
-        .prepare("SELECT doc, vec FROM embeddings WHERE indexed = 0 AND embedder = ?1")?
-        .query_map(params![EMBEDDER], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<Result<_, _>>()?;
     let mut n = 0;
-    for (doc, bytes) in rows {
-        let Some(repo) = repo_of(&tx, &doc)? else {
-            continue;
-        };
-        let vec: Vec<f32> = bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|b| f32::from_le_bytes(*b))
-            .collect();
-        index(&tx, &doc, &repo, &vec)?;
-        tx.execute(
-            "UPDATE embeddings SET indexed = 1 WHERE doc = ?1",
-            params![doc],
-        )?;
-        n += 1;
+    loop {
+        let tx = conn.transaction()?;
+        let rows: Vec<(String, Vec<u8>)> = tx
+            .prepare(
+                "SELECT doc, vec FROM embeddings WHERE indexed = 0 AND embedder = ?1 LIMIT ?2",
+            )?
+            .query_map(params![EMBEDDER, PAGE], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        if rows.is_empty() {
+            return Ok(n);
+        }
+        for (doc, bytes) in rows {
+            // A vector whose document is gone is dropped with it (no row stays unindexed forever).
+            let Some(repo) = repo_of(&tx, &doc)? else {
+                tx.execute("DELETE FROM embeddings WHERE doc = ?1", params![doc])?;
+                continue;
+            };
+            let vec: Vec<f32> = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect();
+            index(&tx, &doc, &repo, &vec)?;
+            tx.execute(
+                "UPDATE embeddings SET indexed = 1 WHERE doc = ?1",
+                params![doc],
+            )?;
+            n += 1;
+        }
+        tx.commit()?;
     }
-    tx.commit()?;
-    Ok(n)
 }
 
 fn index(conn: &Connection, doc: &str, repo: &str, vec: &[f32]) -> Result<()> {
@@ -325,6 +334,13 @@ pub fn reindex(home: &Path) -> Result<Stats> {
         "[embedding] provider is \"{}\"; reindex needs \"workers-ai\"",
         cfg.embedding.provider
     );
+    // The account and the token are checked before the index is dropped: a failed reindex must
+    // not leave search without one.
+    anyhow::ensure!(
+        cfg.embedding.account_id.is_some(),
+        "[embedding] account_id is not set"
+    );
+    config::read_key(&cfg.embedding.key_file)?;
     let mut conn = db::open(home)?;
     conn.execute_batch("DELETE FROM vec_docs; UPDATE embeddings SET indexed = 0;")?;
     backlog(&mut conn, &cfg.embedding, None)
@@ -508,6 +524,53 @@ mod tests {
         db::insert_prompt(&conn, "s", 3, "a third prompt").unwrap();
         let stats = backlog_at(&mut conn, &url, "k", Some(0)).unwrap();
         assert_eq!((stats.embedded, stats.requests), (0, 0));
+        drop(conn);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reindex_keeps_the_index_when_the_token_is_missing_and_rebuilds_it_in_pages() {
+        let dir = std::env::temp_dir().join(format!("oboete-embed-pages-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut conn = db::open(&dir).unwrap();
+        db::upsert_session(&conn, "s", "claude", "/r", "/r", 1).unwrap();
+        // More vectors than one page, stored as if embedded earlier and not yet indexed.
+        let n = PAGE as usize + 500;
+        let tx = conn.transaction().unwrap();
+        let mut v = vec![0.0f32; DIM];
+        v[0] = 1.0;
+        let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+        for i in 1..=n {
+            db::insert_prompt(&tx, "s", i as i64, "p").unwrap();
+            tx.execute(
+                "INSERT INTO embeddings(doc, embedder, text_sha, vec) VALUES(?1, ?2, '', ?3)",
+                params![format!("p{i}"), EMBEDDER, bytes],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        assert_eq!(index_pending(&mut conn).unwrap(), n);
+        let indexed: i64 = conn
+            .query_row("SELECT COUNT(*) FROM vec_docs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(indexed, n as i64);
+        drop(conn);
+
+        std::fs::write(
+            dir.join("config.toml"),
+            format!(
+                "[embedding]\nprovider = \"workers-ai\"\naccount_id = \"a\"\nkey_file = \"{}\"\n",
+                dir.join("missing-key.md").display()
+            ),
+        )
+        .unwrap();
+        assert!(reindex(&dir).is_err());
+        let conn = db::open(&dir).unwrap();
+        let still: i64 = conn
+            .query_row("SELECT COUNT(*) FROM vec_docs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(still, n as i64);
         drop(conn);
         std::fs::remove_dir_all(&dir).ok();
     }
