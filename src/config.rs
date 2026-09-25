@@ -90,6 +90,10 @@ pub enum Provider {
         /// Extra request-body fields merged in (OpenRouter's `models` fallback, `provider`).
         #[serde(default)]
         extra: serde_json::Map<String, serde_json::Value>,
+        /// Extra request headers (OpenCode Go's `x-opencode-session`). Never a key: keys stay
+        /// in `key_file`.
+        #[serde(default)]
+        headers: std::collections::BTreeMap<String, String>,
     },
     /// A subscription CLI run headless (`agy`, `claude`, `grok`, `codex`).
     Cli {
@@ -170,6 +174,7 @@ fn openai(
         timeout_s: default_timeout(),
         retry_429,
         extra: extra.as_object().cloned().unwrap_or_default(),
+        headers: Default::default(),
     }
 }
 
@@ -192,6 +197,19 @@ fn cli(name: &str, model: Option<&str>, daily_budget: u32) -> Provider {
 /// owner keeps the grok subscription out of curation (2026-09-25).
 fn default_providers() -> Vec<Provider> {
     let groq = "https://api.groq.com/openai/v1";
+    let mut opencode_go = openai(
+        "opencode-go",
+        "https://opencode.ai/zen/go/v1",
+        "OPENCODE_API_KEY.md",
+        "glm-5.3-flash",
+        300,
+        true,
+        serde_json::json!({}),
+    );
+    if let Provider::Openai { headers, .. } = &mut opencode_go {
+        // New console keys are refused without it (HTTP 400 MissingSessionID, 2026-09-26).
+        headers.insert("x-opencode-session".into(), "oboete".into());
+    }
     vec![
         openai(
             "groq",
@@ -211,6 +229,17 @@ fn default_providers() -> Vec<Provider> {
             true,
             serde_json::json!({}),
         ),
+        openai(
+            "nim",
+            "https://integrate.api.nvidia.com/v1",
+            "NVIDIA_NIM_KEY.md",
+            "nvidia/nemotron-3-super-120b-a12b",
+            500,
+            true,
+            serde_json::json!({"max_tokens": 2000}),
+        ),
+        opencode_go,
+        cli("codex", Some("gpt-6-luna"), 200),
         cli("claude", Some("haiku"), 200),
         openai(
             "openrouter",
@@ -222,15 +251,6 @@ fn default_providers() -> Vec<Provider> {
             serde_json::json!({"models": ["qwen/qwen3.8-27b:free"], "provider": {"require_parameters": true}}),
         ),
         openai(
-            "nim",
-            "https://integrate.api.nvidia.com/v1",
-            "NVIDIA_NIM_KEY.md",
-            "nvidia/nemotron-3-super-120b-a12b",
-            500,
-            true,
-            serde_json::json!({"max_tokens": 2000}),
-        ),
-        openai(
             "mistral",
             "https://api.mistral.ai/v1",
             "MISTRAL_API_KEY.md",
@@ -239,7 +259,6 @@ fn default_providers() -> Vec<Provider> {
             true,
             serde_json::json!({}),
         ),
-        cli("codex", Some("gpt-6-luna"), 200),
     ]
 }
 
@@ -299,12 +318,27 @@ mod tests {
     #[test]
     fn defaults_and_toml_extra_fields_parse() {
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.providers.len(), 7);
-        assert!(
-            cfg.providers
-                .iter()
-                .all(|p| p.name() != "agy" && p.name() != "grok")
+        // The owner's order (2026-09-26), with OpenCode Go after nim; agy and grok are out.
+        let names: Vec<_> = cfg.providers.iter().map(Provider::name).collect();
+        assert_eq!(
+            names,
+            [
+                "groq",
+                "groq-20b",
+                "nim",
+                "opencode-go",
+                "codex",
+                "claude",
+                "openrouter",
+                "mistral"
+            ]
         );
+        match &cfg.providers[3] {
+            Provider::Openai { headers, .. } => {
+                assert_eq!(headers["x-opencode-session"], "oboete")
+            }
+            _ => panic!("expected opencode-go"),
+        }
         assert_eq!(cfg.summary.language, "Japanese");
         assert_eq!(cfg.embedding.provider, "none");
         let cfg: Config = toml::from_str(
@@ -316,6 +350,7 @@ kind = "openai"
 name = "ollama"
 base_url = "http://127.0.0.1:11434/v1"
 model = "qwen3:8b"
+headers = { "x-opencode-session" = "oboete" }
 [providers.extra]
 options = { num_ctx = 16000 }
 [[providers]]
@@ -329,10 +364,14 @@ model = "haiku"
         assert_eq!(cfg.summary.language, "English");
         match &cfg.providers[0] {
             Provider::Openai {
-                key_file, extra, ..
+                key_file,
+                extra,
+                headers,
+                ..
             } => {
                 assert!(key_file.is_none());
                 assert_eq!(extra["options"]["num_ctx"], 16000);
+                assert_eq!(headers["x-opencode-session"], "oboete");
             }
             _ => panic!("expected openai"),
         }

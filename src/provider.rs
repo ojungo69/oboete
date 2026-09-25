@@ -213,6 +213,7 @@ fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<Value, CallError> 
             model,
             timeout_s,
             extra,
+            headers,
             ..
         } => openai_compat(
             base_url,
@@ -220,6 +221,7 @@ fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<Value, CallError> 
             model,
             *timeout_s,
             extra,
+            headers,
             prompt,
             schema,
         ),
@@ -232,12 +234,14 @@ fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<Value, CallError> 
     }
 }
 
+#[allow(clippy::too_many_arguments)] // the fields of one `Provider::Openai`, as the tests pass them
 fn openai_compat(
     base_url: &str,
     key_file: Option<&Path>,
     model: &str,
     timeout_s: u64,
     extra: &serde_json::Map<String, Value>,
+    headers: &std::collections::BTreeMap<String, String>,
     prompt: &str,
     schema: &Value,
 ) -> Result<Value, CallError> {
@@ -261,6 +265,9 @@ fn openai_compat(
     }
     let agent: ureq::Agent = agent.build().into();
     let mut req = agent.post(&url);
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
     if let Some(key_file) = key_file {
         let key = config::read_key(key_file).map_err(|e| CallError::other(format!("{e:#}")))?;
         req = req.header("Authorization", &format!("Bearer {key}"));
@@ -725,10 +732,15 @@ mod tests {
     }
 
     /// One-shot HTTP server on localhost that answers any request with `body`.
-    fn serve_once(body: Vec<u8>, extra_headers: &'static str) -> String {
+    /// Also hands back the request it received.
+    fn serve_once(
+        body: Vec<u8>,
+        extra_headers: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let (mut conn, _) = listener.accept().unwrap();
             let mut req = Vec::new();
@@ -757,8 +769,9 @@ mod tests {
             );
             conn.write_all(head.as_bytes()).ok();
             conn.write_all(&body).ok();
+            tx.send(String::from_utf8_lossy(&req).into_owned()).ok();
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), rx)
     }
 
     #[test]
@@ -782,18 +795,50 @@ mod tests {
     #[test]
     fn http_answers_are_parsed_and_capped() {
         let answer = json!({"choices": [{"message": {"content": "{\"summary\":\"s\",\"observations\":[]}"}}]});
-        let url = serve_once(answer.to_string().into_bytes(), "");
-        let v = openai_compat(&url, None, "m", 10, &Default::default(), "p", &json!({})).unwrap();
+        let (url, request) = serve_once(answer.to_string().into_bytes(), "");
+        // OpenCode Go refuses a request without its session header (HTTP 400 MissingSessionID).
+        let headers = [("x-opencode-session".to_string(), "oboete".to_string())].into();
+        let v = openai_compat(
+            &url,
+            None,
+            "m",
+            10,
+            &Default::default(),
+            &headers,
+            "p",
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(v["summary"], "s");
-        let url = serve_once(vec![b' '; MAX_RESPONSE_BYTES as usize + 10], "");
-        let e =
-            openai_compat(&url, None, "m", 10, &Default::default(), "p", &json!({})).unwrap_err();
+        let request = request.recv().unwrap().to_lowercase();
+        assert!(request.contains("x-opencode-session: oboete"), "{request}");
+        let (url, _) = serve_once(vec![b' '; MAX_RESPONSE_BYTES as usize + 10], "");
+        let e = openai_compat(
+            &url,
+            None,
+            "m",
+            10,
+            &Default::default(),
+            &Default::default(),
+            "p",
+            &json!({}),
+        )
+        .unwrap_err();
         assert!(e.invalid(), "{}", e.message);
         // 2 KB on the wire, 2 MiB once decoded.
         let bomb = include_bytes!("testdata/two-mib-of-spaces.gz").to_vec();
-        let url = serve_once(bomb, "Content-Encoding: gzip\r\n");
-        let e =
-            openai_compat(&url, None, "m", 10, &Default::default(), "p", &json!({})).unwrap_err();
+        let (url, _) = serve_once(bomb, "Content-Encoding: gzip\r\n");
+        let e = openai_compat(
+            &url,
+            None,
+            "m",
+            10,
+            &Default::default(),
+            &Default::default(),
+            "p",
+            &json!({}),
+        )
+        .unwrap_err();
         assert!(e.message.contains("larger than"), "{}", e.message);
     }
 
