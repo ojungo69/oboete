@@ -23,13 +23,14 @@ DOC_SQL = {'o': 'SELECT title, body FROM observations WHERE id=?',
 
 
 def kappa(pairs):
-    """Cohen's kappa for two binary raters; pairs of (bool, bool)."""
+    """Cohen's kappa for two binary raters; pairs of (bool, bool). None when both raters used one
+    category only: kappa is undefined there, and the raw agreement is reported beside it."""
     n = len(pairs)
     po = sum(a == b for a, b in pairs) / n
     pa = sum(a for a, _ in pairs) / n
     pb = sum(b for _, b in pairs) / n
     pe = pa * pb + (1 - pa) * (1 - pb)
-    return 1.0 if pe == 1 else (po - pe) / (1 - pe)
+    return None if pe == 1 else (po - pe) / (1 - pe)
 
 
 def draw(queries, judgments, doc_text, n=N):

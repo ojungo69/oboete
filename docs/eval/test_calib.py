@@ -20,6 +20,10 @@ def sessions(side, n):
     return out
 
 
+def test_kappa_is_undefined_when_both_raters_use_one_category():
+    assert kappa([(True, True)] * 20) is None
+
+
 def test_draw_takes_dev_pairs_balanced_one_per_question_and_blind():
     dev, test = sessions('dev', 80), sessions('test', 5)
     queries = [{'qid': f'q{i}', 'text': f'question {i}', 'session': s, 'split': 'dev'} for i, s in enumerate(dev)]
