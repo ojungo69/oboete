@@ -234,6 +234,16 @@ fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<Value, CallError> 
     }
 }
 
+/// Some models wrap their JSON in a markdown fence even under a strict `json_schema`
+/// (OpenCode Go's glm-5.3-flash, 3 of 4 calls on 2026-09-26).
+fn unfence(content: &str) -> &str {
+    let t = content.trim();
+    t.strip_prefix("```json")
+        .or_else(|| t.strip_prefix("```"))
+        .and_then(|rest| rest.strip_suffix("```"))
+        .map_or(t, str::trim)
+}
+
 #[allow(clippy::too_many_arguments)] // the fields of one `Provider::Openai`, as the tests pass them
 fn openai_compat(
     base_url: &str,
@@ -309,7 +319,7 @@ fn openai_compat(
     let content = v["choices"][0]["message"]["content"]
         .as_str()
         .ok_or_else(|| CallError::other("invalid output: no choices[0].message.content"))?;
-    serde_json::from_str(content)
+    serde_json::from_str(unfence(content))
         .map_err(|e| CallError::other(format!("invalid output: content is not JSON ({e})")))
 }
 
@@ -812,6 +822,26 @@ mod tests {
         assert_eq!(v["summary"], "s");
         let request = request.recv().unwrap().to_lowercase();
         assert!(request.contains("x-opencode-session: oboete"), "{request}");
+        // OpenCode Go's glm-5.3-flash fenced its JSON in 3 of 4 calls under a strict schema.
+        for content in [
+            "```json\n{\"summary\":\"f\",\"observations\":[]}\n```",
+            " ```\n{\"summary\":\"f\",\"observations\":[]}\n```\n",
+        ] {
+            let answer = json!({"choices": [{"message": {"content": content}}]});
+            let (url, _) = serve_once(answer.to_string().into_bytes(), "");
+            let v = openai_compat(
+                &url,
+                None,
+                "m",
+                10,
+                &Default::default(),
+                &Default::default(),
+                "p",
+                &json!({}),
+            )
+            .unwrap();
+            assert_eq!(v["summary"], "f");
+        }
         let (url, _) = serve_once(vec![b' '; MAX_RESPONSE_BYTES as usize + 10], "");
         let e = openai_compat(
             &url,
