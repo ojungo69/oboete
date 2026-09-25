@@ -480,11 +480,12 @@ git add docs/eval/build_english.py docs/eval/test_build_english.py docs/spec.md 
 ## Task 3: The replay set
 
 Spec 8.4 item 1: events-1000.jsonl, 30 held-out transcripts stratified by length, language and agent, the 24-hour session if its transcript exists, and a separate set of dev transcripts. Decisions made here (Claude; overrulable, recorded in the note):
-- **Pool**: transcripts on disk whose session claude-mem recorded with at least one observation, so claude-mem's own rows are its end-to-end baseline (229 Claude Code and up to 350 Codex sessions on 2026-09-26; claude-mem recorded Codex as `platform_source = 'codex'`), with at least 2 typed prompts.
+- **Pool**: transcripts on disk whose session claude-mem recorded with at least one observation, so claude-mem's own rows are its end-to-end baseline (claude-mem recorded Codex as `platform_source = 'codex'`), with at least one typed prompt. "Typed" leaves out Claude Code records the developer did not type: the hook's envelopes (`src/hook.rs` `ENVELOPES`), teammate messages, command output, slash-command tags, bash mode and interrupts (`NOT_TYPED`; issue #65).
 - **Sides**: held-out = test side of the common split, dev = dev side. So a held-out transcript never shares a session with a dev question.
 - **Size and agents**: 30 per side: 24 Claude Code, 6 Codex (the owner's decisions live in Claude Code sessions; Codex sessions are mostly delegated tasks).
-- **Strata**: prompts < 10 / 10-39 / ≥ 40; Japanese when ≥ 30% of the typed characters are Japanese. Each agent's quota is spread over its non-empty strata in proportion, at least one each (largest remainder).
+- **Strata**: length by tool calls, < 50 / 50-299 / ≥ 300 (one typed prompt can start hours of work, so prompts are no measure of length); Japanese when ≥ 30% of the typed characters are Japanese. Each agent's quota gives one to each non-empty stratum first, then spreads the rest in proportion to what each stratum has left (largest remainder), never above the quota (issue #65).
 - **Long session**: the transcript with the longest span between first and last entry is added (flag `long_span`) when that span is at least 20 hours, whichever side its hash puts it on, even if claude-mem did not record it.
+- The code blocks below are the first version; the committed `docs/eval/replay_set.py` and its tests are the reference after issue #65 (`NOT_TYPED`, `tool_calls`, the quota rule).
 - **Copies**: agents delete and rewrite transcripts, so the set is copied (Claude Code subagent files included) and hashed.
 
 **Files:**
@@ -783,7 +784,9 @@ Event mapping:
 | Transcript record | Event | Payload fields (besides `session_id`, `transcript_path`, `cwd`, `hook_event_name`) |
 |---|---|---|
 | first emitted event | `SessionStart` first | `source: "startup"` |
-| Claude `user`, `content` a string, not `isMeta` / `isCompactSummary`, main file | `UserPromptSubmit` (a pending `Stop` first) | `prompt` |
+| Claude `user`, `content` a string, not `isMeta` / `isCompactSummary`, main file | `UserPromptSubmit` (a pending `Stop` first) | `prompt`. Harness envelopes (`<task-notification>` …) stay prompts: live hooks receive them and drop them (`hook::is_envelope`) |
+| Claude `user` whose text starts with `<command-name>` or `<command-message>` | `UserPromptSubmit` | `prompt` = the command as typed, `/name args` |
+| Claude `user` whose text starts with `<local-command-`, `<bash-input`, `<bash-stdout`, `<bash-stderr` or `[Request interrupted` | nothing: transcript-only records no prompt hook ever saw | |
 | Claude `user`, `content` list with `text` items, main file | `UserPromptSubmit` | `prompt` = the text items joined by `\n` |
 | Claude `tool_result` item | `PostToolUse`, or `PostToolUseFailure` when `is_error` | `tool_name`, `tool_input` (the `tool_use` input; for AskUserQuestion plus `answers` from `toolUseResult.answers`), `tool_response` (`toolUseResult`, else the item's `content`), `error` (failures), `agent_id` (subagents) |
 | Claude `user` with `isCompactSummary` | `PostCompact` | `trigger: "auto"`, `compact_summary` |
@@ -802,7 +805,7 @@ Event mapping:
 
 - [ ] **Step 1: Write the fixtures**
 
-`src/testdata/transcripts/claude-basic.jsonl` (18 lines; line 7 is deliberately not JSON; lines 16-18 are an inline subagent, as older Claude Code wrote them):
+`src/testdata/transcripts/claude-basic.jsonl` (20 lines; line 7 is deliberately not JSON; lines 16-18 are an inline subagent, as older Claude Code wrote them; line 19 is command output, line 20 a slash command):
 
 ```
 {"type":"permission-mode","permissionMode":"default","sessionId":"claude-basic"}
@@ -823,6 +826,8 @@ this line is not JSON
 {"type":"user","isSidechain":true,"agentId":"b2","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:12.000Z","message":{"role":"user","content":"Inline subagent task: list the Rust files"}}
 {"type":"assistant","isSidechain":true,"agentId":"b2","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:13.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Listing them."},{"type":"tool_use","id":"toolu_b1","name":"Glob","input":{"pattern":"**/*.rs"}}]}}
 {"type":"user","isSidechain":true,"agentId":"b2","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:14.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_b1","content":"src/cache.rs"}]}}
+{"type":"user","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:15.000Z","message":{"role":"user","content":"<local-command-stdout>Compacted</local-command-stdout>"}}
+{"type":"user","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:16.000Z","message":{"role":"user","content":"<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args>keep the cache decision</command-args>"}}
 ```
 
 `src/testdata/transcripts/claude-basic/subagents/agent-a1.jsonl`:
@@ -886,8 +891,9 @@ mod tests {
                 "PostToolUseFailure",
                 "PostCompact",
                 "PostToolUse",
-                "PostToolUse",
                 "Stop",
+                "UserPromptSubmit",
+                "PostToolUse",
                 "PostToolUse",
                 "SessionEnd"
             ]
@@ -909,25 +915,27 @@ mod tests {
         // The inline subagent: its tool call only, never its task as a prompt or its text as a Stop.
         assert_eq!(v[8]["payload"]["tool_name"], "Glob");
         assert_eq!(v[8]["payload"]["agent_id"], "b2");
-        assert_eq!(v[10]["payload"]["last_assistant_message"], "テストを直します。");
-        assert_eq!(v[11]["payload"]["tool_name"], "Grep");
-        assert_eq!(v[11]["payload"]["agent_id"], "a1");
+        assert_eq!(v[9]["payload"]["last_assistant_message"], "テストを直します。");
+        // Command output is no prompt; the slash command is, as typed.
+        assert_eq!(v[10]["payload"]["prompt"], "/compact keep the cache decision");
+        assert_eq!(v[12]["payload"]["tool_name"], "Grep");
+        assert_eq!(v[12]["payload"]["agent_id"], "a1");
     }
 
     #[test]
     fn a_tool_call_without_result_is_emitted_at_the_end() {
         let (v, _) = events(CLAUDE, "claude");
-        assert_eq!(v[9]["payload"]["tool_name"], "Edit");
-        assert_eq!(v[9]["payload"]["interrupted"], true);
-        assert!(v[9]["payload"]["tool_response"].is_null());
+        assert_eq!(v[11]["payload"]["tool_name"], "Edit");
+        assert_eq!(v[11]["payload"]["interrupted"], true);
+        assert!(v[11]["payload"]["tool_response"].is_null());
     }
 
     #[test]
     fn unknown_and_broken_lines_are_skipped() {
         let (v, stats) = events(CLAUDE, "claude");
         let ignored = [("atis-latch".to_string(), 1), ("permission-mode".to_string(), 1)].into();
-        assert_eq!(stats, Stats { lines: 21, skipped: 1, events: 13, ignored });
-        assert_eq!(v.len(), 13);
+        assert_eq!(stats, Stats { lines: 23, skipped: 1, events: 14, ignored });
+        assert_eq!(v.len(), 14);
         assert!(convert(Path::new(CLAUDE), "grok", Vec::new()).is_err());
     }
 
@@ -1001,6 +1009,15 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+
+/// Claude Code records that only the transcript has: no prompt hook ever saw them.
+const TRANSCRIPT_ONLY: [&str; 5] = [
+    "<local-command-",
+    "<bash-input",
+    "<bash-stdout",
+    "<bash-stderr",
+    "[Request interrupted",
+];
 
 /// Harness context Codex sends as user messages; not typed prompts.
 const CODEX_CONTEXT: [&str; 5] = [
@@ -1128,6 +1145,20 @@ fn text_of(content: &Value) -> String {
     }
 }
 
+/// A slash command as the developer typed it: the transcript stores it as tags.
+fn command_text(s: &str) -> Option<String> {
+    let tag = |name: &str| {
+        let (_, rest) = s.split_once(&format!("<{name}>"))?;
+        let (value, _) = rest.split_once(&format!("</{name}>"))?;
+        Some(value.trim().to_string())
+    };
+    let name = tag("command-name")?;
+    Some(match tag("command-args").filter(|a| !a.is_empty()) {
+        Some(args) => format!("{name} {args}"),
+        None => name,
+    })
+}
+
 fn claude_line<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) -> Result<()> {
     // Older Claude Code wrote subagent turns inline, marked isSidechain; newer writes them to
     // <session>/subagents/, read with their file's agent id.
@@ -1157,10 +1188,17 @@ fn claude_line<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) 
                 }
             }
             let text = text_of(content);
-            if agent_id.is_none() && !text.trim().is_empty() {
-                e.prompt(&ts, &text)?;
+            let t = text.trim_start();
+            if agent_id.is_some() || t.is_empty() || TRANSCRIPT_ONLY.iter().any(|p| t.starts_with(p)) {
+                return Ok(());
             }
-            Ok(())
+            if t.starts_with("<command-name>") || t.starts_with("<command-message>") {
+                if let Some(command) = command_text(t) {
+                    e.prompt(&ts, &command)?;
+                }
+                return Ok(());
+            }
+            e.prompt(&ts, &text)
         }
         Some("assistant") => {
             for item in content.as_array().into_iter().flatten() {
@@ -2850,7 +2888,7 @@ if __name__ == '__main__':
 - [ ] **Step 2: Run it and check against known counts**
 
 Run: `cd docs/eval && python3 corpus_count.py`
-Expected: `eval_store` shows 152,030 observations, 13,155 summaries and 13,185 prompts (docs/pr-b.md B1 result; equal to Task 1's counts); `live_store` shows a few thousand documents at most; the Windows and iMac lines show counts, `null` (no database) or an `error` (iMac asleep: rerun later). `raw_rate` runs `oboete transcript` over every transcript of the last 90 days (about 2,000 files): minutes, not seconds; run it in the background.
+Expected: `eval_store` equal to Task 1's counts in the note (152,136 observations, 13,169 summaries, 13,197 prompts on 2026-09-26); `live_store` shows a few thousand documents at most; the Windows and iMac lines show counts, `null` (no database) or an `error` (iMac asleep: rerun later). `raw_rate` runs `oboete transcript` over every transcript of the last 90 days (about 2,000 files): minutes, not seconds; run it in the background.
 
 - [ ] **Step 3: Record and commit**
 

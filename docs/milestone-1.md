@@ -27,3 +27,29 @@ Every draw orders candidates by sha256 of `<purpose>:oboete-milestone-1-2026-09-
 - End-to-end: at least 10 new held-out transcripts from the same period, drawn with replay_set.py's strata and the seed `oboete-final-replay-2026-09-26`.
 - Judged only at milestone 8, by a judge that passed calibration. Nobody tunes on it. A failed final run uses the set up (8.1).
 - Risk: if claude-mem stops recording before milestone 8, the source becomes the agents' transcripts from the same period, with the same filters; the decision is recorded here when it happens.
+
+## Replay set (Task 3)
+
+Frozen as replay/manifest.json (every copied file's sha256) and replay/events-1000.jsonl. Rules (Claude; overrulable):
+- Pool: transcripts on disk whose session claude-mem recorded with at least one observation (so claude-mem's own rows are its end-to-end baseline, for Claude Code and Codex alike), with at least one typed prompt.
+- Typed prompts leave out Claude Code records the developer did not type: the hook's envelopes, teammate messages, command output, slash-command tags, bash mode and interrupts (`NOT_TYPED` in replay_set.py).
+- Sides: held-out = test side of the common session-hash split, dev = dev side.
+- 24 Claude Code and 6 Codex sessions per side. Strata: length by tool calls (< 50, 50-299, ≥ 300) × language (Japanese when ≥ 30% of typed characters are Japanese). One per non-empty stratum first, the rest in proportion, never above the quota.
+- The longest-span transcript is added when it spans 20 hours or more.
+
+Pool on 2026-09-26: 224 Claude Code and 242 Codex sessions.
+
+| Side | Agent | long/ja | long/en | mid/ja | mid/en | short/ja | short/en | Total |
+|---|---|---|---|---|---|---|---|---|
+| held-out | claude | 8 | 2 | 7 | 1 | 5 | 2 | 25 (with the long session) |
+| held-out | codex | 1 | 1 | 1 | 1 | 1 | 1 | 6 |
+| dev | claude | 7 | 1 | 8 | 2 | 4 | 2 | 24 |
+| dev | codex | 1 | 1 | 1 | 1 | 1 | 1 | 6 |
+
+- The long session: 58.97 hours, 18 typed prompts, 3,864 tool calls, held-out (Claude Code). No 24-hour session was found; this one is longer.
+- Held-out: 145 typed prompts and 15,934 tool calls. Dev: 125 and 12,175. 304 files (with subagent files), 706 MB.
+- The first draw was discarded before anything read it: its "typed prompts" counted 1,063 task notifications, which made nearly every Claude Code session look English and short. freeze.json's two replay entries were removed and the set drawn again with the rules above (issue #65).
+
+## Findings
+
+- Today's hook keeps teammate messages ("Another Claude session sent a message: <teammate-message …>") as prompts: `ENVELOPES` in src/hook.rs has `<agent-message` but not this form. Design B's capture (milestone 2) should treat it as an envelope.
