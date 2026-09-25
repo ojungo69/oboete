@@ -184,9 +184,12 @@ fn cli(name: &str, model: Option<&str>, daily_budget: u32) -> Provider {
 }
 
 /// Default chain (docs/plan.md, verified by probes 2026-09-23): the two Groq strict-schema models
-/// (separate 8k-TPM buckets) → claude → OpenRouter free → NIM → Mistral → codex → grok. agy is
-/// not in it: headless agy has no switch that turns its tools off (it inherits the user's own
-/// tool permissions and plugins), and a curator reads untrusted text.
+/// (separate 8k-TPM buckets) → claude → OpenRouter free → NIM → Mistral → codex. The
+/// subscription CLIs run their cheap models (claude Haiku, codex gpt-6-luna), as claude-mem does
+/// on the Claude subscription: curation spends the quota the owner codes with. agy is not in
+/// it: headless agy has no switch that turns its tools off (it inherits the user's own tool
+/// permissions and plugins), and a curator reads untrusted text. grok is not in it either: the
+/// owner keeps the grok subscription out of curation (2026-09-25).
 fn default_providers() -> Vec<Provider> {
     let groq = "https://api.groq.com/openai/v1";
     vec![
@@ -208,7 +211,7 @@ fn default_providers() -> Vec<Provider> {
             true,
             serde_json::json!({}),
         ),
-        cli("claude", Some("sonnet"), 200),
+        cli("claude", Some("haiku"), 200),
         openai(
             "openrouter",
             "https://openrouter.ai/api/v1",
@@ -236,8 +239,7 @@ fn default_providers() -> Vec<Provider> {
             true,
             serde_json::json!({}),
         ),
-        cli("codex", None, 200),
-        cli("grok", None, 200),
+        cli("codex", Some("gpt-6-luna"), 200),
     ]
 }
 
@@ -297,8 +299,12 @@ mod tests {
     #[test]
     fn defaults_and_toml_extra_fields_parse() {
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.providers.len(), 8);
-        assert!(cfg.providers.iter().all(|p| p.name() != "agy"));
+        assert_eq!(cfg.providers.len(), 7);
+        assert!(
+            cfg.providers
+                .iter()
+                .all(|p| p.name() != "agy" && p.name() != "grok")
+        );
         assert_eq!(cfg.summary.language, "Japanese");
         assert_eq!(cfg.embedding.provider, "none");
         let cfg: Config = toml::from_str(

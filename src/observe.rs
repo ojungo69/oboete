@@ -317,6 +317,11 @@ fn build_prompt(agent: &str, language: &str, transcript: &str) -> String {
     )
 }
 
+#[cfg(test)]
+pub fn schema_for_tests() -> Value {
+    schema()
+}
+
 fn schema() -> Value {
     json!({
         "type": "object",

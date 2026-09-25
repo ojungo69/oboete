@@ -121,6 +121,17 @@ impl<'a> Chain<'a> {
                 std::thread::sleep(Duration::from_secs_f64(wait + 0.5));
                 result = call(p, prompt, schema);
             }
+            // Only strict-schema providers enforce the shape; valid JSON of another shape from the
+            // rest would pass here and fail the window later, without trying the next provider.
+            let result = result.and_then(|v| {
+                if fits(&v, schema) {
+                    Ok(v)
+                } else {
+                    Err(CallError::other(
+                        "invalid output: the answer does not match the schema",
+                    ))
+                }
+            });
             let ms = started.elapsed().as_millis() as i64;
             match result {
                 Ok(v) => {
@@ -150,6 +161,30 @@ impl<'a> Chain<'a> {
                 .join(" | ")
         ))
     }
+}
+
+/// Whether `v` has the types, required keys and array items `schema` asks for. Enums are left to
+/// the caller (observe maps an unknown kind).
+fn fits(v: &Value, schema: &Value) -> bool {
+    let typed = match schema["type"].as_str() {
+        Some("object") => v.is_object(),
+        Some("array") => v.is_array(),
+        Some("string") => v.is_string(),
+        Some("number" | "integer") => v.is_number(),
+        Some("boolean") => v.is_boolean(),
+        _ => true,
+    };
+    let required = schema["required"].as_array().is_none_or(|keys| {
+        keys.iter()
+            .all(|k| k.as_str().is_some_and(|k| v.get(k).is_some()))
+    });
+    let properties = schema["properties"]
+        .as_object()
+        .is_none_or(|ps| ps.iter().all(|(k, s)| v.get(k).is_none_or(|x| fits(x, s))));
+    let items = !schema["items"].is_object()
+        || v.as_array()
+            .is_none_or(|xs| xs.iter().all(|x| fits(x, &schema["items"])));
+    typed && required && properties && items
 }
 
 /// How long to skip a provider after this failure. Per-answer failures (schema mismatch, an
@@ -596,6 +631,23 @@ fn extract_structured(cli: &str, text: &str) -> Result<Value, CallError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn answers_of_another_shape_do_not_count_as_success() {
+        let schema = crate::observe::schema_for_tests();
+        let ok = serde_json::json!({"observations": [{"kind": "decision", "title": "t", "body": "b"}], "summary": "s"});
+        assert!(fits(&ok, &schema));
+        // Valid JSON, wrong keys: what a free model without strict schema support returned.
+        let other = serde_json::json!({"issue": "x", "resolution": "y", "decision": "z"});
+        assert!(!fits(&other, &schema));
+        let item_missing_body = serde_json::json!({"observations": [{"kind": "decision", "title": "t"}], "summary": "s"});
+        assert!(!fits(&item_missing_body, &schema));
+        let summary_not_text = serde_json::json!({"observations": [], "summary": 3});
+        assert!(!fits(&summary_not_text, &schema));
+        // Kinds outside the enum are mapped later (observe), not refused here.
+        let odd_kind = serde_json::json!({"observations": [{"kind": "Decision", "title": "t", "body": "b"}], "summary": ""});
+        assert!(fits(&odd_kind, &schema));
+    }
 
     #[test]
     fn cli_prompts_stay_off_the_command_line() {
