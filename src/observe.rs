@@ -55,15 +55,24 @@ pub fn run(home: &Path, settle_ms: u64) -> Result<Stats> {
     }
     let mut stats = Stats::default();
     let mut chain = provider::Chain::new(&cfg.providers);
-    let pending = db::pending_sessions(&conn, db::now_ms(), settle_ms)?;
-    for s in pending {
-        match process_session(&mut conn, &cfg, &mut chain, &s, &mut stats) {
-            Ok(()) => stats.sessions_done += 1,
-            Err(e) => {
-                stats.sessions_failed += 1;
-                eprintln!("oboete observe: session {}: {e:#}", s.id);
-            }
-        }
+    // One part per session per round, until every session is done: a long session neither
+    // stops early (nothing would start the next run) nor holds the others back.
+    let mut pending = db::pending_sessions(&conn, db::now_ms(), settle_ms)?;
+    while !pending.is_empty() {
+        pending.retain(
+            |s| match process_part(&mut conn, &cfg, &mut chain, s, &mut stats) {
+                Ok(true) => true,
+                Ok(false) => {
+                    stats.sessions_done += 1;
+                    false
+                }
+                Err(e) => {
+                    stats.sessions_failed += 1;
+                    eprintln!("oboete observe: session {}: {e:#}", s.id);
+                    false
+                }
+            },
+        );
     }
     if cfg.embedding.provider == "workers-ai" {
         match embed::backlog(&mut conn, &cfg.embedding, Some(embed::PER_RUN)) {
@@ -75,47 +84,43 @@ pub fn run(home: &Path, settle_ms: u64) -> Result<Stats> {
     Ok(stats)
 }
 
-fn process_session(
+/// Summarize the session's next part. `true`: a part was stored and more may be pending.
+fn process_part(
     conn: &mut rusqlite::Connection,
     cfg: &config::Config,
     chain: &mut provider::Chain,
     s: &db::PendingSession,
     stats: &mut Stats,
-) -> Result<()> {
-    // No cap on parts: nothing starts another run when this one stops early, and the provider
-    // chain's daily budgets already bound the calls.
-    loop {
-        let part = next_part(conn, &s.id)?;
-        let Some((last_id, last_ts)) = part.last else {
-            return Ok(());
-        };
-        // Each part's rows carry the time of its own last event.
-        let s = db::PendingSession {
-            id: s.id.clone(),
-            agent: s.agent.clone(),
-            repo: s.repo.clone(),
-            last_event_at: last_ts,
-        };
-        let stored = if part.text.trim().is_empty() {
-            // Nothing worth a model call (e.g. only SessionStart/SessionEnd): mark the rows read.
-            db::apply_batch(conn, &s, "none", "", &[], last_id)?
-        } else {
-            let prompt = build_prompt(&s.agent, &cfg.summary.language, &part.text);
-            let result = chain.summarize(conn, &prompt, &schema())?;
-            stats.fallbacks += result.fallbacks.len() as u32;
-            let observations = parse_observations(&result.output)?;
-            let summary = parse_summary(&result.output);
-            stats.observations += observations.len() as u32;
-            *stats
-                .by_provider
-                .entry(result.provider.clone())
-                .or_default() += 1;
-            db::apply_batch(conn, &s, &result.provider, &summary, &observations, last_id)?
-        };
-        if !stored {
-            return Ok(());
-        }
-    }
+) -> Result<bool> {
+    let part = next_part(conn, &s.id)?;
+    let Some((last_id, last_ts)) = part.last else {
+        return Ok(false);
+    };
+    // Each part's rows carry the time of its own last event.
+    let s = db::PendingSession {
+        id: s.id.clone(),
+        agent: s.agent.clone(),
+        repo: s.repo.clone(),
+        last_event_at: last_ts,
+    };
+    let stored = if part.text.trim().is_empty() {
+        // Nothing worth a model call (e.g. only SessionStart/SessionEnd): mark the rows read.
+        db::apply_batch(conn, &s, "none", "", &[], last_id)?
+    } else {
+        let prompt = build_prompt(&s.agent, &cfg.summary.language, &part.text);
+        let result = chain.summarize(conn, &prompt, &schema())?;
+        stats.fallbacks += result.fallbacks.len() as u32;
+        let observations = parse_observations(&result.output)?;
+        let summary = parse_summary(&result.output);
+        stats.observations += observations.len() as u32;
+        *stats
+            .by_provider
+            .entry(result.provider.clone())
+            .or_default() += 1;
+        db::apply_batch(conn, &s, &result.provider, &summary, &observations, last_id)?
+    };
+    // `false` also when the session was deleted meanwhile: nothing more to do for it.
+    Ok(stored)
 }
 
 /// One summarizer call's worth of a session, from its observe cursor on.
