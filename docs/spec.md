@@ -1313,7 +1313,7 @@ Size:
 
 ## Appendix A. Decisions made by Claude (overrulable)
 
-Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row below. A row groups the tags of one decision (118 tags, 79 rows). Claude's estimates in 8.4 (labelling hours, size) are estimates, not decisions, and are not listed.
+Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row below. A row groups the tags of one decision (115 tags, 80 rows). Claude's estimates in 8.4 (labelling hours, size) are estimates, not decisions, and are not listed.
 
 | # | Item | Section | What overruling it would change |
 |---|---|---|---|
@@ -1396,6 +1396,7 @@ Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row
 | A77 | The embedding consumer is built at milestone 4 | 8.4 | The build order |
 | A78 | Donor-port split: Codex or Grok take only the donor modules without auth | 8.4 | Who builds what |
 | A79 | Milestone placement of every Appendix B row, and the old-PR-to-milestone map | B.0 | Where each carried test runs |
+| A80 | S8's environment allow-list for curator subprocesses is built at milestone 3, with curator isolation, not at milestone 5 | 8.4, C.10 | The allow-list would arrive after claude starts curating at milestone 3 |
 
 ## Appendix B. Acceptance tests carried from issues
 
@@ -1596,6 +1597,8 @@ Only questions that nothing above settles. Each names where it gets settled.
    - whether `--json-schema` adds a structured-output tool to `init.tools`, and whether the final `result` event carries `structured_output` in stream mode. A schema tool in `init.tools` would meet 6.5's rule that the result is discarded when any tool is present.
 
    The same call records how `claude -p` exits at a usage limit (exit code, message) and whether a rejected request uses quota (§5 of the note).
+
+   The same session also runs one codex call with `-c model=gpt-6-luna -c model_reasoning_effort=low` on the same synthetic text, because today's default chain already uses that model (PR #58) without a live check.
 2. **Vectorize on the Free plan.** Cloudflare's pricing page says Vectorize is Paid-only, while the Vectorize intro says Free or Paid (5.3). Remote semantic search needs Workers Paid either way, unless hub platform spike item 4 passes (5.3, §8.3). Settled when the hub is built (milestone 6): if hub platform spike item 4 passes, Vectorize is dropped and the question lapses (§8.3); otherwise the docs state what the account shows.
 3. **OpenCode Go in practice** (docs/research/curator-providers-2026-09-25.md §3.3, §3.4, §5). Nothing on Go was measured, because no key existed. Open:
    - whether `glm-5.3-flash` keeps a strict `json_schema` and accepts `temperature: 0.2`;
