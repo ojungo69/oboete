@@ -12,7 +12,7 @@ oboete is a lightweight single-binary memory for coding agents. This spec is the
 - 4 章は届け方と検索です(セッション開始時とプロンプトごとの注入、検索)。
 - 5 章は端末間の同期です。Cloudflare 上の hub(端末をつなぐ中継点)を通します。
 - 6 章は削除と安全です(「消す」の 4 段階、forget=完全削除、秘密の扱い、curator の隔離、ローカル画面)。
-- 7 章はインストール・更新・今のデータの移し替え・あなたの端末の切り替え・公開です。8 章は評価の決まりと作る順番(マイルストーン 1〜8)です。
+- 7 章はインストール・更新・今のデータの移し替え・あなたの端末の切り替え・公開です。8 章は評価の決まりと作る順番(マイルストーン 1〜8。1 台で動くものを先に作り、同期はマイルストーン 6)です。
 - 文末のタグの読み方: 「(owner decision N)」はあなたが決めたこと、「(Claude; overrulable)」は Claude が決めたことで、あなたが覆せます。
 - 「(set by measurement … at milestone K)」は、その数値をマイルストーン K の測定で決めるという意味です。「(issue #N)」は GitHub issue から来た要件です。
 - Claude が決めた項目は付録 A に表でまとめてあります。覆したい項目があれば、そこから選んでください。
@@ -172,7 +172,7 @@ Safety rules stay fixed and are not settings: decision gates, the global-scope c
 
 ### 1.8 Worker lifecycle and platform
 
-- The worker lifecycle (hook-started, exits when idle) is the default, pending measurement M5 (set by measurement M5 at milestones 4 (one device, fake hub) and 6 (devices, the deciding run)).
+- The worker lifecycle (hook-started, exits when idle) is the default, pending measurement M5 (set by measurement M5 at milestones 4 (one device) and 6 (devices, the deciding run)).
 - One program (Rust) + SQLite. This is justified by one-command install on Windows, macOS and Linux, and by reusing the measured search.
 
 ## 2. Recording
@@ -381,7 +381,7 @@ Donor paths in this section (workers/sync-hub/…, do/SyncHub.ts, index.ts, cano
 - One deployment serves one owner. So the donor's per-user routing (`getByName(userId)`, `X-User-Id`, workers/sync-hub/src/index.ts:13, :363) is not ported. It is still the single DO that proposal:68 chose.
 - Devices push and pull over HTTP with an ordered cursor. This is the only path that decides correctness (MUST-M19).
 - The first release polls and has no WebSocket. This narrows MUST-M19: its WebSocket clause and its measure move to Later (§5.18). (Claude; overrulable)
-- A WebSocket that only wakes a pull (MUST-M19) is added only if M5 shows polling misses the timing line (§5.11) (set by measurement M5 at milestones 4 (one device, fake hub) and 6 (devices, the deciding run)).
+- A WebSocket that only wakes a pull (MUST-M19) is added only if M5 shows polling misses the timing line (§5.11) (set by measurement M5 at milestone 6 (devices, the deciding run)).
 - One device needs no hub. More than one device needs it, including WSL and Windows native on the same PC. WSL and Windows sync through the hub like any two devices. While the PC is offline, they drift apart until it reconnects. The docs say that multi-device needs the hub. (owner decision 12)
 - The user sets the hub URL; none is built in (MUST-M19).
 
@@ -528,11 +528,11 @@ Only with raw sync on (owner decision 14).
 
 - The worker pushes right after it commits new ops.
 - It pulls when it starts, before it refreshes any packet, and then at an interval while it runs.
-- M5 sets the interval against the line below and the hub's request count, starting from 30 s. The interval is not carried over from RD/options-draft.md:161 (set by measurement M5 at milestones 4 (one device, fake hub) and 6 (devices, the deciding run)).
+- M5 sets the interval against the line below and the hub's request count, starting from 30 s. The interval is not carried over from RD/options-draft.md:161 (set by measurement M5 at milestone 6 (devices, the deciding run)).
 - Line: p95 ≤ 5 minutes from the window cut on device 1 to availability on device 2 (M5, RD/options-draft.md:339). This is Claude's reading of owner decision 6's "a few minutes" (RD/owner-decisions.md:10). (Claude; overrulable)
 - Most of that time is curation on device 1. So M5 also reports the transport share (from push to usable on device 2) on its own.
 - Remote MCP adds Vectorize's write-to-query delay: median under 30 s, p99 under 2 min (proposal:324).
-- A device whose worker is not running does not pull. Whether it pulls on a schedule (an OS service) is M5's worker-lifecycle decision (RD/options-draft.md:340) (set by measurement M5 at milestones 4 (one device, fake hub) and 6 (devices, the deciding run)).
+- A device whose worker is not running does not pull. Whether it pulls on a schedule (an OS service) is M5's worker-lifecycle decision (RD/options-draft.md:340) (set by measurement M5 at milestone 6 (devices, the deciding run)).
 - The SessionStart packet and doctor show the time of the last successful pull (RD/issue50.md:131).
 
 ### 5.12 Auth
@@ -1015,7 +1015,7 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
 
 ### 7.6 Running
 
-- **Worker lifecycle**: the worker is hook-started and exits when idle. This is the default until M5 decides (RD/options-draft.md:340) (set by measurement M5 at milestones 4 (one device, fake hub) and 6 (devices, the deciding run)).
+- **Worker lifecycle**: the worker is hook-started and exits when idle. This is the default until M5 decides (RD/options-draft.md:340) (set by measurement M5 at milestones 4 (one device) and 6 (devices, the deciding run)).
   - Periodic jobs run when the worker starts, if they are overdue: the backup deadline (§2.6, RD/sections-1-4.md:27) and S5's daily canary (RD/improvements-synthesis.md:456). So a device that was idle for days catches up at its next session.
   - If M5 makes an OS service the default:
     - setup registers the service, and `setup --remove` unregisters it;
@@ -1157,7 +1157,7 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
 | M2 | Coverage and crash | Every seq is curated, elided with a marker, or skipped with a reason (100%). A crash at 20 points gives identical rows (hard). The test fails against today's code first | options-draft §9 |
 | M3 | Decisions and gates | Overturned decisions shown as current = 0% (hard), on ≥ 50 human-confirmed test pairs, at least 20 of them across sessions (MUST-M3), plus ≥ 20 dev pairs for tuning (Claude; overrulable). Control pairs dropped ≤ 2%. `decided` precision ≥ 0.95 and recall ≥ 0.80. Precision is measured on ≥ 100 claims the curator marked `decided`, and recall on ≥ 100 decisions the owner confirmed in the held-out transcripts (Claude; overrulable). At N = 100, an observed 0.95 has a one-sided 95% Wilson lower bound of 0.90, and an observed 0.80 one of 0.73. Injection and taint canaries 0% (MUST-M4). Precision and recall per kind (MUST-M21) | options-draft §9, MUST-M3, MUST-M4, MUST-M21 |
 | M4 | Deletion | 0 hits after forget in every file, on every device, in the hub, R2 and Vectorize (Vectorize only if the hub spike keeps it). Covers the re-index, re-sync, re-import (claude-mem and transcripts), restore, crash, in-flight, rescan and retention cases, and the hub wipe with re-seeding from a device that holds a pre-delete copy (§5.8) (hard). The grep leaves out the limits that sections 5-7 list and doctor names: the DO's 30-day history (§5.3, §5.8), migration snapshots and evaluation copies (§7.4). Those files are still grepped; their hits are reported as the named limits (§6.7) | sections 5, 6, 7 |
-| M5 | Resume across sessions and devices | Open-item recall ≥ 0.80. Closed items shown as open ≤ 10%. Knowledge on device 2 within 5 min (p95). None tier: open-item recall ≥ 0.50 from the manifest. Worker rule: the worker is kept only if running without it misses the read-hook line at SessionStart, propagation p95 ≤ 5 min, or MCP p95 ≤ 1.5 s on the slowest device with local embeddings. The always-on service is used only if the hook-started worker misses the same lines. M5 also decides the WebSocket wake (§5.1) (set by measurement M5 at milestones 4 (one device, fake hub) and 6 (devices, the deciding run)). §8.4 places the runs at milestones 4 and 6 | RD/options-draft.md:338-340, with its 300 ms read as the read-hook line |
+| M5 | Resume across sessions and devices | Open-item recall ≥ 0.80. Closed items shown as open ≤ 10%. Knowledge on device 2 within 5 min (p95). None tier: open-item recall ≥ 0.50 from the manifest. Worker rule: the worker is kept only if running without it misses the read-hook line at SessionStart, propagation p95 ≤ 5 min, or MCP p95 ≤ 1.5 s on the slowest device with local embeddings. The always-on service is used only if the hook-started worker misses the same lines. M5 also decides the WebSocket wake (§5.1) (set by measurement M5 at milestones 4 (one device) and 6 (devices, the deciding run)). §8.4 places the runs: at milestone 4 the one-device lines and the worker rule's read-hook and MCP halves; at milestone 6 propagation, the WebSocket wake and the deciding run, since sync is built there | RD/options-draft.md:338-340, with its 300 ms read as the read-hook line |
 | M6 | Lookup ("how did we fix X") | ≥ 0.70 and ≥ current + 0.10. Cited-span validity ≥ 0.95 | options-draft §9 |
 | M14 | Hook write and redaction cost | Sets the write-hook line on the slowest machine (provisional: 20 ms p95) (set by measurement M14 at milestone 2) | section 2 |
 | Read hook | SessionStart and per-prompt injection latency | The read-hook line: set from the first measurement of the warm path on the slowest machine at milestone 4, then fixed (Claude; overrulable). M5's worker rule, M22, MUST-M9 and S2 use it | section 4 (§4.3, RD/sections-1-4.md:41) |
@@ -1206,7 +1206,12 @@ M22 counts the corpus because the old "~330k documents" figure (RD/options-draft
 
 ### 8.4 Build order (milestones; each has a docs/ note and PRs)
 
-Milestone 1 comes first. The spikes that need no labels run alongside it: isolation, hook, hub platform and donor self-host. The curator spike's gate-quality part waits for milestone 1's dev labels.
+Milestone 1 comes first. The isolation and hook spikes need no labels and run alongside it. The hub platform and donor self-host spikes need none either; they run any time before milestone 6. The curator spike's gate-quality part waits for milestone 1's dev labels.
+
+Local first: milestones 2-5 build everything one device needs, and all sync code waits for milestone 6 (Claude; overrulable). The owner left the order to Claude on 2026-09-26 ("先にローカルを完成させてからクラウドに進む方が効率的ならそれでも良い。判断は任せる"). Reasons:
+- The owner's machines switch after milestone 5, on one device (owner decision 27). Sync built earlier would wait unused until milestone 6.
+- Sync readiness is in the data from milestone 2: raw.db is keyed by (device, seq) and carries tombstones from day one. So memory recorded before milestone 6 reaches other devices when sync is turned on (5.10).
+- The worker question loses little: its one-device half is measured at milestone 4, and the consumers are the same code in either process model.
 
 1. **Freeze and label** (issue50 §8 row 1, RD/issue50.md:159):
    - B3 first: the judge calibration gate in §8.1.
@@ -1250,25 +1255,25 @@ Milestone 1 comes first. The spikes that need no labels run alongside it: isolat
      - packets and shortlists; SessionStart and per-prompt injection; compaction; current-first search on MCP, CLI and viewer;
      - the S3 reranker (§4.10, RD/sections-1-4.md:48) (Claude; overrulable);
      - B's claude-mem import into an evaluation home, so M1 runs on B's code on B's schema; the only evaluation store today was built by the current import, into today's schema (docs/pr-b.md:15, :21). This is B1's `--eval-store` path (docs/pr-b.md:21), ported to B's schema. The import into the owner's store stays at milestone 7 (Claude; overrulable);
-     - the sync client, docs/hub-protocol.md and its fake hub (§5.16; the client tests need the fake hub anyway, RD/hub-platform.md:56). This settles the worker question before milestones 5-7 build on it (Claude; overrulable);
      - the embedding consumer (vectors) (Claude; overrulable);
      - everything the owner's cut-over runs (§7.5): the v1 import with its keys and checkpoint, the settings migration including the v1 `session_repos` rows, `oboete migrate --finish`, and the transcript import command, whose parsers exist from milestone 1 (Claude; overrulable).
    - The one test-split run: M1, Raw and Rerank together.
    - M5's one-device lines, on the held-out transcripts.
-   - The worker/no-worker comparison, on dev transcripts over the fake hub:
-     - Its latency and propagation lines need no labels.
-     - The fake hub has no network hop, but it still measures polling and curation timing, which make up most of the 5 minutes.
-     - The consumers are the same code in either process model. So if milestone 6 reverses the verdict, only the lifecycle wrapper changes, not the pipeline.
    - Then: the read-hook line, M6, Inject, M21 English, M22 search and injection at scale, M22 manifest truncation.
+   - The worker/no-worker comparison's one-device half, on dev transcripts: the worker rule's read-hook line at SessionStart and MCP p95 with local embeddings. It needs no labels. Its propagation half needs sync and runs at milestone 6.
+     - The consumers are the same code in either process model. So if milestone 6 reverses the verdict, only the lifecycle wrapper changes, not the pipeline.
    - The Transcript line, because the transcript import is built here (Claude; overrulable).
    - MUST fixtures: MUST-M8, MUST-M9, MUST-M11, MUST-M12, MUST-M13.
 5. **Forget and safety** (section 6):
    - Build: the four levels, the forget pipeline and `forget_jobs`, viewer writes (the environment allow-list comes at milestone 3).
    - Lines: M4 (local), M22 forget time at scale.
    - MUST fixtures: MUST-M14 (purge).
-6. **Hub** (section 5). Starts after the donor self-host spike passes and the hub platform spike has run (a failed item 1 changes what milestone 7 ships for public users, not the owner's hub).
-   - Build: the hub from the donor fork with purge, auth, and remote MCP with OAuth and grants.
+6. **Hub** (section 5).
+   - Build, in this order:
+     - the sync client, docs/hub-protocol.md and its fake hub (§5.16; the client tests need the fake hub anyway, RD/hub-platform.md:56). These do not wait for the hub spikes;
+     - the hub from the donor fork with purge, auth, and remote MCP with OAuth and grants. It starts after the donor self-host spike passes and the hub platform spike has run (a failed item 1 changes what milestone 7 ships for public users, not the owner's hub).
    - Lines:
+     - M5's propagation lines over the fake hub first, on dev transcripts. The fake hub has no network hop, but it still measures polling and curation timing, which make up most of the 5 minutes;
      - M4 (devices, hub, R2, and Vectorize if kept);
      - M5's device lines over the real hub. This is the deciding run for the worker rule and the WebSocket wake;
      - M21: corrections survive resync;
@@ -1287,7 +1292,7 @@ Milestone 1 comes first. The spikes that need no labels run alongside it: isolat
 The owner's machines switch from the current oboete after milestone 5, when recording, curation, delivery, forget and safety work on one device (owner decisions 22, 27):
 - The dogfood user switches first, then the owner's machines in section 7's order (§7.5). The old binary is kept for rollback (owner decision 22).
 - The owner's hub joins after milestone 6.
-- Nothing is lost before that: milestone 4's sync client talks only to the fake hub, and the current oboete has no sync either.
+- Nothing is lost before that: no sync code exists before milestone 6, and the current oboete has no sync either.
 
 Who builds:
 - **Claude Code** writes:
@@ -1296,7 +1301,7 @@ Who builds:
 - **Codex or Grok** take independent pieces in parallel (project CLAUDE.md):
   - agent adapter ports;
   - transcript parsers;
-  - the donor modules that have no auth in them (op envelope, push and ack, paged pull, caps), written against docs/hub-protocol.md and tested on the fake hub (Claude; overrulable).
+  - the donor modules that have no auth in them (op envelope, push and ack, paged pull, caps), written against docs/hub-protocol.md and tested on the fake hub, at milestone 6 (Claude; overrulable).
 - Each PR gets one Codex review lane.
 
 Size:
@@ -1316,7 +1321,7 @@ Size:
 
 ## Appendix A. Decisions made by Claude (overrulable)
 
-Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row below. A row groups the tags of one decision (119 tags, 84 rows). Claude's estimates in 8.4 (labelling hours, size) are estimates, not decisions, and are not listed.
+Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row below. A row groups the tags of one decision (119 tags, 85 rows). Claude's estimates in 8.4 (labelling hours, size) are estimates, not decisions, and are not listed.
 
 | # | Item | Section | What overruling it would change |
 |---|---|---|---|
@@ -1395,7 +1400,7 @@ Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row
 | A73 | M22 counts its corpus at milestone 1; the cold path falls back to the packet's ranked claims | 8.2, 8.4 | The M22 corpus and cold path |
 | A74 | Public line: at most 0.02 nDCG@10 below the better single leg | 8.2 | The Japanese sanity line |
 | A75 | Transcript parsers move to milestone 1 | 8.4 | The build order |
-| A76 | Moves to milestone 4: the S3 reranker; the claude-mem import into an evaluation home; the sync client, protocol doc and fake hub | 8.4 | The build order |
+| A76 | Moves to milestone 4: the S3 reranker; the claude-mem import into an evaluation home | 8.4 | The build order |
 | A77 | The embedding consumer is built at milestone 4 | 8.4 | The build order |
 | A78 | Donor-port split: Codex or Grok take only the donor modules without auth | 8.4 | Who builds what |
 | A79 | Milestone placement of every Appendix B row, and the old-PR-to-milestone map | B.0 | Where each carried test runs |
@@ -1404,6 +1409,7 @@ Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row
 | A82 | The cut-over search check runs on the evaluation store imported by both codes, not on the owner's store | 7.5 | What gates the hook switch |
 | A83 | The final set also excludes sessions that supplied M21's questions or any seen result | 8.1 | Which sessions the release run may draw |
 | A84 | The Window sweep runs M6 on dev at milestone 3 | 8.2 | When the window size can be fixed |
+| A85 | Local first: the sync client, protocol doc and fake hub, and M5's propagation half, are built and measured at milestone 6; the hub spikes run any time before milestone 6 (the owner left the order to Claude, 2026-09-26) | 8.2, 8.4, B.0 | The build order |
 
 ## Appendix B. Acceptance tests carried from issues
 
@@ -1424,7 +1430,7 @@ This appendix carries every acceptance test in issues #30, #46, #53, #54, #55 an
   - PR-D (vectors, hybrid search) → 4. Search is section 4, and milestone 4's test run measures the hybrid. (Claude; overrulable)
   - PR-F (automatic injection) → 4. (Claude; overrulable)
   - PR-G (hub) → 6. (Claude; overrulable)
-  - PR-H (device-side sync) → 4 for the client against the fake hub ("the sync client, docs/hub-protocol.md and its fake hub", milestone 4), and 6 for the run against the real hub. A row that names "4, 6" runs at both. (Claude; overrulable)
+  - PR-H (device-side sync) → 6: first the client against the fake hub, then the run against the real hub (8.4, local first). (Claude; overrulable)
   - PR-J (remote MCP) → 6 ("remote MCP with OAuth and grants"). (Claude; overrulable)
   - PR-K1 (global preferences) → 3, the `pref add` gate in 3.3. The viewer button comes with viewer writes at 5. (Claude; overrulable)
 - #54 and #55 describe the current `src/observe.rs`. Design B replaces it with 3.1's windows and checkpoints and 1.1's worker. Their tests stay valid as contracts on those parts. "observe" in #46, #54 and #55 means the worker.
@@ -1440,26 +1446,26 @@ This appendix carries every acceptance test in issues #30, #46, #53, #54, #55 an
 
 | Id | Test | Source | Milestone | Section | Status | Notes |
 |---|---|---|---|---|---|---|
-| 30-1 | Documents and queries that contain secrets or `<private>`: no outbound request body contains the secret. For an excluded repo, outbound requests are 0 (proposal §4.8). | #30 row 1 (rounds 9-13) | 3 (secrets; exclusion on curation calls); 4, 6 (exclusion on embeddings and sync) | 1.2, 5.5, 6.4 | carry as regression test (secrets and `<private>`); applies (exclusion) | Secrets and `<private>`: done in #33 (`redact::outbound`, test `what_goes_to_the_summarizer_passes_the_gate`, src/observe.rs:292). Exclusion: not built. 5.5: "Content ops of an excluded repo never leave", and "Before any call that sends content out (sync, embedding, curation), the egress gate re-reads the exclusion list from the hub." Curation calls come at milestone 3, so the exclusion half starts there. `<private>` is now stated in 2.2 (B.2 #54 item 8). |
+| 30-1 | Documents and queries that contain secrets or `<private>`: no outbound request body contains the secret. For an excluded repo, outbound requests are 0 (proposal §4.8). | #30 row 1 (rounds 9-13) | 3 (secrets; exclusion on curation calls); 4 (exclusion on embeddings); 6 (sync) | 1.2, 5.5, 6.4 | carry as regression test (secrets and `<private>`); applies (exclusion) | Secrets and `<private>`: done in #33 (`redact::outbound`, test `what_goes_to_the_summarizer_passes_the_gate`, src/observe.rs:292). Exclusion: not built. 5.5: "Content ops of an excluded repo never leave", and "Before any call that sends content out (sync, embedding, curation), the egress gate re-reads the exclusion list from the hub." Curation calls come at milestone 3, so the exclusion half starts there. `<private>` is now stated in 2.2 (B.2 #54 item 8). |
 | 30-2 | A query is checked for exclusion against both the caller's repo and the repo it searches. Naming another repo in MCP's `repo` argument does not get past the check. | #30 row 2 (round 20) | 4 | 4.10, 5.5 | applies | Was a gap: 5.5 said when the list is read ("Before any call that sends content out (sync, embedding, curation), the egress gate re-reads the exclusion list from the hub."), not which repos a query is checked against. Now stated in 5.5 (B.2 #30 item 2). |
 | 30-3 | Repo key: the same repo cloned over ssh and https gets the same key. No userinfo, query or fragment remains. Only the default port is dropped; any other port stays as `host:port/path`. | #30 row 3 (rounds 15-17) | 2 | 2.4 | carry as regression test | Done in PR-C1 (#43): test `one_key_for_every_way_to_clone_and_no_secrets` (src/repo.rs:253); docs/pr-c.md C1 decision 1. Not ticked in #30. |
 | 30-4 | A repo alias can be set only in the owner's own settings (`oboete repo alias`), never by a `.oboete.toml` inside the repo. | #30 row 4 (round 9) | 2, 5 | 2.4, 6.1 | applies | The alias is in the spec by reference: RD/constraints-synthesis.md S2-9 ("merge them with `oboete repo alias`") is a checked item that section 1's introduction accepts. 6.1: "A repo's own `.oboete.toml` may only restrict (proposal:28)", and proposal:28 is the alias rule itself. Not built (docs/pr-c.md C1 decision 4). Today the rule holds only because `.oboete.toml` is not read. Design B reads it for `capture = false` (6.1), so the test becomes a real guard at milestone 5. |
 | 30-5 | An event that moves into a nested repo adds that repo to the session's set of touched repos. | #30 row 5 (round 7) | 2 | 2.4, 5.5 | carry as regression test | Done in PR-C2 (#45): test `sessions_record_every_repo_and_idless_events_stay_on_this_device` (src/hook.rs:863). Not ticked in #30. |
-| 30-6 | Two devices change the `status` of the same row: both reach the same result through `rev`, and a tombstone wins over a change. | #30 row 6 (round 15) | 4, 6 | 5.6 | applies | 5.6: "Status changes to one uid: the higher rev wins, then the device id decides." "A tombstone outranks every op on its target, whatever the arrival order." |
-| 30-7 | An exclusion reaches every device (the exclusion op). The hub also refuses the content of sessions that touched an excluded repo. | #30 row 7 (round 15) | 4, 6 | 5.5 | applies | 5.5: "An exclusion is itself an op that reaches every device. The hub refuses content ops of sessions that touched an excluded repo." |
-| 30-8 | A synced session that later enters an excluded repo is withdrawn: it disappears from the hub and the other devices and stays on the recording device. The test runs in this order: send first, enter the excluded repo afterwards. | #30 row 8 (rounds 16, 20) | 4, 6 | 5.5 | applies | 5.5: "The issue #30 tests run in its stated order: sync first, exclude afterwards." |
-| 30-9 | Tombstones, touch-set updates and withdrawal ops are sent whatever the exclusions. | #30 row 9 (rounds 8, 20) | 4, 6 | 5.5 | applies | 5.5: "Control ops always travel: tombstones, withdrawals, exclusion ops and touch-set updates (decision 11 of 2026-09-23 (proposal:35))." |
-| 30-10 | One exclude, then un-exclude cycle publishes the withdrawn sessions again. | #30 row 10 (round 17) | 4, 6 | 5.5 | applies | 5.5: "Un-excluding makes the recording devices publish those sessions again." |
-| 30-11 | Sessions from before PR-C (touched repos unknown): when at least one exclusion exists, only what the owner approved at the first confirmation is sent. | #30 row 11 (round 14) | 4, 6 | 5.5, 7.4 | applies | Was a gap. 5.5: "The first sync lists the repos and their counts and asks for confirmation." Nothing covered a session whose touched repos are unknown. In design B these include the v1 sessions recorded before PR-C2 (#45) added `session_repos` (docs/pr-c.md C2 decision 3), brought in by 7.4. Now stated in 5.5 (B.2 #30 item 3); imported documents travel (5.4), and `oboete migrate` imports the v1 `session_repos` rows (7.4) (B.3 items 1 and 2). |
-| 30-12 | When sync is first turned on, all earlier memory reaches the second device. | #30 row 12 (round 4) | 4, 6 | 5.10 | applies | 5.10: "After the control ops, a new device gets the last 30 days first, then backfills." M22 measures the first sync (8.2). |
-| 30-13 | An exclusion added on another device takes effect here before this device has pulled it. (The row names the mechanism: sync-time embeddings are judged per request by the hub's `/embed`; the summarizer's provider re-reads the list just before each call and does not call if it cannot.) | #30 row 13 (rounds 18, 19) | 4, 6 | 5.5 | applies | The test stands. Design B replaces the `/embed` mechanism with 5.5: "Before any call that sends content out (sync, embedding, curation), the egress gate re-reads the exclusion list from the hub. If it cannot, it sends nothing (issue #30; proposal:374)." |
-| 30-14 | Secrets imported from claude-mem never leave the machine: they are redacted twice, at import and just before sending. | #30 row 14 (round 9) | 4, 6 (send path; the evaluation-home import at 4); 7 (the owner's import) | 1.2, 6.4, 7.4 | applies | 7.4: "Titles and bodies are redacted with the current rules on the way in (src/import.rs:86-87)." 6.4: "Redaction runs at capture (section 2) and again at the egress gate." Both passes exist in current code; the sync path does not. |
-| 30-15 | Size limits: a provider response is at most 1 MB, a summary at most 2,000 characters, an op at most 64 KB. The hub also refuses an op over the limit. | #30 row 15 (round 20) | 3 (response); 4, 6 (op: the device's dead-letter at 4, the hub's 413 at 6) | 1.4, 5.4, 6.5 | applies (response and op); superseded (summary) | Op: 5.4, "every op is at most 64 KB. The hub refuses a larger op with 413. The device moves it to a dead-letter list with the reason instead of retrying". Response: the 1 MB cap is in current code only (src/provider.rs:490, test `http_answers_are_parsed_and_capped` at :731). Summary: design B makes claims, not session summaries (3.2: "Claim kinds: decision, preference, lesson, fix (symptom, cause, fix, commit), open item, repo fact, change."), and 6.5 capped a claim's body without a number: "a body over a length cap is rejected". 6.5 now states the caps: claim body 1,000 characters, digest 2,000, provider response 1 MB (B.3 item 3). |
+| 30-6 | Two devices change the `status` of the same row: both reach the same result through `rev`, and a tombstone wins over a change. | #30 row 6 (round 15) | 6 | 5.6 | applies | 5.6: "Status changes to one uid: the higher rev wins, then the device id decides." "A tombstone outranks every op on its target, whatever the arrival order." |
+| 30-7 | An exclusion reaches every device (the exclusion op). The hub also refuses the content of sessions that touched an excluded repo. | #30 row 7 (round 15) | 6 | 5.5 | applies | 5.5: "An exclusion is itself an op that reaches every device. The hub refuses content ops of sessions that touched an excluded repo." |
+| 30-8 | A synced session that later enters an excluded repo is withdrawn: it disappears from the hub and the other devices and stays on the recording device. The test runs in this order: send first, enter the excluded repo afterwards. | #30 row 8 (rounds 16, 20) | 6 | 5.5 | applies | 5.5: "The issue #30 tests run in its stated order: sync first, exclude afterwards." |
+| 30-9 | Tombstones, touch-set updates and withdrawal ops are sent whatever the exclusions. | #30 row 9 (rounds 8, 20) | 6 | 5.5 | applies | 5.5: "Control ops always travel: tombstones, withdrawals, exclusion ops and touch-set updates (decision 11 of 2026-09-23 (proposal:35))." |
+| 30-10 | One exclude, then un-exclude cycle publishes the withdrawn sessions again. | #30 row 10 (round 17) | 6 | 5.5 | applies | 5.5: "Un-excluding makes the recording devices publish those sessions again." |
+| 30-11 | Sessions from before PR-C (touched repos unknown): when at least one exclusion exists, only what the owner approved at the first confirmation is sent. | #30 row 11 (round 14) | 6 | 5.5, 7.4 | applies | Was a gap. 5.5: "The first sync lists the repos and their counts and asks for confirmation." Nothing covered a session whose touched repos are unknown. In design B these include the v1 sessions recorded before PR-C2 (#45) added `session_repos` (docs/pr-c.md C2 decision 3), brought in by 7.4. Now stated in 5.5 (B.2 #30 item 3); imported documents travel (5.4), and `oboete migrate` imports the v1 `session_repos` rows (7.4) (B.3 items 1 and 2). |
+| 30-12 | When sync is first turned on, all earlier memory reaches the second device. | #30 row 12 (round 4) | 6 | 5.10 | applies | 5.10: "After the control ops, a new device gets the last 30 days first, then backfills." M22 measures the first sync (8.2). |
+| 30-13 | An exclusion added on another device takes effect here before this device has pulled it. (The row names the mechanism: sync-time embeddings are judged per request by the hub's `/embed`; the summarizer's provider re-reads the list just before each call and does not call if it cannot.) | #30 row 13 (rounds 18, 19) | 6 | 5.5 | applies | The test stands. Design B replaces the `/embed` mechanism with 5.5: "Before any call that sends content out (sync, embedding, curation), the egress gate re-reads the exclusion list from the hub. If it cannot, it sends nothing (issue #30; proposal:374)." |
+| 30-14 | Secrets imported from claude-mem never leave the machine: they are redacted twice, at import and just before sending. | #30 row 14 (round 9) | 4 (the evaluation-home import); 6 (send path); 7 (the owner's import) | 1.2, 6.4, 7.4 | applies | 7.4: "Titles and bodies are redacted with the current rules on the way in (src/import.rs:86-87)." 6.4: "Redaction runs at capture (section 2) and again at the egress gate." Both passes exist in current code; the sync path does not. |
+| 30-15 | Size limits: a provider response is at most 1 MB, a summary at most 2,000 characters, an op at most 64 KB. The hub also refuses an op over the limit. | #30 row 15 (round 20) | 3 (response); 6 (op: the device's dead-letter and the hub's 413) | 1.4, 5.4, 6.5 | applies (response and op); superseded (summary) | Op: 5.4, "every op is at most 64 KB. The hub refuses a larger op with 413. The device moves it to a dead-letter list with the reason instead of retrying". Response: the 1 MB cap is in current code only (src/provider.rs:490, test `http_answers_are_parsed_and_capped` at :731). Summary: design B makes claims, not session summaries (3.2: "Claim kinds: decision, preference, lesson, fix (symptom, cause, fix, commit), open item, repo fact, change."), and 6.5 capped a claim's body without a number: "a body over a length cap is rejected". 6.5 now states the caps: claim body 1,000 characters, digest 2,000, provider response 1 MB (B.3 item 3). |
 | 30-16 | Switching the embedding generation: the `activate` op goes out only after the Vectorize send queue is empty. Documents that exist only on this device are searched in the old generation until the new one is ready. Documents made before and after the switch are embedded in the new generation. | #30 row 16 (rounds 5-6, 12) | 4 (local switch), 6 (Vectorize) | 4.10, 5.4 | applies | 5.4 states "vectors with embedder_id". If hub spike item 4 passes, "Vectorize is dropped" (8.3) and the Vectorize clause lapses. The local half stays: 7.1 lets the user change embeddings later with `oboete setup --embeddings`. The generation switch is now stated in 4.10 (B.3 item 4). |
 | 30-17 | Remote MCP: a repo without a grant is refused by `search`, `get` and `timeline`, with `all` and when named directly. | #30 row 17 (rounds 15, 16) | 6 | 5.13 | applies | 5.13: "Per-repo grants: search, get and timeline never cross grants, including `all` and direct ids (R09)." |
 | 30-18 | Automatic injection fences only observations and summaries as data and never includes the prompt's text. | #30 row 18 (round 15) | 4 | 4.4, 4.5, 4.6 | applies (fenced as data, no prompt text); superseded (what is injected) | Design B injects current claims, not observations and summaries. 4.6: "Only current claims are injected, never prompt text." 4.5: imported memories "are never injected or used as current". 4.4: "The injection is fenced as data and attributed." |
 | 30-19 | A preference applies to all repos only when stated explicitly with `oboete pref add` or in the viewer. | #30 row 19 (rounds 9-11) | 3 (viewer button at 5) | 3.3 | applies | 3.3: "Global scope comes only through `oboete pref add` or the viewer's "apply to all repos" button (decision 13 of 2026-09-23 (proposal:37)). A quote in conversation is never enough (RD/constraints-synthesis.md S3-20)." |
-| 30-20 | Repos a session actually touched are added to its set from tool working directories and file paths (relative, absolute, `git -C` and the like). When a path cannot be classified and at least one exclusion exists, nothing is sent out. | #30 row 20 (round 21) | 2 (recording); 4, 6 (send rule) | 2.4, 5.5 | applies | Was a gap. 2.4 stores one "repo (origin URL key)" per event, and 5.5 checks "against every repo a session touched". No settled text derived the set from tool paths or stopped sending on an unclassifiable path. PR-C2 records only each event's working directory; tool paths were left to PR-H (docs/pr-c.md C2 decision 3). Now stated in 5.5 (B.2 #30 item 1). |
+| 30-20 | Repos a session actually touched are added to its set from tool working directories and file paths (relative, absolute, `git -C` and the like). When a path cannot be classified and at least one exclusion exists, nothing is sent out. | #30 row 20 (round 21) | 2 (recording); 6 (send rule) | 2.4, 5.5 | applies | Was a gap. 2.4 stores one "repo (origin URL key)" per event, and 5.5 checks "against every repo a session touched". No settled text derived the set from tool paths or stopped sending on an unclassifiable path. PR-C2 records only each event's working directory; tool paths were left to PR-H (docs/pr-c.md C2 decision 3). Now stated in 5.5 (B.2 #30 item 1). |
 | 30-21 | When `oboete sync exclude` is told to delete, the hub withdraws, at the moment it receives the exclusion op, also the sessions of other devices that this device has not received yet (the exclusion op carries the "delete" intent). | #30 row 21 (round 21) | 6 | 5.5 | applies | 5.5: "The hub then purges that session's content as it would for a tombstone, including sessions from devices this one has not pulled yet." |
 | 30-22 | Judge trust (§3.1, Kendall τ): measured on a subset of representative questions (20-30), with qrels in which a human judged the whole union of every compared configuration's top 50. τ is not computed from about 50 scattered human pairs, because unjudged documents then count as not relevant and configurations that retrieve the hand-picked pairs rise. | #30 row 22 (#31, round 5) | 1 (κ); 4 (τ, once 10 or more configurations exist) | 8.1 | applies | 8.1 listed "about 50 human-labelled pairs; binary relevance κ ≥ 0.4, until 10 or more system configurations exist; after that, Kendall τ ≥ 0.85 on the system order". It did not say how τ's qrels are built, and the list could be read as computing τ from the 50 pairs, which this row forbids. 8.1 now measures τ on 20-30 fully judged questions (B.3 item 5). |
 | 30-23 | Proposal §4.8's "summary truncation is not in the code; fix it in the next PR" is rewritten to "implemented in #31 (`observe::parse_summary`, 2,000 characters)". | #30 row 23 (#31, round 5) | — | 3.2, 6.5 | superseded | Done in #33, as a text fix to the proposal. Design B makes claims, not session summaries (3.2), and capped a claim's body without a number (6.5: "a body over a length cap is rejected"). The 2,000-character summary cap (src/observe.rs:14, `parse_summary` at :215) ends with the current observe; 6.5 now caps a claim body at 1,000 characters and a digest at 2,000 (B.3 item 3). |
