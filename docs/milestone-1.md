@@ -119,10 +119,12 @@ B3 is decided on run 2. Run 1 took the first entry of any answer; Codex (#77) as
 
 ## Dev label drafts (Task 8, 2026-09-26)
 
-Drafted by `claude-sonnet-5` from the 30 dev transcripts of the replay set (62 calls, gated lines, every quote verbatim), in owner decision 29's form: one plain-Japanese sentence and the owner's own message (a typed prompt, or their answer to a question).
-- Decisions: 140 drafted, 99 kept from 21 sessions. Dropped: 8 quotes of the wrong length and 2 not verbatim; before line ids were normalized (the model writes `4`, `"4"` and `"[L4]"` as well as `"L4"`), 67 more had been dropped for that alone. 11 of the 99 sentences contain Latin letters, all product names (LINE, GitHub, iMac, Codex and the like).
-- Pairs: 23 (6 overturns, 17 compatible; 2 across sessions). **Short** of 20 of each: 14 overturns and 3 compatible. Overturned decisions are rare in 99 decisions, so the next step is to draft from more dev-split transcripts, not to lower the count.
-- Tasks for the owner: 50 decisions (`dev-decisions`), the 23 pairs (`dev-pairs`); `draft_candidates.py tasks` adds more as answers of 判断できない come in or drafts grow.
+Drafted by `claude-sonnet-5` in owner decision 29's form: one plain-Japanese sentence and the owner's own message (a typed prompt, or their answer to a question). Every line gated, every quote verbatim.
+- From the replay set's 30 dev transcripts: 140 decisions drafted, 99 kept from 21 sessions; 23 pairs, only 6 of them overturns. Line ids had to be normalized first (the model writes `4`, `"4"` and `"[L4]"` as well as `"L4"`; 67 drafts had been dropped for that alone).
+- So 40 more dev-split transcripts were added (`draft_candidates.py extra 40`: claude-mem-recorded sessions outside the replay set, most typed prompts first, never the held-out side), copied owner-only under `replay/dev-extra`.
+- Now: 520 decisions from 60 sessions; 204 pairs (82 overturns, 122 compatible; 7 and 17 across sessions).
+- Read by Claude before handing over: 5 decisions, all real decisions in plain words; Latin letters only in product names (11 of the first 99). 5 overturn drafts: all real decisions, but not all overturns (2-3 of 5 are clear), and several stay technical in plain Japanese (version control, secret tags); the owner answers 判断できない there and the panel takes them.
+- Tasks for the owner: 50 decisions (`dev-decisions`) and 40 pairs (`dev-pairs`: 20 drafted as each relation, cross-session first). `draft_candidates.py tasks` adds more as answers of 判断できない come in.
 
 ## Findings
 
