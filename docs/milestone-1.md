@@ -102,6 +102,21 @@ B3 is decided on run 2. Run 1 took the first entry of any answer; Codex (#77) as
 - What this does not show (spec 8.1): judges that share a bias agree on the same wrong grade. Agreement with the owner is measured later, on the owner's own decisions (#76).
 - Frozen: `labels/calib-50.inputs.jsonl` (the question and memory every panel judge read, from the evaluation store, unchanged since 2026-09-24), run 1 (`labels/calib-50.panel.jsonl`, `labels/calib-50.result.json`) and run 2 (`labels/calib-50.panel-2.jsonl`, `labels/calib-50.result-2.json`, `labels/calib-50.result-2b.json`). The 4 answers the owner gave before decision 29 are set aside, unused (`labels/calib-50.withdrawn-2026-09-26.jsonl`).
 
+## M22 corpus (Task 10)
+
+`docs/eval/corpus_count.py`, 2026-09-26, read-only (~/.oboete/eval/corpus-count.json):
+
+| Store | Observations | Summaries | Prompts | Other |
+|---|---|---|---|---|
+| Eval store (claude-mem copy imported, 2026-09-24) | 152,136 | 13,169 | 13,197 | |
+| Live store (today's oboete on WSL) | 169 | 20 | 23 | 17,939 events, all in the last 7 days |
+| claude-mem on Windows | 1,285 | 216 | 195 | |
+| claude-mem on the iMac | none | | | no database |
+
+- Documents a device would hold if everything were imported: 178,502 (the eval store) + 1,696 (Windows' claude-mem) = about 180,200. This is an upper bound: the machines' histories overlap, and the live store's 212 documents cover sessions claude-mem also recorded.
+- That is about half the old "~330k" figure, which counted claude-mem twice (spec 8.2).
+- Raw events, from the transcripts of the last 90 days (3,319 files, parsed by `oboete transcript`): 362,379 events, so about 1.47 million a year. The fixture JSON is 2.14 GB for the 90 days, about 8.7 GB a year. That is uncompressed JSON, an upper bound before per-record compression, not a disk estimate.
+
 ## Findings
 
 - Today's hook keeps teammate messages ("Another Claude session sent a message: <teammate-message …>") as prompts: `ENVELOPES` in src/hook.rs has `<agent-message` but not this form. Design B's capture (milestone 2) should treat it as an envelope.
