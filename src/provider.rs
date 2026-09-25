@@ -391,14 +391,17 @@ fn codex_profile(path: Option<&std::ffi::OsStr>) -> String {
         .flat_map(|dir| ["codex", "codex.exe", "codex.cmd"].map(|name| dir.join(name)))
         .find(|p| p.is_file())
         .and_then(|p| p.canonicalize().ok());
-    if let Some(bin) = exe.as_deref().and_then(Path::parent) {
-        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-        let root = bin
-            .parent()
-            .filter(|r| r.parent().is_some())
-            .filter(|r| home.as_ref().is_none_or(|h| !Path::new(h).starts_with(r)))
-            .unwrap_or(bin);
-        readable.push(root.to_string_lossy().into_owned());
+    if let Some(dir) = exe.as_deref().and_then(Path::parent) {
+        // An npm install is the whole package (its native binary sits in a nested node_modules):
+        // bin/codex.js inside it (the symlink target on Unix), or a codex.cmd wrapper beside
+        // node_modules (Windows). Anything else is a native binary: only its own directory.
+        let nested = dir.join("node_modules/@openai/codex");
+        let package = [dir.parent(), Some(nested.as_path())]
+            .into_iter()
+            .flatten()
+            .find(|p| p.ends_with("@openai/codex") && p.is_dir())
+            .unwrap_or(dir);
+        readable.push(package.to_string_lossy().into_owned());
     }
     // A JSON string is a valid TOML basic string (quotes and backslashes escaped).
     let entries: String = readable
@@ -741,20 +744,41 @@ mod tests {
     }
 
     #[test]
-    fn the_codex_profile_keeps_the_resolved_install_readable() {
+    fn the_codex_profile_keeps_only_the_resolved_install_readable() {
         let tmp = scratch_dir().unwrap();
-        let bin = tmp.0.join("opt").join("codex").join("bin");
+        let grant = |p: &Path| {
+            format!(
+                "{}=\"read\"",
+                json!(p.canonicalize().unwrap().to_string_lossy())
+            )
+        };
+        // A native binary: its directory, never the directory above it.
+        let bin = tmp.0.join("home").join(".codex").join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("codex"), "").unwrap();
-        let root = tmp.0.join("opt").join("codex").canonicalize().unwrap();
         let profile = codex_profile(Some(bin.as_os_str()));
+        assert!(profile.contains(&grant(&bin)), "{profile}");
         assert!(
-            profile.contains(&format!("{}=\"read\"", json!(root.to_string_lossy()))),
+            !profile.contains(&grant(&tmp.0.join("home").join(".codex"))),
             "{profile}"
         );
         assert!(profile.starts_with(r#"permissions.curator.filesystem={":root"="deny""#));
+        // An npm wrapper beside node_modules (Windows): the package, not the npm directory.
+        let npm = tmp.0.join("AppData").join("npm");
+        let package = npm.join("node_modules").join("@openai").join("codex");
+        std::fs::create_dir_all(package.join("bin")).unwrap();
+        std::fs::write(npm.join("codex.cmd"), "").unwrap();
+        let profile = codex_profile(Some(npm.as_os_str()));
+        assert!(profile.contains(&grant(&package)), "{profile}");
+        assert!(
+            !profile.contains(&grant(&npm)) && !profile.contains(&grant(&tmp.0.join("AppData")))
+        );
+        // The package's own bin/codex.js (what the Unix symlink resolves to): the package.
+        std::fs::write(package.join("bin").join("codex"), "").unwrap();
+        let profile = codex_profile(Some(package.join("bin").as_os_str()));
+        assert!(profile.contains(&grant(&package)), "{profile}");
         // Without codex on the path, only the standalone install location.
-        let none = codex_profile(Some(tmp.0.as_os_str()));
+        let none = codex_profile(Some(tmp.0.join("home").as_os_str()));
         assert!(none.ends_with(r#""~/.codex/packages"="read"}"#), "{none}");
     }
 
