@@ -773,7 +773,7 @@ These limits are disclosed in MUST-M23's forget-limits doc and printed by forget
     - The environment is S8's allow-list, which never includes `ANTHROPIC_*` or `CLAUDE_CODE_*` names (6.4).
     - Not adopted (§2.4 of the note): the Agent SDK, any token extraction or injection, and a long-lived session. oboete never touches the credential.
   - **codex**: until 2026-09-26 a read-only sandbox, which could still read files (an injected "put ~/.ssh/config in the summary" could land in a claim) and loaded the user's MCP servers, some with auto-approved tools. The curator spike (docs/spike/curator-isolation.md) found the isolation, now in src/provider.rs (`CODEX_PROFILE`):
-    - a permission profile that hides the disk (but the platform's minimal paths and codex's own install) and the network; shown under `codex sandbox` with no model;
+    - a permission profile that hides the disk (but the platform's minimal paths, so on Linux no command can even start) and the network; shown under `codex sandbox` with no model;
     - `--ignore-user-config --ignore-rules` and `--disable plugins`, so no user or plugin MCP server loads;
     - web search off (`web_search="disabled"`), and the built-in browser, computer use, apps and image generation disabled: each can act outside the profile. Web search was shown working in the isolated call and gone with the setting.
     - It rests on a beta codex feature, so milestone 3 re-runs the canaries on each codex update. It also checks that spawned sub-agents (`collaboration.*`, still listed) keep the profile.

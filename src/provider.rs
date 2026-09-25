@@ -378,38 +378,11 @@ fn scratch_dir() -> Result<Scratch, CallError> {
     Ok(Scratch(dir))
 }
 
-/// A codex permission profile for the curator: no file but the platform's minimal paths and
-/// codex's own install, and no network. Beta in codex 0.155-0.157; it replaces `--sandbox`, which
-/// must not be passed with it. bubblewrap re-executes codex as its helper, so the install that
-/// `codex` resolves to on `path` must stay readable (openai/codex#29049): the directory above its
-/// `bin`, or `bin` itself when that would be a filesystem root or would hold the home directory.
-fn codex_profile(path: Option<&std::ffi::OsStr>) -> String {
-    let mut readable = vec!["~/.codex/packages".to_string()];
-    let exe = path
-        .into_iter()
-        .flat_map(std::env::split_paths)
-        .flat_map(|dir| ["codex", "codex.exe", "codex.cmd"].map(|name| dir.join(name)))
-        .find(|p| p.is_file())
-        .and_then(|p| p.canonicalize().ok());
-    if let Some(dir) = exe.as_deref().and_then(Path::parent) {
-        // An npm install is the whole package (its native binary sits in a nested node_modules):
-        // bin/codex.js inside it (the symlink target on Unix), or a codex.cmd wrapper beside
-        // node_modules (Windows). Anything else is a native binary: only its own directory.
-        let nested = dir.join("node_modules/@openai/codex");
-        let package = [dir.parent(), Some(nested.as_path())]
-            .into_iter()
-            .flatten()
-            .find(|p| p.ends_with("@openai/codex") && p.is_dir())
-            .unwrap_or(dir);
-        readable.push(package.to_string_lossy().into_owned());
-    }
-    // A JSON string is a valid TOML basic string (quotes and backslashes escaped).
-    let entries: String = readable
-        .iter()
-        .map(|p| format!(",{}=\"read\"", json!(p)))
-        .collect();
-    format!(r#"permissions.curator.filesystem={{":root"="deny",":minimal"="read"{entries}}}"#)
-}
+/// The codex permission profile for the curator: no file but the platform's minimal paths, and no
+/// network. Beta in codex 0.155-0.157; it replaces `--sandbox`, which must not be passed with it.
+/// codex's own install is not readable either, so on Linux a command cannot even start (bubblewrap
+/// cannot re-execute codex as its helper, openai/codex#29049); the curator answers without one.
+const CODEX_PROFILE: &str = r#"permissions.curator.filesystem={":root"="deny",":minimal"="read"}"#;
 
 /// codex features that give the curator a tool outside the permission profile (codex 0.155-0.157).
 const CODEX_OFF: [&str; 7] = [
@@ -511,8 +484,12 @@ fn headless_command(
                 cmd.args(["--disable", feature]);
             }
             cmd.args(["-c", r#"web_search="disabled""#]);
-            let profile = codex_profile(std::env::var_os("PATH").as_deref());
-            cmd.args(["-c", &profile, "-c", r#"default_permissions="curator""#]);
+            cmd.args([
+                "-c",
+                CODEX_PROFILE,
+                "-c",
+                r#"default_permissions="curator""#,
+            ]);
             cmd.args(["-c", "model_reasoning_effort=low"]);
             if let Some(m) = model {
                 cmd.args(["-c", &format!("model={m}")]);
@@ -727,11 +704,10 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         let web_search_off = r#"web_search="disabled""#;
-        let profile = codex_profile(std::env::var_os("PATH").as_deref());
         for flag in [
             "--ignore-user-config",
             "--ignore-rules",
-            profile.as_str(),
+            CODEX_PROFILE,
             web_search_off,
         ]
         .into_iter()
@@ -741,45 +717,6 @@ mod tests {
         }
         // --sandbox would switch codex back to its older settings and ignore the profile.
         assert!(!args.iter().any(|a| a == "--sandbox"), "{args:?}");
-    }
-
-    #[test]
-    fn the_codex_profile_keeps_only_the_resolved_install_readable() {
-        let tmp = scratch_dir().unwrap();
-        let grant = |p: &Path| {
-            format!(
-                "{}=\"read\"",
-                json!(p.canonicalize().unwrap().to_string_lossy())
-            )
-        };
-        // A native binary: its directory, never the directory above it.
-        let bin = tmp.0.join("home").join(".codex").join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("codex"), "").unwrap();
-        let profile = codex_profile(Some(bin.as_os_str()));
-        assert!(profile.contains(&grant(&bin)), "{profile}");
-        assert!(
-            !profile.contains(&grant(&tmp.0.join("home").join(".codex"))),
-            "{profile}"
-        );
-        assert!(profile.starts_with(r#"permissions.curator.filesystem={":root"="deny""#));
-        // An npm wrapper beside node_modules (Windows): the package, not the npm directory.
-        let npm = tmp.0.join("AppData").join("npm");
-        let package = npm.join("node_modules").join("@openai").join("codex");
-        std::fs::create_dir_all(package.join("bin")).unwrap();
-        std::fs::write(npm.join("codex.cmd"), "").unwrap();
-        let profile = codex_profile(Some(npm.as_os_str()));
-        assert!(profile.contains(&grant(&package)), "{profile}");
-        assert!(
-            !profile.contains(&grant(&npm)) && !profile.contains(&grant(&tmp.0.join("AppData")))
-        );
-        // The package's own bin/codex.js (what the Unix symlink resolves to): the package.
-        std::fs::write(package.join("bin").join("codex"), "").unwrap();
-        let profile = codex_profile(Some(package.join("bin").as_os_str()));
-        assert!(profile.contains(&grant(&package)), "{profile}");
-        // Without codex on the path, only the standalone install location.
-        let none = codex_profile(Some(tmp.0.join("home").as_os_str()));
-        assert!(none.ends_with(r#""~/.codex/packages"="read"}"#), "{none}");
     }
 
     #[test]
