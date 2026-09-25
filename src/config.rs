@@ -197,6 +197,19 @@ fn cli(name: &str, model: Option<&str>, daily_budget: u32) -> Provider {
 /// owner keeps the grok subscription out of curation (2026-09-25).
 fn default_providers() -> Vec<Provider> {
     let groq = "https://api.groq.com/openai/v1";
+    let mut opencode_go = openai(
+        "opencode-go",
+        "https://opencode.ai/zen/go/v1",
+        "OPENCODE_API_KEY.md",
+        "glm-5.3-flash",
+        300,
+        true,
+        serde_json::json!({}),
+    );
+    if let Provider::Openai { headers, .. } = &mut opencode_go {
+        // New console keys are refused without it (HTTP 400 MissingSessionID, 2026-09-26).
+        headers.insert("x-opencode-session".into(), "oboete".into());
+    }
     vec![
         openai(
             "groq",
@@ -225,6 +238,7 @@ fn default_providers() -> Vec<Provider> {
             true,
             serde_json::json!({"max_tokens": 2000}),
         ),
+        opencode_go,
         cli("codex", Some("gpt-6-luna"), 200),
         cli("claude", Some("haiku"), 200),
         openai(
@@ -304,7 +318,7 @@ mod tests {
     #[test]
     fn defaults_and_toml_extra_fields_parse() {
         let cfg: Config = toml::from_str("").unwrap();
-        // The owner's order (2026-09-26); agy and grok are out.
+        // The owner's order (2026-09-26), with OpenCode Go after nim; agy and grok are out.
         let names: Vec<_> = cfg.providers.iter().map(Provider::name).collect();
         assert_eq!(
             names,
@@ -312,12 +326,19 @@ mod tests {
                 "groq",
                 "groq-20b",
                 "nim",
+                "opencode-go",
                 "codex",
                 "claude",
                 "openrouter",
                 "mistral"
             ]
         );
+        match &cfg.providers[3] {
+            Provider::Openai { headers, .. } => {
+                assert_eq!(headers["x-opencode-session"], "oboete")
+            }
+            _ => panic!("expected opencode-go"),
+        }
         assert_eq!(cfg.summary.language, "Japanese");
         assert_eq!(cfg.embedding.provider, "none");
         let cfg: Config = toml::from_str(
