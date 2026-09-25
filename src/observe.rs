@@ -15,8 +15,6 @@ const MAX_PROMPT_CHARS: usize = 16_000;
 const DIALOGUE_CHARS: usize = 12_000;
 /// Events read per query while a part is built.
 const PAGE: usize = 500;
-/// Summarizer calls per session in one run; the rest stays pending for the next run.
-const MAX_PARTS_PER_RUN: usize = 10;
 const MAX_OBSERVATIONS: usize = 12;
 const MAX_SUMMARY_CHARS: usize = 2_000;
 pub const KINDS: [&str; 6] = [
@@ -84,7 +82,9 @@ fn process_session(
     s: &db::PendingSession,
     stats: &mut Stats,
 ) -> Result<()> {
-    for _ in 0..MAX_PARTS_PER_RUN {
+    // No cap on parts: nothing starts another run when this one stops early, and the provider
+    // chain's daily budgets already bound the calls.
+    loop {
         let part = next_part(conn, &s.id)?;
         let Some((last_id, last_ts)) = part.last else {
             return Ok(());
@@ -116,7 +116,6 @@ fn process_session(
             return Ok(());
         }
     }
-    Ok(())
 }
 
 /// One summarizer call's worth of a session, from its observe cursor on.
@@ -149,7 +148,8 @@ fn next_part(conn: &rusqlite::Connection, session_id: &str) -> Result<Part> {
             match line(e) {
                 Line::Dialogue(l) => {
                     let l = cap(l, DIALOGUE_CHARS);
-                    let n = l.chars().count();
+                    // Every line also costs the newline that joins it.
+                    let n = l.chars().count() + 1;
                     // Past its share, dialogue still fills the call while nothing else needs
                     // the room, so a short talk-heavy session stays one call.
                     if !dialogue.is_empty()
@@ -162,7 +162,7 @@ fn next_part(conn: &rusqlite::Connection, session_id: &str) -> Result<Part> {
                     dialogue.push((e.id, l));
                 }
                 Line::Tool(l) => {
-                    tool_chars += l.chars().count();
+                    tool_chars += l.chars().count() + 1;
                     tools.push_back((e.id, l));
                 }
                 Line::Skip => {}
@@ -171,7 +171,7 @@ fn next_part(conn: &rusqlite::Connection, session_id: &str) -> Result<Part> {
                 let Some((_, l)) = tools.pop_front() else {
                     break;
                 };
-                tool_chars -= l.chars().count();
+                tool_chars -= l.chars().count() + 1;
                 omitted += 1;
             }
             last = Some((e.id, e.ts));
@@ -584,6 +584,41 @@ mod tests {
             .query_row("SELECT MAX(id) FROM events", [], |r| r.get(0))
             .unwrap();
         assert_eq!(part.last.map(|(id, _)| id), Some(last));
+        drop(conn);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn many_short_lines_still_fit_one_call() {
+        let dir = std::env::temp_dir().join(format!("oboete-observe-short-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut conn = db::open(&dir).unwrap();
+        db::upsert_session(&conn, "short", "claude", "/r", "/r", 1).unwrap();
+        let tool = json!({"tool": "Bash", "input": "i", "output": "o", "failed": false});
+        for i in 0..3_000 {
+            let (event, payload) = if i % 2 == 0 {
+                ("UserPromptSubmit", json!({"prompt": "x"}))
+            } else {
+                ("PostToolUse", tool.clone())
+            };
+            db::insert_event(&conn, "short", event, 1 + i, &payload.to_string()).unwrap();
+        }
+        let s = db::PendingSession {
+            id: "short".into(),
+            agent: "claude".into(),
+            repo: "/r".into(),
+            last_event_at: 1_000_000,
+        };
+        loop {
+            let part = next_part(&conn, "short").unwrap();
+            let Some((last, _)) = part.last else {
+                break;
+            };
+            let n = part.text.chars().count();
+            assert!(n <= MAX_PROMPT_CHARS + 64, "{n}");
+            assert!(db::apply_batch(&mut conn, &s, "p", "", &[], last).unwrap());
+        }
         drop(conn);
         std::fs::remove_dir_all(&dir).ok();
     }
