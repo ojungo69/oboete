@@ -456,6 +456,8 @@ Donor paths in this section (workers/sync-hub/…, do/SyncHub.ts, index.ts, cano
 - A session's touch set also takes in the repos of its tools' working directories and file paths (relative, absolute, `git -C` and the like). While any exclusion exists, a session with a path that cannot be classified sends no content (issue #30 row 20).
 - An exclusion is itself an op that reaches every device. The hub refuses content ops of sessions that touched an excluded repo.
 - Before any call that sends content out (sync, embedding, curation), the egress gate re-reads the exclusion list from the hub. If it cannot, it sends nothing (issue #30; proposal:374).
+  - A device with no hub configured has no other device that could add an exclusion, so its local list is the whole list and the gate uses it (owner decision 12: one device needs no hub) (Claude; overrulable).
+  - A device whose configured hub is unreachable sends nothing out until it can re-read the list; local providers (Ollama, local embeddings) still run, because nothing leaves the machine (issue #30 row 13) (Claude; overrulable).
 - A search query that leaves the machine, for example to a remote embedder, is checked against the exclusions of both the caller's repo and every repo the search covers; naming another repo in MCP's `repo` argument does not get past the check (issue #30 row 2).
 - Withdrawal:
   - Excluding a repo whose sessions already synced asks whether to withdraw them (default: keep).
@@ -809,7 +811,7 @@ These limits are disclosed in MUST-M23's forget-limits doc and printed by forget
 
 ### 6.7 Reviews and tests
 
-- Security review under rules/security.md for: redaction changes, the egress gate, key and token handling (S8), curator isolation and its gate, viewer writes, hub auth and MCP OAuth.
+- Security review under rules/security.md (the maintainer's review rules, kept outside this repo at ~/.claude/rules/security.md: semgrep, a security-audit pass and an independent security review lane) for: redaction changes, the egress gate, key and token handling (S8), curator isolation and its gate, viewer writes, hub auth and MCP OAuth.
 - **M4 deletion canary**: after forget, a byte grep finds 0 hits in every file under the data home (raw.db, knowledge.db, their -wal/-shm files, backups, caches, spool, eval copies, migration snapshots), temp and log directories, the hub DO, R2 and Vectorize.
   - The pass leaves out the limits that sections 5-7 name, as §8.2's M4 row does: the DO's 30-day history (§5.8), migration snapshots until `oboete migrate --finish`, and evaluation copies (§7.4). Those files are still grepped, and their hits are reported as the named limits, not as failures (Claude; overrulable).
   - Migration snapshots (for example ~/.oboete/pre-*.db on the owner's machine) are either rewritten by forget or listed as a forget limit. Section 7, where migration lives, settles which: they are listed as a limit, not rewritten, until `oboete migrate --finish` deletes them (§7.4) (Claude; overrulable; A33).
@@ -995,7 +997,7 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
      - Today's hooks call `/home/jura/.cargo/bin/oboete` by absolute path (~/.claude/settings.json; src/setup.rs:162-172). A new binary installed there would switch every agent before the checks below.
      - Until step 4, the old binary keeps that path, and the new one is called by its full path.
   2. Run the migration (7.4). Answer yes to the transcript import, so the sessions the old `DELETE` trimmed get their heads back (7.4). Run doctor.
-  3. Compare search on the 112 questions against the old store (which store the judgments cover: Appendix C item 11). Pass (Claude; overrulable):
+  3. Compare search on the 112 questions, run on the evaluation store that the judgments grade (the claude-mem evaluation copy, imported once by the old code and once by the new code; milestone 4 builds the new import), not on the owner's migrated store, whose documents the judgments do not cover (Appendix C item 11). Pass (Claude; overrulable):
      - no slice's recall@10 drops by more than 0.02 (M1's no-regression line, RD/options-draft.md:325);
      - overall nDCG@10 drops by no more than the same 0.02. This half is Claude's adaptation of M1's line.
   4. Switch the hooks: setup rewrites the entries to the new path.
@@ -1114,6 +1116,7 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
 - **Unseen final set**: issue50 requires a final set kept apart from every set whose results have been seen (RD/issue50.md:194). Its definition (Claude; overrulable):
   - Source: questions built by docs/eval/build_queries.py from a fresh read-only claude-mem copy (docs/pr-b.md:13).
     - Only sessions that started after the 2026-09-24 copy (the one the 424 questions came from) are used. So the set shares no session with the 424 or with the replay set.
+    - Sessions that supplied M21's new English questions, or any other question whose result has been seen, are excluded too (Claude; overrulable).
     - Add at least 10 new held-out transcripts from the same period, for the end-to-end lines.
   - Size and strata: at least as many questions as the test split (112), stratified the same way (Japanese/English, developer prompts/agent searches).
   - Sealing:
@@ -1164,7 +1167,7 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
 | Transcript | Transcript import | A canary forgotten before the import is absent after it (M4, hard). 100% of imported records carry `source = transcript`. At most one turn per session appears twice, and both copies are labelled by source. A session the old `DELETE` trimmed gets its head back. One fixture per parser | §7.4 |
 | Inject | Per-prompt injection threshold | On by default only if the one-sided 95% upper bound of irrelevant injections is ≤ 10% | decision 12 of 2026-09-23 (proposal:36), section 4 |
 | Judge | Judge-model roles | Selection: curator input −30% with recall drop ≤ 0.02. Veto: fewer wrong `decided`, with recall kept | section 3 |
-| Window | Curation window size | The smallest size that passes M2, M3 and M6, swept on dev transcripts only (RD/constraints-synthesis.md:266) (set by measurement Window at milestone 3) | section 3 |
+| Window | Curation window size | The smallest size that passes M2, M3 and M6, swept on dev transcripts only (RD/constraints-synthesis.md:266); the sweep runs M6 on dev at milestone 3, ahead of M6's deciding run at milestone 4 (Claude; overrulable) (set by measurement Window at milestone 3) | section 3 |
 | Rerank | S3 reranker | The M1 line, inside milestone 4's single test run. Also CPU p95 and RSS on the M1 iMac and the slowest WSL machine (RD/improvements-synthesis.md:441) | S3 |
 | Public | JQaRA and JaCWIR sanity check | On each set, the default is at most 0.02 nDCG@10 below the better of its two legs run alone (FTS only, bge-m3 only) (Claude; overrulable). A sanity line, not a tuning set (RD/constraints-synthesis.md:377) | section 4 |
 | Cost | Per heavy day | Curator calls ≤ 20% of each daily cap. Paid ≤ USD 5/month | options-draft §9 |
@@ -1313,7 +1316,7 @@ Size:
 
 ## Appendix A. Decisions made by Claude (overrulable)
 
-Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row below. A row groups the tags of one decision (115 tags, 80 rows). Claude's estimates in 8.4 (labelling hours, size) are estimates, not decisions, and are not listed.
+Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row below. A row groups the tags of one decision (119 tags, 84 rows). Claude's estimates in 8.4 (labelling hours, size) are estimates, not decisions, and are not listed.
 
 | # | Item | Section | What overruling it would change |
 |---|---|---|---|
@@ -1397,6 +1400,10 @@ Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row
 | A78 | Donor-port split: Codex or Grok take only the donor modules without auth | 8.4 | Who builds what |
 | A79 | Milestone placement of every Appendix B row, and the old-PR-to-milestone map | B.0 | Where each carried test runs |
 | A80 | S8's environment allow-list for curator subprocesses is built at milestone 3, with curator isolation, not at milestone 5 | 8.4, C.10 | The allow-list would arrive after claude starts curating at milestone 3 |
+| A81 | The egress gate with no hub uses the local exclusion list; with an unreachable hub it sends nothing, and local providers still run | 5.5 | Whether an offline device may curate remotely with its last pulled list |
+| A82 | The cut-over search check runs on the evaluation store imported by both codes, not on the owner's store | 7.5 | What gates the hook switch |
+| A83 | The final set also excludes sessions that supplied M21's questions or any seen result | 8.1 | Which sessions the release run may draw |
+| A84 | The Window sweep runs M6 on dev at milestone 3 | 8.2 | When the window size can be fixed |
 
 ## Appendix B. Acceptance tests carried from issues
 
@@ -1613,11 +1620,11 @@ Only questions that nothing above settles. Each names where it gets settled.
 8. **agy after its no-tool mode passes.** The gate then stops skipping agy in any chain that lists it (6.5). PR #51 took it out of `default_providers()`; public setup turns a logged-in subscription CLI on by default, agy only after its no-tool mode passes (7.2, owner decision 28). Whether the owner's own chain lists agy again is the owner's call, after the curator spike tests a no-tool `--agent` (§8.3).
 9. **The workerd citation.** 5.13 cites cloudflare/workerd src/workerd/util/sqlite.c++:1334-1343 for the fts5 module; the section's own check read :1334-1341 (fts5 and fts5vocab). Neither is pinned to a workerd commit. Settled by hub platform spike item 3, which runs the trigram statement in the DO (§8.3).
 10. **The cut-over after milestone 4, and what milestone 5 builds.** Settled 2026-09-26: the owner's machines switch after milestone 5 (owner decision 27), so forget, mute and capture exclusion exist from the switch on; S8's environment allow-list moves to milestone 3, before claude curates (8.4, Claude; overrulable).
-11. **What the cut-over search check compares** (7.5 step 3). The 112-question judgments (eval/judgments.jsonl) grade documents of the evaluation store, which is the claude-mem import (§8.2 M1; docs/pr-b.md:21); their document ids look like `o76645`. They do not grade the owner's v1 store, which held 141 observations on 2026-09-25 (7.4). So 7.4's "the 112-question judgments still map to them" does not hold for the owner's store, and step 3 has almost nothing judged to compare. The check needs a store the judgments cover (for example the evaluation store imported by the old and by the new code; milestone 4 builds B's evaluation-store import, 8.4) or new judgments on the owner's store. Settled at milestone 4, when the cut-over tools are built, before the cut-over (A63).
-12. **Window and M6.** The Window row sets the window size as the smallest that passes M2, M3 and M6 (set by measurement Window at milestone 3), but 8.4 first runs M6 at milestone 4. Either M6 runs on dev at milestone 3 for the sweep, or Window is set at milestone 4. 8.1 also lists Window and Judge among the lines "decided once on the test split", while the Window row sweeps on dev transcripts only and the curator spike tunes on dev; which split decides them is open. Settled when milestone 3 is planned.
+11. **What the cut-over search check compares** Settled 2026-09-26: step 3 of 7.5 runs on the evaluation store imported by the old and by the new code (7.5).
+12. **Window and M6.** Settled 2026-09-26: the Window sweep runs M6 on dev at milestone 3; M6's deciding run stays at milestone 4 (8.2 Window row).
 13. **M21's new English test questions.** M21 adds at least 53 English questions to the test side (8.2). But 8.1 speaks of "the 112-question test split", uses it once more "in a single run" at milestone 4 with a Holm correction across that run, and sizes the final set by it (112); 8.4 lists "M21 English" after that run. Not stated: when the new questions are drawn and judged, whether they join the single milestone-4 run or form a separate held-out set with its own budget, and which size the final set then follows. Settled at milestone 1, when the questions and their splits are frozen (8.4).
 14. **Which spike runs which hub check.** 5.3 has the donor self-host spike end with a timed setup on a fresh Free-plan account, from the docs alone (A17, MUST-M23's test). 8.3's pass line for that spike leaves it out; the spike runs alongside milestone 1 and must pass before milestone 6, while the docs are built at milestone 7 (8.4). Also, 5.3 and 5.15 give the self-host spike the Node-free deploy, the trigram statement and the first push on Free, which 5.17 and 8.3 list as hub platform spike items 1, 3 and 7 (that spike also runs on a fresh Free account, RD/hub-platform.md §4). Settled when the spikes are planned, alongside milestone 1: which spike runs each check, and whether the docs-only setup runs in the spike with draft docs or at milestone 7 with MUST-M23.
 15. **The WebSocket wake if M5 needs it.** 5.1 and A14 ship the first release with polling only and move the wake to Later (5.18). But M5's deciding run for the wake is at milestone 6, before the release gate, and milestone 6's MUST-M19 line on dropped wake messages applies if M5 adds the wake (8.4). If M5 shows that polling misses the timing line, it is open whether the wake ships in the first release or the release waits. If it ships, it is also open whether the donor's kill switch is ported: 5.2 drops it because "the first release only polls". A14 also narrows MUST-M19, while owner decision 11 put all 23 MUST items into the design; owner decision 18 then settled section 5 as written. Settled by the owner when M5's milestone-6 result is in.
 16. **Owner decision 21 and line 52.** Settled 2026-09-26: with line 52 present, the owner turned subscriptions on by default in public setup (owner decision 28, 7.2).
 17. **Where the kept op log lives.** 1.7 rebuilds knowledge.db from raw plus the kept op log, and 7.3 step 3 backs up "raw.db and the op log" apart from knowledge.db. No section names the op log's file (a table in raw.db, or a file of its own). Settled with the schema, at the latest at milestone 3, where `rebuild` is built (8.4).
-18. **The egress gate without a reachable hub.** 5.5 has the gate re-read the exclusion list from the hub before any call that sends content out, and send nothing if it cannot. Two cases are not stated: a device with no hub (owner decision 12: one device needs no hub), where only the local list exists, although 3.1 lets free APIs and paid APIs curate at any time; and a device with a hub that is offline, which as written can neither curate through a provider nor embed remotely until it reconnects. Settled by the PR that adds the hub re-read to the egress gate (milestone 4, with the sync client).
+18. **The egress gate without a reachable hub.** Settled 2026-09-26: with no hub configured, the local list is the whole list; with a configured hub unreachable, nothing leaves the machine until the list is re-read, and local providers still run (5.5).
