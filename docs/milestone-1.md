@@ -59,6 +59,26 @@ Pool on 2026-09-26: 227 Claude Code and 242 Codex sessions.
 
   The fourth draw, with the rules above, is the frozen one; it keeps 50 of the third draw's 61 sessions.
 
+## Transcript parser (Task 4)
+
+`oboete transcript <file> --agent claude|codex` (hidden) prints a transcript as the replay fixture `oboete replay` reads: the hook events the transcript implies, as the live hooks received them. Run on the 30 dev transcripts of the fourth draw (2026-09-26, read-only):
+
+| Agent | Files | Lines | Unreadable | Events | Tool events | Prompts: typed / envelopes |
+|---|---|---|---|---|---|---|
+| Claude Code (with 968 subagent files) | 24 | 129,180 | 0 | 22,169 | 20,921 | 73 / 533 |
+| Codex | 6 | 29,494 | 0 | 4,271 | 4,224 | 20 / 0 |
+
+- The parser and replay_set.py are two implementations of the same rules (Task 3); they agree on every session's typed prompts and tool calls.
+- Envelopes (task notifications and the like) are emitted as prompts because the live hook receives them: the live store had 39 in September. The hook's `ENVELOPES` decides what to keep.
+- Slash commands: a skill command (stored message tag first) and `/goal` are prompts, as typed (`/name args`); claude-mem's copy has `/goal` prompts from 42 sessions. The other local commands (`/compact`, `/effort`, ...; stored name tag first, or as plain text by older Claude Code; 713 of them in 1,909 transcripts outside the held-out set) are not: claude-mem's 15,218 prompts have none of them.
+- A prompt typed while a turn runs is sent when it is queued, and its later delivery is skipped. The running turn goes on: in the dev set, 20 such prompts were delivered later as user records, none between a turn's tool calls (14 right after the enqueue, 4 right after a turn's end record, 2 after other records), and 329 queued messages (typed or not) reached a running turn as attachments.
+- Failed tool calls carry `error` and no `tool_response`, as live failures do (the plan's table asked for both; the hook reads `tool_response` first, so replay would have stored a different text).
+- Workflow agents' files (`subagents/workflows/wf_*/agent-*.jsonl`) are read with the other subagent files; a workflow's `journal.jsonl` is not a transcript and is skipped.
+- Codex: harness messages are left out by `content_item_kinds`; a forked rollout keeps its own id (its parent's `session_meta` follows its own); a resumed rollout follows `turn_context` into its new directory; an aborted turn sends no Stop.
+- A subagent's compacted context is not the session's PostCompact.
+- Lines come out in time order (a stable sort), so subagent calls sit inside the turn that made them; Stop comes where the Stop hook ran (`stop_hook_summary`) or the turn ended (`turn_duration`), else at the next prompt, with the directory of the turn's last text; calls a developer interrupted (Claude Code) or a turn abort cut off (Codex) end there. The largest dev session (111 MB with its subagent files) converts in 0.3 s with a 39 MB peak.
+- Record types not read. Claude Code: agent-name, ai-title, atis-latch, attachment, bridge-session, cost-state, custom-title, file-history, fork-context-ref, frame-link, last-prompt, mode, permission-mode, pr-link, queue operations other than enqueue, system records other than the two turn ends. Codex: reasoning, token counts, turn and thread bookkeeping, inter-agent messages, world_state. None is typed dialogue.
+
 ## Findings
 
 - Today's hook keeps teammate messages ("Another Claude session sent a message: <teammate-message …>") as prompts: `ENVELOPES` in src/hook.rs has `<agent-message` but not this form. Design B's capture (milestone 2) should treat it as an envelope.

@@ -1,0 +1,2 @@
+{"type":"assistant","isSidechain":true,"agentId":"w1","sessionId":"claude-basic","cwd":"/work/app-wt","timestamp":"2026-09-01T00:00:05.500Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_w1","name":"WebFetch","input":{"url":"https://example.com"}}]}}
+{"type":"user","isSidechain":true,"agentId":"w1","sessionId":"claude-basic","cwd":"/work/app-wt","timestamp":"2026-09-01T00:00:05.600Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_w1","content":"ok"}]}}

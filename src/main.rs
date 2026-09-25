@@ -17,6 +17,7 @@ mod replay;
 mod repo;
 mod search;
 mod setup;
+mod transcript;
 mod view;
 
 use std::path::PathBuf;
@@ -112,6 +113,14 @@ enum Cmd {
     /// Evaluation: pass stdin through the outbound gate (what may leave the machine) to stdout
     #[command(hide = true)]
     Gate,
+    /// Evaluation: print a Claude Code or Codex transcript as a replay fixture
+    #[command(hide = true)]
+    Transcript {
+        path: PathBuf,
+        /// claude or codex
+        #[arg(long)]
+        agent: String,
+    },
     /// Evaluation: run `{"qid","text"}` JSONL queries through search, print a TREC run
     #[command(hide = true)]
     Eval {
@@ -298,6 +307,22 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let mut text = String::new();
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
             emit(&redact::outbound(&text))
+        }
+        Cmd::Transcript { path, agent } => {
+            let stats = transcript::convert(&path, &agent, std::io::stdout().lock())?;
+            let ignored: Vec<String> = stats
+                .ignored
+                .iter()
+                .map(|(k, n)| format!("{k} {n}"))
+                .collect();
+            eprintln!(
+                "oboete transcript: {} lines, {} skipped, {} events; not read: {}",
+                stats.lines,
+                stats.skipped,
+                stats.events,
+                ignored.join(", ")
+            );
+            Ok(())
         }
         Cmd::Eval {
             queries,
