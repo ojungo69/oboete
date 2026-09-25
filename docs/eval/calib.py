@@ -70,7 +70,9 @@ def store_doc_text(db):
         row = db.execute(DOC_SQL[doc[0]], (int(doc[1:]),)).fetchone()
         if row is None:
             return None
-        body, cut = '\n'.join(p for p in row if p), min(chars, MAX_DOC_CHARS)
+        title, text = row
+        # judge.py's own serialization, so the clip lands on the same character.
+        body, cut = (title + '\n' + text).strip() if title else text, min(chars, MAX_DOC_CHARS)
         return body if len(body) <= cut else body[:cut] + f'\n…(以下 {len(body) - cut} 文字は省略。判定器も同じところまで読みました)'
     return text
 

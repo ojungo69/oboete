@@ -52,6 +52,9 @@ def test_the_owner_sees_the_window_the_judge_saw():
     assert text('p1', 1200).startswith('x' * 1200 + '\n…(以下 800 文字は省略')
     assert text('p1', 4000) == 'x' * 2000
     assert text('p2', 4000) is None
+    db.execute('CREATE TABLE observations (id INTEGER PRIMARY KEY, title TEXT, body TEXT)')
+    db.execute("INSERT INTO observations VALUES (1, '  見出し', ?)", ('y' * 1300,))
+    assert text('o1', 1200) == ('見出し\n' + 'y' * 1300)[:1200] + '\n…(以下 104 文字は省略。判定器も同じところまで読みました)'
 
 
 def test_the_repeat_waits_a_week():
