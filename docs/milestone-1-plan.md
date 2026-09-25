@@ -59,15 +59,16 @@ PRs: A = Tasks 1-3; B = Task 4 (delegated to Codex); C = Tasks 5-6; D = Task 7; 
 
 ## Owner sittings (オーナーの作業、日本語)
 
-ラベル付けはすべて Claude が候補を作り、あなたは画面で「はい / いいえ」などを選ぶだけです。1 回 1 時間以内、途中でやめても続きから再開できます。
+2026-09-26 に変更しました (spec の owner decision 29)。あなたにお願いするのは「あなた自身が決めたこと」の確認だけです。技術的な判定 (検索結果が問いに役立つか など) は、別々の会社の AI 3〜5 種に判定させ、互いの一致で信頼できるかを測ります。
+
+すべて Claude が候補を作り、やさしい日本語の一文と、あなた自身の元の発言を添えて見せます。あなたは「はい / いいえ / 判断できない」を選ぶだけです。判断できないものは AI の判定に回します。1 回 1 時間以内、途中でやめても続きから再開できます。
 
 | いつ | 内容 | 目安 |
 |---|---|---|
-| Task 6 の後 | 判定器の信頼チェック: 問いと記憶の組 50 個に「役に立つ / 立たない」 | 約 2 時間 (1 組 2〜3 分) |
-| その 1 週間後以降 | 同じ 50 組から選んだ 20 組をもう一度 (前の答えは見せません) | 約 50 分 |
-| Task 8 の後 | 決定の候補 約 50 個に「あなたが決めたことか」、覆った組 20 個と対照の組 20 個に「後が前を覆しているか」 | 約 2〜3 時間 |
+| Task 8 の後 | 決定の候補 約 50 個に「あなたが決めたことか」、覆った組 20 個と対照の組 20 個に「後の決定が前の決定を覆しているか」 | 約 1.5 時間 |
+| その 1 週間後以降 | 上から選んだ 20 個をもう一度 (前の答えは見せません) | 約 15 分 |
 
-合計 約 4〜6 時間 (spec 8.4 の見積もりどおり)。test 側のラベル (約 5〜7 時間) は段階 3 の判定の前に、同じ画面で別途お願いします。
+段階 3 の判定の前 (test 側の決定 100 個と、覆った組 50 個・対照 50 個) と、段階 3〜4 の間 (要約役が「決定」とした 100 個) にも、同じ形でお願いします。合計 約 4〜5 時間の見込みです。
 
 ---
 
@@ -1746,6 +1747,8 @@ git add docs/eval/label.py docs/eval/test_label.py && git commit -m "eval: the o
 
 ## Task 6: B3, the judge-trust gate
 
+**Changed 2026-09-26 (owner decision 29, spec 8.1):** the owner does not grade these pairs; the owner found the memories too English and technical to judge. The 50 pairs already drawn (`labels/tasks/calib-50.jsonl`) are graded by a panel of judges from different model makers, run with no tools, and each judge passes on κ ≥ 0.4 against the majority of the others, with the panel's Fleiss κ ≥ 0.4. The owner's blind repeat moves to the owner's own items (Task 8). The steps below keep the owner-vs-judge design for the record; the implementing PR replaces the owner's answers with the panel's grades and keeps `kappa`, `draw` and the key file.
+
 Spec 8.1: about 50 human-labelled pairs; binary relevance κ ≥ 0.4 between the owner and the judge; until it passes, the judge decides nothing. A blind repeat of 20 of the 50, at least a week later, reports the owner's agreement with their earlier self next to the judge's. Decisions (Claude; overrulable, in the note): pairs come from dev questions only, from pairs the judge graded (`claude-sonnet-5`; the `claude-sonnet` alias rows of 2026-09-24 count as the same judge, docs/eval/judge.py); 25 graded relevant (2-3) and 25 not (12 graded 1, the near misses, and 13 graded 0); at most one pair per question; the owner answers binary, never 0-3, and never sees the grade.
 
 If κ < 0.4 (the failure branch, 8.1): the judge decides nothing; D2's test pool must be re-judged by a judge that passes or by the owner's labels before M1 uses 0.545 as its baseline. The next step is then to rerun the 50 pairs through another judge (for example `claude-opus-5-5` with judge.py's prompt) and compute κ again; that is recorded as a follow-up issue, not built here.
@@ -2207,6 +2210,8 @@ Open PR D.
 ---
 
 ## Task 8: Decision and overturn candidates for the dev labels
+
+**Changed 2026-09-26 (owner decision 29):** each item the owner sees is one plain-Japanese sentence of the decision (or the two decisions of a pair), with the owner's own prompt from that turn quoted, and the choices are はい / いいえ / 判断できない. English or technical detail stays out of the item; "判断できない" items go to the panel and are counted apart. The owner's blind repeat (20 of these, a week later) is here now.
 
 Spec 8.4 item 1: "Claude drafts every candidate, so the owner only confirms, rejects or grades (owner decision 22)". Before the curator spike the owner labels about 50 dev decisions and 20 overturned pairs with 20 control pairs. Drafting uses the judge's model and isolation (`claude-sonnet-5`), on dev transcripts only, after `oboete gate`; every quote must appear verbatim in the gated line it cites, so a candidate the model invented is dropped in code. Up to 55 decisions and 25 pairs of each relation are drafted, so rejections still leave the target counts.
 
