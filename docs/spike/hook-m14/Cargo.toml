@@ -1,0 +1,16 @@
+[package]
+name = "hook-m14"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Its own workspace: a throwaway, outside the oboete build and CI.
+[workspace]
+
+[dependencies]
+aho-corasick = "1"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+zstd = "0.13"
