@@ -1321,7 +1321,7 @@ Size:
 
 ## Appendix A. Decisions made by Claude (overrulable)
 
-Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row below. A row groups the tags of one decision (119 tags, 85 rows). Claude's estimates in 8.4 (labelling hours, size) are estimates, not decisions, and are not listed.
+Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row below. A row groups the tags of one decision (119 tags, 86 rows). Claude's estimates in 8.4 (labelling hours, size) are estimates, not decisions, and are not listed.
 
 | # | Item | Section | What overruling it would change |
 |---|---|---|---|
@@ -1410,6 +1410,7 @@ Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row
 | A83 | The final set also excludes sessions that supplied M21's questions or any seen result | 8.1 | Which sessions the release run may draw |
 | A84 | The Window sweep runs M6 on dev at milestone 3 | 8.2 | When the window size can be fixed |
 | A85 | Local first: the sync client, protocol doc and fake hub, and M5's propagation half, are built and measured at milestone 6; the hub spikes run any time before milestone 6 (the owner left the order to Claude, 2026-09-26) | 8.2, 8.4, B.0 | The build order |
+| A86 | M21's 53 new English test questions are drawn and frozen unjudged at milestone 1 and scored only inside milestone 4's single test run; the final set stays at 112 | 8.2, Appendix C | When M21's English questions are drawn and used |
 
 ## Appendix B. Acceptance tests carried from issues
 
@@ -1628,7 +1629,7 @@ Only questions that nothing above settles. Each names where it gets settled.
 10. **The cut-over after milestone 4, and what milestone 5 builds.** Settled 2026-09-26: the owner's machines switch after milestone 5 (owner decision 27), so forget, mute and capture exclusion exist from the switch on; S8's environment allow-list moves to milestone 3, before claude curates (8.4, Claude; overrulable).
 11. **What the cut-over search check compares** Settled 2026-09-26: step 3 of 7.5 runs on the evaluation store imported by the old and by the new code (7.5).
 12. **Window and M6.** Settled 2026-09-26: the Window sweep runs M6 on dev at milestone 3; M6's deciding run stays at milestone 4 (8.2 Window row).
-13. **M21's new English test questions.** M21 adds at least 53 English questions to the test side (8.2). But 8.1 speaks of "the 112-question test split", uses it once more "in a single run" at milestone 4 with a Holm correction across that run, and sizes the final set by it (112); 8.4 lists "M21 English" after that run. Not stated: when the new questions are drawn and judged, whether they join the single milestone-4 run or form a separate held-out set with its own budget, and which size the final set then follows. Settled at milestone 1, when the questions and their splits are frozen (8.4).
+13. **M21's new English test questions.** Settled 2026-09-26 (A86): the new English questions are drawn at milestone 1 from the 2026-09-24 copy (118 English test-side prompts were available) and frozen unjudged as queries-en.jsonl. They are judged and scored only in milestone 4's single test run, as its English slice; the Holm correction stays across the run's candidates. The final set keeps the 112-question size and strata (docs/milestone-1.md).
 14. **Which spike runs which hub check.** 5.3 has the donor self-host spike end with a timed setup on a fresh Free-plan account, from the docs alone (A17, MUST-M23's test). 8.3's pass line for that spike leaves it out; the spike runs alongside milestone 1 and must pass before milestone 6, while the docs are built at milestone 7 (8.4). Also, 5.3 and 5.15 give the self-host spike the Node-free deploy, the trigram statement and the first push on Free, which 5.17 and 8.3 list as hub platform spike items 1, 3 and 7 (that spike also runs on a fresh Free account, RD/hub-platform.md §4). Settled when the spikes are planned, alongside milestone 1: which spike runs each check, and whether the docs-only setup runs in the spike with draft docs or at milestone 7 with MUST-M23.
 15. **The WebSocket wake if M5 needs it.** 5.1 and A14 ship the first release with polling only and move the wake to Later (5.18). But M5's deciding run for the wake is at milestone 6, before the release gate, and milestone 6's MUST-M19 line on dropped wake messages applies if M5 adds the wake (8.4). If M5 shows that polling misses the timing line, it is open whether the wake ships in the first release or the release waits. If it ships, it is also open whether the donor's kill switch is ported: 5.2 drops it because "the first release only polls". A14 also narrows MUST-M19, while owner decision 11 put all 23 MUST items into the design; owner decision 18 then settled section 5 as written. Settled by the owner when M5's milestone-6 result is in.
 16. **Owner decision 21 and line 52.** Settled 2026-09-26: with line 52 present, the owner turned subscriptions on by default in public setup (owner decision 28, 7.2).
