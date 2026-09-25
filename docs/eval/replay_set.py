@@ -54,27 +54,39 @@ def tool_calls(agent, o):
     return int(o.get('type') == 'response_item' and p.get('type') in ('function_call', 'custom_tool_call'))
 
 
+def session_files(agent, path):
+    """The main transcript and, for Claude Code, its subagent files: the replay includes their tool
+    calls, so the length strata count them too."""
+    sub = os.path.join(os.path.dirname(path), os.path.basename(path)[:-6], 'subagents')
+    return [path] + (sorted(glob.glob(os.path.join(sub, '*.jsonl'))) if agent == 'claude' else [])
+
+
+def lines_of(files):
+    for p in files:
+        with open(p, encoding='utf-8', errors='replace') as f:
+            yield from f
+
+
 def features(agent, path):
-    """Stratum features of one transcript, streamed line by line; None without a typed prompt.
+    """Stratum features of one session, streamed line by line; None without a typed prompt.
     Length is tool calls, not prompts: one typed prompt can start hours of work."""
     prompts = chars = ja = tools = 0
     first = last = None
-    with open(path, encoding='utf-8', errors='replace') as f:
-        for line in f:
-            try:
-                o = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(o.get('timestamp'), str):
-                t = ts(o['timestamp'])
-                first = t if first is None else min(first, t)
-                last = t if last is None else max(last, t)
-            tools += tool_calls(agent, o)
-            text = typed(agent, o)
-            if text and text.strip():
-                prompts += 1
-                chars += len(text)
-                ja += len(JA.findall(text))
+    for line in lines_of(session_files(agent, path)):
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(o.get('timestamp'), str):
+            t = ts(o['timestamp'])
+            first = t if first is None else min(first, t)
+            last = t if last is None else max(last, t)
+        tools += tool_calls(agent, o)
+        text = typed(agent, o)
+        if text and text.strip():
+            prompts += 1
+            chars += len(text)
+            ja += len(JA.findall(text))
     if prompts < 1:
         return None
     ja_ratio = ja / chars if chars else 0.0
@@ -117,11 +129,10 @@ def choose(pool, quotas, seed):
 def copy_out(chosen, dest_root):
     for c in chosen:
         base = os.path.join(c['side'], c['agent'])
-        files = {os.path.join(base, f'{c["session"]}.jsonl'): c['path']}
-        sub = os.path.join(os.path.dirname(c['path']), c['session'], 'subagents')
-        if c['agent'] == 'claude' and os.path.isdir(sub):
-            for f in sorted(glob.glob(os.path.join(sub, '*.jsonl'))):
-                files[os.path.join(base, c['session'], 'subagents', os.path.basename(f))] = f
+        main, *subs = session_files(c['agent'], c['path'])
+        files = {os.path.join(base, f'{c["session"]}.jsonl'): main}
+        for f in subs:
+            files[os.path.join(base, c['session'], 'subagents', os.path.basename(f))] = f
         c['files'] = {}
         for rel, src in files.items():
             dst = os.path.join(dest_root, rel)
@@ -158,6 +169,10 @@ def inventory():
 
 if __name__ == '__main__':
     owner_only()
+    from freeze import check
+    bad = check()
+    if bad:
+        sys.exit('frozen inputs changed: ' + ', '.join(bad))
     root = f'{E}/replay'
     if os.path.exists(f'{root}/manifest.json'):
         sys.exit(f'{root}/manifest.json exists and is frozen')

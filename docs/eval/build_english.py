@@ -32,6 +32,10 @@ def select(rows, have_qids, have_texts, n):
 
 if __name__ == '__main__':
     owner_only()
+    from freeze import check
+    bad = check()
+    if bad:
+        sys.exit('frozen inputs changed: ' + ', '.join(bad))
     target = f'{E}/queries-en.jsonl'
     if os.path.exists(target):
         sys.exit(f'{target} exists and is frozen')

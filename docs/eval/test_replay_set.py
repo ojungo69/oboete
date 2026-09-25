@@ -30,6 +30,13 @@ def test_features_count_typed_prompts_language_and_span():
         assert f['prompts'] == 12 and f['tools'] == 60 and f['ja_ratio'] > 0.9 and f['stratum'] == ('claude', 'mid', 'ja')
         assert 21.9 < f['span_h'] < 22.1
         assert features('claude', claude_file(d, 'b', 0)) is None   # no typed prompt
+        # A subagent's tool calls are part of the session's length (they are replayed with it).
+        os.makedirs(os.path.join(d, 'a', 'subagents'))
+        with open(os.path.join(d, 'a', 'subagents', 'agent-x.jsonl'), 'w') as f:
+            f.write(json.dumps({'type': 'assistant', 'isSidechain': True, 'timestamp': '2026-09-03T00:00:00Z',
+                                'message': {'content': [{'type': 'tool_use', 'id': 's', 'name': 'Grep', 'input': {}}]}}) + '\n')
+        g = features('claude', os.path.join(d, 'a.jsonl'))
+        assert g['tools'] == 61 and g['prompts'] == 12 and g['span_h'] > 40
 
 
 def test_choose_is_deterministic_and_covers_every_stratum():

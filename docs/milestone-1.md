@@ -34,21 +34,21 @@ Frozen as replay/manifest.json (every copied file's sha256) and replay/events-10
 - Pool: transcripts on disk whose session claude-mem recorded with at least one observation (so claude-mem's own rows are its end-to-end baseline, for Claude Code and Codex alike), with at least one typed prompt.
 - Typed prompts leave out Claude Code records the developer did not type: the hook's envelopes, teammate messages, command output, slash-command tags, bash mode and interrupts (`NOT_TYPED` in replay_set.py).
 - Sides: held-out = test side of the common session-hash split, dev = dev side.
-- 24 Claude Code and 6 Codex sessions per side. Strata: length by tool calls (< 50, 50-299, ≥ 300) × language (Japanese when ≥ 30% of typed characters are Japanese). One per non-empty stratum first, the rest in proportion, never above the quota.
+- 24 Claude Code and 6 Codex sessions per side. Strata: length by tool calls, subagent files included (< 50, 50-299, ≥ 300) × language (Japanese when ≥ 30% of typed characters are Japanese). One per non-empty stratum first, the rest in proportion, never above the quota.
 - The longest-span transcript is added when it spans 20 hours or more.
 
 Pool on 2026-09-26: 224 Claude Code and 242 Codex sessions.
 
 | Side | Agent | long/ja | long/en | mid/ja | mid/en | short/ja | short/en | Total |
 |---|---|---|---|---|---|---|---|---|
-| held-out | claude | 8 | 2 | 7 | 1 | 5 | 2 | 25 (with the long session) |
+| held-out | claude | 8 | 3 | 6 | 0 | 6 | 2 | 25 (with the long session) |
 | held-out | codex | 1 | 1 | 1 | 1 | 1 | 1 | 6 |
-| dev | claude | 7 | 1 | 8 | 2 | 4 | 2 | 24 |
+| dev | claude | 8 | 2 | 7 | 1 | 4 | 2 | 24 |
 | dev | codex | 1 | 1 | 1 | 1 | 1 | 1 | 6 |
 
-- The long session: 58.97 hours, 18 typed prompts, 3,864 tool calls, held-out (Claude Code). No 24-hour session was found; this one is longer.
-- Held-out: 145 typed prompts and 15,934 tool calls. Dev: 125 and 12,175. 304 files (with subagent files), 706 MB.
-- The first draw was discarded before anything read it: its "typed prompts" counted 1,063 task notifications, which made nearly every Claude Code session look English and short. freeze.json's two replay entries were removed and the set drawn again with the rules above (issue #65).
+- The long session: 58.97 hours, 18 typed prompts, 5,983 tool calls with its subagents, held-out (Claude Code). No 24-hour session was found; this one is longer.
+- Held-out: 152 typed prompts and 19,807 tool calls. Dev: 121 and 14,796. 267 files (with subagent files), 682 MB.
+- Two draws were discarded before anything read them, and freeze.json's two replay entries removed each time: the first counted 1,063 task notifications as typed prompts, which made nearly every Claude Code session look English and short (issue #65); the second left subagent tool calls out of the length strata (PR #66 review). The third draw, with the rules above, is the frozen one.
 
 ## Findings
 
