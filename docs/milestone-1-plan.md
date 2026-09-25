@@ -17,7 +17,7 @@
 - The dev/test split is the one in `docs/eval/build_queries.py`: `'test' if int(sha256('split:' + session)[:8], 16) % 10 < 3 else 'dev'`. Every new set uses it.
 - Anything sent to a model passes `oboete gate` first (8.1, docs/pr-b.md decision 3).
 - `claude -p` calls use the judge's isolation: `--setting-sources "" --tools "" --strict-mcp-config --no-session-persistence --settings '{"disableAllHooks":true}'`, a scratch cwd, `OBOETE_SKIP=1`, and no environment variable whose name contains TOKEN, KEY, SECRET or PASSWORD (docs/eval/judge.py `ask`).
-- Never open the owner's live stores for writing: `~/.oboete/oboete.db`, `~/.claude-mem/claude-mem.db`, the Windows `C:\Users\jura\.claude-mem\claude-mem.db`. Copy with `sqlite3 <db> ".backup <copy>"` or open with `?mode=ro`. Never stop, delete or reconfigure claude-mem.
+- Never open the owner's live stores for writing: `~/.oboete/oboete.db`, `~/.claude-mem/claude-mem.db`, the Windows `C:\Users\jura\.claude-mem\claude-mem.db`. Copy with `sqlite3 <db> ".backup <copy>"` or open with `?mode=ro`, except the Windows database, which WSL copies file by file with a consistency check (Task 10): a WAL index is not shared across the WSL/Windows boundary. Never stop, delete or reconfigure claude-mem.
 - API keys: never printed, never in a subprocess environment (project CLAUDE.md).
 - Replays and drafting share the owner's Groq and Claude quotas: the isolated homes use API-only providers with `daily_budget` 100 each, and drafting stops at 300 `claude` calls per run.
 - Owner-facing UI text is polite, natural Japanese (the labelling page, its buttons and messages).
@@ -28,7 +28,7 @@
 
 1. **Transcript text rendered in the labelling page**: transcripts and memories contain HTML, `<script>` and markdown. Expect them shown as plain text, never interpreted. Pinned in Task 5 (`test_item_text_is_never_html`).
 2. **A second browser tab or a replayed POST on the labelling page**: expect the latest label per item to win and the page to skip labelled items; no label is lost or duplicated in the results. Pinned in Task 5 (`test_latest_label_wins_and_next_skips_labelled`).
-3. **A transcript line that is not JSON, or a record type the parser has never seen** (Claude Code adds types often: `atis-latch`, `bridge-session`, `pr-link` in the last month): expect the line skipped and counted on stderr, the rest of the session still parsed. Pinned in Task 4 (`unknown_and_broken_lines_are_skipped`).
+3. **A transcript line that is not JSON, or a record type the parser has never seen** (Claude Code adds types often: `atis-latch`, `bridge-session`, `pr-link` in the last month): expect a broken line skipped and counted, every record type the parser does not read counted by type on stderr (so schema drift is visible), and the rest of the session still parsed. Pinned in Task 4 (`unknown_and_broken_lines_are_skipped`, and the `ignored` assertion of the Codex test).
 4. **A tool call whose result never arrives** (the session was killed mid-tool): expect a `PostToolUse` with an empty `tool_response` at the end of the session rather than a lost call or a crash. Pinned in Task 4 (`a_tool_call_without_result_is_emitted_at_the_end`).
 5. **A frozen input edited by a later script** (for example the claude-mem copy opened read-write by mistake): expect `freeze.py check` to fail loudly, and every later script to run it first. Pinned in Task 1 (`test_add_check_and_refuse`) and in the first step of Tasks 6, 8 and 9.
 
@@ -78,7 +78,7 @@ PRs: A = Tasks 1-3; B = Task 4 (delegated to Codex); C = Tasks 5-6; D = Task 7; 
 - Modify: `.gitignore`; remove `docs/eval/__pycache__/judge.cpython-314.pyc` from the index
 
 **Interfaces:**
-- Produces: `common.E` (str, eval dir, `OBOETE_EVAL` overrides it), `common.SEED` (str), `common.h(s) -> int`, `common.split(session) -> 'dev'|'test'`, `common.owner_only() -> None`, `common.sha256_file(path) -> str`, `common.read_jsonl(path) -> list[dict]`, `common.write_jsonl(path, rows) -> None`, `common.gate(text, oboete='oboete') -> str`, `common.claude_json(prompt, model, timeout=300) -> str` (the result text). `freeze.py add <rel>...` / `freeze.py check` (exit 1 on any change); `freeze.check() -> list[str]`.
+- Produces: `common.E` (str, eval dir, `OBOETE_EVAL` overrides it), `common.SEED` (str), `common.h(s) -> int`, `common.split(session) -> 'dev'|'test'`, `common.owner_only() -> None`, `common.sha256_file(path) -> str`, `common.read_jsonl(path) -> list[dict]`, `common.write_jsonl(path, rows) -> None`, `common.clean_env() -> dict` (the environment minus TOKEN/KEY/SECRET/PASSWORD names, for every subprocess), `common.gate(text, oboete='oboete') -> str`, `common.claude_json(prompt, model, timeout=300) -> str` (the result text). `freeze.py add <rel>...` / `freeze.py check` (exit 1 on any change); `freeze.check() -> list[str]`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -168,16 +168,23 @@ def write_jsonl(path, rows):
             f.write(json.dumps(r, ensure_ascii=False) + '\n')
 
 
+def clean_env():
+    """The environment without secret-bearing variables: keys never reach a subprocess environment
+    (project CLAUDE.md). Every subprocess these scripts start gets this."""
+    return {k: v for k, v in os.environ.items()
+            if k != 'CLAUDECODE' and not any(s in k.upper() for s in ('TOKEN', 'KEY', 'SECRET', 'PASSWORD'))}
+
+
 def gate(text, oboete='oboete'):
     """The outbound gate of the shipped binary: <private> blocks removed, secrets redacted."""
-    return subprocess.run([oboete, 'gate'], input=text, capture_output=True, text=True, check=True).stdout
+    return subprocess.run([oboete, 'gate'], input=text, capture_output=True, text=True, check=True,
+                          env=clean_env()).stdout
 
 
 def claude_json(prompt, model, timeout=300):
     """One `claude -p` call with the judge's isolation (docs/eval/judge.py `ask`); returns the result
     text. judge.py keeps its own copy: its recorded grades were made through it."""
-    env = {k: v for k, v in os.environ.items()
-           if k != 'CLAUDECODE' and not any(s in k for s in ('TOKEN', 'KEY', 'SECRET', 'PASSWORD'))}
+    env = clean_env()
     env['OBOETE_SKIP'] = '1'
     with tempfile.TemporaryDirectory() as cwd:
         r = subprocess.run(
@@ -769,7 +776,7 @@ Decisions (Claude; overrulable, recorded in the note):
 
 **Interfaces:**
 - Consumes: `crate::db::open(home) -> Result<Connection>`, `crate::hook::handle(conn, agent, event, payload) -> Result<Option<String>>` (tests only).
-- Produces: `transcript::convert(path: &Path, agent: &str, out: impl Write) -> anyhow::Result<transcript::Stats>`, `Stats { lines: u64, skipped: u64, events: u64 }`; CLI `oboete transcript <path> --agent claude|codex` (hidden) writing the fixture to stdout and `oboete transcript: <lines> lines, <skipped> skipped, <events> events` to stderr.
+- Produces: `transcript::convert(path: &Path, agent: &str, out: impl Write) -> anyhow::Result<transcript::Stats>`, `Stats { lines: u64, skipped: u64, events: u64, ignored: BTreeMap<String, u64> }` (`skipped` = lines that are not JSON; `ignored` = record types not read, by type); CLI `oboete transcript <path> --agent claude|codex` (hidden) writing the fixture to stdout and `oboete transcript: <lines> lines, <skipped> skipped, <events> events; not read: <type> <n>, …` to stderr.
 
 Event mapping:
 
@@ -791,7 +798,7 @@ Event mapping:
 | a tool call with no result at the end of a file | `PostToolUse` | `tool_response: null`, `interrupted: true` |
 | end of the main file | `Stop` for a remembered text | |
 | end of everything | `SessionEnd` | `reason: "transcript_end"` |
-| any other record type | nothing | |
+| any other record type | nothing; counted in `Stats.ignored` by type (Codex: `<type>:<payload.type>`) | |
 
 - [ ] **Step 1: Write the fixtures**
 
@@ -918,14 +925,16 @@ mod tests {
     #[test]
     fn unknown_and_broken_lines_are_skipped() {
         let (v, stats) = events(CLAUDE, "claude");
-        assert_eq!(stats, Stats { lines: 21, skipped: 1, events: 13 });
+        let ignored = [("atis-latch".to_string(), 1), ("permission-mode".to_string(), 1)].into();
+        assert_eq!(stats, Stats { lines: 21, skipped: 1, events: 13, ignored });
         assert_eq!(v.len(), 13);
         assert!(convert(Path::new(CLAUDE), "grok", Vec::new()).is_err());
     }
 
     #[test]
     fn codex_rollout_maps_prompts_calls_turns_and_compaction() {
-        let (v, _) = events("src/testdata/transcripts/codex-basic.jsonl", "codex");
+        let (v, stats) = events("src/testdata/transcripts/codex-basic.jsonl", "codex");
+        assert_eq!(stats.ignored, [("world_state:".to_string(), 1)].into());
         assert_eq!(
             names(&v),
             [
@@ -1005,8 +1014,11 @@ const CODEX_CONTEXT: [&str; 5] = [
 #[derive(Debug, Default, PartialEq)]
 pub struct Stats {
     pub lines: u64,
+    /// Lines that are not JSON.
     pub skipped: u64,
     pub events: u64,
+    /// Record types this parser does not read, by type: a new format shows up here.
+    pub ignored: std::collections::BTreeMap<String, u64>,
 }
 
 /// A tool call waiting for its result: (id, name, input, ts, subagent id).
@@ -1027,6 +1039,10 @@ struct Emitter<W: Write> {
 }
 
 impl<W: Write> Emitter<W> {
+    fn ignore(&mut self, kind: String) {
+        *self.stats.ignored.entry(kind).or_default() += 1;
+    }
+
     fn write(&mut self, event: &str, ts: &str, mut payload: Value) -> Result<()> {
         self.stats.events += 1;
         payload["session_id"] = json!(self.session);
@@ -1167,7 +1183,10 @@ fn claude_line<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) 
             }
             Ok(())
         }
-        _ => Ok(()),
+        other => {
+            e.ignore(other.unwrap_or("<none>").to_string());
+            Ok(())
+        }
     }
 }
 
@@ -1240,7 +1259,10 @@ fn codex_line<W: Write>(e: &mut Emitter<W>, v: &Value) -> Result<()> {
             Some(s) => e.emit("PostCompact", &ts, json!({"trigger": "auto", "compact_summary": s})),
             None => Ok(()),
         },
-        _ => Ok(()),
+        (kind, sub) => {
+            e.ignore(format!("{}:{}", kind.unwrap_or("<none>"), sub.unwrap_or("")));
+            Ok(())
+        }
     }
 }
 
@@ -1328,9 +1350,13 @@ and in the dispatch, next to `Cmd::Gate`:
 ```rust
         Cmd::Transcript { path, agent } => {
             let stats = transcript::convert(&path, &agent, std::io::stdout().lock())?;
+            let ignored: Vec<String> = stats.ignored.iter().map(|(k, n)| format!("{k} {n}")).collect();
             eprintln!(
-                "oboete transcript: {} lines, {} skipped, {} events",
-                stats.lines, stats.skipped, stats.events
+                "oboete transcript: {} lines, {} skipped, {} events; not read: {}",
+                stats.lines,
+                stats.skipped,
+                stats.events,
+                ignored.join(", ")
             );
             Ok(())
         }
@@ -1350,7 +1376,7 @@ for f in $(python3 -c "import json;m=json.load(open('$HOME/.oboete/eval/replay/m
 done
 ```
 
-Expected: one `oboete transcript: … lines, … skipped, … events` line per dev transcript, no `FAILED`, `skipped` 0 or near 0. Compare one Claude file's `UserPromptSubmit` count with `replay_set.py`'s `prompts` for that session in the manifest: they must match (both count typed prompts). Record the totals in `docs/milestone-1.md`.
+Expected: one `oboete transcript: … lines, … skipped, … events; not read: …` line per dev transcript, no `FAILED`, `skipped` 0 or near 0. Read the `not read` types: any name that sounds like dialogue (a prompt, a message, an answer) is a format the parser misses; add it to the mapping table and the parser before going on. Compare one Claude file's `UserPromptSubmit` count with `replay_set.py`'s `prompts` for that session in the manifest: they must match (both count typed prompts). Record the totals in `docs/milestone-1.md`.
 
 - [ ] **Step 7: Commit**
 
@@ -1692,7 +1718,7 @@ If κ < 0.4 (the failure branch, 8.1): the judge decides nothing; D2's test pool
 
 **Interfaces:**
 - Consumes: `common.*`, `label.latest_labels`, `freeze.check`.
-- Produces: `calib.kappa(pairs: list[tuple[bool, bool]]) -> float`, `calib.draw(queries, judgments, doc_text, n=50) -> (items, key)`, `calib.repeat_allowed(first_ts: int, now: int) -> bool`; files `labels/tasks/calib-50.jsonl`, `labels/calib-50.key.jsonl` (`{"id", "qid", "doc", "grade", "judge"}`), `labels/calib-50.result.json`, `labels/tasks/calib-repeat-20.jsonl`, `labels/calib-repeat-20.result.json`.
+- Produces: `calib.kappa(pairs: list[tuple[bool, bool]]) -> float`, `calib.draw(queries, judgments, doc_text, n=50) -> (items, key)`, `calib.repeat_allowed(finished_ts: int, now: int) -> bool` (a week after the last first-round answer); files `labels/tasks/calib-50.jsonl`, `labels/calib-50.key.jsonl` (`{"id", "qid", "doc", "grade", "judge"}`), `labels/calib-50.result.json`, `labels/tasks/calib-repeat-20.jsonl`, `labels/calib-repeat-20.result.json`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1742,6 +1768,7 @@ def test_draw_takes_dev_pairs_balanced_one_per_question_and_blind():
 
 def test_the_repeat_waits_a_week():
     day = 86400
+    # Counted from the last first-round answer: pairs answered on the last day still get a week.
     assert not repeat_allowed(1_000_000, 1_000_000 + 6 * day)
     assert repeat_allowed(1_000_000, 1_000_000 + 7 * day)
 ```
@@ -1758,7 +1785,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'calib'`.
 
   calib.py draw           50 dev pairs the judge graded -> labels/tasks/calib-50.jsonl and its key
   calib.py kappa          owner vs judge on binary relevance (judge grade >= 2); passes at kappa >= 0.4
-  calib.py repeat         a week or more after the first answer: 20 of the 50 again, blind
+  calib.py repeat         a week or more after the last first-round answer: 20 of the 50 again, blind
   calib.py kappa-repeat   owner vs owner on those 20
 The owner sees the question and the document as the judge saw them (4,000 characters), never the grade."""
 import json, os, sqlite3, sys, time
@@ -1815,8 +1842,8 @@ def draw(queries, judgments, doc_text, n=N):
     return [items[i] for i in order], [key[i] for i in order]
 
 
-def repeat_allowed(first_ts, now):
-    return now - first_ts >= WEEK
+def repeat_allowed(finished_ts, now):
+    return now - finished_ts >= WEEK
 
 
 def store_doc_text(db):
@@ -1864,10 +1891,15 @@ def main(cmd):
                                    'judges': sorted({k['judge'] for k in key}),
                                    'pass': bool(done and k is not None and k >= PASS_KAPPA)})
     elif cmd == 'repeat':
-        answered = [r['ts'] for r in read_jsonl(f'{labels}/calib-50.jsonl') if r['value'] is not None]
-        if not answered or not repeat_allowed(min(answered), int(time.time())):
-            when = time.strftime('%Y-%m-%d', time.localtime(min(answered) + WEEK)) if answered else 'after the first answers'
-            sys.exit(f'the blind repeat opens on {when}')
+        # A week after the first round is finished: the latest standing answer, not the first one.
+        standing = {}
+        for r in read_jsonl(f'{labels}/calib-50.jsonl'):
+            standing[r['id']] = r
+        answered = [r['ts'] for r in standing.values() if r['value'] is not None]
+        if len(answered) < N:
+            sys.exit(f'the first round has {len(answered)} of {N} answers; the blind repeat opens a week after it is finished')
+        if not repeat_allowed(max(answered), int(time.time())):
+            sys.exit(f'the blind repeat opens on {time.strftime("%Y-%m-%d", time.localtime(max(answered) + WEEK))}')
         items = read_jsonl(f'{tasks}/calib-50.jsonl')
         chosen = sorted(items, key=lambda i: h(f'repeat:{SEED}:{i["id"]}'))[:N_REPEAT]
         chosen = [{**i, 'id': 'r' + i['id']} for i in sorted(chosen, key=lambda i: h(f'repeat-order:{SEED}:{i["id"]}'))]
@@ -2229,7 +2261,7 @@ Every line sent passes `oboete gate`; a quote must appear verbatim in the gated 
 Answers are cached per prompt, so a run stopped by its call budget resumes where it stopped."""
 import hashlib, json, os, re, subprocess, sys
 
-from common import E, SEED, claude_json, gate, h, owner_only, read_jsonl, write_jsonl
+from common import E, SEED, claude_json, clean_env, gate, h, owner_only, read_jsonl, write_jsonl
 
 MODEL = 'claude-sonnet-5'
 WINDOW, OVERLAP, CAP = 12_000, 10, 1_500
@@ -2358,7 +2390,7 @@ def rendered(s):
     if os.path.exists(path):
         return [tuple(r) for r in read_jsonl(path)]
     out = subprocess.run(['oboete', 'transcript', f'{E}/replay/dev/{s["agent"]}/{s["session"]}.jsonl', '--agent', s['agent']],
-                         capture_output=True, text=True, check=True).stdout
+                         capture_output=True, text=True, check=True, env=clean_env()).stdout
     events = [json.loads(line) for line in out.splitlines()]
     repo = next((e['payload'].get('cwd') for e in events if e['payload'].get('cwd')), '.')
     lines = [(lid, ts, gate(text)) for lid, ts, text in render(events)]
@@ -2520,7 +2552,7 @@ Held-out transcripts are never touched here: they are replayed once, at mileston
   baseline.py summary         per-session counts for docs/milestone-1.md"""
 import glob, json, os, sqlite3, subprocess, sys
 
-from common import E, owner_only, read_jsonl, write_jsonl
+from common import E, clean_env, owner_only, read_jsonl, write_jsonl
 
 B = f'{E}/baseline'
 HOME = os.path.expanduser('~')
@@ -2556,7 +2588,7 @@ def dev_sessions():
 
 def version():
     head = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True, cwd=REPO).stdout.strip()
-    binary = subprocess.run(['oboete', '--version'], capture_output=True, text=True).stdout.strip()
+    binary = subprocess.run(['oboete', '--version'], capture_output=True, text=True, env=clean_env()).stdout.strip()
     return head, binary
 
 
@@ -2579,10 +2611,10 @@ def run_oboete():
         fixture = f'{B}/fixtures/{s["session"]}.jsonl'
         with open(fixture, 'w', encoding='utf-8') as out:
             subprocess.run(['oboete', 'transcript', f'{E}/replay/dev/{s["agent"]}/{s["session"]}.jsonl',
-                            '--agent', s['agent']], stdout=out, check=True)
+                            '--agent', s['agent']], stdout=out, check=True, env=clean_env())
         with open(report + '.part', 'w') as r:
             if subprocess.run(['oboete', 'replay', fixture, '--home', home, '--agent', 'all', '--spawn-sample', '0'],
-                              stdout=r).returncode != 0:
+                              stdout=r, env=clean_env()).returncode != 0:
                 sys.exit(f'replay of {s["session"]} failed part way; its events may be in {home} already. '
                          f'Remove {home} and run this again.')
         os.replace(report + '.part', report)
@@ -2694,7 +2726,7 @@ git add docs/eval/baseline.py docs/milestone-1.md && git commit -m "eval: dev ba
 
 ## Task 10: M22's corpus count
 
-Spec 8.2 M22: "The corpus is counted in milestone 1, not assumed: the evaluation store, the live store, the other machines' claude-mem databases if imported, and one year of raw chunks at the measured rate." Read-only everywhere; the Windows claude-mem database is copied into the eval directory first and the copy deleted after counting; the iMac is counted over SSH with `sqlite3 -readonly`.
+Spec 8.2 M22: "The corpus is counted in milestone 1, not assumed: the evaluation store, the live store, the other machines' claude-mem databases if imported, and one year of raw chunks at the measured rate." Read-only everywhere; the Windows claude-mem database and its WAL are copied into the eval directory, checked for consistency (unchanged source, `quick_check`), counted and deleted; the iMac is counted over SSH with `sqlite3 -readonly`.
 
 **Files:**
 - Create: `docs/eval/corpus_count.py`
@@ -2714,7 +2746,7 @@ opened with mode=ro, the Windows claude-mem database is copied first and the cop
 iMac is read with `sqlite3 -readonly` over SSH. Writes ~/.oboete/eval/corpus-count.json."""
 import glob, json, os, shutil, sqlite3, subprocess, tempfile, time
 
-from common import E, owner_only
+from common import E, clean_env, owner_only
 
 OBOETE = {t: f'SELECT count(*) FROM {t}' for t in ('observations', 'summaries', 'prompts', 'events')}
 CLAUDE_MEM = {'observations': 'SELECT count(*) FROM observations',
@@ -2740,14 +2772,33 @@ def live_store():
 
 
 def windows_claude_mem():
+    """claude-mem on Windows owns this database. From WSL neither a SQLite backup nor a read-only open
+    is safe: a WAL database's shared-memory index is not shared across the WSL/Windows boundary. So
+    the database and its WAL are copied, and the copy counts only if the source did not change while
+    it was copied and the copy passes quick_check; otherwise it tries again."""
     src = '/mnt/c/Users/jura/.claude-mem/claude-mem.db'
     if not os.path.exists(src):
         return None
-    with tempfile.TemporaryDirectory(dir=E) as d:
-        for suffix in ('', '-wal', '-shm'):
-            if os.path.exists(src + suffix):
-                shutil.copyfile(src + suffix, f'{d}/copy.db{suffix}')
-        return counts(sqlite3.connect(f'{d}/copy.db'), CLAUDE_MEM)
+
+    def state():
+        return tuple((os.stat(src + x).st_size, os.stat(src + x).st_mtime_ns) if os.path.exists(src + x) else None
+                     for x in ('', '-wal'))
+
+    for _ in range(5):
+        with tempfile.TemporaryDirectory(dir=E) as d:
+            before = state()
+            for suffix in ('', '-wal'):
+                if os.path.exists(src + suffix):
+                    shutil.copyfile(src + suffix, f'{d}/copy.db{suffix}')
+            if state() == before:
+                db = sqlite3.connect(f'{d}/copy.db')
+                if db.execute('PRAGMA quick_check').fetchone()[0] == 'ok':
+                    out = counts(db, CLAUDE_MEM)
+                    db.close()
+                    return out
+                db.close()
+        time.sleep(2)
+    return {'error': 'the database kept changing while it was copied (5 tries)'}
 
 
 def imac_claude_mem():
@@ -2769,13 +2820,17 @@ def raw_rate(days=90):
     files = [(agent, p) for agent, pattern in (('claude', '~/.claude/projects/*/*.jsonl'),
                                                 ('codex', '~/.codex/sessions/**/*.jsonl'))
              for p in glob.glob(os.path.expanduser(pattern), recursive=True) if os.path.getmtime(p) >= since]
+    # A file touched in the window can hold older events (a resumed session): count by the event's
+    # own time. ISO timestamps compare as strings.
+    since_iso = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(since))
     events = size = 0
     for agent, path in files:
-        with subprocess.Popen(['oboete', 'transcript', path, '--agent', agent],
-                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as p:
+        with subprocess.Popen(['oboete', 'transcript', path, '--agent', agent], stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, env=clean_env()) as p:
             for line in p.stdout:
-                events += 1
-                size += len(line)
+                if json.loads(line).get('ts', '') >= since_iso:
+                    events += 1
+                    size += len(line)
     return {'days': days, 'files': len(files), 'events': events, 'bytes': size,
             'events_per_year': round(events / days * 365), 'mb_per_year': round(size / days * 365 / 1e6)}
 
