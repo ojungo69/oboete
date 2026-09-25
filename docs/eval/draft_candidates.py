@@ -3,7 +3,8 @@ Owner decision 29: the owner confirms only their own decisions, each as one plai
 the owner's own message, and may always answer 判断できない; the panel of Task 6 takes those.
 
   draft_candidates.py decisions [max calls]   dev transcripts -> labels/drafts/decisions.jsonl
-  draft_candidates.py pairs [max calls]       decisions       -> labels/drafts/pairs.jsonl
+  draft_candidates.py extra <n>               n more dev-split transcripts, outside the replay set, for drafting
+  draft_candidates.py pairs [max calls]       decisions       -> labels/drafts/pairs.jsonl (kept pairs stay)
   draft_candidates.py tasks                   adds items to labels/tasks/dev-decisions.jsonl and dev-pairs.jsonl
                                               until the owner's counts can be reached; rerun after a sitting
   draft_candidates.py panel                   the five API judges: every `unknown` item, and a blind sample
@@ -182,8 +183,36 @@ def ask(prompt, budget):
 
 
 def dev_sessions():
+    """The replay set's dev transcripts, then the extra ones (`extra`), in that order, so the ids
+    of decisions drafted earlier never change."""
     with open(f'{E}/replay/manifest.json') as f:
-        return [s for s in json.load(f)['sessions'] if s['side'] == 'dev']
+        out = [{**s, 'dir': 'replay/dev'} for s in json.load(f)['sessions'] if s['side'] == 'dev']
+    path = f'{DRAFTS}/extra.json'
+    if os.path.exists(path):
+        with open(path) as f:
+            out += [{**s, 'dir': 'replay/dev-extra'} for s in json.load(f)]
+    return out
+
+
+def extra(n):
+    """n more dev-split transcripts claude-mem recorded, outside the replay set (either side), the
+    ones with the most typed prompts first (they hold the most decisions); copied owner-only."""
+    from replay_set import copy_out, inventory
+    with open(f'{E}/replay/manifest.json') as f:
+        taken = {s['session'] for s in json.load(f)['sessions']}
+    path = f'{DRAFTS}/extra.json'
+    old = json.load(open(path)) if os.path.exists(path) else []
+    taken |= {s['session'] for s in old}
+    pool, _ = inventory()
+    fresh = sorted((p for p in pool if p['side'] == 'dev' and p['session'] not in taken),
+                   key=lambda p: (-p['prompts'], h(f'extra:{SEED}:{p["session"]}')))[:n]
+    for p in fresh:
+        p['side'] = 'dev-extra'
+    copy_out(fresh, f'{E}/replay')
+    new = old + [{'session': p['session'], 'agent': p['agent']} for p in fresh]
+    with open(path, 'w') as f:
+        json.dump(new, f, indent=1)
+    return len(fresh)
 
 
 def events_of(out):
@@ -197,7 +226,7 @@ def rendered(s):
     path = f'{DRAFTS}/rendered/{s["session"]}.jsonl'
     if os.path.exists(path):
         return [tuple(r) for r in read_jsonl(path)]
-    out = subprocess.run(['oboete', 'transcript', f'{E}/replay/dev/{s["agent"]}/{s["session"]}.jsonl', '--agent', s['agent']],
+    out = subprocess.run(['oboete', 'transcript', f'{E}/{s["dir"]}/{s["agent"]}/{s["session"]}.jsonl', '--agent', s['agent']],
                          capture_output=True, text=True, check=True, env=clean_env()).stdout
     events = events_of(out)
     repo = next((e['payload'].get('cwd') for e in events if e['payload'].get('cwd')), '.')
@@ -422,10 +451,15 @@ if __name__ == '__main__':
         write_jsonl(f'{DRAFTS}/decisions.jsonl', found)
         print(f'{len(found)} decisions from {len({d["session"] for d in found})} sessions'
               + ('' if complete else ' (incomplete: rerun)'))
+    elif cmd == 'extra':
+        print(f'{extra(int(sys.argv[2]))} more dev transcripts')
     elif cmd == 'pairs':
-        found = pairs(budget, read_jsonl(f'{DRAFTS}/decisions.jsonl'))
+        # Pairs found before stay (the owner may have answered them); new ones are added.
+        old = read_jsonl(f'{DRAFTS}/pairs.jsonl') if os.path.exists(f'{DRAFTS}/pairs.jsonl') else []
+        known = {pair_id(p) for p in old}
+        found = old + [p for p in pairs(budget, read_jsonl(f'{DRAFTS}/decisions.jsonl')) if pair_id(p) not in known]
         write_jsonl(f'{DRAFTS}/pairs.jsonl', found)
-        print(f'{len(found)} pairs')
+        print(f'{len(found)} pairs ({len(found) - len(old)} new)')
     elif cmd == 'tasks':
         tasks()
     elif cmd == 'panel':
