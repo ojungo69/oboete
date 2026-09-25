@@ -1,5 +1,6 @@
 //! Summarize pending sessions. Single instance per home (file lock), bounded pass, then exit.
 
+use std::collections::VecDeque;
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
@@ -8,8 +9,14 @@ use serde_json::{Value, json};
 
 use crate::{config, db, embed, hook, provider, redact};
 
-/// Characters of transcript sent to the model per batch.
+/// Characters of transcript sent to the model per call.
 const MAX_PROMPT_CHARS: usize = 16_000;
+/// Share of one call that dialogue may take; tool lines get the rest.
+const DIALOGUE_CHARS: usize = 12_000;
+/// Events read per query while a part is built.
+const PAGE: usize = 500;
+/// Summarizer calls per session in one run; the rest stays pending for the next run.
+const MAX_PARTS_PER_RUN: usize = 10;
 const MAX_OBSERVATIONS: usize = 12;
 const MAX_SUMMARY_CHARS: usize = 2_000;
 pub const KINDS: [&str; 6] = [
@@ -77,91 +84,209 @@ fn process_session(
     s: &db::PendingSession,
     stats: &mut Stats,
 ) -> Result<()> {
-    let events = db::session_events(conn, &s.id)?;
-    let Some(last) = events.last() else {
-        return Ok(());
-    };
-    let last_id = last.id;
-    let transcript = render(&events);
-    if transcript.trim().is_empty() {
-        // Nothing worth a model call (e.g. only SessionStart/SessionEnd): mark the rows read.
-        db::apply_batch(conn, s, "none", "", &[], last_id)?;
-        return Ok(());
+    for _ in 0..MAX_PARTS_PER_RUN {
+        let part = next_part(conn, &s.id)?;
+        let Some((last_id, last_ts)) = part.last else {
+            return Ok(());
+        };
+        // Each part's rows carry the time of its own last event.
+        let s = db::PendingSession {
+            id: s.id.clone(),
+            agent: s.agent.clone(),
+            repo: s.repo.clone(),
+            last_event_at: last_ts,
+        };
+        let stored = if part.text.trim().is_empty() {
+            // Nothing worth a model call (e.g. only SessionStart/SessionEnd): mark the rows read.
+            db::apply_batch(conn, &s, "none", "", &[], last_id)?
+        } else {
+            let prompt = build_prompt(&s.agent, &cfg.summary.language, &part.text);
+            let result = chain.summarize(conn, &prompt, &schema())?;
+            stats.fallbacks += result.fallbacks.len() as u32;
+            let observations = parse_observations(&result.output)?;
+            let summary = parse_summary(&result.output);
+            stats.observations += observations.len() as u32;
+            *stats
+                .by_provider
+                .entry(result.provider.clone())
+                .or_default() += 1;
+            db::apply_batch(conn, &s, &result.provider, &summary, &observations, last_id)?
+        };
+        if !stored {
+            return Ok(());
+        }
     }
-    let prompt = build_prompt(&s.agent, &cfg.summary.language, &transcript);
-    let result = chain.summarize(conn, &prompt, &schema())?;
-    stats.fallbacks += result.fallbacks.len() as u32;
-    let observations = parse_observations(&result.output)?;
-    let summary = parse_summary(&result.output);
-    stats.observations += observations.len() as u32;
-    *stats
-        .by_provider
-        .entry(result.provider.clone())
-        .or_default() += 1;
-    db::apply_batch(conn, s, &result.provider, &summary, &observations, last_id)?;
     Ok(())
 }
 
-/// Plain-text transcript from stored events, oldest first; middle dropped when too long. Every
-/// field passes `redact::outbound` here: this text goes to an external provider.
-fn render(events: &[db::RawEvent]) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    for e in events {
-        let v: Value = serde_json::from_str(&e.payload).unwrap_or(Value::Null);
-        match e.event.as_str() {
-            "UserPromptSubmit" => {
-                let p = redact::outbound(v["prompt"].as_str().unwrap_or(""));
-                if !p.is_empty() {
-                    // A task report is worth summarizing, but it is not the developer speaking.
-                    let who = if hook::is_envelope(&p) {
-                        "NOTIFICATION"
-                    } else {
-                        "USER"
-                    };
-                    lines.push(format!("{who}: {p}"));
+/// One summarizer call's worth of a session, from its observe cursor on.
+struct Part {
+    text: String,
+    /// Id and time of the last event the part covers; `None` when nothing is pending.
+    last: Option<(i64, i64)>,
+}
+
+/// Every dialogue line (the developer, answers to the agent's questions, harness reports, the
+/// agent's replies) in order until they fill `DIALOGUE_CHARS`, plus the newest tool lines that fit
+/// in what is left. Reads a page at a time and keeps at most one call's worth of tool lines, so a
+/// long session is never held in memory whole; everything it covers is either sent or counted in
+/// the omitted-tool-calls line.
+// ponytail: keeps the newest tool lines of a part; the redesign's curation windows
+// (docs/research/redesign-2026-09-24/sections-1-4.md, section 3) replace this.
+fn next_part(conn: &rusqlite::Connection, session_id: &str) -> Result<Part> {
+    let mut dialogue: Vec<(i64, String)> = Vec::new();
+    let mut tools: VecDeque<(i64, String)> = VecDeque::new();
+    let (mut dialogue_chars, mut tool_chars, mut omitted) = (0, 0, 0);
+    let mut last = None;
+    let mut after = 0;
+    'read: loop {
+        let page = db::session_events_after(conn, session_id, after, PAGE)?;
+        let Some(end) = page.last() else {
+            break;
+        };
+        after = end.id;
+        for e in &page {
+            match line(e) {
+                Line::Dialogue(l) => {
+                    let l = cap(l, DIALOGUE_CHARS);
+                    let n = l.chars().count();
+                    // Past its share, dialogue still fills the call while nothing else needs
+                    // the room, so a short talk-heavy session stays one call.
+                    if !dialogue.is_empty()
+                        && dialogue_chars + n > DIALOGUE_CHARS
+                        && (omitted > 0 || dialogue_chars + n + tool_chars > MAX_PROMPT_CHARS)
+                    {
+                        break 'read;
+                    }
+                    dialogue_chars += n;
+                    dialogue.push((e.id, l));
                 }
+                Line::Tool(l) => {
+                    tool_chars += l.chars().count();
+                    tools.push_back((e.id, l));
+                }
+                Line::Skip => {}
             }
-            "PostToolUse" | "PostToolUseFailure" => {
-                let tool = redact::outbound(v["tool"].as_str().unwrap_or("?"));
-                let input = short(&redact::outbound(v["input"].as_str().unwrap_or("")), 300);
-                let output = short(&redact::outbound(v["output"].as_str().unwrap_or("")), 600);
-                let mark = if v["failed"].as_bool().unwrap_or(false) {
-                    " (failed)"
-                } else {
-                    ""
+            while tool_chars > MAX_PROMPT_CHARS.saturating_sub(dialogue_chars) {
+                let Some((_, l)) = tools.pop_front() else {
+                    break;
                 };
-                lines.push(format!("TOOL {tool}{mark}: {input}\n  -> {output}"));
+                tool_chars -= l.chars().count();
+                omitted += 1;
             }
-            "Stop" => {
-                let a = redact::outbound(v["assistant"].as_str().unwrap_or(""));
-                if !a.is_empty() {
-                    lines.push(format!("ASSISTANT: {}", short(&a, 1_500)));
-                }
-            }
-            "PostCompact" => {
-                let s = redact::outbound(v["summary"].as_str().unwrap_or(""));
-                if !s.is_empty() {
-                    lines.push(format!("COMPACTED EARLIER PART: {}", short(&s, 1_500)));
-                }
-            }
-            _ => {}
+            last = Some((e.id, e.ts));
         }
     }
-    let text = lines.join("\n");
-    if text.chars().count() <= MAX_PROMPT_CHARS {
-        return text;
+    let mut lines: Vec<(i64, String)> = dialogue;
+    lines.extend(tools);
+    lines.sort_by_key(|(id, _)| *id);
+    let mut text: Vec<String> = lines.into_iter().map(|(_, l)| l).collect();
+    if omitted > 0 {
+        text.insert(
+            0,
+            format!("[{omitted} older tool calls of this part omitted]"),
+        );
     }
-    let half = MAX_PROMPT_CHARS / 2;
-    let head: String = text.chars().take(half).collect();
-    let tail: String = text
-        .chars()
-        .rev()
-        .take(half)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
+    Ok(Part {
+        text: text.join("\n"),
+        last,
+    })
+}
+
+enum Line {
+    Dialogue(String),
+    Tool(String),
+    Skip,
+}
+
+/// One stored event as transcript text. Every field passes `redact::outbound` here: this text
+/// goes to an external provider.
+fn line(e: &db::RawEvent) -> Line {
+    let v: Value = serde_json::from_str(&e.payload).unwrap_or(Value::Null);
+    match e.event.as_str() {
+        "UserPromptSubmit" => {
+            let p = redact::outbound(v["prompt"].as_str().unwrap_or(""));
+            if p.is_empty() {
+                Line::Skip
+            } else if hook::is_envelope(&p) {
+                // A task report is worth summarizing, but it is not the developer speaking.
+                Line::Dialogue(format!("NOTIFICATION: {}", short(&p, 1_500)))
+            } else {
+                Line::Dialogue(format!("USER: {p}"))
+            }
+        }
+        "PostToolUse" | "PostToolUseFailure" => {
+            if let Some(answers) = answers(&v) {
+                return Line::Dialogue(answers);
+            }
+            let tool = redact::outbound(v["tool"].as_str().unwrap_or("?"));
+            let input = short(&redact::outbound(v["input"].as_str().unwrap_or("")), 300);
+            let output = short(&redact::outbound(v["output"].as_str().unwrap_or("")), 600);
+            let mark = if v["failed"].as_bool().unwrap_or(false) {
+                " (failed)"
+            } else {
+                ""
+            };
+            Line::Tool(format!("TOOL {tool}{mark}: {input}\n  -> {output}"))
+        }
+        "Stop" => {
+            let a = redact::outbound(v["assistant"].as_str().unwrap_or(""));
+            if a.is_empty() {
+                Line::Skip
+            } else {
+                Line::Dialogue(format!("ASSISTANT: {}", short(&a, 1_500)))
+            }
+        }
+        "PostCompact" => {
+            let s = redact::outbound(v["summary"].as_str().unwrap_or(""));
+            if s.is_empty() {
+                Line::Skip
+            } else {
+                Line::Dialogue(format!("COMPACTED EARLIER PART: {}", short(&s, 1_500)))
+            }
+        }
+        _ => Line::Skip,
+    }
+}
+
+/// Claude Code's AskUserQuestion carries the developer's answers at the end of its input, past
+/// where a tool line is cut; they are the developer speaking, so they are dialogue.
+// ponytail: an input over the capture limit (`hook::clip`, 8,000 characters) has lost its answers
+// before this runs and stays a tool line; the redesign keeps tool input whole.
+fn answers(v: &Value) -> Option<String> {
+    if v["tool"].as_str() != Some("AskUserQuestion") {
+        return None;
+    }
+    let input: Value = serde_json::from_str(v["input"].as_str()?).ok()?;
+    let answers: Vec<String> = input["answers"]
+        .as_object()?
+        .iter()
+        .map(|(q, a)| {
+            format!(
+                "{q} -> {}",
+                a.as_str().map_or_else(|| a.to_string(), str::to_owned)
+            )
+        })
         .collect();
-    format!("{head}\n…[middle of the session omitted]…\n{tail}")
+    if answers.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "USER ANSWERED: {}",
+        redact::outbound(&answers.join(" / "))
+    ))
+}
+
+/// A single line longer than `max` keeps its head and tail and says how much is left out.
+fn cap(s: String, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s;
+    }
+    let half = max / 2;
+    let head: String = s.chars().take(half).collect();
+    let tail: String = s.chars().skip(n - half).collect();
+    format!("{head}…[{} characters omitted]…{tail}", n - 2 * half)
 }
 
 fn short(s: &str, max: usize) -> String {
@@ -260,6 +385,17 @@ fn vmhwm_kb() -> Option<u64> {
 mod tests {
     use super::*;
 
+    fn render(events: &[db::RawEvent]) -> String {
+        let lines: Vec<String> = events
+            .iter()
+            .filter_map(|e| match line(e) {
+                Line::Dialogue(l) | Line::Tool(l) => Some(l),
+                Line::Skip => None,
+            })
+            .collect();
+        lines.join("\n")
+    }
+
     #[test]
     fn kinds_outside_the_schema_fall_back_to_discovery() {
         let out = json!({"observations": [
@@ -295,6 +431,7 @@ mod tests {
         let ev = |event: &str, payload: Value| db::RawEvent {
             id: 0,
             event: event.into(),
+            ts: 0,
             payload: payload.to_string(),
         };
         let prompt = build_prompt(
@@ -319,11 +456,144 @@ mod tests {
         assert!(prompt.contains("TAIL-MARKER"), "{prompt}");
     }
 
+    /// A long session: decisions in the middle, an answer to the agent's question whose text sits
+    /// at the end of the tool input, one oversized prompt, thousands of tool calls around them.
+    fn long_session(conn: &rusqlite::Connection) -> i64 {
+        db::upsert_session(conn, "long", "claude", "/r", "/r", 1).unwrap();
+        let tool = json!({"tool": "Bash", "input": "x".repeat(300), "output": "y".repeat(600), "failed": false});
+        let ask = json!({"questions": [{"question": "どちらにしますか?", "header": "方針", "options": [{"label": "A", "description": "a".repeat(400)}, {"label": "B", "description": "b".repeat(400)}]}], "answers": {"どちらにしますか?": "A にする (推奨)"}}).to_string();
+        let mut events = vec![("UserPromptSubmit", json!({"prompt": "HEAD-PROMPT"}))];
+        events.extend((0..2_000).map(|_| ("PostToolUse", tool.clone())));
+        events.push((
+            "UserPromptSubmit",
+            json!({"prompt": "中央の決定: 検索は trigram にする"}),
+        ));
+        events.push((
+            "PostToolUse",
+            json!({"tool": "AskUserQuestion", "input": ask, "output": ask, "failed": false}),
+        ));
+        events.push((
+            "UserPromptSubmit",
+            json!({"prompt": format!("LONG-HEAD{}LONG-TAIL", "L".repeat(30_000))}),
+        ));
+        events.extend((0..2_000).map(|_| ("PostToolUse", tool.clone())));
+        events.push(("Stop", json!({"assistant": "TAIL-REPLY"})));
+        for (i, (event, payload)) in events.iter().enumerate() {
+            db::insert_event(conn, "long", event, 1 + i as i64, &payload.to_string()).unwrap();
+        }
+        conn.query_row("SELECT MAX(id) FROM events", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn every_dialogue_line_of_a_long_session_reaches_the_summarizer() {
+        let dir = std::env::temp_dir().join(format!("oboete-observe-long-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut conn = db::open(&dir).unwrap();
+        let last_event = long_session(&conn);
+        let s = db::PendingSession {
+            id: "long".into(),
+            agent: "claude".into(),
+            repo: "/r".into(),
+            last_event_at: 1_000_000,
+        };
+        let mut sent = Vec::new();
+        loop {
+            let part = next_part(&conn, "long").unwrap();
+            let Some((last, _)) = part.last else {
+                break;
+            };
+            assert!(
+                part.text.chars().count() <= MAX_PROMPT_CHARS + 200,
+                "one call stays bounded"
+            );
+            sent.push(part.text);
+            assert!(db::apply_batch(&mut conn, &s, "p", "", &[], last).unwrap());
+            assert!(sent.len() < 10, "a few calls, not one per page");
+        }
+        let all = sent.join("\n");
+        for needle in [
+            "HEAD-PROMPT",
+            "中央の決定: 検索は trigram にする",
+            "A にする (推奨)",
+            "LONG-HEAD",
+            "LONG-TAIL",
+            "characters omitted",
+            "TAIL-REPLY",
+            "older tool calls of this part omitted",
+        ] {
+            assert!(
+                all.contains(needle),
+                "{needle} never reached the summarizer"
+            );
+        }
+        // Every tool call is either sent or counted as omitted.
+        let shown = all.matches("TOOL Bash").count();
+        let omitted: usize = all
+            .lines()
+            .filter_map(|l| {
+                l.strip_prefix('[')?
+                    .split(' ')
+                    .next()?
+                    .parse::<usize>()
+                    .ok()
+            })
+            .sum();
+        assert_eq!(shown + omitted, 4_000);
+        // The oversized prompt got a call of its own instead of pushing the others out.
+        assert_eq!(
+            sent.len(),
+            3,
+            "{:?}",
+            sent.iter().map(|t| t.len()).collect::<Vec<_>>()
+        );
+        let cursor: i64 = conn
+            .query_row(
+                "SELECT observed_event_id FROM sessions WHERE id='long'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor, last_event);
+        drop(conn);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_short_talk_heavy_session_stays_one_call() {
+        let dir = std::env::temp_dir().join(format!("oboete-observe-talk-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = db::open(&dir).unwrap();
+        db::upsert_session(&conn, "talk", "claude", "/r", "/r", 1).unwrap();
+        for i in 0..14 {
+            let prompt = json!({"prompt": format!("Q{i} {}", "q".repeat(1_000))});
+            db::insert_event(
+                &conn,
+                "talk",
+                "UserPromptSubmit",
+                1 + i,
+                &prompt.to_string(),
+            )
+            .unwrap();
+        }
+        let part = next_part(&conn, "talk").unwrap();
+        assert!(part.text.contains("Q0 ") && part.text.contains("Q13 "));
+        let last: i64 = conn
+            .query_row("SELECT MAX(id) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(part.last.map(|(id, _)| id), Some(last));
+        drop(conn);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn harness_notifications_are_not_the_developer_speaking() {
         let ev = |event: &str, payload: Value| db::RawEvent {
             id: 0,
             event: event.into(),
+            ts: 0,
             payload: payload.to_string(),
         };
         let text = render(&[
