@@ -216,6 +216,16 @@ fn default_providers() -> Vec<Provider> {
             true,
             serde_json::json!({}),
         ),
+        openai(
+            "nim",
+            "https://integrate.api.nvidia.com/v1",
+            "NVIDIA_NIM_KEY.md",
+            "nvidia/nemotron-3-super-120b-a12b",
+            500,
+            true,
+            serde_json::json!({"max_tokens": 2000}),
+        ),
+        cli("codex", Some("gpt-6-luna"), 200),
         cli("claude", Some("haiku"), 200),
         openai(
             "openrouter",
@@ -227,15 +237,6 @@ fn default_providers() -> Vec<Provider> {
             serde_json::json!({"models": ["qwen/qwen3.8-27b:free"], "provider": {"require_parameters": true}}),
         ),
         openai(
-            "nim",
-            "https://integrate.api.nvidia.com/v1",
-            "NVIDIA_NIM_KEY.md",
-            "nvidia/nemotron-3-super-120b-a12b",
-            500,
-            true,
-            serde_json::json!({"max_tokens": 2000}),
-        ),
-        openai(
             "mistral",
             "https://api.mistral.ai/v1",
             "MISTRAL_API_KEY.md",
@@ -244,7 +245,6 @@ fn default_providers() -> Vec<Provider> {
             true,
             serde_json::json!({}),
         ),
-        cli("codex", Some("gpt-6-luna"), 200),
     ]
 }
 
@@ -304,11 +304,19 @@ mod tests {
     #[test]
     fn defaults_and_toml_extra_fields_parse() {
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.providers.len(), 7);
-        assert!(
-            cfg.providers
-                .iter()
-                .all(|p| p.name() != "agy" && p.name() != "grok")
+        // The owner's order (2026-09-26); agy and grok are out.
+        let names: Vec<_> = cfg.providers.iter().map(Provider::name).collect();
+        assert_eq!(
+            names,
+            [
+                "groq",
+                "groq-20b",
+                "nim",
+                "codex",
+                "claude",
+                "openrouter",
+                "mistral"
+            ]
         );
         assert_eq!(cfg.summary.language, "Japanese");
         assert_eq!(cfg.embedding.provider, "none");
@@ -321,6 +329,7 @@ kind = "openai"
 name = "ollama"
 base_url = "http://127.0.0.1:11434/v1"
 model = "qwen3:8b"
+headers = { "x-opencode-session" = "oboete" }
 [providers.extra]
 options = { num_ctx = 16000 }
 [[providers]]
@@ -334,10 +343,14 @@ model = "haiku"
         assert_eq!(cfg.summary.language, "English");
         match &cfg.providers[0] {
             Provider::Openai {
-                key_file, extra, ..
+                key_file,
+                extra,
+                headers,
+                ..
             } => {
                 assert!(key_file.is_none());
                 assert_eq!(extra["options"]["num_ctx"], 16000);
+                assert_eq!(headers["x-opencode-session"], "oboete");
             }
             _ => panic!("expected openai"),
         }
