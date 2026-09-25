@@ -252,12 +252,22 @@ fn claude_line<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) 
     } else {
         agent_id
     };
-    // The session's current directory: hooks key the repository from each event's cwd.
-    if (agent_id.is_none() || e.cwd.is_none())
-        && let Some(cwd) = v["cwd"].as_str()
-    {
-        e.cwd = Some(cwd.into());
+    // Hooks key the repository from each event's cwd. A main-session record moves the session's
+    // directory; a subagent's events carry its own (it may run in a worktree, and its file is read
+    // after the main one) without moving the session's.
+    let cwd = v["cwd"].as_str().map(String::from);
+    if agent_id.is_none() {
+        e.cwd = cwd.or(e.cwd.take());
+        return claude_record(e, v, None);
     }
+    let session = e.cwd.clone();
+    e.cwd = cwd.or(session.clone());
+    let result = claude_record(e, v, agent_id);
+    e.cwd = session;
+    result
+}
+
+fn claude_record<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) -> Result<()> {
     let ts = v["timestamp"].as_str().unwrap_or_default().to_string();
     let content = &v["message"]["content"];
     match v["type"].as_str() {
@@ -610,7 +620,10 @@ mod tests {
         for (i, e) in v.iter().enumerate() {
             assert_eq!(e["seq"], i as u64 + 1);
             assert_eq!(e["session"], "claude-basic");
-            assert_eq!(e["payload"]["cwd"], "/work/app");
+            // The workflow agent ran in a worktree: its event keeps its own directory, and the
+            // session's does not move.
+            let cwd = if i == 6 { "/work/app-wt" } else { "/work/app" };
+            assert_eq!(e["payload"]["cwd"], cwd, "{i}");
             assert_eq!(e["payload"]["hook_event_name"], e["event"]);
         }
         let ts: Vec<&str> = v[1..].iter().map(|e| e["ts"].as_str().unwrap()).collect();
