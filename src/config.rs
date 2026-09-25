@@ -90,6 +90,10 @@ pub enum Provider {
         /// Extra request-body fields merged in (OpenRouter's `models` fallback, `provider`).
         #[serde(default)]
         extra: serde_json::Map<String, serde_json::Value>,
+        /// Extra request headers (OpenCode Go's `x-opencode-session`). Never a key: keys stay
+        /// in `key_file`.
+        #[serde(default)]
+        headers: std::collections::BTreeMap<String, String>,
     },
     /// A subscription CLI run headless (`agy`, `claude`, `grok`, `codex`).
     Cli {
@@ -170,6 +174,7 @@ fn openai(
         timeout_s: default_timeout(),
         retry_429,
         extra: extra.as_object().cloned().unwrap_or_default(),
+        headers: Default::default(),
     }
 }
 
