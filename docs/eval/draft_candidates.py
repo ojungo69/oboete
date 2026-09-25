@@ -1,26 +1,37 @@
-"""Milestone 1, Task 8: decision and overturn candidates for the owner's dev labels (docs/spec.md 8.4
-item 1: Claude drafts, the owner confirms or rejects).
+"""Milestone 1, Task 8: the owner's own decisions for the dev labels (docs/spec.md 8.1, 8.4 item 1).
+Owner decision 29: the owner confirms only their own decisions, each as one plain-Japanese sentence with
+the owner's own message, and may always answer 判断できない; the panel of Task 6 takes those.
 
   draft_candidates.py decisions [max calls]   dev transcripts -> labels/drafts/decisions.jsonl
   draft_candidates.py pairs [max calls]       decisions       -> labels/drafts/pairs.jsonl
-  draft_candidates.py tasks                   -> labels/tasks/dev-decisions.jsonl, dev-pairs.jsonl
+  draft_candidates.py tasks                   adds items to labels/tasks/dev-decisions.jsonl and dev-pairs.jsonl
+                                              until the owner's counts can be reached; rerun after a sitting
+  draft_candidates.py panel                   the five API judges: every `unknown` item, and a blind sample
+                                              of the owner's answered items (the overlap, #76)
+  draft_candidates.py report                  counts, and the panel's agreement with the owner on the overlap
+  draft_candidates.py repeat                  a week after the last answer: 20 answered items again, blind
+  draft_candidates.py agreement               the owner against their own earlier answers
 Every line sent passes `oboete gate`; a quote must appear verbatim in the gated line it cites.
 Answers are cached per prompt, so a run stopped by its call budget resumes where it stopped."""
-import hashlib, json, os, re, subprocess, sys
+import hashlib, json, os, re, subprocess, sys, time
 
+from calib import PANEL, chat, kappa, majority
 from common import E, SEED, claude_json, clean_env, gate, h, owner_only, read_jsonl, write_jsonl
 from replay_set import NOT_TYPED
 
 MODEL = 'claude-sonnet-5'
-WINDOW, OVERLAP, CAP = 12_000, 10, 1_500
-N_DECISIONS, N_PAIRS = 55, 25
+WINDOW, OVERLAP, CAP, PROMPT_CAP = 12_000, 10, 1_500, 600
+# The owner's counts (spec 8.4 item 1): answered decisions, and pairs confirmed as each relation.
+N_DECISIONS, N_PAIRS, N_OVERLAP, N_REPEAT, WEEK = 50, 20, 40, 20, 7 * 86400
 WHO = {'user', 'assistant_accepted'}
-RELATIONS = {'overturns', 'compatible'}
+RELATIONS = ('overturns', 'compatible')
 DRAFTS = f'{E}/labels/drafts'
+TASKS, LABELS = f'{E}/labels/tasks', f'{E}/labels'
 
 DECISIONS_PROMPT = """You read part of a coding session between a developer (USER, USER ANSWERED) and an AI agent (ASSISTANT). Lines are numbered [L..].
 List every decision the developer made or accepted in this part: a choice between options, a rule to follow from now on, a rejected option, or a reversal of an earlier decision. Include a decision the ASSISTANT proposed only if the developer accepted it in a later line (who = "assistant_accepted"); otherwise who = "user". Skip routine requests ("run the tests"), questions, and plans nobody confirmed.
-For each decision give "line" (the id of the line that states or accepts it), "quote" (10-300 characters copied exactly, character for character, from that line), "who", "statement" (one Japanese sentence saying what was decided) and "topic" (2-5 words).
+For each decision give "line" (the id of the line that states or accepts it), "quote" (10-300 characters copied exactly, character for character, from that line), "who", "prompt_line" (the id of the USER line, the developer's own message, in which the decision was made or accepted), "statement" and "topic" (2-5 words).
+"statement" is one plain Japanese sentence that a person who does not program can follow: no code, no file or command names, no untranslated English terms; say what the choice means in everyday words.
 Answer with JSON only: {{"decisions": [...]}}, with an empty list if there is none.
 
 --- SESSION PART ---
@@ -34,6 +45,32 @@ Find pairs (earlier, later) about the same subject where:
 Give at most 15 pairs of each relation. Answer with JSON only: {{"pairs": [{{"earlier": "d3", "later": "d9", "relation": "overturns", "why": "<one Japanese sentence>"}}]}}.
 
 {text}"""
+
+# The panel reads English, so it gets the lines around each decision; the owner never does.
+PANEL_DECISION = """You check a decision that was drafted from a developer's coding session. The lines around it (▶ marks the line it cites):
+<<<
+{context}
+>>>
+Drafted decision (Japanese): {statement}
+Did the developer make or accept this decision in this session? Answer with JSON only: {{"answer": "yes"}} or {{"answer": "no"}}."""
+
+PANEL_PAIR = """Two decisions from a developer's coding sessions, each with the lines around it (▶ marks the line it cites).
+Earlier ({earlier_ts}): {earlier}
+<<<
+{earlier_context}
+>>>
+Later ({later_ts}): {later}
+<<<
+{later_context}
+>>>
+Does the later decision replace, reverse or cancel the earlier one, so the earlier one is no longer in force? Answer with JSON only: {{"answer": "overturns"}} or {{"answer": "compatible"}}."""
+
+DECISION_CHOICES = [{'value': 'yes', 'label': 'はい、私が決めたこと'},
+                    {'value': 'no', 'label': 'いいえ、決めていない'},
+                    {'value': 'unknown', 'label': '判断できない'}]
+PAIR_CHOICES = [{'value': 'overturns', 'label': 'はい、後の決定が前の決定を覆している'},
+                {'value': 'compatible', 'label': 'いいえ、両方とも有効'},
+                {'value': 'unknown', 'label': '判断できない'}]
 
 
 def cap(text, n=CAP):
@@ -91,14 +128,18 @@ def windows(lines, limit=WINDOW, overlap=OVERLAP):
 
 
 def valid_decisions(found, window):
+    """Decisions whose quote is verbatim in the line it cites and whose `prompt_line` is the owner's
+    own message in the same window; that message is kept for the owner to see."""
     text = {lid: t for lid, _, t in window}
     ok = []
     for d in found:
         q = (d.get('quote') or '').strip()
-        if (d.get('line') in text and 10 <= len(q) <= 300 and q in text[d['line']]
+        own = text.get(d.get('prompt_line'), '')
+        if (d.get('line') in text and 10 <= len(q) <= 300 and q in text[d['line']] and own.startswith('USER: ')
                 and d.get('who') in WHO and (d.get('statement') or '').strip()):
             ok.append({'line': d['line'], 'quote': q, 'who': d['who'], 'statement': d['statement'].strip(),
-                       'topic': (d.get('topic') or '').strip()})
+                       'topic': (d.get('topic') or '').strip(), 'prompt_line': d['prompt_line'],
+                       'prompt': cap(own[len('USER: '):], PROMPT_CAP)})
     return ok
 
 
@@ -186,46 +227,169 @@ def pairs(budget, found):
     return out
 
 
-def context(session, line_id, around=3):
-    lines = [tuple(r) for r in read_jsonl(f'{DRAFTS}/rendered/{session}.jsonl')]
-    i = next(k for k, line in enumerate(lines) if line[0] == line_id)
-    return '\n'.join(('▶ ' if k == i else '  ') + lines[k][2] for k in range(max(0, i - around), min(len(lines), i + around + 1)))
+def decision_fields(d, side=''):
+    return [{'label': f'{side}この決定 (Claude がやさしい日本語でまとめたもの)', 'text': d['statement']},
+            {'label': f'{side}そのときのあなたのメッセージ', 'text': d['prompt']}]
+
+
+def decision_item(d):
+    return {'id': d['id'], 'question': 'これは、あなたが決めたことですか？', 'fields': decision_fields(d),
+            'choices': DECISION_CHOICES}
+
+
+def pair_id(p):
+    return f'{p["earlier"]}-{p["later"]}'
+
+
+def pair_item(p, by_id):
+    a, b = by_id[p['earlier']], by_id[p['later']]
+    return {'id': pair_id(p), 'question': '後の決定は、前の決定を覆していますか？',
+            'fields': decision_fields(a, f'前 ({a["ts"][:10]}) ') + decision_fields(b, f'後 ({b["ts"][:10]}) '),
+            'choices': PAIR_CHOICES}
+
+
+def refill(order, shown, target, counts):
+    """The next ids of `order` to show so that `target` shown ids can still count; `counts(id)` says
+    whether a shown id counts or may still (answered so, or not answered yet). An `unknown` answer
+    never counts, so each one brings in another candidate (#76)."""
+    have = sum(1 for i in shown if counts(i))
+    return [i for i in order if i not in shown][:max(0, target - have)]
+
+
+def pair_order(found_pairs, by_id, rel):
+    ps = [p for p in found_pairs if p['relation'] == rel]
+    # Pairs across sessions first: MUST-M3 counts them separately (spec 8.2 M3).
+    ps.sort(key=lambda p: (by_id[p['earlier']]['session'] == by_id[p['later']]['session'],
+                           h(f'pair:{SEED}:{p["earlier"]}:{p["later"]}')))
+    return [pair_id(p) for p in ps]
+
+
+def standing(name):
+    """id -> (value, ts) of the owner's latest answer; a withdrawn answer (value null) is none."""
+    out = {}
+    path = f'{LABELS}/{name}.jsonl'
+    for r in read_jsonl(path) if os.path.exists(path) else []:
+        out[r['id']] = (r['value'], r['ts'])
+    return {i: v for i, v in out.items() if v[0] is not None}
+
+
+def append(name, items, keys):
+    for path, rows in ((f'{TASKS}/{name}.jsonl', items), (f'{LABELS}/{name}.key.jsonl', keys)):
+        old = read_jsonl(path) if os.path.exists(path) else []
+        write_jsonl(path, old + rows)
 
 
 def tasks():
     found = read_jsonl(f'{DRAFTS}/decisions.jsonl')
     by_id = {d['id']: d for d in found}
-    chosen = sorted(found, key=lambda d: h(f'decision:{SEED}:{d["id"]}'))[:N_DECISIONS]
-    items = [{'id': d['id'], 'question': 'これは、あなた (開発者) が決めたことですか？', 'fields': [
-        {'label': 'Claude の要約', 'text': d['statement']},
-        {'label': '会話の該当部分 (▶ が根拠の行)', 'text': context(d['session'], d['line'])}],
-        'choices': [{'value': 'yes', 'label': 'はい、決めたこと'},
-                    {'value': 'partly', 'label': '一部違う (直し方をメモに書いてください)'},
-                    {'value': 'no', 'label': 'いいえ、決めていない'}]} for d in chosen]
-    write_jsonl(f'{E}/labels/tasks/dev-decisions.jsonl', items)
-    write_jsonl(f'{E}/labels/dev-decisions.key.jsonl', chosen)
+    shown = {k['id'] for k in read_jsonl(f'{LABELS}/dev-decisions.key.jsonl')} \
+        if os.path.exists(f'{LABELS}/dev-decisions.key.jsonl') else set()
+    answers = {i: v for i, (v, _) in standing('dev-decisions').items()}
+    order = [d['id'] for d in sorted(found, key=lambda d: h(f'decision:{SEED}:{d["id"]}'))]
+    new = refill(order, shown, N_DECISIONS, lambda i: answers.get(i) != 'unknown')
+    append('dev-decisions', [decision_item(by_id[i]) for i in new], [by_id[i] for i in new])
 
-    def side(d, name):
-        return {'label': f'{name} ({d["ts"][:10]})', 'text': f'{d["statement"]}\n\n根拠: 「{d["quote"]}」'}
+    found_pairs = {pair_id(p): p for p in read_jsonl(f'{DRAFTS}/pairs.jsonl')}
+    shown = {k['id'] for k in read_jsonl(f'{LABELS}/dev-pairs.key.jsonl')} \
+        if os.path.exists(f'{LABELS}/dev-pairs.key.jsonl') else set()
+    answers = {i: v for i, (v, _) in standing('dev-pairs').items()}
+    added = []
+    for rel in RELATIONS:
+        # A pair counts toward the relation the owner gave it; one not answered yet, toward its draft's.
+        counts = lambda i, rel=rel: answers.get(i, found_pairs[i]['relation']) == rel
+        added += refill(pair_order(found_pairs.values(), by_id, rel), shown | set(added), N_PAIRS, counts)
+    added.sort(key=lambda i: h(f'pair-order:{SEED}:{i}'))
+    append('dev-pairs', [pair_item(found_pairs[i], by_id) for i in added], [{**found_pairs[i], 'id': i} for i in added])
+    print(f'added {len(new)} decisions and {len(added)} pairs')
 
-    found_pairs = read_jsonl(f'{DRAFTS}/pairs.jsonl')
-    chosen_pairs = []
-    for rel in ('overturns', 'compatible'):
-        ps = [p for p in found_pairs if p['relation'] == rel]
-        # Pairs across sessions first: MUST-M3 counts them separately (spec 8.2 M3).
-        ps.sort(key=lambda p: (by_id[p['earlier']]['session'] == by_id[p['later']]['session'],
-                               h(f'pair:{SEED}:{p["earlier"]}:{p["later"]}')))
-        chosen_pairs += ps[:N_PAIRS]
-    chosen_pairs.sort(key=lambda p: h(f'pair-order:{SEED}:{p["earlier"]}:{p["later"]}'))
-    items = [{'id': f'{p["earlier"]}-{p["later"]}', 'question': '後の決定は、前の決定を覆していますか？', 'fields': [
-        side(by_id[p['earlier']], '前の決定'), side(by_id[p['later']], '後の決定')],
-        'choices': [{'value': 'overturns', 'label': 'はい、覆している (前の決定はもう有効ではない)'},
-                    {'value': 'compatible', 'label': 'いいえ、両方とも有効'},
-                    {'value': 'unsure', 'label': 'わからない'}]} for p in chosen_pairs]
-    write_jsonl(f'{E}/labels/tasks/dev-pairs.jsonl', items)
-    write_jsonl(f'{E}/labels/dev-pairs.key.jsonl', chosen_pairs)
-    print(f'{len(chosen)} decisions, {len(chosen_pairs)} pairs '
-          f'({sum(p["relation"] == "overturns" for p in chosen_pairs)} drafted as overturns)')
+
+def context(d, around=3):
+    lines = [tuple(r) for r in read_jsonl(f'{DRAFTS}/rendered/{d["session"]}.jsonl')]
+    i = next(k for k, line in enumerate(lines) if line[0] == d['line'])
+    return '\n'.join(('▶ ' if k == i else '  ') + lines[k][2] for k in range(max(0, i - around), min(len(lines), i + around + 1)))
+
+
+def panel_targets(ids, answers, n=N_OVERLAP):
+    """(the items the owner could not judge, a seeded sample of those the owner did judge). The
+    sample is graded blind: panel prompts are built from the drafts, never from the owner's answers."""
+    unknown = [i for i in ids if answers.get(i) == 'unknown']
+    judged = sorted((i for i in ids if answers.get(i) not in (None, 'unknown')), key=lambda i: h(f'overlap:{SEED}:{i}'))
+    return unknown, judged[:n]
+
+
+def parse_answer(text, allowed):
+    text = re.sub(r'<think>.*?</think>', '', text or '', flags=re.S)
+    m = re.search(r'\{.*\}', text, re.S)
+    value = json.loads(m.group(0)).get('answer') if m else None
+    if value not in allowed:
+        raise ValueError(f'answer outside {sorted(allowed)}: {text[:120]!r}')
+    return value
+
+
+def panel():
+    by_id = {d['id']: d for d in read_jsonl(f'{DRAFTS}/decisions.jsonl')}
+    for name in ('dev-decisions', 'dev-pairs'):
+        keys = {k['id']: k for k in read_jsonl(f'{LABELS}/{name}.key.jsonl')}
+        answers = {i: v for i, (v, _) in standing(name).items()}
+        unknown, sample = panel_targets(list(keys), answers)
+        path = f'{LABELS}/{name}.panel.jsonl'
+        done = {(r['id'], r['judge']) for r in read_jsonl(path)} if os.path.exists(path) else set()
+        for i in unknown + sample:
+            k = keys[i]
+            if name == 'dev-decisions':
+                prompt, allowed = PANEL_DECISION.format(context=context(k), statement=k['statement']), {'yes', 'no'}
+            else:
+                a, b = by_id[k['earlier']], by_id[k['later']]
+                prompt = PANEL_PAIR.format(earlier_ts=a['ts'][:10], earlier=a['statement'], earlier_context=context(a),
+                                           later_ts=b['ts'][:10], later=b['statement'], later_context=context(b))
+                allowed = set(RELATIONS)
+            prompt = gate(prompt)
+            for member in PANEL:
+                if (i, member) in done:
+                    continue
+                try:
+                    value = parse_answer(chat(member, prompt), allowed)
+                except (OSError, ValueError, KeyError) as e:      # left for the next run
+                    print(f'{i} {member}: {type(e).__name__} {str(e)[:120]}', file=sys.stderr)
+                    continue
+                with open(path, 'a') as f:
+                    f.write(json.dumps({'id': i, 'judge': member, 'value': value,
+                                        'why': 'unknown' if i in unknown else 'overlap'}) + '\n')
+    print('panel done; rerun if any call failed')
+
+
+def report():
+    out = {}
+    for name, yes in (('dev-decisions', 'yes'), ('dev-pairs', 'overturns')):
+        answers = {i: v for i, (v, _) in standing(name).items()}
+        path = f'{LABELS}/{name}.panel.jsonl'
+        votes = {}
+        for r in read_jsonl(path) if os.path.exists(path) else []:
+            votes.setdefault(r['id'], {})[r['judge']] = r['value'] == yes
+        counts = {v: sum(1 for a in answers.values() if a == v) for v in sorted(set(answers.values()))}
+        overlap = {i: v for i, v in votes.items() if answers.get(i) not in (None, 'unknown')}
+        agree = {}
+        for judge in [*PANEL, 'majority']:
+            pairs = [(answers[i] == yes, majority(list(v.values())) if judge == 'majority' else v.get(judge))
+                     for i, v in overlap.items()]
+            pairs = [p for p in pairs if p[1] is not None]
+            agree[judge] = {'n': len(pairs), 'kappa': kappa(pairs) if pairs else None,
+                            'agreement': sum(a == b for a, b in pairs) / len(pairs) if pairs else None}
+        out[name] = {'owner': counts, 'panel_on_unknown': {
+            i: majority(list(v.values())) for i, v in votes.items() if answers.get(i) == 'unknown'},
+            'overlap': agree,
+            'what': 'agreement with the owner on the owner\'s own decisions, not a check of technical relevance'}
+    with open(f'{LABELS}/dev-labels.result.json', 'w') as f:
+        json.dump(out, f, indent=1, ensure_ascii=False)
+    print(json.dumps(out, indent=1, ensure_ascii=False))
+
+
+def repeat_items(tasks_by_id, answers, last_ts, now, n=N_REPEAT):
+    """20 items the owner answered other than `unknown`, blind, with fresh ids; None before a week."""
+    if now - last_ts < WEEK:
+        return None
+    judged = sorted((i for i, v in answers.items() if v != 'unknown'), key=lambda i: h(f'repeat:{SEED}:{i}'))[:n]
+    return [{**tasks_by_id[i], 'id': 'r' + i} for i in judged]
 
 
 if __name__ == '__main__':
@@ -247,5 +411,30 @@ if __name__ == '__main__':
         print(f'{len(found)} pairs')
     elif cmd == 'tasks':
         tasks()
+    elif cmd == 'panel':
+        panel()
+    elif cmd == 'report':
+        report()
+    elif cmd in ('repeat', 'agreement'):
+        answers = {**standing('dev-decisions'), **standing('dev-pairs')}
+        if cmd == 'repeat':
+            items = {i['id']: i for n in ('dev-decisions', 'dev-pairs') for i in read_jsonl(f'{TASKS}/{n}.jsonl')}
+            last = max((ts for _, ts in answers.values()), default=None)
+            chosen = repeat_items(items, {i: v for i, (v, _) in answers.items()}, last or 0, int(time.time())) if last else None
+            if chosen is None:
+                sys.exit('the blind repeat opens a week after the last answer'
+                         + (f': {time.strftime("%Y-%m-%d", time.localtime(last + WEEK))}' if last else ''))
+            write_jsonl(f'{TASKS}/dev-repeat-20.jsonl', chosen)
+            print(f'{len(chosen)} items -> {TASKS}/dev-repeat-20.jsonl')
+        else:
+            again = {i[1:]: v for i, (v, _) in standing('dev-repeat-20').items() if v != 'unknown'}
+            yes = {'yes', 'overturns'}
+            rated = [(answers[i][0] in yes, v in yes) for i, v in again.items() if i in answers]
+            result = {'n': len(rated), 'kappa': kappa(rated) if rated else None,
+                      'agreement': sum(a == b for a, b in rated) / len(rated) if rated else None,
+                      'what': 'the owner against their own earlier answers'}
+            with open(f'{LABELS}/dev-repeat-20.result.json', 'w') as f:
+                json.dump(result, f, indent=1)
+            print(json.dumps(result, indent=1))
     else:
         sys.exit(__doc__)
