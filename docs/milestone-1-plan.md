@@ -785,7 +785,7 @@ Event mapping:
 |---|---|---|
 | first emitted event | `SessionStart` first | `source: "startup"` |
 | Claude `user`, `content` a string, not `isMeta` / `isCompactSummary`, main file | `UserPromptSubmit` (a pending `Stop` first) | `prompt`. Harness envelopes (`<task-notification>` …) stay prompts: live hooks receive them and drop them (`hook::is_envelope`) |
-| Claude `user` whose text starts with `<command-name>` or `<command-message>` | `UserPromptSubmit` | `prompt` = the command as typed, `/name args` |
+| Claude `user` whose text starts with `<command-message>` (a skill command) or `<command-name>/goal<` | `UserPromptSubmit` | `prompt` = the command as typed, `/name args`. Other `<command-name>` records are local commands the hook never saw: nothing (measured, docs/milestone-1.md) |
 | Claude `user` whose text starts with `<local-command-`, `<bash-input`, `<bash-stdout`, `<bash-stderr` or `[Request interrupted` | nothing: transcript-only records no prompt hook ever saw | |
 | Claude `user`, `content` list with `text` items, main file | `UserPromptSubmit` | `prompt` = the text items joined by `\n` |
 | Claude `tool_result` item | `PostToolUse`, or `PostToolUseFailure` when `is_error` | `tool_name`, `tool_input` (the `tool_use` input; for AskUserQuestion plus `answers` from `toolUseResult.answers`), `tool_response` (`toolUseResult`, else the item's `content`), `error` (failures), `agent_id` (subagents) |

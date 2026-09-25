@@ -19,3 +19,8 @@ this line is not JSON
 {"type":"user","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:15.000Z","message":{"role":"user","content":"<local-command-stdout>Compacted</local-command-stdout>"}}
 {"type":"user","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:16.000Z","message":{"role":"user","content":"<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args>keep the cache decision</command-args>"}}
 {"type":"user","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:17.000Z","message":{"role":"user","content":"<command-message>graphify</command-message>\n<command-name>/graphify</command-name>\n<command-args>src</command-args>"}}
+{"type":"user","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:18.000Z","message":{"role":"user","content":"<command-name>/goal</command-name>\n            <command-message>goal</command-message>\n            <command-args>finish the cache</command-args>"}}
+{"type":"user","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:19.000Z","message":{"role":"user","content":"/compact keep it short"}}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-01T00:00:20.000Z","sessionId":"claude-basic","content":"テストも直して"}
+{"type":"queue-operation","operation":"remove","timestamp":"2026-09-01T00:00:20.500Z","sessionId":"claude-basic","content":"テストも直して"}
+{"type":"user","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:21.000Z","message":{"role":"user","content":"テストも直して"}}

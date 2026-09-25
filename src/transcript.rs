@@ -10,11 +10,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-/// Claude Code records that only the transcript has: no prompt hook ever saw them. A local slash
-/// command (/compact, /effort) is stored name tag first; the live hook never got one (2026-09-26:
-/// the store had none of the 7 typed that week, but it had the skill command typed with them).
-const TRANSCRIPT_ONLY: [&str; 6] = [
-    "<command-name>",
+/// Claude Code records that only the transcript has: no prompt hook ever saw them.
+const TRANSCRIPT_ONLY: [&str; 5] = [
     "<local-command-",
     "<bash-input",
     "<bash-stdout",
@@ -22,13 +19,35 @@ const TRANSCRIPT_ONLY: [&str; 6] = [
     "[Request interrupted",
 ];
 
-/// Harness context Codex sends as user messages; not typed prompts.
-const CODEX_CONTEXT: [&str; 5] = [
+/// Local commands older Claude Code stored as plain text; the prompt hook never got them.
+const LOCAL_COMMANDS: [&str; 13] = [
+    "/compact",
+    "/clear",
+    "/effort",
+    "/model",
+    "/plugin",
+    "/exit",
+    "/mcp",
+    "/login",
+    "/resume",
+    "/config",
+    "/reload-plugins",
+    "/reload-skills",
+    "/advisor",
+];
+
+/// Harness context Codex sends as user messages; not typed prompts. Newer rollouts say so in
+/// `content_item_kinds`; this list is for records without it.
+const CODEX_CONTEXT: [&str; 9] = [
     "<environment_context>",
     "<user_instructions>",
     "# AGENTS.md",
     "<permissions",
     "<INSTRUCTIONS>",
+    "<recommended_plugins>",
+    "<skill>",
+    "<codex_internal_context",
+    "<hook_prompt",
 ];
 
 #[derive(Debug, Default, PartialEq)]
@@ -51,6 +70,10 @@ struct Emitter<W: Write> {
     path: String,
     cwd: Option<String>,
     started: bool,
+    /// A forked Codex rollout carries its parent's `session_meta` after its own.
+    meta_seen: bool,
+    /// Prompts the prompt hook got when they were queued, not yet delivered as user records.
+    queued: Vec<String>,
     stats: Stats,
     pending: Vec<Pending>,
     /// The current turn's last assistant text and its time, sent as `Stop` when the turn ends.
@@ -122,16 +145,20 @@ impl<W: Write> Emitter<W> {
         if let Some(a) = answers {
             input["answers"] = a.clone();
         }
-        let mut p = json!({"tool_name": name, "tool_input": input, "tool_response": response});
+        let mut p = json!({"tool_name": name, "tool_input": input});
         if let Some(a) = agent_id {
             p["agent_id"] = json!(a);
         }
+        // A live failure carries `error` and no `tool_response`; the hook reads the latter first.
         match error {
             Some(e) => {
                 p["error"] = json!(e);
                 self.emit("PostToolUseFailure", ts, p)
             }
-            None => self.emit("PostToolUse", ts, p),
+            None => {
+                p["tool_response"] = response;
+                self.emit("PostToolUse", ts, p)
+            }
         }
     }
 
@@ -213,17 +240,45 @@ fn claude_line<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) 
             let t = text.trim_start();
             if agent_id.is_some()
                 || t.is_empty()
-                || TRANSCRIPT_ONLY.iter().any(|p| t.starts_with(p))
+                || TRANSCRIPT_ONLY
+                    .iter()
+                    .chain(&LOCAL_COMMANDS)
+                    .any(|p| t.starts_with(p))
             {
                 return Ok(());
             }
-            // A skill command, stored message tag first, reaches the hook as typed.
-            if t.starts_with("<command-message>") {
-                return match command_text(t) {
+            // The delivery of a prompt already sent when it was queued.
+            if let Some(i) = e.queued.iter().position(|q| q == text.trim()) {
+                e.queued.remove(i);
+                return Ok(());
+            }
+            // A skill command (message tag first) and /goal reach the prompt hook as typed; other
+            // local commands (/compact, /effort: name tag first) never do. Measured 2026-09-26:
+            // claude-mem's copy has skill commands and /goal (42 sessions) among its prompts, but
+            // none of the 245 /effort or 135 /compact in the transcripts.
+            if t.starts_with("<command-message>") || t.starts_with("<command-name>") {
+                let hooked =
+                    t.starts_with("<command-message>") || t.starts_with("<command-name>/goal<");
+                return match command_text(t).filter(|_| hooked) {
                     Some(command) => e.prompt(&ts, &command),
                     None => Ok(()),
                 };
             }
+            e.prompt(&ts, &text)
+        }
+        // A prompt typed while a turn runs reaches the prompt hook when it is queued (claude-mem
+        // has them). Harness traffic is queued too; it is read where it is delivered.
+        Some("queue-operation") if v["operation"] == "enqueue" => {
+            let text = text_of(&v["content"]);
+            let t = text.trim();
+            if t.is_empty()
+                || t.starts_with('<')
+                || t.starts_with("Another Claude session sent a message")
+                || LOCAL_COMMANDS.iter().any(|p| t.starts_with(p))
+            {
+                return Ok(());
+            }
+            e.queued.push(t.to_string());
             e.prompt(&ts, &text)
         }
         Some("assistant") => {
@@ -260,11 +315,12 @@ fn codex_line<W: Write>(e: &mut Emitter<W>, v: &Value) -> Result<()> {
     let call_id = p["call_id"].as_str().unwrap_or_default();
     match (v["type"].as_str(), p["type"].as_str()) {
         (Some("session_meta"), _) => {
-            if !e.started
+            if !e.meta_seen
                 && let Some(id) = p["id"].as_str()
             {
                 e.session = id.to_string();
             }
+            e.meta_seen = true;
             if e.cwd.is_none() {
                 e.cwd = p["cwd"].as_str().map(Into::into);
             }
@@ -277,11 +333,16 @@ fn codex_line<W: Write>(e: &mut Emitter<W>, v: &Value) -> Result<()> {
             Ok(())
         }
         (Some("response_item"), Some("message")) => {
-            let text = p["content"]
+            let items: Vec<&Value> = p["content"].as_array().into_iter().flatten().collect();
+            let kinds = p["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
                 .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|c| c["text"].as_str())
+                .filter(|k| k.len() == items.len());
+            // Only what the developer typed ("user.text"), when the rollout says which is which.
+            let text = items
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| kinds.is_none_or(|k| k[*i] == "user.text"))
+                .filter_map(|(_, c)| c["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
             if text.trim().is_empty() {
@@ -332,6 +393,10 @@ fn codex_line<W: Write>(e: &mut Emitter<W>, v: &Value) -> Result<()> {
             }
             e.stop()
         }
+        (Some("event_msg"), Some("turn_aborted")) => {
+            e.last_text = None;
+            Ok(())
+        }
         (Some("compacted"), _) => match p["message"].as_str().filter(|s| !s.trim().is_empty()) {
             Some(s) => e.emit(
                 "PostCompact",
@@ -365,7 +430,10 @@ fn read_file<W: Write>(e: &mut Emitter<W>, path: &Path, agent_id: Option<&str>) 
             e.stats.skipped += 1;
             continue;
         };
-        if let Some(t) = v["timestamp"].as_str() {
+        // SessionEnd takes the main file's last time; subagent files are read after it.
+        if agent_id.is_none()
+            && let Some(t) = v["timestamp"].as_str()
+        {
             e.last_ts = t.to_string();
         }
         match e.agent {
@@ -374,6 +442,21 @@ fn read_file<W: Write>(e: &mut Emitter<W>, path: &Path, agent_id: Option<&str>) 
         }
     }
     e.finish()
+}
+
+fn jsonl_under(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let p = entry?.path();
+        if p.is_dir() {
+            jsonl_under(&p, out)?;
+        } else if p.extension().is_some_and(|x| x == "jsonl")
+            // A workflow's journal.jsonl sits beside its agents; it is no transcript.
+            && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("agent-"))
+        {
+            out.push(p);
+        }
+    }
+    Ok(())
 }
 
 pub fn convert(path: &Path, agent: &str, out: impl Write) -> Result<Stats> {
@@ -393,6 +476,8 @@ pub fn convert(path: &Path, agent: &str, out: impl Write) -> Result<Stats> {
         path: path.display().to_string(),
         cwd: None,
         started: false,
+        meta_seen: false,
+        queued: Vec::new(),
         stats: Stats::default(),
         pending: Vec::new(),
         last_text: None,
@@ -401,10 +486,9 @@ pub fn convert(path: &Path, agent: &str, out: impl Write) -> Result<Stats> {
     read_file(&mut e, path, None)?;
     let subagents = path.with_extension("").join("subagents");
     if agent == "claude" && subagents.is_dir() {
-        let mut files: Vec<_> = std::fs::read_dir(&subagents)?
-            .filter_map(|d| d.ok().map(|d| d.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
-            .collect();
+        // Workflow agents sit deeper: subagents/workflows/wf_*/agent-*.jsonl.
+        let mut files = Vec::new();
+        jsonl_under(&subagents, &mut files)?;
         files.sort();
         for f in files {
             let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
@@ -458,6 +542,9 @@ mod tests {
                 "PostToolUse",
                 "Stop",
                 "UserPromptSubmit",
+                "UserPromptSubmit",
+                "UserPromptSubmit",
+                "PostToolUse",
                 "PostToolUse",
                 "PostToolUse",
                 "SessionEnd"
@@ -481,7 +568,9 @@ mod tests {
             v[5]["payload"]["tool_input"]["answers"]["どちらにしますか?"],
             "A にする"
         );
+        // A failure carries the error only, as the live hook gets it.
         assert_eq!(v[6]["payload"]["error"], "error: 2 tests failed");
+        assert!(v[6]["payload"].get("tool_response").is_none());
         assert!(
             v[7]["payload"]["compact_summary"]
                 .as_str()
@@ -497,16 +586,25 @@ mod tests {
         );
         // Command output and a local command are no prompt; a skill command is, as typed.
         assert_eq!(v[10]["payload"]["prompt"], "/graphify src");
-        assert_eq!(v[12]["payload"]["tool_name"], "Grep");
-        assert_eq!(v[12]["payload"]["agent_id"], "a1");
+        assert_eq!(v[11]["payload"]["prompt"], "/goal finish the cache");
+        // A plain-text local command is no prompt; a queued prompt is sent once, when queued.
+        assert_eq!(v[12]["payload"]["prompt"], "テストも直して");
+        assert_eq!(v[12]["ts"], "2026-09-01T00:00:20.000Z");
+        assert_eq!(v[14]["payload"]["tool_name"], "Grep");
+        assert_eq!(v[14]["payload"]["agent_id"], "a1");
+        // A workflow agent's file sits deeper under subagents/.
+        assert_eq!(v[15]["payload"]["tool_name"], "WebFetch");
+        assert_eq!(v[15]["payload"]["agent_id"], "w1");
+        // SessionEnd takes the main file's last time, not a subagent file's.
+        assert_eq!(v[16]["ts"], "2026-09-01T00:00:21.000Z");
     }
 
     #[test]
     fn a_tool_call_without_result_is_emitted_at_the_end() {
         let (v, _) = events(CLAUDE, "claude");
-        assert_eq!(v[11]["payload"]["tool_name"], "Edit");
-        assert_eq!(v[11]["payload"]["interrupted"], true);
-        assert!(v[11]["payload"]["tool_response"].is_null());
+        assert_eq!(v[13]["payload"]["tool_name"], "Edit");
+        assert_eq!(v[13]["payload"]["interrupted"], true);
+        assert!(v[13]["payload"]["tool_response"].is_null());
     }
 
     #[test]
@@ -515,18 +613,19 @@ mod tests {
         let ignored = [
             ("atis-latch".to_string(), 1),
             ("permission-mode".to_string(), 1),
+            ("queue-operation".to_string(), 1),
         ]
         .into();
         assert_eq!(
             stats,
             Stats {
-                lines: 24,
+                lines: 31,
                 skipped: 1,
-                events: 14,
+                events: 17,
                 ignored
             }
         );
-        assert_eq!(v.len(), 14);
+        assert_eq!(v.len(), 17);
         assert!(convert(Path::new(CLAUDE), "grok", Vec::new()).is_err());
     }
 
@@ -543,9 +642,11 @@ mod tests {
                 "PostToolUse",
                 "Stop",
                 "PostCompact",
+                "UserPromptSubmit",
                 "SessionEnd"
             ]
         );
+        // The fork's own id and cwd, not its parent's second session_meta.
         for e in &v {
             assert_eq!(e["session"], "22222222-2222-4222-8222-222222222222");
             assert_eq!(e["payload"]["cwd"], "/work/svc");
@@ -563,6 +664,8 @@ mod tests {
             v[4]["payload"]["last_assistant_message"],
             "Added the timeout."
         );
+        // Harness text marked by content_item_kinds is no prompt; an aborted turn sends no Stop.
+        assert_eq!(v[6]["payload"]["prompt"], "Try again with 100ms");
     }
 
     #[test]
