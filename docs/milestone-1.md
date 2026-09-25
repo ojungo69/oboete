@@ -79,6 +79,25 @@ Pool on 2026-09-26: 227 Claude Code and 242 Codex sessions.
 - Lines come out in time order (a stable sort), so subagent calls sit inside the turn that made them; Stop comes where the Stop hook ran (`stop_hook_summary`) or the turn ended (`turn_duration`), else at the next prompt, with the directory of the turn's last text; calls a developer interrupted (Claude Code) or a turn abort cut off (Codex) end there. The largest dev session (111 MB with its subagent files) converts in 0.3 s with a 39 MB peak.
 - Record types not read. Claude Code: agent-name, ai-title, atis-latch, attachment, bridge-session, cost-state, custom-title, file-history, fork-context-ref, frame-link, last-prompt, mode, permission-mode, pr-link, queue operations other than enqueue, system records other than the two turn ends. Codex: reasoning, token counts, turn and thread bookkeeping, inter-agent messages, world_state. None is typed dialogue.
 
+## B3: judge trust (Task 6, 2026-09-26)
+
+By a panel, not the owner (owner decision 29: the owner found the memories too English and technical to judge). The 50 pairs of `calib.py draw` (dev questions only; 25 graded relevant by the judge, 12 graded 1, 13 graded 0; one per question) were graded by five API judges from other makers, each pair alone, with judge.py's prompt and the text the judge saw, temperature 0. The judge under test counts with its pool grades (`claude-sonnet-5`, graded in batches of 10). Relevant = grade ≥ 2.
+
+| Judge (maker, model) | κ against the other five's majority | Agreement |
+|---|---|---|
+| Anthropic `claude-sonnet-5` (under test) | 0.84 | 92% |
+| OpenAI `openai/gpt-oss-120b` (Groq) | 0.60 | 80% |
+| DeepSeek `deepseek-v4-pro` (OpenCode Go) | 0.72 | 86% |
+| Zhipu `glm-5.3` (OpenCode Go) | 0.72 | 86% |
+| Moonshot `kimi-k3` (OpenCode Go) | 0.76 | 88% |
+| Alibaba `qwen3.8-max` (OpenCode Go) | 0.76 | 88% |
+
+- The panel's Fleiss κ: 0.72. All six judges agreed on 35 of the 50 pairs.
+- **B3 passes** (each judge κ ≥ 0.4, panel ≥ 0.4). The judge may decide from here on; D2's 0.545 is no longer provisional on this account.
+- `claude-sonnet-5` differed from the others' majority on 4 pairs: 2 it graded relevant and 2 it did not.
+- What this does not show (spec 8.1): judges that share a bias agree on the same wrong grade. Agreement with the owner is measured later, on the owner's own decisions (#76).
+- Frozen: `labels/calib-50.panel.jsonl`, `labels/calib-50.result.json`. The 4 answers the owner gave before decision 29 are set aside, unused (`labels/calib-50.withdrawn-2026-09-26.jsonl`).
+
 ## Findings
 
 - Today's hook keeps teammate messages ("Another Claude session sent a message: <teammate-message …>") as prompts: `ENVELOPES` in src/hook.rs has `<agent-message` but not this form. Design B's capture (milestone 2) should treat it as an envelope.

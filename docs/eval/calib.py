@@ -1,18 +1,23 @@
-"""Milestone 1, Task 6: B3, the judge-trust gate (docs/spec.md 8.1 "Judge trust").
+"""Milestone 1, Task 6: B3, the judge-trust gate (docs/spec.md 8.1 "Judge trust"; owner decision 29).
 
-  calib.py draw           50 dev pairs the judge graded -> labels/tasks/calib-50.jsonl and its key
-  calib.py kappa          owner vs judge on binary relevance (judge grade >= 2); passes at kappa >= 0.4
-  calib.py repeat         a week or more after the last first-round answer: 20 of the 50 again, blind
-  calib.py kappa-repeat   owner vs owner on those 20
-The owner sees the question and the document as that grade's judge saw them (4,000 characters, 1,200 for
-grades written before `chars` was recorded), never the grade."""
-import json, os, sqlite3, sys, time
+  calib.py draw               50 dev pairs the judge graded -> labels/tasks/calib-50.jsonl and its key
+  calib.py panel [max calls]  five API judges grade every pair -> labels/calib-50.panel.jsonl (resumes)
+  calib.py kappa              each judge against the other five's majority, and the panel's Fleiss kappa
+Relevant = grade >= 2. Every judge sees the question and the document as the judge under test saw
+them (4,000 characters, 1,200 for grades written before `chars` was recorded), never a grade."""
+import concurrent.futures, json, os, re, sqlite3, sys, threading, time, urllib.error, urllib.request
 
 from common import E, SEED, h, owner_only, read_jsonl, write_jsonl
-from label import latest_labels
 
-N, N_REPEAT, PASS_KAPPA, WEEK = 50, 20, 0.4, 7 * 86400
+N, PASS_KAPPA = 50, 0.4
 JUDGES = {'claude-sonnet-5', 'claude-sonnet'}   # the alias rows of 2026-09-24 came from claude-sonnet-5
+UNDER_TEST = 'claude-sonnet-5'
+GO = ('https://opencode.ai/zen/go/v1', 'OPENCODE_API_KEY.md', {'x-opencode-session': 'oboete'})
+# Five more makers, chosen 2026-09-26 by what answered (NIM and Mistral gave 429 or 404 that day).
+# API calls only: no tools. Keys are read in this process and never put in any environment.
+PANEL = {'gpt-oss-120b': ('https://api.groq.com/openai/v1', 'GROQ_API_KEY.md', {}, 'openai/gpt-oss-120b'),
+         'deepseek-v4-pro': (*GO, 'deepseek-v4-pro'), 'glm-5.3': (*GO, 'glm-5.3'),
+         'kimi-k3': (*GO, 'kimi-k3'), 'qwen3.8-max': (*GO, 'qwen3.8-max')}
 MAX_DOC_CHARS, OLD_CHARS = 4000, 1200   # judge.py's window, and the one before `chars` was recorded
 QUESTION = 'この記憶は、この問いに答えるのに役に立ちますか？'
 CHOICES = [{'value': 'yes', 'label': '役に立つ (答えに使える情報が入っている)'},
@@ -31,6 +36,66 @@ def kappa(pairs):
     pb = sum(b for _, b in pairs) / n
     pe = pa * pb + (1 - pa) * (1 - pb)
     return None if pe == 1 else (po - pe) / (1 - pe)
+
+
+def fleiss(rows):
+    """Fleiss' kappa for binary ratings, one row per item with every rater's rating. None when
+    every rating is the same."""
+    n = len(rows[0])
+    p_bar = sum((sum(r) * (sum(r) - 1) + (n - sum(r)) * (n - sum(r) - 1)) / (n * (n - 1)) for r in rows) / len(rows)
+    p = sum(sum(r) for r in rows) / (len(rows) * n)
+    pe = p * p + (1 - p) * (1 - p)
+    return None if pe == 1 else (p_bar - pe) / (1 - pe)
+
+
+def majority(votes):
+    yes = sum(votes)
+    return None if yes * 2 == len(votes) else yes * 2 > len(votes)
+
+
+def against_others(grades, judge):
+    """(the judge's binary grade, the other judges' majority) per pair; ties left out. `grades`:
+    pair id -> judge -> 0-3."""
+    out = []
+    for g in grades.values():
+        ref = majority([v >= 2 for j, v in g.items() if j != judge])
+        if judge in g and ref is not None:
+            out.append((g[judge] >= 2, ref))
+    return out
+
+
+def parse_grade(text):
+    """The one grade in an answer to judge.py's prompt; a code fence or a reasoning block around
+    the JSON is allowed, anything else raises."""
+    text = re.sub(r'<think>.*?</think>', '', text or '', flags=re.S)
+    m = re.search(r'\{.*\}', text, re.S)
+    grades = json.loads(m.group(0)).get('grades') if m else None
+    if not grades or not isinstance(grades[0].get('grade'), int) or not 0 <= grades[0]['grade'] <= 3:
+        raise ValueError(f'no usable grade: {text[:120]!r}')
+    return grades[0]['grade']
+
+
+def chat(member, prompt, timeout=120):
+    """One chat completion from a panel judge, temperature 0; a 429 is retried twice."""
+    base, key_file, headers, model = PANEL[member]
+    with open(os.path.expanduser(f'~/{key_file}')) as f:
+        key = f.read().split('\n')[1].strip()
+    body = json.dumps({'model': model, 'temperature': 0, 'messages': [{'role': 'user', 'content': prompt}]}).encode()
+    for attempt in range(3):
+        req = urllib.request.Request(f'{base}/chat/completions', data=body, headers={
+            'Authorization': f'Bearer {key}', 'Content-Type': 'application/json', 'User-Agent': 'oboete-eval', **headers})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.load(r)['choices'][0]['message'].get('content') or ''
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or attempt == 2:
+                raise
+            time.sleep(20 * (attempt + 1))
+
+
+def ask_panel(member, question, memory):
+    from judge import PROMPT
+    return parse_grade(chat(member, PROMPT.format(query=question, docs=f'[d]\n{memory}')))
 
 
 def draw(queries, judgments, doc_text, n=N):
@@ -61,10 +126,6 @@ def draw(queries, judgments, doc_text, n=N):
     return [items[i] for i in order], [key[i] for i in order]
 
 
-def repeat_allowed(finished_ts, now):
-    return now - finished_ts >= WEEK
-
-
 def store_doc_text(db):
     def text(doc, chars):
         row = db.execute(DOC_SQL[doc[0]], (int(doc[1:]),)).fetchone()
@@ -73,17 +134,8 @@ def store_doc_text(db):
         title, text = row
         # judge.py's own serialization, so the clip lands on the same character.
         body, cut = (title + '\n' + text).strip() if title else text, min(chars, MAX_DOC_CHARS)
-        return body if len(body) <= cut else body[:cut] + f'\n…(以下 {len(body) - cut} 文字は省略。判定器も同じところまで読みました)'
+        return body if len(body) <= cut else body[:cut] + '\n…[clipped]'   # judge.py's own mark
     return text
-
-
-def report(name, pairs, extra):
-    k = kappa(pairs) if pairs else None
-    agree = sum(a == b for a, b in pairs) / len(pairs) if pairs else None
-    out = {'n': len(pairs), 'kappa': k, 'agreement': agree, **extra}
-    with open(f'{E}/labels/{name}.result.json', 'w') as f:
-        json.dump(out, f, indent=1)
-    print(json.dumps(out, indent=1))
 
 
 def main(cmd):
@@ -102,39 +154,54 @@ def main(cmd):
         write_jsonl(f'{tasks}/calib-50.jsonl', items)
         write_jsonl(f'{labels}/calib-50.key.jsonl', key)
         print(f'{len(items)} pairs -> {tasks}/calib-50.jsonl')
-    elif cmd == 'kappa':
-        latest = latest_labels(f'{labels}/calib-50.jsonl')
+    elif cmd == 'panel':
+        budget = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
         key = read_jsonl(f'{labels}/calib-50.key.jsonl')
-        pairs = [(latest[k['id']] == 'yes', k['grade'] >= 2) for k in key if latest.get(k['id']) in ('yes', 'no')]
-        confusion = {f'owner_{o}_judge_{j}': sum(1 for a, b in pairs if a == (o == 'yes') and b == (j == 'yes'))
-                     for o in ('yes', 'no') for j in ('yes', 'no')}
-        done = len(pairs) == len(key) == N
-        k = kappa(pairs) if pairs else None
-        report('calib-50', pairs, {'confusion': confusion, 'complete': done,
-                                   'judges': sorted({k['judge'] for k in key}),
-                                   'pass': bool(done and k is not None and k >= PASS_KAPPA)})
-    elif cmd == 'repeat':
-        # A week after the first round is finished: the latest standing answer, not the first one.
-        standing = {}
-        for r in read_jsonl(f'{labels}/calib-50.jsonl'):
-            standing[r['id']] = r
-        answered = [r['ts'] for r in standing.values() if r['value'] is not None]
-        if len(answered) < N:
-            sys.exit(f'the first round has {len(answered)} of {N} answers; the blind repeat opens a week after it is finished')
-        if not repeat_allowed(max(answered), int(time.time())):
-            sys.exit(f'the blind repeat opens on {time.strftime("%Y-%m-%d", time.localtime(max(answered) + WEEK))}')
-        items = read_jsonl(f'{tasks}/calib-50.jsonl')
-        chosen = sorted(items, key=lambda i: h(f'repeat:{SEED}:{i["id"]}'))[:N_REPEAT]
-        chosen = [{**i, 'id': 'r' + i['id']} for i in sorted(chosen, key=lambda i: h(f'repeat-order:{SEED}:{i["id"]}'))]
-        write_jsonl(f'{tasks}/calib-repeat-20.jsonl', chosen)
-        print(f'{len(chosen)} pairs -> {tasks}/calib-repeat-20.jsonl')
-    elif cmd == 'kappa-repeat':
-        first = latest_labels(f'{labels}/calib-50.jsonl')
-        again = latest_labels(f'{labels}/calib-repeat-20.jsonl')
-        pairs = [(first[i[1:]] == 'yes', v == 'yes') for i, v in again.items()
-                 if v in ('yes', 'no') and first.get(i[1:]) in ('yes', 'no')]
-        report('calib-repeat-20', pairs, {'what': 'the owner against their own earlier answers',
-                                          'complete': len(pairs) == N_REPEAT})
+        path = f'{labels}/calib-50.panel.jsonl'
+        done = {(r['id'], r['judge']) for r in read_jsonl(path)} if os.path.exists(path) else set()
+        questions = {q['qid']: q['text'] for q in read_jsonl(f'{E}/queries.jsonl')}
+        text = store_doc_text(sqlite3.connect(f'file:{E}/home/oboete.db?mode=ro', uri=True))
+        memory = {k['id']: text(k['doc'], k['chars']) for k in key}
+        todo = [(k, m) for k in key for m in PANEL if (k['id'], m) not in done][:budget]
+        lock = threading.Lock()
+
+        def grade(k, member):
+            try:
+                g = ask_panel(member, questions[k['qid']], memory[k['id']])
+            except (OSError, ValueError, KeyError) as e:      # left for the next run
+                print(f'{k["id"]} {member}: {type(e).__name__} {str(e)[:120]}', file=sys.stderr)
+                return False
+            with lock, open(path, 'a') as f:
+                f.write(json.dumps({'id': k['id'], 'judge': member, 'grade': g}) + '\n')
+            return True
+
+        # One worker per judge: each provider sees one call at a time.
+        with concurrent.futures.ThreadPoolExecutor(len(PANEL)) as pool:
+            jobs = [pool.submit(lambda m=m: [grade(k, m) for k, mm in todo if mm == m]) for m in PANEL]
+            failed = sum(r.count(False) for r in (j.result() for j in jobs))
+        have = len(read_jsonl(path)) if os.path.exists(path) else 0
+        print(f'{have} of {len(key) * len(PANEL)} panel grades; {failed} failed this run')
+    elif cmd == 'kappa':
+        grades = {k['id']: {UNDER_TEST: k['grade']} for k in read_jsonl(f'{labels}/calib-50.key.jsonl')}
+        for r in read_jsonl(f'{labels}/calib-50.panel.jsonl'):
+            grades[r['id']][r['judge']] = r['grade']
+        judges = [UNDER_TEST, *PANEL]
+        complete = len(grades) == N and all(len(g) == len(judges) for g in grades.values())
+        each = {}
+        for j in judges:
+            pairs = against_others(grades, j)
+            k = kappa(pairs) if pairs else None
+            each[j] = {'n': len(pairs), 'kappa': k, 'agreement': sum(a == b for a, b in pairs) / len(pairs) if pairs else None,
+                       'pass': bool(complete and k is not None and k >= PASS_KAPPA)}
+        rows = [[g[j] >= 2 for j in judges] for g in grades.values() if len(g) == len(judges)]
+        fk = fleiss(rows) if rows else None
+        panel_pass = bool(complete and fk is not None and fk >= PASS_KAPPA)
+        out = {'complete': complete, 'judges': each, 'fleiss': fk, 'panel_pass': panel_pass,
+               'pass': panel_pass and each[UNDER_TEST]['pass'],
+               'models': {UNDER_TEST: UNDER_TEST, **{j: m[3] for j, m in PANEL.items()}}}
+        with open(f'{labels}/calib-50.result.json', 'w') as f:
+            json.dump(out, f, indent=1)
+        print(json.dumps(out, indent=1))
     else:
         sys.exit(__doc__)
 
