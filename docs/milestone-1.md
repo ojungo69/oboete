@@ -96,7 +96,7 @@ By a panel, not the owner (owner decision 29: the owner found the memories too E
 - **B3 passes** (each judge κ ≥ 0.4, panel ≥ 0.4). The judge may decide from here on; D2's 0.545 is no longer provisional on this account.
 - `claude-sonnet-5` differed from the others' majority on 4 pairs: 2 it graded relevant and 2 it did not.
 - What this does not show (spec 8.1): judges that share a bias agree on the same wrong grade. Agreement with the owner is measured later, on the owner's own decisions (#76).
-- Frozen: `labels/calib-50.panel.jsonl`, `labels/calib-50.result.json`. The 4 answers the owner gave before decision 29 are set aside, unused (`labels/calib-50.withdrawn-2026-09-26.jsonl`).
+- Frozen: `labels/calib-50.inputs.jsonl` (the question and memory every panel judge read, from the evaluation store, unchanged since 2026-09-24), `labels/calib-50.panel.jsonl`, `labels/calib-50.result.json`. The 4 answers the owner gave before decision 29 are set aside, unused (`labels/calib-50.withdrawn-2026-09-26.jsonl`).
 
 ## Findings
 

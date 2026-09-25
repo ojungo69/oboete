@@ -77,6 +77,9 @@ def test_the_reference_never_contains_the_judge_itself():
 def test_parse_grade_takes_fenced_or_reasoned_answers_only():
     assert parse_grade('```json\n{"grades": [{"id": "d", "grade": 2}]}\n```') == 2
     assert parse_grade('<think>maybe {"grade": 3}</think>{"grades": [{"id": "d", "grade": 1}]}') == 1
-    for bad in ('3', '{"grades": []}', '{"grades": [{"id": "d", "grade": 7}]}', None):
+    assert parse_grade('{"grades": [{"id": "[d]", "grade": 0}]}') == 0
+    for bad in ('3', '{"grades": []}', '{"grades": [{"id": "d", "grade": 7}]}', None,
+                '{"grades": [{"id": "e", "grade": 2}]}', '{"grades": [{"id": "d", "grade": true}]}',
+                '{"grades": [{"id": "d", "grade": 1}, {"id": "d", "grade": 3}]}'):
         with pytest.raises(ValueError):
             parse_grade(bad)

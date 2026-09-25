@@ -65,12 +65,15 @@ def against_others(grades, judge):
 
 
 def parse_grade(text):
-    """The one grade in an answer to judge.py's prompt; a code fence or a reasoning block around
-    the JSON is allowed, anything else raises."""
+    """The grade of memory `d`, the only one asked about, in an answer to judge.py's prompt; a code
+    fence or a reasoning block around the JSON is allowed. Anything else raises: more entries, another
+    id, or a grade outside 0-3."""
     text = re.sub(r'<think>.*?</think>', '', text or '', flags=re.S)
     m = re.search(r'\{.*\}', text, re.S)
     grades = json.loads(m.group(0)).get('grades') if m else None
-    if not grades or not isinstance(grades[0].get('grade'), int) or not 0 <= grades[0]['grade'] <= 3:
+    ok = (isinstance(grades, list) and len(grades) == 1 and str(grades[0].get('id', '')).strip('[]') == 'd'
+          and type(grades[0].get('grade')) is int and 0 <= grades[0]['grade'] <= 3)
+    if not ok:
         raise ValueError(f'no usable grade: {text[:120]!r}')
     return grades[0]['grade']
 
@@ -159,15 +162,20 @@ def main(cmd):
         key = read_jsonl(f'{labels}/calib-50.key.jsonl')
         path = f'{labels}/calib-50.panel.jsonl'
         done = {(r['id'], r['judge']) for r in read_jsonl(path)} if os.path.exists(path) else set()
-        questions = {q['qid']: q['text'] for q in read_jsonl(f'{E}/queries.jsonl')}
-        text = store_doc_text(sqlite3.connect(f'file:{E}/home/oboete.db?mode=ro', uri=True))
-        memory = {k['id']: text(k['doc'], k['chars']) for k in key}
+        # What every panel judge reads, written once and frozen: the store is not under the freeze.
+        inputs = f'{labels}/calib-50.inputs.jsonl'
+        if not os.path.exists(inputs):
+            questions = {q['qid']: q['text'] for q in read_jsonl(f'{E}/queries.jsonl')}
+            text = store_doc_text(sqlite3.connect(f'file:{E}/home/oboete.db?mode=ro', uri=True))
+            write_jsonl(inputs, [{'id': k['id'], 'question': questions[k['qid']], 'memory': text(k['doc'], k['chars'])}
+                                 for k in key])
+        given = {r['id']: r for r in read_jsonl(inputs)}
         todo = [(k, m) for k in key for m in PANEL if (k['id'], m) not in done][:budget]
         lock = threading.Lock()
 
         def grade(k, member):
             try:
-                g = ask_panel(member, questions[k['qid']], memory[k['id']])
+                g = ask_panel(member, given[k['id']]['question'], given[k['id']]['memory'])
             except (OSError, ValueError, KeyError) as e:      # left for the next run
                 print(f'{k["id"]} {member}: {type(e).__name__} {str(e)[:120]}', file=sys.stderr)
                 return False
