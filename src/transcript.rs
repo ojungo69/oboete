@@ -162,15 +162,26 @@ impl<W: Write> Emitter<W> {
         }
     }
 
-    /// End of one file: calls that never got a result, then the turn's last text.
-    fn finish(&mut self) -> Result<()> {
-        for (_, name, input, ts, agent_id) in std::mem::take(&mut self.pending) {
+    /// Calls that never got a result, as interrupted, at their own time. `main_only`: at an
+    /// interruption of the session, only its own calls; subagent calls wait for their file's end.
+    fn interrupt(&mut self, main_only: bool) -> Result<()> {
+        let (gone, kept) = std::mem::take(&mut self.pending)
+            .into_iter()
+            .partition(|p| !main_only || p.4.is_none());
+        self.pending = kept;
+        for (_, name, input, ts, agent_id) in gone {
             let mut p = json!({"tool_name": name, "tool_input": input, "tool_response": Value::Null, "interrupted": true});
             if let Some(a) = agent_id {
                 p["agent_id"] = json!(a);
             }
             self.emit("PostToolUse", &ts, p)?;
         }
+        Ok(())
+    }
+
+    /// End of one file: calls that never got a result, then the turn's last text.
+    fn finish(&mut self) -> Result<()> {
+        self.interrupt(false)?;
         self.stop()
     }
 }
@@ -242,6 +253,10 @@ fn claude_line<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) 
             }
             let text = text_of(content);
             let t = text.trim_start();
+            // The developer stopped the turn: its unanswered calls end here, not at the file's end.
+            if agent_id.is_none() && t.starts_with("[Request interrupted") {
+                e.interrupt(true)?;
+            }
             if agent_id.is_some()
                 || t.is_empty()
                 || TRANSCRIPT_ONLY
@@ -275,10 +290,15 @@ fn claude_line<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) 
         Some("queue-operation") if v["operation"] == "enqueue" => {
             let text = text_of(&v["content"]);
             let t = text.trim();
+            // Only the known harness forms; a queued prompt may itself start with markup.
             if t.is_empty()
-                || t.starts_with('<')
+                || crate::hook::is_envelope(t)
                 || t.starts_with("Another Claude session sent a message")
-                || LOCAL_COMMANDS.iter().any(|p| t.starts_with(p))
+                || t.starts_with("<command-")
+                || TRANSCRIPT_ONLY
+                    .iter()
+                    .chain(&LOCAL_COMMANDS)
+                    .any(|p| t.starts_with(p))
             {
                 return Ok(());
             }
@@ -551,6 +571,8 @@ mod tests {
                 "UserPromptSubmit",
                 "PostToolUse",
                 "PostToolUse",
+                "UserPromptSubmit",
+                "PostToolUse",
                 "PostToolUse",
                 "SessionEnd"
             ]
@@ -595,21 +617,25 @@ mod tests {
         // A plain-text local command is no prompt; a queued prompt is sent once, when queued.
         assert_eq!(v[12]["payload"]["prompt"], "テストも直して");
         assert_eq!(v[12]["ts"], "2026-09-01T00:00:20.000Z");
-        assert_eq!(v[14]["payload"]["tool_name"], "Grep");
-        assert_eq!(v[14]["payload"]["agent_id"], "a1");
+        // A queued prompt that starts with markup is still a prompt.
+        assert_eq!(v[15]["payload"]["prompt"], "<div>見出し</div> を直して");
+        assert_eq!(v[16]["payload"]["tool_name"], "Grep");
+        assert_eq!(v[16]["payload"]["agent_id"], "a1");
         // A workflow agent's file sits deeper under subagents/.
-        assert_eq!(v[15]["payload"]["tool_name"], "WebFetch");
-        assert_eq!(v[15]["payload"]["agent_id"], "w1");
+        assert_eq!(v[17]["payload"]["tool_name"], "WebFetch");
+        assert_eq!(v[17]["payload"]["agent_id"], "w1");
         // SessionEnd takes the main file's last time, not a subagent file's.
-        assert_eq!(v[16]["ts"], "2026-09-01T00:00:21.000Z");
+        assert_eq!(v[18]["ts"], "2026-09-01T00:00:24.000Z");
     }
 
     #[test]
-    fn a_tool_call_without_result_is_emitted_at_the_end() {
+    fn calls_without_result_end_at_the_interruption() {
         let (v, _) = events(CLAUDE, "claude");
         assert_eq!(v[13]["payload"]["tool_name"], "Edit");
         assert_eq!(v[13]["payload"]["interrupted"], true);
         assert!(v[13]["payload"]["tool_response"].is_null());
+        assert_eq!(v[14]["payload"]["tool_name"], "Bash");
+        assert_eq!(v[14]["ts"], "2026-09-01T00:00:22.000Z");
     }
 
     #[test]
@@ -624,13 +650,13 @@ mod tests {
         assert_eq!(
             stats,
             Stats {
-                lines: 32,
+                lines: 35,
                 skipped: 1,
-                events: 17,
+                events: 19,
                 ignored
             }
         );
-        assert_eq!(v.len(), 17);
+        assert_eq!(v.len(), 19);
         assert!(convert(Path::new(CLAUDE), "grok", Vec::new()).is_err());
     }
 
