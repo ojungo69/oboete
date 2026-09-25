@@ -73,8 +73,10 @@ def parse_grade(text):
     id, or a grade outside 0-3."""
     text = re.sub(r'<think>.*?</think>', '', text or '', flags=re.S)
     m = re.search(r'\{.*\}', text, re.S)
-    grades = json.loads(m.group(0)).get('grades') if m else None
-    ok = (isinstance(grades, list) and len(grades) == 1 and str(grades[0].get('id', '')).strip('[]') == 'd'
+    answer = json.loads(m.group(0)) if m else None
+    grades = answer.get('grades') if isinstance(answer, dict) else None
+    ok = (isinstance(grades, list) and len(grades) == 1 and isinstance(grades[0], dict)
+          and str(grades[0].get('id', '')).strip('[]') == 'd'
           and type(grades[0].get('grade')) is int and 0 <= grades[0]['grade'] <= 3)
     if not ok:
         raise ValueError(f'no usable grade: {text[:120]!r}')

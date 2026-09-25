@@ -80,6 +80,6 @@ def test_parse_grade_takes_fenced_or_reasoned_answers_only():
     assert parse_grade('{"grades": [{"id": "[d]", "grade": 0}]}') == 0
     for bad in ('3', '{"grades": []}', '{"grades": [{"id": "d", "grade": 7}]}', None,
                 '{"grades": [{"id": "e", "grade": 2}]}', '{"grades": [{"id": "d", "grade": true}]}',
-                '{"grades": [{"id": "d", "grade": 1}, {"id": "d", "grade": 3}]}'):
+                '{"grades": [{"id": "d", "grade": 1}, {"id": "d", "grade": 3}]}', '{"grades": [null]}', '{"grades": [1]}'):
         with pytest.raises(ValueError):
             parse_grade(bad)
