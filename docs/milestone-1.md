@@ -65,7 +65,7 @@ Pool on 2026-09-26: 227 Claude Code and 242 Codex sessions.
 
 | Agent | Files | Lines | Unreadable | Events | Tool events | Prompts: typed / envelopes |
 |---|---|---|---|---|---|---|
-| Claude Code (with 968 subagent files) | 24 | 129,180 | 0 | 22,170 | 20,921 | 73 / 533 |
+| Claude Code (with 968 subagent files) | 24 | 129,180 | 0 | 22,166 | 20,921 | 73 / 533 |
 | Codex | 6 | 29,494 | 0 | 4,271 | 4,224 | 20 / 0 |
 
 - The parser and replay_set.py are two implementations of the same rules (Task 3); they agree on every session's typed prompts and tool calls.
@@ -74,7 +74,8 @@ Pool on 2026-09-26: 227 Claude Code and 242 Codex sessions.
 - A prompt typed while a turn runs is sent when it is queued, and its later delivery is skipped.
 - Failed tool calls carry `error` and no `tool_response`, as live failures do (the plan's table asked for both; the hook reads `tool_response` first, so replay would have stored a different text).
 - Workflow agents' files (`subagents/workflows/wf_*/agent-*.jsonl`) are read with the other subagent files; a workflow's `journal.jsonl` is not a transcript and is skipped.
-- Codex: harness messages are left out by `content_item_kinds`; a forked rollout keeps its own id (its parent's `session_meta` follows its own); an aborted turn sends no Stop.
+- Codex: harness messages are left out by `content_item_kinds`; a forked rollout keeps its own id (its parent's `session_meta` follows its own); a resumed rollout follows `turn_context` into its new directory; an aborted turn sends no Stop.
+- A subagent's compacted context is not the session's PostCompact.
 - Record types not read. Claude Code: agent-name, ai-title, atis-latch, attachment, bridge-session, cost-state, custom-title, file-history, fork-context-ref, frame-link, last-prompt, mode, permission-mode, pr-link, queue operations other than enqueue, system. Codex: reasoning, token counts, turn and thread bookkeeping, inter-agent messages, world_state. None is typed dialogue.
 
 ## Findings

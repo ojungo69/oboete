@@ -210,13 +210,17 @@ fn claude_line<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) 
     } else {
         agent_id
     };
-    if e.cwd.is_none() {
-        e.cwd = v["cwd"].as_str().map(Into::into);
+    // The session's current directory: hooks key the repository from each event's cwd.
+    if (agent_id.is_none() || e.cwd.is_none())
+        && let Some(cwd) = v["cwd"].as_str()
+    {
+        e.cwd = Some(cwd.into());
     }
     let ts = v["timestamp"].as_str().unwrap_or_default().to_string();
     let content = &v["message"]["content"];
     match v["type"].as_str() {
-        Some("user") if v["isCompactSummary"] == true => e.emit(
+        // A subagent's compacted context is its own, not the session's.
+        Some("user") if v["isCompactSummary"] == true && agent_id.is_none() => e.emit(
             "PostCompact",
             &ts,
             json!({"trigger": "auto", "compact_summary": text_of(content)}),
@@ -326,9 +330,10 @@ fn codex_line<W: Write>(e: &mut Emitter<W>, v: &Value) -> Result<()> {
             }
             Ok(())
         }
+        // A resumed rollout can continue in another directory.
         (Some("turn_context"), _) => {
-            if e.cwd.is_none() {
-                e.cwd = p["cwd"].as_str().map(Into::into);
+            if let Some(cwd) = p["cwd"].as_str() {
+                e.cwd = Some(cwd.into());
             }
             Ok(())
         }
@@ -619,7 +624,7 @@ mod tests {
         assert_eq!(
             stats,
             Stats {
-                lines: 31,
+                lines: 32,
                 skipped: 1,
                 events: 17,
                 ignored
@@ -646,10 +651,12 @@ mod tests {
                 "SessionEnd"
             ]
         );
-        // The fork's own id and cwd, not its parent's second session_meta.
-        for e in &v {
+        // The fork's own id and cwd, not its parent's second session_meta; then the directory a
+        // later turn_context moves to.
+        for (i, e) in v.iter().enumerate() {
             assert_eq!(e["session"], "22222222-2222-4222-8222-222222222222");
-            assert_eq!(e["payload"]["cwd"], "/work/svc");
+            let cwd = if i < 6 { "/work/svc" } else { "/work/svc2" };
+            assert_eq!(e["payload"]["cwd"], cwd, "{i}");
         }
         assert_eq!(v[1]["payload"]["prompt"], "Add a 50ms timeout to fetchJson");
         assert_eq!(v[2]["payload"]["tool_input"]["cmd"], "rg fetchJson");

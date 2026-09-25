@@ -13,4 +13,5 @@
 {"timestamp":"2026-09-02T00:00:11.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Keep working toward the goal."}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["goal.internal_context"]}}}
 {"timestamp":"2026-09-02T00:00:12.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Half done."}]}}
 {"timestamp":"2026-09-02T00:00:13.000Z","type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}
+{"timestamp":"2026-09-02T00:00:13.500Z","type":"turn_context","payload":{"cwd":"/work/svc2"}}
 {"timestamp":"2026-09-02T00:00:14.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Try again with 100ms"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text"]}}}
