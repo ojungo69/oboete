@@ -664,24 +664,50 @@ pub fn pending_sessions(
 pub struct RawEvent {
     pub id: i64,
     pub event: String,
+    pub ts: i64,
     pub payload: String,
 }
 
-/// The session's raw events that observe has not read yet, oldest first.
-pub fn session_events(conn: &Connection, session_id: &str) -> Result<Vec<RawEvent>> {
+/// Up to `limit` of the session's raw events that observe has not read yet and that come after
+/// event `after`, oldest first, so a long session can be read a page at a time.
+pub fn session_events_after(
+    conn: &Connection,
+    session_id: &str,
+    after: i64,
+    limit: usize,
+) -> Result<Vec<RawEvent>> {
     let mut stmt = conn.prepare(
-        "SELECT id, event, payload FROM events WHERE session_id=?1
-           AND id > COALESCE((SELECT observed_event_id FROM sessions WHERE id=?1), 0)
-         ORDER BY id",
+        "SELECT id, event, ts, payload FROM events WHERE session_id=?1
+           AND id > MAX(?2, COALESCE((SELECT observed_event_id FROM sessions WHERE id=?1), 0))
+         ORDER BY id LIMIT ?3",
     )?;
-    let rows = stmt.query_map(params![session_id], |r| {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows = stmt.query_map(params![session_id, after, limit], |r| {
         Ok(RawEvent {
             id: r.get(0)?,
             event: r.get(1)?,
-            payload: r.get(2)?,
+            ts: r.get(2)?,
+            payload: r.get(3)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The session's raw events that observe has not read yet, oldest first.
+#[cfg(test)]
+pub fn session_events(conn: &Connection, session_id: &str) -> Result<Vec<RawEvent>> {
+    session_events_after(conn, session_id, 0, usize::MAX)
+}
+
+/// The session's newest summary: what its earlier parts said, for the next part's call.
+pub fn latest_summary(conn: &Connection, session_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT body FROM summaries WHERE session_id=?1 ORDER BY ts DESC, id DESC LIMIT 1",
+            params![session_id],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 pub struct Observation {
@@ -818,6 +844,7 @@ pub fn import_doc(conn: &Connection, source: &str, source_id: &str, d: &Doc) -> 
 /// One transaction: store the batch's knowledge (and its search rows) and move the session's
 /// observe cursor past its raw events, which stay stored.
 /// Rows carry the session's time (`last_event_at`), not the time they were summarized.
+/// `false`: the session was deleted meanwhile, so nothing was stored and the cursor did not move.
 pub fn apply_batch(
     conn: &mut Connection,
     s: &PendingSession,
@@ -825,7 +852,7 @@ pub fn apply_batch(
     summary: &str,
     observations: &[Observation],
     last_event_id: i64,
-) -> Result<()> {
+) -> Result<bool> {
     let (session_id, repo, ts) = (&s.id, &s.repo, s.last_event_at);
     let tx = conn.transaction()?;
     // The viewer may have deleted the session while the provider was summarizing it; then its
@@ -840,7 +867,7 @@ pub fn apply_batch(
         .optional()?
         .is_some();
     if !alive {
-        return Ok(());
+        return Ok(false);
     }
     if !summary.trim().is_empty() {
         tx.execute(
@@ -866,7 +893,7 @@ pub fn apply_batch(
         params![session_id, last_event_id],
     )?;
     tx.commit()?;
-    Ok(())
+    Ok(true)
 }
 
 /// Remove one observation (`o<id>`), summary (`s<id>`) or prompt (`p<id>`) together with its
@@ -1313,9 +1340,9 @@ mod tests {
         // A session deleted while its summary was being written leaves nothing behind, also
         // when the agent's next event has recreated the session in the meantime.
         assert!(delete_session(&mut conn, "s1").unwrap());
-        apply_batch(&mut conn, &s, "p", "late", std::slice::from_ref(&obs), 0).unwrap();
+        assert!(!apply_batch(&mut conn, &s, "p", "late", std::slice::from_ref(&obs), 0).unwrap());
         upsert_session(&conn, "s1", "claude", "/r", "/r", 3).unwrap();
-        apply_batch(&mut conn, &s, "p", "later", std::slice::from_ref(&obs), 0).unwrap();
+        assert!(!apply_batch(&mut conn, &s, "p", "later", std::slice::from_ref(&obs), 0).unwrap());
         for table in ["observations", "summaries", "fts"] {
             assert_eq!(
                 ids(&conn, &format!("SELECT COUNT(*) FROM {table}")),
@@ -1328,7 +1355,7 @@ mod tests {
             last_event_at: 3,
             ..s
         };
-        apply_batch(&mut conn, &s3, "p", "own", std::slice::from_ref(&obs), 0).unwrap();
+        assert!(apply_batch(&mut conn, &s3, "p", "own", std::slice::from_ref(&obs), 0).unwrap());
         assert_eq!(ids(&conn, "SELECT COUNT(*) FROM summaries"), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
