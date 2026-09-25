@@ -378,6 +378,11 @@ fn scratch_dir() -> Result<Scratch, CallError> {
     Ok(Scratch(dir))
 }
 
+/// A codex permission profile for the curator: no file but the platform's minimal paths and
+/// codex's own install (without it bubblewrap cannot start codex's helper, openai/codex#29049), and
+/// no network. Beta in codex 0.155-0.157; it replaces `--sandbox`, which must not be passed with it.
+const CODEX_PROFILE: &str = r#"permissions.curator.filesystem={":root"="deny",":minimal"="read","~/.codex/packages"="read"}"#;
+
 /// The command for one headless CLI run, with the smallest configuration each one allows: no
 /// hooks, no tools, no session persistence, no user settings or MCP servers where the CLI can skip
 /// them. The prompt never goes on the command line (any local user can read another process's
@@ -455,11 +460,22 @@ fn headless_command(
                 .arg("--output-schema")
                 .arg(write("schema.json", schema_text)?);
             cmd.arg("-o").arg(dir.join("last.json"));
+            cmd.args(["--ephemeral", "--skip-git-repo-check"]);
+            // No user config (its MCP servers, some with auto-approved tools), no execpolicy rules
+            // and no plugins (their MCP servers); the login still comes from CODEX_HOME. Commands
+            // run under a permission profile that hides the disk and the network:
+            // `--sandbox read-only` let them read HOME (docs/spike/curator-isolation.md).
             cmd.args([
-                "--ephemeral",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--disable",
+                "plugins",
+            ]);
+            cmd.args([
+                "-c",
+                CODEX_PROFILE,
+                "-c",
+                r#"default_permissions="curator""#,
             ]);
             cmd.args(["-c", "model_reasoning_effort=low"]);
             if let Some(m) = model {
@@ -664,6 +680,26 @@ mod tests {
         // Kinds outside the enum are mapped later (observe), not refused here.
         let odd_kind = serde_json::json!({"observations": [{"kind": "Decision", "title": "t", "body": "b"}], "summary": ""});
         assert!(fits(&odd_kind, &schema));
+    }
+
+    #[test]
+    fn the_codex_curator_gets_no_user_config_mcp_or_home() {
+        let scratch = scratch_dir().unwrap();
+        let (cmd, _) = headless_command("codex", None, &scratch.0, "p", "{}").unwrap();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        for flag in [
+            "--ignore-user-config",
+            "--ignore-rules",
+            "plugins",
+            CODEX_PROFILE,
+        ] {
+            assert!(args.iter().any(|a| a == flag), "{flag}: {args:?}");
+        }
+        // --sandbox would switch codex back to its older settings and ignore the profile.
+        assert!(!args.iter().any(|a| a == "--sandbox"), "{args:?}");
     }
 
     #[test]
