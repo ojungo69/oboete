@@ -1,7 +1,7 @@
 """Milestone 1, Task 3: the replay set (docs/spec.md 8.4 item 1; rules in docs/milestone-1.md).
 Reads the agents' transcripts and the frozen claude-mem copy read-only; copies the chosen
 transcripts into ~/.oboete/eval/replay with a manifest of sha256s."""
-import datetime, glob, json, os, re, shutil, sqlite3, sys
+import collections, datetime, glob, json, os, re, shutil, sqlite3, sys
 
 from common import E, JA, SEED, h, owner_only, sha256_file, split
 
@@ -9,14 +9,20 @@ PER_SIDE = {'claude': 24, 'codex': 6}
 SHORT, LONG = 50, 300          # tool calls: short < 50 <= mid < 300 <= long
 LONG_SPAN_H = 20
 UUID = re.compile(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$')
-# Codex puts harness context in user messages; these are not typed prompts.
-CODEX_CONTEXT = ('<environment_context>', '<user_instructions>', '# AGENTS.md', '<permissions', '<INSTRUCTIONS>')
+# Codex puts harness context in user messages; these are not typed prompts. Newer rollouts say so in
+# content_item_kinds ('user.text' is typed); this prefix list is for records without it.
+CODEX_CONTEXT = ('<environment_context>', '<user_instructions>', '# AGENTS.md', '<permissions', '<INSTRUCTIONS>',
+                 '<recommended_plugins>', '<skill>', '<codex_internal_context', '<hook_prompt')
 # Claude Code "user" records the developer did not type: the hook's ENVELOPES (src/hook.rs), teammate
 # messages, and transcript-only records (command output, slash-command tags, bash mode, interrupts).
 # 1,063 task notifications in the first draw's Claude files made nearly every session look English.
 NOT_TYPED = ('<task-notification', '<agent-message', '<system_notification', '<bash-notification', '<<autonomous-loop',
              'Another Claude session sent a message', '<local-command-', '<command-name>', '<command-message>',
              '<bash-input', '<bash-stdout', '<bash-stderr', '[Request interrupted')
+# Local commands older Claude Code stored as plain text; the prompt hook never got them (claude-mem's
+# copy has none of them).
+LOCAL_COMMANDS = ('/compact', '/clear', '/effort', '/model', '/plugin', '/exit', '/mcp', '/login', '/resume', '/config',
+                  '/reload-plugins', '/reload-skills', '/advisor')
 
 
 def ts(s):
@@ -24,8 +30,15 @@ def ts(s):
 
 
 def typed(agent, o):
-    """The text the developer typed in this record, or None."""
+    """The text the developer typed in this record, or None. Claude Code: a prompt typed while a turn
+    runs is queued, and the prompt hook fires when it is queued (claude-mem has them); `prompts`
+    counts it once when it is later delivered as a user record."""
     if agent == 'claude':
+        if o.get('type') == 'queue-operation' and o.get('operation') == 'enqueue':
+            c = o.get('content')
+            text = c if isinstance(c, str) else '\n'.join(x.get('text', '') for x in c or [] if isinstance(x, dict))
+            t = text.lstrip()
+            return None if not t or t.startswith(NOT_TYPED + LOCAL_COMMANDS) else text
         m = o.get('message') or {}
         # isSidechain: a subagent's turn, written inline by older Claude Code; not typed.
         if (o.get('type') != 'user' or o.get('isMeta') or o.get('isCompactSummary') or o.get('isSidechain')
@@ -36,14 +49,32 @@ def typed(agent, o):
             text = c
         else:
             text = '\n'.join(x.get('text', '') for x in c or [] if isinstance(x, dict) and x.get('type') == 'text')
-        return None if not text or text.lstrip().startswith(NOT_TYPED) else text
+        t = text.lstrip()
+        # A skill command (message tag first) and /goal reach the prompt hook as typed; other local
+        # commands (name tag first) never do (docs/milestone-1.md, Task 4).
+        if t.startswith('<command-message>') or t.startswith('<command-name>/goal<'):
+            return command_text(t)
+        return None if not text or t.startswith(NOT_TYPED + LOCAL_COMMANDS) else text
     # Codex: the response_item user message. Its rare event_msg `user_message` twin (3 in 40 rollouts
     # of 2026-08) repeats the same text, so it is not counted.
     p = o.get('payload') if isinstance(o.get('payload'), dict) else {}
     if o.get('type') == 'response_item' and p.get('type') == 'message' and p.get('role') == 'user':
-        text = '\n'.join(x.get('text', '') for x in p.get('content') or [] if isinstance(x, dict))
+        items = [x for x in p.get('content') or [] if isinstance(x, dict)]
+        kinds = (p.get('internal_chat_message_metadata_passthrough') or {}).get('content_item_kinds')
+        if isinstance(kinds, list) and len(kinds) == len(items):
+            return '\n'.join(x.get('text', '') for x, k in zip(items, kinds) if k == 'user.text') or None
+        text = '\n'.join(x.get('text', '') for x in items)
         return None if text.lstrip().startswith(CODEX_CONTEXT) else text
     return None
+
+
+def command_text(t):
+    """A slash command as typed, from the transcript's tags: '/name args'."""
+    name = re.search(r'<command-name>(.*?)</command-name>', t, re.S)
+    args = re.search(r'<command-args>(.*?)</command-args>', t, re.S)
+    if not name:
+        return None
+    return ' '.join(x for x in (name.group(1).strip(), args.group(1).strip() if args else '') if x)
 
 
 def tool_calls(agent, o):
@@ -57,8 +88,14 @@ def tool_calls(agent, o):
 def session_files(agent, path):
     """The main transcript and, for Claude Code, its subagent files: the replay includes their tool
     calls, so the length strata count them too."""
-    sub = os.path.join(os.path.dirname(path), os.path.basename(path)[:-6], 'subagents')
-    return [path] + (sorted(glob.glob(os.path.join(sub, '*.jsonl'))) if agent == 'claude' else [])
+    sub = subagents_dir(path)
+    # Workflow agents sit deeper (subagents/workflows/wf_*/agent-*.jsonl); the live hook sees their
+    # tool calls too (a session with 300 in its main file had 16,151 hook events).
+    return [path] + (sorted(glob.glob(os.path.join(sub, '**', '*.jsonl'), recursive=True)) if agent == 'claude' else [])
+
+
+def subagents_dir(path):
+    return os.path.join(os.path.dirname(path), os.path.basename(path)[:-6], 'subagents')
 
 
 def lines_of(files):
@@ -72,6 +109,7 @@ def features(agent, path):
     Length is tool calls, not prompts: one typed prompt can start hours of work."""
     prompts = chars = ja = tools = 0
     first = last = None
+    queued = collections.Counter()
     for line in lines_of(session_files(agent, path)):
         try:
             o = json.loads(line)
@@ -83,10 +121,16 @@ def features(agent, path):
             last = t if last is None else max(last, t)
         tools += tool_calls(agent, o)
         text = typed(agent, o)
-        if text and text.strip():
-            prompts += 1
-            chars += len(text)
-            ja += len(JA.findall(text))
+        if not (text and text.strip()):
+            continue
+        if o.get('type') == 'queue-operation':
+            queued[text.strip()] += 1
+        elif queued[text.strip()]:          # the delivery of a prompt counted when it was queued
+            queued[text.strip()] -= 1
+            continue
+        prompts += 1
+        chars += len(text)
+        ja += len(JA.findall(text))
     if prompts < 1:
         return None
     ja_ratio = ja / chars if chars else 0.0
@@ -132,7 +176,7 @@ def copy_out(chosen, dest_root):
         main, *subs = session_files(c['agent'], c['path'])
         files = {os.path.join(base, f'{c["session"]}.jsonl'): main}
         for f in subs:
-            files[os.path.join(base, c['session'], 'subagents', os.path.basename(f))] = f
+            files[os.path.join(base, c['session'], 'subagents', os.path.relpath(f, subagents_dir(c['path'])))] = f
         c['files'] = {}
         for rel, src in files.items():
             dst = os.path.join(dest_root, rel)

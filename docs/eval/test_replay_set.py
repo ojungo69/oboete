@@ -1,7 +1,7 @@
 import json, os, sys, tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from replay_set import choose, copy_out, features
+from replay_set import choose, copy_out, features, typed
 
 
 def claude_file(d, sid, prompts, ja=False, hours=1, tools=0):
@@ -37,6 +37,42 @@ def test_features_count_typed_prompts_language_and_span():
                                 'message': {'content': [{'type': 'tool_use', 'id': 's', 'name': 'Grep', 'input': {}}]}}) + '\n')
         g = features('claude', os.path.join(d, 'a.jsonl'))
         assert g['tools'] == 61 and g['prompts'] == 12 and g['span_h'] > 40
+        # Workflow agents sit deeper; the live hook sees their calls too.
+        os.makedirs(os.path.join(d, 'a', 'subagents', 'workflows', 'wf_1'))
+        with open(os.path.join(d, 'a', 'subagents', 'workflows', 'wf_1', 'agent-y.jsonl'), 'w') as f:
+            f.write(json.dumps({'type': 'assistant', 'timestamp': '2026-09-03T00:00:00Z',
+                                'message': {'content': [{'type': 'tool_use', 'id': 'w', 'name': 'Read', 'input': {}}]}}) + '\n')
+        assert features('claude', os.path.join(d, 'a.jsonl'))['tools'] == 62
+
+
+def user(text, **extra):
+    return {'type': 'user', 'timestamp': '2026-09-01T00:00:00Z', 'message': {'role': 'user', 'content': text}, **extra}
+
+
+def test_typed_follows_what_the_prompt_hook_received():
+    assert typed('claude', user('/compact keep the decision')) is None          # a local command, old plain form
+    assert typed('claude', user('<command-name>/effort</command-name>\n<command-message>effort</command-message>')) is None
+    assert typed('claude', user('<command-message>graphify</command-message>\n<command-name>/graphify</command-name>\n'
+                                '<command-args>src</command-args>')) == '/graphify src'
+    assert typed('claude', user('<command-name>/goal</command-name>\n<command-args>finish</command-args>')) == '/goal finish'
+    assert typed('claude', {'type': 'queue-operation', 'operation': 'enqueue', 'content': 'それで良い'}) == 'それで良い'
+    assert typed('claude', {'type': 'queue-operation', 'operation': 'enqueue', 'content': '<task-notification>x'}) is None
+    kinds = lambda k, text: {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
+                             'content': [{'type': 'input_text', 'text': text}],
+                             'internal_chat_message_metadata_passthrough': {'content_item_kinds': k}}}
+    assert typed('codex', kinds(['plugins.recommendations'], '<recommended_plugins>\n...')) is None
+    assert typed('codex', kinds(['user.text'], 'Add a timeout')) == 'Add a timeout'
+    assert typed('codex', kinds(None, '<skill>\n<name>caveman</name>')) is None       # older rollouts: by prefix
+
+
+def test_a_queued_prompt_counts_once():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, 'q.jsonl')
+        with open(path, 'w') as f:
+            for o in ({'type': 'queue-operation', 'operation': 'enqueue', 'timestamp': '2026-09-01T00:00:00Z',
+                       'content': 'それで良い'}, user('それで良い'), user('次へ')):
+                f.write(json.dumps(o, ensure_ascii=False) + '\n')
+        assert features('claude', path)['prompts'] == 2
 
 
 def test_choose_is_deterministic_and_covers_every_stratum():
@@ -63,8 +99,12 @@ def test_copy_out_is_owner_only_and_hashed():
         os.makedirs(os.path.join(src, 'c', 'subagents'))
         with open(os.path.join(src, 'c', 'subagents', 'agent-1.jsonl'), 'w') as f:
             f.write('{}\n')
+        os.makedirs(os.path.join(src, 'c', 'subagents', 'workflows', 'wf_1'))
+        with open(os.path.join(src, 'c', 'subagents', 'workflows', 'wf_1', 'agent-2.jsonl'), 'w') as f:
+            f.write('{}\n')
         chosen = [{'session': 'c', 'agent': 'claude', 'side': 'dev', 'path': path}]
         copy_out(chosen, dst)
         rel = 'dev/claude/c.jsonl'
-        assert set(chosen[0]['files']) == {rel, 'dev/claude/c/subagents/agent-1.jsonl'}
+        assert set(chosen[0]['files']) == {rel, 'dev/claude/c/subagents/agent-1.jsonl',
+                                           'dev/claude/c/subagents/workflows/wf_1/agent-2.jsonl'}
         assert os.stat(os.path.join(dst, rel)).st_mode & 0o777 == 0o600
