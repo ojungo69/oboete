@@ -1,7 +1,7 @@
 """Milestone 1, Task 6: B3, the judge-trust gate (docs/spec.md 8.1 "Judge trust"; owner decision 29).
 
   calib.py draw               50 dev pairs the judge graded -> labels/tasks/calib-50.jsonl and its key
-  calib.py panel [max calls]  five API judges grade every pair -> labels/calib-50.panel.jsonl (resumes)
+  calib.py panel [max calls]  five API judges grade every pair -> labels/calib-50.panel-2.jsonl (resumes)
   calib.py kappa              each judge against the other five's majority, and the panel's Fleiss kappa
 Relevant = grade >= 2. Every judge sees the question and the document as the judge under test saw
 them (4,000 characters, 1,200 for grades written before `chars` was recorded), never a grade."""
@@ -10,6 +10,9 @@ import concurrent.futures, json, os, re, sqlite3, sys, threading, time, urllib.e
 from common import E, SEED, h, owner_only, read_jsonl, write_jsonl
 
 N, PASS_KAPPA = 50, 0.4
+# Run 1 (`calib-50.panel.jsonl`, frozen) took the first entry of any answer; run 2 requires exactly
+# the grade of memory `d` and is the one B3 is decided on (#77).
+RUN = 'calib-50.panel-2'
 JUDGES = {'claude-sonnet-5', 'claude-sonnet'}   # the alias rows of 2026-09-24 came from claude-sonnet-5
 UNDER_TEST = 'claude-sonnet-5'
 GO = ('https://opencode.ai/zen/go/v1', 'OPENCODE_API_KEY.md', {'x-opencode-session': 'oboete'})
@@ -78,7 +81,7 @@ def parse_grade(text):
     return grades[0]['grade']
 
 
-def chat(member, prompt, timeout=120):
+def chat(member, prompt, timeout=300):
     """One chat completion from a panel judge, temperature 0; a 429 is retried twice."""
     base, key_file, headers, model = PANEL[member]
     with open(os.path.expanduser(f'~/{key_file}')) as f:
@@ -160,7 +163,7 @@ def main(cmd):
     elif cmd == 'panel':
         budget = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
         key = read_jsonl(f'{labels}/calib-50.key.jsonl')
-        path = f'{labels}/calib-50.panel.jsonl'
+        path = f'{labels}/{RUN}.jsonl'
         done = {(r['id'], r['judge']) for r in read_jsonl(path)} if os.path.exists(path) else set()
         # What every panel judge reads, written once and frozen: the store is not under the freeze.
         inputs = f'{labels}/calib-50.inputs.jsonl'
@@ -174,14 +177,19 @@ def main(cmd):
         lock = threading.Lock()
 
         def grade(k, member):
-            try:
-                g = ask_panel(member, given[k['id']]['question'], given[k['id']]['memory'])
-            except (OSError, ValueError, KeyError) as e:      # left for the next run
-                print(f'{k["id"]} {member}: {type(e).__name__} {str(e)[:120]}', file=sys.stderr)
-                return False
+            row = {'id': k['id'], 'judge': member}
+            for attempt in range(3):
+                try:
+                    row['grade'] = ask_panel(member, given[k['id']]['question'], given[k['id']]['memory'])
+                    break
+                except ValueError as e:      # an answer with no usable grade: asked again, then recorded
+                    row.update(grade=None, unusable=str(e)[:200])
+                except (OSError, KeyError) as e:      # the call failed: left for the next run
+                    print(f'{k["id"]} {member}: {type(e).__name__} {str(e)[:120]}', file=sys.stderr)
+                    return False
             with lock, open(path, 'a') as f:
-                f.write(json.dumps({'id': k['id'], 'judge': member, 'grade': g}) + '\n')
-            return True
+                f.write(json.dumps(row) + '\n')
+            return row['grade'] is not None
 
         # One worker per judge: each provider sees one call at a time.
         with concurrent.futures.ThreadPoolExecutor(len(PANEL)) as pool:
@@ -191,10 +199,15 @@ def main(cmd):
         print(f'{have} of {len(key) * len(PANEL)} panel grades; {failed} failed this run')
     elif cmd == 'kappa':
         grades = {k['id']: {UNDER_TEST: k['grade']} for k in read_jsonl(f'{labels}/calib-50.key.jsonl')}
-        for r in read_jsonl(f'{labels}/calib-50.panel.jsonl'):
-            grades[r['id']][r['judge']] = r['grade']
+        recorded = read_jsonl(f'{labels}/{RUN}.jsonl')
+        for r in recorded:
+            if r['grade'] is not None:       # an unusable answer leaves the pair out for that judge only
+                grades[r['id']][r['judge']] = r['grade']
+        first = {(r['id'], r['judge']): r['grade'] for r in read_jsonl(f'{labels}/calib-50.panel.jsonl')}
+        again = [(first[i, j], g) for i, js in grades.items() for j, g in js.items() if (i, j) in first]
         judges = [UNDER_TEST, *PANEL]
-        complete = len(grades) == N and all(len(g) == len(judges) for g in grades.values())
+        # Complete when every judge answered every pair, with a grade or with an unusable answer 3 times.
+        complete = len(grades) == N and len({(r['id'], r['judge']) for r in recorded}) == N * len(PANEL)
         each = {}
         for j in judges:
             pairs = against_others(grades, j)
@@ -204,10 +217,13 @@ def main(cmd):
         rows = [[g[j] >= 2 for j in judges] for g in grades.values() if len(g) == len(judges)]
         fk = fleiss(rows) if rows else None
         panel_pass = bool(complete and fk is not None and fk >= PASS_KAPPA)
-        out = {'complete': complete, 'judges': each, 'fleiss': fk, 'panel_pass': panel_pass,
+        out = {'run': RUN, 'complete': complete, 'judges': each,
+               'unusable': [(r['id'], r['judge']) for r in recorded if r['grade'] is None],
+               'changed_from_run_1': {'n': len(again), 'grade': sum(a != b for a, b in again),
+                                      'relevance': sum((a >= 2) != (b >= 2) for a, b in again)}, 'fleiss': fk, 'panel_pass': panel_pass,
                'pass': panel_pass and each[UNDER_TEST]['pass'],
                'models': {UNDER_TEST: UNDER_TEST, **{j: m[3] for j, m in PANEL.items()}}}
-        with open(f'{labels}/calib-50.result.json', 'w') as f:
+        with open(f'{labels}/{RUN.replace("panel", "result")}.json', 'w') as f:
             json.dump(out, f, indent=1)
         print(json.dumps(out, indent=1))
     else:
