@@ -59,15 +59,16 @@ PRs: A = Tasks 1-3; B = Task 4 (delegated to Codex); C = Tasks 5-6; D = Task 7; 
 
 ## Owner sittings (オーナーの作業、日本語)
 
-ラベル付けはすべて Claude が候補を作り、あなたは画面で「はい / いいえ」などを選ぶだけです。1 回 1 時間以内、途中でやめても続きから再開できます。
+2026-09-26 に変更しました (spec の owner decision 29)。あなたにお願いするのは「あなた自身が決めたこと」の確認だけです。技術的な判定 (検索結果が問いに役立つか など) は、別々の会社の AI 3〜5 種に判定させ、互いの一致で信頼できるかを測ります。
+
+すべて Claude が候補を作り、やさしい日本語の一文と、あなた自身の元の発言を添えて見せます。あなたは「はい / いいえ / 判断できない」を選ぶだけです。判断できないものは AI の判定に回します。1 回 1 時間以内、途中でやめても続きから再開できます。
 
 | いつ | 内容 | 目安 |
 |---|---|---|
-| Task 6 の後 | 判定器の信頼チェック: 問いと記憶の組 50 個に「役に立つ / 立たない」 | 約 2 時間 (1 組 2〜3 分) |
-| その 1 週間後以降 | 同じ 50 組から選んだ 20 組をもう一度 (前の答えは見せません) | 約 50 分 |
-| Task 8 の後 | 決定の候補 約 50 個に「あなたが決めたことか」、覆った組 20 個と対照の組 20 個に「後が前を覆しているか」 | 約 2〜3 時間 |
+| Task 8 の後 | 決定の候補 約 50 個に「あなたが決めたことか」、覆った組 20 個と対照の組 20 個に「後の決定が前の決定を覆しているか」 | 約 1.5 時間 |
+| その 1 週間後以降 | 上から選んだ 20 個をもう一度 (前の答えは見せません) | 約 15 分 |
 
-合計 約 4〜6 時間 (spec 8.4 の見積もりどおり)。test 側のラベル (約 5〜7 時間) は段階 3 の判定の前に、同じ画面で別途お願いします。
+段階 3 の判定の前 (test 側の決定 100 個と、覆った組 50 個・対照 50 個) と、段階 3〜4 の間 (要約役が「決定」とした 100 個) にも、同じ形でお願いします。合計 約 4〜5 時間の見込みです。
 
 ---
 
@@ -1746,244 +1747,73 @@ git add docs/eval/label.py docs/eval/test_label.py && git commit -m "eval: the o
 
 ## Task 6: B3, the judge-trust gate
 
-Spec 8.1: about 50 human-labelled pairs; binary relevance κ ≥ 0.4 between the owner and the judge; until it passes, the judge decides nothing. A blind repeat of 20 of the 50, at least a week later, reports the owner's agreement with their earlier self next to the judge's. Decisions (Claude; overrulable, in the note): pairs come from dev questions only, from pairs the judge graded (`claude-sonnet-5`; the `claude-sonnet` alias rows of 2026-09-24 count as the same judge, docs/eval/judge.py); 25 graded relevant (2-3) and 25 not (12 graded 1, the near misses, and 13 graded 0); at most one pair per question; the owner answers binary, never 0-3, and never sees the grade.
+Rewritten 2026-09-26 (owner decision 29, spec 8.1). The owner does not grade these pairs: the owner found the memories too English and technical to judge. A panel of judges from six model makers grades them instead, and the judge under test (`claude-sonnet-5`, whose pool grades D2 used) is trusted by its agreement with the others. The first version of this task (owner against judge) is in git history (PR #64); its draw and key are kept.
 
-If κ < 0.4 (the failure branch, 8.1): the judge decides nothing; D2's test pool must be re-judged by a judge that passes or by the owner's labels before M1 uses 0.545 as its baseline. The next step is then to rerun the 50 pairs through another judge (for example `claude-opus-5-5` with judge.py's prompt) and compute κ again; that is recorded as a follow-up issue, not built here.
+Rule (spec 8.1; Claude; overrulable, in the note):
+- Pairs: the 50 already drawn by `calib.py draw` (`labels/tasks/calib-50.jsonl`, key `labels/calib-50.key.jsonl`): dev questions only, 25 graded relevant (2-3), 12 graded 1 and 13 graded 0, one pair per question, each shown as the judge saw it (4,000 characters, 1,200 for older grades).
+- Panel: the judge under test, graded by its key grade; and `openai/gpt-oss-120b` through Groq, `deepseek-v4-pro`, `glm-5.3`, `kimi-k3` and `qwen3.8-max` through OpenCode Go (base URL `https://opencode.ai/zen/go/v1`, header `x-opencode-session: oboete`), each asked once per pair with judge.py's prompt and the pair as its only memory, temperature 0. They are API calls with no tools; keys are read from `~/<NAME>_KEY.md` line 2 inside the process and never put in any environment.
+- Binary relevance: grade ≥ 2.
+- For each judge, its reference on a pair is the majority of the other five (five, so no tie). A judge passes when its Cohen κ against that reference is ≥ 0.4 on all 50 pairs.
+- The panel passes when its Fleiss κ over the six judges is ≥ 0.4. A panel that fails labels nothing.
+- B3 passes when the panel passes and `claude-sonnet-5` passes.
+- If B3 fails: the judge decides nothing, D2's 0.545 stays provisional, and D2's test pool is re-judged only by a judge that passes (spec 8.1). The note records which judges passed, so a passing one can take over.
 
 **Files:**
-- Create: `docs/eval/calib.py`, `docs/eval/test_calib.py`
-- Modify: `docs/milestone-1.md`
+- Modify: `docs/eval/calib.py`, `docs/eval/test_calib.py`, `docs/milestone-1.md`
 
 **Interfaces:**
-- Consumes: `common.*`, `label.latest_labels`, `freeze.check`.
-- Produces: `calib.kappa(pairs: list[tuple[bool, bool]]) -> float`, `calib.draw(queries, judgments, doc_text, n=50) -> (items, key)`, `calib.repeat_allowed(finished_ts: int, now: int) -> bool` (a week after the last first-round answer); files `labels/tasks/calib-50.jsonl`, `labels/calib-50.key.jsonl` (`{"id", "qid", "doc", "grade", "judge"}`), `labels/calib-50.result.json`, `labels/tasks/calib-repeat-20.jsonl`, `labels/calib-repeat-20.result.json`.
+- Consumes: `common.*`, `freeze.check`, `judge.PROMPT`, the draw and key above.
+- Produces: `calib.fleiss(rows: list[list[bool]]) -> float | None` (None when every rating is the same), `calib.majority(votes: list[bool]) -> bool | None` (None on a tie), `calib.against_others(grades: dict[str, dict[str, int]], judge: str) -> list[tuple[bool, bool]]` (the judge's binary grade and the others' majority, per pair, ties left out), `calib.parse_grade(text: str) -> int` (the grade from an answer that may wrap its JSON in a code fence or a reasoning block; raises on anything else); files `labels/calib-50.panel.jsonl` (`{"id", "judge", "grade"}`, appended, so a run resumes) and `labels/calib-50.result.json`.
+- Commands: `calib.py panel [max calls]` asks every panel judge for every pair it has not graded; `calib.py kappa` writes the result (`complete` is false until all six judges graded all 50).
 
-- [ ] **Step 1: Write the failing tests**
-
-`docs/eval/test_calib.py`:
+- [ ] **Step 1: Write the failing tests** (`docs/eval/test_calib.py`, kept: the draw and kappa tests of the first version)
 
 ```python
-import os, sys
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from calib import draw, kappa, repeat_allowed
-from common import split
-
-
-def test_kappa_matches_a_worked_example():
-    pairs = [(True, True)] * 20 + [(True, False)] * 5 + [(False, True)] * 5 + [(False, False)] * 20
-    assert abs(kappa(pairs) - 0.6) < 1e-9          # po 0.8, pe 0.5
-    assert kappa([(True, True), (False, False)]) == 1.0
+def test_fleiss_matches_a_worked_example():
+    rows = [[True, True, True], [False, False, False], [True, True, False], [True, False, False]]
+    assert abs(fleiss(rows) - 1 / 3) < 1e-9       # P-bar 2/3, Pe 1/2
+    assert fleiss([[True, True], [True, True]]) is None
 
 
-def sessions(side, n):
-    out, i = [], 0
-    while len(out) < n:
-        if split(f's{i}') == side:
-            out.append(f's{i}')
-        i += 1
-    return out
+def test_the_reference_never_contains_the_judge_itself():
+    grades = {'p1': {'a': 3, 'b': 0, 'c': 0, 'd': 0}, 'p2': {'a': 0, 'b': 2, 'c': 3, 'd': 2},
+              'p3': {'a': 2, 'b': 2, 'c': 0, 'd': 1}}
+    assert against_others(grades, 'a') == [(True, False), (False, True), (True, False)]
+    assert majority([True, False]) is None
 
 
-def test_draw_takes_dev_pairs_balanced_one_per_question_and_blind():
-    dev, test = sessions('dev', 80), sessions('test', 5)
-    queries = [{'qid': f'q{i}', 'text': f'question {i}', 'session': s, 'split': 'dev'} for i, s in enumerate(dev)]
-    queries += [{'qid': f't{i}', 'text': 't', 'session': s, 'split': 'test'} for i, s in enumerate(test)]
-    judgments = []
-    for i in range(80):
-        for g in range(4):
-            judgments.append({'qid': f'q{i}', 'doc': f'o{i}{g}', 'grade': g, 'judge': 'claude-sonnet'})
-    judgments += [{'qid': 't0', 'doc': 'o999', 'grade': 3, 'judge': 'claude-sonnet-5'}]      # test side: never
-    judgments += [{'qid': 'q0', 'doc': 'o00', 'grade': 3, 'judge': 'some-other-model'}]       # other judge: ignored
-    items, key = draw(queries, judgments, lambda doc: f'text of {doc}')
-    assert len(items) == len(key) == 50
-    grades = sorted(k['grade'] for k in key)
-    assert sum(g >= 2 for g in grades) == 25 and grades.count(1) == 12 and grades.count(0) == 13
-    assert len({k['qid'] for k in key}) == 50 and all(k['qid'].startswith('q') for k in key)
-    assert all('grade' not in str(i) and len(i['choices']) == 2 for i in items)
-    assert (items, key) == draw(queries, judgments, lambda doc: f'text of {doc}')   # deterministic
-
-
-def test_the_repeat_waits_a_week():
-    day = 86400
-    # Counted from the last first-round answer: pairs answered on the last day still get a week.
-    assert not repeat_allowed(1_000_000, 1_000_000 + 6 * day)
-    assert repeat_allowed(1_000_000, 1_000_000 + 7 * day)
+def test_parse_grade_takes_fenced_or_reasoned_answers_only():
+    assert parse_grade('```json\n{"grades": [{"id": "d", "grade": 2}]}\n```') == 2
+    assert parse_grade('<think>maybe 3</think>{"grades": [{"id": "d", "grade": 1}]}') == 1
+    for bad in ('3', '{"grades": []}', '{"grades": [{"id": "d", "grade": 7}]}'):
+        with pytest.raises(ValueError):
+            parse_grade(bad)
 ```
 
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `cd docs/eval && uv run --with pytest pytest -q test_calib.py`
-Expected: FAIL with `ModuleNotFoundError: No module named 'calib'`.
+Expected: the three new tests fail with ImportError.
 
-- [ ] **Step 3: Write `calib.py`**
+- [ ] **Step 3: Write the panel into `calib.py`**
 
-```python
-"""Milestone 1, Task 6: B3, the judge-trust gate (docs/spec.md 8.1 "Judge trust").
-
-  calib.py draw           50 dev pairs the judge graded -> labels/tasks/calib-50.jsonl and its key
-  calib.py kappa          owner vs judge on binary relevance (judge grade >= 2); passes at kappa >= 0.4
-  calib.py repeat         a week or more after the last first-round answer: 20 of the 50 again, blind
-  calib.py kappa-repeat   owner vs owner on those 20
-The owner sees the question and the document as the judge saw them (4,000 characters), never the grade."""
-import json, os, sqlite3, sys, time
-
-from common import E, SEED, h, owner_only, read_jsonl, write_jsonl
-from label import latest_labels
-
-N, N_REPEAT, PASS_KAPPA, WEEK = 50, 20, 0.4, 7 * 86400
-JUDGES = {'claude-sonnet-5', 'claude-sonnet'}   # the alias rows of 2026-09-24 came from claude-sonnet-5
-MAX_DOC_CHARS = 4000
-QUESTION = 'この記憶は、この問いに答えるのに役に立ちますか？'
-CHOICES = [{'value': 'yes', 'label': '役に立つ (答えに使える情報が入っている)'},
-           {'value': 'no', 'label': '役に立たない (無関係、または話題が同じだけ)'}]
-DOC_SQL = {'o': 'SELECT title, body FROM observations WHERE id=?',
-           's': "SELECT '', body FROM summaries WHERE id=?",
-           'p': "SELECT '', body FROM prompts WHERE id=?"}
-
-
-def kappa(pairs):
-    """Cohen's kappa for two binary raters; pairs of (bool, bool)."""
-    n = len(pairs)
-    po = sum(a == b for a, b in pairs) / n
-    pa = sum(a for a, _ in pairs) / n
-    pb = sum(b for _, b in pairs) / n
-    pe = pa * pb + (1 - pa) * (1 - pb)
-    return 1.0 if pe == 1 else (po - pe) / (1 - pe)
-
-
-def draw(queries, judgments, doc_text, n=N):
-    """Half graded 2-3, the rest split between 1 (near misses) and 0; dev questions only; one pair
-    per question; the latest grade of a pair counts; seeded hash order."""
-    dev = {q['qid']: q for q in queries if q['split'] == 'dev'}
-    graded = {}
-    for j in judgments:
-        if j['qid'] in dev and j['judge'] in JUDGES:
-            graded[(j['qid'], j['doc'])] = (j['grade'], j['judge'])
-    quota = {'relevant': n // 2, 1: (n - n // 2) // 2, 0: n - n // 2 - (n - n // 2) // 2}
-    items, key, used = [], [], set()
-    for (qid, doc), (grade, judge) in sorted(graded.items(), key=lambda kv: h(f'calib:{SEED}:{kv[0][0]}:{kv[0][1]}')):
-        bucket = 'relevant' if grade >= 2 else grade
-        if qid in used or quota[bucket] == 0:
-            continue
-        text = doc_text(doc)
-        if text is None:          # deleted from the store since it was judged
-            continue
-        quota[bucket] -= 1
-        used.add(qid)
-        item_id = f'c{len(items) + 1:02d}'
-        items.append({'id': item_id, 'question': QUESTION, 'choices': CHOICES, 'fields': [
-            {'label': '問い (開発者が AI に送ったメッセージ)', 'text': dev[qid]['text']},
-            {'label': '記憶 (以前のセッションで残されたメモ)', 'text': text}]})
-        key.append({'id': item_id, 'qid': qid, 'doc': doc, 'grade': grade, 'judge': judge})
-    order = sorted(range(len(items)), key=lambda i: h(f'calib-order:{SEED}:{items[i]["id"]}'))
-    return [items[i] for i in order], [key[i] for i in order]
-
-
-def repeat_allowed(finished_ts, now):
-    return now - finished_ts >= WEEK
-
-
-def store_doc_text(db):
-    def text(doc):
-        row = db.execute(DOC_SQL[doc[0]], (int(doc[1:]),)).fetchone()
-        if row is None:
-            return None
-        body = '\n'.join(p for p in row if p)
-        return body if len(body) <= MAX_DOC_CHARS else body[:MAX_DOC_CHARS] + f'\n…(以下 {len(body) - MAX_DOC_CHARS} 文字は省略。判定器も同じところまで読みました)'
-    return text
-
-
-def report(name, pairs, extra):
-    k = kappa(pairs) if pairs else None
-    agree = sum(a == b for a, b in pairs) / len(pairs) if pairs else None
-    out = {'n': len(pairs), 'kappa': k, 'agreement': agree, **extra}
-    with open(f'{E}/labels/{name}.result.json', 'w') as f:
-        json.dump(out, f, indent=1)
-    print(json.dumps(out, indent=1))
-
-
-def main(cmd):
-    from freeze import check
-    bad = check()
-    if bad:
-        sys.exit('frozen inputs changed: ' + ', '.join(bad))
-    tasks, labels = f'{E}/labels/tasks', f'{E}/labels'
-    if cmd == 'draw':
-        if os.path.exists(f'{tasks}/calib-50.jsonl'):
-            sys.exit('calib-50 exists; its labels belong to it')
-        db = sqlite3.connect(f'file:{E}/home/oboete.db?mode=ro', uri=True)
-        items, key = draw(read_jsonl(f'{E}/queries.jsonl'), read_jsonl(f'{E}/judgments.jsonl'), store_doc_text(db))
-        write_jsonl(f'{tasks}/calib-50.jsonl', items)
-        write_jsonl(f'{labels}/calib-50.key.jsonl', key)
-        print(f'{len(items)} pairs -> {tasks}/calib-50.jsonl')
-    elif cmd == 'kappa':
-        latest = latest_labels(f'{labels}/calib-50.jsonl')
-        key = read_jsonl(f'{labels}/calib-50.key.jsonl')
-        pairs = [(latest[k['id']] == 'yes', k['grade'] >= 2) for k in key if latest.get(k['id']) in ('yes', 'no')]
-        confusion = {f'owner_{o}_judge_{j}': sum(1 for a, b in pairs if a == (o == 'yes') and b == (j == 'yes'))
-                     for o in ('yes', 'no') for j in ('yes', 'no')}
-        done = len(pairs) == len(key)
-        k = kappa(pairs) if pairs else None
-        report('calib-50', pairs, {'confusion': confusion, 'complete': done,
-                                   'judges': sorted({k['judge'] for k in key}),
-                                   'pass': bool(done and k is not None and k >= PASS_KAPPA)})
-    elif cmd == 'repeat':
-        # A week after the first round is finished: the latest standing answer, not the first one.
-        standing = {}
-        for r in read_jsonl(f'{labels}/calib-50.jsonl'):
-            standing[r['id']] = r
-        answered = [r['ts'] for r in standing.values() if r['value'] is not None]
-        if len(answered) < N:
-            sys.exit(f'the first round has {len(answered)} of {N} answers; the blind repeat opens a week after it is finished')
-        if not repeat_allowed(max(answered), int(time.time())):
-            sys.exit(f'the blind repeat opens on {time.strftime("%Y-%m-%d", time.localtime(max(answered) + WEEK))}')
-        items = read_jsonl(f'{tasks}/calib-50.jsonl')
-        chosen = sorted(items, key=lambda i: h(f'repeat:{SEED}:{i["id"]}'))[:N_REPEAT]
-        chosen = [{**i, 'id': 'r' + i['id']} for i in sorted(chosen, key=lambda i: h(f'repeat-order:{SEED}:{i["id"]}'))]
-        write_jsonl(f'{tasks}/calib-repeat-20.jsonl', chosen)
-        print(f'{len(chosen)} pairs -> {tasks}/calib-repeat-20.jsonl')
-    elif cmd == 'kappa-repeat':
-        first = latest_labels(f'{labels}/calib-50.jsonl')
-        again = latest_labels(f'{labels}/calib-repeat-20.jsonl')
-        pairs = [(first[i[1:]] == 'yes', v == 'yes') for i, v in again.items()
-                 if v in ('yes', 'no') and first.get(i[1:]) in ('yes', 'no')]
-        report('calib-repeat-20', pairs, {'what': 'the owner against their own earlier answers'})
-    else:
-        sys.exit(__doc__)
-
-
-if __name__ == '__main__':
-    owner_only()
-    main(sys.argv[1] if len(sys.argv) > 1 else '')
-```
+Add `PANEL` (the five API judges above: name, base URL, key file, model, extra headers), `ask_panel(member, question, memory) -> int` (one chat completion through `urllib.request`, `parse_grade` on the answer, 3 tries with a pause on HTTP 429), `fleiss`, `majority`, `against_others` and `parse_grade`. `panel` reads the task items (the texts the judge saw) and appends each answer to `calib-50.panel.jsonl` as it comes. `kappa` joins the key grades (as judge `claude-sonnet-5`) with the panel file and writes, for each judge, κ and agreement against the others with its pass; the panel's Fleiss κ and pass; and B3's pass. Remove the owner's commands (`repeat`, `kappa-repeat`) and `latest_labels`: the owner's blind repeat is on the owner's own items now (Task 8).
 
 - [ ] **Step 4: Run the tests to see them pass**
 
 Run: `cd docs/eval && uv run --with pytest pytest -q test_calib.py`
-Expected: `3 passed`.
+Expected: all pass.
 
-- [ ] **Step 5: Draw the pairs and hand them to the owner**
+- [ ] **Step 5: Run the panel and record**
 
-Run: `cd docs/eval && python3 calib.py draw && python3 label.py calib-50`
-Expected: `50 pairs -> …`, then the URL. Give the owner the URL with this note (Japanese): 「50 組あります。1 組 2〜3 分、1 回 1 時間以内で区切ってください。途中でやめても続きから始まります。記憶が長いときは、答えに使える部分があるかだけ見てください。」 Stop the server (Ctrl+C in its terminal) when a sitting ends.
+Run: `cd docs/eval && python3 calib.py panel && python3 calib.py kappa`. Rerun `panel` while any judge is missing pairs (a 429 or an unusable answer leaves the pair for the next run). Record in `docs/milestone-1.md` under "B3": each judge's κ against the others, the panel's Fleiss κ, the pass or fail, and every judge's model name. Then `python3 freeze.py add labels/calib-50.panel.jsonl labels/calib-50.result.json`.
 
-- [ ] **Step 6: After the owner finishes, compute κ and record the verdict**
-
-Run: `cd docs/eval && python3 calib.py kappa && python3 freeze.py add labels/calib-50.jsonl labels/calib-50.key.jsonl`
-Expected: `"complete": true`, a κ value, `"pass": true|false`. Write into `docs/milestone-1.md` under "B3": n, agreement, κ, the confusion counts, the judge models, the verdict, and on failure the follow-up issue number (failure branch above). Also add a calendar note for the blind repeat date the `repeat` command prints.
-
-- [ ] **Step 7: A week later, the blind repeat**
-
-Run: `cd docs/eval && python3 calib.py repeat && python3 label.py calib-repeat-20`, then after the sitting `python3 calib.py kappa-repeat`. Record the owner's self-agreement next to the judge's κ in the note (spec 8.1).
-
-- [ ] **Step 8: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add docs/eval/calib.py docs/eval/test_calib.py docs/milestone-1.md && git commit -m "eval: B3 judge-trust gate (calibration pairs, kappa, blind repeat)"
+git add docs/eval/calib.py docs/eval/test_calib.py docs/milestone-1.md
+git commit -m "eval: B3 by a panel of six judges (owner decision 29)"
 ```
-
-Open PR C (Tasks 5-6) after Step 4; Steps 5-7 add only note lines, committed to main through a small docs PR when the owner's sittings are done.
 
 ---
 
@@ -2207,6 +2037,22 @@ Open PR D.
 ---
 
 ## Task 8: Decision and overturn candidates for the dev labels
+
+**Changed 2026-09-26 (owner decision 29). These changes replace the matching parts of the steps below; the implementing PR follows them, not the older text.**
+
+What the owner sees, per item: one plain-Japanese sentence of the decision (for a pair, one per side), and the owner's own message from the turn it came from. Nothing else from the transcript: no surrounding lines, no quotes of the agent, no code. Choices: decisions `yes` はい、私が決めたこと / `no` いいえ、決めていない / `unknown` 判断できない; pairs `overturns` はい、後の決定が前の決定を覆している / `compatible` いいえ、両方とも有効 / `unknown` 判断できない. There is no `partly`.
+
+1. `DECISIONS_PROMPT`: "statement" becomes "one plain Japanese sentence a non-programmer can follow: no code, file or command names, no untranslated English terms; say what the choice means in everyday words", and each decision also gives "prompt_line": the id of the USER line (the developer's own message) it was made or accepted in.
+2. `valid_decisions` also drops a decision whose `prompt_line` is not a USER line of the same window, and keeps that line's text (capped at 600 characters) as `prompt`.
+3. `tasks()`: fields `この決定 (Claude がやさしい日本語でまとめたもの)` = statement and `そのときのあなたのメッセージ` = prompt, for each side of a pair. `context()` is deleted.
+4. `draft_candidates.py panel`: every item the owner answered `unknown` is graded by Task 6's five API judges (the rendered context is allowed there, since they read English), with the owner's choices minus `unknown`; the majority of the five is written to `labels/dev-decisions.panel.jsonl` or `labels/dev-pairs.panel.jsonl`. The note counts these apart from the owner's answers.
+5. `draft_candidates.py repeat`: at least a week after the last answer of both tasks, 20 items drawn by seeded hash from those the owner answered other than `unknown`, with fresh ids (`r` + id) and the same fields, into `labels/tasks/dev-repeat-20.jsonl`; before that it exits with the date it opens. `draft_candidates.py agreement` writes the owner's agreement and κ with their own earlier answers to `labels/dev-repeat-20.result.json`.
+6. Tests added to `test_draft_candidates.py`:
+   - every decision and pair item has exactly the three choices above, and no field holds a rendered transcript line other than the owner's own message;
+   - `valid_decisions` drops a decision whose `prompt_line` is an ASSISTANT line or is outside the window;
+   - `repeat` never picks an `unknown` item, and refuses when the last answer is less than a week old;
+   - `panel` sends only `unknown` items, and a judge's answer outside the owner's choices is refused.
+7. Step 5's hand-over note to the owner becomes: 「候補は Claude が作りました。あなたの決めたことでなければ『いいえ』、わからなければ『判断できない』を選んでください。判断できないものは AI の判定に回します。」 Step 6 counts yes / no / unknown and overturns / compatible / unknown.
 
 Spec 8.4 item 1: "Claude drafts every candidate, so the owner only confirms, rejects or grades (owner decision 22)". Before the curator spike the owner labels about 50 dev decisions and 20 overturned pairs with 20 control pairs. Drafting uses the judge's model and isolation (`claude-sonnet-5`), on dev transcripts only, after `oboete gate`; every quote must appear verbatim in the gated line it cites, so a candidate the model invented is dropped in code. Up to 55 decisions and 25 pairs of each relation are drafted, so rejections still leave the target counts.
 
