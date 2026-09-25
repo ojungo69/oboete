@@ -379,9 +379,34 @@ fn scratch_dir() -> Result<Scratch, CallError> {
 }
 
 /// A codex permission profile for the curator: no file but the platform's minimal paths and
-/// codex's own install (without it bubblewrap cannot start codex's helper, openai/codex#29049), and
-/// no network. Beta in codex 0.155-0.157; it replaces `--sandbox`, which must not be passed with it.
-const CODEX_PROFILE: &str = r#"permissions.curator.filesystem={":root"="deny",":minimal"="read","~/.codex/packages"="read"}"#;
+/// codex's own install, and no network. Beta in codex 0.155-0.157; it replaces `--sandbox`, which
+/// must not be passed with it. bubblewrap re-executes codex as its helper, so the install that
+/// `codex` resolves to on `path` must stay readable (openai/codex#29049): the directory above its
+/// `bin`, or `bin` itself when that would be a filesystem root or would hold the home directory.
+fn codex_profile(path: Option<&std::ffi::OsStr>) -> String {
+    let mut readable = vec!["~/.codex/packages".to_string()];
+    let exe = path
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .flat_map(|dir| ["codex", "codex.exe", "codex.cmd"].map(|name| dir.join(name)))
+        .find(|p| p.is_file())
+        .and_then(|p| p.canonicalize().ok());
+    if let Some(bin) = exe.as_deref().and_then(Path::parent) {
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+        let root = bin
+            .parent()
+            .filter(|r| r.parent().is_some())
+            .filter(|r| home.as_ref().is_none_or(|h| !Path::new(h).starts_with(r)))
+            .unwrap_or(bin);
+        readable.push(root.to_string_lossy().into_owned());
+    }
+    // A JSON string is a valid TOML basic string (quotes and backslashes escaped).
+    let entries: String = readable
+        .iter()
+        .map(|p| format!(",{}=\"read\"", json!(p)))
+        .collect();
+    format!(r#"permissions.curator.filesystem={{":root"="deny",":minimal"="read"{entries}}}"#)
+}
 
 /// codex features that give the curator a tool outside the permission profile (codex 0.155-0.157).
 const CODEX_OFF: [&str; 7] = [
@@ -483,12 +508,8 @@ fn headless_command(
                 cmd.args(["--disable", feature]);
             }
             cmd.args(["-c", r#"web_search="disabled""#]);
-            cmd.args([
-                "-c",
-                CODEX_PROFILE,
-                "-c",
-                r#"default_permissions="curator""#,
-            ]);
+            let profile = codex_profile(std::env::var_os("PATH").as_deref());
+            cmd.args(["-c", &profile, "-c", r#"default_permissions="curator""#]);
             cmd.args(["-c", "model_reasoning_effort=low"]);
             if let Some(m) = model {
                 cmd.args(["-c", &format!("model={m}")]);
@@ -703,10 +724,11 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         let web_search_off = r#"web_search="disabled""#;
+        let profile = codex_profile(std::env::var_os("PATH").as_deref());
         for flag in [
             "--ignore-user-config",
             "--ignore-rules",
-            CODEX_PROFILE,
+            profile.as_str(),
             web_search_off,
         ]
         .into_iter()
@@ -716,6 +738,24 @@ mod tests {
         }
         // --sandbox would switch codex back to its older settings and ignore the profile.
         assert!(!args.iter().any(|a| a == "--sandbox"), "{args:?}");
+    }
+
+    #[test]
+    fn the_codex_profile_keeps_the_resolved_install_readable() {
+        let tmp = scratch_dir().unwrap();
+        let bin = tmp.0.join("opt").join("codex").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("codex"), "").unwrap();
+        let root = tmp.0.join("opt").join("codex").canonicalize().unwrap();
+        let profile = codex_profile(Some(bin.as_os_str()));
+        assert!(
+            profile.contains(&format!("{}=\"read\"", json!(root.to_string_lossy()))),
+            "{profile}"
+        );
+        assert!(profile.starts_with(r#"permissions.curator.filesystem={":root"="deny""#));
+        // Without codex on the path, only the standalone install location.
+        let none = codex_profile(Some(tmp.0.as_os_str()));
+        assert!(none.ends_with(r#""~/.codex/packages"="read"}"#), "{none}");
     }
 
     #[test]
