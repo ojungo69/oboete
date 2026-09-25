@@ -28,3 +28,6 @@ target
 
 # Workflow outputs of the design research (large, regenerable; the .md files cite them as not committed)
 docs/research/redesign-2026-09-24/*.json
+
+# Python bytecode from the evaluation scripts
+__pycache__/
