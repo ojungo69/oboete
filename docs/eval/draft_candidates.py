@@ -175,6 +175,12 @@ def dev_sessions():
         return [s for s in json.load(f)['sessions'] if s['side'] == 'dev']
 
 
+def events_of(out):
+    """`oboete transcript` output as events. split('\\n'), not splitlines(): a JSON string may hold
+    U+2028, which splitlines() breaks on."""
+    return [json.loads(line) for line in out.split('\n') if line]
+
+
 def rendered(s):
     """Parse, render and gate one dev transcript once; later runs read the saved lines."""
     path = f'{DRAFTS}/rendered/{s["session"]}.jsonl'
@@ -182,7 +188,7 @@ def rendered(s):
         return [tuple(r) for r in read_jsonl(path)]
     out = subprocess.run(['oboete', 'transcript', f'{E}/replay/dev/{s["agent"]}/{s["session"]}.jsonl', '--agent', s['agent']],
                          capture_output=True, text=True, check=True, env=clean_env()).stdout
-    events = [json.loads(line) for line in out.splitlines()]
+    events = events_of(out)
     repo = next((e['payload'].get('cwd') for e in events if e['payload'].get('cwd')), '.')
     lines = [(lid, ts, gate(text)) for lid, ts, text in render(events)]
     write_jsonl(path, [list(line) for line in lines])

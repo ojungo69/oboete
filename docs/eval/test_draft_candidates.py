@@ -3,7 +3,7 @@ import os, sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from draft_candidates import (WEEK, decision_item, pair_item, panel_targets, parse_answer, refill, render,
+from draft_candidates import (WEEK, decision_item, events_of, pair_item, panel_targets, parse_answer, refill, render,
                               repeat_items, valid_decisions, valid_pairs, windows)
 
 
@@ -102,3 +102,8 @@ def test_pairs_need_known_ids_in_time_order():
         {'earlier': 'd1', 'later': 'd2', 'relation': 'overturns', 'why': 'duplicate'},
     ]
     assert valid_pairs(found, by_id) == [{'earlier': 'd1', 'later': 'd2', 'relation': 'overturns', 'why': 'w'}]
+
+
+def test_transcript_lines_split_on_newlines_only():
+    out = '{"event": "Stop", "payload": {"last_assistant_message": "a\u2028b"}}\n' + '{"event": "SessionEnd", "payload": {}}\n'
+    assert [e['event'] for e in events_of(out)] == ['Stop', 'SessionEnd']
