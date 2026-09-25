@@ -699,6 +699,17 @@ pub fn session_events(conn: &Connection, session_id: &str) -> Result<Vec<RawEven
     session_events_after(conn, session_id, 0, usize::MAX)
 }
 
+/// The session's newest summary: what its earlier parts said, for the next part's call.
+pub fn latest_summary(conn: &Connection, session_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT body FROM summaries WHERE session_id=?1 ORDER BY ts DESC, id DESC LIMIT 1",
+            params![session_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 pub struct Observation {
     pub kind: String,
     pub title: String,

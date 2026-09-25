@@ -107,7 +107,13 @@ fn process_part(
         // Nothing worth a model call (e.g. only SessionStart/SessionEnd): mark the rows read.
         db::apply_batch(conn, &s, "none", "", &[], last_id)?
     } else {
-        let prompt = build_prompt(&s.agent, &cfg.summary.language, &part.text);
+        let earlier = db::latest_summary(conn, &s.id)?;
+        let prompt = build_prompt(
+            &s.agent,
+            &cfg.summary.language,
+            earlier.as_deref(),
+            &part.text,
+        );
         let result = chain.summarize(conn, &prompt, &schema())?;
         stats.fallbacks += result.fallbacks.len() as u32;
         let observations = parse_observations(&result.output)?;
@@ -303,17 +309,26 @@ fn short(s: &str, max: usize) -> String {
     }
 }
 
-fn build_prompt(agent: &str, language: &str, transcript: &str) -> String {
+/// `earlier`: the session's summary so far, when earlier parts or runs already covered some of it;
+/// the new summary then covers the whole session, so its newest summary row stands for all of it.
+fn build_prompt(agent: &str, language: &str, earlier: Option<&str>, transcript: &str) -> String {
+    let earlier = earlier
+        .map(redact::outbound)
+        .filter(|e| !e.trim().is_empty())
+        .map(|e| format!("--- EARLIER PARTS OF THIS SESSION, AS SUMMARIZED ---\n{e}\n"))
+        .unwrap_or_default();
     format!(
         "You are the long-term memory of a software developer. Below is one coding session with the `{agent}` agent.\n\
          Extract only what is worth remembering in future sessions of this repository, then write a short summary.\n\
          Observations are facts, decisions, bug fixes, discoveries, changes or the developer's stated preferences: \
          concrete, with file paths, names and numbers. Skip routine tool noise, restated instructions and anything \
          the code itself already shows. If nothing is worth remembering, return an empty observations array. \
-         At most {MAX_OBSERVATIONS} observations, each with a kind, a specific title (max 80 chars) and a body of 1-3 sentences.\n\
-         The summary is 2-4 sentences: what was worked on, what was decided, what is still open.\n\
+         At most {MAX_OBSERVATIONS} observations, each with a kind, a specific title (max 80 chars) and a body of 1-3 sentences. \
+         Take observations only from the SESSION part; an earlier summary is context.\n\
+         The summary is 2-4 sentences about the whole session so far, earlier parts included: what was worked on, \
+         what was decided, what is still open.\n\
          Write every title, body and the summary in {language}.\n\n\
-         --- SESSION ---\n{transcript}\n--- END ---"
+         {earlier}--- SESSION ---\n{transcript}\n--- END ---"
     )
 }
 
@@ -447,6 +462,7 @@ mod tests {
         let prompt = build_prompt(
             "claude",
             "English",
+            Some(&format!("EARLIER-SUMMARY-MARKER with {key}")),
             &render(&[
                 ev(
                     "UserPromptSubmit",
@@ -464,6 +480,7 @@ mod tests {
         // A tag an agent merely read does not swallow the rest of the session.
         assert!(prompt.contains("the opt-out"), "{prompt}");
         assert!(prompt.contains("TAIL-MARKER"), "{prompt}");
+        assert!(prompt.contains("EARLIER-SUMMARY-MARKER"), "{prompt}");
     }
 
     /// A long session: decisions in the middle, an answer to the agent's question whose text sits
