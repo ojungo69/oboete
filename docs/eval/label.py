@@ -50,16 +50,23 @@ async function load() {
     const b = el('button', `${i + 1}. ${c.label}`); b.onclick = () => answer(c.value); choices.append(b);
   });
 }
-async function answer(value) {
-  await fetch(base + '/label', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: current.id, value, note: document.getElementById('note').value }) });
-  load();
+let busy = false;   // one submission at a time, so answers are saved in the order they were given
+async function post(path, body) {
+  if (busy) return;
+  busy = true;
+  document.querySelectorAll('button').forEach(b => b.disabled = true);
+  try {
+    await fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    await load();
+  } finally {
+    busy = false;
+    document.querySelectorAll('button').forEach(b => b.disabled = false);
+  }
 }
-document.getElementById('back').onclick = async () => {
-  await fetch(base + '/back', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); load();
-};
+function answer(value) { post('/label', { id: current.id, value, note: document.getElementById('note').value }); }
+document.getElementById('back').onclick = () => post('/back', {});
 document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'TEXTAREA' || !current) return;
+  if (e.target.tagName === 'TEXTAREA' || !current || busy) return;
   const i = parseInt(e.key, 10) - 1;
   if (i >= 0 && i < current.choices.length) answer(current.choices[i].value);
 });
