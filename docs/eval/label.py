@@ -80,7 +80,7 @@ class Store:
         self.items = read_jsonl(f'{root}/labels/tasks/{name}.jsonl')
         self.by_id = {i['id']: i for i in self.items}
         self.path = f'{root}/labels/{name}.jsonl'
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()   # back() withdraws through label() under the same lock
 
     def next(self):
         latest = latest_labels(self.path)
@@ -99,13 +99,13 @@ class Store:
 
     def back(self):
         """Withdraw the most recent answer that still stands."""
-        with self.lock:
-            order = [r['id'] for r in read_jsonl(self.path)] if os.path.exists(self.path) else []
-        latest = latest_labels(self.path)
-        for item_id in reversed(order):
-            if latest.get(item_id) is not None:
-                self.label(item_id, None)
-                return
+        with self.lock:   # one snapshot: an answer posted meanwhile must not be skipped
+            rows = read_jsonl(self.path) if os.path.exists(self.path) else []
+            latest = {r['id']: r['value'] for r in rows}
+            for r in reversed(rows):
+                if latest.get(r['id']) is not None:
+                    self.label(r['id'], None)
+                    return
 
 
 def handler(store, token):

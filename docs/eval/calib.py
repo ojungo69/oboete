@@ -131,7 +131,8 @@ def main(cmd):
         again = latest_labels(f'{labels}/calib-repeat-20.jsonl')
         pairs = [(first[i[1:]] == 'yes', v == 'yes') for i, v in again.items()
                  if v in ('yes', 'no') and first.get(i[1:]) in ('yes', 'no')]
-        report('calib-repeat-20', pairs, {'what': 'the owner against their own earlier answers'})
+        report('calib-repeat-20', pairs, {'what': 'the owner against their own earlier answers',
+                                          'complete': len(pairs) == N_REPEAT})
     else:
         sys.exit(__doc__)
 
