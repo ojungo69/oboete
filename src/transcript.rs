@@ -70,7 +70,8 @@ struct Emitter<W: Write> {
     path: String,
     cwd: Option<String>,
     started: bool,
-    /// A forked Codex rollout carries its parent's `session_meta` after its own.
+    /// The session's own id was read (the file name is only the fallback). A forked Codex
+    /// rollout carries its parent's `session_meta` after its own.
     meta_seen: bool,
     /// Prompts the prompt hook got when they were queued, not yet delivered as user records.
     queued: Vec<String>,
@@ -267,6 +268,13 @@ fn claude_line<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) 
     // after the main one) without moving the session's.
     let cwd = v["cwd"].as_str().map(String::from);
     if agent_id.is_none() {
+        // The id the hooks got, even when the file was copied under another name.
+        if !e.meta_seen
+            && let Some(id) = v["sessionId"].as_str()
+        {
+            e.session = id.to_string();
+            e.meta_seen = true;
+        }
         e.cwd = cwd.or(e.cwd.take());
         return claude_record(e, v, None);
     }
@@ -619,7 +627,7 @@ mod tests {
         let path = dir.join("q.jsonl");
         let at = |s: u32| format!("2026-09-01T00:00:0{s}Z");
         let user = |s, cwd: &str, text: &str| {
-            json!({"type": "user", "timestamp": at(s), "cwd": cwd,
+            json!({"type": "user", "timestamp": at(s), "cwd": cwd, "sessionId": "s-1",
             "message": {"role": "user", "content": text}})
         };
         let said = |s, text: &str| {
@@ -641,6 +649,11 @@ mod tests {
         std::fs::write(&path, text).unwrap();
         let (v, _) = events(path.to_str().unwrap(), "claude");
         std::fs::remove_dir_all(&dir).unwrap();
+        // The recorded id, not the file's name.
+        assert!(
+            v.iter()
+                .all(|e| e["session"] == "s-1" && e["payload"]["session_id"] == "s-1")
+        );
         let got: Vec<(&str, &str, &str, &str)> = v
             .iter()
             .map(|e| {
