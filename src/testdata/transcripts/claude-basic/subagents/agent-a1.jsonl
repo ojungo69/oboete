@@ -1,0 +1,3 @@
+{"type":"user","isSidechain":true,"agentId":"a1","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:02.500Z","message":{"role":"user","content":"Find the callers of Cache"}}
+{"type":"assistant","isSidechain":true,"agentId":"a1","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:02.600Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_s1","name":"Grep","input":{"pattern":"Cache"}}]}}
+{"type":"user","isSidechain":true,"agentId":"a1","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:02.700Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_s1","content":"src/main.rs:3"}]}}
