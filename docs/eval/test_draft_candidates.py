@@ -51,6 +51,10 @@ def test_a_quote_must_be_verbatim_and_the_message_the_owners_own():
     ok = valid_decisions(found, window)
     assert [d['statement'] for d in ok] == ['キャッシュは SQLite']
     assert ok[0]['prompt'] == 'キャッシュは SQLite に置く。依存を増やしたくない'
+    # The model writes line ids as 1, '1' or '[L1]' too; the owner's answer to a question is their own.
+    window.append(('L3', 't3', 'USER ANSWERED: どちら? -> A にする'))
+    more = [{**base, 'line': 1, 'prompt_line': '[L3]', 'statement': '数字の行'}]
+    assert [(d['line'], d['prompt']) for d in valid_decisions(more, window)] == [('L1', 'どちら? -> A にする')]
 
 
 def test_the_owner_sees_only_a_plain_sentence_and_their_own_message():

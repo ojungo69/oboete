@@ -127,6 +127,15 @@ def windows(lines, limit=WINDOW, overlap=OVERLAP):
     return out
 
 
+OWN = ('USER: ', 'USER ANSWERED: ')   # the owner's typed message, or their answer to a question
+
+
+def line_id(v):
+    """'L4' for 'L4', '[L4]', 4 or '4' (the model writes all of them)."""
+    v = str(v if v is not None else '').strip().strip('[]')
+    return f'L{v}' if v.isdigit() else v
+
+
 def valid_decisions(found, window):
     """Decisions whose quote is verbatim in the line it cites and whose `prompt_line` is the owner's
     own message in the same window; that message is kept for the owner to see."""
@@ -134,12 +143,14 @@ def valid_decisions(found, window):
     ok = []
     for d in found:
         q = (d.get('quote') or '').strip()
-        own = text.get(d.get('prompt_line'), '')
-        if (d.get('line') in text and 10 <= len(q) <= 300 and q in text[d['line']] and own.startswith('USER: ')
+        line, own_line = line_id(d.get('line')), line_id(d.get('prompt_line'))
+        own = text.get(own_line, '')
+        prefix = next((p for p in OWN if own.startswith(p)), None)
+        if (line in text and 10 <= len(q) <= 300 and q in text[line] and prefix
                 and d.get('who') in WHO and (d.get('statement') or '').strip()):
-            ok.append({'line': d['line'], 'quote': q, 'who': d['who'], 'statement': d['statement'].strip(),
-                       'topic': (d.get('topic') or '').strip(), 'prompt_line': d['prompt_line'],
-                       'prompt': cap(own[len('USER: '):], PROMPT_CAP)})
+            ok.append({'line': line, 'quote': q, 'who': d['who'], 'statement': d['statement'].strip(),
+                       'topic': (d.get('topic') or '').strip(), 'prompt_line': own_line,
+                       'prompt': cap(own[len(prefix):], PROMPT_CAP)})
     return ok
 
 
