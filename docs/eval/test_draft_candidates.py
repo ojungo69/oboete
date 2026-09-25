@@ -3,7 +3,7 @@ import os, sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from draft_candidates import (WEEK, decision_item, events_of, pair_item, panel_targets, parse_answer, refill, render,
+from draft_candidates import (WEEK, context, decision_item, events_of, pair_chunks, pair_item, panel_targets, parse_answer, refill, render,
                               repeat_items, valid_decisions, valid_pairs, windows)
 
 
@@ -111,3 +111,18 @@ def test_pairs_need_known_ids_in_time_order():
 def test_transcript_lines_split_on_newlines_only():
     out = '{"event": "Stop", "payload": {"last_assistant_message": "a\u2028b"}}\n' + '{"event": "SessionEnd", "payload": {}}\n'
     assert [e['event'] for e in events_of(out)] == ['Stop', 'SessionEnd']
+
+
+def test_every_two_decisions_of_a_repository_meet_in_one_prompt():
+    for n in (30, 80, 81, 200):
+        ds = list(range(n))
+        chunks = pair_chunks(ds)
+        assert max(map(len, chunks)) <= 80
+        assert all(any(a in c and b in c for c in chunks) for a in ds for b in ds if a < b)
+    assert pair_chunks(list(range(80))) == [list(range(80))]       # as one prompt, as before
+
+
+def test_the_panel_sees_the_proposal_and_the_owners_acceptance():
+    lines = [(f'L{i}', 't', f'line {i}') for i in range(1, 21)]
+    text = context({'line': 'L3', 'prompt_line': 'L15'}, around=1, lines=lines)
+    assert text.split('\n') == ['  line 2', '▶ line 3', '  line 4', '  …', '  line 14', '▶ line 15', '  line 16']

@@ -262,8 +262,7 @@ def pairs(budget, found):
         per_repo.setdefault(d['repo'], []).append(d)
     out = []
     for repo, ds in sorted(per_repo.items()):
-        for i in range(0, len(ds), 80):
-            chunk = ds[i:i + 80]
+        for chunk in pair_chunks(ds):
             listing = '\n'.join(f'{d["id"]} | {d["ts"][:10]} | {d["statement"]} | {d["quote"]}' for d in chunk)
             answer = ask(PAIRS_PROMPT.format(text=listing), budget)
             if answer is None:
@@ -271,6 +270,15 @@ def pairs(budget, found):
                 return out
             out += valid_pairs(answer.get('pairs') or [], {d['id']: by_id[d['id']] for d in chunk})
     return out
+
+
+def pair_chunks(ds, block=40):
+    """Every two blocks of `block` decisions together, in time order, so any two decisions of a
+    repository meet in some prompt of at most 2 * block lines (up to 80, one prompt as before)."""
+    if len(ds) <= 2 * block:
+        return [ds]
+    blocks = [ds[i:i + block] for i in range(0, len(ds), block)]
+    return [blocks[i] + blocks[j] for i in range(len(blocks)) for j in range(i + 1, len(blocks))]
 
 
 def decision_fields(d, side=''):
@@ -349,10 +357,18 @@ def tasks():
     print(f'added {len(new)} decisions and {len(added)} pairs')
 
 
-def context(d, around=3):
-    lines = [tuple(r) for r in read_jsonl(f'{DRAFTS}/rendered/{d["session"]}.jsonl')]
-    i = next(k for k, line in enumerate(lines) if line[0] == d['line'])
-    return '\n'.join(('▶ ' if k == i else '  ') + lines[k][2] for k in range(max(0, i - around), min(len(lines), i + around + 1)))
+def context(d, around=3, lines=None):
+    """The lines around the cited line and around the owner's own line (▶ marks both), so a panel
+    judge asked whether the developer accepted a proposal also sees the acceptance."""
+    lines = lines or [tuple(r) for r in read_jsonl(f'{DRAFTS}/rendered/{d["session"]}.jsonl')]
+    marked = {k for k, line in enumerate(lines) if line[0] in (d['line'], d['prompt_line'])}
+    near = sorted({k for m in marked for k in range(max(0, m - around), min(len(lines), m + around + 1))})
+    out = []
+    for a, b in zip([None] + near, near):
+        if a is not None and b != a + 1:
+            out.append('  …')
+        out.append(('▶ ' if b in marked else '  ') + lines[b][2])
+    return '\n'.join(out)
 
 
 def panel_targets(ids, answers, n=N_OVERLAP):
@@ -412,6 +428,9 @@ def report():
         votes = {}
         for r in read_jsonl(path) if os.path.exists(path) else []:
             votes.setdefault(r['id'], {})[r['judge']] = r['value'] == yes
+        # A majority only from all five judges: fewer is a partial panel, reported as missing.
+        missing = sorted(i for i, v in votes.items() if len(v) < len(PANEL))
+        votes = {i: v for i, v in votes.items() if len(v) == len(PANEL)}
         counts = {v: sum(1 for a in answers.values() if a == v) for v in sorted(set(answers.values()))}
         overlap = {i: v for i, v in votes.items() if answers.get(i) not in (None, 'unknown')}
         agree = {}
@@ -421,7 +440,7 @@ def report():
             pairs = [p for p in pairs if p[1] is not None]
             agree[judge] = {'n': len(pairs), 'kappa': kappa(pairs) if pairs else None,
                             'agreement': sum(a == b for a, b in pairs) / len(pairs) if pairs else None}
-        out[name] = {'owner': counts, 'panel_on_unknown': {
+        out[name] = {'owner': counts, 'panel_incomplete': missing, 'panel_on_unknown': {
             i: majority(list(v.values())) for i, v in votes.items() if answers.get(i) == 'unknown'},
             'overlap': agree,
             'what': 'agreement with the owner on the owner\'s own decisions, not a check of technical relevance'}
