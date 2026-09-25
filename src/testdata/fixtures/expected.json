@@ -1,0 +1,92 @@
+{
+ "long-24h": {
+  "span_h": 24,
+  "decisions": [
+   {
+    "id": "L1",
+    "session": "long-24h",
+    "fragment": "キャッシュは Redis ではなく SQLite に置く",
+    "status": "overturned"
+   },
+   {
+    "id": "L2",
+    "session": "long-24h",
+    "fragment": "やっぱりキャッシュは持たない",
+    "status": "current"
+   }
+  ]
+ },
+ "middle-only": {
+  "decisions": [
+   {
+    "id": "M1",
+    "session": "middle-only",
+    "fragment": "同期の間隔は 45 秒にする",
+    "status": "current"
+   }
+  ]
+ },
+ "overturn-cross": {
+  "decisions": [
+   {
+    "id": "A1",
+    "session": "cross-a",
+    "fragment": "テストは cargo nextest で回す",
+    "status": "overturned"
+   },
+   {
+    "id": "B1",
+    "session": "cross-b",
+    "fragment": "テストは cargo test に戻す",
+    "status": "current"
+   },
+   {
+    "id": "C1",
+    "session": "cross-c",
+    "fragment": "CI のタイムアウトは 20 分にする",
+    "status": "current"
+   },
+   {
+    "id": "D1",
+    "session": "cross-d",
+    "fragment": "ログは JSON で出す",
+    "status": "overturned"
+   },
+   {
+    "id": "D2",
+    "session": "cross-d",
+    "fragment": "やっぱりログはテキストのまま",
+    "status": "current"
+   }
+  ],
+  "pairs": [
+   {
+    "earlier": "A1",
+    "later": "B1",
+    "relation": "overturns"
+   },
+   {
+    "earlier": "B1",
+    "later": "C1",
+    "relation": "compatible"
+   },
+   {
+    "earlier": "D1",
+    "later": "D2",
+    "relation": "overturns"
+   }
+  ]
+ },
+ "canaries": {
+  "canaries": [
+   "OBOETE-CANARY-PROMPT-2d56fe3c",
+   "OBOETE-CANARY-TOOLIN-1b8c4825",
+   "OBOETE-CANARY-TOOLOUT-ed94aa27",
+   "OBOETE-CANARY-ASSIST-81949072",
+   "OBOETE-CANARY-COMPACT-b0d7b928",
+   "OBOETE-CANARY-ANSWER-7da106cb",
+   "OBOETE-CANARY-SUBAGENT-9bce19f1"
+  ],
+  "private": "OBOETE-CANARY-PRIVATE-c26ebeca"
+ }
+}
