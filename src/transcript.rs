@@ -76,8 +76,10 @@ struct Emitter<W: Write> {
     queued: Vec<String>,
     stats: Stats,
     pending: Vec<Pending>,
-    /// The current turn's last assistant text, sent as `Stop` when the turn ends.
+    /// The current turn's last assistant text, sent as `Stop` when the turn ends, and the
+    /// directory it was said in (the record that ends the turn may already be in another).
     last_text: Option<String>,
+    turn_cwd: Option<String>,
     last_ts: String,
     /// Lines without their `seq`, keyed by time: subagent files are read after the main file,
     /// and `oboete replay` takes the lines in order, so they are sorted before they are written.
@@ -136,11 +138,19 @@ impl<W: Write> Emitter<W> {
     }
 
     /// The turn ended at `ts` (the record that ended it), after its last text.
+    fn said(&mut self, text: String) {
+        self.last_text = Some(text);
+        self.turn_cwd.clone_from(&self.cwd);
+    }
+
     fn stop(&mut self, ts: &str) -> Result<()> {
-        match self.last_text.take() {
-            Some(text) => self.emit("Stop", ts, json!({"last_assistant_message": text})),
-            None => Ok(()),
-        }
+        let Some(text) = self.last_text.take() else {
+            return Ok(());
+        };
+        let now = std::mem::replace(&mut self.cwd, self.turn_cwd.take());
+        let result = self.emit("Stop", ts, json!({"last_assistant_message": text}));
+        self.cwd = now;
+        result
     }
 
     fn prompt(&mut self, ts: &str, text: &str) -> Result<()> {
@@ -308,9 +318,10 @@ fn claude_record<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>
                 return Ok(());
             }
             // The delivery of a prompt already sent when it was queued.
+            // Measured on the dev set: it comes after the turn ended (mid-turn ones are attachments).
             if let Some(i) = e.queued.iter().position(|q| q == text.trim()) {
                 e.queued.remove(i);
-                return Ok(());
+                return e.stop(&ts);
             }
             // A skill command (message tag first) and /goal reach the prompt hook as typed; other
             // local commands (/compact, /effort: name tag first) never do. Measured 2026-09-26:
@@ -343,8 +354,19 @@ fn claude_record<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>
             {
                 return Ok(());
             }
+            // The turn that runs goes on: its Stop comes where it ends, not here.
             e.queued.push(t.to_string());
-            e.prompt(&ts, &text)
+            e.emit("UserPromptSubmit", &ts, json!({"prompt": text}))
+        }
+        // Where the Stop hook ran (a turn with stop hooks), or the turn's end.
+        Some("system")
+            if agent_id.is_none()
+                && matches!(
+                    v["subtype"].as_str(),
+                    Some("stop_hook_summary" | "turn_duration")
+                ) =>
+        {
+            e.stop(&ts)
         }
         Some("assistant") => {
             for item in content.as_array().into_iter().flatten() {
@@ -359,7 +381,7 @@ fn claude_record<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>
                     Some("text") if agent_id.is_none() => {
                         let t = item["text"].as_str().unwrap_or_default();
                         if !t.trim().is_empty() {
-                            e.last_text = Some(t.to_string());
+                            e.said(t.to_string());
                         }
                     }
                     _ => {}
@@ -423,7 +445,7 @@ fn codex_line<W: Write>(e: &mut Emitter<W>, v: &Value) -> Result<()> {
                     e.prompt(&ts, &text)
                 }
                 Some("assistant") => {
-                    e.last_text = Some(text);
+                    e.said(text);
                     Ok(())
                 }
                 _ => Ok(()),
@@ -455,7 +477,7 @@ fn codex_line<W: Write>(e: &mut Emitter<W>, v: &Value) -> Result<()> {
                 .as_str()
                 .filter(|t| !t.trim().is_empty())
             {
-                e.last_text = Some(t.to_string());
+                e.said(t.to_string());
             }
             e.stop(&ts)
         }
@@ -548,6 +570,7 @@ pub fn convert(path: &Path, agent: &str, out: impl Write) -> Result<Stats> {
         stats: Stats::default(),
         pending: Vec::new(),
         last_text: None,
+        turn_cwd: None,
         last_ts: String::new(),
         lines: Vec::new(),
     };
@@ -588,6 +611,65 @@ mod tests {
     }
 
     const CLAUDE: &str = "src/testdata/transcripts/claude-basic.jsonl";
+
+    #[test]
+    fn a_queued_prompt_leaves_its_turn_running_and_a_stop_keeps_its_directory() {
+        let dir = std::env::temp_dir().join(format!("oboete-transcript-q-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("q.jsonl");
+        let at = |s: u32| format!("2026-09-01T00:00:0{s}Z");
+        let user = |s, cwd: &str, text: &str| {
+            json!({"type": "user", "timestamp": at(s), "cwd": cwd,
+            "message": {"role": "user", "content": text}})
+        };
+        let said = |s, text: &str| {
+            json!({"type": "assistant", "timestamp": at(s), "cwd": "/a",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}})
+        };
+        let lines = [
+            user(1, "/a", "first"),
+            said(2, "working"),
+            json!({"type": "queue-operation", "operation": "enqueue", "timestamp": at(3), "content": "also this"}),
+            said(4, "done"),
+            json!({"type": "system", "subtype": "stop_hook_summary", "timestamp": at(5), "cwd": "/a"}),
+            user(6, "/a", "also this"),
+            said(7, "did it"),
+            // Resumed in another directory: the turn before keeps its own.
+            user(8, "/b", "next"),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        let (v, _) = events(path.to_str().unwrap(), "claude");
+        std::fs::remove_dir_all(&dir).unwrap();
+        let got: Vec<(&str, &str, &str, &str)> = v
+            .iter()
+            .map(|e| {
+                let p = &e["payload"];
+                let said = p["prompt"]
+                    .as_str()
+                    .or(p["last_assistant_message"].as_str());
+                (
+                    e["event"].as_str().unwrap(),
+                    &e["ts"].as_str().unwrap()[17..19],
+                    said.unwrap_or(""),
+                    p["cwd"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("SessionStart", "01", "", "/a"),
+                ("UserPromptSubmit", "01", "first", "/a"),
+                // Sent to the prompt hook when queued; the turn goes on until its Stop hook ran.
+                ("UserPromptSubmit", "03", "also this", "/a"),
+                ("Stop", "05", "done", "/a"),
+                ("Stop", "08", "did it", "/a"),
+                ("UserPromptSubmit", "08", "next", "/b"),
+                ("SessionEnd", "08", "", "/b"),
+            ]
+        );
+    }
 
     #[test]
     fn claude_prompts_tools_answers_compaction_and_stops() {
