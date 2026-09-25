@@ -60,8 +60,15 @@ pub struct Stats {
     pub ignored: std::collections::BTreeMap<String, u64>,
 }
 
-/// A tool call waiting for its result: (id, name, input, ts, subagent id).
-type Pending = (String, String, Value, String, Option<String>);
+/// A tool call waiting for its result: (id, name, input, ts, subagent id, cwd when made).
+type Pending = (
+    String,
+    String,
+    Value,
+    String,
+    Option<String>,
+    Option<String>,
+);
 
 struct Emitter<W: Write> {
     out: W,
@@ -166,6 +173,7 @@ impl<W: Write> Emitter<W> {
             input,
             ts.into(),
             agent_id.map(Into::into),
+            self.cwd.clone(),
         );
         self.pending.push(entry);
     }
@@ -182,7 +190,7 @@ impl<W: Write> Emitter<W> {
         let Some(i) = self.pending.iter().position(|p| p.0 == id) else {
             return Ok(());
         };
-        let (_, name, mut input, _, agent_id) = self.pending.remove(i);
+        let (_, name, mut input, _, agent_id, _) = self.pending.remove(i);
         if let Some(a) = answers {
             input["answers"] = a.clone();
         }
@@ -210,12 +218,16 @@ impl<W: Write> Emitter<W> {
             .into_iter()
             .partition(|p| !main_only || p.4.is_none());
         self.pending = kept;
-        for (_, name, input, ts, agent_id) in gone {
+        for (_, name, input, ts, agent_id, cwd) in gone {
             let mut p = json!({"tool_name": name, "tool_input": input, "tool_response": Value::Null, "interrupted": true});
             if let Some(a) = agent_id {
                 p["agent_id"] = json!(a);
             }
-            self.emit("PostToolUse", &ts, p)?;
+            // In the directory the call was made in: a subagent's end comes after its scope.
+            let now = std::mem::replace(&mut self.cwd, cwd);
+            let result = self.emit("PostToolUse", &ts, p);
+            self.cwd = now;
+            result?;
         }
         Ok(())
     }
@@ -682,6 +694,32 @@ mod tests {
                 ("SessionEnd", "08", "", "/b"),
             ]
         );
+    }
+
+    #[test]
+    fn an_unanswered_subagent_call_keeps_its_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("oboete-transcript-sub-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("m").join("subagents")).unwrap();
+        let main = json!({"type": "user", "timestamp": "2026-09-01T00:00:01Z", "cwd": "/a",
+            "message": {"role": "user", "content": "first"}});
+        let call = json!({"type": "assistant", "timestamp": "2026-09-01T00:00:02Z", "cwd": "/wt",
+            "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Grep", "input": {}}]}});
+        std::fs::write(dir.join("m.jsonl"), format!("{main}\n")).unwrap();
+        std::fs::write(
+            dir.join("m").join("subagents").join("agent-x.jsonl"),
+            format!("{call}\n"),
+        )
+        .unwrap();
+        let (v, _) = events(dir.join("m.jsonl").to_str().unwrap(), "claude");
+        std::fs::remove_dir_all(&dir).unwrap();
+        let cut = v
+            .iter()
+            .find(|e| e["payload"]["interrupted"] == true)
+            .unwrap();
+        assert_eq!(cut["payload"]["agent_id"], "x");
+        assert_eq!(cut["payload"]["cwd"], "/wt");
+        assert_eq!(v.last().unwrap()["payload"]["cwd"], "/a");
     }
 
     #[test]
