@@ -510,6 +510,8 @@ def claude_file(d, sid, prompts, ja=False, hours=1):
             f.write(json.dumps({'type': 'user', 'sessionId': sid, 'timestamp': ts,   # a tool result: not typed
                                 'message': {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 't', 'content': 'x'}]}}) + '\n')
             f.write('{"type":"atis-latch"}\n')                                        # unknown type: ignored
+            f.write(json.dumps({'type': 'user', 'isSidechain': True, 'sessionId': sid, 'timestamp': ts,  # a subagent's task
+                                'message': {'role': 'user', 'content': 'inline subagent task'}}) + '\n')
     return path
 
 
@@ -573,7 +575,9 @@ def typed(agent, o):
     """The text the developer typed in this record, or None."""
     if agent == 'claude':
         m = o.get('message') or {}
-        if o.get('type') != 'user' or o.get('isMeta') or o.get('isCompactSummary') or m.get('role') != 'user':
+        # isSidechain: a subagent's turn, written inline by older Claude Code; not typed.
+        if (o.get('type') != 'user' or o.get('isMeta') or o.get('isCompactSummary') or o.get('isSidechain')
+                or m.get('role') != 'user'):
             return None
         c = m.get('content')
         if isinstance(c, str):
@@ -756,7 +760,7 @@ Decisions (Claude; overrulable, recorded in the note):
 - **Output**: the replay fixture format `oboete replay` already reads (`{seq, agent, event, session, payload}`, `src/replay.rs:1-3`), plus `ts` (the transcript entry's timestamp, which today's replay ignores and the transcript import will use). Payloads are shaped like each agent's hook payloads, so the hook path stores them as it stores live events.
 - **Agents**: Claude Code and Codex only, the replay set's two agents. agy and Cursor transcript tails are read by today's hooks (`src/hook.rs:243-368`); their full parsers come with the transcript import at milestone 4.
 - **No redaction or stripping in the parser**: the hook path redacts and strips `<private>`, and that cost is part of what a replay measures.
-- **Claude Code subagents**: files in `<session>/subagents/*.jsonl` are the same session (their hooks carry the parent's session id). Only their tool calls are emitted, with `agent_id`, after the main file's events; consumers that need time order sort by `ts`.
+- **Claude Code subagents**: files in `<session>/subagents/*.jsonl` are the same session (their hooks carry the parent's session id). Only their tool calls are emitted, with `agent_id`, after the main file's events; consumers that need time order sort by `ts`. Older Claude Code wrote subagent turns inline in the main file with `isSidechain: true` (the replay pool reaches back to June): those records are handled the same way, with `agent_id` from their `agentId`.
 - **Streaming**: files are read line by line (the longest sessions are hundreds of MB); a line that is not JSON is skipped and counted on stderr.
 
 **Files:**
@@ -791,7 +795,7 @@ Event mapping:
 
 - [ ] **Step 1: Write the fixtures**
 
-`src/testdata/transcripts/claude-basic.jsonl` (15 lines; line 7 is deliberately not JSON):
+`src/testdata/transcripts/claude-basic.jsonl` (18 lines; line 7 is deliberately not JSON; lines 16-18 are an inline subagent, as older Claude Code wrote them):
 
 ```
 {"type":"permission-mode","permissionMode":"default","sessionId":"claude-basic"}
@@ -809,6 +813,9 @@ this line is not JSON
 {"type":"user","isCompactSummary":true,"sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:09.000Z","message":{"role":"user","content":"This session is being continued. Summary: the cache uses SQLite."}}
 {"type":"user","isMeta":true,"sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:10.000Z","message":{"role":"user","content":"<local-command-caveat>not typed</local-command-caveat>"}}
 {"type":"assistant","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:11.000Z","message":{"role":"assistant","content":[{"type":"text","text":"テストを直します。"},{"type":"tool_use","id":"toolu_4","name":"Edit","input":{"file_path":"/work/app/src/cache.rs"}}]}}
+{"type":"user","isSidechain":true,"agentId":"b2","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:12.000Z","message":{"role":"user","content":"Inline subagent task: list the Rust files"}}
+{"type":"assistant","isSidechain":true,"agentId":"b2","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:13.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Listing them."},{"type":"tool_use","id":"toolu_b1","name":"Glob","input":{"pattern":"**/*.rs"}}]}}
+{"type":"user","isSidechain":true,"agentId":"b2","sessionId":"claude-basic","cwd":"/work/app","timestamp":"2026-09-01T00:00:14.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_b1","content":"src/cache.rs"}]}}
 ```
 
 `src/testdata/transcripts/claude-basic/subagents/agent-a1.jsonl`:
@@ -872,6 +879,7 @@ mod tests {
                 "PostToolUseFailure",
                 "PostCompact",
                 "PostToolUse",
+                "PostToolUse",
                 "Stop",
                 "PostToolUse",
                 "SessionEnd"
@@ -891,24 +899,27 @@ mod tests {
         assert_eq!(v[5]["payload"]["tool_input"]["answers"]["どちらにしますか?"], "A にする");
         assert_eq!(v[6]["payload"]["error"], "error: 2 tests failed");
         assert!(v[7]["payload"]["compact_summary"].as_str().unwrap().contains("SQLite"));
-        assert_eq!(v[9]["payload"]["last_assistant_message"], "テストを直します。");
-        assert_eq!(v[10]["payload"]["tool_name"], "Grep");
-        assert_eq!(v[10]["payload"]["agent_id"], "a1");
+        // The inline subagent: its tool call only, never its task as a prompt or its text as a Stop.
+        assert_eq!(v[8]["payload"]["tool_name"], "Glob");
+        assert_eq!(v[8]["payload"]["agent_id"], "b2");
+        assert_eq!(v[10]["payload"]["last_assistant_message"], "テストを直します。");
+        assert_eq!(v[11]["payload"]["tool_name"], "Grep");
+        assert_eq!(v[11]["payload"]["agent_id"], "a1");
     }
 
     #[test]
     fn a_tool_call_without_result_is_emitted_at_the_end() {
         let (v, _) = events(CLAUDE, "claude");
-        assert_eq!(v[8]["payload"]["tool_name"], "Edit");
-        assert_eq!(v[8]["payload"]["interrupted"], true);
-        assert!(v[8]["payload"]["tool_response"].is_null());
+        assert_eq!(v[9]["payload"]["tool_name"], "Edit");
+        assert_eq!(v[9]["payload"]["interrupted"], true);
+        assert!(v[9]["payload"]["tool_response"].is_null());
     }
 
     #[test]
     fn unknown_and_broken_lines_are_skipped() {
         let (v, stats) = events(CLAUDE, "claude");
-        assert_eq!(stats, Stats { lines: 18, skipped: 1, events: 12 });
-        assert_eq!(v.len(), 12);
+        assert_eq!(stats, Stats { lines: 21, skipped: 1, events: 13 });
+        assert_eq!(v.len(), 13);
         assert!(convert(Path::new(CLAUDE), "grok", Vec::new()).is_err());
     }
 
@@ -1102,6 +1113,13 @@ fn text_of(content: &Value) -> String {
 }
 
 fn claude_line<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) -> Result<()> {
+    // Older Claude Code wrote subagent turns inline, marked isSidechain; newer writes them to
+    // <session>/subagents/, read with their file's agent id.
+    let agent_id = if v["isSidechain"] == true {
+        Some(v["agentId"].as_str().unwrap_or("sidechain"))
+    } else {
+        agent_id
+    };
     if e.cwd.is_none() {
         e.cwd = v["cwd"].as_str().map(Into::into);
     }
@@ -1321,7 +1339,7 @@ and in the dispatch, next to `Cmd::Gate`:
 - [ ] **Step 5: Run the tests to see them pass**
 
 Run: `cargo test -q transcript && cargo fmt --check && cargo clippy --all-targets -q -- -D warnings && cargo test -q`
-Expected: the five transcript tests pass; the whole suite passes (115 + 5).
+Expected: the five transcript tests pass; the whole suite passes (115 + 5). If `a_parsed_transcript_replays_through_the_hook_path` fails inside `repo::key` on the fixture's nonexistent `/work/app`, create a temporary directory in the test, replace `/work/app` in each payload's `cwd` with it before calling `hook::handle`, and keep the parser unchanged.
 
 - [ ] **Step 6: Smoke test on real files (read-only, nothing leaves the machine)**
 
@@ -2485,8 +2503,8 @@ Spec 8.1 "Baselines, all on the same inputs": no memory; the current oboete at c
 - Modify: `docs/milestone-1.md`
 
 **Interfaces:**
-- Consumes: `common.*`, `freeze.check`, `oboete transcript` (Task 4), `oboete replay`, `oboete --home <h> observe`, the frozen claude-mem copy, `report.py` and `judge.py` (existing).
-- Produces: `baseline.config(home) -> None` (writes `<home>/config.toml`), `~/.oboete/eval/baseline/dev-all.jsonl`, `~/.oboete/eval/baseline/oboete-<sha>/` (a replayed home with `version.txt`), `~/.oboete/eval/baseline/claude-mem-dev.jsonl` (`{"session", "agent", "observations": [...], "summaries": [...]}`).
+- Consumes: `common.*`, `freeze.check`, `oboete transcript` (Task 4), `oboete replay`, `oboete --home <h> observe`, the frozen claude-mem copy, Task 7's fixtures, `report.py` and `judge.py` (existing).
+- Produces: `baseline.config(home) -> None` (writes `<home>/config.toml`), `~/.oboete/eval/baseline/fixtures/<session>.jsonl`, `~/.oboete/eval/baseline/oboete-<sha>/` (a replayed home with `version.txt` and one `replay-<session>.json` per session), `~/.oboete/eval/baseline/claude-mem-dev.jsonl` (`{"session", "agent", "observations": [...], "summaries": [...]}`).
 
 - [ ] **Step 1: Write `baseline.py`**
 
@@ -2497,7 +2515,7 @@ Spec 8.1 "Baselines, all on the same inputs": no memory; the current oboete at c
 Held-out transcripts are never touched here: they are replayed once, at milestone 4.
 
   baseline.py config <home>   write the API-only provider config into <home>/config.toml
-  baseline.py oboete          dev transcripts -> one fixture -> replay through today's oboete
+  baseline.py oboete          each dev transcript -> fixture -> replay through today's oboete
   baseline.py claude-mem      claude-mem's own observations and summaries of the dev sessions
   baseline.py summary         per-session counts for docs/milestone-1.md"""
 import glob, json, os, sqlite3, subprocess, sys
@@ -2543,27 +2561,33 @@ def version():
 
 
 def run_oboete():
+    """One replay per session into one home: `oboete replay` reads its fixture whole, so a single
+    concatenated fixture would hold every dev transcript in memory at once. A session whose report
+    exists was replayed before and is skipped: replaying it again would insert its events twice."""
     head, binary = version()
     home = f'{B}/oboete-{head}'
-    if os.path.exists(f'{home}/oboete.db'):
-        sys.exit(f'{home} exists; to finish its curation run: oboete --home {home} observe --settle-ms 0')
-    config(home)
-    with open(f'{home}/version.txt', 'w') as f:
-        f.write(f'{binary} installed from {head}\n')
-    seq = 0
-    with open(f'{B}/dev-all.jsonl', 'w', encoding='utf-8') as out:
-        for s in dev_sessions():
-            src = f'{E}/replay/dev/{s["agent"]}/{s["session"]}.jsonl'
-            r = subprocess.run(['oboete', 'transcript', src, '--agent', s['agent']], capture_output=True, text=True, check=True)
-            for line in r.stdout.splitlines():
-                seq += 1
-                e = json.loads(line)
-                e['seq'] = seq
-                out.write(json.dumps(e, ensure_ascii=False) + '\n')
-    with open(f'{home}/replay-report.json', 'w') as report:
-        subprocess.run(['oboete', 'replay', f'{B}/dev-all.jsonl', '--home', home, '--agent', 'all', '--spawn-sample', '0'],
-                       stdout=report, check=True)
-    print(f'{seq} events replayed into {home}')
+    if not os.path.exists(f'{home}/config.toml'):
+        config(home)
+        with open(f'{home}/version.txt', 'w') as f:
+            f.write(f'{binary} installed from {head}\n')
+    os.makedirs(f'{B}/fixtures', exist_ok=True)
+    done = 0
+    for s in dev_sessions():
+        report = f'{home}/replay-{s["session"]}.json'
+        if os.path.exists(report):
+            continue
+        fixture = f'{B}/fixtures/{s["session"]}.jsonl'
+        with open(fixture, 'w', encoding='utf-8') as out:
+            subprocess.run(['oboete', 'transcript', f'{E}/replay/dev/{s["agent"]}/{s["session"]}.jsonl',
+                            '--agent', s['agent']], stdout=out, check=True)
+        with open(report + '.part', 'w') as r:
+            if subprocess.run(['oboete', 'replay', fixture, '--home', home, '--agent', 'all', '--spawn-sample', '0'],
+                              stdout=r).returncode != 0:
+                sys.exit(f'replay of {s["session"]} failed part way; its events may be in {home} already. '
+                         f'Remove {home} and run this again.')
+        os.replace(report + '.part', report)
+        done += 1
+    print(f'{done} sessions replayed into {home}')
 
 
 def claude_mem():
@@ -2633,7 +2657,7 @@ Run outside the owner's working hours (the replay shares the owner's free tiers)
 cargo install --path . --locked && cd docs/eval && python3 baseline.py oboete && python3 baseline.py claude-mem && python3 baseline.py summary
 ```
 
-Expected: `… events replayed into …/baseline/oboete-<sha>`, `30 sessions, … observations`, then the two tables. When `provider_calls` shows `budget` outcomes, finish the next day with `oboete --home <that home> observe --settle-ms 0` and run `summary` again. Paste both tables into `docs/milestone-1.md` under "Dev baselines".
+Expected: `30 sessions replayed into …/baseline/oboete-<sha>` (fewer on a rerun), `30 sessions, … observations`, then the two tables. When `provider_calls` shows `budget` outcomes, finish the next day with `oboete --home <that home> observe --settle-ms 0` and run `summary` again. Paste both tables into `docs/milestone-1.md` under "Dev baselines".
 
 - [ ] **Step 4: Retrieval baselines on dev (only after B3 passed)**
 
@@ -2739,7 +2763,8 @@ def imac_claude_mem():
 
 def raw_rate(days=90):
     """Hook events and bytes the agents' transcripts imply over the last `days`, scaled to a year:
-    design B keeps every event and full tool outputs (spec 2.4)."""
+    design B keeps every event and full tool outputs (spec 2.4). The bytes are replay-fixture JSON,
+    before per-record compression: an upper bound on raw.db's size, not a disk estimate."""
     since = time.time() - days * 86400
     files = [(agent, p) for agent, pattern in (('claude', '~/.claude/projects/*/*.jsonl'),
                                                 ('codex', '~/.codex/sessions/**/*.jsonl'))
@@ -2770,11 +2795,11 @@ if __name__ == '__main__':
 - [ ] **Step 2: Run it and check against known counts**
 
 Run: `cd docs/eval && python3 corpus_count.py`
-Expected: `eval_store` shows 152,030 observations, 13,155 summaries and 13,185 prompts (docs/pr-b.md B1 result; equal to Task 1's counts); `live_store` shows a few thousand documents at most; the Windows and iMac lines show counts, `null` (no database) or an `error` (iMac asleep: rerun later). `raw_rate` takes a few minutes.
+Expected: `eval_store` shows 152,030 observations, 13,155 summaries and 13,185 prompts (docs/pr-b.md B1 result; equal to Task 1's counts); `live_store` shows a few thousand documents at most; the Windows and iMac lines show counts, `null` (no database) or an `error` (iMac asleep: rerun later). `raw_rate` runs `oboete transcript` over every transcript of the last 90 days (about 2,000 files): minutes, not seconds; run it in the background.
 
 - [ ] **Step 3: Record and commit**
 
-Write under "M22 corpus" in `docs/milestone-1.md`: each count; the total a device would hold if everything is imported (eval-store documents + other machines' claude-mem documents not already in the copy, marked as an upper bound because the machines' histories overlap) plus one year of raw events; a sentence comparing it with the old "~330k" figure (spec 8.2 says it counted claude-mem twice). Then:
+Write under "M22 corpus" in `docs/milestone-1.md`: each count; the total a device would hold if everything is imported (eval-store documents + other machines' claude-mem documents not already in the copy, marked as an upper bound because the machines' histories overlap) plus one year of raw events; `mb_per_year` labelled "uncompressed JSON, an upper bound before per-record compression"; a sentence comparing the document total with the old "~330k" figure (spec 8.2 says it counted claude-mem twice). Then:
 
 ```bash
 git add docs/eval/corpus_count.py docs/milestone-1.md && git commit -m "eval: count M22's corpus"
@@ -2915,6 +2940,12 @@ fn main() {
 }
 ```
 
+Commit it now: Steps 3 and 4 ship it to the other machines with `git archive HEAD`.
+
+```bash
+printf 'target/\nCargo.lock\n' > docs/spike/hook-m14/.gitignore && git add docs/spike/hook-m14 && git commit -m "spike: hook write harness (M14)"
+```
+
 - [ ] **Step 2: Run on WSL**
 
 ```bash
@@ -2949,7 +2980,7 @@ Poll with `ssh asuka@100.79.238.11 'wc -l ~/oboete-probe/m14/result.csv'` from a
 The note: the question, the harness (paths above), the three CSVs as one table (machine × size × redaction × zstd → p50/p95/p99), the slowest machine, and the direction for milestone 2: which sizes meet 20 ms p95 with full redaction, whether zstd pays for itself at write time, and whether 256 KB outputs need the head-and-tail rule of spec 2.2. State that milestone 2 sets the line from its own measurement of the real hook.
 
 ```bash
-git add docs/spike/hook-m14 docs/spike/hook-m14.md && git commit -m "spike: hook write cost under synchronous=FULL with full redaction (M14)"
+git add docs/spike/hook-m14.md && git commit -m "spike: hook write cost under synchronous=FULL with full redaction (M14)"
 ```
 
 ---
