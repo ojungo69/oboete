@@ -41,7 +41,8 @@ fn write_one(db: &str, size: usize, redact_on: bool, zstd_on: bool) {
     let conn = rusqlite::Connection::open(db).unwrap();
     conn.busy_timeout(std::time::Duration::from_secs(2)).unwrap();
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;").unwrap();
-    if cfg!(target_os = "macos") {
+    // HOOK_M14_NO_FULLFSYNC: the synchronous=FULL-only control on macOS (PR #68 review).
+    if cfg!(target_os = "macos") && std::env::var_os("HOOK_M14_NO_FULLFSYNC").is_none() {
         conn.execute_batch("PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON;").unwrap();
     }
     conn.execute_batch(
