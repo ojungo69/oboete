@@ -76,9 +76,12 @@ struct Emitter<W: Write> {
     queued: Vec<String>,
     stats: Stats,
     pending: Vec<Pending>,
-    /// The current turn's last assistant text and its time, sent as `Stop` when the turn ends.
-    last_text: Option<(String, String)>,
+    /// The current turn's last assistant text, sent as `Stop` when the turn ends.
+    last_text: Option<String>,
     last_ts: String,
+    /// Lines without their `seq`, keyed by time: subagent files are read after the main file,
+    /// and `oboete replay` takes the lines in order, so they are sorted before they are written.
+    lines: Vec<(String, String)>,
 }
 
 impl<W: Write> Emitter<W> {
@@ -92,10 +95,36 @@ impl<W: Write> Emitter<W> {
         payload["transcript_path"] = json!(self.path);
         payload["cwd"] = json!(self.cwd.as_deref().unwrap_or("."));
         payload["hook_event_name"] = json!(event);
-        let line = json!({"seq": self.stats.events, "agent": self.agent, "event": event,
-                          "session": self.session, "ts": ts, "payload": payload});
-        writeln!(self.out, "{line}")?;
+        // A record without a time keeps the place of the one before it.
+        let ts = match (ts, self.lines.last()) {
+            ("", Some((prev, _))) => prev.clone(),
+            _ => ts.to_string(),
+        };
+        let line = json!({"agent": self.agent, "event": event, "session": self.session,
+                          "ts": ts, "payload": payload});
+        // SessionStart sorts first whatever its time.
+        let key = if event == "SessionStart" {
+            String::new()
+        } else {
+            ts
+        };
+        self.lines.push((key, line.to_string()));
         Ok(())
+    }
+
+    /// Every line in time order (a stable sort: equal times keep the order they were read in),
+    /// numbered, then SessionEnd.
+    fn flush(mut self) -> Result<Stats> {
+        if self.started {
+            let ts = self.last_ts.clone();
+            self.write("SessionEnd", &ts, json!({"reason": "transcript_end"}))?;
+        }
+        let end = self.lines.len().saturating_sub(1);
+        self.lines[..end].sort_by(|a, b| a.0.cmp(&b.0));
+        for (i, (_, line)) in self.lines.iter().enumerate() {
+            writeln!(self.out, "{{\"seq\":{},{}", i + 1, &line[1..])?;
+        }
+        Ok(self.stats)
     }
 
     fn emit(&mut self, event: &str, ts: &str, payload: Value) -> Result<()> {
@@ -106,15 +135,16 @@ impl<W: Write> Emitter<W> {
         self.write(event, ts, payload)
     }
 
-    fn stop(&mut self) -> Result<()> {
+    /// The turn ended at `ts` (the record that ended it), after its last text.
+    fn stop(&mut self, ts: &str) -> Result<()> {
         match self.last_text.take() {
-            Some((ts, text)) => self.emit("Stop", &ts, json!({"last_assistant_message": text})),
+            Some(text) => self.emit("Stop", ts, json!({"last_assistant_message": text})),
             None => Ok(()),
         }
     }
 
     fn prompt(&mut self, ts: &str, text: &str) -> Result<()> {
-        self.stop()?;
+        self.stop(ts)?;
         self.emit("UserPromptSubmit", ts, json!({"prompt": text}))
     }
 
@@ -182,7 +212,8 @@ impl<W: Write> Emitter<W> {
     /// End of one file: calls that never got a result, then the turn's last text.
     fn finish(&mut self) -> Result<()> {
         self.interrupt(false)?;
-        self.stop()
+        let ts = self.last_ts.clone();
+        self.stop(&ts)
     }
 }
 
@@ -318,7 +349,7 @@ fn claude_line<W: Write>(e: &mut Emitter<W>, v: &Value, agent_id: Option<&str>) 
                     Some("text") if agent_id.is_none() => {
                         let t = item["text"].as_str().unwrap_or_default();
                         if !t.trim().is_empty() {
-                            e.last_text = Some((ts.clone(), t.to_string()));
+                            e.last_text = Some(t.to_string());
                         }
                     }
                     _ => {}
@@ -382,7 +413,7 @@ fn codex_line<W: Write>(e: &mut Emitter<W>, v: &Value) -> Result<()> {
                     e.prompt(&ts, &text)
                 }
                 Some("assistant") => {
-                    e.last_text = Some((ts, text));
+                    e.last_text = Some(text);
                     Ok(())
                 }
                 _ => Ok(()),
@@ -414,13 +445,14 @@ fn codex_line<W: Write>(e: &mut Emitter<W>, v: &Value) -> Result<()> {
                 .as_str()
                 .filter(|t| !t.trim().is_empty())
             {
-                e.last_text = Some((ts, t.to_string()));
+                e.last_text = Some(t.to_string());
             }
-            e.stop()
+            e.stop(&ts)
         }
+        // An aborted turn sends no Stop, and its unanswered calls end here.
         (Some("event_msg"), Some("turn_aborted")) => {
             e.last_text = None;
-            Ok(())
+            e.interrupt(true)
         }
         (Some("compacted"), _) => match p["message"].as_str().filter(|s| !s.trim().is_empty()) {
             Some(s) => e.emit(
@@ -507,6 +539,7 @@ pub fn convert(path: &Path, agent: &str, out: impl Write) -> Result<Stats> {
         pending: Vec::new(),
         last_text: None,
         last_ts: String::new(),
+        lines: Vec::new(),
     };
     read_file(&mut e, path, None)?;
     let subagents = path.with_extension("").join("subagents");
@@ -521,11 +554,7 @@ pub fn convert(path: &Path, agent: &str, out: impl Write) -> Result<Stats> {
             read_file(&mut e, &f, Some(&id))?;
         }
     }
-    if e.started {
-        let ts = e.last_ts.clone();
-        e.write("SessionEnd", &ts, json!({"reason": "transcript_end"}))?;
-    }
-    Ok(e.stats)
+    e.flush()
 }
 
 #[cfg(test)]
@@ -553,27 +582,28 @@ mod tests {
     #[test]
     fn claude_prompts_tools_answers_compaction_and_stops() {
         let (v, _) = events(CLAUDE, "claude");
+        // In time order: subagent files are read last but sorted into place.
         assert_eq!(
             names(&v),
             [
                 "SessionStart",
                 "UserPromptSubmit",
                 "PostToolUse",
+                "PostToolUse",
                 "Stop",
                 "UserPromptSubmit",
+                "PostToolUse",
                 "PostToolUse",
                 "PostToolUseFailure",
                 "PostCompact",
                 "PostToolUse",
+                "PostToolUse",
                 "Stop",
                 "UserPromptSubmit",
                 "UserPromptSubmit",
                 "UserPromptSubmit",
                 "PostToolUse",
-                "PostToolUse",
                 "UserPromptSubmit",
-                "PostToolUse",
-                "PostToolUse",
                 "SessionEnd"
             ]
         );
@@ -583,47 +613,52 @@ mod tests {
             assert_eq!(e["payload"]["cwd"], "/work/app");
             assert_eq!(e["payload"]["hook_event_name"], e["event"]);
         }
+        let ts: Vec<&str> = v[1..].iter().map(|e| e["ts"].as_str().unwrap()).collect();
+        assert!(ts.windows(2).all(|w| w[0] <= w[1]), "{ts:?}");
         assert_eq!(v[1]["payload"]["prompt"], "キャッシュの方針を決めたい");
         assert_eq!(v[1]["ts"], "2026-09-01T00:00:00.000Z");
         assert_eq!(v[2]["payload"]["tool_name"], "Read");
+        // A subagent's call sits at its own time, inside the turn that started it.
+        assert_eq!(v[3]["payload"]["tool_name"], "Grep");
+        assert_eq!(v[3]["payload"]["agent_id"], "a1");
+        // Stop at the end of the turn (the next prompt's time), with the turn's last text.
         assert_eq!(
-            v[3]["payload"]["last_assistant_message"],
+            v[4]["payload"]["last_assistant_message"],
             "SQLite にします。"
         );
-        assert_eq!(v[4]["payload"]["prompt"], "どちらが良い？");
+        assert_eq!(v[4]["ts"], v[5]["ts"]);
+        assert_eq!(v[5]["payload"]["prompt"], "どちらが良い？");
+        // A workflow agent's file sits deeper under subagents/.
+        assert_eq!(v[6]["payload"]["tool_name"], "WebFetch");
+        assert_eq!(v[6]["payload"]["agent_id"], "w1");
         assert_eq!(
-            v[5]["payload"]["tool_input"]["answers"]["どちらにしますか?"],
+            v[7]["payload"]["tool_input"]["answers"]["どちらにしますか?"],
             "A にする"
         );
         // A failure carries the error only, as the live hook gets it.
-        assert_eq!(v[6]["payload"]["error"], "error: 2 tests failed");
-        assert!(v[6]["payload"].get("tool_response").is_none());
+        assert_eq!(v[8]["payload"]["error"], "error: 2 tests failed");
+        assert!(v[8]["payload"].get("tool_response").is_none());
         assert!(
-            v[7]["payload"]["compact_summary"]
+            v[9]["payload"]["compact_summary"]
                 .as_str()
                 .unwrap()
                 .contains("SQLite")
         );
         // The inline subagent: its tool call only, never its task as a prompt or its text as a Stop.
-        assert_eq!(v[8]["payload"]["tool_name"], "Glob");
-        assert_eq!(v[8]["payload"]["agent_id"], "b2");
+        assert_eq!(v[11]["payload"]["tool_name"], "Glob");
+        assert_eq!(v[11]["payload"]["agent_id"], "b2");
         assert_eq!(
-            v[9]["payload"]["last_assistant_message"],
+            v[12]["payload"]["last_assistant_message"],
             "テストを直します。"
         );
         // Command output and a local command are no prompt; a skill command is, as typed.
-        assert_eq!(v[10]["payload"]["prompt"], "/graphify src");
-        assert_eq!(v[11]["payload"]["prompt"], "/goal finish the cache");
+        assert_eq!(v[13]["payload"]["prompt"], "/graphify src");
+        assert_eq!(v[14]["payload"]["prompt"], "/goal finish the cache");
         // A plain-text local command is no prompt; a queued prompt is sent once, when queued.
-        assert_eq!(v[12]["payload"]["prompt"], "テストも直して");
-        assert_eq!(v[12]["ts"], "2026-09-01T00:00:20.000Z");
+        assert_eq!(v[15]["payload"]["prompt"], "テストも直して");
+        assert_eq!(v[15]["ts"], "2026-09-01T00:00:20.000Z");
         // A queued prompt that starts with markup is still a prompt.
-        assert_eq!(v[15]["payload"]["prompt"], "<div>見出し</div> を直して");
-        assert_eq!(v[16]["payload"]["tool_name"], "Grep");
-        assert_eq!(v[16]["payload"]["agent_id"], "a1");
-        // A workflow agent's file sits deeper under subagents/.
-        assert_eq!(v[17]["payload"]["tool_name"], "WebFetch");
-        assert_eq!(v[17]["payload"]["agent_id"], "w1");
+        assert_eq!(v[17]["payload"]["prompt"], "<div>見出し</div> を直して");
         // SessionEnd takes the main file's last time, not a subagent file's.
         assert_eq!(v[18]["ts"], "2026-09-01T00:00:24.000Z");
     }
@@ -631,11 +666,12 @@ mod tests {
     #[test]
     fn calls_without_result_end_at_the_interruption() {
         let (v, _) = events(CLAUDE, "claude");
-        assert_eq!(v[13]["payload"]["tool_name"], "Edit");
-        assert_eq!(v[13]["payload"]["interrupted"], true);
-        assert!(v[13]["payload"]["tool_response"].is_null());
-        assert_eq!(v[14]["payload"]["tool_name"], "Bash");
-        assert_eq!(v[14]["ts"], "2026-09-01T00:00:22.000Z");
+        // Ended by the interruption at 00:00:23, placed at the time each call was made.
+        assert_eq!(v[10]["payload"]["tool_name"], "Edit");
+        assert_eq!(v[10]["payload"]["interrupted"], true);
+        assert!(v[10]["payload"]["tool_response"].is_null());
+        assert_eq!(v[16]["payload"]["tool_name"], "Bash");
+        assert_eq!(v[16]["ts"], "2026-09-01T00:00:22.000Z");
     }
 
     #[test]
@@ -673,6 +709,7 @@ mod tests {
                 "PostToolUse",
                 "Stop",
                 "PostCompact",
+                "PostToolUse",
                 "UserPromptSubmit",
                 "SessionEnd"
             ]
@@ -681,7 +718,7 @@ mod tests {
         // later turn_context moves to.
         for (i, e) in v.iter().enumerate() {
             assert_eq!(e["session"], "22222222-2222-4222-8222-222222222222");
-            let cwd = if i < 6 { "/work/svc" } else { "/work/svc2" };
+            let cwd = if i < 7 { "/work/svc" } else { "/work/svc2" };
             assert_eq!(e["payload"]["cwd"], cwd, "{i}");
         }
         assert_eq!(v[1]["payload"]["prompt"], "Add a 50ms timeout to fetchJson");
@@ -697,8 +734,11 @@ mod tests {
             v[4]["payload"]["last_assistant_message"],
             "Added the timeout."
         );
-        // Harness text marked by content_item_kinds is no prompt; an aborted turn sends no Stop.
-        assert_eq!(v[6]["payload"]["prompt"], "Try again with 100ms");
+        // Harness text marked by content_item_kinds is no prompt; an aborted turn sends no Stop,
+        // and its unanswered call ends at the abort, not at the end of the rollout.
+        assert_eq!(v[6]["payload"]["tool_input"]["cmd"], "sleep 100");
+        assert_eq!(v[6]["payload"]["interrupted"], true);
+        assert_eq!(v[7]["payload"]["prompt"], "Try again with 100ms");
     }
 
     #[test]
