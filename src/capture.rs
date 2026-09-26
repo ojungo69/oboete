@@ -121,13 +121,14 @@ fn markers(v: &Value) -> Value {
             Value::Object(m.iter().map(|(k, x)| (k.clone(), markers(x))).collect())
         }),
         Value::Array(a) => Value::Array(a.iter().map(markers).collect()),
+        Value::String(s) => data_uris(s),
         other => other.clone(),
     }
 }
 
-/// The three shapes seen in agent payloads: a content block `{type, source: {type: base64,
+/// The object shapes seen in agent payloads: a content block `{type, source: {type: base64,
 /// media_type, data}}`, Claude Code's image read result `{type: <mime>, base64}`, and MCP's
-/// `{type, mimeType, data}`. `sha256` is of the base64 text, `bytes` the decoded size.
+/// `{type, mimeType, data}`. OpenAI's `image_url` is a data URI string (`data_uris`).
 fn binary(m: &Map<String, Value>) -> Option<Value> {
     let kind = m.get("type").and_then(Value::as_str);
     let (kind, mime, data) = if let Some(src) = m.get("source").filter(|s| s["type"] == "base64") {
@@ -142,16 +143,41 @@ fn binary(m: &Map<String, Value>) -> Option<Value> {
             m.get("data")?.as_str()?,
         )
     };
+    Some(marker(kind, mime, data))
+}
+
+/// `data:<mime>;base64,<data>` anywhere in a string (OpenAI's `image_url`, an inline `<img>`): a
+/// whole-string URI becomes the marker object, one inside other text becomes the marker's JSON.
+fn data_uris(s: &str) -> Value {
+    static URI: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"data:([\w.+-]+/[\w.+-]+);base64,([A-Za-z0-9+/]+=*)").expect("data URI")
+    });
+    let found = |c: &regex::Captures| {
+        let mime = &c[1];
+        marker(mime.split('/').next().unwrap_or(mime), mime, &c[2])
+    };
+    match URI.captures(s) {
+        None => Value::String(s.to_owned()),
+        Some(c) if c[0].len() == s.len() => found(&c),
+        Some(_) => Value::String(
+            URI.replace_all(s, |c: &regex::Captures| found(c).to_string())
+                .into_owned(),
+        ),
+    }
+}
+
+/// `sha256` is of the base64 text, `bytes` the decoded size.
+fn marker(kind: &str, mime: &str, data: &str) -> Value {
     let sha: String = Sha256::digest(data.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    Some(json!({
+    json!({
         "kind": kind,
         "mime": mime,
         "bytes": data.trim_end_matches('=').len() * 3 / 4,
         "sha256": sha,
-    }))
+    })
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -398,6 +424,29 @@ mod tests {
             assert_eq!(stored[i]["sha256"].as_str().unwrap().len(), 64);
         }
         assert_eq!(stored[3]["text"], "caption");
+    }
+
+    #[test]
+    fn data_uris_become_markers_whole_or_inside_text() {
+        let uri = "data:image/png;base64,iVBORw0KGgo=";
+        let out = json!([
+            {"type": "input_image", "image_url": uri},
+            {"type": "image_url", "image_url": {"url": uri}},
+            format!("<img src=\"{uri}\"> after"),
+        ]);
+        let e = one(
+            "PostToolUse",
+            json!({"tool_name": "view_image", "tool_input": {}, "tool_response": out}),
+        );
+        assert!(!e.body.contains("iVBORw0KGgo"), "{}", e.body);
+        let stored: Value = serde_json::from_str(body(&e)["output"].as_str().unwrap()).unwrap();
+        assert_eq!(stored[0]["image_url"]["mime"], "image/png");
+        assert_eq!(stored[1]["image_url"]["url"]["bytes"], 8);
+        let inline = stored[2].as_str().unwrap();
+        assert!(
+            inline.starts_with("<img src=\"{\"kind\":\"image\"") && inline.ends_with("\"> after"),
+            "{inline}"
+        );
     }
 
     #[test]
