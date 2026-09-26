@@ -143,6 +143,14 @@ pub fn open(home: &Path) -> Result<Connection> {
         "INTEGER NOT NULL DEFAULT 0",
     )
     .context("migrate observe cursor")?;
+    for column in [
+        "prompt_tokens",
+        "completion_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
+    ] {
+        ensure_column(&mut conn, "provider_calls", column, "INTEGER").context("migrate usage")?;
+    }
     ensure_autoincrement(&mut conn).context("migrate doc ids")?;
     ensure_fts(&mut conn).context("search index")?;
     ensure_vec(&mut conn).context("vector index")?;
@@ -963,9 +971,40 @@ pub fn record_call(
     ms: i64,
     detail: Option<&str>,
 ) -> Result<()> {
+    record_call_usage(conn, provider, outcome, ms, detail, &Usage::default())
+}
+
+/// Tokens one provider call used, as the provider reported them (None where it did not say).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Usage {
+    pub prompt: Option<i64>,
+    pub completion: Option<i64>,
+    pub cached: Option<i64>,
+    pub reasoning: Option<i64>,
+}
+
+pub fn record_call_usage(
+    conn: &Connection,
+    provider: &str,
+    outcome: &str,
+    ms: i64,
+    detail: Option<&str>,
+    usage: &Usage,
+) -> Result<()> {
     conn.execute(
-        "INSERT INTO provider_calls(ts, provider, outcome, ms, detail) VALUES(?1,?2,?3,?4,?5)",
-        params![now_ms(), provider, outcome, ms, detail],
+        "INSERT INTO provider_calls(ts, provider, outcome, ms, detail, prompt_tokens,
+           completion_tokens, cached_tokens, reasoning_tokens) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            now_ms(),
+            provider,
+            outcome,
+            ms,
+            detail,
+            usage.prompt,
+            usage.completion,
+            usage.cached,
+            usage.reasoning
+        ],
     )?;
     Ok(())
 }
