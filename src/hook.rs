@@ -53,8 +53,11 @@ fn run_io(
     mut input: impl Read,
     mut output: impl Write,
 ) -> Result<()> {
-    // Whether this call tried to write (MUST-M16): skips and filtered sessions never reach it.
+    // MUST-M16: whether this call tried to write (skips and filtered sessions never do), and
+    // whether a row was written. Only a written row shows that recording works again: a hook
+    // with nothing to capture (PreToolUse, an empty Stop) proves nothing.
     let mut tried = false;
+    let mut wrote = false;
     let result: Result<Option<String>> = (|| {
         if std::env::var_os(SKIP_ENV).is_some() {
             return Ok(None);
@@ -79,18 +82,20 @@ fn run_io(
         std::fs::create_dir_all(home)?;
         if crate::capture::PORTED.contains(&agent) {
             // Design B: nothing is injected until the manifest (milestone 2 Task 9).
-            record(
+            wrote = record(
                 &mut crate::raw::open(home)?,
                 agent,
                 event,
                 &payload,
                 db::now_ms(),
-            )?;
+            )? > 0;
             start_worker(home)?;
             return Ok(None);
         }
         let conn = db::open(home)?;
+        let before = conn.total_changes();
         let out = handle(&conn, agent, event, &payload)?;
+        wrote = conn.total_changes() > before;
         if matches!(event, "Stop" | "SessionEnd") && std::env::var_os("OBOETE_NO_SPAWN").is_none() {
             // Agents without a reliable SessionEnd need their last turn to settle first.
             spawn_observe(home, observe_wait_ms(agent));
@@ -101,10 +106,11 @@ fn run_io(
     if tried {
         // The marker lives outside the stores, so it is written when they cannot be.
         match &result {
-            Ok(_) => {
+            Ok(_) if wrote => {
                 crate::failure::prepare(home);
                 crate::failure::clear(home);
             }
+            Ok(_) => {}
             Err(e) => crate::failure::mark(home, crate::failure::classify(e)),
         }
         // Design B injects nothing at SessionStart until the manifest (Task 9), except this line.
@@ -130,14 +136,15 @@ fn run_io(
 }
 
 /// Design B (milestone 2 Task 2): the events of one hook call, appended to `raw.db` with the
-/// event's time (`now` in a hook; the fixture's in a replay).
+/// event's time (`now` in a hook; the fixture's in a replay). Returns how many were appended.
 pub fn record(
     raw: &mut crate::raw::Raw,
     agent: &str,
     event: &str,
     payload: &Value,
     ts: i64,
-) -> Result<()> {
+) -> Result<usize> {
+    let mut n = 0;
     for mut c in crate::capture::events(agent, event, payload, ts) {
         // An idless event's session is this device's own: a bare "unknown" would be one session
         // on every device once they sync (as `handle` does for v1).
@@ -145,8 +152,9 @@ pub fn record(
             c.event.session = format!("unknown-{}", raw.device());
         }
         raw.append_with_ledger(&c.event, &c.ledger)?;
+        n += 1;
     }
-    Ok(())
+    Ok(n)
 }
 
 /// The hook file `oboete setup grok` writes. While it exists, Grok delivers its own events.
@@ -813,6 +821,18 @@ mod tests {
             .unwrap();
         assert!(text.contains("recording has failed since"), "{text}");
         assert_eq!(crate::failure::since(home).map(|f| f.1), Some(first));
+    }
+
+    #[test]
+    fn a_hook_with_nothing_to_record_leaves_the_marker() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        crate::failure::mark(home, crate::failure::Class::Busy);
+        // A Stop with no reply captures nothing: it does not show that writes work again.
+        let stop = br#"{"session_id":"s"}"#;
+        let mut out = Vec::new();
+        run_io(home, "claude", "Stop", &stop[..], &mut out).unwrap();
+        assert!(crate::failure::since(home).is_some());
     }
 
     #[test]
