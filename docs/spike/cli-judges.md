@@ -46,4 +46,4 @@ Run 3 (`calib-50.panel-3.jsonl`, 100 grades, none failed or unusable; both froze
 | grok-4.7 (reported `grok-4.7-build`) | 0.838 | 92% | yes |
 | gpt-6-astra | 0.797 | 90% | yes |
 
-With eight judges the panel's Fleiss κ is 0.746 (run 2, six judges: 0.741), and claude-sonnet-5 stays at κ 0.878. Both new judges join the owner-decision panel and grade every target there, not only the ones left when OpenCode Go's window closed. gpt-6-astra is OpenAI's, like gpt-oss-120b, so the panel now has seven judges from six makers.
+With eight judges the panel's Fleiss κ is 0.746 (run 2, six judges: 0.741), and claude-sonnet-5 stays at κ 0.878. Both new judges join the owner-decision panel and grade every target there, not only the ones left when OpenCode Go's window closed. gpt-6-astra is OpenAI's, like gpt-oss-120b. So calibration has eight judges from seven makers (with claude-sonnet-5, the judge under test), and the panel that labels (`calib.PANEL`, without claude-sonnet-5) has seven judges from six makers.
