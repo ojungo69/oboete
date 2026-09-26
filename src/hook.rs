@@ -919,6 +919,52 @@ mod tests {
     }
 
     #[test]
+    fn session_start_shows_the_manifest_with_a_directive_line_taken_back() {
+        // MUST-M5 through the hook: a directive of two lines, one taken back in a later session;
+        // a new session sees the other in the fence, and a resume sees nothing again.
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cwd.path().join(".git")).unwrap();
+        std::fs::write(cwd.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let c = cwd.path().to_string_lossy().into_owned();
+        let hook = |event: &str, payload: Value| {
+            let mut out = Vec::new();
+            let input = payload.to_string();
+            run_io(home.path(), "claude", event, input.as_bytes(), &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        hook(
+            "UserPromptSubmit",
+            json!({"session_id": "s1", "cwd": c,
+                "prompt": "今後はテストを先に書いて\nコミットの前に必ず cargo fmt を通して"}),
+        );
+        hook(
+            "UserPromptSubmit",
+            json!({"session_id": "s2", "cwd": c, "prompt": "テストを先に書くのはやめて"}),
+        );
+        crate::worker::run_once(home.path()).unwrap();
+        let out = hook(
+            "SessionStart",
+            json!({"session_id": "s3", "cwd": c, "source": "startup"}),
+        );
+        let v: Value = serde_json::from_str(out.trim()).unwrap();
+        let text = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(
+            text.starts_with("<oboete-memory>")
+                && text.contains("必ず cargo fmt を通して")
+                && !text.contains("テストを先に書いて"),
+            "{text}"
+        );
+        let resumed = hook(
+            "SessionStart",
+            json!({"session_id": "s3", "cwd": c, "source": "resume"}),
+        );
+        assert_eq!(resumed, "");
+    }
+
+    #[test]
     fn a_home_that_cannot_be_made_is_reported_at_session_start() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("file"), "").unwrap();
