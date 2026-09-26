@@ -63,49 +63,130 @@ pub fn classify(e: &anyhow::Error) -> Class {
     Class::Other
 }
 
+/// What the marker holds: when the last write that succeeded ended, or the class and the first
+/// and last end times of the failures since. Hooks overlap, and one can reach the marker long
+/// after its write ended (the free-space probe takes up to 500 ms), so each transition compares
+/// these times instead of trusting the order in which hooks arrive.
+#[derive(Debug, PartialEq)]
+enum State {
+    Ok(i64),
+    Failed { class: Class, first: i64, last: i64 },
+}
+
+impl State {
+    fn parse(text: &str) -> Option<State> {
+        let mut words = text.split_whitespace();
+        match words.next()? {
+            "ok" => Some(State::Ok(
+                words.next().and_then(|t| t.parse().ok()).unwrap_or(0),
+            )),
+            "failed" => {
+                let class = Class::parse(words.next()?);
+                let first = words.next()?.parse().ok()?;
+                let last = words.next().and_then(|t| t.parse().ok()).unwrap_or(first);
+                Some(State::Failed { class, first, last })
+            }
+            _ => None,
+        }
+    }
+
+    fn text(&self) -> String {
+        padded(&match self {
+            State::Ok(at) => format!("ok {at}"),
+            State::Failed { class, first, last } => {
+                format!("failed {} {first} {last}", class.name())
+            }
+        })
+    }
+}
+
 /// After a successful write: the marker exists at its full size before any failure needs it. One
 /// cut short (a failure's own write that ran out of space) is written again whole.
 pub fn prepare(home: &Path) {
     let path = marker(home);
     if !std::fs::metadata(&path).is_ok_and(|m| m.len() == SIZE as u64) {
         let _ = std::fs::create_dir_all(home.join("state"));
-        let _ = std::fs::write(&path, padded("ok"));
+        let _ = std::fs::write(&path, State::Ok(0).text());
     }
 }
 
-/// After a failed write: the class and the first failure's time, kept until a write succeeds.
-pub fn mark(home: &Path, class: Class) {
-    if since(home).is_some() {
-        return;
-    }
+/// After a write that failed when it ended at `at`: a failure record with the class and the
+/// first failure's time, kept until a write that ends later succeeds. Nothing when a write that
+/// ended after `at` has already succeeded.
+pub fn mark(home: &Path, class: Class, at: i64) {
+    let failing = std::fs::read_to_string(marker(home))
+        .ok()
+        .and_then(|t| State::parse(&t))
+        .is_some_and(|s| matches!(s, State::Failed { .. }));
     // SQLite reports a full disk as an I/O error while it sets up its journal (SQLITE_IOERR 4874
-    // on a full tmpfs): the free space tells them apart.
-    let class = if class == Class::Io && free_bytes(home).is_some_and(|b| b < 1024 * 1024) {
-        Class::DiskFull
-    } else {
-        class
+    // on a full tmpfs): the free space tells them apart. Only a new record needs the class.
+    let class =
+        if !failing && class == Class::Io && free_bytes(home).is_some_and(|b| b < 1024 * 1024) {
+            Class::DiskFull
+        } else {
+            class
+        };
+    let new = State::Failed {
+        class,
+        first: at,
+        last: at,
     };
-    let text = padded(&format!("failed {} {}", class.name(), crate::db::now_ms()));
-    if rewrite(home, &text).is_err() {
+    let written = transition(home, |s| match s {
+        Some(State::Ok(ok)) if ok > at => None,
+        Some(State::Failed { class, first, last }) => Some(State::Failed {
+            class,
+            first,
+            last: last.max(at),
+        }),
+        _ => Some(State::Failed {
+            class,
+            first: at,
+            last: at,
+        }),
+    });
+    if written.is_err() {
         // Never prepared (the first write failed): creating it may fail on a full disk too.
         let _ = std::fs::create_dir_all(home.join("state"));
-        let _ = std::fs::write(marker(home), text);
+        let _ = std::fs::write(marker(home), new.text());
     }
 }
 
 pub fn since(home: &Path) -> Option<(Class, i64)> {
-    let text = std::fs::read_to_string(marker(home)).ok()?;
-    let mut words = text.split_whitespace();
-    (words.next()? == "failed").then_some(())?;
-    let class = Class::parse(words.next()?);
-    Some((class, words.next()?.parse().ok()?))
+    match State::parse(&std::fs::read_to_string(marker(home)).ok()?)? {
+        State::Failed { class, first, .. } => Some((class, first)),
+        State::Ok(_) => None,
+    }
 }
 
-/// After a successful write, in place.
-pub fn clear(home: &Path) {
-    if since(home).is_some() {
-        let _ = rewrite(home, &padded("ok"));
+/// After a write that succeeded when it ended at `at`, in place. Nothing when a write that ended
+/// after `at` has failed.
+pub fn clear(home: &Path, at: i64) {
+    let _ = transition(home, |s| match s {
+        Some(State::Failed { last, .. }) if last > at => None,
+        Some(State::Ok(ok)) if ok >= at => None,
+        _ => Some(State::Ok(at)),
+    });
+}
+
+/// The marker read, changed by `change` (`None` leaves it) and written back in place, under the
+/// file's lock, so two hooks cannot interleave their read and write.
+fn transition(
+    home: &Path,
+    change: impl FnOnce(Option<State>) -> Option<State>,
+) -> std::io::Result<()> {
+    use std::io::{Read, Seek, Write};
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(marker(home))?;
+    f.lock()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    if let Some(next) = change(State::parse(&String::from_utf8_lossy(&buf))) {
+        f.seek(std::io::SeekFrom::Start(0))?;
+        f.write_all(next.text().as_bytes())?;
     }
+    Ok(())
 }
 
 /// What doctor and SessionStart say while recording fails.
@@ -128,13 +209,6 @@ fn marker(home: &Path) -> PathBuf {
 
 fn padded(text: &str) -> String {
     format!("{text:<width$}\n", width = SIZE - 1)
-}
-
-/// Overwrite the existing marker from its first byte, without truncating or growing it.
-fn rewrite(home: &Path, text: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new().write(true).open(marker(home))?;
-    f.write_all(text.as_bytes())
 }
 
 /// `YYYY-MM-DD HH:MM UTC` for a Unix time in ms (days to a civil date: H. Hinnant's algorithm).
@@ -211,7 +285,7 @@ mod tests {
         for short in ["", "failed disk-full 17"] {
             std::fs::write(marker(home), short).unwrap();
             prepare(home);
-            clear(home);
+            clear(home, 1);
             assert_eq!(std::fs::metadata(marker(home)).unwrap().len(), SIZE as u64);
             assert_eq!(since(home), None);
         }
@@ -271,21 +345,37 @@ mod tests {
         prepare(home);
         assert_eq!(std::fs::metadata(marker(home)).unwrap().len(), 64);
         assert_eq!(since(home), None);
-        mark(home, Class::DiskFull);
-        let (class, first) = since(home).unwrap();
-        assert_eq!(class, Class::DiskFull);
-        assert!((crate::db::now_ms() - first).abs() < 60_000, "{first}");
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        mark(home, Class::Io);
-        assert_eq!(since(home), Some((Class::DiskFull, first)));
+        mark(home, Class::DiskFull, 1_000);
+        assert_eq!(since(home), Some((Class::DiskFull, 1_000)));
+        mark(home, Class::Io, 2_000);
+        assert_eq!(since(home), Some((Class::DiskFull, 1_000)));
         assert_eq!(std::fs::metadata(marker(home)).unwrap().len(), 64);
-        clear(home);
+        clear(home, 3_000);
         assert_eq!(since(home), None);
         assert_eq!(std::fs::metadata(marker(home)).unwrap().len(), 64);
         // A failure before any success still leaves a marker when the disk allows it.
         let fresh = tempfile::tempdir().unwrap();
-        mark(fresh.path(), Class::Busy);
+        mark(fresh.path(), Class::Busy, 5);
         assert_eq!(since(fresh.path()).map(|f| f.0), Some(Class::Busy));
+    }
+
+    #[test]
+    fn transitions_follow_when_each_write_ended_not_when_its_hook_reached_the_marker() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        prepare(home);
+        clear(home, 2_000); // a write that ended at 2,000 succeeded
+        mark(home, Class::Busy, 1_000); // one that failed earlier arrives late: not a failure now
+        assert_eq!(since(home), None);
+        mark(home, Class::Busy, 3_000);
+        clear(home, 2_500); // a success from before that failure arrives late: the failure stays
+        assert_eq!(since(home), Some((Class::Busy, 3_000)));
+        mark(home, Class::Busy, 4_000);
+        clear(home, 3_500); // still before the last failure
+        assert_eq!(since(home), Some((Class::Busy, 3_000)));
+        clear(home, 4_500);
+        assert_eq!(since(home), None);
+        assert_eq!(std::fs::metadata(marker(home)).unwrap().len(), 64);
     }
 
     #[test]

@@ -106,16 +106,18 @@ fn run_io(
         }
         Ok(out)
     })();
+    // When the store operation ended: overlapping hooks change the marker in this order.
+    let ended = db::now_ms();
     let mut out = result.as_ref().ok().cloned().flatten();
     if tried {
         // The marker lives outside the stores, so it is written when they cannot be.
         match &result {
             Ok(_) if wrote => {
                 crate::failure::prepare(home);
-                crate::failure::clear(home);
+                crate::failure::clear(home, ended);
             }
             Ok(_) => {}
-            Err(e) => crate::failure::mark(home, crate::failure::classify(e)),
+            Err(e) => crate::failure::mark(home, crate::failure::classify(e), ended),
         }
         // Design B injects nothing at SessionStart until the manifest (Task 9), except this line.
         if event == "SessionStart"
@@ -831,7 +833,7 @@ mod tests {
     fn a_hook_with_nothing_to_record_leaves_the_marker() {
         let home = tempfile::tempdir().unwrap();
         let home = home.path();
-        crate::failure::mark(home, crate::failure::Class::Busy);
+        crate::failure::mark(home, crate::failure::Class::Busy, 0);
         // A Stop with no reply captures nothing: it does not show that writes work again.
         let stop = br#"{"session_id":"s"}"#;
         let mut out = Vec::new();
@@ -843,7 +845,7 @@ mod tests {
     fn a_successful_write_clears_the_marker_and_says_nothing() {
         let home = tempfile::tempdir().unwrap();
         let home = home.path();
-        crate::failure::mark(home, crate::failure::Class::Busy);
+        crate::failure::mark(home, crate::failure::Class::Busy, 0);
         let start = br#"{"session_id":"t","source":"startup"}"#;
         let mut out = Vec::new();
         run_io(home, "claude", "SessionStart", &start[..], &mut out).unwrap();
