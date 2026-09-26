@@ -160,11 +160,33 @@ fn utc(ms: i64) -> String {
 /// ponytail: `df` instead of statvfs (no unsafe, no new dependency); Windows gets none, add
 /// GetDiskFreeSpaceExW when doctor runs there.
 pub fn free_bytes(home: &Path) -> Option<u64> {
-    let out = std::process::Command::new("df")
+    df("df".as_ref(), home)
+}
+
+/// How long `df` gets. On a stalled network or FUSE mount it can hang, and a hook calls it after
+/// a failed write: it must never block the agent (MUST-M16).
+const DF_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+fn df(program: &std::ffi::OsStr, home: &Path) -> Option<u64> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(program)
         .arg("-Pk")
         .arg(home)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
+    let deadline = std::time::Instant::now() + DF_TIMEOUT;
+    while child.try_wait().ok()?.is_none() {
+        if std::time::Instant::now() >= deadline {
+            // Not waited for: a `df` stuck in the kernel may not die at once.
+            let _ = child.kill();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let out = child.wait_with_output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let kb: u64 = text
         .lines()
@@ -179,6 +201,24 @@ pub fn free_bytes(home: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_df_that_hangs_is_given_up_on() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let stuck = dir.path().join("df");
+        std::fs::write(&stuck, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let t = std::time::Instant::now();
+        assert_eq!(df(stuck.as_os_str(), dir.path()), None);
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t.elapsed()
+        );
+        assert!(free_bytes(dir.path()).is_some()); // the real one answers
+    }
 
     fn sqlite(code: i32) -> anyhow::Error {
         anyhow::Error::new(rusqlite::Error::SqliteFailure(

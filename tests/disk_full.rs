@@ -12,6 +12,8 @@ fn a_full_disk_never_blocks_the_agent_and_is_reported() {
     let script = format!(
         r#"
         mount -t tmpfs -o size=1m tmpfs {h} || exit 77
+        # No worker: one started by a hook would write to the tmpfs while `dd` fills it.
+        export OBOETE_NO_SPAWN=1
         echo '{{"session_id":"s","prompt":"first"}}' | {b} --home {h} hook claude UserPromptSubmit
         test -f {h}/state/recording-failed || echo "no marker after the first hook"
         dd if=/dev/zero of={h}/fill bs=4k 2>/dev/null
