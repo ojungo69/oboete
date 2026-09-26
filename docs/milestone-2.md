@@ -29,6 +29,8 @@ The plan is docs/milestone-2-plan.md. The spec is docs/spec.md sections 1-2, 4.9
 - Its checkpoint moves back when it starts again, so the worker now sets any checkpoint a step returns, not only a higher one.
 - The tombstones reach the other consumers as records: the FTS consumer indexes each target again, masked. The rescan appends them before the FTS consumer reads the same batch.
 - A rewind (raw lost commits, which may include its tombstones) and a new knowledge.db (a restore moves it aside) forget the stored version, so the whole store is scanned again and the tombstones are derived again. Tombstones no rule derives (`forget`, milestone 5) will need their deletion state kept apart (#83).
+- It scans each JSON string of a body on its own, as capture scanned the fields, so a rule anchored to a field's start or end (`^`, `$`) matches as it would have at capture.
+- Reads do not wait for it. Every read path prints stored text through the egress gate with the rules as they are now: the MCP answers (#108), SessionStart's manifest (#111) and the CLI's output (`search` gates each hit's text before its snippet is cut and each label on its own; `get` gates the body field by field). So a rule hides its value on every read from the moment it is saved; the rescan then tombstones it in raw.db, the index and the next backups when a worker runs. A hit in a label (repo, branch, cwd, session) is hidden on reads but stays stored until a tombstone can target a label (#83).
 - Fixture of record (405 Claude Code and Codex records), release build, WSL: the first worker run, which scans everything once, took 0.04 s and added no tombstone; after a user rule was added, 0.06 s and 24 tombstones.
 
 ## Redaction and capture settings (Task 3b, 2026-09-27)
