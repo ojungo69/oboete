@@ -121,14 +121,14 @@ fn markers(v: &Value) -> Value {
             Value::Object(m.iter().map(|(k, x)| (k.clone(), markers(x))).collect())
         }),
         Value::Array(a) => Value::Array(a.iter().map(markers).collect()),
-        Value::String(s) => data_uris(s),
+        Value::String(s) => base64_runs(s),
         other => other.clone(),
     }
 }
 
 /// The object shapes seen in agent payloads: a content block `{type, source: {type: base64,
 /// media_type, data}}`, Claude Code's image read result `{type: <mime>, base64}`, and MCP's
-/// `{type, mimeType, data}`. OpenAI's `image_url` is a data URI string (`data_uris`).
+/// `{type, mimeType, data}`. OpenAI's `image_url` is a data URI string (`base64_runs`).
 fn binary(m: &Map<String, Value>) -> Option<Value> {
     let kind = m.get("type").and_then(Value::as_str);
     let (kind, mime, data) = if let Some(src) = m.get("source").filter(|s| s["type"] == "base64") {
@@ -146,21 +146,30 @@ fn binary(m: &Map<String, Value>) -> Option<Value> {
     Some(marker(kind, mime, data))
 }
 
-/// `data:<mime>;base64,<data>` anywhere in a string (OpenAI's `image_url`, an inline `<img>`): a
-/// whole-string URI becomes the marker object, one inside other text becomes the marker's JSON.
-fn data_uris(s: &str) -> Value {
-    static URI: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"data:([\w.+-]+/[\w.+-]+);base64,([A-Za-z0-9+/]+=*)").expect("data URI")
+/// Base64 in a string: a `data:<mime>;base64,` URI (OpenAI's `image_url`, an inline `<img>`), or
+/// any run of 1,024 or more base64 characters, whatever shape carried it (the design's length check,
+/// docs/research/redesign-2026-09-24/constraints-synthesis.md S2-25). A whole-string match becomes
+/// the marker object; one inside other text becomes the marker's JSON.
+/// ponytail: line-wrapped base64 (76 characters a line) is not caught; add when one shows up.
+fn base64_runs(s: &str) -> Value {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"data:([\w.+-]+/[\w.+-]+);base64,([A-Za-z0-9+/]+=*)|[A-Za-z0-9+/_-]{1024,}={0,2}",
+        )
+        .expect("base64 pattern")
     });
-    let found = |c: &regex::Captures| {
-        let mime = &c[1];
-        marker(mime.split('/').next().unwrap_or(mime), mime, &c[2])
+    let found = |c: &regex::Captures| match (c.get(1), c.get(2)) {
+        (Some(mime), Some(data)) => {
+            let mime = mime.as_str();
+            marker(mime.split('/').next().unwrap_or(mime), mime, data.as_str())
+        }
+        _ => marker("binary", "application/octet-stream", &c[0]),
     };
-    match URI.captures(s) {
+    match RE.captures(s) {
         None => Value::String(s.to_owned()),
         Some(c) if c[0].len() == s.len() => found(&c),
         Some(_) => Value::String(
-            URI.replace_all(s, |c: &regex::Captures| found(c).to_string())
+            RE.replace_all(s, |c: &regex::Captures| found(c).to_string())
                 .into_owned(),
         ),
     }
@@ -254,7 +263,7 @@ mod tests {
     #[test]
     fn a_long_tool_output_is_kept_whole_and_redacted_past_the_old_window() {
         let key = &format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split, as in import.rs, so secret scanners pass it
-        let out = "x".repeat(100_000) + " Authorization: Bearer " + key;
+        let out = "word ".repeat(20_000) + " Authorization: Bearer " + key;
         let e = one(
             "PostToolUse",
             json!({"session_id": "s", "cwd": "/", "tool_name": "Bash",
@@ -262,7 +271,12 @@ mod tests {
         );
         assert_eq!(e.kind, "tool");
         let b = body(&e);
-        assert!(b["output"].as_str().unwrap().contains(&"x".repeat(100_000)));
+        assert!(
+            b["output"]
+                .as_str()
+                .unwrap()
+                .contains(&"word ".repeat(20_000))
+        );
         assert!(
             !e.body.contains(key),
             "a secret past today's 12,000-character window"
@@ -424,6 +438,33 @@ mod tests {
             assert_eq!(stored[i]["sha256"].as_str().unwrap().len(), 64);
         }
         assert_eq!(stored[3]["text"], "caption");
+    }
+
+    #[test]
+    fn long_base64_in_any_shape_becomes_a_marker() {
+        let blob = "QUJD".repeat(300); // 1,200 characters
+        let e = one(
+            "PostToolUse",
+            json!({"tool_name": "mcp__x", "tool_input": {},
+                   "tool_response": {"encoding": "base64", "content": blob, "note": format!("saved {blob}.")}}),
+        );
+        assert!(!e.body.contains("QUJDQUJD"), "{}", e.body);
+        let stored: Value = serde_json::from_str(body(&e)["output"].as_str().unwrap()).unwrap();
+        assert_eq!(stored["content"]["kind"], "binary");
+        assert_eq!(stored["content"]["bytes"], 900);
+        assert!(
+            stored["note"]
+                .as_str()
+                .unwrap()
+                .starts_with("saved {\"kind\":\"binary\"")
+        );
+        // Short base64-looking text (a hash, a key id) stays.
+        let short = "a1B2".repeat(64);
+        let e = one(
+            "PostToolUse",
+            json!({"tool_name": "x", "tool_input": {}, "tool_response": short}),
+        );
+        assert!(e.body.contains(&short));
     }
 
     #[test]
