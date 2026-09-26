@@ -105,3 +105,31 @@ fn the_limit_holds_across_both_stores() {
         "{four}"
     );
 }
+
+#[test]
+fn a_rule_added_after_capture_hides_its_value_before_the_rescan_runs() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let (h, c) = (home.path(), cwd.path());
+    let payload = serde_json::json!({"session_id": "s", "prompt": "zebra acme-123456", "cwd": c});
+    oboete(
+        h,
+        c,
+        &["hook", "claude", "UserPromptSubmit"],
+        &payload.to_string(),
+    );
+    oboete(h, c, &["worker", "--idle-ms", "0"], "");
+    std::fs::write(
+        h.join("config.toml"),
+        "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+    )
+    .unwrap();
+    // No worker has run since: the value is only in raw and the index, not yet tombstoned.
+    let hit = oboete(h, c, &["search", "zebra"], "");
+    let id = hit.split_whitespace().next().unwrap().to_owned();
+    let got = oboete(h, c, &["get", &id], "");
+    assert!(
+        hit.contains("zebra") && !hit.contains("123456") && !got.contains("123456"),
+        "{hit}\n{got}"
+    );
+}

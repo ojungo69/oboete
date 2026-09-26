@@ -226,9 +226,15 @@ fn raw_get(home: &std::path::Path, id: &str) -> Result<Option<String>> {
     )))
 }
 
+/// Stored text leaves through the egress gate: the user's rules as they are now (spec 6.4), so a
+/// rule added after capture hides its value, labels included, before the rescan (Task 7b) has
+/// tombstoned it.
 fn emit(text: &str) -> Result<()> {
     use std::io::Write;
-    match std::io::stdout().lock().write_all(text.as_bytes()) {
+    match std::io::stdout()
+        .lock()
+        .write_all(redact::outbound(text).as_bytes())
+    {
         Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
         _ => Ok(()),
     }

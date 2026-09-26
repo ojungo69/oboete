@@ -156,4 +156,41 @@ mod tests {
         assert_eq!(tombstones(&raw), 1);
         assert!(!body(&raw, old).contains("acme"));
     }
+
+    #[test]
+    fn a_restore_that_skips_the_tombstone_masks_its_target_again() {
+        // #83, raised on #110: the tombstone is sealed in a later segment than its target.
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        raw.append(&raw::test_event(r#"{"prompt":"deploy acme-123456 now"}"#))
+            .unwrap();
+        crate::backup::export(p).unwrap();
+        std::fs::write(
+            p.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        worker::run_once(p).unwrap();
+        crate::backup::export(p).unwrap();
+        drop(raw);
+        let later = std::fs::read_dir(p.join("backups"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|f| f.to_string_lossy().ends_with("-000000000002.seg.zst"))
+            .unwrap();
+        std::fs::write(&later, b"damaged").unwrap();
+        std::fs::write(p.join("raw.db"), b"not a database at all").unwrap();
+        for f in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(p.join(f));
+        }
+        worker::run_once(p).unwrap(); // restores seq 1 only, then the rescan runs from seq 1
+        let raw = raw::open(p).unwrap();
+        assert!(!body(&raw, 1).contains("acme"), "{}", body(&raw, 1));
+        assert!(
+            crate::search::raw(p, "acme-123", None, 5)
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
