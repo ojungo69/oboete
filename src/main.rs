@@ -230,11 +230,14 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let query = query.join(" ");
             let scope = repo_filter(all)?;
             let mut out = String::new();
+            let mut left = limit;
             // Design B's none tier (milestone 2 Task 6): the raw index, by (device, seq). Until
             // every agent is ported (Task 2b) a home can hold both stores, and v1 commands such
             // as `timeline` create an empty oboete.db, so each store is searched when it exists.
             if home.join("raw.db").exists() {
-                for h in search::raw(&home, &query, scope.as_deref(), limit)? {
+                let hits = search::raw(&home, &query, scope.as_deref(), limit)?;
+                left -= hits.len().min(left);
+                for h in hits {
                     let repo = match (all, &h.repo) {
                         (true, Some(r)) => format!("[{}] ", r.rsplit('/').next().unwrap_or(r)),
                         _ => String::new(),
@@ -246,13 +249,13 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                     ));
                 }
             }
-            if !home.join("oboete.db").exists() {
+            if left == 0 || !home.join("oboete.db").exists() {
                 return emit(&out);
             }
             let conn = db::open(&home)?;
             let terms = search::terms(&query);
             let embedding = config::search_embedding(&home);
-            for h in search::find(&conn, &embedding, &query, scope.as_deref(), limit)? {
+            for h in search::find(&conn, &embedding, &query, scope.as_deref(), left)? {
                 let text = search::snippet(&h.body, &terms, 110);
                 let repo = if all {
                     let name = std::path::Path::new(&h.repo)
