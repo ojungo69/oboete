@@ -290,7 +290,9 @@ fn openai_compat(
         .headers()
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse::<f64>().ok());
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        // A negative, infinite or NaN wait would panic in Duration::from_secs_f64.
+        .filter(|s| s.is_finite() && *s >= 0.0);
     // Capped after decoding: a gzip answer of a few KB on the wire can decode to far more.
     let mut raw = Vec::new();
     std::io::Read::read_to_end(
@@ -308,12 +310,11 @@ fn openai_compat(
         // The body is read here and never kept: a provider can echo the prompt or its own
         // generation in it (Groq's `failed_generation`), and the message goes to provider_calls
         // and the chain's fallbacks (issue #91). Only the status and a vetted code remain.
-        let lower = text.to_ascii_lowercase();
         let mut message = format!("http {status}");
         if let Some(code) = error_code(&text) {
             message = format!("{message}: {code}");
         }
-        if lower.contains("moderat") || lower.contains("flagged") {
+        if moderation(&text) {
             message.push_str(" (moderation)");
         }
         return Err(CallError {
@@ -369,6 +370,26 @@ pub(crate) fn read_error(e: &std::io::Error) -> String {
     e.get_ref()
         .and_then(|inner| inner.downcast_ref::<ureq::Error>())
         .map_or_else(|| format!("io: {:?}", e.kind()), transport)
+}
+
+/// Whether an error body is a moderation refusal. In a JSON body only the error's own message,
+/// code and type are read: fields like `failed_generation` quote the prompt or the answer, whose
+/// words must not decide the class.
+fn moderation(body: &str) -> bool {
+    let hit = |s: &str| {
+        let s = s.to_ascii_lowercase();
+        s.contains("moderat") || s.contains("flagged")
+    };
+    match serde_json::from_str::<Value>(body) {
+        Ok(v) => {
+            let e = v.get("error").unwrap_or(&v);
+            ["message", "code", "type"]
+                .iter()
+                .filter_map(|k| e.get(*k).and_then(Value::as_str))
+                .any(hit)
+        }
+        Err(_) => hit(body),
+    }
 }
 
 /// Error codes kept from a provider's error body: only these known names, never a value the body
@@ -1109,6 +1130,44 @@ mod tests {
         .unwrap_err();
         assert!(!e.message.contains("canary"), "{}", e.message);
         assert!(e.message.starts_with("http request: "), "{}", e.message);
+        // A permission error quoting a generation that says "flagged" is not moderation.
+        let (url, _) = serve(
+            "403 Forbidden",
+            json!({"error": {"message": "not allowed for this key", "failed_generation": "the item was flagged"}})
+                .to_string()
+                .into_bytes(),
+            "",
+        );
+        let e = openai_compat(
+            &url,
+            None,
+            "m",
+            10,
+            &Default::default(),
+            &Default::default(),
+            "p",
+            &json!({}),
+        )
+        .unwrap_err();
+        assert_eq!(e.message, "http 403");
+        // A negative Retry-After is ignored, not a panic in the chain's sleep.
+        let (url, _) = serve(
+            "429 Too Many Requests",
+            b"{}".to_vec(),
+            "Retry-After: -1\r\n",
+        );
+        let e = openai_compat(
+            &url,
+            None,
+            "m",
+            10,
+            &Default::default(),
+            &Default::default(),
+            "p",
+            &json!({}),
+        )
+        .unwrap_err();
+        assert_eq!(e.retry_after_s, None);
         let flagged = CallError {
             status: Some(403),
             retry_after_s: None,
