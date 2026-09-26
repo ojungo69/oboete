@@ -199,7 +199,7 @@ impl Raw {
         let mut st = self.conn.prepare(
             "SELECT device, seq, type, ts, kind, agent, session, repo, branch, head, gitdir, cwd,
                     source, body, original_bytes,
-                    target_device, target_seq, target_offset, target_length
+                    target_device, target_seq, target_offset, target_length, enc
              FROM records WHERE device = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
         )?;
         let rows = st.query_map(
@@ -217,7 +217,17 @@ impl Raw {
                         None => Target::Record { device, seq },
                     })
                 } else {
-                    let body: Vec<u8> = r.get(13)?;
+                    let mut body: Vec<u8> = r.get(13)?;
+                    // Task 10: no reader sees `enc`.
+                    if r.get::<_, String>(19)? == "zstd" {
+                        body = unzstd(&body).map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                13,
+                                rusqlite::types::Type::Blob,
+                                Box::new(e),
+                            )
+                        })?;
+                    }
                     Item::Event(Box::new(Event {
                         ts: r.get(3)?,
                         kind: r.get(4)?,
@@ -242,6 +252,73 @@ impl Raw {
         )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+
+    /// Task 10 (spec 2.4): the plain event bodies of `device` after `after` through `through`,
+    /// rewritten as zstd (level 3) where that is smaller; (device, seq) and every label stay.
+    /// Bodies are read and compressed outside the write lock, then written in one short
+    /// transaction per batch, so a hook waits on it no longer than on another hook. Returns how
+    /// many were rewritten.
+    pub fn compress_through(&self, device: &str, after: i64, through: i64) -> Result<usize> {
+        let mut from = after;
+        let mut rewritten = 0;
+        loop {
+            let batch: Vec<(i64, Vec<u8>)> = self
+                .conn
+                .prepare(
+                    "SELECT seq, body FROM records WHERE device = ?1 AND seq > ?2 AND seq <= ?3
+                       AND type = 'event' AND enc = 'plain' ORDER BY seq LIMIT ?4",
+                )?
+                .query_map(params![device, from, through, COMPRESS_BATCH as i64], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            let Some(&(last, _)) = batch.last() else {
+                return Ok(rewritten);
+            };
+            let mut smaller = Vec::new();
+            for (seq, body) in &batch {
+                let z = zstd::bulk::compress(body, 3)?;
+                if z.len() < body.len() {
+                    smaller.push((*seq, z));
+                }
+            }
+            let tx = rusqlite::Transaction::new_unchecked(
+                &self.conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            for (seq, z) in &smaller {
+                rewritten += tx.execute(
+                    "UPDATE records SET body = ?1, enc = 'zstd'
+                     WHERE device = ?2 AND seq = ?3 AND enc = 'plain'",
+                    params![z, device, seq],
+                )?;
+            }
+            tx.commit()?;
+            from = last;
+        }
+    }
+}
+
+/// Records `compress_through` reads per batch.
+const COMPRESS_BATCH: usize = 200;
+
+/// The most a stored body may decompress to. Far above any body capture writes (each string is
+/// capped at `capture::MAX_FIELD_BYTES`); it stops a crafted frame, as a restored or synced record
+/// could carry, from expanding without bound.
+const MAX_BODY_BYTES: u64 = 64 << 20;
+
+fn unzstd(z: &[u8]) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    zstd::Decoder::new(z)?
+        .take(MAX_BODY_BYTES + 1)
+        .read_to_end(&mut out)?;
+    if out.len() as u64 > MAX_BODY_BYTES {
+        return Err(std::io::Error::other(
+            "a stored body decompresses past 64 MiB",
+        ));
+    }
+    Ok(out)
 }
 
 /// A prompt event with this body, for tests of every later consumer.
@@ -365,6 +442,15 @@ mod tests {
             .query_row("SELECT field FROM ledger", [], |x| x.get(0))
             .unwrap();
         assert_eq!(field, "/prompt");
+    }
+
+    #[test]
+    fn a_body_that_decompresses_past_the_limit_is_an_error() {
+        let bomb = zstd::bulk::compress(&vec![0u8; (MAX_BODY_BYTES + 1) as usize], 3).unwrap();
+        assert!(bomb.len() < 64 * 1024, "{}", bomb.len());
+        assert!(unzstd(&bomb).is_err());
+        let ok = zstd::bulk::compress(b"fine", 3).unwrap();
+        assert_eq!(unzstd(&ok).unwrap(), b"fine");
     }
 
     #[test]

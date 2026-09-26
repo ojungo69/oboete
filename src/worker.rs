@@ -19,7 +19,11 @@ pub trait Consumer {
 
 /// This milestone's consumers, in order.
 pub fn consumers() -> Vec<Box<dyn Consumer>> {
-    vec![Box::new(crate::consumer::fts::Fts)]
+    // Compression last: it waits for every consumer before it.
+    vec![
+        Box::new(crate::consumer::fts::Fts),
+        Box::new(crate::consumer::compress::Compress),
+    ]
 }
 
 /// Runs each consumer from its checkpoint until none advances; each step and its checkpoint move
