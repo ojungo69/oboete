@@ -138,7 +138,10 @@ fn a_rule_added_after_capture_hides_its_value_before_the_rescan_runs() {
 fn get_applies_a_rule_anchored_to_a_field_before_the_rescan_runs() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
-    let (h, c) = (home.path(), cwd.path());
+    // The repo label (a checkout's path) ends in a value the rule covers too.
+    let c = &cwd.path().join("app-acme-777777");
+    std::fs::create_dir(c).unwrap();
+    let h = home.path();
     let payload = serde_json::json!({"session_id": "s", "prompt": "zebra acme-654321", "cwd": c});
     oboete(
         h,
@@ -158,7 +161,10 @@ fn get_applies_a_rule_anchored_to_a_field_before_the_rescan_runs() {
     )
     .unwrap();
     let got = oboete(h, c, &["get", &id], "");
-    assert!(got.contains("zebra") && !got.contains("654321"), "{got}");
+    assert!(
+        got.contains("zebra") && !got.contains("654321") && !got.contains("777777"),
+        "{got}"
+    );
 }
 
 #[test]
