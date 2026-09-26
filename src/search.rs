@@ -507,6 +507,15 @@ pub fn raw(
         clauses.push("d.repo = ?".into());
         args.push(Value::Text(r.to_string()));
     }
+    // D8: a tombstone the index has not reached yet hides its target here, so no search shows
+    // what raw already hides.
+    let pending: std::collections::HashSet<(String, i64)> = if home.join("raw.db").exists() {
+        let raw = crate::raw::open(home)?;
+        let at = crate::knowledge::checkpoint::get(&k, "fts", raw.device())?;
+        raw.tombstones_after(at)?.into_iter().collect()
+    } else {
+        Default::default()
+    };
     let order = if ranked {
         "rank, d.ts DESC"
     } else {
@@ -519,16 +528,10 @@ pub fn raw(
          WHERE {} ORDER BY {order} LIMIT ?",
         clauses.join(" AND ")
     );
-    args.push(Value::Integer(sql_limit(limit)));
-    // D8: a tombstone the index has not reached yet hides its target here, so no search shows
-    // what raw already hides.
-    let pending: std::collections::HashSet<(String, i64)> = if home.join("raw.db").exists() {
-        let raw = crate::raw::open(home)?;
-        let at = crate::knowledge::checkpoint::get(&k, "fts", raw.device())?;
-        raw.tombstones_after(at)?.into_iter().collect()
-    } else {
-        Default::default()
-    };
+    // Enough rows that the hidden ones cannot take the place of visible ones.
+    args.push(Value::Integer(sql_limit(
+        limit.saturating_add(pending.len()),
+    )));
     let terms = terms(query);
     let mut stmt = k.prepare(&sql)?;
     let hits = stmt.query_map(params_from_iter(args), |r| {
@@ -544,6 +547,7 @@ pub fn raw(
     })?;
     let mut hits: Vec<RawHit> = hits.collect::<Result<_, _>>()?;
     hits.retain(|h| !pending.contains(&(h.device.clone(), h.seq)));
+    hits.truncate(limit);
     Ok(hits)
 }
 
@@ -999,6 +1003,28 @@ mod tests {
             );
             assert!(matches!(recs[1].item, Item::Removed));
         }
+    }
+
+    #[test]
+    fn a_hidden_hit_never_takes_the_place_of_a_visible_one() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut store = crate::raw::open(p).unwrap();
+        for body in ["shared lantern one", "shared lantern two"] {
+            store.append(&crate::raw::test_event(body)).unwrap();
+        }
+        crate::worker::run_once(p).unwrap();
+        let both = raw_search(p, "lantern", None);
+        assert_eq!(both.len(), 2);
+        store
+            .append_tombstone(crate::raw::Target::Record {
+                device: both[0].device.clone(),
+                seq: both[0].seq,
+            })
+            .unwrap();
+        // The index has not reached the tombstone: the top hit is hidden, the next one shown.
+        let one = raw(p, "lantern", None, 1).unwrap();
+        assert_eq!(one.iter().map(|h| h.seq).collect::<Vec<_>>(), [both[1].seq]);
     }
 
     fn raw_search(home: &std::path::Path, q: &str, repo: Option<&str>) -> Vec<RawHit> {
