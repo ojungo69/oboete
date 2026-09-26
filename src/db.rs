@@ -95,18 +95,17 @@ CREATE TABLE IF NOT EXISTS embeddings(
 CREATE INDEX IF NOT EXISTS embeddings_unindexed ON embeddings(doc) WHERE indexed = 0;
 ";
 
-pub fn open(home: &Path) -> Result<Connection> {
-    let path = home.join("oboete.db");
-    private(home, 0o700);
-    register_sqlite_vec();
-    let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+/// WAL with a 2 s busy timeout and the given `synchronous` level.
+pub(crate) fn wal(conn: &Connection, synchronous: &str) -> Result<()> {
     conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
     // Switching a file to WAL takes an exclusive lock that the busy handler does not cover:
     // openers racing on a fresh or pre-WAL file wait for each other here instead.
     let mut tries = 0;
     loop {
-        match conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;") {
-            Ok(()) => break,
+        match conn.execute_batch(&format!(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous={synchronous};"
+        )) {
+            Ok(()) => return Ok(()),
             Err(e) if tries < 50 && e.to_string().contains("locked") => {
                 tries += 1;
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -114,6 +113,14 @@ pub fn open(home: &Path) -> Result<Connection> {
             Err(e) => return Err(e).context("journal mode"),
         }
     }
+}
+
+pub fn open(home: &Path) -> Result<Connection> {
+    let path = home.join("oboete.db");
+    private(home, 0o700);
+    register_sqlite_vec();
+    let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+    wal(&conn, "NORMAL")?;
     conn.execute_batch(SCHEMA).context("schema")?;
     for file in ["oboete.db", "oboete.db-wal", "oboete.db-shm"] {
         private(&home.join(file), 0o600);
@@ -242,7 +249,7 @@ fn file_identity(meta: &std::fs::Metadata) -> String {
 /// This device's id, 8 hex digits, chosen when the store is created and again when the store
 /// turns up as another file (a `~/.oboete` copied to another machine), so two devices never share
 /// one. It prefixes ids that must be unique across devices.
-fn ensure_device(conn: &Connection, path: &Path) -> Result<()> {
+pub(crate) fn ensure_device(conn: &Connection, path: &Path) -> Result<()> {
     let here = store_file(path);
     let known: Option<String> = conn
         .query_row("SELECT value FROM meta WHERE key='store_file'", [], |r| {
@@ -722,7 +729,7 @@ const FTS_INSERT: &str =
 /// The store holds prompts and tool output from every project: owner-only whatever the umask
 /// (the directory first, so the file SQLite creates is never reachable at 0644). Best effort: a
 /// filesystem without Unix modes (a Windows drive under WSL) keeps its own rules.
-fn private(path: &Path, mode: u32) {
+pub(crate) fn private(path: &Path, mode: u32) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
