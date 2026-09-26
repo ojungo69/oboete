@@ -94,8 +94,9 @@ def test_the_repeat_is_blind_judged_only_and_waits_a_week():
     items = {i: {'id': i, 'fields': []} for i in 'abc'}
     answers = {'a': 'yes', 'b': 'unknown', 'c': 'compatible'}
     assert repeat_items(items, answers, 1_000_000, 1_000_000 + WEEK - 1) is None
-    got = repeat_items(items, answers, 1_000_000, 1_000_000 + WEEK)
+    got = repeat_items(items, answers, 1_000_000, 1_000_000 + WEEK, n=2)
     assert sorted(i['id'] for i in got) == ['ra', 'rc']
+    assert repeat_items(items, answers, 1_000_000, 1_000_000 + WEEK, n=3) is None     # only 2 judged yet
 
 
 def test_pairs_need_known_ids_in_time_order():

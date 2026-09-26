@@ -461,11 +461,12 @@ def report():
 
 
 def repeat_items(tasks_by_id, answers, last_ts, now, n=N_REPEAT):
-    """20 items the owner answered other than `unknown`, blind, with fresh ids; None before a week."""
-    if now - last_ts < WEEK:
+    """20 items the owner answered other than `unknown`, blind, with fresh ids; None before a week,
+    or while fewer than 20 such answers exist (a paused sitting)."""
+    judged = sorted((i for i, v in answers.items() if v != 'unknown'), key=lambda i: h(f'repeat:{SEED}:{i}'))
+    if now - last_ts < WEEK or len(judged) < n:
         return None
-    judged = sorted((i for i, v in answers.items() if v != 'unknown'), key=lambda i: h(f'repeat:{SEED}:{i}'))[:n]
-    return [{**tasks_by_id[i], 'id': 'r' + i} for i in judged]
+    return [{**tasks_by_id[i], 'id': 'r' + i} for i in judged[:n]]
 
 
 if __name__ == '__main__':
@@ -509,7 +510,7 @@ if __name__ == '__main__':
             last = max((ts for _, ts in answers.values()), default=None)
             chosen = repeat_items(items, {i: v for i, (v, _) in answers.items()}, last or 0, int(time.time())) if last else None
             if chosen is None:
-                sys.exit('the blind repeat opens a week after the last answer'
+                sys.exit('the blind repeat opens a week after the last answer, once 20 items are answered'
                          + (f': {time.strftime("%Y-%m-%d", time.localtime(last + WEEK))}' if last else ''))
             write_jsonl(f'{TASKS}/dev-repeat-20.jsonl', chosen)
             print(f'{len(chosen)} items -> {TASKS}/dev-repeat-20.jsonl')
