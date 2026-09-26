@@ -7,7 +7,7 @@ the owner's own message, and may always answer 判断できない; the panel of 
   draft_candidates.py pairs [max calls]       decisions       -> labels/drafts/pairs.jsonl (kept pairs stay)
   draft_candidates.py tasks                   adds items to labels/tasks/dev-decisions.jsonl and dev-pairs.jsonl
                                               until the owner's counts can be reached; rerun after a sitting
-  draft_candidates.py panel                   the five API judges: every `unknown` item, and a blind sample
+  draft_candidates.py panel                   the panel judges: every `unknown` item, and a blind sample
                                               of the owner's answered items (the overlap, #76)
   draft_candidates.py report                  counts, and the panel's agreement with the owner on the overlap
   draft_candidates.py repeat                  a week after the last answer: 20 answered items again, blind
@@ -453,7 +453,7 @@ def report():
         for r in read_jsonl(path) if os.path.exists(path) else []:
             votes.setdefault(r['id'], {})[r['judge']] = r['value'] == yes
             models.setdefault(r['judge'], set()).add(r.get('model'))
-        # A majority only from all five judges. Every target `panel` should have asked counts: one
+        # A majority only from every panel judge. Every target `panel` should have asked counts: one
         # with fewer votes, none included, is reported as missing, never quietly dropped.
         keys = [k['id'] for k in read_jsonl(f'{LABELS}/{name}.key.jsonl')]
         unknown, sample = panel_targets(keys, answers)
