@@ -99,8 +99,12 @@ def chat(member, prompt, timeout=300):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 answer = json.load(r)
-            # The model the provider says answered: an alias can move to another model.
-            return answer['choices'][0]['message'].get('content') or '', answer.get('model') or ''
+            try:
+                text = answer['choices'][0]['message'].get('content') or ''
+            except (KeyError, IndexError, TypeError, AttributeError):   # a call that failed, not an answer
+                raise ConnectionError(f'no completion in the reply: {str(answer)[:120]}') from None
+            # The model the provider says answered (an alias can move to another model); none is None.
+            return text, answer.get('model') or None
 
         except urllib.error.HTTPError as e:
             if e.code != 429 or attempt == 2:
