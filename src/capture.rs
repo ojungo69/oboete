@@ -17,7 +17,7 @@ pub const PORTED: &[&str] = &["claude", "codex"];
 /// The events one hook call of a ported agent records: none for events that carry nothing.
 pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> {
     let (kind, body) = match event {
-        "SessionStart" => ("start", json!({"source": payload.get("source")})),
+        "SessionStart" => ("start", json!({"source": payload.get("source").map(clean)})),
         "UserPromptSubmit" => {
             let prompt = strip_blocks(str_field(payload, &["prompt"]).unwrap_or(""), true);
             if prompt.is_empty() {
@@ -34,7 +34,7 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
         "PostToolUse" | "PostToolUseFailure" => (
             "tool",
             json!({
-                "tool": str_field(payload, &["tool_name", "toolName", "name"]).unwrap_or("?"),
+                "tool": without_blocks(str_field(payload, &["tool_name", "toolName", "name"]).unwrap_or("?"), false),
                 "input": text(field(payload, &["tool_input", "toolInput", "args"])),
                 "output": text(field(payload, &["tool_response", "toolResult", "tool_output", "error"])),
                 "failed": event == "PostToolUseFailure",
@@ -54,20 +54,23 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
             }
             ("reply", json!({"assistant": reply}))
         }
-        "PreCompact" => ("compaction", json!({"trigger": payload.get("trigger")})),
+        "PreCompact" => (
+            "compaction",
+            json!({"trigger": payload.get("trigger").map(clean)}),
+        ),
         "PostCompact" => {
             match str_field(payload, &["compact_summary"]).map(|s| without_blocks(s, false)) {
                 Some(s) if !s.trim().is_empty() => ("compaction", json!({"summary": s})),
                 _ => return Vec::new(),
             }
         }
-        "SessionEnd" => ("end", json!({"reason": payload.get("reason")})),
+        "SessionEnd" => ("end", json!({"reason": payload.get("reason").map(clean)})),
         _ => return Vec::new(), // PreToolUse and the rest carry nothing to keep
     };
     let cwd = str_field(payload, &["cwd"]).unwrap_or(".");
     let git = git(Path::new(cwd));
     // Labels are stored text too (spec 2.2): a path or branch can carry a token.
-    let label = gate;
+    let label = |s: &str| redact::redact(&without_blocks(s, false));
     vec![Event {
         agent: agent.into(),
         // A label only: an event without one is still this device's next seq.
@@ -86,43 +89,42 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
     }]
 }
 
-/// A tool field as text: binary content replaced by its marker, then closed `<private>`-style
-/// blocks removed (what v1's `clip` did first). `redacted` masks it with the rest of the body.
+/// A tool field as text: `clean`, then flattened. `redacted` masks it with the rest of the body.
 fn text(v: &Value) -> String {
-    without_blocks(&compact(&markers(v)), false)
+    compact(&clean(v))
 }
 
-/// Closed `<private>`-style blocks removed, then redaction: `redact::outbound` without its
-/// trim, so stored text keeps its whitespace (an indented code line), as v1's `clip` did.
-fn gate(s: &str) -> String {
-    redact::redact(&without_blocks(s, false))
-}
-
-/// `v` through `gate`: every string loses its closed `<private>`-style blocks and is
-/// redacted, so whatever a payload puts in a field (a tool name, a reason) passes the same gate as
-/// tool output (spec 2.2, every byte that is stored).
-fn redacted(v: Value) -> Value {
+/// A payload value as stored, string by string, so a block never pairs across two fields: closed
+/// `<private>`-style blocks removed without a trim (stored text keeps its whitespace, as v1's
+/// `clip` did), and base64 replaced by `{kind, mime, bytes, sha256}` (spec 2.3).
+fn clean(v: &Value) -> Value {
     match v {
-        Value::String(s) => Value::String(gate(&s)),
-        Value::Array(a) => Value::Array(a.into_iter().map(redacted).collect()),
-        Value::Object(m) => Value::Object(
-            m.into_iter()
-                .map(|(k, x)| (gate(&k), redacted(x)))
-                .collect(),
-        ),
-        other => other,
+        Value::Object(m) => binary(m).unwrap_or_else(|| {
+            Value::Object(
+                m.iter()
+                    .map(|(k, x)| (without_blocks(k, false), clean(x)))
+                    .collect(),
+            )
+        }),
+        Value::Array(a) => Value::Array(a.iter().map(clean).collect()),
+        Value::String(s) => base64_runs(&without_blocks(s, false)),
+        other => other.clone(),
     }
 }
 
-/// `v` with every base64 payload replaced by `{kind, mime, bytes, sha256}` (spec 2.3).
-fn markers(v: &Value) -> Value {
+/// `v` with every string and key redacted, whatever field it came from (spec 2.2, every byte
+/// that is stored). Blocks are gone by now: stripping here again would pair an opener left in one
+/// flattened tool field with a closer in another.
+fn redacted(v: Value) -> Value {
     match v {
-        Value::Object(m) => binary(m).unwrap_or_else(|| {
-            Value::Object(m.iter().map(|(k, x)| (k.clone(), markers(x))).collect())
-        }),
-        Value::Array(a) => Value::Array(a.iter().map(markers).collect()),
-        Value::String(s) => base64_runs(s),
-        other => other.clone(),
+        Value::String(s) => Value::String(redact::redact(&s)),
+        Value::Array(a) => Value::Array(a.into_iter().map(redacted).collect()),
+        Value::Object(m) => Value::Object(
+            m.into_iter()
+                .map(|(k, x)| (redact::redact(&k), redacted(x)))
+                .collect(),
+        ),
+        other => other,
     }
 }
 
@@ -323,6 +325,20 @@ mod tests {
         assert_eq!(
             one("UserPromptSubmit", json!({"prompt": "hi"})).session,
             "unknown"
+        );
+    }
+
+    #[test]
+    fn a_block_never_pairs_across_two_fields() {
+        let out = json!({"a": "<private>x", "b": "y</private>", "keep": "z", "c": "<private>gone</private>!"});
+        let e = one(
+            "PostToolUse",
+            json!({"tool_name": "t", "tool_input": {}, "tool_response": out}),
+        );
+        let stored: Value = serde_json::from_str(body(&e)["output"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            stored,
+            json!({"a": "<private>x", "b": "y</private>", "keep": "z", "c": "!"})
         );
     }
 
