@@ -66,19 +66,19 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
     };
     let cwd = str_field(payload, &["cwd"]).unwrap_or(".");
     let git = git(Path::new(cwd));
+    // Labels are stored text too (spec 2.2): a path or branch can carry a token.
+    let label = |s: &str| redact::redact(s);
     vec![Event {
         agent: agent.into(),
         // A label only: an event without one is still this device's next seq.
-        session: str_field(payload, &["session_id", "sessionId"])
-            .unwrap_or("unknown")
-            .into(),
+        session: label(str_field(payload, &["session_id", "sessionId"]).unwrap_or("unknown")),
         kind: kind.into(),
         ts,
-        repo: Some(repo::key(Path::new(cwd))),
-        branch: git.branch,
-        head: git.head,
-        gitdir: git.gitdir,
-        cwd: Some(cwd.into()),
+        repo: Some(label(&repo::key(Path::new(cwd)))),
+        branch: git.branch.as_deref().map(label),
+        head: git.head.as_deref().map(label),
+        gitdir: git.gitdir.as_deref().map(label),
+        cwd: Some(label(cwd)),
         source: "hook".into(),
         body: body.to_string(),
         original_bytes: None,
@@ -287,6 +287,25 @@ mod tests {
         assert_eq!(body(&e)["summary"], "sum");
         let only_private = json!({"last_assistant_message": "<private>all</private>"});
         assert!(events("claude", "Stop", &only_private, 0).is_empty());
+    }
+
+    #[test]
+    fn labels_are_redacted_too() {
+        let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join(format!("Bearer {token}"));
+        std::fs::create_dir(&cwd).unwrap();
+        let e = one(
+            "SessionStart",
+            json!({"session_id": format!("Authorization: Bearer {token}"), "cwd": cwd}),
+        );
+        for field in [Some(&e.session), e.cwd.as_ref(), e.repo.as_ref()] {
+            let field = field.unwrap();
+            assert!(
+                !field.contains(&token) && field.contains("[REDACTED]"),
+                "{field}"
+            );
+        }
     }
 
     #[test]
