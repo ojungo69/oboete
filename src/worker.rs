@@ -1,8 +1,8 @@
 //! Design B's worker (docs/milestone-2-plan.md D6, D10; MUST-M14): one per home, started by hooks,
 //! it runs this milestone's consumers over `raw.db` in seq order and exits when idle.
 
-use crate::knowledge::{self, checkpoint};
-use crate::raw::{self, Raw};
+use crate::knowledge::checkpoint;
+use crate::raw::Raw;
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
@@ -96,14 +96,19 @@ pub fn run_with(
     let Some(mut held) = lock(home)? else {
         return Ok(());
     };
-    let raw = raw::open(home)?;
-    let mut k = knowledge::open(home)?;
-    // ponytail: a failed check stops the worker with an error until Task 8 restores from backup.
-    raw.quick_check()?;
-    crate::db::quick_check(&k, "knowledge.db")?;
+    // Task 8: a damaged raw.db is restored from the backups, a damaged knowledge.db rebuilt.
+    let raw = crate::backup::open_raw(home)?;
+    let mut k = crate::backup::open_knowledge(home)?;
     checkpoint::rewind(&raw, &k, &mut consumers)?;
+    // ponytail: D11's 30-minute deadline in memory; every idle exit backs up too, so a lost
+    // deadline only brings the next backup forward.
+    let mut next_backup = Instant::now() + crate::backup::EVERY;
     loop {
         drain(&raw, &mut k, &mut consumers)?;
+        if Instant::now() >= next_backup {
+            crate::backup::run(home, &raw);
+            next_backup = Instant::now() + crate::backup::EVERY;
+        }
         let seen = raw.max_seq()?;
         let deadline = Instant::now() + Duration::from_millis(idle_ms);
         let mut more = false;
@@ -117,6 +122,8 @@ pub fn run_with(
         if more {
             continue;
         }
+        // Under the lock: a worker started after the release cannot export the same seqs.
+        crate::backup::run(home, &raw);
         drop(held);
         before_exit();
         if !behind(&raw, &k, &consumers)? {
@@ -142,6 +149,7 @@ pub fn run_once(home: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::knowledge;
     use crate::raw;
 
     /// A consumer that writes each seq it sees into knowledge.db, so these tests need no index

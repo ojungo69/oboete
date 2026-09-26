@@ -1641,6 +1641,10 @@ pub fn doctor(home: &Path) -> Result<()> {
             println!("  rewound after lost commits: {n} time(s), last {last}");
         }
     }
+    let (backup, backup_well) = crate::backup::doctor(home);
+    for l in &backup {
+        println!("  {l}");
+    }
     if db_path.exists() {
         let conn = db::open(home)?;
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
@@ -1815,6 +1819,9 @@ pub fn doctor(home: &Path) -> Result<()> {
     }
     if capture.is_err() {
         unhealthy.push("capture settings are wrong");
+    }
+    if !backup_well {
+        unhealthy.push("backups or raw.db need attention (see above)");
     }
     // Red: a script (or the owner) sees it in the exit code, not only in the text.
     anyhow::ensure!(unhealthy.is_empty(), "{}", unhealthy.join(", "));

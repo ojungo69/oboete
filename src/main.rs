@@ -3,6 +3,7 @@
 //! M0 spike: Claude Code hook capture → SQLite → summarizer chain with
 //! fallback → SessionStart injection. See docs/plan.md.
 
+mod backup;
 mod capture;
 mod config;
 mod consumer;
@@ -67,6 +68,9 @@ enum Cmd {
         #[arg(long, default_value_t = 60_000)]
         idle_ms: u64,
     },
+    /// Rebuild raw.db from the backup segments (MUST-M15); the current file is kept aside.
+    /// The worker does this by itself when raw.db is damaged.
+    Restore,
     /// Print the context that would be injected for the current directory
     Inject,
     /// Serve the memory as an MCP server on stdin/stdout (search / get / timeline tools)
@@ -427,6 +431,14 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             )?)
         }
         Cmd::Doctor => setup::doctor(&home),
+        Cmd::Restore => {
+            // The worker's lock, so no worker reads raw.db while it is replaced.
+            let _held = worker::lock(&home)?.ok_or_else(|| {
+                anyhow::anyhow!("a worker is running; try again when it has exited")
+            })?;
+            println!("{}", backup::restore(&home)?);
+            Ok(())
+        }
         Cmd::View { port, open } => view::run(&home, port, open),
         Cmd::Replay {
             fixture,
