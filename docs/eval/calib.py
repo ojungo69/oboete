@@ -99,11 +99,12 @@ def chat(member, prompt, timeout=300):
             'Authorization': f'Bearer {key}', 'Content-Type': 'application/json', 'User-Agent': 'oboete-eval', **headers})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                answer = json.load(r)
+                body = r.read()
             try:
+                answer = json.loads(body)
                 text = answer['choices'][0]['message'].get('content') or ''
-            except (KeyError, IndexError, TypeError, AttributeError):   # a call that failed, not an answer
-                raise ConnectionError(f'no completion in the reply: {str(answer)[:120]}') from None
+            except (ValueError, KeyError, IndexError, TypeError, AttributeError):   # a failed call, not an answer
+                raise ConnectionError(f'no completion in the reply: {body[:120]!r}') from None
             # The model the provider says answered (an alias can move to another model); none is None.
             return text, answer.get('model') or None
 
