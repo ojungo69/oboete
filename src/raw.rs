@@ -68,6 +68,9 @@ pub enum Target {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     Event(Box<Event>),
+    /// An event a tombstone targets whole: its seq stays, its body never leaves `raw.rs`
+    /// (written from milestone 2 Task 7 on).
+    Removed,
     Tombstone(Target),
 }
 
@@ -255,7 +258,7 @@ mod tests {
             .into_iter()
             .map(|rec| match rec.item {
                 Item::Event(e) => e.body,
-                Item::Tombstone(_) => unreachable!(),
+                Item::Removed | Item::Tombstone(_) => unreachable!(),
             })
             .collect();
         assert_eq!(bodies.len(), 100);
