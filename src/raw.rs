@@ -276,7 +276,12 @@ impl Raw {
                 return Ok(rewritten);
             };
             let mut smaller = Vec::new();
-            for (seq, body) in &batch {
+            // A body above what `unzstd` returns stays plain: capture caps each string, not a
+            // whole body, and a compressed body must always read back.
+            for (seq, body) in batch
+                .iter()
+                .filter(|(_, b)| b.len() as u64 <= MAX_BODY_BYTES)
+            {
                 let z = zstd::bulk::compress(body, 3)?;
                 if z.len() < body.len() {
                     smaller.push((*seq, z));
@@ -302,9 +307,8 @@ impl Raw {
 /// Records `compress_through` reads per batch.
 const COMPRESS_BATCH: usize = 200;
 
-/// The most a stored body may decompress to. Far above any body capture writes (each string is
-/// capped at `capture::MAX_FIELD_BYTES`); it stops a crafted frame, as a restored or synced record
-/// could carry, from expanding without bound.
+/// The most a stored body may decompress to, so a crafted frame, as a restored or synced record
+/// could carry, cannot expand without bound. `compress_through` leaves larger bodies plain.
 const MAX_BODY_BYTES: u64 = 64 << 20;
 
 fn unzstd(z: &[u8]) -> std::io::Result<Vec<u8>> {
@@ -442,6 +446,19 @@ mod tests {
             .query_row("SELECT field FROM ledger", [], |x| x.get(0))
             .unwrap();
         assert_eq!(field, "/prompt");
+    }
+
+    #[test]
+    fn a_body_above_the_decode_limit_stays_plain_and_reads_back() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let big = "a".repeat(MAX_BODY_BYTES as usize + 1);
+        raw.append(&test_event(&big)).unwrap();
+        raw.append(&test_event(&"b".repeat(1000))).unwrap();
+        let device = raw.device().to_owned();
+        assert_eq!(raw.compress_through(&device, 0, 2).unwrap(), 1); // only the second
+        let recs = raw.after(&device, 0, 2).unwrap();
+        assert!(matches!(&recs[0].item, Item::Event(e) if e.body.len() == big.len()));
     }
 
     #[test]
