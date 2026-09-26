@@ -160,3 +160,31 @@ fn get_applies_a_rule_anchored_to_a_field_before_the_rescan_runs() {
     let got = oboete(h, c, &["get", &id], "");
     assert!(got.contains("zebra") && !got.contains("654321"), "{got}");
 }
+
+#[test]
+fn search_applies_a_rule_anchored_to_a_field_to_every_hit() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let (h, c) = (home.path(), cwd.path());
+    for (s, v) in [("s1", "111111"), ("s2", "222222")] {
+        let payload =
+            serde_json::json!({"session_id": s, "prompt": format!("zebra acme-{v}"), "cwd": c});
+        oboete(
+            h,
+            c,
+            &["hook", "claude", "UserPromptSubmit"],
+            &payload.to_string(),
+        );
+    }
+    oboete(h, c, &["worker", "--idle-ms", "0"], "");
+    std::fs::write(
+        h.join("config.toml"),
+        "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}$' }]\n",
+    )
+    .unwrap();
+    let hits = oboete(h, c, &["search", "zebra"], "");
+    assert!(
+        hits.lines().count() == 2 && !hits.contains("111111") && !hits.contains("222222"),
+        "{hits}"
+    );
+}

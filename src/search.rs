@@ -569,7 +569,8 @@ pub fn raw(
             kind: r.get(2)?,
             when: r.get(6)?,
             repo: r.get(4)?,
-            snippet: snippet(&text, &terms, 110),
+            // Gated before the snippet is cut, field by field (the index holds one per line).
+            snippet: snippet(&crate::redact::outbound_lines(&text), &terms, 110),
         })
     })?;
     let mut hits: Vec<RawHit> = hits.collect::<Result<_, _>>()?;

@@ -878,6 +878,16 @@ pub fn field_ranges(body: &str, rules: &Rules) -> Vec<(usize, usize)> {
         .collect()
 }
 
+/// The egress gate on indexed text (field values one per line): whole, then line by line, so a
+/// rule anchored to a field's end (`$`) matches each field as capture's did.
+pub fn outbound_lines(text: &str) -> String {
+    outbound(text)
+        .split('\n')
+        .map(outbound)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The egress gate on a stored body, field by field as capture scanned it.
 pub fn outbound_fields(body: &str) -> String {
     let mut out = String::with_capacity(body.len());

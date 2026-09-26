@@ -293,8 +293,12 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 let hits = search::raw(&home, &query, scope.as_deref(), limit)?;
                 left -= hits.len().min(left);
                 for h in hits {
+                    // Each stored field through the gate on its own, before the lines are joined.
                     let repo = match (all, &h.repo) {
-                        (true, Some(r)) => format!("[{}] ", r.rsplit('/').next().unwrap_or(r)),
+                        (true, Some(r)) => {
+                            let r = redact::outbound(r);
+                            format!("[{}] ", r.rsplit('/').next().unwrap_or(&r))
+                        }
                         _ => String::new(),
                     };
                     let device: String = h.device.chars().take(8).collect();
@@ -311,7 +315,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let terms = search::terms(&query);
             let embedding = config::search_embedding(&home);
             for h in search::find(&conn, &embedding, &query, scope.as_deref(), left)? {
-                let text = search::snippet(&h.body, &terms, 110);
+                let text = search::snippet(&redact::outbound(&h.body), &terms, 110);
                 let repo = if all {
                     let name = std::path::Path::new(&h.repo)
                         .file_name()
