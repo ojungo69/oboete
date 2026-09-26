@@ -237,24 +237,31 @@ def rendered(s):
 
 
 def decisions(budget):
-    out = []
+    out, n = [], 0
     for s in dev_sessions():
         lines = rendered(s)
         repo = read_jsonl(f'{DRAFTS}/rendered/{s["session"]}.repo.jsonl')[0]['repo']
         ts = {lid: t for lid, t, _ in lines}
-        seen = set()
+        seen, kept = set(), set()
         for w in windows(lines):
             answer = ask(DECISIONS_PROMPT.format(text='\n'.join(f'[{lid}] {t}' for lid, _, t in w)), budget)
             if answer is None:
                 print(f'call budget spent; rerun to continue (at {s["session"]})')
                 return out, False
+            # A message in the overlap was read by the window before; this window adds decisions on it
+            # only when that one found none (the same decision comes back with another quote).
+            before = set(kept)
             for d in valid_decisions(answer.get('decisions') or [], w):
                 if (d['line'], d['quote']) not in seen:
                     seen.add((d['line'], d['quote']))
+                    n += 1          # ids stay those of the drafts written before this rule
+                    if d['prompt_line'] in before:
+                        continue
+                    kept.add(d['prompt_line'])
                     # A decision is made at the developer's own message: an accepted proposal when it
                     # is accepted, and a decision the drafter cited from a later restatement when it was said.
                     at = ts[d['prompt_line']]
-                    out.append({'id': f'd{len(out) + 1}', 'session': s['session'], 'repo': repo, 'ts': at, **d})
+                    out.append({'id': f'd{n}', 'session': s['session'], 'repo': repo, 'ts': at, **d})
     return out, True
 
 

@@ -155,3 +155,19 @@ def test_panel_parses_the_text_of_each_completion(monkeypatch, tmp_path):
     draft_candidates.panel()
     rows = [json.loads(l) for l in (tmp_path / 'dev-decisions.panel.jsonl').read_text().splitlines()]
     assert [(r['judge'], r['value'], r['model']) for r in rows] == [('j1', 'yes', 'j1-model'), ('j2', 'yes', 'j2-model')]
+
+
+def test_a_message_read_by_two_windows_gives_its_decisions_once(monkeypatch, tmp_path):
+    lines = [('L1', 't1', 'USER: キャッシュは SQLite に置く'), ('L2', 't2', 'USER: 同期は 45 秒ごとに行う')]
+    (tmp_path / 'rendered').mkdir()
+    (tmp_path / 'rendered' / 's.repo.jsonl').write_text('{"repo": "r"}\n')
+    monkeypatch.setattr(draft_candidates, 'DRAFTS', str(tmp_path))
+    monkeypatch.setattr(draft_candidates, 'dev_sessions', lambda: [{'session': 's'}])
+    monkeypatch.setattr(draft_candidates, 'rendered', lambda s: lines)
+    monkeypatch.setattr(draft_candidates, 'windows', lambda ls: [ls[:1], ls])       # L1 is in both windows
+    d = lambda line, quote: {'line': line, 'prompt_line': line, 'quote': quote, 'who': 'user', 'statement': quote, 'topic': 't'}
+    answers = iter([{'decisions': [d('L1', 'キャッシュは SQLite')]},
+                    {'decisions': [d('L1', 'SQLite に置く'), d('L2', '同期は 45 秒ごとに行う')]}])       # L1 again, another quote
+    monkeypatch.setattr(draft_candidates, 'ask', lambda prompt, budget: next(answers))
+    got, complete = draft_candidates.decisions({'left': 9})
+    assert complete and [(x['id'], x['quote']) for x in got] == [('d1', 'キャッシュは SQLite'), ('d3', '同期は 45 秒ごとに行う')]
