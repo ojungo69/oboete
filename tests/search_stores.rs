@@ -49,6 +49,29 @@ fn raw_hits_stay_found_after_a_v1_command_creates_oboete_db() {
 }
 
 #[test]
+fn a_raw_hit_id_from_search_opens_with_get() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let (h, c) = (home.path(), cwd.path());
+    let payload = serde_json::json!({"session_id": "s", "prompt": "zebra plan", "cwd": c});
+    oboete(
+        h,
+        c,
+        &["hook", "claude", "UserPromptSubmit"],
+        &payload.to_string(),
+    );
+    oboete(h, c, &["worker", "--idle-ms", "0"], "");
+    let hit = oboete(h, c, &["search", "zebra"], "");
+    let id = hit.split_whitespace().next().unwrap().to_owned();
+    let got = oboete(h, c, &["get", &id], "");
+    assert!(
+        got.starts_with(&id) && got.contains("zebra plan"),
+        "{hit}\n{got}"
+    );
+    assert!(!h.join("oboete.db").exists()); // a raw-only home stays one
+}
+
+#[test]
 fn the_limit_holds_across_both_stores() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();

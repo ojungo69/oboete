@@ -185,6 +185,42 @@ fn repo_filter(all: bool) -> Result<Option<String>> {
 
 /// Listing output. Piped into `head`, stdout closes early; that is not an error. Anything
 /// else (a full disk behind a redirect) is.
+/// A raw hit's id as `oboete search` prints it, `<device>:<seq>` (milestone 2 Task 6): the event
+/// with its time, kind and repo. `None` for any other id, or one raw does not hold, which then
+/// goes to v1's store (whose synced uids also hold a colon).
+fn raw_get(home: &std::path::Path, id: &str) -> Result<Option<String>> {
+    let Some((device, seq)) = id.split_once(':') else {
+        return Ok(None);
+    };
+    let Ok(seq) = seq.parse::<i64>() else {
+        return Ok(None);
+    };
+    if seq < 1 || !home.join("raw.db").exists() {
+        return Ok(None);
+    }
+    let raw = raw::open(home)?;
+    let Some(r) = raw
+        .after(device, seq - 1, 1)?
+        .pop()
+        .filter(|r| r.seq == seq)
+    else {
+        return Ok(None);
+    };
+    let raw::Item::Event(e) = r.item else {
+        return Ok(None);
+    };
+    let when: String = rusqlite::Connection::open_in_memory()?.query_row(
+        "SELECT strftime('%Y-%m-%d %H:%M', ?1 / 1000, 'unixepoch', 'localtime')",
+        [e.ts],
+        |r| r.get(0),
+    )?;
+    let repo = e.repo.as_deref().unwrap_or("");
+    Ok(Some(format!(
+        "{id} {when} {} {repo}\n\n{}\n",
+        e.kind, e.body
+    )))
+}
+
 fn emit(text: &str) -> Result<()> {
     use std::io::Write;
     match std::io::stdout().lock().write_all(text.as_bytes()) {
@@ -278,10 +314,15 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             emit(&out)
         }
         Cmd::Get { id } => {
+            if let Some(text) = raw_get(&home, &id)? {
+                return emit(&text);
+            }
+            let missing = || anyhow::anyhow!("no document {id} (ids come from `oboete search`)");
+            if !home.join("oboete.db").exists() {
+                return Err(missing());
+            }
             let conn = db::open(&home)?;
-            let h = search::get(&conn, &id)?.ok_or_else(|| {
-                anyhow::anyhow!("no document {id} (ids come from `oboete search`)")
-            })?;
+            let h = search::get(&conn, &id)?.ok_or_else(missing)?;
             let title = if h.title.is_empty() {
                 String::new()
             } else {
