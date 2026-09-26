@@ -10,11 +10,21 @@ use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub struct Manifest;
+pub struct Manifest {
+    home: PathBuf,
+}
+
+impl Manifest {
+    pub fn new(home: &Path) -> Self {
+        Self {
+            home: home.to_owned(),
+        }
+    }
+}
 
 /// Records per step, as the FTS consumer.
 const BATCH: usize = 500;
@@ -51,6 +61,8 @@ fn schema(k: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS manifests(
            repo TEXT NOT NULL, branch TEXT NOT NULL, device TEXT NOT NULL,
            built_at INTEGER NOT NULL, text TEXT NOT NULL,
+           -- The ruleset version its fields were gated with (Task 3b).
+           ruleset TEXT NOT NULL DEFAULT '',
            PRIMARY KEY (repo, branch, device)
          );
          -- Checkouts whose facts changed since their manifest was built.
@@ -66,6 +78,8 @@ fn schema(k: &Connection) -> Result<()> {
 /// hook never writes knowledge.db, and none is made when the worker has not run yet.
 /// None while the saved text may show what raw now hides (D8): a tombstone the worker has not
 /// applied yet, or a checkout still marked for a rebuild.
+/// None too when it was built under other redaction rules than `ruleset` (the version now): its
+/// fields were flattened and clipped, so a rule of another shape cannot be applied to it after.
 /// The session it is shown to is left out of "Other active sessions" (after a compaction the
 /// text was built while that session was running).
 pub fn text(
@@ -74,6 +88,7 @@ pub fn text(
     repo: &str,
     branch: &str,
     session: &str,
+    ruleset: &str,
 ) -> Result<Option<String>> {
     let device = raw.device();
     let path = home.join("knowledge.db");
@@ -104,14 +119,16 @@ pub fn text(
     if dirty || !raw.tombstones_after(device, at)?.is_empty() {
         return Ok(None);
     }
-    let text: Option<String> = k
+    let text: Option<(String, String)> = k
         .query_row(
-            "SELECT text FROM manifests WHERE repo = ?1 AND branch = ?2 AND device = ?3",
+            "SELECT text, ruleset FROM manifests WHERE repo = ?1 AND branch = ?2 AND device = ?3",
             params![repo, branch, device],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    Ok(text.map(|t| without_session(&t, session)))
+    Ok(text
+        .filter(|(_, built)| built == ruleset)
+        .map(|(t, _)| without_session(&t, session)))
 }
 
 /// `text` without its line for `session` under "Other active sessions" (and the heading, when
@@ -178,9 +195,20 @@ impl Consumer for Manifest {
                 Item::Removed => {}
             }
         }
-        // A backlog is built once, at its end, not once per batch.
+        // A backlog is built once, at its end, not once per batch. Each field is gated with the
+        // rules as they are now before it is flattened and clipped, and a text built under other
+        // rules is built again. Settings that do not load stop capture too (doctor names them):
+        // the bundled rules then.
         if recs.len() < BATCH {
-            rebuild(raw, k, device)?;
+            let rules = crate::capture::Settings::load(&self.home)
+                .map(|s| s.rules)
+                .unwrap_or_default();
+            k.execute(
+                "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device)
+                 SELECT repo, branch, device FROM manifests WHERE device = ?1 AND ruleset != ?2",
+                params![device, rules.version()],
+            )?;
+            rebuild(raw, k, device, &rules)?;
         }
         Ok(recs.last().map_or(after, |r| r.seq))
     }
@@ -325,9 +353,9 @@ fn failed(body: &Value) -> bool {
     code.is_some_and(|c| c != 0)
 }
 
-/// A todo list's items as `[status] text`: Claude Code's TodoWrite (`todos`) or Codex's
+/// A todo list's items as (status, text): Claude Code's TodoWrite (`todos`) or Codex's
 /// `update_plan` (`plan`).
-fn todos(input: &Value) -> Option<Vec<String>> {
+fn todos(input: &Value) -> Option<Vec<(String, String)>> {
     let (items, text) = match (input.get("todos"), input.get("plan")) {
         (Some(Value::Array(a)), _) => (a, "content"),
         (_, Some(Value::Array(a))) => (a, "step"),
@@ -336,13 +364,7 @@ fn todos(input: &Value) -> Option<Vec<String>> {
     Some(
         items
             .iter()
-            .map(|i| {
-                format!(
-                    "[{}] {}",
-                    str_at(i, "status"),
-                    one_line(str_at(i, text), CLIP)
-                )
-            })
+            .map(|i| (str_at(i, "status").to_owned(), str_at(i, text).to_owned()))
             .collect(),
     )
 }
@@ -408,18 +430,26 @@ fn one_line(s: &str, n: usize) -> String {
 }
 
 /// Every dirty checkout of this device built again (or its row removed when no record is left).
-fn rebuild(raw: &Raw, k: &Connection, device: &str) -> Result<()> {
+fn rebuild(raw: &Raw, k: &Connection, device: &str, rules: &crate::redact::Rules) -> Result<()> {
     let dirty: Vec<(String, String)> = k
         .prepare("SELECT repo, branch FROM manifest_dirty WHERE device = ?1 ORDER BY repo, branch")?
         .query_map([device], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     for (repo, branch) in dirty {
-        match build(raw, k, device, &repo, &branch)? {
+        match build(raw, k, device, &repo, &branch, rules)? {
             Some(text) => k.execute(
-                "INSERT INTO manifests(repo, branch, device, built_at, text) VALUES(?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO manifests(repo, branch, device, built_at, text, ruleset)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(repo, branch, device) DO UPDATE SET built_at = excluded.built_at,
-                   text = excluded.text",
-                params![repo, branch, device, crate::db::now_ms(), text],
+                   text = excluded.text, ruleset = excluded.ruleset",
+                params![
+                    repo,
+                    branch,
+                    device,
+                    crate::db::now_ms(),
+                    text,
+                    rules.version()
+                ],
             )?,
             None => k.execute(
                 "DELETE FROM manifests WHERE repo = ?1 AND branch = ?2 AND device = ?3",
@@ -455,7 +485,10 @@ fn build(
     device: &str,
     repo: &str,
     branch: &str,
+    rules: &crate::redact::Rules,
 ) -> Result<Option<String>> {
+    // Every stored field it shows is gated before it is flattened or clipped.
+    let gate = |s: &str| crate::redact::outbound_with(s, rules);
     let last = |fact: &str| -> Result<Option<i64>> {
         Ok(k.query_row(
             "SELECT MAX(seq) FROM manifest_facts
@@ -513,8 +546,8 @@ fn build(
         p.failing = Some(format!(
             "{}: {}\n  failed with: {}",
             str_at(&b, "tool"),
-            one_line(&what_ran(str_at(&b, "input")), CLIP),
-            one_line(str_at(&b, "output"), CLIP)
+            one_line(&gate(&what_ran(str_at(&b, "input"))), CLIP),
+            one_line(&gate(str_at(&b, "output")), CLIP)
         ));
     }
     let mut owner: Vec<(i64, String, i64)> = k
@@ -532,8 +565,8 @@ fn build(
     let mut lines = Vec::new();
     for (seq, session, ts) in owner {
         if let Some(e) = event(raw, device, seq)? {
-            let b = body(&e);
-            for text in str_at(&b, "prompt").split(['\n', '。']).map(str::trim) {
+            let prompt = gate(str_at(&body(&e), "prompt"));
+            for text in prompt.split(['\n', '。']).map(str::trim) {
                 if manifest::is_owner_line(text) {
                     lines.push(Line {
                         date: crate::db::utc(ts)[..10].to_owned(),
@@ -562,6 +595,7 @@ fn build(
             .unwrap_or_default()
             .into_iter()
             .take(TODOS)
+            .map(|(status, text)| format!("[{status}] {}", one_line(&gate(&text), CLIP)))
             .collect();
     }
     if let Some(e) = last("prompt")?
@@ -569,14 +603,14 @@ fn build(
         .transpose()?
         .flatten()
     {
-        p.last_prompt = Some(one_line(str_at(&body(&e), "prompt"), CLIP));
+        p.last_prompt = Some(one_line(&gate(str_at(&body(&e), "prompt")), CLIP));
     }
     if let Some(e) = last("reply")?
         .map(|s| event(raw, device, s))
         .transpose()?
         .flatten()
     {
-        p.last_reply = Some(one_line(str_at(&body(&e), "assistant"), CLIP));
+        p.last_reply = Some(one_line(&gate(str_at(&body(&e), "assistant")), CLIP));
     }
     p.files = k
         .prepare(
@@ -585,6 +619,7 @@ fn build(
              GROUP BY label ORDER BY MAX(seq) DESC LIMIT ?4",
         )?
         .query_map(params![device, repo, branch, FILES as i64], |r| r.get(0))?
+        .map(|f| f.map(|f: String| gate(&f)))
         .collect::<rusqlite::Result<_>>()?;
     // Sessions on the repo with records in the 30 minutes before as-of that have not ended. One
     // aggregate, so SQLite takes the branch and time from the session's last record.
@@ -608,8 +643,12 @@ fn build(
             .optional()?
             .is_some();
         if !ended && p.others.len() < SESSIONS {
-            let short = short(&session);
-            let on = if on.is_empty() { "no branch" } else { &on };
+            let short = short(&gate(&session));
+            let on = if on.is_empty() {
+                "no branch".to_owned()
+            } else {
+                gate(&on)
+            };
             p.others.push(format!(
                 "session {short} on {on}, last at {}",
                 &crate::db::utc(ts)[11..]
@@ -881,21 +920,22 @@ mod tests {
         assert_eq!(manifest(home.path()).0, first);
     }
 
+    /// The manifest SessionStart shows for checkout (r, main) under the rules the home has now.
+    fn shown(home: &Path, store: &Raw) -> Option<String> {
+        let rules = crate::capture::Settings::load(home).unwrap().rules;
+        text(home, store, "r", "main", "none", rules.version()).unwrap()
+    }
+
     #[test]
     fn session_start_reads_the_manifest_without_writing_knowledge_db() {
         let home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let store = raw::open(home.path()).unwrap();
-        assert_eq!(
-            text(home.path(), &store, "r", "main", "none").unwrap(),
-            None
-        );
+        assert_eq!(shown(home.path(), &store), None);
         assert!(!home.path().join("knowledge.db").exists());
         session(home.path(), cwd.path());
         worker::run_once(home.path()).unwrap();
-        let shown = text(home.path(), &store, "r", "main", "none")
-            .unwrap()
-            .unwrap();
+        let shown = shown(home.path(), &store).unwrap();
         assert_eq!(shown, manifest(home.path()).0);
     }
 
@@ -907,12 +947,7 @@ mod tests {
         worker::run_once(home.path()).unwrap();
         let mut store = raw::open(home.path()).unwrap();
         let device = store.device().to_owned();
-        assert!(
-            text(home.path(), &store, "r", "main", "none")
-                .unwrap()
-                .unwrap()
-                .contains("look at it")
-        );
+        assert!(shown(home.path(), &store).unwrap().contains("look at it"));
         let seq = store
             .after(&device, 0, 100)
             .unwrap()
@@ -927,14 +962,9 @@ mod tests {
             })
             .unwrap();
         // No worker step yet: the saved text still has the prompt, so none is shown.
-        assert_eq!(
-            text(home.path(), &store, "r", "main", "none").unwrap(),
-            None
-        );
+        assert_eq!(shown(home.path(), &store), None);
         worker::run_once(home.path()).unwrap();
-        let shown = text(home.path(), &store, "r", "main", "none")
-            .unwrap()
-            .unwrap();
+        let shown = shown(home.path(), &store).unwrap();
         assert!(!shown.contains("look at it"), "{shown}");
     }
 

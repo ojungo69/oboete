@@ -103,16 +103,22 @@ fn run_io(
                 let branch = start.branch.as_deref().unwrap_or("");
                 // It goes to the agent's model provider: the rules as they are now apply, so a
                 // rule added after the text was built already hides its value (spec 6.4).
-                manifest =
-                    crate::consumer::manifest::text(home, &store, repo, branch, &start.session)
-                        .unwrap_or_else(|e| {
-                            eprintln!("oboete: manifest not read: {e:#}");
-                            None
-                        })
-                        .map(|t| {
-                            let gated = crate::redact::outbound_with(&t, &settings.rules);
-                            crate::manifest::cut(&gated, crate::consumer::manifest::CAP)
-                        });
+                manifest = crate::consumer::manifest::text(
+                    home,
+                    &store,
+                    repo,
+                    branch,
+                    &start.session,
+                    settings.rules.version(),
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("oboete: manifest not read: {e:#}");
+                    None
+                })
+                .map(|t| {
+                    let gated = crate::redact::outbound_with(&t, &settings.rules);
+                    crate::manifest::cut(&gated, crate::consumer::manifest::CAP)
+                });
             }
             return Ok(None);
         }
@@ -972,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn session_start_applies_a_rule_added_after_the_manifest_was_built() {
+    fn session_start_shows_no_manifest_built_under_other_rules() {
         let home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(cwd.path().join(".git")).unwrap();
@@ -986,18 +992,26 @@ mod tests {
         };
         hook(
             "UserPromptSubmit",
-            json!({"session_id": "s1", "cwd": c, "prompt": "deploy acme-123456 today"}),
+            json!({"session_id": "s1", "cwd": c, "prompt": "deploy acme  123456 today"}),
         );
         crate::worker::run_once(home.path()).unwrap();
         std::fs::write(
             home.path().join("config.toml"),
-            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme {2}[0-9]{6}' }]\n",
         )
         .unwrap();
-        let out = hook(
-            "SessionStart",
-            json!({"session_id": "s2", "cwd": c, "source": "startup"}),
-        );
+        let start = || {
+            hook(
+                "SessionStart",
+                json!({"session_id": "s2", "cwd": c, "source": "startup"}),
+            )
+        };
+        // Built under the old rules, and the text has its spaces flattened: the new rule cannot
+        // be applied to it, so none is shown until the worker builds it again.
+        let out = start();
+        assert!(!out.contains("deploy") && !out.contains("123456"), "{out}");
+        crate::worker::run_once(home.path()).unwrap();
+        let out = start();
         assert!(out.contains("deploy") && !out.contains("123456"), "{out}");
     }
 
