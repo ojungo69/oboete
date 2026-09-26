@@ -89,7 +89,11 @@ fn run_io(
                 &payload,
                 db::now_ms(),
             )? > 0;
-            start_worker(home)?;
+            if let Err(e) = start_worker(home) {
+                // The row is written, and the next hook starts a worker for it: MUST-M16's
+                // marker is about the store, so this is no recording failure.
+                eprintln!("oboete: worker not started: {e:#}");
+            }
             return Ok(None);
         }
         let conn = db::open(home)?;
@@ -847,6 +851,20 @@ mod tests {
         assert_eq!(crate::failure::since(home), None);
         let marker = home.join("state").join("recording-failed");
         assert_eq!(std::fs::metadata(marker).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn a_worker_that_cannot_start_is_no_recording_failure() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        // The lock cannot be opened: the worker does not start, but the row is written.
+        std::fs::create_dir_all(home.join("state").join("worker.lock")).unwrap();
+        let prompt = br#"{"session_id":"s","prompt":"hello"}"#;
+        let mut out = Vec::new();
+        run_io(home, "claude", "UserPromptSubmit", &prompt[..], &mut out).unwrap();
+        assert_eq!(crate::failure::since(home), None);
+        let raw = crate::raw::open(home).unwrap();
+        assert_eq!(raw.max_seq().unwrap(), 1);
     }
 
     /// Payload shapes from the Cursor event table, with all paths kept inside the test repo.
