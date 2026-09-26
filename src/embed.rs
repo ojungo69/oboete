@@ -285,11 +285,13 @@ fn run_model(url: &str, key: &str, texts: &[&str], timeout: Duration) -> Result<
         "workers ai: response larger than {MAX_RESPONSE_BYTES} bytes"
     );
     let text = String::from_utf8_lossy(&raw);
-    anyhow::ensure!(
-        status == 200,
-        "workers ai: http {status}: {}",
-        text.chars().take(300).collect::<String>()
-    );
+    // The body is not kept: a 400 can quote the stored text sent for embedding (issue #91).
+    if status != 200 {
+        let code = crate::provider::error_code(&text)
+            .map(|c| format!(": {c}"))
+            .unwrap_or_default();
+        anyhow::bail!("workers ai: http {status}{code}");
+    }
     let v: Value = serde_json::from_str(&text).context("workers ai: response is not JSON")?;
     vectors(&v, texts.len())
 }
