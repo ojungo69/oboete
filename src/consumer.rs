@@ -3,3 +3,4 @@
 
 pub mod compress;
 pub mod fts;
+pub mod rescan;

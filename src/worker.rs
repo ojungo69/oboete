@@ -18,23 +18,26 @@ pub trait Consumer {
 }
 
 /// This milestone's consumers, in order.
-pub fn consumers() -> Vec<Box<dyn Consumer>> {
+pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
     // Compression last: it waits for every consumer before it.
     vec![
+        // The rescan first: the tombstones it appends are in raw before the others read a record.
+        Box::new(crate::consumer::rescan::Rescan::new(home)),
         Box::new(crate::consumer::fts::Fts),
         Box::new(crate::consumer::compress::Compress),
     ]
 }
 
-/// Runs each consumer from its checkpoint until none advances; each step and its checkpoint move
-/// share one knowledge.db transaction.
+/// Runs each consumer from its checkpoint until none moves; each step and its checkpoint move
+/// share one knowledge.db transaction. A step may move its checkpoint back (the rescan starting
+/// again under new rules).
 #[cfg(test)] // the worker checks the backup deadline between passes
 pub fn drain(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> Result<()> {
     while pass(raw, k, consumers)? {}
     Ok(())
 }
 
-/// One batch for each consumer: whether any advanced.
+/// One batch for each consumer: whether any checkpoint moved.
 fn pass(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> Result<bool> {
     let device = raw.device().to_owned();
     let mut advanced = false;
@@ -42,7 +45,7 @@ fn pass(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> R
         let tx = k.transaction()?;
         let at = checkpoint::get(&tx, c.name(), &device)?;
         let next = c.step(raw, &tx, at)?;
-        if next > at {
+        if next != at {
             checkpoint::set(&tx, c.name(), &device, next)?;
             advanced = true;
         }
@@ -149,12 +152,12 @@ pub fn run_with(
 }
 
 pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
-    run_with(home, idle_ms, consumers(), || {})
+    run_with(home, idle_ms, consumers(home), || {})
 }
 
 #[allow(dead_code)] // Task 12's replay drains without waiting.
 pub fn run_once(home: &Path) -> Result<()> {
-    run_with(home, 0, consumers(), || {})
+    run_with(home, 0, consumers(home), || {})
 }
 
 #[cfg(test)]

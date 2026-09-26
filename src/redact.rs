@@ -837,6 +837,13 @@ fn user_spans_in(
     spans
 }
 
+/// Task 7's rescan: the byte ranges of a stored `text` the rules find now, merged, from both of
+/// its views as capture scans them. What capture masked, or a tombstone starred, is no finding
+/// (`a_rescan_finds_nothing_new_in_what_capture_masked`).
+pub fn ranges(text: &str, rules: &Rules) -> Vec<(usize, usize)> {
+    merged(&spans(text, rules))
+}
+
 /// Overlapping spans (a short and a long rule on one token) as the runs one mask covers.
 fn merged(spans: &[(usize, usize, usize)]) -> Vec<(usize, usize)> {
     let mut runs: Vec<(usize, usize)> = Vec::new();
@@ -1326,6 +1333,24 @@ mod tests {
             !masked.contains("Zq8vN3kL7pW2") && masked.contains("aaaaaaaa"),
             "{masked}"
         );
+    }
+
+    #[test]
+    fn a_rescan_finds_nothing_new_in_what_capture_masked() {
+        let rules = Rules::default();
+        let ghp = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: scanners
+        let aws = format!("AKIA{}", "Z7Q2XK4M9PL3WR8T");
+        let text = format!(
+            "curl -u admin:Zq8vN3kL7pW2 https://h.test\n\
+             curl -H \"Authorization: Bearer {ghp}\" https://h.test\n\
+             password=Zq8vN3kL7pW2xY\naws_access_key_id = {aws}\n"
+        );
+        let (masked, found) = scan(&text, &rules);
+        assert!(found.len() >= 3, "{masked}");
+        assert_eq!(ranges(&masked, &rules), vec![], "{masked}");
+        // A tombstone's stars are no new finding either.
+        let starred = masked.replace(MASK, &"*".repeat(MASK.len()));
+        assert_eq!(ranges(&starred, &rules), vec![], "{starred}");
     }
 
     #[test]
