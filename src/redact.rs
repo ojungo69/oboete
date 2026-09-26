@@ -771,7 +771,14 @@ fn user_spans_in(
         let rule = r.rules.len() + j;
         let mut regions = vec![(0, text.len())];
         let mut matched = 0;
+        let mut looked = 0;
         'regions: while let Some((from, to)) = regions.pop() {
+            // Past the limit of regions too, the text is masked whole (below).
+            looked += 1;
+            if looked > MAX_FINDINGS {
+                matched = MAX_FINDINGS + 1;
+                break;
+            }
             for caps in x.regex.captures_iter(&text[from..to]) {
                 let all = caps.get(0).expect("group 0");
                 let secret = match x.secret_group {
@@ -786,8 +793,11 @@ fn user_spans_in(
                     // A value already looked at: blanked by the fixpoint, or masked in a rescan.
                     // A greedy pattern that ends on it passes over one before it, so this match
                     // is looked at again up to that value.
-                    if secret.start() > all.start() {
-                        regions.push((from + all.start(), from + secret.start()));
+                    // Only a smaller region: an empty group at the end of a match over the whole
+                    // region would give the same one again, forever.
+                    let before = (from + all.start(), from + secret.start());
+                    if secret.start() > all.start() && before != (from, to) {
+                        regions.push(before);
                     }
                     continue;
                 }
@@ -1289,6 +1299,16 @@ mod tests {
         // A rescan of stored text, whose mask the rule matches again, looks before it too.
         let (again, _) = scan(r#"ACME_CLIENT otp="123456" otp="[REDACTED]""#, &rules);
         assert!(!again.contains("123456"), "{again}");
+    }
+
+    #[test]
+    fn a_rule_whose_group_is_empty_at_the_end_of_its_match_ends() {
+        let rules = user(
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = '(?s).*()', secret_group = 1 }]",
+        )
+        .unwrap();
+        let text = "id acme-123456\nnext line";
+        assert_eq!(scan(text, &rules).0, text);
     }
 
     #[test]
