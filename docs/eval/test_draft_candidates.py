@@ -171,3 +171,20 @@ def test_a_message_read_by_two_windows_gives_its_decisions_once(monkeypatch, tmp
     monkeypatch.setattr(draft_candidates, 'ask', lambda prompt, budget: next(answers))
     got, complete = draft_candidates.decisions({'left': 9})
     assert complete and [(x['id'], x['quote']) for x in got] == [('d1', 'キャッシュは SQLite'), ('d3', '同期は 45 秒ごとに行う')]
+
+
+def test_a_judge_whose_alias_moved_since_calibration_gives_no_labels(monkeypatch, tmp_path):
+    monkeypatch.setattr(draft_candidates, 'LABELS', str(tmp_path))
+    monkeypatch.setattr(draft_candidates, 'PANEL', {'j1': None, 'grok-4.7': None})
+    (tmp_path / 'calib-50.result-3.json').write_text(json.dumps({'models': {
+        'j1': ['openai/x (requested; the reply was not recorded)'], 'grok-4.7': ['grok-4.7-build']}}))
+    (tmp_path / 'dev-decisions.key.jsonl').write_text('{"id": "a"}\n')
+    (tmp_path / 'dev-decisions.jsonl').write_text('{"id": "a", "value": "unknown", "ts": 1}\n')
+    (tmp_path / 'dev-pairs.key.jsonl').write_text('')
+    for model, labelled in (('grok-4.7-build', True), ('grok-5', False)):
+        (tmp_path / 'dev-decisions.panel.jsonl').write_text(''.join(json.dumps(
+            {'id': 'a', 'judge': j, 'value': 'yes', 'model': m}) + '\n' for j, m in (('j1', 'x'), ('grok-4.7', model))))
+        draft_candidates.report()
+        r = json.loads((tmp_path / 'dev-labels.result.json').read_text())['dev-decisions']
+        assert (r['panel_on_unknown'] is not None) == labelled
+        assert r['moved_since_calibration'] == ([] if labelled else ['grok-4.7'])
