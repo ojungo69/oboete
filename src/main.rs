@@ -14,6 +14,8 @@ mod hook;
 mod import;
 mod inject;
 mod knowledge;
+#[allow(dead_code)] // wired to the worker and SessionStart in this task
+mod manifest;
 mod mcp;
 mod observe;
 mod provider;
