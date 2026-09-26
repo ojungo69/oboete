@@ -346,22 +346,48 @@ fn is_loopback(url: &str) -> bool {
 }
 
 /// Groq spells the reset out in the body: "Please try again in 17.28s".
-/// The error's code or type from a JSON error body (`{"error": {"code" | "type": …}}`), when it
-/// is a short identifier: never free text, which can carry the prompt (issue #91).
+/// Error codes kept from a provider's error body: only these known names, never a value the body
+/// makes up (a provider can put user data in `code`, issue #91).
+const KNOWN_CODES: &[&str] = &[
+    "api_error",
+    "authentication_error",
+    "context_length_exceeded",
+    "insufficient_quota",
+    "internal_server_error",
+    "invalid_api_key",
+    "invalid_request_error",
+    "json_validate_failed",
+    "model_not_found",
+    "not_found_error",
+    "overloaded_error",
+    "permission_error",
+    "rate_limit_error",
+    "rate_limit_exceeded",
+    "request_too_large",
+    "server_error",
+    "service_unavailable",
+    "tokens",
+    "INVALID_ARGUMENT",
+    "PERMISSION_DENIED",
+    "RESOURCE_EXHAUSTED",
+    "UNAVAILABLE",
+];
+
+/// The error's code, type or status from a JSON error body (`{"error": {"code" | "type": …}}`),
+/// when it is one of `KNOWN_CODES` or an HTTP status number (issue #91).
 pub(crate) fn error_code(body: &str) -> Option<String> {
     let v: Value = serde_json::from_str(body).ok()?;
     let e = v.get("error").unwrap_or(&v);
-    ["code", "type", "status"].iter().find_map(|k| {
-        let c = match e.get(*k)? {
-            Value::String(s) => s.clone(),
-            Value::Number(n) => n.to_string(),
-            _ => return None,
-        };
-        let ok = (1..=64).contains(&c.len())
-            && c.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b));
-        ok.then_some(c)
-    })
+    ["code", "type", "status"]
+        .iter()
+        .find_map(|k| match e.get(*k)? {
+            Value::String(s) => KNOWN_CODES.contains(&s.as_str()).then(|| s.clone()),
+            Value::Number(n) => n
+                .as_u64()
+                .filter(|n| (100..600).contains(n))
+                .map(|n| n.to_string()),
+            _ => None,
+        })
 }
 
 fn retry_after_in_body(body: &str) -> Option<f64> {
@@ -993,6 +1019,17 @@ mod tests {
                 "400 Bad Request",
                 json!({"error": {"code": format!("{canary} with spaces")}}).to_string(),
                 "http 400",
+            ),
+            // Identifier-shaped but not a known code: user data in `code` stays out too.
+            (
+                "400 Bad Request",
+                json!({"error": {"code": "customer-1234", "type": "invalid_request_error"}}).to_string(),
+                "http 400: invalid_request_error",
+            ),
+            (
+                "402 Payment Required",
+                json!({"error": {"code": 40212345}}).to_string(),
+                "http 402",
             ),
         ];
         for (status, body, want) in cases {
