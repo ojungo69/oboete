@@ -45,6 +45,9 @@ fn schema(k: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS manifest_facts_seq
            ON manifest_facts(device, repo, branch, fact, seq);
          CREATE INDEX IF NOT EXISTS manifest_facts_ts ON manifest_facts(device, repo, fact, ts);
+         -- A failure and the success of the same call (a seek, not a scan of later successes).
+         CREATE INDEX IF NOT EXISTS manifest_facts_label
+           ON manifest_facts(device, repo, branch, fact, label, seq);
          CREATE TABLE IF NOT EXISTS manifests(
            repo TEXT NOT NULL, branch TEXT NOT NULL, device TEXT NOT NULL,
            built_at INTEGER NOT NULL, text TEXT NOT NULL,
@@ -61,8 +64,11 @@ fn schema(k: &Connection) -> Result<()> {
 
 /// The manifest SessionStart shows for this checkout, if its records built one. Read-only: a
 /// hook never writes knowledge.db, and none is made when the worker has not run yet.
-#[allow(dead_code)] // SessionStart reads it once #104 and #108 are in (this task)
-pub fn text(home: &Path, repo: &str, branch: &str, device: &str) -> Result<Option<String>> {
+/// None while the saved text may show what raw now hides (D8): a tombstone the worker has not
+/// applied yet, or a checkout still marked for a rebuild.
+#[allow(dead_code)] // SessionStart reads it once #108 is in (this task)
+pub fn text(home: &Path, raw: &Raw, repo: &str, branch: &str) -> Result<Option<String>> {
+    let device = raw.device();
     let path = home.join("knowledge.db");
     if !path.exists() {
         return Ok(None);
@@ -77,6 +83,18 @@ pub fn text(home: &Path, repo: &str, branch: &str, device: &str) -> Result<Optio
         .optional()?
         .is_some();
     if !built {
+        return Ok(None);
+    }
+    let dirty = k
+        .query_row(
+            "SELECT 1 FROM manifest_dirty WHERE repo = ?1 AND branch = ?2 AND device = ?3",
+            params![repo, branch, device],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    let at = crate::knowledge::checkpoint::get(&k, "manifest", device)?;
+    if dirty || !raw.tombstones_after(device, at)?.is_empty() {
         return Ok(None);
     }
     Ok(k.query_row(
@@ -170,6 +188,8 @@ fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
         }
         "reply" => add("reply", "")?,
         "end" => add("end", "")?,
+        // An interrupted call returned nothing: neither a failure nor the fix of one.
+        "tool" if body.get("interrupted").and_then(Value::as_bool) == Some(true) => {}
         "tool" => {
             let key = call_key(&body);
             if failed(&body) {
@@ -196,9 +216,16 @@ fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
         }
         _ => {}
     }
+    // Owner directives and other sessions are the repo's, not the branch's: every checkout of
+    // the repo is built again, so its text depends on the records, not on the order they came.
     k.execute(
         "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device) VALUES(?1, ?2, ?3)",
         params![repo, branch, device],
+    )?;
+    k.execute(
+        "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device)
+         SELECT repo, branch, device FROM manifests WHERE repo = ?1 AND device = ?2",
+        params![repo, device],
     )?;
     Ok(())
 }
@@ -207,8 +234,8 @@ fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-/// What a tool call ran, for "the same call succeeded later": a command without Claude's
-/// `description`, else the whole input.
+/// What a tool call ran, for "the same call succeeded later": a command (Codex's `cmd`) without
+/// Claude's `description`, else the whole input.
 fn call_key(body: &Value) -> String {
     use sha2::{Digest, Sha256};
     let text = format!(
@@ -224,7 +251,7 @@ fn call_key(body: &Value) -> String {
 
 fn what_ran(input: &str) -> String {
     match serde_json::from_str::<Value>(input) {
-        Ok(v) => match v.get("command") {
+        Ok(v) => match v.get("command").or_else(|| v.get("cmd")) {
             Some(Value::String(c)) => c.clone(),
             Some(Value::Array(a)) => a
                 .iter()
@@ -238,7 +265,8 @@ fn what_ran(input: &str) -> String {
 }
 
 /// A failed call: the hook said so (PostToolUseFailure), or its output carries a non-zero exit
-/// (Grok's `exit_code`, Codex's `Exit code: N` text).
+/// (Grok's `exit_code`; Codex's header, `Exit code: N` or `Process exited with code N`, in the
+/// lines before `Output:`, so a command's own output is never read as its exit).
 fn failed(body: &Value) -> bool {
     if body.get("failed").and_then(Value::as_bool) == Some(true) {
         return true;
@@ -247,8 +275,12 @@ fn failed(body: &Value) -> bool {
     let code = match serde_json::from_str::<Value>(output) {
         Ok(v) => v.get("exit_code").and_then(Value::as_i64),
         Err(_) => output
-            .strip_prefix("Exit code: ")
-            .and_then(|r| r.lines().next())
+            .lines()
+            .take_while(|l| l.trim_end() != "Output:")
+            .find_map(|l| {
+                l.strip_prefix("Exit code: ")
+                    .or_else(|| l.strip_prefix("Process exited with code "))
+            })
             .and_then(|n| n.trim().parse().ok()),
     };
     code.is_some_and(|c| c != 0)
@@ -277,15 +309,16 @@ fn todos(input: &Value) -> Option<Vec<String>> {
 }
 
 /// The files a call names: the file path fields agents use (not a bare `path`: Glob, Grep and
-/// LS take a directory there), and the file lines of Codex's `apply_patch`. A path under the
-/// call's cwd is shown relative to it.
+/// LS take a directory there), and the file lines of Codex's `apply_patch` (its hook's
+/// `command`, its transcript's `input`). A path under the call's cwd is shown relative to it.
 fn paths(input: &Value, cwd: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = ["file_path", "notebook_path", "target_file"]
         .iter()
         .filter_map(|k| input.get(*k).and_then(Value::as_str))
         .map(str::to_owned)
         .collect();
-    for line in str_at(input, "command").lines() {
+    let patch = format!("{}\n{}", str_at(input, "command"), str_at(input, "input"));
+    for line in patch.lines() {
         for tag in [
             "*** Add File: ",
             "*** Update File: ",
@@ -442,14 +475,21 @@ fn build(
         })?
         .collect::<rusqlite::Result<_>>()?;
     owner.reverse();
+    // D13 matches directive lines one by one: taking one back leaves the others of its prompt.
+    // ponytail: lines and `。`; English sentences on one line stay one line.
     let mut lines = Vec::new();
     for (seq, session, ts) in owner {
         if let Some(e) = event(raw, device, seq)? {
-            lines.push(Line {
-                date: crate::db::utc(ts)[..10].to_owned(),
-                session,
-                text: str_at(&body(&e), "prompt").to_owned(),
-            });
+            let b = body(&e);
+            for text in str_at(&b, "prompt").split(['\n', '。']).map(str::trim) {
+                if manifest::is_owner_line(text) {
+                    lines.push(Line {
+                        date: crate::db::utc(ts)[..10].to_owned(),
+                        session: session.clone(),
+                        text: text.to_owned(),
+                    });
+                }
+            }
         }
     }
     // A line said again is shown once, at its latest date.
@@ -634,8 +674,11 @@ fn status(cwd: &Path) -> Option<String> {
             }
         }
     };
-    let out = reader.join().ok()?;
-    ok.then_some(out)
+    if !ok {
+        // A killed git's pipe can stay open in what it started: the reader finishes on its own.
+        return None;
+    }
+    reader.join().ok()
 }
 
 #[cfg(test)]
@@ -787,13 +830,47 @@ mod tests {
     fn session_start_reads_the_manifest_without_writing_knowledge_db() {
         let home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        assert_eq!(text(home.path(), "r", "main", "d").unwrap(), None);
+        let store = raw::open(home.path()).unwrap();
+        assert_eq!(text(home.path(), &store, "r", "main").unwrap(), None);
         assert!(!home.path().join("knowledge.db").exists());
         session(home.path(), cwd.path());
         worker::run_once(home.path()).unwrap();
-        let device = raw::open(home.path()).unwrap().device().to_owned();
-        let shown = text(home.path(), "r", "main", &device).unwrap().unwrap();
+        let shown = text(home.path(), &store, "r", "main").unwrap().unwrap();
         assert_eq!(shown, manifest(home.path()).0);
+    }
+
+    #[test]
+    fn a_tombstone_the_worker_has_not_applied_hides_the_saved_manifest() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        worker::run_once(home.path()).unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let device = store.device().to_owned();
+        assert!(
+            text(home.path(), &store, "r", "main")
+                .unwrap()
+                .unwrap()
+                .contains("look at it")
+        );
+        let seq = store
+            .after(&device, 0, 100)
+            .unwrap()
+            .into_iter()
+            .find(|r| matches!(&r.item, Item::Event(e) if e.body.contains("look at it")))
+            .unwrap()
+            .seq;
+        store
+            .append_tombstone(Target::Record {
+                device: device.clone(),
+                seq,
+            })
+            .unwrap();
+        // No worker step yet: the saved text still has the prompt, so none is shown.
+        assert_eq!(text(home.path(), &store, "r", "main").unwrap(), None);
+        worker::run_once(home.path()).unwrap();
+        let shown = text(home.path(), &store, "r", "main").unwrap().unwrap();
+        assert!(!shown.contains("look at it"), "{shown}");
     }
 
     #[test]
@@ -865,5 +942,83 @@ mod tests {
         assert!(!failed(&b(r#"{"stdout": "ok"}"#, false)));
         let patch = serde_json::json!({"command": "*** Begin Patch\n*** Update File: src/a.rs\n*** Add File: b.md\n"});
         assert_eq!(paths(&patch, None), vec!["b.md", "src/a.rs"]);
+        // Codex's newer header, and a command's own output that only looks like one.
+        let newer =
+            "Chunk ID: a1\nWall time: 1.2 seconds\nProcess exited with code 101\nOutput:\nx";
+        assert!(failed(&b(newer, false)));
+        assert!(!failed(&b(
+            "Exit code: 0\nWall time: 0 seconds\nOutput:\nExit code: 1",
+            false
+        )));
+        // Codex's transcript: the patch under `input`, the command under `cmd`.
+        let custom = serde_json::json!({"input": "*** Begin Patch\n*** Update File: src/http.ts\n*** End Patch"});
+        assert_eq!(paths(&custom, None), vec!["src/http.ts"]);
+        assert_eq!(what_ran(r#"{"cmd": "rg fetchJson"}"#), "rg fetchJson");
+    }
+
+    #[test]
+    fn an_interrupted_retry_fixes_nothing_and_a_retraction_takes_back_only_its_line() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let build = serde_json::json!({"command": "cargo build"}).to_string();
+        let mut store = raw::open(home.path()).unwrap();
+        for e in [
+            ev(
+                "prompt",
+                "s1",
+                60_000,
+                cwd.path(),
+                serde_json::json!({"prompt": "from now on run clippy\nalways write tests first"}),
+            ),
+            tool(
+                cwd.path(),
+                120_000,
+                "Bash",
+                serde_json::json!({"command": "cargo build"}),
+                "E0308",
+                true,
+            ),
+            ev(
+                "tool",
+                "s1",
+                180_000,
+                cwd.path(),
+                serde_json::json!({"tool": "Bash", "input": build, "output": "", "failed": false,
+                    "interrupted": true}),
+            ),
+        ] {
+            store.append(&e).unwrap();
+        }
+        worker::run_once(home.path()).unwrap();
+        let before = manifest(home.path()).0;
+        assert!(
+            before.contains("cargo build") && before.contains("\"from now on run clippy\""),
+            "{before}"
+        );
+        // Taken back on another branch: the directives are the repo's, so main is built again.
+        store
+            .append(&Event {
+                branch: Some("feature".into()),
+                ..ev(
+                    "prompt",
+                    "s2",
+                    240_000,
+                    cwd.path(),
+                    serde_json::json!({"prompt": "cancel that clippy rule"}),
+                )
+            })
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        let after = manifest(home.path()).0;
+        assert!(
+            after.contains("\"always write tests first\"")
+                && !after.contains("\"from now on run clippy\""),
+            "{after}"
+        );
+        for f in ["knowledge.db", "knowledge.db-wal", "knowledge.db-shm"] {
+            std::fs::remove_file(home.path().join(f)).ok();
+        }
+        worker::run_once(home.path()).unwrap();
+        assert_eq!(manifest(home.path()).0, after); // the same records, the same bytes
     }
 }
