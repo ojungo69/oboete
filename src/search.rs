@@ -500,8 +500,7 @@ pub fn raw(
 ) -> Result<Vec<RawHit>> {
     // raw.db first: its shared hold on raw.lock keeps a restore from swapping raw.db and moving
     // knowledge.db aside while this search reads them (Task 8).
-    // `raw.db.restored` alone: a restore stopped mid-swap, which the open finishes.
-    let raw = if home.join("raw.db").exists() || home.join("raw.db.restored").exists() {
+    let raw = if crate::raw::exists(home) {
         Some(crate::raw::open(home)?)
     } else {
         None

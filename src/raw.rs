@@ -97,6 +97,12 @@ pub struct Raw {
     _swap: std::fs::File,
 }
 
+/// Whether the home has a raw store: `raw.db`, or `raw.db.restored` alone (a restore stopped
+/// mid-swap, which `open` finishes).
+pub fn exists(home: &Path) -> bool {
+    home.join("raw.db").exists() || home.join("raw.db.restored").exists()
+}
+
 /// `<home>/raw.db`: WAL, synchronous=FULL (and fullfsync on macOS), 2 s busy timeout.
 pub fn open(home: &Path) -> Result<Raw> {
     let path = home.join("raw.db");
@@ -107,7 +113,12 @@ pub fn open(home: &Path) -> Result<Raw> {
     // are committed), so the rename is finished here instead of creating an empty store.
     let restored = home.join("raw.db.restored");
     if !path.exists() && restored.exists() {
-        let _ = std::fs::rename(&restored, &path);
+        // Failed, and no other open finished it: an error, never a new empty store beside it.
+        if let Err(e) = std::fs::rename(&restored, &path)
+            && !path.exists()
+        {
+            return Err(e).context("finish a stopped restore");
+        }
     }
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     crate::db::wal(&conn, "FULL")?;

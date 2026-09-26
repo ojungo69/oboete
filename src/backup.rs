@@ -468,7 +468,7 @@ pub fn doctor(home: &Path) -> (Vec<String>, bool) {
         }
     }
     let segs = segments(&dir).unwrap_or_default();
-    if home.join("raw.db").exists() {
+    if raw::exists(home) {
         match raw::open(home) {
             Ok(raw) => {
                 let through = segs

@@ -200,7 +200,7 @@ fn raw_get(home: &std::path::Path, id: &str) -> Result<Option<String>> {
     let Ok(seq) = seq.parse::<i64>() else {
         return Ok(None);
     };
-    if seq < 1 || !home.join("raw.db").exists() {
+    if seq < 1 || !raw::exists(home) {
         return Ok(None);
     }
     let raw = raw::open(home)?;
@@ -281,8 +281,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             // Design B's none tier (milestone 2 Task 6): the raw index, by (device, seq). Until
             // every agent is ported (Task 2b) a home can hold both stores, and v1 commands such
             // as `timeline` create an empty oboete.db, so each store is searched when it exists.
-            // `raw.db.restored` alone: a restore stopped mid-swap, which `search::raw` finishes.
-            if home.join("raw.db").exists() || home.join("raw.db.restored").exists() {
+            if raw::exists(&home) {
                 let hits = search::raw(&home, &query, scope.as_deref(), limit)?;
                 left -= hits.len().min(left);
                 for h in hits {
