@@ -45,11 +45,11 @@ cat > "$W/prompt.txt"
 cd "$W"
 case "$1" in
 grok)
-  grok --cwd "$W" --prompt-file "$W/prompt.txt" --deny '*' --permission-mode dontAsk --disable-web-search \
+  timeout -k 10 "$3" grok --cwd "$W" --prompt-file "$W/prompt.txt" --deny '*' --permission-mode dontAsk --disable-web-search \
     --no-subagents --no-plan --max-turns 3 --output-format json -m "$2" > "$W/out.json" 2> "$W/err.txt" || { head -c 300 "$W/err.txt" >&2; exit 1; }
   python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); print(json.dumps({"text": d.get("text") or "", "model": next(iter(d.get("modelUsage") or {}), None)}))' "$W/out.json" ;;
 codex)
-  codex exec --ephemeral --skip-git-repo-check --ignore-user-config --ignore-rules \
+  timeout -k 10 "$3" codex exec --ephemeral --skip-git-repo-check --ignore-user-config --ignore-rules \
     --disable plugins --disable apps --disable browser_use --disable browser_use_external --disable in_app_browser \
     --disable computer_use --disable image_generation -c 'web_search="disabled"' \
     -c 'permissions.curator.filesystem={":root"="deny",":minimal"="read"}' -c 'default_permissions="curator"' \
@@ -157,8 +157,10 @@ def cli_chat(cli, model, prompt, timeout):
     """(answer text, the model the CLI reports) from one tool-less CLI run as the dogfood user; a
     failed run raises ConnectionError, like a failed API call."""
     try:
-        run = subprocess.run(['sudo', '-n', '-u', DOGFOOD, '-H', 'bash', '-c', CLI_JUDGE, 'judge', cli, model],
-                             input=prompt, capture_output=True, text=True, timeout=timeout)
+        # The CLI's own timeout runs as the dogfood user, so a slow call does not outlive this one
+        # (killing sudo alone would leave it running); this timeout is only the backstop.
+        run = subprocess.run(['sudo', '-n', '-u', DOGFOOD, '-H', 'bash', '-c', CLI_JUDGE, 'judge', cli, model, str(timeout)],
+                             input=prompt, capture_output=True, text=True, timeout=timeout + 30)
     except subprocess.TimeoutExpired:
         raise ConnectionError(f'{cli} gave no answer in {timeout} s') from None
     if run.returncode != 0:
@@ -286,11 +288,12 @@ def main(cmd):
         grades = {i: g for i, g in grades.items() if len(g) == len(judges)}
         # Complete when every judge answered every pair, with a grade or with an unusable answer 3 times.
         complete = len({(r['id'], r['judge']) for r in recorded}) == N * len(PANEL)
-        # One model per judge. Run 2 was recorded before replies carried the model, so its judges have
-        # none at all; a judge with some rows missing it, or with two models, cannot pass (spec 8.1: a
-        # model change means a new calibration).
+        # One model per judge. Run 2 was recorded before replies carried the model, so its judges may
+        # have none at all; a judge added later must report one. A judge with some rows missing it, or
+        # with two models, cannot pass (spec 8.1: a model change means a new calibration).
         reported = {j: {r.get('model') for r in recorded if r['judge'] == j and r['grade'] is not None} for j in PANEL}
-        one_model = all(len(m) == 1 for m in reported.values())
+        legacy = {r['judge'] for r in read_jsonl(f'{labels}/{RUN_2}.jsonl')}
+        one_model = all(len(m) == 1 and (j in legacy or None not in m) for j, m in reported.items())
         complete = complete and one_model
         each = {}
         for j in judges:
