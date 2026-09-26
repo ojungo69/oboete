@@ -394,30 +394,17 @@ pub fn parse_capture(text: Option<&str>) -> Result<CaptureConfig> {
 }
 
 /// A TOML error in config.toml as it may be printed: by hooks to stderr, by doctor, by a running
-/// `oboete mcp`. Never the source line (the error's usual display quotes it). An error in
-/// `[redaction]` keeps only its line number, since its message can quote the value there, and
-/// that table holds values the user means to hide; an error whose place is unknown is treated
-/// the same.
+/// `oboete mcp`. Only its line: the error's own text can quote the value on that line (a serde
+/// message quotes a value of the wrong type, the display quotes the line), and `[redaction]`
+/// holds values the user means to hide.
 fn toml_error(text: &str, e: &toml::de::Error) -> anyhow::Error {
-    let at = e.span().map(|s| s.start.min(text.len()));
-    let before = at.and_then(|a| text.get(..a));
-    let line = before.map_or(0, |b| b.matches('\n').count() + 1);
-    let in_redaction = before.is_none_or(|b| {
-        let this_line = b.rsplit('\n').next().unwrap_or("").trim_start();
-        let table = b
-            .lines()
-            .rev()
-            .map(str::trim_start)
-            .find(|l| l.starts_with('['));
-        this_line.starts_with("redaction") || table.is_some_and(|t| t.starts_with("[redaction"))
-    });
-    if in_redaction {
-        anyhow::anyhow!(
-            "line {line}: a setting in [redaction] is not valid (the details are not shown: they could quote a value to hide)"
-        )
-    } else {
-        anyhow::anyhow!("line {line}: {}", e.message())
-    }
+    let line = e
+        .span()
+        .and_then(|s| text.get(..s.start))
+        .map_or(0, |b| b.matches('\n').count() + 1);
+    anyhow::anyhow!(
+        "line {line} is not valid here (the details are not shown: they could quote a value to hide)"
+    )
 }
 
 /// Read an API key from the owner's key-file convention (token on line 2).

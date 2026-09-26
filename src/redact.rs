@@ -520,67 +520,81 @@ fn bundled_version() -> &'static str {
     VERSION.get_or_init(|| short_hash(&[RULES_TOML, EXTRA_TOML].concat()))
 }
 
-/// Secret spans in `text`: (start, end, rule index), unmerged, in `text`'s offsets. The bundled
-/// rules and the user's each run to their own fixpoint, and a value the user keeps is never one.
+/// Secret spans in `text`: (start, end, rule index), unmerged, in `text`'s offsets; a value the
+/// user keeps is never one. Every rule looks at the text once; a rule that found or kept
+/// something then looks again on its own until it finds nothing new (`fixpoint`).
 fn spans(text: &str, rules: &Rules) -> Vec<(usize, usize, usize)> {
-    let mut all = group(text, rules, false);
-    if !rules.extra.is_empty() {
-        all.extend(group(text, rules, true));
+    let mut kept = Vec::new();
+    let first = views(text, rules, None, &mut kept);
+    let mut again: Vec<usize> = first.iter().chain(&kept).map(|x| x.2).collect();
+    again.sort_unstable();
+    again.dedup();
+    let mut all = Vec::new();
+    for r in again {
+        let own = |x: &&(usize, usize, usize)| x.2 == r;
+        let found: Vec<_> = first.iter().filter(own).copied().collect();
+        let kept: Vec<_> = kept.iter().filter(own).copied().collect();
+        all.extend(fixpoint(text, rules, r, found, &kept));
     }
     all.sort_unstable();
     all.dedup();
     all
 }
 
-/// One group of rules (the bundled ones, or the user's) to its fixpoint. A rule finds one secret
-/// per context per look (curl-auth-user's greedy `.*` takes the last `-u` of a line,
+/// Rule `rule` to its fixpoint, from what it `found` and `kept` in its first look. A rule finds
+/// one secret per context per look (curl-auth-user's greedy `.*` takes the last `-u` of a line,
 /// curl-auth-header's lazy `.*?` the first header after a `curl`), so each look is at a copy of
-/// `text` where what the group found before, and every value the user keeps, is blanked out with
-/// spaces of the same length: offsets stay those of `text`. The other group's findings are not
-/// blanked, so neither group takes context the other needs. Still finding after `MAX_PASSES`,
-/// the whole text is one span: a look never stops with a secret left unlooked-at.
-fn group(text: &str, rules: &Rules, user: bool) -> Vec<(usize, usize, usize)> {
-    let mut work = std::borrow::Cow::Borrowed(text);
-    let mut found = Vec::new();
+/// `text` where what this rule found or kept before is blanked out with spaces of the same length:
+/// offsets stay those of `text`, and no other rule's finding is blanked, so no rule takes context
+/// another needs. Still finding after `MAX_PASSES`, the whole text is one span: a look never stops
+/// with a secret left unlooked-at.
+fn fixpoint(
+    text: &str,
+    rules: &Rules,
+    rule: usize,
+    mut found: Vec<(usize, usize, usize)>,
+    kept: &[(usize, usize, usize)],
+) -> Vec<(usize, usize, usize)> {
+    let mut work = text.to_owned();
     let mut blank: Vec<(usize, usize)> = Vec::new();
-    let mut last_rule = 0;
+    let mut new = found.clone();
+    let mut new_kept = kept.to_vec();
     for _ in 0..=MAX_PASSES {
-        let mut kept = Vec::new();
-        let mut new = views(&work, rules, user, &mut kept);
+        for &(s, e, _) in new.iter().chain(&new_kept) {
+            work.replace_range(s..e, &" ".repeat(e - s));
+            blank.push((s, e));
+        }
+        new_kept.clear();
+        new = views(&work, rules, Some(rule), &mut new_kept);
         let blanked =
             |&(s, e, _): &(usize, usize, usize)| blank.iter().any(|&(a, b)| a <= s && e <= b);
         new.retain(|x| !blanked(x));
-        kept.retain(|x| !blanked(x));
-        if new.is_empty() && kept.is_empty() {
+        new_kept.retain(|x| !blanked(x));
+        if new.is_empty() && new_kept.is_empty() {
             return found;
         }
-        let w = work.to_mut();
-        for &(s, e, r) in new.iter().chain(&kept) {
-            w.replace_range(s..e, &" ".repeat(e - s));
-            blank.push((s, e));
-            last_rule = r;
-        }
-        found.extend(new);
+        found.extend(&new);
     }
-    vec![(0, text.len(), last_rule)]
+    vec![(0, text.len(), rule)]
 }
 
-/// One look of a group at `text` and at its JSON-unescaped view, mapped back onto `text`. A tool
+/// One look of every rule, or of rule `only`, at `text` and at its JSON-unescaped view, mapped
+/// back onto `text`. A tool
 /// field is stored as flattened JSON, where `\"` and `\n` hide the quotes and line breaks rules
 /// match on (curl's `-u "user:pass"`, a quoted header), and the whole output reads as one line to
 /// a line-scoped allowlist. Scanning both views can only add masks.
 fn views(
     text: &str,
     rules: &Rules,
-    user: bool,
+    only: Option<usize>,
     kept: &mut Vec<(usize, usize, usize)>,
 ) -> Vec<(usize, usize, usize)> {
-    let mut all = spans_in(text, rules, user, kept);
+    let mut all = spans_in(text, rules, only, kept);
     if text.contains('\\') {
         let (view, at) = unescaped(text);
         let mut kept_view = Vec::new();
         all.extend(
-            spans_in(&view, rules, user, &mut kept_view)
+            spans_in(&view, rules, only, &mut kept_view)
                 .into_iter()
                 .map(|(s, e, r)| (at[s], at[e], r)),
         );
@@ -634,30 +648,31 @@ fn escape(s: &str) -> Option<(char, usize)> {
 }
 
 /// Secret spans in `text`: (start, end, rule index), unmerged, as gitleaks finds them.
-/// Secret spans in `text` found by the bundled rules, or by the user's (`user`), as gitleaks
-/// finds them; `kept` gets the spans of the values the user keeps.
+/// Secret spans in `text` found by every rule, or by rule `only`, as gitleaks finds them; `kept`
+/// gets the spans of the values the user keeps.
 fn spans_in(
     text: &str,
     rules: &Rules,
-    user: bool,
+    only: Option<usize>,
     kept: &mut Vec<(usize, usize, usize)>,
 ) -> Vec<(usize, usize, usize)> {
-    if user {
-        return user_spans_in(text, rules, kept);
-    }
     let r = bundled();
+    let mut spans = user_spans_in(text, rules, only, kept);
+    if only.is_some_and(|o| o >= r.rules.len()) {
+        spans.sort_unstable();
+        return spans;
+    }
     let mut hit = vec![false; r.rules.len()];
     // Overlapping: "sk" (twilio) inside "gsk_" (groq) must not hide the longer keyword.
     for m in r.keywords.find_overlapping_iter(text) {
         hit[r.keyword_rule[m.pattern().as_usize()]] = true;
     }
-    let mut spans = Vec::new();
     for (i, (rule, _)) in r
         .rules
         .iter()
         .zip(&hit)
         .enumerate()
-        .filter(|(_, (_, h))| **h)
+        .filter(|(i, (_, h))| **h && only.is_none_or(|o| o == *i))
     {
         let Some(re) = rule.regex.as_deref().and_then(compiled) else {
             continue;
@@ -700,12 +715,16 @@ fn spans_in(
 fn user_spans_in(
     text: &str,
     rules: &Rules,
+    only: Option<usize>,
     kept: &mut Vec<(usize, usize, usize)>,
 ) -> Vec<(usize, usize, usize)> {
     let r = bundled();
     let mut spans = Vec::new();
     let mut lower: Option<String> = None;
     for (j, x) in rules.extra.iter().enumerate() {
+        if only.is_some_and(|o| o != r.rules.len() + j) {
+            continue;
+        }
         if !x.keywords.is_empty() {
             let lower = lower.get_or_insert_with(|| text.to_lowercase());
             if !x.keywords.iter().any(|k| lower.contains(k.as_str())) {
@@ -1325,6 +1344,20 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_never_takes_context_another_rule_of_its_group_needs() {
+        let rules = user(
+            "[redaction]\nextra_rules = [{ id = \"name\", regex = 'ACME_[A-Z]+' }, \
+             { id = \"otp\", regex = 'ACME_[A-Z]+.* otp=([0-9]{6})' }]",
+        )
+        .unwrap();
+        let (masked, _) = scan("ACME_CLIENT otp=123456 otp=654321", &rules);
+        assert!(
+            !masked.contains("123456") && !masked.contains("654321"),
+            "{masked}"
+        );
+    }
+
+    #[test]
     fn egress_follows_the_file_as_it_changes() {
         let home = tempfile::tempdir().unwrap();
         let mut e = Egress {
@@ -1365,6 +1398,10 @@ mod tests {
                 "[redaction]\nextra_rules = [{{ id = \"x\", regex = 'x', entropy = \"{v}\" }}]"
             ),
             format!("redaction = \"{v}\""),
+            format!("[ redaction ]\nallowlist = \"{v}\""),
+            format!("[\"redaction\"]\nallowlist = \"{v}\""),
+            format!("[[redaction.extra_rules]]\nid = \"x\"\nregex = 'x'\nentropy = \"{v}\""),
+            format!("[capture]\ntool_output = \"{v}\""),
         ] {
             let e = format!("{:#}", user(&toml).err().expect(&toml));
             assert!(!e.contains(&v), "{toml}: {e}");
@@ -1375,12 +1412,11 @@ mod tests {
                 assert!(!format!("{e:#}").contains(&v), "{toml}: {e:#}");
             }
         }
-        // Elsewhere the message stays, as it quotes nothing to hide.
         let e = format!(
             "{:#}",
             user("[capture]\nstore_prompts = \"yes\"").err().unwrap()
         );
-        assert!(e.contains("line 2") && e.contains("bool"), "{e}");
+        assert!(e.contains("line 2 is not valid"), "{e}");
     }
 
     #[test]
@@ -1403,13 +1439,10 @@ mod tests {
                 "secret_group",
             ),
             ("[redaction]\nallowlist = [\"abc\"]", "SHA-256"),
-            (
-                "[redaction]\nextra_rule = []",
-                "a setting in [redaction] is not valid",
-            ),
+            ("[redaction]\nextra_rule = []", "line 2 is not valid"),
             (
                 "[redaction]\nextra_rules = [{ id = \"x\", regex = 'x', keyword = [\"k\"] }]",
-                "a setting in [redaction] is not valid",
+                "line 2 is not valid",
             ),
         ] {
             let e = format!("{:#}", user(toml).err().expect(toml));
