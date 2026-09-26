@@ -95,11 +95,6 @@ fn run_io(
                 db::now_ms(),
             )? > 0;
             ended = crate::failure::now();
-            if let Err(e) = start_worker(home) {
-                // The row is written, and the next hook starts a worker for it: MUST-M16's
-                // marker is about the store, so this is no recording failure.
-                eprintln!("oboete: worker not started: {e:#}");
-            }
             return Ok(None);
         }
         let conn = db::open(home)?;
@@ -120,6 +115,13 @@ fn run_io(
             Ok(_) if wrote => {
                 crate::failure::prepare(home);
                 crate::failure::clear(home, ended);
+                // After the marker: nothing that can take long runs between the write and its
+                // marker update, which overlapping hooks order by the write's end.
+                if let Err(e) = start_worker(home) {
+                    // The row is written, and the next hook starts a worker for it: MUST-M16's
+                    // marker is about the store, so this is no recording failure.
+                    eprintln!("oboete: worker not started: {e:#}");
+                }
             }
             Ok(_) => {}
             Err(e) => crate::failure::mark(home, crate::failure::classify(e), ended),
