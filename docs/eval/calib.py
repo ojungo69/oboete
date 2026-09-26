@@ -223,6 +223,13 @@ def main(cmd):
         grades = {i: g for i, g in grades.items() if len(g) == len(judges)}
         # Complete when every judge answered every pair, with a grade or with an unusable answer 3 times.
         complete = len({(r['id'], r['judge']) for r in recorded}) == N * len(PANEL)
+        # One model per judge. A run recorded before replies carried the model (run 2) has none at
+        # all; a run with some rows missing it, or with two models, cannot pass (spec 8.1: a model
+        # change means a new calibration).
+        reported = {j: {r.get('model') for r in recorded if r['judge'] == j and r['grade'] is not None} for j in PANEL}
+        one_model = all(len(m) == 1 for m in reported.values()) and (
+            all(m == {None} for m in reported.values()) or all(None not in m for m in reported.values()))
+        complete = complete and one_model
         each = {}
         for j in judges:
             pairs = against_others(grades, j)
@@ -237,9 +244,9 @@ def main(cmd):
                'changed_from_run_1': {'n': len(again), 'grade': sum(a != b for a, b in again),
                                       'relevance': sum((a >= 2) != (b >= 2) for a, b in again)}, 'fleiss': fk, 'panel_pass': panel_pass,
                'pass': panel_pass and each[UNDER_TEST]['pass'],
-               'models': {UNDER_TEST: [UNDER_TEST], **{j: sorted({r.get('model') or f'{m[3]} (requested; the reply was not recorded)'
-                                                                   for r in recorded if r['judge'] == j})
-                                                    for j, m in PANEL.items()}}}
+               'one_model_per_judge': one_model,
+               'models': {UNDER_TEST: [UNDER_TEST], **{j: sorted(m or f'{PANEL[j][3]} (requested; the reply was not recorded)'
+                                                                   for m in reported[j]) for j in PANEL}}}
         from freeze import load
         if f'labels/{RESULT}.json' in load()['files']:
             sys.exit(f'labels/{RESULT}.json is frozen; a changed rule writes a new result')
