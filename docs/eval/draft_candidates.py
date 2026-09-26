@@ -444,15 +444,16 @@ def panel():
     print('panel done; rerun if any call failed')
 
 
-def calibrated_models():
-    """judge -> the models calib-50 recorded for it (run 3 on); judges whose calibration kept none are
-    left out."""
+def calibration():
+    """(judges that passed B3 in a panel that passed, judge -> the models calib-50 recorded for it).
+    Judges whose calibration kept no model (run 2) are left out of the second."""
     path = f'{LABELS}/calib-50.result-3.json'
     if not os.path.exists(path):
-        return {}
+        return set(), {}
     with open(path) as f:
-        models = json.load(f)['models']
-    return {j: m for j, m in models.items() if not any('requested' in x for x in m)}
+        result = json.load(f)
+    passed = {j for j, v in result['judges'].items() if v['pass']} if result['panel_pass'] else set()
+    return passed, {j: m for j, m in result['models'].items() if not any('requested' in x for x in m)}
 
 
 def report():
@@ -482,16 +483,17 @@ def report():
         # spec 8.1: a judge whose model changed mid-run (or was not reported) needs a new calibration,
         # so its votes give no labels and no agreement.
         one_model = all(len(models.get(j, ())) == 1 and None not in models[j] for j in PANEL)
-        # And that model is the one calibrated, where the calibration recorded it (the judges added in
-        # run 3; run 2 kept no model): an alias that moved to another model has not passed B3.
-        calibrated = {j: set(m) for j, m in calibrated_models().items() if j in PANEL}
-        moved = sorted(j for j, m in calibrated.items() if models.get(j, set()) - m)
-        one_model = one_model and not moved
+        # Every judge passed B3 (calib-50 run 3), with the model it answers with now where the
+        # calibration recorded one (run 2 kept none): an alias that moved has not passed B3.
+        passed, calibrated = calibration()
+        uncalibrated = sorted(j for j in PANEL if j not in passed)
+        moved = sorted(j for j, m in calibrated.items() if j in PANEL and models.get(j, set()) - set(m))
+        one_model = one_model and not moved and not uncalibrated
         out[name] = {'owner': counts, 'panel_incomplete': missing, 'panel_on_unknown': {
             i: majority(list(v.values())) for i, v in votes.items() if answers.get(i) == 'unknown'} if one_model else None,
             'overlap': agree if one_model else None,
             'models': {j: sorted(m or '(not reported)' for m in ms) for j, ms in models.items()},
-            'one_model_per_judge': one_model, 'moved_since_calibration': moved,
+            'one_model_per_judge': one_model, 'moved_since_calibration': moved, 'not_calibrated': uncalibrated,
             'what': 'agreement with the owner on the owner\'s own decisions, not a check of technical relevance'}
     with open(f'{LABELS}/dev-labels.result.json', 'w') as f:
         json.dump(out, f, indent=1, ensure_ascii=False)

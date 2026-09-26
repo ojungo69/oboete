@@ -176,8 +176,9 @@ def test_a_message_read_by_two_windows_gives_its_decisions_once(monkeypatch, tmp
 def test_a_judge_whose_alias_moved_since_calibration_gives_no_labels(monkeypatch, tmp_path):
     monkeypatch.setattr(draft_candidates, 'LABELS', str(tmp_path))
     monkeypatch.setattr(draft_candidates, 'PANEL', {'j1': None, 'grok-4.7': None})
-    (tmp_path / 'calib-50.result-3.json').write_text(json.dumps({'models': {
-        'j1': ['openai/x (requested; the reply was not recorded)'], 'grok-4.7': ['grok-4.7-build']}}))
+    result = {'panel_pass': True, 'judges': {'j1': {'pass': True}, 'grok-4.7': {'pass': True}}, 'models': {
+        'j1': ['openai/x (requested; the reply was not recorded)'], 'grok-4.7': ['grok-4.7-build']}}
+    (tmp_path / 'calib-50.result-3.json').write_text(json.dumps(result))
     (tmp_path / 'dev-decisions.key.jsonl').write_text('{"id": "a"}\n')
     (tmp_path / 'dev-decisions.jsonl').write_text('{"id": "a", "value": "unknown", "ts": 1}\n')
     (tmp_path / 'dev-pairs.key.jsonl').write_text('')
@@ -188,3 +189,8 @@ def test_a_judge_whose_alias_moved_since_calibration_gives_no_labels(monkeypatch
         r = json.loads((tmp_path / 'dev-labels.result.json').read_text())['dev-decisions']
         assert (r['panel_on_unknown'] is not None) == labelled
         assert r['moved_since_calibration'] == ([] if labelled else ['grok-4.7'])
+    result['judges']['grok-4.7']['pass'] = False                       # a judge that failed B3
+    (tmp_path / 'calib-50.result-3.json').write_text(json.dumps(result))
+    draft_candidates.report()
+    r = json.loads((tmp_path / 'dev-labels.result.json').read_text())['dev-decisions']
+    assert r['panel_on_unknown'] is None and r['not_calibrated'] == ['grok-4.7']
