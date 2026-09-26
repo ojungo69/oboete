@@ -353,7 +353,7 @@ i    vec-kf               0.620ᵃᵇᶜᵈᵍʰ  0.690ᵃᵇᶜᵈʰ   0.371ᵃ
 ```
 
 - Today's hybrid (`hybrid-d2`) scores above both claude-mem rows in every stratum. Overall: nDCG@10 0.583 against 0.219 (0.282 without claude-mem's 90-day window), Hit Rate@10 0.918 against 0.392. The difference is significant in every metric of every stratum except the 22 agent searches, too few for it.
-- Today's FTS (`e0-trigram`) is also significantly above both claude-mem rows in every stratum but the agent searches (overall nDCG@10 0.436).
+- Today's FTS (`e0-trigram`, overall nDCG@10 0.436) is significantly above claude-mem with its window in every metric of every stratum, except Hit Rate in the agent searches. Against claude-mem without the window it is significant everywhere except the 40 English questions (no metric) and two metrics of the agent searches.
 - claude-mem's 90-day window hurts most on old prompts (nDCG@10 0.190 with it, 0.263 without, for prompts typed 90 days ago or earlier; 0.240 and 0.278 within 90 days) and when only documents written before the prompt count (0.058 and 0.218).
 
 ## Findings
