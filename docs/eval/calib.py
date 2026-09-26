@@ -46,10 +46,11 @@ W=$(mktemp -d) && [ -d "$W" ] || exit 1
 S=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$W") && [ -n "$S" ] || exit 1
 # Only this call's directory and grok's session for it; both names are checked non-empty above.
 trap 'rm -rf -- "$W" "$HOME/.grok/sessions/$S"' EXIT
+# The version first, before the prompt exists anywhere this CLI can see: no stdin, run from /.
+v=$(cd / && timeout -k 5 20 "$1" --version < /dev/null 2>/dev/null | head -1)
+case "$v" in "$4"|"$4 "*) ;; *) echo "untested $1 version: $v (canary passed on $4)" >&2; exit 1 ;; esac
 cat > "$W/prompt.txt" || exit 1
 cd "$W" || exit 1
-v=$(timeout -k 5 20 "$1" --version 2>/dev/null | head -1)
-case "$v" in "$4"|"$4 "*) ;; *) echo "untested $1 version: $v (canary passed on $4)" >&2; exit 1 ;; esac
 case "$1" in
 grok)
   timeout -k 10 "$3" grok --cwd "$W" --prompt-file "$W/prompt.txt" --deny '*' --permission-mode dontAsk --disable-web-search \
