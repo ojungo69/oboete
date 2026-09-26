@@ -11,6 +11,7 @@ fn a_full_disk_never_blocks_the_agent_and_is_reported() {
     // marker, `dd` takes the rest of the space, then one more hook, doctor and a new SessionStart.
     let script = format!(
         r#"
+        echo inside
         mount -t tmpfs -o size=1m tmpfs {h} || exit 77
         # No worker: one started by a hook would write to the tmpfs while `dd` fills it.
         export OBOETE_NO_SPAWN=1
@@ -27,13 +28,16 @@ fn a_full_disk_never_blocks_the_agent_and_is_reported() {
         .args(["-rm", "sh", "-c", &script])
         .output()
         .unwrap();
-    if out.status.code() == Some(77)
-        || String::from_utf8_lossy(&out.stderr).contains("unshare failed")
-    {
-        eprintln!("skipped: no unprivileged tmpfs mount on this kernel");
+    let s = String::from_utf8_lossy(&out.stdout);
+    // No user namespace (GitHub's Ubuntu runners restrict them with AppArmor) or no tmpfs in one:
+    // the script never ran, or stopped at the mount.
+    if !s.contains("inside") || out.status.code() == Some(77) {
+        eprintln!(
+            "skipped: no unprivileged tmpfs mount here: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         return;
     }
-    let s = String::from_utf8_lossy(&out.stdout);
     assert!(!s.contains("no marker"), "{s}");
     assert!(s.contains("hook=0"), "{s}"); // the agent is not blocked
     assert!(!s.contains("doctor=0"), "{s}"); // doctor is red
