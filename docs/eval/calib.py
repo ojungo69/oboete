@@ -167,10 +167,11 @@ def cli_chat(cli, model, prompt, timeout, version=None):
     CLI version it is testing; every judge call uses TESTED."""
     try:
         # The CLI's own timeout runs as the dogfood user, so a slow call does not outlive this one
-        # (killing sudo alone would leave it running); this timeout is only the backstop.
+        # (killing sudo alone would leave it running); this timeout is only the backstop, past both of
+        # the child's deadlines (the version probe's 20 + 5 s and the call's timeout + 10 s) and cleanup.
         run = subprocess.run(['sudo', '-n', '-u', DOGFOOD, '-H', 'bash', '-c', CLI_JUDGE, 'judge', cli, model, str(timeout),
                               version or TESTED[cli]],
-                             input=prompt, capture_output=True, text=True, timeout=timeout + 30, env=clean_env())
+                             input=prompt, capture_output=True, text=True, timeout=timeout + 90, env=clean_env())
     except subprocess.TimeoutExpired:
         raise ConnectionError(f'{cli} gave no answer in {timeout} s') from None
     if run.returncode != 0:
