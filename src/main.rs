@@ -7,6 +7,7 @@ mod capture;
 mod config;
 mod db;
 mod embed;
+mod failure;
 mod hook;
 mod import;
 mod inject;

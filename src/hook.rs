@@ -53,6 +53,8 @@ fn run_io(
     mut input: impl Read,
     mut output: impl Write,
 ) -> Result<()> {
+    // Whether this call tried to write (MUST-M16): skips and filtered sessions never reach it.
+    let mut tried = false;
     let result: Result<Option<String>> = (|| {
         if std::env::var_os(SKIP_ENV).is_some() {
             return Ok(None);
@@ -73,6 +75,7 @@ fn run_io(
         {
             return Ok(None);
         }
+        tried = true;
         std::fs::create_dir_all(home)?;
         if crate::capture::PORTED.contains(&agent) {
             // Design B: nothing is injected until the manifest (milestone 2 Task 9).
@@ -94,7 +97,30 @@ fn run_io(
         }
         Ok(out)
     })();
-    if let Ok(Some(out)) = &result {
+    let mut out = result.as_ref().ok().cloned().flatten();
+    if tried {
+        // The marker lives outside the stores, so it is written when they cannot be.
+        match &result {
+            Ok(_) => {
+                crate::failure::prepare(home);
+                crate::failure::clear(home);
+            }
+            Err(e) => crate::failure::mark(home, crate::failure::classify(e)),
+        }
+        // Design B injects nothing at SessionStart until the manifest (Task 9), except this line.
+        if event == "SessionStart"
+            && crate::capture::PORTED.contains(&agent)
+            && out.is_none()
+            && let Some(failed) = crate::failure::since(home)
+        {
+            let text = crate::failure::line(failed);
+            out = Some(
+                json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
+                    .to_string(),
+            );
+        }
+    }
+    if let Some(out) = &out {
         writeln!(output, "{out}")?;
     } else if matches!(agent, "agy" | "cursor") {
         // Each adapter returns its own JSON shape, including skip and error paths.
@@ -765,6 +791,42 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn a_failed_write_is_marked_and_named_at_the_next_session_start() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        // A directory where raw.db should be: every write to the store fails.
+        std::fs::create_dir(home.join("raw.db")).unwrap();
+        let prompt = br#"{"session_id":"s","prompt":"first"}"#;
+        let mut out = Vec::new();
+        assert!(run_io(home, "claude", "UserPromptSubmit", &prompt[..], &mut out).is_err());
+        assert!(out.is_empty());
+        let (_, first) = crate::failure::since(home).expect("marked");
+        let start = br#"{"session_id":"t","source":"startup"}"#;
+        let mut out = Vec::new();
+        assert!(run_io(home, "claude", "SessionStart", &start[..], &mut out).is_err());
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        let text = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("recording has failed since"), "{text}");
+        assert_eq!(crate::failure::since(home).map(|f| f.1), Some(first));
+    }
+
+    #[test]
+    fn a_successful_write_clears_the_marker_and_says_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        crate::failure::mark(home, crate::failure::Class::Busy);
+        let start = br#"{"session_id":"t","source":"startup"}"#;
+        let mut out = Vec::new();
+        run_io(home, "claude", "SessionStart", &start[..], &mut out).unwrap();
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+        assert_eq!(crate::failure::since(home), None);
+        let marker = home.join("state").join("recording-failed");
+        assert_eq!(std::fs::metadata(marker).unwrap().len(), 64);
     }
 
     /// Payload shapes from the Cursor event table, with all paths kept inside the test repo.

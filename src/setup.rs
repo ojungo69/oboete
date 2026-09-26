@@ -1605,12 +1605,30 @@ fn cursor_hooks_status(file: &Path, cmd: &HookCommand, windows: bool) -> String 
 }
 
 /// `oboete doctor`: one screen of what is wired, what is stored and whether providers can run.
+/// Below this, doctor is red: the next hooks may not be able to write.
+const LOW_FREE_BYTES: u64 = 100 * 1024 * 1024;
+
 pub fn doctor(home: &Path) -> Result<()> {
     let exe = std::env::current_exe()?;
     println!("oboete {} at {}", env!("CARGO_PKG_VERSION"), exe.display());
     let db_path = home.join("oboete.db");
     let size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
     println!("home {} (db {} KB)", home.display(), size / 1024);
+    // First, before anything that needs the disk: MUST-M16 is about a disk that is full.
+    let mut unhealthy = Vec::new();
+    if let Some(failed) = crate::failure::since(home) {
+        println!("  {}", crate::failure::line(failed));
+        unhealthy.push("recording has failed");
+    }
+    if let Some(free) = crate::failure::free_bytes(home)
+        && free < LOW_FREE_BYTES
+    {
+        println!(
+            "  low free space: {} MB left where the store lives; recording fails when it runs out",
+            free / (1024 * 1024)
+        );
+        unhealthy.push("low free space");
+    }
     if home.join("knowledge.db").exists() {
         // MUST-M14: raw lost commits that a consumer had processed; its output was rewound.
         let k = crate::knowledge::open(home)?;
@@ -1771,6 +1789,8 @@ pub fn doctor(home: &Path) -> Result<()> {
         };
         println!("  {:<11} {state}", p.name());
     }
+    // Red: a script (or the owner) sees it in the exit code, not only in the text.
+    anyhow::ensure!(unhealthy.is_empty(), "{}", unhealthy.join(", "));
     Ok(())
 }
 
