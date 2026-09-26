@@ -117,9 +117,11 @@ def test_a_429_waits_its_retry_after_unless_it_is_long(monkeypatch, tmp_path):
 def test_a_cli_judge_answers_like_an_api_judge_or_fails_like_one(monkeypatch):
     import subprocess
     import calib
-    runs = []
+    runs, runs_env = [], []
+    monkeypatch.setenv('SOME_API_KEY', 'x')
     def run(argv, **kw):
         runs.append((argv, kw['input']))
+        runs_env.append(kw['env'])
         return replies.pop(0)
     monkeypatch.setattr(calib.subprocess, 'run', run)
     ok = subprocess.CompletedProcess([], 0, '{"text": "{\\"d\\": 2}", "model": "grok-4.7-build"}', '')
@@ -128,6 +130,7 @@ def test_a_cli_judge_answers_like_an_api_judge_or_fails_like_one(monkeypatch):
     argv, stdin = runs[0]
     assert argv[:5] == ['sudo', '-n', '-u', 'oboete-dogfood', '-H'] and stdin == 'the prompt'
     assert 'the prompt' not in ' '.join(argv)                    # never on the command line
+    assert not any('KEY' in k.upper() or 'TOKEN' in k.upper() for k in runs_env[0])   # no secret variables
     for _ in range(2):
         with pytest.raises(ConnectionError):
             calib.chat('gpt-6-astra', 'the prompt')

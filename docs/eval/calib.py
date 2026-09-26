@@ -9,7 +9,7 @@ Relevant = grade >= 2. Every judge sees the question and the document as the jud
 them (4,000 characters, 1,200 for grades written before `chars` was recorded), never a grade."""
 import concurrent.futures, json, os, re, sqlite3, subprocess, sys, threading, time, urllib.error, urllib.request
 
-from common import E, SEED, h, owner_only, read_jsonl, write_jsonl
+from common import E, SEED, clean_env, h, owner_only, read_jsonl, write_jsonl
 
 N, PASS_KAPPA = 50, 0.4
 # Run 1 (`calib-50.panel.jsonl`, frozen) took the first entry of any answer; run 2 requires exactly
@@ -160,7 +160,7 @@ def cli_chat(cli, model, prompt, timeout):
         # The CLI's own timeout runs as the dogfood user, so a slow call does not outlive this one
         # (killing sudo alone would leave it running); this timeout is only the backstop.
         run = subprocess.run(['sudo', '-n', '-u', DOGFOOD, '-H', 'bash', '-c', CLI_JUDGE, 'judge', cli, model, str(timeout)],
-                             input=prompt, capture_output=True, text=True, timeout=timeout + 30)
+                             input=prompt, capture_output=True, text=True, timeout=timeout + 30, env=clean_env())
     except subprocess.TimeoutExpired:
         raise ConnectionError(f'{cli} gave no answer in {timeout} s') from None
     if run.returncode != 0:
