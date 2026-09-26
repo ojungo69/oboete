@@ -260,7 +260,7 @@ def pairs(budget, found):
     per_repo = {}
     for d in sorted(found, key=lambda d: d['ts']):
         per_repo.setdefault(d['repo'], []).append(d)
-    out = []
+    out, seen = [], set()
     for repo, ds in sorted(per_repo.items()):
         for chunk in pair_chunks(ds):
             listing = '\n'.join(f'{d["id"]} | {d["ts"][:10]} | {d["statement"]} | {d["quote"]}' for d in chunk)
@@ -268,7 +268,11 @@ def pairs(budget, found):
             if answer is None:
                 print(f'call budget spent; rerun to continue (at {repo})')
                 return out
-            out += valid_pairs(answer.get('pairs') or [], {d['id']: by_id[d['id']] for d in chunk})
+            # Two decisions of one block meet in several prompts: the first answer about them stands.
+            for p in valid_pairs(answer.get('pairs') or [], {d['id']: by_id[d['id']] for d in chunk}):
+                if pair_id(p) not in seen:
+                    seen.add(pair_id(p))
+                    out.append(p)
     return out
 
 
@@ -435,7 +439,7 @@ def report():
         missing = sorted(i for i in unknown + sample if len(votes.get(i, {})) < len(PANEL))
         votes = {i: v for i, v in votes.items() if len(v) == len(PANEL)}
         counts = {v: sum(1 for a in answers.values() if a == v) for v in sorted(set(answers.values()))}
-        overlap = {i: v for i, v in votes.items() if answers.get(i) not in (None, 'unknown')}
+        overlap = {i: votes[i] for i in sample if i in votes}
         agree = {}
         for judge in [*PANEL, 'majority']:
             pairs = [(answers[i] == yes, majority(list(v.values())) if judge == 'majority' else v.get(judge))
@@ -477,8 +481,11 @@ if __name__ == '__main__':
         print(f'{extra(int(sys.argv[2]))} more dev transcripts')
     elif cmd == 'pairs':
         # Pairs found before stay (the owner may have answered them); new ones are added.
-        old = read_jsonl(f'{DRAFTS}/pairs.jsonl') if os.path.exists(f'{DRAFTS}/pairs.jsonl') else []
-        known = {pair_id(p) for p in old}
+        old, known = [], set()
+        for p in read_jsonl(f'{DRAFTS}/pairs.jsonl') if os.path.exists(f'{DRAFTS}/pairs.jsonl') else []:
+            if pair_id(p) not in known:          # drafts written before pairs were deduplicated
+                known.add(pair_id(p))
+                old.append(p)
         found = old + [p for p in pairs(budget, read_jsonl(f'{DRAFTS}/decisions.jsonl')) if pair_id(p) not in known]
         write_jsonl(f'{DRAFTS}/pairs.jsonl', found)
         print(f'{len(found)} pairs ({len(found) - len(old)} new)')

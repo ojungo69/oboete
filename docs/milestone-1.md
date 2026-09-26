@@ -122,9 +122,9 @@ B3 is decided on run 2. Run 1 took the first entry of any answer; Codex (#77) as
 Drafted by `claude-sonnet-5` in owner decision 29's form: one plain-Japanese sentence and the owner's own message (a typed prompt, or their answer to a question). Every line gated, every quote verbatim.
 - From the replay set's 30 dev transcripts: 140 decisions drafted, 99 kept from 21 sessions; 23 pairs, only 6 of them overturns. Line ids had to be normalized first (the model writes `4`, `"4"` and `"[L4]"` as well as `"L4"`; 67 drafts had been dropped for that alone).
 - So 40 more dev-split transcripts were added (`draft_candidates.py extra 40`: claude-mem-recorded sessions outside the replay set, most typed prompts first, never the held-out side), copied owner-only under `replay/dev-extra`.
-- Now: 520 decisions from 60 sessions; 204 pairs (82 overturns, 122 compatible; 7 and 17 across sessions).
+- Now: 520 decisions from 60 sessions; 148 pairs (50 overturns, 98 compatible; 7 and 16 across sessions). The first count said 204: a repository with more than 80 decisions is drafted in overlapping prompts, and 56 pairs came back more than once (7 of them with both relations); the first answer about a pair now stands (Codex, #78).
 - Read by Claude before handing over: 5 decisions, all real decisions in plain words; Latin letters only in product names (11 of the first 99). 5 overturn drafts: all real decisions, but not all overturns (2-3 of 5 are clear), and several stay technical in plain Japanese (version control, secret tags); the owner answers 判断できない there and the panel takes them.
-- Tasks for the owner: 50 decisions (`dev-decisions`) and 40 pairs (`dev-pairs`: 20 drafted as each relation, cross-session first). `draft_candidates.py tasks` adds more as answers of 判断できない come in.
+- Tasks for the owner: 50 decisions (`dev-decisions`) and 43 pairs (`dev-pairs`: 20 drafted as each relation, cross-session first, and 3 more after the duplicates were removed). `draft_candidates.py tasks` adds more as answers of 判断できない come in.
 
 ## Fixtures, today's code (Task 9 step 5, 2026-09-26)
 

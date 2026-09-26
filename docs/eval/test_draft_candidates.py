@@ -2,6 +2,8 @@ import os, sys
 
 import pytest
 
+import draft_candidates
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from draft_candidates import (WEEK, context, decision_item, events_of, pair_chunks, pair_item, panel_targets, parse_answer, refill, render,
                               repeat_items, valid_decisions, valid_pairs, windows)
@@ -126,3 +128,13 @@ def test_the_panel_sees_the_proposal_and_the_owners_acceptance():
     lines = [(f'L{i}', 't', f'line {i}') for i in range(1, 21)]
     text = context({'line': 'L3', 'prompt_line': 'L15'}, around=1, lines=lines)
     assert text.split('\n') == ['  line 2', '▶ line 3', '  line 4', '  …', '  line 14', '▶ line 15', '  line 16']
+
+
+def test_a_pair_met_in_several_prompts_is_kept_once(monkeypatch):
+    ds = [{'id': f'd{i}', 'repo': 'r', 'ts': f'2026-09-01T00:{i // 60:02d}:{i % 60:02d}Z', 'statement': 's', 'quote': 'q'}
+          for i in range(120)]
+    # Every prompt answers about d1 and d2 (one block), once as each relation.
+    answers = iter([{'pairs': [{'earlier': 'd1', 'later': 'd2', 'relation': rel}]} for rel in ('overturns', 'compatible') * 3])
+    monkeypatch.setattr(draft_candidates, 'ask', lambda prompt, budget: next(answers))
+    got = draft_candidates.pairs({'left': 10}, ds)
+    assert [(p['earlier'], p['later'], p['relation']) for p in got] == [('d1', 'd2', 'overturns')]
