@@ -382,6 +382,8 @@ pub struct CaptureConfig {
     _summary: serde::de::IgnoredAny,
     #[serde(default, rename = "embedding")]
     _embedding: serde::de::IgnoredAny,
+    #[serde(default, rename = "backup")]
+    _backup: serde::de::IgnoredAny,
 }
 
 pub fn load_capture(home: &Path) -> Result<CaptureConfig> {

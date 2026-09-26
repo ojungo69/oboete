@@ -586,10 +586,17 @@ mod tests {
         let p = home.path();
         let mut raw = raw::open(p).unwrap();
         let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
-        let (masked, found) = crate::redact::scan(&format!("alpha {key} zqx-private-words tail"));
+        let (masked, found) = crate::redact::scan(
+            &format!("alpha {key} zqx-private-words tail"),
+            &crate::redact::Rules::default(),
+        );
         let finding = found.into_iter().next().unwrap();
         let a = raw
-            .append_with_ledger(&raw::test_event(&masked), &[("/prompt".into(), finding)])
+            .append_with_ledger(
+                &raw::test_event(&masked),
+                &[("/prompt".into(), finding)],
+                "test",
+            )
             .unwrap();
         let b = raw.append(&raw::test_event("bravo visible")).unwrap();
         let dev = raw.device().to_owned();
@@ -801,14 +808,17 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
         let mut raw = raw::open(p).unwrap();
-        let (masked, found) =
-            crate::redact::scan(&format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"));
+        let (masked, found) = crate::redact::scan(
+            &format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"),
+            &crate::redact::Rules::default(),
+        );
         let body = serde_json::json!({"trigger": {"zqx-private-words": masked}}).to_string();
         let finding = found.into_iter().next().unwrap();
         let seq = raw
             .append_with_ledger(
                 &raw::test_event(&body),
                 &[("/trigger/zqx-private-words".into(), finding)],
+                "test",
             )
             .unwrap();
         let at = body.find("zqx").unwrap() as i64;
