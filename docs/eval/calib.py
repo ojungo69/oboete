@@ -89,12 +89,13 @@ def parse_grade(text):
 
 def chat(member, prompt, timeout=300):
     """(answer text, the model the provider reports) of one chat completion from a panel judge,
-    temperature 0; a 429 is retried twice."""
+    temperature 0. A 429 is retried after its Retry-After (Groq's tokens per minute) up to four times;
+    one that asks for more than two minutes (OpenCode Go's 5-hour limit) fails at once."""
     base, key_file, headers, model = PANEL[member]
     with open(os.path.expanduser(f'~/{key_file}')) as f:
         key = f.read().split('\n')[1].strip()
     body = json.dumps({'model': model, 'temperature': 0, 'messages': [{'role': 'user', 'content': prompt}]}).encode()
-    for attempt in range(3):
+    for attempt in range(5):
         req = urllib.request.Request(f'{base}/chat/completions', data=body, headers={
             'Authorization': f'Bearer {key}', 'Content-Type': 'application/json', 'User-Agent': 'oboete-eval', **headers})
         try:
@@ -109,9 +110,13 @@ def chat(member, prompt, timeout=300):
             return text, answer.get('model') or None
 
         except urllib.error.HTTPError as e:
-            if e.code != 429 or attempt == 2:
+            if e.code != 429:
                 raise
-            time.sleep(20 * (attempt + 1))
+            after = e.headers.get('Retry-After') or str(20 * (attempt + 1))
+            wait = int(after) if after.isdigit() else 10 ** 9      # an HTTP date: a long wait, for the next run
+            if wait > 120 or attempt == 4:
+                raise
+            time.sleep(wait + 1)
 
 
 def ask_panel(member, question, memory):
