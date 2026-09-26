@@ -325,7 +325,7 @@ fn openai_compat(
         if moderation(&text) {
             message.push_str(" (moderation)");
         }
-        let retry_after_s = retry_after_s.or_else(|| retry_after_in_body(&text));
+        let retry_after_s = retry_after_s.or_else(|| retry_after_in_error(status, &text));
         if let Some(s) = retry_after_s {
             message.push_str(&format!(", retry in {s:.0}s"));
         }
@@ -446,6 +446,17 @@ pub(crate) fn error_code(body: &str) -> Option<String> {
                 .map(|n| n.to_string()),
             _ => None,
         })
+}
+
+/// The reset a 429 names in its `error.message` (Groq sends it there, not only in Retry-After).
+/// Only that field and only on a 429: other fields and other errors can echo the prompt or the
+/// generation (`failed_generation`), and a "try again in 24h" there must not set a cooldown.
+fn retry_after_in_error(status: u16, body: &str) -> Option<f64> {
+    if status != 429 {
+        return None;
+    }
+    let v: Value = serde_json::from_str(body).ok()?;
+    retry_after_in_body(v["error"]["message"].as_str()?)
 }
 
 /// Groq's "try again in 17.2875s", "6m20.064s", "1h2m3.5s" or "580ms", in seconds.
@@ -1343,6 +1354,25 @@ mod tests {
         ] {
             assert_eq!(retry_after_in_body(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn the_reset_comes_only_from_a_429s_error_message() {
+        let msg = |m: &str| json!({"error": {"message": m}}).to_string();
+        assert_eq!(
+            retry_after_in_error(429, &msg("Please try again in 2m3s.")),
+            Some(123.0)
+        );
+        // An echoed generation or prompt says "24h": it is not the provider's reset.
+        let echoed = json!({"error": {"failed_generation": "try again in 24h",
+            "message": "Please try again in 2s."}})
+        .to_string();
+        assert_eq!(retry_after_in_error(429, &echoed), Some(2.0));
+        let only_echo =
+            json!({"error": {"failed_generation": "try again in 24h", "message": "slow down"}});
+        assert_eq!(retry_after_in_error(429, &only_echo.to_string()), None);
+        assert_eq!(retry_after_in_error(429, "try again in 24h"), None);
+        assert_eq!(retry_after_in_error(400, &msg("try again in 24h")), None);
     }
 
     #[test]
