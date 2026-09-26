@@ -140,17 +140,15 @@ fn export_from(raw: &Raw, dir: &Path) -> Result<Option<PathBuf>> {
     }
 }
 
-/// Sealing: the checksum, then the segment, each written to a temporary name, synced and
-/// renamed, then the directory synced. A segment never exists without its checksum; a checksum
-/// left without its segment is written again by the next export.
+/// Sealing: the checksum, then the segment, each written to a temporary name, synced, renamed
+/// and its directory entry synced before the next. A segment never exists without its checksum,
+/// even after a power loss; a checksum left without its segment is written again by the next
+/// export.
 fn seal(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf> {
     let z = zstd::bulk::compress(data, 3)?;
     let sum = format!("{}  {name}\n", hex(&Sha256::digest(&z)));
     write_synced(dir, &format!("{name}.sha256"), sum.as_bytes())?;
-    let path = write_synced(dir, name, &z)?;
-    #[cfg(unix)]
-    std::fs::File::open(dir)?.sync_all()?;
-    Ok(path)
+    write_synced(dir, name, &z)
 }
 
 fn write_synced(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf> {
@@ -161,6 +159,8 @@ fn write_synced(dir: &Path, name: &str, data: &[u8]) -> Result<PathBuf> {
     f.sync_all()?;
     let path = dir.join(name);
     std::fs::rename(&tmp, &path)?;
+    #[cfg(unix)]
+    std::fs::File::open(dir)?.sync_all()?;
     Ok(path)
 }
 
@@ -203,7 +203,10 @@ fn damage(seg: &Path) -> Option<String> {
 fn quarantine(home: &Path, name: &str) -> Result<PathBuf> {
     let suffix = format!("quarantined-{}", crate::db::now_ms());
     let main = home.join(format!("{name}.{suffix}"));
-    for ext in ["", "-wal", "-shm"] {
+    // The sidecars before the file: stopped in between, the file is left without them (and is
+    // still damaged, so it is quarantined again), never the file's name free with an old WAL
+    // beside it that SQLite would replay into the next file of that name.
+    for ext in ["-wal", "-shm", ""] {
         let from = home.join(format!("{name}{ext}"));
         if from.exists() {
             std::fs::rename(&from, home.join(format!("{name}{ext}.{suffix}")))
@@ -678,6 +681,9 @@ mod tests {
         for f in ["raw.db-wal", "raw.db-shm"] {
             let _ = std::fs::remove_file(p.join(f));
         }
+        // A search finishes it too, before it reads.
+        crate::search::raw(p, "event", None, 5).unwrap();
+        assert!(p.join("raw.db").exists() && !p.join("raw.db.restored").exists());
         let raw = raw::open(p).unwrap();
         assert_eq!(
             (raw.device().to_owned(), raw.max_seq().unwrap()),

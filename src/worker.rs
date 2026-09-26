@@ -118,6 +118,11 @@ pub fn run_with(
                 more = true;
                 break;
             }
+            // An idle wait longer than the backup interval still backs up on time.
+            if Instant::now() >= next_backup {
+                crate::backup::run(home, &raw);
+                next_backup = Instant::now() + crate::backup::EVERY;
+            }
         }
         if more {
             continue;
