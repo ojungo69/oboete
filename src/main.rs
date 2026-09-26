@@ -281,7 +281,8 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             // Design B's none tier (milestone 2 Task 6): the raw index, by (device, seq). Until
             // every agent is ported (Task 2b) a home can hold both stores, and v1 commands such
             // as `timeline` create an empty oboete.db, so each store is searched when it exists.
-            if home.join("raw.db").exists() {
+            // `raw.db.restored` alone: a restore stopped mid-swap, which `search::raw` finishes.
+            if home.join("raw.db").exists() || home.join("raw.db.restored").exists() {
                 let hits = search::raw(&home, &query, scope.as_deref(), limit)?;
                 left -= hits.len().min(left);
                 for h in hits {

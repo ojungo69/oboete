@@ -324,6 +324,9 @@ pub fn restore(home: &Path) -> Result<String> {
     rebuild.finish()?;
     let whole = home.join("raw.db.restored");
     std::fs::rename(&tmp, &whole)?;
+    // Durable before the damaged file goes: an open that finds neither would make an empty store.
+    #[cfg(unix)]
+    std::fs::File::open(home)?.sync_all()?;
     // Everything that must not outlive the old raw.db goes before the swap, so a restore that
     // stops at any point is either redone (raw.db still damaged) or complete.
     // Derived data is rebuilt from what was restored: a skipped segment leaves a gap below raw's
