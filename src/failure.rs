@@ -120,7 +120,7 @@ pub fn prepare(home: &Path) {
         return;
     };
     let mut buf = Vec::new();
-    if f.lock().is_err() || f.read_to_end(&mut buf).is_err() || buf.len() == SIZE {
+    if locked(&f).is_err() || f.read_to_end(&mut buf).is_err() || buf.len() == SIZE {
         return;
     }
     let state = State::parse(&String::from_utf8_lossy(&buf)).unwrap_or(State::Ok(0));
@@ -195,7 +195,7 @@ fn transition(
         .create(true)
         .truncate(false)
         .open(marker(home))?;
-    f.lock()?;
+    locked(&f)?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
     if let Some(next) = change(State::parse(&String::from_utf8_lossy(&buf))) {
@@ -225,6 +225,29 @@ pub fn line((class, ts): (Class, i64)) -> String {
         "oboete: recording has failed since {} ({what}); events from then on are not recorded. Run `oboete doctor`.",
         utc(ts / 1_000_000)
     )
+}
+
+/// How long a hook waits for another to finish its marker update before it leaves the marker as
+/// it is: the lock is held for one small read and write, so only a stopped process holds it long,
+/// and a hook never waits on one (MUST-M16: a failure never blocks the agent).
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+
+fn locked(f: &std::fs::File) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + LOCK_WAIT;
+    loop {
+        match f.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(std::io::Error::other(
+                    "the marker is locked by another process",
+                ));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
 }
 
 fn marker(home: &Path) -> PathBuf {
@@ -406,6 +429,25 @@ mod tests {
         clear(home, 4_500);
         assert_eq!(since(home), None);
         assert_eq!(std::fs::metadata(marker(home)).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn a_marker_held_by_a_stopped_process_never_blocks_a_hook() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        prepare(home);
+        clear(home, 5);
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .open(marker(home))
+            .unwrap();
+        held.lock().unwrap(); // a hook stopped inside its update
+        let t = std::time::Instant::now();
+        mark(home, Class::Busy, 9);
+        clear(home, 10);
+        prepare(home);
+        assert!(t.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(since(home), None); // left as it was
     }
 
     #[test]
