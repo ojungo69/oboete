@@ -66,7 +66,15 @@ fn schema(k: &Connection) -> Result<()> {
 /// hook never writes knowledge.db, and none is made when the worker has not run yet.
 /// None while the saved text may show what raw now hides (D8): a tombstone the worker has not
 /// applied yet, or a checkout still marked for a rebuild.
-pub fn text(home: &Path, raw: &Raw, repo: &str, branch: &str) -> Result<Option<String>> {
+/// The session it is shown to is left out of "Other active sessions" (after a compaction the
+/// text was built while that session was running).
+pub fn text(
+    home: &Path,
+    raw: &Raw,
+    repo: &str,
+    branch: &str,
+    session: &str,
+) -> Result<Option<String>> {
     let device = raw.device();
     let path = home.join("knowledge.db");
     if !path.exists() {
@@ -96,12 +104,35 @@ pub fn text(home: &Path, raw: &Raw, repo: &str, branch: &str) -> Result<Option<S
     if dirty || !raw.tombstones_after(device, at)?.is_empty() {
         return Ok(None);
     }
-    Ok(k.query_row(
-        "SELECT text FROM manifests WHERE repo = ?1 AND branch = ?2 AND device = ?3",
-        params![repo, branch, device],
-        |r| r.get(0),
-    )
-    .optional()?)
+    let text: Option<String> = k
+        .query_row(
+            "SELECT text FROM manifests WHERE repo = ?1 AND branch = ?2 AND device = ?3",
+            params![repo, branch, device],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(text.map(|t| without_session(&t, session)))
+}
+
+/// `text` without its line for `session` under "Other active sessions" (and the heading, when
+/// that was the only one).
+fn without_session(text: &str, session: &str) -> String {
+    let own = format!("- session {} on ", short(session));
+    let mut out = String::with_capacity(text.len());
+    let mut lines = text.lines().filter(|l| !l.starts_with(&own)).peekable();
+    while let Some(l) = lines.next() {
+        let empty = l == "## Other active sessions"
+            && lines.peek().is_none_or(|next| next.starts_with("## "));
+        if !empty {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn short(session: &str) -> String {
+    session.chars().take(8).collect()
 }
 
 impl Consumer for Manifest {
@@ -566,7 +597,7 @@ fn build(
             .optional()?
             .is_some();
         if !ended && p.others.len() < SESSIONS {
-            let short: String = session.chars().take(8).collect();
+            let short = short(&session);
             let on = if on.is_empty() { "no branch" } else { &on };
             p.others.push(format!(
                 "session {short} on {on}, last at {}",
@@ -842,11 +873,16 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let store = raw::open(home.path()).unwrap();
-        assert_eq!(text(home.path(), &store, "r", "main").unwrap(), None);
+        assert_eq!(
+            text(home.path(), &store, "r", "main", "none").unwrap(),
+            None
+        );
         assert!(!home.path().join("knowledge.db").exists());
         session(home.path(), cwd.path());
         worker::run_once(home.path()).unwrap();
-        let shown = text(home.path(), &store, "r", "main").unwrap().unwrap();
+        let shown = text(home.path(), &store, "r", "main", "none")
+            .unwrap()
+            .unwrap();
         assert_eq!(shown, manifest(home.path()).0);
     }
 
@@ -859,7 +895,7 @@ mod tests {
         let mut store = raw::open(home.path()).unwrap();
         let device = store.device().to_owned();
         assert!(
-            text(home.path(), &store, "r", "main")
+            text(home.path(), &store, "r", "main", "none")
                 .unwrap()
                 .unwrap()
                 .contains("look at it")
@@ -878,9 +914,14 @@ mod tests {
             })
             .unwrap();
         // No worker step yet: the saved text still has the prompt, so none is shown.
-        assert_eq!(text(home.path(), &store, "r", "main").unwrap(), None);
+        assert_eq!(
+            text(home.path(), &store, "r", "main", "none").unwrap(),
+            None
+        );
         worker::run_once(home.path()).unwrap();
-        let shown = text(home.path(), &store, "r", "main").unwrap().unwrap();
+        let shown = text(home.path(), &store, "r", "main", "none")
+            .unwrap()
+            .unwrap();
         assert!(!shown.contains("look at it"), "{shown}");
     }
 
@@ -967,6 +1008,22 @@ mod tests {
         assert_eq!(what_ran(r#"{"cmd": "rg fetchJson"}"#), "rg fetchJson");
         let windows = serde_json::json!({"file_path": "C:\\repo\\src\\a.rs"});
         assert_eq!(paths(&windows, Some("C:\\repo\\")), vec!["src/a.rs"]);
+    }
+
+    #[test]
+    fn the_session_it_is_shown_to_is_no_other_session() {
+        let t = "## Other active sessions\n- session abcdefgh on main, last at 10:00 UTC\n\
+                 ## As of\nnow\n";
+        assert_eq!(without_session(t, "abcdefgh-1234"), "## As of\nnow\n");
+        let two = t.replace(
+            "## As of",
+            "- session zzzzzzzz on dev, last at 10:01 UTC\n## As of",
+        );
+        assert_eq!(
+            without_session(&two, "abcdefgh-1234"),
+            "## Other active sessions\n- session zzzzzzzz on dev, last at 10:01 UTC\n## As of\nnow\n"
+        );
+        assert_eq!(without_session(t, "other"), t);
     }
 
     #[test]

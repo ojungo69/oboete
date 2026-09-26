@@ -101,11 +101,12 @@ fn run_io(
                 && let Some(repo) = start.repo.as_deref()
             {
                 let branch = start.branch.as_deref().unwrap_or("");
-                manifest = crate::consumer::manifest::text(home, &store, repo, branch)
-                    .unwrap_or_else(|e| {
-                        eprintln!("oboete: manifest not read: {e:#}");
-                        None
-                    });
+                manifest =
+                    crate::consumer::manifest::text(home, &store, repo, branch, &start.session)
+                        .unwrap_or_else(|e| {
+                            eprintln!("oboete: manifest not read: {e:#}");
+                            None
+                        });
             }
             return Ok(None);
         }
