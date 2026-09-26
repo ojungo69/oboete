@@ -284,20 +284,22 @@ fn openai_compat(
     }
     let mut resp = req
         .send_json(&body)
-        .map_err(|e| CallError::other(format!("http request: {e}")))?;
+        .map_err(|e| CallError::other(format!("http request: {}", transport(&e))))?;
     let status = resp.status().as_u16();
     let retry_after_s = resp
         .headers()
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse::<f64>().ok());
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        // A negative, infinite or NaN wait would panic in Duration::from_secs_f64.
+        .filter(|s| s.is_finite() && *s >= 0.0);
     // Capped after decoding: a gzip answer of a few KB on the wire can decode to far more.
     let mut raw = Vec::new();
     std::io::Read::read_to_end(
         &mut std::io::Read::take(resp.body_mut().as_reader(), MAX_RESPONSE_BYTES + 1),
         &mut raw,
     )
-    .map_err(|e| CallError::other(format!("read body: {e}")))?;
+    .map_err(|e| CallError::other(format!("read body: {}", read_error(&e))))?;
     if raw.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(CallError::other(format!(
             "invalid output: response larger than {MAX_RESPONSE_BYTES} bytes"
@@ -305,13 +307,20 @@ fn openai_compat(
     }
     let text = String::from_utf8_lossy(&raw);
     if status != 200 {
+        // The body is read here and never kept: a provider can echo the prompt or its own
+        // generation in it (Groq's `failed_generation`), and the message goes to provider_calls
+        // and the chain's fallbacks (issue #91). Only the status and a vetted code remain.
+        let mut message = format!("http {status}");
+        if let Some(code) = error_code(&text) {
+            message = format!("{message}: {code}");
+        }
+        if moderation(&text) {
+            message.push_str(" (moderation)");
+        }
         return Err(CallError {
             status: Some(status),
             retry_after_s: retry_after_s.or_else(|| retry_after_in_body(&text)),
-            message: format!(
-                "http {status}: {}",
-                text.chars().take(300).collect::<String>()
-            ),
+            message,
         });
     }
     let v: Value = serde_json::from_str(&text)
@@ -338,6 +347,95 @@ fn is_loopback(url: &str) -> bool {
 }
 
 /// Groq spells the reset out in the body: "Please try again in 17.28s".
+/// A transport failure as a fixed name: ureq's own text can quote what the server sent (a
+/// `Location` header, a URI), and it would be kept in provider_calls (issue #91).
+pub(crate) fn transport(e: &ureq::Error) -> String {
+    use ureq::Error as E;
+    match e {
+        E::Timeout(t) => format!("timeout: {t}"),
+        E::StatusCode(c) => format!("status {c}"),
+        E::HostNotFound => "host not found".into(),
+        E::ConnectionFailed => "connection failed".into(),
+        E::TooManyRedirects => "too many redirects".into(),
+        E::RedirectFailed => "redirect failed".into(),
+        E::BodyExceedsLimit(_) => "body exceeds limit".into(),
+        E::Tls(t) => format!("tls: {t}"),
+        E::Io(io) => format!("io: {:?}", io.kind()),
+        _ => "protocol error".into(),
+    }
+}
+
+/// A failure while reading a body: ureq's error inside the io error, else the io error's kind.
+pub(crate) fn read_error(e: &std::io::Error) -> String {
+    e.get_ref()
+        .and_then(|inner| inner.downcast_ref::<ureq::Error>())
+        .map_or_else(|| format!("io: {:?}", e.kind()), transport)
+}
+
+/// Whether an error body is a moderation refusal. In a JSON body only the error's own message,
+/// code and type are read: fields like `failed_generation` quote the prompt or the answer, whose
+/// words must not decide the class.
+fn moderation(body: &str) -> bool {
+    let hit = |s: &str| {
+        let s = s.to_ascii_lowercase();
+        s.contains("moderat") || s.contains("flagged")
+    };
+    match serde_json::from_str::<Value>(body) {
+        Ok(v) => {
+            let e = v.get("error").unwrap_or(&v);
+            ["message", "code", "type"]
+                .iter()
+                .filter_map(|k| e.get(*k).and_then(Value::as_str))
+                .any(hit)
+        }
+        Err(_) => hit(body),
+    }
+}
+
+/// Error codes kept from a provider's error body: only these known names, never a value the body
+/// makes up (a provider can put user data in `code`, issue #91).
+const KNOWN_CODES: &[&str] = &[
+    "api_error",
+    "authentication_error",
+    "context_length_exceeded",
+    "insufficient_quota",
+    "internal_server_error",
+    "invalid_api_key",
+    "invalid_request_error",
+    "json_validate_failed",
+    "model_not_found",
+    "not_found_error",
+    "overloaded_error",
+    "permission_error",
+    "rate_limit_error",
+    "rate_limit_exceeded",
+    "request_too_large",
+    "server_error",
+    "service_unavailable",
+    "tokens",
+    "INVALID_ARGUMENT",
+    "PERMISSION_DENIED",
+    "RESOURCE_EXHAUSTED",
+    "UNAVAILABLE",
+];
+
+/// The error's code, type or status from a JSON error body (`{"error": {"code" | "type": …}}`),
+/// when it is one of `KNOWN_CODES` or an HTTP status number (issue #91).
+pub(crate) fn error_code(body: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let e = v.get("error").unwrap_or(&v);
+    ["code", "type", "status"]
+        .iter()
+        .find_map(|k| match e.get(*k)? {
+            Value::String(s) => KNOWN_CODES.contains(&s.as_str()).then(|| s.clone()),
+            Value::Number(n) => n
+                .as_u64()
+                .filter(|n| (100..600).contains(n))
+                .map(|n| n.to_string()),
+            _ => None,
+        })
+}
+
 fn retry_after_in_body(body: &str) -> Option<f64> {
     let rest = &body[body.find("try again in ")? + "try again in ".len()..];
     let num: String = rest
@@ -627,10 +725,10 @@ fn run_cli(
     };
     let (out, err) = (join(stdout), join(stderr));
     if !status.success() {
-        let err = String::from_utf8_lossy(&err);
+        // stderr is not kept: a CLI can print the prompt it read from stdin (issue #91).
         return Err(CallError::other(format!(
-            "exit {status}: {}",
-            err.chars().take(300).collect::<String>()
+            "{status}, {} bytes on stderr",
+            err.len()
         )));
     }
     if out.len() as u64 > MAX_RESPONSE_BYTES {
@@ -772,7 +870,12 @@ mod tests {
         .unwrap_err();
         assert!(err.message.contains("more than"), "{}", err.message);
         let err = run_cli(sh("echo boom >&2; exit 3"), None, Duration::from_secs(10)).unwrap_err();
-        assert!(err.message.contains("boom"), "{}", err.message);
+        assert!(!err.message.contains("boom"), "{}", err.message);
+        assert!(
+            err.message.contains("exit") && err.message.contains("5 bytes"),
+            "{}",
+            err.message
+        );
         let start = Instant::now();
         let err = run_cli(sh("sleep 5"), None, Duration::from_secs(1)).unwrap_err();
         assert!(err.message.contains("timed out"), "{}", err.message);
@@ -797,6 +900,15 @@ mod tests {
     /// One-shot HTTP server on localhost that answers any request with `body`.
     /// Also hands back the request it received.
     fn serve_once(
+        body: Vec<u8>,
+        extra_headers: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        serve("200 OK", body, extra_headers)
+    }
+
+    /// `serve_once` with another status line.
+    fn serve(
+        status: &'static str,
         body: Vec<u8>,
         extra_headers: &'static str,
     ) -> (String, std::sync::mpsc::Receiver<String>) {
@@ -827,7 +939,7 @@ mod tests {
                 }
             }
             let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             conn.write_all(head.as_bytes()).ok();
@@ -923,6 +1035,186 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.message.contains("larger than"), "{}", e.message);
+    }
+
+    #[test]
+    fn error_bodies_are_never_kept() {
+        // An ordinary sentence and a generation echoed back: neither is a secret pattern.
+        let canary = "今日は設計の続きをします canary-91";
+        let cases = [
+            (
+                "400 Bad Request",
+                json!({"error": {"message": format!("bad request: {canary}"), "type": "invalid_request_error",
+                    "code": "json_validate_failed", "failed_generation": canary}})
+                .to_string(),
+                "http 400: json_validate_failed",
+            ),
+            ("401 Unauthorized", format!("<html>{canary}</html>"), "http 401"),
+            (
+                "429 Too Many Requests",
+                json!({"error": {"message": format!("Please try again in 1.5s. {canary}"), "code": "rate_limit_exceeded"}}).to_string(),
+                "http 429: rate_limit_exceeded",
+            ),
+            ("500 Internal Server Error", format!("{canary}\n{canary}"), "http 500"),
+            (
+                "403 Forbidden",
+                json!({"error": {"message": format!("Your input was flagged: {canary}"), "code": 403}}).to_string(),
+                "http 403: 403 (moderation)",
+            ),
+            (
+                "400 Bad Request",
+                json!({"error": {"code": format!("{canary} with spaces")}}).to_string(),
+                "http 400",
+            ),
+            // Identifier-shaped but not a known code: user data in `code` stays out too.
+            (
+                "400 Bad Request",
+                json!({"error": {"code": "customer-1234", "type": "invalid_request_error"}}).to_string(),
+                "http 400: invalid_request_error",
+            ),
+            (
+                "402 Payment Required",
+                json!({"error": {"code": 40212345}}).to_string(),
+                "http 402",
+            ),
+        ];
+        for (status, body, want) in cases {
+            let (url, _) = serve(status, body.into_bytes(), "");
+            let e = openai_compat(
+                &url,
+                None,
+                "m",
+                10,
+                &Default::default(),
+                &Default::default(),
+                "p",
+                &json!({}),
+            )
+            .unwrap_err();
+            assert_eq!(e.message, want);
+        }
+        // The 429's wait is still read from the body; moderation still gets no cooldown.
+        let (url, _) = serve(
+            "429 Too Many Requests",
+            b"{\"error\": {\"message\": \"Please try again in 1.5s.\"}}".to_vec(),
+            "",
+        );
+        let e = openai_compat(
+            &url,
+            None,
+            "m",
+            10,
+            &Default::default(),
+            &Default::default(),
+            "p",
+            &json!({}),
+        )
+        .unwrap_err();
+        assert_eq!(e.retry_after_s, Some(1.5));
+        // A redirect whose Location quotes the canary fails inside ureq: its text is not kept.
+        let (url, _) = serve(
+            "302 Found",
+            Vec::new(),
+            "Location: canary-91-location/../../../../../../../\r\n",
+        );
+        let e = openai_compat(
+            &url,
+            None,
+            "m",
+            10,
+            &Default::default(),
+            &Default::default(),
+            "p",
+            &json!({}),
+        )
+        .unwrap_err();
+        assert!(!e.message.contains("canary"), "{}", e.message);
+        assert!(e.message.starts_with("http request: "), "{}", e.message);
+        // A permission error quoting a generation that says "flagged" is not moderation.
+        let (url, _) = serve(
+            "403 Forbidden",
+            json!({"error": {"message": "not allowed for this key", "failed_generation": "the item was flagged"}})
+                .to_string()
+                .into_bytes(),
+            "",
+        );
+        let e = openai_compat(
+            &url,
+            None,
+            "m",
+            10,
+            &Default::default(),
+            &Default::default(),
+            "p",
+            &json!({}),
+        )
+        .unwrap_err();
+        assert_eq!(e.message, "http 403");
+        // A negative Retry-After is ignored, not a panic in the chain's sleep.
+        let (url, _) = serve(
+            "429 Too Many Requests",
+            b"{}".to_vec(),
+            "Retry-After: -1\r\n",
+        );
+        let e = openai_compat(
+            &url,
+            None,
+            "m",
+            10,
+            &Default::default(),
+            &Default::default(),
+            "p",
+            &json!({}),
+        )
+        .unwrap_err();
+        assert_eq!(e.retry_after_s, None);
+        let flagged = CallError {
+            status: Some(403),
+            retry_after_s: None,
+            message: "http 403 (moderation)".into(),
+        };
+        assert_eq!(cooldown_for(&flagged), None);
+    }
+
+    #[test]
+    fn a_failed_chain_keeps_no_error_body_in_provider_calls() {
+        let canary = "要約の途中の文 canary-91-chain";
+        let home = std::env::temp_dir().join(format!("oboete-provider-91-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let conn = crate::db::open(&home).unwrap();
+        let (url, _) = serve(
+            "400 Bad Request",
+            json!({"error": {"code": "json_validate_failed", "failed_generation": canary}})
+                .to_string()
+                .into_bytes(),
+            "",
+        );
+        let providers = [Provider::Openai {
+            name: "stub".into(),
+            base_url: url,
+            key_file: None,
+            model: "m".into(),
+            daily_budget: 10,
+            timeout_s: 10,
+            retry_429: false,
+            extra: Default::default(),
+            headers: Default::default(),
+        }];
+        let Err(err) = Chain::new(&providers).summarize(&conn, "p", &json!({})) else {
+            panic!("the stub only fails");
+        };
+        assert!(!format!("{err:#}").contains("canary"), "{err:#}");
+        let details: Vec<String> = conn
+            .prepare("SELECT COALESCE(detail, '') FROM provider_calls")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(details, ["http 400: json_validate_failed"]);
+        drop(conn);
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
