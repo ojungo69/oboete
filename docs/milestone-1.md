@@ -102,6 +102,38 @@ B3 is decided on run 2. Run 1 took the first entry of any answer; Codex (#77) as
 - What this does not show (spec 8.1): judges that share a bias agree on the same wrong grade. Agreement with the owner is measured later, on the owner's own decisions (#76).
 - Frozen: `labels/calib-50.inputs.jsonl` (the question and memory every panel judge read, from the evaluation store, unchanged since 2026-09-24), run 1 (`labels/calib-50.panel.jsonl`, `labels/calib-50.result.json`) and run 2 (`labels/calib-50.panel-2.jsonl`, `labels/calib-50.result-2.json`, `labels/calib-50.result-2b.json`). The 4 answers the owner gave before decision 29 are set aside, unused (`labels/calib-50.withdrawn-2026-09-26.jsonl`).
 
+## M22 corpus (Task 10)
+
+`docs/eval/corpus_count.py`, 2026-09-26, read-only (~/.oboete/eval/corpus-count.json):
+
+| Store | Observations | Summaries | Prompts | Other |
+|---|---|---|---|---|
+| Eval store (claude-mem copy imported, 2026-09-24) | 152,136 | 13,169 | 13,197 | |
+| Live store (today's oboete on WSL) | 169 | 20 | 23 | 17,939 events, all in the last 7 days |
+| claude-mem on Windows | 1,285 | 216 | 195 | |
+| claude-mem on the iMac | none | | | no database |
+
+- Documents a device would hold if everything were imported: 178,502 (the eval store) + 1,696 (Windows' claude-mem) = about 180,200. This is an upper bound: the machines' histories overlap, and the live store's 212 documents cover sessions claude-mem also recorded.
+- That is about half the old "~330k" figure, which counted claude-mem twice (spec 8.2).
+- Raw events, from the transcripts of the last 90 days (3,319 files, parsed by `oboete transcript`): 362,379 events, so about 1.47 million a year. The fixture JSON is 2.14 GB for the 90 days, about 8.7 GB a year. That is uncompressed JSON, an upper bound before per-record compression, not a disk estimate.
+
+## Dev label drafts (Task 8, 2026-09-26)
+
+Drafted by `claude-sonnet-5` in owner decision 29's form: one plain-Japanese sentence and the owner's own message (a typed prompt, or their answer to a question). Every line gated, every quote verbatim.
+- From the replay set's 30 dev transcripts: 140 decisions drafted, 99 kept from 21 sessions; 23 pairs, only 6 of them overturns. Line ids had to be normalized first (the model writes `4`, `"4"` and `"[L4]"` as well as `"L4"`; 67 drafts had been dropped for that alone).
+- So 40 more dev-split transcripts were added (`draft_candidates.py extra 40`: claude-mem-recorded sessions outside the replay set, most typed prompts first, never the held-out side), copied owner-only under `replay/dev-extra`.
+- Now: 428 decisions from 60 sessions; 181 pairs (45 overturns, 136 compatible). The first count said 204: a repository with more than 80 decisions is drafted in overlapping prompts, and 56 pairs came back more than once (7 of them with both relations); the first answer about a pair now stands. Then an accepted proposal took the time of its acceptance, not of the proposal (79 accepted, 26 of them moved): 2 earlier pairs no longer held their order and were dropped, and the prompts whose order changed found 15 more (Codex, #78). Last, every decision took the time of the developer's own message: 42 had been cited from a later restatement, and 5 compatible pairs no longer held their order and were dropped; no pair prompt changed, and none of the 43 owner pair tasks was affected (Codex, #78). Then a message in the 10-line overlap of two windows had its decisions drafted twice, with different quotes: a later window now adds decisions on a message only when the earlier one found none there. 92 of 520 went (ids and content of the rest unchanged); 34 pairs went with them, and the 15 pair prompts whose decisions changed found 59 more (Codex, #78).
+- Pairs are grouped by the session's first working directory. A session that moved into another repository, or two worktrees of one repository, are grouped apart; that can only leave some pairs unproposed, since the owner gives each shown pair its relation.
+- Read by Claude before handing over: 5 decisions, all real decisions in plain words; Latin letters only in product names (11 of the first 99). 5 overturn drafts: all real decisions, but not all overturns (2-3 of 5 are clear), and several stay technical in plain Japanese (version control, secret tags); the owner answers 判断できない there and the panel takes them.
+- Tasks for the owner: 50 decisions (`dev-decisions`) and 40 pairs (`dev-pairs`: 20 drafted as each relation, cross-session first). Drawn again after the overlap fix, before any answer; the earlier tasks are kept owner-only under `labels/drafts/superseded-2026-09-26`. `draft_candidates.py tasks` adds more as answers of 判断できない come in.
+
+## Fixtures, today's code (Task 9 step 5, 2026-09-26)
+
+Task 7's fixtures through the owner's binary built from main f43da4d, in a temporary home with the API-only chain (`baseline.py config`):
+- `middle-only`: 12 observations; the middle decision is captured ("同期間隔を45秒に設定"). The plan's query (`LIKE '%45 秒%'`, with a space) found 0 because the title has no space; `LIKE '%45%'` finds it in 2 observations. So #57's parts-in-order stopgap holds on this fixture.
+- `long-24h`: 3 observations about the cache ("キャッシュの保存先をSQLiteに変更", "キャッシュ層の削除を決定", "キャッシュ保持に対する開発者の方針変更"), the overturned decision and the current one side by side with no status. As spec 8.1 expects, the M3 test milestone 3 writes fails against today's code.
+- Steps 3 and 4 (the dev replay through today's oboete and the judged retrieval baselines) run outside the owner's working hours: they share the owner's free tiers and Claude allowance.
+
 ## Findings
 
 - Today's hook keeps teammate messages ("Another Claude session sent a message: <teammate-message …>") as prompts: `ENVELOPES` in src/hook.rs has `<agent-message` but not this form. Design B's capture (milestone 2) should treat it as an envelope.
