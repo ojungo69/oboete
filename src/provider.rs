@@ -379,9 +379,10 @@ fn usage_cli(cli: &str, stdout: &str) -> db::Usage {
             let u = &v["usage"];
             let cache_read = tokens(&u["cache_read_input_tokens"]);
             db::Usage {
-                prompt: tokens(&u["input_tokens"]).map(|n| {
-                    n + tokens(&u["cache_creation_input_tokens"]).unwrap_or(0)
-                        + cache_read.unwrap_or(0)
+                // A sum that does not fit is not a count: dropped, never wrapped.
+                prompt: tokens(&u["input_tokens"]).and_then(|n| {
+                    n.checked_add(tokens(&u["cache_creation_input_tokens"]).unwrap_or(0))?
+                        .checked_add(cache_read.unwrap_or(0))
                 }),
                 completion: tokens(&u["output_tokens"]),
                 cached: cache_read,
@@ -1153,6 +1154,8 @@ mod tests {
             }
         );
         assert_eq!(usage_cli("grok", "{}"), db::Usage::default());
+        let huge = json!({"usage": {"input_tokens": i64::MAX, "cache_read_input_tokens": 1}});
+        assert_eq!(usage_cli("claude", &huge.to_string()).prompt, None);
     }
 
     #[test]
