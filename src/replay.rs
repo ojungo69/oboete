@@ -49,7 +49,8 @@ pub fn run(
         let event = v["event"].as_str().unwrap_or("");
         let started = Instant::now();
         let out = if crate::capture::PORTED.contains(&ev_agent) {
-            hook::record(&mut raw, ev_agent, event, &v["payload"])?;
+            let ts = fixture_ms(&conn, &v["ts"]).unwrap_or_else(db::now_ms);
+            hook::record(&mut raw, ev_agent, event, &v["payload"], ts)?;
             None
         } else {
             hook::handle(&conn, ev_agent, event, &v["payload"])?
@@ -81,6 +82,18 @@ pub fn run(
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+/// A fixture line's `ts` (RFC 3339, as `oboete transcript` writes it) in unix ms; `None` when the
+/// line has none (events-1000.jsonl), so replay falls back to now (issue #65).
+fn fixture_ms(conn: &rusqlite::Connection, ts: &Value) -> Option<i64> {
+    conn.query_row(
+        "SELECT CAST(round(unixepoch(?1, 'subsec') * 1000) AS INTEGER)",
+        [ts.as_str()?],
+        |r| r.get(0),
+    )
+    .ok()
+    .flatten()
 }
 
 fn sample_spawns(home: &Path, root: &str, n: usize) -> Result<Vec<u128>> {
@@ -122,4 +135,19 @@ fn pct(sorted: &[u128], p: usize) -> u128 {
     }
     let idx = (sorted.len() * p / 100).min(sorted.len() - 1);
     sorted[idx]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_times_are_read_to_the_millisecond() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let ms = |t: &str| fixture_ms(&conn, &json!(t));
+        assert_eq!(ms("1970-01-02T00:00:00.000Z"), Some(86_400_000));
+        assert_eq!(ms("2026-09-01T00:00:00.123Z"), Some(1_788_220_800_123));
+        assert_eq!(ms("not a time"), None);
+        assert_eq!(fixture_ms(&conn, &Value::Null), None);
+    }
 }

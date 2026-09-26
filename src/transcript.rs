@@ -900,6 +900,7 @@ mod tests {
                 "claude",
                 e["event"].as_str().unwrap(),
                 &e["payload"],
+                0,
             )
             .unwrap();
         }

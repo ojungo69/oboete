@@ -1,6 +1,6 @@
 //! Design B capture (docs/milestone-2-plan.md Task 2; spec 2.1-2.4): one hook payload becomes
-//! the events appended to `raw.db`. Text is kept whole (no clip) and redacted in full; images and
-//! other base64 content become a marker; git fields are read from files, never from `git`.
+//! the events appended to `raw.db`. Text is kept whole (no clip); every text field loses its
+//! `<private>`-style blocks and is redacted in full; images and other base64 content become a marker; git fields are read from files, never from `git`.
 //! Agents move here one by one: `PORTED` lists those done, and the others still go through
 //! `hook::handle` into v1's store until their port lands.
 
@@ -48,15 +48,16 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
                     .map(|p| crate::hook::last_assistant_in_transcript(Path::new(p)))
                     .unwrap_or_default(),
             };
+            let reply = redact::outbound(&reply);
             if reply.trim().is_empty() {
                 return Vec::new();
             }
-            ("reply", json!({"assistant": redact::redact(&reply)}))
+            ("reply", json!({"assistant": reply}))
         }
         "PreCompact" => ("compaction", json!({"trigger": payload.get("trigger")})),
         "PostCompact" => match str_field(payload, &["compact_summary"]) {
-            Some(s) if !s.trim().is_empty() => {
-                ("compaction", json!({"summary": redact::redact(s)}))
+            Some(s) if !redact::outbound(s).trim().is_empty() => {
+                ("compaction", json!({"summary": redact::outbound(s)}))
             }
             _ => return Vec::new(),
         },
@@ -84,9 +85,10 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
     }]
 }
 
-/// A tool field as stored: binary content replaced by its marker, then redacted in full.
+/// A tool field as stored: binary content replaced by its marker, then closed `<private>`-style
+/// blocks removed and the rest redacted in full (`redact::outbound`, what v1's `clip` did first).
 fn text(v: &Value) -> String {
-    redact::redact(&compact(&markers(v)))
+    redact::outbound(&compact(&markers(v)))
 }
 
 /// `v` with every base64 payload replaced by `{kind, mime, bytes, sha256}` (spec 2.3).
@@ -259,6 +261,32 @@ mod tests {
             one("UserPromptSubmit", json!({"prompt": "hi"})).session,
             "unknown"
         );
+    }
+
+    #[test]
+    fn private_blocks_leave_every_text_field() {
+        let e = one(
+            "PostToolUse",
+            json!({"tool_name": "Bash", "tool_input": {"command": "echo <private>zqx-in</private>"},
+                   "tool_response": {"stdout": "a <private>zqx-out</private> b"}}),
+        );
+        assert!(
+            !e.body.contains("zqx") && !e.body.contains("private"),
+            "{}",
+            e.body
+        );
+        let e = one(
+            "Stop",
+            json!({"last_assistant_message": "ok <private>reply</private>"}),
+        );
+        assert_eq!(body(&e)["assistant"], "ok");
+        let e = one(
+            "PostCompact",
+            json!({"compact_summary": "sum <private>mary</private>"}),
+        );
+        assert_eq!(body(&e)["summary"], "sum");
+        let only_private = json!({"last_assistant_message": "<private>all</private>"});
+        assert!(events("claude", "Stop", &only_private, 0).is_empty());
     }
 
     #[test]

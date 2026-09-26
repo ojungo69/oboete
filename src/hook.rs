@@ -76,7 +76,13 @@ fn run_io(
         std::fs::create_dir_all(home)?;
         if crate::capture::PORTED.contains(&agent) {
             // Design B: nothing is injected until the manifest (milestone 2 Task 9).
-            record(&mut crate::raw::open(home)?, agent, event, &payload)?;
+            record(
+                &mut crate::raw::open(home)?,
+                agent,
+                event,
+                &payload,
+                db::now_ms(),
+            )?;
             return Ok(None);
         }
         let conn = db::open(home)?;
@@ -96,9 +102,16 @@ fn run_io(
     result.map(|_| ())
 }
 
-/// Design B (milestone 2 Task 2): the events of one hook call, appended to `raw.db`.
-pub fn record(raw: &mut crate::raw::Raw, agent: &str, event: &str, payload: &Value) -> Result<()> {
-    for e in crate::capture::events(agent, event, payload, db::now_ms()) {
+/// Design B (milestone 2 Task 2): the events of one hook call, appended to `raw.db` with the
+/// event's time (`now` in a hook; the fixture's in a replay).
+pub fn record(
+    raw: &mut crate::raw::Raw,
+    agent: &str,
+    event: &str,
+    payload: &Value,
+    ts: i64,
+) -> Result<()> {
+    for e in crate::capture::events(agent, event, payload, ts) {
         raw.append(&e)?;
     }
     Ok(())
