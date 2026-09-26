@@ -71,7 +71,7 @@ impl Consumer for Rescan {
         let recs = raw.after(device, from, BATCH)?;
         for r in &recs {
             let Item::Event(e) = &r.item else { continue };
-            for (start, end) in crate::redact::ranges(&e.body, &settings.rules) {
+            for (start, end) in crate::redact::field_ranges(&e.body, &settings.rules) {
                 if self.writer.is_none() {
                     self.writer = Some(crate::raw::open(&self.home)?);
                 }
@@ -155,6 +155,29 @@ mod tests {
         worker::run_once(p).unwrap();
         assert_eq!(tombstones(&raw), 1);
         assert!(!body(&raw, old).contains("acme"));
+    }
+
+    #[test]
+    fn a_rule_anchored_to_a_field_matches_as_capture_would() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        let seq = raw
+            .append(&raw::test_event(
+                r#"{"prompt":"deploy acme-123456","cwd":"/r"}"#,
+            ))
+            .unwrap();
+        worker::run_once(p).unwrap();
+        std::fs::write(
+            p.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}$' }]\n",
+        )
+        .unwrap();
+        worker::run_once(p).unwrap();
+        assert_eq!(
+            body(&raw, seq),
+            r#"{"prompt":"deploy ***********","cwd":"/r"}"#
+        );
     }
 
     #[test]

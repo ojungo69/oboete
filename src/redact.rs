@@ -837,11 +837,58 @@ fn user_spans_in(
     spans
 }
 
-/// Task 7's rescan: the byte ranges of a stored `text` the rules find now, merged, from both of
-/// its views as capture scans them. What capture masked, or a tombstone starred, is no finding
+/// The byte ranges of `text` the rules find now, merged, from both of its views as capture scans
+/// them. What capture masked, or a tombstone starred, is no finding
 /// (`a_rescan_finds_nothing_new_in_what_capture_masked`).
 pub fn ranges(text: &str, rules: &Rules) -> Vec<(usize, usize)> {
     merged(&spans(text, rules))
+}
+
+/// The content of each JSON string literal of `text`, keys too, as byte ranges of `text`.
+/// Capture scans a body field by field, so a rule anchored to a field's start or end (`^`, `$`)
+/// is only ever matched against one field.
+fn literals(text: &str) -> Vec<(usize, usize)> {
+    let b = text.as_bytes();
+    let (mut out, mut open, mut i) = (Vec::new(), None, 0);
+    while i < b.len() {
+        match (b[i], open) {
+            (b'\\', Some(_)) => i += 1,
+            (b'"', None) => open = Some(i + 1),
+            (b'"', Some(start)) => {
+                out.push((start, i));
+                open = None;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Task 7's rescan: `ranges` of a stored body, field by field as capture scanned it, as byte
+/// ranges of the body.
+pub fn field_ranges(body: &str, rules: &Rules) -> Vec<(usize, usize)> {
+    literals(body)
+        .into_iter()
+        .flat_map(|(s, e)| {
+            ranges(&body[s..e], rules)
+                .into_iter()
+                .map(move |(a, b)| (s + a, s + b))
+        })
+        .collect()
+}
+
+/// The egress gate on a stored body, field by field as capture scanned it.
+pub fn outbound_fields(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut pos = 0;
+    for (s, e) in literals(body) {
+        out.push_str(&body[pos..s]);
+        out.push_str(&outbound(&body[s..e]));
+        pos = e;
+    }
+    out.push_str(&body[pos..]);
+    out
 }
 
 /// Overlapping spans (a short and a long rule on one token) as the runs one mask covers.

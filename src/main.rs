@@ -220,9 +220,11 @@ fn raw_get(home: &std::path::Path, id: &str) -> Result<Option<String>> {
         |r| r.get(0),
     )?;
     let repo = e.repo.as_deref().unwrap_or("");
+    // Gated field by field as well as whole (`emit`): a rule may be anchored to a field's end.
     Ok(Some(format!(
         "{id} {when} {} {repo}\n\n{}\n",
-        e.kind, e.body
+        e.kind,
+        redact::outbound_fields(&e.body)
     )))
 }
 
