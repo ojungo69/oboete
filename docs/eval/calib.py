@@ -161,14 +161,15 @@ def chat(member, prompt, timeout=300):
             time.sleep(wait + 1)
 
 
-def cli_chat(cli, model, prompt, timeout):
+def cli_chat(cli, model, prompt, timeout, version=None):
     """(answer text, the model the CLI reports) from one tool-less CLI run as the dogfood user; a
-    failed run raises ConnectionError, like a failed API call."""
+    failed run raises ConnectionError, like a failed API call. `version` is for the canary only: the
+    CLI version it is testing; every judge call uses TESTED."""
     try:
         # The CLI's own timeout runs as the dogfood user, so a slow call does not outlive this one
         # (killing sudo alone would leave it running); this timeout is only the backstop.
         run = subprocess.run(['sudo', '-n', '-u', DOGFOOD, '-H', 'bash', '-c', CLI_JUDGE, 'judge', cli, model, str(timeout),
-                              TESTED[cli]],
+                              version or TESTED[cli]],
                              input=prompt, capture_output=True, text=True, timeout=timeout + 30, env=clean_env())
     except subprocess.TimeoutExpired:
         raise ConnectionError(f'{cli} gave no answer in {timeout} s') from None
