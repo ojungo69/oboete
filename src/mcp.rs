@@ -403,7 +403,10 @@ mod tests {
         crate::redact::set_home(&dir).unwrap();
         rusqlite::Connection::open(dir.join("oboete.db"))
             .unwrap()
-            .execute("UPDATE summaries SET body = ?1", ["BEGIN\nkq7Wz2hidden END"])
+            .execute(
+                "UPDATE summaries SET body = ?1",
+                ["BEGIN\nkq7Wz2hidden END"],
+            )
             .unwrap();
         let tl = body(
             s.timeline(Parameters(TimelineArgs {
