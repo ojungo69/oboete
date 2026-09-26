@@ -262,29 +262,44 @@ impl Raw {
         let mut from = after;
         let mut rewritten = 0;
         loop {
-            let batch: Vec<(i64, Vec<u8>)> = self
+            // Sizes first: a batch loads at most `COMPRESS_BATCH` bodies and `BATCH_BYTES` of them
+            // (always one), and a body above `MAX_BODY_BYTES` is never loaded: it stays plain, as
+            // capture caps each string, not a whole body, and a compressed body must read back.
+            let sizes: Vec<(i64, i64)> = self
                 .conn
                 .prepare(
-                    "SELECT seq, body FROM records WHERE device = ?1 AND seq > ?2 AND seq <= ?3
-                       AND type = 'event' AND enc = 'plain' ORDER BY seq LIMIT ?4",
+                    "SELECT seq, length(body) FROM records WHERE device = ?1 AND seq > ?2
+                       AND seq <= ?3 AND type = 'event' AND enc = 'plain' ORDER BY seq LIMIT ?4",
                 )?
                 .query_map(params![device, from, through, COMPRESS_BATCH as i64], |r| {
                     Ok((r.get(0)?, r.get(1)?))
                 })?
                 .collect::<rusqlite::Result<_>>()?;
-            let Some(&(last, _)) = batch.last() else {
+            if sizes.is_empty() {
                 return Ok(rewritten);
-            };
+            }
+            let (mut upto, mut bytes, mut chosen) = (from, 0u64, Vec::new());
+            for (seq, len) in sizes {
+                let len = len as u64;
+                if len <= MAX_BODY_BYTES {
+                    if !chosen.is_empty() && bytes + len > BATCH_BYTES {
+                        break;
+                    }
+                    bytes += len;
+                    chosen.push(seq);
+                }
+                upto = seq;
+            }
             let mut smaller = Vec::new();
-            // A body above what `unzstd` returns stays plain: capture caps each string, not a
-            // whole body, and a compressed body must always read back.
-            for (seq, body) in batch
-                .iter()
-                .filter(|(_, b)| b.len() as u64 <= MAX_BODY_BYTES)
-            {
-                let z = zstd::bulk::compress(body, 3)?;
+            for seq in chosen {
+                let body: Vec<u8> = self.conn.query_row(
+                    "SELECT body FROM records WHERE device = ?1 AND seq = ?2",
+                    params![device, seq],
+                    |r| r.get(0),
+                )?;
+                let z = zstd::bulk::compress(&body, 3)?;
                 if z.len() < body.len() {
-                    smaller.push((*seq, z));
+                    smaller.push((seq, z));
                 }
             }
             let tx = rusqlite::Transaction::new_unchecked(
@@ -299,13 +314,14 @@ impl Raw {
                 )?;
             }
             tx.commit()?;
-            from = last;
+            from = upto;
         }
     }
 }
 
-/// Records `compress_through` reads per batch.
+/// Records `compress_through` reads per batch, and the bytes of their bodies it loads at once.
 const COMPRESS_BATCH: usize = 200;
+const BATCH_BYTES: u64 = 16 << 20;
 
 /// The most a stored body may decompress to, so a crafted frame, as a restored or synced record
 /// could carry, cannot expand without bound. `compress_through` leaves larger bodies plain.
@@ -446,6 +462,23 @@ mod tests {
             .query_row("SELECT field FROM ledger", [], |x| x.get(0))
             .unwrap();
         assert_eq!(field, "/prompt");
+    }
+
+    #[test]
+    fn bodies_larger_than_a_batch_together_are_compressed_over_several() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let big = "c".repeat(BATCH_BYTES as usize / 2 + 1);
+        for _ in 0..3 {
+            raw.append(&test_event(&big)).unwrap();
+        }
+        let device = raw.device().to_owned();
+        assert_eq!(raw.compress_through(&device, 0, 3).unwrap(), 3);
+        let recs = raw.after(&device, 0, 3).unwrap();
+        assert!(
+            recs.iter()
+                .all(|r| matches!(&r.item, Item::Event(e) if e.body == big))
+        );
     }
 
     #[test]
