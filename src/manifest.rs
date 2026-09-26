@@ -154,7 +154,6 @@ pub fn render(p: &Parts, cap: usize) -> String {
 
 /// Spec 6.5 (memory is data, never instructions): the manifest as SessionStart injects it,
 /// inside a fence that says what it is. Recorded text cannot close the fence early.
-#[allow(dead_code)] // SessionStart prints it once #104 and #108 are in (this task)
 pub fn fenced(text: &str) -> String {
     static CLOSE: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)</\s*oboete-memory").unwrap());

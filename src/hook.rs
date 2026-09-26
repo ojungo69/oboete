@@ -62,6 +62,8 @@ fn run_io(
     // When the store operation ended (0 until one did): overlapping hooks change the marker in
     // this order, so it is taken before anything that runs after the write.
     let mut ended = 0;
+    // Task 9: the manifest SessionStart shows for the checkout its event names.
+    let mut manifest = None;
     let result: Result<Option<String>> = (|| {
         if std::env::var_os(SKIP_ENV).is_some() {
             return Ok(None);
@@ -86,17 +88,25 @@ fn run_io(
         tried = crate::capture::PORTED.contains(&agent);
         std::fs::create_dir_all(home)?;
         if tried {
-            // Design B: nothing is injected until the manifest (milestone 2 Task 9).
             let settings = crate::capture::Settings::load(home)?;
-            wrote = record(
-                &mut crate::raw::open(home)?,
-                agent,
-                event,
-                &payload,
-                db::now_ms(),
-                &settings,
-            )? > 0;
+            let mut store = crate::raw::open(home)?;
+            let events = record(&mut store, agent, event, &payload, db::now_ms(), &settings)?;
+            wrote = !events.is_empty();
             ended = crate::failure::now();
+            // Not on a resume: its context has the manifest already (after a compaction it
+            // does not, so it is shown again). A manifest that cannot be read is no recording
+            // failure: the row is written.
+            if let Some(start) = events.iter().find(|e| e.kind == "start")
+                && str_field(&payload, &["source"]) != Some("resume")
+                && let Some(repo) = start.repo.as_deref()
+            {
+                let branch = start.branch.as_deref().unwrap_or("");
+                manifest = crate::consumer::manifest::text(home, &store, repo, branch)
+                    .unwrap_or_else(|e| {
+                        eprintln!("oboete: manifest not read: {e:#}");
+                        None
+                    });
+            }
             return Ok(None);
         }
         let conn = db::open(home)?;
@@ -128,19 +138,27 @@ fn run_io(
             Ok(_) => {}
             Err(e) => crate::failure::mark(home, crate::failure::classify(e), ended),
         }
-        // Design B injects nothing at SessionStart until the manifest (Task 9), except this line.
+        // Design B's SessionStart: the recording-failure line, then the manifest in its fence.
+        let failed = crate::failure::since(home).or_else(|| {
+            // No marker when even the marker could not be written: this call's error, then.
+            result
+                .as_ref()
+                .err()
+                .map(|e| (crate::failure::classify(e), ended))
+        });
+        let parts: Vec<String> = [
+            failed.map(crate::failure::line),
+            manifest.as_deref().map(crate::manifest::fenced),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         if event == "SessionStart"
             && crate::capture::PORTED.contains(&agent)
             && out.is_none()
-            // No marker when even the marker could not be written: this call's error, then.
-            && let Some(failed) = crate::failure::since(home).or_else(|| {
-                result
-                    .as_ref()
-                    .err()
-                    .map(|e| (crate::failure::classify(e), ended))
-            })
+            && !parts.is_empty()
         {
-            let text = crate::failure::line(failed);
+            let text = parts.join("\n");
             out = Some(
                 json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
                     .to_string(),
@@ -157,7 +175,7 @@ fn run_io(
 }
 
 /// Design B (milestone 2 Task 2): the events of one hook call, appended to `raw.db` with the
-/// event's time (`now` in a hook; the fixture's in a replay). Returns how many were appended.
+/// event's time (`now` in a hook; the fixture's in a replay). Returns the appended events.
 pub fn record(
     raw: &mut crate::raw::Raw,
     agent: &str,
@@ -165,8 +183,8 @@ pub fn record(
     payload: &Value,
     ts: i64,
     settings: &crate::capture::Settings,
-) -> Result<usize> {
-    let mut n = 0;
+) -> Result<Vec<crate::raw::Event>> {
+    let mut appended = Vec::new();
     for mut c in crate::capture::events(agent, event, payload, ts, settings) {
         // An idless event's session is this device's own: a bare "unknown" would be one session
         // on every device once they sync (as `handle` does for v1).
@@ -174,9 +192,9 @@ pub fn record(
             c.event.session = format!("unknown-{}", raw.device());
         }
         raw.append_with_ledger(&c.event, &c.ledger, settings.rules.version())?;
-        n += 1;
+        appended.push(c.event);
     }
-    Ok(n)
+    Ok(appended)
 }
 
 /// The hook file `oboete setup grok` writes. While it exists, Grok delivers its own events.

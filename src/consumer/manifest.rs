@@ -66,7 +66,6 @@ fn schema(k: &Connection) -> Result<()> {
 /// hook never writes knowledge.db, and none is made when the worker has not run yet.
 /// None while the saved text may show what raw now hides (D8): a tombstone the worker has not
 /// applied yet, or a checkout still marked for a rebuild.
-#[allow(dead_code)] // SessionStart reads it once #108 is in (this task)
 pub fn text(home: &Path, raw: &Raw, repo: &str, branch: &str) -> Result<Option<String>> {
     let device = raw.device();
     let path = home.join("knowledge.db");
