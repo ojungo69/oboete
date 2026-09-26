@@ -162,14 +162,10 @@ fn fuse(
     Ok(out)
 }
 
-/// Ranked search. `repo = None` searches every repository. Prompts come after observations and
-/// summaries.
-pub fn search(
-    conn: &Connection,
-    query: &str,
-    repo: Option<&str>,
-    limit: usize,
-) -> Result<Vec<Hit>> {
+/// What a query matches on: its trigrams ORed against the FTS5 table `fts`, or, for a query too
+/// short for a trigram, each word as a `LIKE` on any of the `like` columns. The clauses, their
+/// arguments, and whether bm25 ranks them (there are trigrams); `None` when nothing is left.
+fn query_clauses(query: &str, fts: &str, like: &[&str]) -> Option<(Vec<String>, Vec<Value>, bool)> {
     let grams = trigrams(query);
     let short: Vec<&str> = if grams.is_empty() {
         query.split_whitespace().collect()
@@ -177,7 +173,7 @@ pub fn search(
         Vec::new()
     };
     if grams.is_empty() && short.is_empty() {
-        return Ok(Vec::new());
+        return None;
     }
     let mut clauses: Vec<String> = Vec::new();
     let mut args: Vec<Value> = Vec::new();
@@ -188,7 +184,7 @@ pub fn search(
             .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(" OR ");
-        clauses.push("fts MATCH ?".into());
+        clauses.push(format!("{fts} MATCH ?"));
         args.push(Value::Text(q));
     }
     for t in &short {
@@ -198,20 +194,38 @@ pub fn search(
                 .replace('%', "\\%")
                 .replace('_', "\\_")
         );
-        clauses.push("(title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')".into());
-        args.push(Value::Text(pattern.clone()));
-        args.push(Value::Text(pattern));
+        let any: Vec<String> = like
+            .iter()
+            .map(|c| format!("{c} LIKE ? ESCAPE '\\'"))
+            .collect();
+        clauses.push(format!("({})", any.join(" OR ")));
+        args.extend(like.iter().map(|_| Value::Text(pattern.clone())));
     }
+    Some((clauses, args, !grams.is_empty()))
+}
+
+/// Ranked search. `repo = None` searches every repository. Prompts come after observations and
+/// summaries.
+pub fn search(
+    conn: &Connection,
+    query: &str,
+    repo: Option<&str>,
+    limit: usize,
+) -> Result<Vec<Hit>> {
+    let Some((mut clauses, mut args, ranked)) = query_clauses(query, "fts", &["title", "body"])
+    else {
+        return Ok(Vec::new());
+    };
     if let Some(r) = repo {
         clauses.push("repo = ?".into());
         args.push(Value::Text(r.to_string()));
     }
     // Knowledge before prompts: bm25 favours short documents, and a prompt is usually a short
     // question where an observation is the answer.
-    let order = if grams.is_empty() {
-        "kind = 'prompt', ts DESC"
-    } else {
+    let order = if ranked {
         "kind = 'prompt', rank, ts DESC"
+    } else {
+        "kind = 'prompt', ts DESC"
     };
     let mut sql = format!("SELECT {COLUMNS} FROM fts WHERE {}", clauses.join(" AND "));
     sql.push_str(&format!(" ORDER BY {order} LIMIT ?"));
@@ -486,44 +500,17 @@ pub fn raw(
 ) -> Result<Vec<RawHit>> {
     let k = crate::knowledge::open(home)?;
     crate::consumer::fts::schema(&k)?;
-    let grams = trigrams(query);
-    let short: Vec<&str> = if grams.is_empty() {
-        query.split_whitespace().collect()
-    } else {
-        Vec::new()
-    };
-    if grams.is_empty() && short.is_empty() {
+    let Some((mut clauses, mut args, ranked)) = query_clauses(query, "raw_fts", &["f.text"]) else {
         return Ok(Vec::new());
-    }
-    let mut clauses: Vec<String> = Vec::new();
-    let mut args: Vec<Value> = Vec::new();
-    if !grams.is_empty() {
-        let q = grams
-            .iter()
-            .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        clauses.push("raw_fts MATCH ?".into());
-        args.push(Value::Text(q));
-    }
-    for t in &short {
-        let pattern = format!(
-            "%{}%",
-            t.replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        );
-        clauses.push("f.text LIKE ? ESCAPE '\\'".into());
-        args.push(Value::Text(pattern));
-    }
+    };
     if let Some(r) = repo {
         clauses.push("d.repo = ?".into());
         args.push(Value::Text(r.to_string()));
     }
-    let order = if grams.is_empty() {
-        "d.ts DESC"
-    } else {
+    let order = if ranked {
         "rank, d.ts DESC"
+    } else {
+        "d.ts DESC"
     };
     let sql = format!(
         "SELECT d.device, d.seq, d.kind, d.ts, d.repo, f.text,
