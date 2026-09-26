@@ -125,9 +125,9 @@ impl<'a> Chain<'a> {
             }
             // Only strict-schema providers enforce the shape; valid JSON of another shape from the
             // rest would pass here and fail the window later, without trying the next provider.
-            let result = result.and_then(|v| {
+            let result = result.and_then(|(v, usage)| {
                 if fits(&v, schema) {
-                    Ok(v)
+                    Ok((v, usage))
                 } else {
                     Err(CallError::other(
                         "invalid output: the answer does not match the schema",
@@ -136,8 +136,8 @@ impl<'a> Chain<'a> {
             });
             let ms = started.elapsed().as_millis() as i64;
             match result {
-                Ok(v) => {
-                    db::record_call(conn, &name, "ok", ms, None)?;
+                Ok((v, usage)) => {
+                    db::record_call_usage(conn, &name, "ok", ms, None, &usage)?;
                     if down_until != 0 || fails != 0 {
                         db::set_provider_state(conn, &name, 0, 0)?;
                     }
@@ -223,7 +223,7 @@ fn cooldown_for(e: &CallError) -> Option<Duration> {
     }
 }
 
-fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<Value, CallError> {
+fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<(Value, db::Usage), CallError> {
     match p {
         Provider::Openai {
             base_url,
@@ -272,7 +272,7 @@ fn openai_compat(
     headers: &std::collections::BTreeMap<String, String>,
     prompt: &str,
     schema: &Value,
-) -> Result<Value, CallError> {
+) -> Result<(Value, db::Usage), CallError> {
     let mut body = json!({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -350,8 +350,61 @@ fn openai_compat(
     let content = v["choices"][0]["message"]["content"]
         .as_str()
         .ok_or_else(|| CallError::other("invalid output: no choices[0].message.content"))?;
-    serde_json::from_str(unfence(content))
-        .map_err(|e| CallError::other(format!("invalid output: content is not JSON ({e})")))
+    let answer = serde_json::from_str(unfence(content))
+        .map_err(|e| CallError::other(format!("invalid output: content is not JSON ({e})")))?;
+    Ok((answer, usage_openai(&v)))
+}
+
+/// A token count from a provider's answer: a non-negative integer, else nothing.
+fn tokens(v: &Value) -> Option<i64> {
+    v.as_i64().filter(|n| *n >= 0)
+}
+
+/// `usage` of an OpenAI-compatible answer (cached and reasoning where the provider reports them).
+fn usage_openai(v: &Value) -> db::Usage {
+    let u = &v["usage"];
+    db::Usage {
+        prompt: tokens(&u["prompt_tokens"]),
+        completion: tokens(&u["completion_tokens"]),
+        cached: tokens(&u["prompt_tokens_details"]["cached_tokens"]),
+        reasoning: tokens(&u["completion_tokens_details"]["reasoning_tokens"]),
+    }
+}
+
+/// Usage from a CLI's own output: claude's JSON result, codex's `turn.completed` event (`--json`).
+fn usage_cli(cli: &str, stdout: &str) -> db::Usage {
+    match cli {
+        "claude" => {
+            let v: Value = serde_json::from_str(stdout).unwrap_or_default();
+            let u = &v["usage"];
+            let cache_read = tokens(&u["cache_read_input_tokens"]);
+            db::Usage {
+                prompt: tokens(&u["input_tokens"]).map(|n| {
+                    n + tokens(&u["cache_creation_input_tokens"]).unwrap_or(0)
+                        + cache_read.unwrap_or(0)
+                }),
+                completion: tokens(&u["output_tokens"]),
+                cached: cache_read,
+                reasoning: None,
+            }
+        }
+        "codex" => stdout
+            .lines()
+            .rev()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| v["type"] == "turn.completed")
+            .map(|v| {
+                let u = &v["usage"];
+                db::Usage {
+                    prompt: tokens(&u["input_tokens"]),
+                    completion: tokens(&u["output_tokens"]),
+                    cached: tokens(&u["cached_input_tokens"]),
+                    reasoning: tokens(&u["reasoning_output_tokens"]),
+                }
+            })
+            .unwrap_or_default(),
+        _ => db::Usage::default(),
+    }
 }
 
 fn is_loopback(url: &str) -> bool {
@@ -625,7 +678,8 @@ fn headless_command(
                 .arg("--output-schema")
                 .arg(write("schema.json", schema_text)?);
             cmd.arg("-o").arg(dir.join("last.json"));
-            cmd.args(["--ephemeral", "--skip-git-repo-check"]);
+            // Events on stdout, for the token usage of `turn.completed`; the answer is last.json.
+            cmd.args(["--json", "--ephemeral", "--skip-git-repo-check"]);
             // No user config (its MCP servers, some with auto-approved tools) and no execpolicy
             // rules; the login still comes from CODEX_HOME. Commands run under a permission profile
             // that hides the disk and the network:
@@ -672,7 +726,7 @@ fn cli_headless(
     timeout_s: u64,
     prompt: &str,
     schema: &Value,
-) -> Result<Value, CallError> {
+) -> Result<(Value, db::Usage), CallError> {
     let scratch = scratch_dir()?;
     let last = scratch.0.join("last.json");
     let (mut cmd, stdin) = headless_command(cli, model, &scratch.0, prompt, &schema.to_string())?;
@@ -709,6 +763,7 @@ fn cli_headless(
         CallError::other(tagged)
     })?;
     let stdout = String::from_utf8_lossy(&out);
+    let usage = usage_cli(cli, &stdout);
     let text = match cli {
         "codex" => {
             use std::io::Read;
@@ -721,7 +776,7 @@ fn cli_headless(
         "agy" => agy_result(&stdout)?,
         _ => stdout.into_owned(),
     };
-    extract_structured(cli, &text)
+    Ok((extract_structured(cli, &text)?, usage))
 }
 
 /// The schema-validated object out of a CLI's JSON envelope: `structured_output` (claude, agy),
@@ -1056,12 +1111,82 @@ mod tests {
     }
 
     #[test]
+    fn token_usage_is_read_from_every_answer_shape() {
+        let http = json!({"usage": {"prompt_tokens": 3585, "completion_tokens": 254,
+            "prompt_tokens_details": {"cached_tokens": 1024},
+            "completion_tokens_details": {"reasoning_tokens": 75}}});
+        let want = db::Usage {
+            prompt: Some(3585),
+            completion: Some(254),
+            cached: Some(1024),
+            reasoning: Some(75),
+        };
+        assert_eq!(usage_openai(&http), want);
+        // A provider's own numbers, but only as numbers: nothing else is kept.
+        let odd = json!({"usage": {"prompt_tokens": -3, "completion_tokens": "many"}});
+        assert_eq!(usage_openai(&odd), db::Usage::default());
+        let claude = json!({"usage": {"input_tokens": 10, "cache_creation_input_tokens": 5306,
+            "cache_read_input_tokens": 200, "output_tokens": 1353}})
+        .to_string();
+        assert_eq!(
+            usage_cli("claude", &claude),
+            db::Usage {
+                prompt: Some(5516),
+                completion: Some(1353),
+                cached: Some(200),
+                reasoning: None
+            }
+        );
+        let codex = [
+            r#"{"type":"thread.started","thread_id":"t"}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"{}"}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":8990,"cached_input_tokens":2816,"output_tokens":88,"reasoning_output_tokens":12}}"#,
+        ]
+        .join("\n");
+        assert_eq!(
+            usage_cli("codex", &codex),
+            db::Usage {
+                prompt: Some(8990),
+                completion: Some(88),
+                cached: Some(2816),
+                reasoning: Some(12)
+            }
+        );
+        assert_eq!(usage_cli("grok", "{}"), db::Usage::default());
+    }
+
+    #[test]
+    fn an_answer_records_its_token_usage() {
+        let home =
+            std::env::temp_dir().join(format!("oboete-provider-usage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let conn = crate::db::open(&home).unwrap();
+        let answer = json!({"choices": [{"message": {"content": "{\"summary\": \"s\"}"}}],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 30}});
+        let (url, _) = serve_once(answer.to_string().into_bytes(), "");
+        Chain::new(&[stub(url)])
+            .summarize(&conn, "p", &json!({"type": "object"}))
+            .unwrap();
+        let row: (String, Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT outcome, prompt_tokens, completion_tokens, cached_tokens FROM provider_calls",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("ok".into(), Some(120), Some(30), None));
+        drop(conn);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
     fn http_answers_are_parsed_and_capped() {
         let answer = json!({"choices": [{"message": {"content": "{\"summary\":\"s\",\"observations\":[]}"}}]});
         let (url, request) = serve_once(answer.to_string().into_bytes(), "");
         // OpenCode Go refuses a request without its session header (HTTP 400 MissingSessionID).
         let headers = [("x-opencode-session".to_string(), "oboete".to_string())].into();
-        let v = openai_compat(
+        let (v, _) = openai_compat(
             &url,
             None,
             "m",
@@ -1082,7 +1207,7 @@ mod tests {
         ] {
             let answer = json!({"choices": [{"message": {"content": content}}]});
             let (url, _) = serve_once(answer.to_string().into_bytes(), "");
-            let v = openai_compat(
+            let (v, _) = openai_compat(
                 &url,
                 None,
                 "m",
