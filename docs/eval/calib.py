@@ -39,8 +39,10 @@ DOGFOOD = 'oboete-dogfood'
 CLI_JUDGE = r'''
 set -u
 export PATH="$HOME/.local/bin:$PATH" GROK_MEMORY=0 GROK_SESSION_SEARCH=0
-W=$(mktemp -d)
-trap 'rm -rf "$W" "$HOME/.grok/sessions/$(python3 -c "import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=\"\"))" "$W")"' EXIT
+W=$(mktemp -d) && [ -d "$W" ] || exit 1
+S=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$W") && [ -n "$S" ] || exit 1
+# Only this call's directory and grok's session for it; both names are checked non-empty above.
+trap 'rm -rf -- "$W" "$HOME/.grok/sessions/$S"' EXIT
 cat > "$W/prompt.txt"
 cd "$W"
 case "$1" in
