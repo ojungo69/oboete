@@ -15,6 +15,11 @@ pub fn open(home: &Path) -> Result<Connection> {
         "CREATE TABLE IF NOT EXISTS checkpoints(
            consumer TEXT NOT NULL, device TEXT NOT NULL, seq INTEGER NOT NULL,
            PRIMARY KEY (consumer, device)
+         );
+         -- MUST-M14's report: each checkpoint moved back because raw lost commits, for doctor.
+         CREATE TABLE IF NOT EXISTS rewinds(
+           ts INTEGER NOT NULL, consumer TEXT NOT NULL, device TEXT NOT NULL,
+           was INTEGER NOT NULL, now INTEGER NOT NULL
          );",
     )
     .context("knowledge schema")?;
@@ -51,10 +56,10 @@ pub mod checkpoint {
     }
 
     /// MUST-M14: a checkpoint above raw's highest seq for this device means raw lost commits that
-    /// a consumer had already processed. The consumer's output above that seq and the checkpoint
-    /// move back in one transaction, so nothing of a lost seq survives to collide with the event
-    /// that reuses it. Returns (consumer, was, now); also appended to `<home>/state/rewound` for
-    /// doctor.
+    /// a consumer had already processed. The consumer's output above that seq, the checkpoint and
+    /// a `rewinds` row for doctor move in one transaction, so nothing of a lost seq survives to
+    /// collide with the event that reuses it, and no rewind goes unreported. Returns
+    /// (consumer, was, now).
     pub fn rewind(
         raw: &Raw,
         k: &Connection,
@@ -71,22 +76,12 @@ pub mod checkpoint {
             let tx = k.unchecked_transaction()?;
             c.rewind(&tx, &device, top)?;
             set(&tx, c.name(), &device, top)?;
+            tx.execute(
+                "INSERT INTO rewinds(ts, consumer, device, was, now) VALUES(?1, ?2, ?3, ?4, ?5)",
+                params![crate::db::now_ms(), c.name(), device, was, top],
+            )?;
             tx.commit()?;
             moved.push((c.name().to_owned(), was, top));
-        }
-        if !moved.is_empty() {
-            let lines: String = moved
-                .iter()
-                .map(|(c, was, now)| format!("{} {c} {device} {was} {now}\n", crate::db::now_ms()))
-                .collect();
-            let state = raw.home().join("state");
-            std::fs::create_dir_all(&state)?;
-            use std::io::Write;
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(state.join("rewound"))?
-                .write_all(lines.as_bytes())?;
         }
         Ok(moved)
     }

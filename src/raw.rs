@@ -89,7 +89,6 @@ pub struct Record {
 pub struct Raw {
     conn: Connection,
     device: String,
-    home: std::path::PathBuf,
 }
 
 /// `<home>/raw.db`: WAL, synchronous=FULL (and fullfsync on macOS), 2 s busy timeout.
@@ -111,21 +110,12 @@ pub fn open(home: &Path) -> Result<Raw> {
     let device = conn.query_row("SELECT value FROM meta WHERE key='device_id'", [], |r| {
         r.get(0)
     })?;
-    Ok(Raw {
-        conn,
-        device,
-        home: home.to_path_buf(),
-    })
+    Ok(Raw { conn, device })
 }
 
 impl Raw {
     pub fn device(&self) -> &str {
         &self.device
-    }
-
-    /// The home this store lives in (where the worker keeps its state files).
-    pub fn home(&self) -> &Path {
-        &self.home
     }
 
     /// SQLite's `quick_check` on raw.db: an error names the first problem it reports.

@@ -201,8 +201,12 @@ mod tests {
             vec![("seen".into(), 8, 5)]
         );
         assert_eq!(seen(&k), vec![1, 2, 3, 4, 5]); // no output left for the lost 6-8
-        let rewound = std::fs::read_to_string(home.path().join("state/rewound")).unwrap();
-        assert!(rewound.trim_end().ends_with(" 8 5"), "{rewound}");
+        let logged: (String, i64, i64) = k
+            .query_row("SELECT consumer, was, now FROM rewinds", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(logged, ("seen".into(), 8, 5));
         raw.append(&raw::test_event("new")).unwrap(); // seq 6 again, a different event
         drain(&raw, &mut k, &mut consumers).unwrap();
         assert_eq!(seen(&k), vec![1, 2, 3, 4, 5, 6]);
