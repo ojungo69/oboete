@@ -789,21 +789,19 @@ fn user_spans_in(
                 }
                 .unwrap_or(all);
                 let value = secret.as_str().trim();
-                if value.is_empty() || value == MASK {
-                    // A value already looked at: blanked by the fixpoint, or masked in a rescan.
-                    // A greedy pattern that ends on it passes over one before it, so this match
-                    // is looked at again up to that value.
+                let plain = x
+                    .entropy
+                    .is_some_and(|min| shannon_entropy(secret.as_str()) <= min);
+                if value.is_empty() || value == MASK || plain {
+                    // A value this rule does not mask: blanked by the fixpoint, masked in a
+                    // rescan, or below its entropy. A greedy pattern that ends on it passes over
+                    // one before it, so this match is looked at again up to that value.
                     // Only a smaller region: an empty group at the end of a match over the whole
                     // region would give the same one again, forever.
                     let before = (from + all.start(), from + secret.start());
                     if secret.start() > all.start() && before != (from, to) {
                         regions.push(before);
                     }
-                    continue;
-                }
-                if x.entropy
-                    .is_some_and(|min| shannon_entropy(secret.as_str()) <= min)
-                {
                     continue;
                 }
                 let at = (from + secret.start(), from + secret.end(), rule);
@@ -1299,6 +1297,16 @@ mod tests {
         // A rescan of stored text, whose mask the rule matches again, looks before it too.
         let (again, _) = scan(r#"ACME_CLIENT otp="123456" otp="[REDACTED]""#, &rules);
         assert!(!again.contains("123456"), "{again}");
+        // One below the rule's entropy, which the greedy match ends on, does not hide one before.
+        let rules = user(
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'ACME.*otp=([A-Za-z0-9]+)', entropy = 3.0 }]",
+        )
+        .unwrap();
+        let (masked, _) = scan("ACME otp=Zq8vN3kL7pW2 otp=aaaaaaaa", &rules);
+        assert!(
+            !masked.contains("Zq8vN3kL7pW2") && masked.contains("aaaaaaaa"),
+            "{masked}"
+        );
     }
 
     #[test]
