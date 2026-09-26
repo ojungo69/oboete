@@ -59,10 +59,26 @@ fn schema(k: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The manifest SessionStart shows for this checkout, if its records built one.
+/// The manifest SessionStart shows for this checkout, if its records built one. Read-only: a
+/// hook never writes knowledge.db, and none is made when the worker has not run yet.
 #[allow(dead_code)] // SessionStart reads it once #104 and #108 are in (this task)
-pub fn text(k: &Connection, repo: &str, branch: &str, device: &str) -> Result<Option<String>> {
-    schema(k)?;
+pub fn text(home: &Path, repo: &str, branch: &str, device: &str) -> Result<Option<String>> {
+    let path = home.join("knowledge.db");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let k = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let built = k
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'manifests'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !built {
+        return Ok(None);
+    }
     Ok(k.query_row(
         "SELECT text FROM manifests WHERE repo = ?1 AND branch = ?2 AND device = ?3",
         params![repo, branch, device],
@@ -86,12 +102,21 @@ impl Consumer for Manifest {
                 Item::Tombstone(
                     Target::Record { device: d, seq } | Target::Range { device: d, seq, .. },
                 ) => {
+                    // The target's facts again, from what raw returns now (masked, or none
+                    // when it is removed), in a build of its checkout.
                     k.execute(
                         "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device)
                          SELECT DISTINCT repo, branch, device FROM manifest_facts
                          WHERE device = ?1 AND seq = ?2",
                         params![d, seq],
                     )?;
+                    k.execute(
+                        "DELETE FROM manifest_facts WHERE device = ?1 AND seq = ?2",
+                        params![d, seq],
+                    )?;
+                    if let Some(e) = event(raw, d, *seq)? {
+                        facts(k, d, *seq, &e)?;
+                    }
                 }
                 Item::Removed => {}
             }
@@ -152,8 +177,8 @@ fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
             } else if k
                 .query_row(
                     "SELECT 1 FROM manifest_facts WHERE device = ?1 AND repo = ?2 AND fact = 'fail'
-                       AND branch = ?3 AND label = ?4 LIMIT 1",
-                    params![device, repo, branch, key],
+                       AND branch = ?3 AND label = ?4 AND seq < ?5 LIMIT 1",
+                    params![device, repo, branch, key, seq],
                     |_| Ok(()),
                 )
                 .optional()?
@@ -251,10 +276,11 @@ fn todos(input: &Value) -> Option<Vec<String>> {
     )
 }
 
-/// The files a call names: the path fields agents use, and the file lines of Codex's
-/// `apply_patch`. A path under the call's cwd is shown relative to it.
+/// The files a call names: the file path fields agents use (not a bare `path`: Glob, Grep and
+/// LS take a directory there), and the file lines of Codex's `apply_patch`. A path under the
+/// call's cwd is shown relative to it.
 fn paths(input: &Value, cwd: Option<&str>) -> Vec<String> {
-    let mut out: Vec<String> = ["file_path", "path", "notebook_path", "target_file"]
+    let mut out: Vec<String> = ["file_path", "notebook_path", "target_file"]
         .iter()
         .filter_map(|k| input.get(*k).and_then(Value::as_str))
         .map(str::to_owned)
@@ -755,6 +781,19 @@ mod tests {
         }
         worker::run_once(home.path()).unwrap(); // built again from raw
         assert_eq!(manifest(home.path()).0, first);
+    }
+
+    #[test]
+    fn session_start_reads_the_manifest_without_writing_knowledge_db() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        assert_eq!(text(home.path(), "r", "main", "d").unwrap(), None);
+        assert!(!home.path().join("knowledge.db").exists());
+        session(home.path(), cwd.path());
+        worker::run_once(home.path()).unwrap();
+        let device = raw::open(home.path()).unwrap().device().to_owned();
+        let shown = text(home.path(), "r", "main", &device).unwrap().unwrap();
+        assert_eq!(shown, manifest(home.path()).0);
     }
 
     #[test]
