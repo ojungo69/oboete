@@ -383,6 +383,10 @@ pub fn scan(text: &str, rules: &Rules) -> (String, Vec<Finding>) {
 
 /// Past this many findings in one text, the text is one mask.
 const MAX_FINDINGS: usize = 1_000;
+/// Past this many matches one user rule looks at in one text (found or passed over: blank,
+/// masked, below its entropy), the text is one mask too, so a rule that matches at every
+/// position (`a()` over a long run of `a`) costs a bounded time.
+const MAX_LOOKS: usize = 10 * MAX_FINDINGS;
 
 /// One rule's spans that masking merged into one mask are one finding (their lengths summed), so
 /// a broad rule (`.`) gives a ledger row per mask, not per character. Past `MAX_FINDINGS` the
@@ -771,15 +775,20 @@ fn user_spans_in(
         let rule = r.rules.len() + j;
         let mut regions = vec![(0, text.len())];
         let mut matched = 0;
-        let mut looked = 0;
+        let (mut regions_seen, mut looks) = (0, 0);
         'regions: while let Some((from, to)) = regions.pop() {
-            // Past the limit of regions too, the text is masked whole (below).
-            looked += 1;
-            if looked > MAX_FINDINGS {
+            // Past the limit of regions or of matches too, the text is masked whole (below).
+            regions_seen += 1;
+            if regions_seen > MAX_FINDINGS {
                 matched = MAX_FINDINGS + 1;
                 break;
             }
             for caps in x.regex.captures_iter(&text[from..to]) {
+                looks += 1;
+                if looks > MAX_LOOKS {
+                    matched = MAX_FINDINGS + 1;
+                    break 'regions;
+                }
                 let all = caps.get(0).expect("group 0");
                 let secret = match x.secret_group {
                     Some(g) => caps.get(g),
@@ -1280,6 +1289,16 @@ mod tests {
         let each = user("[redaction]\nextra_rules = [{ id = \"a\", regex = 'a' }]").unwrap();
         let (masked, found) = scan(&"ab".repeat(5_000), &each);
         assert_eq!((masked.as_str(), found.len()), (MASK, 1));
+        // Matches passed over count too: an empty group at every position ends in bounded time.
+        let empty =
+            user("[redaction]\nextra_rules = [{ id = \"e\", regex = 'a()', secret_group = 1 }]")
+                .unwrap();
+        let mut kept = Vec::new();
+        let spans = user_spans_in(&"a".repeat(100_000), &empty, None, &mut kept);
+        assert_eq!(
+            spans.iter().map(|s| (s.0, s.1)).collect::<Vec<_>>(),
+            [(0, 100_000)]
+        );
     }
 
     #[test]
