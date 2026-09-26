@@ -376,8 +376,38 @@ pub fn scan(text: &str, rules: &Rules) -> (String, Vec<Finding>) {
     let (mut masked, mut found) = mask(text, spans(text, rules), rules);
     if !found.is_empty() {
         rescan(&mut masked, &mut found, rules);
+        coalesce(&mut masked, &mut found);
     }
     (masked, found)
+}
+
+/// Past this many findings in one text, the text is one mask.
+const MAX_FINDINGS: usize = 1_000;
+
+/// One rule's spans that masking merged into one mask are one finding (their lengths summed), so
+/// a broad rule (`.`) gives a ledger row per mask, not per character. Past `MAX_FINDINGS` the
+/// whole text is one mask with one finding per rule: a hook never writes an unbounded ledger.
+fn coalesce(masked: &mut String, found: &mut Vec<Finding>) {
+    found.sort_by(|a, b| (a.offset, &a.rule).cmp(&(b.offset, &b.rule)));
+    found.dedup_by(|later, kept| {
+        let same = later.offset == kept.offset && later.rule == kept.rule;
+        if same {
+            kept.length += later.length;
+        }
+        same
+    });
+    if found.len() > MAX_FINDINGS {
+        *masked = MASK.to_string();
+        let mut per: std::collections::BTreeMap<String, usize> = Default::default();
+        for f in found.drain(..) {
+            *per.entry(f.rule).or_default() += f.length;
+        }
+        found.extend(per.into_iter().map(|(rule, length)| Finding {
+            rule,
+            offset: 0,
+            length,
+        }));
+    }
 }
 
 /// Passes over masked text before `rescan` masks the whole text; each pass must mask something new.
@@ -738,26 +768,39 @@ fn user_spans_in(
                 continue;
             }
         }
-        for caps in x.regex.captures_iter(text) {
-            let all = caps.get(0).expect("group 0");
-            let secret = match x.secret_group {
-                Some(g) => caps.get(g),
-                None => (1..caps.len())
-                    .find_map(|i| caps.get(i))
-                    .filter(|m| !m.is_empty()),
-            }
-            .unwrap_or(all);
-            if secret.is_empty()
-                || x.entropy
+        let rule = r.rules.len() + j;
+        let mut regions = vec![(0, text.len())];
+        while let Some((from, to)) = regions.pop() {
+            for caps in x.regex.captures_iter(&text[from..to]) {
+                let all = caps.get(0).expect("group 0");
+                let secret = match x.secret_group {
+                    Some(g) => caps.get(g),
+                    None => (1..caps.len())
+                        .find_map(|i| caps.get(i))
+                        .filter(|m| !m.is_empty()),
+                }
+                .unwrap_or(all);
+                let value = secret.as_str().trim();
+                if value.is_empty() || value == MASK {
+                    // A value already looked at: blanked by the fixpoint, or masked in a rescan.
+                    // A greedy pattern that ends on it passes over one before it, so this match
+                    // is looked at again up to that value.
+                    if secret.start() > all.start() {
+                        regions.push((from + all.start(), from + secret.start()));
+                    }
+                    continue;
+                }
+                if x.entropy
                     .is_some_and(|min| shannon_entropy(secret.as_str()) <= min)
-            {
-                continue;
-            }
-            let rule = r.rules.len() + j;
-            if rules.keeps(secret.as_str()) {
-                kept.push((secret.start(), secret.end(), rule));
-            } else {
-                spans.push((secret.start(), secret.end(), rule));
+                {
+                    continue;
+                }
+                let at = (from + secret.start(), from + secret.end(), rule);
+                if rules.keeps(secret.as_str()) {
+                    kept.push(at);
+                } else {
+                    spans.push(at);
+                }
             }
         }
     }
@@ -1202,6 +1245,34 @@ mod tests {
 
     fn sha(v: &str) -> String {
         short_hash_full(v)
+    }
+
+    #[test]
+    fn a_broad_rule_gives_a_bounded_ledger() {
+        let every = user("[redaction]\nextra_rules = [{ id = \"any\", regex = '.' }]").unwrap();
+        let (masked, found) = scan(&"x".repeat(100_000), &every);
+        assert_eq!((masked.as_str(), found.len()), (MASK, 1));
+        assert_eq!(found[0].length, 100_000);
+        let each = user("[redaction]\nextra_rules = [{ id = \"a\", regex = 'a' }]").unwrap();
+        let (masked, found) = scan(&"ab".repeat(5_000), &each);
+        assert_eq!((masked.as_str(), found.len()), (MASK, 1));
+    }
+
+    #[test]
+    fn a_greedy_rule_that_ends_on_a_masked_value_still_finds_the_one_before() {
+        let rules = user(
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'ACME_[A-Z]+.* otp=\"([^\"]+)\"' }]",
+        )
+        .unwrap();
+        let (masked, found) = scan(r#"ACME_CLIENT otp="123456" otp="654321""#, &rules);
+        assert!(
+            !masked.contains("123456") && !masked.contains("654321"),
+            "{masked}"
+        );
+        assert_eq!(found.len(), 2);
+        // A rescan of stored text, whose mask the rule matches again, looks before it too.
+        let (again, _) = scan(r#"ACME_CLIENT otp="123456" otp="[REDACTED]""#, &rules);
+        assert!(!again.contains("123456"), "{again}");
     }
 
     #[test]

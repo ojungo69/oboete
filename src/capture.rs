@@ -74,17 +74,16 @@ pub fn events(
     let (kind, body) = match event {
         "SessionStart" => ("start", json!({"source": payload.get("source").map(clean)})),
         "UserPromptSubmit" => {
-            let prompt = strip_blocks(str_field(payload, &["prompt"]).unwrap_or(""), true);
-            if prompt.is_empty() {
-                return Vec::new();
-            }
+            let typed = str_field(payload, &["prompt"]).unwrap_or("");
+            let prompt = strip_blocks(typed, true);
             // Harness traffic is recorded, but never as something the developer typed.
             let kind = if is_envelope(&prompt) {
                 "envelope"
             } else {
                 "prompt"
             };
-            if !settings.store_prompts {
+            // A turn whose text was all `<private>` is still a turn when no text is kept anyway.
+            if !settings.store_prompts && !typed.trim().is_empty() {
                 // The turn is still an event (Task 11 counts it), without what was typed.
                 return vec![capture(
                     agent,
@@ -94,6 +93,9 @@ pub fn events(
                     ts,
                     settings,
                 )];
+            }
+            if prompt.is_empty() {
+                return Vec::new();
             }
             (kind, json!({"prompt": base64_runs(&prompt)}))
         }
@@ -666,6 +668,19 @@ mod tests {
         assert_eq!(v[0].event.kind, "prompt");
         assert_eq!(body(&v[0].event), json!({"omitted": true}));
         assert!(!format!("{:?}", v[0]).contains("zebra"));
+        // A turn that was all private is a turn too.
+        let private = json!({"session_id": "s", "prompt": "<private>zebra</private>"});
+        let v = events("claude", "UserPromptSubmit", &private, 0, &s);
+        assert_eq!(v.len(), 1);
+        assert_eq!(body(&v[0].event), json!({"omitted": true}));
+        let on = events(
+            "claude",
+            "UserPromptSubmit",
+            &private,
+            0,
+            &Settings::default(),
+        );
+        assert!(on.is_empty());
     }
 
     #[test]

@@ -76,6 +76,18 @@ fn text(s: String) -> Result<CallToolResult, ErrorData> {
     )]))
 }
 
+/// One search hit as the model reads it. The body is gated whole before the snippet is cut from
+/// it: a rule's context (a `curl` far before its `-u`) can lie outside the snippet.
+fn hit_line(h: &search::Hit, terms: &[String]) -> String {
+    let snippet = search::snippet(&crate::redact::outbound(&h.body), terms, 160);
+    if h.title.is_empty() {
+        format!("{} {} {} — {snippet}\n", h.doc, h.when, h.kind)
+    } else {
+        let title = crate::redact::outbound(&h.title);
+        format!("{} {} {} — {title}: {snippet}\n", h.doc, h.when, h.kind)
+    }
+}
+
 /// A failure the model can act on (a wrong argument, an unknown id) is a tool result with
 /// `isError`, not a protocol error, so the client hands it back to the model.
 fn failed(s: String) -> Result<CallToolResult, ErrorData> {
@@ -147,15 +159,7 @@ impl Oboete {
         let terms = search::terms(&a.query);
         let mut out = String::new();
         for h in hits {
-            let snippet = search::snippet(&h.body, &terms, 160);
-            if h.title.is_empty() {
-                out.push_str(&format!("{} {} {} — {snippet}\n", h.doc, h.when, h.kind));
-            } else {
-                out.push_str(&format!(
-                    "{} {} {} — {}: {snippet}\n",
-                    h.doc, h.when, h.kind, h.title
-                ));
-            }
+            out.push_str(&hit_line(&h, &terms));
         }
         if out.is_empty() {
             out.push_str("no hits");
@@ -372,6 +376,23 @@ mod tests {
             .unwrap();
         let doc = body(s.get(Parameters(GetArgs { id: "o1".into() })).unwrap());
         assert!(!doc.contains(&token) && doc.contains("[REDACTED]"), "{doc}");
+        // A snippet is cut from the gated body: the rule's context may lie outside it.
+        let far = search::Hit {
+            doc: "o2".into(),
+            kind: "discovery".into(),
+            repo: String::new(),
+            when: String::new(),
+            title: "a curl call".into(),
+            body: format!(
+                "curl https://h.test {} trigram -u admin:Zq8vN3kL7pW2 now",
+                "x".repeat(300)
+            ),
+        };
+        let line = hit_line(&far, &search::terms("trigram"));
+        assert!(
+            line.contains("trigram -u") && !line.contains("Zq8vN3kL7pW2"),
+            "{line}"
+        );
         let tools = s.tool_router.list_all();
         let mut names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
         names.sort();
