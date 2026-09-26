@@ -507,6 +507,38 @@ pub fn raw(
         clauses.push("d.repo = ?".into());
         args.push(Value::Text(r.to_string()));
     }
+    // D8: a tombstone the index has not reached yet hides its target here, so no search shows
+    // what raw already hides. The checkpoint is read before the index and the tombstones after
+    // it: one that commits while the query runs is still seen (one the worker applies in between
+    // only hides more).
+    // Every device partition counts: a copied home keeps its records, and their tombstones,
+    // under the old id (#83: the worker reads only its own until Task 8's part b).
+    let raw_db = if home.join("raw.db").exists() {
+        let raw = crate::raw::open(home)?;
+        let mut devices = raw.devices()?;
+        // This device's own partition too while it is still empty (a home copied a moment ago).
+        if !devices.iter().any(|d| d == raw.device()) {
+            devices.push(raw.device().to_owned());
+        }
+        let mut ats = Vec::new();
+        for d in devices {
+            ats.push((crate::knowledge::checkpoint::get(&k, "fts", &d)?, d));
+        }
+        Some((raw, ats))
+    } else {
+        None
+    };
+    type Seen = Option<(crate::raw::Raw, Vec<(i64, String)>)>;
+    let pending = |raw_db: &Seen| -> Result<std::collections::HashSet<(String, i64)>> {
+        let mut out = std::collections::HashSet::new();
+        if let Some((raw, ats)) = raw_db {
+            for (at, d) in ats {
+                out.extend(raw.tombstones_after(d, *at)?);
+            }
+        }
+        Ok(out)
+    };
+    let before = pending(&raw_db)?.len();
     let order = if ranked {
         "rank, d.ts DESC"
     } else {
@@ -519,7 +551,8 @@ pub fn raw(
          WHERE {} ORDER BY {order} LIMIT ?",
         clauses.join(" AND ")
     );
-    args.push(Value::Integer(sql_limit(limit)));
+    // Enough rows that the hidden ones cannot take the place of visible ones.
+    args.push(Value::Integer(sql_limit(limit.saturating_add(before))));
     let terms = terms(query);
     let mut stmt = k.prepare(&sql)?;
     let hits = stmt.query_map(params_from_iter(args), |r| {
@@ -533,7 +566,11 @@ pub fn raw(
             snippet: snippet(&text, &terms, 110),
         })
     })?;
-    Ok(hits.collect::<Result<_, _>>()?)
+    let mut hits: Vec<RawHit> = hits.collect::<Result<_, _>>()?;
+    let pending = pending(&raw_db)?;
+    hits.retain(|h| !pending.contains(&(h.device.clone(), h.seq)));
+    hits.truncate(limit);
+    Ok(hits)
 }
 
 /// One line of `body`, `width` characters around the passage with the most different `terms`
@@ -940,6 +977,100 @@ mod tests {
         crate::knowledge::checkpoint::rewind(&raw, &k, &mut consumers).unwrap();
         let hits = raw_search(p, "lease note", None);
         assert_eq!(hits.iter().map(|h| h.seq).collect::<Vec<_>>(), [1]);
+    }
+
+    #[test]
+    fn a_record_tombstone_hides_it_and_a_range_tombstone_masks_only_its_range() {
+        use crate::raw::{Item, Target};
+        // Tombstones that arrive before the index reads the records, and after it has.
+        for index_first in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            let mut raw = crate::raw::open(p).unwrap();
+            let a = raw
+                .append(&crate::raw::test_event("alpha zqx-private-words tail"))
+                .unwrap();
+            let b = raw
+                .append(&crate::raw::test_event("bravo visible"))
+                .unwrap();
+            let dev = raw.device().to_owned();
+            if index_first {
+                crate::worker::run_once(p).unwrap();
+                assert_eq!(raw_search(p, "bravo", None).len(), 1);
+            }
+            raw.append_tombstone(Target::Record {
+                device: dev.clone(),
+                seq: b,
+            })
+            .unwrap();
+            raw.append_tombstone(Target::Range {
+                device: dev.clone(),
+                seq: a,
+                offset: 6,
+                length: 17,
+            })
+            .unwrap();
+            // Hidden before the index reaches the tombstones too.
+            assert!(raw_search(p, "bravo", None).is_empty());
+            assert!(raw_search(p, "zqx-private", None).is_empty());
+            crate::worker::run_once(p).unwrap();
+            assert!(raw_search(p, "bravo", None).is_empty());
+            assert!(raw_search(p, "zqx-private", None).is_empty());
+            let hits = raw_search(p, "alpha", None);
+            assert_eq!(hits.len(), 1);
+            assert!(hits[0].snippet.contains("tail") && !hits[0].snippet.contains("zqx"));
+            let recs = raw.after(&dev, 0, 10).unwrap();
+            assert!(
+                matches!(&recs[0].item, Item::Event(e) if e.body == "alpha ***************** tail")
+            );
+            assert!(matches!(recs[1].item, Item::Removed));
+        }
+    }
+
+    #[test]
+    fn a_copied_home_still_hides_what_an_old_device_tombstoned() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut store = crate::raw::open(p).unwrap();
+        let seq = store
+            .append(&crate::raw::test_event("copied lantern"))
+            .unwrap();
+        crate::worker::run_once(p).unwrap();
+        let old = store.device().to_owned();
+        store
+            .append_tombstone(crate::raw::Target::Record { device: old, seq })
+            .unwrap();
+        drop(store);
+        // The copy gets a new device id: the tombstone stays under the old one, unindexed.
+        let copy = tempfile::tempdir().unwrap();
+        for f in ["raw.db", "knowledge.db"] {
+            std::fs::copy(p.join(f), copy.path().join(f)).unwrap();
+        }
+        let moved = crate::raw::open(copy.path()).unwrap();
+        assert_eq!(moved.devices().unwrap().len(), 1);
+        assert!(raw_search(copy.path(), "lantern", None).is_empty());
+    }
+
+    #[test]
+    fn a_hidden_hit_never_takes_the_place_of_a_visible_one() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut store = crate::raw::open(p).unwrap();
+        for body in ["shared lantern one", "shared lantern two"] {
+            store.append(&crate::raw::test_event(body)).unwrap();
+        }
+        crate::worker::run_once(p).unwrap();
+        let both = raw_search(p, "lantern", None);
+        assert_eq!(both.len(), 2);
+        store
+            .append_tombstone(crate::raw::Target::Record {
+                device: both[0].device.clone(),
+                seq: both[0].seq,
+            })
+            .unwrap();
+        // The index has not reached the tombstone: the top hit is hidden, the next one shown.
+        let one = raw(p, "lantern", None, 1).unwrap();
+        assert_eq!(one.iter().map(|h| h.seq).collect::<Vec<_>>(), [both[1].seq]);
     }
 
     fn raw_search(home: &std::path::Path, q: &str, repo: Option<&str>) -> Vec<RawHit> {
