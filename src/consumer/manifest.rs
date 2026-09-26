@@ -711,8 +711,10 @@ fn status(cwd: &Path) -> Option<String> {
                 std::thread::sleep(Duration::from_millis(10));
             }
             _ => {
+                // No blocking wait: a git stuck in the kernel may not exit at once. It is
+                // reaped when the worker exits.
                 child.kill().ok();
-                child.wait().ok();
+                let _ = child.try_wait();
                 break false;
             }
         }

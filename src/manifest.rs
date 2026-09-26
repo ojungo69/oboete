@@ -103,6 +103,17 @@ pub struct Parts {
 
 /// The manifest's text: spec 4.9's sections in its order, each dropped whole from the last while
 /// the text is over `cap` characters; the first left is cut to `cap` if it still is.
+/// `text` within `cap` characters, cut after its last whole line that fits: a mask the egress gate
+/// puts in can make a built manifest longer than its cap.
+pub fn cut(text: &str, cap: usize) -> String {
+    match text.char_indices().nth(cap) {
+        None => text.to_owned(),
+        Some((at, _)) => text[..at]
+            .rfind('\n')
+            .map_or_else(String::new, |nl| text[..=nl].to_owned()),
+    }
+}
+
 pub fn render(p: &Parts, cap: usize) -> String {
     let list = |title: &str, lines: &[String]| -> Option<String> {
         (!lines.is_empty()).then(|| {
@@ -168,6 +179,13 @@ pub fn fenced(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_manifest_the_gate_made_longer_is_cut_at_a_line() {
+        assert_eq!(cut("ab\ncd\nef\n", 7), "ab\ncd\n");
+        assert_eq!(cut("ab\ncd\n", 6), "ab\ncd\n");
+        assert_eq!(cut("abcdef", 3), "");
+    }
 
     fn owner(date: &str, text: &str) -> Line {
         Line {

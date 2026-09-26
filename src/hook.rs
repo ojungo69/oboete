@@ -109,7 +109,10 @@ fn run_io(
                             eprintln!("oboete: manifest not read: {e:#}");
                             None
                         })
-                        .map(|t| crate::redact::outbound_with(&t, &settings.rules));
+                        .map(|t| {
+                            let gated = crate::redact::outbound_with(&t, &settings.rules);
+                            crate::manifest::cut(&gated, crate::consumer::manifest::CAP)
+                        });
             }
             return Ok(None);
         }
