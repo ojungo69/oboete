@@ -545,7 +545,7 @@ fn build(
         let b = body(&e);
         p.failing = Some(format!(
             "{}: {}\n  failed with: {}",
-            str_at(&b, "tool"),
+            one_line(&gate(str_at(&b, "tool")), CLIP),
             one_line(&gate(&what_ran(str_at(&b, "input"))), CLIP),
             one_line(&gate(str_at(&b, "output")), CLIP)
         ));
@@ -595,7 +595,10 @@ fn build(
             .unwrap_or_default()
             .into_iter()
             .take(TODOS)
-            .map(|(status, text)| format!("[{status}] {}", one_line(&gate(&text), CLIP)))
+            .map(|(status, text)| {
+                let (status, text) = (gate(&status), gate(&text));
+                format!("[{}] {}", one_line(&status, CLIP), one_line(&text, CLIP))
+            })
             .collect();
     }
     if let Some(e) = last("prompt")?
@@ -918,6 +921,28 @@ mod tests {
         }
         worker::run_once(home.path()).unwrap(); // built again from raw
         assert_eq!(manifest(home.path()).0, first);
+    }
+
+    #[test]
+    fn a_rule_anchored_to_a_field_is_applied_to_each_field_shown() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let input = serde_json::json!({"command": "run it"});
+        store
+            .append(&tool(cwd.path(), 1, "acme-secret", input, "no", true))
+            .unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = '^acme-secret$' }]\n",
+        )
+        .unwrap();
+        worker::run_once(home.path()).unwrap();
+        let shown = shown(home.path(), &store).unwrap();
+        assert!(
+            shown.contains("failed with: no") && !shown.contains("acme"),
+            "{shown}"
+        );
     }
 
     /// The manifest SessionStart shows for checkout (r, main) under the rules the home has now.
