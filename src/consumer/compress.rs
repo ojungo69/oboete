@@ -69,6 +69,9 @@ mod tests {
             })
             .collect();
         assert_eq!(bodies, [long.as_str(), "hi"]);
+        // Indexed before it was compressed, and found after (Task 6's index runs first).
+        let hits = crate::search::raw(p, "again and again", None, 10).unwrap();
+        assert_eq!(hits.iter().map(|h| h.seq).collect::<Vec<_>>(), [1]);
         let c = rusqlite::Connection::open(p.join("raw.db")).unwrap();
         let stored: i64 = c
             .query_row("SELECT length(body) FROM records WHERE seq = 1", [], |r| {
