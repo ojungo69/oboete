@@ -43,11 +43,15 @@ def windows_claude_mem():
 
     for _ in range(5):
         with tempfile.TemporaryDirectory(dir=E) as d:
-            before = state()
-            for suffix in ('', '-wal'):
-                if os.path.exists(src + suffix):
-                    shutil.copyfile(src + suffix, f'{d}/copy.db{suffix}')
-            if state() == before:
+            try:
+                before = state()
+                for suffix in ('', '-wal'):
+                    if os.path.exists(src + suffix):
+                        shutil.copyfile(src + suffix, f'{d}/copy.db{suffix}')
+                same = state() == before
+            except FileNotFoundError:        # the WAL went away during a checkpoint: a changed source
+                same = False
+            if same:
                 db = sqlite3.connect(f'{d}/copy.db')
                 if db.execute('PRAGMA quick_check').fetchone()[0] == 'ok':
                     out = counts(db, CLAUDE_MEM)

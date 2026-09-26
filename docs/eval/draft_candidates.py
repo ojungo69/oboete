@@ -506,6 +506,8 @@ if __name__ == '__main__':
     elif cmd in ('repeat', 'agreement'):
         answers = {**standing('dev-decisions'), **standing('dev-pairs')}
         if cmd == 'repeat':
+            if os.path.exists(f'{TASKS}/dev-repeat-20.jsonl'):
+                sys.exit('dev-repeat-20 exists; its answers belong to it, so it is never drawn again')
             items = {i['id']: i for n in ('dev-decisions', 'dev-pairs') for i in read_jsonl(f'{TASKS}/{n}.jsonl')}
             last = max((ts for _, ts in answers.values()), default=None)
             chosen = repeat_items(items, {i: v for i, (v, _) in answers.items()}, last or 0, int(time.time())) if last else None
