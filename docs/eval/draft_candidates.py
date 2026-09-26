@@ -251,8 +251,9 @@ def decisions(budget):
             for d in valid_decisions(answer.get('decisions') or [], w):
                 if (d['line'], d['quote']) not in seen:
                     seen.add((d['line'], d['quote']))
-                    # An accepted proposal is decided when the developer accepts it, not when proposed.
-                    at = ts[d['prompt_line']] if d['who'] == 'assistant_accepted' else ts[d['line']]
+                    # A decision is made at the developer's own message: an accepted proposal when it
+                    # is accepted, and a decision the drafter cited from a later restatement when it was said.
+                    at = ts[d['prompt_line']]
                     out.append({'id': f'd{len(out) + 1}', 'session': s['session'], 'repo': repo, 'ts': at, **d})
     return out, True
 
@@ -494,8 +495,8 @@ if __name__ == '__main__':
         old, known = [], set()
         by_id = {d['id']: d for d in read_jsonl(f'{DRAFTS}/decisions.jsonl')}
         for p in read_jsonl(f'{DRAFTS}/pairs.jsonl') if os.path.exists(f'{DRAFTS}/pairs.jsonl') else []:
-            # Drafts written before pairs were deduplicated, or before an accepted proposal took
-            # its acceptance time, are checked again.
+            # Drafts written before pairs were deduplicated, or before every decision took the time
+            # of the developer's message, are checked again.
             if pair_id(p) not in known and valid_pairs([p], by_id):
                 known.add(pair_id(p))
                 old.append(p)
