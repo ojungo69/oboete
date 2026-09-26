@@ -67,7 +67,7 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
     let cwd = str_field(payload, &["cwd"]).unwrap_or(".");
     let git = git(Path::new(cwd));
     // Labels are stored text too (spec 2.2): a path or branch can carry a token.
-    let label = |s: &str| redact::redact(s);
+    let label = redact::outbound;
     vec![Event {
         agent: agent.into(),
         // A label only: an event without one is still this device's next seq.
@@ -92,15 +92,16 @@ fn text(v: &Value) -> String {
     strip_blocks(&compact(&markers(v)), false)
 }
 
-/// `v` with every string redacted: whatever a payload puts in a field (a tool name, a reason)
-/// passes the same gate as tool output (spec 2.2, every byte that is stored).
+/// `v` through the outbound gate: every string loses its closed `<private>`-style blocks and is
+/// redacted, so whatever a payload puts in a field (a tool name, a reason) passes the same gate as
+/// tool output (spec 2.2, every byte that is stored).
 fn redacted(v: Value) -> Value {
     match v {
-        Value::String(s) => Value::String(redact::redact(&s)),
+        Value::String(s) => Value::String(redact::outbound(&s)),
         Value::Array(a) => Value::Array(a.into_iter().map(redacted).collect()),
         Value::Object(m) => Value::Object(
             m.into_iter()
-                .map(|(k, x)| (redact::redact(&k), redacted(x)))
+                .map(|(k, x)| (redact::outbound(&k), redacted(x)))
                 .collect(),
         ),
         other => other,
@@ -306,9 +307,9 @@ mod tests {
     }
 
     #[test]
-    fn every_string_in_the_body_is_redacted() {
+    fn every_string_in_the_body_passes_the_outbound_gate() {
         let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
-        let bearer = format!("Authorization: Bearer {token}");
+        let bearer = format!("Authorization: Bearer {token} <private>zqx-opt-out</private>");
         for (event, payload) in [
             (
                 "PostToolUse",
@@ -323,7 +324,9 @@ mod tests {
         ] {
             let e = one(event, payload);
             assert!(
-                !e.body.contains(&token) && e.body.contains("[REDACTED]"),
+                !e.body.contains(&token)
+                    && e.body.contains("[REDACTED]")
+                    && !e.body.contains("zqx"),
                 "{event}: {}",
                 e.body
             );
