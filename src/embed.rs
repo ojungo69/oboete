@@ -272,14 +272,14 @@ fn run_model(url: &str, key: &str, texts: &[&str], timeout: Duration) -> Result<
         .post(url)
         .header("Authorization", &format!("Bearer {key}"))
         .send_json(json!({"text": texts, "truncate_inputs": true}))
-        .map_err(|e| anyhow!("workers ai: {e}"))?;
+        .map_err(|e| anyhow!("workers ai: {}", crate::provider::transport(&e)))?;
     let status = resp.status().as_u16();
     let mut raw = Vec::new();
     std::io::Read::read_to_end(
         &mut std::io::Read::take(resp.body_mut().as_reader(), MAX_RESPONSE_BYTES + 1),
         &mut raw,
     )
-    .context("workers ai: read body")?;
+    .map_err(|e| anyhow!("workers ai: read body: {}", crate::provider::read_error(&e)))?;
     anyhow::ensure!(
         raw.len() as u64 <= MAX_RESPONSE_BYTES,
         "workers ai: response larger than {MAX_RESPONSE_BYTES} bytes"

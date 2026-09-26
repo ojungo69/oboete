@@ -284,7 +284,7 @@ fn openai_compat(
     }
     let mut resp = req
         .send_json(&body)
-        .map_err(|e| CallError::other(format!("http request: {e}")))?;
+        .map_err(|e| CallError::other(format!("http request: {}", transport(&e))))?;
     let status = resp.status().as_u16();
     let retry_after_s = resp
         .headers()
@@ -297,7 +297,7 @@ fn openai_compat(
         &mut std::io::Read::take(resp.body_mut().as_reader(), MAX_RESPONSE_BYTES + 1),
         &mut raw,
     )
-    .map_err(|e| CallError::other(format!("read body: {e}")))?;
+    .map_err(|e| CallError::other(format!("read body: {}", read_error(&e))))?;
     if raw.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(CallError::other(format!(
             "invalid output: response larger than {MAX_RESPONSE_BYTES} bytes"
@@ -346,6 +346,31 @@ fn is_loopback(url: &str) -> bool {
 }
 
 /// Groq spells the reset out in the body: "Please try again in 17.28s".
+/// A transport failure as a fixed name: ureq's own text can quote what the server sent (a
+/// `Location` header, a URI), and it would be kept in provider_calls (issue #91).
+pub(crate) fn transport(e: &ureq::Error) -> String {
+    use ureq::Error as E;
+    match e {
+        E::Timeout(t) => format!("timeout: {t}"),
+        E::StatusCode(c) => format!("status {c}"),
+        E::HostNotFound => "host not found".into(),
+        E::ConnectionFailed => "connection failed".into(),
+        E::TooManyRedirects => "too many redirects".into(),
+        E::RedirectFailed => "redirect failed".into(),
+        E::BodyExceedsLimit(_) => "body exceeds limit".into(),
+        E::Tls(t) => format!("tls: {t}"),
+        E::Io(io) => format!("io: {:?}", io.kind()),
+        _ => "protocol error".into(),
+    }
+}
+
+/// A failure while reading a body: ureq's error inside the io error, else the io error's kind.
+pub(crate) fn read_error(e: &std::io::Error) -> String {
+    e.get_ref()
+        .and_then(|inner| inner.downcast_ref::<ureq::Error>())
+        .map_or_else(|| format!("io: {:?}", e.kind()), transport)
+}
+
 /// Error codes kept from a provider's error body: only these known names, never a value the body
 /// makes up (a provider can put user data in `code`, issue #91).
 const KNOWN_CODES: &[&str] = &[
@@ -1065,6 +1090,25 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.retry_after_s, Some(1.5));
+        // A redirect whose Location quotes the canary fails inside ureq: its text is not kept.
+        let (url, _) = serve(
+            "302 Found",
+            Vec::new(),
+            "Location: canary-91-location/../../../../../../../\r\n",
+        );
+        let e = openai_compat(
+            &url,
+            None,
+            "m",
+            10,
+            &Default::default(),
+            &Default::default(),
+            "p",
+            &json!({}),
+        )
+        .unwrap_err();
+        assert!(!e.message.contains("canary"), "{}", e.message);
+        assert!(e.message.starts_with("http request: "), "{}", e.message);
         let flagged = CallError {
             status: Some(403),
             retry_after_s: None,
