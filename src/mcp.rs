@@ -215,7 +215,8 @@ impl Oboete {
             let summary = if r.summary.is_empty() {
                 "(not summarized yet)".to_string()
             } else {
-                r.summary.replace('\n', " ")
+                // Gated before the newlines go: a user rule may need them to match.
+                crate::redact::outbound(&r.summary).replace('\n', " ")
             };
             out.push_str(&format!(
                 "{} {} {} {} — {summary}\n",
@@ -393,6 +394,26 @@ mod tests {
             line.contains("trigram -u") && !line.contains("Zq8vN3kL7pW2"),
             "{line}"
         );
+        // A summary is gated before its newlines are flattened: a user rule may need them.
+        std::fs::write(
+            dir.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"block\", regex = 'BEGIN\\n(.*?)END' }]\n",
+        )
+        .unwrap();
+        crate::redact::set_home(&dir).unwrap();
+        rusqlite::Connection::open(dir.join("oboete.db"))
+            .unwrap()
+            .execute("UPDATE summaries SET body = ?1", ["BEGIN\nkq7Wz2hidden END"])
+            .unwrap();
+        let tl = body(
+            s.timeline(Parameters(TimelineArgs {
+                all: Some(true),
+                repo: None,
+                limit: None,
+            }))
+            .unwrap(),
+        );
+        assert!(tl.contains("BEGIN") && !tl.contains("kq7Wz2hidden"), "{tl}");
         let tools = s.tool_router.list_all();
         let mut names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
         names.sort();
