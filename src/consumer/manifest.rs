@@ -576,12 +576,13 @@ fn build(
         )?
         .query_map(params![device, repo, branch, FILES as i64], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    // Sessions on the repo with records in the 30 minutes before as-of that have not ended.
+    // Sessions on the repo with records in the 30 minutes before as-of that have not ended. One
+    // aggregate, so SQLite takes the branch and time from the session's last record.
     let sessions: Vec<(String, String, i64, i64)> = k
         .prepare(
-            "SELECT session, branch, MAX(ts), MAX(seq) FROM manifest_facts
+            "SELECT session, branch, ts, MAX(seq) FROM manifest_facts
              WHERE device = ?1 AND repo = ?2 AND fact = 'event' AND ts >= ?3
-             GROUP BY session ORDER BY MAX(ts) DESC, session",
+             GROUP BY session ORDER BY ts DESC, session",
         )?
         .query_map(params![device, repo, as_of - ACTIVE_MS], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
@@ -1008,6 +1009,37 @@ mod tests {
         assert_eq!(what_ran(r#"{"cmd": "rg fetchJson"}"#), "rg fetchJson");
         let windows = serde_json::json!({"file_path": "C:\\repo\\src\\a.rs"});
         assert_eq!(paths(&windows, Some("C:\\repo\\")), vec!["src/a.rs"]);
+    }
+
+    #[test]
+    fn a_session_that_changed_branch_shows_the_last_one() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        for (ts, branch, session) in [
+            (60_000, "main", "s1"),
+            (120_000, "feature", "s1"),
+            (180_000, "main", "s2"),
+        ] {
+            store
+                .append(&Event {
+                    branch: Some(branch.into()),
+                    ..ev(
+                        "prompt",
+                        session,
+                        ts,
+                        cwd.path(),
+                        serde_json::json!({"prompt": "x"}),
+                    )
+                })
+                .unwrap();
+        }
+        worker::run_once(home.path()).unwrap();
+        let main = manifest(home.path()).0;
+        assert!(
+            main.contains("session s1 on feature") && !main.contains("session s1 on main"),
+            "{main}"
+        );
     }
 
     #[test]
