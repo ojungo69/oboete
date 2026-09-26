@@ -49,4 +49,4 @@ id = "generic-basic-auth"
 description = "Basic credentials in an Authorization header, with or without a curl before it"
 regex = '''(?i)\bauthorization["']?\s*[:=]\s*["']?basic\s+([A-Za-z0-9+/]{8,}={0,2})'''
 keywords = ["basic"]
-entropy = 2.75
+# No entropy gate: after "Authorization: Basic" even a weak credential is one.

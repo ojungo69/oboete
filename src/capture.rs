@@ -480,6 +480,7 @@ mod tests {
     fn secrets_behind_json_escapes_in_tool_fields_are_masked() {
         // A tool field is stored as flattened JSON: its quotes and line breaks become `\"`, `\n`.
         let b64 = format!("dXNyOnE5Wng4{}", "bUwydkI0blI3dFl3");
+        let weak = format!("MTExMTExMTE6{}", "MTExMTExMTE="); // 11111111:11111111
         let pass = format!("q9Zx8mL2{}", "vB4nR7tY1wK3");
         let api = format!("k7Fq2Lp9{}", "Xw3Rt8Vn5Bz1Mc6D");
         let cases = [
@@ -488,6 +489,12 @@ mod tests {
                 json!({"command": "cat cfg.json"}),
                 json!({"stdout": format!("{{\"Authorization\":\"Basic {b64}\"}}"), "stderr": ""}),
                 &b64,
+            ),
+            // A weak credential after "Authorization: Basic" is still one
+            (
+                json!({"command": "cat headers.txt"}),
+                json!({"stdout": format!("Authorization: Basic {weak}\n")}),
+                &weak,
             ),
             // curl's -u and -H in double quotes
             (
