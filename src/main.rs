@@ -433,10 +433,15 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         Cmd::Doctor => setup::doctor(&home),
         Cmd::Restore => {
             // The worker's lock, so no worker reads raw.db while it is replaced.
-            let _held = worker::lock(&home)?.ok_or_else(|| {
+            let held = worker::lock(&home)?.ok_or_else(|| {
                 anyhow::anyhow!("a worker is running; try again when it has exited")
             })?;
-            println!("{}", backup::restore(&home)?);
+            let said = backup::restore(&home)?;
+            // Derived data was moved aside: it is rebuilt before this returns, so a search right
+            // after finds the restored records.
+            drop(held);
+            worker::run_once(&home)?;
+            println!("{said}");
             Ok(())
         }
         Cmd::View { port, open } => view::run(&home, port, open),
