@@ -321,7 +321,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| h.repo.clone());
-                    format!("[{name}] ")
+                    format!("[{}] ", redact::outbound(&name))
                 } else {
                     String::new()
                 };
@@ -330,7 +330,10 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 } else {
                     format!(
                         "{:<5} {}  {:<10} {repo}{}\n      {text}\n",
-                        h.doc, h.when, h.kind, h.title
+                        h.doc,
+                        h.when,
+                        h.kind,
+                        redact::outbound(&h.title)
                     )
                 });
             }
@@ -346,14 +349,19 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             }
             let conn = db::open(&home)?;
             let h = search::get(&conn, &id)?.ok_or_else(missing)?;
+            // Each stored field through the gate on its own, then the whole (`emit`).
             let title = if h.title.is_empty() {
                 String::new()
             } else {
-                format!("{}\n", h.title)
+                format!("{}\n", redact::outbound(&h.title))
             };
             emit(&format!(
                 "{} {} {} {}\n{title}\n{}\n",
-                h.doc, h.when, h.kind, h.repo, h.body
+                h.doc,
+                h.when,
+                h.kind,
+                redact::outbound(&h.repo),
+                redact::outbound(&h.body)
             ))
         }
         Cmd::Timeline { all, limit } => {
@@ -369,10 +377,17 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                         .chars()
                         .rev()
                         .collect();
-                let summary: String = r.summary.replace('\n', " ").chars().take(120).collect();
+                // Gated before it is flattened and clipped, and the label on its own.
+                let summary: String = redact::outbound(&r.summary)
+                    .replace('\n', " ")
+                    .chars()
+                    .take(120)
+                    .collect();
                 out.push_str(&format!(
                     "{}  {:<6} {id}  {}  {summary}\n",
-                    r.when, r.agent, r.repo
+                    r.when,
+                    r.agent,
+                    redact::outbound(&r.repo)
                 ));
             }
             emit(&out)
