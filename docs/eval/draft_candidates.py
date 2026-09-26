@@ -517,7 +517,10 @@ if __name__ == '__main__':
             again = {i[1:]: v for i, (v, _) in standing('dev-repeat-20').items() if v != 'unknown'}
             yes = {'yes', 'overturns'}
             rated = [(answers[i][0] in yes, v in yes) for i, v in again.items() if i in answers]
-            result = {'n': len(rated), 'kappa': kappa(rated) if rated else None,
+            shown = [i['id'] for i in read_jsonl(f'{TASKS}/dev-repeat-20.jsonl')]
+            given = standing('dev-repeat-20')
+            result = {'complete': all(i in given for i in shown), 'answered': sum(i in given for i in shown), 'of': len(shown),
+                      'n': len(rated), 'kappa': kappa(rated) if rated else None,
                       'agreement': sum(a == b for a, b in rated) / len(rated) if rated else None,
                       'what': 'the owner against their own earlier answers'}
             with open(f'{LABELS}/dev-repeat-20.result.json', 'w') as f:
