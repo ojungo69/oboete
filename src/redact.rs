@@ -770,7 +770,8 @@ fn user_spans_in(
         }
         let rule = r.rules.len() + j;
         let mut regions = vec![(0, text.len())];
-        while let Some((from, to)) = regions.pop() {
+        let mut matched = 0;
+        'regions: while let Some((from, to)) = regions.pop() {
             for caps in x.regex.captures_iter(&text[from..to]) {
                 let all = caps.get(0).expect("group 0");
                 let secret = match x.secret_group {
@@ -801,7 +802,18 @@ fn user_spans_in(
                 } else {
                     spans.push(at);
                 }
+                matched += 1;
+                if matched > MAX_FINDINGS {
+                    break 'regions;
+                }
             }
+        }
+        // A rule that matches past `MAX_FINDINGS` times (`.`, a letter) masks the whole text as
+        // one span, before a span per match is held in memory.
+        if matched > MAX_FINDINGS {
+            spans.retain(|x| x.2 != rule);
+            kept.retain(|x| x.2 != rule);
+            spans.push((0, text.len(), rule));
         }
     }
     spans.sort_unstable();
@@ -1253,6 +1265,10 @@ mod tests {
         let (masked, found) = scan(&"x".repeat(100_000), &every);
         assert_eq!((masked.as_str(), found.len()), (MASK, 1));
         assert_eq!(found[0].length, 100_000);
+        // Bounded while matching, not only in the ledger: one span once past the limit.
+        let mut kept = Vec::new();
+        let text = "x".repeat(10_000);
+        assert_eq!(user_spans_in(&text, &every, None, &mut kept).len(), 1);
         let each = user("[redaction]\nextra_rules = [{ id = \"a\", regex = 'a' }]").unwrap();
         let (masked, found) = scan(&"ab".repeat(5_000), &each);
         assert_eq!((masked.as_str(), found.len()), (MASK, 1));
