@@ -369,14 +369,15 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let mut out = String::new();
             for r in search::timeline(&conn, repo_filter(all)?.as_deref(), limit)? {
                 // The tail of the id: UUIDv7 heads (Codex, Grok) are timestamps and collide.
-                let id: String =
-                    r.id.chars()
-                        .rev()
-                        .take(8)
-                        .collect::<String>()
-                        .chars()
-                        .rev()
-                        .collect();
+                // Gated before it is shortened, as each field is.
+                let id: String = redact::outbound(&r.id)
+                    .chars()
+                    .rev()
+                    .take(8)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
                 // Gated before it is flattened and clipped, and the label on its own.
                 let summary: String = redact::outbound(&r.summary)
                     .replace('\n', " ")
