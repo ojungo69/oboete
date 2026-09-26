@@ -379,6 +379,27 @@ pub fn restore(home: &Path) -> Result<String> {
     Ok(note)
 }
 
+/// A hook that found raw.db damaged while a worker held the lock asks that worker to restore it.
+fn restore_request(home: &Path) -> PathBuf {
+    home.join("state").join("restore-wanted")
+}
+
+pub fn request_restore(home: &Path) {
+    let path = restore_request(home);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, "");
+}
+
+pub fn restore_requested(home: &Path) -> bool {
+    restore_request(home).exists()
+}
+
+pub fn take_restore_request(home: &Path) {
+    let _ = std::fs::remove_file(restore_request(home));
+}
+
 /// Whether an error says the database file is damaged (not busy, not missing).
 pub fn corrupt(e: &anyhow::Error) -> bool {
     e.chain().any(|c| {

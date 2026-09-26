@@ -27,14 +27,27 @@ fn oboete(home: &Path, args: &[&str], stdin: &str, spawn: bool) -> Output {
     child.wait_with_output().unwrap()
 }
 
-#[test]
-fn a_hook_that_finds_raw_db_damaged_starts_the_restore() {
+/// Until `search` finds the first prompt again: raw.db was restored.
+fn restored(h: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let out = oboete(h, &["search", "zebra"], "", false);
+        if out.status.success() && String::from_utf8_lossy(&out.stdout).contains("zebra crossing") {
+            return;
+        }
+        assert!(Instant::now() < deadline, "raw.db was not restored");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// One prompt recorded and backed up, then raw.db overwritten with bytes that are no database.
+fn damaged_home() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let h = home.path();
-    let prompt = |text: &str| serde_json::json!({"session_id": "s", "prompt": text}).to_string();
+    let payload = serde_json::json!({"session_id": "s", "prompt": "zebra crossing notes"});
     let hook = ["hook", "claude", "UserPromptSubmit"];
     assert!(
-        oboete(h, &hook, &prompt("zebra crossing notes"), false)
+        oboete(h, &hook, &payload.to_string(), false)
             .status
             .success()
     );
@@ -44,19 +57,60 @@ fn a_hook_that_finds_raw_db_damaged_starts_the_restore() {
             .status
             .success()
     );
+    home
+}
+
+fn damage(h: &Path) {
     for name in ["raw.db-wal", "raw.db-shm"] {
         let _ = std::fs::remove_file(h.join(name));
     }
     std::fs::write(h.join("raw.db"), vec![b'x'; 4096]).unwrap();
-    // The write fails, the agent is not blocked, and a worker starts.
-    assert!(oboete(h, &hook, &prompt("second"), true).status.success());
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let out = oboete(h, &["search", "zebra"], "", false);
-        if out.status.success() && String::from_utf8_lossy(&out.stdout).contains("zebra crossing") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "raw.db was not restored");
-        std::thread::sleep(Duration::from_millis(200));
+}
+
+fn second_prompt(h: &Path) {
+    let payload = serde_json::json!({"session_id": "s", "prompt": "second"}).to_string();
+    // The write fails, and the agent is not blocked.
+    let hook = ["hook", "claude", "UserPromptSubmit"];
+    assert!(oboete(h, &hook, &payload, true).status.success());
+}
+
+#[test]
+fn a_worker_running_when_raw_db_is_damaged_restores_it_on_a_hook_s_request() {
+    let home = damaged_home();
+    let h = home.path();
+    let mut worker = Command::new(env!("CARGO_BIN_EXE_oboete"))
+        .arg("--home")
+        .arg(h)
+        .args(["worker", "--idle-ms", "30000"])
+        .env("OBOETE_NO_SPAWN", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    // Until it holds the lock.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(h.join("state").join("worker.lock"))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while lock.try_lock().is_ok() {
+        lock.unlock().unwrap();
+        assert!(Instant::now() < deadline, "the worker never took the lock");
+        std::thread::sleep(Duration::from_millis(50));
     }
+    damage(h);
+    second_prompt(h); // no worker starts: the running one holds the lock
+    restored(h); // well before the running worker's idle exit
+    worker.kill().unwrap();
+    worker.wait().unwrap();
+}
+
+#[test]
+fn a_hook_that_finds_raw_db_damaged_starts_the_restore() {
+    let home = damaged_home();
+    damage(home.path());
+    second_prompt(home.path());
+    restored(home.path());
 }

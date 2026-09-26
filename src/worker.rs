@@ -100,26 +100,67 @@ pub fn run_with(
     mut consumers: Vec<Box<dyn Consumer>>,
     mut before_exit: impl FnMut(),
 ) -> Result<()> {
-    let Some(mut held) = lock(home)? else {
-        return Ok(());
-    };
-    // Task 8: a damaged raw.db is restored from the backups, a damaged knowledge.db rebuilt.
-    let raw = crate::backup::open_raw(home)?;
-    let mut k = crate::backup::open_knowledge(home)?;
-    checkpoint::rewind(&raw, &k, &mut consumers)?;
-    crate::backup::check(home, &raw);
+    let mut held = None;
     // ponytail: D11's 30-minute deadline in memory; every idle exit backs up too, so a lost
     // deadline only brings the next backup forward. It is checked between batches and while
     // idle, so neither a long backlog nor a long idle wait puts it off.
     let mut next_backup = Instant::now() + crate::backup::EVERY;
+    // Task 8: the stores are closed and opened again, which restores a damaged raw.db, when a
+    // hook asks (it found raw.db damaged while this worker held the lock) or when one of this
+    // worker's own reads finds it damaged. Twice at most for the second: a damage that opening
+    // does not see would otherwise loop.
+    let mut damaged = 0;
+    loop {
+        match serve(
+            home,
+            idle_ms,
+            &mut consumers,
+            &mut held,
+            &mut next_backup,
+            &mut before_exit,
+        ) {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(e) if crate::backup::corrupt(&e) && damaged < 2 => {
+                damaged += 1;
+                eprintln!("oboete: {e:#}; opening the stores again");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// One run of the worker over the stores it opens: `Ok(true)` when a restore was asked for and
+/// they must be opened again, `Ok(false)` when it is done.
+fn serve(
+    home: &Path,
+    idle_ms: u64,
+    consumers: &mut [Box<dyn Consumer>],
+    held: &mut Option<Lock>,
+    next_backup: &mut Instant,
+    before_exit: &mut impl FnMut(),
+) -> Result<bool> {
+    if held.is_none() {
+        match lock(home)? {
+            Some(l) => *held = Some(l),
+            None => return Ok(false),
+        }
+    }
+    // Before the open: a request made after it is seen by the checks below.
+    crate::backup::take_restore_request(home);
+    // Task 8: a damaged raw.db is restored from the backups, a damaged knowledge.db rebuilt.
+    let raw = crate::backup::open_raw(home)?;
+    let mut k = crate::backup::open_knowledge(home)?;
+    checkpoint::rewind(&raw, &k, consumers)?;
+    crate::backup::check(home, &raw);
     let mut due = |raw: &Raw| {
-        if Instant::now() >= next_backup {
+        if Instant::now() >= *next_backup {
             crate::backup::run(home, raw);
-            next_backup = Instant::now() + crate::backup::EVERY;
+            *next_backup = Instant::now() + crate::backup::EVERY;
         }
     };
     loop {
-        while pass(&raw, &mut k, &mut consumers)? {
+        while pass(&raw, &mut k, consumers)? {
             due(&raw);
         }
         due(&raw);
@@ -128,6 +169,9 @@ pub fn run_with(
         let mut more = false;
         while Instant::now() < deadline {
             std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
+            if crate::backup::restore_requested(home) {
+                return Ok(true);
+            }
             if raw.max_seq()? > seen {
                 more = true;
                 break;
@@ -139,15 +183,20 @@ pub fn run_with(
         }
         // Under the lock: a worker started after the release cannot export the same seqs.
         crate::backup::run(home, &raw);
-        drop(held);
+        *held = None;
         before_exit();
-        if !behind(&raw, &k, &consumers)? {
-            return Ok(());
+        // A hook that asked before the release saw the lock held and started nothing.
+        let wanted = crate::backup::restore_requested(home);
+        if !wanted && !behind(&raw, &k, consumers)? {
+            return Ok(false);
         }
         match lock(home)? {
-            Some(l) => held = l,
+            Some(l) => *held = Some(l),
             // Another worker took the lock after the release: the records are its now.
-            None => return Ok(()),
+            None => return Ok(false),
+        }
+        if wanted {
+            return Ok(true);
         }
     }
 }
@@ -263,6 +312,42 @@ mod tests {
         let device = raw::open(p).unwrap().device().to_owned();
         let k = knowledge::open(p).unwrap();
         assert_eq!(checkpoint::get(&k, "seen", &device).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_restore_asked_for_while_the_worker_waits_opens_the_stores_again() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path().to_path_buf();
+        let worker = {
+            let p = p.clone();
+            std::thread::spawn(move || run_with(&p, 2_000, vec![Box::new(Seen)], || {}))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        crate::backup::request_restore(&p);
+        let t = Instant::now();
+        while crate::backup::restore_requested(&p) {
+            assert!(
+                t.elapsed() < Duration::from_secs(1),
+                "not taken while waiting"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn a_restore_asked_for_as_the_worker_exits_is_not_lost() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut asked = false;
+        // After the release: the hook that asked saw the lock still held and started nothing.
+        run_with(p, 0, vec![Box::new(Seen)], || {
+            if !std::mem::replace(&mut asked, true) {
+                crate::backup::request_restore(p);
+            }
+        })
+        .unwrap();
+        assert!(!crate::backup::restore_requested(p));
     }
 
     #[test]
