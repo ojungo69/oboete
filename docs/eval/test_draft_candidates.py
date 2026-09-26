@@ -1,4 +1,4 @@
-import os, sys
+import json, os, sys
 
 import pytest
 
@@ -139,3 +139,19 @@ def test_a_pair_met_in_several_prompts_is_kept_once(monkeypatch):
     monkeypatch.setattr(draft_candidates, 'ask', lambda prompt, budget: next(answers))
     got = draft_candidates.pairs({'left': 10}, ds)
     assert [(p['earlier'], p['later'], p['relation']) for p in got] == [('d1', 'd2', 'overturns')]
+
+
+def test_panel_parses_the_text_of_each_completion(monkeypatch, tmp_path):
+    monkeypatch.setattr(draft_candidates, 'LABELS', str(tmp_path))
+    monkeypatch.setattr(draft_candidates, 'DRAFTS', str(tmp_path))
+    monkeypatch.setattr(draft_candidates, 'PANEL', {'j1': None, 'j2': None})
+    monkeypatch.setattr(draft_candidates, 'chat', lambda member, prompt: ('{"answer": "yes"}', f'{member}-model'))
+    monkeypatch.setattr(draft_candidates, 'gate', lambda text: text)
+    monkeypatch.setattr(draft_candidates, 'context', lambda d: 'ctx')
+    (tmp_path / 'decisions.jsonl').write_text('')
+    (tmp_path / 'dev-decisions.key.jsonl').write_text('{"id": "t1", "statement": "s"}\n')
+    (tmp_path / 'dev-decisions.jsonl').write_text('{"id": "t1", "value": "unknown", "ts": 1}\n')
+    (tmp_path / 'dev-pairs.key.jsonl').write_text('')
+    draft_candidates.panel()
+    rows = [json.loads(l) for l in (tmp_path / 'dev-decisions.panel.jsonl').read_text().splitlines()]
+    assert [(r['judge'], r['value'], r['why']) for r in rows] == [('j1', 'yes', 'unknown'), ('j2', 'yes', 'unknown')]

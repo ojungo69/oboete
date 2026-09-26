@@ -418,7 +418,7 @@ def panel():
                 if (i, member) in done:
                     continue
                 try:
-                    value = parse_answer(chat(member, prompt), allowed)
+                    value = parse_answer(chat(member, prompt)[0], allowed)
                 except (OSError, ValueError, KeyError) as e:      # left for the next run
                     print(f'{i} {member}: {type(e).__name__} {str(e)[:120]}', file=sys.stderr)
                     continue
