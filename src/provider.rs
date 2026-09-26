@@ -1,10 +1,10 @@
 //! Summarizer providers and the fallback chain.
 //! Every provider takes (prompt, json schema) and returns the parsed JSON object or an error.
 //! The chain walks providers in order; a provider is skipped when its daily budget is spent or
-//! it is cooling down after a failure in this run, a 429 with a near reset is waited out once,
+//! it is cooling down after a failure (kept in the store across runs), a 429 with a near reset is
+//! waited out once,
 //! and any other error (HTTP, timeout, unparsable/invalid output) moves on to the next provider.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -25,6 +25,11 @@ const COOLDOWN_429: Duration = Duration::from_secs(45);
 const COOLDOWN_OUTAGE: Duration = Duration::from_secs(600);
 /// Longest cooldown a provider's own reset time can set (a daily quota resets within a day).
 const MAX_COOLDOWN: Duration = Duration::from_secs(24 * 3600);
+/// Failures that set no cooldown (an answer that is not the schema, a 400) are per-answer luck,
+/// but this many in a row mean the provider cannot do the task for now: every one of them still
+/// uploads the whole window (groq-20b: 20 such 400s in the owner's store, 2026-09-22..26).
+const BREAKER_AFTER: u32 = 3;
+const COOLDOWN_BREAKER: Duration = Duration::from_secs(30 * 60);
 
 pub struct ChainResult {
     pub provider: String,
@@ -54,18 +59,15 @@ impl CallError {
     }
 }
 
-/// The chain for one observe run: a provider that failed cools down before it is tried again.
+/// The chain for one observe run. A provider that failed cools down before it is tried again; the
+/// cooldown is kept in the store (`provider_state`), so the next run skips it too.
 pub struct Chain<'a> {
     providers: &'a [Provider],
-    down_until: HashMap<String, Instant>,
 }
 
 impl<'a> Chain<'a> {
     pub fn new(providers: &'a [Provider]) -> Self {
-        Self {
-            providers,
-            down_until: HashMap::new(),
-        }
+        Self { providers }
     }
 
     /// Walk the chain. `OBOETE_FAIL_PROVIDER=<name>` forces that provider to fail (fallback proof).
@@ -79,11 +81,8 @@ impl<'a> Chain<'a> {
         let mut fallbacks = Vec::new();
         for p in self.providers {
             let name = p.name().to_string();
-            if self
-                .down_until
-                .get(&name)
-                .is_some_and(|t| *t > Instant::now())
-            {
+            let (down_until, fails) = db::provider_state(conn, &name)?;
+            if down_until > db::now_ms() {
                 fallbacks.push((name, "cooling down after an earlier failure".into()));
                 continue;
             }
@@ -100,7 +99,8 @@ impl<'a> Chain<'a> {
                 continue;
             }
             let started = Instant::now();
-            let mut result = if forced_fail.as_deref() == Some(name.as_str()) {
+            let forced = forced_fail.as_deref() == Some(name.as_str());
+            let mut result = if forced {
                 Err(CallError::other("forced failure (OBOETE_FAIL_PROVIDER)"))
             } else {
                 call(p, prompt, schema)
@@ -138,6 +138,9 @@ impl<'a> Chain<'a> {
             match result {
                 Ok(v) => {
                     db::record_call(conn, &name, "ok", ms, None)?;
+                    if down_until != 0 || fails != 0 {
+                        db::set_provider_state(conn, &name, 0, 0)?;
+                    }
                     return Ok(ChainResult {
                         provider: name,
                         output: v,
@@ -147,8 +150,15 @@ impl<'a> Chain<'a> {
                 Err(e) => {
                     let outcome = if e.invalid() { "invalid" } else { "error" };
                     db::record_call(conn, &name, outcome, ms, Some(&e.message))?;
-                    if let Some(c) = cooldown_for(&e) {
-                        self.down_until.insert(name.clone(), Instant::now() + c);
+                    // A forced failure is a test of the fallback, not of the provider.
+                    if !forced {
+                        let (cooldown, fails) = match cooldown_for(&e) {
+                            Some(c) => (Some(c), 0),
+                            None if fails + 1 >= BREAKER_AFTER => (Some(COOLDOWN_BREAKER), 0),
+                            None => (None, fails + 1),
+                        };
+                        let until = cooldown.map_or(0, |c| db::now_ms() + c.as_millis() as i64);
+                        db::set_provider_state(conn, &name, until, fails)?;
                     }
                     fallbacks.push((name, e.message));
                 }
@@ -1291,6 +1301,107 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(details, ["http 400: json_validate_failed"]);
+        drop(conn);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    fn stub(url: String) -> Provider {
+        Provider::Openai {
+            name: "stub".into(),
+            base_url: url,
+            key_file: None,
+            model: "m".into(),
+            daily_budget: 10,
+            timeout_s: 10,
+            retry_429: false,
+            extra: Default::default(),
+            headers: Default::default(),
+        }
+    }
+
+    fn outcomes(conn: &Connection) -> Vec<String> {
+        conn.prepare("SELECT outcome FROM provider_calls ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_cooldown_outlives_the_observe_run() {
+        let home =
+            std::env::temp_dir().join(format!("oboete-provider-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let conn = crate::db::open(&home).unwrap();
+        let (url, _) = serve(
+            "429 Too Many Requests",
+            json!({"error": {"message": "Please try again in 6m20.064s."}})
+                .to_string()
+                .into_bytes(),
+            "",
+        );
+        let providers = [stub(url)];
+        assert!(
+            Chain::new(&providers)
+                .summarize(&conn, "p", &json!({}))
+                .is_err()
+        );
+        // The next run (a new Chain, as each observe process makes) does not call it again.
+        let Err(err) = Chain::new(&providers).summarize(&conn, "p", &json!({})) else {
+            panic!("the stub is cooling down");
+        };
+        assert!(format!("{err:#}").contains("cooling down"), "{err:#}");
+        assert_eq!(outcomes(&conn), ["error"]);
+        let (until, _) = crate::db::provider_state(&conn, "stub").unwrap();
+        let left = until - crate::db::now_ms();
+        assert!((370_000..=381_000).contains(&left), "{left}");
+        drop(conn);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn three_bad_answers_in_a_row_open_the_breaker_and_an_answer_closes_it() {
+        let home =
+            std::env::temp_dir().join(format!("oboete-provider-breaker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let conn = crate::db::open(&home).unwrap();
+        let bad = || {
+            let (url, _) = serve(
+                "400 Bad Request",
+                json!({"error": {"code": "json_validate_failed"}})
+                    .to_string()
+                    .into_bytes(),
+                "",
+            );
+            [stub(url)]
+        };
+        for _ in 0..2 {
+            assert!(
+                Chain::new(&bad())
+                    .summarize(&conn, "p", &json!({}))
+                    .is_err()
+            );
+            assert_eq!(crate::db::provider_state(&conn, "stub").unwrap().0, 0);
+        }
+        assert!(
+            Chain::new(&bad())
+                .summarize(&conn, "p", &json!({}))
+                .is_err()
+        );
+        let (until, fails) = crate::db::provider_state(&conn, "stub").unwrap();
+        assert!(until - crate::db::now_ms() > 29 * 60_000, "{until}");
+        assert_eq!(fails, 0);
+        // An answer clears the streak.
+        crate::db::set_provider_state(&conn, "stub", 0, 2).unwrap();
+        let answer = json!({"choices": [{"message": {"content": "{\"summary\": \"s\"}"}}]});
+        let (url, _) = serve_once(answer.to_string().into_bytes(), "");
+        Chain::new(&[stub(url)])
+            .summarize(&conn, "p", &json!({"type": "object"}))
+            .unwrap();
+        assert_eq!(crate::db::provider_state(&conn, "stub").unwrap(), (0, 0));
         drop(conn);
         std::fs::remove_dir_all(&home).ok();
     }
