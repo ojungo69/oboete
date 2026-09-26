@@ -329,10 +329,13 @@ fn paths(input: &Value, cwd: Option<&str>) -> Vec<String> {
             }
         }
     }
-    let prefix = cwd.map(|c| format!("{}/", c.trim_end_matches('/')));
+    // `/` on every platform, so a Windows path under a Windows cwd is relative too.
+    let slashes = |s: &str| s.replace('\\', "/");
+    let prefix = cwd.map(|c| format!("{}/", slashes(c).trim_end_matches('/')));
     let mut out: Vec<String> = out
         .into_iter()
         .filter(|p| !p.is_empty())
+        .map(|p| slashes(&p))
         .map(
             |p| match prefix.as_deref().and_then(|c| p.strip_prefix(c)) {
                 Some(rel) => rel.to_owned(),
@@ -953,6 +956,8 @@ mod tests {
         let custom = serde_json::json!({"input": "*** Begin Patch\n*** Update File: src/http.ts\n*** End Patch"});
         assert_eq!(paths(&custom, None), vec!["src/http.ts"]);
         assert_eq!(what_ran(r#"{"cmd": "rg fetchJson"}"#), "rg fetchJson");
+        let windows = serde_json::json!({"file_path": "C:\\repo\\src\\a.rs"});
+        assert_eq!(paths(&windows, Some("C:\\repo\\")), vec!["src/a.rs"]);
     }
 
     #[test]
