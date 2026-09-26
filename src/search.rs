@@ -520,6 +520,15 @@ pub fn raw(
         clauses.join(" AND ")
     );
     args.push(Value::Integer(sql_limit(limit)));
+    // D8: a tombstone the index has not reached yet hides its target here, so no search shows
+    // what raw already hides.
+    let pending: std::collections::HashSet<(String, i64)> = if home.join("raw.db").exists() {
+        let raw = crate::raw::open(home)?;
+        let at = crate::knowledge::checkpoint::get(&k, "fts", raw.device())?;
+        raw.tombstones_after(at)?.into_iter().collect()
+    } else {
+        Default::default()
+    };
     let terms = terms(query);
     let mut stmt = k.prepare(&sql)?;
     let hits = stmt.query_map(params_from_iter(args), |r| {
@@ -533,7 +542,9 @@ pub fn raw(
             snippet: snippet(&text, &terms, 110),
         })
     })?;
-    Ok(hits.collect::<Result<_, _>>()?)
+    let mut hits: Vec<RawHit> = hits.collect::<Result<_, _>>()?;
+    hits.retain(|h| !pending.contains(&(h.device.clone(), h.seq)));
+    Ok(hits)
 }
 
 /// One line of `body`, `width` characters around the passage with the most different `terms`
@@ -973,6 +984,9 @@ mod tests {
                 length: 17,
             })
             .unwrap();
+            // Hidden before the index reaches the tombstones too.
+            assert!(raw_search(p, "bravo", None).is_empty());
+            assert!(raw_search(p, "zqx-private", None).is_empty());
             crate::worker::run_once(p).unwrap();
             assert!(raw_search(p, "bravo", None).is_empty());
             assert!(raw_search(p, "zqx-private", None).is_empty());
