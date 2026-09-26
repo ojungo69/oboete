@@ -892,22 +892,30 @@ mod tests {
         let home = std::env::temp_dir().join(format!("oboete-transcript-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
-        let conn = crate::db::open(&home).unwrap();
+        let mut raw = crate::raw::open(&home).unwrap();
         let (v, _) = events(CLAUDE, "claude");
         for e in &v {
-            crate::hook::handle(&conn, "claude", e["event"].as_str().unwrap(), &e["payload"])
-                .unwrap();
+            crate::hook::record(
+                &mut raw,
+                "claude",
+                e["event"].as_str().unwrap(),
+                &e["payload"],
+                0,
+            )
+            .unwrap();
         }
-        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert!(count("SELECT count(*) FROM events WHERE session_id = 'claude-basic'") >= 8);
-        // The developer's answer reaches the store, where observe reads it (src/observe.rs `answers`).
-        assert_eq!(
-            count(
-                "SELECT count(*) FROM events WHERE session_id = 'claude-basic' AND payload LIKE '%A にする%'"
-            ),
-            1
-        );
-        drop(conn);
+        let recs = raw.after(raw.device(), 0, 1000).unwrap();
+        let bodies: Vec<String> = recs
+            .into_iter()
+            .filter_map(|r| match r.item {
+                crate::raw::Item::Event(e) if e.session == "claude-basic" => Some(e.body),
+                _ => None,
+            })
+            .collect();
+        assert!(bodies.len() >= 8, "{bodies:?}");
+        // The developer's answer reaches raw.db, where curation will read it.
+        assert_eq!(bodies.iter().filter(|b| b.contains("A にする")).count(), 1);
+        drop(raw);
         std::fs::remove_dir_all(&home).ok();
     }
 }
