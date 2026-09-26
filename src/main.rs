@@ -8,6 +8,7 @@ mod config;
 mod consumer;
 mod db;
 mod embed;
+mod failure;
 mod hook;
 mod import;
 mod inject;

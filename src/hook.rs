@@ -53,6 +53,15 @@ fn run_io(
     mut input: impl Read,
     mut output: impl Write,
 ) -> Result<()> {
+    // MUST-M16, for Design B's raw.db: whether this call tried to write there (skips, filtered
+    // sessions and agents still on v1's store never do), and whether a row was written. Only a
+    // written row shows that recording works again: a hook with nothing to capture (PreToolUse,
+    // an empty Stop) proves nothing, and a write to v1's store says nothing about raw.db.
+    let mut tried = false;
+    let mut wrote = false;
+    // When the store operation ended (0 until one did): overlapping hooks change the marker in
+    // this order, so it is taken before anything that runs after the write.
+    let mut ended = 0;
     let result: Result<Option<String>> = (|| {
         if std::env::var_os(SKIP_ENV).is_some() {
             return Ok(None);
@@ -73,17 +82,19 @@ fn run_io(
         {
             return Ok(None);
         }
+        // Creating the home is part of the attempt: a home that cannot be made is a failure too.
+        tried = crate::capture::PORTED.contains(&agent);
         std::fs::create_dir_all(home)?;
-        if crate::capture::PORTED.contains(&agent) {
+        if tried {
             // Design B: nothing is injected until the manifest (milestone 2 Task 9).
-            record(
+            wrote = record(
                 &mut crate::raw::open(home)?,
                 agent,
                 event,
                 &payload,
                 db::now_ms(),
-            )?;
-            start_worker(home)?;
+            )? > 0;
+            ended = crate::failure::now();
             return Ok(None);
         }
         let conn = db::open(home)?;
@@ -94,7 +105,47 @@ fn run_io(
         }
         Ok(out)
     })();
-    if let Ok(Some(out)) = &result {
+    if ended == 0 {
+        ended = crate::failure::now(); // a failure: the operation ended when it returned
+    }
+    let mut out = result.as_ref().ok().cloned().flatten();
+    if tried {
+        // The marker lives outside the stores, so it is written when they cannot be.
+        match &result {
+            Ok(_) if wrote => {
+                crate::failure::prepare(home);
+                crate::failure::clear(home, ended);
+                // After the marker: nothing that can take long runs between the write and its
+                // marker update, which overlapping hooks order by the write's end.
+                if let Err(e) = start_worker(home) {
+                    // The row is written, and the next hook starts a worker for it: MUST-M16's
+                    // marker is about the store, so this is no recording failure.
+                    eprintln!("oboete: worker not started: {e:#}");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => crate::failure::mark(home, crate::failure::classify(e), ended),
+        }
+        // Design B injects nothing at SessionStart until the manifest (Task 9), except this line.
+        if event == "SessionStart"
+            && crate::capture::PORTED.contains(&agent)
+            && out.is_none()
+            // No marker when even the marker could not be written: this call's error, then.
+            && let Some(failed) = crate::failure::since(home).or_else(|| {
+                result
+                    .as_ref()
+                    .err()
+                    .map(|e| (crate::failure::classify(e), ended))
+            })
+        {
+            let text = crate::failure::line(failed);
+            out = Some(
+                json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
+                    .to_string(),
+            );
+        }
+    }
+    if let Some(out) = &out {
         writeln!(output, "{out}")?;
     } else if matches!(agent, "agy" | "cursor") {
         // Each adapter returns its own JSON shape, including skip and error paths.
@@ -104,14 +155,15 @@ fn run_io(
 }
 
 /// Design B (milestone 2 Task 2): the events of one hook call, appended to `raw.db` with the
-/// event's time (`now` in a hook; the fixture's in a replay).
+/// event's time (`now` in a hook; the fixture's in a replay). Returns how many were appended.
 pub fn record(
     raw: &mut crate::raw::Raw,
     agent: &str,
     event: &str,
     payload: &Value,
     ts: i64,
-) -> Result<()> {
+) -> Result<usize> {
+    let mut n = 0;
     for mut c in crate::capture::events(agent, event, payload, ts) {
         // An idless event's session is this device's own: a bare "unknown" would be one session
         // on every device once they sync (as `handle` does for v1).
@@ -119,8 +171,9 @@ pub fn record(
             c.event.session = format!("unknown-{}", raw.device());
         }
         raw.append_with_ledger(&c.event, &c.ledger)?;
+        n += 1;
     }
-    Ok(())
+    Ok(n)
 }
 
 /// The hook file `oboete setup grok` writes. While it exists, Grok delivers its own events.
@@ -765,6 +818,95 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn a_failed_write_is_marked_and_named_at_the_next_session_start() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        // A directory where raw.db should be: every write to the store fails.
+        std::fs::create_dir(home.join("raw.db")).unwrap();
+        let prompt = br#"{"session_id":"s","prompt":"first"}"#;
+        let mut out = Vec::new();
+        assert!(run_io(home, "claude", "UserPromptSubmit", &prompt[..], &mut out).is_err());
+        assert!(out.is_empty());
+        let (_, first) = crate::failure::since(home).expect("marked");
+        let start = br#"{"session_id":"t","source":"startup"}"#;
+        let mut out = Vec::new();
+        assert!(run_io(home, "claude", "SessionStart", &start[..], &mut out).is_err());
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        let text = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("recording has failed since"), "{text}");
+        assert_eq!(crate::failure::since(home).map(|f| f.1), Some(first));
+    }
+
+    #[test]
+    fn a_write_to_v1_store_neither_marks_nor_clears_raw_failures() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        // raw.db cannot be written: Claude Code's hook fails and marks it.
+        std::fs::create_dir(home.join("raw.db")).unwrap();
+        let prompt = br#"{"session_id":"s","prompt":"first"}"#;
+        assert!(run_io(home, "claude", "UserPromptSubmit", &prompt[..], Vec::new()).is_err());
+        let failed = crate::failure::since(home).expect("marked");
+        // Grok still writes v1's store, which works: that says nothing about raw.db.
+        let grok = br#"{"session_id":"g","prompt":"hello","hook_event_name":"UserPromptSubmit"}"#;
+        run_io(home, "grok", "UserPromptSubmit", &grok[..], Vec::new()).unwrap();
+        assert_eq!(crate::failure::since(home), Some(failed));
+    }
+
+    #[test]
+    fn a_hook_with_nothing_to_record_leaves_the_marker() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        crate::failure::mark(home, crate::failure::Class::Busy, 0);
+        // A Stop with no reply captures nothing: it does not show that writes work again.
+        let stop = br#"{"session_id":"s"}"#;
+        let mut out = Vec::new();
+        run_io(home, "claude", "Stop", &stop[..], &mut out).unwrap();
+        assert!(crate::failure::since(home).is_some());
+    }
+
+    #[test]
+    fn a_successful_write_clears_the_marker_and_says_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        crate::failure::mark(home, crate::failure::Class::Busy, 0);
+        let start = br#"{"session_id":"t","source":"startup"}"#;
+        let mut out = Vec::new();
+        run_io(home, "claude", "SessionStart", &start[..], &mut out).unwrap();
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+        assert_eq!(crate::failure::since(home), None);
+        let marker = home.join("state").join("recording-failed");
+        assert_eq!(std::fs::metadata(marker).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn a_worker_that_cannot_start_is_no_recording_failure() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        // The lock cannot be opened: the worker does not start, but the row is written.
+        std::fs::create_dir_all(home.join("state").join("worker.lock")).unwrap();
+        let prompt = br#"{"session_id":"s","prompt":"hello"}"#;
+        let mut out = Vec::new();
+        run_io(home, "claude", "UserPromptSubmit", &prompt[..], &mut out).unwrap();
+        assert_eq!(crate::failure::since(home), None);
+        let raw = crate::raw::open(home).unwrap();
+        assert_eq!(raw.max_seq().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_home_that_cannot_be_made_is_reported_at_session_start() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file"), "").unwrap();
+        let home = dir.path().join("file").join("home"); // under a file: no directory, no marker
+        let start = br#"{"session_id":"s"}"#;
+        let mut out = Vec::new();
+        assert!(run_io(&home, "claude", "SessionStart", &start[..], &mut out).is_err());
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("recording has failed since"), "{out}");
     }
 
     /// Payload shapes from the Cursor event table, with all paths kept inside the test repo.
