@@ -141,17 +141,30 @@ fn export_from(raw: &Raw, dir: &Path) -> Result<Option<PathBuf>> {
 /// unseen here, as it does for the consumers' rewind: #83).
 fn cursor(raw: &Raw, dir: &Path) -> Result<i64> {
     let max = raw.max_seq()?;
-    let mine: Vec<Segment> = segments(dir)?
+    let mut mine: Vec<Segment> = segments(dir)?
         .into_iter()
         .filter(|s| s.device == raw.device())
         .collect();
+    mine.sort_by_key(|s| s.first);
     set_aside(mine.iter().filter(|s| s.last > max))?;
-    Ok(mine
-        .iter()
-        .filter(|s| s.last <= max)
-        .map(|s| s.last)
-        .max()
-        .unwrap_or(0))
+    mine.retain(|s| s.last <= max);
+    // A range raw holds that no segment covers (a segment file was removed): the segments after
+    // it are set aside too, so the next export writes that range and the rest again. A range raw
+    // does not hold either (a segment a restore skipped) stays a gap.
+    let mut end = 0;
+    for (i, s) in mine.iter().enumerate() {
+        if s.first > end + 1
+            && raw
+                .after(raw.device(), end, 1)?
+                .first()
+                .is_some_and(|r| r.seq < s.first)
+        {
+            set_aside(&mine[i..])?;
+            break;
+        }
+        end = end.max(s.last);
+    }
+    Ok(end)
 }
 
 /// Segments no longer trusted, renamed (the segment before its checksum: a checksum left alone
@@ -721,6 +734,31 @@ mod tests {
             (raw.device().to_owned(), raw.max_seq().unwrap()),
             (device, 5)
         );
+    }
+
+    #[test]
+    fn a_removed_segment_is_written_again_from_raw() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 30, 10); // segments 1-10, 11-20, 21-30
+        let ranges = |p: &Path| {
+            let mut r: Vec<(i64, i64)> = segments(&p.join("backups"))
+                .unwrap()
+                .iter()
+                .map(|s| (s.first, s.last))
+                .collect();
+            r.sort();
+            r
+        };
+        let middle = segments(&p.join("backups"))
+            .unwrap()
+            .into_iter()
+            .find(|s| s.first == 11)
+            .unwrap()
+            .path;
+        std::fs::remove_file(&middle).unwrap();
+        export(p).unwrap();
+        assert_eq!(ranges(p), [(1, 10), (11, 30)]);
     }
 
     #[test]
