@@ -600,6 +600,81 @@ mod tests {
         assert_eq!(hits.first().map(|h| h.seq), Some(8));
     }
 
+    /// raw.db of `n` events, one segment exported after each `per` of them.
+    fn segmented(p: &Path, n: usize, per: usize) {
+        let mut raw = raw::open(p).unwrap();
+        for i in 0..n {
+            raw.append(&raw::test_event(&format!("rec zq{i:03}x")))
+                .unwrap();
+            if (i + 1) % per == 0 {
+                export(p).unwrap();
+            }
+        }
+    }
+
+    fn damage_raw(p: &Path) {
+        std::fs::write(p.join("raw.db"), b"not a database at all").unwrap();
+        for f in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(p.join(f));
+        }
+    }
+
+    #[test]
+    fn a_skipped_segment_leaves_neither_its_records_in_search_nor_its_seqs_unbacked() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 30, 10); // segments 1-10, 11-20, 21-30
+        crate::worker::run_once(p).unwrap(); // index all 30
+        let segs = segments(&p.join("backups")).unwrap();
+        assert_eq!(segs.len(), 3);
+        std::fs::write(&segs[1].path, b"damaged").unwrap(); // the middle one
+        damage_raw(p);
+        crate::worker::run_once(p).unwrap();
+        // Derived data was rebuilt: nothing of 11-20 is found, 21-30 is.
+        let hits = crate::search::raw(p, "zq0", None, 100).unwrap();
+        assert!(!hits.is_empty() && hits.iter().all(|h| !(11..=20).contains(&h.seq)));
+        assert_eq!(crate::search::raw(p, "zq024x", None, 5).unwrap()[0].seq, 25);
+        assert!(verify(&p.join("backups")).unwrap().is_empty()); // set aside, not trusted
+        // The newest segment damaged: its seqs are reused and backed up again.
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 20, 10);
+        let last = segments(&p.join("backups")).unwrap().remove(1).path;
+        std::fs::write(&last, b"damaged").unwrap();
+        damage_raw(p);
+        crate::worker::run_once(p).unwrap();
+        let mut raw = raw::open(p).unwrap();
+        assert_eq!(raw.max_seq().unwrap(), 10);
+        raw.append(&raw::test_event("after the restore")).unwrap();
+        drop(raw);
+        export(p).unwrap();
+        let segs = segments(&p.join("backups")).unwrap();
+        assert_eq!(segs.last().map(|s| (s.first, s.last)), Some((11, 11)));
+    }
+
+    #[test]
+    fn no_store_opens_while_a_restore_swaps_the_file_and_a_stopped_swap_is_finished() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 5, 5);
+        let device = raw::open(p).unwrap().device().to_owned();
+        let held = raw::lock_for_swap(p).unwrap();
+        let t = std::time::Instant::now();
+        assert!(raw::open(p).is_err()); // a hook's write waits, then fails (MUST-M16's marker)
+        assert!(t.elapsed() >= std::time::Duration::from_secs(1));
+        drop(held);
+        // Stopped after the damaged file was moved aside: the rebuilt one is renamed in.
+        std::fs::rename(p.join("raw.db"), p.join("raw.db.restoring")).unwrap();
+        for f in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(p.join(f));
+        }
+        let raw = raw::open(p).unwrap();
+        assert_eq!(
+            (raw.device().to_owned(), raw.max_seq().unwrap()),
+            (device, 5)
+        );
+    }
+
     #[test]
     fn only_damage_restores_not_a_busy_or_missing_file() {
         assert!(damaged(&anyhow::anyhow!(
