@@ -126,6 +126,13 @@ Drafted by `claude-sonnet-5` in owner decision 29's form: one plain-Japanese sen
 - Read by Claude before handing over: 5 decisions, all real decisions in plain words; Latin letters only in product names (11 of the first 99). 5 overturn drafts: all real decisions, but not all overturns (2-3 of 5 are clear), and several stay technical in plain Japanese (version control, secret tags); the owner answers 判断できない there and the panel takes them.
 - Tasks for the owner: 50 decisions (`dev-decisions`) and 40 pairs (`dev-pairs`: 20 drafted as each relation, cross-session first). `draft_candidates.py tasks` adds more as answers of 判断できない come in.
 
+## Fixtures, today's code (Task 9 step 5, 2026-09-26)
+
+Task 7's fixtures through the owner's binary built from main f43da4d, in a temporary home with the API-only chain (`baseline.py config`):
+- `middle-only`: 12 observations; the middle decision is captured ("同期間隔を45秒に設定"). The plan's query (`LIKE '%45 秒%'`, with a space) found 0 because the title has no space; `LIKE '%45%'` finds it in 2 observations. So #57's parts-in-order stopgap holds on this fixture.
+- `long-24h`: 3 observations about the cache ("キャッシュの保存先をSQLiteに変更", "キャッシュ層の削除を決定", "キャッシュ保持に対する開発者の方針変更"), the overturned decision and the current one side by side with no status. As spec 8.1 expects, the M3 test milestone 3 writes fails against today's code.
+- Steps 3 and 4 (the dev replay through today's oboete and the judged retrieval baselines) run outside the owner's working hours: they share the owner's free tiers and Claude allowance.
+
 ## Findings
 
 - Today's hook keeps teammate messages ("Another Claude session sent a message: <teammate-message …>") as prompts: `ENVELOPES` in src/hook.rs has `<agent-message` but not this form. Design B's capture (milestone 2) should treat it as an envelope.
