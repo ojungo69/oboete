@@ -37,6 +37,7 @@ pub fn run(
     // raw.db (milestone 2 Task 2), the others still v1's store.
     let mut micros: Vec<u128> = Vec::new();
     let mut injected = 0u32;
+    let mut v1_events = 0usize;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let line = line.replace(ROOT_PLACEHOLDER, &root_str);
         let v: Value = serde_json::from_str(&line)?;
@@ -53,6 +54,7 @@ pub fn run(
             hook::record(&mut raw, ev_agent, event, &v["payload"], ts)?;
             None
         } else {
+            v1_events += 1;
             hook::handle(&conn, ev_agent, event, &v["payload"])?
         };
         micros.push(started.elapsed().as_micros());
@@ -69,8 +71,14 @@ pub fn run(
         Vec::new()
     };
 
-    // 3. Summarize everything that was captured (in-process; nothing spawns here).
-    let stats = observe::run(home, 0)?;
+    // 3. Summarize what v1's store captured (in-process; nothing spawns here). observe reads only
+    // oboete.db: ported agents' raw records wait for milestone 3's curation, so a replay of them
+    // alone reports no summary rather than a summary of nothing.
+    let stats = if v1_events > 0 {
+        Some(observe::run(home, 0)?)
+    } else {
+        None
+    };
 
     micros.sort_unstable();
     let report = json!({
@@ -79,6 +87,7 @@ pub fn run(
         "hook_spawn_ms": {"n": spawn_ms.len(), "p50": pct(&spawn_ms, 50), "p95": pct(&spawn_ms, 95), "max": spawn_ms.last().copied().unwrap_or(0)},
         "session_start_injections": injected,
         "observe": stats,
+        "observe_covers": format!("the {v1_events} events of agents not in capture::PORTED {:?}", crate::capture::PORTED),
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -140,6 +149,36 @@ fn pct(sorted: &[u128], p: usize) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ported_replay_keeps_fixture_times_and_reports_no_v1_summary() {
+        let home = tempfile::tempdir().unwrap();
+        let fixture = home.path().join("f.jsonl");
+        let line = |ts: &str, prompt: &str| {
+            json!({"agent": "claude", "event": "UserPromptSubmit", "ts": ts,
+                   "payload": {"session_id": "s", "prompt": prompt}})
+            .to_string()
+        };
+        let lines = [
+            line("2026-09-01T00:00:00.000Z", "one"),
+            line("2026-09-02T00:00:00.000Z", "two"),
+        ];
+        std::fs::write(&fixture, lines.join("\n")).unwrap();
+        run(home.path(), &fixture, None, 0, "claude").unwrap();
+        let raw = crate::raw::open(home.path()).unwrap();
+        let ts: Vec<i64> = raw
+            .after(raw.device(), 0, 10)
+            .unwrap()
+            .into_iter()
+            .map(|r| match r.item {
+                crate::raw::Item::Event(e) => e.ts,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(ts, vec![1_788_220_800_000, 1_788_307_200_000]);
+        // observe never ran: it would have created its lock file in the home.
+        assert!(!home.path().join("observe.lock").exists());
+    }
 
     #[test]
     fn fixture_times_are_read_to_the_millisecond() {
