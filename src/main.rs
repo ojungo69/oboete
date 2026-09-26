@@ -3,6 +3,7 @@
 //! M0 spike: Claude Code hook capture → SQLite → summarizer chain with
 //! fallback → SessionStart injection. See docs/plan.md.
 
+mod capture;
 mod config;
 mod db;
 mod embed;
@@ -12,7 +13,7 @@ mod inject;
 mod mcp;
 mod observe;
 mod provider;
-// Design B's store; the hook writes to it from milestone 2 Task 2 on.
+// Design B's store: the hook writes to it; its readers come with the worker (milestone 2 Task 5).
 #[allow(dead_code)]
 mod raw;
 mod redact;

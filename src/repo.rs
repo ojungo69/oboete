@@ -46,14 +46,14 @@ fn find(start: &Path) -> Option<(PathBuf, PathBuf)> {
 }
 
 /// `.git` file → `gitdir: <path>`.
-fn gitdir(git_file: &Path) -> Option<PathBuf> {
+pub(crate) fn gitdir(git_file: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(git_file).ok()?;
     let gitdir = text.strip_prefix("gitdir:")?.trim();
     Some(git_file.parent()?.join(gitdir))
 }
 
 /// A linked worktree's `<gitdir>/commondir` → the main repository's git directory.
-fn common_dir(gitdir: &Path) -> Option<PathBuf> {
+pub(crate) fn common_dir(gitdir: &Path) -> Option<PathBuf> {
     let common = std::fs::read_to_string(gitdir.join("commondir")).ok()?;
     gitdir.join(common.trim()).canonicalize().ok()
 }

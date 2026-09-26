@@ -32,6 +32,8 @@ const ENVELOPES: &[&str] = &[
     "<system_notification",
     "<bash-notification",
     "<<autonomous-loop",
+    // Agent teams: a teammate's message arrives as a prompt (docs/milestone-1.md, dev drafts).
+    "Another Claude session sent a message:",
 ];
 
 pub fn run_stdin(home: &Path, agent: &str, event: &str) -> Result<()> {
@@ -72,6 +74,11 @@ fn run_io(
             return Ok(None);
         }
         std::fs::create_dir_all(home)?;
+        if crate::capture::PORTED.contains(&agent) {
+            // Design B: nothing is injected until the manifest (milestone 2 Task 9).
+            record(&mut crate::raw::open(home)?, agent, event, &payload)?;
+            return Ok(None);
+        }
         let conn = db::open(home)?;
         let out = handle(&conn, agent, event, &payload)?;
         if matches!(event, "Stop" | "SessionEnd") && std::env::var_os("OBOETE_NO_SPAWN").is_none() {
@@ -87,6 +94,14 @@ fn run_io(
         writeln!(output, "{{}}")?;
     }
     result.map(|_| ())
+}
+
+/// Design B (milestone 2 Task 2): the events of one hook call, appended to `raw.db`.
+pub fn record(raw: &mut crate::raw::Raw, agent: &str, event: &str, payload: &Value) -> Result<()> {
+    for e in crate::capture::events(agent, event, payload, db::now_ms()) {
+        raw.append(&e)?;
+    }
+    Ok(())
 }
 
 /// The hook file `oboete setup grok` writes. While it exists, Grok delivers its own events.
@@ -540,15 +555,15 @@ pub fn is_envelope(prompt: &str) -> bool {
     ENVELOPES.iter().any(|e| prompt.starts_with(e))
 }
 
-fn field<'a>(v: &'a Value, keys: &[&str]) -> &'a Value {
+pub(crate) fn field<'a>(v: &'a Value, keys: &[&str]) -> &'a Value {
     keys.iter().find_map(|k| v.get(*k)).unwrap_or(&Value::Null)
 }
 
-fn str_field<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a str> {
+pub(crate) fn str_field<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|k| v.get(*k).and_then(Value::as_str))
 }
 
-fn compact(v: &Value) -> String {
+pub(crate) fn compact(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
         Value::String(s) => s.clone(),
@@ -649,7 +664,7 @@ fn cursor_turns(path: &Path) -> Vec<(String, String)> {
 }
 
 /// Last assistant `output_text` in a Codex rollout JSONL, reading only the file's tail.
-fn last_assistant_in_transcript(path: &Path) -> String {
+pub(crate) fn last_assistant_in_transcript(path: &Path) -> String {
     let text = transcript_tail(path, TAIL);
     let mut last = String::new();
     for line in text.lines() {
@@ -1122,6 +1137,14 @@ mod tests {
             let raw = format!("\u{feff}{payload}\r\n");
             let mut output = Vec::new();
             run_io(&dir, agent, "SessionStart", raw.as_bytes(), &mut output).unwrap();
+            if crate::capture::PORTED.contains(&agent) {
+                let r = crate::raw::open(&dir).unwrap();
+                let starts = r.after(r.device(), 0, 100).unwrap().into_iter().filter(|x| {
+                    matches!(&x.item, crate::raw::Item::Event(e) if e.agent == agent && e.kind == "start")
+                });
+                assert_eq!(starts.count(), 1, "{agent}");
+                continue;
+            }
             let conn = db::open(&dir).unwrap();
             let events = db::session_events(&conn, agent).unwrap();
             assert_eq!(events.len(), 1, "{agent}");

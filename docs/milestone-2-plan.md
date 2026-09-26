@@ -80,7 +80,7 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
 |---|---|---|---|---|
 | 0 | `v1` branch; Design B's setup in the dogfood user | Claude | — | branch `v1`; `oboete setup` registers B's hooks in a temp or dogfood home |
 | 1 | `raw.db`: schema, open (FULL, fullfsync), append with seq | Claude | 0 | `raw::open`, `Raw::{append, max_seq, after}`, `Event`, `Record`, `Item`, `Target` |
-| 2 | Capture: full events, envelopes, binary markers, `<private>`, git fields | Claude; adapter ports by Grok | 1 | `capture::event(agent, name, &Value, cwd) -> Option<Event>` |
+| 2 | Capture: full events, envelopes, binary markers, `<private>`, git fields | Claude; adapter ports by Grok | 1 | `capture::events(agent, event, &Value, ts) -> Vec<Event>`; `hook::record` |
 | 3 | Redaction: full scan, head-and-tail cap, ledger, extra rules and allowlist; security review | Claude | 2 | `redact::{Rules, Finding, scan}`; `capture::cut_and_redact`; ledger rows |
 | 4 | Write-failure classification, marker, doctor, injection line (MUST-M16) | Claude | 2 | `failure::{classify, mark, since}` |
 | 5 | Worker: lock, spawn, idle exit, lost-wakeup rule, checkpoints, rewind (MUST-M14) | Claude | 1 | `worker::{lock, drain, run_with, run, run_once}`, `checkpoint::{get, set, rewind}` |
@@ -208,12 +208,13 @@ fn device_id_stays_with_the_file_and_changes_on_a_copy() { /* port of the db.rs 
 
 **Files:**
 - Create: `src/capture.rs`
-- Modify: `src/hook.rs` (the Design B path calls `capture::event` and `raw::append`; the v1 path is deleted, since `v1` keeps it)
-- Test: `src/capture.rs`
+- Modify: `src/hook.rs` (`hook::record`: `capture::events` then `Raw::append`; `run_io` sends the agents in `capture::PORTED` there and the others to v1's `handle` until their port lands, 2b; a ported agent's SessionStart prints nothing until Task 9)
+- Modify: `src/replay.rs` (ported agents replay into `raw.db`), `src/transcript.rs` (its replay test reads `raw.db`), `src/repo.rs` (`gitdir`, `common_dir` shared with `capture::git`)
+- Test: `src/capture.rs`, `src/hook.rs`
 
 **Interfaces:**
-- Consumes: `raw::Event`; today's per-agent parsing in `hook::handle` (`src/hook.rs:204-360`), `STRIP_BLOCKS` and `strip_blocks` (`src/hook.rs:25, 474-536`), `is_envelope` (`src/hook.rs:539`), `repo::key` (`src/repo.rs:9-58`).
-- Produces: `pub fn event(agent: &str, name: &str, input: &serde_json::Value, cwd: &Path) -> Option<raw::Event>`; `pub fn git(cwd: &Path) -> Git { branch, head, gitdir }`.
+- Consumes: `raw::Event`; today's per-agent parsing in `hook::handle` (`src/hook.rs:204-460`), `STRIP_BLOCKS` and `strip_blocks` (`src/hook.rs:25, 474-536`), `is_envelope` (`src/hook.rs:539`), `repo::key` (`src/repo.rs:9-58`).
+- Produces: `pub fn events(agent: &str, event: &str, payload: &serde_json::Value, ts: i64) -> Vec<raw::Event>` (a hook call can carry several: cursor's SessionEnd recovers turns, agy's hooks read a transcript tail); `pub const PORTED: &[&str]`; `pub fn git(cwd: &Path) -> Git { branch, head, gitdir }`; `hook::record(&mut Raw, agent, event, &Value)`.
 
 Rules (spec 2.1-2.4, D9, D15):
 - Kinds: prompt, tool call with its output, assistant reply, compaction, end. Text fields are kept whole (no `MAX_FIELD` clip); D4's cap is Task 3's.
@@ -224,28 +225,9 @@ Rules (spec 2.1-2.4, D9, D15):
 - Repo labels keep today's rules and tests: one key for every way to clone, no userinfo (`one_key_for_every_way_to_clone_and_no_secrets`, #30 row 3); an alias only from the owner's settings (#30 row 4); the repos a session touches are recorded from tool working directories and file paths (`sessions_record_every_repo_and_idless_events_stay_on_this_device`, #30 rows 5 and 20), as a `session_repos` table in `knowledge.db` kept by the FTS consumer (Task 6).
 - Git fields from files (D9): `.git` may be a file (`gitdir: …`) in a worktree.
 
-- [ ] **Step 1: Failing tests.** Port the tests of `hook.rs` that pin `<private>`, envelopes and agent parsing onto `capture::event`, and add:
-
-```rust
-#[test]
-fn a_long_tool_output_is_kept_whole_and_a_teammate_message_is_an_envelope() {
-    let out = "x".repeat(100_000);
-    let e = capture::event("claude", "PostToolUse", &json!({"tool_name": "Bash", "tool_input": {"command": "ls"},
-        "tool_response": {"stdout": out}}), Path::new("/tmp")).unwrap();
-    assert!(e.body.contains(&"x".repeat(100_000)));
-    let t = capture::event("claude", "UserPromptSubmit", &json!({"prompt":
-        "Another Claude session sent a message: <teammate-message from=\"a\">hi</teammate-message>"}), Path::new("/tmp"));
-    assert!(t.map_or(true, |e| e.kind != "prompt"));
-}
-
-#[test]
-fn git_fields_come_from_files_in_a_worktree_too() {
-    // git init; commit; git worktree add; capture::git on both checkouts gives the branch, HEAD and gitdir.
-}
-```
-
+- [ ] **Step 1: Failing tests** (in `src/capture.rs`): a 100,000-character tool output is kept whole and a token past today's 12,000-character window is masked; `<private>` blocks go and an unclosed one hides the rest; envelopes, the teammate message among them, are recorded as `envelope`, never `prompt`; images become markers in each shape agents send; replies come from the payload or Codex's transcript; git fields come from files in a main checkout, a linked worktree, after `pack-refs`, and detached.
 - [ ] **Step 2: Run, expect failure.**
-- [ ] **Step 3: Implement** `capture.rs` by moving the per-agent parsing out of `hook::handle` and dropping the clip. The adapter-specific parsers (agy, codex, cursor, opencode, pi) are independent pieces: delegate their ports to Grok with the files listed and the tests above as acceptance, after the Claude and Codex paths pass (spec 8.4, "Who builds").
+- [ ] **Step 3: Implement** in two parts. **2a** (Claude): `capture.rs` with the Claude Code and Codex paths, redacting each text field in full with today's `redact::redact` until Task 3 brings `scan` and the ledger. **2b**: the agy, cursor, grok, opencode and pi ports, then v1's write path in `hook::handle` is deleted. 2b needs per-session hook state that 2a does not (inject once, agy's prompt-step claims, cursor's recovered-turn count). Neither store fits it as is: `knowledge.db` is rebuilt from raw, and raw has no session key (spec 1.6). So 2b starts by settling where that state lives, with Task 9's injection (spec 4.2, 4.4). After that the ports are independent pieces for Grok, with the `hook.rs` tests as acceptance (spec 8.4, "Who builds").
 - [ ] **Step 4: Run all tests.**
 - [ ] **Step 5: Commit** `capture: full events, envelopes, binary markers and git fields (milestone 2, Task 2)`.
 
@@ -272,7 +254,7 @@ fn git_fields_come_from_files_in_a_worktree_too() {
 ```rust
 #[test]
 fn every_byte_is_scanned_and_the_ledger_never_holds_the_value() {
-    let key = "ghp_".to_owned() + &"a1B2".repeat(9);
+    let key = "ghp_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g".to_owned(); // redact.rs's own test token: a low-entropy one is not a secret to the rule
     let text = "x".repeat(200_000) + &key;          // far past today's 12,000-character window
     let (masked, found) = redact::scan(&text, &Rules::default());
     assert!(!masked.contains(&key));
@@ -282,7 +264,7 @@ fn every_byte_is_scanned_and_the_ledger_never_holds_the_value() {
 
 #[test]
 fn a_secret_across_the_head_tail_cut_is_masked_in_what_is_kept() {
-    let key = "ghp_".to_owned() + &"a1B2".repeat(9);
+    let key = "ghp_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g".to_owned(); // redact.rs's own test token: a low-entropy one is not a secret to the rule
     let cap = 64 * 1024;
     let text = "y".repeat(cap / 2 - 10) + &key + &"z".repeat(cap * 2);
     let e = capture::cut_and_redact(&text, cap, &Rules::default());

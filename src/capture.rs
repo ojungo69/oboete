@@ -1,0 +1,361 @@
+//! Design B capture (docs/milestone-2-plan.md Task 2; spec 2.1-2.4): one hook payload becomes
+//! the events appended to `raw.db`. Text is kept whole (no clip) and redacted in full; images and
+//! other base64 content become a marker; git fields are read from files, never from `git`.
+//! Agents move here one by one: `PORTED` lists those done, and the others still go through
+//! `hook::handle` into v1's store until their port lands.
+
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
+use std::path::Path;
+
+use crate::hook::{compact, field, is_envelope, str_field, strip_blocks};
+use crate::raw::Event;
+use crate::{redact, repo};
+
+pub const PORTED: &[&str] = &["claude", "codex"];
+
+/// The events one hook call of a ported agent records: none for events that carry nothing.
+pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> {
+    let (kind, body) = match event {
+        "SessionStart" => ("start", json!({"source": payload.get("source")})),
+        "UserPromptSubmit" => {
+            let prompt = strip_blocks(str_field(payload, &["prompt"]).unwrap_or(""), true);
+            if prompt.is_empty() {
+                return Vec::new();
+            }
+            // Harness traffic is recorded, but never as something the developer typed.
+            let kind = if is_envelope(&prompt) {
+                "envelope"
+            } else {
+                "prompt"
+            };
+            (kind, json!({"prompt": redact::redact(&prompt)}))
+        }
+        "PostToolUse" | "PostToolUseFailure" => (
+            "tool",
+            json!({
+                "tool": str_field(payload, &["tool_name", "toolName", "name"]).unwrap_or("?"),
+                "input": text(field(payload, &["tool_input", "toolInput", "args"])),
+                "output": text(field(payload, &["tool_response", "toolResult", "tool_output", "error"])),
+                "failed": event == "PostToolUseFailure",
+            }),
+        ),
+        "Stop" => {
+            // Codex's Stop carries no message; its rollout transcript does.
+            let reply = match str_field(payload, &["last_assistant_message"]) {
+                Some(t) => t.to_string(),
+                None => str_field(payload, &["transcript_path"])
+                    .map(|p| crate::hook::last_assistant_in_transcript(Path::new(p)))
+                    .unwrap_or_default(),
+            };
+            if reply.trim().is_empty() {
+                return Vec::new();
+            }
+            ("reply", json!({"assistant": redact::redact(&reply)}))
+        }
+        "PreCompact" => ("compaction", json!({"trigger": payload.get("trigger")})),
+        "PostCompact" => match str_field(payload, &["compact_summary"]) {
+            Some(s) if !s.trim().is_empty() => {
+                ("compaction", json!({"summary": redact::redact(s)}))
+            }
+            _ => return Vec::new(),
+        },
+        "SessionEnd" => ("end", json!({"reason": payload.get("reason")})),
+        _ => return Vec::new(), // PreToolUse and the rest carry nothing to keep
+    };
+    let cwd = str_field(payload, &["cwd"]).unwrap_or(".");
+    let git = git(Path::new(cwd));
+    vec![Event {
+        agent: agent.into(),
+        // A label only: an event without one is still this device's next seq.
+        session: str_field(payload, &["session_id", "sessionId"])
+            .unwrap_or("unknown")
+            .into(),
+        kind: kind.into(),
+        ts,
+        repo: Some(repo::key(Path::new(cwd))),
+        branch: git.branch,
+        head: git.head,
+        gitdir: git.gitdir,
+        cwd: Some(cwd.into()),
+        source: "hook".into(),
+        body: body.to_string(),
+        original_bytes: None,
+    }]
+}
+
+/// A tool field as stored: binary content replaced by its marker, then redacted in full.
+fn text(v: &Value) -> String {
+    redact::redact(&compact(&markers(v)))
+}
+
+/// `v` with every base64 payload replaced by `{kind, mime, bytes, sha256}` (spec 2.3).
+fn markers(v: &Value) -> Value {
+    match v {
+        Value::Object(m) => binary(m).unwrap_or_else(|| {
+            Value::Object(m.iter().map(|(k, x)| (k.clone(), markers(x))).collect())
+        }),
+        Value::Array(a) => Value::Array(a.iter().map(markers).collect()),
+        other => other.clone(),
+    }
+}
+
+/// The three shapes seen in agent payloads: a content block `{type, source: {type: base64,
+/// media_type, data}}`, Claude Code's image read result `{type: <mime>, base64}`, and MCP's
+/// `{type, mimeType, data}`. `sha256` is of the base64 text, `bytes` the decoded size.
+fn binary(m: &Map<String, Value>) -> Option<Value> {
+    let kind = m.get("type").and_then(Value::as_str);
+    let (kind, mime, data) = if let Some(src) = m.get("source").filter(|s| s["type"] == "base64") {
+        (kind?, src["media_type"].as_str()?, src["data"].as_str()?)
+    } else if let Some(data) = m.get("base64").and_then(Value::as_str) {
+        let mime = kind?;
+        (mime.split('/').next()?, mime, data)
+    } else {
+        (
+            kind?,
+            m.get("mimeType")?.as_str()?,
+            m.get("data")?.as_str()?,
+        )
+    };
+    let sha: String = Sha256::digest(data.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Some(json!({
+        "kind": kind,
+        "mime": mime,
+        "bytes": data.trim_end_matches('=').len() * 3 / 4,
+        "sha256": sha,
+    }))
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct Git {
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub gitdir: Option<String>,
+}
+
+/// Branch, HEAD SHA and the checkout's own git directory, read from files (plan D9): `.git` may
+/// be a directory or, in a linked worktree, a `gitdir:` file. Refs live in the common directory.
+pub fn git(cwd: &Path) -> Git {
+    let start = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let Some(dot_git) = start
+        .ancestors()
+        .map(|d| d.join(".git"))
+        .find(|g| g.exists())
+    else {
+        return Git::default();
+    };
+    let gitdir = if dot_git.is_file() {
+        match repo::gitdir(&dot_git) {
+            Some(g) => g.canonicalize().unwrap_or(g),
+            None => return Git::default(),
+        }
+    } else {
+        dot_git
+    };
+    let common = repo::common_dir(&gitdir).unwrap_or_else(|| gitdir.clone());
+    let head = std::fs::read_to_string(gitdir.join("HEAD")).unwrap_or_default();
+    let head = head.trim();
+    let (branch, sha) = match head.strip_prefix("ref: ") {
+        Some(name) => (
+            name.strip_prefix("refs/heads/").map(str::to_owned),
+            resolve(&common, name),
+        ),
+        None => (None, (!head.is_empty()).then(|| head.to_owned())), // detached
+    };
+    Git {
+        branch,
+        head: sha,
+        gitdir: Some(gitdir.to_string_lossy().into_owned()),
+    }
+}
+
+/// A ref's SHA from its loose file, else from `packed-refs`; `None` before the first commit.
+fn resolve(common: &Path, name: &str) -> Option<String> {
+    if let Ok(s) = std::fs::read_to_string(common.join(name)) {
+        return Some(s.trim().to_owned());
+    }
+    std::fs::read_to_string(common.join("packed-refs"))
+        .ok()?
+        .lines()
+        .find_map(|l| {
+            let (sha, r) = l.split_once(' ')?;
+            (r == name).then(|| sha.to_owned())
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn one(event: &str, payload: Value) -> Event {
+        let mut v = events("claude", event, &payload, 7);
+        assert_eq!(v.len(), 1, "{event}: {v:?}");
+        v.remove(0)
+    }
+
+    fn body(e: &Event) -> Value {
+        serde_json::from_str(&e.body).unwrap()
+    }
+
+    #[test]
+    fn a_long_tool_output_is_kept_whole_and_redacted_past_the_old_window() {
+        let key = "ghp_q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"; // redact.rs's own test token
+        let out = "x".repeat(100_000) + " Authorization: Bearer " + key;
+        let e = one(
+            "PostToolUse",
+            json!({"session_id": "s", "cwd": "/", "tool_name": "Bash",
+                   "tool_input": {"command": "ls"}, "tool_response": {"stdout": out}}),
+        );
+        assert_eq!(e.kind, "tool");
+        let b = body(&e);
+        assert!(b["output"].as_str().unwrap().contains(&"x".repeat(100_000)));
+        assert!(
+            !e.body.contains(key),
+            "a secret past today's 12,000-character window"
+        );
+        assert_eq!(b["input"], r#"{"command":"ls"}"#);
+        assert_eq!(b["failed"], false);
+        assert_eq!(
+            (e.session.as_str(), e.ts, e.source.as_str()),
+            ("s", 7, "hook")
+        );
+    }
+
+    #[test]
+    fn prompts_lose_private_blocks_and_envelopes_are_not_typed_prompts() {
+        let e = one(
+            "UserPromptSubmit",
+            json!({"prompt": "keep <private>secret plan</private> this"}),
+        );
+        assert_eq!(
+            (e.kind.as_str(), body(&e)["prompt"].as_str()),
+            ("prompt", Some("keep  this"))
+        );
+        let e = one(
+            "UserPromptSubmit",
+            json!({"prompt": "shown <private>and the rest is hidden"}),
+        );
+        assert_eq!(body(&e)["prompt"], "shown");
+        assert!(
+            events(
+                "claude",
+                "UserPromptSubmit",
+                &json!({"prompt": "<private>x"}),
+                0
+            )
+            .is_empty()
+        );
+        for envelope in [
+            "<task-notification>done</task-notification>",
+            "Another Claude session sent a message: <teammate-message from=\"a\">hi</teammate-message>",
+        ] {
+            let e = one("UserPromptSubmit", json!({"prompt": envelope}));
+            assert_eq!(e.kind, "envelope", "{envelope}");
+        }
+        assert_eq!(
+            one("UserPromptSubmit", json!({"prompt": "hi"})).session,
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn images_become_markers_in_each_shape_seen() {
+        let data = "iVBORw0KGgo=";
+        let out = json!([
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}},
+            {"type": "image/png", "base64": data, "dimensions": {}},
+            {"type": "image", "mimeType": "image/jpeg", "data": data},
+            {"type": "text", "text": "caption"},
+        ]);
+        let e = one(
+            "PostToolUse",
+            json!({"tool_name": "Read", "tool_input": {}, "tool_response": out}),
+        );
+        let stored: Value = serde_json::from_str(body(&e)["output"].as_str().unwrap()).unwrap();
+        assert!(!e.body.contains(data));
+        for (i, mime) in ["image/png", "image/png", "image/jpeg"].iter().enumerate() {
+            assert_eq!(stored[i]["kind"], "image");
+            assert_eq!(stored[i]["mime"], *mime);
+            assert_eq!(stored[i]["bytes"], 8);
+            assert_eq!(stored[i]["sha256"].as_str().unwrap().len(), 64);
+        }
+        assert_eq!(stored[3]["text"], "caption");
+    }
+
+    #[test]
+    fn replies_come_from_the_payload_or_the_codex_transcript() {
+        let e = one("Stop", json!({"last_assistant_message": "done"}));
+        assert_eq!(
+            (e.kind.as_str(), body(&e)["assistant"].as_str()),
+            ("reply", Some("done"))
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout.jsonl");
+        std::fs::write(
+            &rollout,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"from codex"}]}}"#,
+        )
+        .unwrap();
+        let v = events("codex", "Stop", &json!({"transcript_path": rollout}), 0);
+        assert_eq!(body(&v[0])["assistant"], "from codex");
+        assert!(events("claude", "Stop", &json!({"last_assistant_message": " "}), 0).is_empty());
+        assert!(events("claude", "PreToolUse", &json!({"tool_name": "Bash"}), 0).is_empty());
+    }
+
+    #[test]
+    fn git_fields_come_from_files_in_a_worktree_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        let git = |args: &[&str], cwd: &Path| {
+            let ok = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "init.defaultBranch=main",
+                ])
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(ok.status.success(), "{args:?}: {ok:?}");
+            String::from_utf8(ok.stdout).unwrap().trim().to_owned()
+        };
+        std::fs::create_dir(&main).unwrap();
+        assert_eq!(super::git(&main), Git::default());
+        git(&["init", "-q"], &main);
+        let unborn = super::git(&main);
+        assert_eq!(
+            (unborn.branch.as_deref(), unborn.head),
+            (Some("main"), None)
+        );
+        git(&["commit", "-q", "--allow-empty", "-m", "one"], &main);
+        let sha = git(&["rev-parse", "HEAD"], &main);
+        let wt = dir.path().join("wt");
+        git(
+            &["worktree", "add", "-q", "-b", "side", wt.to_str().unwrap()],
+            &main,
+        );
+        git(&["pack-refs", "--all"], &main); // refs now only in packed-refs
+        let m = super::git(&main.join("sub-dir-that-does-not-exist"));
+        assert_eq!(
+            (m.branch.as_deref(), m.head.as_deref()),
+            (Some("main"), Some(sha.as_str()))
+        );
+        let w = super::git(&wt);
+        assert_eq!(
+            (w.branch.as_deref(), w.head.as_deref()),
+            (Some("side"), Some(sha.as_str()))
+        );
+        assert_ne!(w.gitdir, m.gitdir);
+        assert!(w.gitdir.unwrap().contains("worktrees"));
+        git(&["checkout", "-q", "--detach"], &wt);
+        let d = super::git(&wt);
+        assert_eq!((d.branch, d.head.as_deref()), (None, Some(sha.as_str())));
+    }
+}

@@ -31,8 +31,10 @@ pub fn run(
     let text =
         std::fs::read_to_string(fixture).with_context(|| format!("read {}", fixture.display()))?;
     let conn = db::open(home)?;
+    let mut raw = crate::raw::open(home)?;
 
-    // 1. In-process hook path: pure store cost per event.
+    // 1. In-process hook path: pure store cost per event. Ported agents write Design B's
+    // raw.db (milestone 2 Task 2), the others still v1's store.
     let mut micros: Vec<u128> = Vec::new();
     let mut injected = 0u32;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
@@ -46,13 +48,18 @@ pub fn run(
         }
         let event = v["event"].as_str().unwrap_or("");
         let started = Instant::now();
-        let out = hook::handle(&conn, ev_agent, event, &v["payload"])?;
+        let out = if crate::capture::PORTED.contains(&ev_agent) {
+            hook::record(&mut raw, ev_agent, event, &v["payload"])?;
+            None
+        } else {
+            hook::handle(&conn, ev_agent, event, &v["payload"])?
+        };
         micros.push(started.elapsed().as_micros());
         if out.as_deref().is_some_and(|s| s != "{}") {
             injected += 1;
         }
     }
-    drop(conn);
+    drop((conn, raw));
 
     // 2. Real process spawns: startup + open + insert, what the agent actually waits for.
     let spawn_ms = if spawn_sample > 0 {
