@@ -188,10 +188,13 @@ fn cli(name: &str, model: Option<&str>, daily_budget: u32) -> Provider {
     }
 }
 
-/// Default chain (docs/plan.md, verified by probes 2026-09-23): the two Groq strict-schema models
-/// (separate 8k-TPM buckets) → claude → OpenRouter free → NIM → Mistral → codex. The
-/// subscription CLIs run their cheap models (claude Haiku, codex gpt-6-luna), as claude-mem does
-/// on the Claude subscription: curation spends the quota the owner codes with. agy is not in
+/// Default chain, the owner's order of 2026-09-27: free first (the two Groq strict-schema models
+/// in separate 8k-TPM buckets, OpenRouter free, Mistral, then NIM, which never answered in the
+/// owner's calls), then the flat-rate OpenCode Go, then the coding subscriptions, codex and
+/// claude. The subscription CLIs run their cheap models (claude Haiku, codex gpt-6-luna), as
+/// claude-mem does on the Claude subscription: curation spends the quota the owner codes with.
+/// Gemini is not in it: its free tier uses the input to train and lets people review it
+/// (ai.google.dev/gemini-api/terms); a paid Gemini key can be configured. agy is not in
 /// it: headless agy has no switch that turns its tools off (it inherits the user's own tool
 /// permissions and plugins), and a curator reads untrusted text. grok is not in it either: the
 /// owner keeps the grok subscription out of curation (2026-09-25).
@@ -230,18 +233,6 @@ fn default_providers() -> Vec<Provider> {
             serde_json::json!({}),
         ),
         openai(
-            "nim",
-            "https://integrate.api.nvidia.com/v1",
-            "NVIDIA_NIM_KEY.md",
-            "nvidia/nemotron-3-super-120b-a12b",
-            500,
-            true,
-            serde_json::json!({"max_tokens": 2000}),
-        ),
-        opencode_go,
-        cli("codex", Some("gpt-6-luna"), 200),
-        cli("claude", Some("haiku"), 200),
-        openai(
             "openrouter",
             "https://openrouter.ai/api/v1",
             "OPENROUTER_API_KEY.md",
@@ -259,6 +250,18 @@ fn default_providers() -> Vec<Provider> {
             true,
             serde_json::json!({}),
         ),
+        openai(
+            "nim",
+            "https://integrate.api.nvidia.com/v1",
+            "NVIDIA_NIM_KEY.md",
+            "nvidia/nemotron-3-super-120b-a12b",
+            500,
+            true,
+            serde_json::json!({"max_tokens": 2000}),
+        ),
+        opencode_go,
+        cli("codex", Some("gpt-6-luna"), 200),
+        cli("claude", Some("haiku"), 200),
     ]
 }
 
@@ -318,22 +321,22 @@ mod tests {
     #[test]
     fn defaults_and_toml_extra_fields_parse() {
         let cfg: Config = toml::from_str("").unwrap();
-        // The owner's order (2026-09-26), with OpenCode Go after nim; agy and grok are out.
+        // The owner's order (2026-09-27): free, then OpenCode Go, then the subscription CLIs.
         let names: Vec<_> = cfg.providers.iter().map(Provider::name).collect();
         assert_eq!(
             names,
             [
                 "groq",
                 "groq-20b",
+                "openrouter",
+                "mistral",
                 "nim",
                 "opencode-go",
                 "codex",
-                "claude",
-                "openrouter",
-                "mistral"
+                "claude"
             ]
         );
-        match &cfg.providers[3] {
+        match &cfg.providers[5] {
             Provider::Openai { headers, .. } => {
                 assert_eq!(headers["x-opencode-session"], "oboete")
             }
