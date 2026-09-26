@@ -32,6 +32,9 @@ PANEL = {'gpt-oss-120b': ('https://api.groq.com/openai/v1', 'GROQ_API_KEY.md', {
          'kimi-k3': (*GO, 'kimi-k3'), 'qwen3.8-max': (*GO, 'qwen3.8-max'),
          'grok-4.7': ('dogfood', 'grok', {}, 'grok-4.7'), 'gpt-6-astra': ('dogfood', 'codex', {}, 'gpt-6-astra')}
 DOGFOOD = 'oboete-dogfood'
+# The CLI versions the tool canary passed on (docs/spike/cli-judges.md). Another version is refused
+# until the canary passes on it and this line changes (spec 6.5: capability per CLI version).
+TESTED = {'grok': 'grok 1.0.40', 'codex': 'codex-cli 0.155.1'}
 # One judge call as the dogfood user: its own logins, and no hooks, MCP servers or plugins of the
 # owner's. The prompt comes on stdin into a private directory that is removed after, with grok's
 # session for that directory; every grok tool is denied, and codex runs under oboete's curator
@@ -45,6 +48,8 @@ S=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], 
 trap 'rm -rf -- "$W" "$HOME/.grok/sessions/$S"' EXIT
 cat > "$W/prompt.txt"
 cd "$W"
+v=$("$1" --version 2>/dev/null | head -1)
+case "$v" in "$4"|"$4 "*) ;; *) echo "untested $1 version: $v (canary passed on $4)" >&2; exit 1 ;; esac
 case "$1" in
 grok)
   timeout -k 10 "$3" grok --cwd "$W" --prompt-file "$W/prompt.txt" --deny '*' --permission-mode dontAsk --disable-web-search \
@@ -161,7 +166,8 @@ def cli_chat(cli, model, prompt, timeout):
     try:
         # The CLI's own timeout runs as the dogfood user, so a slow call does not outlive this one
         # (killing sudo alone would leave it running); this timeout is only the backstop.
-        run = subprocess.run(['sudo', '-n', '-u', DOGFOOD, '-H', 'bash', '-c', CLI_JUDGE, 'judge', cli, model, str(timeout)],
+        run = subprocess.run(['sudo', '-n', '-u', DOGFOOD, '-H', 'bash', '-c', CLI_JUDGE, 'judge', cli, model, str(timeout),
+                              TESTED[cli]],
                              input=prompt, capture_output=True, text=True, timeout=timeout + 30, env=clean_env())
     except subprocess.TimeoutExpired:
         raise ConnectionError(f'{cli} gave no answer in {timeout} s') from None

@@ -31,6 +31,8 @@ The prompt reaches the CLI on stdin, into a private temporary directory that is 
 
 `--tools ""` does not remove grok's tools, and `dontAsk` still runs reads (the permission guide lists them as auto-approved in every mode). Each call also runs under `timeout -k 10` inside the dogfood shell, so a call that overruns is killed there and does not outlive the caller. `--sandbox strict` did not start here (a 300 s timeout, then exit 1), so it is not used; `--deny '*'` is the layer that holds, and the dogfood user is the one around it.
 
+The canary passed on grok 1.0.40 and codex-cli 0.155.1 (the dogfood user's installs; its grok has `auto_update = false`). `calib.TESTED` holds these versions, and a judge call refuses any other until the canary passes on it and the constant changes.
+
 After a judge call, neither `~/.grok` nor `~/.codex` of the dogfood user holds the prompt text (`grep` for the prompt; `session_search.sqlite` unchanged).
 
 ## Calibration (B3's rule, run 3)
