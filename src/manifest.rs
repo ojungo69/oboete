@@ -38,6 +38,11 @@ const STOP: [&str; 16] = [
     "all", "any", "can", "use",
 ];
 
+/// A line the directive rule reads: one with a directive or a negation marker.
+pub(crate) fn is_owner_line(text: &str) -> bool {
+    has(text, &DIRECTIVE) || has(text, &NEGATION)
+}
+
 fn has(text: &str, markers: &[&str]) -> bool {
     let lower = text.to_lowercase();
     markers.iter().any(|m| lower.contains(m))

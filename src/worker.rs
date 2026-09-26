@@ -24,6 +24,7 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
         // The rescan first: the tombstones it appends are in raw before the others read a record.
         Box::new(crate::consumer::rescan::Rescan::new(home)),
         Box::new(crate::consumer::fts::Fts),
+        Box::new(crate::consumer::manifest::Manifest),
         Box::new(crate::consumer::compress::Compress),
     ]
 }
