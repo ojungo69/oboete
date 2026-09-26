@@ -25,9 +25,13 @@ CREATE TABLE IF NOT EXISTS records (
   target_device TEXT, target_seq INTEGER, target_offset INTEGER, target_length INTEGER,
   PRIMARY KEY (device, seq)
 );
--- spec 2.2: rule, where and when, never the value.
+-- spec 2.2: rule, where and when, never the value. `field` is where in the record: a JSON
+-- pointer into the body (`/output`; `/trigger#key` for a key of that object) or a label column
+-- (`cwd`). `offset` is where the mask starts in that field as stored; `length` is the secret's
+-- own length; both in bytes. `ts` is when the mask was applied (a replay stamps the event with the
+-- fixture's time, not this).
 CREATE TABLE IF NOT EXISTS ledger (
-  device TEXT NOT NULL, seq INTEGER NOT NULL, rule TEXT NOT NULL,
+  device TEXT NOT NULL, seq INTEGER NOT NULL, field TEXT NOT NULL, rule TEXT NOT NULL,
   offset INTEGER NOT NULL, length INTEGER NOT NULL, ts INTEGER NOT NULL, ruleset TEXT NOT NULL
 );
 ";
@@ -114,6 +118,15 @@ impl Raw {
     /// Append one event as this device's next seq. The write lock taken by `BEGIN IMMEDIATE`
     /// makes reading the last seq and inserting the next one atomic across processes.
     pub fn append(&mut self, e: &Event) -> Result<i64> {
+        self.append_with_ledger(e, &[])
+    }
+
+    /// `append`, with the event's redaction ledger rows in the same transaction.
+    pub fn append_with_ledger(
+        &mut self,
+        e: &Event,
+        ledger: &[(String, crate::redact::Finding)],
+    ) -> Result<i64> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -143,6 +156,23 @@ impl Raw {
                 e.original_bytes
             ],
         )?;
+        let now = crate::db::now_ms();
+        for (field, f) in ledger {
+            tx.execute(
+                "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    self.device,
+                    seq,
+                    field,
+                    f.rule,
+                    f.offset as i64,
+                    f.length as i64,
+                    now,
+                    crate::redact::ruleset()
+                ],
+            )?;
+        }
         tx.commit()?;
         Ok(seq)
     }

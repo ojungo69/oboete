@@ -1,6 +1,8 @@
-//! Design B capture (docs/milestone-2-plan.md Task 2; spec 2.1-2.4): one hook payload becomes
-//! the events appended to `raw.db`. Text is kept whole (no clip); every text field loses its
-//! `<private>`-style blocks and is redacted in full; images and other base64 content become a marker; git fields are read from files, never from `git`.
+//! Design B capture (docs/milestone-2-plan.md Tasks 2 and 3; spec 2.1-2.4): one hook payload
+//! becomes the events appended to `raw.db`, each with the ledger of what redaction masked. Text is
+//! kept whole up to `MAX_FIELD_BYTES`, head and tail above it; every stored string loses its
+//! `<private>`-style blocks and is scanned in full; images and other base64 content become a
+//! marker; git fields are read from files, never from `git`.
 //! Agents move here one by one: `PORTED` lists those done, and the others still go through
 //! `hook::handle` into v1's store until their port lands.
 
@@ -14,8 +16,19 @@ use crate::{redact, repo};
 
 pub const PORTED: &[&str] = &["claude", "codex"];
 
+/// Bytes a stored string keeps before only its head and tail are kept (spec 2.4, plan D4).
+/// Provisional: Task 12 sets it from M14 on the slowest machine.
+pub const MAX_FIELD_BYTES: usize = 256 * 1024;
+
+/// One event as captured, with the ledger rows of what its redaction masked: (field, finding).
+#[derive(Debug)]
+pub struct Captured {
+    pub event: Event,
+    pub ledger: Vec<(String, redact::Finding)>,
+}
+
 /// The events one hook call of a ported agent records: none for events that carry nothing.
-pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> {
+pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Captured> {
     let (kind, body) = match event {
         "SessionStart" => ("start", json!({"source": payload.get("source").map(clean)})),
         "UserPromptSubmit" => {
@@ -79,26 +92,87 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
     let cwd = str_field(payload, &["cwd"]).unwrap_or(".");
     let git = git(Path::new(cwd));
     // Labels are stored text too (spec 2.2): a path or branch can carry a token.
-    let label = |s: &str| redact::redact(&without_blocks(s, false));
-    vec![Event {
-        agent: agent.into(),
-        // A label only: an event without one is still this device's next seq.
-        session: label(str_field(payload, &["session_id", "sessionId"]).unwrap_or("unknown")),
-        kind: kind.into(),
-        ts,
-        repo: Some(label(&repo::key(Path::new(cwd)))),
-        branch: git.branch.as_deref().map(label),
-        head: git.head.as_deref().map(label),
-        gitdir: git.gitdir.as_deref().map(label),
-        cwd: Some(label(cwd)),
-        source: "hook".into(),
-        // One gate for the body: every string in it is redacted in full, whatever field it is.
-        body: redacted(body).to_string(),
-        original_bytes: None,
+    let mut gate = Gate::default();
+    let mut label = |field: &str, s: &str| gate.text(field, &without_blocks(s, false));
+    let session = label(
+        "session",
+        str_field(payload, &["session_id", "sessionId"]).unwrap_or("unknown"),
+    );
+    let repo = label("repo", &repo::key(Path::new(cwd)));
+    let branch = git.branch.as_deref().map(|b| label("branch", b));
+    let head = git.head.as_deref().map(|h| label("head", h));
+    let gitdir = git.gitdir.as_deref().map(|g| label("gitdir", g));
+    let cwd_label = label("cwd", cwd);
+    // One gate for the body: every string and key in it, whatever field it is.
+    let body = gate.value("", body).to_string();
+    vec![Captured {
+        event: Event {
+            agent: agent.into(),
+            // A label only: an event without one is still this device's next seq.
+            session,
+            kind: kind.into(),
+            ts,
+            repo: Some(repo),
+            branch,
+            head,
+            gitdir,
+            cwd: Some(cwd_label),
+            source: "hook".into(),
+            body,
+            original_bytes: gate.cut,
+        },
+        ledger: gate.ledger,
     }]
 }
 
-/// A tool field as text: `clean`, then flattened. `redacted` masks it with the rest of the body.
+/// The one gate every stored string passes (spec 2.2): `redact::scan_capped` over its whole
+/// length (head and tail above the cap), each finding kept with the field it is in.
+#[derive(Default)]
+struct Gate {
+    ledger: Vec<(String, redact::Finding)>,
+    /// The full size of the strings that were cut, when any was.
+    cut: Option<i64>,
+}
+
+impl Gate {
+    fn text(&mut self, field: &str, s: &str) -> String {
+        let (stored, found, full) = redact::scan_capped(s, MAX_FIELD_BYTES);
+        if let Some(n) = full {
+            *self.cut.get_or_insert(0) += n as i64;
+        }
+        self.ledger
+            .extend(found.into_iter().map(|f| (field.to_owned(), f)));
+        stored
+    }
+
+    /// Every string and key of `v`, at its JSON pointer. Blocks are gone by now: stripping here
+    /// again would pair an opener left in one flattened tool field with a closer in another.
+    fn value(&mut self, path: &str, v: Value) -> Value {
+        match v {
+            Value::String(s) => Value::String(self.text(path, &s)),
+            Value::Array(a) => Value::Array(
+                a.into_iter()
+                    .enumerate()
+                    .map(|(i, x)| self.value(&format!("{path}/{i}"), x))
+                    .collect(),
+            ),
+            Value::Object(m) => Value::Object(
+                m.into_iter()
+                    .map(|(k, x)| {
+                        // The pointer is built from the stored key, so it never holds a secret.
+                        let key = self.text(&format!("{path}#key"), &k);
+                        let child = format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
+                        let x = self.value(&child, x);
+                        (key, x)
+                    })
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+}
+
+/// A tool field as text: `clean`, then flattened. `Gate` scans it with the rest of the body.
 fn text(v: &Value) -> String {
     compact(&clean(v))
 }
@@ -118,22 +192,6 @@ fn clean(v: &Value) -> Value {
         Value::Array(a) => Value::Array(a.iter().map(clean).collect()),
         Value::String(s) => base64_runs(&without_blocks(s, false)),
         other => other.clone(),
-    }
-}
-
-/// `v` with every string and key redacted, whatever field it came from (spec 2.2, every byte
-/// that is stored). Blocks are gone by now: stripping here again would pair an opener left in one
-/// flattened tool field with a closer in another.
-fn redacted(v: Value) -> Value {
-    match v {
-        Value::String(s) => Value::String(redact::redact(&s)),
-        Value::Array(a) => Value::Array(a.into_iter().map(redacted).collect()),
-        Value::Object(m) => Value::Object(
-            m.into_iter()
-                .map(|(k, x)| (redact::redact(&k), redacted(x)))
-                .collect(),
-        ),
-        other => other,
     }
 }
 
@@ -282,7 +340,7 @@ mod tests {
     fn one(event: &str, payload: Value) -> Event {
         let mut v = events("claude", event, &payload, 7);
         assert_eq!(v.len(), 1, "{event}: {v:?}");
-        v.remove(0)
+        v.remove(0).event
     }
 
     fn body(e: &Event) -> Value {
@@ -367,6 +425,59 @@ mod tests {
             stored,
             json!({"a": "<private>x", "b": "y</private>", "keep": "z", "c": "!"})
         );
+    }
+
+    #[test]
+    fn the_ledger_names_the_field_and_the_mask_never_the_value() {
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let payload = json!({"session_id": "s", "tool_name": "Bash",
+            "tool_input": {"command": format!("curl -H 'Authorization: Bearer {key}'")},
+            "tool_response": {"stdout": "ok"}, "reason": {format!("Bearer {key}"): 1}});
+        let v = events("claude", "PostToolUse", &payload, 0);
+        let c = &v[0];
+        assert!(!format!("{c:?}").contains(&key), "{c:?}");
+        let (field, f) = &c.ledger[0];
+        assert_eq!((field.as_str(), f.length), ("/input", key.len()));
+        let input = body(&c.event)["input"].as_str().unwrap().to_owned();
+        assert_eq!(
+            &input[f.offset..f.offset + "[REDACTED]".len()],
+            "[REDACTED]"
+        );
+        // A key names its object, from the stored key: the pointer never holds the secret.
+        let end = events(
+            "claude",
+            "SessionEnd",
+            &json!({"reason": {format!("Bearer {key}"): 1}}),
+            0,
+        );
+        assert!(
+            end[0]
+                .ledger
+                .iter()
+                .any(|(field, _)| field == "/reason#key"),
+            "{:?}",
+            end[0].ledger
+        );
+        assert!(!format!("{:?}", end[0]).contains(&key));
+    }
+
+    #[test]
+    fn an_oversized_field_keeps_head_and_tail_and_its_full_size() {
+        let out = "a".repeat(MAX_FIELD_BYTES) + &"b".repeat(MAX_FIELD_BYTES);
+        let e = one(
+            "PostToolUse",
+            json!({"tool_name": "Bash", "tool_input": {}, "tool_response": out}),
+        );
+        let stored = body(&e)["output"].as_str().unwrap().to_owned();
+        assert!(stored.len() < MAX_FIELD_BYTES + 100, "{}", stored.len());
+        assert!(stored.starts_with('a') && stored.ends_with('b'));
+        assert!(stored.contains(&format!("[cut: {} bytes in full]", out.len())));
+        assert_eq!(e.original_bytes, Some(out.len() as i64));
+        let small = one(
+            "PostToolUse",
+            json!({"tool_name": "Bash", "tool_input": {}, "tool_response": "x"}),
+        );
+        assert_eq!(small.original_bytes, None);
     }
 
     #[test]
@@ -595,7 +706,7 @@ mod tests {
         )
         .unwrap();
         let v = events("codex", "Stop", &json!({"transcript_path": rollout}), 0);
-        assert_eq!(body(&v[0])["assistant"], "from codex");
+        assert_eq!(body(&v[0].event)["assistant"], "from codex");
         assert!(events("claude", "Stop", &json!({"last_assistant_message": " "}), 0).is_empty());
         assert!(events("claude", "PreToolUse", &json!({"tool_name": "Bash"}), 0).is_empty());
     }

@@ -111,13 +111,13 @@ pub fn record(
     payload: &Value,
     ts: i64,
 ) -> Result<()> {
-    for mut e in crate::capture::events(agent, event, payload, ts) {
+    for mut c in crate::capture::events(agent, event, payload, ts) {
         // An idless event's session is this device's own: a bare "unknown" would be one session
         // on every device once they sync (as `handle` does for v1).
-        if e.session == "unknown" {
-            e.session = format!("unknown-{}", raw.device());
+        if c.event.session == "unknown" {
+            c.event.session = format!("unknown-{}", raw.device());
         }
-        raw.append(&e)?;
+        raw.append_with_ledger(&c.event, &c.ledger)?;
     }
     Ok(())
 }

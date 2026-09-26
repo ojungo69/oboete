@@ -25,8 +25,7 @@ struct File {
 
 #[derive(Deserialize)]
 struct Rule {
-    /// Only read by the tests; kept so a failing rule can be named.
-    #[allow(dead_code)]
+    /// The rule a finding names in the redaction ledger.
     id: String,
     #[serde(default)]
     regex: Option<String>,
@@ -128,14 +127,141 @@ pub fn outbound(text: &str) -> String {
 }
 
 pub fn redact(text: &str) -> String {
+    scan(text).0
+}
+
+/// One secret masked in stored text: the rule that found it, where its mask starts in the
+/// stored (masked) text, and the secret's own length, both in bytes. Never the value. Two rules
+/// on one token share one mask, so they give two findings at the same offset.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Finding {
+    pub rule: String,
+    pub offset: usize,
+    pub length: usize,
+}
+
+/// `text` masked, with its findings.
+pub fn scan(text: &str) -> (String, Vec<Finding>) {
+    mask(text, spans(text))
+}
+
+/// Context scanned past each cut of a capped text: a secret across the cut is masked whole, as
+/// v1's `clip` did with REDACT_OVERLAP (plan D4).
+const MARGIN: usize = 4_000;
+
+/// `text` scanned whole when it is at most `cap` bytes. Above that, only its first and last
+/// `cap / 2` bytes are kept, around a marker that gives the full size (spec 2.4), and only they
+/// and MARGIN bytes past each cut are scanned. The third value is the full size when it was cut.
+/// A secret across a cut is kept whole in its mask; a private key block that a cut splits (a
+/// BEGIN without its END, or an END without its BEGIN) is dropped from the part that holds it;
+/// then the stored text is scanned once more, so line-scoped allowlists judge the lines as they
+/// are stored (as v1's `clip` did).
+pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usize>) {
+    if text.len() <= cap {
+        let (masked, found) = scan(text);
+        return (masked, found, None);
+    }
+    let half = cap / 2;
+    let head_window = text.floor_char_boundary(half + MARGIN);
+    let tail_window = text.ceil_char_boundary(text.len().saturating_sub(half + MARGIN));
+    let mut head_end = text.floor_char_boundary(half);
+    let mut tail_start = text.ceil_char_boundary(text.len() - half);
+    let head_spans = spans(&text[..head_window]);
+    let tail_spans: Vec<_> = spans(&text[tail_window..])
+        .into_iter()
+        .map(|(s, e, r)| (s + tail_window, e + tail_window, r))
+        .collect();
+    for &(s, e, _) in &head_spans {
+        if s < head_end && e > head_end {
+            head_end = e;
+        }
+    }
+    for &(s, e, _) in &tail_spans {
+        if s < tail_start && e > tail_start {
+            tail_start = s;
+        }
+    }
+    if let Some(b) = text[..head_end].rfind("-----BEGIN")
+        && !text[b..head_end].contains("-----END")
+    {
+        head_end = b;
+    }
+    if let Some(e) = text[tail_start..].find("-----END")
+        && !text[tail_start..tail_start + e].contains("-----BEGIN")
+    {
+        let end = tail_start + e;
+        tail_start = text[end..].find('\n').map_or(text.len(), |n| end + n);
+    }
+    if head_end >= tail_start {
+        // The cuts met (a secret or a key block spans the middle): keep it whole, scanned.
+        let (masked, found) = scan(text);
+        return (masked, found, None);
+    }
+    let (head, mut found) = mask(
+        &text[..head_end],
+        head_spans
+            .into_iter()
+            .filter(|&(_, e, _)| e <= head_end)
+            .collect(),
+    );
+    let marker = format!("\n…[cut: {} bytes in full]…\n", text.len());
+    let (tail, tail_found) = mask(
+        &text[tail_start..],
+        tail_spans
+            .into_iter()
+            .filter(|&(s, _, _)| s >= tail_start)
+            .map(|(s, e, r)| (s - tail_start, e - tail_start, r))
+            .collect(),
+    );
+    let base = head.len() + marker.len();
+    found.extend(tail_found.into_iter().map(|f| Finding {
+        offset: f.offset + base,
+        ..f
+    }));
+    let kept = head + &marker + &tail;
+    // Second pass: what it masks moves every later mask by the length it changed.
+    let again = spans(&kept);
+    let runs = merged(&again);
+    for f in &mut found {
+        let shift: isize = runs
+            .iter()
+            .filter(|&&(_, e)| e <= f.offset)
+            .map(|&(s, e)| MASK.len() as isize - (e - s) as isize)
+            .sum();
+        f.offset = (f.offset as isize + shift) as usize;
+    }
+    let (stored, more) = mask(&kept, again);
+    found.extend(more);
+    found.sort_by_key(|f| f.offset);
+    (stored, found, Some(text.len()))
+}
+
+/// The version of the rules a finding came from: a hash of the bundled rule files.
+pub fn ruleset() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest([RULES_TOML, EXTRA_TOML].concat().as_bytes());
+        digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+    })
+}
+
+/// Secret spans in `text`: (start, end, rule index), unmerged, as gitleaks finds them.
+fn spans(text: &str) -> Vec<(usize, usize, usize)> {
     let r = rules();
     let mut hit = vec![false; r.rules.len()];
     // Overlapping: "sk" (twilio) inside "gsk_" (groq) must not hide the longer keyword.
     for m in r.keywords.find_overlapping_iter(text) {
         hit[r.keyword_rule[m.pattern().as_usize()]] = true;
     }
-    let mut spans: Vec<(usize, usize)> = Vec::new();
-    for (rule, _) in r.rules.iter().zip(&hit).filter(|(_, h)| **h) {
+    let mut spans = Vec::new();
+    for (i, (rule, _)) in r
+        .rules
+        .iter()
+        .zip(&hit)
+        .enumerate()
+        .filter(|(_, (_, h))| **h)
+    {
         let Some(re) = rule.regex.as_deref().and_then(compiled) else {
             continue;
         };
@@ -160,31 +286,50 @@ pub fn redact(text: &str) -> String {
                 .chain(std::iter::once(&r.global))
                 .any(|a| allows(a, secret.as_str(), whole.as_str(), line));
             if !allowed {
-                spans.push((secret.start(), secret.end()));
+                spans.push((secret.start(), secret.end(), i));
             }
         }
     }
-    if spans.is_empty() {
-        return text.to_string();
-    }
     spans.sort_unstable();
-    // Overlapping matches (a short and a long rule on one token) mask their union.
-    let mut merged: Vec<(usize, usize)> = Vec::new();
-    for (start, end) in spans {
-        match merged.last_mut() {
+    spans
+}
+
+/// Overlapping spans (a short and a long rule on one token) as the runs one mask covers.
+fn merged(spans: &[(usize, usize, usize)]) -> Vec<(usize, usize)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for &(start, end, _) in spans {
+        match runs.last_mut() {
             Some((_, last_end)) if start <= *last_end => *last_end = (*last_end).max(end),
-            _ => merged.push((start, end)),
+            _ => runs.push((start, end)),
         }
     }
+    runs
+}
+
+/// `text` with each run of sorted `spans` replaced by one mask, and a finding per span at the
+/// offset of its mask in the result.
+fn mask(text: &str, spans: Vec<(usize, usize, usize)>) -> (String, Vec<Finding>) {
+    let r = rules();
     let mut out = String::with_capacity(text.len());
+    let mut found = Vec::with_capacity(spans.len());
     let mut pos = 0;
-    for (start, end) in merged {
+    let mut i = 0;
+    for (start, end) in merged(&spans) {
         out.push_str(&text[pos..start]);
+        while i < spans.len() && spans[i].0 < end {
+            let (s, e, rule) = spans[i];
+            found.push(Finding {
+                rule: r.rules[rule].id.clone(),
+                offset: out.len(),
+                length: e - s,
+            });
+            i += 1;
+        }
         out.push_str(MASK);
         pos = end;
     }
     out.push_str(&text[pos..]);
-    out
+    (out, found)
 }
 
 /// gitleaks' allowlist: OR = any regex or stopword hit; AND = every configured check must hold
@@ -315,6 +460,89 @@ mod tests {
             ),
             "ANTHROPIC_API_KEY=[REDACTED]"
         );
+    }
+
+    fn token() -> String {
+        format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g") // split: secret scanners
+    }
+
+    /// Every finding points at a mask in the stored text, and none holds the value.
+    fn check(stored: &str, found: &[Finding], secret: &str) {
+        assert!(!stored.contains(secret));
+        assert!(!format!("{found:?}").contains(secret));
+        for f in found {
+            assert_eq!(&stored[f.offset..f.offset + MASK.len()], MASK, "{f:?}");
+        }
+    }
+
+    #[test]
+    fn every_byte_is_scanned_and_the_ledger_never_holds_the_value() {
+        let key = token();
+        let text = "x".repeat(200_000) + " Authorization: Bearer " + &key; // past v1's 12,000
+        let (masked, found) = scan(&text);
+        // Two rules may find the token (github-pat and a bearer rule): one mask, a finding each.
+        assert!(
+            found
+                .iter()
+                .any(|f| f.rule == "github-pat" && f.length == key.len()),
+            "{found:?}"
+        );
+        assert!(found.iter().all(|f| f.offset == found[0].offset));
+        assert_eq!(masked.matches(MASK).count(), 1);
+        check(&masked, &found, &key);
+        let (capped, again, cut) = scan_capped(&text, 256 * 1024);
+        assert_eq!((capped, again, cut), (masked, found, None));
+    }
+
+    #[test]
+    fn a_secret_across_a_cut_is_masked_in_what_is_kept() {
+        let key = token();
+        let cap = 64 * 1024;
+        for at in [cap / 2 - 10, cap / 2 + 3, 5 * cap - cap / 2 - 10] {
+            // The token straddles the head's cut, sits just past it, or straddles the tail's.
+            let mut text = "y ".repeat(5 * cap / 2);
+            text.replace_range(at..at + key.len() + 7, &format!("Bearer {key}"));
+            let (stored, found, cut) = scan_capped(&text, cap);
+            assert_eq!(cut, Some(text.len()));
+            assert!(stored.len() < cap + 100);
+            for i in 8..=key.len() {
+                assert!(
+                    !stored.contains(&key[i - 8..i]),
+                    "fragment ending at {i}, token at {at}"
+                );
+            }
+            check(&stored, &found, &key);
+        }
+    }
+
+    #[test]
+    fn a_key_block_cut_in_half_is_dropped_from_the_part_that_holds_it() {
+        let cap = 64 * 1024;
+        let block = format!(
+            "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
+            "MIIEowIBAAKCAQEAq9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8gI4kM7oQ1sV3xZ6bD\n".repeat(200)
+        );
+        // BEGIN before the head's cut, END past the margin: the rule never sees the whole block.
+        let text = "h ".repeat(cap / 4 - 100) + &block + &"t ".repeat(cap);
+        let (stored, _, cut) = scan_capped(&text, cap);
+        assert!(cut.is_some());
+        assert!(
+            !stored.contains("MIIEowIBAAKCAQ") && !stored.contains("-----BEGIN"),
+            "{}",
+            &stored[..300]
+        );
+        // The same block across the tail's cut.
+        let text = "h ".repeat(cap) + &block + &" t".repeat(cap / 4 - 100);
+        let (stored, _, _) = scan_capped(&text, cap);
+        assert!(!stored.contains("MIIEowIBAAKCAQ") && !stored.contains("-----END"));
+    }
+
+    #[test]
+    fn cuts_fall_on_character_boundaries() {
+        let text = "日本語".repeat(40_000); // 360,000 bytes, three per character
+        let (stored, found, cut) = scan_capped(&text, 64 * 1024 + 1);
+        assert!(cut.is_some() && found.is_empty());
+        assert!(stored.starts_with('日') && stored.ends_with('語'));
     }
 
     #[test]

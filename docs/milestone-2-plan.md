@@ -241,13 +241,14 @@ Rules (spec 2.1-2.4, D9, D15):
 - Modify: `src/config.rs` (`[redaction] extra_rules`, `allowlist`; `[capture] max_output_bytes`, `store_prompts`, `tool_output = "full" | "head-tail"`)
 - Test: `src/redact.rs`, `src/capture.rs`
 
-**Interfaces:**
-- Produces:
-  - `pub struct Rules`: the built-in rules plus the settings' extra rules and allowlist. `Rules::default()` is the built-in ones only; `Rules::from_config(&Config)` adds the settings. `Rules::version(&self) -> String` is a hash of every rule and allowlist entry, the ledger's ruleset version.
-  - `pub struct Finding { pub rule: String, pub offset: usize, pub length: usize }`: a span of the stored text, never the value.
-  - `pub fn scan(text: &str, rules: &Rules) -> (String, Vec<Finding>)`: the masked text and its findings.
-  - `capture::cut_and_redact(text: &str, cap: usize, rules: &Rules) -> Cut`, with `pub struct Cut { pub body: String, pub original_bytes: Option<i64>, pub findings: Vec<Finding> }`.
-  - `raw::Raw::append_with_ledger(&mut self, e: &Event, f: &[Finding], ruleset: &str) -> Result<i64>`: the event and its ledger rows in one transaction.
+**Interfaces** (in two PRs: **3a** the full scan, the ledger and the cap on the built-in rules; **3b** the settings):
+- Produces (3a):
+  - `pub struct Finding { pub rule: String, pub offset: usize, pub length: usize }`: the rule, where its mask starts in the stored text, and the secret's own length, in bytes; never the value. Two rules on one token share one mask and give two findings.
+  - `pub fn scan(text: &str) -> (String, Vec<Finding>)`; `redact(text)` stays, as `scan(text).0`, for v1's `clip` and `outbound`.
+  - `pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usize>)`: head and tail above `cap`, each scanned with a 4,000-byte margin past its cut (D4); a key block cut in half is dropped from the part holding it; then a second pass over what is kept; the third value is the full size when it was cut. `redact::ruleset()` names the rules' version.
+  - `capture::Captured { event, ledger: Vec<(String, Finding)> }` and `capture::MAX_FIELD_BYTES` (256 KB until Task 12): every stored string passes `capture::Gate`, which applies `scan_capped` and records each finding with its field (a JSON pointer into the body, `#key` for an object's key, or a label column).
+  - `raw::Raw::append_with_ledger(&mut self, e: &Event, ledger: &[(String, Finding)]) -> Result<i64>`: the event and its ledger rows in one transaction; the ledger gains a `field` column.
+- Produces (3b): `Rules` with the settings' extra rules and allowlist (`[redaction] extra_rules`, `allowlist`), its version in the ledger, `outbound` using them too; `[capture] store_prompts` and `tool_output = "full" | "head-tail"`.
 
 - [ ] **Step 1: Failing tests.**
 
