@@ -188,7 +188,7 @@ fn cli(name: &str, model: Option<&str>, daily_budget: u32) -> Provider {
     }
 }
 
-/// Default chain, the owner's order of 2026-09-27: free first (the two Groq strict-schema models
+/// Default chain, the owner's order of 2026-09-27: free first (the three Groq strict-schema models
 /// in separate 8k-TPM buckets, OpenRouter free, Mistral, then NIM, which never answered in the
 /// owner's calls), then the flat-rate OpenCode Go, then the coding subscriptions, codex and
 /// claude. The subscription CLIs run their cheap models (claude Haiku, codex gpt-6-luna), as
@@ -241,6 +241,18 @@ fn default_providers() -> Vec<Provider> {
             // Reasoning tokens count against Groq's 200,000 tokens a day. Low effort cut them from
             // 533 to 9 (20b) and 386 to 75 (120b) on a short window, with valid JSON (2026-09-27).
             serde_json::json!({"reasoning_effort": "low"}),
+        ),
+        // A third free Groq model with its own 200,000 tokens a day, same key and recipient. Strict
+        // schema, no reasoning: 0.9-1.2 s, valid JSON in Japanese on a 12,000-character window
+        // (probe of 2026-09-27).
+        openai(
+            "groq-qwen",
+            groq,
+            "GROQ_API_KEY.md",
+            "qwen/qwen3.8-27b",
+            800,
+            true,
+            serde_json::json!({"reasoning_effort": "none"}),
         ),
         openai(
             "openrouter",
@@ -345,8 +357,12 @@ mod tests {
             } = p
             {
                 let effort = extra.get("reasoning_effort").and_then(|v| v.as_str());
-                let groq = name.starts_with("groq");
-                assert_eq!(effort, groq.then_some("low"), "{name}");
+                let want = match name.as_str() {
+                    "groq" | "groq-20b" => Some("low"),
+                    "groq-qwen" => Some("none"),
+                    _ => None,
+                };
+                assert_eq!(effort, want, "{name}");
                 let want = if name == "opencode-go" { 150 } else { 90 };
                 assert_eq!(*timeout_s, want, "{name}");
             }
@@ -358,6 +374,7 @@ mod tests {
             [
                 "groq",
                 "groq-20b",
+                "groq-qwen",
                 "openrouter",
                 "mistral",
                 "nim",
@@ -366,13 +383,13 @@ mod tests {
                 "claude"
             ]
         );
-        match &cfg.providers[4] {
+        match &cfg.providers[5] {
             Provider::Openai { extra, .. } => {
                 assert_eq!(extra["chat_template_kwargs"]["enable_thinking"], false)
             }
             _ => panic!("expected nim"),
         }
-        match &cfg.providers[5] {
+        match &cfg.providers[6] {
             Provider::Openai { headers, .. } => {
                 assert_eq!(headers["x-opencode-session"], "oboete")
             }
