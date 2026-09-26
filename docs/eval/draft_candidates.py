@@ -251,7 +251,9 @@ def decisions(budget):
             for d in valid_decisions(answer.get('decisions') or [], w):
                 if (d['line'], d['quote']) not in seen:
                     seen.add((d['line'], d['quote']))
-                    out.append({'id': f'd{len(out) + 1}', 'session': s['session'], 'repo': repo, 'ts': ts[d['line']], **d})
+                    # An accepted proposal is decided when the developer accepts it, not when proposed.
+                    at = ts[d['prompt_line']] if d['who'] == 'assistant_accepted' else ts[d['line']]
+                    out.append({'id': f'd{len(out) + 1}', 'session': s['session'], 'repo': repo, 'ts': at, **d})
     return out, True
 
 
@@ -348,13 +350,15 @@ def tasks():
     append('dev-decisions', [decision_item(by_id[i]) for i in new], [by_id[i] for i in new])
 
     found_pairs = {pair_id(p): p for p in read_jsonl(f'{DRAFTS}/pairs.jsonl')}
-    shown = {k['id'] for k in read_jsonl(f'{LABELS}/dev-pairs.key.jsonl')} \
-        if os.path.exists(f'{LABELS}/dev-pairs.key.jsonl') else set()
+    keyed = {k['id']: k for k in read_jsonl(f'{LABELS}/dev-pairs.key.jsonl')} \
+        if os.path.exists(f'{LABELS}/dev-pairs.key.jsonl') else {}
+    shown = set(keyed)
     answers = {i: v for i, (v, _) in standing('dev-pairs').items()}
     added = []
     for rel in RELATIONS:
-        # A pair counts toward the relation the owner gave it; one not answered yet, toward its draft's.
-        counts = lambda i, rel=rel: answers.get(i, found_pairs[i]['relation']) == rel
+        # A pair counts toward the relation the owner gave it; one not answered yet, toward its draft's
+        # (as drafted when it was shown, if the drafts no longer hold it).
+        counts = lambda i, rel=rel: answers.get(i, (found_pairs.get(i) or keyed[i])['relation']) == rel
         added += refill(pair_order(found_pairs.values(), by_id, rel), shown | set(added), N_PAIRS, counts)
     added.sort(key=lambda i: h(f'pair-order:{SEED}:{i}'))
     append('dev-pairs', [pair_item(found_pairs[i], by_id) for i in added], [{**found_pairs[i], 'id': i} for i in added])
@@ -482,8 +486,11 @@ if __name__ == '__main__':
     elif cmd == 'pairs':
         # Pairs found before stay (the owner may have answered them); new ones are added.
         old, known = [], set()
+        by_id = {d['id']: d for d in read_jsonl(f'{DRAFTS}/decisions.jsonl')}
         for p in read_jsonl(f'{DRAFTS}/pairs.jsonl') if os.path.exists(f'{DRAFTS}/pairs.jsonl') else []:
-            if pair_id(p) not in known:          # drafts written before pairs were deduplicated
+            # Drafts written before pairs were deduplicated, or before an accepted proposal took
+            # its acceptance time, are checked again.
+            if pair_id(p) not in known and valid_pairs([p], by_id):
                 known.add(pair_id(p))
                 old.append(p)
         found = old + [p for p in pairs(budget, read_jsonl(f'{DRAFTS}/decisions.jsonl')) if pair_id(p) not in known]

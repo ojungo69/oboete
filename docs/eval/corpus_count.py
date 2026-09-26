@@ -60,13 +60,17 @@ def windows_claude_mem():
 
 def imac_claude_mem():
     script = ('f="$HOME/.claude-mem/claude-mem.db"; test -f "$f" || { echo none; exit 0; }; '
-              'for t in observations session_summaries user_prompts; do sqlite3 -readonly "$f" "SELECT count(*) FROM $t"; done')
+              'for t in observations session_summaries user_prompts; do sqlite3 -readonly "$f" "SELECT count(*) FROM $t" || exit 1; done')
     r = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', IMAC, script],
                        capture_output=True, text=True, timeout=120, env=clean_env())
     if r.returncode != 0:
         return {'error': r.stderr.strip()[-200:]}
     words = r.stdout.split()
-    return None if words == ['none'] else dict(zip(('observations', 'summaries', 'prompts'), map(int, words)))
+    if words == ['none']:
+        return None
+    if len(words) != 3 or not all(w.isdigit() for w in words):
+        return {'error': f'expected three counts, got {r.stdout.strip()[:80]!r}'}
+    return dict(zip(('observations', 'summaries', 'prompts'), map(int, words)))
 
 
 def raw_rate(days=90):
