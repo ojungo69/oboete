@@ -130,10 +130,9 @@ pub fn redact(text: &str) -> String {
     scan(text).0
 }
 
-/// One secret masked in stored text: the rule that found it, where its mask starts in the
-/// stored (masked) text, and the length of what the mask hides (the secret; past `MAX_PASSES`,
-/// its whole match), both in bytes. Never the value. Two rules on one token share one mask, so
-/// they give two findings at the same offset.
+/// One secret masked in stored text: the rule that found it, where the mask hiding it starts in
+/// the stored (masked) text, and the secret's own length, both in bytes. Never the value. Two
+/// rules on one token share one mask, so they give two findings at the same offset.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Finding {
     pub rule: String,
@@ -150,19 +149,28 @@ pub fn scan(text: &str) -> (String, Vec<Finding>) {
     (masked, found)
 }
 
-/// Passes over masked text before `rescan` hides whole matches; each pass must mask something new.
+/// Passes over masked text before `rescan` masks the whole text; each pass must mask something new.
 const MAX_PASSES: usize = 64;
 
-/// Scan `masked` again until a pass finds nothing. A rule with a greedy context (curl-auth-user's
-/// `.*`) finds only the last secret on a line per pass, and a cut can leave a line shorter than
-/// the one a line-scoped allowlist judged (v1's `clip` scanned twice for that). Each earlier
-/// finding moves by what the runs before it changed, or to the start of a new mask covering it.
-/// A line still finding after `MAX_PASSES` gets one last pass that masks each whole match (from
-/// `curl` to the credential), so what is left unscanned is hidden, not kept.
+/// Scan `masked` again until a pass finds nothing. A rule whose secret needs context finds one
+/// secret per context per pass (curl-auth-user's greedy `.*` the last `-u` on a line,
+/// curl-auth-header's lazy `.*?` the first header after a `curl`), and a cut can leave a line
+/// shorter than the one a line-scoped allowlist judged (v1's `clip` scanned twice for that). Each
+/// earlier finding moves by what the runs before it changed, or to the start of a new mask
+/// covering it. Still finding after `MAX_PASSES`, the whole text becomes one mask that every
+/// finding points at: a mask of part of it could take the context (`curl`) that the rest needs.
 fn rescan(masked: &mut String, found: &mut Vec<Finding>) {
     for pass in 0..=MAX_PASSES {
-        let again = spans_of(masked, pass == MAX_PASSES);
+        let again = spans(masked);
         if again.is_empty() {
+            break;
+        }
+        if pass == MAX_PASSES {
+            found.extend(mask(masked, again).1);
+            for f in found.iter_mut() {
+                f.offset = 0;
+            }
+            *masked = MASK.to_string();
             break;
         }
         let runs = merged(&again);
@@ -273,11 +281,6 @@ pub fn ruleset() -> &'static str {
 
 /// Secret spans in `text`: (start, end, rule index), unmerged, as gitleaks finds them.
 fn spans(text: &str) -> Vec<(usize, usize, usize)> {
-    spans_of(text, false)
-}
-
-/// `spans`, or with `whole` each match's full range instead of its secret.
-fn spans_of(text: &str, whole: bool) -> Vec<(usize, usize, usize)> {
     let r = rules();
     let mut hit = vec![false; r.rules.len()];
     // Overlapping: "sk" (twilio) inside "gsk_" (groq) must not hide the longer keyword.
@@ -316,8 +319,7 @@ fn spans_of(text: &str, whole: bool) -> Vec<(usize, usize, usize)> {
                 .chain(std::iter::once(&r.global))
                 .any(|a| allows(a, secret.as_str(), all.as_str(), line));
             if !allowed {
-                let hide = if whole { all } else { secret };
-                spans.push((hide.start(), hide.end(), i));
+                spans.push((secret.start(), secret.end(), i));
             }
         }
     }
@@ -616,7 +618,7 @@ mod tests {
         }
         check(&stored, &found, creds[1]);
         assert!(spans(&stored).is_empty());
-        // More than MAX_PASSES on one line: the last pass hides each whole match.
+        // More than MAX_PASSES on one line: the whole text is masked.
         let line: String = (0..MAX_PASSES + 6)
             .map(|i| format!("curl -u '{}' https://x ; ", creds[i % 4]))
             .collect();
@@ -624,7 +626,34 @@ mod tests {
         for c in creds {
             assert!(!stored.contains(c), "{c} kept past the pass limit");
         }
+        assert_eq!(stored, MASK);
         check(&stored, &found, creds[2]);
+    }
+
+    #[test]
+    fn every_header_after_one_curl_is_masked() {
+        // curl-auth-header's lazy `.*?` finds one header per `curl` per pass, and only within five
+        // lines of it; generic-basic-auth needs no `curl`.
+        let values: Vec<String> = (0..70)
+            .map(|i| format!("dXNyOnE5Wng4bUwy{i:02}dkI0blI3dFl3"))
+            .collect();
+        for n in [3, 66, 67, 70] {
+            for sep in [" ", " \\\n  "] {
+                let sets: String = values[..n]
+                    .iter()
+                    .map(|v| {
+                        format!("-H 'Authorization: Basic {v}' https://x.invalid/{sep}--next ")
+                    })
+                    .collect();
+                let text = format!("curl {sets}");
+                let (stored, found) = scan(&text);
+                for v in &values[..n] {
+                    assert!(!stored.contains(v.as_str()), "n={n} {v} kept");
+                }
+                check(&stored, &found, &values[0]);
+                assert!(spans(&stored).is_empty());
+            }
+        }
     }
 
     #[test]
