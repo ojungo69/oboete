@@ -177,8 +177,10 @@ fn base64_runs(s: &str) -> Value {
     }
 }
 
-/// `sha256` is of the base64 text, `bytes` the decoded size.
+/// `sha256` is of the base64 text, `bytes` the decoded size. `kind` and `mime` come from the
+/// payload, so they are cleaned like any other string.
 fn marker(kind: &str, mime: &str, data: &str) -> Value {
+    let (kind, mime) = (without_blocks(kind, false), without_blocks(mime, false));
     let sha: String = Sha256::digest(data.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -454,6 +456,13 @@ mod tests {
             assert_eq!(stored[i]["sha256"].as_str().unwrap().len(), 64);
         }
         assert_eq!(stored[3]["text"], "caption");
+        let tagged =
+            json!({"type": "image", "mimeType": "image/<private>zqx</private>png", "data": data});
+        let e = one(
+            "PostToolUse",
+            json!({"tool_name": "t", "tool_input": {}, "tool_response": tagged}),
+        );
+        assert!(!e.body.contains("zqx"), "{}", e.body);
     }
 
     #[test]

@@ -30,7 +30,9 @@ pub fn run(
     let root_str = root.canonicalize()?.to_string_lossy().into_owned();
     let text =
         std::fs::read_to_string(fixture).with_context(|| format!("read {}", fixture.display()))?;
-    let conn = db::open(home)?;
+    // v1's store is opened only for an agent not yet ported: a Design B replay never touches it.
+    let mut conn: Option<rusqlite::Connection> = None;
+    let clock = rusqlite::Connection::open_in_memory()?;
     let mut raw = crate::raw::open(home)?;
 
     // 1. In-process hook path: pure store cost per event. Ported agents write Design B's
@@ -50,12 +52,20 @@ pub fn run(
         let event = v["event"].as_str().unwrap_or("");
         let started = Instant::now();
         let out = if crate::capture::PORTED.contains(&ev_agent) {
-            let ts = fixture_ms(&conn, &v["ts"]).unwrap_or_else(db::now_ms);
+            let ts = fixture_ms(&clock, &v["ts"]).unwrap_or_else(db::now_ms);
             hook::record(&mut raw, ev_agent, event, &v["payload"], ts)?;
             None
         } else {
             v1_events += 1;
-            hook::handle(&conn, ev_agent, event, &v["payload"])?
+            if conn.is_none() {
+                conn = Some(db::open(home)?);
+            }
+            hook::handle(
+                conn.as_ref().expect("opened"),
+                ev_agent,
+                event,
+                &v["payload"],
+            )?
         };
         micros.push(started.elapsed().as_micros());
         if out.as_deref().is_some_and(|s| s != "{}") {
@@ -176,8 +186,9 @@ mod tests {
             })
             .collect();
         assert_eq!(ts, vec![1_788_220_800_000, 1_788_307_200_000]);
-        // observe never ran: it would have created its lock file in the home.
+        // observe never ran (it would have created its lock file), and v1's store was never opened.
         assert!(!home.path().join("observe.lock").exists());
+        assert!(!home.path().join("oboete.db").exists());
     }
 
     #[test]
