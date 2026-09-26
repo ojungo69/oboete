@@ -111,7 +111,12 @@ pub fn record(
     payload: &Value,
     ts: i64,
 ) -> Result<()> {
-    for e in crate::capture::events(agent, event, payload, ts) {
+    for mut e in crate::capture::events(agent, event, payload, ts) {
+        // An idless event's session is this device's own: a bare "unknown" would be one session
+        // on every device once they sync (as `handle` does for v1).
+        if e.session == "unknown" {
+            e.session = format!("unknown-{}", raw.device());
+        }
         raw.append(&e)?;
     }
     Ok(())
@@ -1139,6 +1144,25 @@ mod tests {
             );
             assert_eq!(out.as_object().unwrap().len(), 1);
         }
+    }
+
+    #[test]
+    fn an_idless_design_b_event_is_this_devices_own_session() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        record(
+            &mut raw,
+            "claude",
+            "UserPromptSubmit",
+            &json!({"prompt": "hi"}),
+            0,
+        )
+        .unwrap();
+        let recs = raw.after(raw.device(), 0, 10).unwrap();
+        let crate::raw::Item::Event(e) = &recs[0].item else {
+            panic!("{recs:?}")
+        };
+        assert_eq!(e.session, format!("unknown-{}", raw.device()));
     }
 
     #[test]

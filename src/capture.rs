@@ -29,7 +29,7 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
             } else {
                 "prompt"
             };
-            (kind, json!({"prompt": prompt}))
+            (kind, json!({"prompt": base64_runs(&prompt)}))
         }
         "PostToolUse" | "PostToolUseFailure" => (
             "tool",
@@ -52,7 +52,7 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
             if reply.trim().is_empty() {
                 return Vec::new();
             }
-            ("reply", json!({"assistant": reply}))
+            ("reply", json!({"assistant": base64_runs(&reply)}))
         }
         "PreCompact" => (
             "compaction",
@@ -60,7 +60,9 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
         ),
         "PostCompact" => {
             match str_field(payload, &["compact_summary"]).map(|s| without_blocks(s, false)) {
-                Some(s) if !s.trim().is_empty() => ("compaction", json!({"summary": s})),
+                Some(s) if !s.trim().is_empty() => {
+                    ("compaction", json!({"summary": base64_runs(&s)}))
+                }
                 _ => return Vec::new(),
             }
         }
@@ -160,19 +162,35 @@ fn base64_runs(s: &str) -> Value {
         )
         .expect("base64 pattern")
     });
-    let found = |c: &regex::Captures| match (c.get(1), c.get(2)) {
-        (Some(mime), Some(data)) => {
+    // A bare run counts only if it looks like encoded bytes: all three character classes, and a
+    // length base64 can have. A long lowercase or hex run, or an identifier, stays text.
+    let found = |c: &regex::Captures| -> Option<Value> {
+        if let (Some(mime), Some(data)) = (c.get(1), c.get(2)) {
             let mime = mime.as_str();
-            marker(mime.split('/').next().unwrap_or(mime), mime, data.as_str())
+            return Some(marker(
+                mime.split('/').next().unwrap_or(mime),
+                mime,
+                data.as_str(),
+            ));
         }
-        _ => marker("binary", "application/octet-stream", &c[0]),
+        let run = c[0].trim_end_matches('=');
+        let has = |class: fn(&char) -> bool| run.chars().any(|ch| class(&ch));
+        (has(char::is_ascii_uppercase)
+            && has(char::is_ascii_lowercase)
+            && has(char::is_ascii_digit)
+            && run.len() % 4 != 1)
+            .then(|| marker("binary", "application/octet-stream", &c[0]))
     };
     match RE.captures(s) {
+        Some(c) if c[0].len() == s.len() => {
+            found(&c).unwrap_or_else(|| Value::String(s.to_owned()))
+        }
         None => Value::String(s.to_owned()),
-        Some(c) if c[0].len() == s.len() => found(&c),
         Some(_) => Value::String(
-            RE.replace_all(s, |c: &regex::Captures| found(c).to_string())
-                .into_owned(),
+            RE.replace_all(s, |c: &regex::Captures| {
+                found(c).map_or_else(|| c[0].to_string(), |m| m.to_string())
+            })
+            .into_owned(),
         ),
     }
 }
@@ -467,29 +485,49 @@ mod tests {
 
     #[test]
     fn long_base64_in_any_shape_becomes_a_marker() {
-        let blob = "QUJD".repeat(300); // 1,200 characters
+        let blob = "iVBORw0KGgoAAAANSUhEUg".repeat(50); // 1,100 characters
         let e = one(
             "PostToolUse",
             json!({"tool_name": "mcp__x", "tool_input": {},
                    "tool_response": {"encoding": "base64", "content": blob, "note": format!("saved {blob}.")}}),
         );
-        assert!(!e.body.contains("QUJDQUJD"), "{}", e.body);
+        assert!(!e.body.contains("SUhEUgiVBOR"), "{}", e.body);
         let stored: Value = serde_json::from_str(body(&e)["output"].as_str().unwrap()).unwrap();
         assert_eq!(stored["content"]["kind"], "binary");
-        assert_eq!(stored["content"]["bytes"], 900);
+        assert_eq!(stored["content"]["bytes"], 825);
         assert!(
             stored["note"]
                 .as_str()
                 .unwrap()
                 .starts_with("saved {\"kind\":\"binary\"")
         );
-        // Short base64-looking text (a hash, a key id) stays.
-        let short = "a1B2".repeat(64);
-        let e = one(
-            "PostToolUse",
-            json!({"tool_name": "x", "tool_input": {}, "tool_response": short}),
-        );
-        assert!(e.body.contains(&short));
+        // Text that only looks like it stays: short runs (a hash, a key id), runs missing a character
+        // class (a long lowercase or hex run), and a length base64 cannot have (1,025).
+        for kept in [
+            "a1B2".repeat(64),
+            "x".repeat(2_000),
+            "0f".repeat(600),
+            "a1B".repeat(341) + "cd",
+        ] {
+            let e = one(
+                "PostToolUse",
+                json!({"tool_name": "x", "tool_input": {}, "tool_response": kept}),
+            );
+            assert!(e.body.contains(&kept), "{}", kept.len());
+        }
+        // Prompts, replies and summaries get the same pass as tool fields.
+        let uri = "data:image/png;base64,iVBORw0KGgo=";
+        for (event, payload) in [
+            ("UserPromptSubmit", json!({"prompt": format!("see {uri}")})),
+            ("Stop", json!({"last_assistant_message": blob})),
+            (
+                "PostCompact",
+                json!({"compact_summary": format!("{uri} and {blob}")}),
+            ),
+        ] {
+            let e = one(event, payload);
+            assert!(!e.body.contains("iVBORw0KGgo"), "{event}: {}", e.body);
+        }
     }
 
     #[test]
