@@ -428,8 +428,11 @@ def report():
         votes = {}
         for r in read_jsonl(path) if os.path.exists(path) else []:
             votes.setdefault(r['id'], {})[r['judge']] = r['value'] == yes
-        # A majority only from all five judges: fewer is a partial panel, reported as missing.
-        missing = sorted(i for i, v in votes.items() if len(v) < len(PANEL))
+        # A majority only from all five judges. Every target `panel` should have asked counts: one
+        # with fewer votes, none included, is reported as missing, never quietly dropped.
+        keys = [k['id'] for k in read_jsonl(f'{LABELS}/{name}.key.jsonl')]
+        unknown, sample = panel_targets(keys, answers)
+        missing = sorted(i for i in unknown + sample if len(votes.get(i, {})) < len(PANEL))
         votes = {i: v for i, v in votes.items() if len(v) == len(PANEL)}
         counts = {v: sum(1 for a in answers.values() if a == v) for v in sorted(set(answers.values()))}
         overlap = {i: v for i, v in votes.items() if answers.get(i) not in (None, 'unknown')}

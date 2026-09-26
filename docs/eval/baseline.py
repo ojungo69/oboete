@@ -5,9 +5,9 @@ Held-out transcripts are never touched here: they are replayed once, at mileston
   baseline.py oboete          each dev transcript -> fixture -> replay through today's oboete
   baseline.py claude-mem      claude-mem's own observations and summaries of the dev sessions
   baseline.py summary         per-session counts for docs/milestone-1.md"""
-import glob, json, os, sqlite3, subprocess, sys
+import glob, json, os, shutil, sqlite3, subprocess, sys
 
-from common import E, clean_env, owner_only, read_jsonl, write_jsonl
+from common import E, clean_env, owner_only, read_jsonl, sha256_file, write_jsonl
 
 B = f'{E}/baseline'
 HOME = os.path.expanduser('~')
@@ -42,22 +42,27 @@ def dev_sessions():
 
 
 def version():
+    """(the sha256 of the `oboete` executable that runs, first 12 hex; `oboete --version`; this
+    checkout's HEAD). The version string is the crate's and does not change per build, and the
+    installed binary may come from another checkout, so the executable itself names the home."""
+    exe = os.path.realpath(shutil.which('oboete', path=clean_env().get('PATH')))
+    binary = subprocess.run([exe, '--version'], capture_output=True, text=True, env=clean_env()).stdout.strip()
     head = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True, cwd=REPO,
                           env=clean_env()).stdout.strip()
-    binary = subprocess.run(['oboete', '--version'], capture_output=True, text=True, env=clean_env()).stdout.strip()
-    return head, binary
+    return sha256_file(exe)[:12], binary, head
 
 
 def run_oboete():
     """One replay per session into one home: `oboete replay` reads its fixture whole, so a single
     concatenated fixture would hold every dev transcript in memory at once. A session whose report
     exists was replayed before and is skipped: replaying it again would insert its events twice."""
-    head, binary = version()
-    home = f'{B}/oboete-{head}'
+    exe_hash, binary, head = version()
+    home = f'{B}/oboete-{exe_hash}'
     if not os.path.exists(f'{home}/config.toml'):
         config(home)
         with open(f'{home}/version.txt', 'w') as f:
-            f.write(f'{binary} installed from {head}\n')
+            f.write(f'{binary}, executable sha256 {exe_hash}; this checkout was at {head} '
+                    f'(install with `cargo install --path . --locked` from the commit to measure)\n')
     os.makedirs(f'{B}/fixtures', exist_ok=True)
     done = 0
     for s in dev_sessions():

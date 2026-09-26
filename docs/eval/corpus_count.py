@@ -81,14 +81,20 @@ def raw_rate(days=90):
     # own time. ISO timestamps compare as strings.
     since_iso = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(since))
     events = size = 0
+    failed = []
     for agent, path in files:
+        n = b = 0
         with subprocess.Popen(['oboete', 'transcript', path, '--agent', agent], stdout=subprocess.PIPE,
                               stderr=subprocess.DEVNULL, env=clean_env()) as p:
             for line in p.stdout:
                 if json.loads(line).get('ts', '') >= since_iso:
-                    events += 1
-                    size += len(line)
-    return {'days': days, 'files': len(files), 'events': events, 'bytes': size,
+                    n += 1
+                    b += len(line)
+        if p.returncode:       # a failed conversion is counted as failed, never as a smaller file
+            failed.append(path)
+            continue
+        events, size = events + n, size + b
+    return {'days': days, 'files': len(files), 'failed_files': len(failed), 'events': events, 'bytes': size,
             'events_per_year': round(events / days * 365), 'mb_per_year': round(size / days * 365 / 1e6)}
 
 
