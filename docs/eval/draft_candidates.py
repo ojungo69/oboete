@@ -458,7 +458,7 @@ def report():
             'overlap': agree,
             # spec 8.1: a judge whose model changed mid-run (or was not reported) needs a new calibration.
             'models': {j: sorted(m or '(not reported)' for m in ms) for j, ms in models.items()},
-            'one_model_per_judge': all(len(ms) == 1 and None not in ms for ms in models.values()),
+            'one_model_per_judge': all(len(models.get(j, ())) == 1 and None not in models[j] for j in PANEL),
             'what': 'agreement with the owner on the owner\'s own decisions, not a check of technical relevance'}
     with open(f'{LABELS}/dev-labels.result.json', 'w') as f:
         json.dump(out, f, indent=1, ensure_ascii=False)
