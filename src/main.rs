@@ -5,6 +5,7 @@
 
 mod capture;
 mod config;
+mod consumer;
 mod db;
 mod embed;
 mod hook;
@@ -184,6 +185,42 @@ fn repo_filter(all: bool) -> Result<Option<String>> {
 
 /// Listing output. Piped into `head`, stdout closes early; that is not an error. Anything
 /// else (a full disk behind a redirect) is.
+/// A raw hit's id as `oboete search` prints it, `<device>:<seq>` (milestone 2 Task 6): the event
+/// with its time, kind and repo. `None` for any other id, or one raw does not hold, which then
+/// goes to v1's store (whose synced uids also hold a colon).
+fn raw_get(home: &std::path::Path, id: &str) -> Result<Option<String>> {
+    let Some((device, seq)) = id.split_once(':') else {
+        return Ok(None);
+    };
+    let Ok(seq) = seq.parse::<i64>() else {
+        return Ok(None);
+    };
+    if seq < 1 || !home.join("raw.db").exists() {
+        return Ok(None);
+    }
+    let raw = raw::open(home)?;
+    let Some(r) = raw
+        .after(device, seq - 1, 1)?
+        .pop()
+        .filter(|r| r.seq == seq)
+    else {
+        return Ok(None);
+    };
+    let raw::Item::Event(e) = r.item else {
+        return Ok(None);
+    };
+    let when: String = rusqlite::Connection::open_in_memory()?.query_row(
+        "SELECT strftime('%Y-%m-%d %H:%M', ?1 / 1000, 'unixepoch', 'localtime')",
+        [e.ts],
+        |r| r.get(0),
+    )?;
+    let repo = e.repo.as_deref().unwrap_or("");
+    Ok(Some(format!(
+        "{id} {when} {} {repo}\n\n{}\n",
+        e.kind, e.body
+    )))
+}
+
 fn emit(text: &str) -> Result<()> {
     use std::io::Write;
     match std::io::stdout().lock().write_all(text.as_bytes()) {
@@ -226,13 +263,35 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         }
         Cmd::Mcp => mcp::run(&home),
         Cmd::Search { query, all, limit } => {
-            let conn = db::open(&home)?;
             let query = query.join(" ");
-            let terms = search::terms(&query);
-            let mut out = String::new();
-            let embedding = config::search_embedding(&home);
             let scope = repo_filter(all)?;
-            for h in search::find(&conn, &embedding, &query, scope.as_deref(), limit)? {
+            let mut out = String::new();
+            let mut left = limit;
+            // Design B's none tier (milestone 2 Task 6): the raw index, by (device, seq). Until
+            // every agent is ported (Task 2b) a home can hold both stores, and v1 commands such
+            // as `timeline` create an empty oboete.db, so each store is searched when it exists.
+            if home.join("raw.db").exists() {
+                let hits = search::raw(&home, &query, scope.as_deref(), limit)?;
+                left -= hits.len().min(left);
+                for h in hits {
+                    let repo = match (all, &h.repo) {
+                        (true, Some(r)) => format!("[{}] ", r.rsplit('/').next().unwrap_or(r)),
+                        _ => String::new(),
+                    };
+                    let device: String = h.device.chars().take(8).collect();
+                    out.push_str(&format!(
+                        "{device}:{:<5} {}  {:<10} {repo}{}\n",
+                        h.seq, h.when, h.kind, h.snippet
+                    ));
+                }
+            }
+            if left == 0 || !home.join("oboete.db").exists() {
+                return emit(&out);
+            }
+            let conn = db::open(&home)?;
+            let terms = search::terms(&query);
+            let embedding = config::search_embedding(&home);
+            for h in search::find(&conn, &embedding, &query, scope.as_deref(), left)? {
                 let text = search::snippet(&h.body, &terms, 110);
                 let repo = if all {
                     let name = std::path::Path::new(&h.repo)
@@ -255,10 +314,15 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             emit(&out)
         }
         Cmd::Get { id } => {
+            if let Some(text) = raw_get(&home, &id)? {
+                return emit(&text);
+            }
+            let missing = || anyhow::anyhow!("no document {id} (ids come from `oboete search`)");
+            if !home.join("oboete.db").exists() {
+                return Err(missing());
+            }
             let conn = db::open(&home)?;
-            let h = search::get(&conn, &id)?.ok_or_else(|| {
-                anyhow::anyhow!("no document {id} (ids come from `oboete search`)")
-            })?;
+            let h = search::get(&conn, &id)?.ok_or_else(missing)?;
             let title = if h.title.is_empty() {
                 String::new()
             } else {

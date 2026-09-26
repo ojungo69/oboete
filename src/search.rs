@@ -162,14 +162,10 @@ fn fuse(
     Ok(out)
 }
 
-/// Ranked search. `repo = None` searches every repository. Prompts come after observations and
-/// summaries.
-pub fn search(
-    conn: &Connection,
-    query: &str,
-    repo: Option<&str>,
-    limit: usize,
-) -> Result<Vec<Hit>> {
+/// What a query matches on: its trigrams ORed against the FTS5 table `fts`, or, for a query too
+/// short for a trigram, each word as a `LIKE` on any of the `like` columns. The clauses, their
+/// arguments, and whether bm25 ranks them (there are trigrams); `None` when nothing is left.
+fn query_clauses(query: &str, fts: &str, like: &[&str]) -> Option<(Vec<String>, Vec<Value>, bool)> {
     let grams = trigrams(query);
     let short: Vec<&str> = if grams.is_empty() {
         query.split_whitespace().collect()
@@ -177,7 +173,7 @@ pub fn search(
         Vec::new()
     };
     if grams.is_empty() && short.is_empty() {
-        return Ok(Vec::new());
+        return None;
     }
     let mut clauses: Vec<String> = Vec::new();
     let mut args: Vec<Value> = Vec::new();
@@ -188,7 +184,7 @@ pub fn search(
             .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(" OR ");
-        clauses.push("fts MATCH ?".into());
+        clauses.push(format!("{fts} MATCH ?"));
         args.push(Value::Text(q));
     }
     for t in &short {
@@ -198,20 +194,38 @@ pub fn search(
                 .replace('%', "\\%")
                 .replace('_', "\\_")
         );
-        clauses.push("(title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')".into());
-        args.push(Value::Text(pattern.clone()));
-        args.push(Value::Text(pattern));
+        let any: Vec<String> = like
+            .iter()
+            .map(|c| format!("{c} LIKE ? ESCAPE '\\'"))
+            .collect();
+        clauses.push(format!("({})", any.join(" OR ")));
+        args.extend(like.iter().map(|_| Value::Text(pattern.clone())));
     }
+    Some((clauses, args, !grams.is_empty()))
+}
+
+/// Ranked search. `repo = None` searches every repository. Prompts come after observations and
+/// summaries.
+pub fn search(
+    conn: &Connection,
+    query: &str,
+    repo: Option<&str>,
+    limit: usize,
+) -> Result<Vec<Hit>> {
+    let Some((mut clauses, mut args, ranked)) = query_clauses(query, "fts", &["title", "body"])
+    else {
+        return Ok(Vec::new());
+    };
     if let Some(r) = repo {
         clauses.push("repo = ?".into());
         args.push(Value::Text(r.to_string()));
     }
     // Knowledge before prompts: bm25 favours short documents, and a prompt is usually a short
     // question where an observation is the answer.
-    let order = if grams.is_empty() {
-        "kind = 'prompt', ts DESC"
-    } else {
+    let order = if ranked {
         "kind = 'prompt', rank, ts DESC"
+    } else {
+        "kind = 'prompt', ts DESC"
     };
     let mut sql = format!("SELECT {COLUMNS} FROM fts WHERE {}", clauses.join(" AND "));
     sql.push_str(&format!(" ORDER BY {order} LIMIT ?"));
@@ -461,6 +475,65 @@ pub fn feed(conn: &Connection, repo: Option<&str>, limit: usize) -> Result<Vec<F
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// A hit in Design B's raw index: the record it came from, and a line of its text.
+#[derive(Debug)]
+pub struct RawHit {
+    pub device: String,
+    pub seq: i64,
+    pub kind: String,
+    /// Local time, `YYYY-MM-DD HH:MM`.
+    pub when: String,
+    pub repo: Option<String>,
+    pub snippet: String,
+}
+
+/// Search the none tier's index (`raw_fts` in knowledge.db, milestone 2 Task 6) the way
+/// [`search`] searches v1's: trigrams ORed and ranked by bm25, or literal terms (all required)
+/// for a query too short for a trigram. `repo = None` searches every repository.
+pub fn raw(
+    home: &std::path::Path,
+    query: &str,
+    repo: Option<&str>,
+    limit: usize,
+) -> Result<Vec<RawHit>> {
+    let k = crate::knowledge::open(home)?;
+    crate::consumer::fts::schema(&k)?;
+    let Some((mut clauses, mut args, ranked)) = query_clauses(query, "raw_fts", &["f.text"]) else {
+        return Ok(Vec::new());
+    };
+    if let Some(r) = repo {
+        clauses.push("d.repo = ?".into());
+        args.push(Value::Text(r.to_string()));
+    }
+    let order = if ranked {
+        "rank, d.ts DESC"
+    } else {
+        "d.ts DESC"
+    };
+    let sql = format!(
+        "SELECT d.device, d.seq, d.kind, d.ts, d.repo, f.text,
+                strftime('%Y-%m-%d %H:%M', d.ts / 1000, 'unixepoch', 'localtime')
+         FROM raw_fts f JOIN raw_docs d ON d.rowid = f.rowid
+         WHERE {} ORDER BY {order} LIMIT ?",
+        clauses.join(" AND ")
+    );
+    args.push(Value::Integer(sql_limit(limit)));
+    let terms = terms(query);
+    let mut stmt = k.prepare(&sql)?;
+    let hits = stmt.query_map(params_from_iter(args), |r| {
+        let text: String = r.get(5)?;
+        Ok(RawHit {
+            device: r.get(0)?,
+            seq: r.get(1)?,
+            kind: r.get(2)?,
+            when: r.get(6)?,
+            repo: r.get(4)?,
+            snippet: snippet(&text, &terms, 110),
+        })
+    })?;
+    Ok(hits.collect::<Result<_, _>>()?)
 }
 
 /// One line of `body`, `width` characters around the passage with the most different `terms`
@@ -802,6 +875,75 @@ mod tests {
         assert_eq!(trigrams(&long).len(), 26);
         let many: String = (0..100).map(|i| format!("x{i:02} ")).collect();
         assert_eq!(trigrams(&many).len(), 64);
+    }
+
+    #[test]
+    fn raw_search_finds_events_by_a_two_character_japanese_query_and_an_english_word() {
+        use crate::worker::Consumer;
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = crate::raw::open(p).unwrap();
+        let mut ja = crate::raw::test_event(r#"{"prompt":"同期の設計を見直して"}"#);
+        ja.repo = Some("github.com/o/a".into());
+        raw.append(&ja).unwrap();
+        let mut en = crate::raw::test_event(
+            r#"{"tool":"Bash","input":"cargo test","output":"the lease worker panicked"}"#,
+        );
+        en.kind = "tool".into();
+        en.repo = Some("github.com/o/b".into());
+        raw.append(&en).unwrap();
+        let mut k = crate::knowledge::open(p).unwrap();
+        let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(crate::consumer::fts::Fts)];
+        crate::worker::drain(&raw, &mut k, &mut consumers).unwrap();
+        let device = raw.device().to_owned();
+
+        let hits = raw_search(p, "設計", None);
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].device.as_str(), hits[0].seq), (device.as_str(), 1));
+        assert!(hits[0].snippet.contains("設計"), "{}", hits[0].snippet);
+        let hits = raw_search(p, "worker panicked", None);
+        assert_eq!(hits.iter().map(|h| h.seq).collect::<Vec<_>>(), [2]);
+        assert_eq!(hits[0].kind, "tool");
+        // Keys are not text: "prompt" and "tool" are field names here.
+        assert!(raw_search(p, "prompt", None).is_empty());
+        // This repository unless --all.
+        assert!(raw_search(p, "設計", Some("github.com/o/b")).is_empty());
+        assert_eq!(raw_search(p, "設計", Some("github.com/o/a")).len(), 1);
+        let repos: Vec<String> = k
+            .prepare("SELECT repo FROM session_repos ORDER BY repo")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(repos, ["github.com/o/a", "github.com/o/b"]);
+    }
+
+    #[test]
+    fn a_rewound_record_leaves_the_raw_index() {
+        use crate::worker::Consumer;
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = crate::raw::open(p).unwrap();
+        raw.append(&crate::raw::test_event("kept lease note"))
+            .unwrap();
+        raw.append(&crate::raw::test_event("lost lease note"))
+            .unwrap();
+        let mut k = crate::knowledge::open(p).unwrap();
+        let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(crate::consumer::fts::Fts)];
+        crate::worker::drain(&raw, &mut k, &mut consumers).unwrap();
+        drop(raw);
+        let c = Connection::open(p.join("raw.db")).unwrap();
+        c.execute("DELETE FROM records WHERE seq > 1", []).unwrap();
+        drop(c);
+        let raw = crate::raw::open(p).unwrap();
+        crate::knowledge::checkpoint::rewind(&raw, &k, &mut consumers).unwrap();
+        let hits = raw_search(p, "lease note", None);
+        assert_eq!(hits.iter().map(|h| h.seq).collect::<Vec<_>>(), [1]);
+    }
+
+    fn raw_search(home: &std::path::Path, q: &str, repo: Option<&str>) -> Vec<RawHit> {
+        raw(home, q, repo, 10).unwrap()
     }
 
     #[test]
