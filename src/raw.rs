@@ -223,14 +223,30 @@ impl Raw {
         Ok(at)
     }
 
-    /// The targets of this device's tombstones after `seq`: what a reader must hide itself until
+    /// The targets of `device`'s tombstones after `seq`: what a reader must hide itself until
     /// its consumer has reached them.
-    pub fn tombstones_after(&self, seq: i64) -> Result<Vec<(String, i64)>> {
+    pub fn tombstones_after(&self, device: &str, seq: i64) -> Result<Vec<(String, i64)>> {
         let mut st = self.conn.prepare(
             "SELECT target_device, target_seq FROM records
              WHERE device = ?1 AND seq > ?2 AND type = 'tombstone'",
         )?;
-        let rows = st.query_map(params![self.device, seq], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let rows = st.query_map(params![device, seq], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every device with records in this file: this one, and one a copied home left under its
+    /// old id (`ensure_device`). A skip-scan over the primary key, one step per device.
+    pub fn devices(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare(
+            "WITH RECURSIVE d(device) AS (
+               SELECT MIN(device) FROM records
+               UNION ALL
+               SELECT (SELECT MIN(device) FROM records WHERE device > d.device) FROM d
+               WHERE d.device IS NOT NULL
+             )
+             SELECT device FROM d WHERE device IS NOT NULL",
+        )?;
+        let rows = st.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

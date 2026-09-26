@@ -511,18 +511,27 @@ pub fn raw(
     // what raw already hides. The checkpoint is read before the index and the tombstones after
     // it: one that commits while the query runs is still seen (one the worker applies in between
     // only hides more).
+    // Every device partition counts: a copied home keeps its records, and their tombstones,
+    // under the old id (#83: the worker reads only its own until Task 8's part b).
     let raw_db = if home.join("raw.db").exists() {
         let raw = crate::raw::open(home)?;
-        let at = crate::knowledge::checkpoint::get(&k, "fts", raw.device())?;
-        Some((raw, at))
+        let mut ats = Vec::new();
+        for d in raw.devices()? {
+            ats.push((crate::knowledge::checkpoint::get(&k, "fts", &d)?, d));
+        }
+        Some((raw, ats))
     } else {
         None
     };
-    let pending = |raw_db: &Option<(crate::raw::Raw, i64)>| -> Result<std::collections::HashSet<(String, i64)>> {
-        Ok(match raw_db {
-            Some((raw, at)) => raw.tombstones_after(*at)?.into_iter().collect(),
-            None => Default::default(),
-        })
+    type Seen = Option<(crate::raw::Raw, Vec<(i64, String)>)>;
+    let pending = |raw_db: &Seen| -> Result<std::collections::HashSet<(String, i64)>> {
+        let mut out = std::collections::HashSet::new();
+        if let Some((raw, ats)) = raw_db {
+            for (at, d) in ats {
+                out.extend(raw.tombstones_after(d, *at)?);
+            }
+        }
+        Ok(out)
     };
     let before = pending(&raw_db)?.len();
     let order = if ranked {
@@ -1011,6 +1020,30 @@ mod tests {
             );
             assert!(matches!(recs[1].item, Item::Removed));
         }
+    }
+
+    #[test]
+    fn a_copied_home_still_hides_what_an_old_device_tombstoned() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut store = crate::raw::open(p).unwrap();
+        let seq = store
+            .append(&crate::raw::test_event("copied lantern"))
+            .unwrap();
+        crate::worker::run_once(p).unwrap();
+        let old = store.device().to_owned();
+        store
+            .append_tombstone(crate::raw::Target::Record { device: old, seq })
+            .unwrap();
+        drop(store);
+        // The copy gets a new device id: the tombstone stays under the old one, unindexed.
+        let copy = tempfile::tempdir().unwrap();
+        for f in ["raw.db", "knowledge.db"] {
+            std::fs::copy(p.join(f), copy.path().join(f)).unwrap();
+        }
+        let moved = crate::raw::open(copy.path()).unwrap();
+        assert_eq!(moved.devices().unwrap().len(), 1);
+        assert!(raw_search(copy.path(), "lantern", None).is_empty());
     }
 
     #[test]
