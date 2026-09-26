@@ -77,6 +77,11 @@ CREATE TABLE IF NOT EXISTS provider_calls(
   detail TEXT
 );
 CREATE INDEX IF NOT EXISTS provider_calls_day ON provider_calls(provider, ts);
+CREATE TABLE IF NOT EXISTS provider_state(
+  provider TEXT PRIMARY KEY,
+  down_until INTEGER NOT NULL DEFAULT 0,
+  fails INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS imports(
   source TEXT NOT NULL,
   source_id TEXT NOT NULL,
@@ -967,6 +972,32 @@ pub fn record_call(
 
 /// Requests sent to `provider` since the last UTC midnight (the per-provider daily budget window).
 /// A 429 that was waited out still counts: the budget bounds our requests, not our successes.
+/// A provider's cooldown end (Unix ms, 0 for none) and its run of failures that set no cooldown.
+pub fn provider_state(conn: &Connection, provider: &str) -> Result<(i64, u32)> {
+    Ok(conn
+        .query_row(
+            "SELECT down_until, fails FROM provider_state WHERE provider=?1",
+            [provider],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .unwrap_or((0, 0)))
+}
+
+pub fn set_provider_state(
+    conn: &Connection,
+    provider: &str,
+    down_until: i64,
+    fails: u32,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO provider_state(provider, down_until, fails) VALUES(?1,?2,?3)
+         ON CONFLICT(provider) DO UPDATE SET down_until=excluded.down_until, fails=excluded.fails",
+        params![provider, down_until, fails],
+    )?;
+    Ok(())
+}
+
 pub fn calls_today(conn: &Connection, provider: &str) -> Result<u32> {
     let day_ms: i64 = 86_400_000;
     let midnight = now_ms() / day_ms * day_ms;
