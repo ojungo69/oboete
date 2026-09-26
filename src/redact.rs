@@ -276,7 +276,10 @@ pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usiz
 /// complete label naming something else (a certificate) is not a secret.
 fn key_markers<'a>(s: &'a str, marker: &'a str) -> impl Iterator<Item = usize> + 'a {
     s.match_indices(marker).map(|(i, _)| i).filter(move |&i| {
-        let line = s[i + marker.len()..].split('\n').next().unwrap_or("");
+        // A line ends at a line break, or at `\n` in flattened JSON.
+        let rest = &s[i + marker.len()..];
+        let line = rest.split(['\n', '\r']).next().unwrap_or("");
+        let line = line.split("\\n").next().unwrap_or("");
         line.find("-----")
             .is_none_or(|n| line[..n].contains("private key"))
     })
@@ -793,6 +796,17 @@ mod tests {
         assert!(cut.is_some());
         assert!(!stored.contains("MIIEowIBAAKCAQ"));
         assert!(stored.ends_with("log\n"));
+        // Flattened into JSON, with a `-----` on the next line: that is not the label's end.
+        let flat = serde_json::to_string(
+            &(text.replace(
+                "-----END RSA PRIVA\n",
+                "-----END RSA PRIVA\n----- next -----\n",
+            )),
+        )
+        .unwrap();
+        let (stored, _, cut) = scan_capped(&flat, cap);
+        assert!(cut.is_some());
+        assert!(!stored.contains("MIIEowIBAAKCAQ"));
     }
 
     #[test]
