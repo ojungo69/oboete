@@ -235,6 +235,12 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
     if !matches!(&cmd, Cmd::Hook { .. }) {
         std::fs::create_dir_all(&home)?;
     }
+    // The egress gate (`redact::outbound`) applies the user's rules as they are now (spec 6.4).
+    // Hooks load them per call inside their fail-open boundary; doctor and setup report a
+    // broken `[redaction]` table instead of stopping on it.
+    if !matches!(&cmd, Cmd::Hook { .. } | Cmd::Doctor | Cmd::Setup { .. }) {
+        redact::set_active(redact::Rules::load(&home)?);
+    }
     match cmd {
         Cmd::Hook { agent, event } => {
             // Fail-open: a hook must never break the agent.

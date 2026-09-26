@@ -901,6 +901,7 @@ mod tests {
                 e["event"].as_str().unwrap(),
                 &e["payload"],
                 0,
+                &Default::default(),
             )
             .unwrap();
         }

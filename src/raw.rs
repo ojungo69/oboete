@@ -129,14 +129,16 @@ impl Raw {
     /// Append one event as this device's next seq. The write lock taken by `BEGIN IMMEDIATE`
     /// makes reading the last seq and inserting the next one atomic across processes.
     pub fn append(&mut self, e: &Event) -> Result<i64> {
-        self.append_with_ledger(e, &[])
+        self.append_with_ledger(e, &[], "")
     }
 
-    /// `append`, with the event's redaction ledger rows in the same transaction.
+    /// `append`, with the event's redaction ledger rows in the same transaction; `ruleset` is the
+    /// version of the rules that found them (`redact::Rules::version`).
     pub fn append_with_ledger(
         &mut self,
         e: &Event,
         ledger: &[(String, crate::redact::Finding)],
+        ruleset: &str,
     ) -> Result<i64> {
         let tx = self
             .conn
@@ -176,7 +178,7 @@ impl Raw {
                     f.offset as i64,
                     f.length as i64,
                     now,
-                    crate::redact::ruleset()
+                    ruleset
                 ],
             )?;
         }
@@ -594,7 +596,7 @@ mod tests {
             offset: 0,
             length: 1,
         };
-        r.append_with_ledger(&test_event("x"), &[("/prompt".into(), f)])
+        r.append_with_ledger(&test_event("x"), &[("/prompt".into(), f)], "test")
             .unwrap();
         let field: String = r
             .conn

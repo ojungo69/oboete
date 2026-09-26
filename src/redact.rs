@@ -5,7 +5,7 @@
 //! filter the candidates. Rules that depend on a file path are skipped: hook text has none.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use aho_corasick::AhoCorasick;
@@ -55,7 +55,7 @@ struct Allow {
     condition: Option<String>,
 }
 
-struct Rules {
+struct Bundled {
     rules: Vec<Rule>,
     global: Allow,
     keywords: AhoCorasick,
@@ -63,8 +63,8 @@ struct Rules {
     keyword_rule: Vec<usize>,
 }
 
-fn rules() -> &'static Rules {
-    static RULES: OnceLock<Rules> = OnceLock::new();
+fn bundled() -> &'static Bundled {
+    static RULES: OnceLock<Bundled> = OnceLock::new();
     RULES.get_or_init(|| {
         let file: File = toml::from_str(RULES_TOML).expect("bundled gitleaks.toml parses");
         let extra: File = toml::from_str(EXTRA_TOML).expect("bundled oboete-rules.toml parses");
@@ -86,13 +86,174 @@ fn rules() -> &'static Rules {
             .ascii_case_insensitive(true)
             .build(&patterns)
             .expect("keyword automaton");
-        Rules {
+        Bundled {
             rules,
             global: file.allowlist,
             keywords,
             keyword_rule,
         }
     })
+}
+
+/// The rules one scan applies: the bundled ones, which cannot be removed, plus the user's
+/// (`[redaction]` in config.toml, spec 1.5 and 6.4).
+#[derive(Clone)]
+pub struct Rules {
+    extra: Vec<Extra>,
+    /// SHA-256 (lowercase hex) of each exact value the user keeps.
+    allow: HashSet<String>,
+    version: String,
+}
+
+#[derive(Clone)]
+struct Extra {
+    /// `user:` and the user's id, so it can never read as a bundled rule in the ledger.
+    id: String,
+    regex: Regex,
+    keywords: Vec<String>,
+    entropy: Option<f64>,
+    secret_group: Option<usize>,
+}
+
+impl Default for Rules {
+    fn default() -> Self {
+        Self {
+            extra: Vec::new(),
+            allow: HashSet::new(),
+            version: bundled_version().to_owned(),
+        }
+    }
+}
+
+impl Rules {
+    /// The user's rules checked here, so a mistake is an error rather than a rule that never runs.
+    pub fn new(r: &crate::config::Redaction) -> anyhow::Result<Self> {
+        use anyhow::{bail, ensure};
+        let mut extra = Vec::new();
+        for rule in &r.extra_rules {
+            ensure!(
+                !rule.id.is_empty()
+                    && rule
+                        .id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
+                "[redaction] extra rule id {:?}: use letters, digits, '-', '_' or '.'",
+                rule.id
+            );
+            let id = format!("user:{}", rule.id);
+            if extra.iter().any(|e: &Extra| e.id == id) {
+                bail!("[redaction] extra rule id {:?} is used twice", rule.id);
+            }
+            let regex = Regex::new(&rule.regex)
+                .map_err(|e| anyhow::anyhow!("[redaction] extra rule {:?}: regex: {e}", rule.id))?;
+            if let Some(g) = rule.secret_group {
+                ensure!(
+                    g < regex.captures_len(),
+                    "[redaction] extra rule {:?}: secret_group {g}, but the regex has {} group(s)",
+                    rule.id,
+                    regex.captures_len() - 1
+                );
+            }
+            extra.push(Extra {
+                id,
+                regex,
+                keywords: rule.keywords.iter().map(|k| k.to_lowercase()).collect(),
+                entropy: rule.entropy,
+                secret_group: rule.secret_group,
+            });
+        }
+        let mut allow = HashSet::new();
+        for a in &r.allowlist {
+            ensure!(
+                a.len() == 64 && a.bytes().all(|b| b.is_ascii_hexdigit()),
+                "[redaction] allowlist entry {a:?}: expected the SHA-256 of a value, 64 hex digits"
+            );
+            allow.insert(a.to_ascii_lowercase());
+        }
+        let version = if extra.is_empty() && allow.is_empty() {
+            bundled_version().to_owned()
+        } else {
+            // Canonical: the order of rules, keywords or allowlist entries in the file does not
+            // change the version; anything that changes what is masked does (Task 7 rescans).
+            let mut rules: Vec<String> = r
+                .extra_rules
+                .iter()
+                .map(|x| {
+                    let mut x = x.clone();
+                    x.keywords.sort();
+                    serde_json::to_string(&x).expect("a rule serializes")
+                })
+                .collect();
+            rules.sort();
+            let mut kept: Vec<&String> = allow.iter().collect();
+            kept.sort();
+            let user = serde_json::json!({"rules": rules, "allowlist": kept}).to_string();
+            short_hash(&[RULES_TOML, EXTRA_TOML, "\0", &user].concat())
+        };
+        Ok(Self {
+            extra,
+            allow,
+            version,
+        })
+    }
+
+    /// The `[redaction]` table of `<home>/config.toml`, checked.
+    pub fn load(home: &std::path::Path) -> anyhow::Result<Self> {
+        Self::new(&crate::config::load_capture(home)?.redaction)
+    }
+
+    /// The version a finding came from (the ledger's `ruleset`): the bundled files' hash when
+    /// the user adds nothing, so a store upgraded without settings keeps its version.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// For doctor: how many rules and kept values the user added.
+    pub fn counts(&self) -> (usize, usize) {
+        (self.extra.len(), self.allow.len())
+    }
+
+    /// ponytail: the value is hashed as it appears in the view being scanned, so a false positive
+    /// holding `\"` or `\n` inside a flattened tool field needs the hash of that escaped form.
+    fn keeps(&self, secret: &str) -> bool {
+        !self.allow.is_empty() && self.allow.contains(&short_hash_full(secret))
+    }
+
+    fn name(&self, rule: usize) -> &str {
+        let b = &bundled().rules;
+        match b.get(rule) {
+            Some(r) => &r.id,
+            None => &self.extra[rule - b.len()].id,
+        }
+    }
+}
+
+/// The rules egress uses (`outbound`): the user's, set once by `main` for the process.
+static ACTIVE: OnceLock<Rules> = OnceLock::new();
+
+/// Called once, before any text can leave; later calls are ignored.
+pub fn set_active(r: Rules) {
+    let _ = ACTIVE.set(r);
+}
+
+fn active() -> &'static Rules {
+    ACTIVE.get_or_init(Rules::default)
+}
+
+fn short_hash(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(s.as_bytes())[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn short_hash_full(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(s.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 thread_local! {
@@ -122,12 +283,20 @@ fn compiled(pattern: &str) -> Option<Regex> {
 /// judges later (docs/research/search-sync-proposal-2026-09-23.md §4.8). Closed `<private>`-style
 /// blocks go, then gitleaks redaction. Apply it per field, not to a joined transcript: a stray
 /// `<private>` in one tool output must not pair with a `</private>` many events later.
+/// The user's rules apply here as they are now (spec 6.4), so a rule added after capture still
+/// stops the text leaving.
 pub fn outbound(text: &str) -> String {
-    redact(&crate::hook::strip_blocks(text, false))
+    outbound_with(text, active())
 }
 
+pub fn outbound_with(text: &str, rules: &Rules) -> String {
+    scan(&crate::hook::strip_blocks(text, false), rules).0
+}
+
+/// v1's write path (`hook::clip`, agents not yet in `capture::PORTED`): the bundled rules only.
+/// Those agents move to `capture`, and its settings, in Task 2b.
 pub fn redact(text: &str) -> String {
-    scan(text).0
+    scan(text, &Rules::default()).0
 }
 
 /// One secret masked in stored text: the rule that found it, where the mask hiding it starts in
@@ -142,10 +311,10 @@ pub struct Finding {
 }
 
 /// `text` masked, with its findings.
-pub fn scan(text: &str) -> (String, Vec<Finding>) {
-    let (mut masked, mut found) = mask(text, spans(text));
+pub fn scan(text: &str, rules: &Rules) -> (String, Vec<Finding>) {
+    let (mut masked, mut found) = mask(text, spans(text, rules), rules);
     if !found.is_empty() {
-        rescan(&mut masked, &mut found);
+        rescan(&mut masked, &mut found, rules);
     }
     (masked, found)
 }
@@ -160,14 +329,14 @@ const MAX_PASSES: usize = 64;
 /// earlier finding moves by what the runs before it changed, or to the start of a new mask
 /// covering it. Still finding after `MAX_PASSES`, the whole text becomes one mask that every
 /// finding points at: a mask of part of it could take the context (`curl`) that the rest needs.
-fn rescan(masked: &mut String, found: &mut Vec<Finding>) {
+fn rescan(masked: &mut String, found: &mut Vec<Finding>, rules: &Rules) {
     for pass in 0..=MAX_PASSES {
-        let again = spans(masked);
+        let again = spans(masked, rules);
         if again.is_empty() {
             break;
         }
         if pass == MAX_PASSES {
-            found.extend(mask(masked, again).1);
+            found.extend(mask(masked, again, rules).1);
             for f in found.iter_mut() {
                 f.offset = 0;
             }
@@ -175,7 +344,7 @@ fn rescan(masked: &mut String, found: &mut Vec<Finding>) {
             break;
         }
         let runs = merged(&again);
-        let (next, more) = mask(masked, again);
+        let (next, more) = mask(masked, again, rules);
         if next == *masked {
             break; // a rule matching its own mask: nothing new to hide
         }
@@ -209,8 +378,8 @@ fn rescan(masked: &mut String, found: &mut Vec<Finding>) {
 /// END, or an END without its BEGIN, in any case) is dropped from the part that holds it; then the
 /// stored text is scanned once more, so line-scoped allowlists judge the lines as they are stored
 /// (as v1's `clip` did).
-pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usize>) {
-    let (masked, mut found) = scan(text);
+pub fn scan_capped(text: &str, cap: usize, rules: &Rules) -> (String, Vec<Finding>, Option<usize>) {
+    let (masked, mut found) = scan(text, rules);
     if text.len() <= cap || masked.len() <= cap {
         return (masked, found, None);
     }
@@ -272,7 +441,7 @@ pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usiz
         }
     }
     let mut stored = masked[..head_end].to_string() + &marker + &masked[tail_start..];
-    rescan(&mut stored, &mut found);
+    rescan(&mut stored, &mut found, rules);
     (stored, found, Some(text.len()))
 }
 
@@ -291,26 +460,22 @@ fn key_markers<'a>(s: &'a str, marker: &'a str) -> impl Iterator<Item = usize> +
     })
 }
 
-/// The version of the rules a finding came from: a hash of the bundled rule files.
-pub fn ruleset() -> &'static str {
+/// The bundled rules' version: a hash of their files.
+fn bundled_version() -> &'static str {
     static VERSION: OnceLock<String> = OnceLock::new();
-    VERSION.get_or_init(|| {
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::digest([RULES_TOML, EXTRA_TOML].concat().as_bytes());
-        digest[..8].iter().map(|b| format!("{b:02x}")).collect()
-    })
+    VERSION.get_or_init(|| short_hash(&[RULES_TOML, EXTRA_TOML].concat()))
 }
 
 /// Secret spans in `text` and in its JSON-unescaped view, mapped back onto `text`: (start, end,
 /// rule index), unmerged. A tool field is stored as flattened JSON, where `\"` and `\n` hide the
 /// quotes and line breaks rules match on (curl's `-u "user:pass"`, a quoted header), and the whole
 /// output reads as one line to a line-scoped allowlist. Scanning both views can only add masks.
-fn spans(text: &str) -> Vec<(usize, usize, usize)> {
-    let mut all = spans_in(text);
+fn spans(text: &str, rules: &Rules) -> Vec<(usize, usize, usize)> {
+    let mut all = spans_in(text, rules);
     if text.contains('\\') {
         let (view, at) = unescaped(text);
         all.extend(
-            spans_in(&view)
+            spans_in(&view, rules)
                 .into_iter()
                 .map(|(s, e, r)| (at[s], at[e], r)),
         );
@@ -365,8 +530,8 @@ fn escape(s: &str) -> Option<(char, usize)> {
 }
 
 /// Secret spans in `text`: (start, end, rule index), unmerged, as gitleaks finds them.
-fn spans_in(text: &str) -> Vec<(usize, usize, usize)> {
-    let r = rules();
+fn spans_in(text: &str, rules: &Rules) -> Vec<(usize, usize, usize)> {
+    let r = bundled();
     let mut hit = vec![false; r.rules.len()];
     // Overlapping: "sk" (twilio) inside "gsk_" (groq) must not hide the longer keyword.
     for m in r.keywords.find_overlapping_iter(text) {
@@ -403,9 +568,37 @@ fn spans_in(text: &str) -> Vec<(usize, usize, usize)> {
                 .iter()
                 .chain(std::iter::once(&r.global))
                 .any(|a| allows(a, secret.as_str(), all.as_str(), line));
-            if !allowed {
+            if !allowed && !rules.keeps(secret.as_str()) {
                 spans.push((secret.start(), secret.end(), i));
             }
+        }
+    }
+    // The user's rules: a rule without keywords always runs (gitleaks does the same).
+    let mut lower: Option<String> = None;
+    for (j, x) in rules.extra.iter().enumerate() {
+        if !x.keywords.is_empty() {
+            let lower = lower.get_or_insert_with(|| text.to_lowercase());
+            if !x.keywords.iter().any(|k| lower.contains(k.as_str())) {
+                continue;
+            }
+        }
+        for caps in x.regex.captures_iter(text) {
+            let all = caps.get(0).expect("group 0");
+            let secret = match x.secret_group {
+                Some(g) => caps.get(g),
+                None => (1..caps.len())
+                    .find_map(|i| caps.get(i))
+                    .filter(|m| !m.is_empty()),
+            }
+            .unwrap_or(all);
+            if secret.is_empty()
+                || x.entropy
+                    .is_some_and(|min| shannon_entropy(secret.as_str()) <= min)
+                || rules.keeps(secret.as_str())
+            {
+                continue;
+            }
+            spans.push((secret.start(), secret.end(), r.rules.len() + j));
         }
     }
     spans.sort_unstable();
@@ -426,8 +619,7 @@ fn merged(spans: &[(usize, usize, usize)]) -> Vec<(usize, usize)> {
 
 /// `text` with each run of sorted `spans` replaced by one mask, and a finding per span at the
 /// offset of its mask in the result.
-fn mask(text: &str, spans: Vec<(usize, usize, usize)>) -> (String, Vec<Finding>) {
-    let r = rules();
+fn mask(text: &str, spans: Vec<(usize, usize, usize)>, rules: &Rules) -> (String, Vec<Finding>) {
     let mut out = String::with_capacity(text.len());
     let mut found = Vec::with_capacity(spans.len());
     let mut pos = 0;
@@ -437,7 +629,7 @@ fn mask(text: &str, spans: Vec<(usize, usize, usize)>) -> (String, Vec<Finding>)
         while i < spans.len() && spans[i].0 < end {
             let (s, e, rule) = spans[i];
             found.push(Finding {
-                rule: r.rules[rule].id.clone(),
+                rule: rules.name(rule).to_owned(),
                 offset: out.len(),
                 length: e - s,
             });
@@ -511,7 +703,7 @@ mod tests {
     #[test]
     fn every_bundled_regex_compiles() {
         let started = std::time::Instant::now();
-        let r = rules();
+        let r = bundled();
         let parse_ms = started.elapsed().as_millis();
         let started = std::time::Instant::now();
         let mut broken_allowlists = 0;
@@ -597,7 +789,7 @@ mod tests {
     fn every_byte_is_scanned_and_the_ledger_never_holds_the_value() {
         let key = token();
         let text = "x".repeat(200_000) + " Authorization: Bearer " + &key; // past v1's 12,000
-        let (masked, found) = scan(&text);
+        let (masked, found) = scan(&text, &Rules::default());
         // Two rules may find the token (github-pat and a bearer rule): one mask, a finding each.
         assert!(
             found
@@ -608,7 +800,7 @@ mod tests {
         assert!(found.iter().all(|f| f.offset == found[0].offset));
         assert_eq!(masked.matches(MASK).count(), 1);
         check(&masked, &found, &key);
-        let (capped, again, cut) = scan_capped(&text, 256 * 1024);
+        let (capped, again, cut) = scan_capped(&text, 256 * 1024, &Rules::default());
         assert_eq!((capped, again, cut), (masked, found, None));
     }
 
@@ -620,7 +812,7 @@ mod tests {
             // The token straddles the head's cut, sits just past it, or straddles the tail's.
             let mut text = "y ".repeat(5 * cap / 2);
             text.replace_range(at..at + key.len() + 7, &format!("Bearer {key}"));
-            let (stored, found, cut) = scan_capped(&text, cap);
+            let (stored, found, cut) = scan_capped(&text, cap, &Rules::default());
             assert_eq!(cut, Some(text.len()));
             assert!(stored.len() < cap + 100);
             for i in 8..=key.len() {
@@ -642,7 +834,7 @@ mod tests {
         );
         // BEGIN before the head's cut, END past the margin: the rule never sees the whole block.
         let text = "h ".repeat(cap / 4 - 100) + &block + &"t ".repeat(cap);
-        let (stored, _, cut) = scan_capped(&text, cap);
+        let (stored, _, cut) = scan_capped(&text, cap, &Rules::default());
         assert!(cut.is_some());
         assert!(
             !stored.contains("MIIEowIBAAKCAQ") && !stored.contains("-----BEGIN"),
@@ -651,7 +843,7 @@ mod tests {
         );
         // The same block across the tail's cut.
         let text = "h ".repeat(cap) + &block + &" t".repeat(cap / 4 - 100);
-        let (stored, _, _) = scan_capped(&text, cap);
+        let (stored, _, _) = scan_capped(&text, cap, &Rules::default());
         assert!(!stored.contains("MIIEowIBAAKCAQ") && !stored.contains("-----END"));
     }
 
@@ -665,7 +857,7 @@ mod tests {
             + &" ".repeat(40_000)
             + &format!("-u '{pass}'\n")
             + &"t\n".repeat(cap / 8);
-        let (stored, found, cut) = scan_capped(&text, cap);
+        let (stored, found, cut) = scan_capped(&text, cap, &Rules::default());
         assert!(cut.is_some());
         assert!(
             !stored.contains("q9Zx8mL2vB4nR7tYw"),
@@ -687,27 +879,27 @@ mod tests {
             .iter()
             .map(|c| format!("curl -u '{c}' https://x ; "))
             .collect();
-        let (stored, found) = scan(&line);
+        let (stored, found) = scan(&line, &Rules::default());
         for c in creds {
             assert!(!stored.contains(c), "{c} kept: {stored}");
         }
         check(&stored, &found, creds[0]);
-        assert!(spans(&stored).is_empty());
+        assert!(spans(&stored, &Rules::default()).is_empty());
         // The same across a cut: head, middle and tail each hold some.
         let cap = 64 * 1024;
         let text = line.clone() + &" ".repeat(3 * cap) + &line + "\n" + &"t".repeat(cap / 4);
-        let (stored, found, cut) = scan_capped(&text, cap);
+        let (stored, found, cut) = scan_capped(&text, cap, &Rules::default());
         assert!(cut.is_some());
         for c in creds {
             assert!(!stored.contains(c), "{c} kept across the cut");
         }
         check(&stored, &found, creds[1]);
-        assert!(spans(&stored).is_empty());
+        assert!(spans(&stored, &Rules::default()).is_empty());
         // More than MAX_PASSES on one line: the whole text is masked.
         let line: String = (0..MAX_PASSES + 6)
             .map(|i| format!("curl -u '{}' https://x ; ", creds[i % 4]))
             .collect();
-        let (stored, found) = scan(&line);
+        let (stored, found) = scan(&line, &Rules::default());
         for c in creds {
             assert!(!stored.contains(c), "{c} kept past the pass limit");
         }
@@ -731,12 +923,12 @@ mod tests {
                     })
                     .collect();
                 let text = format!("curl {sets}");
-                let (stored, found) = scan(&text);
+                let (stored, found) = scan(&text, &Rules::default());
                 for v in &values[..n] {
                     assert!(!stored.contains(v.as_str()), "n={n} {v} kept");
                 }
                 check(&stored, &found, &values[0]);
-                assert!(spans(&stored).is_empty());
+                assert!(spans(&stored, &Rules::default()).is_empty());
             }
         }
     }
@@ -753,7 +945,7 @@ mod tests {
             + &" ".repeat(cap)
             + "curl -u 'bobby:r8Wy7nK3uC5oQ6sX2vJ4pR9e'\n"
             + &"t".repeat(half);
-        let (stored, found, cut) = scan_capped(&text, cap);
+        let (stored, found, cut) = scan_capped(&text, cap, &Rules::default());
         assert!(cut.is_some());
         check(&stored, &found, "q9Zx8mL2vB4nR7tY1wK3pS6d");
         assert!(stored.len() <= cap + 64);
@@ -770,7 +962,7 @@ mod tests {
             "h ".repeat(cap / 4 - 100) + &block + &"t ".repeat(cap),
             "h ".repeat(cap) + &block + &" t".repeat(cap / 4 - 100),
         ] {
-            let (stored, _, _) = scan_capped(&text, cap);
+            let (stored, _, _) = scan_capped(&text, cap, &Rules::default());
             assert!(!stored.contains("MIIEowIBAAKCAQ"), "{}", &stored[..200]);
         }
     }
@@ -783,7 +975,7 @@ mod tests {
             "MIIDdzCCAl+gAwIBAgIEAgAAuTANBgkqhkiG9w0BAQUFADBaMQswCQYDVQQGEwJJRTES\n".repeat(900)
         );
         let text = "h ".repeat(cap / 4 - 100) + "kept here\n" + &cert + &"t ".repeat(cap);
-        let (stored, _, cut) = scan_capped(&text, cap);
+        let (stored, _, cut) = scan_capped(&text, cap, &Rules::default());
         assert!(cut.is_some());
         assert!(stored.contains("kept here\n-----BEGIN CERTIFICATE-----\nMIIDdzCC"));
     }
@@ -798,7 +990,7 @@ mod tests {
             + &body
             + "-----END RSA PRIVA\n"
             + &"log\n".repeat(cap / 16);
-        let (stored, _, cut) = scan_capped(&text, cap);
+        let (stored, _, cut) = scan_capped(&text, cap, &Rules::default());
         assert!(cut.is_some());
         assert!(!stored.contains("MIIEowIBAAKCAQ"));
         assert!(stored.ends_with("log\n"));
@@ -810,7 +1002,7 @@ mod tests {
             )),
         )
         .unwrap();
-        let (stored, _, cut) = scan_capped(&flat, cap);
+        let (stored, _, cut) = scan_capped(&flat, cap, &Rules::default());
         assert!(cut.is_some());
         assert!(!stored.contains("MIIEowIBAAKCAQ"));
         assert!(
@@ -822,7 +1014,7 @@ mod tests {
     #[test]
     fn cuts_fall_on_character_boundaries() {
         let text = "日本語".repeat(40_000); // 360,000 bytes, three per character
-        let (stored, found, cut) = scan_capped(&text, 64 * 1024 + 1);
+        let (stored, found, cut) = scan_capped(&text, 64 * 1024 + 1, &Rules::default());
         assert!(cut.is_some() && found.is_empty());
         assert!(stored.starts_with('日') && stored.ends_with('語'));
     }
@@ -842,6 +1034,125 @@ mod tests {
         let s = "日本語の説明。トークンは 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 です。";
         let r = redact(s);
         assert_eq!(r, "日本語の説明。トークンは [REDACTED] です。");
+    }
+
+    fn user(toml: &str) -> anyhow::Result<Rules> {
+        let c: crate::config::CaptureConfig = toml::from_str(toml)?;
+        Rules::new(&c.redaction)
+    }
+
+    fn sha(v: &str) -> String {
+        short_hash_full(v)
+    }
+
+    #[test]
+    fn an_allowlisted_false_positive_is_kept_and_an_extra_rule_masks() {
+        let kept = token();
+        let other = format!("ghp_{}", "a7Kd2LmQ9xT4vB8nR1wZ6yH3jF5sP0cE2gUq"); // split: scanners
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!(
+                "[[providers]]\nkind = \"nonsense\"\n\n[redaction]\nallowlist = [\"{}\"]\n\
+                 extra_rules = [{{ id = \"acme\", regex = 'acme-([0-9]{{6}})' }}]\n",
+                sha(&kept).to_uppercase()
+            ),
+        )
+        .unwrap();
+        // A broken [[providers]] table is not capture's to judge.
+        let rules = Rules::load(home.path()).unwrap();
+        let text = format!("{kept} and {other} and acme-123456 and acme-12");
+        let (masked, found) = scan(&text, &rules);
+        assert!(masked.contains(&kept), "{masked}"); // the exact value the user keeps
+        assert!(!masked.contains(&other), "{masked}"); // the same rule on another value
+        assert!(
+            !masked.contains("123456") && masked.contains("acme-12"),
+            "{masked}"
+        );
+        let names: Vec<&str> = found.iter().map(|f| f.rule.as_str()).collect();
+        assert!(names.contains(&"user:acme"), "{names:?}");
+        assert!(!format!("{found:?}").contains("123456"));
+        // The egress gate takes the same rules.
+        assert!(!outbound_with("id acme-654321", &rules).contains("654321"));
+    }
+
+    #[test]
+    fn a_user_rule_without_keywords_always_runs_and_one_with_them_only_on_a_hit() {
+        let rules = user(
+            "[redaction]\nextra_rules = [\
+             { id = \"bare\", regex = 'zq-[0-9]{4}' },\
+             { id = \"gated\", regex = 'yk-[0-9]{4}', keywords = [\"PROJ\"] }]",
+        )
+        .unwrap();
+        let (masked, _) = scan("zq-1111 yk-2222", &rules);
+        assert!(
+            !masked.contains("1111") && masked.contains("yk-2222"),
+            "{masked}"
+        );
+        let (masked, _) = scan("proj: yk-2222", &rules);
+        assert!(!masked.contains("2222"), "{masked}");
+    }
+
+    #[test]
+    fn the_version_follows_what_is_masked_and_not_the_order_in_the_file() {
+        let none = user("").unwrap();
+        assert_eq!(none.version(), Rules::default().version());
+        assert_eq!(none.version(), bundled_version());
+        let a = "{ id = \"a\", regex = 'a-[0-9]{4}', keywords = [\"x\", \"y\"] }";
+        let a_reordered = "{ id = \"a\", regex = 'a-[0-9]{4}', keywords = [\"y\", \"x\"] }";
+        let b = "{ id = \"b\", regex = 'b-[0-9]{4}' }";
+        let h1 = sha("one");
+        let h2 = sha("two");
+        let v = |rules: &str, allow: &str| {
+            user(&format!(
+                "[redaction]\nextra_rules = [{rules}]\nallowlist = [{allow}]"
+            ))
+            .unwrap()
+            .version()
+            .to_owned()
+        };
+        let base = v(&format!("{a}, {b}"), &format!("\"{h1}\", \"{h2}\""));
+        assert_ne!(base, bundled_version());
+        assert_eq!(
+            base,
+            v(
+                &format!("{b}, {a_reordered}"),
+                &format!("\"{h2}\", \"{h1}\"")
+            )
+        );
+        assert_ne!(base, v(&format!("{a}, {b}"), &format!("\"{h1}\""))); // an entry removed
+        assert_ne!(base, v(a, &format!("\"{h1}\", \"{h2}\""))); // a rule removed
+    }
+
+    #[test]
+    fn a_wrong_redaction_table_is_an_error_that_names_the_mistake() {
+        for (toml, says) in [
+            (
+                "[redaction]\nextra_rules = [{ id = \"x\", regex = '(' }]",
+                "regex",
+            ),
+            (
+                "[redaction]\nextra_rules = [{ id = \"a b\", regex = 'x' }]",
+                "id",
+            ),
+            (
+                "[redaction]\nextra_rules = [{ id = \"x\", regex = 'x' }, { id = \"x\", regex = 'y' }]",
+                "twice",
+            ),
+            (
+                "[redaction]\nextra_rules = [{ id = \"x\", regex = 'x', secret_group = 1 }]",
+                "secret_group",
+            ),
+            ("[redaction]\nallowlist = [\"abc\"]", "SHA-256"),
+            ("[redaction]\nextra_rule = []", "unknown field"),
+            (
+                "[redaction]\nextra_rules = [{ id = \"x\", regex = 'x', keyword = [\"k\"] }]",
+                "unknown field",
+            ),
+        ] {
+            let e = format!("{:#}", user(toml).err().expect(toml));
+            assert!(e.contains(says), "{toml}: {e}");
+        }
     }
 }
 

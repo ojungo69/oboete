@@ -87,12 +87,14 @@ fn run_io(
         std::fs::create_dir_all(home)?;
         if tried {
             // Design B: nothing is injected until the manifest (milestone 2 Task 9).
+            let settings = crate::capture::Settings::load(home)?;
             wrote = record(
                 &mut crate::raw::open(home)?,
                 agent,
                 event,
                 &payload,
                 db::now_ms(),
+                &settings,
             )? > 0;
             ended = crate::failure::now();
             return Ok(None);
@@ -162,15 +164,16 @@ pub fn record(
     event: &str,
     payload: &Value,
     ts: i64,
+    settings: &crate::capture::Settings,
 ) -> Result<usize> {
     let mut n = 0;
-    for mut c in crate::capture::events(agent, event, payload, ts) {
+    for mut c in crate::capture::events(agent, event, payload, ts, settings) {
         // An idless event's session is this device's own: a bare "unknown" would be one session
         // on every device once they sync (as `handle` does for v1).
         if c.event.session == "unknown" {
             c.event.session = format!("unknown-{}", raw.device());
         }
-        raw.append_with_ledger(&c.event, &c.ledger)?;
+        raw.append_with_ledger(&c.event, &c.ledger, settings.rules.version())?;
         n += 1;
     }
     Ok(n)
@@ -1307,6 +1310,51 @@ mod tests {
     }
 
     #[test]
+    fn a_user_rule_masks_at_capture_and_its_version_goes_in_the_ledger() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let prompt = br#"{"session_id":"s","prompt":"deploy with acme-123456"}"#;
+        run_io(home, "claude", "UserPromptSubmit", &prompt[..], Vec::new()).unwrap();
+        let version = crate::capture::Settings::load(home)
+            .unwrap()
+            .rules
+            .version()
+            .to_owned();
+        assert_ne!(version, crate::redact::Rules::default().version());
+        let c = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+        let body: Vec<u8> = c
+            .query_row("SELECT body FROM records", [], |r| r.get(0))
+            .unwrap();
+        assert!(!String::from_utf8(body).unwrap().contains("123456"));
+        let row: (String, String) = c
+            .query_row("SELECT rule, ruleset FROM ledger", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(row, ("user:acme".into(), version));
+    }
+
+    #[test]
+    fn a_wrong_redaction_table_records_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        std::fs::write(
+            home.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = '(' }]\n",
+        )
+        .unwrap();
+        let prompt = br#"{"session_id":"s","prompt":"hello"}"#;
+        let e = run_io(home, "claude", "UserPromptSubmit", &prompt[..], Vec::new()).unwrap_err();
+        assert!(format!("{e:#}").contains("regex"), "{e:#}");
+        assert!(!home.join("raw.db").exists());
+    }
+
+    #[test]
     fn an_idless_design_b_event_is_this_devices_own_session() {
         let home = tempfile::tempdir().unwrap();
         let mut raw = crate::raw::open(home.path()).unwrap();
@@ -1316,6 +1364,7 @@ mod tests {
             "UserPromptSubmit",
             &json!({"prompt": "hi"}),
             0,
+            &Default::default(),
         )
         .unwrap();
         let recs = raw.after(raw.device(), 0, 10).unwrap();
