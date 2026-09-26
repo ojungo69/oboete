@@ -508,14 +508,23 @@ pub fn raw(
         args.push(Value::Text(r.to_string()));
     }
     // D8: a tombstone the index has not reached yet hides its target here, so no search shows
-    // what raw already hides.
-    let pending: std::collections::HashSet<(String, i64)> = if home.join("raw.db").exists() {
+    // what raw already hides. The checkpoint is read before the index and the tombstones after
+    // it: one that commits while the query runs is still seen (one the worker applies in between
+    // only hides more).
+    let raw_db = if home.join("raw.db").exists() {
         let raw = crate::raw::open(home)?;
         let at = crate::knowledge::checkpoint::get(&k, "fts", raw.device())?;
-        raw.tombstones_after(at)?.into_iter().collect()
+        Some((raw, at))
     } else {
-        Default::default()
+        None
     };
+    let pending = |raw_db: &Option<(crate::raw::Raw, i64)>| -> Result<std::collections::HashSet<(String, i64)>> {
+        Ok(match raw_db {
+            Some((raw, at)) => raw.tombstones_after(*at)?.into_iter().collect(),
+            None => Default::default(),
+        })
+    };
+    let before = pending(&raw_db)?.len();
     let order = if ranked {
         "rank, d.ts DESC"
     } else {
@@ -529,9 +538,7 @@ pub fn raw(
         clauses.join(" AND ")
     );
     // Enough rows that the hidden ones cannot take the place of visible ones.
-    args.push(Value::Integer(sql_limit(
-        limit.saturating_add(pending.len()),
-    )));
+    args.push(Value::Integer(sql_limit(limit.saturating_add(before))));
     let terms = terms(query);
     let mut stmt = k.prepare(&sql)?;
     let hits = stmt.query_map(params_from_iter(args), |r| {
@@ -546,6 +553,7 @@ pub fn raw(
         })
     })?;
     let mut hits: Vec<RawHit> = hits.collect::<Result<_, _>>()?;
+    let pending = pending(&raw_db)?;
     hits.retain(|h| !pending.contains(&(h.device.clone(), h.seq)));
     hits.truncate(limit);
     Ok(hits)
