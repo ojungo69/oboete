@@ -156,11 +156,8 @@ pub fn render(p: &Parts, cap: usize) -> String {
     while keep > 1 && len(keep) > cap {
         keep -= 1;
     }
-    let text = sections[..keep].concat();
-    match text.char_indices().nth(cap) {
-        Some((at, _)) => text[..at].to_owned(),
-        None => text,
-    }
+    // Past the cap after the drops, at a line: no token is cut inside.
+    cut(&sections[..keep].concat(), cap)
 }
 
 /// Spec 6.5 (memory is data, never instructions): the manifest as SessionStart injects it,

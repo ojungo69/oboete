@@ -389,10 +389,20 @@ fn paths(input: &Value, cwd: Option<&str>) -> Vec<String> {
 }
 
 /// `s` on one line, cut to `n` characters.
+/// `s` on one line, cut to `n` characters at a space: a token is shown whole or not at all, so
+/// a rule added after the manifest was built still matches it at SessionStart's gate (only a
+/// token longer than `n` is cut inside).
 fn one_line(s: &str, n: usize) -> String {
     let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
     match flat.char_indices().nth(n) {
-        Some((at, _)) => format!("{}…", &flat[..at]),
+        Some((at, c)) => {
+            let end = if c == ' ' {
+                at
+            } else {
+                flat[..at].rfind(' ').filter(|&sp| sp > 0).unwrap_or(at)
+            };
+            format!("{}…", &flat[..end])
+        }
         None => flat,
     }
 }
@@ -1011,6 +1021,15 @@ mod tests {
         assert_eq!(what_ran(r#"{"cmd": "rg fetchJson"}"#), "rg fetchJson");
         let windows = serde_json::json!({"file_path": "C:\\repo\\src\\a.rs"});
         assert_eq!(paths(&windows, Some("C:\\repo\\")), vec!["src/a.rs"]);
+    }
+
+    #[test]
+    fn a_clipped_field_never_cuts_a_token() {
+        assert_eq!(one_line("aaaa acme-123456 zzz", 10), "aaaa…");
+        assert_eq!(one_line("aaaa acme-123456 zzz", 16), "aaaa acme-123456…");
+        assert_eq!(one_line("acme-123456", 4), "acme…"); // longer than the clip: cut inside
+        assert_eq!(one_line("a  b\nc", 10), "a b c");
+        assert_eq!(one_line("日本語 の本文です", 5), "日本語…");
     }
 
     #[test]
