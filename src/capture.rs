@@ -158,7 +158,8 @@ fn capture(
     let git = git(Path::new(cwd));
     // Labels are stored text too (spec 2.2): a path or branch can carry a token.
     let mut gate = Gate::new(settings);
-    let mut label = |field: &str, s: &str| gate.text(field, &without_blocks(s, false));
+    let mut label =
+        |field: &str, s: &str| gate.text(field, &without_blocks(s, false), MAX_FIELD_BYTES);
     let session = label(
         "session",
         str_field(payload, &["session_id", "sessionId"]).unwrap_or("unknown"),
@@ -169,7 +170,7 @@ fn capture(
     let gitdir = git.gitdir.as_deref().map(|g| label("gitdir", g));
     let cwd_label = label("cwd", cwd);
     // One gate for the body: every string and key in it, whatever field it is.
-    let body = gate.value("", body).to_string();
+    let body = gate.value("", body, MAX_FIELD_BYTES).to_string();
     Captured {
         event: Event {
             agent: agent.into(),
@@ -214,12 +215,7 @@ impl<'a> Gate<'a> {
         }
     }
 
-    fn text(&mut self, field: &str, s: &str) -> String {
-        let cap = if field == "/output" {
-            self.output_cap
-        } else {
-            MAX_FIELD_BYTES
-        };
+    fn text(&mut self, field: &str, s: &str, cap: usize) -> String {
         let (stored, found, full) = redact::scan_capped(s, cap, self.rules);
         if let Some(n) = full {
             *self.cut.get_or_insert(0) += n as i64;
@@ -231,22 +227,30 @@ impl<'a> Gate<'a> {
 
     /// Every string and key of `v`, at its JSON pointer. Blocks are gone by now: stripping here
     /// again would pair an opener left in one flattened tool field with a closer in another.
-    fn value(&mut self, path: &str, v: Value) -> Value {
+    /// A string is kept up to `cap`.
+    fn value(&mut self, path: &str, v: Value, cap: usize) -> Value {
         match v {
-            Value::String(s) => Value::String(self.text(path, &s)),
+            Value::String(s) => Value::String(self.text(path, &s, cap)),
             Value::Array(a) => Value::Array(
                 a.into_iter()
                     .enumerate()
-                    .map(|(i, x)| self.value(&format!("{path}/{i}"), x))
+                    .map(|(i, x)| self.value(&format!("{path}/{i}"), x, MAX_FIELD_BYTES))
                     .collect(),
             ),
             Value::Object(m) => Value::Object(
                 m.into_iter()
                     .map(|(k, x)| {
+                        // The cap follows the key as capture wrote it: a user rule can mask
+                        // the stored key `output` itself.
+                        let cap = if path.is_empty() && k == "output" {
+                            self.output_cap
+                        } else {
+                            MAX_FIELD_BYTES
+                        };
                         // The pointer is built from the stored key, so it never holds a secret.
-                        let key = self.text(&format!("{path}#key"), &k);
+                        let key = self.text(&format!("{path}#key"), &k, MAX_FIELD_BYTES);
                         let child = format!("{path}/{}", segment(&key));
-                        let x = self.value(&child, x);
+                        let x = self.value(&child, x, cap);
                         (key, x)
                     })
                     .collect(),
@@ -676,6 +680,25 @@ mod tests {
         assert!(out.len() < HEAD_TAIL_BYTES + 100, "{}", out.len());
         assert!(out.starts_with('a') && out.ends_with('b') && out.contains("[cut: "));
         assert!(b["input"].as_str().unwrap().contains(&big));
+    }
+
+    #[test]
+    fn head_tail_holds_when_a_rule_masks_the_key_output() {
+        let s = with(
+            "[capture]\ntool_output = \"head-tail\"\n[[redaction.extra_rules]]\nid = \"o\"\nregex = \"output\"\n",
+        );
+        let big = "a".repeat(HEAD_TAIL_BYTES) + &"b".repeat(HEAD_TAIL_BYTES);
+        let payload = json!({"session_id": "s", "tool_name": "Bash",
+            "tool_input": {}, "tool_response": big});
+        let b = body(&events("claude", "PostToolUse", &payload, 0, &s)[0].event);
+        let (key, out) = b
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, v)| v.as_str().is_some_and(|v| v.starts_with('a')))
+            .unwrap();
+        assert_ne!(key, "output");
+        assert!(out.as_str().unwrap().len() < HEAD_TAIL_BYTES + 100);
     }
 
     #[test]

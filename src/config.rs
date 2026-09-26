@@ -365,14 +365,23 @@ pub enum ToolOutput {
     HeadTail,
 }
 
-/// The two tables capture reads, and nothing else of config.toml: a mistake in `[[providers]]`
-/// must not stop recording. Missing file or tables = defaults.
+/// The two tables capture reads, and nothing else of config.toml: a mistake inside
+/// `[[providers]]` must not stop recording. Missing file or tables = defaults. The other tables
+/// are only named: a table no version reads (`[redactions]`) is an error, not settings that
+/// silently do nothing.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CaptureConfig {
     #[serde(default)]
     pub redaction: Redaction,
     #[serde(default)]
     pub capture: Capture,
+    #[serde(default, rename = "providers")]
+    _providers: serde::de::IgnoredAny,
+    #[serde(default, rename = "summary")]
+    _summary: serde::de::IgnoredAny,
+    #[serde(default, rename = "embedding")]
+    _embedding: serde::de::IgnoredAny,
 }
 
 pub fn load_capture(home: &Path) -> Result<CaptureConfig> {

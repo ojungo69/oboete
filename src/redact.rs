@@ -1457,10 +1457,19 @@ mod tests {
                 "[redaction]\nextra_rules = [{ id = \"x\", regex = 'x', keyword = [\"k\"] }]",
                 "line 2 is not valid",
             ),
+            ("[redactions]\nallowlist = []", "line 1 is not valid"),
+            (
+                "[capture]\n[captures]\nstore_prompts = false",
+                "line 2 is not valid",
+            ),
         ] {
             let e = format!("{:#}", user(toml).err().expect(toml));
             assert!(e.contains(says), "{toml}: {e}");
         }
+        // The tables other commands read are no mistake here.
+        let others =
+            "[[providers]]\nname = \"x\"\n[summary]\nmax = 1\n[embedding]\nprovider = \"none\"\n";
+        assert!(user(others).is_ok());
     }
 }
 
