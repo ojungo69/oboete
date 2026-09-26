@@ -101,13 +101,33 @@ impl State {
 }
 
 /// After a successful write: the marker exists at its full size before any failure needs it. One
-/// cut short (a failure's own write that ran out of space) is written again whole.
+/// cut short (a failure's own write that ran out of space) is written again whole, with what it
+/// said, under the lock `mark` and `clear` take: only its size changes, never its state.
 pub fn prepare(home: &Path) {
+    use std::io::{Read, Seek, Write};
     let path = marker(home);
-    if !std::fs::metadata(&path).is_ok_and(|m| m.len() == SIZE as u64) {
-        let _ = std::fs::create_dir_all(home.join("state"));
-        let _ = std::fs::write(&path, State::Ok(0).text());
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() == SIZE as u64) {
+        return;
     }
+    let _ = std::fs::create_dir_all(home.join("state"));
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+    else {
+        return;
+    };
+    let mut buf = Vec::new();
+    if f.lock().is_err() || f.read_to_end(&mut buf).is_err() || buf.len() == SIZE {
+        return;
+    }
+    let state = State::parse(&String::from_utf8_lossy(&buf)).unwrap_or(State::Ok(0));
+    let _ = f
+        .set_len(0)
+        .and_then(|_| f.seek(std::io::SeekFrom::Start(0)))
+        .and_then(|_| f.write_all(state.text().as_bytes()));
 }
 
 /// After a write that failed when it ended at `at`: a failure record with the class and the
@@ -282,13 +302,19 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let home = home.path();
         std::fs::create_dir_all(home.join("state")).unwrap();
-        for short in ["", "failed disk-full 17"] {
-            std::fs::write(marker(home), short).unwrap();
-            prepare(home);
-            clear(home, 1);
-            assert_eq!(std::fs::metadata(marker(home)).unwrap().len(), SIZE as u64);
-            assert_eq!(since(home), None);
-        }
+        std::fs::write(marker(home), "").unwrap();
+        prepare(home);
+        assert_eq!(std::fs::metadata(marker(home)).unwrap().len(), SIZE as u64);
+        assert_eq!(since(home), None);
+        // A failure cut short keeps what it said: `clear` decides by the times.
+        std::fs::write(marker(home), "failed disk-full 17").unwrap();
+        prepare(home);
+        assert_eq!(std::fs::metadata(marker(home)).unwrap().len(), SIZE as u64);
+        assert_eq!(since(home), Some((Class::DiskFull, 17)));
+        clear(home, 10);
+        assert_eq!(since(home), Some((Class::DiskFull, 17)));
+        clear(home, 20);
+        assert_eq!(since(home), None);
     }
 
     #[cfg(unix)]

@@ -58,6 +58,9 @@ fn run_io(
     // with nothing to capture (PreToolUse, an empty Stop) proves nothing.
     let mut tried = false;
     let mut wrote = false;
+    // When the store operation ended (0 until one did): overlapping hooks change the marker in
+    // this order, so it is taken before anything that runs after the write.
+    let mut ended = 0;
     let result: Result<Option<String>> = (|| {
         if std::env::var_os(SKIP_ENV).is_some() {
             return Ok(None);
@@ -89,6 +92,7 @@ fn run_io(
                 &payload,
                 db::now_ms(),
             )? > 0;
+            ended = db::now_ms();
             if let Err(e) = start_worker(home) {
                 // The row is written, and the next hook starts a worker for it: MUST-M16's
                 // marker is about the store, so this is no recording failure.
@@ -99,6 +103,7 @@ fn run_io(
         let conn = db::open(home)?;
         let before = conn.total_changes();
         let out = handle(&conn, agent, event, &payload)?;
+        ended = db::now_ms();
         wrote = conn.total_changes() > before;
         if matches!(event, "Stop" | "SessionEnd") && std::env::var_os("OBOETE_NO_SPAWN").is_none() {
             // Agents without a reliable SessionEnd need their last turn to settle first.
@@ -106,8 +111,9 @@ fn run_io(
         }
         Ok(out)
     })();
-    // When the store operation ended: overlapping hooks change the marker in this order.
-    let ended = db::now_ms();
+    if ended == 0 {
+        ended = db::now_ms(); // a failure: the operation ended when it returned
+    }
     let mut out = result.as_ref().ok().cloned().flatten();
     if tried {
         // The marker lives outside the stores, so it is written when they cannot be.
