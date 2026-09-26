@@ -109,12 +109,7 @@ fn export_from(raw: &Raw, dir: &Path) -> Result<Option<PathBuf>> {
         !device.is_empty() && device.chars().all(|c| c.is_ascii_alphanumeric()),
         "device id {device:?} cannot name a segment"
     );
-    let mut last = segments(dir)?
-        .iter()
-        .filter(|s| s.device == device)
-        .map(|s| s.last)
-        .max()
-        .unwrap_or(0);
+    let mut last = cursor(raw, dir)?;
     if raw.max_seq()? <= last {
         return Ok(None);
     }
@@ -137,6 +132,51 @@ fn export_from(raw: &Raw, dir: &Path) -> Result<Option<PathBuf>> {
         }
         wrote = Some(seal(dir, &name(device, first, end), text.as_bytes())?);
         last = end;
+    }
+}
+
+/// Where this device's backups end. MUST-M14: raw lost commits the backups hold, and its next
+/// records reuse those seqs. The segments past raw's end are set aside, so that range is backed
+/// up again from raw as it is reused (a loss that new records have already covered again goes
+/// unseen here, as it does for the consumers' rewind: #83).
+fn cursor(raw: &Raw, dir: &Path) -> Result<i64> {
+    let max = raw.max_seq()?;
+    let mine: Vec<Segment> = segments(dir)?
+        .into_iter()
+        .filter(|s| s.device == raw.device())
+        .collect();
+    set_aside(mine.iter().filter(|s| s.last > max))?;
+    Ok(mine
+        .iter()
+        .filter(|s| s.last <= max)
+        .map(|s| s.last)
+        .max()
+        .unwrap_or(0))
+}
+
+/// Segments no longer trusted, renamed (the segment before its checksum: a checksum left alone
+/// is written again by the next export). Their files stay on disk.
+fn set_aside<'a>(segs: impl IntoIterator<Item = &'a Segment>) -> Result<()> {
+    let stamp = crate::db::now_ms();
+    for s in segs {
+        for path in [
+            s.path.clone(),
+            PathBuf::from(format!("{}.sha256", s.path.display())),
+        ] {
+            if path.exists() {
+                let aside = PathBuf::from(format!("{}.quarantined-{stamp}", path.display()));
+                std::fs::rename(&path, aside)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// At a worker's start, when raw may have lost commits: the backups past its end set aside
+/// before new records reuse their seqs.
+pub fn check(home: &Path, raw: &Raw) {
+    if let Err(e) = dir(home).and_then(|d| cursor(raw, &d)) {
+        eprintln!("oboete: backup: {e:#}");
     }
 }
 
@@ -293,18 +333,7 @@ pub fn restore(home: &Path) -> Result<String> {
     }
     // A skipped segment is moved aside, so the export cursor never trusts its name and the seqs
     // it claimed are backed up again as they are reused.
-    let stamp = crate::db::now_ms();
-    for s in &bad {
-        for path in [
-            s.path.clone(),
-            PathBuf::from(format!("{}.sha256", s.path.display())),
-        ] {
-            if path.exists() {
-                let aside = PathBuf::from(format!("{}.quarantined-{stamp}", path.display()));
-                std::fs::rename(&path, aside)?;
-            }
-        }
-    }
+    set_aside(&bad)?;
     let kept = quarantine(home, "raw.db")?;
     std::fs::rename(&whole, home.join("raw.db"))?;
     #[cfg(unix)]
@@ -688,6 +717,41 @@ mod tests {
         assert_eq!(
             (raw.device().to_owned(), raw.max_seq().unwrap()),
             (device, 5)
+        );
+    }
+
+    #[test]
+    fn records_raw_lost_are_backed_up_again_as_their_seqs_are_reused() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 10, 10); // one segment: 1-10
+        rusqlite::Connection::open(p.join("raw.db"))
+            .unwrap()
+            .execute("DELETE FROM records WHERE seq > 6", []) // lost commits (MUST-M14)
+            .unwrap();
+        let mut raw = raw::open(p).unwrap();
+        for i in 0..2 {
+            raw.append(&raw::test_event(&format!("new zn{i}x")))
+                .unwrap();
+        }
+        drop(raw);
+        export(p).unwrap();
+        damage_raw(p);
+        crate::worker::run_once(p).unwrap(); // restored from the backups
+        let raw = raw::open(p).unwrap();
+        let bodies: Vec<String> = raw
+            .after(raw.device(), 0, 100)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r.item {
+                raw::Item::Event(e) => Some(e.body),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bodies.len(), 8, "{bodies:?}");
+        assert!(
+            bodies[7].contains("zn1x") && !bodies.iter().any(|b| b.contains("zq009x")),
+            "{bodies:?}"
         );
     }
 

@@ -28,24 +28,27 @@ pub fn consumers() -> Vec<Box<dyn Consumer>> {
 
 /// Runs each consumer from its checkpoint until none advances; each step and its checkpoint move
 /// share one knowledge.db transaction.
+#[cfg(test)] // the worker checks the backup deadline between passes
 pub fn drain(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> Result<()> {
+    while pass(raw, k, consumers)? {}
+    Ok(())
+}
+
+/// One batch for each consumer: whether any advanced.
+fn pass(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> Result<bool> {
     let device = raw.device().to_owned();
-    loop {
-        let mut advanced = false;
-        for c in consumers.iter_mut() {
-            let tx = k.transaction()?;
-            let at = checkpoint::get(&tx, c.name(), &device)?;
-            let next = c.step(raw, &tx, at)?;
-            if next > at {
-                checkpoint::set(&tx, c.name(), &device, next)?;
-                advanced = true;
-            }
-            tx.commit()?;
+    let mut advanced = false;
+    for c in consumers.iter_mut() {
+        let tx = k.transaction()?;
+        let at = checkpoint::get(&tx, c.name(), &device)?;
+        let next = c.step(raw, &tx, at)?;
+        if next > at {
+            checkpoint::set(&tx, c.name(), &device, next)?;
+            advanced = true;
         }
-        if !advanced {
-            return Ok(());
-        }
+        tx.commit()?;
     }
+    Ok(advanced)
 }
 
 /// The per-home worker lock, `<home>/state/worker.lock`; released when dropped.
@@ -100,15 +103,22 @@ pub fn run_with(
     let raw = crate::backup::open_raw(home)?;
     let mut k = crate::backup::open_knowledge(home)?;
     checkpoint::rewind(&raw, &k, &mut consumers)?;
+    crate::backup::check(home, &raw);
     // ponytail: D11's 30-minute deadline in memory; every idle exit backs up too, so a lost
-    // deadline only brings the next backup forward.
+    // deadline only brings the next backup forward. It is checked between batches and while
+    // idle, so neither a long backlog nor a long idle wait puts it off.
     let mut next_backup = Instant::now() + crate::backup::EVERY;
-    loop {
-        drain(&raw, &mut k, &mut consumers)?;
+    let mut due = |raw: &Raw| {
         if Instant::now() >= next_backup {
-            crate::backup::run(home, &raw);
+            crate::backup::run(home, raw);
             next_backup = Instant::now() + crate::backup::EVERY;
         }
+    };
+    loop {
+        while pass(&raw, &mut k, &mut consumers)? {
+            due(&raw);
+        }
+        due(&raw);
         let seen = raw.max_seq()?;
         let deadline = Instant::now() + Duration::from_millis(idle_ms);
         let mut more = false;
@@ -118,11 +128,7 @@ pub fn run_with(
                 more = true;
                 break;
             }
-            // An idle wait longer than the backup interval still backs up on time.
-            if Instant::now() >= next_backup {
-                crate::backup::run(home, &raw);
-                next_backup = Instant::now() + crate::backup::EVERY;
-            }
+            due(&raw);
         }
         if more {
             continue;
