@@ -90,7 +90,8 @@ The in-process numbers move by 25% between identical runs on this machine (load 
 - A record a tombstone masks is exported with its ledger rows' `field` replaced by `~tombstoned`: the field is a JSON pointer that names keys of the body, which the tombstone may cover.
 - A damaged knowledge.db (and its `-wal`, `-shm`) is moved aside the same way and started empty; every consumer rebuilds from seq 0. raw.db and the segments are not touched.
 - doctor: the backup directory, how many segments and through which seq of raw's highest, each segment whose checksum does not match or is missing, a warning when the data or backup directory is inside OneDrive, iCloud Drive, Dropbox or Google Drive, the last restore, and raw.db's full `integrity_check` (doctor only, never on an automatic path). A bad segment or a failed check turns doctor red.
-- Not yet: a hook starts the worker only after a write that succeeded, so a damaged raw.db is restored at the next worker run that something else starts. With #104 in, a hook whose write failed also starts the worker (part b). The rescan rewriting sealed segments (#83) follows Task 7's part b.
+- A hook starts the worker after a written row, and also after a write that failed because raw.db is damaged (SQLITE_CORRUPT or SQLITE_NOTADB): the failure is marked (MUST-M16) and the worker restores the file. Other write failures (a full disk, busy) start none. Test: `tests/damaged_raw.rs`, through the binary.
+- Not yet: the rescan rewriting sealed segments (#83) follows Task 7's part b.
 
 ## The manifest (Task 9, 2026-09-27)
 

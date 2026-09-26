@@ -380,7 +380,7 @@ pub fn restore(home: &Path) -> Result<String> {
 }
 
 /// Whether an error says the database file is damaged (not busy, not missing).
-fn corrupt(e: &anyhow::Error) -> bool {
+pub fn corrupt(e: &anyhow::Error) -> bool {
     e.chain().any(|c| {
         c.downcast_ref::<rusqlite::Error>().is_some_and(|r| {
             matches!(
