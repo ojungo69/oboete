@@ -418,12 +418,13 @@ def panel():
                 if (i, member) in done:
                     continue
                 try:
-                    value = parse_answer(chat(member, prompt)[0], allowed)
+                    text, model = chat(member, prompt)
+                    value = parse_answer(text, allowed)
                 except (OSError, ValueError, KeyError) as e:      # left for the next run
                     print(f'{i} {member}: {type(e).__name__} {str(e)[:120]}', file=sys.stderr)
                     continue
                 with open(path, 'a') as f:
-                    f.write(json.dumps({'id': i, 'judge': member, 'value': value,
+                    f.write(json.dumps({'id': i, 'judge': member, 'value': value, 'model': model,
                                         'why': 'unknown' if i in unknown else 'overlap'}) + '\n')
     print('panel done; rerun if any call failed')
 
@@ -433,9 +434,10 @@ def report():
     for name, yes in (('dev-decisions', 'yes'), ('dev-pairs', 'overturns')):
         answers = {i: v for i, (v, _) in standing(name).items()}
         path = f'{LABELS}/{name}.panel.jsonl'
-        votes = {}
+        votes, models = {}, {}
         for r in read_jsonl(path) if os.path.exists(path) else []:
             votes.setdefault(r['id'], {})[r['judge']] = r['value'] == yes
+            models.setdefault(r['judge'], set()).add(r.get('model'))
         # A majority only from all five judges. Every target `panel` should have asked counts: one
         # with fewer votes, none included, is reported as missing, never quietly dropped.
         keys = [k['id'] for k in read_jsonl(f'{LABELS}/{name}.key.jsonl')]
@@ -454,6 +456,9 @@ def report():
         out[name] = {'owner': counts, 'panel_incomplete': missing, 'panel_on_unknown': {
             i: majority(list(v.values())) for i, v in votes.items() if answers.get(i) == 'unknown'},
             'overlap': agree,
+            # spec 8.1: a judge whose model changed mid-run (or was not reported) needs a new calibration.
+            'models': {j: sorted(m or '(not reported)' for m in ms) for j, ms in models.items()},
+            'one_model_per_judge': all(len(ms) == 1 and None not in ms for ms in models.values()),
             'what': 'agreement with the owner on the owner\'s own decisions, not a check of technical relevance'}
     with open(f'{LABELS}/dev-labels.result.json', 'w') as f:
         json.dump(out, f, indent=1, ensure_ascii=False)
@@ -514,12 +519,15 @@ if __name__ == '__main__':
             if chosen is None:
                 sys.exit('the blind repeat opens a week after the last answer, once 20 items are answered'
                          + (f': {time.strftime("%Y-%m-%d", time.localtime(last + WEEK))}' if last else ''))
+            # The earlier answers as they stand now: a later correction must not move the comparison.
+            write_jsonl(f'{LABELS}/dev-repeat-20.key.jsonl', [{'id': c['id'], 'earlier': answers[c['id'][1:]][0]} for c in chosen])
             write_jsonl(f'{TASKS}/dev-repeat-20.jsonl', chosen)
             print(f'{len(chosen)} items -> {TASKS}/dev-repeat-20.jsonl')
         else:
             again = {i[1:]: v for i, (v, _) in standing('dev-repeat-20').items() if v != 'unknown'}
             yes = {'yes', 'overturns'}
-            rated = [(answers[i][0] in yes, v in yes) for i, v in again.items() if i in answers]
+            earlier = {k['id'][1:]: k['earlier'] for k in read_jsonl(f'{LABELS}/dev-repeat-20.key.jsonl')}
+            rated = [(earlier[i] in yes, v in yes) for i, v in again.items() if i in earlier]
             shown = [i['id'] for i in read_jsonl(f'{TASKS}/dev-repeat-20.jsonl')]
             given = standing('dev-repeat-20')
             result = {'complete': all(i in given for i in shown), 'answered': sum(i in given for i in shown), 'of': len(shown),

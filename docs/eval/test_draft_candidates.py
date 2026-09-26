@@ -154,4 +154,4 @@ def test_panel_parses_the_text_of_each_completion(monkeypatch, tmp_path):
     (tmp_path / 'dev-pairs.key.jsonl').write_text('')
     draft_candidates.panel()
     rows = [json.loads(l) for l in (tmp_path / 'dev-decisions.panel.jsonl').read_text().splitlines()]
-    assert [(r['judge'], r['value'], r['why']) for r in rows] == [('j1', 'yes', 'unknown'), ('j2', 'yes', 'unknown')]
+    assert [(r['judge'], r['value'], r['model']) for r in rows] == [('j1', 'yes', 'j1-model'), ('j2', 'yes', 'j2-model')]
