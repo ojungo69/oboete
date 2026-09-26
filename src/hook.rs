@@ -82,9 +82,10 @@ fn run_io(
         {
             return Ok(None);
         }
+        // Creating the home is part of the attempt: a home that cannot be made is a failure too.
+        tried = crate::capture::PORTED.contains(&agent);
         std::fs::create_dir_all(home)?;
-        if crate::capture::PORTED.contains(&agent) {
-            tried = true;
+        if tried {
             // Design B: nothing is injected until the manifest (milestone 2 Task 9).
             wrote = record(
                 &mut crate::raw::open(home)?,
@@ -127,7 +128,13 @@ fn run_io(
         if event == "SessionStart"
             && crate::capture::PORTED.contains(&agent)
             && out.is_none()
-            && let Some(failed) = crate::failure::since(home)
+            // No marker when even the marker could not be written: this call's error, then.
+            && let Some(failed) = crate::failure::since(home).or_else(|| {
+                result
+                    .as_ref()
+                    .err()
+                    .map(|e| (crate::failure::classify(e), ended))
+            })
         {
             let text = crate::failure::line(failed);
             out = Some(
@@ -886,6 +893,18 @@ mod tests {
         assert_eq!(crate::failure::since(home), None);
         let raw = crate::raw::open(home).unwrap();
         assert_eq!(raw.max_seq().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_home_that_cannot_be_made_is_reported_at_session_start() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file"), "").unwrap();
+        let home = dir.path().join("file").join("home"); // under a file: no directory, no marker
+        let start = br#"{"session_id":"s"}"#;
+        let mut out = Vec::new();
+        assert!(run_io(&home, "claude", "SessionStart", &start[..], &mut out).is_err());
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("recording has failed since"), "{out}");
     }
 
     /// Payload shapes from the Cursor event table, with all paths kept inside the test repo.

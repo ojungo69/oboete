@@ -146,12 +146,7 @@ pub fn mark(home: &Path, class: Class, at: i64) {
         } else {
             class
         };
-    let new = State::Failed {
-        class,
-        first: at,
-        last: at,
-    };
-    let written = transition(home, |s| match s {
+    let _ = transition(home, |s| match s {
         Some(State::Ok(ok)) if ok > at => None,
         Some(State::Failed { class, first, last }) => Some(State::Failed {
             class,
@@ -164,11 +159,6 @@ pub fn mark(home: &Path, class: Class, at: i64) {
             last: at,
         }),
     });
-    if written.is_err() {
-        // Never prepared (the first write failed): creating it may fail on a full disk too.
-        let _ = std::fs::create_dir_all(home.join("state"));
-        let _ = std::fs::write(marker(home), new.text());
-    }
 }
 
 pub fn since(home: &Path) -> Option<(Class, i64)> {
@@ -190,15 +180,20 @@ pub fn clear(home: &Path, at: i64) {
 }
 
 /// The marker read, changed by `change` (`None` leaves it) and written back in place, under the
-/// file's lock, so two hooks cannot interleave their read and write.
+/// file's lock, so two hooks cannot interleave their read and write. Created when missing (the
+/// first write failed before any `prepare`), under the same lock: creating it may fail on a full
+/// disk too.
 fn transition(
     home: &Path,
     change: impl FnOnce(Option<State>) -> Option<State>,
 ) -> std::io::Result<()> {
     use std::io::{Read, Seek, Write};
+    std::fs::create_dir_all(home.join("state"))?;
     let mut f = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
+        .create(true)
+        .truncate(false)
         .open(marker(home))?;
     f.lock()?;
     let mut buf = Vec::new();
@@ -425,6 +420,17 @@ mod tests {
         assert_eq!(since(home), Some((Class::Busy, 5)));
         clear(home, 6);
         assert_eq!(since(home), None);
+    }
+
+    #[test]
+    fn the_first_marker_is_created_under_the_lock_and_ordered_like_any_other() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path().join("never-prepared");
+        clear(&home, 20); // a success that ended later reached the marker first
+        mark(&home, Class::Io, 10);
+        assert_eq!(since(&home), None);
+        mark(&home, Class::Io, 30);
+        assert_eq!(since(&home), Some((Class::Io, 30)));
     }
 
     #[test]
