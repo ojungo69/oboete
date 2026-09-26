@@ -45,9 +45,13 @@ impl Consumer for Rescan {
     /// which the worker takes from any consumer.
     fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> {
         schema(k)?;
-        // Settings that do not load stop capture too, and doctor names them: nothing to do.
+        // Settings that do not load stop capture too, and doctor names them. The batch is passed
+        // over (a checkpoint that never moves keeps the worker from exiting), and the version is
+        // forgotten, so the first pass that loads them scans raw again from seq 1.
         let Ok(settings) = crate::capture::Settings::load(&self.home) else {
-            return Ok(after);
+            k.execute("DELETE FROM rescan WHERE device = ?1", [raw.device()])?;
+            let recs = raw.after(raw.device(), after, BATCH)?;
+            return Ok(recs.last().map_or(after, |r| r.seq));
         };
         let version = settings.rules.version();
         let device = raw.device();
@@ -155,6 +159,27 @@ mod tests {
         worker::run_once(p).unwrap();
         assert_eq!(tombstones(&raw), 1);
         assert!(!body(&raw, old).contains("acme"));
+    }
+
+    #[test]
+    fn settings_that_do_not_load_neither_hold_the_worker_nor_skip_a_record() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        let rule = "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n";
+        std::fs::write(p.join("config.toml"), rule).unwrap();
+        worker::run_once(p).unwrap(); // the rescan's version is this rule's
+        // Stored under other rules (appended here without capture's gate).
+        let seq = raw
+            .append(&raw::test_event(r#"{"prompt":"deploy acme-123456 now"}"#))
+            .unwrap();
+        std::fs::write(p.join("config.toml"), "[redaction\n").unwrap();
+        worker::run_once(p).unwrap(); // returns: the rescan passes over the batch
+        assert_eq!(tombstones(&raw), 0);
+        // The same rule back: the same version, and still the record passed over is scanned.
+        std::fs::write(p.join("config.toml"), rule).unwrap();
+        worker::run_once(p).unwrap();
+        assert_eq!(body(&raw, seq), r#"{"prompt":"deploy *********** now"}"#);
     }
 
     #[test]
