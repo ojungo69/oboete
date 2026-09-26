@@ -461,12 +461,14 @@ def report():
             pairs = [p for p in pairs if p[1] is not None]
             agree[judge] = {'n': len(pairs), 'kappa': kappa(pairs) if pairs else None,
                             'agreement': sum(a == b for a, b in pairs) / len(pairs) if pairs else None}
+        # spec 8.1: a judge whose model changed mid-run (or was not reported) needs a new calibration,
+        # so its votes give no labels and no agreement.
+        one_model = all(len(models.get(j, ())) == 1 and None not in models[j] for j in PANEL)
         out[name] = {'owner': counts, 'panel_incomplete': missing, 'panel_on_unknown': {
-            i: majority(list(v.values())) for i, v in votes.items() if answers.get(i) == 'unknown'},
-            'overlap': agree,
-            # spec 8.1: a judge whose model changed mid-run (or was not reported) needs a new calibration.
+            i: majority(list(v.values())) for i, v in votes.items() if answers.get(i) == 'unknown'} if one_model else None,
+            'overlap': agree if one_model else None,
             'models': {j: sorted(m or '(not reported)' for m in ms) for j, ms in models.items()},
-            'one_model_per_judge': all(len(models.get(j, ())) == 1 and None not in models[j] for j in PANEL),
+            'one_model_per_judge': one_model,
             'what': 'agreement with the owner on the owner\'s own decisions, not a check of technical relevance'}
     with open(f'{LABELS}/dev-labels.result.json', 'w') as f:
         json.dump(out, f, indent=1, ensure_ascii=False)
