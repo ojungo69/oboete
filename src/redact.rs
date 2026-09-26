@@ -142,7 +142,52 @@ pub struct Finding {
 
 /// `text` masked, with its findings.
 pub fn scan(text: &str) -> (String, Vec<Finding>) {
-    mask(text, spans(text))
+    let (mut masked, mut found) = mask(text, spans(text));
+    if !found.is_empty() {
+        rescan(&mut masked, &mut found);
+    }
+    (masked, found)
+}
+
+/// Passes over masked text before `rescan` hides whole matches; each pass must mask something new.
+const MAX_PASSES: usize = 64;
+
+/// Scan `masked` again until a pass finds nothing. A rule with a greedy context (curl-auth-user's
+/// `.*`) finds only the last secret on a line per pass, and a cut can leave a line shorter than
+/// the one a line-scoped allowlist judged (v1's `clip` scanned twice for that). Each earlier
+/// finding moves by what the runs before it changed, or to the start of a new mask covering it.
+/// A line still finding after `MAX_PASSES` gets one last pass that masks each whole match (from
+/// `curl` to the credential), so what is left unscanned is hidden, not kept.
+fn rescan(masked: &mut String, found: &mut Vec<Finding>) {
+    for pass in 0..=MAX_PASSES {
+        let again = spans_of(masked, pass == MAX_PASSES);
+        if again.is_empty() {
+            break;
+        }
+        let runs = merged(&again);
+        let (next, more) = mask(masked, again);
+        if next == *masked {
+            break; // a rule matching its own mask: nothing new to hide
+        }
+        for f in found.iter_mut() {
+            let mut shift = 0isize;
+            let mut at = f.offset;
+            for &(s, e) in &runs {
+                if e <= f.offset {
+                    shift += MASK.len() as isize - (e - s) as isize;
+                } else {
+                    if s <= f.offset {
+                        at = s;
+                    }
+                    break;
+                }
+            }
+            f.offset = (at as isize + shift) as usize;
+        }
+        *masked = next;
+        found.extend(more);
+    }
+    found.sort_by_key(|f| f.offset);
 }
 
 /// `text` whole when it is at most `cap` bytes. Above that, only its first and last `cap / 2`
@@ -154,11 +199,11 @@ pub fn scan(text: &str) -> (String, Vec<Finding>) {
 /// dropped from the part that holds it; then the stored text is scanned once more, so line-scoped
 /// allowlists judge the lines as they are stored (as v1's `clip` did).
 pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usize>) {
-    let all = spans(text);
     if text.len() <= cap {
-        let (masked, found) = mask(text, all);
+        let (masked, found) = scan(text);
         return (masked, found, None);
     }
+    let all = spans(text);
     let runs = merged(&all);
     let half = cap / 2;
     let mut head_end = text.floor_char_boundary(half);
@@ -197,7 +242,7 @@ pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usiz
     }
     if head_end >= tail_start {
         // The cuts met (a secret or a key block spans the middle): keep it whole.
-        let (masked, found) = mask(text, all);
+        let (masked, found) = scan(text);
         return (masked, found, None);
     }
     let (head, mut found) = mask(
@@ -221,29 +266,8 @@ pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usiz
         offset: f.offset + base,
         ..f
     }));
-    let kept = head + &marker + &tail;
-    // Second pass: each earlier finding moves by what the runs before it changed, or to the start
-    // of a new mask that covers it.
-    let again = spans(&kept);
-    let runs = merged(&again);
-    for f in &mut found {
-        let mut shift = 0isize;
-        let mut at = f.offset;
-        for &(s, e) in &runs {
-            if e <= f.offset {
-                shift += MASK.len() as isize - (e - s) as isize;
-            } else {
-                if s <= f.offset {
-                    at = s;
-                }
-                break;
-            }
-        }
-        f.offset = (at as isize + shift) as usize;
-    }
-    let (stored, more) = mask(&kept, again);
-    found.extend(more);
-    found.sort_by_key(|f| f.offset);
+    let mut stored = head + &marker + &tail;
+    rescan(&mut stored, &mut found);
     (stored, found, Some(text.len()))
 }
 
@@ -259,6 +283,11 @@ pub fn ruleset() -> &'static str {
 
 /// Secret spans in `text`: (start, end, rule index), unmerged, as gitleaks finds them.
 fn spans(text: &str) -> Vec<(usize, usize, usize)> {
+    spans_of(text, false)
+}
+
+/// `spans`, or with `whole` each match's full range instead of its secret.
+fn spans_of(text: &str, whole: bool) -> Vec<(usize, usize, usize)> {
     let r = rules();
     let mut hit = vec![false; r.rules.len()];
     // Overlapping: "sk" (twilio) inside "gsk_" (groq) must not hide the longer keyword.
@@ -277,27 +306,28 @@ fn spans(text: &str) -> Vec<(usize, usize, usize)> {
             continue;
         };
         for caps in re.captures_iter(text) {
-            let whole = caps.get(0).expect("group 0");
+            let all = caps.get(0).expect("group 0");
             let secret = match rule.secret_group {
                 Some(g) => caps.get(g),
                 None => (1..caps.len())
                     .find_map(|i| caps.get(i))
                     .filter(|m| !m.is_empty()),
             }
-            .unwrap_or(whole);
+            .unwrap_or(all);
             if let Some(min) = rule.entropy
                 && shannon_entropy(secret.as_str()) <= min
             {
                 continue;
             }
-            let line = line_of(text, whole.start());
+            let line = line_of(text, all.start());
             let allowed = rule
                 .allowlists
                 .iter()
                 .chain(std::iter::once(&r.global))
-                .any(|a| allows(a, secret.as_str(), whole.as_str(), line));
+                .any(|a| allows(a, secret.as_str(), all.as_str(), line));
             if !allowed {
-                spans.push((secret.start(), secret.end(), i));
+                let hide = if whole { all } else { secret };
+                spans.push((hide.start(), hide.end(), i));
             }
         }
     }
@@ -565,6 +595,46 @@ mod tests {
             "the tail kept the password"
         );
         check(&stored, &found, pass);
+    }
+
+    #[test]
+    fn every_credential_on_a_greedy_line_is_masked() {
+        // curl-auth-user's `.*` reaches the last `-u` of a line: one pass finds one credential.
+        let creds = [
+            "usr:q9Zx8mL2vB4nR7tYw",
+            "adm:K3pS6dJ0aF5hU2cE",
+            "ops:Z6bD4kM7oQ1sV3xa",
+            "dev:W8eR2tY6uI0pL4k",
+        ];
+        let line: String = creds
+            .iter()
+            .map(|c| format!("curl -u '{c}' https://x ; "))
+            .collect();
+        let (stored, found) = scan(&line);
+        for c in creds {
+            assert!(!stored.contains(c), "{c} kept: {stored}");
+        }
+        check(&stored, &found, creds[0]);
+        assert!(spans(&stored).is_empty());
+        // The same across a cut: head, middle and tail each hold some.
+        let cap = 64 * 1024;
+        let text = line.clone() + &" ".repeat(3 * cap) + &line + "\n" + &"t".repeat(cap / 4);
+        let (stored, found, cut) = scan_capped(&text, cap);
+        assert!(cut.is_some());
+        for c in creds {
+            assert!(!stored.contains(c), "{c} kept across the cut");
+        }
+        check(&stored, &found, creds[1]);
+        assert!(spans(&stored).is_empty());
+        // More than MAX_PASSES on one line: the last pass hides each whole match.
+        let line: String = (0..MAX_PASSES + 6)
+            .map(|i| format!("curl -u '{}' https://x ; ", creds[i % 4]))
+            .collect();
+        let (stored, found) = scan(&line);
+        for c in creds {
+            assert!(!stored.contains(c), "{c} kept past the pass limit");
+        }
+        check(&stored, &found, creds[2]);
     }
 
     #[test]

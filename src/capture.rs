@@ -136,9 +136,6 @@ struct Gate {
 
 impl Gate {
     fn text(&mut self, field: &str, s: &str) -> String {
-        // A field names a place, not content: a long key's pointer is cut short, so thousands
-        // of findings under it cannot multiply its size.
-        let field = &field[..field.floor_char_boundary(512)];
         let (stored, found, full) = redact::scan_capped(s, MAX_FIELD_BYTES);
         if let Some(n) = full {
             *self.cut.get_or_insert(0) += n as i64;
@@ -164,7 +161,7 @@ impl Gate {
                     .map(|(k, x)| {
                         // The pointer is built from the stored key, so it never holds a secret.
                         let key = self.text(&format!("{path}#key"), &k);
-                        let child = format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
+                        let child = format!("{path}/{}", segment(&key));
                         let x = self.value(&child, x);
                         (key, x)
                     })
@@ -173,6 +170,21 @@ impl Gate {
             other => other,
         }
     }
+}
+
+/// A key as one JSON pointer segment (`~0`, `~1` escaped). A key over 128 bytes is named by
+/// `~sha:` and the first 16 hex digits of its sha256 instead: thousands of findings under a huge
+/// key would otherwise each copy it into the ledger. `~s` is no valid escape, so the name
+/// cannot be mistaken for a key.
+fn segment(key: &str) -> String {
+    if key.len() > 128 {
+        let sha: String = Sha256::digest(key.as_bytes())[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        return format!("~sha:{sha}");
+    }
+    key.replace('~', "~0").replace('/', "~1")
 }
 
 /// A tool field as text: `clean`, then flattened. `Gate` scans it with the rest of the body.
@@ -462,6 +474,28 @@ mod tests {
             end[0].ledger
         );
         assert!(!format!("{:?}", end[0]).contains(&key));
+    }
+
+    #[test]
+    fn a_huge_key_is_named_by_its_hash_in_the_ledger() {
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let big = "k".repeat(250_000);
+        let inner: Map<String, Value> = (0..50).map(|i| (format!("n{i}"), json!(key))).collect();
+        let e = &events(
+            "claude",
+            "SessionEnd",
+            &json!({"reason": {big.clone(): inner}}),
+            0,
+        )[0];
+        assert_eq!(e.ledger.len(), 50);
+        for (field, _) in &e.ledger {
+            assert!(
+                field.starts_with("/reason/~sha:") && field.len() < 64,
+                "{}",
+                &field[..60.min(field.len())]
+            );
+        }
+        assert_eq!(segment("a/b~c"), "a~1b~0c");
     }
 
     #[test]
