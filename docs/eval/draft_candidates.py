@@ -14,7 +14,7 @@ the owner's own message, and may always answer 判断できない; the panel of 
   draft_candidates.py agreement               the owner against their own earlier answers
 Every line sent passes `oboete gate`; a quote must appear verbatim in the gated line it cites.
 Answers are cached per prompt, so a run stopped by its call budget resumes where it stopped."""
-import hashlib, json, os, re, subprocess, sys, time
+import concurrent.futures, hashlib, json, os, re, subprocess, sys, threading, time
 
 from calib import PANEL, chat, kappa, majority
 from common import E, SEED, claude_json, clean_env, gate, h, owner_only, read_jsonl, write_jsonl
@@ -412,6 +412,7 @@ def panel():
         unknown, sample = panel_targets(list(keys), answers)
         path = f'{LABELS}/{name}.panel.jsonl'
         done = {(r['id'], r['judge']) for r in read_jsonl(path)} if os.path.exists(path) else set()
+        prompts = {}
         for i in unknown + sample:
             k = keys[i]
             if name == 'dev-decisions':
@@ -421,8 +422,11 @@ def panel():
                 prompt = PANEL_PAIR.format(earlier_ts=a['ts'][:10], earlier=a['statement'], earlier_context=context(a),
                                            later_ts=b['ts'][:10], later=b['statement'], later_context=context(b))
                 allowed = set(RELATIONS)
-            prompt = gate(prompt)
-            for member in PANEL:
+            prompts[i] = gate(prompt), allowed
+        lock = threading.Lock()
+
+        def judge(member):     # one thread per judge, as in calib.py: a slow maker does not hold the others
+            for i, (prompt, allowed) in prompts.items():
                 if (i, member) in done:
                     continue
                 try:
@@ -431,9 +435,12 @@ def panel():
                 except (OSError, ValueError, KeyError) as e:      # left for the next run
                     print(f'{i} {member}: {type(e).__name__} {str(e)[:120]}', file=sys.stderr)
                     continue
-                with open(path, 'a') as f:
+                with lock, open(path, 'a') as f:
                     f.write(json.dumps({'id': i, 'judge': member, 'value': value, 'model': model,
                                         'why': 'unknown' if i in unknown else 'overlap'}) + '\n')
+
+        with concurrent.futures.ThreadPoolExecutor(len(PANEL)) as pool:
+            list(pool.map(judge, PANEL))
     print('panel done; rerun if any call failed')
 
 
