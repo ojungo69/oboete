@@ -17,9 +17,9 @@ pub trait Consumer {
     fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()>;
 }
 
-/// This milestone's consumers, in order. Empty until Task 6 adds the first.
+/// This milestone's consumers, in order.
 pub fn consumers() -> Vec<Box<dyn Consumer>> {
-    Vec::new()
+    vec![Box::new(crate::consumer::fts::Fts)]
 }
 
 /// Runs each consumer from its checkpoint until none advances; each step and its checkpoint move

@@ -5,6 +5,7 @@
 
 mod capture;
 mod config;
+mod consumer;
 mod db;
 mod embed;
 mod hook;
@@ -226,12 +227,28 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         }
         Cmd::Mcp => mcp::run(&home),
         Cmd::Search { query, all, limit } => {
-            let conn = db::open(&home)?;
             let query = query.join(" ");
+            let scope = repo_filter(all)?;
+            if !home.join("oboete.db").exists() {
+                // Design B's none tier (milestone 2 Task 6): the raw index, by (device, seq).
+                let mut out = String::new();
+                for h in search::raw(&home, &query, scope.as_deref(), limit)? {
+                    let repo = match (all, &h.repo) {
+                        (true, Some(r)) => format!("[{}] ", r.rsplit('/').next().unwrap_or(r)),
+                        _ => String::new(),
+                    };
+                    let device: String = h.device.chars().take(8).collect();
+                    out.push_str(&format!(
+                        "{device}:{:<5} {}  {:<10} {repo}{}\n",
+                        h.seq, h.when, h.kind, h.snippet
+                    ));
+                }
+                return emit(&out);
+            }
+            let conn = db::open(&home)?;
             let terms = search::terms(&query);
             let mut out = String::new();
             let embedding = config::search_embedding(&home);
-            let scope = repo_filter(all)?;
             for h in search::find(&conn, &embedding, &query, scope.as_deref(), limit)? {
                 let text = search::snippet(&h.body, &terms, 110);
                 let repo = if all {
