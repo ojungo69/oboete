@@ -127,6 +127,15 @@ impl Consumer for Manifest {
                          WHERE device = ?1 AND seq = ?2",
                         params![d, seq],
                     )?;
+                    // Every checkout of its repo, as for a new record: a directive or a session
+                    // shows on the repo's other branches too.
+                    k.execute(
+                        "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device)
+                         SELECT repo, branch, device FROM manifests
+                         WHERE device = ?1 AND repo IN
+                           (SELECT repo FROM manifest_facts WHERE device = ?1 AND seq = ?2)",
+                        params![d, seq],
+                    )?;
                     k.execute(
                         "DELETE FROM manifest_facts WHERE device = ?1 AND seq = ?2",
                         params![d, seq],
@@ -958,6 +967,46 @@ mod tests {
         assert_eq!(what_ran(r#"{"cmd": "rg fetchJson"}"#), "rg fetchJson");
         let windows = serde_json::json!({"file_path": "C:\\repo\\src\\a.rs"});
         assert_eq!(paths(&windows, Some("C:\\repo\\")), vec!["src/a.rs"]);
+    }
+
+    #[test]
+    fn a_tombstoned_directive_leaves_every_branch_of_its_repo() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        store
+            .append(&ev(
+                "prompt",
+                "s1",
+                60_000,
+                cwd.path(),
+                serde_json::json!({"prompt": "look at main"}),
+            ))
+            .unwrap();
+        let on_feature = store
+            .append(&Event {
+                branch: Some("feature".into()),
+                ..ev(
+                    "prompt",
+                    "s2",
+                    120_000,
+                    cwd.path(),
+                    serde_json::json!({"prompt": "always run zqxlint first"}),
+                )
+            })
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        assert!(manifest(home.path()).0.contains("zqxlint"));
+        let device = store.device().to_owned();
+        store
+            .append_tombstone(Target::Record {
+                device,
+                seq: on_feature,
+            })
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        let main = manifest(home.path()).0;
+        assert!(!main.contains("zqxlint"), "{main}");
     }
 
     #[test]
