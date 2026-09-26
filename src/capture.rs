@@ -477,6 +477,55 @@ mod tests {
     }
 
     #[test]
+    fn secrets_behind_json_escapes_in_tool_fields_are_masked() {
+        // A tool field is stored as flattened JSON: its quotes and line breaks become `\"`, `\n`.
+        let b64 = format!("dXNyOnE5Wng4{}", "bUwydkI0blI3dFl3");
+        let pass = format!("q9Zx8mL2{}", "vB4nR7tY1wK3");
+        let api = format!("k7Fq2Lp9{}", "Xw3Rt8Vn5Bz1Mc6D");
+        let cases = [
+            // Bash stdout holding JSON (an API's answer, a config file)
+            (
+                json!({"command": "cat cfg.json"}),
+                json!({"stdout": format!("{{\"Authorization\":\"Basic {b64}\"}}"), "stderr": ""}),
+                &b64,
+            ),
+            // curl's -u and -H in double quotes
+            (
+                json!({"command": format!("curl -u \"admin:{pass}\" https://x.invalid/")}),
+                json!({"stdout": "ok"}),
+                &pass,
+            ),
+            (
+                json!({"command": format!("curl -H \"X-Api-Key: {api}\" https://x.invalid/")}),
+                json!({"stdout": "ok"}),
+                &api,
+            ),
+            // A key and its value side by side: why tool fields stay flattened
+            (
+                json!({"api_key": api.clone(), "q": "x"}),
+                json!({"stdout": "ok"}),
+                &api,
+            ),
+        ];
+        for (input, output, secret) in cases {
+            let payload = json!({"session_id": "s", "tool_name": "Bash",
+                "tool_input": input, "tool_response": output});
+            let c = &events("claude", "PostToolUse", &payload, 0)[0];
+            assert!(
+                !format!("{c:?}").contains(secret.as_str()),
+                "{}",
+                c.event.body
+            );
+            assert!(!c.ledger.is_empty());
+            let b = body(&c.event);
+            for (field, f) in &c.ledger {
+                let text = b[&field[1..]].as_str().unwrap();
+                assert_eq!(&text[f.offset..f.offset + "[REDACTED]".len()], "[REDACTED]");
+            }
+        }
+    }
+
+    #[test]
     fn a_huge_key_is_named_by_its_hash_in_the_ledger() {
         let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
         let big = "k".repeat(250_000);

@@ -131,7 +131,8 @@ pub fn redact(text: &str) -> String {
 }
 
 /// One secret masked in stored text: the rule that found it, where the mask hiding it starts in
-/// the stored (masked) text, and the secret's own length, both in bytes. Never the value. Two
+/// the stored (masked) text, and the secret's own length as stored (with any JSON escapes in it),
+/// both in bytes. Never the value. Two
 /// rules on one token share one mask, so they give two findings at the same offset.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Finding {
@@ -279,8 +280,71 @@ pub fn ruleset() -> &'static str {
     })
 }
 
-/// Secret spans in `text`: (start, end, rule index), unmerged, as gitleaks finds them.
+/// Secret spans in `text` and in its JSON-unescaped view, mapped back onto `text`: (start, end,
+/// rule index), unmerged. A tool field is stored as flattened JSON, where `\"` and `\n` hide the
+/// quotes and line breaks rules match on (curl's `-u "user:pass"`, a quoted header), and the whole
+/// output reads as one line to a line-scoped allowlist. Scanning both views can only add masks.
 fn spans(text: &str) -> Vec<(usize, usize, usize)> {
+    let mut all = spans_in(text);
+    if text.contains('\\') {
+        let (view, at) = unescaped(text);
+        all.extend(
+            spans_in(&view)
+                .into_iter()
+                .map(|(s, e, r)| (at[s], at[e], r)),
+        );
+        all.sort_unstable();
+        all.dedup();
+    }
+    all
+}
+
+/// `text` with one level of JSON string escapes decoded, and for each byte of the result the
+/// offset in `text` where the character it belongs to starts (one more entry: `text.len()`).
+/// ponytail: one level; a double-encoded string (JSON inside a JSON string inside a field) keeps
+/// its inner `\"`. Decode again if such payloads show up.
+fn unescaped(text: &str) -> (String, Vec<usize>) {
+    let mut view = String::with_capacity(text.len());
+    let mut at = Vec::with_capacity(text.len() + 1);
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
+        let (c, n) = escape(rest).unwrap_or_else(|| {
+            let c = rest.chars().next().expect("i is a char boundary");
+            (c, c.len_utf8())
+        });
+        at.extend(std::iter::repeat_n(i, c.len_utf8()));
+        view.push(c);
+        i += n;
+    }
+    at.push(text.len());
+    (view, at)
+}
+
+/// The character a JSON escape at the start of `s` stands for, and the escape's length.
+fn escape(s: &str) -> Option<(char, usize)> {
+    let c = match s.as_bytes().get(..2)? {
+        b"\\\"" => '"',
+        b"\\\\" => '\\',
+        b"\\/" => '/',
+        b"\\n" => '\n',
+        b"\\r" => '\r',
+        b"\\t" => '\t',
+        b"\\b" => '\u{8}',
+        b"\\f" => '\u{c}',
+        b"\\u" => {
+            let hex = s
+                .get(2..6)
+                .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))?;
+            return char::from_u32(u32::from_str_radix(hex, 16).ok()?).map(|c| (c, 6));
+        }
+        _ => return None,
+    };
+    Some((c, 2))
+}
+
+/// Secret spans in `text`: (start, end, rule index), unmerged, as gitleaks finds them.
+fn spans_in(text: &str) -> Vec<(usize, usize, usize)> {
     let r = rules();
     let mut hit = vec![false; r.rules.len()];
     // Overlapping: "sk" (twilio) inside "gsk_" (groq) must not hide the longer keyword.
