@@ -258,21 +258,10 @@ fn facts(k: &Connection, device: &str, seq: i64, e: &Event) -> Result<()> {
         // An interrupted call returned nothing: neither a failure nor the fix of one.
         "tool" if body.get("interrupted").and_then(Value::as_bool) == Some(true) => {}
         "tool" => {
+            // Every success, not only one after a failure of its call: a tombstone can change a
+            // failure's key later, and the build pairs them then.
             let key = call_key(&body);
-            if failed(&body) {
-                add("fail", &key)?;
-            } else if k
-                .query_row(
-                    "SELECT 1 FROM manifest_facts WHERE device = ?1 AND repo = ?2 AND fact = 'fail'
-                       AND branch = ?3 AND label = ?4 AND seq < ?5 LIMIT 1",
-                    params![device, repo, branch, key, seq],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some()
-            {
-                add("fixed", &key)?;
-            }
+            add(if failed(&body) { "fail" } else { "fixed" }, &key)?;
             let input: Value = serde_json::from_str(str_at(&body, "input")).unwrap_or(Value::Null);
             if todos(&input).is_some() {
                 add("todo", "")?;
@@ -1132,6 +1121,38 @@ mod tests {
             "## Other active sessions\n- session zzzzzzzz on dev, last at 10:01 UTC\n## As of\nnow\n"
         );
         assert_eq!(without_session(t, "other"), t);
+    }
+
+    #[test]
+    fn a_failure_a_new_rule_masks_is_paired_with_the_success_stored_masked() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut store = raw::open(home.path()).unwrap();
+        let run = |c: &str| serde_json::json!({"command": format!("deploy {c}")});
+        // The failure stored before the rule, its retry after it (masked at capture).
+        store
+            .append(&tool(cwd.path(), 1, "Bash", run("acme-123456"), "no", true))
+            .unwrap();
+        store
+            .append(&tool(
+                cwd.path(),
+                2,
+                "Bash",
+                run("***********"),
+                "ok",
+                false,
+            ))
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        assert!(shown(home.path(), &store).unwrap().contains("failed with"));
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        worker::run_once(home.path()).unwrap(); // the rescan masks the failure: same call now
+        let shown = shown(home.path(), &store).unwrap();
+        assert!(!shown.contains("failed with"), "{shown}");
     }
 
     #[test]
