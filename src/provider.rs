@@ -1179,10 +1179,8 @@ mod tests {
     #[test]
     fn a_failed_chain_keeps_no_error_body_in_provider_calls() {
         let canary = "要約の途中の文 canary-91-chain";
-        let home = std::env::temp_dir().join(format!("oboete-provider-91-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        let conn = crate::db::open(&home).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(home.path()).unwrap();
         let (url, _) = serve(
             "400 Bad Request",
             json!({"error": {"code": "json_validate_failed", "failed_generation": canary}})
@@ -1214,7 +1212,6 @@ mod tests {
             .unwrap();
         assert_eq!(details, ["http 400: json_validate_failed"]);
         drop(conn);
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
