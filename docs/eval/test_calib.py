@@ -83,3 +83,29 @@ def test_parse_grade_takes_fenced_or_reasoned_answers_only():
                 '{"grades": [{"id": "d", "grade": 1}, {"id": "d", "grade": 3}]}', '{"grades": [null]}', '{"grades": [1]}'):
         with pytest.raises(ValueError):
             parse_grade(bad)
+
+
+def test_a_429_waits_its_retry_after_unless_it_is_long(monkeypatch):
+    import io, json, urllib.error
+    import calib
+    from email.message import Message
+    def limited(after):
+        h = Message()
+        h['Retry-After'] = after
+        return urllib.error.HTTPError('u', 429, 'limit', h, io.BytesIO(b''))
+    class Reply(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+    replies, slept = [limited('7'), Reply(json.dumps({'choices': [{'message': {'content': 'ok'}}], 'model': 'm'}).encode())], []
+    def urlopen(req, timeout):
+        r = replies.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+    monkeypatch.setattr(calib.urllib.request, 'urlopen', urlopen)
+    monkeypatch.setattr(calib.time, 'sleep', slept.append)
+    assert calib.chat('glm-5.3', 'x') == ('ok', 'm') and slept == [8]
+    replies[:] = [limited('13809')]                     # a 5-hour limit: fail now, the next run takes it
+    with pytest.raises(urllib.error.HTTPError):
+        calib.chat('glm-5.3', 'x')
+    assert slept == [8]
