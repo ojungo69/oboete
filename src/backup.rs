@@ -255,9 +255,15 @@ pub fn restore(home: &Path) -> Result<String> {
         "no usable backup segment of device {device} in {}",
         dir.display()
     );
+    // A build left by a restore that stopped is made again: `.restoring` may be partial, and a
+    // `.restored` beside a raw.db still in place came from segments that may have changed since.
     let tmp = home.join("raw.db.restoring");
-    for ext in ["", "-journal"] {
-        let _ = std::fs::remove_file(home.join(format!("raw.db.restoring{ext}")));
+    for name in [
+        "raw.db.restoring",
+        "raw.db.restoring-journal",
+        "raw.db.restored",
+    ] {
+        let _ = std::fs::remove_file(home.join(name));
     }
     let mut rebuild = raw::Rebuild::new(&tmp, &device)?;
     let mut records = 0;
@@ -273,8 +279,10 @@ pub fn restore(home: &Path) -> Result<String> {
         }
     }
     rebuild.finish()?;
-    let kept = quarantine(home, "raw.db")?;
-    std::fs::rename(&tmp, home.join("raw.db"))?;
+    let whole = home.join("raw.db.restored");
+    std::fs::rename(&tmp, &whole)?;
+    // Everything that must not outlive the old raw.db goes before the swap, so a restore that
+    // stops at any point is either redone (raw.db still damaged) or complete.
     // Derived data is rebuilt from what was restored: a skipped segment leaves a gap below raw's
     // highest seq that the old index and checkpoints would still cover.
     if home.join("knowledge.db").exists() {
@@ -294,6 +302,8 @@ pub fn restore(home: &Path) -> Result<String> {
             }
         }
     }
+    let kept = quarantine(home, "raw.db")?;
+    std::fs::rename(&whole, home.join("raw.db"))?;
     #[cfg(unix)]
     std::fs::File::open(home)?.sync_all()?;
     let skipped: Vec<String> = bad
@@ -664,7 +674,7 @@ mod tests {
         assert!(t.elapsed() >= std::time::Duration::from_secs(1));
         drop(held);
         // Stopped after the damaged file was moved aside: the rebuilt one is renamed in.
-        std::fs::rename(p.join("raw.db"), p.join("raw.db.restoring")).unwrap();
+        std::fs::rename(p.join("raw.db"), p.join("raw.db.restored")).unwrap();
         for f in ["raw.db-wal", "raw.db-shm"] {
             let _ = std::fs::remove_file(p.join(f));
         }
@@ -673,6 +683,48 @@ mod tests {
             (raw.device().to_owned(), raw.max_seq().unwrap()),
             (device, 5)
         );
+    }
+
+    #[test]
+    fn a_tombstoned_key_never_reaches_a_segment_through_the_ledger() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        let mut raw = raw::open(p).unwrap();
+        let (masked, found) =
+            crate::redact::scan(&format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"));
+        let body = serde_json::json!({"trigger": {"zqx-private-words": masked}}).to_string();
+        let finding = found.into_iter().next().unwrap();
+        let seq = raw
+            .append_with_ledger(
+                &raw::test_event(&body),
+                &[("/trigger/zqx-private-words".into(), finding)],
+            )
+            .unwrap();
+        let at = body.find("zqx").unwrap() as i64;
+        raw.append_tombstone(raw::Target::Range {
+            device: raw.device().to_owned(),
+            seq,
+            offset: at,
+            length: 17,
+        })
+        .unwrap();
+        let lines = raw.export_lines(0, usize::MAX).unwrap();
+        assert!(!lines[0].1.contains("zqx"), "{}", lines[0].1);
+        assert!(lines[0].1.contains("~tombstoned"));
+    }
+
+    #[test]
+    fn a_partial_rebuild_is_never_renamed_in() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 3, 3);
+        // A build that stopped before its records were committed keeps the `.restoring` name.
+        std::fs::rename(p.join("raw.db"), p.join("raw.db.restoring")).unwrap();
+        for f in ["raw.db-wal", "raw.db-shm"] {
+            let _ = std::fs::remove_file(p.join(f));
+        }
+        assert_eq!(raw::open(p).unwrap().max_seq().unwrap(), 0);
+        assert!(p.join("raw.db.restoring").exists());
     }
 
     #[test]

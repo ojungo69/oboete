@@ -103,11 +103,11 @@ pub fn open(home: &Path) -> Result<Raw> {
     crate::db::private(home, 0o700);
     let swap = swap_lock(home, false, OPEN_WAIT)?;
     // A restore that stopped after moving the damaged file aside and before renaming the rebuilt
-    // one in: the rebuilt file is whole (it is committed before the damaged one moves), so the
-    // rename is finished here instead of creating an empty store.
-    let restoring = home.join("raw.db.restoring");
-    if !path.exists() && restoring.exists() {
-        let _ = std::fs::rename(&restoring, &path);
+    // one in: `raw.db.restored` is only ever a whole rebuild (it gets that name once its records
+    // are committed), so the rename is finished here instead of creating an empty store.
+    let restored = home.join("raw.db.restored");
+    if !path.exists() && restored.exists() {
+        let _ = std::fs::rename(&restored, &path);
     }
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     crate::db::wal(&conn, "FULL")?;
@@ -405,8 +405,25 @@ impl Raw {
                 return Ok(out);
             };
             let mut ledger = self.ledger_between(first.seq, last.seq)?;
+            // A ledger field is a JSON pointer, which names keys of the body: a record a tombstone
+            // masks keeps its ledger rows without the field, so a masked key never reaches a
+            // segment through them.
+            let masked: std::collections::HashSet<i64> = self
+                .conn
+                .prepare(
+                    "SELECT target_seq FROM records WHERE type = 'tombstone' AND target_device = ?1
+                       AND target_seq BETWEEN ?2 AND ?3",
+                )?
+                .query_map(params![self.device, first.seq, last.seq], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
             for r in &recs {
-                let line = line(r, ledger.remove(&r.seq).unwrap_or_default());
+                let mut rows = ledger.remove(&r.seq).unwrap_or_default();
+                if masked.contains(&r.seq) {
+                    for row in &mut rows {
+                        row["field"] = serde_json::json!("~tombstoned");
+                    }
+                }
+                let line = line(r, rows);
                 bytes += line.len() + 1;
                 out.push((r.seq, line));
                 at = r.seq;
