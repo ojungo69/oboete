@@ -515,8 +515,13 @@ pub fn raw(
     // under the old id (#83: the worker reads only its own until Task 8's part b).
     let raw_db = if home.join("raw.db").exists() {
         let raw = crate::raw::open(home)?;
+        let mut devices = raw.devices()?;
+        // This device's own partition too while it is still empty (a home copied a moment ago).
+        if !devices.iter().any(|d| d == raw.device()) {
+            devices.push(raw.device().to_owned());
+        }
         let mut ats = Vec::new();
-        for d in raw.devices()? {
+        for d in devices {
             ats.push((crate::knowledge::checkpoint::get(&k, "fts", &d)?, d));
         }
         Some((raw, ats))
