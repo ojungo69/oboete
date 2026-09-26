@@ -29,7 +29,7 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
             } else {
                 "prompt"
             };
-            (kind, json!({"prompt": redact::redact(&prompt)}))
+            (kind, json!({"prompt": prompt}))
         }
         "PostToolUse" | "PostToolUseFailure" => (
             "tool",
@@ -48,19 +48,19 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
                     .map(|p| crate::hook::last_assistant_in_transcript(Path::new(p)))
                     .unwrap_or_default(),
             };
-            let reply = redact::outbound(&reply);
+            let reply = strip_blocks(&reply, false);
             if reply.trim().is_empty() {
                 return Vec::new();
             }
             ("reply", json!({"assistant": reply}))
         }
         "PreCompact" => ("compaction", json!({"trigger": payload.get("trigger")})),
-        "PostCompact" => match str_field(payload, &["compact_summary"]) {
-            Some(s) if !redact::outbound(s).trim().is_empty() => {
-                ("compaction", json!({"summary": redact::outbound(s)}))
+        "PostCompact" => {
+            match str_field(payload, &["compact_summary"]).map(|s| strip_blocks(s, false)) {
+                Some(s) if !s.trim().is_empty() => ("compaction", json!({"summary": s})),
+                _ => return Vec::new(),
             }
-            _ => return Vec::new(),
-        },
+        }
         "SessionEnd" => ("end", json!({"reason": payload.get("reason")})),
         _ => return Vec::new(), // PreToolUse and the rest carry nothing to keep
     };
@@ -80,15 +80,31 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
         gitdir: git.gitdir.as_deref().map(label),
         cwd: Some(label(cwd)),
         source: "hook".into(),
-        body: body.to_string(),
+        // One gate for the body: every string in it is redacted in full, whatever field it is.
+        body: redacted(body).to_string(),
         original_bytes: None,
     }]
 }
 
-/// A tool field as stored: binary content replaced by its marker, then closed `<private>`-style
-/// blocks removed and the rest redacted in full (`redact::outbound`, what v1's `clip` did first).
+/// A tool field as text: binary content replaced by its marker, then closed `<private>`-style
+/// blocks removed (what v1's `clip` did first). `redacted` masks it with the rest of the body.
 fn text(v: &Value) -> String {
-    redact::outbound(&compact(&markers(v)))
+    strip_blocks(&compact(&markers(v)), false)
+}
+
+/// `v` with every string redacted: whatever a payload puts in a field (a tool name, a reason)
+/// passes the same gate as tool output (spec 2.2, every byte that is stored).
+fn redacted(v: Value) -> Value {
+    match v {
+        Value::String(s) => Value::String(redact::redact(&s)),
+        Value::Array(a) => Value::Array(a.into_iter().map(redacted).collect()),
+        Value::Object(m) => Value::Object(
+            m.into_iter()
+                .map(|(k, x)| (redact::redact(&k), redacted(x)))
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 /// `v` with every base64 payload replaced by `{kind, mime, bytes, sha256}` (spec 2.3).
@@ -287,6 +303,31 @@ mod tests {
         assert_eq!(body(&e)["summary"], "sum");
         let only_private = json!({"last_assistant_message": "<private>all</private>"});
         assert!(events("claude", "Stop", &only_private, 0).is_empty());
+    }
+
+    #[test]
+    fn every_string_in_the_body_is_redacted() {
+        let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
+        let bearer = format!("Authorization: Bearer {token}");
+        for (event, payload) in [
+            (
+                "PostToolUse",
+                json!({"tool_name": bearer, "tool_input": {}, "tool_response": ""}),
+            ),
+            ("SessionStart", json!({"source": bearer})),
+            ("PreCompact", json!({"trigger": {"nested": [bearer]}})),
+            ("SessionEnd", json!({"reason": bearer})),
+            ("UserPromptSubmit", json!({"prompt": bearer})),
+            ("Stop", json!({"last_assistant_message": bearer})),
+            ("PostCompact", json!({"compact_summary": bearer})),
+        ] {
+            let e = one(event, payload);
+            assert!(
+                !e.body.contains(&token) && e.body.contains("[REDACTED]"),
+                "{event}: {}",
+                e.body
+            );
+        }
     }
 
     #[test]
