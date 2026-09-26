@@ -240,6 +240,9 @@ fn device_of(home: &Path, segs: &[Segment]) -> Result<String> {
 /// that verify, in seq order. Returns what was done, for stderr and doctor
 /// (`<home>/state/restored`).
 pub fn restore(home: &Path) -> Result<String> {
+    // No store is open while the file is read, rebuilt and swapped; a hook waits (or fails with
+    // MUST-M16's marker) instead of writing into the file that is moved aside.
+    let _swap = raw::lock_for_swap(home)?;
     let dir = dir(home)?;
     let all = segments(&dir)?;
     let device = device_of(home, &all)?;
@@ -272,6 +275,25 @@ pub fn restore(home: &Path) -> Result<String> {
     rebuild.finish()?;
     let kept = quarantine(home, "raw.db")?;
     std::fs::rename(&tmp, home.join("raw.db"))?;
+    // Derived data is rebuilt from what was restored: a skipped segment leaves a gap below raw's
+    // highest seq that the old index and checkpoints would still cover.
+    if home.join("knowledge.db").exists() {
+        quarantine(home, "knowledge.db")?;
+    }
+    // A skipped segment is moved aside, so the export cursor never trusts its name and the seqs
+    // it claimed are backed up again as they are reused.
+    let stamp = crate::db::now_ms();
+    for s in &bad {
+        for path in [
+            s.path.clone(),
+            PathBuf::from(format!("{}.sha256", s.path.display())),
+        ] {
+            if path.exists() {
+                let aside = PathBuf::from(format!("{}.quarantined-{stamp}", path.display()));
+                std::fs::rename(&path, aside)?;
+            }
+        }
+    }
     #[cfg(unix)]
     std::fs::File::open(home)?.sync_all()?;
     let skipped: Vec<String> = bad

@@ -93,12 +93,22 @@ pub struct Record {
 pub struct Raw {
     conn: Connection,
     device: String,
+    /// The shared hold on `<home>/raw.lock` every open keeps (see `swap_lock`).
+    _swap: std::fs::File,
 }
 
 /// `<home>/raw.db`: WAL, synchronous=FULL (and fullfsync on macOS), 2 s busy timeout.
 pub fn open(home: &Path) -> Result<Raw> {
     let path = home.join("raw.db");
     crate::db::private(home, 0o700);
+    let swap = swap_lock(home, false, OPEN_WAIT)?;
+    // A restore that stopped after moving the damaged file aside and before renaming the rebuilt
+    // one in: the rebuilt file is whole (it is committed before the damaged one moves), so the
+    // rename is finished here instead of creating an empty store.
+    let restoring = home.join("raw.db.restoring");
+    if !path.exists() && restoring.exists() {
+        let _ = std::fs::rename(&restoring, &path);
+    }
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     crate::db::wal(&conn, "FULL")?;
     #[cfg(target_os = "macos")]
@@ -114,7 +124,55 @@ pub fn open(home: &Path) -> Result<Raw> {
     let device = conn.query_row("SELECT value FROM meta WHERE key='device_id'", [], |r| {
         r.get(0)
     })?;
-    Ok(Raw { conn, device })
+    Ok(Raw {
+        conn,
+        device,
+        _swap: swap,
+    })
+}
+
+/// How long an open waits for a restore to finish swapping the file, and how long a restore
+/// waits for open stores to close. A hook's write fails after its wait (MUST-M16's marker).
+const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+const SWAP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Task 8: every open of raw.db holds `<home>/raw.lock` shared; a restore holds it exclusively
+/// while it moves the damaged file aside and renames the rebuilt one in, so no writer keeps the
+/// old file across the swap and loses its event there.
+fn swap_lock(home: &Path, exclusive: bool, wait: std::time::Duration) -> Result<std::fs::File> {
+    let path = home.join("raw.lock");
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    crate::db::private(&path, 0o600);
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        let tried = if exclusive {
+            f.try_lock()
+        } else {
+            f.try_lock_shared()
+        };
+        match tried {
+            Ok(()) => return Ok(f),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(if exclusive {
+                "raw.db is open elsewhere; try again when agents and workers have stopped"
+            } else {
+                "raw.db is being restored"
+            }),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
+    }
+}
+
+/// The exclusive hold a restore keeps while it swaps raw.db (released when dropped).
+pub fn lock_for_swap(home: &Path) -> Result<std::fs::File> {
+    swap_lock(home, true, SWAP_WAIT)
 }
 
 impl Raw {
