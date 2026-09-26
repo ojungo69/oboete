@@ -147,7 +147,7 @@ pub fn mark(home: &Path, class: Class, at: i64) {
             class
         };
     let _ = transition(home, |s| match s {
-        Some(State::Ok(ok)) if ok > at => None,
+        Some(State::Ok(ok)) if later(ok, at) => None,
         Some(State::Failed { class, first, last }) => Some(State::Failed {
             class,
             first,
@@ -173,10 +173,20 @@ pub fn since(home: &Path) -> Option<(Class, i64)> {
 pub fn clear(home: &Path, at: i64) {
     let _ = transition(home, |s| match s {
         // A tie keeps the failure: when the order is unknown, report rather than hide.
-        Some(State::Failed { last, .. }) if last >= at => None,
+        Some(State::Failed { last, .. }) if last == at || later(last, at) => None,
         Some(State::Ok(ok)) if ok >= at => None,
         _ => Some(State::Ok(at)),
     });
+}
+
+/// How far apart two overlapping hooks can end: a stored time further ahead of a new one than
+/// this is a wall clock that went back (a VM resumed, a time correction), not an overlap, so the
+/// new state wins instead of waiting for the clock to catch up.
+const OVERLAP_NS: i64 = 5_000_000_000;
+
+/// Whether the stored time `stored` is from a write that ended after the one that ended at `at`.
+fn later(stored: i64, at: i64) -> bool {
+    stored > at && stored - at <= OVERLAP_NS
 }
 
 /// The marker read, changed by `change` (`None` leaves it) and written back in place, under the
@@ -448,6 +458,19 @@ mod tests {
         prepare(home);
         assert!(t.elapsed() < std::time::Duration::from_secs(2));
         assert_eq!(since(home), None); // left as it was
+    }
+
+    #[test]
+    fn a_clock_that_went_back_neither_hides_a_failure_nor_keeps_one() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let minute = 60_000_000_000;
+        prepare(home);
+        clear(home, 10 * minute);
+        mark(home, Class::Io, 9 * minute); // the clock stepped back a minute
+        assert_eq!(since(home), Some((Class::Io, 9 * minute)));
+        clear(home, 8 * minute); // and back again: a later success still clears it
+        assert_eq!(since(home), None);
     }
 
     #[test]
