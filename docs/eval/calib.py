@@ -1,30 +1,70 @@
 """Milestone 1, Task 6: B3, the judge-trust gate (docs/spec.md 8.1 "Judge trust"; owner decision 29).
 
   calib.py draw               50 dev pairs the judge graded -> labels/tasks/calib-50.jsonl and its key
-  calib.py panel [max items]  five API judges grade every pair -> labels/calib-50.panel-2.jsonl (resumes);
+  calib.py panel [max items]  panel judges grade every pair -> labels/calib-50.panel-3.jsonl (resumes; run 2,
+                              the five API judges, is labels/calib-50.panel-2.jsonl, frozen);
                               an item is one judge on one pair, up to 3 calls if its answers are unusable
-  calib.py kappa              each judge against the other five's majority, and the panel's Fleiss kappa
+  calib.py kappa              each judge against the others' majority, and the panel's Fleiss kappa
 Relevant = grade >= 2. Every judge sees the question and the document as the judge under test saw
 them (4,000 characters, 1,200 for grades written before `chars` was recorded), never a grade."""
-import concurrent.futures, json, os, re, sqlite3, sys, threading, time, urllib.error, urllib.request
+import concurrent.futures, json, os, re, sqlite3, subprocess, sys, threading, time, urllib.error, urllib.request
 
-from common import E, SEED, h, owner_only, read_jsonl, write_jsonl
+from common import E, SEED, clean_env, h, owner_only, read_jsonl, write_jsonl
 
 N, PASS_KAPPA = 50, 0.4
 # Run 1 (`calib-50.panel.jsonl`, frozen) took the first entry of any answer; run 2 requires exactly
 # the grade of memory `d` and is the one B3 is decided on (#77).
-RUN = 'calib-50.panel-2'
-# The result of run 2 under the rule that leaves a pair out for every judge (#77); the first result
-# of run 2 (`calib-50.result-2.json`) is frozen as it was.
-RESULT = 'calib-50.result-2b'
+RUN_2 = 'calib-50.panel-2'
+# Run 3 (2026-09-26): the two subscription judges on the same inputs; run 2's grades stand (frozen).
+RUN = 'calib-50.panel-3'
+# Run 2 under the rule that leaves a pair out for every judge is `calib-50.result-2b` (#77, frozen,
+# B3's decision); with the subscription judges added, `calib-50.result-3`.
+RESULT = 'calib-50.result-3'
 JUDGES = {'claude-sonnet-5', 'claude-sonnet'}   # the alias rows of 2026-09-24 came from claude-sonnet-5
 UNDER_TEST = 'claude-sonnet-5'
 GO = ('https://opencode.ai/zen/go/v1', 'OPENCODE_API_KEY.md', {'x-opencode-session': 'oboete'})
 # Five more makers, chosen 2026-09-26 by what answered (NIM and Mistral gave 429 or 404 that day).
 # API calls only: no tools. Keys are read in this process and never put in any environment.
+# The owner's grok and codex subscriptions judge too (2026-09-26), as the dogfood user with no tools
+# (docs/spike/cli-judges.md).
 PANEL = {'gpt-oss-120b': ('https://api.groq.com/openai/v1', 'GROQ_API_KEY.md', {}, 'openai/gpt-oss-120b'),
          'deepseek-v4-pro': (*GO, 'deepseek-v4-pro'), 'glm-5.3': (*GO, 'glm-5.3'),
-         'kimi-k3': (*GO, 'kimi-k3'), 'qwen3.8-max': (*GO, 'qwen3.8-max')}
+         'kimi-k3': (*GO, 'kimi-k3'), 'qwen3.8-max': (*GO, 'qwen3.8-max'),
+         'grok-4.7': ('dogfood', 'grok', {}, 'grok-4.7'), 'gpt-6-astra': ('dogfood', 'codex', {}, 'gpt-6-astra')}
+DOGFOOD = 'oboete-dogfood'
+# The CLI versions the tool canary passed on (docs/spike/cli-judges.md). Another version is refused
+# until the canary passes on it and this line changes (spec 6.5: capability per CLI version).
+TESTED = {'grok': 'grok 1.0.40', 'codex': 'codex-cli 0.155.1'}
+# One judge call as the dogfood user: its own logins, and no hooks, MCP servers or plugins of the
+# owner's. The prompt comes on stdin into a private directory that is removed after, with grok's
+# session for that directory; every grok tool is denied, and codex runs under oboete's curator
+# profile (src/provider.rs: no disk, no network, no plugins). Prints {"text", "model"}.
+CLI_JUDGE = r'''
+set -u
+export PATH="$HOME/.local/bin:$PATH" GROK_MEMORY=0 GROK_SESSION_SEARCH=0
+W=$(mktemp -d) && [ -d "$W" ] || exit 1
+S=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$W") && [ -n "$S" ] || exit 1
+# Only this call's directory and grok's session for it; both names are checked non-empty above.
+trap 'rm -rf -- "$W" "$HOME/.grok/sessions/$S"' EXIT
+# The version first, before the prompt exists anywhere this CLI can see: no stdin, run from /.
+v=$(cd / && timeout -k 5 20 "$1" --version < /dev/null 2>/dev/null | head -1)
+case "$v" in "$4"|"$4 "*) ;; *) echo "untested $1 version: $v (canary passed on $4)" >&2; exit 1 ;; esac
+cat > "$W/prompt.txt" || exit 1
+cd "$W" || exit 1
+case "$1" in
+grok)
+  timeout -k 10 "$3" grok --cwd "$W" --prompt-file "$W/prompt.txt" --deny '*' --permission-mode dontAsk --disable-web-search \
+    --no-subagents --no-plan --max-turns 3 --output-format json -m "$2" > "$W/out.json" 2> "$W/err.txt" || { head -c 300 "$W/err.txt" >&2; exit 1; }
+  python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); print(json.dumps({"text": d.get("text") or "", "model": next(iter(d.get("modelUsage") or {}), None)}))' "$W/out.json" ;;
+codex)
+  timeout -k 10 "$3" codex exec --ephemeral --skip-git-repo-check --ignore-user-config --ignore-rules \
+    --disable plugins --disable apps --disable browser_use --disable browser_use_external --disable in_app_browser \
+    --disable computer_use --disable image_generation -c 'web_search="disabled"' \
+    -c 'permissions.curator.filesystem={":root"="deny",":minimal"="read"}' -c 'default_permissions="curator"' \
+    -c model_reasoning_effort=low -c "model=$2" -o "$W/last.txt" < "$W/prompt.txt" > /dev/null 2> "$W/err.txt" || { tail -c 300 "$W/err.txt" >&2; exit 1; }
+  python3 -c 'import json, re, sys; m = re.search(r"^model: (\S+)", open(sys.argv[2]).read(), re.M); print(json.dumps({"text": open(sys.argv[1]).read(), "model": m and m.group(1)}))' "$W/last.txt" "$W/err.txt" ;;
+esac
+'''
 MAX_DOC_CHARS, OLD_CHARS = 4000, 1200   # judge.py's window, and the one before `chars` was recorded
 QUESTION = 'この記憶は、この問いに答えるのに役に立ちますか？'
 CHOICES = [{'value': 'yes', 'label': '役に立つ (答えに使える情報が入っている)'},
@@ -92,6 +132,8 @@ def chat(member, prompt, timeout=300):
     temperature 0. A 429 is retried after its Retry-After (Groq's tokens per minute) up to four times;
     one that asks for more than two minutes (OpenCode Go's 5-hour limit) fails at once."""
     base, key_file, headers, model = PANEL[member]
+    if base == 'dogfood':
+        return cli_chat(key_file, model, prompt, timeout)
     with open(os.path.expanduser(f'~/{key_file}')) as f:
         key = f.read().split('\n')[1].strip()
     body = json.dumps({'model': model, 'temperature': 0, 'messages': [{'role': 'user', 'content': prompt}]}).encode()
@@ -117,6 +159,28 @@ def chat(member, prompt, timeout=300):
             if wait > 120 or attempt == 4:
                 raise
             time.sleep(wait + 1)
+
+
+def cli_chat(cli, model, prompt, timeout, version=None):
+    """(answer text, the model the CLI reports) from one tool-less CLI run as the dogfood user; a
+    failed run raises ConnectionError, like a failed API call. `version` is for the canary only: the
+    CLI version it is testing; every judge call uses TESTED."""
+    try:
+        # The CLI's own timeout runs as the dogfood user, so a slow call does not outlive this one
+        # (killing sudo alone would leave it running); this timeout is only the backstop, past both of
+        # the child's deadlines (the version probe's 20 + 5 s and the call's timeout + 10 s) and cleanup.
+        run = subprocess.run(['sudo', '-n', '-u', DOGFOOD, '-H', 'bash', '-c', CLI_JUDGE, 'judge', cli, model, str(timeout),
+                              version or TESTED[cli]],
+                             input=prompt, capture_output=True, text=True, timeout=timeout + 90, env=clean_env())
+    except subprocess.TimeoutExpired:
+        raise ConnectionError(f'{cli} gave no answer in {timeout} s') from None
+    if run.returncode != 0:
+        raise ConnectionError(f'{cli} exit {run.returncode}: {run.stderr[-200:]!r}')
+    try:
+        answer = json.loads(run.stdout)
+        return answer['text'], answer['model']
+    except (ValueError, KeyError, TypeError):
+        raise ConnectionError(f'{cli}: no answer in {run.stdout[:120]!r}') from None
 
 
 def ask_panel(member, question, memory):
@@ -186,7 +250,8 @@ def main(cmd):
         items = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
         key = read_jsonl(f'{labels}/calib-50.key.jsonl')
         path = f'{labels}/{RUN}.jsonl'
-        done = {(r['id'], r['judge']) for r in read_jsonl(path)} if os.path.exists(path) else set()
+        done = {(r['id'], r['judge']) for run in (RUN_2, RUN) if os.path.exists(f'{labels}/{run}.jsonl')
+                for r in read_jsonl(f'{labels}/{run}.jsonl')}
         # What every panel judge reads, written once and frozen: the store is not under the freeze.
         inputs = f'{labels}/calib-50.inputs.jsonl'
         if not os.path.exists(inputs):
@@ -217,11 +282,11 @@ def main(cmd):
         with concurrent.futures.ThreadPoolExecutor(len(PANEL)) as pool:
             jobs = [pool.submit(lambda m=m: [grade(k, m) for k, mm in todo if mm == m]) for m in PANEL]
             failed = sum(r.count(False) for r in (j.result() for j in jobs))
-        have = len(read_jsonl(path)) if os.path.exists(path) else 0
+        have = len(done | {(r['id'], r['judge']) for r in read_jsonl(path)}) if os.path.exists(path) else len(done)
         print(f'{have} of {len(key) * len(PANEL)} panel grades; {failed} failed this run')
     elif cmd == 'kappa':
         grades = {k['id']: {UNDER_TEST: k['grade']} for k in read_jsonl(f'{labels}/calib-50.key.jsonl')}
-        recorded = read_jsonl(f'{labels}/{RUN}.jsonl')
+        recorded = read_jsonl(f'{labels}/{RUN_2}.jsonl') + read_jsonl(f'{labels}/{RUN}.jsonl')
         for r in recorded:
             if r['grade'] is not None:       # an unusable answer leaves the pair out for that judge only
                 grades[r['id']][r['judge']] = r['grade']
@@ -229,17 +294,17 @@ def main(cmd):
         again = [(first[i, j], g) for i, js in grades.items() for j, g in js.items() if (i, j) in first]
         judges = [UNDER_TEST, *PANEL]
         # A pair any judge could not grade is left out for every judge and counted, like a tie
-        # (spec 8.1): each judge is then measured on the same pairs against all five others.
+        # (spec 8.1): each judge is then measured on the same pairs against all the others.
         left_out = sorted(i for i, g in grades.items() if len(g) < len(judges))
         grades = {i: g for i, g in grades.items() if len(g) == len(judges)}
         # Complete when every judge answered every pair, with a grade or with an unusable answer 3 times.
         complete = len({(r['id'], r['judge']) for r in recorded}) == N * len(PANEL)
-        # One model per judge. A run recorded before replies carried the model (run 2) has none at
-        # all; a run with some rows missing it, or with two models, cannot pass (spec 8.1: a model
-        # change means a new calibration).
+        # One model per judge. Run 2 was recorded before replies carried the model, so its judges may
+        # have none at all; a judge added later must report one. A judge with some rows missing it, or
+        # with two models, cannot pass (spec 8.1: a model change means a new calibration).
         reported = {j: {r.get('model') for r in recorded if r['judge'] == j and r['grade'] is not None} for j in PANEL}
-        one_model = all(len(m) == 1 for m in reported.values()) and (
-            all(m == {None} for m in reported.values()) or all(None not in m for m in reported.values()))
+        legacy = {r['judge'] for r in read_jsonl(f'{labels}/{RUN_2}.jsonl')}
+        one_model = all(len(m) == 1 and (j in legacy or None not in m) for j, m in reported.items())
         complete = complete and one_model
         each = {}
         for j in judges:
@@ -250,7 +315,7 @@ def main(cmd):
         rows = [[g[j] >= 2 for j in judges] for g in grades.values()]
         fk = fleiss(rows) if rows else None
         panel_pass = bool(complete and fk is not None and fk >= PASS_KAPPA)
-        out = {'run': RUN, 'complete': complete, 'judges': each,
+        out = {'run': [RUN_2, RUN], 'complete': complete, 'judges': each,
                'unusable': [(r['id'], r['judge']) for r in recorded if r['grade'] is None], 'left_out': left_out,
                'changed_from_run_1': {'n': len(again), 'grade': sum(a != b for a, b in again),
                                       'relevance': sum((a >= 2) != (b >= 2) for a, b in again)}, 'fleiss': fk, 'panel_pass': panel_pass,

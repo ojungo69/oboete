@@ -7,7 +7,7 @@ the owner's own message, and may always answer 判断できない; the panel of 
   draft_candidates.py pairs [max calls]       decisions       -> labels/drafts/pairs.jsonl (kept pairs stay)
   draft_candidates.py tasks                   adds items to labels/tasks/dev-decisions.jsonl and dev-pairs.jsonl
                                               until the owner's counts can be reached; rerun after a sitting
-  draft_candidates.py panel                   the five API judges: every `unknown` item, and a blind sample
+  draft_candidates.py panel                   the panel judges: every `unknown` item, and a blind sample
                                               of the owner's answered items (the overlap, #76)
   draft_candidates.py report                  counts, and the panel's agreement with the owner on the overlap
   draft_candidates.py repeat                  a week after the last answer: 20 answered items again, blind
@@ -444,6 +444,18 @@ def panel():
     print('panel done; rerun if any call failed')
 
 
+def calibration():
+    """(judges that passed B3 in a panel that passed, judge -> the models calib-50 recorded for it).
+    Judges whose calibration kept no model (run 2) are left out of the second."""
+    path = f'{LABELS}/calib-50.result-3.json'
+    if not os.path.exists(path):
+        return set(), {}
+    with open(path) as f:
+        result = json.load(f)
+    passed = {j for j, v in result['judges'].items() if v['pass']} if result['panel_pass'] else set()
+    return passed, {j: m for j, m in result['models'].items() if not any('requested' in x for x in m)}
+
+
 def report():
     out = {}
     for name, yes in (('dev-decisions', 'yes'), ('dev-pairs', 'overturns')):
@@ -453,7 +465,7 @@ def report():
         for r in read_jsonl(path) if os.path.exists(path) else []:
             votes.setdefault(r['id'], {})[r['judge']] = r['value'] == yes
             models.setdefault(r['judge'], set()).add(r.get('model'))
-        # A majority only from all five judges. Every target `panel` should have asked counts: one
+        # A majority only from every panel judge. Every target `panel` should have asked counts: one
         # with fewer votes, none included, is reported as missing, never quietly dropped.
         keys = [k['id'] for k in read_jsonl(f'{LABELS}/{name}.key.jsonl')]
         unknown, sample = panel_targets(keys, answers)
@@ -471,11 +483,17 @@ def report():
         # spec 8.1: a judge whose model changed mid-run (or was not reported) needs a new calibration,
         # so its votes give no labels and no agreement.
         one_model = all(len(models.get(j, ())) == 1 and None not in models[j] for j in PANEL)
+        # Every judge passed B3 (calib-50 run 3), with the model it answers with now where the
+        # calibration recorded one (run 2 kept none): an alias that moved has not passed B3.
+        passed, calibrated = calibration()
+        uncalibrated = sorted(j for j in PANEL if j not in passed)
+        moved = sorted(j for j, m in calibrated.items() if j in PANEL and models.get(j, set()) - set(m))
+        one_model = one_model and not moved and not uncalibrated
         out[name] = {'owner': counts, 'panel_incomplete': missing, 'panel_on_unknown': {
             i: majority(list(v.values())) for i, v in votes.items() if answers.get(i) == 'unknown'} if one_model else None,
             'overlap': agree if one_model else None,
             'models': {j: sorted(m or '(not reported)' for m in ms) for j, ms in models.items()},
-            'one_model_per_judge': one_model,
+            'one_model_per_judge': one_model, 'moved_since_calibration': moved, 'not_calibrated': uncalibrated,
             'what': 'agreement with the owner on the owner\'s own decisions, not a check of technical relevance'}
     with open(f'{LABELS}/dev-labels.result.json', 'w') as f:
         json.dump(out, f, indent=1, ensure_ascii=False)
