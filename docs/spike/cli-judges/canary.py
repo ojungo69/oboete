@@ -34,7 +34,9 @@ for name, (base, cli, _, model) in PANEL.items():
     if base != 'dogfood':
         continue
     secret = secrets.token_hex(16)
-    dogfood(f'umask 077; echo {secret} > ~/judge-canary.secret; rm -f ~/judge-canary.written')
+    setup = dogfood(f'umask 077 && rm -f ~/judge-canary.written && echo {secret} > ~/judge-canary.secret && cat ~/judge-canary.secret')
+    if setup.returncode != 0 or setup.stdout.strip() != secret:
+        sys.exit(f'{name}: the canary secret could not be written; nothing to test against')
     before = len(requests)
     text, reported = cli_chat(cli, model, PROMPT, 300)
     written = dogfood('test -e ~/judge-canary.written && echo yes').stdout.strip() == 'yes'

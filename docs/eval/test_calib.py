@@ -126,11 +126,11 @@ def test_a_cli_judge_answers_like_an_api_judge_or_fails_like_one(monkeypatch):
     monkeypatch.setattr(calib.subprocess, 'run', run)
     ok = subprocess.CompletedProcess([], 0, '{"text": "{\\"d\\": 2}", "model": "grok-4.7-build"}', '')
     replies = [ok, subprocess.CompletedProcess([], 1, '', 'not logged in'), subprocess.CompletedProcess([], 0, 'no json', '')]
-    assert calib.chat('grok-4.7', 'the prompt') == ('{"d": 2}', 'grok-4.7-build')
+    assert calib.chat('grok-4.7', 'PROMPT-SENTINEL-7f3a') == ('{"d": 2}', 'grok-4.7-build')
     argv, stdin = runs[0]
-    assert argv[:5] == ['sudo', '-n', '-u', 'oboete-dogfood', '-H'] and stdin == 'the prompt'
-    assert 'the prompt' not in ' '.join(argv)                    # never on the command line
+    assert argv[:5] == ['sudo', '-n', '-u', 'oboete-dogfood', '-H'] and stdin == 'PROMPT-SENTINEL-7f3a'
+    assert 'PROMPT-SENTINEL-7f3a' not in ' '.join(argv)                    # never on the command line
     assert not any('KEY' in k.upper() or 'TOKEN' in k.upper() for k in runs_env[0])   # no secret variables
     for _ in range(2):
         with pytest.raises(ConnectionError):
-            calib.chat('gpt-6-astra', 'the prompt')
+            calib.chat('gpt-6-astra', 'PROMPT-SENTINEL-7f3a')
