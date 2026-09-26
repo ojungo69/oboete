@@ -127,6 +127,20 @@ Drafted by `claude-sonnet-5` in owner decision 29's form: one plain-Japanese sen
 - Read by Claude before handing over: 5 decisions, all real decisions in plain words; Latin letters only in product names (11 of the first 99). 5 overturn drafts: all real decisions, but not all overturns (2-3 of 5 are clear), and several stay technical in plain Japanese (version control, secret tags); the owner answers 判断できない there and the panel takes them.
 - Tasks for the owner: 50 decisions (`dev-decisions`) and 40 pairs (`dev-pairs`: 20 drafted as each relation, cross-session first). Drawn again after the overlap fix, before any answer; the earlier tasks are kept owner-only under `labels/drafts/superseded-2026-09-26`. `draft_candidates.py tasks` adds more as answers of 判断できない come in.
 
+## Dev labels (Task 8, 2026-09-26)
+
+The owner answered every task shown: 59 decisions and 63 pairs; the last answer was on 2026-09-26 at 17:18 JST. The panel is `calib.PANEL`: seven judges from six makers, each of which passed B3 in calib-50 run 3. Every judge answered with one model, the one its calibration recorded (`one_model_per_judge`; none moved, none uncalibrated). The panel graded the items the owner could not judge, plus a seeded sample of 40 the owner did judge, blind to the owner's answers (#76). Numbers are from `draft_candidates.py report` (`labels/dev-labels.result.json`, owner-only).
+
+| | Owner | Panel on the owner's 判断できない | Panel majority vs owner on the sample |
+|---|---|---|---|
+| Decisions | yes 45, no 5, 判断できない 9 (target 50 counted: met) | 9 of 9 graded: yes 8, no 1 | n 40, agreement 0.875, κ −0.04 |
+| Pairs | overturns 20, compatible 26, 判断できない 17 (target 20 overturns with 20 controls: met) | 15 of 17 with all seven votes: overturns 9, compatible 6 | n 6 so far (see below) |
+
+- **Decisions: the panel says yes to almost everything.** On the 40-item sample the owner said yes to 36 and the panel majority to 39. The panel said yes to all 4 items the owner rejected. So agreement is high (0.875), and κ is about zero: with 36 of 40 yes, agreeing is what chance alone gives. For each judge, κ runs from −0.11 to 0.29 and agreement from 0.70 to 0.90. The panel's yes on the owner's 判断できない items (8 of 9) is therefore weak evidence that a decision was really made. Treat these as decision candidates, not as confirmed decisions. This is agreement on the owner's own decisions, not a check of technical relevance.
+- **Pairs are not complete.** Groq's free tier allows gpt-oss-120b 200,000 tokens a day, on a rolling window. The calibration and panel runs of 2026-09-26 used it up: "Used 199724, Requested 1435" on the next call. So gpt-oss-120b graded 21 of the 57 pair targets; the other six judges graded all 57. A majority counts only with all seven votes, so 36 pair targets are listed as `panel_incomplete` and left out, never decided by six. The panel's pair numbers above cover what is complete. They are filled in when gpt-oss-120b's daily budget allows, and the pair rows are frozen then.
+- **Frozen now** (`freeze.py add`, 22 files in all): the owner's answers, keys and tasks for both sets; the drafts the panel prompts are built from (`labels/drafts/decisions.jsonl`, `labels/drafts/pairs.jsonl`); and the decision panel rows (`labels/dev-decisions.panel.jsonl`). `labels/dev-pairs.panel.jsonl` and `labels/dev-labels.result.json` wait for the pair gap to close.
+- **Blind repeat:** it opens a week after the last answer, on 2026-10-03 (`draft_candidates.py repeat`, then `agreement`).
+
 ## Fixtures, today's code (Task 9 step 5, 2026-09-26)
 
 Task 7's fixtures through the owner's binary built from main f43da4d, in a temporary home with the API-only chain (`baseline.py config`):
