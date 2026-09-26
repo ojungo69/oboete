@@ -145,70 +145,73 @@ pub fn scan(text: &str) -> (String, Vec<Finding>) {
     mask(text, spans(text))
 }
 
-/// Context scanned past each cut of a capped text: a secret across the cut is masked whole, as
-/// v1's `clip` did with REDACT_OVERLAP (plan D4).
-const MARGIN: usize = 4_000;
-
-/// `text` scanned whole when it is at most `cap` bytes. Above that, only its first and last
-/// `cap / 2` bytes are kept, around a marker that gives the full size (spec 2.4), and only they
-/// and MARGIN bytes past each cut are scanned. The third value is the full size when it was cut.
-/// A secret across a cut is kept whole in its mask; a private key block that a cut splits (a
-/// BEGIN without its END, or an END without its BEGIN) is dropped from the part that holds it;
-/// then the stored text is scanned once more, so line-scoped allowlists judge the lines as they
-/// are stored (as v1's `clip` did).
+/// `text` whole when it is at most `cap` bytes. Above that, only its first and last `cap / 2`
+/// bytes are kept, around a marker that gives the full size (spec 2.4), and the third value is
+/// that full size. The whole text is scanned first either way ("redacted in full", spec 2.2): a
+/// rule can need context far from its secret (curl-auth-user reads a whole line), so a window
+/// around each cut is not enough. A cut inside a mask moves to the mask's edge; a private key
+/// block that a cut splits (a BEGIN without its END, or an END without its BEGIN, in any case) is
+/// dropped from the part that holds it; then the stored text is scanned once more, so line-scoped
+/// allowlists judge the lines as they are stored (as v1's `clip` did).
 pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usize>) {
+    let all = spans(text);
     if text.len() <= cap {
-        let (masked, found) = scan(text);
+        let (masked, found) = mask(text, all);
         return (masked, found, None);
     }
+    let runs = merged(&all);
     let half = cap / 2;
-    let head_window = text.floor_char_boundary(half + MARGIN);
-    let tail_window = text.ceil_char_boundary(text.len().saturating_sub(half + MARGIN));
     let mut head_end = text.floor_char_boundary(half);
     let mut tail_start = text.ceil_char_boundary(text.len() - half);
-    let head_spans = spans(&text[..head_window]);
-    let tail_spans: Vec<_> = spans(&text[tail_window..])
-        .into_iter()
-        .map(|(s, e, r)| (s + tail_window, e + tail_window, r))
-        .collect();
-    for &(s, e, _) in &head_spans {
+    // A secret across a cut is kept whole: its mask stands for it.
+    for &(s, e) in &runs {
         if s < head_end && e > head_end {
             head_end = e;
         }
-    }
-    for &(s, e, _) in &tail_spans {
         if s < tail_start && e > tail_start {
             tail_start = s;
         }
     }
-    if let Some(b) = text[..head_end].rfind("-----BEGIN")
-        && !text[b..head_end].contains("-----END")
+    // ASCII lowercasing keeps byte offsets.
+    let head = text[..head_end].to_ascii_lowercase();
+    if let Some(b) = head.rfind("-----begin")
+        && !head[b..].contains("-----end")
     {
         head_end = b;
     }
-    if let Some(e) = text[tail_start..].find("-----END")
-        && !text[tail_start..tail_start + e].contains("-----BEGIN")
+    let tail = text[tail_start..].to_ascii_lowercase();
+    if let Some(e) = tail.find("-----end")
+        && !tail[..e].contains("-----begin")
     {
         let end = tail_start + e;
         tail_start = text[end..].find('\n').map_or(text.len(), |n| end + n);
     }
+    // A cut the key-block rule moved into a mask moves out of it, to the side that drops it.
+    for &(s, e) in &runs {
+        if s < head_end && e > head_end {
+            head_end = s;
+        }
+        if s < tail_start && e > tail_start {
+            tail_start = e;
+        }
+    }
     if head_end >= tail_start {
-        // The cuts met (a secret or a key block spans the middle): keep it whole, scanned.
-        let (masked, found) = scan(text);
+        // The cuts met (a secret or a key block spans the middle): keep it whole.
+        let (masked, found) = mask(text, all);
         return (masked, found, None);
     }
     let (head, mut found) = mask(
         &text[..head_end],
-        head_spans
-            .into_iter()
+        all.iter()
+            .copied()
             .filter(|&(_, e, _)| e <= head_end)
             .collect(),
     );
     let marker = format!("\n…[cut: {} bytes in full]…\n", text.len());
     let (tail, tail_found) = mask(
         &text[tail_start..],
-        tail_spans
-            .into_iter()
+        all.iter()
+            .copied()
             .filter(|&(s, _, _)| s >= tail_start)
             .map(|(s, e, r)| (s - tail_start, e - tail_start, r))
             .collect(),
@@ -219,16 +222,24 @@ pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usiz
         ..f
     }));
     let kept = head + &marker + &tail;
-    // Second pass: what it masks moves every later mask by the length it changed.
+    // Second pass: each earlier finding moves by what the runs before it changed, or to the start
+    // of a new mask that covers it.
     let again = spans(&kept);
     let runs = merged(&again);
     for f in &mut found {
-        let shift: isize = runs
-            .iter()
-            .filter(|&&(_, e)| e <= f.offset)
-            .map(|&(s, e)| MASK.len() as isize - (e - s) as isize)
-            .sum();
-        f.offset = (f.offset as isize + shift) as usize;
+        let mut shift = 0isize;
+        let mut at = f.offset;
+        for &(s, e) in &runs {
+            if e <= f.offset {
+                shift += MASK.len() as isize - (e - s) as isize;
+            } else {
+                if s <= f.offset {
+                    at = s;
+                }
+                break;
+            }
+        }
+        f.offset = (at as isize + shift) as usize;
     }
     let (stored, more) = mask(&kept, again);
     found.extend(more);
@@ -535,6 +546,41 @@ mod tests {
         let text = "h ".repeat(cap) + &block + &" t".repeat(cap / 4 - 100);
         let (stored, _, _) = scan_capped(&text, cap);
         assert!(!stored.contains("MIIEowIBAAKCAQ") && !stored.contains("-----END"));
+    }
+
+    #[test]
+    fn a_rule_that_needs_context_far_from_the_cut_still_masks() {
+        // curl-auth-user reads the whole line: `curl` is far outside any window around the cut.
+        let cap = 64 * 1024;
+        let pass = "usr:q9Zx8mL2vB4nR7tYw";
+        let text = "p\n".repeat(cap)
+            + "curl"
+            + &" ".repeat(40_000)
+            + &format!("-u '{pass}'\n")
+            + &"t\n".repeat(cap / 8);
+        let (stored, found, cut) = scan_capped(&text, cap);
+        assert!(cut.is_some());
+        assert!(
+            !stored.contains("q9Zx8mL2vB4nR7tYw"),
+            "the tail kept the password"
+        );
+        check(&stored, &found, pass);
+    }
+
+    #[test]
+    fn a_key_block_in_lowercase_is_dropped_too() {
+        let cap = 64 * 1024;
+        let block = format!(
+            "-----begin rsa private key-----\n{}\n-----End RSA Private Key-----",
+            "MIIEowIBAAKCAQEAq9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8gI4kM7oQ1sV3xZ6bD\n".repeat(700)
+        );
+        for text in [
+            "h ".repeat(cap / 4 - 100) + &block + &"t ".repeat(cap),
+            "h ".repeat(cap) + &block + &" t".repeat(cap / 4 - 100),
+        ] {
+            let (stored, _, _) = scan_capped(&text, cap);
+            assert!(!stored.contains("MIIEowIBAAKCAQ"), "{}", &stored[..200]);
+        }
     }
 
     #[test]

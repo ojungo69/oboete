@@ -136,6 +136,9 @@ struct Gate {
 
 impl Gate {
     fn text(&mut self, field: &str, s: &str) -> String {
+        // A field names a place, not content: a long key's pointer is cut short, so thousands
+        // of findings under it cannot multiply its size.
+        let field = &field[..field.floor_char_boundary(512)];
         let (stored, found, full) = redact::scan_capped(s, MAX_FIELD_BYTES);
         if let Some(n) = full {
             *self.cut.get_or_insert(0) += n as i64;
