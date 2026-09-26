@@ -30,7 +30,7 @@
 
 1. **Two hooks at once.** Two agents (or a hook and the worker) append in the same millisecond. Expected: both events land, with distinct consecutive seqs, and neither hook waits past the busy timeout. Test in Task 1.
 2. **A secret across a cut.** A token straddles the head/tail cut of an oversized output, or the boundary of two redaction windows. Expected: no unmasked fragment of it is stored. Test in Task 3.
-3. **A crash between raw and a checkpoint.** Power is lost after a consumer checkpoint moved but before raw's commit was durable (the MUST-M14 hole). Expected: on the next worker start the checkpoint is rewound, doctor says so, and no later event is skipped. Test in Task 5.
+3. **A crash between raw and a checkpoint.** Power is lost after a consumer checkpoint moved but before raw's commit was durable (the MUST-M14 hole). Expected: on the next worker start the checkpoint is rewound together with that consumer's output for the lost seqs, doctor says so, and no later event is skipped or collides with a ghost row. Test in Task 5.
 4. **A full disk.** The hook cannot write. Expected: the agent is not blocked, nothing claims the event was recorded, a marker outside the database records the failure class and time, doctor is red, and the next injection says recording failed since T (MUST-M16). Test in Task 4.
 5. **A wake-up lost at worker exit.** An event arrives after the worker's last check for pending work and before it exits. Expected: that event is indexed without another hook (spec 1.1, issue #55). Test in Task 5.
 
@@ -50,17 +50,17 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
 
 **D5. Compression in the worker.** The hook stores records uncompressed: Spike 1 found zstd at write time pays only at 256 KB and only on Windows (hook-m14.md:68-69). The worker's compression consumer rewrites a record's body as zstd once its other consumers have passed it (`enc` column: `plain` or `zstd`). A zstd dictionary is decided after a week of dogfooding, as spec 2.4 says (A9).
 
-**D6. A minimal worker now; its lifecycle verdict at milestone 4.** `oboete worker` is started by hooks (detached, as `observe` is today), holds a lock file so one runs per home, runs the consumers of this milestone in order, and exits when idle. A hook appends first and then starts a worker only if the lock is free. So the worker releases the lock first and then checks once more for records above its checkpoints; if there are any, it takes the lock again and goes on (or leaves them to the worker that took it). Either the worker's last check sees the event, or the hook's lock attempt comes after the release and starts a new worker: a wake-up is never lost (spec 1.1, issue #55). A last check made while still holding the lock would lose an event appended between that check and the release. Consumers are library functions, the same code in either process model (spec 8.4), so milestone 4's comparison can change only the wrapper.
+**D6. A minimal worker now; its lifecycle verdict at milestone 4.** `oboete worker` is started by hooks (detached, as `observe` is today), holds a lock file so one runs per home, runs the consumers of this milestone in order, and exits when idle. Every hook that appends then tries the lock and starts a worker only if it is free. So the worker releases the lock first and then checks once more for records above its checkpoints; if there are any, it takes the lock again and goes on (or leaves them to the worker that took it). Either the worker's last check sees the event, or the hook's lock attempt comes after the release and starts a new worker: a wake-up is never lost (spec 1.1, issue #55). A last check made while still holding the lock would lose an event appended between that check and the release. Consumers are library functions, the same code in either process model (spec 8.4), so milestone 4's comparison can change only the wrapper.
 
 **D7. Raw FTS in knowledge.db.** An FTS5 trigram table over each event's text (prompt, reply, tool input and output), keyed by (device, seq), built by the worker from its checkpoint with today's tokenizer and ranking (`src/search.rs`). A tombstoned target is never indexed and is filtered at query time. The none tier's search at this milestone is the CLI (`oboete search`); MCP and the viewer follow at milestone 4 (spec 8.4 row 4).
 
-**D8. Tombstones from day one; physical removal at milestone 5.** Tombstones are records in the same (device, seq) sequence, with no body. A tombstone targets a record (device, seq) or a byte range in one (device, seq, offset, length). From this milestone every read path (FTS indexing, search, manifest, backups) filters or masks the targets. Rewriting `raw.db` without them is milestone 5's forget pipeline (spec 6.2 step 2). This milestone writes tombstones from one source only: the redaction rescan (spec 2.2). v1's hard deletes (`delete_doc`, `delete_session`) are not carried into Design B; its deletions go through forget.
+**D8. Tombstones from day one; physical removal at milestone 5.** Tombstones are records in the same (device, seq) sequence, with no body. A tombstone targets a record (device, seq) or a byte range in one (device, seq, offset, length). From this milestone every read path (FTS indexing, search, manifest, backups) gets the targets hidden or masked, in one place: `Raw::after`, the only way records leave `raw.rs`. A range is masked by as many bytes of `*` as it covers (every character it touches, whole), so offsets stay valid and masking twice changes nothing: a backup of a masked body restores with its tombstone and reads the same. Rewriting `raw.db` without them is milestone 5's forget pipeline (spec 6.2 step 2). This milestone writes tombstones from one source only: the redaction rescan (spec 2.2). v1's hard deletes (`delete_doc`, `delete_session`) are not carried into Design B; its deletions go through forget.
 
 **D9. Git fields read from files in the hook.** The hook reads branch, HEAD SHA and the worktree gitdir from `.git` files (`HEAD`, the ref file or `packed-refs`, a worktree's `gitdir`) without starting `git`. Risky git state for the manifest (uncommitted changes, a rebase or merge in progress, detached HEAD) is computed by the worker with `git status --porcelain=v2 --branch`, never in the hook.
 
 **D10. Checkpoints are seqs in knowledge.db.** Each consumer's checkpoint is the highest seq of this device it has finished. On start, the worker rewinds any checkpoint above raw's highest seq for this device and reports it in doctor (spec 2.5, MUST-M14). A consumer moves its checkpoint in the same knowledge.db transaction as its output.
 
-**D11. The backup interval, defined.** The spec sets the interval by measurement but names no measurement (Appendix C item 7). Definition: backups run at every idle exit that has new seqs, and every 30 minutes while the worker runs (`next_attempt_at`). Task 12 measures export time and segment size per run on the three machines. If the slowest machine's export p95 exceeds 1 s, the periodic interval doubles until it does not. MUST-M15's "loses at most one idle interval" then holds by construction.
+**D11. The backup interval, defined.** The spec sets the interval by measurement but names no measurement (Appendix C item 7). Definition: backups run at every idle exit that has new seqs, and every 30 minutes while the worker runs (`next_attempt_at`). A run exports segments of at most 8 MB of records each and repeats until it is caught up, so the time of one export does not grow with the interval or with activity. Task 12 measures the time per segment and its compressed size on the three machines; if the slowest machine's p95 per segment exceeds 1 s, the segment cap halves until it does not. The interval stays 30 minutes, so MUST-M15's "loses at most one idle interval" holds by construction.
 
 **D12. The manifest at the none tier.** From raw alone the manifest has: risky git state; last failing command; the owner's directive lines (dated, quoted, marked unverified) with MUST-M5's negation pairing; the agent's todo list; last prompt and reply; files touched; as-of and the count of records no consumer of curation has seen (all of them until milestone 3); other active sessions on the repo. "Current decisions" is empty until milestone 3's claims. The drop order is spec 4.9's. SessionStart injects the manifest, fenced as data; packets and ranked claims are milestone 4 (spec 4.4).
 
@@ -79,18 +79,18 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
 | # | Task | Executor | Depends on | Produces |
 |---|---|---|---|---|
 | 0 | `v1` branch; Design B's setup in the dogfood user | Claude | — | branch `v1`; `oboete setup` registers B's hooks in a temp or dogfood home |
-| 1 | `raw.db`: schema, open (FULL, fullfsync), append with seq | Claude | 0 | `raw::open`, `Raw::{append, max_seq, after}`, `Event`, `Record`, `Target` |
+| 1 | `raw.db`: schema, open (FULL, fullfsync), append with seq | Claude | 0 | `raw::open`, `Raw::{append, max_seq, after}`, `Event`, `Record`, `Item`, `Target` |
 | 2 | Capture: full events, envelopes, binary markers, `<private>`, git fields | Claude; adapter ports by Grok | 1 | `capture::event(agent, name, &Value, cwd) -> Option<Event>` |
 | 3 | Redaction: full scan, head-and-tail cap, ledger, extra rules and allowlist; security review | Claude | 2 | `redact::{Rules, Finding, scan}`; `capture::cut_and_redact`; ledger rows |
 | 4 | Write-failure classification, marker, doctor, injection line (MUST-M16) | Claude | 2 | `failure::{classify, mark, since}` |
 | 5 | Worker: lock, spawn, idle exit, lost-wakeup rule, checkpoints, rewind (MUST-M14) | Claude | 1 | `worker::{lock, drain, run_with, run, run_once}`, `checkpoint::{get, set, rewind}` |
 | 6 | Raw FTS consumer and `oboete search` | Claude | 5 | `consumer::Fts`, `search::raw` |
-| 7 | Tombstones: records, read-path filtering, redaction rescan | Claude | 3, 5, 6 | `Raw::{append_tombstone, targets}`, `raw::text`, `consumer::Rescan` |
+| 7 | Tombstones: records, read-path filtering, redaction rescan | Claude | 3, 5, 6 | `Raw::append_tombstone`, masking inside `Raw::after`, `consumer::Rescan` |
 | 8 | Backups: segments, checksums, schedule, cloud-folder warning, quarantine and restore (MUST-M15) | Claude | 5, 7 | `backup::{export, verify, restore}` |
 | 9 | Manifest and SessionStart injection; MUST-M5 negation | Claude | 5, 6 | `consumer::manifest`, `manifest::render` |
 | 10 | Compression consumer | Claude | 5 | `consumer::compress` |
 | 11 | Transcript gap check (spec 2.3) | Claude | 5 | `consumer::gaps`, doctor rows per adapter |
-| 12 | Replay on Design B and M14 on three machines; set the line, the cap and the backup interval | Claude | 1-11 | numbers in `docs/milestone-2.md` |
+| 12 | Replay on Design B and M14 on three machines; set the line, the cap and the backup segment cap | Claude | 1-11 | numbers in `docs/milestone-2.md` |
 | 13 | None tier end to end in the dogfood user; the milestone note | Claude | 12 | `docs/milestone-2.md` |
 
 Task bodies follow, one per section, each with its interfaces and its failing test first.
@@ -130,7 +130,7 @@ Task bodies follow, one per section, each with its interfaces and its failing te
   - `pub fn open(home: &Path) -> Result<Raw>`: WAL, `synchronous=FULL`, `fullfsync=ON` on macOS, busy timeout 2 s, schema, device id.
   - `pub struct Event { pub agent: String, pub session: String, pub kind: String /* prompt, tool, reply, compaction, end */, pub ts: i64, pub repo: Option<String>, pub branch: Option<String>, pub head: Option<String>, pub gitdir: Option<String>, pub cwd: Option<String>, pub source: String, pub body: String, pub original_bytes: Option<i64> }`
   - `pub enum Target { Record { device: String, seq: i64 }, Range { device: String, seq: i64, offset: i64, length: i64 } }`: what a tombstone points at. The columns exist from this task; Task 7 writes them.
-  - `pub struct Record { pub device: String, pub seq: i64, pub event: Option<Event> /* None for a tombstone */, pub target: Option<Target> }`. The body comes back decompressed (Task 10) and not yet masked (Task 7's `raw::text` masks).
+  - `pub struct Record { pub device: String, pub seq: i64, pub item: Item }` with `pub enum Item { Event(Event), Removed /* an event a tombstone targets whole */, Tombstone(Target) }`. `Raw::after` is the only way records leave `raw.rs`: bodies come back decompressed (Task 10) and masked by every tombstone (Task 7, D8). The stored bytes stay private to `raw.rs`, so no consumer can read what a tombstone covers.
   - `impl Raw { pub fn append(&mut self, e: &Event) -> Result<i64> /* seq */; pub fn max_seq(&self) -> Result<i64>; pub fn after(&self, device: &str, seq: i64, limit: usize) -> Result<Vec<Record>>; pub fn device(&self) -> &str }`
   - `#[cfg(test)] pub fn test_event(body: &str) -> Event` (agent `claude`, session `s`, kind `prompt`, source `hook`), used by every later task's tests.
 
@@ -359,7 +359,7 @@ fn a_full_disk_never_blocks_the_agent_and_is_reported() {
 
 **Files:**
 - Create: `src/worker.rs`, `src/knowledge.rs`
-- Modify: `src/hook.rs` (spawn `oboete worker` detached at Stop, SessionEnd and SessionStart, in place of `spawn_observe`, `src/hook.rs:680-700`)
+- Modify: `src/hook.rs` (after every successful append, and at SessionStart, try the worker lock and spawn `oboete worker` detached when it is free, in place of `spawn_observe`, `src/hook.rs:680-700`)
 - Modify: `src/main.rs` (`Cmd::Worker { idle_ms }`)
 - Test: `src/worker.rs`
 
@@ -368,37 +368,61 @@ fn a_full_disk_never_blocks_the_agent_and_is_reported() {
 - Produces:
   - `knowledge::open(home) -> Result<Connection>`: WAL, `synchronous=NORMAL`, table `checkpoints(consumer TEXT, device TEXT, seq INTEGER NOT NULL, PRIMARY KEY (consumer, device))`.
   - `checkpoint::get(k: &Connection, consumer: &str, device: &str) -> Result<i64>` (0 when absent); `checkpoint::set(k, consumer, device, seq) -> Result<()>`.
-  - `checkpoint::rewind(raw: &Raw, k: &Connection) -> Result<Vec<(String, i64, i64)>>` (consumer, was, now) for this device, also written to `<home>/state/rewound` for doctor.
-  - `pub trait Consumer { fn name(&self) -> &'static str; fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> /* new checkpoint */; }`
+  - `pub trait Consumer { fn name(&self) -> &'static str; fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> /* new checkpoint */; fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> /* delete this consumer's output above `to` */; }`
+  - `checkpoint::rewind(raw: &Raw, k: &Connection, consumers: &mut [Box<dyn Consumer>]) -> Result<Vec<(String, i64, i64)>>` (consumer, was, now) for this device: for each checkpoint above raw's highest seq, the consumer's `rewind` and the checkpoint move share one transaction, so no output of a lost seq survives to collide with the event that reuses it. Also written to `<home>/state/rewound` for doctor.
   - `worker::consumers() -> Vec<Box<dyn Consumer>>`: this milestone's consumers in order. It starts empty; each later task adds its own.
   - `worker::drain(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> Result<()>`: runs each consumer from its checkpoint until none advances. Each step and its checkpoint move share one knowledge.db transaction (D10).
   - `worker::lock(home) -> Result<Option<Lock>>`: std's `File::try_lock` on `<home>/state/worker.lock`; `None` when another process holds it. The hook uses it too.
-  - `worker::run_with(home, idle_ms, consumers, before_exit: impl FnMut()) -> Result<()>`: take the lock (return at once without it), `quick_check` both files (a failure stops the worker with an error until Task 8), `rewind`, `drain`; wait for new records or `idle_ms`; when idle, release the lock, call `before_exit` (a test seam), check for records above the checkpoints, and if there are any, take the lock again and go on (D6).
+  - `worker::run_with(home, idle_ms, consumers, before_exit: impl FnMut()) -> Result<()>`: take the lock (return at once without it), `quick_check` both files (a failure stops the worker with an error until Task 8), `checkpoint::rewind`, `drain`; wait for new records or `idle_ms`; when idle, release the lock, call `before_exit` (a test seam), check for records above the checkpoints, and if there are any, take the lock again and go on (D6).
   - `worker::run(home, idle_ms)` is `run_with(home, idle_ms, consumers(), || {})`; `worker::run_once(home)` is the same with `idle_ms = 0`.
 
 - [ ] **Step 1: Failing tests.**
 
 ```rust
-/// A consumer that only walks the sequence, so these tests need no index (Task 6).
+/// A consumer that writes each seq it sees into knowledge.db, so these tests need no index (Task 6).
 struct Seen;
 impl Consumer for Seen {
     fn name(&self) -> &'static str { "seen" }
-    fn step(&mut self, raw: &Raw, _k: &Connection, after: i64) -> Result<i64> {
-        Ok(raw.after(raw.device(), after, 100)?.last().map_or(after, |r| r.seq))
+    fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> {
+        k.execute("CREATE TABLE IF NOT EXISTS seen(device TEXT, seq INTEGER)", [])?;
+        let recs = raw.after(raw.device(), after, 100)?;
+        for r in &recs { k.execute("INSERT INTO seen VALUES (?1, ?2)", (&r.device, r.seq))?; }
+        Ok(recs.last().map_or(after, |r| r.seq))
+    }
+    fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> {
+        k.execute("DELETE FROM seen WHERE device = ?1 AND seq > ?2", (device, to))?;
+        Ok(())
     }
 }
 
+fn seen(k: &Connection) -> Vec<i64> {
+    let mut st = k.prepare("SELECT seq FROM seen ORDER BY seq").unwrap();
+    st.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+}
+
+/// raw.db as if its commits above `seq` had never reached the disk (MUST-M14).
+fn lose_after(home: &Path, seq: i64) -> Raw {
+    let c = rusqlite::Connection::open(home.join("raw.db")).unwrap();
+    c.execute("DELETE FROM records WHERE seq > ?1", [seq]).unwrap();
+    drop(c);
+    raw::open(home).unwrap()
+}
+
 #[test]
-fn a_checkpoint_above_raw_is_rewound_and_later_events_are_not_skipped() {
+fn a_checkpoint_above_raw_is_rewound_with_its_output_and_later_events_are_not_skipped() {
     let home = tempfile::tempdir().unwrap();
     let mut raw = raw::open(home.path()).unwrap();
-    for i in 0..5 { raw.append(&raw::test_event(&i.to_string())).unwrap(); }
     let mut k = knowledge::open(home.path()).unwrap();
-    checkpoint::set(&k, "seen", raw.device(), 8).unwrap();      // as after a lost raw commit (MUST-M14)
-    assert_eq!(checkpoint::rewind(&raw, &k).unwrap(), vec![("seen".into(), 8, 5)]);
-    raw.append(&raw::test_event("new")).unwrap();                // seq 6: skipped if the rewind were missing
-    worker::drain(&raw, &mut k, &mut [Box::new(Seen) as Box<dyn Consumer>]).unwrap();
-    assert_eq!(checkpoint::get(&k, "seen", raw.device()).unwrap(), 6);
+    let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Seen)];
+    for i in 0..8 { raw.append(&raw::test_event(&i.to_string())).unwrap(); }
+    worker::drain(&raw, &mut k, &mut consumers).unwrap();       // output and checkpoint at 8
+    drop(raw);
+    let mut raw = lose_after(home.path(), 5);
+    assert_eq!(checkpoint::rewind(&raw, &k, &mut consumers).unwrap(), vec![("seen".into(), 8, 5)]);
+    assert_eq!(seen(&k), vec![1, 2, 3, 4, 5]);                   // no output left for the lost 6-8
+    raw.append(&raw::test_event("new")).unwrap();                // seq 6 again, a different event
+    worker::drain(&raw, &mut k, &mut consumers).unwrap();
+    assert_eq!(seen(&k), vec![1, 2, 3, 4, 5, 6]);
 }
 
 #[test]
@@ -431,7 +455,7 @@ fn a_second_worker_exits_at_once() {
 ```
 
 - [ ] **Step 2: Run, expect failure.**
-- [ ] **Step 3: Implement.** No async runtime: a loop with `std::thread::sleep` on a short poll plus the idle deadline. The hook appends first, then calls `worker::lock` and spawns a worker only when it gets the lock (dropping it at once), so an idle system starts no process per event and D6's order holds.
+- [ ] **Step 3: Implement.** No async runtime: a loop with `std::thread::sleep` on a short poll plus the idle deadline. Every hook that appends then calls `worker::lock` and spawns a worker only when it gets the lock (dropping it at once), so D6's order holds for every event, not only at Stop. While a worker runs (it stays up `idle_ms` after the last record), the attempt fails and costs one open and one `flock`; a process is spawned only when no worker runs. Task 12's M14 runs include this.
 - [ ] **Step 4: Run the tests.**
 - [ ] **Step 5: Commit** `worker: consumers by seq, checkpoints, rewind, lost-wakeup rule (milestone 2, Task 5)`.
 
@@ -465,9 +489,9 @@ fn a_second_worker_exits_at_once() {
 
 **Interfaces:**
 - Consumes: `Target` and `Record` (Task 1), `worker::run_once` (Task 5), `search::raw` (Task 6).
-- Produces: `Raw::append_tombstone(&mut self, t: Target) -> Result<i64>`; `Raw::targets(&self) -> Result<Targets>` (loaded once per consumer step; a lookup by (device, seq)); `raw::text(r: &Record, t: &Targets) -> Option<String>` (the body with every targeted range replaced by `[removed]`, offsets taken on the stored body; `None` for a tombstone or a record a tombstone targets whole); `consumer::Rescan`: when `Rules::version()` differs from the one stored in `knowledge.db`, scan records with the new rules from seq 1 and append a range tombstone per new hit (spec 2.2), then store the new ruleset.
+- Produces: `Raw::append_tombstone(&mut self, t: Target) -> Result<i64>`; masking inside `Raw::after` (D8: the targets are loaded once per call; a range becomes the same number of bytes of `*`; an event targeted whole comes back as `Item::Removed`); `consumer::Rescan`: when `Rules::version()` differs from the one stored in `knowledge.db`, scan records with the new rules from seq 1 and append a range tombstone per new hit (spec 2.2), then store the new ruleset.
 
-- [ ] **Step 1: Failing tests.** The manifest (Task 9) and backup export (Task 8) read through `raw::text` and add their own assertion on this fixture. Here:
+- [ ] **Step 1: Failing tests.** The manifest (Task 9) and backup export (Task 8) read through `Raw::after` and add their own assertion on this fixture. Here:
 
 ```rust
 #[test]
@@ -486,9 +510,9 @@ fn a_record_tombstone_hides_it_and_a_range_tombstone_masks_only_its_range() {
     let hits = search::raw(p, "alpha").unwrap();
     assert_eq!(hits.len(), 1);
     assert!(hits[0].snippet.contains("tail") && !hits[0].snippet.contains("zqx"));
-    let (targets, recs) = (raw.targets().unwrap(), raw.after(&dev, 0, 10).unwrap());
-    assert_eq!(raw::text(&recs[0], &targets).as_deref(), Some("alpha [removed] tail"));
-    assert_eq!(raw::text(&recs[1], &targets), None);
+    let recs = raw.after(&dev, 0, 10).unwrap();
+    assert!(matches!(&recs[0].item, Item::Event(e) if e.body == "alpha ***************** tail"));
+    assert!(matches!(recs[1].item, Item::Removed));
 }
 
 #[test]
@@ -498,7 +522,7 @@ fn a_new_rule_tombstones_old_records_once() {
 }
 ```
 - [ ] **Step 2: Run, expect failure.**
-- [ ] **Step 3: Implement.** Read paths mask with `Targets` before any text leaves `raw.rs` (one function, `raw::text(record, &targets)`), so a later read path cannot forget it.
+- [ ] **Step 3: Implement.** `Raw::after` masks before any text leaves `raw.rs` (D8), so a later read path cannot forget it. The rescan scans the masked bodies; its offsets stay valid on the stored body because masking keeps byte lengths.
 - [ ] **Step 4: Run the tests.**
 - [ ] **Step 5: Commit** `raw: tombstones in the sequence, masked on every read; redaction rescan (milestone 2, Task 7)`.
 
@@ -513,14 +537,14 @@ fn a_new_rule_tombstones_old_records_once() {
 
 **Interfaces:**
 - Produces:
-  - Segment files `<backup dir>/<device>-<first seq>-<last seq>.seg.zst`: the records (events and tombstones) as JSON lines, bodies read through `raw::text`, zstd-compressed, each with a `.sha256` beside it.
+  - Segment files `<backup dir>/<device>-<first seq>-<last seq>.seg.zst`: the records (events and tombstones) as JSON lines, bodies as `Raw::after` returns them (masked, D8), zstd-compressed, each with a `.sha256` beside it.
   - `backup::export(home) -> Result<Option<PathBuf>>`: the records above the last backed-up seq; `None` when there are none.
   - `backup::verify(dir) -> Vec<Problem>`.
   - `backup::restore(home, dir) -> Result<()>`: quarantine the damaged `raw.db` as `raw.db.quarantined-<time>`, rebuild it from the segments in seq order, keep each record's (device, seq) and the file's device id (the segments are this device's own history).
   - `Raw::hashes(&self) -> Result<BTreeMap<(String, i64), String>>`: sha256 of each record's content (labels and body as `Raw::after` returns it, so compression does not change it; `sha2` is already a dependency).
-  - `worker::run_with`: a failed `quick_check`, or `SQLITE_CORRUPT`/`SQLITE_NOTADB` on open, calls `backup::restore` and writes `<home>/state/restored` for doctor.
+  - `worker::run_with`: a failed `quick_check` of `raw.db`, or `SQLITE_CORRUPT`/`SQLITE_NOTADB` on opening it, calls `backup::restore` and writes `<home>/state/restored` for doctor. A failed check of `knowledge.db` only quarantines it as `knowledge.db.quarantined-<time>` and starts an empty one: every consumer rebuilds from seq 0 (spec 1.7), and `raw.db` and the segments are not touched.
 
-- [ ] **Step 1: Failing tests.** MUST-M15, plus a unit test that a backup directory under `OneDrive`, `iCloud Drive`, `Dropbox` or `Google Drive` gives the doctor warning, and one that Task 7's fixture exports no `zqx-private-words` and no `bravo`:
+- [ ] **Step 1: Failing tests.** MUST-M15, plus unit tests that: a backup directory under `OneDrive`, `iCloud Drive`, `Dropbox` or `Google Drive` gives the doctor warning; Task 7's fixture exports no `zqx-private-words` and no `bravo`, and after a restore reads the same through `Raw::after` (masking twice changes nothing, D8); a damaged `knowledge.db` is quarantined and rebuilt while `raw.db` and the segments stay byte for byte:
 
 ```rust
 #[test]
@@ -552,7 +576,7 @@ fn overwrite(path: &std::path::Path, at: u64, bytes: &[u8]) {
 }
 ```
 - [ ] **Step 2: Run, expect failure.**
-- [ ] **Step 3: Implement.** Segments are sealed: written to a temporary name, fsynced, renamed. The last backed-up seq and `next_attempt_at` live in `knowledge.db` (if it is lost, the next export starts from seq 1, which only repeats work). Forget's rewrite of segments is milestone 5's (spec 6.2 step 6); the format allows it because each segment covers a seq range and can be rewritten alone.
+- [ ] **Step 3: Implement.** Segments are sealed: written to a temporary name, fsynced, renamed. The last backed-up seq is read from the segment names (this device's highest `<last seq>`), so it survives a lost `knowledge.db`; `next_attempt_at` lives in `knowledge.db` (lost, it only brings the next export forward). Each run writes segments of at most the cap (D11) until it is caught up. Forget's rewrite of segments is milestone 5's (spec 6.2 step 6); the format allows it because each segment covers a seq range and can be rewritten alone.
 - [ ] **Step 4: Run the tests.**
 - [ ] **Step 5: Commit** `backup: sealed, checksummed zstd segments; quarantine and restore (milestone 2, Task 8)`.
 
@@ -600,7 +624,7 @@ fn fields_drop_in_the_fixed_order_under_the_cap() { /* git state and failing com
 - Test: `src/consumer/compress.rs`
 
 **Interfaces:**
-- Produces: `consumer::Compress`, which rewrites `body` as zstd (level 3) and `enc='zstd'` for records every other consumer has passed; `Raw::after` decompresses transparently, so no reader sees `enc`.
+- Produces: `consumer::Compress`, which calls `Raw::compress_through(&mut self, device: &str, seq: i64)`: inside `raw.rs`, it rewrites `body` as zstd (level 3) and `enc='zstd'` for records every other consumer has passed; `Raw::after` decompresses transparently, so no reader sees `enc`.
 
 - [ ] **Step 1: Failing test:** after the worker runs, a record's `enc` is `zstd`, its text reads back identical, and search still finds it.
 - [ ] **Step 2: Run, expect failure.**
@@ -637,12 +661,12 @@ fn fields_drop_in_the_fixed_order_under_the_cap() { /* git state and failing com
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: the write-hook line (M14), `capture.max_output_bytes`'s default (D4), the backup interval (D11), written in `docs/milestone-2.md` and as constants in code.
+- Produces: the write-hook line (M14), `capture.max_output_bytes`'s default (D4), the backup segment cap (D11), written in `docs/milestone-2.md` and as constants in code.
 
 - [ ] **Step 1: Failing test:** `replay` of the long-24h fixture records events whose first and last `ts` are at least 23.5 hours apart (issue #65).
 - [ ] **Step 2: Run, expect failure; implement; pass.**
 - [ ] **Step 3: Measure** on WSL, the M1 iMac (SSH) and Windows (the GNU cross-build, D14): 300 hook runs per size (1, 64, 256 KB), with redaction and the ledger, spawned processes, p50/p95/max; backup export time and segment size per idle exit.
-- [ ] **Step 4: Set** the line from the slowest machine at each size after the cap; set the cap (D4) and the interval (D11) by their rules; write the numbers and the rules applied.
+- [ ] **Step 4: Set** the line from the slowest machine at each size after the cap; set the cap (D4) and the segment cap (D11) by their rules; write the numbers and the rules applied.
 - [ ] **Step 5: Commit** `replay, M14: the write-hook line on three machines (milestone 2, Task 12)`.
 
 ---
