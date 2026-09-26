@@ -501,7 +501,12 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
 
 /// The read check keeps the hook path free of write locks; the write transaction re-checks,
 /// so hooks that open an old database at the same moment do not race on the ALTER.
-fn ensure_column(conn: &mut Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+pub(crate) fn ensure_column(
+    conn: &mut Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> Result<()> {
     if has_column(conn, table, column)? {
         return Ok(());
     }

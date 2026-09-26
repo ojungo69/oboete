@@ -95,11 +95,14 @@ pub struct Raw {
 pub fn open(home: &Path) -> Result<Raw> {
     let path = home.join("raw.db");
     crate::db::private(home, 0o700);
-    let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+    let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     crate::db::wal(&conn, "FULL")?;
     #[cfg(target_os = "macos")]
     conn.execute_batch("PRAGMA fullfsync=ON;")?;
     conn.execute_batch(SCHEMA).context("raw schema")?;
+    // A raw.db from before the ledger named its field (milestone 2 Task 1's schema).
+    crate::db::ensure_column(&mut conn, "ledger", "field", "TEXT NOT NULL DEFAULT ''")
+        .context("migrate ledger")?;
     for file in ["raw.db", "raw.db-wal", "raw.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -332,6 +335,31 @@ mod tests {
         assert_eq!(recs[1].item, Item::Event(Box::new(e)));
         assert_eq!(recs[1].device, r.device());
         assert!(r.after("other-device", 0, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_ledger_from_task_1_gains_its_field_column() {
+        let home = tempfile::tempdir().unwrap();
+        let c = Connection::open(home.path().join("raw.db")).unwrap();
+        c.execute_batch(
+            "CREATE TABLE ledger (device TEXT NOT NULL, seq INTEGER NOT NULL, rule TEXT NOT NULL,
+             offset INTEGER NOT NULL, length INTEGER NOT NULL, ts INTEGER NOT NULL, ruleset TEXT NOT NULL);",
+        )
+        .unwrap();
+        drop(c);
+        let mut r = open(home.path()).unwrap();
+        let f = crate::redact::Finding {
+            rule: "r".into(),
+            offset: 0,
+            length: 1,
+        };
+        r.append_with_ledger(&test_event("x"), &[("/prompt".into(), f)])
+            .unwrap();
+        let field: String = r
+            .conn
+            .query_row("SELECT field FROM ledger", [], |x| x.get(0))
+            .unwrap();
+        assert_eq!(field, "/prompt");
     }
 
     #[test]
