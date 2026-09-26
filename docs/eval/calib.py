@@ -110,8 +110,11 @@ def chat(member, prompt, timeout=300):
             return text, answer.get('model') or None
 
         except urllib.error.HTTPError as e:
-            wait = int(e.headers.get('Retry-After') or 20 * (attempt + 1)) if e.code == 429 else None
-            if wait is None or wait > 120 or attempt == 4:
+            if e.code != 429:
+                raise
+            after = e.headers.get('Retry-After') or str(20 * (attempt + 1))
+            wait = int(after) if after.isdigit() else 10 ** 9      # an HTTP date: a long wait, for the next run
+            if wait > 120 or attempt == 4:
                 raise
             time.sleep(wait + 1)
 
