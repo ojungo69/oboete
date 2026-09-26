@@ -118,8 +118,11 @@ fn export_from(raw: &Raw, dir: &Path) -> Result<Option<PathBuf>> {
     if raw.max_seq()? <= last {
         return Ok(None);
     }
-    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    crate::db::private(dir, 0o700);
+    if !dir.exists() {
+        // Private when oboete makes it; a directory the user chose keeps its permissions.
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        crate::db::private(dir, 0o700);
+    }
     let mut wrote = None;
     loop {
         let lines = raw.export_lines(last, SEGMENT_BYTES)?;
@@ -311,39 +314,44 @@ fn corrupt(e: &anyhow::Error) -> bool {
 /// raw.db for the worker: restored from the segments when opening it says it is damaged or its
 /// `quick_check` fails. Any other error stays an error.
 pub fn open_raw(home: &Path) -> Result<Raw> {
-    let damaged = match raw::open(home) {
-        Ok(r) => match r.quick_check() {
-            Ok(()) => return Ok(r),
-            // A check that ran and reported a problem, or a read that hit a damaged page.
-            Err(e) => e.downcast_ref::<rusqlite::Error>().is_none() || corrupt(&e),
-        },
-        Err(e) if corrupt(&e) => true,
-        Err(e) => return Err(e),
-    };
-    debug_assert!(damaged);
-    eprintln!("oboete: {}", restore(home)?);
-    raw::open(home)
+    match raw::open(home).and_then(|r| r.quick_check().map(|()| r)) {
+        Ok(r) => Ok(r),
+        Err(e) if damaged(&e) => {
+            eprintln!("oboete: raw.db: {e:#}; {}", restore(home)?);
+            raw::open(home)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// knowledge.db for the worker: a damaged one is quarantined and started empty. Every consumer
 /// then rebuilds from seq 0 (spec 1.7); raw.db and the segments are not touched.
 pub fn open_knowledge(home: &Path) -> Result<rusqlite::Connection> {
-    let damaged = match crate::knowledge::open(home) {
-        Ok(k) => match crate::db::quick_check(&k, "knowledge.db") {
-            Ok(()) => return Ok(k),
-            Err(e) => e.downcast_ref::<rusqlite::Error>().is_none() || corrupt(&e),
-        },
-        Err(e) => corrupt(&e),
-    };
-    if !damaged {
-        return crate::knowledge::open(home);
+    let checked = crate::knowledge::open(home)
+        .and_then(|k| crate::db::quick_check(&k, "knowledge.db").map(|()| k));
+    match checked {
+        Ok(k) => Ok(k),
+        Err(e) if damaged(&e) => {
+            let kept = quarantine(home, "knowledge.db")?;
+            eprintln!(
+                "oboete: knowledge.db: {e:#}; kept as {} and rebuilt from raw.db",
+                kept.display()
+            );
+            crate::knowledge::open(home)
+        }
+        Err(e) => Err(e),
     }
-    let kept = quarantine(home, "knowledge.db")?;
-    eprintln!(
-        "oboete: knowledge.db was damaged; kept as {} and rebuilt from raw.db",
-        kept.display()
-    );
-    crate::knowledge::open(home)
+}
+
+/// An open or `quick_check` error that says the file is damaged: SQLite's corrupt or not a
+/// database, or a check that ran and reported a problem (the one error that is no
+/// `rusqlite::Error`). Busy, permission and the like are not.
+fn damaged(e: &anyhow::Error) -> bool {
+    corrupt(e)
+        || (e
+            .chain()
+            .all(|c| c.downcast_ref::<rusqlite::Error>().is_none())
+            && e.to_string().contains("quick_check"))
 }
 
 /// The worker's backup step (D11): export what is new. A failure is reported and never stops
@@ -568,6 +576,27 @@ mod tests {
         assert_eq!(std::fs::read(&seg).unwrap(), seg_bytes);
         let hits = crate::search::raw(p, "zq007x", None, 5).unwrap();
         assert_eq!(hits.first().map(|h| h.seq), Some(8));
+    }
+
+    #[test]
+    fn only_damage_restores_not_a_busy_or_missing_file() {
+        assert!(damaged(&anyhow::anyhow!(
+            "raw.db: quick_check: *** in database main *** Page 2: btreeInitPage() returns error code 11"
+        )));
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        );
+        assert!(!damaged(
+            &anyhow::Error::from(busy).context("raw.db: quick_check")
+        ));
+        let corrupt = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            None,
+        );
+        assert!(damaged(&anyhow::Error::from(corrupt)));
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(!damaged(&anyhow::Error::from(denied)));
     }
 
     #[test]
