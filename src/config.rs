@@ -290,7 +290,9 @@ pub fn load(home: &Path) -> Result<Config> {
     }
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let cfg: Config = toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    let cfg: Config = toml::from_str(&text)
+        .map_err(|e| toml_error(&text, &e))
+        .with_context(|| format!("parse {}", path.display()))?;
     match cfg.embedding.provider.as_str() {
         "none" => {}
         "workers-ai" => anyhow::ensure!(
@@ -383,24 +385,39 @@ pub fn load_capture(home: &Path) -> Result<CaptureConfig> {
     parse_capture(text.as_deref()).with_context(|| format!("parse {}", path.display()))
 }
 
-/// `load_capture` on the file's text (`None`: no file). A TOML error names only its line and
-/// its kind, with quoted text left out: the usual message shows the line itself, and a line of
-/// `[redaction]` can hold the value the user means to hide.
+/// `load_capture` on the file's text (`None`: no file).
 pub fn parse_capture(text: Option<&str>) -> Result<CaptureConfig> {
     let Some(text) = text else {
         return Ok(CaptureConfig::default());
     };
-    toml::from_str(text).map_err(|e| {
-        let line = e.span().map_or(0, |s| {
-            text.as_bytes()[..s.start.min(text.len())]
-                .iter()
-                .filter(|&&b| b == b'\n')
-                .count()
-                + 1
-        });
-        let quoted = regex::Regex::new(r#""[^"]*"|'[^']*'"#).expect("valid");
-        anyhow::anyhow!("line {line}: {}", quoted.replace_all(e.message(), "\"…\""))
-    })
+    toml::from_str(text).map_err(|e| toml_error(text, &e))
+}
+
+/// A TOML error in config.toml as it may be printed: by hooks to stderr, by doctor, by a running
+/// `oboete mcp`. Never the source line (the error's usual display quotes it). An error in
+/// `[redaction]` keeps only its line number, since its message can quote the value there, and
+/// that table holds values the user means to hide; an error whose place is unknown is treated
+/// the same.
+fn toml_error(text: &str, e: &toml::de::Error) -> anyhow::Error {
+    let at = e.span().map(|s| s.start.min(text.len()));
+    let before = at.and_then(|a| text.get(..a));
+    let line = before.map_or(0, |b| b.matches('\n').count() + 1);
+    let in_redaction = before.is_none_or(|b| {
+        let this_line = b.rsplit('\n').next().unwrap_or("").trim_start();
+        let table = b
+            .lines()
+            .rev()
+            .map(str::trim_start)
+            .find(|l| l.starts_with('['));
+        this_line.starts_with("redaction") || table.is_some_and(|t| t.starts_with("[redaction"))
+    });
+    if in_redaction {
+        anyhow::anyhow!(
+            "line {line}: a setting in [redaction] is not valid (the details are not shown: they could quote a value to hide)"
+        )
+    } else {
+        anyhow::anyhow!("line {line}: {}", e.message())
+    }
 }
 
 /// Read an API key from the owner's key-file convention (token on line 2).

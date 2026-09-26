@@ -215,15 +215,6 @@ impl Rules {
         &self.version
     }
 
-    /// These rules without the user's extra ones (same kept values).
-    fn without_extra(&self) -> Rules {
-        Rules {
-            extra: Vec::new(),
-            allow: self.allow.clone(),
-            version: self.version.clone(),
-        }
-    }
-
     /// For doctor: how many rules and kept values the user added.
     pub fn counts(&self) -> (usize, usize) {
         (self.extra.len(), self.allow.len())
@@ -372,19 +363,9 @@ pub struct Finding {
     pub length: usize,
 }
 
-/// `text` masked, with its findings. The bundled rules run to their fixpoint first, and the
-/// user's only then: a user mask must never take context a bundled rule needs on a later pass
-/// (curl-auth-user reads the `curl` of a line).
+/// `text` masked, with its findings. `spans` finds every secret with the text's own context;
+/// the pass over the masked text after it can only add masks.
 pub fn scan(text: &str, rules: &Rules) -> (String, Vec<Finding>) {
-    if rules.extra.is_empty() {
-        return scan_bundled(text, rules);
-    }
-    let (mut masked, mut found) = scan_bundled(text, &rules.without_extra());
-    rescan(&mut masked, &mut found, rules);
-    (masked, found)
-}
-
-fn scan_bundled(text: &str, rules: &Rules) -> (String, Vec<Finding>) {
     let (mut masked, mut found) = mask(text, spans(text, rules), rules);
     if !found.is_empty() {
         rescan(&mut masked, &mut found, rules);
@@ -539,46 +520,72 @@ fn bundled_version() -> &'static str {
     VERSION.get_or_init(|| short_hash(&[RULES_TOML, EXTRA_TOML].concat()))
 }
 
-/// Secret spans in `text` and in its JSON-unescaped view, mapped back onto `text`: (start, end,
-/// rule index), unmerged. A tool field is stored as flattened JSON, where `\"` and `\n` hide the
-/// quotes and line breaks rules match on (curl's `-u "user:pass"`, a quoted header), and the whole
-/// output reads as one line to a line-scoped allowlist. Scanning both views can only add masks.
-///
-/// A value the user keeps is not masked, but it must not hide other secrets either: a rule that
-/// matched it (curl-auth-user takes the last `-u` of a line) would never look at one it passed
-/// over. So each kept value becomes spaces of its length in the text looked at next, until no new
-/// one turns up; offsets stay those of `text`.
+/// Secret spans in `text`: (start, end, rule index), unmerged, in `text`'s offsets. The bundled
+/// rules and the user's each run to their own fixpoint, and a value the user keeps is never one.
 fn spans(text: &str, rules: &Rules) -> Vec<(usize, usize, usize)> {
-    let mut work = std::borrow::Cow::Borrowed(text);
-    let mut all = Vec::new();
-    let mut spaced: Vec<(usize, usize)> = Vec::new();
-    for _ in 0..=MAX_PASSES {
-        let mut kept = Vec::new();
-        all.extend(spans_in(&work, rules, &mut kept));
-        if work.contains('\\') {
-            let (view, at) = unescaped(&work);
-            let mut kept_view = Vec::new();
-            all.extend(
-                spans_in(&view, rules, &mut kept_view)
-                    .into_iter()
-                    .map(|(s, e, r)| (at[s], at[e], r)),
-            );
-            kept.extend(kept_view.into_iter().map(|(s, e)| (at[s], at[e])));
-        }
-        kept.retain(|k| !spaced.contains(k));
-        if kept.is_empty() {
-            break;
-        }
-        let w = work.to_mut();
-        for &(s, e) in &kept {
-            w.replace_range(s..e, &" ".repeat(e - s));
-        }
-        spaced.extend(kept);
+    let mut all = group(text, rules, false);
+    if !rules.extra.is_empty() {
+        all.extend(group(text, rules, true));
     }
-    // A span that only covers spaces put in place of a kept value is that value.
-    all.retain(|&(s, e, _)| !spaced.iter().any(|&(a, b)| a <= s && e <= b));
     all.sort_unstable();
     all.dedup();
+    all
+}
+
+/// One group of rules (the bundled ones, or the user's) to its fixpoint. A rule finds one secret
+/// per context per look (curl-auth-user's greedy `.*` takes the last `-u` of a line,
+/// curl-auth-header's lazy `.*?` the first header after a `curl`), so each look is at a copy of
+/// `text` where what the group found before, and every value the user keeps, is blanked out with
+/// spaces of the same length: offsets stay those of `text`. The other group's findings are not
+/// blanked, so neither group takes context the other needs. Still finding after `MAX_PASSES`,
+/// the whole text is one span: a look never stops with a secret left unlooked-at.
+fn group(text: &str, rules: &Rules, user: bool) -> Vec<(usize, usize, usize)> {
+    let mut work = std::borrow::Cow::Borrowed(text);
+    let mut found = Vec::new();
+    let mut blank: Vec<(usize, usize)> = Vec::new();
+    let mut last_rule = 0;
+    for _ in 0..=MAX_PASSES {
+        let mut kept = Vec::new();
+        let mut new = views(&work, rules, user, &mut kept);
+        let blanked =
+            |&(s, e, _): &(usize, usize, usize)| blank.iter().any(|&(a, b)| a <= s && e <= b);
+        new.retain(|x| !blanked(x));
+        kept.retain(|x| !blanked(x));
+        if new.is_empty() && kept.is_empty() {
+            return found;
+        }
+        let w = work.to_mut();
+        for &(s, e, r) in new.iter().chain(&kept) {
+            w.replace_range(s..e, &" ".repeat(e - s));
+            blank.push((s, e));
+            last_rule = r;
+        }
+        found.extend(new);
+    }
+    vec![(0, text.len(), last_rule)]
+}
+
+/// One look of a group at `text` and at its JSON-unescaped view, mapped back onto `text`. A tool
+/// field is stored as flattened JSON, where `\"` and `\n` hide the quotes and line breaks rules
+/// match on (curl's `-u "user:pass"`, a quoted header), and the whole output reads as one line to
+/// a line-scoped allowlist. Scanning both views can only add masks.
+fn views(
+    text: &str,
+    rules: &Rules,
+    user: bool,
+    kept: &mut Vec<(usize, usize, usize)>,
+) -> Vec<(usize, usize, usize)> {
+    let mut all = spans_in(text, rules, user, kept);
+    if text.contains('\\') {
+        let (view, at) = unescaped(text);
+        let mut kept_view = Vec::new();
+        all.extend(
+            spans_in(&view, rules, user, &mut kept_view)
+                .into_iter()
+                .map(|(s, e, r)| (at[s], at[e], r)),
+        );
+        kept.extend(kept_view.into_iter().map(|(s, e, r)| (at[s], at[e], r)));
+    }
     all
 }
 
@@ -627,12 +634,17 @@ fn escape(s: &str) -> Option<(char, usize)> {
 }
 
 /// Secret spans in `text`: (start, end, rule index), unmerged, as gitleaks finds them.
-/// `kept` gets the spans of the values the user keeps.
+/// Secret spans in `text` found by the bundled rules, or by the user's (`user`), as gitleaks
+/// finds them; `kept` gets the spans of the values the user keeps.
 fn spans_in(
     text: &str,
     rules: &Rules,
-    kept: &mut Vec<(usize, usize)>,
+    user: bool,
+    kept: &mut Vec<(usize, usize, usize)>,
 ) -> Vec<(usize, usize, usize)> {
+    if user {
+        return user_spans_in(text, rules, kept);
+    }
     let r = bundled();
     let mut hit = vec![false; r.rules.len()];
     // Overlapping: "sk" (twilio) inside "gsk_" (groq) must not hide the longer keyword.
@@ -674,13 +686,24 @@ fn spans_in(
                 continue;
             }
             if rules.keeps(secret.as_str()) {
-                kept.push((secret.start(), secret.end()));
+                kept.push((secret.start(), secret.end(), i));
             } else {
                 spans.push((secret.start(), secret.end(), i));
             }
         }
     }
-    // The user's rules: a rule without keywords always runs (gitleaks does the same).
+    spans.sort_unstable();
+    spans
+}
+
+/// The user's rules: a rule without keywords always runs (gitleaks does the same).
+fn user_spans_in(
+    text: &str,
+    rules: &Rules,
+    kept: &mut Vec<(usize, usize, usize)>,
+) -> Vec<(usize, usize, usize)> {
+    let r = bundled();
+    let mut spans = Vec::new();
     let mut lower: Option<String> = None;
     for (j, x) in rules.extra.iter().enumerate() {
         if !x.keywords.is_empty() {
@@ -704,10 +727,11 @@ fn spans_in(
             {
                 continue;
             }
+            let rule = r.rules.len() + j;
             if rules.keeps(secret.as_str()) {
-                kept.push((secret.start(), secret.end()));
+                kept.push((secret.start(), secret.end(), rule));
             } else {
-                spans.push((secret.start(), secret.end(), r.rules.len() + j));
+                spans.push((secret.start(), secret.end(), rule));
             }
         }
     }
@@ -1269,6 +1293,38 @@ mod tests {
     }
 
     #[test]
+    fn many_kept_values_never_let_a_secret_through() {
+        let kept = format!("dev:{}", "W8eR2tY6uI0pL4k"); // split: secret scanners
+        let other = format!("usr:{}", "q9Zx8mL2vB4nR7tYw");
+        let rules = user(&format!("[redaction]\nallowlist = [\"{}\"]", sha(&kept))).unwrap();
+        for n in [MAX_PASSES - 1, MAX_PASSES, MAX_PASSES + 1, MAX_PASSES + 2] {
+            let line = format!("curl -u {other} https://x ; ")
+                + &format!("curl -u {kept} https://x ; ").repeat(n);
+            let json = serde_json::to_string(&line).unwrap();
+            for text in [&line, &json] {
+                let (masked, _) = scan(text, &rules);
+                assert!(!masked.contains(&other), "n={n}: {masked}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_bundled_rule_never_takes_context_a_user_rule_needs() {
+        let bearer = format!("q9Zx8mL2vB4nR7tYw{}", "K3pS6dJ0"); // split: secret scanners
+        let text = format!("Authorization: Bearer {bearer}; otp=654321");
+        let rules = user(
+            "[redaction]\nextra_rules = [{ id = \"otp\", regex = 'Bearer [A-Za-z0-9]+; otp=([0-9]{6})' }]",
+        )
+        .unwrap();
+        let (masked, found) = scan(&text, &rules);
+        assert!(
+            !masked.contains(&bearer) && !masked.contains("654321"),
+            "{masked}"
+        );
+        assert!(found.iter().any(|f| f.rule == "user:otp"), "{found:?}");
+    }
+
+    #[test]
     fn egress_follows_the_file_as_it_changes() {
         let home = tempfile::tempdir().unwrap();
         let mut e = Egress {
@@ -1304,10 +1360,27 @@ mod tests {
             format!("[redaction]\nextra_rules = [{{ id = \"x\", regex = '({v}' }}]"),
             format!("[redaction]\nallowlist = [{v}]"),
             format!("[redaction]\nallowlist = \"{v}\""),
+            format!("[redaction]\nallowlist = 'prefix\"{v}'"),
+            format!(
+                "[redaction]\nextra_rules = [{{ id = \"x\", regex = 'x', entropy = \"{v}\" }}]"
+            ),
+            format!("redaction = \"{v}\""),
         ] {
             let e = format!("{:#}", user(&toml).err().expect(&toml));
             assert!(!e.contains(&v), "{toml}: {e}");
+            // The whole config, as doctor and `oboete mcp` read it.
+            let home = tempfile::tempdir().unwrap();
+            std::fs::write(home.path().join("config.toml"), &toml).unwrap();
+            if let Err(e) = crate::config::load(home.path()) {
+                assert!(!format!("{e:#}").contains(&v), "{toml}: {e:#}");
+            }
         }
+        // Elsewhere the message stays, as it quotes nothing to hide.
+        let e = format!(
+            "{:#}",
+            user("[capture]\nstore_prompts = \"yes\"").err().unwrap()
+        );
+        assert!(e.contains("line 2") && e.contains("bool"), "{e}");
     }
 
     #[test]
@@ -1330,10 +1403,13 @@ mod tests {
                 "secret_group",
             ),
             ("[redaction]\nallowlist = [\"abc\"]", "SHA-256"),
-            ("[redaction]\nextra_rule = []", "unknown field"),
+            (
+                "[redaction]\nextra_rule = []",
+                "a setting in [redaction] is not valid",
+            ),
             (
                 "[redaction]\nextra_rules = [{ id = \"x\", regex = 'x', keyword = [\"k\"] }]",
-                "unknown field",
+                "a setting in [redaction] is not valid",
             ),
         ] {
             let e = format!("{:#}", user(toml).err().expect(toml));
