@@ -257,7 +257,12 @@ fn default_providers() -> Vec<Provider> {
             "nvidia/nemotron-3-super-120b-a12b",
             500,
             true,
-            serde_json::json!({"max_tokens": 2000}),
+            // Nemotron reasons before it answers, and the reasoning counts against max_tokens: on
+            // a full-size window it stopped at 2000 tokens mid-JSON (finish_reason "length"), which
+            // is every one of nim's failures in the owner's calls. Without reasoning it answered
+            // valid JSON in about 5 s with 837 tokens (probe of 2026-09-27, a 16,000-character
+            // synthetic window).
+            serde_json::json!({"max_tokens": 4000, "chat_template_kwargs": {"enable_thinking": false}}),
         ),
         opencode_go,
         cli("codex", Some("gpt-6-luna"), 200),
@@ -336,6 +341,12 @@ mod tests {
                 "claude"
             ]
         );
+        match &cfg.providers[4] {
+            Provider::Openai { extra, .. } => {
+                assert_eq!(extra["chat_template_kwargs"]["enable_thinking"], false)
+            }
+            _ => panic!("expected nim"),
+        }
         match &cfg.providers[5] {
             Provider::Openai { headers, .. } => {
                 assert_eq!(headers["x-opencode-session"], "oboete")
