@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS records (
   device TEXT NOT NULL,
   seq INTEGER NOT NULL,
-  type TEXT NOT NULL,          -- 'event' or 'tombstone'
+  type TEXT NOT NULL,          -- 'event', 'tombstone', or 'removed' (restored without its body)
   ts INTEGER NOT NULL,         -- unix ms, the event's own time (replay: the fixture's)
   kind TEXT,                   -- Event.kind; NULL for a tombstone
   agent TEXT, session TEXT,    -- labels, never keys
@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS ledger (
   device TEXT NOT NULL, seq INTEGER NOT NULL, field TEXT NOT NULL, rule TEXT NOT NULL,
   offset INTEGER NOT NULL, length INTEGER NOT NULL, ts INTEGER NOT NULL, ruleset TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS ledger_seq ON ledger(device, seq);
 ";
 
 /// One agent event as captured, after redaction.
@@ -92,12 +93,33 @@ pub struct Record {
 pub struct Raw {
     conn: Connection,
     device: String,
+    /// The shared hold on `<home>/raw.lock` every open keeps (see `swap_lock`).
+    _swap: std::fs::File,
+}
+
+/// Whether the home has a raw store: `raw.db`, or `raw.db.restored` alone (a restore stopped
+/// mid-swap, which `open` finishes).
+pub fn exists(home: &Path) -> bool {
+    home.join("raw.db").exists() || home.join("raw.db.restored").exists()
 }
 
 /// `<home>/raw.db`: WAL, synchronous=FULL (and fullfsync on macOS), 2 s busy timeout.
 pub fn open(home: &Path) -> Result<Raw> {
     let path = home.join("raw.db");
     crate::db::private(home, 0o700);
+    let swap = swap_lock(home, false, OPEN_WAIT)?;
+    // A restore that stopped after moving the damaged file aside and before renaming the rebuilt
+    // one in: `raw.db.restored` is only ever a whole rebuild (it gets that name once its records
+    // are committed), so the rename is finished here instead of creating an empty store.
+    let restored = home.join("raw.db.restored");
+    if !path.exists() && restored.exists() {
+        // Failed, and no other open finished it: an error, never a new empty store beside it.
+        if let Err(e) = std::fs::rename(&restored, &path)
+            && !path.exists()
+        {
+            return Err(e).context("finish a stopped restore");
+        }
+    }
     let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     crate::db::wal(&conn, "FULL")?;
     #[cfg(target_os = "macos")]
@@ -113,7 +135,55 @@ pub fn open(home: &Path) -> Result<Raw> {
     let device = conn.query_row("SELECT value FROM meta WHERE key='device_id'", [], |r| {
         r.get(0)
     })?;
-    Ok(Raw { conn, device })
+    Ok(Raw {
+        conn,
+        device,
+        _swap: swap,
+    })
+}
+
+/// How long an open waits for a restore to finish swapping the file, and how long a restore
+/// waits for open stores to close. A hook's write fails after its wait (MUST-M16's marker).
+const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+const SWAP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Task 8: every open of raw.db holds `<home>/raw.lock` shared; a restore holds it exclusively
+/// while it moves the damaged file aside and renames the rebuilt one in, so no writer keeps the
+/// old file across the swap and loses its event there.
+fn swap_lock(home: &Path, exclusive: bool, wait: std::time::Duration) -> Result<std::fs::File> {
+    let path = home.join("raw.lock");
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    crate::db::private(&path, 0o600);
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        let tried = if exclusive {
+            f.try_lock()
+        } else {
+            f.try_lock_shared()
+        };
+        match tried {
+            Ok(()) => return Ok(f),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(if exclusive {
+                "raw.db is open elsewhere; try again when agents and workers have stopped"
+            } else {
+                "raw.db is being restored"
+            }),
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
+    }
+}
+
+/// The exclusive hold a restore keeps while it swaps raw.db (released when dropped).
+pub fn lock_for_swap(home: &Path) -> Result<std::fs::File> {
+    swap_lock(home, true, SWAP_WAIT)
 }
 
 impl Raw {
@@ -124,6 +194,15 @@ impl Raw {
     /// SQLite's `quick_check` on raw.db: an error names the first problem it reports.
     pub fn quick_check(&self) -> Result<()> {
         crate::db::quick_check(&self.conn, "raw.db")
+    }
+
+    /// SQLite's full `integrity_check` (every page): doctor only.
+    pub fn integrity_check(&self) -> Result<()> {
+        let first: String = self
+            .conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+        anyhow::ensure!(first == "ok", "raw.db integrity_check: {first}");
+        Ok(())
     }
 
     /// Append one event as this device's next seq. The write lock taken by `BEGIN IMMEDIATE`
@@ -272,7 +351,10 @@ impl Raw {
         let rows = st.query_map(
             params![device, seq, i64::try_from(limit).unwrap_or(i64::MAX)],
             |r| {
-                let item = if r.get::<_, String>(2)? == "tombstone" {
+                let kind: String = r.get(2)?;
+                let item = if kind == "removed" {
+                    Item::Removed
+                } else if kind == "tombstone" {
                     let (device, seq) = (r.get(15)?, r.get(16)?);
                     Item::Tombstone(match r.get::<_, Option<i64>>(17)? {
                         Some(offset) => Target::Range {
@@ -320,6 +402,91 @@ impl Raw {
         let mut recs: Vec<Record> = rows.collect::<rusqlite::Result<_>>()?;
         self.hide(device, &mut recs)?;
         Ok(recs)
+    }
+
+    /// Task 8: this device's records after `seq` as backup lines, one JSON object each, as
+    /// `Raw::after` returns them (masked, D8) with each event's ledger rows, until `max_bytes`
+    /// of lines (always one). Returns (seq, line) pairs in seq order.
+    pub fn export_lines(&self, seq: i64, max_bytes: usize) -> Result<Vec<(i64, String)>> {
+        let mut out = Vec::new();
+        let (mut at, mut bytes) = (seq, 0);
+        loop {
+            let recs = self.after(&self.device, at, EXPORT_BATCH)?;
+            let (Some(first), Some(last)) = (recs.first(), recs.last()) else {
+                return Ok(out);
+            };
+            let mut ledger = self.ledger_between(first.seq, last.seq)?;
+            // A ledger field is a JSON pointer, which names keys of the body: a record a tombstone
+            // masks keeps its ledger rows without the field, so a masked key never reaches a
+            // segment through them.
+            let masked: std::collections::HashSet<i64> = self
+                .conn
+                .prepare(
+                    "SELECT target_seq FROM records WHERE type = 'tombstone' AND target_device = ?1
+                       AND target_seq BETWEEN ?2 AND ?3",
+                )?
+                .query_map(params![self.device, first.seq, last.seq], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for r in &recs {
+                let mut rows = ledger.remove(&r.seq).unwrap_or_default();
+                if masked.contains(&r.seq) {
+                    for row in &mut rows {
+                        row["field"] = serde_json::json!("~tombstoned");
+                    }
+                }
+                let line = line(r, rows);
+                bytes += line.len() + 1;
+                out.push((r.seq, line));
+                at = r.seq;
+                if bytes >= max_bytes {
+                    return Ok(out);
+                }
+            }
+        }
+    }
+
+    /// Task 8: the sha256 of each of this device's records as its backup line, so a restore can
+    /// be compared with what was backed up (compression does not change it).
+    #[cfg(test)]
+    pub fn hashes(&self) -> Result<std::collections::BTreeMap<(String, i64), String>> {
+        use sha2::{Digest, Sha256};
+        Ok(self
+            .export_lines(0, usize::MAX)?
+            .into_iter()
+            .map(|(seq, l)| {
+                let h = Sha256::digest(l.as_bytes());
+                let hex = h.iter().map(|b| format!("{b:02x}")).collect();
+                ((self.device.clone(), seq), hex)
+            })
+            .collect())
+    }
+
+    /// This device's ledger rows for seqs from `first` through `last`, by seq.
+    fn ledger_between(
+        &self,
+        first: i64,
+        last: i64,
+    ) -> Result<std::collections::HashMap<i64, Vec<serde_json::Value>>> {
+        let mut st = self.conn.prepare(
+            "SELECT seq, field, rule, offset, length, ts, ruleset FROM ledger
+             WHERE device = ?1 AND seq BETWEEN ?2 AND ?3 ORDER BY seq, rowid",
+        )?;
+        let mut out: std::collections::HashMap<i64, Vec<serde_json::Value>> = Default::default();
+        let rows = st.query_map(params![self.device, first, last], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                serde_json::json!({
+                    "field": r.get::<_, String>(1)?, "rule": r.get::<_, String>(2)?,
+                    "offset": r.get::<_, i64>(3)?, "length": r.get::<_, i64>(4)?,
+                    "ts": r.get::<_, i64>(5)?, "ruleset": r.get::<_, String>(6)?,
+                }),
+            ))
+        })?;
+        for row in rows {
+            let (seq, v) = row?;
+            out.entry(seq).or_default().push(v);
+        }
+        Ok(out)
     }
 
     /// D8, in the one place records leave: each event a tombstone targets whole becomes
@@ -417,6 +584,151 @@ impl Raw {
             tx.commit()?;
             from = upto;
         }
+    }
+}
+
+/// Records `export_lines` reads at once.
+const EXPORT_BATCH: usize = 500;
+
+/// One record as a backup line. The key order is fixed (serde_json keeps insertion order), so
+/// the same record always gives the same bytes.
+fn line(r: &Record, ledger: Vec<serde_json::Value>) -> String {
+    let v = match &r.item {
+        Item::Event(e) => serde_json::json!({
+            "device": r.device, "seq": r.seq, "type": "event", "ts": e.ts, "kind": e.kind,
+            "agent": e.agent, "session": e.session, "repo": e.repo, "branch": e.branch,
+            "head": e.head, "gitdir": e.gitdir, "cwd": e.cwd, "source": e.source,
+            "body": e.body, "original_bytes": e.original_bytes, "ledger": ledger,
+        }),
+        Item::Removed => serde_json::json!({"device": r.device, "seq": r.seq, "type": "removed"}),
+        Item::Tombstone(t) => {
+            let (device, seq, offset, length) = match t {
+                Target::Record { device, seq } => (device, seq, None, None),
+                Target::Range {
+                    device,
+                    seq,
+                    offset,
+                    length,
+                } => (device, seq, Some(offset), Some(length)),
+            };
+            serde_json::json!({"device": r.device, "seq": r.seq, "type": "tombstone",
+                "target": {"device": device, "seq": seq, "offset": offset, "length": length}})
+        }
+    };
+    v.to_string()
+}
+
+/// Task 8: a new raw.db at `path` (which must not exist) with `device`'s id, filled from backup
+/// lines. The file keeps the id after it is renamed into place: its identity (`meta.store_file`)
+/// is the file's own, which a rename keeps.
+pub struct Rebuild {
+    conn: Connection,
+}
+
+impl Rebuild {
+    pub fn new(path: &Path, device: &str) -> Result<Self> {
+        anyhow::ensure!(!path.exists(), "{} exists", path.display());
+        let conn = Connection::open(path)?;
+        conn.execute_batch(SCHEMA)?;
+        crate::db::ensure_device(&conn, path)?;
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'device_id'",
+            [device],
+        )?;
+        conn.execute_batch("BEGIN")?;
+        Ok(Self { conn })
+    }
+
+    /// One backup line. Bodies are stored as zstd where that is smaller, as the compress
+    /// consumer would have; a tombstone gets no time or source back (`Raw::after` never
+    /// returns them): ts 0, source `restore`.
+    pub fn add(&mut self, line: &str) -> Result<()> {
+        let v: serde_json::Value = serde_json::from_str(line)?;
+        let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str);
+        let i = |k: &str| v.get(k).and_then(serde_json::Value::as_i64);
+        let (device, seq) = (s("device").context("device")?, i("seq").context("seq")?);
+        match s("type") {
+            Some("event") => {
+                let body = s("body").unwrap_or("").as_bytes();
+                let z = zstd::bulk::compress(body, 3)?;
+                let (enc, stored) = if z.len() < body.len() {
+                    ("zstd", z.as_slice())
+                } else {
+                    ("plain", body)
+                };
+                self.conn.execute(
+                    "INSERT INTO records(device, seq, type, ts, kind, agent, session, repo, branch,
+                       head, gitdir, cwd, source, enc, body, original_bytes)
+                     VALUES(?1, ?2, 'event', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                    params![
+                        device,
+                        seq,
+                        i("ts").unwrap_or(0),
+                        s("kind").unwrap_or(""),
+                        s("agent").unwrap_or(""),
+                        s("session").unwrap_or(""),
+                        s("repo"),
+                        s("branch"),
+                        s("head"),
+                        s("gitdir"),
+                        s("cwd"),
+                        s("source").unwrap_or(""),
+                        enc,
+                        stored,
+                        i("original_bytes")
+                    ],
+                )?;
+                for l in v["ledger"].as_array().into_iter().flatten() {
+                    let ls = |k: &str| l.get(k).and_then(serde_json::Value::as_str).unwrap_or("");
+                    let li = |k: &str| l.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0);
+                    self.conn.execute(
+                        "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
+                         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![
+                            device,
+                            seq,
+                            ls("field"),
+                            ls("rule"),
+                            li("offset"),
+                            li("length"),
+                            li("ts"),
+                            ls("ruleset")
+                        ],
+                    )?;
+                }
+            }
+            Some("removed") => {
+                self.conn.execute(
+                    "INSERT INTO records(device, seq, type, ts, source) VALUES(?1, ?2, 'removed', 0, 'restore')",
+                    params![device, seq],
+                )?;
+            }
+            Some("tombstone") => {
+                let t = &v["target"];
+                self.conn.execute(
+                    "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq,
+                       target_offset, target_length)
+                     VALUES(?1, ?2, 'tombstone', 0, 'restore', ?3, ?4, ?5, ?6)",
+                    params![
+                        device,
+                        seq,
+                        t["device"].as_str().context("target device")?,
+                        t["seq"].as_i64().context("target seq")?,
+                        t["offset"].as_i64(),
+                        t["length"].as_i64()
+                    ],
+                )?;
+            }
+            other => anyhow::bail!("seq {seq}: unknown record type {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// Commit and close, so the file is whole on disk before it is renamed into place.
+    pub fn finish(self) -> Result<()> {
+        self.conn.execute_batch("COMMIT")?;
+        self.conn.close().map_err(|(_, e)| e)?;
+        Ok(())
     }
 }
 

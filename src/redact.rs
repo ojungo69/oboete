@@ -1617,8 +1617,8 @@ mod tests {
             assert!(e.contains(says), "{toml}: {e}");
         }
         // The tables other commands read are no mistake here.
-        let others =
-            "[[providers]]\nname = \"x\"\n[summary]\nmax = 1\n[embedding]\nprovider = \"none\"\n";
+        let others = "[[providers]]\nname = \"x\"\n[summary]\nmax = 1\n[embedding]\nprovider = \"none\"\n\
+                      [backup]\ndir = \"elsewhere\"\n";
         assert!(user(others).is_ok());
     }
 }

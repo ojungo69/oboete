@@ -498,6 +498,13 @@ pub fn raw(
     repo: Option<&str>,
     limit: usize,
 ) -> Result<Vec<RawHit>> {
+    // raw.db first: its shared hold on raw.lock keeps a restore from swapping raw.db and moving
+    // knowledge.db aside while this search reads them (Task 8).
+    let raw = if crate::raw::exists(home) {
+        Some(crate::raw::open(home)?)
+    } else {
+        None
+    };
     let k = crate::knowledge::open(home)?;
     crate::consumer::fts::schema(&k)?;
     let Some((mut clauses, mut args, ranked)) = query_clauses(query, "raw_fts", &["f.text"]) else {
@@ -513,8 +520,7 @@ pub fn raw(
     // only hides more).
     // Every device partition counts: a copied home keeps its records, and their tombstones,
     // under the old id (#83: the worker reads only its own until Task 8's part b).
-    let raw_db = if home.join("raw.db").exists() {
-        let raw = crate::raw::open(home)?;
+    let raw_db = if let Some(raw) = raw {
         let mut devices = raw.devices()?;
         // This device's own partition too while it is still empty (a home copied a moment ago).
         if !devices.iter().any(|d| d == raw.device()) {

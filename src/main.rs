@@ -3,6 +3,7 @@
 //! M0 spike: Claude Code hook capture → SQLite → summarizer chain with
 //! fallback → SessionStart injection. See docs/plan.md.
 
+mod backup;
 mod capture;
 mod config;
 mod consumer;
@@ -67,6 +68,9 @@ enum Cmd {
         #[arg(long, default_value_t = 60_000)]
         idle_ms: u64,
     },
+    /// Rebuild raw.db from the backup segments (MUST-M15); the current file is kept aside.
+    /// The worker does this by itself when raw.db is damaged.
+    Restore,
     /// Print the context that would be injected for the current directory
     Inject,
     /// Serve the memory as an MCP server on stdin/stdout (search / get / timeline tools)
@@ -196,7 +200,7 @@ fn raw_get(home: &std::path::Path, id: &str) -> Result<Option<String>> {
     let Ok(seq) = seq.parse::<i64>() else {
         return Ok(None);
     };
-    if seq < 1 || !home.join("raw.db").exists() {
+    if seq < 1 || !raw::exists(home) {
         return Ok(None);
     }
     let raw = raw::open(home)?;
@@ -277,7 +281,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             // Design B's none tier (milestone 2 Task 6): the raw index, by (device, seq). Until
             // every agent is ported (Task 2b) a home can hold both stores, and v1 commands such
             // as `timeline` create an empty oboete.db, so each store is searched when it exists.
-            if home.join("raw.db").exists() {
+            if raw::exists(&home) {
                 let hits = search::raw(&home, &query, scope.as_deref(), limit)?;
                 left -= hits.len().min(left);
                 for h in hits {
@@ -427,6 +431,19 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             )?)
         }
         Cmd::Doctor => setup::doctor(&home),
+        Cmd::Restore => {
+            // The worker's lock, so no worker reads raw.db while it is replaced.
+            let held = worker::lock(&home)?.ok_or_else(|| {
+                anyhow::anyhow!("a worker is running; try again when it has exited")
+            })?;
+            let said = backup::restore(&home)?;
+            // Derived data was moved aside: it is rebuilt before this returns, so a search right
+            // after finds the restored records.
+            drop(held);
+            worker::run_once(&home)?;
+            println!("{said}");
+            Ok(())
+        }
         Cmd::View { port, open } => view::run(&home, port, open),
         Cmd::Replay {
             fixture,
