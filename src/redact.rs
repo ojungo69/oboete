@@ -144,8 +144,10 @@ impl Rules {
             if extra.iter().any(|e: &Extra| e.id == id) {
                 bail!("[redaction] extra rule id {:?} is used twice", rule.id);
             }
-            // The regex error quotes the pattern, which may hold the very value to hide.
-            let regex = Regex::new(&rule.regex).map_err(|_| {
+            // Compiled as the bundled rules are (gitleaks' ASCII `\w`, `\b`), so `\bacme-` still
+            // matches after a Japanese character. The regex error quotes the pattern, which may
+            // hold the very value to hide.
+            let regex = compiled(&rule.regex).ok_or_else(|| {
                 anyhow::anyhow!(
                     "[redaction] extra rule {:?}: its regex does not compile",
                     rule.id
@@ -1200,6 +1202,20 @@ mod tests {
 
     fn sha(v: &str) -> String {
         short_hash_full(v)
+    }
+
+    #[test]
+    fn a_user_rule_reads_word_boundaries_as_the_bundled_rules_do() {
+        let rules = user(
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = '\\bacme-[0-9]{6}\\b' }, \
+             { id = \"emp\", regex = '社員番号[0-9]{4}' }]",
+        )
+        .unwrap();
+        let (masked, _) = scan("日本語acme-123456 と 社員番号1234 です", &rules);
+        assert!(
+            !masked.contains("123456") && !masked.contains("1234 "),
+            "{masked}"
+        );
     }
 
     #[test]
