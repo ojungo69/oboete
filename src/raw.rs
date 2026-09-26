@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS records (
   target_device TEXT, target_seq INTEGER, target_offset INTEGER, target_length INTEGER,
   PRIMARY KEY (device, seq)
 );
+-- D8: a read finds the tombstones of the records it returns by their target.
+CREATE INDEX IF NOT EXISTS tombstone_targets ON records(target_device, target_seq)
+  WHERE type = 'tombstone';
 -- spec 2.2: rule, where and when, never the value. `field` is where in the record: a JSON
 -- pointer into the body (`/output`; `/trigger#key` for a key of that object) or a label column
 -- (`cwd`). `offset` is where the mask starts in that field as stored; `length` is the secret's
@@ -138,11 +141,7 @@ impl Raw {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let seq: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM records WHERE device = ?1",
-            [&self.device],
-            |r| r.get(0),
-        )?;
+        let seq = next_seq(&tx, &self.device)?;
         tx.execute(
             "INSERT INTO records(device, seq, type, ts, kind, agent, session, repo, branch, head,
                                  gitdir, cwd, source, body, original_bytes)
@@ -183,6 +182,45 @@ impl Raw {
         }
         tx.commit()?;
         Ok(seq)
+    }
+
+    /// D8: a tombstone as this device's next seq. It hides its target in every later read: a
+    /// whole record comes back as `Item::Removed`, a byte range of its body as `*`.
+    pub fn append_tombstone(&mut self, t: Target) -> Result<i64> {
+        let (device, seq, range) = match &t {
+            Target::Record { device, seq } => (device, *seq, None),
+            Target::Range {
+                device,
+                seq,
+                offset,
+                length,
+            } => {
+                anyhow::ensure!(*offset >= 0 && *length > 0, "a tombstone range is empty");
+                (device, *seq, Some((*offset, *length)))
+            }
+        };
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let at = next_seq(&tx, &self.device)?;
+        // ponytail: every tombstone is the redaction rescan's this milestone (D8); forget
+        // (milestone 5) names its own source.
+        tx.execute(
+            "INSERT INTO records(device, seq, type, ts, source, target_device, target_seq,
+                                 target_offset, target_length)
+             VALUES(?1, ?2, 'tombstone', ?3, 'rescan', ?4, ?5, ?6, ?7)",
+            params![
+                self.device,
+                at,
+                crate::db::now_ms(),
+                device,
+                seq,
+                range.map(|r| r.0),
+                range.map(|r| r.1)
+            ],
+        )?;
+        tx.commit()?;
+        Ok(at)
     }
 
     /// This device's highest seq, 0 for an empty store.
@@ -250,7 +288,41 @@ impl Raw {
                 })
             },
         )?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut recs: Vec<Record> = rows.collect::<rusqlite::Result<_>>()?;
+        self.hide(device, &mut recs)?;
+        Ok(recs)
+    }
+
+    /// D8, in the one place records leave: each event a tombstone targets whole becomes
+    /// `Item::Removed`; each range it targets becomes as many `*` as the bytes of every character
+    /// it touches, so offsets stay valid and hiding twice changes nothing. The tombstones are
+    /// loaded once per read, by the seqs the read returns.
+    fn hide(&self, device: &str, recs: &mut [Record]) -> Result<()> {
+        let (Some(first), Some(last)) = (recs.first(), recs.last()) else {
+            return Ok(());
+        };
+        let mut st = self.conn.prepare(
+            "SELECT target_seq, target_offset, target_length FROM records
+             WHERE type = 'tombstone' AND target_device = ?1 AND target_seq BETWEEN ?2 AND ?3",
+        )?;
+        let targets: Vec<(i64, Option<i64>, Option<i64>)> = st
+            .query_map(params![device, first.seq, last.seq], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        for (seq, offset, length) in targets {
+            let Some(r) = recs.iter_mut().find(|r| r.seq == seq) else {
+                continue;
+            };
+            let Item::Event(e) = &mut r.item else {
+                continue; // a tombstone of a tombstone hides nothing
+            };
+            match (offset, length) {
+                (Some(o), Some(l)) => e.body = masked(&e.body, o, l),
+                _ => r.item = Item::Removed,
+            }
+        }
+        Ok(())
     }
 
     /// Task 10 (spec 2.4): the plain event bodies of `device` after `after` through `through`,
@@ -319,6 +391,34 @@ impl Raw {
     }
 }
 
+/// `body` with the bytes from `offset` for `length` replaced by `*`, widened to whole characters
+/// and cut at the body's end.
+fn masked(body: &str, offset: i64, length: i64) -> String {
+    let clamp = |n: i64| usize::try_from(n).unwrap_or(0).min(body.len());
+    let (mut start, mut end) = (clamp(offset), clamp(offset.saturating_add(length)));
+    while !body.is_char_boundary(start) {
+        start -= 1;
+    }
+    while !body.is_char_boundary(end) {
+        end += 1;
+    }
+    format!(
+        "{}{}{}",
+        &body[..start],
+        "*".repeat(end - start),
+        &body[end..]
+    )
+}
+
+/// The next seq of `device`, inside a write transaction.
+fn next_seq(tx: &rusqlite::Transaction, device: &str) -> Result<i64> {
+    Ok(tx.query_row(
+        "SELECT COALESCE(MAX(seq), 0) + 1 FROM records WHERE device = ?1",
+        [device],
+        |r| r.get(0),
+    )?)
+}
+
 /// Records `compress_through` reads per batch, and the bytes of their bodies it loads at once.
 const COMPRESS_BATCH: usize = 200;
 const BATCH_BYTES: u64 = 16 << 20;
@@ -363,6 +463,18 @@ pub fn test_event(body: &str) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_range_is_masked_by_whole_characters_and_masking_again_changes_nothing() {
+        assert_eq!(masked("abcdef", 1, 2), "a**def");
+        // A range that starts or ends inside a character covers all of its bytes.
+        assert_eq!(masked("aé日b", 2, 2), "a*****b");
+        assert_eq!(masked("abc", 2, 100), "ab*"); // cut at the end
+        assert_eq!(masked("abc", 7, 2), "abc");
+        let once = masked("aé日b", 2, 2);
+        assert_eq!(masked(&once, 2, 2), once);
+        assert_eq!(once.len(), "aé日b".len());
+    }
 
     #[test]
     fn two_writers_get_consecutive_seqs_and_both_land() {

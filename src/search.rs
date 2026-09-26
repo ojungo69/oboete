@@ -942,6 +942,51 @@ mod tests {
         assert_eq!(hits.iter().map(|h| h.seq).collect::<Vec<_>>(), [1]);
     }
 
+    #[test]
+    fn a_record_tombstone_hides_it_and_a_range_tombstone_masks_only_its_range() {
+        use crate::raw::{Item, Target};
+        // Tombstones that arrive before the index reads the records, and after it has.
+        for index_first in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let p = home.path();
+            let mut raw = crate::raw::open(p).unwrap();
+            let a = raw
+                .append(&crate::raw::test_event("alpha zqx-private-words tail"))
+                .unwrap();
+            let b = raw
+                .append(&crate::raw::test_event("bravo visible"))
+                .unwrap();
+            let dev = raw.device().to_owned();
+            if index_first {
+                crate::worker::run_once(p).unwrap();
+                assert_eq!(raw_search(p, "bravo", None).len(), 1);
+            }
+            raw.append_tombstone(Target::Record {
+                device: dev.clone(),
+                seq: b,
+            })
+            .unwrap();
+            raw.append_tombstone(Target::Range {
+                device: dev.clone(),
+                seq: a,
+                offset: 6,
+                length: 17,
+            })
+            .unwrap();
+            crate::worker::run_once(p).unwrap();
+            assert!(raw_search(p, "bravo", None).is_empty());
+            assert!(raw_search(p, "zqx-private", None).is_empty());
+            let hits = raw_search(p, "alpha", None);
+            assert_eq!(hits.len(), 1);
+            assert!(hits[0].snippet.contains("tail") && !hits[0].snippet.contains("zqx"));
+            let recs = raw.after(&dev, 0, 10).unwrap();
+            assert!(
+                matches!(&recs[0].item, Item::Event(e) if e.body == "alpha ***************** tail")
+            );
+            assert!(matches!(recs[1].item, Item::Removed));
+        }
+    }
+
     fn raw_search(home: &std::path::Path, q: &str, repo: Option<&str>) -> Vec<RawHit> {
         raw(home, q, repo, 10).unwrap()
     }
