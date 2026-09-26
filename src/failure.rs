@@ -182,7 +182,8 @@ pub fn since(home: &Path) -> Option<(Class, i64)> {
 /// after `at` has failed.
 pub fn clear(home: &Path, at: i64) {
     let _ = transition(home, |s| match s {
-        Some(State::Failed { last, .. }) if last > at => None,
+        // A tie keeps the failure: when the order is unknown, report rather than hide.
+        Some(State::Failed { last, .. }) if last >= at => None,
         Some(State::Ok(ok)) if ok >= at => None,
         _ => Some(State::Ok(at)),
     });
@@ -209,6 +210,14 @@ fn transition(
     Ok(())
 }
 
+/// The time the marker's states are ordered by: nanoseconds since the Unix epoch, so two hooks
+/// ending in the same millisecond still have an order (and a tie keeps a failure).
+pub fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX))
+}
+
 /// What doctor and SessionStart say while recording fails.
 pub fn line((class, ts): (Class, i64)) -> String {
     let what = match class {
@@ -219,7 +228,7 @@ pub fn line((class, ts): (Class, i64)) -> String {
     };
     format!(
         "oboete: recording has failed since {} ({what}); events from then on are not recorded. Run `oboete doctor`.",
-        utc(ts)
+        utc(ts / 1_000_000)
     )
 }
 
@@ -405,9 +414,23 @@ mod tests {
     }
 
     #[test]
+    fn a_tie_keeps_the_failure() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        prepare(home);
+        clear(home, 5);
+        mark(home, Class::Busy, 5); // a success and a failure that ended together
+        assert_eq!(since(home), Some((Class::Busy, 5)));
+        clear(home, 5);
+        assert_eq!(since(home), Some((Class::Busy, 5)));
+        clear(home, 6);
+        assert_eq!(since(home), None);
+    }
+
+    #[test]
     fn the_line_names_the_time_in_utc_and_the_class() {
         // 2026-09-27 04:05 UTC.
-        let line = line((Class::DiskFull, 1_790_481_900_000));
+        let line = line((Class::DiskFull, 1_790_481_900_000_000_000));
         assert!(
             line.contains("recording has failed since 2026-09-27 04:05 UTC"),
             "{line}"

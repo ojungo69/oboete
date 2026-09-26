@@ -53,9 +53,10 @@ fn run_io(
     mut input: impl Read,
     mut output: impl Write,
 ) -> Result<()> {
-    // MUST-M16: whether this call tried to write (skips and filtered sessions never do), and
-    // whether a row was written. Only a written row shows that recording works again: a hook
-    // with nothing to capture (PreToolUse, an empty Stop) proves nothing.
+    // MUST-M16, for Design B's raw.db: whether this call tried to write there (skips, filtered
+    // sessions and agents still on v1's store never do), and whether a row was written. Only a
+    // written row shows that recording works again: a hook with nothing to capture (PreToolUse,
+    // an empty Stop) proves nothing, and a write to v1's store says nothing about raw.db.
     let mut tried = false;
     let mut wrote = false;
     // When the store operation ended (0 until one did): overlapping hooks change the marker in
@@ -81,9 +82,9 @@ fn run_io(
         {
             return Ok(None);
         }
-        tried = true;
         std::fs::create_dir_all(home)?;
         if crate::capture::PORTED.contains(&agent) {
+            tried = true;
             // Design B: nothing is injected until the manifest (milestone 2 Task 9).
             wrote = record(
                 &mut crate::raw::open(home)?,
@@ -92,7 +93,7 @@ fn run_io(
                 &payload,
                 db::now_ms(),
             )? > 0;
-            ended = db::now_ms();
+            ended = crate::failure::now();
             if let Err(e) = start_worker(home) {
                 // The row is written, and the next hook starts a worker for it: MUST-M16's
                 // marker is about the store, so this is no recording failure.
@@ -101,10 +102,7 @@ fn run_io(
             return Ok(None);
         }
         let conn = db::open(home)?;
-        let before = conn.total_changes();
         let out = handle(&conn, agent, event, &payload)?;
-        ended = db::now_ms();
-        wrote = conn.total_changes() > before;
         if matches!(event, "Stop" | "SessionEnd") && std::env::var_os("OBOETE_NO_SPAWN").is_none() {
             // Agents without a reliable SessionEnd need their last turn to settle first.
             spawn_observe(home, observe_wait_ms(agent));
@@ -112,7 +110,7 @@ fn run_io(
         Ok(out)
     })();
     if ended == 0 {
-        ended = db::now_ms(); // a failure: the operation ended when it returned
+        ended = crate::failure::now(); // a failure: the operation ended when it returned
     }
     let mut out = result.as_ref().ok().cloned().flatten();
     if tried {
@@ -833,6 +831,21 @@ mod tests {
             .unwrap();
         assert!(text.contains("recording has failed since"), "{text}");
         assert_eq!(crate::failure::since(home).map(|f| f.1), Some(first));
+    }
+
+    #[test]
+    fn a_write_to_v1_store_neither_marks_nor_clears_raw_failures() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        // raw.db cannot be written: Claude Code's hook fails and marks it.
+        std::fs::create_dir(home.join("raw.db")).unwrap();
+        let prompt = br#"{"session_id":"s","prompt":"first"}"#;
+        assert!(run_io(home, "claude", "UserPromptSubmit", &prompt[..], Vec::new()).is_err());
+        let failed = crate::failure::since(home).expect("marked");
+        // Grok still writes v1's store, which works: that says nothing about raw.db.
+        let grok = br#"{"session_id":"g","prompt":"hello","hook_event_name":"UserPromptSubmit"}"#;
+        run_io(home, "grok", "UserPromptSubmit", &grok[..], Vec::new()).unwrap();
+        assert_eq!(crate::failure::since(home), Some(failed));
     }
 
     #[test]
