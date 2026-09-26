@@ -12,6 +12,9 @@ mod inject;
 mod mcp;
 mod observe;
 mod provider;
+// Design B's store; the hook writes to it from milestone 2 Task 2 on.
+#[allow(dead_code)]
+mod raw;
 mod redact;
 mod replay;
 mod repo;
