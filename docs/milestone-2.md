@@ -44,6 +44,10 @@ Decisions (Claude; overrulable):
 - **A wrong table records nothing.** A bad regex, id, `secret_group`, allowlist entry or unknown key makes the hook of a ported agent fail before it opens `raw.db`, so no text is stored under rules the user did not get. MUST-M16's marker and doctor report it; doctor names the mistake and exits non-zero. Every other command except `doctor` and `setup` stops on it too: several of them (`observe`, `reindex`, and `mcp` and `search` with embeddings) send text out, and the egress gate must apply the user's rules.
 - **The ruleset version** is the bundled files' hash when the user adds nothing, so a store upgraded without settings keeps its version and Task 7 does not rescan for nothing. With user rules or kept values, it also covers them in a canonical form: reordering the file changes nothing; adding or removing a rule or an allowlist entry changes the version.
 - **A rule without keywords always runs**, as in gitleaks. With keywords, it runs when one appears in the text (any case).
+- **The bundled rules run to their fixpoint before the user's.** A user rule that masks a word a bundled rule reads as context (curl-auth-user reads the `curl` of a line) would otherwise hide a secret that rule finds on a later pass (Codex security review).
+- **A kept value does not hide its neighbors.** A rule can match only the last secret of a line (curl-auth-user's greedy `.*`). When that match is a kept value, the value is replaced by spaces of the same length in the text looked at next, so the rule finds the one it passed over. The stored text still holds the kept value.
+- **Egress follows the file as it is.** `redact::outbound` rereads `config.toml` at each call and rebuilds the rules when it changed, so a long-running `oboete mcp` applies a rule added, or a kept value removed, while it runs. If the table turns wrong while a process runs, nothing of the text leaves: it is sent as one mask.
+- **Errors never quote a value.** An allowlist entry is named by its position, a regex error only by its rule id, and a TOML error by its line, with quoted text left out: each of those could be the value the user means to hide.
 - **The allowlist** is checked against the value as it appears in the text being scanned. A value inside a flattened tool field that holds `\"` or `\n` needs the hash of that escaped form.
 - **`tool_output = "head-tail"`** keeps the first and last 4 KB of each tool output (`capture::HEAD_TAIL_BYTES`, 8 KB in all, about v1's 8,000 characters). `"full"` is spec 2.4's default: whole up to `MAX_FIELD_BYTES`, head and tail above it. Tool input and the other fields are unaffected.
 - **`store_prompts = false`** omits the text of both kinds of prompt event, typed prompts and harness envelopes. The event stays, so Task 11 can count the turn (#83).
@@ -57,3 +61,7 @@ Replay of the fixture of record (release build, WSL), before and after, each run
 | before (main at 481682f) | 1517 / 2198 | 9 / 11 |
 | after, no config.toml | 1513 / 2109, 1497 / 2171 | 9 / 11, 9 / 10 |
 | after, 2 extra rules and 1 allowlist entry | 1487 / 2124, 1520 / 2140 | 9 / 11, 9 / 11 |
+| after the security fixes, no config.toml | 1604 / 2231, 1911 / 2597 | 9 / 11, 9 / 12 |
+| after the security fixes, the same settings | 1619 / 2289, 1513 / 2274 | 9 / 11, 10 / 10 |
+
+The in-process numbers move by 25% between identical runs on this machine (load average about 1), so they show no change beyond that noise; the spawned hook, which also reads `config.toml`, stays at 9-10 ms.

@@ -239,7 +239,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
     // Hooks load them per call inside their fail-open boundary; doctor and setup report a
     // broken `[redaction]` table instead of stopping on it.
     if !matches!(&cmd, Cmd::Hook { .. } | Cmd::Doctor | Cmd::Setup { .. }) {
-        redact::set_active(redact::Rules::load(&home)?);
+        redact::set_home(&home)?;
     }
     match cmd {
         Cmd::Hook { agent, event } => {

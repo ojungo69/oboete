@@ -376,11 +376,31 @@ pub struct CaptureConfig {
 pub fn load_capture(home: &Path) -> Result<CaptureConfig> {
     let path = home.join("config.toml");
     let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(CaptureConfig::default()),
+        Ok(t) => Some(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
     };
-    toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
+    parse_capture(text.as_deref()).with_context(|| format!("parse {}", path.display()))
+}
+
+/// `load_capture` on the file's text (`None`: no file). A TOML error names only its line and
+/// its kind, with quoted text left out: the usual message shows the line itself, and a line of
+/// `[redaction]` can hold the value the user means to hide.
+pub fn parse_capture(text: Option<&str>) -> Result<CaptureConfig> {
+    let Some(text) = text else {
+        return Ok(CaptureConfig::default());
+    };
+    toml::from_str(text).map_err(|e| {
+        let line = e.span().map_or(0, |s| {
+            text.as_bytes()[..s.start.min(text.len())]
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count()
+                + 1
+        });
+        let quoted = regex::Regex::new(r#""[^"]*"|'[^']*'"#).expect("valid");
+        anyhow::anyhow!("line {line}: {}", quoted.replace_all(e.message(), "\"…\""))
+    })
 }
 
 /// Read an API key from the owner's key-file convention (token on line 2).

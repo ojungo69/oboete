@@ -144,8 +144,13 @@ impl Rules {
             if extra.iter().any(|e: &Extra| e.id == id) {
                 bail!("[redaction] extra rule id {:?} is used twice", rule.id);
             }
-            let regex = Regex::new(&rule.regex)
-                .map_err(|e| anyhow::anyhow!("[redaction] extra rule {:?}: regex: {e}", rule.id))?;
+            // The regex error quotes the pattern, which may hold the very value to hide.
+            let regex = Regex::new(&rule.regex).map_err(|_| {
+                anyhow::anyhow!(
+                    "[redaction] extra rule {:?}: its regex does not compile",
+                    rule.id
+                )
+            })?;
             if let Some(g) = rule.secret_group {
                 ensure!(
                     g < regex.captures_len(),
@@ -163,10 +168,12 @@ impl Rules {
             });
         }
         let mut allow = HashSet::new();
-        for a in &r.allowlist {
+        for (i, a) in r.allowlist.iter().enumerate() {
+            // Never the entry itself: a value pasted in place of its hash would be printed.
             ensure!(
                 a.len() == 64 && a.bytes().all(|b| b.is_ascii_hexdigit()),
-                "[redaction] allowlist entry {a:?}: expected the SHA-256 of a value, 64 hex digits"
+                "[redaction] allowlist entry {}: expected the SHA-256 of a value, 64 hex digits",
+                i + 1
             );
             allow.insert(a.to_ascii_lowercase());
         }
@@ -208,6 +215,15 @@ impl Rules {
         &self.version
     }
 
+    /// These rules without the user's extra ones (same kept values).
+    fn without_extra(&self) -> Rules {
+        Rules {
+            extra: Vec::new(),
+            allow: self.allow.clone(),
+            version: self.version.clone(),
+        }
+    }
+
     /// For doctor: how many rules and kept values the user added.
     pub fn counts(&self) -> (usize, usize) {
         (self.extra.len(), self.allow.len())
@@ -228,16 +244,57 @@ impl Rules {
     }
 }
 
-/// The rules egress uses (`outbound`): the user's, set once by `main` for the process.
-static ACTIVE: OnceLock<Rules> = OnceLock::new();
-
-/// Called once, before any text can leave; later calls are ignored.
-pub fn set_active(r: Rules) {
-    let _ = ACTIVE.set(r);
+/// The rules egress uses: those of `<home>/config.toml` as it is at each call (spec 6.4), so a
+/// long-running `oboete mcp` picks up a rule added or a kept value removed. `None` while the
+/// table is wrong or unreadable.
+struct Egress {
+    home: std::path::PathBuf,
+    /// The file as last read: `None` when it is absent.
+    seen: Option<Option<String>>,
+    rules: Option<std::sync::Arc<Rules>>,
 }
 
-fn active() -> &'static Rules {
-    ACTIVE.get_or_init(Rules::default)
+impl Egress {
+    fn rules(&mut self) -> Option<std::sync::Arc<Rules>> {
+        let now = match std::fs::read_to_string(self.home.join("config.toml")) {
+            Ok(t) => Some(t),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => {
+                self.seen = None;
+                return None;
+            }
+        };
+        if self.seen.as_ref() != Some(&now) {
+            self.rules = crate::config::parse_capture(now.as_deref())
+                .and_then(|c| Rules::new(&c.redaction))
+                .ok()
+                .map(std::sync::Arc::new);
+            self.seen = Some(now);
+        }
+        self.rules.clone()
+    }
+}
+
+static EGRESS: std::sync::Mutex<Option<Egress>> = std::sync::Mutex::new(None);
+
+/// Called by `main` before any text can leave: the home whose config egress follows. An error
+/// when its `[redaction]` table is wrong, so the command stops before sending anything.
+pub fn set_home(home: &std::path::Path) -> anyhow::Result<()> {
+    Rules::load(home)?;
+    *EGRESS.lock().unwrap_or_else(|e| e.into_inner()) = Some(Egress {
+        home: home.to_owned(),
+        seen: None,
+        rules: None,
+    });
+    Ok(())
+}
+
+/// Egress's rules now; the bundled ones where no home was set (tests).
+fn egress() -> Option<std::sync::Arc<Rules>> {
+    match EGRESS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        Some(e) => e.rules(),
+        None => Some(std::sync::Arc::new(Rules::default())),
+    }
 }
 
 fn short_hash(s: &str) -> String {
@@ -285,8 +342,13 @@ fn compiled(pattern: &str) -> Option<Regex> {
 /// `<private>` in one tool output must not pair with a `</private>` many events later.
 /// The user's rules apply here as they are now (spec 6.4), so a rule added after capture still
 /// stops the text leaving.
+/// A table that went wrong after the process started sends nothing of the text: all of it is
+/// masked, and doctor names the mistake.
 pub fn outbound(text: &str) -> String {
-    outbound_with(text, active())
+    match egress() {
+        Some(rules) => outbound_with(text, &rules),
+        None => MASK.to_string(),
+    }
 }
 
 pub fn outbound_with(text: &str, rules: &Rules) -> String {
@@ -310,8 +372,19 @@ pub struct Finding {
     pub length: usize,
 }
 
-/// `text` masked, with its findings.
+/// `text` masked, with its findings. The bundled rules run to their fixpoint first, and the
+/// user's only then: a user mask must never take context a bundled rule needs on a later pass
+/// (curl-auth-user reads the `curl` of a line).
 pub fn scan(text: &str, rules: &Rules) -> (String, Vec<Finding>) {
+    if rules.extra.is_empty() {
+        return scan_bundled(text, rules);
+    }
+    let (mut masked, mut found) = scan_bundled(text, &rules.without_extra());
+    rescan(&mut masked, &mut found, rules);
+    (masked, found)
+}
+
+fn scan_bundled(text: &str, rules: &Rules) -> (String, Vec<Finding>) {
     let (mut masked, mut found) = mask(text, spans(text, rules), rules);
     if !found.is_empty() {
         rescan(&mut masked, &mut found, rules);
@@ -470,18 +543,42 @@ fn bundled_version() -> &'static str {
 /// rule index), unmerged. A tool field is stored as flattened JSON, where `\"` and `\n` hide the
 /// quotes and line breaks rules match on (curl's `-u "user:pass"`, a quoted header), and the whole
 /// output reads as one line to a line-scoped allowlist. Scanning both views can only add masks.
+///
+/// A value the user keeps is not masked, but it must not hide other secrets either: a rule that
+/// matched it (curl-auth-user takes the last `-u` of a line) would never look at one it passed
+/// over. So each kept value becomes spaces of its length in the text looked at next, until no new
+/// one turns up; offsets stay those of `text`.
 fn spans(text: &str, rules: &Rules) -> Vec<(usize, usize, usize)> {
-    let mut all = spans_in(text, rules);
-    if text.contains('\\') {
-        let (view, at) = unescaped(text);
-        all.extend(
-            spans_in(&view, rules)
-                .into_iter()
-                .map(|(s, e, r)| (at[s], at[e], r)),
-        );
-        all.sort_unstable();
-        all.dedup();
+    let mut work = std::borrow::Cow::Borrowed(text);
+    let mut all = Vec::new();
+    let mut spaced: Vec<(usize, usize)> = Vec::new();
+    for _ in 0..=MAX_PASSES {
+        let mut kept = Vec::new();
+        all.extend(spans_in(&work, rules, &mut kept));
+        if work.contains('\\') {
+            let (view, at) = unescaped(&work);
+            let mut kept_view = Vec::new();
+            all.extend(
+                spans_in(&view, rules, &mut kept_view)
+                    .into_iter()
+                    .map(|(s, e, r)| (at[s], at[e], r)),
+            );
+            kept.extend(kept_view.into_iter().map(|(s, e)| (at[s], at[e])));
+        }
+        kept.retain(|k| !spaced.contains(k));
+        if kept.is_empty() {
+            break;
+        }
+        let w = work.to_mut();
+        for &(s, e) in &kept {
+            w.replace_range(s..e, &" ".repeat(e - s));
+        }
+        spaced.extend(kept);
     }
+    // A span that only covers spaces put in place of a kept value is that value.
+    all.retain(|&(s, e, _)| !spaced.iter().any(|&(a, b)| a <= s && e <= b));
+    all.sort_unstable();
+    all.dedup();
     all
 }
 
@@ -530,7 +627,12 @@ fn escape(s: &str) -> Option<(char, usize)> {
 }
 
 /// Secret spans in `text`: (start, end, rule index), unmerged, as gitleaks finds them.
-fn spans_in(text: &str, rules: &Rules) -> Vec<(usize, usize, usize)> {
+/// `kept` gets the spans of the values the user keeps.
+fn spans_in(
+    text: &str,
+    rules: &Rules,
+    kept: &mut Vec<(usize, usize)>,
+) -> Vec<(usize, usize, usize)> {
     let r = bundled();
     let mut hit = vec![false; r.rules.len()];
     // Overlapping: "sk" (twilio) inside "gsk_" (groq) must not hide the longer keyword.
@@ -568,7 +670,12 @@ fn spans_in(text: &str, rules: &Rules) -> Vec<(usize, usize, usize)> {
                 .iter()
                 .chain(std::iter::once(&r.global))
                 .any(|a| allows(a, secret.as_str(), all.as_str(), line));
-            if !allowed && !rules.keeps(secret.as_str()) {
+            if allowed {
+                continue;
+            }
+            if rules.keeps(secret.as_str()) {
+                kept.push((secret.start(), secret.end()));
+            } else {
                 spans.push((secret.start(), secret.end(), i));
             }
         }
@@ -594,11 +701,14 @@ fn spans_in(text: &str, rules: &Rules) -> Vec<(usize, usize, usize)> {
             if secret.is_empty()
                 || x.entropy
                     .is_some_and(|min| shannon_entropy(secret.as_str()) <= min)
-                || rules.keeps(secret.as_str())
             {
                 continue;
             }
-            spans.push((secret.start(), secret.end(), r.rules.len() + j));
+            if rules.keeps(secret.as_str()) {
+                kept.push((secret.start(), secret.end()));
+            } else {
+                spans.push((secret.start(), secret.end(), r.rules.len() + j));
+            }
         }
     }
     spans.sort_unstable();
@@ -1037,8 +1147,7 @@ mod tests {
     }
 
     fn user(toml: &str) -> anyhow::Result<Rules> {
-        let c: crate::config::CaptureConfig = toml::from_str(toml)?;
-        Rules::new(&c.redaction)
+        Rules::new(&crate::config::parse_capture(Some(toml))?.redaction)
     }
 
     fn sha(v: &str) -> String {
@@ -1122,6 +1231,83 @@ mod tests {
         );
         assert_ne!(base, v(&format!("{a}, {b}"), &format!("\"{h1}\""))); // an entry removed
         assert_ne!(base, v(a, &format!("\"{h1}\", \"{h2}\""))); // a rule removed
+    }
+
+    #[test]
+    fn a_kept_value_does_not_hide_a_secret_its_rule_passed_over() {
+        let kept = format!("dev:{}", "W8eR2tY6uI0pL4k"); // split: secret scanners
+        let other = format!("usr:{}", "q9Zx8mL2vB4nR7tYw");
+        let text = format!("curl -u {other} https://x ; curl -u {kept} https://x ;");
+        let (masked, _) = scan(&text, &Rules::default());
+        assert!(
+            !masked.contains(&kept) && !masked.contains(&other),
+            "{masked}"
+        );
+        let rules = user(&format!("[redaction]\nallowlist = [\"{}\"]", sha(&kept))).unwrap();
+        let (masked, _) = scan(&text, &rules);
+        assert!(masked.contains(&kept), "{masked}");
+        assert!(!masked.contains(&other), "{masked}");
+        // Flattened JSON, where the kept value is found in the unescaped view.
+        let json = serde_json::to_string(&format!("\"{text}\"")).unwrap();
+        let (masked, _) = scan(&json, &rules);
+        assert!(
+            masked.contains(&kept) && !masked.contains(&other),
+            "{masked}"
+        );
+    }
+
+    #[test]
+    fn a_user_rule_never_takes_context_a_bundled_rule_needs() {
+        let a = format!("usr:{}", "q9Zx8mL2vB4nR7tYw"); // split: secret scanners
+        let b = format!("dev:{}", "W8eR2tY6uI0pL4k");
+        let text = format!("curl -u {a} https://x ; curl -u {b} https://x ;");
+        let rules =
+            user("[redaction]\nextra_rules = [{ id = \"c\", regex = '\\bcurl\\b' }]").unwrap();
+        let (masked, _) = scan(&text, &rules);
+        assert!(!masked.contains(&a) && !masked.contains(&b), "{masked}");
+        assert!(!masked.contains("curl"), "{masked}");
+    }
+
+    #[test]
+    fn egress_follows_the_file_as_it_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let mut e = Egress {
+            home: home.path().to_owned(),
+            seen: None,
+            rules: None,
+        };
+        let text = "id acme-123456";
+        let now = |e: &mut Egress| e.rules().map(|r| outbound_with(text, &r));
+        assert_eq!(now(&mut e).as_deref(), Some(text)); // no file: the bundled rules
+        let config = home.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        assert!(!now(&mut e).unwrap().contains("123456")); // a rule added while running
+        std::fs::write(
+            &config,
+            "[redaction]\nextra_rules = [{ id = \"x\", regex = '(' }]\n",
+        )
+        .unwrap();
+        assert_eq!(now(&mut e), None); // wrong: nothing leaves
+        std::fs::remove_file(&config).unwrap();
+        assert_eq!(now(&mut e).as_deref(), Some(text));
+    }
+
+    #[test]
+    fn a_settings_error_never_prints_the_value() {
+        let v = format!("hunter{}", "2secret"); // split: secret scanners
+        for toml in [
+            format!("[redaction]\nallowlist = [\"{v}\"]"),
+            format!("[redaction]\nextra_rules = [{{ id = \"x\", regex = '({v}' }}]"),
+            format!("[redaction]\nallowlist = [{v}]"),
+            format!("[redaction]\nallowlist = \"{v}\""),
+        ] {
+            let e = format!("{:#}", user(&toml).err().expect(&toml));
+            assert!(!e.contains(&v), "{toml}: {e}");
+        }
     }
 
     #[test]
