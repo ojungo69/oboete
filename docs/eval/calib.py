@@ -13,6 +13,9 @@ N, PASS_KAPPA = 50, 0.4
 # Run 1 (`calib-50.panel.jsonl`, frozen) took the first entry of any answer; run 2 requires exactly
 # the grade of memory `d` and is the one B3 is decided on (#77).
 RUN = 'calib-50.panel-2'
+# The result of run 2 under the rule that leaves a pair out for every judge (#77); the first result
+# of run 2 (`calib-50.result-2.json`) is frozen as it was.
+RESULT = 'calib-50.result-2b'
 JUDGES = {'claude-sonnet-5', 'claude-sonnet'}   # the alias rows of 2026-09-24 came from claude-sonnet-5
 UNDER_TEST = 'claude-sonnet-5'
 GO = ('https://opencode.ai/zen/go/v1', 'OPENCODE_API_KEY.md', {'x-opencode-session': 'oboete'})
@@ -84,7 +87,8 @@ def parse_grade(text):
 
 
 def chat(member, prompt, timeout=300):
-    """One chat completion from a panel judge, temperature 0; a 429 is retried twice."""
+    """(answer text, the model the provider reports) of one chat completion from a panel judge,
+    temperature 0; a 429 is retried twice."""
     base, key_file, headers, model = PANEL[member]
     with open(os.path.expanduser(f'~/{key_file}')) as f:
         key = f.read().split('\n')[1].strip()
@@ -94,7 +98,10 @@ def chat(member, prompt, timeout=300):
             'Authorization': f'Bearer {key}', 'Content-Type': 'application/json', 'User-Agent': 'oboete-eval', **headers})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.load(r)['choices'][0]['message'].get('content') or ''
+                answer = json.load(r)
+            # The model the provider says answered: an alias can move to another model.
+            return answer['choices'][0]['message'].get('content') or '', answer.get('model') or ''
+
         except urllib.error.HTTPError as e:
             if e.code != 429 or attempt == 2:
                 raise
@@ -102,8 +109,10 @@ def chat(member, prompt, timeout=300):
 
 
 def ask_panel(member, question, memory):
+    """(grade, the model the provider reports)."""
     from judge import PROMPT
-    return parse_grade(chat(member, PROMPT.format(query=question, docs=f'[d]\n{memory}')))
+    text, model = chat(member, PROMPT.format(query=question, docs=f'[d]\n{memory}'))
+    return parse_grade(text), model
 
 
 def draw(queries, judgments, doc_text, n=N):
@@ -182,7 +191,7 @@ def main(cmd):
             row = {'id': k['id'], 'judge': member}
             for attempt in range(3):
                 try:
-                    row['grade'] = ask_panel(member, given[k['id']]['question'], given[k['id']]['memory'])
+                    row['grade'], row['model'] = ask_panel(member, given[k['id']]['question'], given[k['id']]['memory'])
                     break
                 except ValueError as e:      # an answer with no usable grade: asked again, then recorded
                     row.update(grade=None, unusable=str(e)[:200])
@@ -208,24 +217,33 @@ def main(cmd):
         first = {(r['id'], r['judge']): r['grade'] for r in read_jsonl(f'{labels}/calib-50.panel.jsonl')}
         again = [(first[i, j], g) for i, js in grades.items() for j, g in js.items() if (i, j) in first]
         judges = [UNDER_TEST, *PANEL]
+        # A pair any judge could not grade is left out for every judge and counted, like a tie
+        # (spec 8.1): each judge is then measured on the same pairs against all five others.
+        left_out = sorted(i for i, g in grades.items() if len(g) < len(judges))
+        grades = {i: g for i, g in grades.items() if len(g) == len(judges)}
         # Complete when every judge answered every pair, with a grade or with an unusable answer 3 times.
-        complete = len(grades) == N and len({(r['id'], r['judge']) for r in recorded}) == N * len(PANEL)
+        complete = len({(r['id'], r['judge']) for r in recorded}) == N * len(PANEL)
         each = {}
         for j in judges:
             pairs = against_others(grades, j)
             k = kappa(pairs) if pairs else None
             each[j] = {'n': len(pairs), 'kappa': k, 'agreement': sum(a == b for a, b in pairs) / len(pairs) if pairs else None,
                        'pass': bool(complete and k is not None and k >= PASS_KAPPA)}
-        rows = [[g[j] >= 2 for j in judges] for g in grades.values() if len(g) == len(judges)]
+        rows = [[g[j] >= 2 for j in judges] for g in grades.values()]
         fk = fleiss(rows) if rows else None
         panel_pass = bool(complete and fk is not None and fk >= PASS_KAPPA)
         out = {'run': RUN, 'complete': complete, 'judges': each,
-               'unusable': [(r['id'], r['judge']) for r in recorded if r['grade'] is None],
+               'unusable': [(r['id'], r['judge']) for r in recorded if r['grade'] is None], 'left_out': left_out,
                'changed_from_run_1': {'n': len(again), 'grade': sum(a != b for a, b in again),
                                       'relevance': sum((a >= 2) != (b >= 2) for a, b in again)}, 'fleiss': fk, 'panel_pass': panel_pass,
                'pass': panel_pass and each[UNDER_TEST]['pass'],
-               'models': {UNDER_TEST: UNDER_TEST, **{j: m[3] for j, m in PANEL.items()}}}
-        with open(f'{labels}/{RUN.replace("panel", "result")}.json', 'w') as f:
+               'models': {UNDER_TEST: [UNDER_TEST], **{j: sorted({r.get('model') or f'{m[3]} (requested; the reply was not recorded)'
+                                                                   for r in recorded if r['judge'] == j})
+                                                    for j, m in PANEL.items()}}}
+        from freeze import load
+        if f'labels/{RESULT}.json' in load()['files']:
+            sys.exit(f'labels/{RESULT}.json is frozen; a changed rule writes a new result')
+        with open(f'{labels}/{RESULT}.json', 'w') as f:
             json.dump(out, f, indent=1)
         print(json.dumps(out, indent=1))
     else:

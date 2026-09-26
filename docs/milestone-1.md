@@ -85,7 +85,7 @@ By a panel, not the owner (owner decision 29: the owner found the memories too E
 
 B3 is decided on run 2. Run 1 took the first entry of any answer; Codex (#77) asked for exactly the grade of the one memory asked about, and run 2, asked again under that rule, found 3 answers in run 1's style (grades for "1", "2", "3"), so run 1 may hold misread grades. Run 1 stays frozen as it was.
 
-| Judge (maker, model) | Run 2: κ against the other five's majority | Agreement | Run 1 κ |
+| Judge (maker, model) | Run 2: κ against the other five's majority (49 pairs) | Agreement | Run 1 κ |
 |---|---|---|---|
 | Anthropic `claude-sonnet-5` (under test) | 0.88 | 94% | 0.84 |
 | OpenAI `openai/gpt-oss-120b` (Groq) | 0.68 | 84% | 0.60 |
@@ -96,10 +96,11 @@ B3 is decided on run 2. Run 1 took the first entry of any answer; Codex (#77) as
 
 - The panel's Fleiss κ: 0.74 (run 1: 0.72).
 - **B3 passes** (each judge κ ≥ 0.4, panel ≥ 0.4, in both runs). The judge may decide from here on; D2's 0.545 is no longer provisional on this account.
-- Three answers stayed unusable after three tries, all on pair c29 (gpt-oss-120b, kimi-k3, glm-5.3 graded memories "1", "2", "3"); c29 is left out for those three judges only.
+- Three answers stayed unusable after three tries, all on pair c29 (gpt-oss-120b, kimi-k3, glm-5.3 graded memories "1", "2", "3"). c29 is left out for every judge, like a tie (spec 8.1), so all six are measured on the same 49 pairs, each against all five others (`labels/calib-50.result-2b.json`). The first result of run 2, which left c29 out for those three judges only, is frozen as `labels/calib-50.result-2.json`; its numbers differ by less than 0.005.
+- The model each provider reports is recorded with each grade from now on; run 2's replies did not record it, so its models are the requested ones.
 - Stability: between the two runs, at temperature 0 and on the same inputs, 41 of 247 grades changed, 18 of them across the relevant line (7%). Hosted models are not deterministic at temperature 0; a single run's κ carries that noise.
 - What this does not show (spec 8.1): judges that share a bias agree on the same wrong grade. Agreement with the owner is measured later, on the owner's own decisions (#76).
-- Frozen: `labels/calib-50.inputs.jsonl` (the question and memory every panel judge read, from the evaluation store, unchanged since 2026-09-24), run 1 (`labels/calib-50.panel.jsonl`, `labels/calib-50.result.json`) and run 2 (`labels/calib-50.panel-2.jsonl`, `labels/calib-50.result-2.json`). The 4 answers the owner gave before decision 29 are set aside, unused (`labels/calib-50.withdrawn-2026-09-26.jsonl`).
+- Frozen: `labels/calib-50.inputs.jsonl` (the question and memory every panel judge read, from the evaluation store, unchanged since 2026-09-24), run 1 (`labels/calib-50.panel.jsonl`, `labels/calib-50.result.json`) and run 2 (`labels/calib-50.panel-2.jsonl`, `labels/calib-50.result-2.json`, `labels/calib-50.result-2b.json`). The 4 answers the owner gave before decision 29 are set aside, unused (`labels/calib-50.withdrawn-2026-09-26.jsonl`).
 
 ## Findings
 
