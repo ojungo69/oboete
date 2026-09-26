@@ -22,3 +22,49 @@ The plan is docs/milestone-2-plan.md. The spec is docs/spec.md sections 1-2, 4.9
 - `Raw::append_tombstone` writes a tombstone as the device's next seq. `Raw::after` hides what the tombstones of the returned records target, in one query per read by target (a partial index on `(target_device, target_seq)` for tombstones only): an event targeted whole comes back as `Item::Removed`, a byte range as `*`. A range is widened to whole characters and cut at the body's end, so the body stays valid UTF-8, offsets stay valid, and masking twice changes nothing (D8). A tombstone of a tombstone hides nothing.
 - The FTS consumer indexes a tombstone's target again as `Raw::after` returns it: masked text, or the document removed. Search, `oboete get` and every consumer read through `Raw::after`, so none can show what a tombstone covers.
 - Every tombstone this milestone comes from the redaction rescan (source `rescan`). The rescan itself (part b) needs the ruleset version of Task 3b (#108).
+
+## Redaction and capture settings (Task 3b, 2026-09-27)
+
+`config.toml` gains two tables (spec 1.5, 6.4). Capture reads only these two, so a mistake in `[[providers]]` never stops recording.
+
+```toml
+[redaction]
+# Added to the bundled rules, which cannot be removed. Named `user:<id>` in the ledger.
+extra_rules = [{ id = "acme", regex = 'acme-[0-9]{6}', keywords = ["acme"] }]
+# The SHA-256 (hex) of one exact value to keep, never a pattern.
+allowlist = ["<sha256 of the value>"]
+
+[capture]
+store_prompts = true        # false: the turn is recorded as {"omitted": true}
+tool_output = "full"        # or "head-tail"
+```
+
+Decisions (Claude; overrulable):
+
+- **A wrong table records nothing.** A bad regex, id, `secret_group`, allowlist entry or unknown key makes the hook of a ported agent fail before it opens `raw.db`, so no text is stored under rules the user did not get. MUST-M16's marker and doctor report it; doctor names the mistake and exits non-zero. Every other command except `doctor` and `setup` stops on it too: several of them (`observe`, `reindex`, and `mcp` and `search` with embeddings) send text out, and the egress gate must apply the user's rules.
+- **The ruleset version** is the bundled files' hash when the user adds nothing, so a store upgraded without settings keeps its version and Task 7 does not rescan for nothing. With user rules or kept values, it also covers them in a canonical form: reordering the file changes nothing; adding or removing a rule or an allowlist entry changes the version.
+- **A rule without keywords always runs**, as in gitleaks. With keywords, it runs when one appears in the text (any case).
+- **Each rule looks at the text with its own context** (Codex security review, three rounds). A rule finds one secret per context per look: curl-auth-user's greedy `.*` takes the last `-u` of a line. So every rule first looks at the original text. Each rule that found or kept something then looks again on its own, until it finds nothing new. It looks at a copy where only its own findings and kept values are blanked out with spaces of the same length. Offsets stay those of the original, which is masked once at the end. No rule takes context another needs: a user rule matching `curl`, a bundled mask over a `Bearer` token that a user rule reads, or two user rules that share a prefix. The old pass over the masked text stays after that, and it can only add masks.
+- **A kept value does not hide its neighbors.** When a greedy match is a kept value, the value is blanked in the next look, so the rule finds the secret it passed over. The stored text still holds the kept value.
+- **The pass limit fails closed.** A rule still finding after 64 looks masks the whole text, so no look stops with a secret left unlooked-at.
+- **`oboete mcp` answers pass the egress gate.** What it returns goes into the agent's context, and so to the agent's model provider. So the user's rules as they are now apply to stored text too, including rules added after it was stored.
+- **Egress follows the file as it is.** `redact::outbound` rereads `config.toml` at each call and rebuilds the rules when it changed, so a long-running `oboete mcp` applies a rule added, or a kept value removed, while it runs. If the table turns wrong while a process runs, nothing of the text leaves: it is sent as one mask.
+- **Errors never quote a value.** An allowlist entry is named by its position and a regex error only by its rule id. A TOML error in `config.toml` gives only its line number, wherever it is: TOML and serde messages can quote the value on the line. Telling `[redaction]` apart by reading the file failed on legal forms (`[ redaction ]`, `[[redaction.extra_rules]]`). This holds for capture, doctor and a running `oboete mcp`, since `config::load` uses the same formatting.
+- **The allowlist** is checked against the value as it appears in the text being scanned. A value inside a flattened tool field that holds `\"` or `\n` needs the hash of that escaped form.
+- **`tool_output = "head-tail"`** keeps the first and last 4 KB of each tool output (`capture::HEAD_TAIL_BYTES`, 8 KB in all, about v1's 8,000 characters). `"full"` is spec 2.4's default: whole up to `MAX_FIELD_BYTES`, head and tail above it. Tool input and the other fields are unaffected.
+- **`store_prompts = false`** omits the text of both kinds of prompt event, typed prompts and harness envelopes. The event stays, so Task 11 can count the turn (#83).
+- **Agents not yet ported** (v1's write path, until Task 2b) keep the bundled rules only.
+- `oboete setup --advanced` (the hidden prompt that stores an allowlist value as its hash) is not part of this task. Until then the user writes the hash, for example `printf %s '<value>' | sha256sum`.
+
+Replay of the fixture of record (release build, WSL), before and after, each run twice:
+
+| | in-process p50 / p95 (µs) | spawned hook p50 / p95 (ms) |
+|---|---|---|
+| before (main at 481682f) | 1517 / 2198 | 9 / 11 |
+| after, no config.toml | 1513 / 2109, 1497 / 2171 | 9 / 11, 9 / 10 |
+| after, 2 extra rules and 1 allowlist entry | 1487 / 2124, 1520 / 2140 | 9 / 11, 9 / 11 |
+| after the security fixes, no config.toml | 1604 / 2231, 1911 / 2597 | 9 / 11, 9 / 12 |
+| after the security fixes, the same settings | 1619 / 2289, 1513 / 2274 | 9 / 11, 10 / 10 |
+| after the third round (each rule its own look), no config.toml / the same settings | 1593 / 2183, 1605 / 2244 | 9 / 11, 10 / 11 |
+
+The in-process numbers move by 25% between identical runs on this machine (load average about 1), so they show no change beyond that noise; the spawned hook, which also reads `config.toml`, stays at 9-10 ms.

@@ -290,7 +290,9 @@ pub fn load(home: &Path) -> Result<Config> {
     }
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let cfg: Config = toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    let cfg: Config = toml::from_str(&text)
+        .map_err(|e| toml_error(&text, &e))
+        .with_context(|| format!("parse {}", path.display()))?;
     match cfg.embedding.provider.as_str() {
         "none" => {}
         "workers-ai" => anyhow::ensure!(
@@ -304,6 +306,114 @@ pub fn load(home: &Path) -> Result<Config> {
         ),
     }
     Ok(cfg)
+}
+
+/// `[redaction]` (spec 1.5, 6.4): rules the user adds to the built-in ones, which cannot be
+/// removed, and false positives to keep, each the SHA-256 (hex) of one exact value.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Redaction {
+    #[serde(default)]
+    pub extra_rules: Vec<ExtraRule>,
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+}
+
+/// One user rule, in gitleaks' terms: the secret is `secret_group` (else the first non-empty
+/// group, else the whole match); `keywords`, when given, gate the regex (case-insensitive);
+/// `entropy` is the Shannon entropy a secret must exceed.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtraRule {
+    pub id: String,
+    pub regex: String,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub entropy: Option<f64>,
+    #[serde(default)]
+    pub secret_group: Option<usize>,
+}
+
+/// `[capture]` (spec 1.5, 2.4): what is recorded.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Capture {
+    /// Off: a prompt is recorded as an event without its text.
+    #[serde(default = "default_true")]
+    pub store_prompts: bool,
+    #[serde(default)]
+    pub tool_output: ToolOutput,
+}
+
+impl Default for Capture {
+    fn default() -> Self {
+        Self {
+            store_prompts: true,
+            tool_output: ToolOutput::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolOutput {
+    /// Whole, up to the size where head and tail are kept (spec 2.4).
+    #[default]
+    Full,
+    /// Always only its head and tail (`capture::HEAD_TAIL_BYTES`).
+    HeadTail,
+}
+
+/// The two tables capture reads, and nothing else of config.toml: a mistake inside
+/// `[[providers]]` must not stop recording. Missing file or tables = defaults. The other tables
+/// are only named: a table no version reads (`[redactions]`) is an error, not settings that
+/// silently do nothing.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureConfig {
+    #[serde(default)]
+    pub redaction: Redaction,
+    #[serde(default)]
+    pub capture: Capture,
+    #[serde(default, rename = "providers")]
+    _providers: serde::de::IgnoredAny,
+    #[serde(default, rename = "summary")]
+    _summary: serde::de::IgnoredAny,
+    #[serde(default, rename = "embedding")]
+    _embedding: serde::de::IgnoredAny,
+}
+
+pub fn load_capture(home: &Path) -> Result<CaptureConfig> {
+    let path = home.join("config.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => Some(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    parse_capture(text.as_deref()).with_context(|| format!("parse {}", path.display()))
+}
+
+/// `load_capture` on the file's text (`None`: no file).
+pub fn parse_capture(text: Option<&str>) -> Result<CaptureConfig> {
+    let Some(text) = text else {
+        return Ok(CaptureConfig::default());
+    };
+    toml::from_str(text).map_err(|e| toml_error(text, &e))
+}
+
+/// A TOML error in config.toml as it may be printed: by hooks to stderr, by doctor, by a running
+/// `oboete mcp`. Only its line: the error's own text can quote the value on that line (a serde
+/// message quotes a value of the wrong type, the display quotes the line), and `[redaction]`
+/// holds values the user means to hide.
+fn toml_error(text: &str, e: &toml::de::Error) -> anyhow::Error {
+    let line = e
+        .span()
+        .and_then(|s| text.get(..s.start))
+        .map_or(0, |b| b.matches('\n').count() + 1);
+    anyhow::anyhow!(
+        "line {line} is not valid here (the details are not shown: they could quote a value to hide)"
+    )
 }
 
 /// Read an API key from the owner's key-file convention (token on line 2).

@@ -20,6 +20,42 @@ pub const PORTED: &[&str] = &["claude", "codex"];
 /// Provisional: Task 12 sets it from M14 on the slowest machine.
 pub const MAX_FIELD_BYTES: usize = 256 * 1024;
 
+/// What `tool_output = "head-tail"` keeps of each tool output: its first and last halves. v1's
+/// hook kept 8,000 characters (src/hook.rs `MAX_FIELD`). (Claude; overrulable)
+pub const HEAD_TAIL_BYTES: usize = 8 * 1024;
+
+/// The user's capture settings (spec 1.5): `[redaction]` and `[capture]` in config.toml.
+#[derive(Clone)]
+pub struct Settings {
+    pub rules: redact::Rules,
+    pub store_prompts: bool,
+    pub tool_output: crate::config::ToolOutput,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        let c = crate::config::Capture::default();
+        Self {
+            rules: redact::Rules::default(),
+            store_prompts: c.store_prompts,
+            tool_output: c.tool_output,
+        }
+    }
+}
+
+impl Settings {
+    /// An error when either table is wrong: a hook then records nothing rather than store text
+    /// under rules the user did not get (MUST-M16's marker and doctor say so).
+    pub fn load(home: &Path) -> anyhow::Result<Self> {
+        let c = crate::config::load_capture(home)?;
+        Ok(Self {
+            rules: redact::Rules::new(&c.redaction)?,
+            store_prompts: c.capture.store_prompts,
+            tool_output: c.capture.tool_output,
+        })
+    }
+}
+
 /// One event as captured, with the ledger rows of what its redaction masked: (field, finding).
 #[derive(Debug)]
 pub struct Captured {
@@ -28,20 +64,39 @@ pub struct Captured {
 }
 
 /// The events one hook call of a ported agent records: none for events that carry nothing.
-pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Captured> {
+pub fn events(
+    agent: &str,
+    event: &str,
+    payload: &Value,
+    ts: i64,
+    settings: &Settings,
+) -> Vec<Captured> {
     let (kind, body) = match event {
         "SessionStart" => ("start", json!({"source": payload.get("source").map(clean)})),
         "UserPromptSubmit" => {
-            let prompt = strip_blocks(str_field(payload, &["prompt"]).unwrap_or(""), true);
-            if prompt.is_empty() {
-                return Vec::new();
-            }
+            let typed = str_field(payload, &["prompt"]).unwrap_or("");
+            let prompt = strip_blocks(typed, true);
             // Harness traffic is recorded, but never as something the developer typed.
             let kind = if is_envelope(&prompt) {
                 "envelope"
             } else {
                 "prompt"
             };
+            // A turn whose text was all `<private>` is still a turn when no text is kept anyway.
+            if !settings.store_prompts && !typed.trim().is_empty() {
+                // The turn is still an event (Task 11 counts it), without what was typed.
+                return vec![capture(
+                    agent,
+                    kind,
+                    json!({"omitted": true}),
+                    payload,
+                    ts,
+                    settings,
+                )];
+            }
+            if prompt.is_empty() {
+                return Vec::new();
+            }
             (kind, json!({"prompt": base64_runs(&prompt)}))
         }
         "PostToolUse" | "PostToolUseFailure" => {
@@ -89,11 +144,24 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Capture
         "SessionEnd" => ("end", json!({"reason": payload.get("reason").map(clean)})),
         _ => return Vec::new(), // PreToolUse and the rest carry nothing to keep
     };
+    vec![capture(agent, kind, body, payload, ts, settings)]
+}
+
+/// One event of `kind` with `body`, its labels from `payload`, all through one gate.
+fn capture(
+    agent: &str,
+    kind: &str,
+    body: Value,
+    payload: &Value,
+    ts: i64,
+    settings: &Settings,
+) -> Captured {
     let cwd = str_field(payload, &["cwd"]).unwrap_or(".");
     let git = git(Path::new(cwd));
     // Labels are stored text too (spec 2.2): a path or branch can carry a token.
-    let mut gate = Gate::default();
-    let mut label = |field: &str, s: &str| gate.text(field, &without_blocks(s, false));
+    let mut gate = Gate::new(settings);
+    let mut label =
+        |field: &str, s: &str| gate.text(field, &without_blocks(s, false), MAX_FIELD_BYTES);
     let session = label(
         "session",
         str_field(payload, &["session_id", "sessionId"]).unwrap_or("unknown"),
@@ -104,8 +172,8 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Capture
     let gitdir = git.gitdir.as_deref().map(|g| label("gitdir", g));
     let cwd_label = label("cwd", cwd);
     // One gate for the body: every string and key in it, whatever field it is.
-    let body = gate.value("", body).to_string();
-    vec![Captured {
+    let body = gate.value("", body, MAX_FIELD_BYTES).to_string();
+    Captured {
         event: Event {
             agent: agent.into(),
             // A label only: an event without one is still this device's next seq.
@@ -122,21 +190,35 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Capture
             original_bytes: gate.cut,
         },
         ledger: gate.ledger,
-    }]
+    }
 }
 
 /// The one gate every stored string passes (spec 2.2): `redact::scan_capped` over its whole
 /// length (head and tail above the cap), each finding kept with the field it is in.
-#[derive(Default)]
-struct Gate {
+struct Gate<'a> {
+    rules: &'a redact::Rules,
+    /// The cap of a tool's `/output`: `MAX_FIELD_BYTES`, or `HEAD_TAIL_BYTES` by the settings.
+    output_cap: usize,
     ledger: Vec<(String, redact::Finding)>,
     /// The full size of the strings that were cut, when any was.
     cut: Option<i64>,
 }
 
-impl Gate {
-    fn text(&mut self, field: &str, s: &str) -> String {
-        let (stored, found, full) = redact::scan_capped(s, MAX_FIELD_BYTES);
+impl<'a> Gate<'a> {
+    fn new(settings: &'a Settings) -> Self {
+        Self {
+            rules: &settings.rules,
+            output_cap: match settings.tool_output {
+                crate::config::ToolOutput::Full => MAX_FIELD_BYTES,
+                crate::config::ToolOutput::HeadTail => HEAD_TAIL_BYTES,
+            },
+            ledger: Vec::new(),
+            cut: None,
+        }
+    }
+
+    fn text(&mut self, field: &str, s: &str, cap: usize) -> String {
+        let (stored, found, full) = redact::scan_capped(s, cap, self.rules);
         if let Some(n) = full {
             *self.cut.get_or_insert(0) += n as i64;
         }
@@ -147,22 +229,30 @@ impl Gate {
 
     /// Every string and key of `v`, at its JSON pointer. Blocks are gone by now: stripping here
     /// again would pair an opener left in one flattened tool field with a closer in another.
-    fn value(&mut self, path: &str, v: Value) -> Value {
+    /// A string is kept up to `cap`.
+    fn value(&mut self, path: &str, v: Value, cap: usize) -> Value {
         match v {
-            Value::String(s) => Value::String(self.text(path, &s)),
+            Value::String(s) => Value::String(self.text(path, &s, cap)),
             Value::Array(a) => Value::Array(
                 a.into_iter()
                     .enumerate()
-                    .map(|(i, x)| self.value(&format!("{path}/{i}"), x))
+                    .map(|(i, x)| self.value(&format!("{path}/{i}"), x, MAX_FIELD_BYTES))
                     .collect(),
             ),
             Value::Object(m) => Value::Object(
                 m.into_iter()
                     .map(|(k, x)| {
+                        // The cap follows the key as capture wrote it: a user rule can mask
+                        // the stored key `output` itself.
+                        let cap = if path.is_empty() && k == "output" {
+                            self.output_cap
+                        } else {
+                            MAX_FIELD_BYTES
+                        };
                         // The pointer is built from the stored key, so it never holds a secret.
-                        let key = self.text(&format!("{path}#key"), &k);
+                        let key = self.text(&format!("{path}#key"), &k, MAX_FIELD_BYTES);
                         let child = format!("{path}/{}", segment(&key));
-                        let x = self.value(&child, x);
+                        let x = self.value(&child, x, cap);
                         (key, x)
                     })
                     .collect(),
@@ -353,7 +443,7 @@ mod tests {
     use super::*;
 
     fn one(event: &str, payload: Value) -> Event {
-        let mut v = events("claude", event, &payload, 7);
+        let mut v = events("claude", event, &payload, 7, &Settings::default());
         assert_eq!(v.len(), 1, "{event}: {v:?}");
         v.remove(0).event
     }
@@ -411,7 +501,8 @@ mod tests {
                 "claude",
                 "UserPromptSubmit",
                 &json!({"prompt": "<private>x"}),
-                0
+                0,
+                &Settings::default()
             )
             .is_empty()
         );
@@ -448,7 +539,7 @@ mod tests {
         let payload = json!({"session_id": "s", "tool_name": "Bash",
             "tool_input": {"command": format!("curl -H 'Authorization: Bearer {key}'")},
             "tool_response": {"stdout": "ok"}, "reason": {format!("Bearer {key}"): 1}});
-        let v = events("claude", "PostToolUse", &payload, 0);
+        let v = events("claude", "PostToolUse", &payload, 0, &Settings::default());
         let c = &v[0];
         assert!(!format!("{c:?}").contains(&key), "{c:?}");
         let (field, f) = &c.ledger[0];
@@ -464,6 +555,7 @@ mod tests {
             "SessionEnd",
             &json!({"reason": {format!("Bearer {key}"): 1}}),
             0,
+            &Settings::default(),
         );
         assert!(
             end[0]
@@ -523,7 +615,7 @@ mod tests {
         for (input, output, secret) in cases {
             let payload = json!({"session_id": "s", "tool_name": "Bash",
                 "tool_input": input, "tool_response": output});
-            let c = &events("claude", "PostToolUse", &payload, 0)[0];
+            let c = &events("claude", "PostToolUse", &payload, 0, &Settings::default())[0];
             assert!(
                 !format!("{c:?}").contains(secret.as_str()),
                 "{}",
@@ -548,6 +640,7 @@ mod tests {
             "SessionEnd",
             &json!({"reason": {big.clone(): inner}}),
             0,
+            &Settings::default(),
         )[0];
         assert_eq!(e.ledger.len(), 50);
         for (field, _) in &e.ledger {
@@ -558,6 +651,69 @@ mod tests {
             );
         }
         assert_eq!(segment("a/b~c"), "a~1b~0c");
+    }
+
+    fn with(toml: &str) -> Settings {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("config.toml"), toml).unwrap();
+        Settings::load(home.path()).unwrap()
+    }
+
+    #[test]
+    fn with_prompts_off_the_turn_is_recorded_without_its_text() {
+        let s = with("[capture]\nstore_prompts = false\n");
+        let payload = json!({"session_id": "s", "prompt": "the zebra plan"});
+        let v = events("claude", "UserPromptSubmit", &payload, 0, &s);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].event.kind, "prompt");
+        assert_eq!(body(&v[0].event), json!({"omitted": true}));
+        assert!(!format!("{:?}", v[0]).contains("zebra"));
+        // A turn that was all private is a turn too.
+        let private = json!({"session_id": "s", "prompt": "<private>zebra</private>"});
+        let v = events("claude", "UserPromptSubmit", &private, 0, &s);
+        assert_eq!(v.len(), 1);
+        assert_eq!(body(&v[0].event), json!({"omitted": true}));
+        let on = events(
+            "claude",
+            "UserPromptSubmit",
+            &private,
+            0,
+            &Settings::default(),
+        );
+        assert!(on.is_empty());
+    }
+
+    #[test]
+    fn head_tail_cuts_a_tool_output_and_leaves_its_input_whole() {
+        let s = with("[capture]\ntool_output = \"head-tail\"\n");
+        let big = "a".repeat(HEAD_TAIL_BYTES) + &"b".repeat(HEAD_TAIL_BYTES);
+        let payload = json!({"session_id": "s", "tool_name": "Bash",
+            "tool_input": {"cmd": big}, "tool_response": big});
+        let e = &events("claude", "PostToolUse", &payload, 0, &s)[0].event;
+        let b = body(e);
+        let out = b["output"].as_str().unwrap();
+        assert!(out.len() < HEAD_TAIL_BYTES + 100, "{}", out.len());
+        assert!(out.starts_with('a') && out.ends_with('b') && out.contains("[cut: "));
+        assert!(b["input"].as_str().unwrap().contains(&big));
+    }
+
+    #[test]
+    fn head_tail_holds_when_a_rule_masks_the_key_output() {
+        let s = with(
+            "[capture]\ntool_output = \"head-tail\"\n[[redaction.extra_rules]]\nid = \"o\"\nregex = \"output\"\n",
+        );
+        let big = "a".repeat(HEAD_TAIL_BYTES) + &"b".repeat(HEAD_TAIL_BYTES);
+        let payload = json!({"session_id": "s", "tool_name": "Bash",
+            "tool_input": {}, "tool_response": big});
+        let b = body(&events("claude", "PostToolUse", &payload, 0, &s)[0].event);
+        let (key, out) = b
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, v)| v.as_str().is_some_and(|v| v.starts_with('a')))
+            .unwrap();
+        assert_ne!(key, "output");
+        assert!(out.as_str().unwrap().len() < HEAD_TAIL_BYTES + 100);
     }
 
     #[test]
@@ -640,7 +796,7 @@ mod tests {
         );
         assert_eq!(body(&e)["summary"], "sum ");
         let only_private = json!({"last_assistant_message": "<private>all</private>"});
-        assert!(events("claude", "Stop", &only_private, 0).is_empty());
+        assert!(events("claude", "Stop", &only_private, 0, &Settings::default()).is_empty());
     }
 
     #[test]
@@ -804,10 +960,34 @@ mod tests {
             r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"from codex"}]}}"#,
         )
         .unwrap();
-        let v = events("codex", "Stop", &json!({"transcript_path": rollout}), 0);
+        let v = events(
+            "codex",
+            "Stop",
+            &json!({"transcript_path": rollout}),
+            0,
+            &Settings::default(),
+        );
         assert_eq!(body(&v[0].event)["assistant"], "from codex");
-        assert!(events("claude", "Stop", &json!({"last_assistant_message": " "}), 0).is_empty());
-        assert!(events("claude", "PreToolUse", &json!({"tool_name": "Bash"}), 0).is_empty());
+        assert!(
+            events(
+                "claude",
+                "Stop",
+                &json!({"last_assistant_message": " "}),
+                0,
+                &Settings::default()
+            )
+            .is_empty()
+        );
+        assert!(
+            events(
+                "claude",
+                "PreToolUse",
+                &json!({"tool_name": "Bash"}),
+                0,
+                &Settings::default()
+            )
+            .is_empty()
+        );
     }
 
     #[test]

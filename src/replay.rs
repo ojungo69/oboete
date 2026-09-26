@@ -34,6 +34,8 @@ pub fn run(
     // touches v1's oboete.db, and one of unported agents never creates raw.db.
     let mut conn: Option<rusqlite::Connection> = None;
     let mut raw: Option<crate::raw::Raw> = None;
+    // Loaded once: the in-process loop measures the store; the spawned hooks below load it each.
+    let settings = crate::capture::Settings::load(home)?;
     let clock = rusqlite::Connection::open_in_memory()?;
 
     // 1. In-process hook path: pure store cost per event. Ported agents write Design B's
@@ -63,6 +65,7 @@ pub fn run(
                 event,
                 &v["payload"],
                 ts,
+                &settings,
             )?;
             None
         } else {

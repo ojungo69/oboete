@@ -34,20 +34,30 @@ pub fn context(conn: &Connection, repo: &str) -> Result<String> {
         out.push_str("\n## Recent sessions (newest first)\n");
         for s in &summaries {
             out.push_str("- ");
-            out.push_str(&truncate(s, 600));
+            out.push_str(&truncate(&gate(s), 600));
             out.push('\n');
         }
     }
     if !observations.is_empty() {
         out.push_str("\n## Recent observations\n");
         for (kind, title, body) in &observations {
-            out.push_str(&format!("- [{kind}] {title}: {}\n", truncate(body, 240)));
+            out.push_str(&format!(
+                "- [{kind}] {}: {}\n",
+                gate(title),
+                truncate(&gate(body), 240)
+            ));
         }
     }
     if out.chars().count() > MAX_CHARS {
         out = out.chars().take(MAX_CHARS).collect::<String>() + "…";
     }
     Ok(out)
+}
+
+/// Stored text passes the egress gate with today's rules: a rule added after capture still keeps
+/// its matches out of the agent's context (spec 6.4).
+fn gate(s: &str) -> String {
+    crate::redact::outbound(s)
 }
 
 /// One line, at most `max` characters.
@@ -96,6 +106,10 @@ mod tests {
             assert!(text.contains(kept), "{kept}: {text}");
         }
         assert!(!text.contains("PART-"), "{text}");
+        // Stored before a rule matched it, masked on the way out.
+        let key = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: scanners
+        batch(&mut conn, "old1", 40, &format!("token {key} here"));
+        assert!(!context(&conn, "/r").unwrap().contains(&key));
         drop(conn);
         std::fs::remove_dir_all(&dir).ok();
     }

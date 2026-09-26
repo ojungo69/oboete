@@ -67,8 +67,25 @@ pub struct TimelineArgs {
 /// A model can ask for any `limit`; the store is not dumped into one reply.
 const MAX_LIMIT: usize = 100;
 
+/// Every answer passes the egress gate: it goes into the agent's context, and so to its model's
+/// provider, and the user's rules as they are now apply (spec 6.4), including rules added after
+/// the text was stored.
 fn text(s: String) -> Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![ContentBlock::text(s)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(
+        crate::redact::outbound(&s),
+    )]))
+}
+
+/// One search hit as the model reads it. The body is gated whole before the snippet is cut from
+/// it: a rule's context (a `curl` far before its `-u`) can lie outside the snippet.
+fn hit_line(h: &search::Hit, terms: &[String]) -> String {
+    let snippet = search::snippet(&crate::redact::outbound(&h.body), terms, 160);
+    if h.title.is_empty() {
+        format!("{} {} {} — {snippet}\n", h.doc, h.when, h.kind)
+    } else {
+        let title = crate::redact::outbound(&h.title);
+        format!("{} {} {} — {title}: {snippet}\n", h.doc, h.when, h.kind)
+    }
 }
 
 /// A failure the model can act on (a wrong argument, an unknown id) is a tool result with
@@ -142,15 +159,7 @@ impl Oboete {
         let terms = search::terms(&a.query);
         let mut out = String::new();
         for h in hits {
-            let snippet = search::snippet(&h.body, &terms, 160);
-            if h.title.is_empty() {
-                out.push_str(&format!("{} {} {} — {snippet}\n", h.doc, h.when, h.kind));
-            } else {
-                out.push_str(&format!(
-                    "{} {} {} — {}: {snippet}\n",
-                    h.doc, h.when, h.kind, h.title
-                ));
-            }
+            out.push_str(&hit_line(&h, &terms));
         }
         if out.is_empty() {
             out.push_str("no hits");
@@ -206,7 +215,8 @@ impl Oboete {
             let summary = if r.summary.is_empty() {
                 "(not summarized yet)".to_string()
             } else {
-                r.summary.replace('\n', " ")
+                // Gated before the newlines go: a user rule may need them to match.
+                crate::redact::outbound(&r.summary).replace('\n', " ")
             };
             out.push_str(&format!(
                 "{} {} {} {} — {summary}\n",
@@ -359,6 +369,54 @@ mod tests {
             .unwrap(),
         );
         assert!(tl.contains("claude s1") && tl.contains("要約"), "{tl}");
+        // A secret stored before a rule could catch it is masked on the way out.
+        let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: scanners
+        rusqlite::Connection::open(dir.join("oboete.db"))
+            .unwrap()
+            .execute("UPDATE observations SET body = ?1", [&token])
+            .unwrap();
+        let doc = body(s.get(Parameters(GetArgs { id: "o1".into() })).unwrap());
+        assert!(!doc.contains(&token) && doc.contains("[REDACTED]"), "{doc}");
+        // A snippet is cut from the gated body: the rule's context may lie outside it.
+        let far = search::Hit {
+            doc: "o2".into(),
+            kind: "discovery".into(),
+            repo: String::new(),
+            when: String::new(),
+            title: "a curl call".into(),
+            body: format!(
+                "curl https://h.test {} trigram -u admin:Zq8vN3kL7pW2 now",
+                "x".repeat(300)
+            ),
+        };
+        let line = hit_line(&far, &search::terms("trigram"));
+        assert!(
+            line.contains("trigram -u") && !line.contains("Zq8vN3kL7pW2"),
+            "{line}"
+        );
+        // A summary is gated before its newlines are flattened: a user rule may need them.
+        std::fs::write(
+            dir.join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"block\", regex = 'BEGIN\\n(.*?)END' }]\n",
+        )
+        .unwrap();
+        crate::redact::set_home(&dir).unwrap();
+        rusqlite::Connection::open(dir.join("oboete.db"))
+            .unwrap()
+            .execute(
+                "UPDATE summaries SET body = ?1",
+                ["BEGIN\nkq7Wz2hidden END"],
+            )
+            .unwrap();
+        let tl = body(
+            s.timeline(Parameters(TimelineArgs {
+                all: Some(true),
+                repo: None,
+                limit: None,
+            }))
+            .unwrap(),
+        );
+        assert!(tl.contains("BEGIN") && !tl.contains("kq7Wz2hidden"), "{tl}");
         let tools = s.tool_router.list_all();
         let mut names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
         names.sort();

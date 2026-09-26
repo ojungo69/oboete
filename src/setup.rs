@@ -1769,6 +1769,30 @@ pub fn doctor(home: &Path) -> Result<()> {
     println!("  opencode {}", opencode_mcp_status(&opencode_dir(), &want));
     println!("  pi      native tools in the extension (no MCP client)");
     println!("  cursor  {}", mcp(&cursor_dir().join("mcp.json")));
+    // spec 8 (setup, "doctor prints the effective values"): what capture records.
+    let capture = crate::capture::Settings::load(home);
+    match &capture {
+        Ok(s) => {
+            let (rules, kept) = s.rules.counts();
+            println!(
+                "capture: prompts {}, tool output {}, {rules} extra redaction rule(s), {kept} allowlisted value(s), ruleset {}",
+                if s.store_prompts {
+                    "stored"
+                } else {
+                    "not stored"
+                },
+                match s.tool_output {
+                    config::ToolOutput::Full => "full",
+                    config::ToolOutput::HeadTail => "head and tail",
+                },
+                s.rules.version()
+            );
+        }
+        Err(e) => println!(
+            "capture: settings are wrong, so the hooks of {} record nothing: {e:#}",
+            crate::capture::PORTED.join(", ")
+        ),
+    }
     println!("providers (chain order):");
     for p in config::load(home)?.providers {
         let state = match &p {
@@ -1788,6 +1812,9 @@ pub fn doctor(home: &Path) -> Result<()> {
             }
         };
         println!("  {:<11} {state}", p.name());
+    }
+    if capture.is_err() {
+        unhealthy.push("capture settings are wrong");
     }
     // Red: a script (or the owner) sees it in the exit code, not only in the text.
     anyhow::ensure!(unhealthy.is_empty(), "{}", unhealthy.join(", "));
