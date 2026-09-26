@@ -270,14 +270,15 @@ pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usiz
     (stored, found, Some(text.len()))
 }
 
-/// Offsets of the PEM markers (`-----begin` or `-----end`, in lowercased text) that name a
-/// private key, as the bundled private-key rule's header does; a certificate's are not a secret.
+/// Offsets of the PEM markers (`-----begin` or `-----end`, in lowercased text) that may open or
+/// close a private key: a label naming one, as the bundled private-key rule's header does, or a
+/// label not closed by `-----` on its line (cut short upstream, like `-----end rsa priva`). A
+/// complete label naming something else (a certificate) is not a secret.
 fn key_markers<'a>(s: &'a str, marker: &'a str) -> impl Iterator<Item = usize> + 'a {
     s.match_indices(marker).map(|(i, _)| i).filter(move |&i| {
-        s[i + marker.len()..]
-            .split("-----")
-            .next()
-            .is_some_and(|label| label.contains("private key"))
+        let line = s[i + marker.len()..].split('\n').next().unwrap_or("");
+        line.find("-----")
+            .is_none_or(|n| line[..n].contains("private key"))
     })
 }
 
@@ -776,6 +777,22 @@ mod tests {
         let (stored, _, cut) = scan_capped(&text, cap);
         assert!(cut.is_some());
         assert!(stored.contains("kept here\n-----BEGIN CERTIFICATE-----\nMIIDdzCC"));
+    }
+
+    #[test]
+    fn a_key_whose_footer_was_cut_upstream_is_dropped_from_the_tail() {
+        let cap = 64 * 1024;
+        let body =
+            "MIIEowIBAAKCAQEAq9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8gI4kM7oQ1sV3xZ6bD\n".repeat(700);
+        let text = "h ".repeat(cap)
+            + "-----BEGIN RSA PRIVATE KEY-----\n"
+            + &body
+            + "-----END RSA PRIVA\n"
+            + &"log\n".repeat(cap / 16);
+        let (stored, _, cut) = scan_capped(&text, cap);
+        assert!(cut.is_some());
+        assert!(!stored.contains("MIIEowIBAAKCAQ"));
+        assert!(stored.ends_with("log\n"));
     }
 
     #[test]
