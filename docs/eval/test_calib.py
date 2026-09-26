@@ -1,7 +1,9 @@
 import os, sqlite3, sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from calib import draw, kappa, repeat_allowed, store_doc_text
+from calib import against_others, draw, fleiss, kappa, majority, parse_grade, store_doc_text
 from common import split
 
 
@@ -44,21 +46,40 @@ def test_draw_takes_dev_pairs_balanced_one_per_question_and_blind():
     assert {k['chars'] for k in key} == {1200}   # grades without `chars` saw 1,200 characters
 
 
-def test_the_owner_sees_the_window_the_judge_saw():
+def test_the_panel_sees_the_window_the_judge_saw():
     db = sqlite3.connect(':memory:')
     db.execute('CREATE TABLE prompts (id INTEGER PRIMARY KEY, body TEXT)')
     db.execute("INSERT INTO prompts VALUES (1, ?)", ('x' * 2000,))
     text = store_doc_text(db)
-    assert text('p1', 1200).startswith('x' * 1200 + '\n…(以下 800 文字は省略')
+    assert text('p1', 1200) == 'x' * 1200 + '\n…[clipped]'
     assert text('p1', 4000) == 'x' * 2000
     assert text('p2', 4000) is None
     db.execute('CREATE TABLE observations (id INTEGER PRIMARY KEY, title TEXT, body TEXT)')
     db.execute("INSERT INTO observations VALUES (1, '  見出し', ?)", ('y' * 1300,))
-    assert text('o1', 1200) == ('見出し\n' + 'y' * 1300)[:1200] + '\n…(以下 104 文字は省略。判定器も同じところまで読みました)'
+    assert text('o1', 1200) == ('見出し\n' + 'y' * 1300)[:1200] + '\n…[clipped]'
 
 
-def test_the_repeat_waits_a_week():
-    day = 86400
-    # Counted from the last first-round answer: pairs answered on the last day still get a week.
-    assert not repeat_allowed(1_000_000, 1_000_000 + 6 * day)
-    assert repeat_allowed(1_000_000, 1_000_000 + 7 * day)
+def test_fleiss_matches_a_worked_example():
+    rows = [[True, True, True], [False, False, False], [True, True, False], [True, False, False]]
+    assert abs(fleiss(rows) - 1 / 3) < 1e-9       # P-bar 2/3, Pe 1/2
+    assert fleiss([[True, True], [True, True]]) is None
+
+
+def test_the_reference_never_contains_the_judge_itself():
+    grades = {'p1': {'a': 3, 'b': 0, 'c': 0, 'd': 0}, 'p2': {'a': 0, 'b': 2, 'c': 3, 'd': 2},
+              'p3': {'a': 2, 'b': 2, 'c': 0, 'd': 1}}
+    assert against_others(grades, 'a') == [(True, False), (False, True), (True, False)]
+    assert majority([True, False]) is None
+    # A tie among the others leaves the pair out.
+    assert against_others({'p': {'a': 3, 'b': 3, 'c': 0}}, 'a') == []
+
+
+def test_parse_grade_takes_fenced_or_reasoned_answers_only():
+    assert parse_grade('```json\n{"grades": [{"id": "d", "grade": 2}]}\n```') == 2
+    assert parse_grade('<think>maybe {"grade": 3}</think>{"grades": [{"id": "d", "grade": 1}]}') == 1
+    assert parse_grade('{"grades": [{"id": "[d]", "grade": 0}]}') == 0
+    for bad in ('3', '{"grades": []}', '{"grades": [{"id": "d", "grade": 7}]}', None,
+                '{"grades": [{"id": "e", "grade": 2}]}', '{"grades": [{"id": "d", "grade": true}]}',
+                '{"grades": [{"id": "d", "grade": 1}, {"id": "d", "grade": 3}]}', '{"grades": [null]}', '{"grades": [1]}'):
+        with pytest.raises(ValueError):
+            parse_grade(bad)
