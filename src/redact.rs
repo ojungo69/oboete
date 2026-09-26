@@ -232,14 +232,14 @@ pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usiz
     }
     // ASCII lowercasing keeps byte offsets.
     let head = masked[..head_end].to_ascii_lowercase();
-    if let Some(b) = head.rfind("-----begin")
-        && !head[b..].contains("-----end")
+    if let Some(b) = key_markers(&head, "-----begin").last()
+        && key_markers(&head[b..], "-----end").next().is_none()
     {
         head_end = b;
     }
     let tail = masked[tail_start..].to_ascii_lowercase();
-    if let Some(e) = tail.find("-----end")
-        && !tail[..e].contains("-----begin")
+    if let Some(e) = key_markers(&tail, "-----end").next()
+        && key_markers(&tail[..e], "-----begin").next().is_none()
     {
         let end = tail_start + e;
         tail_start = masked[end..].find('\n').map_or(masked.len(), |n| end + n);
@@ -268,6 +268,17 @@ pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usiz
     let mut stored = masked[..head_end].to_string() + &marker + &masked[tail_start..];
     rescan(&mut stored, &mut found);
     (stored, found, Some(text.len()))
+}
+
+/// Offsets of the PEM markers (`-----begin` or `-----end`, in lowercased text) that name a
+/// private key, as the bundled private-key rule's header does; a certificate's are not a secret.
+fn key_markers<'a>(s: &'a str, marker: &'a str) -> impl Iterator<Item = usize> + 'a {
+    s.match_indices(marker).map(|(i, _)| i).filter(move |&i| {
+        s[i + marker.len()..]
+            .split("-----")
+            .next()
+            .is_some_and(|label| label.contains("private key"))
+    })
 }
 
 /// The version of the rules a finding came from: a hash of the bundled rule files.
@@ -752,6 +763,19 @@ mod tests {
             let (stored, _, _) = scan_capped(&text, cap);
             assert!(!stored.contains("MIIEowIBAAKCAQ"), "{}", &stored[..200]);
         }
+    }
+
+    #[test]
+    fn a_certificate_across_a_cut_keeps_the_head() {
+        let cap = 64 * 1024;
+        let cert = format!(
+            "-----BEGIN CERTIFICATE-----\n{}-----END CERTIFICATE-----\n",
+            "MIIDdzCCAl+gAwIBAgIEAgAAuTANBgkqhkiG9w0BAQUFADBaMQswCQYDVQQGEwJJRTES\n".repeat(900)
+        );
+        let text = "h ".repeat(cap / 4 - 100) + "kept here\n" + &cert + &"t ".repeat(cap);
+        let (stored, _, cut) = scan_capped(&text, cap);
+        assert!(cut.is_some());
+        assert!(stored.contains("kept here\n-----BEGIN CERTIFICATE-----\nMIIDdzCC"));
     }
 
     #[test]
