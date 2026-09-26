@@ -209,9 +209,15 @@ fn default_providers() -> Vec<Provider> {
         true,
         serde_json::json!({}),
     );
-    if let Provider::Openai { headers, .. } = &mut opencode_go {
+    if let Provider::Openai {
+        headers, timeout_s, ..
+    } = &mut opencode_go
+    {
         // New console keys are refused without it (HTTP 400 MissingSessionID, 2026-09-26).
         headers.insert("x-opencode-session".into(), "oboete".into());
+        // glm-5.3-flash reasons first: its answers took 63 s on average and 6 calls hit 90 s
+        // (owner's store, 2026-09-22..26); a call cut off at the timeout may still be billed.
+        *timeout_s = 150;
     }
     vec![
         openai(
@@ -221,7 +227,9 @@ fn default_providers() -> Vec<Provider> {
             "openai/gpt-oss-120b",
             800,
             true,
-            serde_json::json!({}),
+            // Reasoning tokens count against Groq's 200,000 tokens a day. Low effort cut them from
+            // 533 to 9 (20b) and 386 to 75 (120b) on a short window, with valid JSON (2026-09-27).
+            serde_json::json!({"reasoning_effort": "low"}),
         ),
         openai(
             "groq-20b",
@@ -230,7 +238,9 @@ fn default_providers() -> Vec<Provider> {
             "openai/gpt-oss-20b",
             800,
             true,
-            serde_json::json!({}),
+            // Reasoning tokens count against Groq's 200,000 tokens a day. Low effort cut them from
+            // 533 to 9 (20b) and 386 to 75 (120b) on a short window, with valid JSON (2026-09-27).
+            serde_json::json!({"reasoning_effort": "low"}),
         ),
         openai(
             "openrouter",
@@ -326,6 +336,21 @@ mod tests {
     #[test]
     fn defaults_and_toml_extra_fields_parse() {
         let cfg: Config = toml::from_str("").unwrap();
+        for p in &cfg.providers {
+            if let Provider::Openai {
+                name,
+                extra,
+                timeout_s,
+                ..
+            } = p
+            {
+                let effort = extra.get("reasoning_effort").and_then(|v| v.as_str());
+                let groq = name.starts_with("groq");
+                assert_eq!(effort, groq.then_some("low"), "{name}");
+                let want = if name == "opencode-go" { 150 } else { 90 };
+                assert_eq!(*timeout_s, want, "{name}");
+            }
+        }
         // The owner's order (2026-09-27): free, then OpenCode Go, then the subscription CLIs.
         let names: Vec<_> = cfg.providers.iter().map(Provider::name).collect();
         assert_eq!(

@@ -23,6 +23,8 @@ const MAX_WAIT_S: f64 = 60.0;
 /// hit again. A schema-mismatch 400 or unparsable output is per-answer luck and gets no cooldown.
 const COOLDOWN_429: Duration = Duration::from_secs(45);
 const COOLDOWN_OUTAGE: Duration = Duration::from_secs(600);
+/// Longest cooldown a provider's own reset time can set (a daily quota resets within a day).
+const MAX_COOLDOWN: Duration = Duration::from_secs(24 * 3600);
 
 pub struct ChainResult {
     pub provider: String,
@@ -196,7 +198,13 @@ fn cooldown_for(e: &CallError) -> Option<Duration> {
         m.contains("moderat") || m.contains("flagged")
     };
     match e.status {
-        Some(429) => Some(COOLDOWN_429),
+        // Until the provider's reset when it gave one: Groq's daily-token 429 says "6m20s", and
+        // a 45 s cooldown re-sent the window to it several times before then.
+        Some(429) => Some(
+            e.retry_after_s
+                .map(|s| Duration::from_secs_f64(s.min(MAX_COOLDOWN.as_secs_f64())))
+                .map_or(COOLDOWN_429, |d| d.max(COOLDOWN_429)),
+        ),
         Some(401) => Some(COOLDOWN_OUTAGE),
         Some(403) if !moderation => Some(COOLDOWN_OUTAGE),
         Some(400..=499) => None,
@@ -317,9 +325,13 @@ fn openai_compat(
         if moderation(&text) {
             message.push_str(" (moderation)");
         }
+        let retry_after_s = retry_after_s.or_else(|| retry_after_in_body(&text));
+        if let Some(s) = retry_after_s {
+            message.push_str(&format!(", retry in {s:.0}s"));
+        }
         return Err(CallError {
             status: Some(status),
-            retry_after_s: retry_after_s.or_else(|| retry_after_in_body(&text)),
+            retry_after_s,
             message,
         });
     }
@@ -436,15 +448,27 @@ pub(crate) fn error_code(body: &str) -> Option<String> {
         })
 }
 
+/// Groq's "try again in 17.2875s", "6m20.064s", "1h2m3.5s" or "580ms", in seconds.
 fn retry_after_in_body(body: &str) -> Option<f64> {
-    let rest = &body[body.find("try again in ")? + "try again in ".len()..];
-    let num: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '.')
-        .collect();
-    let secs = num.parse::<f64>().ok()?;
-    // "1m26.4s" style is not produced here; a bare number is seconds.
-    rest[num.len()..].starts_with('s').then_some(secs)
+    let mut rest = &body[body.find("try again in ")? + "try again in ".len()..];
+    let mut secs = 0.0;
+    let mut parts = 0;
+    loop {
+        let n = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(rest.len());
+        let Ok(value) = rest[..n].parse::<f64>() else {
+            break;
+        };
+        let (unit, len) = [("ms", 0.001), ("h", 3600.0), ("m", 60.0), ("s", 1.0)]
+            .into_iter()
+            .find(|(u, _)| rest[n..].starts_with(u))
+            .map(|(u, f)| (f, u.len()))?;
+        secs += value * unit;
+        parts += 1;
+        rest = &rest[n + len..];
+    }
+    (parts > 0 && secs.is_finite()).then_some(secs)
 }
 
 /// A fresh private directory for one CLI run, removed again when dropped (on every return
@@ -1096,7 +1120,7 @@ mod tests {
             (
                 "429 Too Many Requests",
                 json!({"error": {"message": format!("Please try again in 1.5s. {canary}"), "code": "rate_limit_exceeded"}}).to_string(),
-                "http 429: rate_limit_exceeded",
+                "http 429: rate_limit_exceeded, retry in 2s",
             ),
             ("500 Internal Server Error", format!("{canary}\n{canary}"), "http 500"),
             (
@@ -1304,8 +1328,37 @@ mod tests {
     fn retry_after_is_read_from_groq_bodies() {
         let body = r#"{"error":{"message":"Rate limit reached ... Please try again in 17.2875s. Need more tokens?"}}"#;
         assert_eq!(retry_after_in_body(body), Some(17.2875));
-        assert_eq!(retry_after_in_body("try again in 2m3s"), None);
-        assert_eq!(retry_after_in_body("nothing"), None);
+        // Groq's daily-token 429 (every one in the owner's store, 2026-09-22..26).
+        let tpd = "on tokens per day (TPD): Limit 200000. Please try again in 6m20.064s. Need more";
+        assert_eq!(retry_after_in_body(tpd), Some(380.064));
+        assert_eq!(retry_after_in_body("try again in 1h2m3.5s."), Some(3723.5));
+        assert_eq!(retry_after_in_body("try again in 580ms"), Some(0.58));
+        assert_eq!(retry_after_in_body("try again in 2m"), Some(120.0));
+        for bad in [
+            "nothing",
+            "try again in s",
+            "try again in 5",
+            "try again in 1e999s",
+            "try again in 3x",
+        ] {
+            assert_eq!(retry_after_in_body(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_429_cools_down_until_the_providers_reset() {
+        let e = |retry: Option<f64>| CallError {
+            status: Some(429),
+            retry_after_s: retry,
+            message: String::new(),
+        };
+        assert_eq!(cooldown_for(&e(None)), Some(COOLDOWN_429));
+        assert_eq!(cooldown_for(&e(Some(10.0))), Some(COOLDOWN_429));
+        assert_eq!(
+            cooldown_for(&e(Some(380.064))),
+            Some(Duration::from_secs_f64(380.064))
+        );
+        assert_eq!(cooldown_for(&e(Some(1e12))), Some(MAX_COOLDOWN));
     }
 
     #[test]
