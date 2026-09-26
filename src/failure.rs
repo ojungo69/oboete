@@ -63,10 +63,11 @@ pub fn classify(e: &anyhow::Error) -> Class {
     Class::Other
 }
 
-/// After a successful write: the marker exists at its full size before any failure needs it.
+/// After a successful write: the marker exists at its full size before any failure needs it. One
+/// cut short (a failure's own write that ran out of space) is written again whole.
 pub fn prepare(home: &Path) {
     let path = marker(home);
-    if !path.exists() {
+    if !std::fs::metadata(&path).is_ok_and(|m| m.len() == SIZE as u64) {
         let _ = std::fs::create_dir_all(home.join("state"));
         let _ = std::fs::write(&path, padded("ok"));
     }
@@ -201,6 +202,20 @@ fn df(program: &std::ffi::OsStr, home: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_marker_cut_short_is_written_whole_after_the_next_write() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        for short in ["", "failed disk-full 17"] {
+            std::fs::write(marker(home), short).unwrap();
+            prepare(home);
+            clear(home);
+            assert_eq!(std::fs::metadata(marker(home)).unwrap().len(), SIZE as u64);
+            assert_eq!(since(home), None);
+        }
+    }
 
     #[cfg(unix)]
     #[test]
