@@ -30,10 +30,11 @@ pub fn run(
     let root_str = root.canonicalize()?.to_string_lossy().into_owned();
     let text =
         std::fs::read_to_string(fixture).with_context(|| format!("read {}", fixture.display()))?;
-    // v1's store is opened only for an agent not yet ported: a Design B replay never touches it.
+    // Each store is opened on the first event that needs it: a replay of ported agents never
+    // touches v1's oboete.db, and one of unported agents never creates raw.db.
     let mut conn: Option<rusqlite::Connection> = None;
+    let mut raw: Option<crate::raw::Raw> = None;
     let clock = rusqlite::Connection::open_in_memory()?;
-    let mut raw = crate::raw::open(home)?;
 
     // 1. In-process hook path: pure store cost per event. Ported agents write Design B's
     // raw.db (milestone 2 Task 2), the others still v1's store.
@@ -53,7 +54,16 @@ pub fn run(
         let started = Instant::now();
         let out = if crate::capture::PORTED.contains(&ev_agent) {
             let ts = fixture_ms(&clock, &v["ts"]).unwrap_or_else(db::now_ms);
-            hook::record(&mut raw, ev_agent, event, &v["payload"], ts)?;
+            if raw.is_none() {
+                raw = Some(crate::raw::open(home)?);
+            }
+            hook::record(
+                raw.as_mut().expect("opened"),
+                ev_agent,
+                event,
+                &v["payload"],
+                ts,
+            )?;
             None
         } else {
             v1_events += 1;
