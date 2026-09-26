@@ -31,15 +31,22 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
             };
             (kind, json!({"prompt": base64_runs(&prompt)}))
         }
-        "PostToolUse" | "PostToolUseFailure" => (
-            "tool",
-            json!({
+        "PostToolUse" | "PostToolUseFailure" => {
+            let mut body = json!({
                 "tool": without_blocks(str_field(payload, &["tool_name", "toolName", "name"]).unwrap_or("?"), false),
                 "input": text(field(payload, &["tool_input", "toolInput", "args"])),
                 "output": text(field(payload, &["tool_response", "toolResult", "tool_output", "error"])),
                 "failed": event == "PostToolUseFailure",
-            }),
-        ),
+            });
+            // Provenance and status when the payload has them: a subagent's call, and a call
+            // that never got its answer (both from `oboete transcript`, src/transcript.rs).
+            for key in ["agent_id", "interrupted"] {
+                if let Some(v) = payload.get(key) {
+                    body[key] = clean(v);
+                }
+            }
+            ("tool", body)
+        }
         "Stop" => {
             // Codex's Stop carries no message; its rollout transcript does.
             let reply = match str_field(payload, &["last_assistant_message"]) {
@@ -359,6 +366,26 @@ mod tests {
         assert_eq!(
             stored,
             json!({"a": "<private>x", "b": "y</private>", "keep": "z", "c": "!"})
+        );
+    }
+
+    #[test]
+    fn a_tool_call_keeps_its_subagent_and_interruption() {
+        let e = one(
+            "PostToolUse",
+            json!({"tool_name": "Bash", "tool_input": {}, "tool_response": null,
+                   "agent_id": "a1", "interrupted": true}),
+        );
+        assert_eq!(
+            (&body(&e)["agent_id"], &body(&e)["interrupted"]),
+            (&json!("a1"), &json!(true))
+        );
+        let plain = one(
+            "PostToolUse",
+            json!({"tool_name": "Bash", "tool_input": {}}),
+        );
+        assert!(
+            body(&plain).get("agent_id").is_none() && body(&plain).get("interrupted").is_none()
         );
     }
 
