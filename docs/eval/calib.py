@@ -1,7 +1,8 @@
 """Milestone 1, Task 6: B3, the judge-trust gate (docs/spec.md 8.1 "Judge trust"; owner decision 29).
 
   calib.py draw               50 dev pairs the judge graded -> labels/tasks/calib-50.jsonl and its key
-  calib.py panel [max calls]  five API judges grade every pair -> labels/calib-50.panel-2.jsonl (resumes)
+  calib.py panel [max items]  five API judges grade every pair -> labels/calib-50.panel-2.jsonl (resumes);
+                              an item is one judge on one pair, up to 3 calls if its answers are unusable
   calib.py kappa              each judge against the other five's majority, and the panel's Fleiss kappa
 Relevant = grade >= 2. Every judge sees the question and the document as the judge under test saw
 them (4,000 characters, 1,200 for grades written before `chars` was recorded), never a grade."""
@@ -176,7 +177,7 @@ def main(cmd):
         write_jsonl(f'{labels}/calib-50.key.jsonl', key)
         print(f'{len(items)} pairs -> {tasks}/calib-50.jsonl')
     elif cmd == 'panel':
-        budget = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
+        items = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
         key = read_jsonl(f'{labels}/calib-50.key.jsonl')
         path = f'{labels}/{RUN}.jsonl'
         done = {(r['id'], r['judge']) for r in read_jsonl(path)} if os.path.exists(path) else set()
@@ -188,7 +189,7 @@ def main(cmd):
             write_jsonl(inputs, [{'id': k['id'], 'question': questions[k['qid']], 'memory': text(k['doc'], k['chars'])}
                                  for k in key])
         given = {r['id']: r for r in read_jsonl(inputs)}
-        todo = [(k, m) for k in key for m in PANEL if (k['id'], m) not in done][:budget]
+        todo = [(k, m) for k in key for m in PANEL if (k['id'], m) not in done][:items]
         lock = threading.Lock()
 
         def grade(k, member):
