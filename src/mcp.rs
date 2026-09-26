@@ -67,8 +67,13 @@ pub struct TimelineArgs {
 /// A model can ask for any `limit`; the store is not dumped into one reply.
 const MAX_LIMIT: usize = 100;
 
+/// Every answer passes the egress gate: it goes into the agent's context, and so to its model's
+/// provider, and the user's rules as they are now apply (spec 6.4), including rules added after
+/// the text was stored.
 fn text(s: String) -> Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![ContentBlock::text(s)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(
+        crate::redact::outbound(&s),
+    )]))
 }
 
 /// A failure the model can act on (a wrong argument, an unknown id) is a tool result with
@@ -359,6 +364,14 @@ mod tests {
             .unwrap(),
         );
         assert!(tl.contains("claude s1") && tl.contains("要約"), "{tl}");
+        // A secret stored before a rule could catch it is masked on the way out.
+        let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: scanners
+        rusqlite::Connection::open(dir.join("oboete.db"))
+            .unwrap()
+            .execute("UPDATE observations SET body = ?1", [&token])
+            .unwrap();
+        let doc = body(s.get(Parameters(GetArgs { id: "o1".into() })).unwrap());
+        assert!(!doc.contains(&token) && doc.contains("[REDACTED]"), "{doc}");
         let tools = s.tool_router.list_all();
         let mut names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
         names.sort();

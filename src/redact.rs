@@ -151,6 +151,11 @@ impl Rules {
                     rule.id
                 )
             })?;
+            ensure!(
+                rule.entropy.is_none_or(f64::is_finite),
+                "[redaction] extra rule {:?}: entropy must be a finite number",
+                rule.id
+            );
             if let Some(g) = rule.secret_group {
                 ensure!(
                     g < regex.captures_len(),
@@ -1439,6 +1444,14 @@ mod tests {
                 "secret_group",
             ),
             ("[redaction]\nallowlist = [\"abc\"]", "SHA-256"),
+            (
+                "[redaction]\nextra_rules = [{ id = \"x\", regex = 'x', entropy = nan }]",
+                "finite",
+            ),
+            (
+                "[redaction]\nextra_rules = [{ id = \"x\", regex = 'x', entropy = inf }]",
+                "finite",
+            ),
             ("[redaction]\nextra_rule = []", "line 2 is not valid"),
             (
                 "[redaction]\nextra_rules = [{ id = \"x\", regex = 'x', keyword = [\"k\"] }]",
