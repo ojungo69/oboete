@@ -27,6 +27,9 @@ const FILES: usize = 10;
 const DIRECTIVES: usize = 10;
 const TODOS: usize = 20;
 const SESSIONS: usize = 5;
+/// ponytail: the owner lines a build reads (a negation older than these no longer matters); a
+/// claims table replaces the scan in milestone 3.
+const OWNER_LINES: i64 = 500;
 /// Spec 4.9: sessions with records this close to the checkout's last one are active.
 const ACTIVE_MS: i64 = 30 * 60 * 1000;
 /// D9's `git status` in the worker, given up after this.
@@ -39,7 +42,8 @@ fn schema(k: &Connection) -> Result<()> {
            session TEXT NOT NULL, ts INTEGER NOT NULL, fact TEXT NOT NULL,
            label TEXT NOT NULL DEFAULT ''
          );
-         CREATE INDEX IF NOT EXISTS manifest_facts_seq ON manifest_facts(device, repo, fact, seq);
+         CREATE INDEX IF NOT EXISTS manifest_facts_seq
+           ON manifest_facts(device, repo, branch, fact, seq);
          CREATE INDEX IF NOT EXISTS manifest_facts_ts ON manifest_facts(device, repo, fact, ts);
          CREATE TABLE IF NOT EXISTS manifests(
            repo TEXT NOT NULL, branch TEXT NOT NULL, device TEXT NOT NULL,
@@ -402,15 +406,16 @@ fn build(
             one_line(str_at(&b, "output"), CLIP)
         ));
     }
-    let owner: Vec<(i64, String, i64)> = k
+    let mut owner: Vec<(i64, String, i64)> = k
         .prepare(
             "SELECT seq, session, ts FROM manifest_facts
-             WHERE device = ?1 AND repo = ?2 AND fact = 'owner' ORDER BY seq",
+             WHERE device = ?1 AND repo = ?2 AND fact = 'owner' ORDER BY seq DESC LIMIT ?3",
         )?
-        .query_map(params![device, repo], |r| {
+        .query_map(params![device, repo, OWNER_LINES], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
+    owner.reverse();
     let mut lines = Vec::new();
     for (seq, session, ts) in owner {
         if let Some(e) = event(raw, device, seq)? {
@@ -421,14 +426,14 @@ fn build(
             });
         }
     }
-    let kept = manifest::directives(&lines);
-    p.directives = kept[kept.len().saturating_sub(DIRECTIVES)..]
-        .iter()
-        .map(|l| Line {
-            text: one_line(&l.text, CLIP),
-            ..l.clone()
-        })
-        .collect();
+    // A line said again is shown once, at its latest date.
+    let mut kept: Vec<Line> = Vec::new();
+    for l in manifest::directives(&lines) {
+        let text = one_line(&l.text, CLIP);
+        kept.retain(|k| k.text != text);
+        kept.push(Line { text, ..l });
+    }
+    p.directives = kept.split_off(kept.len().saturating_sub(DIRECTIVES));
     if let Some(e) = last("todo")?
         .map(|s| event(raw, device, s))
         .transpose()?
@@ -517,8 +522,10 @@ fn risky(cwd: &Path, branch: &str) -> Vec<String> {
             out.push(what.to_owned());
         }
     }
-    if g.branch.is_none() {
-        let at: String = g.head.unwrap_or_default().chars().take(12).collect();
+    if g.branch.is_none()
+        && let Some(head) = g.head
+    {
+        let at: String = head.chars().take(12).collect();
         out.push(format!("detached HEAD at {at}"));
     }
     if let Some(status) = status(cwd) {
@@ -704,6 +711,13 @@ mod tests {
                 "s2",
                 8 * min,
                 cwd,
+                serde_json::json!({"prompt": "from now on run the linter first"}),
+            ),
+            ev(
+                "prompt",
+                "s2",
+                9 * min,
+                cwd,
                 serde_json::json!({"prompt": "look at it"}),
             ),
         ] {
@@ -718,8 +732,12 @@ mod tests {
         session(home.path(), cwd.path());
         worker::run_once(home.path()).unwrap();
         let (first, built) = manifest(home.path());
-        assert!(
-            first.contains("from now on run the linter first"),
+        // Said twice, shown once.
+        assert_eq!(
+            first
+                .matches("\"from now on run the linter first\"")
+                .count(),
+            1,
             "{first}"
         );
         assert!(
@@ -729,7 +747,7 @@ mod tests {
         assert!(first.contains("[in_progress] fix the test"), "{first}");
         assert!(first.contains("- src/lib.rs"), "{first}");
         assert!(first.contains("prompt: look at it"), "{first}");
-        assert!(first.contains("8 record(s) not yet curated"), "{first}");
+        assert!(first.contains("9 record(s) not yet curated"), "{first}");
         worker::run_once(home.path()).unwrap(); // nothing new: nothing built
         assert_eq!(manifest(home.path()), (first.clone(), built));
         for f in ["knowledge.db", "knowledge.db-wal", "knowledge.db-shm"] {
@@ -747,7 +765,7 @@ mod tests {
         worker::run_once(home.path()).unwrap();
         assert!(manifest(home.path()).0.contains("look at it"));
         let c = rusqlite::Connection::open(home.path().join("raw.db")).unwrap();
-        c.execute("DELETE FROM records WHERE seq > 7", []).unwrap(); // lost commits (MUST-M14)
+        c.execute("DELETE FROM records WHERE seq > 8", []).unwrap(); // lost commits (MUST-M14)
         drop(c);
         worker::run_once(home.path()).unwrap();
         let text = manifest(home.path()).0;
