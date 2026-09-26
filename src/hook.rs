@@ -83,6 +83,7 @@ fn run_io(
                 &payload,
                 db::now_ms(),
             )?;
+            start_worker(home)?;
             return Ok(None);
         }
         let conn = db::open(home)?;
@@ -705,6 +706,18 @@ pub(crate) fn last_assistant_in_transcript(path: &Path) -> String {
     last
 }
 
+/// After every append (D6): start a worker when none holds the lock. The lock is dropped before
+/// the spawn; while a worker runs, this costs one open and one failed `flock`.
+fn start_worker(home: &Path) -> Result<()> {
+    if std::env::var_os("OBOETE_NO_SPAWN").is_some() {
+        return Ok(());
+    }
+    if crate::worker::lock(home)?.is_some() {
+        spawn_detached(home, &["worker"]);
+    }
+    Ok(())
+}
+
 /// Detached `oboete observe` in its own process group, so the agent exiting right after
 /// SessionEnd does not take it down; the lock inside observe makes duplicates harmless.
 /// The observe settle window (60 s by default) plus a margin.
@@ -715,15 +728,20 @@ fn observe_wait_ms(agent: &str) -> Option<u64> {
 }
 
 fn spawn_observe(home: &Path, wait_ms: Option<u64>) {
+    match wait_ms {
+        Some(ms) => spawn_detached(home, &["observe", "--wait-ms", &ms.to_string()]),
+        None => spawn_detached(home, &["observe"]),
+    }
+}
+
+/// `oboete --home <home> <args>`, detached in its own process group.
+fn spawn_detached(home: &Path, args: &[&str]) {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,
     };
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--home").arg(home).arg("observe");
-    if let Some(ms) = wait_ms {
-        cmd.arg("--wait-ms").arg(ms.to_string());
-    }
+    cmd.arg("--home").arg(home).args(args);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());

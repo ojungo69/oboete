@@ -96,6 +96,13 @@ CREATE INDEX IF NOT EXISTS embeddings_unindexed ON embeddings(doc) WHERE indexed
 ";
 
 /// WAL with a 2 s busy timeout and the given `synchronous` level.
+/// `PRAGMA quick_check`: Ok when SQLite answers "ok", else the first problem it names.
+pub(crate) fn quick_check(conn: &Connection, name: &str) -> Result<()> {
+    let first: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+    anyhow::ensure!(first == "ok", "{name}: quick_check: {first}");
+    Ok(())
+}
+
 pub(crate) fn wal(conn: &Connection, synchronous: &str) -> Result<()> {
     conn.busy_timeout(std::time::Duration::from_millis(2_000))?;
     // Switching a file to WAL takes an exclusive lock that the busy handler does not cover:

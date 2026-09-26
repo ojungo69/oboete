@@ -10,6 +10,7 @@ mod embed;
 mod hook;
 mod import;
 mod inject;
+mod knowledge;
 mod mcp;
 mod observe;
 mod provider;
@@ -23,6 +24,7 @@ mod search;
 mod setup;
 mod transcript;
 mod view;
+mod worker;
 
 use std::path::PathBuf;
 
@@ -56,6 +58,12 @@ enum Cmd {
         /// Sleep this long first (hooks of agents without a session-end event)
         #[arg(long, default_value_t = 0)]
         wait_ms: u64,
+    },
+    /// Run Design B's consumers over raw.db until idle (hooks start it; one per home)
+    Worker {
+        /// Exit after this long without a new record
+        #[arg(long, default_value_t = 60_000)]
+        idle_ms: u64,
     },
     /// Print the context that would be injected for the current directory
     Inject,
@@ -203,6 +211,7 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             println!("{}", serde_json::to_string(&stats)?);
             Ok(())
         }
+        Cmd::Worker { idle_ms } => worker::run(&home, idle_ms),
         Cmd::Reindex => {
             let stats = embed::reindex(&home)?;
             println!("{}", serde_json::to_string(&stats)?);

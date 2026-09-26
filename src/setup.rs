@@ -1611,6 +1611,18 @@ pub fn doctor(home: &Path) -> Result<()> {
     let db_path = home.join("oboete.db");
     let size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
     println!("home {} (db {} KB)", home.display(), size / 1024);
+    if home.join("knowledge.db").exists() {
+        // MUST-M14: raw lost commits that a consumer had processed; its output was rewound.
+        let k = crate::knowledge::open(home)?;
+        let (n, last): (i64, Option<String>) = k.query_row(
+            "SELECT COUNT(*), strftime('%Y-%m-%d %H:%M', MAX(ts) / 1000, 'unixepoch', 'localtime') FROM rewinds",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if let Some(last) = last {
+            println!("  rewound after lost commits: {n} time(s), last {last}");
+        }
+    }
     if db_path.exists() {
         let conn = db::open(home)?;
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };

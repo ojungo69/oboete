@@ -118,6 +118,11 @@ impl Raw {
         &self.device
     }
 
+    /// SQLite's `quick_check` on raw.db: an error names the first problem it reports.
+    pub fn quick_check(&self) -> Result<()> {
+        crate::db::quick_check(&self.conn, "raw.db")
+    }
+
     /// Append one event as this device's next seq. The write lock taken by `BEGIN IMMEDIATE`
     /// makes reading the last seq and inserting the next one atomic across processes.
     pub fn append(&mut self, e: &Event) -> Result<i64> {
