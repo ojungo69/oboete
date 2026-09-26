@@ -25,9 +25,13 @@ CREATE TABLE IF NOT EXISTS records (
   target_device TEXT, target_seq INTEGER, target_offset INTEGER, target_length INTEGER,
   PRIMARY KEY (device, seq)
 );
--- spec 2.2: rule, where and when, never the value.
+-- spec 2.2: rule, where and when, never the value. `field` is where in the record: a JSON
+-- pointer into the body (`/output`; `/trigger#key` for a key of that object) or a label column
+-- (`cwd`). `offset` is where the mask starts in that field as stored; `length` is the secret's
+-- own length; both in bytes. `ts` is when the mask was applied (a replay stamps the event with the
+-- fixture's time, not this).
 CREATE TABLE IF NOT EXISTS ledger (
-  device TEXT NOT NULL, seq INTEGER NOT NULL, rule TEXT NOT NULL,
+  device TEXT NOT NULL, seq INTEGER NOT NULL, field TEXT NOT NULL, rule TEXT NOT NULL,
   offset INTEGER NOT NULL, length INTEGER NOT NULL, ts INTEGER NOT NULL, ruleset TEXT NOT NULL
 );
 ";
@@ -91,11 +95,14 @@ pub struct Raw {
 pub fn open(home: &Path) -> Result<Raw> {
     let path = home.join("raw.db");
     crate::db::private(home, 0o700);
-    let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+    let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     crate::db::wal(&conn, "FULL")?;
     #[cfg(target_os = "macos")]
     conn.execute_batch("PRAGMA fullfsync=ON;")?;
     conn.execute_batch(SCHEMA).context("raw schema")?;
+    // A raw.db from before the ledger named its field (milestone 2 Task 1's schema).
+    crate::db::ensure_column(&mut conn, "ledger", "field", "TEXT NOT NULL DEFAULT ''")
+        .context("migrate ledger")?;
     for file in ["raw.db", "raw.db-wal", "raw.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -114,6 +121,15 @@ impl Raw {
     /// Append one event as this device's next seq. The write lock taken by `BEGIN IMMEDIATE`
     /// makes reading the last seq and inserting the next one atomic across processes.
     pub fn append(&mut self, e: &Event) -> Result<i64> {
+        self.append_with_ledger(e, &[])
+    }
+
+    /// `append`, with the event's redaction ledger rows in the same transaction.
+    pub fn append_with_ledger(
+        &mut self,
+        e: &Event,
+        ledger: &[(String, crate::redact::Finding)],
+    ) -> Result<i64> {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -143,6 +159,23 @@ impl Raw {
                 e.original_bytes
             ],
         )?;
+        let now = crate::db::now_ms();
+        for (field, f) in ledger {
+            tx.execute(
+                "INSERT INTO ledger(device, seq, field, rule, offset, length, ts, ruleset)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    self.device,
+                    seq,
+                    field,
+                    f.rule,
+                    f.offset as i64,
+                    f.length as i64,
+                    now,
+                    crate::redact::ruleset()
+                ],
+            )?;
+        }
         tx.commit()?;
         Ok(seq)
     }
@@ -302,6 +335,31 @@ mod tests {
         assert_eq!(recs[1].item, Item::Event(Box::new(e)));
         assert_eq!(recs[1].device, r.device());
         assert!(r.after("other-device", 0, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_ledger_from_task_1_gains_its_field_column() {
+        let home = tempfile::tempdir().unwrap();
+        let c = Connection::open(home.path().join("raw.db")).unwrap();
+        c.execute_batch(
+            "CREATE TABLE ledger (device TEXT NOT NULL, seq INTEGER NOT NULL, rule TEXT NOT NULL,
+             offset INTEGER NOT NULL, length INTEGER NOT NULL, ts INTEGER NOT NULL, ruleset TEXT NOT NULL);",
+        )
+        .unwrap();
+        drop(c);
+        let mut r = open(home.path()).unwrap();
+        let f = crate::redact::Finding {
+            rule: "r".into(),
+            offset: 0,
+            length: 1,
+        };
+        r.append_with_ledger(&test_event("x"), &[("/prompt".into(), f)])
+            .unwrap();
+        let field: String = r
+            .conn
+            .query_row("SELECT field FROM ledger", [], |x| x.get(0))
+            .unwrap();
+        assert_eq!(field, "/prompt");
     }
 
     #[test]

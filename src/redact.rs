@@ -25,8 +25,7 @@ struct File {
 
 #[derive(Deserialize)]
 struct Rule {
-    /// Only read by the tests; kept so a failing rule can be named.
-    #[allow(dead_code)]
+    /// The rule a finding names in the redaction ledger.
     id: String,
     #[serde(default)]
     regex: Option<String>,
@@ -128,63 +127,327 @@ pub fn outbound(text: &str) -> String {
 }
 
 pub fn redact(text: &str) -> String {
+    scan(text).0
+}
+
+/// One secret masked in stored text: the rule that found it, where the mask hiding it starts in
+/// the stored (masked) text, and the secret's own length as stored (with any JSON escapes in it),
+/// both in bytes. Never the value. Two
+/// rules on one token share one mask, so they give two findings at the same offset.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Finding {
+    pub rule: String,
+    pub offset: usize,
+    pub length: usize,
+}
+
+/// `text` masked, with its findings.
+pub fn scan(text: &str) -> (String, Vec<Finding>) {
+    let (mut masked, mut found) = mask(text, spans(text));
+    if !found.is_empty() {
+        rescan(&mut masked, &mut found);
+    }
+    (masked, found)
+}
+
+/// Passes over masked text before `rescan` masks the whole text; each pass must mask something new.
+const MAX_PASSES: usize = 64;
+
+/// Scan `masked` again until a pass finds nothing. A rule whose secret needs context finds one
+/// secret per context per pass (curl-auth-user's greedy `.*` the last `-u` on a line,
+/// curl-auth-header's lazy `.*?` the first header after a `curl`), and a cut can leave a line
+/// shorter than the one a line-scoped allowlist judged (v1's `clip` scanned twice for that). Each
+/// earlier finding moves by what the runs before it changed, or to the start of a new mask
+/// covering it. Still finding after `MAX_PASSES`, the whole text becomes one mask that every
+/// finding points at: a mask of part of it could take the context (`curl`) that the rest needs.
+fn rescan(masked: &mut String, found: &mut Vec<Finding>) {
+    for pass in 0..=MAX_PASSES {
+        let again = spans(masked);
+        if again.is_empty() {
+            break;
+        }
+        if pass == MAX_PASSES {
+            found.extend(mask(masked, again).1);
+            for f in found.iter_mut() {
+                f.offset = 0;
+            }
+            *masked = MASK.to_string();
+            break;
+        }
+        let runs = merged(&again);
+        let (next, more) = mask(masked, again);
+        if next == *masked {
+            break; // a rule matching its own mask: nothing new to hide
+        }
+        for f in found.iter_mut() {
+            let mut shift = 0isize;
+            let mut at = f.offset;
+            for &(s, e) in &runs {
+                if e <= f.offset {
+                    shift += MASK.len() as isize - (e - s) as isize;
+                } else {
+                    if s <= f.offset {
+                        at = s;
+                    }
+                    break;
+                }
+            }
+            f.offset = (at as isize + shift) as usize;
+        }
+        *masked = next;
+        found.extend(more);
+    }
+    found.sort_by_key(|f| f.offset);
+}
+
+/// `text` whole when it is at most `cap` bytes. Above that, only the first and last `cap / 2`
+/// bytes of its masked form are kept, around a marker that gives the full size (spec 2.4), and
+/// the third value is that full size. The whole text is scanned and masked to a fixpoint before
+/// anything is cut ("redacted in full", spec 2.2): a rule can need context far from its secret
+/// (curl-auth-user reads a whole line, and a cut can drop a closing quote it needs). A cut inside
+/// a mask moves to the mask's edge; a private key block that a cut splits (a BEGIN without its
+/// END, or an END without its BEGIN, in any case) is dropped from the part that holds it; then the
+/// stored text is scanned once more, so line-scoped allowlists judge the lines as they are stored
+/// (as v1's `clip` did).
+pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usize>) {
+    let (masked, mut found) = scan(text);
+    if text.len() <= cap || masked.len() <= cap {
+        return (masked, found, None);
+    }
+    let runs: Vec<(usize, usize)> = found
+        .iter()
+        .map(|f| (f.offset, f.offset + MASK.len()))
+        .collect();
+    let half = cap / 2;
+    let mut head_end = masked.floor_char_boundary(half);
+    let mut tail_start = masked.ceil_char_boundary(masked.len() - half);
+    // A mask across a cut is kept whole.
+    for &(s, e) in &runs {
+        if s < head_end && e > head_end {
+            head_end = e;
+        }
+        if s < tail_start && e > tail_start {
+            tail_start = s;
+        }
+    }
+    // ASCII lowercasing keeps byte offsets.
+    let head = masked[..head_end].to_ascii_lowercase();
+    if let Some(b) = key_markers(&head, "-----begin").last()
+        && key_markers(&head[b..], "-----end").next().is_none()
+    {
+        head_end = b;
+    }
+    let tail = masked[tail_start..].to_ascii_lowercase();
+    if let Some(e) = key_markers(&tail, "-----end").next()
+        && key_markers(&tail[..e], "-----begin").next().is_none()
+    {
+        let end = tail_start + e;
+        let rest = &masked[end..];
+        // The footer's line ends at a line break, or at `\n` in flattened JSON.
+        let eol = [rest.find('\n'), rest.find("\\n")]
+            .into_iter()
+            .flatten()
+            .min();
+        tail_start = eol.map_or(masked.len(), |n| end + n);
+    }
+    // A cut the key-block rule moved into a mask moves out of it, to the side that drops it.
+    for &(s, e) in &runs {
+        if s < head_end && e > head_end {
+            head_end = s;
+        }
+        if s < tail_start && e > tail_start {
+            tail_start = e;
+        }
+    }
+    if head_end >= tail_start {
+        // The cuts met (a key block spans the middle): keep it whole.
+        return (masked, found, None);
+    }
+    let marker = format!("\n…[cut: {} bytes in full]…\n", text.len());
+    let moved = head_end + marker.len();
+    found.retain(|f| f.offset + MASK.len() <= head_end || f.offset >= tail_start);
+    for f in &mut found {
+        if f.offset >= tail_start {
+            f.offset = f.offset - tail_start + moved;
+        }
+    }
+    let mut stored = masked[..head_end].to_string() + &marker + &masked[tail_start..];
+    rescan(&mut stored, &mut found);
+    (stored, found, Some(text.len()))
+}
+
+/// Offsets of the PEM markers (`-----begin` or `-----end`, in lowercased text) that may open or
+/// close a private key: a label naming one, as the bundled private-key rule's header does, or a
+/// label not closed by `-----` on its line (cut short upstream, like `-----end rsa priva`). A
+/// complete label naming something else (a certificate) is not a secret.
+fn key_markers<'a>(s: &'a str, marker: &'a str) -> impl Iterator<Item = usize> + 'a {
+    s.match_indices(marker).map(|(i, _)| i).filter(move |&i| {
+        // A line ends at a line break, or at `\n` in flattened JSON.
+        let rest = &s[i + marker.len()..];
+        let line = rest.split(['\n', '\r']).next().unwrap_or("");
+        let line = line.split("\\n").next().unwrap_or("");
+        line.find("-----")
+            .is_none_or(|n| line[..n].contains("private key"))
+    })
+}
+
+/// The version of the rules a finding came from: a hash of the bundled rule files.
+pub fn ruleset() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest([RULES_TOML, EXTRA_TOML].concat().as_bytes());
+        digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+    })
+}
+
+/// Secret spans in `text` and in its JSON-unescaped view, mapped back onto `text`: (start, end,
+/// rule index), unmerged. A tool field is stored as flattened JSON, where `\"` and `\n` hide the
+/// quotes and line breaks rules match on (curl's `-u "user:pass"`, a quoted header), and the whole
+/// output reads as one line to a line-scoped allowlist. Scanning both views can only add masks.
+fn spans(text: &str) -> Vec<(usize, usize, usize)> {
+    let mut all = spans_in(text);
+    if text.contains('\\') {
+        let (view, at) = unescaped(text);
+        all.extend(
+            spans_in(&view)
+                .into_iter()
+                .map(|(s, e, r)| (at[s], at[e], r)),
+        );
+        all.sort_unstable();
+        all.dedup();
+    }
+    all
+}
+
+/// `text` with one level of JSON string escapes decoded, and for each byte of the result the
+/// offset in `text` where the character it belongs to starts (one more entry: `text.len()`).
+/// ponytail: one level; a double-encoded string (JSON inside a JSON string inside a field) keeps
+/// its inner `\"`. Decode again if such payloads show up.
+fn unescaped(text: &str) -> (String, Vec<usize>) {
+    let mut view = String::with_capacity(text.len());
+    let mut at = Vec::with_capacity(text.len() + 1);
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
+        let (c, n) = escape(rest).unwrap_or_else(|| {
+            let c = rest.chars().next().expect("i is a char boundary");
+            (c, c.len_utf8())
+        });
+        at.extend(std::iter::repeat_n(i, c.len_utf8()));
+        view.push(c);
+        i += n;
+    }
+    at.push(text.len());
+    (view, at)
+}
+
+/// The character a JSON escape at the start of `s` stands for, and the escape's length.
+fn escape(s: &str) -> Option<(char, usize)> {
+    let c = match s.as_bytes().get(..2)? {
+        b"\\\"" => '"',
+        b"\\\\" => '\\',
+        b"\\/" => '/',
+        b"\\n" => '\n',
+        b"\\r" => '\r',
+        b"\\t" => '\t',
+        b"\\b" => '\u{8}',
+        b"\\f" => '\u{c}',
+        b"\\u" => {
+            let hex = s
+                .get(2..6)
+                .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))?;
+            return char::from_u32(u32::from_str_radix(hex, 16).ok()?).map(|c| (c, 6));
+        }
+        _ => return None,
+    };
+    Some((c, 2))
+}
+
+/// Secret spans in `text`: (start, end, rule index), unmerged, as gitleaks finds them.
+fn spans_in(text: &str) -> Vec<(usize, usize, usize)> {
     let r = rules();
     let mut hit = vec![false; r.rules.len()];
     // Overlapping: "sk" (twilio) inside "gsk_" (groq) must not hide the longer keyword.
     for m in r.keywords.find_overlapping_iter(text) {
         hit[r.keyword_rule[m.pattern().as_usize()]] = true;
     }
-    let mut spans: Vec<(usize, usize)> = Vec::new();
-    for (rule, _) in r.rules.iter().zip(&hit).filter(|(_, h)| **h) {
+    let mut spans = Vec::new();
+    for (i, (rule, _)) in r
+        .rules
+        .iter()
+        .zip(&hit)
+        .enumerate()
+        .filter(|(_, (_, h))| **h)
+    {
         let Some(re) = rule.regex.as_deref().and_then(compiled) else {
             continue;
         };
         for caps in re.captures_iter(text) {
-            let whole = caps.get(0).expect("group 0");
+            let all = caps.get(0).expect("group 0");
             let secret = match rule.secret_group {
                 Some(g) => caps.get(g),
                 None => (1..caps.len())
                     .find_map(|i| caps.get(i))
                     .filter(|m| !m.is_empty()),
             }
-            .unwrap_or(whole);
+            .unwrap_or(all);
             if let Some(min) = rule.entropy
                 && shannon_entropy(secret.as_str()) <= min
             {
                 continue;
             }
-            let line = line_of(text, whole.start());
+            let line = line_of(text, all.start());
             let allowed = rule
                 .allowlists
                 .iter()
                 .chain(std::iter::once(&r.global))
-                .any(|a| allows(a, secret.as_str(), whole.as_str(), line));
+                .any(|a| allows(a, secret.as_str(), all.as_str(), line));
             if !allowed {
-                spans.push((secret.start(), secret.end()));
+                spans.push((secret.start(), secret.end(), i));
             }
         }
     }
-    if spans.is_empty() {
-        return text.to_string();
-    }
     spans.sort_unstable();
-    // Overlapping matches (a short and a long rule on one token) mask their union.
-    let mut merged: Vec<(usize, usize)> = Vec::new();
-    for (start, end) in spans {
-        match merged.last_mut() {
+    spans
+}
+
+/// Overlapping spans (a short and a long rule on one token) as the runs one mask covers.
+fn merged(spans: &[(usize, usize, usize)]) -> Vec<(usize, usize)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for &(start, end, _) in spans {
+        match runs.last_mut() {
             Some((_, last_end)) if start <= *last_end => *last_end = (*last_end).max(end),
-            _ => merged.push((start, end)),
+            _ => runs.push((start, end)),
         }
     }
+    runs
+}
+
+/// `text` with each run of sorted `spans` replaced by one mask, and a finding per span at the
+/// offset of its mask in the result.
+fn mask(text: &str, spans: Vec<(usize, usize, usize)>) -> (String, Vec<Finding>) {
+    let r = rules();
     let mut out = String::with_capacity(text.len());
+    let mut found = Vec::with_capacity(spans.len());
     let mut pos = 0;
-    for (start, end) in merged {
+    let mut i = 0;
+    for (start, end) in merged(&spans) {
         out.push_str(&text[pos..start]);
+        while i < spans.len() && spans[i].0 < end {
+            let (s, e, rule) = spans[i];
+            found.push(Finding {
+                rule: r.rules[rule].id.clone(),
+                offset: out.len(),
+                length: e - s,
+            });
+            i += 1;
+        }
         out.push_str(MASK);
         pos = end;
     }
     out.push_str(&text[pos..]);
-    out
+    (out, found)
 }
 
 /// gitleaks' allowlist: OR = any regex or stopword hit; AND = every configured check must hold
@@ -315,6 +578,253 @@ mod tests {
             ),
             "ANTHROPIC_API_KEY=[REDACTED]"
         );
+    }
+
+    fn token() -> String {
+        format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g") // split: secret scanners
+    }
+
+    /// Every finding points at a mask in the stored text, and none holds the value.
+    fn check(stored: &str, found: &[Finding], secret: &str) {
+        assert!(!stored.contains(secret));
+        assert!(!format!("{found:?}").contains(secret));
+        for f in found {
+            assert_eq!(&stored[f.offset..f.offset + MASK.len()], MASK, "{f:?}");
+        }
+    }
+
+    #[test]
+    fn every_byte_is_scanned_and_the_ledger_never_holds_the_value() {
+        let key = token();
+        let text = "x".repeat(200_000) + " Authorization: Bearer " + &key; // past v1's 12,000
+        let (masked, found) = scan(&text);
+        // Two rules may find the token (github-pat and a bearer rule): one mask, a finding each.
+        assert!(
+            found
+                .iter()
+                .any(|f| f.rule == "github-pat" && f.length == key.len()),
+            "{found:?}"
+        );
+        assert!(found.iter().all(|f| f.offset == found[0].offset));
+        assert_eq!(masked.matches(MASK).count(), 1);
+        check(&masked, &found, &key);
+        let (capped, again, cut) = scan_capped(&text, 256 * 1024);
+        assert_eq!((capped, again, cut), (masked, found, None));
+    }
+
+    #[test]
+    fn a_secret_across_a_cut_is_masked_in_what_is_kept() {
+        let key = token();
+        let cap = 64 * 1024;
+        for at in [cap / 2 - 10, cap / 2 + 3, 5 * cap - cap / 2 - 10] {
+            // The token straddles the head's cut, sits just past it, or straddles the tail's.
+            let mut text = "y ".repeat(5 * cap / 2);
+            text.replace_range(at..at + key.len() + 7, &format!("Bearer {key}"));
+            let (stored, found, cut) = scan_capped(&text, cap);
+            assert_eq!(cut, Some(text.len()));
+            assert!(stored.len() < cap + 100);
+            for i in 8..=key.len() {
+                assert!(
+                    !stored.contains(&key[i - 8..i]),
+                    "fragment ending at {i}, token at {at}"
+                );
+            }
+            check(&stored, &found, &key);
+        }
+    }
+
+    #[test]
+    fn a_key_block_cut_in_half_is_dropped_from_the_part_that_holds_it() {
+        let cap = 64 * 1024;
+        let block = format!(
+            "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
+            "MIIEowIBAAKCAQEAq9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8gI4kM7oQ1sV3xZ6bD\n".repeat(200)
+        );
+        // BEGIN before the head's cut, END past the margin: the rule never sees the whole block.
+        let text = "h ".repeat(cap / 4 - 100) + &block + &"t ".repeat(cap);
+        let (stored, _, cut) = scan_capped(&text, cap);
+        assert!(cut.is_some());
+        assert!(
+            !stored.contains("MIIEowIBAAKCAQ") && !stored.contains("-----BEGIN"),
+            "{}",
+            &stored[..300]
+        );
+        // The same block across the tail's cut.
+        let text = "h ".repeat(cap) + &block + &" t".repeat(cap / 4 - 100);
+        let (stored, _, _) = scan_capped(&text, cap);
+        assert!(!stored.contains("MIIEowIBAAKCAQ") && !stored.contains("-----END"));
+    }
+
+    #[test]
+    fn a_rule_that_needs_context_far_from_the_cut_still_masks() {
+        // curl-auth-user reads the whole line: `curl` is far outside any window around the cut.
+        let cap = 64 * 1024;
+        let pass = "usr:q9Zx8mL2vB4nR7tYw";
+        let text = "p\n".repeat(cap)
+            + "curl"
+            + &" ".repeat(40_000)
+            + &format!("-u '{pass}'\n")
+            + &"t\n".repeat(cap / 8);
+        let (stored, found, cut) = scan_capped(&text, cap);
+        assert!(cut.is_some());
+        assert!(
+            !stored.contains("q9Zx8mL2vB4nR7tYw"),
+            "the tail kept the password"
+        );
+        check(&stored, &found, pass);
+    }
+
+    #[test]
+    fn every_credential_on_a_greedy_line_is_masked() {
+        // curl-auth-user's `.*` reaches the last `-u` of a line: one pass finds one credential.
+        let creds = [
+            "usr:q9Zx8mL2vB4nR7tYw",
+            "adm:K3pS6dJ0aF5hU2cE",
+            "ops:Z6bD4kM7oQ1sV3xa",
+            "dev:W8eR2tY6uI0pL4k",
+        ];
+        let line: String = creds
+            .iter()
+            .map(|c| format!("curl -u '{c}' https://x ; "))
+            .collect();
+        let (stored, found) = scan(&line);
+        for c in creds {
+            assert!(!stored.contains(c), "{c} kept: {stored}");
+        }
+        check(&stored, &found, creds[0]);
+        assert!(spans(&stored).is_empty());
+        // The same across a cut: head, middle and tail each hold some.
+        let cap = 64 * 1024;
+        let text = line.clone() + &" ".repeat(3 * cap) + &line + "\n" + &"t".repeat(cap / 4);
+        let (stored, found, cut) = scan_capped(&text, cap);
+        assert!(cut.is_some());
+        for c in creds {
+            assert!(!stored.contains(c), "{c} kept across the cut");
+        }
+        check(&stored, &found, creds[1]);
+        assert!(spans(&stored).is_empty());
+        // More than MAX_PASSES on one line: the whole text is masked.
+        let line: String = (0..MAX_PASSES + 6)
+            .map(|i| format!("curl -u '{}' https://x ; ", creds[i % 4]))
+            .collect();
+        let (stored, found) = scan(&line);
+        for c in creds {
+            assert!(!stored.contains(c), "{c} kept past the pass limit");
+        }
+        assert_eq!(stored, MASK);
+        check(&stored, &found, creds[2]);
+    }
+
+    #[test]
+    fn every_header_after_one_curl_is_masked() {
+        // curl-auth-header's lazy `.*?` finds one header per `curl` per pass, and only within five
+        // lines of it; generic-basic-auth needs no `curl`.
+        let values: Vec<String> = (0..70)
+            .map(|i| format!("dXNyOnE5Wng4bUwy{i:02}dkI0blI3dFl3"))
+            .collect();
+        for n in [3, 66, 67, 70] {
+            for sep in [" ", " \\\n  "] {
+                let sets: String = values[..n]
+                    .iter()
+                    .map(|v| {
+                        format!("-H 'Authorization: Basic {v}' https://x.invalid/{sep}--next ")
+                    })
+                    .collect();
+                let text = format!("curl {sets}");
+                let (stored, found) = scan(&text);
+                for v in &values[..n] {
+                    assert!(!stored.contains(v.as_str()), "n={n} {v} kept");
+                }
+                check(&stored, &found, &values[0]);
+                assert!(spans(&stored).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_credential_whose_quote_the_cut_would_drop_is_masked_first() {
+        // Cut first, the head would end inside the quotes and curl-auth-user would not match.
+        let cap = 64 * 1024;
+        let half = cap / 2;
+        let first = "curl -u 'alice:q9Zx8mL2vB4nR7tY1wK3pS6d";
+        let text = " ".repeat(half - first.len())
+            + first
+            + "' ; "
+            + &" ".repeat(cap)
+            + "curl -u 'bobby:r8Wy7nK3uC5oQ6sX2vJ4pR9e'\n"
+            + &"t".repeat(half);
+        let (stored, found, cut) = scan_capped(&text, cap);
+        assert!(cut.is_some());
+        check(&stored, &found, "q9Zx8mL2vB4nR7tY1wK3pS6d");
+        assert!(stored.len() <= cap + 64);
+    }
+
+    #[test]
+    fn a_key_block_in_lowercase_is_dropped_too() {
+        let cap = 64 * 1024;
+        let block = format!(
+            "-----begin rsa private key-----\n{}\n-----End RSA Private Key-----",
+            "MIIEowIBAAKCAQEAq9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8gI4kM7oQ1sV3xZ6bD\n".repeat(700)
+        );
+        for text in [
+            "h ".repeat(cap / 4 - 100) + &block + &"t ".repeat(cap),
+            "h ".repeat(cap) + &block + &" t".repeat(cap / 4 - 100),
+        ] {
+            let (stored, _, _) = scan_capped(&text, cap);
+            assert!(!stored.contains("MIIEowIBAAKCAQ"), "{}", &stored[..200]);
+        }
+    }
+
+    #[test]
+    fn a_certificate_across_a_cut_keeps_the_head() {
+        let cap = 64 * 1024;
+        let cert = format!(
+            "-----BEGIN CERTIFICATE-----\n{}-----END CERTIFICATE-----\n",
+            "MIIDdzCCAl+gAwIBAgIEAgAAuTANBgkqhkiG9w0BAQUFADBaMQswCQYDVQQGEwJJRTES\n".repeat(900)
+        );
+        let text = "h ".repeat(cap / 4 - 100) + "kept here\n" + &cert + &"t ".repeat(cap);
+        let (stored, _, cut) = scan_capped(&text, cap);
+        assert!(cut.is_some());
+        assert!(stored.contains("kept here\n-----BEGIN CERTIFICATE-----\nMIIDdzCC"));
+    }
+
+    #[test]
+    fn a_key_whose_footer_was_cut_upstream_is_dropped_from_the_tail() {
+        let cap = 64 * 1024;
+        let body =
+            "MIIEowIBAAKCAQEAq9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8gI4kM7oQ1sV3xZ6bD\n".repeat(700);
+        let text = "h ".repeat(cap)
+            + "-----BEGIN RSA PRIVATE KEY-----\n"
+            + &body
+            + "-----END RSA PRIVA\n"
+            + &"log\n".repeat(cap / 16);
+        let (stored, _, cut) = scan_capped(&text, cap);
+        assert!(cut.is_some());
+        assert!(!stored.contains("MIIEowIBAAKCAQ"));
+        assert!(stored.ends_with("log\n"));
+        // Flattened into JSON, with a `-----` on the next line: that is not the label's end.
+        let flat = serde_json::to_string(
+            &(text.replace(
+                "-----END RSA PRIVA\n",
+                "-----END RSA PRIVA\n----- next -----\n",
+            )),
+        )
+        .unwrap();
+        let (stored, _, cut) = scan_capped(&flat, cap);
+        assert!(cut.is_some());
+        assert!(!stored.contains("MIIEowIBAAKCAQ"));
+        assert!(
+            stored.ends_with("log\\n\""),
+            "the log after the footer is kept"
+        );
+    }
+
+    #[test]
+    fn cuts_fall_on_character_boundaries() {
+        let text = "日本語".repeat(40_000); // 360,000 bytes, three per character
+        let (stored, found, cut) = scan_capped(&text, 64 * 1024 + 1);
+        assert!(cut.is_some() && found.is_empty());
+        assert!(stored.starts_with('日') && stored.ends_with('語'));
     }
 
     #[test]

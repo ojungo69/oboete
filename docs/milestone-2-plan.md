@@ -46,7 +46,7 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
 
 **D3. macOS keeps fullfsync.** Spike 1 measured the iMac at 23-27 ms p95 with `F_FULLFSYNC` even at 1 KB, and 3-13 ms without it (docs/spike/hook-m14.md:65). FULL exists to close a durability hole; dropping fullfsync would reopen it on Apple SSDs. So the write-hook line is set from measurement with fullfsync on (Task 12), expected near 25-27 ms instead of the provisional 20 ms. A hook of that length is not felt at a prompt.
 
-**D4. Oversized outputs: a head-and-tail cap set by measurement.** `capture.max_output_bytes` is a config constant. Task 12 sets its default: the largest of 64, 128 and 256 KB at which the slowest machine's hook p95 stays within the line (spec 2.2; hook-m14.md:70 found Windows at 41 ms p95 for 256 KB). Above the cap, the stored text keeps the first and last half of the cap, with a marker giving the original size. Each kept part is redacted with a 4,000-character margin past the cut (today's `REDACT_OVERLAP`), so a secret across the cut is masked in what is kept.
+**D4. Oversized outputs: a head-and-tail cap set by measurement.** `capture.max_output_bytes` is a config constant. Task 12 sets its default: the largest of 64, 128 and 256 KB at which the slowest machine's hook p95 stays within the line (spec 2.2; hook-m14.md:70 found Windows at 41 ms p95 for 256 KB). Above the cap, the stored text keeps the first and last half of the cap, with a marker giving the original size. The whole output is scanned before the cut (spec 2.2: "redacted in full"): a rule can need context far from its secret (curl-auth-user reads a whole line), so a margin around each cut is not enough (Codex security review of #88). A secret across a cut is kept whole in its mask.
 
 **D5. Compression in the worker.** The hook stores records uncompressed: Spike 1 found zstd at write time pays only at 256 KB and only on Windows (hook-m14.md:68-69). The worker's compression consumer rewrites a record's body as zstd once its other consumers have passed it (`enc` column: `plain` or `zstd`). A zstd dictionary is decided after a week of dogfooding, as spec 2.4 says (A9).
 
@@ -241,13 +241,14 @@ Rules (spec 2.1-2.4, D9, D15):
 - Modify: `src/config.rs` (`[redaction] extra_rules`, `allowlist`; `[capture] max_output_bytes`, `store_prompts`, `tool_output = "full" | "head-tail"`)
 - Test: `src/redact.rs`, `src/capture.rs`
 
-**Interfaces:**
-- Produces:
-  - `pub struct Rules`: the built-in rules plus the settings' extra rules and allowlist. `Rules::default()` is the built-in ones only; `Rules::from_config(&Config)` adds the settings. `Rules::version(&self) -> String` is a hash of every rule and allowlist entry, the ledger's ruleset version.
-  - `pub struct Finding { pub rule: String, pub offset: usize, pub length: usize }`: a span of the stored text, never the value.
-  - `pub fn scan(text: &str, rules: &Rules) -> (String, Vec<Finding>)`: the masked text and its findings.
-  - `capture::cut_and_redact(text: &str, cap: usize, rules: &Rules) -> Cut`, with `pub struct Cut { pub body: String, pub original_bytes: Option<i64>, pub findings: Vec<Finding> }`.
-  - `raw::Raw::append_with_ledger(&mut self, e: &Event, f: &[Finding], ruleset: &str) -> Result<i64>`: the event and its ledger rows in one transaction.
+**Interfaces** (in two PRs: **3a** the full scan, the ledger and the cap on the built-in rules; **3b** the settings):
+- Produces (3a):
+  - `pub struct Finding { pub rule: String, pub offset: usize, pub length: usize }`: the rule, where its mask starts in the stored text, and the secret's own length, in bytes; never the value. Two rules on one token share one mask and give two findings.
+  - `pub fn scan(text: &str) -> (String, Vec<Finding>)`; `redact(text)` stays, as `scan(text).0`, for v1's `clip` and `outbound`.
+  - `pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usize>)`: the whole text scanned, then head and tail kept above `cap` (D4); a key block cut in half (any case) is dropped from the part holding it; then a second pass over what is kept; the third value is the full size when it was cut. `redact::ruleset()` names the rules' version.
+  - `capture::Captured { event, ledger: Vec<(String, Finding)> }` and `capture::MAX_FIELD_BYTES` (256 KB until Task 12): every stored string passes `capture::Gate`, which applies `scan_capped` and records each finding with its field (a JSON pointer into the body, `#key` for an object's key, or a label column).
+  - `raw::Raw::append_with_ledger(&mut self, e: &Event, ledger: &[(String, Finding)]) -> Result<i64>`: the event and its ledger rows in one transaction; the ledger gains a `field` column.
+- Produces (3b): `Rules` with the settings' extra rules and allowlist (`[redaction] extra_rules`, `allowlist`), its version in the ledger, `outbound` using them too; `[capture] store_prompts` and `tool_output = "full" | "head-tail"`.
 
 - [ ] **Step 1: Failing tests.**
 
@@ -279,7 +280,7 @@ fn an_allowlisted_false_positive_is_kept_and_an_extra_rule_masks() { /* config-d
 ```
 
 - [ ] **Step 2: Run, expect failure.**
-- [ ] **Step 3: Implement.** `scan` runs today's pipeline over the whole text (keyword gate, regex, entropy, allowlist, merge, mask) and returns the merged spans as findings. `cut_and_redact` redacts the head plus a 4,000-character margin and the tail plus the same margin, then cuts at the cap's halves with a marker `…[cut: N bytes in full]…` (D4).
+- [ ] **Step 3: Implement.** `scan` runs today's pipeline over the whole text (keyword gate, regex, entropy, allowlist, merge, mask) and returns the merged spans as findings. `scan_capped` scans the whole text, then keeps the cap's halves around a marker `…[cut: N bytes in full]…` (D4).
 - [ ] **Step 4: Run the tests; then the security review.** rules/security.md: the `security-audit-skill`, `semgrep scan` on `src/redact.rs src/capture.rs`, and `/codex-review mode=security`. Record the review's outcome in the PR.
 - [ ] **Step 5: Commit** `redact: full scan, ledger, head-and-tail cap, extra rules and allowlist (milestone 2, Task 3)`.
 
