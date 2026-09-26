@@ -105,3 +105,92 @@ fn the_limit_holds_across_both_stores() {
         "{four}"
     );
 }
+
+#[test]
+fn a_rule_added_after_capture_hides_its_value_before_the_rescan_runs() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let (h, c) = (home.path(), cwd.path());
+    let payload = serde_json::json!({"session_id": "s", "prompt": "zebra acme-123456", "cwd": c});
+    oboete(
+        h,
+        c,
+        &["hook", "claude", "UserPromptSubmit"],
+        &payload.to_string(),
+    );
+    oboete(h, c, &["worker", "--idle-ms", "0"], "");
+    std::fs::write(
+        h.join("config.toml"),
+        "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}' }]\n",
+    )
+    .unwrap();
+    // No worker has run since: the value is only in raw and the index, not yet tombstoned.
+    let hit = oboete(h, c, &["search", "zebra"], "");
+    let id = hit.split_whitespace().next().unwrap().to_owned();
+    let got = oboete(h, c, &["get", &id], "");
+    assert!(
+        hit.contains("zebra") && !hit.contains("123456") && !got.contains("123456"),
+        "{hit}\n{got}"
+    );
+}
+
+#[test]
+fn get_applies_a_rule_anchored_to_a_field_before_the_rescan_runs() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    // The repo label (a checkout's path) ends in a value the rule covers too.
+    let c = &cwd.path().join("app-acme-777777");
+    std::fs::create_dir(c).unwrap();
+    let h = home.path();
+    let payload = serde_json::json!({"session_id": "s", "prompt": "zebra acme-654321", "cwd": c});
+    oboete(
+        h,
+        c,
+        &["hook", "claude", "UserPromptSubmit"],
+        &payload.to_string(),
+    );
+    oboete(h, c, &["worker", "--idle-ms", "0"], "");
+    let id = oboete(h, c, &["search", "zebra"], "")
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    std::fs::write(
+        h.join("config.toml"),
+        "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}$' }]\n",
+    )
+    .unwrap();
+    let got = oboete(h, c, &["get", &id], "");
+    assert!(
+        got.contains("zebra") && !got.contains("654321") && !got.contains("777777"),
+        "{got}"
+    );
+}
+
+#[test]
+fn search_applies_a_rule_anchored_to_a_field_to_every_hit() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let (h, c) = (home.path(), cwd.path());
+    for (s, v) in [("s1", "111111"), ("s2", "222222")] {
+        let payload =
+            serde_json::json!({"session_id": s, "prompt": format!("zebra acme-{v}"), "cwd": c});
+        oboete(
+            h,
+            c,
+            &["hook", "claude", "UserPromptSubmit"],
+            &payload.to_string(),
+        );
+    }
+    oboete(h, c, &["worker", "--idle-ms", "0"], "");
+    std::fs::write(
+        h.join("config.toml"),
+        "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[0-9]{6}$' }]\n",
+    )
+    .unwrap();
+    let hits = oboete(h, c, &["search", "zebra"], "");
+    assert!(
+        hits.lines().count() == 2 && !hits.contains("111111") && !hits.contains("222222"),
+        "{hits}"
+    );
+}

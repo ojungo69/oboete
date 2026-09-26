@@ -219,16 +219,24 @@ fn raw_get(home: &std::path::Path, id: &str) -> Result<Option<String>> {
         [e.ts],
         |r| r.get(0),
     )?;
-    let repo = e.repo.as_deref().unwrap_or("");
+    // Gated field by field as well as whole (`emit`): a rule may be anchored to a field's end.
+    let repo = redact::outbound(e.repo.as_deref().unwrap_or(""));
     Ok(Some(format!(
         "{id} {when} {} {repo}\n\n{}\n",
-        e.kind, e.body
+        e.kind,
+        redact::outbound_fields(&e.body)
     )))
 }
 
+/// Stored text leaves through the egress gate: the user's rules as they are now (spec 6.4), so a
+/// rule added after capture hides its value, labels included, before the rescan (Task 7b) has
+/// tombstoned it.
 fn emit(text: &str) -> Result<()> {
     use std::io::Write;
-    match std::io::stdout().lock().write_all(text.as_bytes()) {
+    match std::io::stdout()
+        .lock()
+        .write_all(redact::outbound(text).as_bytes())
+    {
         Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
         _ => Ok(()),
     }
@@ -285,8 +293,12 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 let hits = search::raw(&home, &query, scope.as_deref(), limit)?;
                 left -= hits.len().min(left);
                 for h in hits {
+                    // Each stored field through the gate on its own, before the lines are joined.
                     let repo = match (all, &h.repo) {
-                        (true, Some(r)) => format!("[{}] ", r.rsplit('/').next().unwrap_or(r)),
+                        (true, Some(r)) => {
+                            let r = redact::outbound(r);
+                            format!("[{}] ", r.rsplit('/').next().unwrap_or(&r))
+                        }
                         _ => String::new(),
                     };
                     let device: String = h.device.chars().take(8).collect();
@@ -303,13 +315,13 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let terms = search::terms(&query);
             let embedding = config::search_embedding(&home);
             for h in search::find(&conn, &embedding, &query, scope.as_deref(), left)? {
-                let text = search::snippet(&h.body, &terms, 110);
+                let text = search::snippet(&redact::outbound(&h.body), &terms, 110);
                 let repo = if all {
                     let name = std::path::Path::new(&h.repo)
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| h.repo.clone());
-                    format!("[{name}] ")
+                    format!("[{}] ", redact::outbound(&name))
                 } else {
                     String::new()
                 };
@@ -318,7 +330,10 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
                 } else {
                     format!(
                         "{:<5} {}  {:<10} {repo}{}\n      {text}\n",
-                        h.doc, h.when, h.kind, h.title
+                        h.doc,
+                        h.when,
+                        h.kind,
+                        redact::outbound(&h.title)
                     )
                 });
             }
@@ -334,14 +349,19 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             }
             let conn = db::open(&home)?;
             let h = search::get(&conn, &id)?.ok_or_else(missing)?;
+            // Each stored field through the gate on its own, then the whole (`emit`).
             let title = if h.title.is_empty() {
                 String::new()
             } else {
-                format!("{}\n", h.title)
+                format!("{}\n", redact::outbound(&h.title))
             };
             emit(&format!(
                 "{} {} {} {}\n{title}\n{}\n",
-                h.doc, h.when, h.kind, h.repo, h.body
+                h.doc,
+                h.when,
+                h.kind,
+                redact::outbound(&h.repo),
+                redact::outbound(&h.body)
             ))
         }
         Cmd::Timeline { all, limit } => {
@@ -349,18 +369,26 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             let mut out = String::new();
             for r in search::timeline(&conn, repo_filter(all)?.as_deref(), limit)? {
                 // The tail of the id: UUIDv7 heads (Codex, Grok) are timestamps and collide.
-                let id: String =
-                    r.id.chars()
-                        .rev()
-                        .take(8)
-                        .collect::<String>()
-                        .chars()
-                        .rev()
-                        .collect();
-                let summary: String = r.summary.replace('\n', " ").chars().take(120).collect();
+                // Gated before it is shortened, as each field is.
+                let id: String = redact::outbound(&r.id)
+                    .chars()
+                    .rev()
+                    .take(8)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                // Gated before it is flattened and clipped, and the label on its own.
+                let summary: String = redact::outbound(&r.summary)
+                    .replace('\n', " ")
+                    .chars()
+                    .take(120)
+                    .collect();
                 out.push_str(&format!(
                     "{}  {:<6} {id}  {}  {summary}\n",
-                    r.when, r.agent, r.repo
+                    r.when,
+                    r.agent,
+                    redact::outbound(&r.repo)
                 ));
             }
             emit(&out)

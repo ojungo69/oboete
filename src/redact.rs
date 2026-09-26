@@ -837,6 +837,70 @@ fn user_spans_in(
     spans
 }
 
+/// The byte ranges of `text` the rules find now, merged, from both of its views as capture scans
+/// them. What capture masked, or a tombstone starred, is no finding
+/// (`a_rescan_finds_nothing_new_in_what_capture_masked`).
+pub fn ranges(text: &str, rules: &Rules) -> Vec<(usize, usize)> {
+    merged(&spans(text, rules))
+}
+
+/// The content of each JSON string literal of `text`, keys too, as byte ranges of `text`.
+/// Capture scans a body field by field, so a rule anchored to a field's start or end (`^`, `$`)
+/// is only ever matched against one field.
+fn literals(text: &str) -> Vec<(usize, usize)> {
+    let b = text.as_bytes();
+    let (mut out, mut open, mut i) = (Vec::new(), None, 0);
+    while i < b.len() {
+        match (b[i], open) {
+            (b'\\', Some(_)) => i += 1,
+            (b'"', None) => open = Some(i + 1),
+            (b'"', Some(start)) => {
+                out.push((start, i));
+                open = None;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Task 7's rescan: `ranges` of a stored body, field by field as capture scanned it, as byte
+/// ranges of the body.
+pub fn field_ranges(body: &str, rules: &Rules) -> Vec<(usize, usize)> {
+    literals(body)
+        .into_iter()
+        .flat_map(|(s, e)| {
+            ranges(&body[s..e], rules)
+                .into_iter()
+                .map(move |(a, b)| (s + a, s + b))
+        })
+        .collect()
+}
+
+/// The egress gate on indexed text (field values one per line): whole, then line by line, so a
+/// rule anchored to a field's end (`$`) matches each field as capture's did.
+pub fn outbound_lines(text: &str) -> String {
+    outbound(text)
+        .split('\n')
+        .map(outbound)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The egress gate on a stored body, field by field as capture scanned it.
+pub fn outbound_fields(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut pos = 0;
+    for (s, e) in literals(body) {
+        out.push_str(&body[pos..s]);
+        out.push_str(&outbound(&body[s..e]));
+        pos = e;
+    }
+    out.push_str(&body[pos..]);
+    out
+}
+
 /// Overlapping spans (a short and a long rule on one token) as the runs one mask covers.
 fn merged(spans: &[(usize, usize, usize)]) -> Vec<(usize, usize)> {
     let mut runs: Vec<(usize, usize)> = Vec::new();
@@ -1326,6 +1390,24 @@ mod tests {
             !masked.contains("Zq8vN3kL7pW2") && masked.contains("aaaaaaaa"),
             "{masked}"
         );
+    }
+
+    #[test]
+    fn a_rescan_finds_nothing_new_in_what_capture_masked() {
+        let rules = Rules::default();
+        let ghp = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split: scanners
+        let aws = format!("AKIA{}", "Z7Q2XK4M9PL3WR8T");
+        let text = format!(
+            "curl -u admin:Zq8vN3kL7pW2 https://h.test\n\
+             curl -H \"Authorization: Bearer {ghp}\" https://h.test\n\
+             password=Zq8vN3kL7pW2xY\naws_access_key_id = {aws}\n"
+        );
+        let (masked, found) = scan(&text, &rules);
+        assert!(found.len() >= 3, "{masked}");
+        assert_eq!(ranges(&masked, &rules), vec![], "{masked}");
+        // A tombstone's stars are no new finding either.
+        let starred = masked.replace(MASK, &"*".repeat(MASK.len()));
+        assert_eq!(ranges(&starred, &rules), vec![], "{starred}");
     }
 
     #[test]
