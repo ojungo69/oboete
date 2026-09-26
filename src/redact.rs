@@ -242,7 +242,13 @@ pub fn scan_capped(text: &str, cap: usize) -> (String, Vec<Finding>, Option<usiz
         && key_markers(&tail[..e], "-----begin").next().is_none()
     {
         let end = tail_start + e;
-        tail_start = masked[end..].find('\n').map_or(masked.len(), |n| end + n);
+        let rest = &masked[end..];
+        // The footer's line ends at a line break, or at `\n` in flattened JSON.
+        let eol = [rest.find('\n'), rest.find("\\n")]
+            .into_iter()
+            .flatten()
+            .min();
+        tail_start = eol.map_or(masked.len(), |n| end + n);
     }
     // A cut the key-block rule moved into a mask moves out of it, to the side that drops it.
     for &(s, e) in &runs {
@@ -807,6 +813,10 @@ mod tests {
         let (stored, _, cut) = scan_capped(&flat, cap);
         assert!(cut.is_some());
         assert!(!stored.contains("MIIEowIBAAKCAQ"));
+        assert!(
+            stored.ends_with("log\\n\""),
+            "the log after the footer is kept"
+        );
     }
 
     #[test]
