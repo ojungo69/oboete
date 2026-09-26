@@ -509,7 +509,7 @@ pub fn strip_blocks(s: &str, unclosed_private_hides_rest: bool) -> String {
         .to_string()
 }
 
-fn without_blocks(s: &str, unclosed_private_hides_rest: bool) -> String {
+pub(crate) fn without_blocks(s: &str, unclosed_private_hides_rest: bool) -> String {
     let mut out = s.to_string();
     for tag in STRIP_BLOCKS {
         out = strip_tag(&out, tag, unclosed_private_hides_rest && *tag == "private");

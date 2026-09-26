@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-use crate::hook::{compact, field, is_envelope, str_field, strip_blocks};
+use crate::hook::{compact, field, is_envelope, str_field, strip_blocks, without_blocks};
 use crate::raw::Event;
 use crate::{redact, repo};
 
@@ -48,7 +48,7 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
                     .map(|p| crate::hook::last_assistant_in_transcript(Path::new(p)))
                     .unwrap_or_default(),
             };
-            let reply = strip_blocks(&reply, false);
+            let reply = without_blocks(&reply, false);
             if reply.trim().is_empty() {
                 return Vec::new();
             }
@@ -56,7 +56,7 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
         }
         "PreCompact" => ("compaction", json!({"trigger": payload.get("trigger")})),
         "PostCompact" => {
-            match str_field(payload, &["compact_summary"]).map(|s| strip_blocks(s, false)) {
+            match str_field(payload, &["compact_summary"]).map(|s| without_blocks(s, false)) {
                 Some(s) if !s.trim().is_empty() => ("compaction", json!({"summary": s})),
                 _ => return Vec::new(),
             }
@@ -67,7 +67,7 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
     let cwd = str_field(payload, &["cwd"]).unwrap_or(".");
     let git = git(Path::new(cwd));
     // Labels are stored text too (spec 2.2): a path or branch can carry a token.
-    let label = redact::outbound;
+    let label = gate;
     vec![Event {
         agent: agent.into(),
         // A label only: an event without one is still this device's next seq.
@@ -89,19 +89,25 @@ pub fn events(agent: &str, event: &str, payload: &Value, ts: i64) -> Vec<Event> 
 /// A tool field as text: binary content replaced by its marker, then closed `<private>`-style
 /// blocks removed (what v1's `clip` did first). `redacted` masks it with the rest of the body.
 fn text(v: &Value) -> String {
-    strip_blocks(&compact(&markers(v)), false)
+    without_blocks(&compact(&markers(v)), false)
 }
 
-/// `v` through the outbound gate: every string loses its closed `<private>`-style blocks and is
+/// Closed `<private>`-style blocks removed, then redaction: `redact::outbound` without its
+/// trim, so stored text keeps its whitespace (an indented code line), as v1's `clip` did.
+fn gate(s: &str) -> String {
+    redact::redact(&without_blocks(s, false))
+}
+
+/// `v` through `gate`: every string loses its closed `<private>`-style blocks and is
 /// redacted, so whatever a payload puts in a field (a tool name, a reason) passes the same gate as
 /// tool output (spec 2.2, every byte that is stored).
 fn redacted(v: Value) -> Value {
     match v {
-        Value::String(s) => Value::String(redact::outbound(&s)),
+        Value::String(s) => Value::String(gate(&s)),
         Value::Array(a) => Value::Array(a.into_iter().map(redacted).collect()),
         Value::Object(m) => Value::Object(
             m.into_iter()
-                .map(|(k, x)| (redact::outbound(&k), redacted(x)))
+                .map(|(k, x)| (gate(&k), redacted(x)))
                 .collect(),
         ),
         other => other,
@@ -281,6 +287,24 @@ mod tests {
     }
 
     #[test]
+    fn stored_text_keeps_its_whitespace() {
+        let out = "\n    indented line\n\t";
+        let e = one(
+            "PostToolUse",
+            json!({"tool_name": "Read", "tool_input": " a ", "tool_response": out}),
+        );
+        assert_eq!(
+            (body(&e)["output"].as_str(), body(&e)["input"].as_str()),
+            (Some(out), Some(" a "))
+        );
+        let e = one(
+            "Stop",
+            json!({"last_assistant_message": "  code:\n    x = 1\n"}),
+        );
+        assert_eq!(body(&e)["assistant"], "  code:\n    x = 1\n");
+    }
+
+    #[test]
     fn private_blocks_leave_every_text_field() {
         let e = one(
             "PostToolUse",
@@ -296,18 +320,18 @@ mod tests {
             "Stop",
             json!({"last_assistant_message": "ok <private>reply</private>"}),
         );
-        assert_eq!(body(&e)["assistant"], "ok");
+        assert_eq!(body(&e)["assistant"], "ok "); // whitespace is kept, the block is not
         let e = one(
             "PostCompact",
             json!({"compact_summary": "sum <private>mary</private>"}),
         );
-        assert_eq!(body(&e)["summary"], "sum");
+        assert_eq!(body(&e)["summary"], "sum ");
         let only_private = json!({"last_assistant_message": "<private>all</private>"});
         assert!(events("claude", "Stop", &only_private, 0).is_empty());
     }
 
     #[test]
-    fn every_string_in_the_body_passes_the_outbound_gate() {
+    fn every_string_in_the_body_passes_the_gate() {
         let token = format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g");
         let bearer = format!("Authorization: Bearer {token} <private>zqx-opt-out</private>");
         for (event, payload) in [
