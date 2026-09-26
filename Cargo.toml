@@ -22,6 +22,7 @@ toml = "1.1.6"
 tokio = { version = "1", features = ["rt", "io-std"] }
 toml_edit = "0.23"
 ureq = { version = "3.4.2", features = ["json"] }
+zstd = "0.14"
 
 [profile.release]
 strip = true
