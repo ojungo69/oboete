@@ -126,22 +126,22 @@ Hook, spawned, milliseconds (p50 / p95 / p99 / max):
 |---|---|---|---|---|
 | WSL (ext4) | 10.5 / 12.1 / 12.7 / 25.8 | 12.1 / 13.8 / 15.9 / 18.9 | 12.8 / 14.4 / 15.2 / 15.7 | 14.9 / 16.2 / 16.7 / 17.2 |
 | Windows, GNU build (NTFS, Defender on) | 19.9 / 22.8 / 80.0 / 85.4 | 23.5 / 25.5 / 26.7 / 100.9 | 25.4 / 27.3 / 70.8 / 506.9 | 27.7 / 30.8 / 108.1 / 189.7 |
-| M1 iMac (APFS, fullfsync) | pending | pending | pending | pending |
+| M1 iMac (APFS, fullfsync) | 21.9 / 25.2 / 30.0 / 38.0 | 21.9 / 23.9 / 25.9 / 30.0 | 21.8 / 24.1 / 29.1 / 34.0 | 22.0 / 24.1 / 30.9 / 32.2 |
 
 - An earlier Windows run without 128 KB gave p95 22.1, 24.8 and 31.0 ms at 1, 64 and 256 KB; the rules below use the worse of the two runs.
 - Against Spike 1's harness at full redaction (docs/spike/hook-m14.md), Windows' 1 KB p95 rose from 13.5 to 22.8 ms and its 256 KB p95 fell from 41.4 to 30.8 ms; WSL's moved from 9.4 to 12.1 ms and from 20.3 to 16.2 ms. This hook does more than that harness (settings, the ledger, the worker-lock attempt); which part costs Windows the extra 9 ms at 1 KB is not measured.
-- The iMac is offline: Tailscale showed it last seen about an hour before 10:05 JST. FileVault stops a restart at the unlock screen, so it may need the owner at the machine. It is measured with the same command when it is back, and the rules below are applied again.
+- The iMac (M1, 8 GiB, macOS 26.6.2) was measured on 2026-09-27 at d30c10c, with the same command, twice. The first run started 7 minutes after a boot, with the 5-minute load average at 17. The second started once it was under 3 (1.4 / 3.0 / 6.3). They agree within 1.6 ms at every p95 (first run: 25.0, 22.3, 22.8 and 24.1 ms). The table shows the second run, and the rules use the worse of the two at each size, which is the second run everywhere. Spike 1 measured 24.9 ms at 1 KB with `F_FULLFSYNC`; this hook's settings, ledger and lock attempt add little on the iMac, where the fsync dominates.
 - The Windows run found a replay bug: the fixture's root placeholder was replaced with an unescaped Windows path, which broke the JSON (`invalid escape`). It is escaped now (`a_repo_root_with_a_backslash_replays`).
 - Windows is the GNU cross-build (`cargo zigbuild`), as in Spike 1. The MSVC artifact is unmeasured until CI builds it (D14).
 - Each size is measured as written whole: the runs above were made while the cap was 256 KB, and replay now sets `OBOETE_FIELD_CAP` on the hooks it spawns to the size measured (read only between 1 and 256 KB), so the iMac run measures the same writes under the lowered cap.
 
-The rules as applied, provisional until the iMac row is filled:
+The rules as applied, with all three machines:
 
-- **The line** is the slowest machine's p95 at 1 KB: the floor every hook pays, which no cap can lower (on the iMac, `F_FULLFSYNC`; D3). Measured so far: Windows, 22.8 ms. Spike 1's iMac value (24.9 ms) came from a lighter harness, and Windows' 1 KB rose by 9 ms between that harness and this hook, so it is not reused.
-- **The cap (D4)** is the largest of 64, 128 and 256 KB whose p95 on the slowest machine stays within the line. With WSL and Windows none does (Windows is at 25.5 ms from 64 KB on), so it is the rule's smallest, 64 KB: `capture::MAX_FIELD_BYTES` goes from 256 KB to 64 KB, and a longer stored string keeps its first and last 32 KB around the cut marker. It moves to 128 KB if the iMac's 1 KB p95 is at least 27.3 ms and its own 128 KB p95 is within that; to 256 KB if at least 31.0 ms and its own 256 KB p95 is within that.
-- **M14's line per size (D14)**, for sizes up to the cap: 1 KB 22.8 ms, 64 KB 25.5 ms p95 (Windows), until the iMac is measured.
-- **The backup segment cap (D11)**: p95 per 8 MB segment is 117.7 ms on WSL and 153.8 ms on Windows (18 segments each), under 1 s, so `backup::SEGMENT_BYTES` stays 8 MB. Segments were 1 to 11 KB compressed: the synthetic payload repeats, so these sizes are a lower bound for real records; only the time feeds the rule.
-- Also measured: the in-process store path per fixture event (255 events, no spawn) is 1.5 / 2.1 ms p50 / p95 on WSL and 0.8 / 1.2 ms on Windows; the replay process's peak RSS on WSL is 126,000 KB (VmHWM is read from `/proc`, so Windows reports none).
+- **The line** is the slowest machine's p95 at 1 KB: the floor every hook pays, which no cap can lower (on the iMac, `F_FULLFSYNC`; D3). It is the iMac's, **25.2 ms**. Windows is 22.8 ms and WSL 12.1 ms.
+- **The cap (D4)** is the largest of 64, 128 and 256 KB whose p95 on the slowest machine stays within the line. None does: Windows is at 25.5 ms from 64 KB on, over the iMac's 25.2 ms. The iMac itself stays within its own line at every size. So the cap is the rule's smallest, 64 KB: `capture::MAX_FIELD_BYTES` goes from 256 KB to 64 KB, and a longer stored string keeps its first and last 32 KB around the cut marker. The iMac's 1 KB p95 is under the 27.3 ms that would have moved it to 128 KB, so it stays.
+- **M14's line per size (D14)**, for sizes up to the cap: 1 KB 25.2 ms p95 (the iMac) and 64 KB 25.5 ms p95 (Windows).
+- **The backup segment cap (D11)**: p95 per 8 MB segment is 117.7 ms on WSL, 153.8 ms on Windows and 144.4 ms on the iMac (18 segments each), under 1 s, so `backup::SEGMENT_BYTES` stays 8 MB. Segments were 1 to 11 KB compressed: the synthetic payload repeats, so these sizes are a lower bound for real records; only the time feeds the rule.
+- Also measured: the in-process store path per fixture event (255 events, no spawn) is 1.5 / 2.1 ms p50 / p95 on WSL, 0.8 / 1.2 ms on Windows and 4.8 / 6.0 ms on the iMac (the fullfsync); the replay process's peak RSS on WSL is 126,000 KB (VmHWM is read from `/proc`, so Windows reports none).
 
 ## The other agents (Task 2, part b, 2026-09-27)
 
@@ -192,7 +192,7 @@ In the dogfood user: Design B's binary (main 0434bd1 with #119's fix) as `~/.loc
 
 - **Built** (spec 8.4, row 2): raw.db keyed by (device, seq) with `synchronous=FULL`, full redaction with the ledger, write-failure reporting, backups with restore, tombstones with the redaction rescan, raw FTS, and the deterministic manifest. All seven agents record there (#115), and v1's write path is gone (#118).
 - **The none tier works end to end**: Task 13 above.
-- **Line M14**: measured on WSL and Windows (GNU build). The iMac was offline, so the line and the 64 KB cap are provisional (Task 12 names the iMac values that would move the cap). The MSVC build is unmeasured.
+- **Line M14**: measured on WSL, Windows (GNU build) and the M1 iMac: 25.2 ms p95 at 1 KB (the iMac), and the cap stays 64 KB. The MSVC build is unmeasured.
 - **MUST fixtures**:
   - MUST-M14: FULL, and the checkpoint rewind (Task 5).
   - MUST-M15: backups and restore (Task 8, `tests/damaged_raw.rs`).

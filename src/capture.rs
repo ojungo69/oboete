@@ -14,8 +14,8 @@ use crate::{redact, repo};
 
 /// Bytes a stored string keeps before only its head and tail are kept (spec 2.4, plan D4): the
 /// largest of 64, 128 and 256 KB whose hook p95 on the slowest machine stays within the line.
-/// Provisional until the iMac is measured: Windows is over WSL and Windows' floor from 64 KB on,
-/// and the iMac's floor decides whether 128 or 256 KB fit (docs/milestone-2.md, Task 12).
+/// None does: Windows is at 25.5 ms from 64 KB on, over the iMac's 1 KB floor of 25.2 ms
+/// (docs/milestone-2.md, Task 12), so it is the smallest candidate.
 pub const MAX_FIELD_BYTES: usize = 64 * 1024;
 
 /// Set on the hooks replay spawns (M14, D4): the cap a candidate size is measured at, so a
