@@ -45,6 +45,8 @@ const MAX_BACKOFF_429: Duration = Duration::from_secs(3600);
 pub struct ChainResult {
     pub provider: String,
     pub output: Value,
+    /// The answering entry's tier (`Provider::tier`).
+    pub tier: i64,
 }
 
 /// Why the chain went past a provider, which the curation phase needs to know (D10, D11).
@@ -352,6 +354,7 @@ impl<'a> Chain<'a> {
                     return Ok(ChainResult {
                         provider: name,
                         output: a.value,
+                        tier: p.tier(),
                     });
                 }
                 Err(e) => {
@@ -1571,17 +1574,23 @@ mod tests {
     #[test]
     fn answers_of_another_shape_do_not_count_as_success() {
         let schema = crate::curate::schema();
-        let ok = serde_json::json!({"observations": [{"kind": "decision", "title": "t", "body": "b"}], "summary": "s"});
+        let claim = |kind: &str| {
+            serde_json::json!({"id": "c1", "kind": kind, "status": "decided", "speaker": "user",
+                "scope": "repo", "body": "b", "quote": "q", "line": "L1", "supersedes": []})
+        };
+        let ok = serde_json::json!({"claims": [claim("decision")], "summary": "s"});
         assert!(fits(&ok, &schema));
         // Valid JSON, wrong keys: what a free model without strict schema support returned.
         let other = serde_json::json!({"issue": "x", "resolution": "y", "decision": "z"});
         assert!(!fits(&other, &schema));
-        let item_missing_body = serde_json::json!({"observations": [{"kind": "decision", "title": "t"}], "summary": "s"});
+        let mut item_missing_body = claim("decision");
+        item_missing_body.as_object_mut().unwrap().remove("body");
+        let item_missing_body = serde_json::json!({"claims": [item_missing_body], "summary": "s"});
         assert!(!fits(&item_missing_body, &schema));
-        let summary_not_text = serde_json::json!({"observations": [], "summary": 3});
+        let summary_not_text = serde_json::json!({"claims": [], "summary": 3});
         assert!(!fits(&summary_not_text, &schema));
-        // Kinds outside the enum are mapped later (the curation phase), not refused here.
-        let odd_kind = serde_json::json!({"observations": [{"kind": "Decision", "title": "t", "body": "b"}], "summary": ""});
+        // Kinds outside the enum are mapped later (the claims consumer), not refused here.
+        let odd_kind = serde_json::json!({"claims": [claim("Decision")], "summary": ""});
         assert!(fits(&odd_kind, &schema));
     }
 

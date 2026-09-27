@@ -257,6 +257,17 @@ impl Provider {
             Provider::Openai { limits, .. } | Provider::Cli { limits, .. } => limits,
         }
     }
+    /// Its tier (spec 1.4): 3 paid, 2 subscription, 1 free or local. The highest tier's
+    /// derivation of a claim is the active one (MUST-M18).
+    pub fn tier(&self) -> i64 {
+        if self.limits().is_paid() {
+            3
+        } else if self.subscription() {
+            2
+        } else {
+            1
+        }
+    }
     /// Whether a call spends a subscription the owner codes with: every CLI, and an API entry
     /// marked so. Such a call waits while the owner works (D9).
     pub fn subscription(&self) -> bool {

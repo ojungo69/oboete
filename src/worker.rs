@@ -146,7 +146,7 @@ pub fn run_with(
 }
 
 /// The curation phase a worker runs after its consumers have drained (milestone 3 D3).
-pub type CurationPhase<'a> = dyn FnMut(&mut Raw) -> Result<Phase> + 'a;
+pub type CurationPhase<'a> = dyn FnMut(&mut Raw, &Connection) -> Result<Phase> + 'a;
 
 fn run_holding(
     home: &Path,
@@ -275,7 +275,7 @@ fn serve(
         // within D10's 30 minutes, keeps the worker up until then.
         let mut stay = None;
         if let Some(phase) = phase.as_mut() {
-            match phase(&mut raw)? {
+            match phase(&mut raw, &k)? {
                 Phase::Covered if crate::backup::restore_requested(home) => return Ok(true),
                 Phase::Covered => continue,
                 Phase::Waiting { until, up: true } => stay = Some(until),
@@ -355,7 +355,7 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
     let home = home.to_owned();
     // Opened once curation is on: a home that never asks for it gets no providers.db.
     let mut db = None;
-    Box::new(move |raw: &mut Raw| {
+    Box::new(move |raw: &mut Raw, k: &Connection| {
         // Read again for each window: a worker that stays up follows the owner's edits (turning
         // curation on or off, a provider removed, a lower cap). A file that no longer loads (one
         // the owner is still editing) stops curation until it loads again, not the worker.
@@ -392,7 +392,7 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
         };
         // Who is asked and within what caps: a window held under other ones is tried again now.
         let chain = format!("{:?} {}", cfg.providers, cfg.paid_usd_per_month);
-        crate::curate::run_phase(raw, db, &rules, &cfg.summary, &chain, &mut curator)
+        crate::curate::run_phase(raw, k, db, &rules, &cfg.summary, &chain, &mut curator)
     })
 }
 
@@ -760,7 +760,7 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         let (started, again) = (Instant::now(), std::cell::Cell::new(None));
         let until = crate::db::now_ms() + 400;
-        let mut phase = |_: &mut Raw| -> Result<Phase> {
+        let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
             calls.set(calls.get() + 1);
             Ok(match calls.get() {
                 1 => Phase::Waiting { until, up: true },
@@ -788,7 +788,7 @@ mod tests {
         assert_eq!(calls.get(), 3);
 
         calls.set(0);
-        let mut phase = |_: &mut Raw| -> Result<Phase> {
+        let mut phase = |_: &mut Raw, _: &Connection| -> Result<Phase> {
             calls.set(calls.get() + 1);
             Ok(Phase::Waiting {
                 until: crate::db::now_ms() + 3_600_000,
@@ -849,17 +849,26 @@ mod tests {
         let mut raw = raw::open(home.path()).unwrap();
         raw.append(&raw::test_event("a")).unwrap();
         let mut phase = curation(home.path());
-        assert_eq!(phase(&mut raw).unwrap(), Phase::Idle);
+        assert_eq!(
+            phase(&mut raw, &Connection::open_in_memory().unwrap()).unwrap(),
+            Phase::Idle
+        );
         config(true);
         assert!(matches!(
-            phase(&mut raw).unwrap(),
+            phase(&mut raw, &Connection::open_in_memory().unwrap()).unwrap(),
             Phase::Waiting { up: false, .. }
         ));
         config(false);
-        assert_eq!(phase(&mut raw).unwrap(), Phase::Idle);
+        assert_eq!(
+            phase(&mut raw, &Connection::open_in_memory().unwrap()).unwrap(),
+            Phase::Idle
+        );
         // A file the owner is still editing stops curation for this run, not the worker.
         std::fs::write(home.path().join("config.toml"), "[summary\n").unwrap();
-        assert_eq!(phase(&mut raw).unwrap(), Phase::Idle);
+        assert_eq!(
+            phase(&mut raw, &Connection::open_in_memory().unwrap()).unwrap(),
+            Phase::Idle
+        );
     }
 
     /// The Windows runner's worker stopped with "database is locked" after a restore: a search

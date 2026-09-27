@@ -42,10 +42,15 @@ fn hit(r: &rusqlite::Row) -> rusqlite::Result<Hit> {
 // p50 0.3 s, p95 0.8 s). Fine for MCP and the viewer; the injection hook (PR-F, 300 ms) should
 // keep only the rarest trigrams (measured in docs/pr-e0.md).
 pub(crate) fn trigrams(query: &str) -> Vec<String> {
+    trigrams_upto(query, 64)
+}
+
+/// `trigrams` up to `cap` of them.
+pub(crate) fn trigrams_upto(query: &str, cap: usize) -> Vec<String> {
     const SEPARATORS: &str = "、。，．,.!?！？「」『』()（）[]{}:;：；\"'`<>";
     let hiragana = |c: &char| ('\u{3040}'..='\u{309f}').contains(c);
     let mut out: Vec<String> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for run in query.split(|c: char| c.is_whitespace() || SEPARATORS.contains(c)) {
         let chars: Vec<char> = run.chars().collect();
         for w in chars.windows(3) {
@@ -53,8 +58,7 @@ pub(crate) fn trigrams(query: &str) -> Vec<String> {
             // The query keeps its spelling: SQLite folds it as it folded the index, and a char
             // whose lowercase is longer (`İ`) would no longer be one trigram.
             let folded: String = w.iter().map(|&c| fold(c)).collect();
-            if !w.iter().all(hiragana) && !seen.contains(&folded) && out.len() < 64 {
-                seen.push(folded);
+            if out.len() < cap && !w.iter().all(hiragana) && seen.insert(folded) {
                 out.push(w.iter().collect());
             }
         }

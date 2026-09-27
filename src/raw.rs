@@ -410,6 +410,26 @@ impl Raw {
         )?)
     }
 
+    /// The first prompt this device recorded in one agent's session, as `after` returns it: the
+    /// session's goal for the curator (milestone 3 Task 7). A scan by label, as `turns`.
+    pub fn first_prompt(&self, agent: &str, session: &str) -> Result<Option<Event>> {
+        let seq: Option<i64> = self.conn.query_row(
+            "SELECT MIN(seq) FROM records WHERE device = ?1 AND type = 'event' AND agent = ?2
+               AND session = ?3 AND kind = 'prompt'",
+            rusqlite::params![self.device, agent, session],
+            |r| r.get(0),
+        )?;
+        let Some(seq) = seq else { return Ok(None) };
+        Ok(self
+            .after(&self.device, seq - 1, 1)?
+            .into_iter()
+            .find(|r| r.seq == seq)
+            .and_then(|r| match r.item {
+                Item::Event(e) => Some(*e),
+                _ => None,
+            }))
+    }
+
     /// The typed prompts and harness envelopes this device recorded in one agent's session (Task
     /// 11). A scan by label: sessions have no index (spec 1.6).
     pub fn turns(&self, agent: &str, session: &str) -> Result<i64> {
@@ -754,6 +774,30 @@ impl Raw {
             Some((Some(from), Some(to))) => Some((from, to)),
             _ => None,
         })
+    }
+
+    /// The ops appended with `device`'s last window op that is not a recuration: the window
+    /// before the next one, whose claims the next one carries (milestone 3 Task 7).
+    pub fn last_window_ops(&self, device: &str) -> Result<Vec<Op>> {
+        use rusqlite::OptionalExtension;
+        let batch: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT batch FROM ops WHERE device = ?1 AND type = 'window'
+                   AND COALESCE(json_extract(body, '$.recurate'), 0) = 0
+                 ORDER BY op_seq DESC LIMIT 1",
+                [device],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(batch) = batch else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .ops_after(device, batch - 1, 1_000)?
+            .into_iter()
+            .take_while(|o| o.batch == batch)
+            .collect())
     }
 
     /// D1: this device's ops after `op_seq` as backup lines, from `max_bytes` of lines on only
