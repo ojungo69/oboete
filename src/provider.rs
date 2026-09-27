@@ -2121,7 +2121,7 @@ mod tests {
             } = &mut p
             {
                 *n = name.into();
-                *daily_budget = budget;
+                *daily_budget = Some(budget);
             }
             p
         };
@@ -2432,7 +2432,7 @@ mod tests {
             base_url: url,
             key_file: None,
             model: "m".into(),
-            daily_budget: 10,
+            daily_budget: Some(10),
             timeout_s: 10,
             retry_429: false,
             extra: Default::default(),
@@ -2461,7 +2461,7 @@ mod tests {
             base_url: url,
             key_file: None,
             model: "m".into(),
-            daily_budget: 10,
+            daily_budget: Some(10),
             timeout_s: 10,
             retry_429: false,
             extra: Default::default(),

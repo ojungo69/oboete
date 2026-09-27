@@ -202,7 +202,7 @@ mod tests {
             base_url: "http://127.0.0.1:9".into(),
             key_file: None,
             model: "m".into(),
-            daily_budget: 10,
+            daily_budget: Some(10),
             timeout_s: 1,
             retry_429: false,
             extra: Default::default(),
