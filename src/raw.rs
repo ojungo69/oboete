@@ -340,6 +340,17 @@ impl Raw {
         )?)
     }
 
+    /// The typed prompts and harness envelopes this device recorded in one agent's session (Task
+    /// 11). A scan by label: sessions have no index (spec 1.6).
+    pub fn turns(&self, agent: &str, session: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM records WHERE device = ?1 AND type = 'event' AND agent = ?2
+               AND session = ?3 AND kind IN ('prompt', 'envelope')",
+            rusqlite::params![self.device, agent, session],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Up to `limit` records of `device` after `seq`, in seq order.
     pub fn after(&self, device: &str, seq: i64, limit: usize) -> Result<Vec<Record>> {
         let mut st = self.conn.prepare(

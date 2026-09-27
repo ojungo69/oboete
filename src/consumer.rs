@@ -3,5 +3,6 @@
 
 pub mod compress;
 pub mod fts;
+pub mod gaps;
 pub mod manifest;
 pub mod rescan;

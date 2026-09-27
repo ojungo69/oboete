@@ -82,8 +82,13 @@ pub fn events(
             } else {
                 "prompt"
             };
-            // A turn whose text was all `<private>` is still a turn when no text is kept anyway.
-            if !settings.store_prompts && !typed.trim().is_empty() {
+            // A turn whose text was all `<private>` is none, whatever `store_prompts` says: so
+            // whether a turn is recorded never depends on the settings, and Task 11 can count
+            // a transcript's turns under any of them.
+            if prompt.is_empty() {
+                return Vec::new();
+            }
+            if !settings.store_prompts {
                 // The turn is still an event (Task 11 counts it), without what was typed.
                 return vec![capture(
                     agent,
@@ -93,9 +98,6 @@ pub fn events(
                     ts,
                     settings,
                 )];
-            }
-            if prompt.is_empty() {
-                return Vec::new();
             }
             (kind, json!({"prompt": base64_runs(&prompt)}))
         }
@@ -141,7 +143,14 @@ pub fn events(
                 _ => return Vec::new(),
             }
         }
-        "SessionEnd" => ("end", json!({"reason": payload.get("reason").map(clean)})),
+        "SessionEnd" => {
+            let mut body = json!({"reason": payload.get("reason").map(clean)});
+            // Task 11: the worker counts the transcript's turns against raw's.
+            if let Some(path) = str_field(payload, &["transcript_path"]) {
+                body["transcript"] = json!(path);
+            }
+            ("end", body)
+        }
         _ => return Vec::new(), // PreToolUse and the rest carry nothing to keep
     };
     vec![capture(agent, kind, body, payload, ts, settings)]
@@ -668,11 +677,9 @@ mod tests {
         assert_eq!(v[0].event.kind, "prompt");
         assert_eq!(body(&v[0].event), json!({"omitted": true}));
         assert!(!format!("{:?}", v[0]).contains("zebra"));
-        // A turn that was all private is a turn too.
+        // A turn that was all private is none, as with prompts on.
         let private = json!({"session_id": "s", "prompt": "<private>zebra</private>"});
-        let v = events("claude", "UserPromptSubmit", &private, 0, &s);
-        assert_eq!(v.len(), 1);
-        assert_eq!(body(&v[0].event), json!({"omitted": true}));
+        assert!(events("claude", "UserPromptSubmit", &private, 0, &s).is_empty());
         let on = events(
             "claude",
             "UserPromptSubmit",

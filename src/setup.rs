@@ -1640,6 +1640,10 @@ pub fn doctor(home: &Path) -> Result<()> {
         if let Some(last) = last {
             println!("  rewound after lost commits: {n} time(s), last {last}");
         }
+        // Task 11: turns a transcript holds that raw did not record, per agent.
+        for l in crate::consumer::gaps::doctor(&k) {
+            println!("  {l}");
+        }
     }
     let (backup, backup_well) = crate::backup::doctor(home);
     for l in &backup {
