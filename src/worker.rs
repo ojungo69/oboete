@@ -470,6 +470,72 @@ pub fn running(home: &Path) -> bool {
         .is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
 }
 
+/// `oboete rebuild` (spec 1.7): under the worker lock, knowledge.db is moved aside and every
+/// consumer runs from zero over raw.db and the op log, with no curation phase, so no provider is
+/// called. The old file is removed once the new one is complete; a rebuild that fails keeps it,
+/// named in the error.
+pub fn rebuild(home: &Path) -> Result<()> {
+    use anyhow::Context;
+    let held = lock(home)?
+        .ok_or_else(|| anyhow::anyhow!("a worker is running; try again when it has exited"))?;
+    let name = format!("knowledge.db.rebuilding-{}", crate::db::now_ms());
+    let aside = set_aside(home, &name)?;
+    let kept = home.join(&name);
+    run_holding(home, 0, consumers(home), || {}, Some(held), None).with_context(|| {
+        // A home with no knowledge.db yet set nothing aside.
+        if kept.exists() {
+            format!(
+                "rebuild; the old knowledge.db is kept as {}",
+                kept.display()
+            )
+        } else {
+            "rebuild".to_owned()
+        }
+    })?;
+    // The rebuild is complete: an old file that will not go is left and named, not a failure.
+    for f in aside {
+        if let Err(e) = std::fs::remove_file(&f) {
+            eprintln!(
+                "oboete: rebuilt; {} is left ({e}): delete it by hand",
+                f.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// knowledge.db moved aside as `name`, its sidecars with it under the names SQLite looks for
+/// beside that file (`...-wal`, `...-shm`), so the kept file opens with its last commits. Under
+/// raw.lock held exclusively, as a restore moves it: every reader of knowledge.db holds raw.db
+/// open (a shared hold) while it reads. The sidecars first: never the file's name free with an
+/// old WAL beside it that SQLite would replay into the new file. A move that fails puts back the
+/// ones before it, so the file never stays without its WAL.
+fn set_aside(home: &Path, name: &str) -> Result<Vec<std::path::PathBuf>> {
+    use anyhow::Context;
+    let _swap = crate::raw::lock_for_swap(home)?;
+    // Names joined to `home`, never through its display form: a home path need not be UTF-8.
+    let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    for ext in ["-wal", "-shm", ""] {
+        let from = home.join(format!("knowledge.db{ext}"));
+        if !from.exists() {
+            continue;
+        }
+        let to = home.join(format!("{name}{ext}"));
+        if let Err(e) = std::fs::rename(&from, &to) {
+            // One that cannot go back is named, so the owner can put it back by hand.
+            let mut why = format!("move {}", from.display());
+            for (from, to) in moved.iter().rev() {
+                if let Err(back) = std::fs::rename(to, from) {
+                    why += &format!("; {} stays as {} ({back})", from.display(), to.display());
+                }
+            }
+            return Err(e).context(why);
+        }
+        moved.push((from, to));
+    }
+    Ok(moved.into_iter().map(|(_, to)| to).collect())
+}
+
 /// One run now, for `oboete restore` and tests. It waits up to 2 s for the lock rather than
 /// return at once: a worker a hook started holds it only while it drains, and a lock just
 /// released can still be held for a moment by a child another thread forked (it keeps the open
@@ -547,6 +613,80 @@ mod tests {
     fn two_ops(raw: &mut Raw) {
         let op = || (raw::OpKind::Claim, serde_json::json!({}));
         raw.append_ops(&[op(), op()]).unwrap();
+    }
+
+    /// A rebuild keeps the old knowledge.db under names SQLite opens as one database: a commit
+    /// still in its WAL reads there.
+    #[test]
+    fn the_file_a_rebuild_sets_aside_opens_with_its_wal() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        {
+            let k = knowledge::open(p).unwrap();
+            k.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(7);")
+                .unwrap();
+            // A copy of the file and its WAL while the commit is only in the WAL (the last
+            // close would checkpoint it), put back in place once the connection is gone.
+            for ext in ["", "-wal"] {
+                std::fs::copy(
+                    p.join(format!("knowledge.db{ext}")),
+                    p.join(format!("copy{ext}")),
+                )
+                .unwrap();
+            }
+        }
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(p.join(format!("knowledge.db{ext}")));
+        }
+        for ext in ["", "-wal"] {
+            std::fs::rename(
+                p.join(format!("copy{ext}")),
+                p.join(format!("knowledge.db{ext}")),
+            )
+            .unwrap();
+        }
+        let aside = set_aside(p, "kept").unwrap();
+        let kept = p.join("kept");
+        assert!(!p.join("knowledge.db").exists() && aside.contains(&kept));
+        let x: i64 = Connection::open(&kept)
+            .unwrap()
+            .query_row("SELECT x FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(x, 7);
+    }
+
+    /// A home whose path is not UTF-8 (valid on Linux; macOS refuses such a name) keeps its file
+    /// under the right name.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_home_path_that_is_not_utf8_is_set_aside_in_place() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join(std::ffi::OsStr::from_bytes(b"home-\xff"));
+        std::fs::create_dir(&home).unwrap();
+        drop(knowledge::open(&home).unwrap());
+        let aside = set_aside(&home, "kept").unwrap();
+        assert!(aside.contains(&home.join("kept")));
+        assert!(
+            aside
+                .iter()
+                .all(|f| f.parent() == Some(home.as_path()) && f.exists())
+        );
+    }
+
+    /// A move that fails puts back the ones before it: the file never stays without its WAL.
+    #[test]
+    fn a_set_aside_that_fails_puts_the_wal_back() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        std::fs::write(p.join("knowledge.db"), b"db").unwrap();
+        std::fs::write(p.join("knowledge.db-wal"), b"wal").unwrap();
+        // The file's new name is a directory's, so its move fails after the WAL's.
+        std::fs::create_dir(p.join("kept")).unwrap();
+        std::fs::write(p.join("kept").join("x"), b"").unwrap();
+        assert!(set_aside(p, "kept").is_err());
+        assert_eq!(std::fs::read(p.join("knowledge.db-wal")).unwrap(), b"wal");
+        assert!(!p.join("kept-wal").exists() && p.join("knowledge.db").exists());
     }
 
     /// MUST-M14 for the op log: a restore that lost ops moves an op consumer back to what raw

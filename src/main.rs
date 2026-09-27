@@ -67,6 +67,9 @@ enum Cmd {
         #[arg(long, default_value_t = 60_000)]
         idle_ms: u64,
     },
+    /// Rebuild knowledge.db (claims, digests, indexes, manifests) from raw.db and its op log,
+    /// with no AI call
+    Rebuild,
     /// Rebuild raw.db from the backup segments (MUST-M15); the current file is kept aside.
     /// The worker does this by itself when raw.db is damaged.
     Restore,
@@ -470,6 +473,11 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             } else {
                 println!("{provider} was not stopped");
             }
+            Ok(())
+        }
+        Cmd::Rebuild => {
+            worker::rebuild(&home)?;
+            println!("knowledge.db rebuilt from raw.db, with no AI call");
             Ok(())
         }
         Cmd::Restore => {

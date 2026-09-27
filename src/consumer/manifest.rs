@@ -1165,6 +1165,90 @@ mod tests {
         assert_eq!(shown_digest(&store), None);
     }
 
+    /// Spec 1.7: `oboete rebuild` makes knowledge.db again from raw.db and the op log: the same
+    /// current claims and the same manifest, no provider called, no old file left.
+    #[test]
+    fn rebuilding_gives_the_same_claims_with_no_call() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let said = |ts: i64, text: &str| {
+            ev(
+                "prompt",
+                "s3",
+                ts,
+                cwd.path(),
+                serde_json::json!({"prompt": text}),
+            )
+        };
+        let (tabs, old) = claimed(
+            &mut store,
+            said(1, "Use tabs."),
+            "decision",
+            "decided",
+            vec![],
+        );
+        let (spaces, _) = claimed(
+            &mut store,
+            said(2, "Use spaces instead."),
+            "decision",
+            "decided",
+            vec![old],
+        );
+        let (flaky, _) = claimed(
+            &mut store,
+            said(3, "The CI test is flaky."),
+            "open item",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[tabs, spaces, flaky]).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let knowledge = home.path().join("knowledge.db");
+        // Each read holds raw.db open only while it reads, as a hook does: a rebuild moves
+        // knowledge.db aside only while no store is open.
+        let snapshot = || {
+            let k = rusqlite::Connection::open(&knowledge).unwrap();
+            let claims = crate::claims::current(&k, "r").unwrap();
+            let store = raw::open(home.path()).unwrap();
+            (claims, shown(home.path(), &store).unwrap())
+        };
+        drop(store);
+        let before = snapshot();
+        assert_eq!(before.0.len(), 2);
+        // Only the old file has it.
+        rusqlite::Connection::open(&knowledge)
+            .unwrap()
+            .execute_batch("CREATE TABLE marker(x)")
+            .unwrap();
+        // A home that curates: the rebuild still asks no provider (the phase would open
+        // providers.db for its pending window, here with no budget, so nothing leaves).
+        let config = "[summary]\ncurate = true\n[[providers]]\nkind = \"openai\"\n\
+                      name = \"spent\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n\
+                      daily_budget = 0\n";
+        std::fs::write(home.path().join("config.toml"), config).unwrap();
+        worker::rebuild(home.path()).unwrap();
+        assert_eq!(snapshot(), before);
+        let k = rusqlite::Connection::open(&knowledge).unwrap();
+        let marker: i64 = k
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'marker'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, 0);
+        assert!(!home.path().join("providers.db").exists());
+        let left = std::fs::read_dir(home.path()).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("rebuilding-")
+        });
+        assert!(!left);
+    }
+
     /// Spec 4.9: the repository's current decisions and open items, the newest first, read when
     /// the text is: a superseded, retracted, merely proposed or other repository's claim is not
     /// among them, and reading writes nothing.
