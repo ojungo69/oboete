@@ -1301,6 +1301,14 @@ fn claude_stream(stdout: &str) -> Result<String, CallError> {
     Ok(result.to_string())
 }
 
+/// A subscription's reset time in epoch ms. Claude and codex give seconds, but a value already in
+/// ms (1e12 and up: 2001 in ms, the year 33658 in seconds) is kept, as claude-mem does, so a
+/// change of unit is not read as a rest a thousand times too long.
+fn reset_ms(v: &Value) -> Option<i64> {
+    v.as_f64()
+        .map(|t| (if t < 1e12 { t * 1000.0 } else { t }) as i64)
+}
+
 /// When claude's stream said its subscription should rest (Claude decision C1, at claude-mem's
 /// lines since 2026-09-28, owner delegated): a window's reset once it is used to its line (five
 /// hours 95%, a week 93%, the Sonnet week 92%), or in the last quarter hour of a five-hour window
@@ -1317,7 +1325,7 @@ fn claude_rest(stdout: &str) -> Option<i64> {
         .filter(|e| e["type"] == "rate_limit_event")
         .map(|e| e["rate_limit_info"].clone())
         .collect();
-    let reset = |i: &Value| i["resetsAt"].as_i64().map(|s| s.saturating_mul(1000));
+    let reset = |i: &Value| reset_ms(&i["resetsAt"]);
     if infos.iter().any(|i| {
         i["errorCode"] == "credits_required" || i["isUsingOverage"] == true && reset(i).is_none()
     }) {
@@ -1523,7 +1531,7 @@ fn codex_rest(read: &Value, now: i64) -> Option<i64> {
         .flat_map(|s| [&s["primary"], &s["secondary"]])
         .filter(|w| w.is_object())
         .collect();
-    let reset = |w: &Value| w["resetsAt"].as_i64().map(|s| s.saturating_mul(1000));
+    let reset = |w: &Value| reset_ms(&w["resetsAt"]);
     let cap = |t: i64| t.min(now + MAX_SUBSCRIPTION_REST.as_millis() as i64);
     // The latest reset of some limits' windows, if every one of those limits gives one.
     let latest = |limits: &[&Value]| {
@@ -1956,6 +1964,16 @@ mod tests {
 
     /// Issue #166: codex rests at claude's lines, read from its app server's windows; a reached
     /// limit or no included usage rests it until the latest reset, or until the owner acts.
+    #[test]
+    fn a_reset_is_read_in_seconds_or_milliseconds() {
+        let ms = 1_790_744_400_000_i64;
+        assert_eq!(reset_ms(&json!(1_790_744_400_i64)), Some(ms));
+        assert_eq!(reset_ms(&json!(ms)), Some(ms));
+        assert_eq!(reset_ms(&json!(1_790_744_400.5)), Some(ms + 500));
+        assert_eq!(reset_ms(&json!(null)), None);
+        assert_eq!(reset_ms(&json!("1790744400")), None);
+    }
+
     #[test]
     fn codex_rests_at_the_lines_its_app_server_reports() {
         let now = db::now_ms();
