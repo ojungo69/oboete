@@ -1047,11 +1047,20 @@ fn transcript_tail(path: &Path, tail: u64) -> String {
 /// `<user_query>` (unverified); metadata / `turn_ended` lines have no role.
 fn cursor_turns(path: &Path) -> Vec<(String, String)> {
     let mut turns: Vec<(String, String)> = Vec::new();
-    // The whole conversation, so a turn pushed out by large tool calls is still found and the
-    // n-th repeat of a prompt is counted from the start (SessionEnd is off the hot path).
-    // ponytail: past 16 MiB only the tail is read; repeats before it are then not counted.
-    for line in transcript_tail(path, 16 << 20).lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
+    let Ok(f) = std::fs::File::open(path) else {
+        return turns;
+    };
+    // The whole conversation, one line at a time (SessionEnd is off the hot path): a turn before
+    // large tool calls is still found, and the n-th repeat of a prompt is counted from the start.
+    let mut reader = std::io::BufReader::new(f);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match std::io::BufRead::read_until(&mut reader, b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&line)) else {
             continue;
         };
         let text = v["message"]["content"]
@@ -1881,6 +1890,27 @@ mod tests {
         let failed = crate::failure::since(home.path()).expect("marked");
         let text = inject_text(home.path(), cwd.path(), Some("s"));
         assert_eq!(text, crate::failure::line(failed));
+    }
+
+    #[test]
+    fn cursor_recovery_reads_turns_before_a_large_tail() {
+        // A turn followed by more than the old 16 MiB window of tool data is still recovered.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let line = |role: &str, content: Value| {
+            json!({"role": role, "message": {"content": content}}).to_string() + "\n"
+        };
+        let big = "x".repeat(17 << 20);
+        let text = line(
+            "user",
+            json!([{"type": "text", "text": "<user_query>early</user_query>"}]),
+        ) + &line("assistant", json!([{"type": "tool_use", "input": big}]))
+            + &line("assistant", json!([{"type": "text", "text": "done"}]));
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(
+            cursor_turns(&path),
+            [("early".to_string(), "done".to_string())]
+        );
     }
 
     #[test]
