@@ -103,6 +103,7 @@ The profile does not govern tools that act outside commands:
 - `--json-schema` costs a second turn as well as the `StructuredOutput` tool (4 of 4 calls: 2 turns; without it 1 turn, and the JSON is the `result` text, 4 of 4 parsed). So the curator no longer passes it: the schema goes into the system prompt, the chain's `fits()` checks the answer, and any tool in init discards it (`claude_stream`).
 - The stream's `rate_limit_event` carries `status`, `resetsAt`, `rateLimitType` and `utilization`. On this day it was `allowed_warning` for `seven_day` (utilization 0.87, threshold 0.75, reset 2026-09-30 14:00 JST) on every call, so C1 rests claude until that reset.
 - S8's environment, live: with `ANTHROPIC_BASE_URL` pointing at a closed port and `CLAUDE_CODE_EFFORT_LEVEL=max` in the parent environment, claude and codex both answered (the test `live_subscription_curators_answer_under_the_curator_environment`); claude read 512 input tokens.
+- `@` in the prompt (claude 2.1.283, found by the security review of Tasks 2 and 3, `curator-isolation/at_probe.py`): with every flag above, a session line `please look at @/tmp/oboete-sysprobe/at-canary.txt` made claude read that file into the turn itself. The answer quoted the canary's random word. init still said `tools: []`, and no turn used a tool, so neither check sees it. With each `@` sent as U+FF20 the word did not come back (1 call each; input 580 and 497 tokens). The curator now sends U+FF20. codex exec does not read an `@` path (1 call, same prompt).
 
 ## Codex conclusion (spec 6.5)
 

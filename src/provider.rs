@@ -832,7 +832,10 @@ fn headless_command(
                 cmd.args(["--model", m]);
             }
             cmd.args(["--disallowedTools", "Agent", "Task", "Monitor", "mcp__*"]);
-            Some(prompt.to_owned())
+            // claude -p reads a file named by `@<path>` in the prompt into the turn itself, with no
+            // tool and nothing in the init event (2.1.283, 2026-09-27): a planted `@~/.ssh/id_ed25519`
+            // would be sent and could come back in a summary. No `@` reaches it; U+FF20 reads the same.
+            Some(prompt.replace('@', "\u{FF20}"))
         }
         "grok" => {
             cmd.arg("--prompt-file").arg(write("task.md", prompt)?);
@@ -1347,6 +1350,9 @@ mod tests {
         assert_eq!(args[at + 1..], ["Agent", "Task", "Monitor", "mcp__*"]);
         // --json-schema would hand claude a StructuredOutput tool.
         assert!(!args.iter().any(|a| a == "--json-schema"), "{args:?}");
+        let (_, stdin) =
+            headless_command("claude", None, &scratch.0, "look at @/etc/hostname", "{}").unwrap();
+        assert_eq!(stdin.unwrap(), "look at \u{FF20}/etc/hostname");
     }
 
     #[test]
