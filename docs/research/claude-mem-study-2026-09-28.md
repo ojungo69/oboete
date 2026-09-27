@@ -159,8 +159,9 @@ Citations are prefixed with **claude-mem** or **oboete**.
 - **Proposal:** build it at M5 as the spec says, with repo keys and absolute folder prefixes, and no globs.
   - Normalize both separators. Expand a leading `~` only after separator normalization, which is the order claude-mem got wrong.
   - Canonicalize folder entries the same way capture canonicalizes the cwd. Otherwise an entry typed through a symlink (macOS `/var` → `/private/var`) never matches.
-  - Compare on path components, so `/a/b` does not match `/a/bc`. Compare case-insensitively on Windows and on the iMac's usually case-insensitive file system.
-  - Refuse a bad entry when `capture exclude` adds it: it must be absolute and non-empty. Keep and match a folder that does not exist yet.
+  - A folder that does not exist yet is kept and matched: canonicalize its longest existing ancestor and append the remaining components as typed. Canonicalize again at match time once more of it exists, so a symlink created later on the path still matches.
+  - Compare on path components, so `/a/b` does not match `/a/bc`. Compare case-insensitively only where the volume is: Windows (NTFS, unless the folder carries the per-directory case-sensitive flag) and a macOS volume whose `pathconf(_PC_CASE_SENSITIVE)` is 0, asked of the entry's longest existing ancestor. A case-sensitive APFS volume compares exactly, so excluding `/work/Secret` does not stop capture under a distinct `/work/secret`.
+  - Refuse a bad entry when `capture exclude` adds it: it must be absolute and non-empty.
     - Do not copy "log and skip". A skipped entry leaves its folder recorded, and after that only forget can remove it (`docs/spec.md:622`, `:627`).
     - The rest of the spec is fail-closed: "a session with a path that cannot be classified sends no content" (`docs/spec.md:457`).
   - Add a test for the separator/`~` order and for a symlinked entry. Add globs later, and only if someone asks for them.
@@ -525,6 +526,7 @@ Citations are prefixed with **claude-mem** or **oboete**.
   2. pushes tombstones and withdrawals first;
   3. re-pushes its own ops, and relays the replica ops it holds for other devices. Relayed ops are deduplicated by origin device, seq and hash, and are sent only after the deny-list (`docs/spec.md:501`) and the send-time exclusion check (`docs/spec.md:453-467`).
   - The hub accepts relayed ops only after a new epoch, and only for keys it does not have.
+  - A relay must be authorized, because the stored hash is not an origin signature: with the token binding under Hub (Engineering lessons), device A's token cannot push device B's ops, and exempting relays without proof would let A forge ops for B. So relaying runs only under an owner-issued, epoch-scoped recovery grant (for example `oboete hub recover` mints a one-epoch relay token on one device). The DO records relayed ops as relayed, with the relaying device, and accepts them only for origins that have not pushed in the new epoch; once an origin pushes, its own ops win and the grant no longer covers it.
   - Relaying needs other devices' op envelopes kept byte for byte. The spec does not say so yet: open question 17 (`docs/spec.md:1643`) only leaves open where the kept op log lives, so this requirement is added when that question is settled.
   - M4's wipe test (`docs/spec.md:506`) adds a relay case.
 - **Value:** medium (goal 1 when a device is lost).
@@ -647,7 +649,7 @@ Labels:
   - `canonicalJson` normalizes `-0` to 0 rather than refusing it (`services/sync-api/src/canonical-content.ts:74`).
   - oboete does not port the per-entity rev check (oboete `docs/spec.md:406`). Rec 2 still needs hub-protocol.md to state the answer for a known op id with a different hash.
 - **Bind each device token to its origin device id** (round-2 lane, not verified, low).
-  - When a token first pushes, the DO records that token's origin device id, and refuses ops from any other origin with 403. The push loop selects only ops from its own origin.
+  - When a token first pushes, the DO records that token's origin device id, and refuses ops from any other origin with 403. The push loop selects only ops from its own origin. The only exception is Recommendation 23's relay, under its epoch-scoped recovery grant.
   - Keep a retired id in meta, so that id's unsynced ops can still be pushed.
   - claude-mem's single identity source is enforced by convention only (claude-mem `src/services/sync/SyncApply.ts:16-20`).
 - **Free-plan refusal is a wait** (oboete's own need, salvaged from Dropped #29's fit verifier; not a claude-mem mechanism).
