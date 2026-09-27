@@ -471,6 +471,35 @@ pub fn running(home: &Path) -> bool {
 /// released can still be held for a moment by a child another thread forked (it keeps the open
 /// file until it execs), which made hook tests run nothing under a parallel suite.
 #[allow(dead_code)] // Task 12's replay drains without waiting.
+/// `oboete rebuild` (spec 1.7): under the worker lock, knowledge.db is moved aside and every
+/// consumer runs from zero over raw.db and the op log, with no curation phase, so no provider is
+/// called. The old file is removed once the new one is complete; a rebuild that fails keeps it,
+/// named in the error.
+pub fn rebuild(home: &Path) -> Result<()> {
+    use anyhow::Context;
+    let held = lock(home)?
+        .ok_or_else(|| anyhow::anyhow!("a worker is running; try again when it has exited"))?;
+    let suffix = format!("rebuilding-{}", crate::db::now_ms());
+    // The sidecars first, as a quarantine does: never the file's name free with an old WAL
+    // beside it that SQLite would replay into the new file.
+    let mut aside = Vec::new();
+    for ext in ["-wal", "-shm", ""] {
+        let from = home.join(format!("knowledge.db{ext}"));
+        if from.exists() {
+            let to = home.join(format!("knowledge.db{ext}.{suffix}"));
+            std::fs::rename(&from, &to).with_context(|| format!("move {}", from.display()))?;
+            aside.push(to);
+        }
+    }
+    run_holding(home, 0, consumers(home), || {}, Some(held), None).with_context(|| {
+        format!("rebuild; the old knowledge.db is kept as knowledge.db.{suffix}")
+    })?;
+    for f in aside {
+        std::fs::remove_file(&f).with_context(|| format!("remove {}", f.display()))?;
+    }
+    Ok(())
+}
+
 pub fn run_once(home: &Path) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut held = lock(home)?;
