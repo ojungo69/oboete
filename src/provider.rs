@@ -474,16 +474,24 @@ fn openai_compat(
         .filter(|s| s.is_finite() && *s >= 0.0);
     // Capped after decoding: a gzip answer of a few KB on the wire can decode to far more.
     let mut raw = Vec::new();
-    std::io::Read::read_to_end(
+    let read = std::io::Read::read_to_end(
         &mut std::io::Read::take(resp.body_mut().as_reader(), MAX_RESPONSE_BYTES + 1),
         &mut raw,
-    )
-    .map_err(|e| CallError::other(format!("read body: {}", read_error(&e))).rated(rate))?;
-    if raw.len() as u64 > MAX_RESPONSE_BYTES {
-        return Err(CallError::other(format!(
-            "invalid output: response larger than {MAX_RESPONSE_BYTES} bytes"
-        ))
-        .rated(rate));
+    );
+    let whole = read.is_ok() && raw.len() as u64 <= MAX_RESPONSE_BYTES;
+    if status == 200 {
+        if let Err(e) = read {
+            return Err(CallError::other(format!("read body: {}", read_error(&e))).rated(rate));
+        }
+        if !whole {
+            return Err(CallError::other(format!(
+                "invalid output: response larger than {MAX_RESPONSE_BYTES} bytes"
+            ))
+            .rated(rate));
+        }
+    } else if !whole {
+        // An error answer keeps its status whatever its body: it is not billed.
+        raw.clear();
     }
     let text = String::from_utf8_lossy(&raw);
     if status != 200 {
@@ -1954,6 +1962,24 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.invalid(), "{}", e.message);
+        // An error answer too large to read is still an error answer, not a billed one.
+        let (url, _) = serve(
+            "429 Too Many Requests",
+            vec![b' '; MAX_RESPONSE_BYTES as usize + 10],
+            "",
+        );
+        let e = openai_compat(
+            &url,
+            None,
+            "m",
+            10,
+            &Default::default(),
+            &Default::default(),
+            "p",
+            &json!({}),
+        )
+        .unwrap_err();
+        assert_eq!((e.status, e.message.as_str()), (Some(429), "http 429"));
         // 2 KB on the wire, 2 MiB once decoded.
         let bomb = include_bytes!("testdata/two-mib-of-spaces.gz").to_vec();
         let (url, _) = serve_once(bomb, "Content-Encoding: gzip\r\n");

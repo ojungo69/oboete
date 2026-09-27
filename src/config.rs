@@ -477,6 +477,18 @@ pub fn load(home: &Path) -> Result<Config> {
         };
         cfg.providers.insert(at, gemini());
     }
+    // A CLI's subscription pays for it, and its answer has no cap to price; prices are for HTTP.
+    if let Some(p) = cfg
+        .providers
+        .iter()
+        .find(|p| matches!(p, Provider::Cli { .. }) && p.limits().is_paid())
+    {
+        anyhow::bail!(
+            "{}: provider \"{}\" is a CLI: its limits take no USD prices",
+            path.display(),
+            p.name()
+        );
+    }
     match cfg.embedding.provider.as_str() {
         "none" => {}
         "workers-ai" => anyhow::ensure!(
@@ -762,6 +774,16 @@ model = "haiku"
         );
         assert_eq!(own, ["gemini"]);
         std::fs::write(dir.join("config.toml"), "gemini = \"first\"\n").unwrap();
+        assert!(load(dir).is_err());
+        // A CLI entry takes no prices: its subscription pays, and its answer has no cap.
+        let cli = "[[providers]]\nkind = \"cli\"\nname = \"claude\"\ncli = \"claude\"\n";
+        std::fs::write(dir.join("config.toml"), cli).unwrap();
+        assert!(load(dir).is_ok());
+        std::fs::write(
+            dir.join("config.toml"),
+            format!("{cli}limits = {{ usd_per_mtok_out = 1.0 }}\n"),
+        )
+        .unwrap();
         assert!(load(dir).is_err());
     }
 
