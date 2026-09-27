@@ -99,7 +99,9 @@ const MAX_BODY_CHARS: usize = 1_000;
 /// What the gates let through, and what they did to the rest.
 #[derive(Debug, Default, PartialEq)]
 pub struct Gated {
-    pub kept: Vec<(Draft, Evidence)>,
+    /// Each with its evidence: the quote's first, then a change's reason's when another line
+    /// gives it (spec 3.3).
+    pub kept: Vec<(Draft, Vec<Evidence>)>,
     /// Drafts not kept, and supersedes entries taken out of a kept one: the draft's id and why.
     pub dropped: Vec<(String, &'static str)>,
     /// Kept drafts changed on the way (a lower status, the speaker of the quote's line, repo
@@ -133,19 +135,32 @@ pub fn check(
             g.dropped.push((d.id, "over_cap"));
             continue;
         }
+        let mut evidence = vec![e];
         if d.kind == "change" {
             if bare_file_count(&d.body) {
                 g.dropped.push((d.id, "a bare file count"));
                 continue;
             }
-            // The record's words, or none: a reason no line of the claim's own session and
-            // repository gives is the curator's guess.
-            let why = d.why.trim();
+            // The record's words with their evidence, or none: a reason no line of the claim's
+            // own session and repository gives is the curator's guess. Another line's reason
+            // keeps that line as evidence, so removing it takes the reason's anchor too.
+            let why = d.why.trim().to_owned();
             let own = |l: &&Line| l.key == line.key && l.repo == line.repo;
-            d.why = if w.lines.iter().filter(own).any(|l| l.text.contains(why)) {
-                crate::redact::outbound_with(why, rules)
-            } else {
-                String::new()
+            let given = w
+                .lines
+                .iter()
+                .filter(own)
+                .find_map(|l| crate::curate::locate(w, &l.id, &why));
+            d.why = match given {
+                Some(at) => {
+                    if (at.device.as_str(), at.seq)
+                        != (evidence[0].device.as_str(), evidence[0].seq)
+                    {
+                        evidence.push(at);
+                    }
+                    crate::redact::outbound_with(&why, rules)
+                }
+                None => String::new(),
             };
             if d.why.is_empty() {
                 d.why = "unknown".into();
@@ -185,7 +200,7 @@ pub fn check(
             d.status = "proposed".into();
             lower(&d, why);
         }
-        g.kept.push((d, e));
+        g.kept.push((d, evidence));
         own.push((own_words, line.repo.as_deref(), &line.key));
     }
     // Once every status is settled: what a sibling is, after the gates. Siblings of one kind
@@ -194,7 +209,7 @@ pub fn check(
     let uids: Vec<String> = g
         .kept
         .iter()
-        .map(|(d, e)| crate::claims::uid(&d.kind, e))
+        .map(|(d, e)| crate::claims::uid(&d.kind, &e[0]))
         .collect();
     let settled: HashSet<&str> = g
         .kept
@@ -334,19 +349,24 @@ fn bare(quote: &str) -> bool {
     }
     let mut rest = format!(" {} ", words(&quote.to_lowercase()).join(" "));
     for p in ACCEPT.iter().chain(FILLER) {
-        rest = if p.is_ascii() {
-            rest.replace(&format!(" {p} "), " ")
+        if p.is_ascii() {
+            // Neighbours share a space: "yes yes" needs a second pass.
+            let spaced = format!(" {p} ");
+            while rest.contains(&spaced) {
+                rest = rest.replace(&spaced, " ");
+            }
         } else {
-            rest.replace(p, "")
-        };
+            rest = rest.replace(p, "");
+        }
     }
     rest.chars().filter(|c| c.is_alphanumeric()).count() <= 4
 }
 
-/// A tool line of `line`'s session and repository (a run before a checkout change tested another
-/// one) that did not fail, printed a pass and no failure (MUST-M1): each
-/// `failed` it prints is a `0 failed`, and it reports no error (`1 error`, a line that starts
-/// `error:`). Its output only: an input such as `echo passed` ran nothing.
+/// A command run of `line`'s session and repository (a run before a checkout change tested
+/// another one) that did not fail, printed a pass and no failure (MUST-M1): each `failed` it
+/// prints is a `0 failed`, and it reports no error (`1 error`, a line that starts `error:`). Its
+/// output only, decoded when structured: an input such as `echo passed` ran nothing, and a read
+/// of a file that says tests passed ran none.
 fn passing_run(w: &Window, line: &Line) -> bool {
     static NONE_FAILED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static ERRORS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -355,13 +375,50 @@ fn passing_run(w: &Window, line: &Line) -> bool {
         regex::Regex::new(r"(?m)\b[1-9]\d*\s+errors?\b|^\s*error(?:\[|:)").unwrap()
     });
     w.lines.iter().any(|l| {
-        l.key == line.key && l.repo == line.repo && l.role == (Role::Tool { failed: false }) && {
-            let text = l.source_text().to_lowercase();
-            PASSED.iter().any(|p| text.contains(p))
-                && text.matches("failed").count() == none.find_iter(&text).count()
-                && !errors.is_match(&text)
-        }
+        l.key == line.key
+            && l.repo == line.repo
+            && l.role == (Role::Tool { failed: false })
+            && runs(&l.text)
+            && {
+                let text = decoded(l.source_text()).to_lowercase();
+                PASSED.iter().any(|p| text.contains(p))
+                    && text.matches("failed").count() == none.find_iter(&text).count()
+                    && !errors.is_match(&text)
+            }
     })
+}
+
+/// Whether a tool line is a command run (any agent's shell), not a read or a search.
+fn runs(text: &str) -> bool {
+    let name = text
+        .strip_prefix("[tool ")
+        .and_then(|t| t.split([' ', ']']).next())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    ["bash", "shell", "command", "exec", "terminal"]
+        .iter()
+        .any(|k| name.contains(k))
+}
+
+/// A tool's output as text: a structured one (Claude's Bash gives `{"stdout", "stderr", …}`) as
+/// its strings, one to a line, so an error at the start of stderr starts a line.
+fn decoded(output: &str) -> String {
+    fn strings(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+            serde_json::Value::Object(o) => o.values().for_each(|x| strings(x, out)),
+            _ => {}
+        }
+    }
+    match serde_json::from_str::<serde_json::Value>(output) {
+        Ok(v) if v.is_object() || v.is_array() => {
+            let mut out = Vec::new();
+            strings(&v, &mut out);
+            out.join("\n")
+        }
+        _ => output.to_owned(),
+    }
 }
 
 /// Whether `text` holds one of `list`: a Latin entry as whole words (a word ending in `n't` is
@@ -713,6 +770,25 @@ mod tests {
         }
         let clean = tool("=== 3 passed, 0 errors in 0.2s ===", false);
         assert_eq!(done(&[clean.clone(), reply(fixed)]), "done");
+        // Only a run counts: a file read that says tests passed ran nothing.
+        let read = (
+            "tool",
+            json!({"tool": "Read", "input": "{\"file_path\":\"README.md\"}",
+            "output": "The previous release passed all tests.", "failed": false}),
+        );
+        assert_eq!(done(&[read, reply(fixed)]), "proposed");
+        // Claude's Bash output is structured: an error in its stderr is a failure too.
+        let structured = |stdout: &str, stderr: &str| {
+            let output = json!({"stdout": stdout, "stderr": stderr}).to_string();
+            (
+                "tool",
+                json!({"tool": "Bash", "input": "cargo test", "output": output, "failed": false}),
+            )
+        };
+        let broken = structured("3 passed", "error: could not compile");
+        assert_eq!(done(&[broken, reply(fixed)]), "proposed");
+        let fine = structured("test result: ok. 4 passed; 0 failed", "");
+        assert_eq!(done(&[fine, reply(fixed)]), "done");
         // A bare "yes" names nothing done, whatever ran before it.
         let passed = tool("test result: ok. 4 passed; 0 failed", false);
         let w = window(&[passed, reply("I fixed the parser."), user("Yes.")]);
@@ -722,6 +798,13 @@ mod tests {
         assert_eq!(one(&w, "done", "user", "Is the parser fixed").0, "proposed");
         let w = window(&[user("直った、ありがとう。")]);
         assert_eq!(one(&w, "done", "user", "直った").0, "done");
+    }
+
+    #[test]
+    fn a_repeated_acceptance_is_still_bare() {
+        assert!(bare("Yes, yes, yes, yes."));
+        assert!(bare("OK ok ok"));
+        assert!(!bare("Yes, yes, use tabs everywhere."));
     }
 
     #[test]
@@ -923,6 +1006,20 @@ mod tests {
             let g = check(&w, &[], &[], vec![d], &Rules::default());
             assert_eq!(g.kept[0].0.why, "unknown", "{other}");
         }
+        // A reason from another line is kept with that line's evidence, so removing the line
+        // takes the reason's anchor too (spec 3.3: why with evidence).
+        let later = window(&[
+            user("Renamed the module."),
+            user("I did it because the old name clashed."),
+        ]);
+        let mut d = draft(&later, "c1", "done", "user", quote);
+        (d.0.kind, d.0.why) = ("change".into(), "the old name clashed".into());
+        let g = check(&later, &[], &[], vec![d], &Rules::default());
+        let (kept, evidence) = &g.kept[0];
+        assert_eq!(kept.why, "the old name clashed");
+        let seqs: Vec<i64> = evidence.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, [later.lines[0].seq, later.lines[1].seq]);
+        assert_eq!(evidence[1].quote, "the old name clashed");
         let explained = change("3 files changed to fix the login check.", "");
         assert_eq!(explained.kept.len(), 1);
         for bare in [

@@ -843,7 +843,7 @@ pub fn run_phase(
                         speaker: d.speaker,
                         scope: d.scope,
                         body: d.body,
-                        evidence: vec![evidence],
+                        evidence,
                         supersedes: d.supersedes,
                         recipe: r.provider.clone(),
                         tier: r.tier,
