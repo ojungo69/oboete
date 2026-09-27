@@ -939,10 +939,14 @@ fn curator_env(
 /// `rate_limit_event` with `allowed_warning` or `rejected` rests claude until its reset (Claude
 /// decision C1), and `credits_required` for a day, until the owner acts.
 fn claude_stream(stdout: &str) -> Result<String, CallError> {
+    // A line that does not parse could be the assistant turn that used a tool: the run is
+    // discarded rather than judged on the lines that did parse.
     let events: Vec<Value> = stdout
         .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
+        .filter(|l| !l.trim().is_empty())
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()
+        .map_err(|e| CallError::other(format!("invalid output: claude stream line: {e}")))?;
     let init = events
         .iter()
         .find(|e| e["type"] == "system" && e["subtype"] == "init")
@@ -967,10 +971,9 @@ fn claude_stream(stdout: &str) -> Result<String, CallError> {
              discarded",
         ));
     }
-    if events
-        .iter()
-        .any(|e| e["errorCode"] == "credits_required" || e["error"] == "credits_required")
-    {
+    if events.iter().any(|e| {
+        e["type"] == "rate_limit_event" && e["rate_limit_info"]["errorCode"] == "credits_required"
+    }) {
         return Err(CallError {
             status: Some(429),
             retry_after_s: Some(MAX_COOLDOWN.as_secs_f64()),
@@ -1456,13 +1459,27 @@ mod tests {
     fn credits_required_stops_claude_for_a_day() {
         let out = [
             clean_init(),
-            json!({"type": "result", "subtype": "error_during_execution", "is_error": true,
-                "errorCode": "credits_required"}),
+            // claude 2.1.283 folds the API's error_code into the rate-limit info (`Kbe`).
+            json!({"type": "rate_limit_event", "rate_limit_info":
+                {"status": "rejected", "errorCode": "credits_required"}}),
+            json!({"type": "result", "subtype": "error_during_execution", "is_error": true}),
         ]
         .map(|v| v.to_string())
         .join("\n");
         let e = claude_stream(&out).err().unwrap();
         assert_eq!(cooldown_for(&e), Some(MAX_COOLDOWN));
+    }
+
+    #[test]
+    fn a_stream_line_that_does_not_parse_discards_the_run() {
+        let out = [
+            clean_init().to_string(),
+            r#"{"type": "assistant", "message": {"content": [{"type": "tool_use""#.to_owned(),
+            json!({"type": "result", "subtype": "success", "result": "{}"}).to_string(),
+        ]
+        .join("\n");
+        let e = claude_stream(&out).expect_err("a truncated line");
+        assert!(e.message.contains("stream line"), "{}", e.message);
     }
 
     /// Live, with `--ignored`, in the dogfood user only (curator CLI tests run there): each
