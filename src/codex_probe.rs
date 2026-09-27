@@ -124,14 +124,23 @@ impl Model {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (s, halt, actions) = (seen.clone(), stop.clone(), Arc::new(actions));
         let bearer = Arc::new(format!("bearer {key}"));
+        let busy = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         std::thread::spawn(move || {
+            use std::sync::atomic::Ordering::SeqCst;
             for conn in listener.incoming().flatten() {
-                if halt.load(std::sync::atomic::Ordering::SeqCst) {
+                if halt.load(SeqCst) {
                     break;
                 }
-                let (s, actions, bearer) = (s.clone(), actions.clone(), bearer.clone());
+                // Past the cap a connection is closed unread.
+                if busy.fetch_add(1, SeqCst) >= HANDLERS {
+                    busy.fetch_sub(1, SeqCst);
+                    continue;
+                }
+                let (s, actions, bearer, busy) =
+                    (s.clone(), actions.clone(), bearer.clone(), busy.clone());
                 std::thread::spawn(move || {
                     let _ = answer(conn, &s, &actions, &bearer);
+                    busy.fetch_sub(1, SeqCst);
                 });
             }
         });
@@ -154,6 +163,12 @@ impl Drop for Model {
 
 /// Most one request may take: codex 0.155.1 sends about 50 KB.
 const MAX_REQUEST: usize = 4 << 20;
+/// Most a request's headers may take, and how long the whole request may take to arrive: the port
+/// is on the command line, so another local process can connect before it is refused.
+const MAX_HEADERS: u64 = 64 << 10;
+const REQUEST_TIME: std::time::Duration = std::time::Duration::from_secs(30);
+/// Requests answered at once: codex has one open per thread (the root and one sub-agent).
+const HANDLERS: usize = 8;
 
 fn answer(
     conn: TcpStream,
@@ -161,12 +176,21 @@ fn answer(
     actions: &Actions,
     bearer: &str,
 ) -> std::io::Result<()> {
-    conn.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
-    let mut reader = BufReader::new(conn.try_clone()?);
+    let deadline = std::time::Instant::now() + REQUEST_TIME;
+    let mut reader = BufReader::new(conn.try_clone()?.take(MAX_HEADERS));
     let (mut length, mut line, mut ours) = (0, String::new(), false);
     loop {
         line.clear();
-        if reader.read_line(&mut line)? == 0 || line == "\r\n" {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        conn.set_read_timeout(Some(left))?;
+        // Closed, or past the cap, before the headers ended: nothing is answered.
+        if reader.read_line(&mut line)? == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        if line == "\r\n" {
             break;
         }
         let lower = line.to_ascii_lowercase();
@@ -188,6 +212,9 @@ fn answer(
         return out.write_all(b"HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n");
     }
     let mut body = vec![0; length.min(MAX_REQUEST)];
+    reader.get_mut().set_limit(MAX_REQUEST as u64);
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    conn.set_read_timeout(Some(left.max(std::time::Duration::from_millis(1))))?;
     reader.read_exact(&mut body)?;
     let request: Value = serde_json::from_slice(&body).unwrap_or_default();
     let meta: Value = request["client_metadata"]["x-codex-turn-metadata"]
@@ -548,5 +575,47 @@ mod tests {
             ["functions.exec", "web_search"]
         );
         assert!(seen.login);
+    }
+
+    /// Another local process can find the port: what it opens is bounded in handlers, in header
+    /// bytes and in time, and codex is answered once it lets go.
+    #[test]
+    fn connections_that_are_not_codex_are_bounded() {
+        let model = Model::start(actions()).unwrap();
+        let connect = || {
+            let c = TcpStream::connect(("127.0.0.1", model.port)).unwrap();
+            c.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            c
+        };
+        // A header that never ends is cut at the cap and the connection closed.
+        let mut endless = connect();
+        let _ = endless.write_all(&vec![b'a'; 2 * MAX_HEADERS as usize]);
+        let mut rest = Vec::new();
+        assert!(
+            endless
+                .read_to_end(&mut rest)
+                .map_or(true, |_| rest.is_empty())
+        );
+        // Idle connections take every handler; one more is closed unread.
+        let idle: Vec<TcpStream> = (0..HANDLERS).map(|_| connect()).collect();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut extra = connect();
+        assert_eq!(extra.read(&mut [0u8; 16]).unwrap(), 0);
+        drop(idle);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Codex is answered again.
+        let mut c = connect();
+        let body = r#"{"input":[]}"#;
+        write!(
+            c,
+            "POST /v1/responses HTTP/1.1\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n{body}",
+            model.key,
+            body.len()
+        )
+        .unwrap();
+        let mut answer = String::new();
+        c.read_to_string(&mut answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
     }
 }

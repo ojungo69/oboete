@@ -1834,10 +1834,18 @@ pub fn doctor(home: &Path) -> Result<()> {
                 None => format!("no key, model {model}"),
             },
             config::Provider::Cli { cli, .. } => {
-                if on_path(cli) {
-                    "on PATH".to_string()
+                let path = if on_path(cli) {
+                    "on PATH"
                 } else {
-                    "not on PATH".to_string()
+                    "not on PATH"
+                };
+                if crate::isolation::provable(cli) {
+                    path.to_string()
+                } else {
+                    format!(
+                        "{path}; skipped as a curator ({})",
+                        crate::isolation::Gate::NotProven.why()
+                    )
                 }
             }
         };

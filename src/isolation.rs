@@ -52,6 +52,11 @@ pub fn gate(db: &Connection, cli: &str) -> Result<Gate> {
     }
 }
 
+/// Whether `cli` has a gate that can pass: any other is always skipped as a curator.
+pub fn provable(cli: &str) -> bool {
+    matches!(cli, "claude" | "codex")
+}
+
 fn gate_codex(db: &Connection, exe: &Path, home: &Path) -> Result<Gate> {
     // The curator's own kind of working directory: private, fresh, removed after.
     let Ok(scratch) = scratch_dir() else {
@@ -566,13 +571,17 @@ mod tests {
             Gate::Failed("codex features list: did not finish in 5 s".into())
         );
         assert!(started.elapsed() < std::time::Duration::from_secs(20));
-        // The descendant went with it.
+        // The descendant went with it: it no longer runs. An orphan's zombie is its new parent's to
+        // reap (PID 1 in a container without an init may never do it).
         let pid = std::fs::read_to_string(&pid).unwrap();
         let alive = || {
-            Command::new("kill")
-                .args(["-0", pid.trim()])
-                .status()
-                .is_ok_and(|s| s.success())
+            Command::new("ps")
+                .args(["-o", "stat=", "-p", pid.trim()])
+                .output()
+                .is_ok_and(|o| {
+                    let stat = String::from_utf8_lossy(&o.stdout);
+                    !stat.trim().is_empty() && !stat.trim_start().starts_with('Z')
+                })
         };
         let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while alive() && std::time::Instant::now() < until {
