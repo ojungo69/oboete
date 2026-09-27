@@ -99,23 +99,25 @@ pub fn fresh(k: &Connection, repo: &str) -> Result<Option<Vec<String>>> {
     if !kept {
         return Ok(None);
     }
-    let Some(lines) = k
+    let Some((lines, ts)) = k
         .query_row(
-            "SELECT lines FROM digests WHERE repo = ?1
+            "SELECT lines, ts FROM digests WHERE repo = ?1
              ORDER BY ts DESC, op_device DESC, op_seq DESC LIMIT 1",
             [repo],
-            |r| r.get::<_, String>(0),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
         )
         .optional()?
     else {
         return Ok(None);
     };
     let lines: Vec<Line> = serde_json::from_str(&lines)?;
-    // One indexed lookup per cited uid: a chain tip of `repo` that is not retracted.
+    // Indexed lookups per cited uid: a chain tip of `repo` that is not retracted, and that the
+    // owner has not corrected since (its text or status may no longer be what the digest says).
     let sql = format!("{} AND a.uid = ?2", crate::claims::TIPS);
     let mut tip = k.prepare(&sql)?;
+    let mut corrected = k.prepare("SELECT 1 FROM corrections WHERE uid = ?1 AND ts >= ?2")?;
     for uid in lines.iter().flat_map(|l| &l.uids) {
-        if !tip.exists(params![repo, uid])? {
+        if !tip.exists(params![repo, uid])? || corrected.exists(params![uid, ts])? {
             return Ok(None);
         }
     }

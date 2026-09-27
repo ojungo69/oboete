@@ -1155,7 +1155,7 @@ mod tests {
             .append_ops(&[digest("r", &[("Tabs only.", &[&tabs_uid])])])
             .unwrap();
         assert_eq!(shown_digest(&store).as_deref(), Some("- Tabs only."));
-        let (spaces, _) = claimed(
+        let (spaces, spaces_uid) = claimed(
             &mut store,
             said(3, "Use spaces instead."),
             "decision",
@@ -1163,6 +1163,25 @@ mod tests {
             vec![tabs_uid.clone()],
         );
         store.append_ops(&[spaces]).unwrap();
+        assert_eq!(shown_digest(&store), None);
+        // A claim the owner corrects after the digest: its text may no longer be the digest's.
+        store
+            .append_ops(&[digest("r", &[("Spaces now.", &[&spaces_uid])])])
+            .unwrap();
+        assert_eq!(shown_digest(&store).as_deref(), Some("- Spaces now."));
+        let correction = crate::claims::CorrectionOp {
+            uid: spaces_uid.clone(),
+            anchor: crate::claims::Anchor {
+                device: store.device().to_owned(),
+                seq: 3,
+            },
+            status: None,
+            body: Some("Spaces, four of them.".into()),
+        };
+        let correction = serde_json::to_value(correction).unwrap();
+        store
+            .append_ops(&[(crate::raw::OpKind::Correction, correction)])
+            .unwrap();
         assert_eq!(shown_digest(&store), None);
     }
 
