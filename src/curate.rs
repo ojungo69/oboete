@@ -865,7 +865,7 @@ pub fn run_phase(
                     .collect();
                 let op = json!({"outcome": "curated", "provider": r.provider, "summary": summary,
                     "dropped": dropped, "lowered": gated.lowered});
-                return cover(raw, db, &w, within_op_cap(op), claims);
+                return cover(raw, db, &w, op, claims);
             }
             // Counted like a provider that failed: no answer this window can use.
             Err(e) => vec![Fallback {
@@ -950,7 +950,7 @@ fn waiting(p: &Pending, now: i64) -> Phase {
 }
 
 /// The window op, with the claims it yields, in one transaction: the curation checkpoint moves
-/// with the window's knowledge (D2, spec 3.1).
+/// with the window's knowledge (D2, spec 3.1). The op is cut to the op cap with its range in it.
 fn cover(
     raw: &mut Raw,
     db: &Connection,
@@ -963,7 +963,7 @@ fn cover(
     op["to_seq"] = w.to_seq.into();
     op["to_offset"] = w.to_offset.into();
     op["elided"] = w.elided.clone().into();
-    let mut ops = vec![(OpKind::Window, op)];
+    let mut ops = vec![(OpKind::Window, within_op_cap(op))];
     ops.extend(claims.into_iter().map(|c| (OpKind::Claim, c)));
     #[cfg(test)]
     if STOP_BEFORE_APPEND.with(std::cell::Cell::get) {
@@ -3011,6 +3011,39 @@ mod tests {
         assert_eq!(
             listed as u64 + op["cut"].as_u64().unwrap(),
             4 * MAX_CLAIMS as u64
+        );
+    }
+
+    /// The cap holds for the op as appended: an op that fits only before its range is added is
+    /// still cut, so the window is covered.
+    #[test]
+    fn a_window_op_is_cut_to_the_op_cap_with_its_range() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let base = json!({"outcome": "curated", "dropped": [["c1", ""]], "lowered": []});
+        let reason = "r".repeat(crate::raw::MAX_OP_BYTES - base.to_string().len());
+        let op = json!({"outcome": "curated", "dropped": [["c1", reason]], "lowered": []});
+        assert_eq!(op.to_string().len(), crate::raw::MAX_OP_BYTES);
+        let w = Window {
+            device: "d".into(),
+            from_seq: 1,
+            from_offset: None,
+            to_seq: 1,
+            to_offset: None,
+            text: String::new(),
+            elided: Vec::new(),
+            full: false,
+            lines: Vec::new(),
+        };
+        assert_eq!(
+            cover(&mut raw, &db, &w, op, Vec::new()).unwrap(),
+            Phase::Covered
+        );
+        let op = &windows(&raw)[0];
+        assert!(op.to_string().len() <= crate::raw::MAX_OP_BYTES);
+        assert_eq!(
+            (op["cut"].as_u64(), op["to_seq"].as_i64()),
+            (Some(1), Some(1))
         );
     }
 
