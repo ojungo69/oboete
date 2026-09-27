@@ -135,7 +135,8 @@ pub fn text(
         .transpose()
 }
 
-/// `text` with spec 4.9's current decisions and open items of `repo`, read when the text is:
+/// `text` with spec 4.9's current decisions and open items of `repo`, and after them its newest
+/// digest while every claim it cites is current (spec 4.4), read when the text is:
 /// claims come from curation, which runs while the owner is idle and appends no record this
 /// consumer steps on, so a section built with the text would miss the last session's decisions
 /// at the next SessionStart. Before the owner's directives (spec 4.9's order); the hook's cut then
@@ -159,10 +160,23 @@ fn with_decisions(k: &Connection, repo: &str, text: &str) -> Result<String> {
             format!("- {date} {}: {}\n", c.kind, one_line(&c.body, CLIP))
         })
         .collect();
-    if lines.is_empty() {
+    let mut section = String::new();
+    if !lines.is_empty() {
+        section = format!("## Current decisions and open items\n{}", lines.concat());
+    }
+    if let Some(digest) = crate::digest::fresh(k, repo)? {
+        let lines: Vec<String> = digest
+            .iter()
+            .map(|l| format!("- {}\n", one_line(l, CLIP)))
+            .collect();
+        section.push_str(&format!(
+            "## Digest of the last session\n{}",
+            lines.concat()
+        ));
+    }
+    if section.is_empty() {
         return Ok(text.to_owned());
     }
-    let section = format!("## Current decisions and open items\n{}", lines.concat());
     let at = AFTER_DECISIONS
         .iter()
         .filter_map(|h| {
@@ -1047,6 +1061,108 @@ mod tests {
         };
         let op = (crate::raw::OpKind::Claim, serde_json::to_value(op).unwrap());
         (op, uid)
+    }
+
+    /// A digest op of `repo` whose lines each cite `uids`.
+    fn digest(repo: &str, lines: &[(&str, &[&String])]) -> (crate::raw::OpKind, Value) {
+        let lines: Vec<Value> = lines
+            .iter()
+            .map(|(text, uids)| serde_json::json!({"text": text, "uids": uids}))
+            .collect();
+        let op = serde_json::json!({"agent": "claude", "session": "s3", "repo": repo,
+            "through": {"device": "d", "seq": 1}, "lines": lines});
+        (crate::raw::OpKind::Digest, op)
+    }
+
+    /// Spec 3.4, 4.4: SessionStart shows the repository's newest digest only while every claim it
+    /// cites is current: a retracted or superseded one makes it stale, and an older digest is not
+    /// shown in its place. Another repository's digest and a malformed one are never shown.
+    #[test]
+    fn the_manifest_shows_the_newest_digest_only_while_its_claims_are_current() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let said = |ts: i64, text: &str| {
+            ev(
+                "prompt",
+                "s3",
+                ts,
+                cwd.path(),
+                serde_json::json!({"prompt": text}),
+            )
+        };
+        let (tabs, tabs_uid) = claimed(
+            &mut store,
+            said(1, "Use tabs."),
+            "decision",
+            "decided",
+            vec![],
+        );
+        let (flaky, flaky_uid) = claimed(
+            &mut store,
+            said(2, "The CI test is flaky."),
+            "open item",
+            "decided",
+            vec![],
+        );
+        store.append_ops(&[tabs, flaky.clone()]).unwrap();
+        store
+            .append_ops(&[
+                digest("r", &[("An older digest.", &[&tabs_uid])]),
+                digest(
+                    "r",
+                    &[
+                        ("Tabs are the rule.", &[&tabs_uid]),
+                        ("CI is flaky.", &[&flaky_uid]),
+                    ],
+                ),
+                digest("other", &[("Another repository.", &[&tabs_uid])]),
+                digest(
+                    "r",
+                    &[(
+                        "x".repeat(crate::digest::MAX_CHARS + 1).as_str(),
+                        &[&tabs_uid],
+                    )],
+                ),
+            ])
+            .unwrap();
+        let shown_digest = |store: &Raw| {
+            worker::run_once(home.path()).unwrap();
+            let text = shown(home.path(), store).unwrap();
+            text.split("## Digest of the last session\n")
+                .nth(1)
+                .map(|d| d.split("\n## ").next().unwrap().to_owned())
+        };
+        // The malformed one is the newest op, and is skipped with its reason.
+        assert_eq!(
+            shown_digest(&store).as_deref(),
+            Some("- Tabs are the rule.\n- CI is flaky.")
+        );
+        let k = rusqlite::Connection::open(home.path().join("knowledge.db")).unwrap();
+        let reason: String = k
+            .query_row("SELECT reason FROM digest_skips", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(reason, "over the 2,000-character cap");
+        // Retracted: stale, and the older digest does not come back.
+        let mut retract = flaky.1.clone();
+        (retract["id"], retract["status"]) = ("r1".into(), "retracted".into());
+        store.append_ops(&[(flaky.0, retract)]).unwrap();
+        assert_eq!(shown_digest(&store), None);
+        // A newer digest of current claims is shown, until one of them is superseded.
+        store
+            .append_ops(&[digest("r", &[("Tabs only.", &[&tabs_uid])])])
+            .unwrap();
+        assert_eq!(shown_digest(&store).as_deref(), Some("- Tabs only."));
+        let (spaces, _) = claimed(
+            &mut store,
+            said(3, "Use spaces instead."),
+            "decision",
+            "decided",
+            vec![tabs_uid.clone()],
+        );
+        store.append_ops(&[spaces]).unwrap();
+        assert_eq!(shown_digest(&store), None);
     }
 
     /// Spec 4.9: the repository's current decisions and open items, the newest first, read when
