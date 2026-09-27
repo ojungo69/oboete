@@ -31,3 +31,28 @@ fn doctor_names_a_cli_curator_that_is_always_skipped() {
     );
     assert!(!line("codex").contains("skipped as a curator"), "{text}");
 }
+
+/// A store doctor cannot read is one line and a failed exit, not the end of the report: the
+/// sections after it are still printed (doctor is needed most when a store is damaged).
+#[test]
+fn doctor_reports_past_a_store_it_cannot_read() {
+    let home = tempfile::tempdir().unwrap();
+    for db in ["knowledge.db", "oboete.db", "providers.db"] {
+        std::fs::write(
+            home.path().join(db),
+            "not a database, one of three damaged stores",
+        )
+        .unwrap();
+    }
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_oboete"))
+        .args(["--home", &home.path().to_string_lossy(), "doctor"])
+        .env("OBOETE_NO_SPAWN", "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    for db in ["knowledge.db", "oboete.db", "providers.db"] {
+        assert!(text.contains(&format!("cannot read {db}")), "{db}: {text}");
+    }
+    assert!(text.contains("providers (chain order):"), "{text}");
+    assert!(!out.status.success());
+}
