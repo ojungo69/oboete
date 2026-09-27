@@ -338,8 +338,9 @@ impl<'a> Chain<'a> {
                 Ok(a) => a.rate,
                 Err(e) => e.rate,
             };
-            // Only strict-schema providers enforce the shape; valid JSON of another shape from the
-            // rest would pass here and fail the window later, without trying the next provider.
+            // Only strict-schema providers enforce the shape: an answer the caller's check refuses
+            // (or, with no check, the schema) fails here, so the next provider is tried rather
+            // than the window failing later.
             let mut refused = None;
             let result = result.and_then(|a| {
                 refused = self.check.and_then(|check| check(&a.value));

@@ -776,17 +776,34 @@ impl Raw {
         })
     }
 
-    /// The ops appended with `device`'s last window op that is not a recuration: the window
-    /// before the next one, whose claims the next one carries (milestone 3 Task 7).
-    pub fn last_window_ops(&self, device: &str) -> Result<Vec<Op>> {
+    /// The ops appended with the last window op (not a recuration) that covered this device's
+    /// latest event of `agent`'s `session` before seq `before`: the session's previous window,
+    /// whose proposals its next window carries (milestone 3 Task 7, D12). Per session, since
+    /// sessions interleave: another session's window may come between.
+    pub fn previous_window_ops(&self, agent: &str, session: &str, before: i64) -> Result<Vec<Op>> {
         use rusqlite::OptionalExtension;
+        // Down the primary key from `before`: the session's latest event is usually close.
+        let seq: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT seq FROM records WHERE device = ?1 AND seq < ?2 AND type = 'event'
+                   AND agent = ?3 AND session = ?4 ORDER BY seq DESC LIMIT 1",
+                params![self.device, before, agent, session],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(seq) = seq else {
+            return Ok(Vec::new());
+        };
         let batch: Option<i64> = self
             .conn
             .query_row(
                 "SELECT batch FROM ops WHERE device = ?1 AND type = 'window'
                    AND COALESCE(json_extract(body, '$.recurate'), 0) = 0
+                   AND json_extract(body, '$.from_seq') <= ?2
+                   AND json_extract(body, '$.to_seq') >= ?2
                  ORDER BY op_seq DESC LIMIT 1",
-                [device],
+                params![self.device, seq],
                 |r| r.get(0),
             )
             .optional()?;
@@ -794,7 +811,7 @@ impl Raw {
             return Ok(Vec::new());
         };
         Ok(self
-            .ops_after(device, batch - 1, 1_000)?
+            .ops_after(&self.device, batch - 1, 1_000)?
             .into_iter()
             .take_while(|o| o.batch == batch)
             .collect())

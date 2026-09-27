@@ -623,8 +623,12 @@ pub fn run_phase(
         });
     }
     let mut shown = String::new();
-    let mut repos: Vec<&str> = w.lines.iter().filter_map(|l| l.repo.as_deref()).collect();
-    repos.dedup();
+    let mut repos: Vec<&str> = Vec::new();
+    for repo in w.lines.iter().filter_map(|l| l.repo.as_deref()) {
+        if !repos.contains(&repo) {
+            repos.push(repo);
+        }
+    }
     for repo in repos {
         for c in candidates(k, repo, &w.text)? {
             shown.push_str(&format!(
@@ -935,11 +939,16 @@ pub fn candidates(k: &Connection, repo: &str, text: &str) -> Result<Vec<crate::c
         return Ok(Vec::new());
     }
     let current = crate::claims::current(k, repo)?;
+    // The repository's own matches only, ranked, read until 20 are current: another
+    // repository's better matches never crowd them out.
     let mut st = k.prepare(
         "SELECT c.uid FROM claims_fts f JOIN claims c ON c.rowid = f.rowid
-         WHERE claims_fts MATCH ?1 ORDER BY rank LIMIT 200",
+         JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
+         WHERE claims_fts MATCH ?1 AND d.repo = ?2 ORDER BY rank",
     )?;
-    let ranked = st.query_map([grams.join(" OR ")], |r| r.get::<_, String>(0))?;
+    let ranked = st.query_map(rusqlite::params![grams.join(" OR "), repo], |r| {
+        r.get::<_, String>(0)
+    })?;
     let mut out = Vec::new();
     for uid in ranked {
         let uid = uid?;
@@ -977,10 +986,12 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<Strin
                 _ => None,
             }))
     };
-    let previous = raw.last_window_ops(&w.device)?;
     let mut out = String::new();
     for (key, repo) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
+        // A window that starts inside an event: its first part was in the previous window.
+        let before = w.from_seq + i64::from(w.from_offset.is_some());
+        let previous = raw.previous_window_ops(agent, session, before)?;
         let mut lines = Vec::new();
         if let Some(e) = raw.first_prompt(agent, session)?
             && let Some(goal) = long_text(&e)
@@ -2084,6 +2095,14 @@ mod tests {
             kept(&mut raw, "s3", "r", "The logo is blue."),
         ];
         raw.append_ops(&ops).unwrap();
+        // More than a page of better matches from another repository.
+        let crowd: Vec<_> = (0..250)
+            .map(|i| {
+                let text = "Should sessions move out of Postgres?";
+                kept(&mut raw, &format!("o{i}"), "other", text)
+            })
+            .collect();
+        raw.append_ops(&crowd).unwrap();
         let mut k = crate::knowledge::open(home.path()).unwrap();
         consume(&raw, &mut k);
         let found = candidates(&k, "r", "Should sessions move out of Postgres?").unwrap();
@@ -2228,19 +2247,33 @@ mod tests {
                          _: &AnswerCheck|
          -> Result<ChainResult> {
             sent.borrow_mut().push(p.to_owned());
+            let claims = if sent.borrow().len() == 1 {
+                json!([proposal])
+            } else {
+                json!([])
+            };
             Ok(ChainResult {
-                output: json!({"claims": [proposal], "summary": "s"}),
+                output: json!({"claims": claims, "summary": "s"}),
                 ..answered("fake")
             })
         };
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
         let k = kn();
         run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
+        // Another session's window comes between: the proposal is still the session's last.
+        let other = Event {
+            session: "t".into(),
+            ..prompt("Something else.")
+        };
+        raw.append(&other).unwrap();
+        run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
         raw.append(&prompt("Yes, do that.")).unwrap();
         run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
-        let second = &sent.borrow()[1];
-        assert!(second.contains("goal: Build the importer."), "{second}");
-        assert!(second.contains("proposed before "), "{second}");
-        assert!(second.contains(": Cache parsed files."), "{second}");
+        let sent = sent.borrow();
+        assert!(!sent[1].contains("Cache parsed files."), "{}", sent[1]);
+        let third = &sent[2];
+        assert!(third.contains("goal: Build the importer."), "{third}");
+        assert!(third.contains("proposed before "), "{third}");
+        assert!(third.contains(": Cache parsed files."), "{third}");
     }
 }
