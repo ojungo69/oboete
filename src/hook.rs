@@ -17,11 +17,17 @@ const MAX_FIELD: usize = 8_000;
 const REDACT_OVERLAP: usize = 4_000;
 /// Set on the curator CLIs oboete runs, so the curator's own session is never captured.
 pub const SKIP_ENV: &str = "OBOETE_SKIP";
-/// Blocks inside a prompt that are not part of what was asked, removed before anything is
-/// stored, in this order: context an IDE or another memory tool puts in front of the text (it may
-/// quote `<private>`), then `<private>`, the developer's opt-out (claude-mem's tag; unclosed, it
-/// hides the rest, where claude-mem would keep it all).
-pub(crate) const STRIP_BLOCKS: &[&str] = &["ide_opened_file", "hook_context", "private"];
+/// Blocks that are not part of what was asked or read, removed before anything is stored, in this
+/// order: context an IDE or another memory tool puts in front of the text (it may quote
+/// `<private>`), claude-mem's copy of the past that it writes into instruction files an agent
+/// reads, then `<private>`, the developer's opt-out (claude-mem's tag; unclosed, it hides the
+/// rest, where claude-mem would keep it all).
+pub(crate) const STRIP_BLOCKS: &[&str] = &[
+    "ide_opened_file",
+    "hook_context",
+    "claude-mem-context",
+    "private",
+];
 /// Prompts that are harness traffic, not typed: background task and teammate notifications and
 /// the /loop sentinel (13.5% of the 15,218 prompts claude-mem stored on this machine).
 /// ponytail: fixed prefix list; add one when a new envelope shows up as a prompt card.
@@ -2735,6 +2741,18 @@ mod tests {
         let start = std::time::Instant::now();
         strip_blocks(&many, true);
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    /// claude-mem writes its context block into instruction files (AGENTS.md, CLAUDE.md): a file an
+    /// agent reads keeps its own text, and the other memory's copy of the past is not stored.
+    #[test]
+    fn another_memorys_context_block_is_not_stored() {
+        // Built, so this file does not hold the pair it strips when an agent reads it.
+        let tag = "claude-mem-context";
+        let file = format!(
+            "<{tag}>\n# Memory Context\n\n### Sep 27\n| #1 | decided to use tabs |\n</{tag}>\n\n# Rules\nUse spaces."
+        );
+        assert_eq!(strip_blocks(&file, false), "# Rules\nUse spaces.");
     }
 
     #[test]
