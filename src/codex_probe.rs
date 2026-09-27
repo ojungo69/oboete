@@ -632,20 +632,29 @@ mod tests {
                 .read_to_end(&mut rest)
                 .map_or(true, |_| rest.is_empty())
         );
-        // Idle connections take every handler; one more is closed unread.
-        let idle: Vec<TcpStream> = (0..HANDLERS).map(|_| connect()).collect();
+        // Idle connections take every handler; one more is closed unread. Which one is not fixed:
+        // the handler of the connection above is counted until its thread ends, a moment after it
+        // closed the connection (on the Windows runner, after the next accept).
+        let idle: Vec<TcpStream> = (0..=HANDLERS).map(|_| connect()).collect();
         std::thread::sleep(std::time::Duration::from_millis(200));
-        // Closed (Linux, macOS) or reset (Windows), but not left waiting.
-        let mut extra = connect();
-        match extra.read(&mut [0u8; 16]) {
-            Ok(0) => {}
-            Err(e)
-                if !matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            other => panic!("the connection past the cap was answered or kept: {other:?}"),
-        }
+        // Closed (Linux, macOS) or reset (Windows), not left waiting.
+        let closed = idle
+            .iter()
+            .filter(|&c| {
+                let mut c: &TcpStream = c;
+                c.set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                    .unwrap();
+                match c.read(&mut [0u8; 16]) {
+                    Ok(0) => true,
+                    Ok(_) => panic!("a connection past the cap was answered"),
+                    Err(e) => !matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ),
+                }
+            })
+            .count();
+        assert!(closed >= 1, "every connection past the cap was kept");
         drop(idle);
         std::thread::sleep(std::time::Duration::from_millis(200));
         // Codex is answered again.
