@@ -100,10 +100,18 @@ fn segments(dir: &Path) -> Result<Vec<Segment>> {
 /// Returns the last segment written, `None` when there was nothing new. (The worker calls `run`.)
 #[cfg(test)]
 pub fn export(home: &Path) -> Result<Option<PathBuf>> {
+    Ok(export_from(&raw::open(home)?, &dir(home)?)?
+        .pop()
+        .map(|(p, _)| p))
+}
+
+/// `export`, with the time each segment took (Task 12 measures D11's segment cap with it).
+pub fn export_timed(home: &Path) -> Result<Vec<(PathBuf, std::time::Duration)>> {
     export_from(&raw::open(home)?, &dir(home)?)
 }
 
-fn export_from(raw: &Raw, dir: &Path) -> Result<Option<PathBuf>> {
+/// Each segment written, with the time it took to read, compress and seal.
+fn export_from(raw: &Raw, dir: &Path) -> Result<Vec<(PathBuf, std::time::Duration)>> {
     let device = raw.device();
     anyhow::ensure!(
         !device.is_empty() && device.chars().all(|c| c.is_ascii_alphanumeric()),
@@ -111,15 +119,16 @@ fn export_from(raw: &Raw, dir: &Path) -> Result<Option<PathBuf>> {
     );
     let mut last = cursor(raw, dir)?;
     if raw.max_seq()? <= last {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     if !dir.exists() {
         // Private when oboete makes it; a directory the user chose keeps its permissions.
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
         crate::db::private(dir, 0o700);
     }
-    let mut wrote = None;
+    let mut wrote = Vec::new();
     loop {
+        let started = std::time::Instant::now();
         let lines = raw.export_lines(last, SEGMENT_BYTES)?;
         let (Some(first), Some(end)) = (lines.first(), lines.last()) else {
             return Ok(wrote);
@@ -130,7 +139,8 @@ fn export_from(raw: &Raw, dir: &Path) -> Result<Option<PathBuf>> {
             text.push_str(l);
             text.push('\n');
         }
-        wrote = Some(seal(dir, &name(device, first, end), text.as_bytes())?);
+        let path = seal(dir, &name(device, first, end), text.as_bytes())?;
+        wrote.push((path, started.elapsed()));
         last = end;
     }
 }

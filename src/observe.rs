@@ -397,7 +397,7 @@ fn parse_observations(v: &Value) -> Result<Vec<db::Observation>> {
 }
 
 /// Peak resident size of this process (Linux), for the spike's resource report.
-fn vmhwm_kb() -> Option<u64> {
+pub(crate) fn vmhwm_kb() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     status
         .lines()

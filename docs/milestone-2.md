@@ -116,3 +116,30 @@ When a session ends, the `gaps` consumer counts the turns the agent's transcript
 - An `end` without a transcript path, with a file that is gone, or of an agent without a parser (only `claude` and `codex` have one) is "not checked", never a gap.
 - The transcript is parsed once per session end, one line kept at a time (the parser itself holds the lines to sort them: 39 MB for the largest dev session, 111 MB with its subagent files, 0.3 s). A resumed session is checked again at its next end.
 - Replaying `src/testdata/transcripts/{claude,codex}-basic.jsonl` through the hooks and running the worker gives 6 of 6 and 2 of 2 turns: no gap. The Claude fixture holds one line that is not JSON on purpose, so under the rule above it is now "not checked"; the Codex one still gives 2 of 2.
+
+## Replay and M14 (Task 12, 2026-09-27)
+
+`oboete --home <tmp> replay ../free-mem/test/fixtures/events-1000.jsonl --spawn-sample 300 --sizes 1,64,128,256`, release build. Replay records each event at the fixture's `ts` (issue #65; the 24-hour fixture keeps its day in raw). Then, per size, it spawns 300 `oboete hook claude PostToolUse` whose tool output is tool-output-like text of that size (paths, code, Japanese, every 20th line with words that wake redaction rules but no secret, as in Spike 1). Each spawn loads the settings, scans in full, writes the event and its ledger rows, and makes the worker-lock attempt it makes after every write; replay holds the lock meanwhile, so no worker starts. Then it exports the backup and times each segment.
+
+Hook, spawned, milliseconds (p50 / p95 / p99 / max):
+
+| Machine | 1 KB | 64 KB | 128 KB | 256 KB |
+|---|---|---|---|---|
+| WSL (ext4) | 10.5 / 12.1 / 12.7 / 25.8 | 12.1 / 13.8 / 15.9 / 18.9 | 12.8 / 14.4 / 15.2 / 15.7 | 14.9 / 16.2 / 16.7 / 17.2 |
+| Windows, GNU build (NTFS, Defender on) | 19.9 / 22.8 / 80.0 / 85.4 | 23.5 / 25.5 / 26.7 / 100.9 | 25.4 / 27.3 / 70.8 / 506.9 | 27.7 / 30.8 / 108.1 / 189.7 |
+| M1 iMac (APFS, fullfsync) | pending | pending | pending | pending |
+
+- An earlier Windows run without 128 KB gave p95 22.1, 24.8 and 31.0 ms at 1, 64 and 256 KB; the rules below use the worse of the two runs.
+- Against Spike 1's harness at full redaction (docs/spike/hook-m14.md), Windows' 1 KB p95 rose from 13.5 to 22.8 ms and its 256 KB p95 fell from 41.4 to 30.8 ms; WSL's moved from 9.4 to 12.1 ms and from 20.3 to 16.2 ms. This hook does more than that harness (settings, the ledger, the worker-lock attempt); which part costs Windows the extra 9 ms at 1 KB is not measured.
+- The iMac is offline: Tailscale showed it last seen about an hour before 10:05 JST. FileVault stops a restart at the unlock screen, so it may need the owner at the machine. It is measured with the same command when it is back, and the rules below are applied again.
+- The Windows run found a replay bug: the fixture's root placeholder was replaced with an unescaped Windows path, which broke the JSON (`invalid escape`). It is escaped now (`a_repo_root_with_a_backslash_replays`).
+- Windows is the GNU cross-build (`cargo zigbuild`), as in Spike 1. The MSVC artifact is unmeasured until CI builds it (D14).
+- Each size is measured as written whole: the runs above were made while the cap was 256 KB, and replay now sets `OBOETE_FIELD_CAP` on the hooks it spawns to the size measured (read only between 1 and 256 KB), so the iMac run measures the same writes under the lowered cap.
+
+The rules as applied, provisional until the iMac row is filled:
+
+- **The line** is the slowest machine's p95 at 1 KB: the floor every hook pays, which no cap can lower (on the iMac, `F_FULLFSYNC`; D3). Measured so far: Windows, 22.8 ms. Spike 1's iMac value (24.9 ms) came from a lighter harness, and Windows' 1 KB rose by 9 ms between that harness and this hook, so it is not reused.
+- **The cap (D4)** is the largest of 64, 128 and 256 KB whose p95 on the slowest machine stays within the line. With WSL and Windows none does (Windows is at 25.5 ms from 64 KB on), so it is the rule's smallest, 64 KB: `capture::MAX_FIELD_BYTES` goes from 256 KB to 64 KB, and a longer stored string keeps its first and last 32 KB around the cut marker. It moves to 128 KB if the iMac's 1 KB p95 is at least 27.3 ms and its own 128 KB p95 is within that; to 256 KB if at least 31.0 ms and its own 256 KB p95 is within that.
+- **M14's line per size (D14)**, for sizes up to the cap: 1 KB 22.8 ms, 64 KB 25.5 ms p95 (Windows), until the iMac is measured.
+- **The backup segment cap (D11)**: p95 per 8 MB segment is 117.7 ms on WSL and 153.8 ms on Windows (18 segments each), under 1 s, so `backup::SEGMENT_BYTES` stays 8 MB. Segments were 1 to 11 KB compressed: the synthetic payload repeats, so these sizes are a lower bound for real records; only the time feeds the rule.
+- Also measured: the in-process store path per fixture event (255 events, no spawn) is 1.5 / 2.1 ms p50 / p95 on WSL and 0.8 / 1.2 ms on Windows; the replay process's peak RSS on WSL is 126,000 KB (VmHWM is read from `/proc`, so Windows reports none).
