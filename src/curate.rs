@@ -47,6 +47,28 @@ pub struct Window {
     pub elided: Vec<i64>,
     /// Cut by its size: more records follow. Otherwise it ends at the device's last record.
     pub full: bool,
+    /// Its lines in `text`'s order, each with the id it has there (`L1`, `L2`, ...).
+    pub lines: Vec<Line>,
+}
+
+/// One line of a window's text, and where it comes from, so that a quote in it can be traced to
+/// its event (`locate`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Line {
+    pub id: String,
+    pub seq: i64,
+    /// As sent, after its id.
+    text: String,
+    source: Option<Source>,
+}
+
+/// The part of an event's long text a line shows: from byte `start`, as stored, with the runs of
+/// the long text the gate hides (in its own offsets). None when the gate hides all of it.
+#[derive(Debug, Clone, PartialEq)]
+struct Source {
+    start: usize,
+    text: String,
+    hidden: Vec<(usize, usize)>,
 }
 
 /// One record's share of a window.
@@ -64,6 +86,7 @@ struct Piece {
     /// A typed prompt that starts here: a turn boundary (D12).
     turn: bool,
     tool: bool,
+    source: Option<Source>,
 }
 
 /// Bytes of records read at a time while a window is cut, at least one record (spec 3.1: pages
@@ -135,15 +158,17 @@ pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Resul
     let (Some(first), Some(last)) = (pieces.first(), pieces.last()) else {
         return Ok(None);
     };
+    let (text, lines) = grouped(&pieces);
     Ok(Some(Window {
         device: device.to_owned(),
         from_seq: first.seq,
         from_offset: (first.from > 0).then_some(first.from),
         to_seq: last.seq,
         to_offset: last.to,
-        text: grouped(&pieces),
+        text,
         elided,
         full,
+        lines,
     }))
 }
 
@@ -168,6 +193,7 @@ fn empty(seq: i64) -> Piece {
         tokens: 0,
         turn: false,
         tool: false,
+        source: None,
     }
 }
 
@@ -321,6 +347,7 @@ impl<'r> Prepared<'r> {
     /// Its text from byte `from` of its long text to `to` (its end when none), through the gate.
     fn piece(&self, seq: i64, from: i64, to: Option<i64>) -> Piece {
         let mut text = self.head.clone();
+        let mut source = None;
         if let Some((long, hidden)) = &self.long {
             let start = boundary(long, from);
             let end = to.map_or(long.len(), |t| boundary(long, t)).max(start);
@@ -331,8 +358,20 @@ impl<'r> Prepared<'r> {
                 hidden.as_deref(),
                 self.rules,
             ));
+            source = hidden.as_ref().map(|runs| Source {
+                start,
+                text: long[start..end].to_owned(),
+                hidden: runs
+                    .iter()
+                    .copied()
+                    .filter(|&(s, e)| s < end && start < e)
+                    .collect(),
+            });
         }
-        self.with(seq, from, to, text)
+        Piece {
+            source,
+            ..self.with(seq, from, to, text)
+        }
     }
 
     fn with(&self, seq: i64, from: i64, to: Option<i64>, text: String) -> Piece {
@@ -346,6 +385,7 @@ impl<'r> Prepared<'r> {
             turn: self.turn && from == 0,
             tool: self.tool,
             text,
+            source: None,
         }
     }
 
@@ -399,7 +439,8 @@ fn line_tokens(text: &str) -> u32 {
     if text.is_empty() {
         0
     } else {
-        crate::budget::estimate(text) + 1
+        // Its id in front (`L2000 `, the most a window has) and its line break.
+        crate::budget::estimate(text) + crate::budget::estimate("L2000 ") + 1
     }
 }
 
@@ -423,22 +464,66 @@ fn next_char(s: &str, at: usize) -> usize {
 /// D12: the window's text with each session's records together, sessions in the order they first
 /// appear, records in seq order within each. Sessions are told apart as stored, not by their
 /// headings, which the gate may make alike.
-fn grouped(pieces: &[Piece]) -> String {
+fn grouped(pieces: &[Piece]) -> (String, Vec<Line>) {
     let mut sessions: Vec<(&str, &str)> = Vec::new();
     for p in pieces.iter().filter(|p| !p.text.is_empty()) {
         if !sessions.iter().any(|(k, _)| *k == p.key) {
             sessions.push((&p.key, &p.heading));
         }
     }
-    let mut out = String::new();
+    let (mut out, mut lines) = (String::new(), Vec::new());
     for (key, heading) in sessions {
         out.push_str(&format!("## {heading}\n"));
         for p in pieces.iter().filter(|p| p.key == key && !p.text.is_empty()) {
-            out.push_str(&p.text);
-            out.push('\n');
+            let id = format!("L{}", lines.len() + 1);
+            out.push_str(&format!("{id} {}\n", p.text));
+            lines.push(Line {
+                id,
+                seq: p.seq,
+                text: p.text.clone(),
+                source: p.source.clone(),
+            });
         }
     }
-    out
+    (out, lines)
+}
+
+/// Spec 3.2's evidence for a quote a curator gave from line `line` of `window`: the quote found
+/// verbatim in that line as it was sent and in the event's own long text where the gate shows it,
+/// with the event's own byte offsets. `None` when it is in neither, or only where the gate hid
+/// something (a quote with a mask in it, or text a mask stands for).
+pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims::Evidence> {
+    let line = window.lines.iter().find(|l| l.id == line)?;
+    let source = line.source.as_ref()?;
+    if quote.is_empty() || !line.text.contains(quote) {
+        return None;
+    }
+    let (at, _) = source.text.match_indices(quote).find(|&(i, _)| {
+        let (s, e) = (source.start + i, source.start + i + quote.len());
+        !source.hidden.iter().any(|&(hs, he)| hs < e && s < he)
+    })?;
+    let as_i64 = |n: usize| i64::try_from(n).ok();
+    Some(crate::claims::Evidence {
+        device: window.device.clone(),
+        seq: line.seq,
+        offset: as_i64(source.start + at)?,
+        length: as_i64(quote.len())?,
+        sentence: as_i64(source.start + sentence_start(&source.text[..at]))?,
+        quote: quote.to_owned(),
+    })
+}
+
+/// Where the sentence that `before` runs into starts: after its last sentence end (`。`, `.`,
+/// `?`, `!`, `？`, `！`, a line break) and the spaces after it, else at its start. A claim's uid
+/// is this sentence's (MUST-M18), so any quote from one sentence gives the same.
+fn sentence_start(before: &str) -> usize {
+    let end = before
+        .char_indices()
+        .filter(|&(_, c)| matches!(c, '。' | '.' | '?' | '!' | '？' | '！' | '\n'))
+        .last()
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let spaces = before[end..].len() - before[end..].trim_start().len();
+    end + spaces
 }
 
 /// What one run of the phase did.
@@ -859,6 +944,50 @@ mod tests {
         let part = |w: &Window| w.text.split_once("[assistant] ").unwrap().1.to_owned();
         let (a, b) = (part(&first), part(&next));
         assert!(reply.starts_with(&(a.trim_end_matches('\n').to_owned() + "\n" + &b[..10])));
+    }
+
+    /// Spec 3.2's evidence: a quote after a masked secret, and one in the second part of a split
+    /// event, get the event's own offsets; a quote with the mask in it, or the secret itself, is
+    /// not found.
+    #[test]
+    fn a_quote_is_located_in_its_event_through_masks_and_splits() {
+        let (h, mut raw, dev) = store();
+        let secret = format!("acme-{}", "7Qx9Lm2Vb4Nr");
+        let filler = "words of the answer ".repeat(20);
+        let reply = format!(
+            "{filler}the key is {secret}. Then we decided to use tabs everywhere.\n{filler}\
+             In the end we chose spaces for YAML."
+        );
+        let e = event("reply", serde_json::json!({"assistant": reply}));
+        raw.append(&e).unwrap();
+        std::fs::write(
+            h.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[A-Za-z0-9]{12}' }]\n",
+        )
+        .unwrap();
+        let rules = Rules::load(h.path()).unwrap();
+        let long = long_text(&e).unwrap();
+        let found = |w: &Window, q: &str| {
+            let line = w.lines.iter().find(|l| l.text.contains(q))?;
+            locate(w, &line.id, q)
+        };
+        let first = next_window(&raw, &dev, 200, &rules).unwrap().unwrap();
+        assert!(first.to_offset.is_some(), "not split: {}", first.text);
+        let tabs = "we decided to use tabs everywhere";
+        let ev = found(&first, tabs).expect("after the mask");
+        let at = usize::try_from(ev.offset).unwrap();
+        assert_eq!((&long[at..at + tabs.len()], ev.seq), (tabs, 1));
+        let sentence = usize::try_from(ev.sentence).unwrap();
+        assert_eq!(&long[sentence..sentence + 4], "Then");
+        assert_eq!(found(&first, "the key is [REDACTED]"), None);
+        assert_eq!(found(&first, &secret), None);
+        close(&mut raw, &first);
+        let second = next_window(&raw, &dev, 200, &rules).unwrap().unwrap();
+        let yaml = "we chose spaces for YAML";
+        let ev = found(&second, yaml).expect("in the second part");
+        let at = usize::try_from(ev.offset).unwrap();
+        assert!(at > usize::try_from(first.to_offset.unwrap()).unwrap());
+        assert_eq!(&long[at..at + yaml.len()], yaml);
     }
 
     #[test]
