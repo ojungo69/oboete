@@ -4,6 +4,7 @@
 //! fallback → SessionStart injection. See docs/plan.md.
 
 mod backup;
+mod budget;
 mod capture;
 mod config;
 mod consumer;

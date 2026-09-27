@@ -14,7 +14,9 @@ CREATE TABLE IF NOT EXISTS provider_state(
   provider TEXT PRIMARY KEY,
   down_until INTEGER NOT NULL DEFAULT 0,  -- unix ms; 0 for none
   fails INTEGER NOT NULL DEFAULT 0,       -- failures in a row that set no cooldown (the breaker)
-  backoff INTEGER NOT NULL DEFAULT 0      -- 429s in a row that named no reset
+  backoff INTEGER NOT NULL DEFAULT 0,     -- 429s in a row that named no reset
+  -- What the provider's last answer said is left (Groq's x-ratelimit-* headers), resets in ms.
+  tokens_left INTEGER, tokens_reset_at INTEGER, requests_left INTEGER, requests_reset_at INTEGER
 );
 -- What left the machine and what it cost: `bytes_out` is the recorded text sent, `detail` a vetted
 -- status, error code or retry value, never a provider's error body (issue #91).
@@ -32,7 +34,8 @@ CREATE TABLE IF NOT EXISTS provider_calls(
   prompt_tokens INTEGER,
   completion_tokens INTEGER,
   cached_tokens INTEGER,
-  reasoning_tokens INTEGER
+  reasoning_tokens INTEGER,
+  usd REAL                                -- a paid entry's cost, fixed when the call is recorded
 );
 CREATE INDEX IF NOT EXISTS provider_calls_day ON provider_calls(provider, ts);
 ";
@@ -40,9 +43,19 @@ CREATE INDEX IF NOT EXISTS provider_calls_day ON provider_calls(provider, ts);
 pub fn open(home: &Path) -> Result<Connection> {
     let path = home.join("providers.db");
     crate::db::private(home, 0o700);
-    let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+    let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     crate::db::wal(&conn, "NORMAL")?;
     conn.execute_batch(SCHEMA).context("providers schema")?;
+    // Columns added after the table's first version (milestone 3, Task 4).
+    for column in [
+        "tokens_left",
+        "tokens_reset_at",
+        "requests_left",
+        "requests_reset_at",
+    ] {
+        crate::db::ensure_column(&mut conn, "provider_state", column, "INTEGER")?;
+    }
+    crate::db::ensure_column(&mut conn, "provider_calls", "usd", "REAL")?;
     for file in ["providers.db", "providers.db-wal", "providers.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -67,14 +80,18 @@ pub struct Call<'a> {
     pub ms: i64,
     pub detail: Option<&'a str>,
     pub bytes_out: usize,
+    /// The uncalibrated estimate of what was sent (`budget::estimate`).
+    pub est_tokens: Option<u32>,
     pub usage: Usage,
+    /// A paid entry's cost at its price then (`budget::cost`); None for any other entry.
+    pub usd: Option<f64>,
 }
 
 pub fn record(conn: &Connection, c: &Call) -> Result<()> {
     conn.execute(
         "INSERT INTO provider_calls(ts, provider, role, span, outcome, ms, detail, bytes_out,
-           prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+           est_tokens, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens, usd)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         params![
             now_ms(),
             c.provider,
@@ -84,10 +101,12 @@ pub fn record(conn: &Connection, c: &Call) -> Result<()> {
             c.ms,
             c.detail,
             c.bytes_out as i64,
+            c.est_tokens,
             c.usage.prompt,
             c.usage.completion,
             c.usage.cached,
-            c.usage.reasoning
+            c.usage.reasoning,
+            c.usd
         ],
     )?;
     Ok(())
@@ -149,6 +168,52 @@ pub fn set_state(conn: &Connection, provider: &str, s: State) -> Result<()> {
     Ok(())
 }
 
+/// What a provider said is left of its rate limits, and when each resets (Unix ms).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RateLeft {
+    pub tokens: Option<i64>,
+    pub tokens_reset_at: Option<i64>,
+    pub requests: Option<i64>,
+    pub requests_reset_at: Option<i64>,
+}
+
+pub fn rate(conn: &Connection, provider: &str) -> Result<RateLeft> {
+    Ok(conn
+        .query_row(
+            "SELECT tokens_left, tokens_reset_at, requests_left, requests_reset_at
+             FROM provider_state WHERE provider=?1",
+            [provider],
+            |r| {
+                Ok(RateLeft {
+                    tokens: r.get(0)?,
+                    tokens_reset_at: r.get(1)?,
+                    requests: r.get(2)?,
+                    requests_reset_at: r.get(3)?,
+                })
+            },
+        )
+        .optional()?
+        .unwrap_or_default())
+}
+
+pub fn set_rate(conn: &Connection, provider: &str, r: RateLeft) -> Result<()> {
+    conn.execute(
+        "INSERT INTO provider_state(provider, tokens_left, tokens_reset_at, requests_left,
+           requests_reset_at) VALUES(?1,?2,?3,?4,?5)
+         ON CONFLICT(provider) DO UPDATE SET tokens_left=excluded.tokens_left,
+           tokens_reset_at=excluded.tokens_reset_at, requests_left=excluded.requests_left,
+           requests_reset_at=excluded.requests_reset_at",
+        params![
+            provider,
+            r.tokens,
+            r.tokens_reset_at,
+            r.requests,
+            r.requests_reset_at
+        ],
+    )?;
+    Ok(())
+}
+
 /// Requests sent to `provider` since the last UTC midnight (the per-provider daily budget window).
 /// A 429 that was waited out still counts: the budget bounds our requests, not our successes.
 pub fn calls_today(conn: &Connection, provider: &str) -> Result<u32> {
@@ -181,4 +246,94 @@ pub fn last_calls(conn: &Connection, n: u32) -> Result<Vec<String>> {
         })?
         .collect::<Result<_, _>>()?;
     Ok(rows)
+}
+
+const DAY_MS: i64 = 86_400_000;
+
+/// Tokens (prompt plus completion) `provider` reported since the last UTC midnight.
+pub fn tokens_today(conn: &Connection, provider: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)), 0)
+         FROM provider_calls WHERE provider=?1 AND ts>=?2",
+        params![provider, now_ms() / DAY_MS * DAY_MS],
+        |r| r.get(0),
+    )?)
+}
+
+/// What every paid entry cost since the first of this month (UTC), at the prices of each call's
+/// time: an entry since removed from the chain or repriced still counts.
+pub fn usd_this_month(conn: &Connection) -> Result<f64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(usd), 0) FROM provider_calls WHERE ts>=?1",
+        [chrono_free_month_start(now_ms())],
+        |r| r.get(0),
+    )?)
+}
+
+/// The last UTC midnight, for `unmetered`.
+pub fn today() -> i64 {
+    now_ms() / DAY_MS * DAY_MS
+}
+
+/// What `provider`'s sent calls since `start` may have used beyond the usage they reported: the
+/// estimate of each call with no prompt count, and the number of calls with no completion count
+/// (a timeout, a dropped connection, an answer without a full usage block). A response with an
+/// HTTP error status (`http 429: …`) used none.
+pub fn unmetered(conn: &Connection, provider: &str, start: i64) -> Result<(i64, i64)> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(CASE WHEN prompt_tokens IS NULL THEN est_tokens END), 0),
+                COALESCE(SUM(completion_tokens IS NULL), 0)
+         FROM provider_calls
+         WHERE provider=?1 AND ts>=?2 AND bytes_out > 0 AND outcome IN ('ok', 'invalid', 'error')
+           AND COALESCE(detail, '') NOT GLOB 'http [0-9][0-9][0-9]*'",
+        params![provider, start],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
+/// Unix ms of 00:00 UTC on the first day of `ms`'s month (civil-from-days, H. Hinnant).
+fn chrono_free_month_start(ms: i64) -> i64 {
+    let days = ms.div_euclid(DAY_MS);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day_of_month = doy - (153 * mp + 2) / 5; // 0-based
+    (days - day_of_month) * DAY_MS
+}
+
+/// `prompt_tokens / est_tokens` of `provider`'s newest `n` calls that recorded both.
+pub fn token_ratios(conn: &Connection, provider: &str, n: u32) -> Result<Vec<f64>> {
+    let mut stmt = conn.prepare(
+        "SELECT CAST(prompt_tokens AS REAL) / est_tokens FROM provider_calls
+         WHERE provider=?1 AND prompt_tokens > 0 AND est_tokens > 0 ORDER BY id DESC LIMIT ?2",
+    )?;
+    let ratios = stmt
+        .query_map(params![provider, n], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(ratios)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_month_starts_on_the_first_at_midnight_utc() {
+        // 2026-09-27T02:52:53Z -> 2026-09-01T00:00:00Z; 2024-03-01 after a leap day.
+        assert_eq!(
+            chrono_free_month_start(1_790_477_573_000),
+            1_788_220_800_000
+        );
+        assert_eq!(
+            chrono_free_month_start(1_709_251_200_000),
+            1_709_251_200_000
+        );
+        assert_eq!(
+            chrono_free_month_start(1_709_251_199_999),
+            1_706_745_600_000
+        );
+    }
 }

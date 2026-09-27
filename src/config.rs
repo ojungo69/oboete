@@ -16,6 +16,26 @@ pub struct Config {
     /// Where Gemini joins the chain; absent, it is not in it (the owner decides, free or paid).
     #[serde(default)]
     pub gemini: Option<GeminiPlace>,
+    /// What every paid entry together may spend in a calendar month (owner decision 5: USD 5).
+    #[serde(default = "default_paid_usd_per_month", deserialize_with = "usd")]
+    pub paid_usd_per_month: f64,
+}
+
+fn default_paid_usd_per_month() -> f64 {
+    5.0
+}
+
+/// A USD amount of the config: finite and 0 or more. A negative price would make a paid entry
+/// free or earn it credit, and NaN compares false with every cap.
+fn usd<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<f64, D::Error> {
+    let v = f64::deserialize(d)?;
+    if v.is_finite() && v >= 0.0 {
+        Ok(v)
+    } else {
+        Err(serde::de::Error::custom(
+            "a USD amount is a number, 0 or more",
+        ))
+    }
 }
 
 /// `gemini = "before-subscriptions"` puts it just before the first subscription CLI (it spares
@@ -106,6 +126,8 @@ pub enum Provider {
         /// in `key_file`.
         #[serde(default)]
         headers: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        limits: Limits,
     },
     /// A subscription CLI run headless (`agy`, `claude`, `grok`, `codex`).
     Cli {
@@ -118,10 +140,81 @@ pub enum Provider {
         daily_budget: u32,
         #[serde(default = "default_cli_timeout")]
         timeout_s: u64,
+        #[serde(default)]
+        limits: Limits,
     },
 }
 
+/// What one entry may take (docs/milestone-3-plan.md Task 4), as `limits = { ... }`. With prices
+/// it is a paid entry, inside `paid_usd_per_month` with every other paid entry.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Limits {
+    /// The provider's ceiling for one request, in tokens (Groq free: 8,000). A larger request is
+    /// skipped before it is sent.
+    #[serde(default)]
+    pub max_request_tokens: Option<u32>,
+    /// Tokens (prompt plus completion) a day.
+    #[serde(default)]
+    pub daily_tokens: Option<u64>,
+    /// USD per million tokens, in and out.
+    #[serde(default, deserialize_with = "usd")]
+    pub usd_per_mtok_in: f64,
+    #[serde(default, deserialize_with = "usd")]
+    pub usd_per_mtok_out: f64,
+    /// The largest answer a paid entry may send, which its request asks for as `max_tokens`
+    /// and its admission counts as spent.
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: u32,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_request_tokens: None,
+            daily_tokens: None,
+            usd_per_mtok_in: 0.0,
+            usd_per_mtok_out: 0.0,
+            max_output_tokens: default_max_output_tokens(),
+        }
+    }
+}
+
+impl Limits {
+    pub fn is_paid(&self) -> bool {
+        self.usd_per_mtok_in > 0.0 || self.usd_per_mtok_out > 0.0
+    }
+    /// USD for `prompt` tokens in and `completion` tokens out.
+    pub fn usd(&self, prompt: f64, completion: f64) -> f64 {
+        (prompt * self.usd_per_mtok_in + completion * self.usd_per_mtok_out) / 1e6
+    }
+}
+
+fn default_max_output_tokens() -> u32 {
+    4000
+}
+
 impl Provider {
+    /// The output tokens a request reserves on top of its prompt: `max_tokens` or
+    /// `max_completion_tokens` in `extra`, at most `max_output_tokens` on a paid entry (as
+    /// `provider::call` sends it), or 0 when it names none.
+    pub fn declared_output(&self) -> u32 {
+        let Provider::Openai { extra, limits, .. } = self else {
+            return 0;
+        };
+        let declared = ["max_tokens", "max_completion_tokens"]
+            .iter()
+            .filter_map(|k| extra.get(*k)?.as_u64())
+            .max();
+        let cap = u64::from(limits.max_output_tokens);
+        let n = match (declared, limits.is_paid()) {
+            (Some(n), true) => n.min(cap),
+            (None, true) => cap,
+            (Some(n), false) => n,
+            (None, false) => 0,
+        };
+        u32::try_from(n).unwrap_or(u32::MAX)
+    }
     pub fn name(&self) -> &str {
         match self {
             Provider::Openai { name, .. } | Provider::Cli { name, .. } => name,
@@ -132,6 +225,11 @@ impl Provider {
             Provider::Openai { daily_budget, .. } | Provider::Cli { daily_budget, .. } => {
                 *daily_budget
             }
+        }
+    }
+    pub fn limits(&self) -> &Limits {
+        match self {
+            Provider::Openai { limits, .. } | Provider::Cli { limits, .. } => limits,
         }
     }
     pub fn retry_429(&self) -> bool {
@@ -187,6 +285,7 @@ fn openai(
         retry_429,
         extra: extra.as_object().cloned().unwrap_or_default(),
         headers: Default::default(),
+        limits: Limits::default(),
     }
 }
 
@@ -195,7 +294,7 @@ fn openai(
 /// under the USD 5 a month paid-API cap: Flash-Lite costs about USD 0.005 a window (10,000
 /// tokens in, 1,500 out, USD 0.25 and 1.50 a million, checked 2026-09-27).
 fn gemini() -> Provider {
-    openai(
+    let mut p = openai(
         "gemini",
         "https://generativelanguage.googleapis.com/v1beta/openai",
         "GEMINI_API_KEY.md",
@@ -203,7 +302,14 @@ fn gemini() -> Provider {
         30,
         true,
         serde_json::json!({}),
-    )
+    );
+    // Paid prices (ai.google.dev/gemini-api/docs/pricing, checked 2026-09-27): counted even on a
+    // free key, which only makes the cap stricter.
+    if let Provider::Openai { limits, .. } = &mut p {
+        limits.usd_per_mtok_in = 0.25;
+        limits.usd_per_mtok_out = 1.50;
+    }
+    p
 }
 
 fn cli(name: &str, model: Option<&str>, daily_budget: u32) -> Provider {
@@ -213,6 +319,7 @@ fn cli(name: &str, model: Option<&str>, daily_budget: u32) -> Provider {
         model: model.map(Into::into),
         daily_budget,
         timeout_s: default_cli_timeout(),
+        limits: Limits::default(),
     }
 }
 
@@ -247,7 +354,7 @@ fn default_providers() -> Vec<Provider> {
         // (owner's store, 2026-09-22..26); a call cut off at the timeout may still be billed.
         *timeout_s = 150;
     }
-    vec![
+    let mut chain = vec![
         openai(
             "groq",
             groq,
@@ -317,7 +424,19 @@ fn default_providers() -> Vec<Provider> {
         opencode_go,
         cli("codex", Some("gpt-6-luna"), 200),
         cli("claude", Some("haiku"), 200),
-    ]
+    ];
+    // Groq free refuses a request over 8,000 tokens (its tokens-a-minute limit is also a ceiling
+    // per request; docs/research/curator-providers-2026-09-27.md section 3).
+    for p in &mut chain {
+        if let Provider::Openai {
+            base_url, limits, ..
+        } = p
+            && base_url == groq
+        {
+            limits.max_request_tokens = Some(8000);
+        }
+    }
+    chain
 }
 
 /// The `[embedding]` section for a search: a config.toml that does not load falls back to
@@ -337,6 +456,7 @@ pub fn load(home: &Path) -> Result<Config> {
             summary: Summary::default(),
             embedding: Embedding::default(),
             gemini: None,
+            paid_usd_per_month: default_paid_usd_per_month(),
         });
     }
     let text =
@@ -356,6 +476,18 @@ pub fn load(home: &Path) -> Result<Config> {
             GeminiPlace::AfterSubscriptions => cfg.providers.len(),
         };
         cfg.providers.insert(at, gemini());
+    }
+    // A CLI's subscription pays for it, and its answer has no cap to price; prices are for HTTP.
+    if let Some(p) = cfg
+        .providers
+        .iter()
+        .find(|p| matches!(p, Provider::Cli { .. }) && p.limits().is_paid())
+    {
+        anyhow::bail!(
+            "{}: provider \"{}\" is a CLI: its limits take no USD prices",
+            path.display(),
+            p.name()
+        );
     }
     match cfg.embedding.provider.as_str() {
         "none" => {}
@@ -448,6 +580,11 @@ pub struct CaptureConfig {
     _embedding: serde::de::IgnoredAny,
     #[serde(default, rename = "backup")]
     _backup: serde::de::IgnoredAny,
+    // `Config`'s top-level keys: each one a user sets must not stop recording.
+    #[serde(default, rename = "gemini")]
+    _gemini: serde::de::IgnoredAny,
+    #[serde(default, rename = "paid_usd_per_month")]
+    _paid_usd_per_month: serde::de::IgnoredAny,
 }
 
 pub fn load_capture(home: &Path) -> Result<CaptureConfig> {
@@ -498,6 +635,29 @@ pub fn read_key(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_key_config_reads_leaves_capture_working() {
+        let text = r#"
+gemini = "before-subscriptions"
+paid_usd_per_month = 2.5
+[summary]
+[embedding]
+[backup]
+[redaction]
+[capture]
+"#;
+        let c: Config = toml::from_str(text).unwrap();
+        assert_eq!(c.paid_usd_per_month, 2.5);
+        for bad in ["-1.0", "nan", "inf"] {
+            assert!(toml::from_str::<Config>(&format!("paid_usd_per_month = {bad}")).is_err());
+            assert!(toml::from_str::<Limits>(&format!("usd_per_mtok_in = {bad}")).is_err());
+            assert!(toml::from_str::<Limits>(&format!("usd_per_mtok_out = {bad}")).is_err());
+        }
+        parse_capture(Some(text)).unwrap();
+        // A table no version reads is still an error.
+        assert!(parse_capture(Some("[redactions]\n")).is_err());
+    }
 
     #[test]
     fn defaults_and_toml_extra_fields_parse() {
@@ -614,6 +774,16 @@ model = "haiku"
         );
         assert_eq!(own, ["gemini"]);
         std::fs::write(dir.join("config.toml"), "gemini = \"first\"\n").unwrap();
+        assert!(load(dir).is_err());
+        // A CLI entry takes no prices: its subscription pays, and its answer has no cap.
+        let cli = "[[providers]]\nkind = \"cli\"\nname = \"claude\"\ncli = \"claude\"\n";
+        std::fs::write(dir.join("config.toml"), cli).unwrap();
+        assert!(load(dir).is_ok());
+        std::fs::write(
+            dir.join("config.toml"),
+            format!("{cli}limits = {{ usd_per_mtok_out = 1.0 }}\n"),
+        )
+        .unwrap();
         assert!(load(dir).is_err());
     }
 

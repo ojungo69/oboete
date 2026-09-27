@@ -17,6 +17,7 @@ use anyhow::{Result, anyhow};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 
+use crate::budget;
 use crate::config::{self, Provider};
 use crate::providers_db::{self, Usage};
 use crate::{db, hook};
@@ -55,6 +56,8 @@ struct Answer {
     /// Unix ms until which the provider should rest although it answered: claude's stream said
     /// its subscription is near a limit (spec 3.1, Claude decision C1).
     cool_until: Option<i64>,
+    /// What the provider said is left of its rate limits (Groq's `x-ratelimit-*` headers).
+    rate: Option<providers_db::RateLeft>,
 }
 
 /// One failed call, with what the chain needs to decide what to do next.
@@ -71,6 +74,7 @@ struct CallError {
     /// A subscription's own reset it reported on the way (claude's `rate_limit_event`): the
     /// provider rests until then whatever else failed.
     cool_until: Option<i64>,
+    rate: Option<providers_db::RateLeft>,
 }
 
 impl CallError {
@@ -82,10 +86,15 @@ impl CallError {
             usage: Usage::default(),
             sent: true,
             cool_until: None,
+            rate: None,
         }
     }
     fn with_usage(self, usage: Usage) -> Self {
         Self { usage, ..self }
+    }
+    /// The rate headers of the response it came from.
+    fn rated(self, rate: Option<providers_db::RateLeft>) -> Self {
+        Self { rate, ..self }
     }
     fn resting(self, cool_until: Option<i64>) -> Self {
         Self {
@@ -110,11 +119,24 @@ impl CallError {
 pub struct Chain<'a> {
     providers: &'a [Provider],
     db: &'a Connection,
+    paid_usd_per_month: f64,
 }
 
 impl<'a> Chain<'a> {
     pub fn new(providers: &'a [Provider], db: &'a Connection) -> Self {
-        Self { providers, db }
+        Self {
+            providers,
+            db,
+            paid_usd_per_month: 5.0,
+        }
+    }
+
+    /// What every paid entry together may spend this month (`paid_usd_per_month` in config).
+    pub fn paid_cap(self, usd: f64) -> Self {
+        Self {
+            paid_usd_per_month: usd,
+            ..self
+        }
     }
 
     /// Walk the chain for one `role` (curator, judge, digest) and one `span` (what the call is
@@ -129,9 +151,17 @@ impl<'a> Chain<'a> {
         let conn = self.db;
         let forced_fail = std::env::var("OBOETE_FAIL_PROVIDER").ok();
         let mut fallbacks = Vec::new();
+        let est = budget::estimate(prompt);
+        // A ceiling a provider refused this request at (413): its peers with it are skipped.
+        let mut ceiling_hit = Vec::new();
         for p in self.providers {
             let name = p.name().to_string();
-            let record = |outcome: &str, ms: i64, detail: Option<&str>, sent: bool, usage| {
+            let record = |outcome: &str,
+                          ms: i64,
+                          detail: Option<&str>,
+                          sent: bool,
+                          usage,
+                          usd: Option<f64>| {
                 providers_db::record(
                     conn,
                     &providers_db::Call {
@@ -142,7 +172,9 @@ impl<'a> Chain<'a> {
                         ms,
                         detail,
                         bytes_out: if sent { prompt.len() } else { 0 },
+                        est_tokens: Some(est),
                         usage,
+                        usd,
                     },
                 )
             };
@@ -156,13 +188,21 @@ impl<'a> Chain<'a> {
                 fallbacks.push((name, "cooling down after an earlier failure".into()));
                 continue;
             }
-            let used = providers_db::calls_today(conn, &name)?;
-            if used >= p.daily_budget() {
-                let detail = format!("{used}/{}", p.daily_budget());
-                record("budget", 0, Some(&detail), false, Usage::default())?;
-                fallbacks.push((name, "daily budget spent".into()));
+            let tokens = f64::from(est) * budget::factor(conn, &name)?;
+            let admit = budget::admit(conn, p, tokens, self.paid_usd_per_month, &ceiling_hit)?;
+            if let Some(refusal) = admit {
+                record(
+                    refusal.outcome,
+                    0,
+                    Some(&refusal.detail),
+                    false,
+                    Usage::default(),
+                    None,
+                )?;
+                fallbacks.push((name, refusal.detail));
                 continue;
             }
+            let used = providers_db::calls_today(conn, &name)?;
             let started = Instant::now();
             let forced = forced_fail.as_deref() == Some(name.as_str());
             let mut result = if forced {
@@ -180,10 +220,16 @@ impl<'a> Chain<'a> {
             {
                 let detail = format!("429, retry in {wait:.0}s");
                 let ms = started.elapsed().as_millis() as i64;
-                record("wait", ms, Some(&detail), true, Usage::default())?;
+                // A 429 is an answer with an HTTP error status: not billed.
+                record("wait", ms, Some(&detail), true, Usage::default(), None)?;
                 std::thread::sleep(Duration::from_secs_f64(wait + 0.5));
                 result = call(p, prompt, schema);
             }
+            // The headers hold whatever the answer turns out to be.
+            let rate = match &result {
+                Ok(a) => a.rate,
+                Err(e) => e.rate,
+            };
             // Only strict-schema providers enforce the shape; valid JSON of another shape from the
             // rest would pass here and fail the window later, without trying the next provider.
             let result = result.and_then(|a| {
@@ -198,9 +244,13 @@ impl<'a> Chain<'a> {
                 }
             });
             let ms = started.elapsed().as_millis() as i64;
+            if let Some(rate) = rate {
+                providers_db::set_rate(conn, &name, rate)?;
+            }
             match result {
                 Ok(a) => {
-                    record("ok", ms, None, true, a.usage)?;
+                    let usd = budget::cost(conn, p, est, a.usage, true)?;
+                    record("ok", ms, None, true, a.usage, usd)?;
                     let next = providers_db::State {
                         down_until: a.cool_until.unwrap_or(0),
                         ..Default::default()
@@ -215,8 +265,14 @@ impl<'a> Chain<'a> {
                     });
                 }
                 Err(e) => {
+                    if e.status == Some(413) {
+                        ceiling_hit.extend(p.limits().max_request_tokens);
+                    }
                     let outcome = if e.invalid() { "invalid" } else { "error" };
-                    record(outcome, ms, Some(&e.message), !forced && e.sent, e.usage)?;
+                    let sent = !forced && e.sent;
+                    // An HTTP error status was not billed; a timeout or a dropped answer may be.
+                    let usd = budget::cost(conn, p, est, e.usage, sent && e.status.is_none())?;
+                    record(outcome, ms, Some(&e.message), sent, e.usage, usd)?;
                     // A forced failure is a test of the fallback, not of the provider.
                     if !forced {
                         providers_db::set_state(conn, &name, next_state(state, &e))?;
@@ -316,17 +372,36 @@ fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<Answer, CallError>
             timeout_s,
             extra,
             headers,
+            limits,
             ..
-        } => openai_compat(
-            base_url,
-            key_file.as_deref(),
-            model,
-            *timeout_s,
-            extra,
-            headers,
-            prompt,
-            schema,
-        ),
+        } => {
+            // A paid entry's answer is bounded by what its admission counted: a larger
+            // `max_tokens` in `extra` is lowered to it.
+            let mut extra = extra.clone();
+            if limits.is_paid() {
+                let cap = u64::from(limits.max_output_tokens);
+                let mut bounded = false;
+                for key in ["max_tokens", "max_completion_tokens"] {
+                    if let Some(v) = extra.get_mut(key) {
+                        *v = v.as_u64().map_or(cap, |n| n.min(cap)).into();
+                        bounded = true;
+                    }
+                }
+                if !bounded {
+                    extra.insert("max_tokens".into(), cap.into());
+                }
+            }
+            openai_compat(
+                base_url,
+                key_file.as_deref(),
+                model,
+                *timeout_s,
+                &extra,
+                headers,
+                prompt,
+                schema,
+            )
+        }
         Provider::Cli {
             cli,
             model,
@@ -389,6 +464,7 @@ fn openai_compat(
         .send_json(&body)
         .map_err(|e| CallError::other(format!("http request: {}", transport(&e))))?;
     let status = resp.status().as_u16();
+    let rate = rate_left(resp.headers());
     let retry_after_s = resp
         .headers()
         .get("retry-after")
@@ -398,15 +474,24 @@ fn openai_compat(
         .filter(|s| s.is_finite() && *s >= 0.0);
     // Capped after decoding: a gzip answer of a few KB on the wire can decode to far more.
     let mut raw = Vec::new();
-    std::io::Read::read_to_end(
+    let read = std::io::Read::read_to_end(
         &mut std::io::Read::take(resp.body_mut().as_reader(), MAX_RESPONSE_BYTES + 1),
         &mut raw,
-    )
-    .map_err(|e| CallError::other(format!("read body: {}", read_error(&e))))?;
-    if raw.len() as u64 > MAX_RESPONSE_BYTES {
-        return Err(CallError::other(format!(
-            "invalid output: response larger than {MAX_RESPONSE_BYTES} bytes"
-        )));
+    );
+    let whole = read.is_ok() && raw.len() as u64 <= MAX_RESPONSE_BYTES;
+    if status == 200 {
+        if let Err(e) = read {
+            return Err(CallError::other(format!("read body: {}", read_error(&e))).rated(rate));
+        }
+        if !whole {
+            return Err(CallError::other(format!(
+                "invalid output: response larger than {MAX_RESPONSE_BYTES} bytes"
+            ))
+            .rated(rate));
+        }
+    } else if !whole {
+        // An error answer keeps its status whatever its body: it is not billed.
+        raw.clear();
     }
     let text = String::from_utf8_lossy(&raw);
     if status != 200 {
@@ -431,23 +516,29 @@ fn openai_compat(
             usage: Usage::default(),
             sent: true,
             cool_until: None,
+            rate,
         });
     }
     let v: Value = serde_json::from_str(&text)
-        .map_err(|_| CallError::other("invalid output: response is not JSON"))?;
+        .map_err(|_| CallError::other("invalid output: response is not JSON").rated(rate))?;
     let usage = usage_openai(&v);
     let content = v["choices"][0]["message"]["content"]
         .as_str()
         .ok_or_else(|| {
-            CallError::other("invalid output: no choices[0].message.content").with_usage(usage)
+            CallError::other("invalid output: no choices[0].message.content")
+                .with_usage(usage)
+                .rated(rate)
         })?;
     let answer = serde_json::from_str(unfence(content)).map_err(|e| {
-        CallError::other(format!("invalid output: content is not JSON ({e})")).with_usage(usage)
+        CallError::other(format!("invalid output: content is not JSON ({e})"))
+            .with_usage(usage)
+            .rated(rate)
     })?;
     Ok(Answer {
         value: answer,
         usage,
         cool_until: None,
+        rate,
     })
 }
 
@@ -682,7 +773,11 @@ fn until_pacific_midnight(now: SystemTime) -> f64 {
 
 /// Groq's "try again in 17.2875s", "6m20.064s", "1h2m3.5s" or "580ms", in seconds.
 fn retry_after_in_body(body: &str) -> Option<f64> {
-    let mut rest = &body[body.find("try again in ")? + "try again in ".len()..];
+    go_duration(&body[body.find("try again in ")? + "try again in ".len()..])
+}
+
+/// A Go-style duration at the start of `rest` ("2m59.56s", "7.66s", "580ms"), in seconds.
+fn go_duration(mut rest: &str) -> Option<f64> {
     let mut secs = 0.0;
     let mut parts = 0;
     loop {
@@ -701,6 +796,26 @@ fn retry_after_in_body(body: &str) -> Option<f64> {
         rest = &rest[n + len..];
     }
     (parts > 0 && secs.is_finite()).then_some(secs)
+}
+
+/// Groq's `x-ratelimit-remaining-*` and `x-ratelimit-reset-*` headers (tokens a minute, requests
+/// a day; console.groq.com/docs/rate-limits), with the resets as Unix ms. None without them.
+fn rate_left(h: &ureq::http::HeaderMap) -> Option<providers_db::RateLeft> {
+    let get = |name: &str| h.get(name).and_then(|v| v.to_str().ok()).map(str::trim);
+    let left = |name: &str| get(name).and_then(|v| v.parse::<i64>().ok());
+    let at = |name: &str| {
+        get(name)
+            .and_then(go_duration)
+            .filter(|s| s.is_finite() && *s >= 0.0 && *s < MAX_COOLDOWN.as_secs_f64())
+            .map(|s| db::now_ms() + (s * 1000.0) as i64)
+    };
+    let rate = providers_db::RateLeft {
+        tokens: left("x-ratelimit-remaining-tokens"),
+        tokens_reset_at: at("x-ratelimit-reset-tokens"),
+        requests: left("x-ratelimit-remaining-requests"),
+        requests_reset_at: at("x-ratelimit-reset-requests"),
+    };
+    (rate != providers_db::RateLeft::default()).then_some(rate)
 }
 
 /// A fresh private directory for one CLI run, removed again when dropped (on every return
@@ -989,6 +1104,7 @@ fn claude_stream(stdout: &str) -> Result<String, CallError> {
             usage: Usage::default(),
             sent: true,
             cool_until: Some(providers_db::OWNER_HOLD),
+            rate: None,
         });
     }
     let result = events
@@ -1007,6 +1123,7 @@ fn claude_stream(stdout: &str) -> Result<String, CallError> {
             usage: Usage::default(),
             sent: true,
             cool_until: None,
+            rate: None,
         });
     }
     Ok(result.to_string())
@@ -1112,6 +1229,7 @@ fn cli_headless(
         value: answer,
         usage,
         cool_until: rest,
+        rate: None,
     })
 }
 
@@ -1844,6 +1962,24 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.invalid(), "{}", e.message);
+        // An error answer too large to read is still an error answer, not a billed one.
+        let (url, _) = serve(
+            "429 Too Many Requests",
+            vec![b' '; MAX_RESPONSE_BYTES as usize + 10],
+            "",
+        );
+        let e = openai_compat(
+            &url,
+            None,
+            "m",
+            10,
+            &Default::default(),
+            &Default::default(),
+            "p",
+            &json!({}),
+        )
+        .unwrap_err();
+        assert_eq!((e.status, e.message.as_str()), (Some(429), "http 429"));
         // 2 KB on the wire, 2 MiB once decoded.
         let bomb = include_bytes!("testdata/two-mib-of-spaces.gz").to_vec();
         let (url, _) = serve_once(bomb, "Content-Encoding: gzip\r\n");
@@ -1999,6 +2135,7 @@ mod tests {
             usage: Usage::default(),
             sent: true,
             cool_until: None,
+            rate: None,
         };
         assert_eq!(cooldown_for(&flagged), None);
     }
@@ -2025,6 +2162,7 @@ mod tests {
             retry_429: false,
             extra: Default::default(),
             headers: Default::default(),
+            limits: Default::default(),
         }];
         let Err(err) = Chain::new(&providers, &conn).run("curator", "s", "p", &json!({})) else {
             panic!("the stub only fails");
@@ -2052,6 +2190,7 @@ mod tests {
             retry_429: false,
             extra: Default::default(),
             headers: Default::default(),
+            limits: Default::default(),
         }
     }
 
@@ -2073,6 +2212,7 @@ mod tests {
             usage: Usage::default(),
             sent: true,
             cool_until: None,
+            rate: None,
         };
         let mut s = providers_db::State::default();
         let mut waits = Vec::new();
@@ -2148,6 +2288,66 @@ mod tests {
         assert_eq!(rows, [want.clone(), want]);
     }
 
+    fn capped(url: String, name: &str) -> Provider {
+        let mut p = stub(url);
+        if let Provider::Openai {
+            name: n, limits, ..
+        } = &mut p
+        {
+            *n = name.into();
+            limits.max_request_tokens = Some(8000);
+        }
+        p
+    }
+
+    #[test]
+    fn a_window_over_a_providers_ceiling_is_skipped_without_a_call() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        // 16,800 Japanese-heavy characters: about 9,700 tokens, over Groq free's 8,000.
+        let prompt = "日付の列が dd.mm.yyyy 形式の行が落ちている。".repeat(600);
+        let answer = json!({"choices": [{"message": {"content": "{}"}}]});
+        let (next, _) = serve_once(answer.to_string().into_bytes(), "");
+        // The capped entry points at a closed port: a call would be an error row, not too_big.
+        let providers = [capped("http://127.0.0.1:9".into(), "groq"), stub(next)];
+        let r = Chain::new(&providers, &conn)
+            .run("curator", "s", &prompt, &json!({"type": "object"}))
+            .unwrap();
+        assert_eq!(r.provider, "stub");
+        let rows: Vec<(String, String, i64)> = conn
+            .prepare("SELECT provider, outcome, bytes_out FROM provider_calls ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows[0], ("groq".into(), "too_big".into(), 0));
+        assert_eq!(rows[1].1, "ok");
+    }
+
+    #[test]
+    fn after_a_413_the_entries_with_the_same_ceiling_are_skipped() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let (big, _) = serve(
+            "413 Payload Too Large",
+            json!({"error": {"code": "request_too_large"}})
+                .to_string()
+                .into_bytes(),
+            "",
+        );
+        let providers = [
+            capped(big, "groq"),
+            capped("http://127.0.0.1:9".into(), "groq-20b"),
+        ];
+        assert!(
+            Chain::new(&providers, &conn)
+                .run("curator", "s", "short", &json!({}))
+                .is_err()
+        );
+        assert_eq!(outcomes(&conn), ["error", "too_big"]);
+    }
+
     #[test]
     fn a_failure_before_dispatch_records_no_egress() {
         let home = tempfile::tempdir().unwrap();
@@ -2162,6 +2362,7 @@ mod tests {
             model: None,
             daily_budget: 10,
             timeout_s: 5,
+            limits: Default::default(),
         };
         assert!(
             Chain::new(&[p, missing_cli], &conn)
@@ -2176,6 +2377,120 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(sent, [0, 0]);
+    }
+
+    #[test]
+    fn groqs_rate_headers_are_kept_and_a_request_they_cannot_take_goes_elsewhere() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let answer = json!({"choices": [{"message": {"content": "{}"}}]}).to_string();
+        let (url, _) = serve_once(
+            answer.clone().into_bytes(),
+            "x-ratelimit-remaining-tokens: 300\r\nx-ratelimit-reset-tokens: 2m59.5s\r\n\
+             x-ratelimit-remaining-requests: 999\r\nx-ratelimit-reset-requests: 7.66s\r\n",
+        );
+        let schema = json!({"type": "object"});
+        Chain::new(&[stub(url.clone())], &conn)
+            .run("curator", "s", "short", &schema)
+            .unwrap();
+        let rate = crate::providers_db::rate(&conn, "stub").unwrap();
+        assert_eq!((rate.tokens, rate.requests), (Some(300), Some(999)));
+        let left = rate.tokens_reset_at.unwrap() - db::now_ms();
+        assert!((178_000..=180_000).contains(&left), "{left}");
+        // 2,000 characters are about 560 tokens: more than the 300 left this minute.
+        let (next, _) = serve_once(answer.into_bytes(), "");
+        let providers = [stub(url), {
+            let mut p = stub(next);
+            if let Provider::Openai { name, .. } = &mut p {
+                *name = "next".into();
+            }
+            p
+        }];
+        let r = Chain::new(&providers, &conn)
+            .run("curator", "s", &"a".repeat(2000), &schema)
+            .unwrap();
+        assert_eq!(r.provider, "next");
+        assert_eq!(outcomes(&conn), ["ok", "budget", "ok"]);
+    }
+
+    #[test]
+    fn rate_headers_are_kept_when_the_answer_has_the_wrong_shape() {
+        let schema = json!({"type": "object", "required": ["summary"]});
+        // Valid JSON of another shape, a body that is not JSON, and content that is not JSON.
+        let shape = json!({"choices": [{"message": {"content": "{}"}}]}).to_string();
+        let prose = json!({"choices": [{"message": {"content": "Sure!"}}]}).to_string();
+        for body in [shape, "<html>".to_owned(), prose] {
+            let home = tempfile::tempdir().unwrap();
+            let conn = crate::providers_db::open(home.path()).unwrap();
+            let (url, _) = serve_once(
+                body.clone().into_bytes(),
+                "x-ratelimit-remaining-tokens: 300\r\nx-ratelimit-reset-tokens: 1m\r\n",
+            );
+            let r = Chain::new(&[stub(url)], &conn).run("curator", "s", "short", &schema);
+            assert!(r.is_err());
+            assert_eq!(
+                crate::providers_db::rate(&conn, "stub").unwrap().tokens,
+                Some(300),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_paid_entry_never_asks_for_more_output_than_its_admission_counted() {
+        let answer = json!({"choices": [{"message": {"content": "{}"}}]}).to_string();
+        for extra in [
+            json!({}),
+            json!({"max_tokens": 32_000}),
+            json!({"max_completion_tokens": 100}),
+        ] {
+            let (url, got) = serve_once(answer.clone().into_bytes(), "");
+            let mut p = stub(url);
+            if let Provider::Openai {
+                extra: e, limits, ..
+            } = &mut p
+            {
+                *e = extra.as_object().unwrap().clone();
+                limits.usd_per_mtok_out = 1.0;
+                limits.max_output_tokens = 4000;
+            }
+            call(&p, "short", &json!({"type": "object"})).unwrap();
+            let req = got.recv().unwrap();
+            let body: Value =
+                serde_json::from_str(&req[req.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+            let asked = body["max_tokens"]
+                .as_u64()
+                .or(body["max_completion_tokens"].as_u64());
+            assert!(asked.is_some_and(|n| n <= 4000), "{extra}: {body}");
+        }
+    }
+
+    #[test]
+    fn a_paid_answer_is_recorded_with_its_cost() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let answer = json!({"choices": [{"message": {"content": "{}"}}],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 100}});
+        let (url, _) = serve_once(answer.to_string().into_bytes(), "");
+        let mut p = stub(url);
+        if let Provider::Openai { limits, .. } = &mut p {
+            limits.usd_per_mtok_in = 1.0;
+            limits.usd_per_mtok_out = 10.0;
+        }
+        Chain::new(&[p], &conn)
+            .run("curator", "s", "short", &json!({"type": "object"}))
+            .unwrap();
+        // 1,000 in (0.001) and 100 out (0.001).
+        let usd = crate::providers_db::usd_this_month(&conn).unwrap();
+        assert!((usd - 0.002).abs() < 1e-9, "{usd}");
+    }
+
+    #[test]
+    fn go_durations_read_as_seconds() {
+        assert_eq!(go_duration("2m59.56s"), Some(179.56));
+        assert_eq!(go_duration("7.66s"), Some(7.66));
+        assert_eq!(go_duration("580ms"), Some(0.58));
+        assert_eq!(go_duration("soon"), None);
     }
 
     #[test]
@@ -2312,6 +2627,7 @@ mod tests {
             usage: Usage::default(),
             sent: true,
             cool_until: None,
+            rate: None,
         };
         assert_eq!(cooldown_for(&err(Some(429), "")), Some(COOLDOWN_429));
         assert_eq!(
@@ -2416,6 +2732,7 @@ mod tests {
             usage: Usage::default(),
             sent: true,
             cool_until: None,
+            rate: None,
         };
         assert_eq!(cooldown_for(&e(None)), Some(COOLDOWN_429));
         assert_eq!(cooldown_for(&e(Some(10.0))), Some(COOLDOWN_429));
