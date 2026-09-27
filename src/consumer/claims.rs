@@ -445,6 +445,7 @@ mod tests {
             supersedes: Vec::new(),
             recipe: "test".into(),
             tier: 1,
+            why: String::new(),
         }
     }
 

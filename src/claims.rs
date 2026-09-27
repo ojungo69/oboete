@@ -37,6 +37,10 @@ pub struct ClaimOp {
     pub recipe: String,
     /// 0 code only, 1 free or local, 2 subscription, 3 paid (spec 1.4): the highest is active.
     pub tier: i64,
+    /// A change's reason as the record gives it, or `unknown` (spec 3.3): the gates write it
+    /// (Task 8). Empty for other kinds, and in an op written before the gates, which has none.
+    #[serde(default)]
+    pub why: String,
 }
 
 /// Spec 3.2's kinds.

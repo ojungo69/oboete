@@ -15,6 +15,7 @@ mod db;
 mod digest;
 mod embed;
 mod failure;
+mod gates;
 mod hook;
 mod hookstate;
 mod import;
