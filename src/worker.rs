@@ -488,8 +488,14 @@ pub fn rebuild(home: &Path) -> Result<()> {
             "rebuild".to_owned()
         }
     })?;
+    // The rebuild is complete: an old file that will not go is left and named, not a failure.
     for f in aside {
-        std::fs::remove_file(&f).with_context(|| format!("remove {}", f.display()))?;
+        if let Err(e) = std::fs::remove_file(&f) {
+            eprintln!(
+                "oboete: rebuilt; {} is left ({e}): delete it by hand",
+                f.display()
+            );
+        }
     }
     Ok(())
 }
@@ -504,7 +510,7 @@ fn set_aside(home: &Path, name: &str) -> Result<Vec<std::path::PathBuf>> {
     use anyhow::Context;
     let _swap = crate::raw::lock_for_swap(home)?;
     // Names joined to `home`, never through its display form: a home path need not be UTF-8.
-    let mut moved = Vec::new();
+    let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     for ext in ["-wal", "-shm", ""] {
         let from = home.join(format!("knowledge.db{ext}"));
         if !from.exists() {
@@ -512,10 +518,14 @@ fn set_aside(home: &Path, name: &str) -> Result<Vec<std::path::PathBuf>> {
         }
         let to = home.join(format!("{name}{ext}"));
         if let Err(e) = std::fs::rename(&from, &to) {
+            // One that cannot go back is named, so the owner can put it back by hand.
+            let mut why = format!("move {}", from.display());
             for (from, to) in moved.iter().rev() {
-                let _ = std::fs::rename(to, from);
+                if let Err(back) = std::fs::rename(to, from) {
+                    why += &format!("; {} stays as {} ({back})", from.display(), to.display());
+                }
             }
-            return Err(e).with_context(|| format!("move {}", from.display()));
+            return Err(e).context(why);
         }
         moved.push((from, to));
     }
