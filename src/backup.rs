@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 pub const SEGMENT_BYTES: usize = 8 << 20;
 /// D11: how often a running worker backs up besides at its idle exit.
 pub const EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-/// The most a segment may decompress to: its cap plus one record past it (capture keeps a
-/// body far below this).
+/// The most a segment may decompress to: its cap plus one record or one append of ops past it
+/// (capture keeps a body far below this, `raw::MAX_BATCH_OPS` and `MAX_BATCH_BYTES` an append).
 const MAX_SEGMENT_BYTES: u64 = (SEGMENT_BYTES as u64) + (128 << 20);
 
 /// `[backup]` in config.toml (spec 1.5: the location is a user setting).
@@ -49,6 +49,46 @@ pub fn dir(home: &Path) -> Result<PathBuf> {
     Ok(dir.unwrap_or_else(|| home.join("backups")))
 }
 
+/// Records and ops are backed up alike, each in its own segments with its own cursor (milestone 3
+/// D1): an op is often appended when no record is, and the records' cursor would never reach it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Kind {
+    Records,
+    Ops,
+}
+
+impl Kind {
+    fn suffix(self) -> &'static str {
+        match self {
+            Kind::Records => ".seg.zst",
+            Kind::Ops => ".ops.zst",
+        }
+    }
+    /// This device's highest seq (records) or op seq (ops) in raw.
+    fn top(self, raw: &Raw) -> Result<i64> {
+        match self {
+            Kind::Records => raw.max_seq(),
+            Kind::Ops => raw.max_op_seq(),
+        }
+    }
+    /// The first one raw holds after `at`.
+    fn next(self, raw: &Raw, at: i64) -> Result<Option<i64>> {
+        Ok(match self {
+            Kind::Records => raw.after(raw.device(), at, 1)?.first().map(|r| r.seq),
+            Kind::Ops => raw
+                .ops_after(raw.device(), at, 1)?
+                .first()
+                .map(|o| o.op_seq),
+        })
+    }
+    fn lines(self, raw: &Raw, at: i64) -> Result<Vec<(i64, String)>> {
+        match self {
+            Kind::Records => raw.export_lines(at, SEGMENT_BYTES),
+            Kind::Ops => raw.export_op_lines(at, SEGMENT_BYTES),
+        }
+    }
+}
+
 /// One segment file, by the seqs its name gives.
 struct Segment {
     device: String,
@@ -57,12 +97,13 @@ struct Segment {
     path: PathBuf,
 }
 
-fn name(device: &str, first: i64, last: i64) -> String {
-    format!("{device}-{first:012}-{last:012}.seg.zst")
+fn name(device: &str, first: i64, last: i64, kind: Kind) -> String {
+    format!("{device}-{first:012}-{last:012}{}", kind.suffix())
 }
 
-/// The segments in `dir`, in (device, first seq) order; files of other names are not ours.
-fn segments(dir: &Path) -> Result<Vec<Segment>> {
+/// The segments of `kind` in `dir`, in (device, first seq) order; files of other names are not
+/// ours.
+fn segments(dir: &Path, kind: Kind) -> Result<Vec<Segment>> {
     let mut out = Vec::new();
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -74,7 +115,7 @@ fn segments(dir: &Path) -> Result<Vec<Segment>> {
         let Some(stem) = path
             .file_name()
             .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_suffix(".seg.zst"))
+            .and_then(|n| n.strip_suffix(kind.suffix()))
         else {
             continue;
         };
@@ -96,7 +137,9 @@ fn segments(dir: &Path) -> Result<Vec<Segment>> {
     Ok(out)
 }
 
-/// The records of this home's raw.db above the last backed-up seq, as sealed segments.
+/// The records of this home's raw.db above the last backed-up seq, then its ops above the last
+/// backed-up op seq, as sealed segments (records first: a restore then never holds a window op
+/// whose records it lacks).
 /// Returns the last segment written, `None` when there was nothing new. (The worker calls `run`.)
 #[cfg(test)]
 pub fn export(home: &Path) -> Result<Option<PathBuf>> {
@@ -117,41 +160,44 @@ fn export_from(raw: &Raw, dir: &Path) -> Result<Vec<(PathBuf, std::time::Duratio
         !device.is_empty() && device.chars().all(|c| c.is_ascii_alphanumeric()),
         "device id {device:?} cannot name a segment"
     );
-    let mut last = cursor(raw, dir)?;
-    if raw.max_seq()? <= last {
-        return Ok(Vec::new());
-    }
-    if !dir.exists() {
-        // Private when oboete makes it; a directory the user chose keeps its permissions.
-        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-        crate::db::private(dir, 0o700);
-    }
     let mut wrote = Vec::new();
-    loop {
-        let started = std::time::Instant::now();
-        let lines = raw.export_lines(last, SEGMENT_BYTES)?;
-        let (Some(first), Some(end)) = (lines.first(), lines.last()) else {
-            return Ok(wrote);
-        };
-        let (first, end) = (first.0, end.0);
-        let mut text = String::new();
-        for (_, l) in &lines {
-            text.push_str(l);
-            text.push('\n');
+    for kind in [Kind::Records, Kind::Ops] {
+        let mut last = cursor(raw, dir, kind)?;
+        if kind.top(raw)? <= last {
+            continue;
         }
-        let path = seal(dir, &name(device, first, end), text.as_bytes())?;
-        wrote.push((path, started.elapsed()));
-        last = end;
+        if !dir.exists() {
+            // Private when oboete makes it; a directory the user chose keeps its permissions.
+            std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+            crate::db::private(dir, 0o700);
+        }
+        loop {
+            let started = std::time::Instant::now();
+            let lines = kind.lines(raw, last)?;
+            let (Some(first), Some(end)) = (lines.first(), lines.last()) else {
+                break;
+            };
+            let (first, end) = (first.0, end.0);
+            let mut text = String::new();
+            for (_, l) in &lines {
+                text.push_str(l);
+                text.push('\n');
+            }
+            let path = seal(dir, &name(device, first, end, kind), text.as_bytes())?;
+            wrote.push((path, started.elapsed()));
+            last = end;
+        }
     }
+    Ok(wrote)
 }
 
 /// Where this device's backups end. MUST-M14: raw lost commits the backups hold, and its next
 /// records reuse those seqs. The segments past raw's end are set aside, so that range is backed
 /// up again from raw as it is reused (a loss that new records have already covered again goes
 /// unseen here, as it does for the consumers' rewind: #83).
-fn cursor(raw: &Raw, dir: &Path) -> Result<i64> {
-    let max = raw.max_seq()?;
-    let mut mine: Vec<Segment> = segments(dir)?
+fn cursor(raw: &Raw, dir: &Path, kind: Kind) -> Result<i64> {
+    let max = kind.top(raw)?;
+    let mut mine: Vec<Segment> = segments(dir, kind)?
         .into_iter()
         .filter(|s| s.device == raw.device())
         .collect();
@@ -163,12 +209,7 @@ fn cursor(raw: &Raw, dir: &Path) -> Result<i64> {
     // does not hold either (a segment a restore skipped) stays a gap.
     let mut end = 0;
     for (i, s) in mine.iter().enumerate() {
-        if s.first > end + 1
-            && raw
-                .after(raw.device(), end, 1)?
-                .first()
-                .is_some_and(|r| r.seq < s.first)
-        {
+        if s.first > end + 1 && kind.next(raw, end)?.is_some_and(|seq| seq < s.first) {
             set_aside(&mine[i..])?;
             break;
         }
@@ -198,8 +239,10 @@ fn set_aside<'a>(segs: impl IntoIterator<Item = &'a Segment>) -> Result<()> {
 /// At a worker's start, when raw may have lost commits: the backups past its end set aside
 /// before new records reuse their seqs.
 pub fn check(home: &Path, raw: &Raw) {
-    if let Err(e) = dir(home).and_then(|d| cursor(raw, &d)) {
-        eprintln!("oboete: backup: {e:#}");
+    for kind in [Kind::Records, Kind::Ops] {
+        if let Err(e) = dir(home).and_then(|d| cursor(raw, &d, kind)) {
+            eprintln!("oboete: backup: {e:#}");
+        }
     }
 }
 
@@ -240,7 +283,10 @@ pub struct Problem {
 
 pub fn verify(dir: &Path) -> Result<Vec<Problem>> {
     let mut out = Vec::new();
-    for s in segments(dir)? {
+    for s in segments(dir, Kind::Records)?
+        .into_iter()
+        .chain(segments(dir, Kind::Ops)?)
+    {
         if let Some(what) = damage(&s.path) {
             out.push(Problem { path: s.path, what });
         }
@@ -310,7 +356,7 @@ pub fn restore(home: &Path) -> Result<String> {
     // MUST-M16's marker) instead of writing into the file that is moved aside.
     let _swap = raw::lock_for_swap(home)?;
     let dir = dir(home)?;
-    let all = segments(&dir)?;
+    let all = segments(&dir, Kind::Records)?;
     let device = device_of(home, &all)?;
     let (ok, bad): (Vec<Segment>, Vec<Segment>) = all
         .into_iter()
@@ -334,17 +380,35 @@ pub fn restore(home: &Path) -> Result<String> {
     let mut rebuild = raw::Rebuild::new(&tmp, &device)?;
     let mut records = 0;
     for s in &ok {
-        let mut text = String::new();
-        zstd::Decoder::new(std::fs::File::open(&s.path)?)?
-            .take(MAX_SEGMENT_BYTES)
-            .read_to_string(&mut text)
-            .with_context(|| format!("read {}", s.path.display()))?;
-        for line in text.lines().filter(|l| !l.is_empty()) {
+        for line in read_segment(&s.path)?.lines().filter(|l| !l.is_empty()) {
             rebuild.add(line)?;
             records += 1;
         }
     }
-    rebuild.finish()?;
+    // The ops after the records, in op order up to the first segment that is damaged or does not
+    // start where the one before it ended. The op log after such a hole is set aside with it: its
+    // windows would move the curation checkpoint past the lost ones, whose claims go with
+    // knowledge.db, and their records would never be curated again.
+    let (mut ops_ok, mut ops_bad, mut next) = (Vec::new(), Vec::new(), 1);
+    for s in segments(&dir, Kind::Ops)?
+        .into_iter()
+        .filter(|s| s.device == device)
+    {
+        if ops_bad.is_empty() && s.first == next && damage(&s.path).is_none() {
+            next = s.last + 1;
+            ops_ok.push(s);
+        } else {
+            ops_bad.push(s);
+        }
+    }
+    let mut ops = 0;
+    for s in &ops_ok {
+        for line in read_segment(&s.path)?.lines().filter(|l| !l.is_empty()) {
+            rebuild.add_op(line)?;
+            ops += 1;
+        }
+    }
+    let dropped = rebuild.finish()?;
     let whole = home.join("raw.db.restored");
     std::fs::rename(&tmp, &whole)?;
     // Durable before the damaged file goes: an open that finds neither would make an empty store.
@@ -359,34 +423,54 @@ pub fn restore(home: &Path) -> Result<String> {
     }
     // A skipped segment is moved aside, so the export cursor never trusts its name and the seqs
     // it claimed are backed up again as they are reused.
-    set_aside(&bad)?;
+    set_aside(bad.iter().chain(&ops_bad))?;
     let kept = quarantine(home, "raw.db")?;
     std::fs::rename(&whole, home.join("raw.db"))?;
     #[cfg(unix)]
     std::fs::File::open(home)?.sync_all()?;
     let skipped: Vec<String> = bad
         .iter()
+        .chain(&ops_bad)
         .filter_map(|s| s.path.file_name().map(|n| n.to_string_lossy().into_owned()))
         .collect();
     let note = format!(
-        "raw.db restored at {} from {} segment(s), {records} record(s); the damaged file is kept as {}{}",
+        "raw.db restored at {} from {} segment(s), {records} record(s) and {} op(s); the damaged file is kept as {}{}{}",
         rusqlite::Connection::open_in_memory()?.query_row(
             "SELECT strftime('%Y-%m-%d %H:%M UTC', ?1 / 1000, 'unixepoch')",
             [crate::db::now_ms()],
             |r| r.get::<_, String>(0)
         )?,
-        ok.len(),
+        ok.len() + ops_ok.len(),
+        ops - dropped,
         kept.file_name().unwrap_or_default().to_string_lossy(),
+        if dropped > 0 {
+            format!("; {dropped} op(s) past the restored records dropped")
+        } else {
+            String::new()
+        },
         if skipped.is_empty() {
             String::new()
         } else {
-            format!("; skipped damaged segment(s): {}", skipped.join(", "))
+            format!(
+                "; skipped segment(s), damaged or after a hole in the op log: {}",
+                skipped.join(", ")
+            )
         }
     );
     let state = home.join("state");
     std::fs::create_dir_all(&state)?;
     std::fs::write(state.join("restored"), format!("{note}\n"))?;
     Ok(note)
+}
+
+/// A segment's lines, decompressed up to the cap.
+fn read_segment(path: &Path) -> Result<String> {
+    let mut text = String::new();
+    zstd::Decoder::new(std::fs::File::open(path)?)?
+        .take(MAX_SEGMENT_BYTES)
+        .read_to_string(&mut text)
+        .with_context(|| format!("read {}", path.display()))?;
+    Ok(text)
 }
 
 /// A hook that found raw.db damaged while a worker held the lock asks that worker to restore it.
@@ -512,7 +596,8 @@ pub fn doctor(home: &Path) -> (Vec<String>, bool) {
             ));
         }
     }
-    let segs = segments(&dir).unwrap_or_default();
+    let segs = segments(&dir, Kind::Records).unwrap_or_default();
+    let op_segs = segments(&dir, Kind::Ops).unwrap_or_default();
     if raw::exists(home) {
         match raw::open(home) {
             Ok(raw) => {
@@ -522,11 +607,18 @@ pub fn doctor(home: &Path) -> (Vec<String>, bool) {
                     .map(|s| s.last)
                     .max()
                     .unwrap_or(0);
+                let ops_through = op_segs
+                    .iter()
+                    .filter(|s| s.device == raw.device())
+                    .map(|s| s.last)
+                    .max()
+                    .unwrap_or(0);
                 lines.push(format!(
-                    "backup: {} segment(s) in {}, through seq {through} of {}",
-                    segs.len(),
+                    "backup: {} segment(s) in {}, through seq {through} of {} and op {ops_through} of {}",
+                    segs.len() + op_segs.len(),
                     dir.display(),
-                    raw.max_seq().unwrap_or(0)
+                    raw.max_seq().unwrap_or(0),
+                    raw.max_op_seq().unwrap_or(0)
                 ));
                 // The full check reads every page: doctor only, never on an automatic path.
                 match raw.integrity_check() {
@@ -607,7 +699,10 @@ mod tests {
                 .unwrap()
                 .contains("100 record(s)")
         );
-        let seg = segments(&p.join("backups")).unwrap().remove(0).path;
+        let seg = segments(&p.join("backups"), Kind::Records)
+            .unwrap()
+            .remove(0)
+            .path;
         overwrite(&seg, 10, &[0xA5; 16]);
         assert_eq!(verify(&p.join("backups")).unwrap().len(), 1); // the checksum names it
     }
@@ -650,7 +745,10 @@ mod tests {
         let line = ledger(&raw);
         assert!(line.contains("\"ledger\":[{") && !line.contains(&key));
         export(p).unwrap();
-        let seg = segments(&p.join("backups")).unwrap().remove(0).path;
+        let seg = segments(&p.join("backups"), Kind::Records)
+            .unwrap()
+            .remove(0)
+            .path;
         let mut text = String::new();
         zstd::Decoder::new(std::fs::File::open(&seg).unwrap())
             .unwrap()
@@ -683,7 +781,10 @@ mod tests {
         }
         drop(raw);
         crate::worker::run_once(p).unwrap(); // indexes and backs up at idle exit
-        let seg = segments(&p.join("backups")).unwrap().remove(0).path;
+        let seg = segments(&p.join("backups"), Kind::Records)
+            .unwrap()
+            .remove(0)
+            .path;
         let (raw_bytes, seg_bytes) = (
             std::fs::read(p.join("raw.db")).unwrap(),
             std::fs::read(&seg).unwrap(),
@@ -722,7 +823,7 @@ mod tests {
         let p = home.path();
         segmented(p, 30, 10); // segments 1-10, 11-20, 21-30
         crate::worker::run_once(p).unwrap(); // index all 30
-        let segs = segments(&p.join("backups")).unwrap();
+        let segs = segments(&p.join("backups"), Kind::Records).unwrap();
         assert_eq!(segs.len(), 3);
         std::fs::write(&segs[1].path, b"damaged").unwrap(); // the middle one
         damage_raw(p);
@@ -736,7 +837,10 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
         segmented(p, 20, 10);
-        let last = segments(&p.join("backups")).unwrap().remove(1).path;
+        let last = segments(&p.join("backups"), Kind::Records)
+            .unwrap()
+            .remove(1)
+            .path;
         std::fs::write(&last, b"damaged").unwrap();
         damage_raw(p);
         crate::worker::run_once(p).unwrap();
@@ -745,7 +849,7 @@ mod tests {
         raw.append(&raw::test_event("after the restore")).unwrap();
         drop(raw);
         export(p).unwrap();
-        let segs = segments(&p.join("backups")).unwrap();
+        let segs = segments(&p.join("backups"), Kind::Records).unwrap();
         assert_eq!(segs.last().map(|s| (s.first, s.last)), Some((11, 11)));
     }
 
@@ -781,7 +885,7 @@ mod tests {
         let p = home.path();
         segmented(p, 30, 10); // segments 1-10, 11-20, 21-30
         let ranges = |p: &Path| {
-            let mut r: Vec<(i64, i64)> = segments(&p.join("backups"))
+            let mut r: Vec<(i64, i64)> = segments(&p.join("backups"), Kind::Records)
                 .unwrap()
                 .iter()
                 .map(|s| (s.first, s.last))
@@ -789,7 +893,7 @@ mod tests {
             r.sort();
             r
         };
-        let middle = segments(&p.join("backups"))
+        let middle = segments(&p.join("backups"), Kind::Records)
             .unwrap()
             .into_iter()
             .find(|s| s.first == 11)
@@ -924,5 +1028,145 @@ mod tests {
             assert!(in_cloud_folder(Path::new(p)).is_some(), "{p}");
         }
         assert!(in_cloud_folder(Path::new("/home/a/.oboete/backups")).is_none());
+    }
+
+    fn window(to_seq: i64) -> (raw::OpKind, serde_json::Value) {
+        (
+            raw::OpKind::Window,
+            serde_json::json!({"from_seq": 1, "to_seq": to_seq, "to_offset": null, "outcome": "curated"}),
+        )
+    }
+
+    fn claim(text: &str) -> (raw::OpKind, serde_json::Value) {
+        (raw::OpKind::Claim, serde_json::json!({"text": text}))
+    }
+
+    #[test]
+    fn ops_survive_a_backup_and_restore() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 10, 10);
+        let mut raw = raw::open(p).unwrap();
+        let dev = raw.device().to_owned();
+        raw.append_ops(&[window(10), claim("keep all timestamps in UTC")])
+            .unwrap();
+        let before = raw.ops_after(&dev, 0, 100).unwrap();
+        drop(raw);
+        export(p).unwrap();
+        damage_raw(p);
+        crate::worker::run_once(p).unwrap();
+        let restored = raw::open(p).unwrap();
+        assert_eq!(restored.ops_after(&dev, 0, 100).unwrap(), before);
+        assert_eq!(restored.curation_checkpoint(&dev).unwrap(), (10, None));
+        let note = std::fs::read_to_string(p.join("state/restored")).unwrap();
+        assert!(note.contains("10 record(s) and 2 op(s)"), "{note}");
+    }
+
+    #[test]
+    fn an_op_appended_after_its_records_were_backed_up_is_exported() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 5, 5);
+        let mut raw = raw::open(p).unwrap();
+        raw.append_ops(&[window(5)]).unwrap();
+        export(p).unwrap();
+        // A correction with no new record: the records' cursor is already at the top.
+        raw.append_ops(&[(raw::OpKind::Correction, serde_json::json!({"text": "fix"}))])
+            .unwrap();
+        let wrote = export(p).unwrap().unwrap();
+        assert!(
+            wrote
+                .to_string_lossy()
+                .ends_with("-000000000002-000000000002.ops.zst")
+        );
+        assert!(export(p).unwrap().is_none()); // nothing new
+    }
+
+    #[test]
+    fn a_window_op_past_the_restored_records_goes_with_every_op_after_it() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 10, 5); // segments 1-5, 6-10
+        let mut raw = raw::open(p).unwrap();
+        let dev = raw.device().to_owned();
+        raw.append_ops(&[window(3), claim("a")]).unwrap();
+        raw.append_ops(&[window(10), claim("b")]).unwrap();
+        raw.append_ops(&[(raw::OpKind::Correction, serde_json::json!({"text": "c"}))])
+            .unwrap();
+        drop(raw);
+        export(p).unwrap();
+        // The newest record segment is damaged: seqs 6-10 are not restored.
+        let newest = segments(&p.join("backups"), Kind::Records)
+            .unwrap()
+            .remove(1)
+            .path;
+        std::fs::write(&newest, b"damaged").unwrap();
+        damage_raw(p);
+        crate::worker::run_once(p).unwrap();
+        let restored = raw::open(p).unwrap();
+        assert_eq!(restored.max_seq().unwrap(), 5);
+        let kept: Vec<i64> = restored
+            .ops_after(&dev, 0, 100)
+            .unwrap()
+            .iter()
+            .map(|o| o.op_seq)
+            .collect();
+        assert_eq!(kept, [1, 2]);
+        assert_eq!(restored.curation_checkpoint(&dev).unwrap(), (3, None));
+        let note = std::fs::read_to_string(p.join("state/restored")).unwrap();
+        assert!(
+            note.contains("3 op(s) past the restored records dropped"),
+            "{note}"
+        );
+        // Their op seqs are reused and backed up again, as record seqs are.
+        drop(restored);
+        let mut raw = raw::open(p).unwrap();
+        raw.append_ops(&[window(5)]).unwrap();
+        drop(raw);
+        export(p).unwrap();
+        let ops = segments(&p.join("backups"), Kind::Ops).unwrap();
+        assert_eq!(ops.last().map(|s| (s.first, s.last)), Some((3, 3)));
+    }
+
+    #[test]
+    fn a_hole_in_the_op_log_sets_aside_every_op_after_it() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 10, 10);
+        let mut raw = raw::open(p).unwrap();
+        let dev = raw.device().to_owned();
+        // One ops segment per export: windows to 3, 6 and 9.
+        for to in [3, 6, 9] {
+            raw.append_ops(&[window(to), claim("x")]).unwrap();
+            export(p).unwrap();
+        }
+        drop(raw);
+        let ops = segments(&p.join("backups"), Kind::Ops).unwrap();
+        assert_eq!(ops.len(), 3);
+        std::fs::write(&ops[1].path, b"damaged").unwrap();
+        damage_raw(p);
+        crate::worker::run_once(p).unwrap();
+        let restored = raw::open(p).unwrap();
+        // The window to 9 verifies, but the one to 6 is lost: curation goes on after 3.
+        assert_eq!(restored.max_op_seq().unwrap(), 2);
+        assert_eq!(restored.curation_checkpoint(&dev).unwrap(), (3, None));
+        let left = segments(&p.join("backups"), Kind::Ops).unwrap();
+        assert_eq!(left.iter().map(|s| s.first).collect::<Vec<_>>(), [1]);
+        let note = std::fs::read_to_string(p.join("state/restored")).unwrap();
+        assert!(note.contains("after a hole in the op log"), "{note}");
+        // A missing segment is a hole too.
+        drop(restored);
+        let mut raw = raw::open(p).unwrap();
+        for to in [6, 9] {
+            raw.append_ops(&[window(to)]).unwrap();
+            export(p).unwrap();
+        }
+        drop(raw);
+        let ops = segments(&p.join("backups"), Kind::Ops).unwrap();
+        std::fs::remove_file(&ops[1].path).unwrap();
+        damage_raw(p);
+        crate::worker::run_once(p).unwrap();
+        let restored = raw::open(p).unwrap();
+        assert_eq!(restored.curation_checkpoint(&dev).unwrap(), (3, None));
     }
 }
