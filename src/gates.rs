@@ -432,16 +432,27 @@ fn exited_nonzero(output: &str) -> bool {
     code.is_some_and(|c| c != 0) || EXIT.is_match(output)
 }
 
-/// Whether a tool line is a command run (any agent's shell), not a read or a search.
+/// Whether a tool line is a command run: an agent's shell tool by its whole name (Claude's and
+/// Pi's `bash`, Cursor's `Shell`, Codex's `exec_command`, Gemini's `run_shell_command`, Grok's
+/// `run_terminal_command`, agy's `run_command`, and the Windows and older shells' names), not a
+/// read, a search or an MCP tool that executes something else (`mcp__cloudflare_api__execute`).
 fn runs(text: &str) -> bool {
     let name = text
         .strip_prefix("[tool ")
         .and_then(|t| t.split([' ', ']']).next())
         .unwrap_or("")
         .to_ascii_lowercase();
-    ["bash", "shell", "command", "exec", "terminal"]
-        .iter()
-        .any(|k| name.contains(k))
+    [
+        "bash",
+        "shell",
+        "powershell",
+        "exec_command",
+        "local_shell",
+        "run_shell_command",
+        "run_terminal_command",
+        "run_command",
+    ]
+    .contains(&name.as_str())
 }
 
 /// A tool's output as text: a structured one (Claude's Bash gives `{"stdout", "stderr", …}`) as
@@ -837,6 +848,28 @@ mod tests {
             "output": "The previous release passed all tests.", "failed": false}),
         );
         assert_eq!(done(&[read, reply(fixed)]), "proposed");
+        // Only an agent's shell tool runs: an MCP tool that executes something else is no run.
+        let named = |name: &str| {
+            let body = json!({"tool": name, "input": "{}", "output": "3 passed", "failed": false});
+            ("tool", body)
+        };
+        for name in [
+            "mcp__cloudflare_api__execute",
+            "terminal_status",
+            "execute_sql",
+        ] {
+            assert_eq!(done(&[named(name), reply(fixed)]), "proposed", "{name}");
+        }
+        for name in [
+            "Bash",
+            "Shell",
+            "exec_command",
+            "run_shell_command",
+            "run_terminal_command",
+            "run_command",
+        ] {
+            assert_eq!(done(&[named(name), reply(fixed)]), "done", "{name}");
+        }
         // Claude's Bash output is structured: an error in its stderr is a failure too.
         let structured = |stdout: &str, stderr: &str| {
             let output = json!({"stdout": stdout, "stderr": stderr}).to_string();
