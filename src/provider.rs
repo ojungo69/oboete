@@ -1177,6 +1177,12 @@ fn run_cli(
             // directory as its cwd until it is waited for (Windows refuses the removal).
             child.kill().ok();
             child.wait().ok();
+            // What was already in the pipe is read before the snapshot: the reader ends when the
+            // pipe closes, or is given up on after a moment when a grandchild still holds it.
+            let until = Instant::now() + Duration::from_millis(500);
+            while out_h.as_ref().is_some_and(|h| !h.is_finished()) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
             let e = CallError::other(format!("timed out after {}s", timeout.as_secs()));
             return (take(&out), Err(e));
         }
