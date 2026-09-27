@@ -13,7 +13,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use rusqlite::Connection;
 use serde_json::{Value, json};
 
@@ -41,12 +41,55 @@ const MAX_SUBSCRIPTION_REST: Duration = Duration::from_secs(8 * 24 * 3600);
 /// Longest cooldown of a 429 that names no reset, reached by doubling from `COOLDOWN_429`.
 const MAX_BACKOFF_429: Duration = Duration::from_secs(3600);
 
+#[derive(Debug)]
 pub struct ChainResult {
     pub provider: String,
     pub output: Value,
-    /// Providers tried before the one that answered (name, reason).
-    pub fallbacks: Vec<(String, String)>,
+    /// Providers gone past before the one that answered.
+    pub fallbacks: Vec<Fallback>,
 }
+
+/// Why the chain went past a provider, which the curation phase needs to know (D10, D11).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Skip {
+    /// It may be tried from then on (unix ms): a cooldown, a rate limit's reset, the owner still
+    /// working (D9).
+    Wait(i64),
+    /// Its budget refuses it until then: a day's or a month's reset.
+    Budget(i64),
+    /// It waits for the owner: stopped until `oboete resume`, or a curator CLI that is not
+    /// proven unable to act.
+    Owner,
+    /// It was tried and gave no valid answer.
+    Failed,
+    /// It can never take this request: over its ceiling. Nothing was sent.
+    TooBig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fallback {
+    pub provider: String,
+    pub reason: String,
+    pub skip: Skip,
+}
+
+/// What `Chain::run` fails with when it went past every provider; the curation phase takes it
+/// out of the `anyhow::Error` with `downcast_ref`.
+#[derive(Debug)]
+pub struct ChainFailed(pub Vec<Fallback>);
+
+impl std::fmt::Display for ChainFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let each: Vec<String> = self
+            .0
+            .iter()
+            .map(|b| format!("{}: {}", b.provider, b.reason))
+            .collect();
+        write!(f, "every provider failed: {}", each.join(" | "))
+    }
+}
+
+impl std::error::Error for ChainFailed {}
 
 /// One provider's answer.
 #[derive(Debug)]
@@ -120,6 +163,8 @@ pub struct Chain<'a> {
     providers: &'a [Provider],
     db: &'a Connection,
     paid_usd_per_month: f64,
+    /// Until when the owner is still working (D9), asked right before each subscription call.
+    working: Option<&'a dyn Fn() -> Option<i64>>,
 }
 
 impl<'a> Chain<'a> {
@@ -128,6 +173,17 @@ impl<'a> Chain<'a> {
             providers,
             db,
             paid_usd_per_month: 5.0,
+            working: None,
+        }
+    }
+
+    /// The idle gate (D9): `working` says until when the owner is still working, or `None` once
+    /// they are not. A subscription entry is not called before then.
+    #[allow(dead_code)] // The curation phase (Task 5, part 3b) sets it.
+    pub fn idle_gate(self, working: &'a dyn Fn() -> Option<i64>) -> Self {
+        Self {
+            working: Some(working),
+            ..self
         }
     }
 
@@ -178,14 +234,22 @@ impl<'a> Chain<'a> {
                     },
                 )
             };
+            let mut skip = |reason: String, skip: Skip| {
+                fallbacks.push(Fallback {
+                    provider: name.clone(),
+                    reason,
+                    skip,
+                })
+            };
             let state = providers_db::state(conn, &name)?;
             if state.down_until == providers_db::OWNER_HOLD {
                 let why = format!("stopped until the owner acts (`oboete resume {name}`)");
-                fallbacks.push((name, why));
+                skip(why, Skip::Owner);
                 continue;
             }
             if state.down_until > db::now_ms() {
-                fallbacks.push((name, "cooling down after an earlier failure".into()));
+                let why = "cooling down after an earlier failure".into();
+                skip(why, Skip::Wait(state.down_until));
                 continue;
             }
             let tokens = f64::from(est) * budget::factor(conn, &name)?;
@@ -199,7 +263,14 @@ impl<'a> Chain<'a> {
                     Usage::default(),
                     None,
                 )?;
-                fallbacks.push((name, refusal.detail));
+                skip(refusal.detail, refusal.skip);
+                continue;
+            }
+            // The owner is still working: a subscription waits (D9), a free entry does not.
+            if p.subscription()
+                && let Some(until) = self.working.and_then(|working| working())
+            {
+                skip("waiting for the owner to finish".into(), Skip::Wait(until));
                 continue;
             }
             // A curator CLI that could act on what it reads is not called at all (spec 6.5). After
@@ -210,7 +281,7 @@ impl<'a> Chain<'a> {
                 if gate != crate::isolation::Gate::Passed {
                     let ms = started.elapsed().as_millis() as i64;
                     record("gate", ms, Some(&gate.why()), false, Usage::default(), None)?;
-                    fallbacks.push((name, gate.why()));
+                    skip(gate.why(), Skip::Owner);
                     continue;
                 }
             }
@@ -289,18 +360,15 @@ impl<'a> Chain<'a> {
                     if !forced {
                         providers_db::set_state(conn, &name, next_state(state, &e))?;
                     }
-                    fallbacks.push((name, e.message));
+                    fallbacks.push(Fallback {
+                        provider: name,
+                        reason: e.message,
+                        skip: Skip::Failed,
+                    });
                 }
             }
         }
-        Err(anyhow!(
-            "every provider failed: {}",
-            fallbacks
-                .iter()
-                .map(|(n, r)| format!("{n}: {r}"))
-                .collect::<Vec<_>>()
-                .join(" | ")
-        ))
+        Err(ChainFailed(fallbacks).into())
     }
 }
 
@@ -2013,6 +2081,106 @@ mod tests {
         assert_eq!(usage_cli("claude", &huge.to_string()).prompt, None);
     }
 
+    /// D9: while the owner works, a subscription entry is gone past with the time it may be tried
+    /// from, and a free entry is still called; once they stop, the subscription is called.
+    #[test]
+    fn a_subscription_waits_while_the_owner_works_and_a_free_entry_does_not() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let answer = json!({"choices": [{"message": {"content": "{\"summary\": \"s\"}"}}]});
+        let (free_url, free_request) = serve("500 Internal Server Error", b"{}".to_vec(), "");
+        let (sub_url, sub_request) = serve_once(answer.to_string().into_bytes(), "");
+        let mut sub = stub(sub_url);
+        if let Provider::Openai {
+            name, subscription, ..
+        } = &mut sub
+        {
+            *name = "sub".into();
+            *subscription = true;
+        }
+        let until = crate::db::now_ms() + 600_000;
+        let working = || Some(until);
+        let providers = [stub(free_url), sub.clone()];
+        let err = Chain::new(&providers, &conn)
+            .idle_gate(&working)
+            .run("curator", "s", "p", &json!({}))
+            .unwrap_err();
+        let failed = err.downcast_ref::<ChainFailed>().expect("a ChainFailed");
+        let skips: Vec<(&str, &Skip)> = failed
+            .0
+            .iter()
+            .map(|f| (f.provider.as_str(), &f.skip))
+            .collect();
+        assert_eq!(
+            skips,
+            [("stub", &Skip::Failed), ("sub", &Skip::Wait(until))]
+        );
+        assert_eq!(failed.0[1].reason, "waiting for the owner to finish");
+        assert!(free_request.try_recv().is_ok(), "the free entry was called");
+        assert!(
+            sub_request.try_recv().is_err(),
+            "the subscription was called"
+        );
+        let idle = || None;
+        let r = Chain::new(std::slice::from_ref(&sub), &conn)
+            .idle_gate(&idle)
+            .run("curator", "s", "p", &json!({}))
+            .unwrap();
+        assert_eq!(r.provider, "sub");
+    }
+
+    /// D10, D11: each provider gone past says whether time, a budget reset or the owner will let
+    /// it be tried again, or whether it failed.
+    #[test]
+    fn each_provider_gone_past_says_what_it_waits_for() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let named = |name: &str, budget: u32| {
+            let mut p = stub("http://127.0.0.1:9".into());
+            if let Provider::Openai {
+                name: n,
+                daily_budget,
+                ..
+            } = &mut p
+            {
+                *n = name.into();
+                *daily_budget = budget;
+            }
+            p
+        };
+        let cool_until = crate::db::now_ms() + 60_000;
+        let state = |until| providers_db::State {
+            down_until: until,
+            ..Default::default()
+        };
+        providers_db::set_state(&conn, "held", state(providers_db::OWNER_HOLD)).unwrap();
+        providers_db::set_state(&conn, "cooling", state(cool_until)).unwrap();
+        let providers = [
+            named("held", 10),
+            named("cooling", 10),
+            named("spent", 0),
+            named("down", 10),
+        ];
+        let err = Chain::new(&providers, &conn)
+            .run("curator", "s", "p", &json!({}))
+            .unwrap_err();
+        let failed = err.downcast_ref::<ChainFailed>().expect("a ChainFailed");
+        let skips: Vec<&Skip> = failed.0.iter().map(|f| &f.skip).collect();
+        assert_eq!(
+            skips,
+            [
+                &Skip::Owner,
+                &Skip::Wait(cool_until),
+                &Skip::Budget(providers_db::next_day()),
+                &Skip::Failed
+            ]
+        );
+        assert!(
+            err.to_string()
+                .starts_with("every provider failed: held: stopped")
+        );
+    }
+
     #[test]
     fn an_answer_records_its_token_usage() {
         let home = tempfile::tempdir().unwrap();
@@ -2287,6 +2455,7 @@ mod tests {
             extra: Default::default(),
             headers: Default::default(),
             limits: Default::default(),
+            subscription: false,
         }];
         let Err(err) = Chain::new(&providers, &conn).run("curator", "s", "p", &json!({})) else {
             panic!("the stub only fails");
@@ -2315,6 +2484,7 @@ mod tests {
             extra: Default::default(),
             headers: Default::default(),
             limits: Default::default(),
+            subscription: false,
         }
     }
 
@@ -2447,6 +2617,7 @@ mod tests {
             .unwrap();
         assert_eq!(rows[0], ("groq".into(), "too_big".into(), 0));
         assert_eq!(rows[1].1, "ok");
+        assert_eq!(r.fallbacks[0].skip, Skip::TooBig);
     }
 
     #[test]
