@@ -1649,7 +1649,7 @@ pub fn doctor(home: &Path) -> Result<()> {
     for l in &backup {
         println!("  {l}");
     }
-    if let Ok(why) = std::fs::read_to_string(crate::worker::failed_note(home)) {
+    if let Some(why) = crate::worker::last_failure(home) {
         println!("  the last worker run failed: {}", why.trim_end());
         unhealthy.push("the worker stopped with an error (see above)");
     }

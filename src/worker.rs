@@ -78,14 +78,11 @@ pub fn lock(home: &Path) -> Result<Option<Lock>> {
             // Replaced whole, never rewritten in place: a number cut off by a crash or a full disk
             // would start the count again below the last recorded outcome's.
             // One that is unreadable anyway goes on from the last recorded outcome's.
-            let number = |f: &str| {
-                std::fs::read_to_string(state.join(f))
-                    .ok()
-                    .and_then(|g| g.trim().parse::<u64>().ok())
-            };
             let gen_file = state.join("worker-gen");
-            let taken = number("worker-gen")
-                .or_else(|| number("worker-outcome-gen"))
+            let taken = std::fs::read_to_string(&gen_file)
+                .ok()
+                .and_then(|g| g.trim().parse::<u64>().ok())
+                .or_else(|| outcome(home).map(|(g, _)| g))
                 .unwrap_or(0)
                 + 1;
             let next = state.join("worker-gen.next");
@@ -280,29 +277,35 @@ fn record(home: &Path, last: u64, result: &Result<()>) {
     if guard.lock().is_err() {
         return;
     }
-    let recorded = state.join("worker-outcome-gen");
-    let later = std::fs::read_to_string(&recorded)
-        .ok()
-        .and_then(|g| g.trim().parse::<u64>().ok())
-        .is_some_and(|g| g > last);
-    if later {
+    if outcome(home).is_some_and(|(g, _)| g > last) {
         return;
     }
-    let note = failed_note(home);
-    match result {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&note);
-        }
-        Err(e) => {
-            let _ = std::fs::write(&note, format!("{e:#}\n"));
-        }
+    // The number and the outcome in one file, replaced whole: a run stopped halfway leaves the
+    // last outcome as it was.
+    let why = result
+        .as_ref()
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
+    let next = state.join("worker-outcome.next");
+    if std::fs::write(&next, format!("{last}\n{why}")).is_ok() {
+        let _ = std::fs::rename(&next, state.join("worker-outcome"));
     }
-    let _ = std::fs::write(recorded, last.to_string());
 }
 
-/// `<home>/state/worker-failed`: why the last `oboete worker` stopped with an error.
-pub fn failed_note(home: &Path) -> std::path::PathBuf {
-    home.join("state").join("worker-failed")
+/// `<home>/state/worker-outcome`: the lock number of the last run that recorded its outcome, and
+/// why it stopped with an error (empty when it ended well).
+fn outcome(home: &Path) -> Option<(u64, String)> {
+    let text = std::fs::read_to_string(home.join("state").join("worker-outcome")).ok()?;
+    let (number, why) = text.split_once('\n').unwrap_or((&text, ""));
+    Some((number.trim().parse().ok()?, why.to_owned()))
+}
+
+/// Why the last `oboete worker` stopped with an error, if it did.
+pub fn last_failure(home: &Path) -> Option<String> {
+    outcome(home)
+        .map(|(_, why)| why)
+        .filter(|why| !why.is_empty())
 }
 
 /// One run now, for `oboete restore` and tests. It waits up to 2 s for the lock rather than
@@ -390,16 +393,16 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("raw.db"), b"not a database at all").unwrap();
         assert!(run(home.path(), 0).is_err()); // damaged, and no backup to restore from
-        let why = std::fs::read_to_string(failed_note(home.path())).unwrap();
+        let why = last_failure(home.path()).unwrap();
         assert!(why.contains("backup segment"), "{why}");
         std::fs::remove_file(home.path().join("raw.db")).unwrap();
         // A run that finds another worker holding the lock did nothing: the note stays.
         let other = lock(home.path()).unwrap();
         run(home.path(), 0).unwrap();
-        assert!(failed_note(home.path()).exists());
+        assert!(last_failure(home.path()).is_some());
         drop(other);
         run(home.path(), 0).unwrap();
-        assert!(!failed_note(home.path()).exists());
+        assert!(last_failure(home.path()).is_none());
     }
 
     /// A run's outcome is recorded unless a later run's already is, whichever order the two end
@@ -413,30 +416,36 @@ mod tests {
         let (a, b) = (taken(home.path()), taken(home.path()));
         record(home.path(), b, &failed());
         record(home.path(), a, &Ok(()));
-        assert!(failed_note(home.path()).exists(), "A cleared B's failure");
+        assert!(last_failure(home.path()).is_some(), "A cleared B's failure");
         // B ends well; then A fails.
         let (a, b) = (taken(home.path()), taken(home.path()));
         record(home.path(), b, &Ok(()));
         record(home.path(), a, &failed());
-        assert!(!failed_note(home.path()).exists(), "A recorded over B");
+        assert!(last_failure(home.path()).is_none(), "A recorded over B");
         // A records before B, which fails: B's outcome is the last one.
         let (a, b) = (taken(home.path()), taken(home.path()));
         record(home.path(), a, &Ok(()));
         record(home.path(), b, &failed());
-        let why = std::fs::read_to_string(failed_note(home.path())).unwrap();
-        assert_eq!(why, "a failure\n");
+        let why = last_failure(home.path()).unwrap();
+        assert_eq!(why, "a failure");
         // A lock number lost to a damaged file goes on from the last recorded outcome's.
         std::fs::write(home.path().join("state").join("worker-gen"), "").unwrap();
         let after_damage = taken(home.path());
         record(home.path(), after_damage, &Ok(()));
         assert!(
-            !failed_note(home.path()).exists(),
+            last_failure(home.path()).is_none(),
             "an outcome after the damage was refused"
         );
+        // A run stopped between writing its outcome and putting it in place changes nothing.
+        record(home.path(), taken(home.path()), &failed());
+        let state = home.path().join("state");
+        std::fs::write(state.join("worker-outcome.next"), "1\nhalf written").unwrap();
+        assert_eq!(last_failure(home.path()).as_deref(), Some("a failure"));
+        record(home.path(), taken(home.path()), &Ok(()));
         // A worker holding the lock does not keep an outcome from being recorded.
         let running = lock(home.path()).unwrap().unwrap();
         record(home.path(), running.1, &Ok(()));
-        assert!(!failed_note(home.path()).exists());
+        assert!(last_failure(home.path()).is_none());
         assert!(lock(home.path()).unwrap().is_none());
     }
 
