@@ -13,6 +13,18 @@ pub struct Config {
     pub summary: Summary,
     #[serde(default)]
     pub embedding: Embedding,
+    /// Where Gemini joins the chain; absent, it is not in it (the owner decides, free or paid).
+    #[serde(default)]
+    pub gemini: Option<GeminiPlace>,
+}
+
+/// `gemini = "before-subscriptions"` puts it just before the first subscription CLI (it spares
+/// their quota and sees more windows); `"after-subscriptions"` at the end of the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GeminiPlace {
+    BeforeSubscriptions,
+    AfterSubscriptions,
 }
 
 /// Semantic search is a provider slot (docs/plan.md 2b, docs/pr-d.md): `none` (full-text only,
@@ -178,6 +190,22 @@ fn openai(
     }
 }
 
+/// Gemini through its OpenAI-compatible endpoint, key in `~/GEMINI_API_KEY.md`
+/// (docs/research/curator-providers-2026-09-27.md section 6). 30 calls a day keeps a paid key
+/// under the USD 5 a month paid-API cap: Flash-Lite costs about USD 0.005 a window (10,000
+/// tokens in, 1,500 out, USD 0.25 and 1.50 a million, checked 2026-09-27).
+fn gemini() -> Provider {
+    openai(
+        "gemini",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "GEMINI_API_KEY.md",
+        "gemini-3.1-flash-lite",
+        30,
+        true,
+        serde_json::json!({}),
+    )
+}
+
 fn cli(name: &str, model: Option<&str>, daily_budget: u32) -> Provider {
     Provider::Cli {
         name: name.into(),
@@ -308,11 +336,26 @@ pub fn load(home: &Path) -> Result<Config> {
             providers: default_providers(),
             summary: Summary::default(),
             embedding: Embedding::default(),
+            gemini: None,
         });
     }
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let cfg: Config = toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    let mut cfg: Config =
+        toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    if let Some(place) = cfg.gemini
+        && !cfg.providers.iter().any(|p| p.name() == "gemini")
+    {
+        let at = match place {
+            GeminiPlace::BeforeSubscriptions => cfg
+                .providers
+                .iter()
+                .position(|p| matches!(p, Provider::Cli { .. }))
+                .unwrap_or(cfg.providers.len()),
+            GeminiPlace::AfterSubscriptions => cfg.providers.len(),
+        };
+        cfg.providers.insert(at, gemini());
+    }
     match cfg.embedding.provider.as_str() {
         "none" => {}
         "workers-ai" => anyhow::ensure!(
@@ -432,6 +475,36 @@ model = "haiku"
             _ => panic!("expected openai"),
         }
         assert!(!cfg.providers[1].retry_429());
+    }
+
+    #[test]
+    fn gemini_joins_the_chain_only_where_the_owner_puts_it() {
+        let dir = std::env::temp_dir().join(format!("oboete-gemini-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let names = |toml: &str| {
+            std::fs::write(dir.join("config.toml"), toml).unwrap();
+            load(&dir)
+                .unwrap()
+                .providers
+                .iter()
+                .map(|p| p.name().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(!names("").contains(&"gemini".to_owned()));
+        let before = names("gemini = \"before-subscriptions\"\n");
+        let at = before.iter().position(|n| n == "gemini").unwrap();
+        assert_eq!(before[at - 1], "opencode-go");
+        assert_eq!(before[at + 1], "codex");
+        let after = names("gemini = \"after-subscriptions\"\n");
+        assert_eq!(after.last().map(String::as_str), Some("gemini"));
+        // An entry of the owner's own named gemini is not doubled.
+        let own = names(
+            "gemini = \"after-subscriptions\"\n[[providers]]\nkind = \"openai\"\nname = \"gemini\"\nbase_url = \"https://example.test/v1\"\nmodel = \"m\"\n",
+        );
+        assert_eq!(own, ["gemini"]);
+        std::fs::write(dir.join("config.toml"), "gemini = \"first\"\n").unwrap();
+        assert!(load(&dir).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

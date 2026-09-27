@@ -7,7 +7,7 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Result, anyhow};
 use rusqlite::Connection;
@@ -495,10 +495,19 @@ const KNOWN_CODES: &[&str] = &[
     "UNAVAILABLE",
 ];
 
+/// A JSON error body: `{"error": …}`, or Gemini's `[{"error": …}]` (its OpenAI-compatible
+/// endpoint wraps the error in an array).
+fn error_body(body: &str) -> Option<Value> {
+    match serde_json::from_str(body).ok()? {
+        Value::Array(mut a) if !a.is_empty() => Some(a.swap_remove(0)),
+        v => Some(v),
+    }
+}
+
 /// The error's code, type or status from a JSON error body (`{"error": {"code" | "type": …}}`),
 /// when it is one of `KNOWN_CODES` or an HTTP status number (issue #91).
 pub(crate) fn error_code(body: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(body).ok()?;
+    let v = error_body(body)?;
     let e = v.get("error").unwrap_or(&v);
     ["code", "type", "status"]
         .iter()
@@ -515,12 +524,52 @@ pub(crate) fn error_code(body: &str) -> Option<String> {
 /// The reset a 429 names in its `error.message` (Groq sends it there, not only in Retry-After).
 /// Only that field and only on a 429: other fields and other errors can echo the prompt or the
 /// generation (`failed_generation`), and a "try again in 24h" there must not set a cooldown.
+/// Gemini names it in structured details instead: a `RetryInfo` delay, and a `QuotaFailure`
+/// whose quota is per day, which resets at midnight Pacific time, long after that short delay.
 fn retry_after_in_error(status: u16, body: &str) -> Option<f64> {
     if status != 429 {
         return None;
     }
-    let v: Value = serde_json::from_str(body).ok()?;
-    retry_after_in_body(v["error"]["message"].as_str()?)
+    let v = error_body(body)?;
+    let e = v.get("error")?;
+    let details = e["details"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let of = |kind: &'static str| {
+        details
+            .iter()
+            .filter(move |d| d["@type"].as_str().is_some_and(|t| t.ends_with(kind)))
+    };
+    let per_day = of("QuotaFailure")
+        .flat_map(|d| d["violations"].as_array().into_iter().flatten())
+        .any(|q| {
+            q["quotaId"]
+                .as_str()
+                .is_some_and(|id| id.contains("PerDay"))
+        });
+    if per_day {
+        return Some(until_pacific_midnight(SystemTime::now()));
+    }
+    of("RetryInfo")
+        .find_map(|d| {
+            d["retryDelay"]
+                .as_str()?
+                .strip_suffix('s')?
+                .parse::<f64>()
+                .ok()
+        })
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .or_else(|| retry_after_in_body(e["message"].as_str()?))
+}
+
+/// Seconds to the next 08:00 UTC: midnight in Pacific standard time. Under daylight time that
+/// is an hour after the reset (no time zone database here), which only delays the retry.
+fn until_pacific_midnight(now: SystemTime) -> f64 {
+    let day = 86_400;
+    let s = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let shift = 8 * 3600;
+    let next = ((s + day - shift) / day) * day + shift;
+    (next - s) as f64
 }
 
 /// Groq's "try again in 17.2875s", "6m20.064s", "1h2m3.5s" or "580ms", in seconds.
@@ -1593,6 +1642,35 @@ mod tests {
         ] {
             assert_eq!(retry_after_in_body(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn gemini_errors_are_read_from_its_array_body_and_details() {
+        let body = |id: &str| {
+            json!([{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                "message": "You exceeded your current quota.",
+                "details": [
+                    {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                     "violations": [{"quotaMetric": "generate_content_requests", "quotaId": id}]},
+                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "35s"}]}}])
+            .to_string()
+        };
+        // The array root is read (it gave no code before).
+        assert_eq!(error_code(&body("x")).as_deref(), Some("429"));
+        // A per-minute quota: its RetryInfo delay.
+        let minute = body("GenerateRequestsPerMinutePerProjectPerModel-FreeTier");
+        assert_eq!(retry_after_in_error(429, &minute), Some(35.0));
+        // A daily one resets at midnight Pacific, not in 35 s.
+        let day = body("GenerateRequestsPerDayPerProjectPerModel-FreeTier");
+        let wait = retry_after_in_error(429, &day).unwrap();
+        assert!(wait > 35.0 && wait <= 86_400.0, "{wait}");
+        assert_eq!(retry_after_in_error(400, &day), None);
+        let at = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(s);
+        assert_eq!(until_pacific_midnight(at(86_400 * 100)), 8.0 * 3600.0);
+        assert_eq!(
+            until_pacific_midnight(at(86_400 * 100 + 9 * 3600)),
+            23.0 * 3600.0
+        );
     }
 
     #[test]
