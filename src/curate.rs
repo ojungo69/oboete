@@ -17,6 +17,8 @@ use serde_json::Value;
 pub const WINDOW_TOKENS: u32 = 5_000;
 /// A tool's input shown in a window, at most: the output is what a window reads or elides.
 const TOOL_INPUT_CHARS: usize = 2_000;
+/// A session heading's length, at most.
+const HEADING_CHARS: usize = 200;
 /// Records read at a time while a window is cut.
 const PAGE: usize = 200;
 /// Records one window covers at most, text or not (issue #54: a window is bounded in records as
@@ -164,12 +166,13 @@ fn empty(seq: i64) -> Piece {
 }
 
 /// Capture's `{kind, mime, bytes, sha256}` markers for binary content, whole or inside a text:
-/// neither the content nor its marker goes to a curator (spec 2.3).
+/// neither the content nor its marker goes to a curator (spec 2.3). Known by their four keys in
+/// order, whatever their values: a capture rule may have masked any of them.
 fn without_markers(s: &str) -> String {
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        let text = r#""(?:[^"\\]|\\.)*""#;
+        let value = r#"(?:"(?:[^"\\]|\\.)*"|[^,{}"]*)"#;
         regex::Regex::new(&format!(
-            r#"\{{"kind":{text},"mime":{text},"bytes":\d+,"sha256":"[0-9a-f]{{64}}"\}}"#
+            r#"\{{"kind":{value},"mime":{value},"bytes":{value},"sha256":{value}\}}"#
         ))
         .expect("marker pattern")
     });
@@ -276,6 +279,11 @@ impl<'r> Prepared<'r> {
             }
             _ => String::new(),
         };
+        // A label is shown whole up to this, after the gate: a heading never takes a window.
+        let heading: String = format!("{} session {}{place}", gate(&e.agent), gate(&e.session))
+            .chars()
+            .take(HEADING_CHARS)
+            .collect();
         Self {
             rules,
             long: long.map(|l| {
@@ -286,7 +294,7 @@ impl<'r> Prepared<'r> {
             tool,
             turn: e.kind == "prompt",
             key: format!("{}\u{0}{}", e.agent, e.session),
-            heading: format!("{} session {}{place}", gate(&e.agent), gate(&e.session)),
+            heading,
         }
     }
 
@@ -660,6 +668,11 @@ mod tests {
         let sha = "a".repeat(64);
         let marker = format!(r#"{{"kind":"image","mime":"image/png","bytes":3,"sha256":"{sha}"}}"#);
         raw.append(&prompt(&format!("see {marker} here"))).unwrap();
+        // A marker a capture rule masked a value of is still a marker.
+        raw.append(&prompt(
+            r#"then {"kind":"image","mime":"image/png","bytes":3,"sha256":"[REDACTED]"} there"#,
+        ))
+        .unwrap();
         // A reply whose key a rule masked at capture keeps its text.
         raw.append(&event(
             "reply",
@@ -675,7 +688,11 @@ mod tests {
             "{}",
             w.text
         );
-        assert!(w.text.contains("see  here"), "{}", w.text);
+        assert!(
+            w.text.contains("see  here") && w.text.contains("then  there"),
+            "{}",
+            w.text
+        );
         assert!(w.text.contains("an important decision"), "{}", w.text);
     }
 
@@ -718,5 +735,20 @@ mod tests {
             close(&mut raw, &w);
         }
         assert_eq!(seen, 10_000);
+    }
+
+    #[test]
+    fn a_heading_longer_than_a_window_is_cut() {
+        let (_h, mut raw, dev) = store();
+        raw.append(&Event {
+            session: "s".repeat(50_000),
+            ..prompt("hello")
+        })
+        .unwrap();
+        let w = next_window(&raw, &dev, 300, &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert!(crate::budget::estimate(&w.text) <= 300, "{}", w.text.len());
+        assert!(w.text.contains("hello"));
     }
 }
