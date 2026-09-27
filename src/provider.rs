@@ -1010,13 +1010,22 @@ fn claude_stream(stdout: &str) -> Result<String, CallError> {
 }
 
 /// When claude's stream said its subscription should rest: the reset of a `rate_limit_event` with
-/// `allowed_warning` or `rejected` (Claude decision C1), at most `MAX_SUBSCRIPTION_REST` away.
+/// `allowed_warning` or `rejected` (Claude decision C1), at most `MAX_SUBSCRIPTION_REST` away, or
+/// `OWNER_HOLD` for `credits_required`. Lines that do not parse are passed over: this only ever
+/// adds rest, and a killed run's last line is often cut.
 fn claude_rest(stdout: &str) -> Option<i64> {
     let now = db::now_ms();
-    stdout
+    let events = stdout
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|e| e["type"] == "rate_limit_event")
+        .filter(|e| e["type"] == "rate_limit_event");
+    if events
+        .clone()
+        .any(|e| e["rate_limit_info"]["errorCode"] == "credits_required")
+    {
+        return Some(providers_db::OWNER_HOLD);
+    }
+    events
         .filter(|e| {
             matches!(
                 e["rate_limit_info"]["status"].as_str(),
@@ -1055,7 +1064,15 @@ fn cli_headless(
         .env_clear()
         .envs(curator_env(std::env::vars_os(), cfg!(windows)))
         .env(hook::SKIP_ENV, "1");
-    let out = run_cli(cmd, stdin, Duration::from_secs(timeout_s)).map_err(|e| {
+    let (out, ran) = run_cli(cmd, stdin, Duration::from_secs(timeout_s));
+    let stdout = String::from_utf8_lossy(&out);
+    // claude's reset holds whatever else fails below, a failed or timed-out run included.
+    let rest = if cli == "claude" {
+        claude_rest(&stdout)
+    } else {
+        None
+    };
+    ran.map_err(|e| {
         let tagged = if e.invalid() {
             format!(
                 "invalid output: {cli}: {}",
@@ -1068,15 +1085,9 @@ fn cli_headless(
             message: tagged,
             ..e
         }
+        .resting(rest)
     })?;
-    let stdout = String::from_utf8_lossy(&out);
     let usage = usage_cli(cli, &stdout);
-    // claude's reset holds whatever else fails below.
-    let rest = if cli == "claude" {
-        claude_rest(&stdout)
-    } else {
-        None
-    };
     let text = match cli {
         "claude" => claude_stream(&stdout).map_err(|e| e.with_usage(usage).resting(rest))?,
         "codex" => {
@@ -1110,72 +1121,86 @@ const MAX_RESPONSE_BYTES: u64 = 1 << 20;
 /// Spawn `cmd`, feed it `stdin`, and return its stdout if it exits 0 within `timeout`.
 /// stdin, stdout and stderr each get a thread: a prompt larger than the pipe buffer, or an
 /// answer larger than it, must not deadlock against a child that has not read or exited yet.
+/// Also returns what the child wrote to stdout by then, whatever the outcome: claude reports its
+/// allowance before it answers, and a run that then fails or hangs must still rest it.
 fn run_cli(
     mut cmd: Command,
     stdin: Option<String>,
     timeout: Duration,
-) -> Result<Vec<u8>, CallError> {
+) -> (Vec<u8>, Result<(), CallError>) {
     use std::io::{Read, Write};
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| CallError::other(format!("spawn: {e}")).unsent())?;
+    use std::sync::{Arc, Mutex};
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                Vec::new(),
+                Err(CallError::other(format!("spawn: {e}")).unsent()),
+            );
+        }
+    };
     let feeder = child.stdin.take().zip(stdin).map(|(mut w, text)| {
         // A child that exits without reading just makes the write fail.
         std::thread::spawn(move || w.write_all(text.as_bytes()).ok())
     });
+    // Read as it comes, into a buffer the caller can take without joining: on a timeout a
+    // grandchild may still hold the pipe open.
     let drain = |r: Option<Box<dyn Read + Send>>| {
-        r.map(|r| {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&buf);
+        let h = r.map(|mut r| {
             std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let mut r = r.take(MAX_RESPONSE_BYTES + 1);
-                r.read_to_end(&mut buf).ok();
+                let mut chunk = [0u8; 8192];
                 // Keep reading past the cap so the child is never blocked on a full pipe.
-                std::io::copy(r.get_mut(), &mut std::io::sink()).ok();
-                buf
+                while let Ok(n @ 1..) = r.read(&mut chunk) {
+                    let mut b = sink.lock().unwrap_or_else(|p| p.into_inner());
+                    let room = (MAX_RESPONSE_BYTES as usize + 1).saturating_sub(b.len());
+                    b.extend_from_slice(&chunk[..n.min(room)]);
+                }
             })
-        })
+        });
+        (h, buf)
     };
-    let stdout = drain(child.stdout.take().map(|r| Box::new(r) as _));
-    let stderr = drain(child.stderr.take().map(|r| Box::new(r) as _));
+    let (out_h, out) = drain(child.stdout.take().map(|r| Box::new(r) as _));
+    let (err_h, err) = drain(child.stderr.take().map(|r| Box::new(r) as _));
+    let take =
+        |b: &Arc<Mutex<Vec<u8>>>| std::mem::take(&mut *b.lock().unwrap_or_else(|p| p.into_inner()));
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break s,
             Ok(None) => {}
-            Err(e) => return Err(CallError::other(format!("wait: {e}"))),
+            Err(e) => return (take(&out), Err(CallError::other(format!("wait: {e}")))),
         }
         if Instant::now() > deadline {
             // Reap it before the scratch directory goes: a killed child still holds that
             // directory as its cwd until it is waited for (Windows refuses the removal).
             child.kill().ok();
             child.wait().ok();
-            return Err(CallError::other(format!(
-                "timed out after {}s",
-                timeout.as_secs()
-            )));
+            let e = CallError::other(format!("timed out after {}s", timeout.as_secs()));
+            return (take(&out), Err(e));
         }
         std::thread::sleep(Duration::from_millis(100));
     };
     if let Some(f) = feeder {
         f.join().ok();
     }
-    let join = |h: Option<std::thread::JoinHandle<Vec<u8>>>| {
-        h.and_then(|h| h.join().ok()).unwrap_or_default()
-    };
-    let (out, err) = (join(stdout), join(stderr));
+    for h in [out_h, err_h].into_iter().flatten() {
+        h.join().ok();
+    }
+    let (out, err) = (take(&out), take(&err));
     if !status.success() {
         // stderr is not kept: a CLI can print the prompt it read from stdin (issue #91).
-        return Err(CallError::other(format!(
-            "{status}, {} bytes on stderr",
-            err.len()
-        )));
+        let e = CallError::other(format!("{status}, {} bytes on stderr", err.len()));
+        return (out, Err(e));
     }
     if out.len() as u64 > MAX_RESPONSE_BYTES {
-        return Err(CallError::other(format!(
+        let e = CallError::other(format!(
             "invalid output: more than {MAX_RESPONSE_BYTES} bytes"
-        )));
+        ));
+        return (out, Err(e));
     }
-    Ok(out)
+    (out, Ok(()))
 }
 
 /// agy's stream-json output: one event per line; the answer is in the last `result` event.
@@ -1479,6 +1504,8 @@ mod tests {
         ]
         .map(|v| v.to_string())
         .join("\n");
+        // Read from the stream on its own too, as a failed or timed-out run passes it on.
+        assert_eq!(claude_rest(&out), Some(providers_db::OWNER_HOLD));
         let e = claude_stream(&out).expect_err("credits required");
         let s = next_state(providers_db::State::default(), &e);
         assert_eq!(s.down_until, providers_db::OWNER_HOLD);
@@ -1568,16 +1595,24 @@ mod tests {
         };
         // Larger than any pipe buffer in both directions.
         let big = "x".repeat(300_000);
-        let out = run_cli(sh("cat"), Some(big.clone()), Duration::from_secs(10)).unwrap();
+        let (out, ran) = run_cli(sh("cat"), Some(big.clone()), Duration::from_secs(10));
+        ran.unwrap();
         assert_eq!(out, big.as_bytes());
         let err = run_cli(
             sh("head -c 1100000 /dev/zero"),
             None,
             Duration::from_secs(10),
         )
+        .1
         .unwrap_err();
         assert!(err.message.contains("more than"), "{}", err.message);
-        let err = run_cli(sh("echo boom >&2; exit 3"), None, Duration::from_secs(10)).unwrap_err();
+        let (out, ran) = run_cli(
+            sh("echo said; echo boom >&2; exit 3"),
+            None,
+            Duration::from_secs(10),
+        );
+        assert_eq!(out, b"said\n", "stdout is kept on a failure");
+        let err = ran.unwrap_err();
         assert!(!err.message.contains("boom"), "{}", err.message);
         assert!(
             err.message.contains("exit") && err.message.contains("5 bytes"),
@@ -1585,8 +1620,10 @@ mod tests {
             err.message
         );
         let start = Instant::now();
-        let err = run_cli(sh("sleep 5"), None, Duration::from_secs(1)).unwrap_err();
+        let (out, ran) = run_cli(sh("echo early; sleep 5"), None, Duration::from_secs(1));
+        let err = ran.unwrap_err();
         assert!(err.message.contains("timed out"), "{}", err.message);
+        assert_eq!(out, b"early\n", "and on a timeout");
         assert!(start.elapsed() < Duration::from_secs(4));
     }
 
