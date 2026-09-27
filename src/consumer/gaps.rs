@@ -35,7 +35,9 @@ fn schema(k: &Connection) -> Result<()> {
            raw_turns INTEGER NOT NULL,
            checked_at INTEGER NOT NULL,
            PRIMARY KEY (device, agent, session)
-         );",
+         );
+         -- Devices whose rows a rewind dropped: the next step reads raw from seq 1 again.
+         CREATE TABLE IF NOT EXISTS gaps_rebuild(device TEXT PRIMARY KEY);",
     )?;
     Ok(())
 }
@@ -48,7 +50,13 @@ impl Consumer for Gaps {
     fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> {
         schema(k)?;
         let device = raw.device();
-        let recs = raw.after(device, after, BATCH)?;
+        // After a rewind, from seq 1: its checkpoint moves back, which the worker takes.
+        let from = if k.execute("DELETE FROM gaps_rebuild WHERE device = ?1", [device])? > 0 {
+            0
+        } else {
+            after
+        };
+        let recs = raw.after(device, from, BATCH)?;
         let mut settings = None;
         for r in &recs {
             let Item::Event(e) = &r.item else { continue };
@@ -83,14 +91,19 @@ impl Consumer for Gaps {
                 ],
             )?;
         }
-        Ok(recs.last().map_or(after, |r| r.seq))
+        Ok(recs.last().map_or(from, |r| r.seq))
     }
 
-    fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> {
+    /// A session's row may come from an end among the lost commits while an older end of it
+    /// is still in raw, so every session is checked again from seq 1. ponytail: that parses
+    /// every transcript still on disk once, as a knowledge.db rebuilt from empty does; lost
+    /// commits are rare (MUST-M14).
+    fn rewind(&mut self, k: &Connection, device: &str, _to: i64) -> Result<()> {
         schema(k)?;
+        k.execute("DELETE FROM gaps WHERE device = ?1", [device])?;
         k.execute(
-            "DELETE FROM gaps WHERE device = ?1 AND seq > ?2",
-            params![device, to],
+            "INSERT OR IGNORE INTO gaps_rebuild(device) VALUES(?1)",
+            [device],
         )?;
         Ok(())
     }
@@ -237,6 +250,33 @@ mod tests {
             body: json!({"prompt": text}).to_string(),
             ..raw::test_event("")
         }
+    }
+
+    #[test]
+    fn a_lost_end_leaves_the_session_checked_at_its_older_one() {
+        let home = tempfile::tempdir().unwrap();
+        let file = home.path().join("s1.jsonl");
+        transcript(&file, &["one", "two"]);
+        let mut store = raw::open(home.path()).unwrap();
+        store.append(&prompt("s1", "one")).unwrap();
+        store.append(&end("claude", "s1", Some(&file))).unwrap();
+        worker::run_once(home.path()).unwrap();
+        // Resumed, and ended again; then that end is lost (MUST-M14).
+        store.append(&end("claude", "s1", Some(&file))).unwrap();
+        worker::run_once(home.path()).unwrap();
+        let top = store.max_seq().unwrap();
+        rusqlite::Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute("DELETE FROM records WHERE seq = ?1", [top])
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        let k = knowledge::open(home.path()).unwrap();
+        assert_eq!(
+            doctor(&k),
+            vec![
+                "claude: 1 of 1 ended session(s) short of their transcript (1 turn(s) not recorded)"
+            ]
+        );
     }
 
     #[test]
