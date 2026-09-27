@@ -45,8 +45,6 @@ const MAX_BACKOFF_429: Duration = Duration::from_secs(3600);
 pub struct ChainResult {
     pub provider: String,
     pub output: Value,
-    /// Providers gone past before the one that answered.
-    pub fallbacks: Vec<Fallback>,
 }
 
 /// Why the chain went past a provider, which the curation phase needs to know (D10, D11).
@@ -354,7 +352,6 @@ impl<'a> Chain<'a> {
                     return Ok(ChainResult {
                         provider: name,
                         output: a.value,
-                        fallbacks,
                     });
                 }
                 Err(e) => {
@@ -391,7 +388,7 @@ impl<'a> Chain<'a> {
 }
 
 /// Whether `v` has the types, required keys and array items `schema` asks for. Enums are left to
-/// the caller (observe maps an unknown kind).
+/// the caller (the curation phase maps an unknown kind).
 fn fits(v: &Value, schema: &Value) -> bool {
     let typed = match schema["type"].as_str() {
         Some("object") => v.is_object(),
@@ -1573,7 +1570,7 @@ mod tests {
 
     #[test]
     fn answers_of_another_shape_do_not_count_as_success() {
-        let schema = crate::observe::schema_for_tests();
+        let schema = crate::curate::schema();
         let ok = serde_json::json!({"observations": [{"kind": "decision", "title": "t", "body": "b"}], "summary": "s"});
         assert!(fits(&ok, &schema));
         // Valid JSON, wrong keys: what a free model without strict schema support returned.
@@ -1583,7 +1580,7 @@ mod tests {
         assert!(!fits(&item_missing_body, &schema));
         let summary_not_text = serde_json::json!({"observations": [], "summary": 3});
         assert!(!fits(&summary_not_text, &schema));
-        // Kinds outside the enum are mapped later (observe), not refused here.
+        // Kinds outside the enum are mapped later (the curation phase), not refused here.
         let odd_kind = serde_json::json!({"observations": [{"kind": "Decision", "title": "t", "body": "b"}], "summary": ""});
         assert!(fits(&odd_kind, &schema));
     }
@@ -2642,7 +2639,11 @@ mod tests {
             .unwrap();
         assert_eq!(rows[0], ("groq".into(), "too_big".into(), 0));
         assert_eq!(rows[1].1, "ok");
-        assert_eq!(r.fallbacks[0].skip, Skip::TooBig);
+        let err = Chain::new(&providers[..1], &conn)
+            .run("curator", "s", &prompt, &json!({"type": "object"}))
+            .unwrap_err();
+        let failed = err.downcast_ref::<ChainFailed>().expect("a ChainFailed");
+        assert_eq!(failed.0[0].skip, Skip::TooBig);
     }
 
     #[test]
@@ -2937,7 +2938,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cooldown_outlives_the_observe_run() {
+    fn a_cooldown_outlives_the_run() {
         let home = tempfile::tempdir().unwrap();
         let conn = crate::providers_db::open(home.path()).unwrap();
         let (url, _) = serve(
@@ -2953,7 +2954,7 @@ mod tests {
                 .run("curator", "s", "p", &json!({}))
                 .is_err()
         );
-        // The next run (a new Chain, as each observe process makes) does not call it again.
+        // The next run (a new Chain, as each worker run makes) does not call it again.
         let Err(err) = Chain::new(&providers, &conn).run("curator", "s", "p", &json!({})) else {
             panic!("the stub is cooling down");
         };

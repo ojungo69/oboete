@@ -283,7 +283,6 @@ mod tests {
             &mut conn,
             &db::PendingSession {
                 id: "s1".into(),
-                agent: "claude".into(),
                 repo: repo_key.clone(),
                 last_event_at: 1_700_000_000_000,
             },

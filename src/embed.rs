@@ -35,9 +35,6 @@ const BATCH_TIMEOUT: Duration = Duration::from_secs(180);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// One answer holds up to 100 × 1,024 floats as JSON (about 2 MB).
 const MAX_RESPONSE_BYTES: u64 = 8 << 20;
-/// Requests per observe run: observe holds its lock while embedding, and other sessions' summaries
-/// wait behind it. A backlog (an import) drains over the following runs and days.
-pub const PER_RUN: u32 = 20;
 
 #[derive(Debug, Default, serde::Serialize)]
 pub struct Stats {
@@ -450,9 +447,6 @@ pub fn reindex(home: &Path) -> Result<Stats> {
         "[embedding] account_id is not set"
     );
     config::read_key(&cfg.embedding.key_file)?;
-    // A detached observe would embed the same documents at the same time: wait for it.
-    let lock = std::fs::File::create(home.join("observe.lock"))?;
-    lock.lock()?;
     let mut conn = db::open(home)?;
     conn.execute_batch("DELETE FROM vec_docs; UPDATE embeddings SET indexed = 0;")?;
     backlog(&mut conn, &cfg.embedding, None)

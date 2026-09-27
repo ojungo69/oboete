@@ -634,85 +634,14 @@ pub fn insert_prompt(conn: &Connection, session_id: &str, ts: i64, body: &str) -
     Ok(())
 }
 
+#[cfg(test)] // a fixture for v1's readers' tests, with `apply_batch`
 pub struct PendingSession {
     pub id: String,
-    pub agent: String,
     pub repo: String,
     pub last_event_at: i64,
 }
 
-/// Sessions with raw events observe has not read yet, ended or idle for `settle_ms`, oldest first.
-pub fn pending_sessions(
-    conn: &Connection,
-    now: i64,
-    settle_ms: u64,
-) -> Result<Vec<PendingSession>> {
-    let mut stmt = conn.prepare(
-        "SELECT s.id, s.agent, s.repo, s.last_event_at FROM sessions s
-         WHERE EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.id > s.observed_event_id)
-           AND (s.ended_at IS NOT NULL OR s.last_event_at <= ?1)
-         ORDER BY s.last_event_at ASC LIMIT 20",
-    )?;
-    let rows = stmt.query_map(params![now - settle_ms as i64], |r| {
-        Ok(PendingSession {
-            id: r.get(0)?,
-            agent: r.get(1)?,
-            repo: r.get(2)?,
-            last_event_at: r.get(3)?,
-        })
-    })?;
-    Ok(rows.collect::<Result<_, _>>()?)
-}
-
-pub struct RawEvent {
-    pub id: i64,
-    pub event: String,
-    pub ts: i64,
-    pub payload: String,
-}
-
-/// Up to `limit` of the session's raw events that observe has not read yet and that come after
-/// event `after`, oldest first, so a long session can be read a page at a time.
-pub fn session_events_after(
-    conn: &Connection,
-    session_id: &str,
-    after: i64,
-    limit: usize,
-) -> Result<Vec<RawEvent>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, event, ts, payload FROM events WHERE session_id=?1
-           AND id > MAX(?2, COALESCE((SELECT observed_event_id FROM sessions WHERE id=?1), 0))
-         ORDER BY id LIMIT ?3",
-    )?;
-    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-    let rows = stmt.query_map(params![session_id, after, limit], |r| {
-        Ok(RawEvent {
-            id: r.get(0)?,
-            event: r.get(1)?,
-            ts: r.get(2)?,
-            payload: r.get(3)?,
-        })
-    })?;
-    Ok(rows.collect::<Result<_, _>>()?)
-}
-
-/// The session's raw events that observe has not read yet, oldest first.
 #[cfg(test)]
-pub fn session_events(conn: &Connection, session_id: &str) -> Result<Vec<RawEvent>> {
-    session_events_after(conn, session_id, 0, usize::MAX)
-}
-
-/// The session's newest summary: what its earlier parts said, for the next part's call.
-pub fn latest_summary(conn: &Connection, session_id: &str) -> Result<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT body FROM summaries WHERE session_id=?1 ORDER BY ts DESC, id DESC LIMIT 1",
-            params![session_id],
-            |r| r.get(0),
-        )
-        .optional()?)
-}
-
 pub struct Observation {
     pub kind: String,
     pub title: String,
@@ -845,9 +774,11 @@ pub fn import_doc(conn: &Connection, source: &str, source_id: &str, d: &Doc) -> 
 }
 
 /// One transaction: store the batch's knowledge (and its search rows) and move the session's
-/// observe cursor past its raw events, which stay stored.
+/// observe cursor past its raw events, which stay stored. v1's writer, kept as a fixture for the
+/// readers' tests (MCP, the viewer, search) until milestone 4 moves them.
 /// Rows carry the session's time (`last_event_at`), not the time they were summarized.
 /// `false`: the session was deleted meanwhile, so nothing was stored and the cursor did not move.
+#[cfg(test)]
 pub fn apply_batch(
     conn: &mut Connection,
     s: &PendingSession,
@@ -1230,7 +1161,6 @@ mod tests {
         let mut conn = open(&dir).unwrap();
         let s = PendingSession {
             id: "s1".into(),
-            agent: "claude".into(),
             repo: "/r".into(),
             last_event_at: 1,
         };
@@ -1336,7 +1266,6 @@ mod tests {
         assert!(delete_doc(&mut conn, "s3").unwrap());
         let s = PendingSession {
             id: "s1".into(),
-            agent: "claude".into(),
             repo: "/r".into(),
             last_event_at: 2,
         };
@@ -1375,43 +1304,6 @@ mod tests {
         };
         assert!(apply_batch(&mut conn, &s3, "p", "own", std::slice::from_ref(&obs), 0).unwrap());
         assert_eq!(ids(&conn, "SELECT COUNT(*) FROM summaries"), 1);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn summarized_raw_events_stay_and_only_new_ones_are_pending() {
-        let dir = std::env::temp_dir().join(format!("oboete-db-keep-raw-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut conn = open(&dir).unwrap();
-        upsert_session(&conn, "k1", "claude", "/r", "/r", 1).unwrap();
-        insert_event(&conn, "k1", "UserPromptSubmit", 1, "{}").unwrap();
-        insert_event(&conn, "k1", "Stop", 1, "{}").unwrap();
-        let s = PendingSession {
-            id: "k1".into(),
-            agent: "claude".into(),
-            repo: "/r".into(),
-            last_event_at: 1,
-        };
-        assert_eq!(pending_sessions(&conn, 10, 0).unwrap().len(), 1);
-        let last = session_events(&conn, "k1").unwrap().last().unwrap().id;
-        apply_batch(&mut conn, &s, "p", "sum", &[], last).unwrap();
-        let count = |c: &Connection| -> i64 {
-            c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
-                .unwrap()
-        };
-        assert_eq!(count(&conn), 2, "summarized raw events are kept");
-        assert!(session_events(&conn, "k1").unwrap().is_empty());
-        assert!(pending_sessions(&conn, 10, 0).unwrap().is_empty());
-        // The next event is pending on its own; `i64::MAX` covers only what is stored.
-        insert_event(&conn, "k1", "Stop", 2, "{\"n\":2}").unwrap();
-        let fresh = session_events(&conn, "k1").unwrap();
-        assert_eq!(fresh.len(), 1);
-        apply_batch(&mut conn, &s, "p", "sum2", &[], i64::MAX).unwrap();
-        insert_event(&conn, "k1", "Stop", 3, "{}").unwrap();
-        assert_eq!(session_events(&conn, "k1").unwrap().len(), 1);
-        assert_eq!(count(&conn), 4);
-        drop(conn);
         std::fs::remove_dir_all(&dir).ok();
     }
 

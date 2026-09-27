@@ -104,10 +104,20 @@ pub fn run(
         "hook_in_process_us": {"p50": pct(&micros, 50), "p95": pct(&micros, 95), "max": micros.last().copied().unwrap_or(0)},
         "hook_spawn_ms": spawns,
         "backup_export": {"segments": export_us.len(), "ms": stats_ms(&export_us), "segment_kb": {"p50": pct(&segment_kb, 50), "max": segment_kb.last().copied().unwrap_or(0)}},
-        "vmhwm_kb": crate::observe::vmhwm_kb(),
+        "vmhwm_kb": vmhwm_kb(),
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+/// Peak resident size of this process (Linux), for the report.
+fn vmhwm_kb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    status
+        .lines()
+        .find(|l| l.starts_with("VmHWM:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|n| n.parse().ok())
 }
 
 /// A fixture line's `ts` (RFC 3339, as `oboete transcript` writes it) in unix ms; `None` when the
@@ -246,8 +256,7 @@ mod tests {
             })
             .collect();
         assert_eq!(ts, vec![1_788_220_800_000, 1_788_307_200_000]);
-        // observe never ran (it would have created its lock file), and v1's store was never opened.
-        assert!(!home.path().join("observe.lock").exists());
+        // v1's store was never opened.
         assert!(!home.path().join("oboete.db").exists());
     }
 

@@ -84,7 +84,6 @@ mod tests {
         let batch = |conn: &mut Connection, id: &str, ts: i64, body: &str| {
             let s = db::PendingSession {
                 id: id.into(),
-                agent: "claude".into(),
                 repo: "/r".into(),
                 last_event_at: ts,
             };

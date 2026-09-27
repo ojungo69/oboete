@@ -455,7 +455,7 @@ const OWNER_RETRY_MS: i64 = 60 * 60 * 1000;
 /// v1's bounds on one answer.
 const MAX_OBSERVATIONS: usize = 12;
 const MAX_SUMMARY_CHARS: usize = 2_000;
-const KINDS: [&str; 6] = [
+pub const KINDS: [&str; 6] = [
     "decision",
     "bugfix",
     "feature",
@@ -1096,7 +1096,6 @@ mod tests {
             provider: provider.into(),
             output: json!({"observations": [{"kind": "decision", "title": "UTC on disk",
                 "body": "All timestamps on disk stay UTC."}], "summary": "Timestamps."}),
-            fallbacks: Vec::new(),
         }
     }
 

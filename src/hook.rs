@@ -15,7 +15,7 @@ const MAX_FIELD: usize = 8_000;
 /// Redaction looks this far past the clip point, so a secret straddling it is masked whole when
 /// it fits; a longer block (an RSA-8192 PEM is ~6,400 chars) is cut at its BEGIN line instead.
 const REDACT_OVERLAP: usize = 4_000;
-/// Set on the CLIs observe spawns, so the summarizer's own session is never captured.
+/// Set on the curator CLIs oboete runs, so the curator's own session is never captured.
 pub const SKIP_ENV: &str = "OBOETE_SKIP";
 /// Blocks inside a prompt that are not part of what was asked, removed before anything is
 /// stored, in this order: context an IDE or another memory tool puts in front of the text (it may
