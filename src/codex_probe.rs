@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct Seen {
     pub root: Vec<String>,
     pub sub: Vec<String>,
-    /// A request carried credentials: codex sent a login to the probe's endpoint.
-    pub authorized: bool,
+    /// A request carried a credential other than the probe's own key: codex sent a login.
+    pub login: bool,
 }
 
 /// The commands the script runs, one line of output each (`<name>:<exit>:<output>`).
@@ -83,6 +83,9 @@ pub(crate) fn next_item(agent: &str, done: usize, a: &Actions) -> Value {
 /// The scripted model, serving until dropped with the listener's thread.
 pub(crate) struct Model {
     pub port: u16,
+    /// The key codex sends as its bearer token (from its environment, which only this user can
+    /// read): a request without it is not codex's, and is neither answered nor counted.
+    pub key: String,
     pub seen: Arc<Mutex<Seen>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -91,21 +94,30 @@ impl Model {
     pub fn start(actions: Actions) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
+        let mut raw = [0u8; 16];
+        getrandom::fill(&mut raw).map_err(std::io::Error::other)?;
+        let key: String = raw.iter().map(|b| format!("{b:02x}")).collect();
         let seen = Arc::new(Mutex::new(Seen::default()));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (s, halt, actions) = (seen.clone(), stop.clone(), Arc::new(actions));
+        let bearer = Arc::new(format!("bearer {key}"));
         std::thread::spawn(move || {
             for conn in listener.incoming().flatten() {
                 if halt.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
                 }
-                let (s, actions) = (s.clone(), actions.clone());
+                let (s, actions, bearer) = (s.clone(), actions.clone(), bearer.clone());
                 std::thread::spawn(move || {
-                    let _ = answer(conn, &s, &actions);
+                    let _ = answer(conn, &s, &actions, &bearer);
                 });
             }
         });
-        Ok(Self { port, seen, stop })
+        Ok(Self {
+            port,
+            key,
+            seen,
+            stop,
+        })
     }
 }
 
@@ -120,10 +132,15 @@ impl Drop for Model {
 /// Most one request may take: codex 0.155.1 sends about 50 KB.
 const MAX_REQUEST: usize = 4 << 20;
 
-fn answer(conn: TcpStream, seen: &Mutex<Seen>, actions: &Actions) -> std::io::Result<()> {
+fn answer(
+    conn: TcpStream,
+    seen: &Mutex<Seen>,
+    actions: &Actions,
+    bearer: &str,
+) -> std::io::Result<()> {
     conn.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
     let mut reader = BufReader::new(conn.try_clone()?);
-    let (mut length, mut line) = (0, String::new());
+    let (mut length, mut line, mut ours) = (0, String::new(), false);
     loop {
         line.clear();
         if reader.read_line(&mut line)? == 0 || line == "\r\n" {
@@ -133,9 +150,19 @@ fn answer(conn: TcpStream, seen: &Mutex<Seen>, actions: &Actions) -> std::io::Re
         if let Some(v) = lower.strip_prefix("content-length:") {
             length = v.trim().parse().unwrap_or(0);
         }
-        if lower.starts_with("authorization:") || lower.starts_with("chatgpt-account-id:") {
-            seen.lock().unwrap().authorized = true;
+        if let Some(v) = lower.strip_prefix("authorization:") {
+            ours = v.trim() == bearer;
+            if !ours && v.contains("bearer") {
+                seen.lock().unwrap().login = true;
+            }
         }
+        if lower.starts_with("chatgpt-account-id:") {
+            seen.lock().unwrap().login = true;
+        }
+    }
+    if !ours {
+        let mut out = conn;
+        return out.write_all(b"HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n");
     }
     let mut body = vec![0; length.min(MAX_REQUEST)];
     reader.read_exact(&mut body)?;
@@ -205,7 +232,7 @@ fn output_text(item: &Value) -> String {
 /// Whether what the script saw proves codex could not act: every action ran and was refused, in
 /// the sandbox and escalated, in the root and in any sub-agent that ran.
 pub(crate) fn verdict(seen: &Seen, secret: &str, touched: bool) -> Result<(), String> {
-    if seen.authorized {
+    if seen.login {
         return Err("codex sent credentials to the probe's model".into());
     }
     if touched {
@@ -280,7 +307,7 @@ mod tests {
         Seen {
             root: root.iter().map(|s| s.to_string()).collect(),
             sub: sub.iter().map(|s| s.to_string()).collect(),
-            authorized: false,
+            login: false,
         }
     }
 
@@ -341,19 +368,17 @@ mod tests {
         }
         let ok = seen(&[SANDBOXED, ESCALATED, spawned], SUB);
         assert!(verdict(&ok, "SECRET-x", true).is_err());
-        let login = Seen {
-            authorized: true,
-            ..ok
-        };
+        let login = Seen { login: true, ..ok };
         assert!(verdict(&login, "SECRET-x", false).is_err());
     }
 
-    /// The server end to end, with this test as codex: each request gets the script's next call,
-    /// and each thread's outputs are kept.
+    /// The server end to end, with this test as codex: each request with the key gets the
+    /// script's next call, and each thread's outputs are kept; any other request is refused.
     #[test]
-    fn the_scripted_model_answers_each_thread_in_turn() {
+    fn the_scripted_model_answers_each_thread_in_turn_and_only_codex() {
         let model = Model::start(actions()).unwrap();
-        let post = |agent: &str, outputs: &[&str], auth: bool| -> Value {
+        let key = format!("Bearer {}", model.key);
+        let post = |agent: &str, outputs: &[&str], auth: &str| -> Option<Value> {
             let meta = json!({"agent_name": agent}).to_string();
             let input: Vec<Value> = outputs
                 .iter()
@@ -362,10 +387,10 @@ mod tests {
             let body = json!({"client_metadata": {"x-codex-turn-metadata": meta}, "input": input})
                 .to_string();
             let mut c = TcpStream::connect(("127.0.0.1", model.port)).unwrap();
-            let auth = if auth {
-                "Authorization: Bearer x\r\n"
+            let auth = if auth.is_empty() {
+                String::new()
             } else {
-                ""
+                format!("Authorization: {auth}\r\n")
             };
             write!(
                 c,
@@ -379,33 +404,44 @@ mod tests {
                 .lines()
                 .filter_map(|l| l.strip_prefix("data: "))
                 .filter_map(|d| serde_json::from_str::<Value>(d).ok())
-                .find(|e| e["type"] == "response.output_item.done")
-                .unwrap();
-            item["item"].clone()
+                .find(|e| e["type"] == "response.output_item.done")?;
+            Some(item["item"].clone())
         };
-        let first = post("/root", &[], false);
+        let first = post("/root", &[], &key).unwrap();
         assert_eq!(
             (first["type"].as_str(), first["name"].as_str()),
             (Some("custom_tool_call"), Some("exec"))
         );
         assert!(first["input"].as_str().unwrap().contains("cat /h/secret"));
-        let escalate = post("/root", &["a"], false);
+        let escalate = post("/root", &["a"], &key).unwrap();
         assert!(
             escalate["input"]
                 .as_str()
                 .unwrap()
                 .contains("require_escalated")
         );
-        assert_eq!(post("/root", &["a", "b"], false)["name"], "spawn_agent");
-        assert_eq!(post("/root", &["a", "b", "c"], false)["name"], "wait_agent");
-        assert_eq!(post("/root/probe", &["s"], false)["name"], "exec");
         assert_eq!(
-            post("/root", &["a", "b", "c", "d"], true)["type"],
+            post("/root", &["a", "b"], &key).unwrap()["name"],
+            "spawn_agent"
+        );
+        assert_eq!(
+            post("/root", &["a", "b", "c"], &key).unwrap()["name"],
+            "wait_agent"
+        );
+        assert_eq!(post("/root/probe", &["s"], &key).unwrap()["name"], "exec");
+        assert_eq!(
+            post("/root", &["a", "b", "c", "d"], &key).unwrap()["type"],
             "message"
         );
+        // Another local process knows the port, not the key: refused, and not counted.
+        let forged = ["cat:1:x", "cat:threw:x", "x", "x", "x"];
+        assert!(post("/root", &forged, "").is_none());
+        assert!(!model.seen.lock().unwrap().login);
+        // A credential that is not the key is a login codex sent: refused, and it fails the gate.
+        assert!(post("/root", &forged, "Bearer sk-other").is_none());
         let seen = model.seen.lock().unwrap().clone();
         assert_eq!(
-            (seen.root.len(), seen.sub, seen.authorized),
+            (seen.root.len(), seen.sub, seen.login),
             (4, vec!["s".to_string()], true)
         );
     }

@@ -97,14 +97,18 @@ fn output(cmd: &mut Command) -> Result<std::process::Output, String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| e.to_string())?;
+    // Each pipe drains on a thread that hands its bytes over a channel: a descendant that kept a
+    // pipe open after codex exited must not hold the gate past its limit.
     let read = |pipe: Option<Box<dyn Read + Send>>| {
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut buf = Vec::new();
             if let Some(mut p) = pipe {
                 let _ = p.read_to_end(&mut buf);
             }
-            buf
-        })
+            let _ = tx.send(buf);
+        });
+        rx
     };
     let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
     let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
@@ -122,10 +126,15 @@ fn output(cmd: &mut Command) -> Result<std::process::Output, String> {
             }
         }
     };
+    let drained = |rx: std::sync::mpsc::Receiver<Vec<u8>>| {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        rx.recv_timeout(left)
+            .map_err(|_| format!("did not finish in {} s", PROBE_LIMIT.as_secs()))
+    };
     Ok(std::process::Output {
         status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
+        stdout: drained(stdout)?,
+        stderr: drained(stderr)?,
     })
 }
 
@@ -281,9 +290,16 @@ fn probe_exec(exe: &Path, cwd: &Path, canary: &Canary) -> Result<(), String> {
             ),
         ])
         .args(["-c", r#"model_providers.oboeteprobe.wire_api="responses""#])
+        .args([
+            "-c",
+            r#"model_providers.oboeteprobe.env_key="OBOETE_PROBE_KEY""#,
+        ])
         .args(["-c", "model_providers.oboeteprobe.request_max_retries=0"])
         .args(["-c", "model_providers.oboeteprobe.stream_max_retries=0"])
         .arg("probe")
+        // Only this user can read a process's environment: codex's requests carry the key, and
+        // another local user's cannot.
+        .env("OBOETE_PROBE_KEY", &model.key)
         // The probe's model is on this machine, never behind the environment's proxy.
         .env("NO_PROXY", "127.0.0.1")
         .env("no_proxy", "127.0.0.1")
@@ -408,7 +424,7 @@ mod tests {
     /// and in the sub-agent.
     const EXEC: &str = r#"for a in "$@"; do case "$a" in model_providers.oboeteprobe.base_url=*)
         url=${a#*=}; url=${url#\"}; url=${url%\"};; esac; done
-        post() { curl -sS -o /dev/null --data "{\"client_metadata\":{\"x-codex-turn-metadata\":\"{\\\"agent_name\\\":\\\"$1\\\"}\"},\"input\":[$2]}" "$url/responses"; }
+        post() { curl -sS -o /dev/null -H "Authorization: Bearer $OBOETE_PROBE_KEY" --data "{\"client_metadata\":{\"x-codex-turn-metadata\":\"{\\\"agent_name\\\":\\\"$1\\\"}\"},\"input\":[$2]}" "$url/responses"; }
         out() { printf '{"type":"custom_tool_call_output","output":"%s"}' "$1"; }
         S=$(out "cat:1:cat: x: No such file or directory\ntouch:1:touch: cannot touch x\ncurl:${CURL:-7}:curl: (7) Failed\n")
         E=$(out "cat:threw:rejected\ntouch:threw:rejected\ncurl:threw:rejected\n")
@@ -512,6 +528,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let started = std::time::Instant::now();
         let (_, g) = gate_with(&fake(dir.path(), "sleep 60", REFUSES), dir.path());
+        assert_eq!(
+            g,
+            Gate::Failed("codex features list: did not finish in 5 s".into())
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    }
+
+    #[test]
+    fn a_descendant_holding_the_output_open_fails_the_gate_in_bounded_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        let (_, g) = gate_with(&fake(dir.path(), "(sleep 60 &)", REFUSES), dir.path());
         assert_eq!(
             g,
             Gate::Failed("codex features list: did not finish in 5 s".into())
