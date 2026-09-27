@@ -49,6 +49,9 @@ struct CallError {
     message: String,
     /// Tokens a billed answer used even though it was unusable (malformed, wrong shape).
     usage: Usage,
+    /// Whether the prompt may have left the machine: false for a failure before dispatch (no
+    /// key file, no scratch directory, a CLI that did not start), for the egress ledger.
+    sent: bool,
 }
 
 impl CallError {
@@ -58,10 +61,18 @@ impl CallError {
             retry_after_s: None,
             message: message.into(),
             usage: Usage::default(),
+            sent: true,
         }
     }
     fn with_usage(self, usage: Usage) -> Self {
         Self { usage, ..self }
+    }
+    /// A failure before the request or the CLI started: nothing was uploaded.
+    fn unsent(self) -> Self {
+        Self {
+            sent: false,
+            ..self
+        }
     }
     fn invalid(&self) -> bool {
         self.message.starts_with("invalid output")
@@ -169,7 +180,7 @@ impl<'a> Chain<'a> {
                 }
                 Err(e) => {
                     let outcome = if e.invalid() { "invalid" } else { "error" };
-                    record(outcome, ms, Some(&e.message), !forced, e.usage)?;
+                    record(outcome, ms, Some(&e.message), !forced && e.sent, e.usage)?;
                     // A forced failure is a test of the fallback, not of the provider.
                     if !forced {
                         providers_db::set_state(conn, &name, next_state(state, &e))?;
@@ -332,7 +343,8 @@ fn openai_compat(
         req = req.header(k, v);
     }
     if let Some(key_file) = key_file {
-        let key = config::read_key(key_file).map_err(|e| CallError::other(format!("{e:#}")))?;
+        let key =
+            config::read_key(key_file).map_err(|e| CallError::other(format!("{e:#}")).unsent())?;
         req = req.header("Authorization", &format!("Bearer {key}"));
     }
     let mut resp = req
@@ -379,6 +391,7 @@ fn openai_compat(
             retry_after_s,
             message,
             usage: Usage::default(),
+            sent: true,
         });
     }
     let v: Value = serde_json::from_str(&text)
@@ -655,7 +668,8 @@ impl Drop for Scratch {
 
 fn scratch_dir() -> Result<Scratch, CallError> {
     let mut raw = [0u8; 8];
-    getrandom::fill(&mut raw).map_err(|e| CallError::other(format!("scratch dir: {e}")))?;
+    getrandom::fill(&mut raw)
+        .map_err(|e| CallError::other(format!("scratch dir: {e}")).unsent())?;
     let name: String = raw.iter().map(|b| format!("{b:02x}")).collect();
     let dir = std::env::temp_dir().join(format!("oboete-cli-{name}"));
     let mut builder = std::fs::DirBuilder::new();
@@ -666,7 +680,7 @@ fn scratch_dir() -> Result<Scratch, CallError> {
     }
     builder
         .create(&dir)
-        .map_err(|e| CallError::other(format!("scratch dir: {e}")))?;
+        .map_err(|e| CallError::other(format!("scratch dir: {e}")).unsent())?;
     Ok(Scratch(dir))
 }
 
@@ -709,7 +723,8 @@ fn headless_command(
 ) -> Result<(Command, Option<String>), CallError> {
     let write = |name: &str, text: &str| {
         let path = dir.join(name);
-        std::fs::write(&path, text).map_err(|e| CallError::other(format!("write {name}: {e}")))?;
+        std::fs::write(&path, text)
+            .map_err(|e| CallError::other(format!("write {name}: {e}")).unsent())?;
         Ok::<_, CallError>(path)
     };
     let mut cmd = Command::new(cli);
@@ -807,9 +822,7 @@ fn headless_command(
             Some(prompt.to_owned())
         }
         other => {
-            return Err(CallError::other(format!(
-                "unsupported cli provider {other}"
-            )));
+            return Err(CallError::other(format!("unsupported cli provider {other}")).unsent());
         }
     };
     Ok((cmd, stdin))
@@ -856,7 +869,10 @@ fn cli_headless(
         } else {
             format!("{cli} {}", e.message)
         };
-        CallError::other(tagged)
+        CallError {
+            message: tagged,
+            ..e
+        }
     })?;
     let stdout = String::from_utf8_lossy(&out);
     let usage = usage_cli(cli, &stdout);
@@ -896,7 +912,7 @@ fn run_cli(
     use std::io::{Read, Write};
     let mut child = cmd
         .spawn()
-        .map_err(|e| CallError::other(format!("spawn: {e}")))?;
+        .map_err(|e| CallError::other(format!("spawn: {e}")).unsent())?;
     let feeder = child.stdin.take().zip(stdin).map(|(mut w, text)| {
         // A child that exits without reading just makes the write fail.
         std::thread::spawn(move || w.write_all(text.as_bytes()).ok())
@@ -1483,6 +1499,7 @@ mod tests {
             retry_after_s: None,
             message: "http 403 (moderation)".into(),
             usage: Usage::default(),
+            sent: true,
         };
         assert_eq!(cooldown_for(&flagged), None);
     }
@@ -1555,6 +1572,7 @@ mod tests {
             retry_after_s: None,
             message: "http 429".into(),
             usage: Usage::default(),
+            sent: true,
         };
         let mut s = providers_db::State::default();
         let mut waits = Vec::new();
@@ -1628,6 +1646,36 @@ mod tests {
             .unwrap();
         let want = ("invalid".to_string(), Some(100), Some(20));
         assert_eq!(rows, [want.clone(), want]);
+    }
+
+    #[test]
+    fn a_failure_before_dispatch_records_no_egress() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let mut p = stub("http://127.0.0.1:9".into());
+        if let Provider::Openai { key_file, .. } = &mut p {
+            *key_file = Some(home.path().join("NO_SUCH_KEY.md"));
+        }
+        let missing_cli = Provider::Cli {
+            name: "nocli".into(),
+            cli: "oboete-no-such-cli".into(),
+            model: None,
+            daily_budget: 10,
+            timeout_s: 5,
+        };
+        assert!(
+            Chain::new(&[p, missing_cli], &conn)
+                .run("curator", "s", "private text", &json!({}))
+                .is_err()
+        );
+        let sent: Vec<i64> = conn
+            .prepare("SELECT bytes_out FROM provider_calls ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(sent, [0, 0]);
     }
 
     #[test]
@@ -1762,6 +1810,7 @@ mod tests {
             retry_after_s: None,
             message: msg.into(),
             usage: Usage::default(),
+            sent: true,
         };
         assert_eq!(cooldown_for(&err(Some(429), "")), Some(COOLDOWN_429));
         assert_eq!(
@@ -1864,6 +1913,7 @@ mod tests {
             retry_after_s: retry,
             message: String::new(),
             usage: Usage::default(),
+            sent: true,
         };
         assert_eq!(cooldown_for(&e(None)), Some(COOLDOWN_429));
         assert_eq!(cooldown_for(&e(Some(10.0))), Some(COOLDOWN_429));
