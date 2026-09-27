@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS pending(
   hold TEXT NOT NULL,                     -- time, budget or owner: what it waits for
   attempts INTEGER NOT NULL DEFAULT 0,    -- attempts that count toward D11's three
   next_attempt_at INTEGER NOT NULL,       -- unix ms: not tried again before then
-  since INTEGER NOT NULL                  -- when the window first waited
+  since INTEGER NOT NULL,                 -- when the window first waited
+  prompt TEXT NOT NULL                    -- the SHA-256 of the request the attempts were on
 );
 ";
 
@@ -369,10 +370,12 @@ pub struct Pending {
     pub attempts: i64,
     pub next_attempt_at: i64,
     pub since: i64,
+    /// The SHA-256 of the prompt the attempts were on.
+    pub prompt: String,
 }
 
 const PENDING_COLUMNS: &str = "device, from_seq, from_offset, to_seq, to_offset, reason, hold,
-     attempts, next_attempt_at, since";
+     attempts, next_attempt_at, since, prompt";
 
 fn pending_row(r: &rusqlite::Row) -> rusqlite::Result<Pending> {
     Ok(Pending {
@@ -386,6 +389,7 @@ fn pending_row(r: &rusqlite::Row) -> rusqlite::Result<Pending> {
         attempts: r.get(7)?,
         next_attempt_at: r.get(8)?,
         since: r.get(9)?,
+        prompt: r.get(10)?,
     })
 }
 
@@ -411,7 +415,9 @@ pub fn pending_of(conn: &Connection, device: &str) -> Result<Option<Pending>> {
 
 pub fn set_pending(conn: &Connection, p: &Pending) -> Result<()> {
     conn.execute(
-        &format!("INSERT OR REPLACE INTO pending({PENDING_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"),
+        &format!(
+            "INSERT OR REPLACE INTO pending({PENDING_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"
+        ),
         params![
             p.device,
             p.from_seq,
@@ -422,7 +428,8 @@ pub fn set_pending(conn: &Connection, p: &Pending) -> Result<()> {
             p.hold,
             p.attempts,
             p.next_attempt_at,
-            p.since
+            p.since,
+            p.prompt
         ],
     )?;
     Ok(())
@@ -454,6 +461,7 @@ mod tests {
             attempts: 0,
             next_attempt_at: 5_000_000_000_000,
             since: 1,
+            prompt: "p".into(),
         };
         set_pending(&conn, &row("a", "owner")).unwrap();
         set_pending(&conn, &row("b", "time")).unwrap();

@@ -502,18 +502,21 @@ pub fn run_phase(
             up: until - now <= STAY_UP_MS,
         });
     }
-    // A row for another window is stale: a restore or a skipped window moved the checkpoint, or
-    // records added since made it longer, and its attempts were not on this text.
+    let prompt = prompt(&summary.language, &w.text);
+    let sent = sha256_hex(&prompt);
+    // A row for another request is stale, and its attempts were not on this one: a restore or a
+    // skipped window moved the checkpoint, records added since made the window longer, or new
+    // rules or another language changed what would be sent.
     let range = |p: &Pending| (p.from_seq, p.from_offset, p.to_seq, p.to_offset);
-    let pending = providers_db::pending_of(db, &device)?
-        .filter(|p| range(p) == (w.from_seq, w.from_offset, w.to_seq, w.to_offset));
+    let pending = providers_db::pending_of(db, &device)?.filter(|p| {
+        range(p) == (w.from_seq, w.from_offset, w.to_seq, w.to_offset) && p.prompt == sent
+    });
     if let Some(p) = &pending
         && p.next_attempt_at > now
     {
         return Ok(waiting(p, now));
     }
     let span = format!("{}-{}", w.from_seq, w.to_seq);
-    let prompt = prompt(&summary.language, &w.text);
     let answer = {
         let raw: &Raw = raw;
         curator(&span, &prompt, &|| working(raw))
@@ -554,6 +557,7 @@ pub fn run_phase(
         attempts,
         next_attempt_at: next,
         since: pending.map_or(now, |p| p.since),
+        prompt: sent,
     };
     providers_db::set_pending(db, &p)?;
     Ok(waiting(&p, now))
@@ -588,6 +592,14 @@ fn hold(failed: &[Fallback], now: i64) -> (&'static str, i64, bool) {
         }
         (None, None) => ("owner", now + OWNER_RETRY_MS, false),
     }
+}
+
+fn sha256_hex(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn waiting(p: &Pending, now: i64) -> Phase {
@@ -1323,6 +1335,7 @@ mod tests {
             attempts: 2,
             next_attempt_at: crate::db::now_ms() + 3_600_000,
             since: 0,
+            prompt: String::new(),
         };
         providers_db::set_pending(&db, &stale).unwrap();
         let mut chain = |_: &str, _: &str, _: &dyn Fn() -> Option<i64>| -> Result<ChainResult> {
@@ -1364,6 +1377,19 @@ mod tests {
         providers_db::set_pending(&db, &p).unwrap();
         raw.append(&prompt("two")).unwrap();
         let phase = run_phase(&mut raw, &db, &rules, &summary, &mut chain).unwrap();
+        assert!(matches!(phase, Phase::Waiting { .. }), "{phase:?}");
+        let mut p = providers_db::pending_of(&db, raw.device())
+            .unwrap()
+            .unwrap();
+        assert_eq!((p.to_seq, p.attempts), (2, 1));
+        // The same range asked for in another language is another request too.
+        (p.attempts, p.next_attempt_at) = (2, 0);
+        providers_db::set_pending(&db, &p).unwrap();
+        let english = Summary {
+            language: "English".into(),
+            ..summary.clone()
+        };
+        let phase = run_phase(&mut raw, &db, &rules, &english, &mut chain).unwrap();
         assert!(matches!(phase, Phase::Waiting { .. }), "{phase:?}");
         let p = providers_db::pending_of(&db, raw.device())
             .unwrap()
