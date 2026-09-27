@@ -1292,7 +1292,8 @@ fn claude_stream(stdout: &str) -> Result<String, CallError> {
 /// When claude's stream said its subscription should rest (Claude decision C1, at claude-mem's
 /// lines since 2026-09-28, owner delegated): a window's reset once it is used to its line (five
 /// hours 95%, a week 93%, the Sonnet week 92%), or in the last quarter hour of a five-hour window
-/// used to 85%, or once it is rejected; with no utilization, once it warns. Paid overage rests it
+/// used to 85%, or once it is rejected; with no utilization or in a window it does not name, once
+/// it warns. Paid overage rests it
 /// at once, until the owner acts when no reset comes with it, and so does `credits_required`.
 /// At most `MAX_SUBSCRIPTION_REST` away. Lines that do not parse are passed over: this only ever
 /// adds rest, and a killed run's last line is often cut.
@@ -1312,17 +1313,19 @@ fn claude_rest(stdout: &str) -> Option<i64> {
     }
     let rests = |i: &Value| {
         let window = i["rateLimitType"].as_str().unwrap_or("");
+        // Only the windows claude-mem names have a line; another is judged by its status.
         let line = match window {
-            "five_hour" | "overage" => 0.95,
-            "seven_day_sonnet" => 0.92,
-            _ => 0.93,
+            "five_hour" | "overage" => Some(0.95),
+            "seven_day" | "seven_day_opus" => Some(0.93),
+            "seven_day_sonnet" => Some(0.92),
+            _ => None,
         };
         let ending = window == "five_hour" && reset(i).is_some_and(|t| t - now <= 15 * 60_000);
         i["status"] == "rejected"
             || i["isUsingOverage"] == true
-            || match i["utilization"].as_f64() {
-                Some(used) => used >= line || ending && used >= 0.85,
-                None => i["status"] == "allowed_warning",
+            || match (i["utilization"].as_f64(), line) {
+                (Some(used), Some(line)) => used >= line || ending && used >= 0.85,
+                _ => i["status"] == "allowed_warning",
             }
     };
     infos
@@ -1806,7 +1809,7 @@ mod tests {
     /// Claude decision C1 at claude-mem's lines (owner delegated, 2026-09-28): a window used to
     /// its line (five hours 95%, a week 93%, the Sonnet week 92%), the last quarter hour of a
     /// five-hour window used to 85%, a rejection, or paid overage rests claude until the reset; a
-    /// warning under the line does not. An event with no utilization rests it on a warning.
+    /// warning under the line does not. An event with no utilization, or of a window with no line, rests it on a warning.
     #[test]
     fn claude_rests_at_claude_mems_usage_lines() {
         let now_s = db::now_ms() / 1000;
@@ -1851,6 +1854,14 @@ mod tests {
         let bare = |status: &str| json!({"status": status, "resetsAt": later});
         assert_eq!(rest(bare("allowed_warning")), Some(later * 1000));
         assert_eq!(rest(bare("allowed")), None);
+        // A window claude-mem does not name, or none, has no line: its status decides.
+        for window in ["", "seven_day_haiku"] {
+            assert_eq!(rest(at("allowed", window, 0.99)), None, "{window}");
+            let warned = rest(at("allowed_warning", window, 0.5));
+            assert_eq!(warned, Some(later * 1000), "{window}");
+        }
+        let untyped = json!({"status": "allowed", "resetsAt": later, "utilization": 0.99});
+        assert_eq!(rest(untyped), None);
     }
 
     #[test]
