@@ -147,6 +147,9 @@ struct OpRow {
 
 /// The most one op's body may take (spec 6.5, A42).
 pub const MAX_OP_BYTES: usize = 64 << 10;
+/// The most one append's bodies may take together: an ops segment ends only between appends, so
+/// a segment is at most `backup::SEGMENT_BYTES` plus one append, well within what a restore reads.
+pub const MAX_BATCH_BYTES: usize = 4 << 20;
 
 pub struct Raw {
     conn: Connection,
@@ -557,6 +560,11 @@ impl Raw {
                 Ok((kind.name(), text))
             })
             .collect::<Result<Vec<_>>>()?;
+        let total: usize = bodies.iter().map(|(_, b)| b.len()).sum();
+        anyhow::ensure!(
+            total <= MAX_BATCH_BYTES,
+            "an append of {total} bytes of ops is over the {MAX_BATCH_BYTES}-byte cap"
+        );
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1273,6 +1281,10 @@ mod tests {
             raw.append_ops(&[(OpKind::Claim, claim), (OpKind::Claim, huge)])
                 .is_err()
         );
+        // So does an append whose ops fit one by one but not together.
+        let big = serde_json::json!({"text": "x".repeat(MAX_OP_BYTES - 100)});
+        let many = vec![(OpKind::Claim, big); MAX_BATCH_BYTES / MAX_OP_BYTES + 1];
+        assert!(raw.append_ops(&many).is_err());
         assert_eq!(raw.max_op_seq().unwrap(), 2);
         assert_eq!(raw.ops_after(&dev, 1, 10).unwrap().len(), 1);
     }

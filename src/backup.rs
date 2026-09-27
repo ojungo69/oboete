@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 pub const SEGMENT_BYTES: usize = 8 << 20;
 /// D11: how often a running worker backs up besides at its idle exit.
 pub const EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-/// The most a segment may decompress to: its cap plus one record past it (capture keeps a
-/// body far below this).
+/// The most a segment may decompress to: its cap plus one record or one append of ops past it
+/// (capture keeps a body far below this, `raw::MAX_BATCH_BYTES` an append).
 const MAX_SEGMENT_BYTES: u64 = (SEGMENT_BYTES as u64) + (128 << 20);
 
 /// `[backup]` in config.toml (spec 1.5: the location is a user setting).
