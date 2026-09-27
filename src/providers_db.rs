@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS provider_calls(
   prompt_tokens INTEGER,
   completion_tokens INTEGER,
   cached_tokens INTEGER,
-  reasoning_tokens INTEGER
+  reasoning_tokens INTEGER,
+  usd REAL                                -- a paid entry's cost, fixed when the call is recorded
 );
 CREATE INDEX IF NOT EXISTS provider_calls_day ON provider_calls(provider, ts);
 ";
@@ -54,6 +55,7 @@ pub fn open(home: &Path) -> Result<Connection> {
     ] {
         crate::db::ensure_column(&mut conn, "provider_state", column, "INTEGER")?;
     }
+    crate::db::ensure_column(&mut conn, "provider_calls", "usd", "REAL")?;
     for file in ["providers.db", "providers.db-wal", "providers.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -81,13 +83,15 @@ pub struct Call<'a> {
     /// The uncalibrated estimate of what was sent (`budget::estimate`).
     pub est_tokens: Option<u32>,
     pub usage: Usage,
+    /// A paid entry's cost at its price then (`budget::cost`); None for any other entry.
+    pub usd: Option<f64>,
 }
 
 pub fn record(conn: &Connection, c: &Call) -> Result<()> {
     conn.execute(
         "INSERT INTO provider_calls(ts, provider, role, span, outcome, ms, detail, bytes_out,
-           est_tokens, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+           est_tokens, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens, usd)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         params![
             now_ms(),
             c.provider,
@@ -101,7 +105,8 @@ pub fn record(conn: &Connection, c: &Call) -> Result<()> {
             c.usage.prompt,
             c.usage.completion,
             c.usage.cached,
-            c.usage.reasoning
+            c.usage.reasoning,
+            c.usd
         ],
     )?;
     Ok(())
@@ -255,23 +260,19 @@ pub fn tokens_today(conn: &Connection, provider: &str) -> Result<i64> {
     )?)
 }
 
-/// Prompt and completion tokens `provider` reported since the first of this month (UTC).
-pub fn tokens_this_month(conn: &Connection, provider: &str) -> Result<(i64, i64)> {
-    let start = chrono_free_month_start(now_ms());
+/// What every paid entry cost since the first of this month (UTC), at the prices of each call's
+/// time: an entry since removed from the chain or repriced still counts.
+pub fn usd_this_month(conn: &Connection) -> Result<f64> {
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0)
-         FROM provider_calls WHERE provider=?1 AND ts>=?2",
-        params![provider, start],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        "SELECT COALESCE(SUM(usd), 0) FROM provider_calls WHERE ts>=?1",
+        [chrono_free_month_start(now_ms())],
+        |r| r.get(0),
     )?)
 }
 
-/// Since the last UTC midnight and since the first of this month (UTC), for `unmetered`.
+/// The last UTC midnight, for `unmetered`.
 pub fn today() -> i64 {
     now_ms() / DAY_MS * DAY_MS
-}
-pub fn this_month() -> i64 {
-    chrono_free_month_start(now_ms())
 }
 
 /// What `provider`'s sent calls since `start` may have used beyond the usage they reported: the

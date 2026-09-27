@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::config::Provider;
-use crate::providers_db;
+use crate::providers_db::{self, Usage};
 
 /// Tokens a text is estimated to take before a provider's own factor: 0.8 per CJK character and
 /// 0.28 per other character, fitted on the size sweep of 2026-09-27 (docs/spike/curator-sizes.md:
@@ -52,7 +52,6 @@ const CEILING_SHARE: f64 = 0.95;
 pub fn admit(
     db: &Connection,
     p: &Provider,
-    providers: &[Provider],
     tokens: f64,
     paid_usd_per_month: f64,
     ceiling_hit: &[u32],
@@ -113,7 +112,7 @@ pub fn admit(
         }
     }
     if limits.is_paid() {
-        let spent = spent_this_month(db, providers)?;
+        let spent = providers_db::usd_this_month(db)?;
         // The output the request asks for at most, as `provider::call` sends it.
         let this = limits.usd(tokens, f64::from(p.declared_output()));
         if spent + this > paid_usd_per_month {
@@ -128,38 +127,44 @@ pub fn admit(
     Ok(None)
 }
 
-/// USD spent this calendar month (UTC) on every paid entry, at their current prices. A sent call
-/// whose usage never came back counts at its estimate and its largest answer.
-pub fn spent_this_month(db: &Connection, providers: &[Provider]) -> Result<f64> {
-    let mut usd = 0.0;
-    for p in providers.iter().filter(|p| p.limits().is_paid()) {
-        let limits = p.limits();
-        let (prompt, completion) = providers_db::tokens_this_month(db, p.name())?;
-        usd += limits.usd(prompt as f64, completion as f64);
-        let (input, output) = unmetered_parts(db, p, providers_db::this_month())?;
-        usd += limits.usd(input, output);
+/// What one call to a paid entry `p` cost, to be stored with it: the usage it reported, and for a
+/// part it did not report, its largest (the calibrated estimate for the prompt, the declared
+/// output for the answer). None for an entry that is not paid, or a call that was not billed.
+pub fn cost(
+    db: &Connection,
+    p: &Provider,
+    est: u32,
+    usage: Usage,
+    billed: bool,
+) -> Result<Option<f64>> {
+    let limits = p.limits();
+    if !limits.is_paid() || !billed {
+        return Ok(None);
     }
-    Ok(usd)
+    let input = match usage.prompt {
+        Some(n) => n as f64,
+        None => f64::from(est) * factor(db, p.name())?,
+    };
+    let output = match usage.completion {
+        Some(n) => n as f64,
+        None => f64::from(largest_output(p)),
+    };
+    Ok(Some(limits.usd(input, output)))
+}
+
+/// The answer a request may get at most: its declared output, or the entry's output cap.
+fn largest_output(p: &Provider) -> u32 {
+    match p.declared_output() {
+        0 => p.limits().max_output_tokens,
+        n => n,
+    }
 }
 
 /// The tokens `p`'s sent calls since `start` may have used and did not report: a missing prompt
-/// count at its calibrated estimate, a missing completion count at the request's declared output
-/// (or the entry's output cap), as input and output.
-fn unmetered_parts(db: &Connection, p: &Provider, start: i64) -> Result<(f64, f64)> {
-    let (est, calls) = providers_db::unmetered(db, p.name(), start)?;
-    let out = match p.declared_output() {
-        0 => p.limits().max_output_tokens,
-        n => n,
-    };
-    Ok((
-        est as f64 * factor(db, p.name())?,
-        (calls * i64::from(out)) as f64,
-    ))
-}
-
+/// count at its calibrated estimate, a missing completion count at its largest output.
 fn unmetered(db: &Connection, p: &Provider, start: i64) -> Result<f64> {
-    let (input, output) = unmetered_parts(db, p, start)?;
-    Ok(input + output)
+    let (est, calls) = providers_db::unmetered(db, p.name(), start)?;
+    Ok(est as f64 * factor(db, p.name())? + (calls * i64::from(largest_output(p))) as f64)
 }
 
 #[cfg(test)]
@@ -200,6 +205,32 @@ mod tests {
                     completion: Some(completion),
                     ..Default::default()
                 },
+                usd: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// A call to paid entry `p` with its cost stored, as the chain records one.
+    fn paid_call(db: &Connection, p: &Provider, prompt: i64, completion: i64) {
+        let usage = Usage {
+            prompt: Some(prompt),
+            completion: Some(completion),
+            ..Default::default()
+        };
+        record(
+            db,
+            &Call {
+                provider: p.name(),
+                role: "curator",
+                span: "s",
+                outcome: "ok",
+                ms: 1,
+                detail: None,
+                bytes_out: 1,
+                est_tokens: None,
+                usage,
+                usd: cost(db, p, 0, usage, true).unwrap(),
             },
         )
         .unwrap();
@@ -239,31 +270,20 @@ mod tests {
                 ..Default::default()
             },
         );
-        let chain = std::slice::from_ref(&groq);
-        assert!(
-            admit(&db, &groq, chain, 7000.0, 5.0, &[])
-                .unwrap()
-                .is_none()
-        );
-        let r = admit(&db, &groq, chain, 7700.0, 5.0, &[]).unwrap().unwrap();
+        assert!(admit(&db, &groq, 7000.0, 5.0, &[]).unwrap().is_none());
+        let r = admit(&db, &groq, 7700.0, 5.0, &[]).unwrap().unwrap();
         assert_eq!(r.outcome, "too_big"); // over 95% of the ceiling
-        let r = admit(&db, &groq, chain, 100.0, 5.0, &[4000, 8000])
+        let r = admit(&db, &groq, 100.0, 5.0, &[4000, 8000])
             .unwrap()
             .unwrap();
         assert_eq!(r.outcome, "too_big");
-        assert!(
-            admit(&db, &groq, chain, 100.0, 5.0, &[4000])
-                .unwrap()
-                .is_none()
-        );
+        assert!(admit(&db, &groq, 100.0, 5.0, &[4000]).unwrap().is_none());
         // A declared output is reserved too: 7,000 in and 4,000 out do not fit in 8,000.
         let mut declared = groq.clone();
         if let Provider::Openai { extra, .. } = &mut declared {
             extra.insert("max_completion_tokens".into(), 4000.into());
         }
-        let r = admit(&db, &declared, chain, 7000.0, 5.0, &[])
-            .unwrap()
-            .unwrap();
+        let r = admit(&db, &declared, 7000.0, 5.0, &[]).unwrap().unwrap();
         assert_eq!(r.outcome, "too_big");
     }
 
@@ -279,9 +299,8 @@ mod tests {
             },
         );
         call(&db, "p", None, 7000, 1000);
-        let chain = std::slice::from_ref(&p);
-        assert!(admit(&db, &p, chain, 1500.0, 5.0, &[]).unwrap().is_none());
-        let r = admit(&db, &p, chain, 2500.0, 5.0, &[]).unwrap().unwrap();
+        assert!(admit(&db, &p, 1500.0, 5.0, &[]).unwrap().is_none());
+        let r = admit(&db, &p, 2500.0, 5.0, &[]).unwrap().unwrap();
         assert_eq!(
             (r.outcome, r.detail.as_str()),
             ("budget", "8000/10000 tokens today")
@@ -291,9 +310,7 @@ mod tests {
         if let Provider::Openai { extra, .. } = &mut declared {
             extra.insert("max_tokens".into(), 4000.into());
         }
-        let r = admit(&db, &declared, chain, 1000.0, 5.0, &[])
-            .unwrap()
-            .unwrap();
+        let r = admit(&db, &declared, 1000.0, 5.0, &[]).unwrap().unwrap();
         assert_eq!(r.outcome, "budget");
         // A sent call with no usage back counts at its estimate and its largest output: 1,000
         // in and the entry's 4,000 out take the day to 13,000.
@@ -309,10 +326,11 @@ mod tests {
                 bytes_out: 1,
                 est_tokens: Some(1_000),
                 usage: Usage::default(),
+                usd: None,
             },
         )
         .unwrap();
-        let r = admit(&db, &p, chain, 1.0, 5.0, &[]).unwrap().unwrap();
+        let r = admit(&db, &p, 1.0, 5.0, &[]).unwrap().unwrap();
         assert_eq!(r.detail, "13000/10000 tokens today");
     }
 
@@ -333,41 +351,28 @@ mod tests {
         };
         let chain = [paid("a"), paid("b"), entry("free", Limits::default())];
         // USD 4.63 spent across both paid entries; the free one does not count.
-        call(&db, "a", None, 1_000_000, 300_000);
-        call(&db, "b", None, 630_000, 0);
-        call(&db, "free", None, 50_000_000, 5_000_000);
-        assert!((spent_this_month(&db, &chain).unwrap() - 4.63).abs() < 1e-9);
+        paid_call(&db, &chain[0], 1_000_000, 300_000);
+        paid_call(&db, &chain[1], 630_000, 0);
+        paid_call(&db, &chain[2], 50_000_000, 5_000_000);
+        let spent = providers_db::usd_this_month(&db).unwrap();
+        assert!((spent - 4.63).abs() < 1e-9, "{spent}");
         // 10,000 in (0.01) and up to 4,000 out (0.04): 4.68, inside 5.
-        assert!(
-            admit(&db, &chain[0], &chain, 10_000.0, 5.0, &[])
-                .unwrap()
-                .is_none()
-        );
+        assert!(admit(&db, &chain[0], 10_000.0, 5.0, &[]).unwrap().is_none());
         // Just below the cap, the same call could cross it by its answer alone.
-        call(&db, "b", None, 0, 33_000);
-        let r = admit(&db, &chain[1], &chain, 10_000.0, 5.0, &[])
-            .unwrap()
-            .unwrap();
+        paid_call(&db, &chain[1], 0, 33_000);
+        let r = admit(&db, &chain[1], 10_000.0, 5.0, &[]).unwrap().unwrap();
         assert_eq!(r.outcome, "budget");
-        assert!(
-            admit(&db, &chain[2], &chain, 10_000.0, 5.0, &[])
-                .unwrap()
-                .is_none()
-        );
+        assert!(admit(&db, &chain[2], 10_000.0, 5.0, &[]).unwrap().is_none());
         // An entry that asks for 100 output tokens is priced at 100 (0.011 in all): it fits.
         let mut small = chain[1].clone();
         if let Provider::Openai { extra, .. } = &mut small {
             extra.insert("max_completion_tokens".into(), 100.into());
         }
-        assert!(
-            admit(&db, &small, &chain, 10_000.0, 5.0, &[])
-                .unwrap()
-                .is_none()
-        );
+        assert!(admit(&db, &small, 10_000.0, 5.0, &[]).unwrap().is_none());
     }
 
     #[test]
-    fn a_sent_call_that_reported_no_usage_counts_at_its_largest_cost() {
+    fn a_sent_call_that_reported_no_usage_is_charged_its_largest_cost_and_keeps_it() {
         let home = tempfile::tempdir().unwrap();
         let db = open(home.path()).unwrap();
         let paid = entry(
@@ -379,48 +384,51 @@ mod tests {
                 ..Default::default()
             },
         );
-        let row = |outcome: &str, detail: Option<&str>, usage: Usage| {
-            record(
-                &db,
-                &Call {
-                    provider: "a",
-                    role: "curator",
-                    span: "s",
-                    outcome,
-                    ms: 1,
-                    detail,
-                    bytes_out: 1,
-                    est_tokens: Some(1_000),
-                    usage,
-                },
-            )
-            .unwrap();
-        };
-        // A timeout after sending, as openai_compat words it: 1,000 in (0.001) and up to 4,000
-        // out (0.04).
-        row(
-            "error",
-            Some("http request: timeout: global"),
-            Usage::default(),
-        );
-        // An HTTP error response was not billed.
-        row("error", Some("http 429: rate_limit"), Usage::default());
-        // An answer that gave its prompt count only: its output counts at the most (0.04), its
-        // input as reported (0.0005).
+        let none = Usage::default();
+        let close = |a: Option<f64>, b: f64| a.is_some_and(|a| (a - b).abs() < 1e-9);
+        // A timeout after sending: 1,000 in (0.001) and up to 4,000 out (0.04).
+        let timeout = cost(&db, &paid, 1_000, none, true).unwrap();
+        assert!(close(timeout, 0.041), "{timeout:?}");
+        // An answer with an HTTP error status was not billed.
+        assert_eq!(cost(&db, &paid, 1_000, none, false).unwrap(), None);
+        // A prompt count only: 500 in (0.0005) and the most out (0.04).
         let partial = Usage {
             prompt: Some(500),
             ..Default::default()
         };
-        row("ok", None, partial);
-        let spent = spent_this_month(&db, std::slice::from_ref(&paid)).unwrap();
-        assert!((spent - 0.0815).abs() < 1e-9, "{spent}");
-        // Once this provider is known to read twice its estimate, a missing prompt count is
-        // charged at the calibrated 2,000: the 5 samples cost 0.001, the timeout's input 0.001
-        // more.
+        assert!(close(
+            cost(&db, &paid, 1_000, partial, true).unwrap(),
+            0.0405
+        ));
+        // A free entry has no cost.
+        let free = entry("f", Limits::default());
+        assert_eq!(cost(&db, &free, 1_000, none, true).unwrap(), None);
+        // The timeout's cost is stored with it and stays when the entry is removed, repriced or
+        // calibrated later: five samples at twice the estimate raise a new call's input to 2,000,
+        // not the stored one's.
+        record(
+            &db,
+            &Call {
+                provider: "a",
+                role: "curator",
+                span: "s",
+                outcome: "error",
+                ms: 1,
+                detail: Some("http request: timeout: global"),
+                bytes_out: 1,
+                est_tokens: Some(1_000),
+                usage: none,
+                usd: timeout,
+            },
+        )
+        .unwrap();
         for _ in 0..5 {
             call(&db, "a", Some(100), 200, 0);
         }
-        let spent = spent_this_month(&db, &[paid]).unwrap();
-        assert!((spent - 0.0835).abs() < 1e-9, "{spent}");
+        assert!(close(cost(&db, &paid, 1_000, none, true).unwrap(), 0.042));
+        assert!(close(
+            Some(providers_db::usd_this_month(&db).unwrap()),
+            0.041
+        ));
     }
 }

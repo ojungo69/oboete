@@ -156,7 +156,12 @@ impl<'a> Chain<'a> {
         let mut ceiling_hit = Vec::new();
         for p in self.providers {
             let name = p.name().to_string();
-            let record = |outcome: &str, ms: i64, detail: Option<&str>, sent: bool, usage| {
+            let record = |outcome: &str,
+                          ms: i64,
+                          detail: Option<&str>,
+                          sent: bool,
+                          usage,
+                          usd: Option<f64>| {
                 providers_db::record(
                     conn,
                     &providers_db::Call {
@@ -169,6 +174,7 @@ impl<'a> Chain<'a> {
                         bytes_out: if sent { prompt.len() } else { 0 },
                         est_tokens: Some(est),
                         usage,
+                        usd,
                     },
                 )
             };
@@ -183,14 +189,7 @@ impl<'a> Chain<'a> {
                 continue;
             }
             let tokens = f64::from(est) * budget::factor(conn, &name)?;
-            let admit = budget::admit(
-                conn,
-                p,
-                self.providers,
-                tokens,
-                self.paid_usd_per_month,
-                &ceiling_hit,
-            )?;
+            let admit = budget::admit(conn, p, tokens, self.paid_usd_per_month, &ceiling_hit)?;
             if let Some(refusal) = admit {
                 record(
                     refusal.outcome,
@@ -198,6 +197,7 @@ impl<'a> Chain<'a> {
                     Some(&refusal.detail),
                     false,
                     Usage::default(),
+                    None,
                 )?;
                 fallbacks.push((name, refusal.detail));
                 continue;
@@ -220,7 +220,8 @@ impl<'a> Chain<'a> {
             {
                 let detail = format!("429, retry in {wait:.0}s");
                 let ms = started.elapsed().as_millis() as i64;
-                record("wait", ms, Some(&detail), true, Usage::default())?;
+                // A 429 is an answer with an HTTP error status: not billed.
+                record("wait", ms, Some(&detail), true, Usage::default(), None)?;
                 std::thread::sleep(Duration::from_secs_f64(wait + 0.5));
                 result = call(p, prompt, schema);
             }
@@ -248,7 +249,8 @@ impl<'a> Chain<'a> {
             }
             match result {
                 Ok(a) => {
-                    record("ok", ms, None, true, a.usage)?;
+                    let usd = budget::cost(conn, p, est, a.usage, true)?;
+                    record("ok", ms, None, true, a.usage, usd)?;
                     let next = providers_db::State {
                         down_until: a.cool_until.unwrap_or(0),
                         ..Default::default()
@@ -267,7 +269,10 @@ impl<'a> Chain<'a> {
                         ceiling_hit.extend(p.limits().max_request_tokens);
                     }
                     let outcome = if e.invalid() { "invalid" } else { "error" };
-                    record(outcome, ms, Some(&e.message), !forced && e.sent, e.usage)?;
+                    let sent = !forced && e.sent;
+                    // An HTTP error status was not billed; a timeout or a dropped answer may be.
+                    let usd = budget::cost(conn, p, est, e.usage, sent && e.status.is_none())?;
+                    record(outcome, ms, Some(&e.message), sent, e.usage, usd)?;
                     // A forced failure is a test of the fallback, not of the provider.
                     if !forced {
                         providers_db::set_state(conn, &name, next_state(state, &e))?;
@@ -2432,6 +2437,26 @@ mod tests {
                 .or(body["max_completion_tokens"].as_u64());
             assert!(asked.is_some_and(|n| n <= 4000), "{extra}: {body}");
         }
+    }
+
+    #[test]
+    fn a_paid_answer_is_recorded_with_its_cost() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let answer = json!({"choices": [{"message": {"content": "{}"}}],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 100}});
+        let (url, _) = serve_once(answer.to_string().into_bytes(), "");
+        let mut p = stub(url);
+        if let Provider::Openai { limits, .. } = &mut p {
+            limits.usd_per_mtok_in = 1.0;
+            limits.usd_per_mtok_out = 10.0;
+        }
+        Chain::new(&[p], &conn)
+            .run("curator", "s", "short", &json!({"type": "object"}))
+            .unwrap();
+        // 1,000 in (0.001) and 100 out (0.001).
+        let usd = crate::providers_db::usd_this_month(&conn).unwrap();
+        assert!((usd - 0.002).abs() < 1e-9, "{usd}");
     }
 
     #[test]

@@ -510,6 +510,7 @@ mod tests {
                     bytes_out: 1,
                     est_tokens: None,
                     usage: Default::default(),
+                    usd: None,
                 },
             )
             .unwrap();
