@@ -113,10 +113,11 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
          -- The active derivations' bodies and quotes, for Task 7's candidates.
          CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5(text, tokenize='trigram');
          -- Windows whose claims lost a quote to a mask or a removal since: Task 11 sends them
-         -- again.
+         -- again. With the claim op that lost it, so a rewind that loses the op takes it back.
          CREATE TABLE IF NOT EXISTS recurate(
            device TEXT NOT NULL, from_seq INTEGER NOT NULL, to_seq INTEGER NOT NULL,
-           PRIMARY KEY (device, from_seq, to_seq)
+           op_device TEXT NOT NULL, op_seq INTEGER NOT NULL,
+           PRIMARY KEY (op_device, op_seq)
          );
          -- Claim ops that gave no claim, and why: doctor counts them.
          CREATE TABLE IF NOT EXISTS claim_skips(

@@ -90,7 +90,13 @@ impl Consumer for Claims {
             .prepare("SELECT DISTINCT uid FROM derivations WHERE op_device = ?1 AND op_seq > ?2")?
             .query_map(params![device, to], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        for table in ["derivations", "evidence", "edges", "claim_skips"] {
+        for table in [
+            "derivations",
+            "evidence",
+            "edges",
+            "claim_skips",
+            "recurate",
+        ] {
             k.execute(
                 &format!("DELETE FROM {table} WHERE op_device = ?1 AND op_seq > ?2"),
                 params![device, to],
@@ -234,8 +240,9 @@ fn queue(raw: &Raw, k: &Connection, op_device: &str, op_seq: i64, e: &Evidence) 
         None => (e.device.as_str(), e.seq, e.seq),
     };
     k.execute(
-        "INSERT OR IGNORE INTO recurate(device, from_seq, to_seq) VALUES(?1, ?2, ?3)",
-        params![device, from, to],
+        "INSERT OR IGNORE INTO recurate(device, from_seq, to_seq, op_device, op_seq)
+         VALUES(?1, ?2, ?3, ?4, ?5)",
+        params![device, from, to, op_device, op_seq],
     )?;
     Ok(())
 }
@@ -865,5 +872,8 @@ mod tests {
         let mut k = crate::knowledge::open(home.path()).unwrap();
         run(&raw, &mut k);
         assert_eq!(state(&k), want);
+        // A restore that loses the claim op takes its span back out.
+        Claims.rewind(&k, &dev, 1).unwrap();
+        assert_eq!(count(&k, "recurate"), 0);
     }
 }
