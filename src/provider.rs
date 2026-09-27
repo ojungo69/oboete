@@ -943,13 +943,17 @@ fn claude_stream(stdout: &str) -> Result<ClaudeRun, CallError> {
                 .as_array()
                 .is_some_and(|c| c.iter().any(|b| b["type"] == "tool_use"))
     });
+    // `apiKeySource` "none" is the subscription login; anything else would bill an API key the
+    // curator was never meant to spend (spec 1.4, 6.5).
     if !(empty("tools") && empty("mcp_servers") && empty("plugins"))
         || init["permissionMode"] != "dontAsk"
+        || init["apiKeySource"] != "none"
         || used_tool
     {
         return Err(CallError::other(
-            "claude isolation: its init reported a tool, MCP server, plugin or permission mode \
-             the curator did not ask for, or a turn used a tool; the answer was discarded",
+            "claude isolation: its init reported a tool, MCP server, plugin, permission mode or \
+             API key source the curator did not ask for, or a turn used a tool; the answer was \
+             discarded",
         ));
     }
     let now = db::now_ms();
@@ -1375,6 +1379,7 @@ mod tests {
             ("mcp_servers", json!([{"name": "github"}])),
             ("plugins", json!([{"name": "agents-md"}])),
             ("permissionMode", json!("bypassPermissions")),
+            ("apiKeySource", json!("ANTHROPIC_API_KEY")),
         ] {
             let mut init = clean_init();
             init[k] = v;
