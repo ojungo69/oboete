@@ -113,6 +113,8 @@ enum Cmd {
     },
     /// Report hook wiring, stored data and provider readiness
     Doctor,
+    /// Use a provider again after it stopped for the owner (claude's credits) or cooled down
+    Resume { provider: String },
     /// Browse the memory in a browser: a read-only page on 127.0.0.1 (prints its URL)
     View {
         /// Port to listen on (0 = any free port)
@@ -471,6 +473,15 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             )?)
         }
         Cmd::Doctor => setup::doctor(&home),
+        Cmd::Resume { provider } => {
+            let db = providers_db::open(&home)?;
+            if providers_db::resume(&db, &provider)? {
+                println!("{provider} will be used again");
+            } else {
+                println!("{provider} was not stopped");
+            }
+            Ok(())
+        }
         Cmd::Restore => {
             // The worker's lock, so no worker reads raw.db while it is replaced.
             let held = worker::lock(&home)?.ok_or_else(|| {

@@ -5,6 +5,10 @@
 //! waited out once,
 //! and any other error (HTTP, timeout, unparsable/invalid output) moves on to the next provider.
 
+// One error per provider call, which takes seconds on the network or in a CLI: moving a
+// large error costs nothing next to it.
+#![allow(clippy::result_large_err)]
+
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
@@ -31,6 +35,8 @@ const MAX_COOLDOWN: Duration = Duration::from_secs(24 * 3600);
 /// uploads the whole window (groq-20b: 20 such 400s in the owner's store, 2026-09-22..26).
 const BREAKER_AFTER: u32 = 3;
 const COOLDOWN_BREAKER: Duration = Duration::from_secs(30 * 60);
+/// Longest rest a subscription's own reset can set: a weekly window resets within 7 days.
+const MAX_SUBSCRIPTION_REST: Duration = Duration::from_secs(8 * 24 * 3600);
 /// Longest cooldown of a 429 that names no reset, reached by doubling from `COOLDOWN_429`.
 const MAX_BACKOFF_429: Duration = Duration::from_secs(3600);
 
@@ -39,6 +45,16 @@ pub struct ChainResult {
     pub output: Value,
     /// Providers tried before the one that answered (name, reason).
     pub fallbacks: Vec<(String, String)>,
+}
+
+/// One provider's answer.
+#[derive(Debug)]
+struct Answer {
+    value: Value,
+    usage: Usage,
+    /// Unix ms until which the provider should rest although it answered: claude's stream said
+    /// its subscription is near a limit (spec 3.1, Claude decision C1).
+    cool_until: Option<i64>,
 }
 
 /// One failed call, with what the chain needs to decide what to do next.
@@ -52,6 +68,9 @@ struct CallError {
     /// Whether the prompt may have left the machine: false for a failure before dispatch (no
     /// key file, no scratch directory, a CLI that did not start), for the egress ledger.
     sent: bool,
+    /// A subscription's own reset it reported on the way (claude's `rate_limit_event`): the
+    /// provider rests until then whatever else failed.
+    cool_until: Option<i64>,
 }
 
 impl CallError {
@@ -62,10 +81,17 @@ impl CallError {
             message: message.into(),
             usage: Usage::default(),
             sent: true,
+            cool_until: None,
         }
     }
     fn with_usage(self, usage: Usage) -> Self {
         Self { usage, ..self }
+    }
+    fn resting(self, cool_until: Option<i64>) -> Self {
+        Self {
+            cool_until: self.cool_until.max(cool_until),
+            ..self
+        }
     }
     /// A failure before the request or the CLI started: nothing was uploaded.
     fn unsent(self) -> Self {
@@ -121,6 +147,11 @@ impl<'a> Chain<'a> {
                 )
             };
             let state = providers_db::state(conn, &name)?;
+            if state.down_until == providers_db::OWNER_HOLD {
+                let why = format!("stopped until the owner acts (`oboete resume {name}`)");
+                fallbacks.push((name, why));
+                continue;
+            }
             if state.down_until > db::now_ms() {
                 fallbacks.push((name, "cooling down after an earlier failure".into()));
                 continue;
@@ -155,26 +186,31 @@ impl<'a> Chain<'a> {
             }
             // Only strict-schema providers enforce the shape; valid JSON of another shape from the
             // rest would pass here and fail the window later, without trying the next provider.
-            let result = result.and_then(|(v, usage)| {
-                if fits(&v, schema) {
-                    Ok((v, usage))
+            let result = result.and_then(|a| {
+                if fits(&a.value, schema) {
+                    Ok(a)
                 } else {
                     Err(
                         CallError::other("invalid output: the answer does not match the schema")
-                            .with_usage(usage),
+                            .with_usage(a.usage)
+                            .resting(a.cool_until),
                     )
                 }
             });
             let ms = started.elapsed().as_millis() as i64;
             match result {
-                Ok((v, usage)) => {
-                    record("ok", ms, None, true, usage)?;
-                    if state != providers_db::State::default() {
-                        providers_db::set_state(conn, &name, providers_db::State::default())?;
+                Ok(a) => {
+                    record("ok", ms, None, true, a.usage)?;
+                    let next = providers_db::State {
+                        down_until: a.cool_until.unwrap_or(0),
+                        ..Default::default()
+                    };
+                    if state != next {
+                        providers_db::set_state(conn, &name, next)?;
                     }
                     return Ok(ChainResult {
                         provider: name,
-                        output: v,
+                        output: a.value,
                         fallbacks,
                     });
                 }
@@ -263,13 +299,15 @@ fn next_state(was: providers_db::State, e: &CallError) -> providers_db::State {
         None => (None, was.fails + 1, 0),
     };
     providers_db::State {
-        down_until: cooldown.map_or(0, |c| db::now_ms() + c.as_millis() as i64),
+        down_until: cooldown
+            .map_or(0, |c| db::now_ms() + c.as_millis() as i64)
+            .max(e.cool_until.unwrap_or(0)),
         fails,
         backoff,
     }
 }
 
-fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<(Value, Usage), CallError> {
+fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<Answer, CallError> {
     match p {
         Provider::Openai {
             base_url,
@@ -318,7 +356,7 @@ fn openai_compat(
     headers: &std::collections::BTreeMap<String, String>,
     prompt: &str,
     schema: &Value,
-) -> Result<(Value, Usage), CallError> {
+) -> Result<Answer, CallError> {
     let mut body = json!({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -392,6 +430,7 @@ fn openai_compat(
             message,
             usage: Usage::default(),
             sent: true,
+            cool_until: None,
         });
     }
     let v: Value = serde_json::from_str(&text)
@@ -405,7 +444,11 @@ fn openai_compat(
     let answer = serde_json::from_str(unfence(content)).map_err(|e| {
         CallError::other(format!("invalid output: content is not JSON ({e})")).with_usage(usage)
     })?;
-    Ok((answer, usage))
+    Ok(Answer {
+        value: answer,
+        usage,
+        cool_until: None,
+    })
 }
 
 /// A token count from a provider's answer: a non-negative integer, else nothing.
@@ -428,7 +471,13 @@ fn usage_openai(v: &Value) -> Usage {
 fn usage_cli(cli: &str, stdout: &str) -> Usage {
     match cli {
         "claude" => {
-            let v: Value = serde_json::from_str(stdout).unwrap_or_default();
+            // The stream's result event (one JSON object per line), or the whole output.
+            let v: Value = stdout
+                .lines()
+                .rev()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .find(|v| v["type"] == "result" || v.get("usage").is_some())
+                .unwrap_or_default();
             let u = &v["usage"];
             let cache_read = tokens(&u["cache_read_input_tokens"]);
             Usage {
@@ -748,13 +797,11 @@ fn headless_command(
             Some(format!("{turn}\n"))
         }
         "claude" => {
-            cmd.args([
-                "-p",
-                "--output-format",
-                "json",
-                "--json-schema",
-                schema_text,
-            ]);
+            // The schema goes into the system prompt, not --json-schema: that flag gives claude a
+            // StructuredOutput tool and a second turn (2.1.278, docs/spike/curator-isolation.md),
+            // and a curator holds no tool. The answer is read from the result text instead.
+            let system = format!("{CURATOR_SYSTEM} The JSON schema: {schema_text}");
+            cmd.args(["-p", "--output-format", "stream-json", "--verbose"]);
             cmd.args([
                 "--setting-sources",
                 "",
@@ -766,13 +813,29 @@ fn headless_command(
                 "--no-session-persistence",
                 "--settings",
                 r#"{"disableAllHooks":true}"#,
-                "--system-prompt",
-                CURATOR_SYSTEM,
+            ]);
+            cmd.arg("--system-prompt-file")
+                .arg(write("system.md", &system)?);
+            // spec 6.5's extra layers; `claude_stream` checks what the init event reports.
+            cmd.args([
+                "--permission-mode",
+                "dontAsk",
+                "--permission-prompts",
+                "none",
+                "--disable-slash-commands",
+                "--max-turns",
+                "1",
+                "--effort",
+                "low",
             ]);
             if let Some(m) = model {
                 cmd.args(["--model", m]);
             }
-            Some(prompt.to_owned())
+            cmd.args(["--disallowedTools", "Agent", "Task", "Monitor", "mcp__*"]);
+            // claude -p reads a file named by `@<path>` in the prompt into the turn itself, with no
+            // tool and nothing in the init event (2.1.283, 2026-09-27): a planted `@~/.ssh/id_ed25519`
+            // would be sent and could come back in a summary. No `@` reaches it; U+FF20 reads the same.
+            Some(prompt.replace('@', "\u{FF20}"))
         }
         "grok" => {
             cmd.arg("--prompt-file").arg(write("task.md", prompt)?);
@@ -828,6 +891,158 @@ fn headless_command(
     Ok((cmd, stdin))
 }
 
+/// The only environment names a curator CLI gets (S8, spec 6.4): what finding a program, a home,
+/// a temp directory, a locale and a proxy needs, and each CLI's own config-directory variable.
+/// Windows also needs its system root to start a process and open a socket. Never an
+/// `ANTHROPIC_*` or `CLAUDE_CODE_*` name: an inherited base URL, token or effort level must not
+/// reach claude; and nothing else, so no key or credential variable leaks by its name's spelling.
+const CURATOR_ENV: [&str; 19] = [
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TMP",
+    "TEMP",
+    "TMPDIR",
+    "LANG",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+];
+const CURATOR_ENV_PREFIXES: [&str; 2] = ["LC_", "XDG_"];
+
+/// `parent`'s variables that a curator CLI may see. Names compare without case on Windows, and
+/// the proxy names everywhere (`https_proxy` is the usual spelling on Unix).
+fn curator_env(
+    parent: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    windows: bool,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    parent
+        .filter(|(k, _)| {
+            let Some(k) = k.to_str() else {
+                return false;
+            };
+            let upper = k.to_ascii_uppercase();
+            let name = if windows || upper.ends_with("_PROXY") {
+                upper.as_str()
+            } else {
+                k
+            };
+            CURATOR_ENV.contains(&name) || CURATOR_ENV_PREFIXES.iter().any(|p| name.starts_with(p))
+        })
+        .collect()
+}
+
+/// Check claude's stream (spec 6.5) and pick out its result. The `system/init` event must report
+/// no tool, MCP server or plugin and the permission mode asked for, and no turn may use a tool:
+/// otherwise the answer is discarded, since a curator that can act might have acted. A
+/// `rate_limit_event` with `allowed_warning` or `rejected` rests claude until its reset (Claude
+/// decision C1), and `credits_required` for a day, until the owner acts.
+fn claude_stream(stdout: &str) -> Result<String, CallError> {
+    // A line that does not parse could be the assistant turn that used a tool: the run is
+    // discarded rather than judged on the lines that did parse.
+    let events: Vec<Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()
+        .map_err(|e| CallError::other(format!("invalid output: claude stream line: {e}")))?;
+    let init = events
+        .iter()
+        .find(|e| e["type"] == "system" && e["subtype"] == "init")
+        .ok_or_else(|| CallError::other("invalid output: claude reported no init event"))?;
+    let empty = |k: &str| init[k].as_array().is_some_and(Vec::is_empty);
+    let used_tool = events.iter().any(|e| {
+        e["type"] == "assistant"
+            && e["message"]["content"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|b| b["type"] == "tool_use"))
+    });
+    // `apiKeySource` "none" is the subscription login; anything else would bill an API key the
+    // curator was never meant to spend (spec 1.4, 6.5).
+    if !(empty("tools") && empty("mcp_servers") && empty("plugins"))
+        || init["permissionMode"] != "dontAsk"
+        || init["apiKeySource"] != "none"
+        || used_tool
+    {
+        return Err(CallError::other(
+            "claude isolation: its init reported a tool, MCP server, plugin, permission mode or \
+             API key source the curator did not ask for, or a turn used a tool; the answer was \
+             discarded",
+        ));
+    }
+    if events.iter().any(|e| {
+        e["type"] == "rate_limit_event" && e["rate_limit_info"]["errorCode"] == "credits_required"
+    }) {
+        return Err(CallError {
+            status: Some(429),
+            retry_after_s: None,
+            message: "claude: credits required (the owner must act)".into(),
+            usage: Usage::default(),
+            sent: true,
+            cool_until: Some(providers_db::OWNER_HOLD),
+        });
+    }
+    let result = events
+        .iter()
+        .rev()
+        .find(|e| e["type"] == "result")
+        .ok_or_else(|| CallError::other("invalid output: claude printed no result event"))?;
+    if result["is_error"] == true {
+        let status = result["api_error_status"]
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok());
+        return Err(CallError {
+            status,
+            retry_after_s: None,
+            message: format!("claude {}", result["subtype"].as_str().unwrap_or("error")),
+            usage: Usage::default(),
+            sent: true,
+            cool_until: None,
+        });
+    }
+    Ok(result.to_string())
+}
+
+/// When claude's stream said its subscription should rest: the reset of a `rate_limit_event` with
+/// `allowed_warning` or `rejected` (Claude decision C1), at most `MAX_SUBSCRIPTION_REST` away, or
+/// `OWNER_HOLD` for `credits_required`. Lines that do not parse are passed over: this only ever
+/// adds rest, and a killed run's last line is often cut.
+fn claude_rest(stdout: &str) -> Option<i64> {
+    let now = db::now_ms();
+    let events = stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["type"] == "rate_limit_event");
+    if events
+        .clone()
+        .any(|e| e["rate_limit_info"]["errorCode"] == "credits_required")
+    {
+        return Some(providers_db::OWNER_HOLD);
+    }
+    events
+        .filter(|e| {
+            matches!(
+                e["rate_limit_info"]["status"].as_str(),
+                Some("allowed_warning" | "rejected")
+            )
+        })
+        .filter_map(|e| e["rate_limit_info"]["resetsAt"].as_i64())
+        .map(|s| {
+            s.saturating_mul(1000)
+                .min(now + MAX_SUBSCRIPTION_REST.as_millis() as i64)
+        })
+        .max()
+}
+
 /// Run a subscription CLI headless (see `headless_command`) and return its structured answer.
 fn cli_headless(
     cli: &str,
@@ -835,12 +1050,12 @@ fn cli_headless(
     timeout_s: u64,
     prompt: &str,
     schema: &Value,
-) -> Result<(Value, Usage), CallError> {
+) -> Result<Answer, CallError> {
     let scratch = scratch_dir()?;
     let last = scratch.0.join("last.json");
     let (mut cmd, stdin) = headless_command(cli, model, &scratch.0, prompt, &schema.to_string())?;
-    // Keep the CLI out of the user's repo and away from the parent's secrets-bearing env, and
-    // make sure our own hooks ignore the summarizer's session.
+    // Keep the CLI out of the user's repo, give it only S8's environment (spec 6.4), and make
+    // sure our own hooks ignore the summarizer's session.
     cmd.current_dir(&scratch.0)
         .stdin(if stdin.is_some() {
             Stdio::piped()
@@ -849,18 +1064,18 @@ fn cli_headless(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env(hook::SKIP_ENV, "1")
-        .env_remove("CLAUDECODE");
-    for (k, _) in std::env::vars() {
-        if k.contains("TOKEN")
-            || k.contains("KEY")
-            || k.contains("SECRET")
-            || k.contains("PASSWORD")
-        {
-            cmd.env_remove(&k);
-        }
-    }
-    let out = run_cli(cmd, stdin, Duration::from_secs(timeout_s)).map_err(|e| {
+        .env_clear()
+        .envs(curator_env(std::env::vars_os(), cfg!(windows)))
+        .env(hook::SKIP_ENV, "1");
+    let (out, ran) = run_cli(cmd, stdin, Duration::from_secs(timeout_s));
+    let stdout = String::from_utf8_lossy(&out);
+    // claude's reset holds whatever else fails below, a failed or timed-out run included.
+    let rest = if cli == "claude" {
+        claude_rest(&stdout)
+    } else {
+        None
+    };
+    ran.map_err(|e| {
         let tagged = if e.invalid() {
             format!(
                 "invalid output: {cli}: {}",
@@ -873,10 +1088,11 @@ fn cli_headless(
             message: tagged,
             ..e
         }
+        .resting(rest)
     })?;
-    let stdout = String::from_utf8_lossy(&out);
     let usage = usage_cli(cli, &stdout);
     let text = match cli {
+        "claude" => claude_stream(&stdout).map_err(|e| e.with_usage(usage).resting(rest))?,
         "codex" => {
             use std::io::Read;
             let mut text = String::new();
@@ -891,8 +1107,12 @@ fn cli_headless(
         "agy" => agy_result(&stdout).map_err(|e| e.with_usage(usage))?,
         _ => stdout.into_owned(),
     };
-    let answer = extract_structured(cli, &text).map_err(|e| e.with_usage(usage))?;
-    Ok((answer, usage))
+    let answer = extract_structured(cli, &text).map_err(|e| e.with_usage(usage).resting(rest))?;
+    Ok(Answer {
+        value: answer,
+        usage,
+        cool_until: rest,
+    })
 }
 
 /// The schema-validated object out of a CLI's JSON envelope: `structured_output` (claude, agy),
@@ -904,72 +1124,92 @@ const MAX_RESPONSE_BYTES: u64 = 1 << 20;
 /// Spawn `cmd`, feed it `stdin`, and return its stdout if it exits 0 within `timeout`.
 /// stdin, stdout and stderr each get a thread: a prompt larger than the pipe buffer, or an
 /// answer larger than it, must not deadlock against a child that has not read or exited yet.
+/// Also returns what the child wrote to stdout by then, whatever the outcome: claude reports its
+/// allowance before it answers, and a run that then fails or hangs must still rest it.
 fn run_cli(
     mut cmd: Command,
     stdin: Option<String>,
     timeout: Duration,
-) -> Result<Vec<u8>, CallError> {
+) -> (Vec<u8>, Result<(), CallError>) {
     use std::io::{Read, Write};
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| CallError::other(format!("spawn: {e}")).unsent())?;
+    use std::sync::{Arc, Mutex};
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                Vec::new(),
+                Err(CallError::other(format!("spawn: {e}")).unsent()),
+            );
+        }
+    };
     let feeder = child.stdin.take().zip(stdin).map(|(mut w, text)| {
         // A child that exits without reading just makes the write fail.
         std::thread::spawn(move || w.write_all(text.as_bytes()).ok())
     });
+    // Read as it comes, into a buffer the caller can take without joining: on a timeout a
+    // grandchild may still hold the pipe open.
     let drain = |r: Option<Box<dyn Read + Send>>| {
-        r.map(|r| {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&buf);
+        let h = r.map(|mut r| {
             std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let mut r = r.take(MAX_RESPONSE_BYTES + 1);
-                r.read_to_end(&mut buf).ok();
+                let mut chunk = [0u8; 8192];
                 // Keep reading past the cap so the child is never blocked on a full pipe.
-                std::io::copy(r.get_mut(), &mut std::io::sink()).ok();
-                buf
+                while let Ok(n @ 1..) = r.read(&mut chunk) {
+                    let mut b = sink.lock().unwrap_or_else(|p| p.into_inner());
+                    let room = (MAX_RESPONSE_BYTES as usize + 1).saturating_sub(b.len());
+                    b.extend_from_slice(&chunk[..n.min(room)]);
+                }
             })
-        })
+        });
+        (h, buf)
     };
-    let stdout = drain(child.stdout.take().map(|r| Box::new(r) as _));
-    let stderr = drain(child.stderr.take().map(|r| Box::new(r) as _));
+    let (out_h, out) = drain(child.stdout.take().map(|r| Box::new(r) as _));
+    let (err_h, err) = drain(child.stderr.take().map(|r| Box::new(r) as _));
+    let take =
+        |b: &Arc<Mutex<Vec<u8>>>| std::mem::take(&mut *b.lock().unwrap_or_else(|p| p.into_inner()));
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break s,
             Ok(None) => {}
-            Err(e) => return Err(CallError::other(format!("wait: {e}"))),
+            Err(e) => return (take(&out), Err(CallError::other(format!("wait: {e}")))),
         }
         if Instant::now() > deadline {
             // Reap it before the scratch directory goes: a killed child still holds that
             // directory as its cwd until it is waited for (Windows refuses the removal).
             child.kill().ok();
             child.wait().ok();
-            return Err(CallError::other(format!(
-                "timed out after {}s",
-                timeout.as_secs()
-            )));
+            // What was already in the pipe is read before the snapshot: the reader ends when the
+            // pipe closes, or is given up on after a moment when a grandchild still holds it.
+            let until = Instant::now() + Duration::from_millis(500);
+            while out_h.as_ref().is_some_and(|h| !h.is_finished()) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let e = CallError::other(format!("timed out after {}s", timeout.as_secs()));
+            return (take(&out), Err(e));
         }
         std::thread::sleep(Duration::from_millis(100));
     };
     if let Some(f) = feeder {
         f.join().ok();
     }
-    let join = |h: Option<std::thread::JoinHandle<Vec<u8>>>| {
-        h.and_then(|h| h.join().ok()).unwrap_or_default()
-    };
-    let (out, err) = (join(stdout), join(stderr));
+    for h in [out_h, err_h].into_iter().flatten() {
+        h.join().ok();
+    }
+    let (out, err) = (take(&out), take(&err));
     if !status.success() {
         // stderr is not kept: a CLI can print the prompt it read from stdin (issue #91).
-        return Err(CallError::other(format!(
-            "{status}, {} bytes on stderr",
-            err.len()
-        )));
+        let e = CallError::other(format!("{status}, {} bytes on stderr", err.len()));
+        return (out, Err(e));
     }
     if out.len() as u64 > MAX_RESPONSE_BYTES {
-        return Err(CallError::other(format!(
+        let e = CallError::other(format!(
             "invalid output: more than {MAX_RESPONSE_BYTES} bytes"
-        )));
+        ));
+        return (out, Err(e));
     }
-    Ok(out)
+    (out, Ok(()))
 }
 
 /// agy's stream-json output: one event per line; the answer is in the last `result` event.
@@ -996,7 +1236,7 @@ fn extract_structured(cli: &str, text: &str) -> Result<Value, CallError> {
         .iter()
         .find_map(|k| v.get(*k).and_then(Value::as_str));
     match inner {
-        Some(s) => serde_json::from_str(s).map_err(|e| {
+        Some(s) => serde_json::from_str(unfence(s)).map_err(|e| {
             CallError::other(format!("invalid output: {cli} answer is not JSON ({e})"))
         }),
         None => Err(CallError::other(format!(
@@ -1063,8 +1303,13 @@ mod tests {
                 .collect()
         };
         let claude = args("claude");
-        let at = claude.iter().position(|a| a == "--system-prompt").unwrap();
-        assert_eq!(claude[at + 1], CURATOR_SYSTEM);
+        let at = claude
+            .iter()
+            .position(|a| a == "--system-prompt-file")
+            .unwrap();
+        assert_eq!(Path::new(&claude[at + 1]), dir.join("system.md"));
+        let system = std::fs::read_to_string(&claude[at + 1]).unwrap();
+        assert_eq!(system, format!("{CURATOR_SYSTEM} The JSON schema: {{}}"));
         let codex = args("codex");
         let value = codex
             .iter()
@@ -1074,6 +1319,249 @@ mod tests {
         let file = table["model_instructions_file"].as_str().unwrap();
         assert_eq!(Path::new(file), dir.join("instructions.md"));
         assert_eq!(std::fs::read_to_string(file).unwrap(), CURATOR_SYSTEM);
+    }
+
+    #[test]
+    fn claude_runs_with_spec_6_5s_layers_and_no_schema_tool() {
+        let scratch = scratch_dir().unwrap();
+        let (cmd, _) = headless_command("claude", Some("haiku"), &scratch.0, "p", "{}").unwrap();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let has = |pair: [&str; 2]| args.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1]);
+        for pair in [
+            ["--output-format", "stream-json"],
+            ["--permission-mode", "dontAsk"],
+            ["--permission-prompts", "none"],
+            ["--tools", ""],
+            ["--max-turns", "1"],
+        ] {
+            assert!(has(pair), "{pair:?}: {args:?}");
+        }
+        for flag in [
+            "--verbose",
+            "--disable-slash-commands",
+            "--strict-mcp-config",
+        ] {
+            assert!(args.iter().any(|a| a == flag), "{flag}: {args:?}");
+        }
+        let at = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert_eq!(args[at + 1..], ["Agent", "Task", "Monitor", "mcp__*"]);
+        // --json-schema would hand claude a StructuredOutput tool.
+        assert!(!args.iter().any(|a| a == "--json-schema"), "{args:?}");
+        let (_, stdin) =
+            headless_command("claude", None, &scratch.0, "look at @/etc/hostname", "{}").unwrap();
+        assert_eq!(stdin.unwrap(), "look at \u{FF20}/etc/hostname");
+    }
+
+    #[test]
+    fn the_curator_environment_is_the_allow_list() {
+        let os = |k: &str, v: &str| (std::ffi::OsString::from(k), std::ffi::OsString::from(v));
+        let parent = [
+            os("PATH", "/bin"),
+            os("HOME", "/h"),
+            os("LANG", "ja_JP.UTF-8"),
+            os("LC_ALL", "C"),
+            os("XDG_CONFIG_HOME", "/h/.config"),
+            os("https_proxy", "http://p:1"),
+            os("CODEX_HOME", "/h/.codex"),
+            os("ANTHROPIC_BASE_URL", "http://evil"),
+            os("ANTHROPIC_API_KEY", "k"),
+            os("CLAUDE_CODE_EFFORT_LEVEL", "max"),
+            os("AUTHORIZATION", "Bearer x"),
+            os("google_application_credentials", "/h/k.json"),
+            os("SSH_AUTH_SOCK", "/tmp/agent"),
+            os("GROQ_TOKEN", "t"),
+            os("Path", "C:\\bin"),
+        ];
+        let names = |windows| -> Vec<String> {
+            curator_env(parent.clone().into_iter(), windows)
+                .into_iter()
+                .map(|(k, _)| k.into_string().unwrap())
+                .collect()
+        };
+        let want = [
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "XDG_CONFIG_HOME",
+            "https_proxy",
+            "CODEX_HOME",
+        ];
+        assert_eq!(names(false), want);
+        // Windows compares names without case: its `Path` is PATH.
+        assert_eq!(names(true), [&want[..], &["Path"]].concat());
+    }
+
+    /// claude's stream: the init event, an answer, the rate-limit event and the result.
+    fn claude_events(init: Value, rate: &str, result: Value) -> String {
+        [
+            init,
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "{}"}]}}),
+            json!({"type": "rate_limit_event", "rate_limit_info":
+                {"status": rate, "resetsAt": 1_790_744_400_i64, "rateLimitType": "seven_day"}}),
+            result,
+        ]
+        .map(|v| v.to_string())
+        .join("\n")
+    }
+
+    fn clean_init() -> Value {
+        json!({"type": "system", "subtype": "init", "tools": [], "mcp_servers": [],
+            "plugins": [], "permissionMode": "dontAsk", "apiKeySource": "none"})
+    }
+
+    fn result_of(text: &str) -> Value {
+        json!({"type": "result", "subtype": "success", "is_error": false, "result": text,
+            "usage": {"input_tokens": 9, "cache_creation_input_tokens": 100, "output_tokens": 50}})
+    }
+
+    #[test]
+    fn claudes_answer_is_read_from_its_stream() {
+        let out = claude_events(
+            clean_init(),
+            "allowed",
+            result_of("```json\n{\"summary\": \"s\"}\n```"),
+        );
+        let result = claude_stream(&out).unwrap();
+        assert_eq!(claude_rest(&out), None);
+        assert_eq!(
+            extract_structured("claude", &result).unwrap(),
+            json!({"summary": "s"})
+        );
+        assert_eq!(usage_cli("claude", &out).prompt, Some(109));
+    }
+
+    #[test]
+    fn a_tool_in_system_init_discards_the_answer() {
+        for (k, v) in [
+            ("tools", json!(["Bash"])),
+            ("mcp_servers", json!([{"name": "github"}])),
+            ("plugins", json!([{"name": "agents-md"}])),
+            ("permissionMode", json!("bypassPermissions")),
+            ("apiKeySource", json!("ANTHROPIC_API_KEY")),
+        ] {
+            let mut init = clean_init();
+            init[k] = v;
+            let out = claude_events(init, "allowed", result_of("{}"));
+            let e = claude_stream(&out).expect_err(k);
+            assert!(e.message.contains("isolation"), "{k}: {}", e.message);
+            assert!(!e.invalid(), "an isolation failure rests claude: {k}");
+        }
+        // A turn that used a tool, whatever init said.
+        let used = [
+            clean_init(),
+            json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash"}]}}),
+            result_of("{}"),
+        ]
+        .map(|v| v.to_string())
+        .join("\n");
+        assert!(claude_stream(&used).is_err());
+    }
+
+    #[test]
+    fn a_rate_limit_warning_cools_claude_down_until_its_reset() {
+        for status in ["allowed_warning", "rejected"] {
+            let out = claude_events(clean_init(), status, result_of("{}"));
+            assert!(claude_stream(&out).is_ok());
+            // Until the weekly window's reset, days away: not capped at a day.
+            assert_eq!(claude_rest(&out), Some(1_790_744_400_000), "{status}");
+        }
+    }
+
+    #[test]
+    fn claudes_reset_holds_when_its_run_fails_or_its_answer_is_unusable() {
+        let reset_s = db::now_ms() / 1000 + 5 * 86_400; // a weekly window, 5 days away
+        let rejected = [
+            clean_init(),
+            json!({"type": "rate_limit_event", "rate_limit_info":
+                {"status": "rejected", "resetsAt": reset_s, "rateLimitType": "seven_day"}}),
+            json!({"type": "result", "subtype": "error_during_execution", "is_error": true}),
+        ]
+        .map(|v| v.to_string())
+        .join("\n");
+        let rest = claude_rest(&rejected);
+        assert_eq!(rest, Some(reset_s * 1000));
+        // The failed run, as cli_headless passes it on: not a 10-minute outage.
+        let e = claude_stream(&rejected).unwrap_err().resting(rest);
+        let s = next_state(providers_db::State::default(), &e);
+        assert_eq!(s.down_until, reset_s * 1000);
+        // Doctor lists it with its reset.
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        providers_db::set_state(&conn, "claude", s).unwrap();
+        assert_eq!(
+            providers_db::stopped(&conn).unwrap(),
+            [("claude".to_owned(), reset_s * 1000)]
+        );
+        // An answer of the wrong shape under a warning, as the chain passes it on.
+        let e =
+            CallError::other("invalid output: the answer does not match the schema").resting(rest);
+        assert_eq!(
+            next_state(providers_db::State::default(), &e).down_until,
+            reset_s * 1000
+        );
+    }
+
+    #[test]
+    fn credits_required_stops_claude_until_the_owner_acts() {
+        let out = [
+            clean_init(),
+            // claude 2.1.283 folds the API's error_code into the rate-limit info (`Kbe`).
+            json!({"type": "rate_limit_event", "rate_limit_info":
+                {"status": "rejected", "errorCode": "credits_required"}}),
+            json!({"type": "result", "subtype": "error_during_execution", "is_error": true}),
+        ]
+        .map(|v| v.to_string())
+        .join("\n");
+        // Read from the stream on its own too, as a failed or timed-out run passes it on.
+        assert_eq!(claude_rest(&out), Some(providers_db::OWNER_HOLD));
+        let e = claude_stream(&out).expect_err("credits required");
+        let s = next_state(providers_db::State::default(), &e);
+        assert_eq!(s.down_until, providers_db::OWNER_HOLD);
+        // No time ends it; the owner's `oboete resume` does.
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        providers_db::set_state(&conn, "claude", s).unwrap();
+        assert_eq!(
+            providers_db::stopped(&conn).unwrap(),
+            [("claude".to_owned(), providers_db::OWNER_HOLD)]
+        );
+        assert!(providers_db::resume(&conn, "claude").unwrap());
+        assert!(providers_db::stopped(&conn).unwrap().is_empty());
+        assert_eq!(providers_db::state(&conn, "claude").unwrap().down_until, 0);
+    }
+
+    #[test]
+    fn a_stream_line_that_does_not_parse_discards_the_run() {
+        let out = [
+            clean_init().to_string(),
+            r#"{"type": "assistant", "message": {"content": [{"type": "tool_use""#.to_owned(),
+            json!({"type": "result", "subtype": "success", "result": "{}"}).to_string(),
+        ]
+        .join("\n");
+        let e = claude_stream(&out).expect_err("a truncated line");
+        assert!(e.message.contains("stream line"), "{}", e.message);
+    }
+
+    /// Live, with `--ignored`, in the dogfood user only (curator CLI tests run there): each
+    /// subscription CLI answers under S8's environment and claude's spec 6.5 flags.
+    #[test]
+    #[ignore]
+    fn live_subscription_curators_answer_under_the_curator_environment() {
+        let schema = json!({"type": "object", "properties": {"summary": {"type": "string"}},
+            "required": ["summary"], "additionalProperties": false});
+        let prompt = "Summarize this session in one sentence.\n--- SESSION ---\n\
+            [user] fix the date parser in src/ingest/csv_reader.py\n\
+            [assistant] added %d.%m.%Y; 21 tests pass\n--- END ---";
+        for (cli, model) in [("claude", "haiku"), ("codex", "gpt-6-luna")] {
+            let a = cli_headless(cli, Some(model), 180, prompt, &schema)
+                .unwrap_or_else(|e| panic!("{cli}: {}", e.message));
+            assert!(a.value["summary"].is_string(), "{cli}: {}", a.value);
+            eprintln!("{cli}: {:?}, rest until {:?}", a.usage, a.cool_until);
+        }
     }
 
     #[test]
@@ -1119,16 +1607,24 @@ mod tests {
         };
         // Larger than any pipe buffer in both directions.
         let big = "x".repeat(300_000);
-        let out = run_cli(sh("cat"), Some(big.clone()), Duration::from_secs(10)).unwrap();
+        let (out, ran) = run_cli(sh("cat"), Some(big.clone()), Duration::from_secs(10));
+        ran.unwrap();
         assert_eq!(out, big.as_bytes());
         let err = run_cli(
             sh("head -c 1100000 /dev/zero"),
             None,
             Duration::from_secs(10),
         )
+        .1
         .unwrap_err();
         assert!(err.message.contains("more than"), "{}", err.message);
-        let err = run_cli(sh("echo boom >&2; exit 3"), None, Duration::from_secs(10)).unwrap_err();
+        let (out, ran) = run_cli(
+            sh("echo said; echo boom >&2; exit 3"),
+            None,
+            Duration::from_secs(10),
+        );
+        assert_eq!(out, b"said\n", "stdout is kept on a failure");
+        let err = ran.unwrap_err();
         assert!(!err.message.contains("boom"), "{}", err.message);
         assert!(
             err.message.contains("exit") && err.message.contains("5 bytes"),
@@ -1136,8 +1632,10 @@ mod tests {
             err.message
         );
         let start = Instant::now();
-        let err = run_cli(sh("sleep 5"), None, Duration::from_secs(1)).unwrap_err();
+        let (out, ran) = run_cli(sh("echo early; sleep 5"), None, Duration::from_secs(1));
+        let err = ran.unwrap_err();
         assert!(err.message.contains("timed out"), "{}", err.message);
+        assert_eq!(out, b"early\n", "and on a timeout");
         assert!(start.elapsed() < Duration::from_secs(4));
     }
 
@@ -1299,7 +1797,7 @@ mod tests {
         let (url, request) = serve_once(answer.to_string().into_bytes(), "");
         // OpenCode Go refuses a request without its session header (HTTP 400 MissingSessionID).
         let headers = [("x-opencode-session".to_string(), "oboete".to_string())].into();
-        let (v, _) = openai_compat(
+        let Answer { value: v, .. } = openai_compat(
             &url,
             None,
             "m",
@@ -1320,7 +1818,7 @@ mod tests {
         ] {
             let answer = json!({"choices": [{"message": {"content": content}}]});
             let (url, _) = serve_once(answer.to_string().into_bytes(), "");
-            let (v, _) = openai_compat(
+            let Answer { value: v, .. } = openai_compat(
                 &url,
                 None,
                 "m",
@@ -1500,6 +1998,7 @@ mod tests {
             message: "http 403 (moderation)".into(),
             usage: Usage::default(),
             sent: true,
+            cool_until: None,
         };
         assert_eq!(cooldown_for(&flagged), None);
     }
@@ -1573,6 +2072,7 @@ mod tests {
             message: "http 429".into(),
             usage: Usage::default(),
             sent: true,
+            cool_until: None,
         };
         let mut s = providers_db::State::default();
         let mut waits = Vec::new();
@@ -1811,6 +2311,7 @@ mod tests {
             message: msg.into(),
             usage: Usage::default(),
             sent: true,
+            cool_until: None,
         };
         assert_eq!(cooldown_for(&err(Some(429), "")), Some(COOLDOWN_429));
         assert_eq!(
@@ -1914,6 +2415,7 @@ mod tests {
             message: String::new(),
             usage: Usage::default(),
             sent: true,
+            cool_until: None,
         };
         assert_eq!(cooldown_for(&e(None)), Some(COOLDOWN_429));
         assert_eq!(cooldown_for(&e(Some(10.0))), Some(COOLDOWN_429));

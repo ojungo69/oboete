@@ -1681,11 +1681,21 @@ pub fn doctor(home: &Path) -> Result<()> {
         }
     }
     if home.join("providers.db").exists() {
-        let rows = crate::providers_db::last_calls(&crate::providers_db::open(home)?, 5)?;
+        let db = crate::providers_db::open(home)?;
+        let rows = crate::providers_db::last_calls(&db, 5)?;
         if !rows.is_empty() {
             println!("  last curation calls (providers.db):");
             for r in rows {
                 println!("    {r}");
+            }
+        }
+        for (p, until) in crate::providers_db::stopped(&db)? {
+            if until == crate::providers_db::OWNER_HOLD {
+                println!(
+                    "  {p}: stopped until you act (for claude: turn on usage credits), then run `oboete resume {p}`"
+                );
+            } else {
+                println!("  {p}: resting until {}", crate::db::utc(until));
             }
         }
     }
