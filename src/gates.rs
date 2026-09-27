@@ -204,15 +204,18 @@ pub fn check(
         // else the window holds (a passing run answers no question).
         let asked = speaker == "user" && (question(&line.text) || continues(w, line));
         // The user's own words carry the claim; a bare "yes" accepts only what it answers.
-        let own_words = speaker == "user" && !asked && !bare(&d.quote);
-        let answers = speaker == "user" && bare(&d.quote) && answers_a_reply(w, i);
+        // Any part of a user turn that says nothing but acceptance and filler is bare too
+        // ("please" from "Yes, please.").
+        let is_bare = bare(&d.quote) || speaker == "user" && unsaid(line.source_text()) == 0;
+        let own_words = speaker == "user" && !asked && !is_bare;
+        let answers = speaker == "user" && is_bare && answers_a_reply(w, i);
         let accepts = speaker == "assistant proposal" && accepted(w, i);
         let below = match d.status.as_str() {
             "decided" if !own_words && !answers && !accepts => {
                 Some("decided needs the user's words or an acceptance right after")
             }
             // A bare "yes" names nothing done, whatever ran (spec 3.3).
-            "done" if asked || bare(&d.quote) || !own_words && !passing_run(w, line) => {
+            "done" if asked || is_bare || !own_words && !passing_run(w, line) => {
                 Some("done needs the user's words or a passing run")
             }
             "retracted" if !own_words => Some("retracted needs the user's words"),
@@ -376,10 +379,12 @@ fn acceptance(text: &str) -> bool {
 /// words (spec 3.3). A short statement with no acceptance word ("直った") is the user's own.
 // ponytail: four characters; the dev split's counts (Task 8 part 2) tune it.
 fn bare(quote: &str) -> bool {
-    if !holds(quote, ACCEPT) {
-        return false;
-    }
-    let mut rest = format!(" {} ", words(&quote.to_lowercase()).join(" "));
+    holds(quote, ACCEPT) && unsaid(quote) <= 4
+}
+
+/// How many letters and digits `text` has once its acceptance and filler words are gone.
+fn unsaid(text: &str) -> usize {
+    let mut rest = format!(" {} ", words(&text.to_lowercase()).join(" "));
     for p in ACCEPT.iter().chain(FILLER) {
         if p.is_ascii() {
             // Neighbours share a space: "yes yes" needs a second pass.
@@ -391,7 +396,7 @@ fn bare(quote: &str) -> bool {
             rest = rest.replace(p, "");
         }
     }
-    rest.chars().filter(|c| c.is_alphanumeric()).count() <= 4
+    rest.chars().filter(|c| c.is_alphanumeric()).count()
 }
 
 /// A command run of `line`'s session and repository (a run before a checkout change tested
@@ -938,6 +943,11 @@ mod tests {
             assert_eq!(got, "decided", "{polite}");
         }
         assert!(!bare("すみません"));
+        // A turn that says nothing else makes any part of it bare; one that says more does not.
+        let w = window(&[user("Yes, please.")]);
+        assert_eq!(one(&w, "decided", "user", "please").0, "proposed");
+        let w = window(&[user("はい、直った")]);
+        assert_eq!(one(&w, "done", "user", "直った").0, "done");
     }
 
     #[test]
