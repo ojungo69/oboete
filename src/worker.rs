@@ -228,9 +228,19 @@ pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
         return Ok(());
     };
     let result = run_holding(home, idle_ms, consumers(home), || {}, Some(held));
-    // A worker a hook started writes its stderr nowhere: its last failure is kept for doctor.
+    record(home, &result);
+    result
+}
+
+/// A worker a hook started writes its stderr nowhere: its last failure is kept for doctor, and a
+/// good run clears it. Only under the lock, which the run has released by now: a worker that took
+/// it since is the last one, and records its own outcome when it ends.
+fn record(home: &Path, result: &Result<()>) {
+    let Ok(Some(_held)) = lock(home) else {
+        return;
+    };
     let note = failed_note(home);
-    match &result {
+    match result {
         Ok(()) => {
             let _ = std::fs::remove_file(&note);
         }
@@ -238,7 +248,6 @@ pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
             let _ = std::fs::write(&note, format!("{e:#}\n"));
         }
     }
-    result
 }
 
 /// `<home>/state/worker-failed`: why the last `oboete worker` stopped with an error.
@@ -295,8 +304,10 @@ mod tests {
     }
 
     /// A consumer whose step reads, lets another connection write to knowledge.db (as a search
-    /// does when it creates its table in a fresh file), then writes itself. Once.
-    struct Raced(std::path::PathBuf, bool);
+    /// does when it creates its table in a fresh file), then writes itself. Once. The other
+    /// writer's thread is kept for the test to join.
+    type Contender = std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>;
+    struct Raced(std::path::PathBuf, bool, Contender);
     impl Consumer for Raced {
         fn name(&self) -> &'static str {
             "raced"
@@ -307,13 +318,13 @@ mod tests {
             }
             let _: i64 = k.query_row("SELECT COUNT(*) FROM checkpoints", [], |r| r.get(0))?;
             let (home, (done, wait)) = (self.0.clone(), std::sync::mpsc::channel());
-            std::thread::spawn(move || {
+            *self.2.lock().unwrap() = Some(std::thread::spawn(move || {
                 let other = knowledge::open(&home).unwrap();
                 other
                     .execute_batch("CREATE TABLE IF NOT EXISTS other(x)")
                     .unwrap();
                 done.send(()).ok();
-            });
+            }));
             // The other write lands first unless this step already holds the write lock.
             let _ = wait.recv_timeout(Duration::from_millis(500));
             k.execute("CREATE TABLE IF NOT EXISTS raced(x)", [])?;
@@ -341,6 +352,26 @@ mod tests {
         assert!(!failed_note(home.path()).exists());
     }
 
+    /// A run's outcome is recorded only while no other worker has taken the lock since it let go:
+    /// that worker's outcome is the last one, whichever order the two end in.
+    #[test]
+    fn a_runs_outcome_is_not_recorded_over_a_later_workers() {
+        let home = tempfile::tempdir().unwrap();
+        let failed = || Err(anyhow::anyhow!("a failure"));
+        let later = lock(home.path()).unwrap();
+        record(home.path(), &failed());
+        assert!(!failed_note(home.path()).exists());
+        std::fs::write(failed_note(home.path()), "the later worker's failure\n").unwrap();
+        record(home.path(), &Ok(()));
+        assert!(failed_note(home.path()).exists());
+        drop(later);
+        record(home.path(), &failed());
+        let why = std::fs::read_to_string(failed_note(home.path())).unwrap();
+        assert_eq!(why, "a failure\n");
+        record(home.path(), &Ok(()));
+        assert!(!failed_note(home.path()).exists());
+    }
+
     /// The Windows runner's worker stopped with "database is locked" after a restore: a search
     /// created its table in the fresh knowledge.db between a step's read and its write.
     #[test]
@@ -349,9 +380,16 @@ mod tests {
         let mut raw = raw::open(home.path()).unwrap();
         raw.append(&raw::test_event("a")).unwrap();
         let mut k = knowledge::open(home.path()).unwrap();
-        let mut consumers: Vec<Box<dyn Consumer>> =
-            vec![Box::new(Raced(home.path().to_path_buf(), false))];
+        let contender = Contender::default();
+        let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Raced(
+            home.path().to_path_buf(),
+            false,
+            contender.clone(),
+        ))];
         drain(&raw, &mut k, &mut consumers).unwrap();
+        // The other writer ran, and its write went through once the step's had.
+        let other = contender.lock().unwrap().take().expect("the step ran");
+        other.join().unwrap();
     }
 
     fn seen(k: &Connection) -> Vec<i64> {

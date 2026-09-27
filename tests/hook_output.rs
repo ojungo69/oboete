@@ -25,14 +25,18 @@ fn a_hooks_output_ends_when_the_hook_does_not_when_its_worker_does() {
         .unwrap();
     let start = Instant::now();
     let out = hook.wait_with_output().unwrap();
+    let ended = start.elapsed();
     assert!(out.status.success());
-    assert!(
-        home.path().join("state").join("worker.lock").exists(),
-        "no worker was started"
-    );
-    assert!(
-        start.elapsed() < Duration::from_secs(20),
-        "{:?}",
-        start.elapsed()
-    );
+    // The worker holds its lock while it waits for records (60 s idle): held now, it was running
+    // when the output ended.
+    let held = || {
+        std::fs::File::open(home.path().join("state").join("worker.lock"))
+            .is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+    };
+    let until = Instant::now() + Duration::from_secs(5);
+    while !held() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(held(), "no worker was running");
+    assert!(ended < Duration::from_secs(20), "{ended:?}");
 }
