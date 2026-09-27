@@ -44,7 +44,10 @@ fn pass(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> R
     let device = raw.device().to_owned();
     let mut advanced = false;
     for c in consumers.iter_mut() {
-        let tx = k.transaction()?;
+        // Immediate: a step reads before it writes, and a deferred transaction whose snapshot
+        // another writer moved meanwhile (a search creating its table in a fresh knowledge.db)
+        // fails its first write with SQLITE_BUSY at once, which stopped the worker.
+        let tx = k.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let at = checkpoint::get(&tx, c.name(), &device)?;
         let next = c.step(raw, &tx, at)?;
         if next != at {
@@ -56,8 +59,9 @@ fn pass(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> R
     Ok(advanced)
 }
 
-/// The per-home worker lock, `<home>/state/worker.lock`; released when dropped.
-pub struct Lock(#[allow(dead_code)] std::fs::File);
+/// The per-home worker lock, `<home>/state/worker.lock`; released when dropped. Each taking of it
+/// has the next number of `state/worker-gen`, so a run's outcome is ordered against a later run's.
+pub struct Lock(#[allow(dead_code)] std::fs::File, u64);
 
 /// The lock, or `None` when another process holds it. Hooks try it too, and start a worker only
 /// when they get it (dropping it at once).
@@ -70,7 +74,22 @@ pub fn lock(home: &Path) -> Result<Option<Lock>> {
         .write(true)
         .open(state.join("worker.lock"))?;
     match f.try_lock() {
-        Ok(()) => Ok(Some(Lock(f))),
+        Ok(()) => {
+            // Replaced whole, never rewritten in place: a number cut off by a crash or a full disk
+            // would start the count again below the last recorded outcome's.
+            // One that is unreadable anyway goes on from the last recorded outcome's.
+            let gen_file = state.join("worker-gen");
+            let taken = std::fs::read_to_string(&gen_file)
+                .ok()
+                .and_then(|g| g.trim().parse::<u64>().ok())
+                .or_else(|| outcome(home).map(|(g, _)| g))
+                .unwrap_or(0)
+                + 1;
+            let next = state.join("worker-gen.next");
+            std::fs::write(&next, taken.to_string())?;
+            std::fs::rename(&next, &gen_file)?;
+            Ok(Some(Lock(f, taken)))
+        }
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
         Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
     }
@@ -95,6 +114,7 @@ fn behind(raw: &Raw, k: &Connection, consumers: &[Box<dyn Consumer>]) -> Result<
 /// more (D6): a hook that appended before the release saw the lock held and started nothing, so
 /// this last check is what finds its record; one that appends after the release gets the lock and
 /// starts a worker itself. `before_exit` runs between the release and that check (a test seam).
+#[cfg(test)] // `run` takes the lock itself, to know whether this run did the work
 pub fn run_with(
     home: &Path,
     idle_ms: u64,
@@ -109,7 +129,44 @@ fn run_holding(
     idle_ms: u64,
     mut consumers: Vec<Box<dyn Consumer>>,
     mut before_exit: impl FnMut(),
-    mut held: Option<Lock>,
+    taken: Option<Lock>,
+) -> Result<()> {
+    let (mut held, mut last) = (None, 0);
+    if let Some(l) = taken {
+        take(home, l, &mut held, &mut last);
+    }
+    let result = serve_until_done(
+        home,
+        idle_ms,
+        &mut consumers,
+        &mut before_exit,
+        &mut held,
+        &mut last,
+    );
+    // Released first: a hook that finds the lock free starts a worker for what it appended.
+    drop(held);
+    // A run that never took the lock did no work: another worker's outcome stands.
+    if last > 0 {
+        record(home, last, &result);
+    }
+    result
+}
+
+/// Every lock this run takes is noted as a run that has not ended, until `record` replaces the
+/// note: a worker killed or crashed while it holds any of them is reported (doctor).
+fn take(home: &Path, l: Lock, held: &mut Option<Lock>, last: &mut u64) {
+    *last = l.1;
+    note(home, l.1, STOPPED);
+    *held = Some(l);
+}
+
+fn serve_until_done(
+    home: &Path,
+    idle_ms: u64,
+    consumers: &mut [Box<dyn Consumer>],
+    before_exit: &mut impl FnMut(),
+    held: &mut Option<Lock>,
+    last: &mut u64,
 ) -> Result<()> {
     // ponytail: D11's 30-minute deadline in memory; every idle exit backs up too, so a lost
     // deadline only brings the next backup forward. It is checked between batches and while
@@ -124,10 +181,11 @@ fn run_holding(
         match serve(
             home,
             idle_ms,
-            &mut consumers,
-            &mut held,
+            consumers,
+            held,
             &mut next_backup,
-            &mut before_exit,
+            before_exit,
+            last,
         ) {
             Ok(true) => {}
             Ok(false) => return Ok(()),
@@ -149,10 +207,11 @@ fn serve(
     held: &mut Option<Lock>,
     next_backup: &mut Instant,
     before_exit: &mut impl FnMut(),
+    last: &mut u64,
 ) -> Result<bool> {
     if held.is_none() {
         match lock(home)? {
-            Some(l) => *held = Some(l),
+            Some(l) => take(home, l, held, last),
             None => return Ok(false),
         }
     }
@@ -208,7 +267,7 @@ fn serve(
             return Ok(false);
         }
         match lock(home)? {
-            Some(l) => *held = Some(l),
+            Some(l) => take(home, l, held, last),
             // Another worker took the lock after the release: the records are its now.
             None => return Ok(false),
         }
@@ -219,7 +278,83 @@ fn serve(
 }
 
 pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
-    run_with(home, idle_ms, consumers(home), || {})
+    run_consumers(home, idle_ms, consumers(home))
+}
+
+fn run_consumers(home: &Path, idle_ms: u64, consumers: Vec<Box<dyn Consumer>>) -> Result<()> {
+    // Another worker holds the lock: its run, not this one, says how the work went.
+    let Some(held) = lock(home)? else {
+        return Ok(());
+    };
+    run_holding(home, idle_ms, consumers, || {}, Some(held))
+}
+
+/// A run's outcome until it ends.
+const STOPPED: &str = "it stopped before it finished (killed or crashed); the next worker a hook \
+                       starts goes on from where it stopped";
+
+/// A worker a hook started writes its stderr nowhere: its last failure is kept for doctor, and a
+/// good run clears it. `last` numbers the run's last taking of the worker lock: an outcome is
+/// recorded unless a later run's already is. Under a lock of its
+/// own, not the worker lock: a hook that finds the worker lock taken starts no worker, and this
+/// run no longer reads new records.
+fn record(home: &Path, last: u64, result: &Result<()>) {
+    let why = result
+        .as_ref()
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
+    note(home, last, &why);
+}
+
+fn note(home: &Path, last: u64, why: &str) {
+    let state = home.join("state");
+    let Ok(guard) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(state.join("worker-note.lock"))
+    else {
+        return;
+    };
+    if guard.lock().is_err() {
+        return;
+    }
+    if outcome(home).is_some_and(|(g, _)| g > last) {
+        return;
+    }
+    // The number and the outcome in one file, replaced whole: a run stopped halfway leaves the
+    // last outcome as it was.
+    let next = state.join("worker-outcome.next");
+    if std::fs::write(&next, format!("{last}\n{why}")).is_ok() {
+        let _ = std::fs::rename(&next, state.join("worker-outcome"));
+    }
+}
+
+/// `<home>/state/worker-outcome`: the lock number of the last run that recorded its outcome, and
+/// why it stopped with an error (empty when it ended well).
+fn outcome(home: &Path) -> Option<(u64, String)> {
+    let text = std::fs::read_to_string(home.join("state").join("worker-outcome")).ok()?;
+    let (number, why) = text.split_once('\n').unwrap_or((&text, ""));
+    Some((number.trim().parse().ok()?, why.to_owned()))
+}
+
+/// Why the last `oboete worker` stopped with an error, if it did.
+pub fn last_failure(home: &Path) -> Option<String> {
+    let (_, why) = outcome(home)?;
+    // A run still going has not stopped.
+    if why == STOPPED && running(home) {
+        return None;
+    }
+    Some(why).filter(|why| !why.is_empty())
+}
+
+/// Whether a process holds the worker lock now. It takes no number: this runs nothing.
+fn running(home: &Path) -> bool {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(home.join("state").join("worker.lock"))
+        .is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
 }
 
 /// One run now, for `oboete restore` and tests. It waits up to 2 s for the lock rather than
@@ -268,6 +403,186 @@ mod tests {
             )?;
             Ok(())
         }
+    }
+
+    /// A consumer whose step reads, lets another connection write to knowledge.db (as a search
+    /// does when it creates its table in a fresh file), then writes itself. Once. The other
+    /// writer's thread is kept for the test to join.
+    type Contender = std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>;
+    struct Raced(std::path::PathBuf, bool, Contender);
+    impl Consumer for Raced {
+        fn name(&self) -> &'static str {
+            "raced"
+        }
+        fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> {
+            if std::mem::replace(&mut self.1, true) {
+                return Ok(after.max(raw.max_seq()?));
+            }
+            let _: i64 = k.query_row("SELECT COUNT(*) FROM checkpoints", [], |r| r.get(0))?;
+            let (home, (done, wait)) = (self.0.clone(), std::sync::mpsc::channel());
+            *self.2.lock().unwrap() = Some(std::thread::spawn(move || {
+                let other = knowledge::open(&home).unwrap();
+                other
+                    .execute_batch("CREATE TABLE IF NOT EXISTS other(x)")
+                    .unwrap();
+                done.send(()).ok();
+            }));
+            // The other write lands first unless this step already holds the write lock.
+            let _ = wait.recv_timeout(Duration::from_millis(500));
+            k.execute("CREATE TABLE IF NOT EXISTS raced(x)", [])?;
+            raw.max_seq()
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_failed_run_leaves_its_reason_and_the_next_good_run_clears_it() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("raw.db"), b"not a database at all").unwrap();
+        assert!(run(home.path(), 0).is_err()); // damaged, and no backup to restore from
+        let why = last_failure(home.path()).unwrap();
+        assert!(why.contains("backup segment"), "{why}");
+        std::fs::remove_file(home.path().join("raw.db")).unwrap();
+        // A run that finds another worker holding the lock did nothing: the note stays.
+        let other = lock(home.path()).unwrap();
+        run(home.path(), 0).unwrap();
+        assert!(last_failure(home.path()).is_some());
+        drop(other);
+        run(home.path(), 0).unwrap();
+        assert!(last_failure(home.path()).is_none());
+    }
+
+    /// A run's outcome is recorded unless a later run's already is, whichever order the two end
+    /// in, and recording never holds the worker lock.
+    #[test]
+    fn a_runs_outcome_is_not_recorded_over_a_later_workers() {
+        let home = tempfile::tempdir().unwrap();
+        let failed = || Err(anyhow::anyhow!("a failure"));
+        let taken = |h: &Path| lock(h).unwrap().unwrap().1;
+        // A lets go; B takes the lock, fails and records; then A ends well.
+        let (a, b) = (taken(home.path()), taken(home.path()));
+        record(home.path(), b, &failed());
+        record(home.path(), a, &Ok(()));
+        assert!(last_failure(home.path()).is_some(), "A cleared B's failure");
+        // B ends well; then A fails.
+        let (a, b) = (taken(home.path()), taken(home.path()));
+        record(home.path(), b, &Ok(()));
+        record(home.path(), a, &failed());
+        assert!(last_failure(home.path()).is_none(), "A recorded over B");
+        // A records before B, which fails: B's outcome is the last one.
+        let (a, b) = (taken(home.path()), taken(home.path()));
+        record(home.path(), a, &Ok(()));
+        record(home.path(), b, &failed());
+        let why = last_failure(home.path()).unwrap();
+        assert_eq!(why, "a failure");
+        // A lock number lost to a damaged file goes on from the last recorded outcome's.
+        std::fs::write(home.path().join("state").join("worker-gen"), "").unwrap();
+        let after_damage = taken(home.path());
+        record(home.path(), after_damage, &Ok(()));
+        assert!(
+            last_failure(home.path()).is_none(),
+            "an outcome after the damage was refused"
+        );
+        // A run stopped between writing its outcome and putting it in place changes nothing.
+        record(home.path(), taken(home.path()), &failed());
+        let state = home.path().join("state");
+        std::fs::write(state.join("worker-outcome.next"), "1\nhalf written").unwrap();
+        assert_eq!(last_failure(home.path()).as_deref(), Some("a failure"));
+        record(home.path(), taken(home.path()), &Ok(()));
+        // A worker holding the lock does not keep an outcome from being recorded.
+        let running = lock(home.path()).unwrap().unwrap();
+        record(home.path(), running.1, &Ok(()));
+        assert!(last_failure(home.path()).is_none());
+        assert!(lock(home.path()).unwrap().is_none());
+    }
+
+    /// A step that panics once it reaches its seq.
+    struct PanicsAt(i64);
+    impl Consumer for PanicsAt {
+        fn name(&self) -> &'static str {
+            "panics"
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, after: i64) -> Result<i64> {
+            let top = raw.max_seq()?;
+            assert!(top < self.0, "a crash in the middle of a run");
+            Ok(after.max(top))
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A worker killed or crashed after it took the lock never records how its run ended: doctor
+    /// says it stopped once no process holds the lock, and not while one does.
+    #[test]
+    fn a_run_that_never_ends_is_reported_once_its_lock_is_free() {
+        let home = tempfile::tempdir().unwrap();
+        run(home.path(), 0).unwrap();
+        raw::open(home.path())
+            .unwrap()
+            .append(&raw::test_event("a"))
+            .unwrap();
+        let crashed =
+            std::panic::catch_unwind(|| run_consumers(home.path(), 0, vec![Box::new(PanicsAt(1))]));
+        assert!(crashed.is_err());
+        let why = last_failure(home.path()).expect("the stopped run was not reported");
+        assert!(why.starts_with("it stopped before it finished"), "{why}");
+        let held = lock(home.path()).unwrap().unwrap();
+        note(home.path(), held.1, STOPPED);
+        assert!(
+            last_failure(home.path()).is_none(),
+            "a live run was reported"
+        );
+        drop(held);
+        assert!(last_failure(home.path()).is_some());
+        run(home.path(), 0).unwrap();
+        assert!(last_failure(home.path()).is_none());
+    }
+
+    /// A run that takes the lock again at its idle exit notes that taking too: B takes and
+    /// releases the lock in A's exit window and records its success, then A takes it again and
+    /// crashes. Doctor reports A, not B's success.
+    #[test]
+    fn a_run_that_crashes_after_taking_the_lock_again_is_reported() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        raw.append(&raw::test_event("a")).unwrap();
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut once = true;
+            run_with(home.path(), 0, vec![Box::new(PanicsAt(2))], || {
+                if std::mem::take(&mut once) {
+                    // B: a hook's worker, run to its end while A has let go.
+                    raw.append(&raw::test_event("b")).unwrap();
+                    run_consumers(home.path(), 0, vec![Box::new(Seen)]).unwrap();
+                    assert!(last_failure(home.path()).is_none());
+                }
+            })
+        }));
+        assert!(crashed.is_err(), "A did not take the lock again");
+        let why = last_failure(home.path()).expect("A's crash was not reported");
+        assert!(why.starts_with("it stopped before it finished"), "{why}");
+    }
+
+    /// The Windows runner's worker stopped with "database is locked" after a restore: a search
+    /// created its table in the fresh knowledge.db between a step's read and its write.
+    #[test]
+    fn a_reader_writing_knowledge_db_mid_step_does_not_stop_the_pass() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        raw.append(&raw::test_event("a")).unwrap();
+        let mut k = knowledge::open(home.path()).unwrap();
+        let contender = Contender::default();
+        let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Raced(
+            home.path().to_path_buf(),
+            false,
+            contender.clone(),
+        ))];
+        drain(&raw, &mut k, &mut consumers).unwrap();
+        // The other writer ran, and its write went through once the step's had.
+        let other = contender.lock().unwrap().take().expect("the step ran");
+        other.join().unwrap();
     }
 
     fn seen(k: &Connection) -> Vec<i64> {

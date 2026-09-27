@@ -1649,6 +1649,10 @@ pub fn doctor(home: &Path) -> Result<()> {
     for l in &backup {
         println!("  {l}");
     }
+    if let Some(why) = crate::worker::last_failure(home) {
+        println!("  the last worker run failed: {}", why.trim_end());
+        unhealthy.push("the worker stopped with an error (see above)");
+    }
     if db_path.exists() {
         let conn = db::open(home)?;
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };

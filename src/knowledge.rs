@@ -73,7 +73,9 @@ pub mod checkpoint {
             if was <= top {
                 continue;
             }
-            let tx = k.unchecked_transaction()?;
+            // Immediate, as a pass's (worker.rs): a read before the write must not lose the lock.
+            let tx =
+                rusqlite::Transaction::new_unchecked(k, rusqlite::TransactionBehavior::Immediate)?;
             c.rewind(&tx, &device, top)?;
             set(&tx, c.name(), &device, top)?;
             tx.execute(

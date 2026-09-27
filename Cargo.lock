@@ -846,6 +846,7 @@ dependencies = [
  "toml_edit",
  "ureq",
  "winapi-util",
+ "windows-sys 0.61.2",
  "zstd",
 ]
 
