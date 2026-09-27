@@ -385,12 +385,22 @@ pub fn restore(home: &Path) -> Result<String> {
             records += 1;
         }
     }
-    // The ops after the records, each segment that verifies; a damaged one is skipped and set
-    // aside like a record segment.
-    let (ops_ok, ops_bad): (Vec<Segment>, Vec<Segment>) = segments(&dir, Kind::Ops)?
+    // The ops after the records, in op order up to the first segment that is damaged or does not
+    // start where the one before it ended. The op log after such a hole is set aside with it: its
+    // windows would move the curation checkpoint past the lost ones, whose claims go with
+    // knowledge.db, and their records would never be curated again.
+    let (mut ops_ok, mut ops_bad, mut next) = (Vec::new(), Vec::new(), 1);
+    for s in segments(&dir, Kind::Ops)?
         .into_iter()
         .filter(|s| s.device == device)
-        .partition(|s| damage(&s.path).is_none());
+    {
+        if ops_bad.is_empty() && s.first == next && damage(&s.path).is_none() {
+            next = s.last + 1;
+            ops_ok.push(s);
+        } else {
+            ops_bad.push(s);
+        }
+    }
     let mut ops = 0;
     for s in &ops_ok {
         for line in read_segment(&s.path)?.lines().filter(|l| !l.is_empty()) {
@@ -441,7 +451,10 @@ pub fn restore(home: &Path) -> Result<String> {
         if skipped.is_empty() {
             String::new()
         } else {
-            format!("; skipped damaged segment(s): {}", skipped.join(", "))
+            format!(
+                "; skipped segment(s), damaged or after a hole in the op log: {}",
+                skipped.join(", ")
+            )
         }
     );
     let state = home.join("state");
@@ -1113,5 +1126,47 @@ mod tests {
         export(p).unwrap();
         let ops = segments(&p.join("backups"), Kind::Ops).unwrap();
         assert_eq!(ops.last().map(|s| (s.first, s.last)), Some((3, 3)));
+    }
+
+    #[test]
+    fn a_hole_in_the_op_log_sets_aside_every_op_after_it() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        segmented(p, 10, 10);
+        let mut raw = raw::open(p).unwrap();
+        let dev = raw.device().to_owned();
+        // One ops segment per export: windows to 3, 6 and 9.
+        for to in [3, 6, 9] {
+            raw.append_ops(&[window(to), claim("x")]).unwrap();
+            export(p).unwrap();
+        }
+        drop(raw);
+        let ops = segments(&p.join("backups"), Kind::Ops).unwrap();
+        assert_eq!(ops.len(), 3);
+        std::fs::write(&ops[1].path, b"damaged").unwrap();
+        damage_raw(p);
+        crate::worker::run_once(p).unwrap();
+        let restored = raw::open(p).unwrap();
+        // The window to 9 verifies, but the one to 6 is lost: curation goes on after 3.
+        assert_eq!(restored.max_op_seq().unwrap(), 2);
+        assert_eq!(restored.curation_checkpoint(&dev).unwrap(), (3, None));
+        let left = segments(&p.join("backups"), Kind::Ops).unwrap();
+        assert_eq!(left.iter().map(|s| s.first).collect::<Vec<_>>(), [1]);
+        let note = std::fs::read_to_string(p.join("state/restored")).unwrap();
+        assert!(note.contains("after a hole in the op log"), "{note}");
+        // A missing segment is a hole too.
+        drop(restored);
+        let mut raw = raw::open(p).unwrap();
+        for to in [6, 9] {
+            raw.append_ops(&[window(to)]).unwrap();
+            export(p).unwrap();
+        }
+        drop(raw);
+        let ops = segments(&p.join("backups"), Kind::Ops).unwrap();
+        std::fs::remove_file(&ops[1].path).unwrap();
+        damage_raw(p);
+        crate::worker::run_once(p).unwrap();
+        let restored = raw::open(p).unwrap();
+        assert_eq!(restored.curation_checkpoint(&dev).unwrap(), (3, None));
     }
 }
