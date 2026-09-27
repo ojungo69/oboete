@@ -297,6 +297,7 @@ pub fn device_id(conn: &Connection) -> Result<String> {
 }
 
 /// The session's events came from `repo` too (a no-op after the first time).
+#[cfg(test)] // a fixture for v1's readers' tests: no hook writes oboete.db since Task 2b
 pub fn touch_repo(conn: &Connection, session_id: &str, repo: &str) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO session_repos(session_id, repo) VALUES(?1, ?2)",
@@ -560,6 +561,7 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)] // a fixture for v1's readers' tests: no hook writes oboete.db since Task 2b
 pub fn upsert_session(
     conn: &Connection,
     id: &str,
@@ -576,60 +578,7 @@ pub fn upsert_session(
     Ok(())
 }
 
-/// Context was handed to this session (Claude/Codex at SessionStart, Grok at its first tool call,
-/// agy at PreInvocation).
-pub fn mark_injected(conn: &Connection, id: &str, ts: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE sessions SET injected_at=?2 WHERE id=?1",
-        params![id, ts],
-    )?;
-    Ok(())
-}
-
-pub fn injected(conn: &Connection, id: &str) -> Result<bool> {
-    let v: Option<i64> = conn
-        .query_row(
-            "SELECT injected_at FROM sessions WHERE id=?1",
-            params![id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    Ok(v.is_some())
-}
-
-/// Claim an agy USER_INPUT step inside the transaction that stores its prompt and raw event.
-/// The cursor lives on the session, not in the raw events; an older transcript cannot move it back.
-pub fn claim_prompt_step(conn: &Connection, id: &str, step: i64) -> Result<bool> {
-    Ok(conn.execute(
-        "UPDATE sessions SET last_prompt_step=?2 WHERE id=?1
-         AND (last_prompt_step IS NULL OR last_prompt_step < ?2)",
-        params![id, step],
-    )? > 0)
-}
-
-/// Compaction drops context; the flag lives on the session, outside the raw events.
-pub fn mark_compacted(conn: &Connection, id: &str) -> Result<()> {
-    conn.execute("UPDATE sessions SET reinject_pending=1 WHERE id=?1", [id])?;
-    Ok(())
-}
-
-/// Consume the flag inside the prompt's write transaction, including when context is empty.
-pub fn claim_reinjection(conn: &Connection, id: &str) -> Result<bool> {
-    Ok(conn.execute(
-        "UPDATE sessions SET reinject_pending=0 WHERE id=?1 AND reinject_pending=1",
-        [id],
-    )? > 0)
-}
-
-pub fn end_session(conn: &Connection, id: &str, ts: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE sessions SET ended_at=?2, last_event_at=?2 WHERE id=?1",
-        params![id, ts],
-    )?;
-    Ok(())
-}
-
+#[cfg(test)] // a fixture for v1's readers' tests: no hook writes oboete.db since Task 2b
 pub fn insert_event(
     conn: &Connection,
     session_id: &str,
@@ -644,17 +593,7 @@ pub fn insert_event(
     Ok(())
 }
 
-/// A prompt the developer typed, with its search row, searchable apart from the raw events.
-/// Filed under its session's repository, like the summaries and observations: the agent may have
-/// moved into another repository (`cd`) since the session started.
-pub fn count_prompts(conn: &Connection, session_id: &str, body: &str) -> Result<i64> {
-    Ok(conn.query_row(
-        "SELECT count(*) FROM prompts WHERE session_id=?1 AND body=?2",
-        params![session_id, body],
-        |r| r.get(0),
-    )?)
-}
-
+#[cfg(test)] // a fixture for v1's readers' tests: no hook writes oboete.db since Task 2b
 pub fn insert_prompt(conn: &Connection, session_id: &str, ts: i64, body: &str) -> Result<()> {
     let repo: String = conn.query_row(
         "SELECT repo FROM sessions WHERE id=?1",
@@ -1225,22 +1164,15 @@ mod tests {
         }
         let conn = open(&dir).unwrap();
         upsert_session(&conn, "s1", "claude", "/r", "/r", 1).unwrap();
-        assert!(!injected(&conn, "s1").unwrap());
-        mark_injected(&conn, "s1", 2).unwrap();
-        assert!(injected(&conn, "s1").unwrap());
-        assert!(claim_prompt_step(&conn, "s1", 0).unwrap());
-        assert!(!claim_prompt_step(&conn, "s1", 0).unwrap());
-        assert!(claim_prompt_step(&conn, "s1", 3).unwrap());
-        assert!(!claim_prompt_step(&conn, "s1", 1).unwrap());
-        assert!(!claim_reinjection(&conn, "s1").unwrap());
-        mark_compacted(&conn, "s1").unwrap();
         // Reopening a current database is a no-op.
         drop(conn);
         let conn = open(&dir).unwrap();
-        assert!(injected(&conn, "s1").unwrap());
-        assert!(!claim_prompt_step(&conn, "s1", 3).unwrap());
-        assert!(claim_reinjection(&conn, "s1").unwrap());
-        assert!(!claim_reinjection(&conn, "s1").unwrap());
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions WHERE id='s1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 

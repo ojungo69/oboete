@@ -353,8 +353,8 @@ pub fn outbound_with(text: &str, rules: &Rules) -> String {
     scan(&crate::hook::strip_blocks(text, false), rules).0
 }
 
-/// v1's write path (`hook::clip`, agents not yet in `capture::PORTED`): the bundled rules only.
-/// Those agents move to `capture`, and its settings, in Task 2b.
+/// v1's import into oboete.db (`hook::clip`): the bundled rules only. Hooks go through
+/// `capture` and its settings.
 pub fn redact(text: &str) -> String {
     scan(text, &Rules::default()).0
 }

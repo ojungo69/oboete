@@ -6,10 +6,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use rusqlite::Connection;
 use serde_json::{Value, json};
 
-use crate::{config, db, inject, redact, repo};
+use crate::{config, db, redact};
 
 /// Largest text kept per field. Tool outputs beyond this are clipped with a marker.
 const MAX_FIELD: usize = 8_000;
@@ -53,10 +52,9 @@ fn run_io(
     mut input: impl Read,
     mut output: impl Write,
 ) -> Result<()> {
-    // MUST-M16, for Design B's raw.db: whether this call tried to write there (skips, filtered
-    // sessions and agents still on v1's store never do), and whether a row was written. Only a
-    // written row shows that recording works again: a hook with nothing to capture (PreToolUse,
-    // an empty Stop) proves nothing, and a write to v1's store says nothing about raw.db.
+    // MUST-M16, for raw.db: whether this call tried to write there (skips and filtered sessions
+    // never do), and whether a row was written. Only a written row shows that recording works
+    // again: a hook with nothing to capture (PreToolUse, an empty Stop) proves nothing.
     let mut tried = false;
     let mut wrote = false;
     // When the store operation ended (0 until one did): overlapping hooks change the marker in
@@ -69,9 +67,9 @@ fn run_io(
     // Cursor's compaction flag this call took, put back if its write fails: the manifest is then
     // shown at the next prompt, once recording works again.
     let mut took_compaction: Option<String> = None;
-    let result: Result<Option<String>> = (|| {
+    let result: Result<()> = (|| {
         if std::env::var_os(SKIP_ENV).is_some() {
-            return Ok(None);
+            return Ok(());
         }
         let mut raw = String::new();
         input.read_to_string(&mut raw)?;
@@ -82,65 +80,56 @@ fn run_io(
             serde_json::from_str(raw)?
         };
         let Some(agent) = resolve_agent(agent, &payload, &grok_hooks_file()) else {
-            return Ok(None);
+            return Ok(());
         };
-        if (matches!(agent, "agy" | "cursor") && agent_workspace(agent, &payload).is_none())
+        if !crate::setup::AGENTS.contains(&agent)
+            || (matches!(agent, "agy" | "cursor") && agent_workspace(agent, &payload).is_none())
             || is_agent_internal(agent, &payload)
         {
-            return Ok(None);
+            return Ok(());
         }
         // Creating the home is part of the attempt: a home that cannot be made is a failure too.
-        tried = crate::capture::PORTED.contains(&agent);
+        tried = true;
         std::fs::create_dir_all(home)?;
-        if tried {
-            let labels = agent_labels(agent, &payload);
-            if (agent, event) == ("cursor", "PreCompact") {
-                // Before the write: a compaction whose record fails still reinjects at the next
-                // prompt. A flag that cannot be written costs that reinjection, not the record.
-                if let Err(e) =
-                    crate::hookstate::set(home, agent, session_label(&labels), "compacted")
-                {
-                    eprintln!("oboete: compaction not noted: {e}");
-                }
+        let labels = agent_labels(agent, &payload);
+        if (agent, event) == ("cursor", "PreCompact") {
+            // Before the write: a compaction whose record fails still reinjects at the next
+            // prompt. A flag that cannot be written costs that reinjection, not the record.
+            if let Err(e) = crate::hookstate::set(home, agent, session_label(&labels), "compacted")
+            {
+                eprintln!("oboete: compaction not noted: {e}");
             }
-            // Before the write too: when this call is the agent's injection point and its own
-            // write fails, the point still carries the recording-failure line. Grok's and agy's
-            // points stay taken then (the line is shown once per session, not at every call).
-            injecting = injects(home, agent, event, &labels);
-            if injecting && (agent, event) == ("cursor", "UserPromptSubmit") {
-                took_compaction = Some(session_label(&labels).to_owned());
-            }
-            let settings = crate::capture::Settings::load(home)?;
-            let mut store = crate::raw::open(home)?;
-            let events = record(
-                home,
-                &mut store,
-                agent,
-                event,
-                &payload,
-                db::now_ms(),
-                &settings,
-            )?;
-            wrote = !events.is_empty();
-            ended = crate::failure::now();
-            // A manifest that cannot be read is no recording failure: the row is written.
-            if injecting {
-                manifest = checkout_manifest(home, &store, &labels, &settings);
-            }
-            return Ok(None);
         }
-        let conn = db::open(home)?;
-        let out = handle(&conn, agent, event, &payload)?;
-        if matches!(event, "Stop" | "SessionEnd") && std::env::var_os("OBOETE_NO_SPAWN").is_none() {
-            // Agents without a reliable SessionEnd need their last turn to settle first.
-            spawn_observe(home, observe_wait_ms(agent));
+        // Before the write too: when this call is the agent's injection point and its own
+        // write fails, the point still carries the recording-failure line. Grok's and agy's
+        // points stay taken then (the line is shown once per session, not at every call).
+        injecting = injects(home, agent, event, &labels);
+        if injecting && (agent, event) == ("cursor", "UserPromptSubmit") {
+            took_compaction = Some(session_label(&labels).to_owned());
         }
-        Ok(out)
+        let settings = crate::capture::Settings::load(home)?;
+        let mut store = crate::raw::open(home)?;
+        let events = record(
+            home,
+            &mut store,
+            agent,
+            event,
+            &payload,
+            db::now_ms(),
+            &settings,
+        )?;
+        wrote = !events.is_empty();
+        ended = crate::failure::now();
+        // A manifest that cannot be read is no recording failure: the row is written.
+        if injecting {
+            manifest = checkout_manifest(home, &store, &labels, &settings);
+        }
+        Ok(())
     })();
     if ended == 0 {
         ended = crate::failure::now(); // a failure: the operation ended when it returned
     }
-    let mut out = result.as_ref().ok().cloned().flatten();
+    let mut out = None;
     if tried {
         // The marker lives outside the stores, so it is written when they cannot be.
         match &result {
@@ -196,7 +185,7 @@ fn run_io(
         .flatten()
         .collect();
         // Cursor gets its field even when empty: a reinjection is consumed either way.
-        if out.is_none() && (!parts.is_empty() || (injecting && agent == "cursor")) {
+        if !parts.is_empty() || (injecting && agent == "cursor") {
             out = Some(injection(agent, event, &parts.join("\n")).to_string());
         }
     }
@@ -206,7 +195,7 @@ fn run_io(
         // Each adapter returns its own JSON shape, including skip and error paths.
         writeln!(output, "{{}}")?;
     }
-    result.map(|_| ())
+    result
 }
 
 /// Task 2b: whether this call is the agent's point to inject context. Claude Code, Codex, Pi and
@@ -361,7 +350,7 @@ pub fn inject_text(home: &Path, cwd: &Path, session: Option<&str>) -> String {
 }
 
 /// An idless event's session is this device's own: a bare "unknown" would be one session on
-/// every device once they sync (as `handle` does for v1). Recording and the manifest's lookup
+/// every device once they sync (v1 did the same). Recording and the manifest's lookup
 /// both use it.
 fn own_session(session: String, raw: &crate::raw::Raw) -> String {
     if session == "unknown" {
@@ -648,264 +637,6 @@ fn agy_workspace(payload: &Value) -> Option<String> {
     Path::new(&path).is_absolute().then_some(path)
 }
 
-/// Store the event. Returns stdout JSON for context injection, or an empty object for agy/Cursor.
-pub fn handle(
-    conn: &Connection,
-    agent: &str,
-    event: &str,
-    payload: &Value,
-) -> Result<Option<String>> {
-    let workspace = agent_workspace(agent, payload);
-    if matches!(agent, "agy" | "cursor") && workspace.is_none() {
-        return Ok(Some("{}".into()));
-    }
-    // An event without one goes to this device's catch-all session: a bare "unknown" would be
-    // the same session on every device once they sync.
-    let unknown;
-    let session_id = match str_field(
-        payload,
-        if agent == "cursor" {
-            &["session_id", "conversation_id"]
-        } else {
-            &[
-                "session_id",
-                "sessionId",
-                "conversation_id",
-                "conversationId",
-            ]
-        },
-    ) {
-        Some(id) => id,
-        None => {
-            unknown = format!("unknown-{}", db::device_id(conn)?);
-            &unknown
-        }
-    };
-    let cwd = workspace
-        .as_deref()
-        .or_else(|| str_field(payload, &["cwd", "workspaceRoot"]))
-        .unwrap_or(".");
-    let repo_key = repo::key(Path::new(cwd));
-    let ts = db::now_ms();
-
-    // agy has no prompt/output fields. Parse at most one bounded transcript tail per hook.
-    let steps: Vec<Value> =
-        if agent == "agy" && matches!(event, "PreInvocation" | "PostToolUse" | "Stop") {
-            str_field(payload, &["transcriptPath"])
-                .map(|p| transcript_tail(Path::new(p), TAIL))
-                .unwrap_or_default()
-                .lines()
-                .rev()
-                .filter_map(|line| serde_json::from_str(line).ok())
-                .collect()
-        } else {
-            Vec::new()
-        };
-    // File order is not step order. Select the newest explicit user step, then unwrap only
-    // USER_REQUEST: metadata and settings changes must never become part of the prompt.
-    let agy_prompt = if matches!(event, "PreInvocation" | "Stop") {
-        steps
-            .iter()
-            .filter(|s| s["type"] == "USER_INPUT" && s["source"] == "USER_EXPLICIT")
-            .max_by_key(|s| s["step_index"].as_i64())
-            .and_then(|s| {
-                let step = s["step_index"].as_i64().filter(|i| *i >= 0)?;
-                let (_, request) = s["content"].as_str()?.split_once("<USER_REQUEST>")?;
-                let (request, _) = request.split_once("</USER_REQUEST>")?;
-                Some((step, request))
-            })
-    } else {
-        None
-    };
-    let mut prompt = agy_prompt
-        .map(|(_, p)| p)
-        .or_else(|| {
-            (event == "UserPromptSubmit").then(|| str_field(payload, &["prompt"]).unwrap_or(""))
-        })
-        .map(|p| clip(&strip_blocks(p, true)))
-        .filter(|p| !p.is_empty());
-    let tool_step = payload["stepIdx"].as_i64().and_then(|index| {
-        steps
-            .iter()
-            .find(|s| s["step_index"].as_i64() == Some(index))
-    });
-    let event = if agent == "agy"
-        && event == "PostToolUse"
-        && (payload["error"].as_str().is_some_and(|s| !s.is_empty())
-            || tool_step.is_some_and(|s| s["status"] == "ERROR"))
-    {
-        "PostToolUseFailure"
-    } else {
-        event
-    };
-    let stored = match event {
-        "SessionStart" => Some(json!({"source": payload.get("source")})),
-        "PostToolUse" | "PostToolUseFailure" => {
-            let tool = if agent == "agy" {
-                &payload["toolCall"]
-            } else {
-                payload
-            };
-            let output = if agent == "agy" {
-                tool_step
-                    .map(|s| {
-                        s.get("content")
-                            .filter(|v| v.as_str().is_some_and(|t| !t.is_empty()))
-                            .unwrap_or(&s["error"])
-                    })
-                    .unwrap_or(&Value::Null)
-            } else if agent == "cursor" && event == "PostToolUseFailure" {
-                &payload["error_message"]
-            } else {
-                field(
-                    payload,
-                    &["tool_response", "toolResult", "tool_output", "error"],
-                )
-            };
-            Some(json!({
-                "tool": str_field(tool, &["tool_name", "toolName", "name"]).unwrap_or("?"),
-                "input": clip(&compact(field(tool, &["tool_input", "toolInput", "args"]))),
-                "output": clip(&compact(output)),
-                "failed": event == "PostToolUseFailure",
-            }))
-        }
-        "Stop" if agent == "agy" => {
-            // Only this turn's answer: a turn that ended without one must not reuse the last.
-            let turn_start = agy_prompt.map_or(-1, |(step, _)| step);
-            let text = steps
-                .iter()
-                .filter(|s| {
-                    s["type"] == "PLANNER_RESPONSE"
-                        && s["step_index"].as_i64().is_some_and(|i| i > turn_start)
-                        && s["content"].as_str().is_some_and(|t| !t.trim().is_empty())
-                })
-                .max_by_key(|s| s["step_index"].as_i64())
-                .and_then(|s| s["content"].as_str())
-                .unwrap_or("");
-            Some(json!({"assistant": clip(text)}))
-        }
-        "Stop" => {
-            let text = match str_field(
-                payload,
-                if agent == "cursor" {
-                    &["text"]
-                } else {
-                    &["last_assistant_message", "lastAssistantMessage"]
-                },
-            ) {
-                Some(t) => t.to_string(),
-                None if agent == "cursor" => String::new(),
-                // Codex's Stop carries no message; its rollout transcript does.
-                None => str_field(payload, &["transcript_path"])
-                    .map(|p| last_assistant_in_transcript(Path::new(p)))
-                    .unwrap_or_default(),
-            };
-            (!text.trim().is_empty()).then(|| json!({"assistant": clip(&text)}))
-        }
-        "PostCompact" => str_field(payload, &["compact_summary"])
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| json!({"summary": clip(s)})),
-        "PreCompact" if agent == "cursor" => Some(json!({})),
-        "SessionEnd" => Some(json!({"reason": payload.get("reason")})),
-        _ => None, // PreToolUse and the rest carry nothing a summary needs
-    };
-    // `cursor-agent -p` fires no prompt or response hook, so SessionEnd recovers those turns
-    // from the transcript. The n-th turn with a given prompt is new when fewer than n are
-    // stored: the others came through the hooks (the TUI) or an earlier `-p` run's SessionEnd.
-    let recovered = if agent == "cursor" && event == "SessionEnd" {
-        str_field(payload, &["transcript_path"])
-            .map(|p| cursor_turns(Path::new(p)))
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    // One transaction: the viewer deleting this session between the two writes would otherwise
-    // leave an event that belongs to no session and never gets summarized or removed.
-    let tx = conn.unchecked_transaction()?;
-    db::upsert_session(&tx, session_id, agent, &repo_key, cwd, ts)?;
-    db::touch_repo(&tx, session_id, &repo_key)?;
-    if let Some((step, _)) = agy_prompt
-        && !db::claim_prompt_step(&tx, session_id, step)?
-    {
-        prompt = None;
-    }
-    if event == "SessionEnd" {
-        db::end_session(&tx, session_id, ts)?;
-    }
-    if agent == "cursor" && event == "PreCompact" {
-        db::mark_compacted(&tx, session_id)?;
-    }
-    // The event feeds the summary and goes with it; the prompt itself is kept as a document.
-    if let Some(p) = prompt.as_deref() {
-        db::insert_event(
-            &tx,
-            session_id,
-            "UserPromptSubmit",
-            ts,
-            &json!({"prompt": p}).to_string(),
-        )?;
-        if !is_envelope(p) {
-            db::insert_prompt(&tx, session_id, ts, p)?;
-        }
-    }
-    let mut nth = std::collections::HashMap::new();
-    for (p, answer) in recovered {
-        let p = clip(&strip_blocks(&p, true));
-        if p.is_empty() || is_envelope(&p) {
-            continue;
-        }
-        let n = nth.entry(p.clone()).or_insert(0);
-        *n += 1;
-        if *n <= db::count_prompts(&tx, session_id, &p)? {
-            continue;
-        }
-        let prompt = json!({"prompt": p}).to_string();
-        db::insert_event(&tx, session_id, "UserPromptSubmit", ts, &prompt)?;
-        db::insert_prompt(&tx, session_id, ts, &p)?;
-        if !answer.trim().is_empty() {
-            let stop = json!({"assistant": clip(&answer)}).to_string();
-            db::insert_event(&tx, session_id, "Stop", ts, &stop)?;
-        }
-    }
-    if let Some(v) = stored {
-        db::insert_event(&tx, session_id, event, ts, &v.to_string())?;
-    }
-    // Claude Code and Codex read context at SessionStart (not on resume: the transcript already
-    // has it; after a compaction it is gone, so `compact` gets it again). Grok ignores
-    // SessionStart stdout, so its context rides on the first tool call. agy reads PreInvocation.
-    // Cursor also restores context on the first prompt after its compaction marker.
-    // The check and marker share the write transaction so simultaneous hooks cannot inject twice.
-    let inject_now = match event {
-        "SessionStart" => {
-            agent == "cursor"
-                || (!matches!(agent, "grok" | "agy")
-                    && payload["source"].as_str() != Some("resume"))
-        }
-        "PreToolUse" => agent == "grok" && !db::injected(&tx, session_id)?,
-        "PreInvocation" => agent == "agy" && !db::injected(&tx, session_id)?,
-        "UserPromptSubmit" => agent == "cursor" && db::claim_reinjection(&tx, session_id)?,
-        _ => false,
-    };
-    let mut out = matches!(agent, "agy" | "cursor").then(|| "{}".into());
-    if inject_now {
-        let text = inject::context(&tx, &repo_key)?;
-        if !text.is_empty() {
-            db::mark_injected(&tx, session_id, ts)?;
-        }
-        if !text.is_empty() || agent == "cursor" {
-            out = Some(if agent == "agy" {
-                json!({"injectSteps": [{"ephemeralMessage": text}]})
-            } else if agent == "cursor" {
-                cursor_injection(&text)
-            } else {
-                json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
-            }.to_string());
-        }
-    }
-    tx.commit()?;
-    Ok(out)
-}
-
 fn cursor_injection(text: &str) -> Value {
     // Cursor measures JS string length and drops the whole field above 10,000 units.
     let mut units = 0;
@@ -1141,22 +872,6 @@ fn start_worker(home: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Detached `oboete observe` in its own process group, so the agent exiting right after
-/// SessionEnd does not take it down; the lock inside observe makes duplicates harmless.
-/// The observe settle window (60 s by default) plus a margin.
-const NO_SESSION_END_OBSERVE_WAIT_MS: u64 = 65_000;
-
-fn observe_wait_ms(agent: &str) -> Option<u64> {
-    matches!(agent, "agy" | "opencode").then_some(NO_SESSION_END_OBSERVE_WAIT_MS)
-}
-
-fn spawn_observe(home: &Path, wait_ms: Option<u64>) {
-    match wait_ms {
-        Some(ms) => spawn_detached(home, &["observe", "--wait-ms", &ms.to_string()]),
-        None => spawn_detached(home, &["observe"]),
-    }
-}
-
 /// `oboete --home <home> <args>`, detached in its own process group.
 fn spawn_detached(home: &Path, args: &[&str]) {
     let exe = match std::env::current_exe() {
@@ -1179,6 +894,8 @@ fn spawn_detached(home: &Path, args: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo;
+    use rusqlite::Connection;
 
     fn hook(home: &Path, agent: &str, event: &str, payload: &Value) -> String {
         let _worker = crate::worker::lock(home).unwrap();
@@ -1420,6 +1137,12 @@ mod tests {
             assert_eq!(asked, text, "{agent}");
             let resumed = json!({"session_id": "b", "cwd": c, "source": "resume"});
             assert_eq!(hook("SessionStart", resumed), "", "{agent}");
+            // After a compaction the context no longer has it: shown again.
+            let compacted = json!({"session_id": "b", "cwd": c, "source": "compact"});
+            assert!(
+                hook("SessionStart", compacted).contains("look at the cache"),
+                "{agent}"
+            );
         }
     }
 
@@ -1624,44 +1347,6 @@ mod tests {
         assert_eq!(bodies[5], json!({"reason":"user_close"}));
         assert_eq!(stored.iter().filter(|e| e.kind == "prompt").count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn sessions_record_every_repo_and_idless_events_stay_on_this_device() {
-        let dir = tmp("touched");
-        std::fs::create_dir_all(dir.join("outer/.git")).unwrap();
-        std::fs::create_dir_all(dir.join("outer/inner/.git")).unwrap();
-        let conn = db::open(&dir).unwrap();
-        for cwd in ["outer", "outer/inner", "outer"] {
-            let payload = json!({"session_id": "s", "cwd": dir.join(cwd), "prompt": "go on"});
-            handle(&conn, "claude", "UserPromptSubmit", &payload).unwrap();
-        }
-        let repos: Vec<String> = conn
-            .prepare("SELECT repo FROM session_repos WHERE session_id='s' ORDER BY repo")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        let mut want = vec![
-            repo::key(&dir.join("outer")),
-            repo::key(&dir.join("outer/inner")),
-        ];
-        want.sort();
-        assert_eq!(repos, want);
-        let idless = json!({"cwd": dir.join("outer"), "prompt": "no id"});
-        handle(&conn, "claude", "UserPromptSubmit", &idless).unwrap();
-        let device = db::device_id(&conn).unwrap();
-        let n: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sessions WHERE id=?1",
-                [format!("unknown-{device}")],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(n, 1);
-        drop(conn);
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2209,9 +1894,7 @@ mod tests {
         let dir = tmp("bom");
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         let _worker = crate::worker::lock(&dir).unwrap();
-        assert_eq!(crate::capture::PORTED.len(), crate::setup::AGENTS.len());
         for agent in crate::setup::AGENTS {
-            assert!(crate::capture::PORTED.contains(&agent), "{agent}");
             let payload = json!({"session_id":agent, "conversationId":agent, "cwd":dir, "workspacePaths":[dir], "workspace_roots":[dir]});
             let input = format!("\u{feff}{payload}\r\n");
             let mut output = Vec::new();
@@ -2419,153 +2102,6 @@ mod tests {
             payload["workspacePaths"] = json!([dir]);
         }
         payloads
-    }
-
-    #[test]
-    fn pi_captures_prompt_tools_answer_and_session_end() {
-        let dir = tmp("pi-capture");
-        std::fs::create_dir(dir.join(".git")).unwrap();
-        let conn = db::open(&dir).unwrap();
-        let mut payload = json!({
-            "session_id": "pi1",
-            "cwd": dir,
-            "transcript_path": dir.join("session.jsonl"),
-            "source": "startup",
-        });
-        assert!(
-            handle(&conn, "pi", "SessionStart", &payload)
-                .unwrap()
-                .is_none()
-        );
-        payload["prompt"] = json!("Fix <private>client token</private> this");
-        handle(&conn, "pi", "UserPromptSubmit", &payload).unwrap();
-        payload["tool_name"] = json!("read");
-        payload["tool_input"] = json!({"path":"notes.txt"});
-        payload["tool_response"] = json!("ok <private>secret output</private>");
-        handle(&conn, "pi", "PostToolUse", &payload).unwrap();
-        payload["tool_name"] = json!("bash");
-        payload["tool_input"] = json!({"command":"false"});
-        payload["tool_response"] = json!("command failed");
-        handle(&conn, "pi", "PostToolUseFailure", &payload).unwrap();
-        payload["last_assistant_message"] = json!("Fixed it");
-        handle(&conn, "pi", "Stop", &payload).unwrap();
-        payload["reason"] = json!("quit");
-        handle(&conn, "pi", "SessionEnd", &payload).unwrap();
-
-        let events = db::session_events(&conn, "pi1").unwrap();
-        assert_eq!(
-            events.iter().map(|e| e.event.as_str()).collect::<Vec<_>>(),
-            [
-                "SessionStart",
-                "UserPromptSubmit",
-                "PostToolUse",
-                "PostToolUseFailure",
-                "Stop",
-                "SessionEnd",
-            ]
-        );
-        let body: String = conn
-            .query_row("SELECT body FROM prompts WHERE session_id='pi1'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(body, "Fix  this");
-        let stored: Vec<Value> = events
-            .iter()
-            .map(|e| serde_json::from_str(&e.payload).unwrap())
-            .collect();
-        assert_eq!(stored[1], json!({"prompt":"Fix  this"}));
-        assert_eq!(stored[2]["tool"], "read");
-        assert_eq!(stored[2]["failed"], false);
-        assert!(
-            !stored[2]["output"]
-                .as_str()
-                .unwrap()
-                .contains("secret output")
-        );
-        assert_eq!(stored[3]["tool"], "bash");
-        assert_eq!(stored[3]["failed"], true);
-        assert_eq!(stored[3]["output"], "command failed");
-        assert_eq!(stored[4], json!({"assistant":"Fixed it"}));
-        assert_eq!(stored[5], json!({"reason":"quit"}));
-        let (agent, repo, ended): (String, String, Option<i64>) = conn
-            .query_row(
-                "SELECT agent, repo, ended_at FROM sessions WHERE id='pi1'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(agent, "pi");
-        assert_eq!(repo, repo::key(&dir));
-        assert!(ended.is_some());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn pi_injects_on_start_and_compact_but_not_resume() {
-        let dir = tmp("pi-injection");
-        std::fs::create_dir(dir.join(".git")).unwrap();
-        let mut conn = db::open(&dir).unwrap();
-        let repo_key = repo::key(&dir);
-        let now = db::now_ms();
-        db::upsert_session(&conn, "old", "pi", &repo_key, dir.to_str().unwrap(), now).unwrap();
-        db::apply_batch(
-            &mut conn,
-            &db::PendingSession {
-                id: "old".into(),
-                agent: "pi".into(),
-                repo: repo_key,
-                last_event_at: now,
-            },
-            "test",
-            "earlier Pi summary",
-            &[],
-            i64::MAX,
-        )
-        .unwrap();
-        let start = json!({"session_id":"new", "cwd":dir, "source":"startup"});
-        let output: Value = serde_json::from_str(
-            &handle(&conn, "pi", "SessionStart", &start)
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            output["hookSpecificOutput"]["hookEventName"],
-            "SessionStart"
-        );
-        assert!(
-            output["hookSpecificOutput"]["additionalContext"]
-                .as_str()
-                .unwrap()
-                .contains("earlier Pi summary")
-        );
-        assert!(db::injected(&conn, "new").unwrap());
-
-        let resumed = json!({"session_id":"resumed", "cwd":dir, "source":"resume"});
-        assert!(
-            handle(&conn, "pi", "SessionStart", &resumed)
-                .unwrap()
-                .is_none()
-        );
-        assert!(!db::injected(&conn, "resumed").unwrap());
-
-        let compact = json!({"session_id":"new", "cwd":dir, "compact_summary":"recent work", "trigger":"manual"});
-        handle(&conn, "pi", "PostCompact", &compact).unwrap();
-        let reinject = json!({"session_id":"new", "cwd":dir, "source":"compact"});
-        assert!(
-            handle(&conn, "pi", "SessionStart", &reinject)
-                .unwrap()
-                .unwrap()
-                .contains("earlier Pi summary")
-        );
-        let events = db::session_events(&conn, "new").unwrap();
-        assert_eq!(events[1].event, "PostCompact");
-        assert_eq!(
-            serde_json::from_str::<Value>(&events[1].payload).unwrap(),
-            json!({"summary":"recent work"})
-        );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3064,18 +2600,19 @@ mod tests {
     }
 
     #[test]
-    fn a_private_block_cut_by_the_clip_is_not_stored() {
-        let dir = tmp("clip-private");
-        let conn = db::open(&dir).unwrap();
+    fn a_private_block_across_the_cap_is_not_stored() {
+        // Blocks go before the cap: a block cut in two would otherwise leave half of it stored.
+        let dir = tmp("cap-private");
+        let half = crate::capture::MAX_FIELD_BYTES / 2;
         let output = format!(
             "{} <private>{}</private> tail",
-            "h".repeat(7_900),
-            "S".repeat(9_000)
+            "h".repeat(half - 100),
+            "S".repeat(half)
         );
         let payload = json!({"session_id": "c1", "cwd": dir, "tool_name": "Read",
                              "tool_input": {}, "tool_response": output});
-        handle(&conn, "claude", "PostToolUse", &payload).unwrap();
-        let stored = &db::session_events(&conn, "c1").unwrap()[0].payload;
+        hook(&dir, "claude", "PostToolUse", &payload);
+        let stored = &recorded(&dir, "claude", "c1")[0].body;
         assert!(!stored.contains("SSS"), "private content stored");
         assert!(!stored.contains("<private>"), "{stored}");
         assert!(stored.contains("tail"));
@@ -3105,15 +2642,10 @@ mod tests {
     #[test]
     fn typed_prompts_are_kept_without_private_blocks_and_harness_traffic() {
         let dir = tmp("prompts");
-        let conn = db::open(&dir).unwrap();
         let cwd = dir.to_string_lossy().to_string();
         let submit = |prompt: &str| {
             let p = json!({"session_id": "c1", "cwd": cwd, "prompt": prompt});
-            assert!(
-                handle(&conn, "claude", "UserPromptSubmit", &p)
-                    .unwrap()
-                    .is_none()
-            );
+            assert_eq!(hook(&dir, "claude", "UserPromptSubmit", &p), "");
         };
         submit("検索を直して <private>pw hunter2</private> お願い");
         submit(
@@ -3130,12 +2662,16 @@ mod tests {
         submit(
             "<hook_context>- bugfix: text after an unclosed <private> tag\n</hook_context>\n\nテストを足して",
         );
-        let bodies: Vec<String> = conn
-            .prepare("SELECT body FROM prompts ORDER BY id")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .map(Result::unwrap)
+        let ev = recorded(&dir, "claude", "c1");
+        let bodies: Vec<String> = ev
+            .iter()
+            .filter(|e| e.kind == "prompt")
+            .map(|e| {
+                serde_json::from_str::<Value>(&e.body).unwrap()["prompt"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
             .collect();
         assert_eq!(
             bodies,
@@ -3149,33 +2685,15 @@ mod tests {
                 "テストを足して"
             ]
         );
-        // The summarizer still reads the notification; nothing private reaches it either, and
-        // a prompt that was all private leaves no event.
-        let ev = db::session_events(&conn, "c1").unwrap();
+        // The notification is kept as an envelope; nothing private is stored, and a prompt that
+        // was all private leaves no event.
         assert_eq!(ev.len(), 8);
-        assert!(ev[1].payload.contains("task-notification"));
-        assert!(ev.iter().all(|e| !e.payload.contains("hunter")
-            && !e.payload.contains("only this")
-            && !e.payload.contains("opened a.rs")));
-        // Prompts are documents: searchable, readable in full.
-        let hits = crate::search::search(&conn, "お願い", None, 10).unwrap();
-        assert_eq!(
-            (hits.len(), hits[0].doc.as_str(), hits[0].kind.as_str()),
-            (1, "p1", "prompt")
-        );
-        // The agent moved into a nested repository: the prompt stays with its session's.
-        std::fs::create_dir_all(dir.join("sub/.git")).unwrap();
-        let moved = json!({"session_id": "c1", "cwd": dir.join("sub").to_string_lossy(), "prompt": "nested ask"});
-        handle(&conn, "claude", "UserPromptSubmit", &moved).unwrap();
-        let repo: String = conn
-            .query_row(
-                "SELECT repo FROM prompts WHERE body = 'nested ask'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(repo, repo::key(&dir));
-        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(ev[1].kind, "envelope");
+        assert!(ev[1].body.contains("task-notification"));
+        assert!(ev.iter().all(|e| !e.body.contains("hunter")
+            && !e.body.contains("only this")
+            && !e.body.contains("opened a.rs")));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -3238,80 +2756,6 @@ mod tests {
     }
 
     #[test]
-    fn opencode_claude_fields_store_session_prompt_tools_and_stop() {
-        let dir = tmp("opencode-events");
-        let conn = db::open(&dir).unwrap();
-        let cwd = dir.to_string_lossy().to_string();
-        let base = json!({"session_id": "oc1", "cwd": cwd});
-        assert!(
-            handle(&conn, "opencode", "SessionStart", &base)
-                .unwrap()
-                .is_none()
-        );
-        let prompt = json!({"session_id": "oc1", "cwd": cwd, "prompt": "keep <private>secret text</private> this"});
-        handle(&conn, "opencode", "UserPromptSubmit", &prompt).unwrap();
-        let success = json!({"session_id": "oc1", "cwd": cwd, "tool_name": "read", "tool_input": {"filePath": "a.rs"}, "tool_response": "file content"});
-        handle(&conn, "opencode", "PostToolUse", &success).unwrap();
-        let failure = json!({"session_id": "oc1", "cwd": cwd, "tool_name": "bash", "tool_input": {"command": "false"}, "tool_response": "exit 1"});
-        handle(&conn, "opencode", "PostToolUseFailure", &failure).unwrap();
-        let stop = json!({"session_id": "oc1", "cwd": cwd, "last_assistant_message": "Done"});
-        handle(&conn, "opencode", "Stop", &stop).unwrap();
-
-        let (agent, stored_cwd): (String, String) = conn
-            .query_row("SELECT agent, cwd FROM sessions WHERE id='oc1'", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .unwrap();
-        assert_eq!(
-            (agent.as_str(), stored_cwd.as_str()),
-            ("opencode", cwd.as_str())
-        );
-        let body: String = conn
-            .query_row("SELECT body FROM prompts WHERE session_id='oc1'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(body, "keep  this");
-        let events = db::session_events(&conn, "oc1").unwrap();
-        let names: Vec<_> = events.iter().map(|e| e.event.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "SessionStart",
-                "UserPromptSubmit",
-                "PostToolUse",
-                "PostToolUseFailure",
-                "Stop"
-            ]
-        );
-        let payloads: Vec<Value> = events
-            .iter()
-            .map(|e| serde_json::from_str(&e.payload).unwrap())
-            .collect();
-        assert_eq!(payloads[1], json!({"prompt": "keep  this"}));
-        assert_eq!(
-            payloads[2],
-            json!({"tool": "read", "input": "{\"filePath\":\"a.rs\"}", "output": "file content", "failed": false})
-        );
-        assert_eq!(
-            payloads[3],
-            json!({"tool": "bash", "input": "{\"command\":\"false\"}", "output": "exit 1", "failed": true})
-        );
-        assert_eq!(payloads[4], json!({"assistant": "Done"}));
-        assert!(events.iter().all(|e| !e.payload.contains("secret text")));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn agents_without_session_end_wait_for_stop_to_settle() {
-        assert_eq!(observe_wait_ms("agy"), Some(65_000));
-        assert_eq!(observe_wait_ms("opencode"), Some(65_000));
-        for agent in ["claude", "codex", "grok"] {
-            assert_eq!(observe_wait_ms(agent), None, "{agent}");
-        }
-    }
-
-    #[test]
     fn codex_stop_reads_last_assistant_from_transcript_tail() {
         let dir = tmp("codex");
         let transcript = dir.join("rollout.jsonl");
@@ -3332,12 +2776,11 @@ mod tests {
         );
         assert_eq!(last_assistant_in_transcript(Path::new("/nonexistent")), "");
 
-        let conn = db::open(&dir).unwrap();
         let payload = json!({"session_id": "cx1", "cwd": dir.to_string_lossy(), "transcript_path": transcript.to_string_lossy()});
-        handle(&conn, "codex", "Stop", &payload).unwrap();
-        let ev = db::session_events(&conn, "cx1").unwrap();
+        hook(&dir, "codex", "Stop", &payload);
+        let ev = recorded(&dir, "codex", "cx1");
         assert_eq!(ev.len(), 1);
-        assert!(ev[0].payload.contains("done: 完了"));
+        assert!(ev[0].body.contains("done: 完了"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

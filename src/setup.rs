@@ -1798,7 +1798,7 @@ pub fn doctor(home: &Path) -> Result<()> {
         }
         Err(e) => println!(
             "capture: settings are wrong, so the hooks of {} record nothing: {e:#}",
-            crate::capture::PORTED.join(", ")
+            AGENTS.join(", ")
         ),
     }
     println!("providers (chain order):");
