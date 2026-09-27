@@ -360,6 +360,14 @@ mod tests {
                 format!("Authorization: AWS4-HMAC-SHA256 Credential=a/b, Signature={token}"),
                 "Authorization: AWS4-HMAC-SHA256 [REDACTED]".to_string(),
             ),
+            (
+                format!("Authorization: foo+bar_v2 {token}"),
+                "Authorization: foo+bar_v2 [REDACTED]".to_string(),
+            ),
+            (
+                format!("Authorization: Digest username=\"a\\\"b\", response=\"{token}\""),
+                "Authorization: Digest [REDACTED]".to_string(),
+            ),
         ];
         for (text, masked) in &cases {
             assert_eq!(&redact(text), masked);
