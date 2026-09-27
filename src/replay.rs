@@ -186,6 +186,7 @@ fn sample_spawns(
             .arg("--home")
             .arg(home)
             .args(["hook", agent, "PostToolUse"])
+            .env(crate::capture::REPLAY_ENV, "1")
             // A candidate above today's cap is measured as written under that cap (D4).
             .env(
                 crate::capture::FIELD_CAP_ENV,

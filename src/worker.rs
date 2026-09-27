@@ -263,10 +263,12 @@ fn serve(
             }
         }
         let seen = raw.max_seq()?;
-        let wait = stay.map_or(0, |until| {
+        // A window's time replaces the idle wait: the phase runs again then, and the idle wait
+        // starts once it has nothing left to wait for.
+        let wait = stay.map_or(idle_ms, |until| {
             u64::try_from(until - crate::db::now_ms()).unwrap_or(0)
         });
-        let deadline = Instant::now() + Duration::from_millis(idle_ms.max(wait));
+        let deadline = Instant::now() + Duration::from_millis(wait);
         let mut more = false;
         while Instant::now() < deadline {
             std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
@@ -635,19 +637,33 @@ mod tests {
             .append(&raw::test_event("a"))
             .unwrap();
         let calls = std::cell::Cell::new(0);
+        let (started, again) = (Instant::now(), std::cell::Cell::new(None));
         let until = crate::db::now_ms() + 400;
         let mut phase = |_: &mut Raw| -> Result<Phase> {
             calls.set(calls.get() + 1);
             Ok(match calls.get() {
                 1 => Phase::Waiting { until, up: true },
-                2 => Phase::Covered,
+                2 => {
+                    again.set(Some(started.elapsed()));
+                    Phase::Covered
+                }
                 _ => Phase::Idle,
             })
         };
-        let started = Instant::now();
         let p: &mut CurationPhase = &mut phase;
-        run_holding(home.path(), 0, vec![Box::new(Seen)], || {}, None, Some(p)).unwrap();
-        assert!(started.elapsed() >= Duration::from_millis(350));
+        // The window's time, not the longer idle wait, says when the phase runs again.
+        run_holding(
+            home.path(),
+            1_500,
+            vec![Box::new(Seen)],
+            || {},
+            None,
+            Some(p),
+        )
+        .unwrap();
+        let again = again.get().expect("the phase did not run again");
+        assert!(again >= Duration::from_millis(350), "{again:?}");
+        assert!(again < Duration::from_millis(1_200), "{again:?}");
         assert_eq!(calls.get(), 3);
 
         calls.set(0);

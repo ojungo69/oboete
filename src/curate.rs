@@ -571,7 +571,9 @@ fn hold(failed: &[Fallback], now: i64) -> (&'static str, i64, bool) {
             .min()
     };
     match (timed(false), timed(true)) {
-        (Some(wait), budget) => ("time", budget.map_or(wait, |b| b.min(wait)), false),
+        // Whichever comes first says what the window waits for then.
+        (Some(wait), Some(budget)) if budget < wait => ("budget", budget, false),
+        (Some(wait), _) => ("time", wait, false),
         (None, Some(budget)) => ("budget", budget, false),
         (None, None)
             if failed
@@ -1221,6 +1223,15 @@ mod tests {
                     ("sub", "waiting", Skip::Wait(soon)),
                 ],
                 "time",
+                0,
+            ),
+            // A budget that resets first is what the window waits for then: no staying up.
+            (
+                vec![
+                    ("sub", "waiting", Skip::Wait(later)),
+                    ("paid", "USD", Skip::Budget(soon)),
+                ],
+                "budget",
                 0,
             ),
             (vec![("groq", "HTTP 400", Skip::Failed)], "time", 1),
