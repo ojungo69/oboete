@@ -412,6 +412,15 @@ pub fn hidden(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
         next.push_str(&work[pos..]);
         next_from.extend_from_slice(&from[pos..]);
         (work, from) = (next, next_from);
+        if *tag == "claude-mem-context"
+            && let Some(cut) = crate::hook::memory_context_cut(&work)
+        {
+            if cut < work.len() {
+                hidden.push((from[cut].0, from[work.len() - 1].1));
+            }
+            work.truncate(cut);
+            from.truncate(cut);
+        }
     }
     let start = work.len() - work.trim_start().len();
     let end = work.trim_end().len().max(start);
@@ -1304,6 +1313,19 @@ mod tests {
         }
         assert_eq!(stored, MASK);
         check(&stored, &found, creds[2]);
+    }
+
+    /// The gate and its offsets agree on a claude-mem block a read cut before its end: what
+    /// `hidden` leaves is what `outbound` shows.
+    #[test]
+    fn a_cut_memory_context_is_hidden_as_the_gate_removes_it() {
+        let tag = "claude-mem-context"; // built: this file must not hold the pair
+        let text = format!("# Title\n<{tag}>\n# Memory Context\n| #1 | tabs |");
+        let rules = Rules::default();
+        assert_eq!(outbound_with(&text, &rules), "# Title");
+        let runs = hidden(&text, &rules).unwrap();
+        assert_eq!(runs.last().map(|r| r.1), Some(text.len()));
+        assert_eq!(outbound_part(&text, 0..text.len(), &rules), "# Title");
     }
 
     #[test]

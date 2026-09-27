@@ -698,8 +698,27 @@ pub(crate) fn without_blocks(s: &str, unclosed_private_hides_rest: bool) -> Stri
     let mut out = s.to_string();
     for tag in STRIP_BLOCKS {
         out = strip_tag(&out, tag, unclosed_private_hides_rest && *tag == "private");
+        if *tag == "claude-mem-context"
+            && let Some(cut) = memory_context_cut(&out)
+        {
+            out.truncate(cut);
+        }
     }
     out
+}
+
+/// Where a read cut before `</claude-mem-context>` (`head`, a Read with a limit) leaves the opener
+/// unpaired. claude-mem writes it on a line of its own, so from such a line on the text is
+/// claude-mem's copy of the past, with or without the line numbers a Read puts in front; an
+/// opener inside a line (claude-mem's own source quoting it) stays text.
+pub(crate) fn memory_context_cut(s: &str) -> Option<usize> {
+    static OPENER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?m)^[ \t]*(?:\d+(?:\t|\x{2192}|\|)[ \t]?)?<claude-mem-context>[ \t]*\r?$",
+        )
+        .expect("opener pattern")
+    });
+    OPENER.find(s).map(|m| m.start())
 }
 
 /// One pass over `<tag` openers and `</tag>` closers: each closer pairs with the nearest open
@@ -2753,6 +2772,15 @@ mod tests {
             "<{tag}>\n# Memory Context\n\n### Sep 27\n| #1 | decided to use tabs |\n</{tag}>\n\n# Rules\nUse spaces."
         );
         assert_eq!(strip_blocks(&file, false), "# Rules\nUse spaces.");
+        // A read cut before the block ends (`head`, a Read with a limit), with or without line
+        // numbers: from the opener's line on, the text is claude-mem's.
+        let cut = format!("# Title\n<{tag}>\n# Memory Context\n| #1 | decided to use tabs |");
+        assert_eq!(strip_blocks(&cut, false), "# Title");
+        let numbered = format!("     1\u{2192}<{tag}>\n     2\u{2192}# Memory Context");
+        assert_eq!(strip_blocks(&numbered, false), "");
+        // A mention inside a line (claude-mem's own source) is text.
+        let source = format!("  const startTag = '<{tag}>';\n  write(startTag);");
+        assert_eq!(strip_blocks(&source, false), source.trim());
     }
 
     #[test]
