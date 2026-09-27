@@ -189,8 +189,8 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
 **Interfaces:**
 - Produces:
   - `raw::Op { device, op_seq, kind: OpKind, ts, body: Value }` with `OpKind::{Window, Claim, Correction, Digest}`; `Raw::append_ops(&mut self, ops: &[OpBody]) -> Result<Vec<i64>>` in one transaction; `Raw::ops_after(device, op_seq, limit)`; `Raw::curation_checkpoint(device) -> Result<(i64, Option<i64>)>` (seq and offset, D2).
-  - `curate::next_window(raw, k, settings) -> Result<Option<Window>>`: pages through `Raw::after` from the checkpoint, bounded by events and bytes (issue #54), cut per D12 at `window_tokens` (D8); an event over the cap is split into parts with evidence offsets inside it, or elided with the "seen, elided" marker if it is a tool output.
-  - `curate::run_phase(home, raw, k, db, settings) -> Result<Phase>` where `Phase` is Curated, Waiting(until) or Idle. Before each subscription call it checks D9's gate.
+  - `curate::next_window(raw, device, window_tokens, rules) -> Result<Option<Window>>`: pages through `Raw::after` from the checkpoint, bounded by events and bytes (issue #54), cut per D12 at `window_tokens` (D8); an event over the cap is split into parts with evidence offsets inside it, or elided with the "seen, elided" marker if it is a tool output.
+  - `curate::run_phase(raw, db, rules, summary, chain, curator) -> Result<Phase>` where `Phase` is `Covered`, `Waiting { until, up }` or `Idle` (as built in #140). The curator is injected; the worker's is the chain with `Chain::idle_gate`, which checks D9's gate before each subscription call. `chain` is the providers and caps as text, part of the pending row's identity.
   - Pending windows: `pending(device, from_seq, to_seq, reason, attempts, next_attempt_at)` in `providers.db`. A pending row counts only for the same request: the phase replaces a row whose range (start and end) is not the next window's (after a restore, or when records added since made the window longer), whose request text changed (new rules, another language), or whose chain or idle gate changed (the owner edited the providers, their caps or `idle_minutes`, so a hold is the old one's), keeping the call ledger and budget state. Test: `a_restore_that_rewinds_raw_drops_the_pending_rows_above_it`.
 - Consumes: `Chain::run` (Task 1), `budget::admit` (Task 4), `isolation::gate` (Task 3), `redact::outbound` and the exclusion check (the egress gate).
 
@@ -207,69 +207,142 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
 - [ ] **Step 2: Implement** the op log and its backup lines, then the window cut, then the phase and the worker's stay-up rule, then the doctor lines. The prompt of this task is v1's observation prompt; Task 7 replaces it with claims.
 - [ ] **Step 3: Remove `observe`** (D14) and check that no test or command still reaches `oboete.db` except MCP, the viewer and `import`.
 - Curation is opt-in until the cut-over (spec 7.5): `[summary] curate = true` turns the phase on, with `window_tokens` (D8) and `idle_minutes` (D9) beside it. By default the worker sends nothing, so no test or older home reaches a provider through it.
-- [ ] **Step 4: Dogfood.** Build, install as `oboete-b`, run a day of the dogfood user's own sessions through it; doctor shows no overdue window; `provider_calls` shows which providers answered.
+- [ ] **Step 4: Dogfood.** Build, install as `oboete-b`, run a day of the dogfood user's own sessions through it; doctor shows no overdue window; `provider_calls` shows which providers answered. This waits for Task 7: the claim ops a day would write are kept records (ops are never rewritten), so they should have Task 7's shape, not the observation shape of this task. Until then the live check in #140 stands in: a release build at bb46bc4 with `curate = true` and two free entries curated the synthetic `overturn-cross` fixture (136 records) in two windows, 24 claim ops, summaries in Japanese, no pending row.
 - [ ] **Step 5: Commit** `curation: windows, the op log as checkpoint, and the curation phase (milestone 3, Task 5)`.
 
 ---
 
 ## Task 6: Claims and the claims consumer
 
-**Files:** Create `src/claims.rs`, `src/consumer/claims.rs`; modify `src/knowledge.rs`, `src/worker.rs`.
+**Files:** Create `src/claims.rs`, `src/consumer/claims.rs`; modify `src/worker.rs` (the `Consumer` trait, `consumers`, `behind`), `src/knowledge.rs` (`checkpoint::rewind`), `src/raw.rs` (tests only).
 
 **Interfaces:**
-- knowledge.db: `claims(uid TEXT PRIMARY KEY, kind, status, speaker, scope, repo, body, valid_from, device, op_seq)`, `evidence(uid, quote, anchor_device, anchor_seq, offset, length)`, `edges(from_uid, to_uid, type)` with type supersedes or retracts, `derivations(uid, recipe, tier, op_device, op_seq)`.
-- Tombstones after curation: when the rescan (or, from milestone 5, forget) tombstones a record or a range that a claim's or digest's evidence anchors on, the claims consumer drops that claim and every digest citing it from knowledge.db, and the span is queued for recuration (Task 11). Rebuild does the same, so a masked secret cannot come back through a paraphrase. Test: `a_rule_added_after_curation_drops_the_claims_quoting_the_masked_text`.
-- `claims::current(k, repo) -> Vec<Claim>`: chain tips, ordered by (valid_from, device, seq) (MUST-M7); the active derivation of a uid is the highest tier, then the newest (MUST-M18).
-- Kinds: decision, preference, lesson, fix, open item, repo fact, change; old kinds map as spec 3.2 says; unknown kinds are stored as repo fact with status unverified (D13).
-- Identity (MUST-M18): a claim's uid is derived in code, never by the model: a hash of its kind and its evidence anchor (device, seq, and the offset of the quote's start rounded down to its sentence). A recuration whose claim has the same kind and an anchor in the same sentence is a new derivation of that uid, whatever its wording; a claim that no longer appears gets a retract edge. Test: `a_recuration_that_rewords_a_claim_keeps_its_uid_and_its_owner_correction`.
+- Consumes: `Raw::{ops_after, max_op_seq, tombstones_after}`, `OpKind::{Claim, Correction}`, `knowledge::checkpoint::{get, set, rewind}`, `worker::Consumer`.
+- Produces:
+  - `Consumer::top(&self, raw: &Raw) -> Result<i64>`, by default `raw.max_seq()`. An op consumer returns `raw.max_op_seq()`: its checkpoint is an `op_seq` (D4), and `checkpoint::rewind` and `worker::behind` compare each checkpoint with its own consumer's `top`, never with raw's highest seq.
+  - `claims::ClaimOp`, the body of a claim op (serde), which Task 7 writes: `{id, kind, status, speaker, scope, body, evidence: [Evidence], supersedes: [String]}`, where `Evidence = {device, seq, offset, length, sentence, quote}`. `offset` and `length` locate the quote in the event's text as the window read it (byte offsets, as `Window.from_offset`); `sentence` is the offset of the start of the sentence the quote starts in, which the phase computes (Task 7) so that the consumer never reads raw to find it. `id` is local to the window (MUST-M2); `supersedes` holds candidate uids or sibling ids.
+  - `claims::uid(kind, &Evidence) -> String`: the hex SHA-256 of (kind, device, seq, sentence) of the first evidence (MUST-M18). The model never names a uid.
+  - knowledge.db (all derived, dropped by `rebuild`):
+    - `claims(uid PRIMARY KEY, kind, status, speaker, scope, repo, body, valid_from, device, op_seq)`: the active derivation of each uid.
+    - `derivations(uid, op_device, op_seq, tier, body, status)`: every derivation; the active one is the highest tier, then the newest `(op_device, op_seq)` (MUST-M18).
+    - `evidence(uid, device, seq, offset, length, quote)`.
+    - `edges(from_uid, to_uid, type)`: `supersedes` or `retracts`.
+    - `corrections(uid, op_device, op_seq, status, body)`: Task 10's owner corrections, applied over the active derivation.
+    - `claims_fts` (FTS5 trigram over body and quotes, rowid = the claim's rowid), which Task 7 searches for candidates.
+  - `claims::current(k, repo) -> Result<Vec<Claim>>`: the chain tips of `repo` (no incoming `supersedes` or `retracts` edge), the correction overlay applied, ordered by (valid_from, device, op_seq) (MUST-M7).
+  - A claim is live only while each of its quotes still reads verbatim at its anchor in raw as `Raw::after` returns it (a tombstoned record reads as nothing, a masked range as its mask). This is what keeps a secret masked after curation from coming back through a claim (spec 6.4), and it depends on raw only, so rebuild reaches the same state.
+  - `consumer::claims::Claims` (after `Fts`, before `Manifest`): reads ops after its checkpoint and, for each claim op whose quotes are live, writes a derivation and recomputes the uid's active row; a `supersedes` entry that names a sibling id resolves to that sibling's uid in the same batch (ops of one `append_ops` share a `batch`).
+  - `consumer::claims::Anchors` (after `Claims`): a raw-seq consumer. For each tombstone after its checkpoint (`Raw::tombstones_after`), it checks the claims anchored in the target record or range and deletes those no longer live, with their derivations, edges and search rows, and records the window's span in `recurate(device, from_seq, to_seq)` for Task 11.
+- Kinds and status: decision, preference, lesson, fix, open item, repo fact, change; the old kinds map as spec 3.2 says (feature to change; discovery to repo fact); any other kind is stored as repo fact with status unverified (D13). A claim op with no `evidence` (the observation shape of part 3b, written only where `curate = true` before Task 7) is skipped and counted in doctor's line.
+- `valid_from` is the `ts` of the record the first evidence anchors on (spec 3.4), read from the op's evidence device and seq when the consumer writes the row; a record gone since (tombstoned) removes the claim anyway (`Anchors`).
+- The offsets are into the text `curate` cuts windows in (the event's long text, as `Window.from_offset`); the consumer reads that text through the same function the window cut uses, so the two never disagree.
+
+- [ ] **Step 1: Failing tests.**
+  - `a_restore_that_loses_ops_rewinds_the_op_consumers_only` (`src/worker.rs`): ops appended, the claims checkpoint past them, then `ops` rows deleted as a restore without them would leave: `checkpoint::rewind` moves `claims` back to `max_op_seq` and leaves `fts` where it was.
+  - `a_claim_ops_uid_is_its_kind_and_the_sentence_its_quote_starts_in` (`src/claims.rs`): two ops, same kind and `sentence`, different wording and offset: one uid, two derivations, the newer one active.
+  - `a_reversal_in_one_append_supersedes_its_sibling` (MUST-M2): ops `c1` (decided) and `c2` (decided, supersedes `c1`) in one batch: one tip, one edge.
+  - `ties_resolve_the_same_way_whatever_order_the_ops_arrive` (MUST-M7): 50 pairs of claims with equal `valid_from` under two devices (the second device's op rows written directly, as sync will from milestone 6); `current` is the same list whichever device's ops the consumer reads first.
+  - `a_rule_added_after_curation_drops_the_claims_quoting_the_masked_text`: a claim's quote falls in a range the rescan tombstones; after the next pass the claim, its evidence and its search row are gone and `recurate` holds its span; `rebuild` gives the same.
+  - `an_unknown_kind_is_stored_as_an_unverified_repo_fact` and `an_op_with_no_evidence_is_skipped`.
+- [ ] **Step 2: Implement** `Consumer::top` and its two callers first (the other consumers keep the default), then the schema, `ClaimOp`, `uid`, `Claims`, `Anchors`, `current`.
+- [ ] **Step 3: Commit** `claims: the claims consumer, uids from evidence, chain tips and the tie order (milestone 3, Task 6)`.
 
 ## Task 7: The curator prompt and answer
 
-**Files:** Modify `src/curate.rs`.
+**Files:** Modify `src/curate.rs`, `src/worker.rs` (the phase gets knowledge.db), `src/provider.rs` (outcome names only).
 
-**Interfaces:** `curate::prompt(window, carried, candidates) -> String` fences all recorded text as data, lists the window's lines with ids, gives up to 20 current claims found by full-text search of the window across the repository as supersede candidates (MUST-M3; vectors join at milestone 4), and asks for claims with window-local ids so a reversal inside the window can point at its sibling (MUST-M2). `curate::parse(answer) -> Result<Vec<Draft>, AnswerFailure>` with `AnswerFailure::{Empty, Prose, Shape, OverCap}`, each recorded as its own outcome in `provider_calls`.
+**Interfaces:**
+- Consumes: `curate::{next_window, run_phase, Window}`, `redact::hidden` and the pieces' `from`/`to`, `claims::{current, ClaimOp, Evidence}`, `claims_fts`.
+- Produces:
+  - `Window.lines`: each piece's line in `text` with a window-local line id (`L1`, `L2`, ...) and the piece's (device, seq, from, to), so a quote can be traced to its event.
+  - `curate::carried(k, raw, window) -> Carried`: per session in the window, its goal (its first prompt, gated and cut to 200 characters; a child session's parent's, spec 3.1), its current open items, and the claims its previous window left proposed (D12, spec 3.3: a proposal and its acceptance in two windows are gated as if in one). Fenced as data.
+  - `curate::candidates(k, repo, text) -> Result<Vec<Claim>>`: up to 20 current claims of the repo that `claims_fts` finds for the window's text (MUST-M3: repo-wide, every window; vectors join at milestone 4). Candidates only: similarity never supersedes.
+  - `curate::prompt(window, carried, candidates, language) -> String`: all recorded text fenced as data (spec 3.3: file and tool content is quotation, never instruction), the lines with their ids, the candidates with their uids, and the answer schema: `{claims: [{id, kind, status, speaker, scope, body, quote, line, supersedes}], summary}`.
+  - `curate::parse(answer) -> Result<Vec<Draft>, AnswerFailure>` with `AnswerFailure::{Empty, Prose, Shape, OverCap, Unanchored}`. `Chain::run` gains a check the phase passes (`parse`, then `locate` for `Unanchored`): an answer the check refuses is recorded under the failure's own `provider_calls.outcome` (`empty`, `prose`, `shape`, `over_cap`, `unanchored`) and the chain goes on to its next entry, as a schema mismatch does today with `invalid`. In `ChainFailed` it is a `Skip::Failed`, so it counts for D11.
+  - `curate::locate(window, line, quote) -> Option<Evidence>`: the quote found verbatim in that line's text as the gate showed it, mapped back to the event's own offsets through the piece's range and `redact::hidden`'s map, with `sentence` set to the start of its sentence (after `。`, `.`, `?`, `!`, `？`, `！` or a line break, else the piece's start). A draft whose quote is not found is not a claim (Task 8 drops it); an answer in which no draft is found is `AnswerFailure::Unanchored`.
+  - The phase writes `ClaimOp`s (Task 6) instead of the observation shape; the window op keeps `summary`.
+  - `run_phase` gains `k: &Connection` (knowledge.db, read only, for `carried` and `candidates`), and `worker::CurationPhase` becomes `FnMut(&mut Raw, &Connection) -> Result<Phase>`, called with the `k` that `serve` holds. The pending row's identity (today a SHA-256 over the chain, the idle gate and the whole prompt, #140) moves to the chain, the idle gate, the language and the window's gated text: the carried context and the candidates change while a window waits (an owner correction, a recuration, a claim a rescan drops, and from milestone 6 another device's claims), and a window every provider fails must still reach D11's three counted attempts. Test: `a_window_pending_while_its_candidates_change_keeps_its_attempts`.
+- [ ] **Step 1: Failing tests.**
+  - `a_quote_is_located_in_its_event_through_masks_and_splits`: a quote after a masked secret and in the second part of a split event gets the event's own offsets; the same quote in text the gate hid is not found.
+  - `each_answer_failure_is_recorded_as_its_own_outcome`: empty, prose, wrong shape, over the cap, no draft anchored.
+  - `the_candidates_are_the_repos_current_claims_the_window_mentions` (MUST-M3): a decision from another session of the repo is a candidate; one from another repo is not.
+  - `recorded_text_is_fenced_as_data`: an instruction inside a tool output reaches the prompt only inside the data fence.
+  - `a_window_pending_while_its_candidates_change_keeps_its_attempts` (D11): a window every provider fails keeps its counted attempts when one of its candidates is dropped between two attempts (a rule the rescan applies tombstones its quote, Task 6's `Anchors`; owner corrections come in Task 10).
+- [ ] **Step 2: Implement.** Keep `schema()` the chain's shape test; the observation fields go.
+- [ ] **Step 3: Commit** `curation: claims with speaker, status, evidence and supersedes; candidates from the repo's current claims (milestone 3, Task 7)`.
 
 ## Task 8: Code gates
 
-**Files:** Create `src/gates.rs`.
+**Files:** Create `src/gates.rs`; modify `src/curate.rs` (the phase calls the gates before `append_ops`).
 
-**Interfaces:** `gates::check(window, candidates, drafts) -> Vec<Claim>`: decided needs a verbatim user quote or an acceptance right after the proposal, and a turn ending in "?" or holding a negation never promotes (spec 3.3; the acceptance phrases are collected from the dev transcripts); MUST-M1's table of evidence per (kind, target status); MUST-M4's taint of proposals and quotes that restate tool or file text; global scope only from `oboete pref add` or the viewer; supersedes only among the candidates shown; every evidence quote verbatim in the window; bodies redacted and capped. A draft that fails a gate is stored lower (proposed, or not at all), never raised.
+**Interfaces:**
+- Consumes: `Draft`, `Window.lines` (speaker, kind of each line), `curate::locate`, candidates.
+- Produces: `gates::check(window, candidates, drafts) -> Gated { claims: Vec<ClaimOp>, dropped: Vec<(String, &'static str)> }`. The gates run in the phase, so a claim op holds the gated status and rebuild needs no gate (D4). A draft that fails a gate is stored lower (proposed) or not at all, never raised; the window op records `dropped` with each reason.
+  - Gate 1 (spec 3.3): decided needs a verbatim user quote, or a user acceptance right after the proposal. A turn that ends in `?`/`？` or holds a negation never promotes. The acceptance phrases (`はい`, `それで`, `OK`, `進めて`, ...) and negations (`ない`, `やめ`, `not`, `don't`, ...) are two lists in `gates.rs`, collected from the dev transcripts (counts only in the PR, spec 8.4).
+  - MUST-M1's table, (kind, target status) to the evidence it needs: done needs a user quote or a passing run in the window (a tool line with exit 0 or a passing test); retracted, and retiring a lesson, need a user quote; any change to a global claim needs an owner directive (`oboete pref add`, the viewer), else it is flagged, not applied.
+  - MUST-M4's taint: a proposal or a user span that shares a run of 40 characters or more with a tool output or file read in the same window is tainted; a tainted proposal needs a verbatim restatement by the owner (a bare acceptance is not enough), and a tainted user span is not a quote for gate 1. The 40 is tuned on the dev split (Task 13).
+  - Speaker: an inferred claim (assistant inferred) cannot become decided without a tool result or a repeated statement (spec 3.2).
+  - Scope: global only through `oboete pref add` or the viewer (spec 3.3); a draft's `global` becomes `repo`.
+  - Supersedes only among the candidates shown and the window's siblings (MUST-M2, M3); anything else is dropped from the draft.
+  - A change carries why with evidence or `why: unknown` (spec 3.3); a bare "N files changed" is dropped.
+  - Bodies through the egress gate and capped (400 characters; quotes 200).
+- [ ] **Step 1: Failing tests.** One per gate above, plus the three M4 canaries as fixtures (a paraphrased attacker file then `はい`; a pasted file with a decisive quote; a fake acceptance line inside tool output): none reaches decided.
+- [ ] **Step 2: Implement** the gates as plain functions over the lines, no model call (spec 3.5: the none tier is code gates only).
+- [ ] **Step 3: Commit** `curation: code gates on status, speaker, taint, scope and supersedes (milestone 3, Task 8)`.
 
 ## Task 9: Digests and the manifest's current decisions
 
-**Files:** Create `src/consumer/digest.rs`; modify `src/consumer/manifest.rs`.
+**Files:** Create `src/consumer/digest.rs`, `src/digest.rs`; modify `src/consumer/manifest.rs`, `src/curate.rs` (the digest call), `src/worker.rs`.
 
-**Interfaces:** a digest op per session after its latest window, from the digest chain (spec 1.4: each role has its own chain); each digest line carries the uids it summarises and is dropped at build time when they are not current tips (MUST-M6); a digest is stale when any cited uid is no longer current. The manifest's "Current decisions" part lists current decided claims of the repo.
+**Interfaces:**
+- Consumes: `claims::current`, `Chain::run` with role `digest`, `OpKind::Digest`, the manifest's parts.
+- Produces:
+  - A digest op per session, written by the curation phase after the session's latest window is covered and the session has ended or been idle for `idle_minutes`: `{session, repo, lines: [{text, uids}]}`. The prompt fences claim bodies as data (MUST-M6).
+  - The digest uses the same chain with `role = "digest"` in `provider_calls` (spec 1.4 lets each role have its own chain; one list until measurement asks for two; Claude's, overrulable).
+  - `consumer::digest::Digests` (op consumer, `top` = `max_op_seq`): stores the latest digest per session; a line whose uids are not all current tips is dropped at build time, and a digest with a dropped line is marked stale (MUST-M6, spec 3.4).
+  - The manifest gets a "Current decisions" part: the repo's current decided claims, newest first, within the manifest's cap.
+- [ ] **Step 1: Failing tests.** `a_digest_line_citing_a_superseded_claim_is_dropped`, `an_instruction_in_a_claim_body_yields_no_uncited_line` (MUST-M6), `the_manifest_lists_the_current_decisions_of_its_repo`.
+- [ ] **Step 2: Implement.**
+- [ ] **Step 3: Commit** `claims: digests that cite current claims, and the manifest's current decisions (milestone 3, Task 9)`.
 
 ## Task 10: Owner corrections
 
-**Files:** Modify `src/main.rs`, `src/claims.rs`.
+**Files:** Modify `src/main.rs`, `src/claims.rs`, `src/consumer/claims.rs`.
 
-**Interfaces:** `oboete correct <uid> --status ... | --body ...` appends a correction op targeted by uid and raw anchor (spec 3.4); the claims consumer applies it after every derivation, so it survives rebuild and re-derivation (MUST-M21, hard).
+**Interfaces:**
+- Produces: `oboete correct <uid> (--status <s> | --body <text>)` appends a correction op `{uid, anchor: {device, seq}, status?, body?}` (spec 3.4); `Claims` writes it into `corrections`; `claims::current` applies the newest correction of a uid over whatever derivation is active, so it survives rebuild, recuration and re-derivation (MUST-M21, hard). A correction for a uid with no claim yet is kept and applies when one appears.
+- [ ] **Step 1: Failing test.** `a_recuration_that_rewords_a_claim_keeps_its_uid_and_its_owner_correction` (MUST-M18, M21): correct a claim to retracted, recurate its window with a reworded answer, rebuild: the uid is the same, the correction still applies, zero provider calls during the rebuild.
+- [ ] **Step 2: Implement.**
+- [ ] **Step 3: Commit** `claims: owner corrections as ops, applied over every derivation (milestone 3, Task 10)`.
 
 ## Task 11: `rebuild` and `recurate`
 
-**Files:** Modify `src/main.rs`, `src/worker.rs`.
+**Files:** Modify `src/main.rs`, `src/worker.rs`, `src/curate.rs`.
 
-**Interfaces:** `oboete rebuild` drops knowledge.db and runs the consumers; zero provider calls (asserted through `provider_calls`), identical claims, the month's spend unchanged. `oboete recurate [--skipped | <device>:<from>-<to>]` prints the windows it would send and a cost estimate from D7 and the entries' prices, then, on `--yes`, appends new window ops marked `recurate: true` (they never move the checkpoint, D2) whose claims become new derivations of the same uids (MUST-M18). Test: `recurating_an_old_span_does_not_send_later_windows_again`.
+**Interfaces:**
+- `oboete rebuild`: under the worker lock, knowledge.db is moved aside and the consumers run from zero; no provider is called (asserted through `provider_calls`), the claims are identical, the month's spend unchanged (spec 1.7). The old file is removed once the new one is complete.
+- `oboete recurate [--skipped | <device>:<from>-<to>] [--yes]`: lists the windows it would send (skipped window ops, the `recurate` spans of Task 6's `Anchors`, or the given range, cut as `next_window` cuts them) and an estimate from D7's tokens and the entries' prices; with `--yes` it appends window ops marked `recurate: true` (they never move the checkpoint, D2), whose claims become new derivations of the same uids (MUST-M18). A span is taken off `recurate` when its window op lands.
+- [ ] **Step 1: Failing tests.** `rebuilding_gives_the_same_claims_with_no_call`, `recurating_an_old_span_does_not_send_later_windows_again`, `a_skipped_window_is_curated_by_recurate_skipped`.
+- [ ] **Step 2: Implement.**
+- [ ] **Step 3: Commit** `curation: rebuild and recurate (milestone 3, Task 11)`.
 
 ## Task 12: Judge roles
 
-**Files:** Create `src/judge.rs`.
+**Files:** `src/judge.rs`, only if Measurement Judge shows a gain.
 
-**Interfaces:** selection ("shrink, never drop") and a veto on decided and supersedes, each behind a setting that stays off unless Measurement Judge shows its gain (spec 3.5): selection only if curator input shrinks by 30% or more while recall of decisions, lessons and fixes drops by 0.02 or less.
+**Interfaces:** selection ("shrink, never drop") and a veto on decided and supersedes, each behind a setting that stays off unless Measurement Judge (Task 13) shows its gain (spec 3.5): selection only if curator input shrinks by 30% or more while recall of decisions, lessons and fixes drops by 0.02 or less; the veto only if it removes wrong decided or supersedes without lowering decided recall below the M3 line. No step bodies until the measurement: when neither role passes, this task ends with its result in the milestone note and no code.
 
 ## Task 13: Lines and the milestone note
 
-**Files:** Create `docs/milestone-3.md`, `docs/spike/curator-sizes.md`.
+**Files:** Create `docs/milestone-3.md`; extend `docs/spike/curator-sizes.md`.
 
 - The size sweep: {4K, 8K, 12K, 16K, 24K} characters × {Japanese-heavy, English and code} × each entry, at least 4 samples a cell, Groq spread over days; validity, latency, tokens; pass lines per docs/research/curator-providers-2026-09-27.md §8. It feeds D7's coefficients and D8's interim; it does not decide Window.
-- M2: coverage 100%, and a crash at 20 points gives identical rows; the test fails against v1 first (spec 8.2).
+- M2: coverage 100% (`every_seq_is_curated_elided_or_skipped` on the dev transcripts), and a crash at 20 points gives identical rows; the test fails against v1 first (spec 8.2).
 - Isolation: the per-CLI table (Task 3).
 - Window: the smallest window size that passes M2, M3 and M6 on dev transcripts (spec 8.2).
 - Cost: curator calls at most 20% of each daily cap on a heavy day; paid at most USD 5 a month.
 - M3: tuned on the dev labels of milestone 1; the deciding run on the test labels, which need the owner (see below).
-- MUST fixtures: M1, M2, M3, M4, M6, M7, M18, M21.
+- MUST fixtures, each a test of the task that owns it: M1, M4 (Task 8), M2, M7, M18 (Task 6), M3 (Task 7), M6 (Task 9), M21 (Task 10).
 
 ---
 
