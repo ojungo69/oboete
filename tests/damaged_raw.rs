@@ -43,7 +43,10 @@ fn restored(h: &Path) {
         }
         assert!(
             Instant::now() < deadline,
-            "search does not find the restored record"
+            "search does not find the restored record: {}, stdout {:?}, stderr {:?}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
         );
         std::thread::sleep(Duration::from_millis(500));
     }
