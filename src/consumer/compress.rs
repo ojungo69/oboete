@@ -13,7 +13,7 @@ impl Consumer for Compress {
         "compress"
     }
 
-    fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> {
+    fn step(&mut self, raw: &Raw, k: &Connection, _device: &str, after: i64) -> Result<i64> {
         // The lowest checkpoint of the others; all of raw when there are none. A consumer that
         // has not started yet is not waited for: it reads compressed records the same way.
         let others: Option<i64> = k.query_row(
