@@ -79,7 +79,11 @@ impl Actions {
 /// root runs the actions, escalates them, spawns a sub-agent and waits for it; the sub-agent runs
 /// the actions and escalates them; then each ends its turn.
 pub(crate) fn next_item(agent: &str, done: usize, a: &Actions) -> Value {
-    let thread = if agent == "/root" { "root" } else { "sub" };
+    let Some(thread) = thread_of(agent) else {
+        // Another agent codex runs (a reviewer, a compaction) gets no script: its turn just ends.
+        return json!({"type": "message", "role": "assistant", "id": "m_other",
+            "content": [{"type": "output_text", "text": "done"}]});
+    };
     let exec = |n: usize, escalated: bool| {
         json!({"type": "custom_tool_call", "id": format!("ct_{thread}_{n}"),
             "call_id": format!("call_{thread}_{n}"), "namespace": "functions", "name": "exec",
@@ -100,6 +104,16 @@ pub(crate) fn next_item(agent: &str, done: usize, a: &Actions) -> Value {
         ("root", 3) => collab(3, "wait_agent", json!({"timeout_ms": 15000})),
         _ => json!({"type": "message", "role": "assistant", "id": format!("m_{thread}"),
             "content": [{"type": "output_text", "text": "done"}]}),
+    }
+}
+
+/// The script's thread for a request from `agent`: the root, or the sub-agent it spawns (task name
+/// `probe`). Results count only from these two.
+fn thread_of(agent: &str) -> Option<&'static str> {
+    match agent {
+        "/root" => Some("root"),
+        "/root/probe" => Some("sub"),
+        _ => None,
     }
 }
 
@@ -239,7 +253,7 @@ fn answer(
         })
         .collect();
     // This thread's own results: a request may also carry another thread's.
-    let mine = format!("call_{}_", if agent == "/root" { "root" } else { "sub" });
+    let mine = format!("call_{}_", thread_of(agent).unwrap_or("none"));
     let done = outputs
         .iter()
         .filter(|(id, _)| id.starts_with(&mine))
@@ -314,6 +328,14 @@ pub(crate) fn verdict(seen: &Seen, secret: &str, touched: bool) -> Result<(), St
         .map(String::as_str)
         .filter(|t| !OFFERED.contains(t))
         .collect();
+    // The tools the script drives must be seen where the gate reads the offer: a codex that moved
+    // the list elsewhere would offer tools the gate never saw.
+    if !["functions.exec", "collaboration.spawn_agent"]
+        .iter()
+        .all(|t| seen.tools.contains(*t))
+    {
+        return Err("codex did not list its tools where the gate reads them".into());
+    }
     if !unreviewed.is_empty() {
         return Err(format!(
             "codex offers the model tools the gate has not reviewed: {}",
@@ -455,6 +477,12 @@ mod tests {
         }
         let ok = seen(&[SANDBOXED, ESCALATED, spawned], SUB);
         assert!(verdict(&ok, "SECRET-x", true).is_err());
+        let mut unlisted = ok.clone();
+        unlisted.tools.clear();
+        assert_eq!(
+            verdict(&unlisted, "SECRET-x", false),
+            Err("codex did not list its tools where the gate reads them".into())
+        );
         let mut more = ok.clone();
         more.tools.insert("web_search".into());
         assert_eq!(
@@ -482,7 +510,8 @@ mod tests {
                 .collect();
             input.push(
                 json!({"type": "additional_tools", "tools": [{"type": "namespace",
-                "name": "functions", "tools": [{"type": "custom", "name": "exec"}]}]}),
+                "name": "functions", "tools": [{"type": "custom", "name": "exec"}]},
+                {"type": "namespace", "name": "collaboration", "tools": [{"name": "spawn_agent"}]}]}),
             );
             let body = json!({"client_metadata": {"x-codex-turn-metadata": meta}, "input": input,
                 "tools": [{"type": "web_search"}]})
@@ -539,6 +568,11 @@ mod tests {
             (&first["name"], &first["call_id"]),
             (&json!("exec"), &json!("call_sub_0"))
         );
+        // Another agent codex runs gets no script, and its results are not the sub-agent's.
+        assert_eq!(
+            post("/root/guardian", &[a], &key).unwrap()["type"],
+            "message"
+        );
         let mut only_root = model.seen.lock().unwrap().clone();
         only_root.tools.remove("web_search");
         assert_eq!(
@@ -572,7 +606,7 @@ mod tests {
         );
         assert_eq!(
             seen.tools.iter().collect::<Vec<_>>(),
-            ["functions.exec", "web_search"]
+            ["collaboration.spawn_agent", "functions.exec", "web_search"]
         );
         assert!(seen.login);
     }

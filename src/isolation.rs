@@ -58,15 +58,16 @@ pub fn provable(cli: &str) -> bool {
 }
 
 fn gate_codex(db: &Connection, exe: &Path, home: &Path) -> Result<Gate> {
-    // The curator's own kind of working directory: private, fresh, removed after.
-    let Ok(scratch) = scratch_dir() else {
-        return Ok(Gate::Failed("no scratch directory for the probe".into()));
+    // The curator's own kind of working directory: private, fresh, removed after. A failure before
+    // the probe is kept too, so doctor never shows an older pass as the current state.
+    let unknown = || "unknown version".to_owned();
+    let (version, result) = match scratch_dir() {
+        Err(_) => (unknown(), Err("no scratch directory for the probe".into())),
+        Ok(scratch) => match version(exe, scratch.0.as_path()) {
+            None => (unknown(), Err("codex --version did not answer".into())),
+            Some(v) => (v, probe(exe, home, scratch.0.as_path())),
+        },
     };
-    let cwd = scratch.0.as_path();
-    let Some(version) = version(exe, cwd) else {
-        return Ok(Gate::Failed("codex --version did not answer".into()));
-    };
-    let result = probe(exe, home, cwd);
     db.execute(
         "INSERT OR REPLACE INTO isolation(cli, version, passed, detail, ts) VALUES(?1,?2,?3,?4,?5)",
         params![
@@ -447,7 +448,8 @@ mod tests {
     /// and in the sub-agent.
     const EXEC: &str = r#"for a in "$@"; do case "$a" in model_providers.oboeteprobe.base_url=*)
         url=${a#*=}; url=${url#\"}; url=${url%\"};; esac; done
-        post() { curl -sS -o /dev/null -H "Authorization: Bearer $OBOETE_PROBE_KEY" --data "{\"client_metadata\":{\"x-codex-turn-metadata\":\"{\\\"agent_name\\\":\\\"$1\\\"}\"},\"input\":[$2]}" "$url/responses"; }
+        T='{"type":"additional_tools","tools":[{"type":"namespace","name":"functions","tools":[{"name":"exec"}]},{"type":"namespace","name":"collaboration","tools":[{"name":"spawn_agent"}]}]}'
+        post() { curl -sS -o /dev/null -H "Authorization: Bearer $OBOETE_PROBE_KEY" --data "{\"client_metadata\":{\"x-codex-turn-metadata\":\"{\\\"agent_name\\\":\\\"$1\\\"}\"},\"input\":[$2,$T]}" "$url/responses"; }
         out() { printf '{"type":"custom_tool_call_output","call_id":"call_%s","output":"%s"}' "$1" "$2"; }
         S="cat:1:cat: x: No such file or directory\ntouch:1:touch: cannot touch x\ncurl:${CURL:-7}:curl: (7) Failed\n"
         E="cat:threw:rejected\ntouch:threw:rejected\ncurl:threw:rejected\n"
@@ -482,6 +484,17 @@ mod tests {
             "probed again"
         );
         assert_eq!(doctor(&db).unwrap().len(), 1);
+        // A codex that stops answering fails before the probe, and doctor shows that, not the pass.
+        std::fs::write(&exe, "#!/bin/sh\nexit 1\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(matches!(
+            gate_codex(&db, &exe, dir.path()).unwrap(),
+            Gate::Failed(_)
+        ));
+        assert_eq!(
+            doctor(&db).unwrap(),
+            ["codex (unknown version): skipped as a curator: codex --version did not answer"]
+        );
     }
 
     #[test]
