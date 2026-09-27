@@ -38,6 +38,16 @@ CREATE TABLE IF NOT EXISTS ledger (
   offset INTEGER NOT NULL, length INTEGER NOT NULL, ts INTEGER NOT NULL, ruleset TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ledger_seq ON ledger(device, seq);
+-- Milestone 3 D1: the curation op log, this device's window, claim, correction and digest ops.
+-- Kept, not derived (spec 1.7): it shares raw.db's durability, backups and restore.
+CREATE TABLE IF NOT EXISTS ops (
+  device TEXT NOT NULL,
+  op_seq INTEGER NOT NULL,
+  type TEXT NOT NULL,          -- 'window', 'claim', 'correction', 'digest'
+  ts INTEGER NOT NULL,         -- unix ms, when it was appended
+  body TEXT NOT NULL,          -- JSON, at most MAX_OP_BYTES
+  PRIMARY KEY (device, op_seq)
+);
 ";
 
 /// One agent event as captured, after redaction.
@@ -89,6 +99,44 @@ pub struct Record {
     pub seq: i64,
     pub item: Item,
 }
+
+/// What an op records (milestone 3 D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpKind {
+    Window,
+    Claim,
+    Correction,
+    Digest,
+}
+
+impl OpKind {
+    fn name(self) -> &'static str {
+        match self {
+            OpKind::Window => "window",
+            OpKind::Claim => "claim",
+            OpKind::Correction => "correction",
+            OpKind::Digest => "digest",
+        }
+    }
+    fn from_name(name: &str) -> Option<Self> {
+        [Self::Window, Self::Claim, Self::Correction, Self::Digest]
+            .into_iter()
+            .find(|k| k.name() == name)
+    }
+}
+
+/// One op as it leaves `raw.rs`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Op {
+    pub device: String,
+    pub op_seq: i64,
+    pub kind: OpKind,
+    pub ts: i64,
+    pub body: serde_json::Value,
+}
+
+/// The most one op's body may take (spec 6.5, A42).
+pub const MAX_OP_BYTES: usize = 64 << 10;
 
 pub struct Raw {
     conn: Connection,
@@ -483,6 +531,140 @@ impl Raw {
         }
     }
 
+    /// D1: `ops` as this device's next op seqs, in one transaction: a window op and the claims
+    /// it yields commit together, and with them the curation checkpoint (D2).
+    pub fn append_ops(&mut self, ops: &[(OpKind, serde_json::Value)]) -> Result<Vec<i64>> {
+        let bodies = ops
+            .iter()
+            .map(|(kind, body)| {
+                let text = body.to_string();
+                anyhow::ensure!(
+                    text.len() <= MAX_OP_BYTES,
+                    "a {} op of {} bytes is over the {MAX_OP_BYTES}-byte cap",
+                    kind.name(),
+                    text.len()
+                );
+                Ok((kind.name(), text))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut op_seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1",
+            [&self.device],
+            |r| r.get(0),
+        )?;
+        let ts = crate::db::now_ms();
+        let mut seqs = Vec::with_capacity(bodies.len());
+        for (kind, body) in &bodies {
+            op_seq += 1;
+            tx.execute(
+                "INSERT INTO ops(device, op_seq, type, ts, body) VALUES(?1, ?2, ?3, ?4, ?5)",
+                params![self.device, op_seq, kind, ts, body],
+            )?;
+            seqs.push(op_seq);
+        }
+        tx.commit()?;
+        Ok(seqs)
+    }
+
+    /// Up to `limit` ops of `device` after `op_seq`, in op_seq order.
+    pub fn ops_after(&self, device: &str, op_seq: i64, limit: usize) -> Result<Vec<Op>> {
+        self.op_rows(device, op_seq, limit)?
+            .into_iter()
+            .map(|(op_seq, kind, ts, body)| {
+                Ok(Op {
+                    device: device.to_owned(),
+                    op_seq,
+                    kind: OpKind::from_name(&kind)
+                        .with_context(|| format!("op {op_seq}: unknown type {kind:?}"))?,
+                    ts,
+                    body: serde_json::from_str(&body)
+                        .with_context(|| format!("op {op_seq}: body"))?,
+                })
+            })
+            .collect()
+    }
+
+    fn op_rows(
+        &self,
+        device: &str,
+        op_seq: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String, i64, String)>> {
+        let mut st = self.conn.prepare(
+            "SELECT op_seq, type, ts, body FROM ops WHERE device = ?1 AND op_seq > ?2
+             ORDER BY op_seq LIMIT ?3",
+        )?;
+        let rows = st.query_map(
+            params![device, op_seq, i64::try_from(limit).unwrap_or(i64::MAX)],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// This device's highest op seq, 0 before its first op.
+    pub fn max_op_seq(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1",
+            [&self.device],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// D2: where `device`'s curation has reached, as (seq, offset): the end of its last window
+    /// op that is not a recuration. An offset is where the next window starts inside an event a
+    /// window split; none means after the whole event. (0, None) before the first window.
+    pub fn curation_checkpoint(&self, device: &str) -> Result<(i64, Option<i64>)> {
+        use rusqlite::OptionalExtension;
+        let last = self
+            .conn
+            .query_row(
+                "SELECT op_seq, json_extract(body, '$.to_seq'), json_extract(body, '$.to_offset')
+                 FROM ops WHERE device = ?1 AND type = 'window'
+                   AND COALESCE(json_extract(body, '$.recurate'), 0) = 0
+                 ORDER BY op_seq DESC LIMIT 1",
+                [device],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<i64>>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        match last {
+            None => Ok((0, None)),
+            Some((_, Some(seq), offset)) => Ok((seq, offset)),
+            Some((op_seq, None, _)) => anyhow::bail!("window op {op_seq} has no to_seq"),
+        }
+    }
+
+    /// D1: this device's ops after `op_seq` as backup lines, until `max_bytes` of lines (always
+    /// one). The body stays the stored JSON text, so a restore gives back the same bytes.
+    pub fn export_op_lines(&self, op_seq: i64, max_bytes: usize) -> Result<Vec<(i64, String)>> {
+        let (mut out, mut at, mut bytes) = (Vec::new(), op_seq, 0);
+        loop {
+            let rows = self.op_rows(&self.device, at, EXPORT_BATCH)?;
+            if rows.is_empty() {
+                return Ok(out);
+            }
+            for (op_seq, kind, ts, body) in rows {
+                let line = serde_json::json!({"device": self.device, "op_seq": op_seq,
+                    "type": kind, "ts": ts, "body": body})
+                .to_string();
+                bytes += line.len() + 1;
+                out.push((op_seq, line));
+                at = op_seq;
+                if bytes >= max_bytes {
+                    return Ok(out);
+                }
+            }
+        }
+    }
+
     /// Task 8: the sha256 of each of this device's records as its backup line, so a restore can
     /// be compared with what was backed up (compression does not change it).
     #[cfg(test)]
@@ -762,11 +944,42 @@ impl Rebuild {
         Ok(())
     }
 
-    /// Commit and close, so the file is whole on disk before it is renamed into place.
-    pub fn finish(self) -> Result<()> {
+    /// One op backup line (D1).
+    pub fn add_op(&mut self, line: &str) -> Result<()> {
+        let v: serde_json::Value = serde_json::from_str(line)?;
+        let op_seq = v["op_seq"].as_i64().context("op_seq")?;
+        let kind = v["type"]
+            .as_str()
+            .and_then(OpKind::from_name)
+            .with_context(|| format!("op {op_seq}: unknown type"))?;
+        self.conn.execute(
+            "INSERT INTO ops(device, op_seq, type, ts, body) VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![
+                v["device"].as_str().context("device")?,
+                op_seq,
+                kind.name(),
+                v["ts"].as_i64().unwrap_or(0),
+                v["body"].as_str().context("body")?
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Commit and close, so the file is whole on disk before it is renamed into place. A window
+    /// op past the restored records (their segment was damaged and skipped) goes, with every op
+    /// after it: the curation checkpoint must never pass a seq the store does not hold, or the
+    /// records that reuse those seqs would never be curated. Returns how many ops went.
+    pub fn finish(self) -> Result<usize> {
+        let dropped = self.conn.execute(
+            "DELETE FROM ops WHERE op_seq >= (
+               SELECT MIN(w.op_seq) FROM ops w WHERE w.device = ops.device AND w.type = 'window'
+                 AND json_extract(w.body, '$.to_seq') >
+                     (SELECT COALESCE(MAX(r.seq), 0) FROM records r WHERE r.device = w.device))",
+            [],
+        )?;
         self.conn.execute_batch("COMMIT")?;
         self.conn.close().map_err(|(_, e)| e)?;
-        Ok(())
+        Ok(dropped)
     }
 }
 
@@ -1009,5 +1222,66 @@ mod tests {
         let other = open(copy.path()).unwrap();
         assert_ne!(other.device(), first);
         assert_eq!(open(copy.path()).unwrap().device(), other.device());
+    }
+
+    #[test]
+    fn ops_commit_together_and_read_back_in_order() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        let window = serde_json::json!({"from_seq": 1, "to_seq": 4, "outcome": "curated"});
+        let claim = serde_json::json!({"text": "all timestamps on disk stay UTC"});
+        let seqs = raw
+            .append_ops(&[
+                (OpKind::Window, window.clone()),
+                (OpKind::Claim, claim.clone()),
+            ])
+            .unwrap();
+        assert_eq!(seqs, [1, 2]);
+        let ops = raw.ops_after(&dev, 0, 10).unwrap();
+        assert_eq!(
+            ops.iter()
+                .map(|o| (o.op_seq, o.kind, o.body.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (1, OpKind::Window, window),
+                (2, OpKind::Claim, claim.clone())
+            ]
+        );
+        // An op over the cap fails the whole append: the op before it is not written either.
+        let huge = serde_json::json!({"text": "x".repeat(MAX_OP_BYTES)});
+        assert!(
+            raw.append_ops(&[(OpKind::Claim, claim), (OpKind::Claim, huge)])
+                .is_err()
+        );
+        assert_eq!(raw.max_op_seq().unwrap(), 2);
+        assert_eq!(raw.ops_after(&dev, 1, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_curation_checkpoint_is_the_last_window_that_is_not_a_recuration() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        assert_eq!(raw.curation_checkpoint(&dev).unwrap(), (0, None));
+        let mut window = |body: serde_json::Value| {
+            raw.append_ops(&[(OpKind::Window, body)]).unwrap();
+            raw.curation_checkpoint(&dev).unwrap()
+        };
+        assert_eq!(
+            window(serde_json::json!({"to_seq": 5, "to_offset": null})),
+            (5, None)
+        );
+        // A window that ends inside an event: the next one starts at that offset.
+        assert_eq!(
+            window(serde_json::json!({"to_seq": 7, "to_offset": 120})),
+            (7, Some(120))
+        );
+        // `oboete recurate` of an older span moves it neither back nor forward.
+        let back = serde_json::json!({"to_seq": 2, "to_offset": null, "recurate": true});
+        assert_eq!(window(back), (7, Some(120)));
+        raw.append_ops(&[(OpKind::Claim, serde_json::json!({"text": "c"}))])
+            .unwrap();
+        assert_eq!(raw.curation_checkpoint(&dev).unwrap(), (7, Some(120)));
     }
 }
