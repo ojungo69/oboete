@@ -21,7 +21,7 @@ use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
-use crate::provider::{CODEX_OFF, CODEX_PROFILE, curator_env};
+use crate::provider::{CODEX_OFF, CODEX_PROFILE, curator_env, scratch_dir};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Gate {
@@ -50,7 +50,12 @@ pub fn gate(db: &Connection, cli: &str) -> Result<Gate> {
 }
 
 fn gate_codex(db: &Connection, exe: &Path, home: &Path) -> Result<Gate> {
-    let Some(version) = version(exe) else {
+    // The curator's own kind of working directory: private, fresh, removed after.
+    let Ok(scratch) = scratch_dir() else {
+        return Ok(Gate::Failed("no scratch directory for the probe".into()));
+    };
+    let cwd = scratch.0.as_path();
+    let Some(version) = version(exe, cwd) else {
         return Ok(Gate::Failed("codex --version did not answer".into()));
     };
     // A result holds for the profile it was probed with: a changed profile is probed again.
@@ -62,7 +67,7 @@ fn gate_codex(db: &Connection, exe: &Path, home: &Path) -> Result<Gate> {
     if let Some(g) = stored(db, "codex", &key)? {
         return Ok(g);
     }
-    let result = probe(exe, home);
+    let result = probe(exe, home, cwd);
     db.execute(
         "INSERT OR REPLACE INTO isolation(cli, version, passed, detail, ts) VALUES(?1,?2,?3,?4,?5)",
         params![
@@ -76,21 +81,22 @@ fn gate_codex(db: &Connection, exe: &Path, home: &Path) -> Result<Gate> {
     Ok(result.map_or_else(Gate::Failed, |()| Gate::Passed))
 }
 
-/// A command under the curator's environment, as `provider::cli_headless` runs it: a probe under
-/// another HOME, CODEX_HOME or PATH would prove nothing about the curator.
-fn command(exe: &Path) -> Command {
+/// A command under the curator's environment and in a working directory like its own, as
+/// `provider::cli_headless` runs it: a probe under another HOME, CODEX_HOME or PATH, or in a shared
+/// directory another user could plant a `.codex` in, would prove nothing about the curator.
+fn command(exe: &Path, cwd: &Path) -> Command {
     let mut cmd = Command::new(exe);
     cmd.env_clear()
         .envs(curator_env(std::env::vars_os(), cfg!(windows)))
         .env(crate::hook::SKIP_ENV, "1")
-        .current_dir(std::env::temp_dir())
+        .current_dir(cwd)
         .stdin(Stdio::null());
     cmd
 }
 
 /// `<cli> --version`, first line.
-fn version(exe: &Path) -> Option<String> {
-    let out = command(exe).arg("--version").output().ok()?;
+fn version(exe: &Path, cwd: &Path) -> Option<String> {
+    let out = command(exe, cwd).arg("--version").output().ok()?;
     let v = String::from_utf8_lossy(&out.stdout)
         .lines()
         .next()?
@@ -149,9 +155,9 @@ fn probe_profile() -> String {
 /// Probe codex's curator profile with no model (docs/spike/curator-isolation.md). Each probe must
 /// end in the tool's own refusal (`touch:`, `cat:`, `curl: (`): a tool the sandbox could not start
 /// (codex exits 101, "Failed to execvp") proves nothing, and neither does a host without the tool.
-fn probe(exe: &Path, home: &Path) -> Result<(), String> {
+fn probe(exe: &Path, home: &Path, cwd: &Path) -> Result<(), String> {
     // The hosted tools the profile does not govern must be off under the curator's flags.
-    let mut features = command(exe);
+    let mut features = command(exe, cwd);
     features.args(["features", "list"]);
     for f in CODEX_OFF {
         features.args(["--disable", f]);
@@ -172,7 +178,7 @@ fn probe(exe: &Path, home: &Path) -> Result<(), String> {
     }
     let canary = Canary::new(home).map_err(|e| format!("canary: {e}"))?;
     let run = |argv: &[&str]| -> Result<String, String> {
-        let out = command(exe)
+        let out = command(exe, cwd)
             .args(["sandbox", "-c", &probe_profile(), "-P", "curator", "--"])
             .args(argv)
             .output()

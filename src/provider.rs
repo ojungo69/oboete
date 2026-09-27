@@ -62,7 +62,7 @@ struct Answer {
 
 /// One failed call, with what the chain needs to decide what to do next.
 #[derive(Debug)]
-struct CallError {
+pub(crate) struct CallError {
     status: Option<u16>,
     retry_after_s: Option<f64>,
     message: String,
@@ -833,7 +833,7 @@ fn rate_left(h: &ureq::http::HeaderMap) -> Option<providers_db::RateLeft> {
 /// path, so failed attempts leave nothing behind). The name is random and the directory must
 /// not exist yet, so nobody else on the machine can plant one under a guessable name (the pid)
 /// and read what the CLI writes there; on Unix it is also created mode 0700.
-struct Scratch(std::path::PathBuf);
+pub(crate) struct Scratch(pub(crate) std::path::PathBuf);
 
 impl Drop for Scratch {
     fn drop(&mut self) {
@@ -841,7 +841,7 @@ impl Drop for Scratch {
     }
 }
 
-fn scratch_dir() -> Result<Scratch, CallError> {
+pub(crate) fn scratch_dir() -> Result<Scratch, CallError> {
     let mut raw = [0u8; 8];
     getrandom::fill(&mut raw)
         .map_err(|e| CallError::other(format!("scratch dir: {e}")).unsent())?;
