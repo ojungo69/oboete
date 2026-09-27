@@ -90,6 +90,9 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            PRIMARY KEY (op_device, op_seq)
          );
          CREATE INDEX IF NOT EXISTS derivations_uid ON derivations(uid);
+         -- `decisions` walks a repository's newest first and stops at its limit.
+         CREATE INDEX IF NOT EXISTS derivations_repo
+           ON derivations(repo, valid_from, anchor_device, anchor_seq);
          -- Each derivation's quotes, where they are in raw.
          CREATE TABLE IF NOT EXISTS evidence(
            op_device TEXT NOT NULL, op_seq INTEGER NOT NULL, idx INTEGER NOT NULL,
@@ -110,6 +113,7 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            rowid INTEGER PRIMARY KEY, uid TEXT NOT NULL UNIQUE,
            op_device TEXT NOT NULL, op_seq INTEGER NOT NULL
          );
+         CREATE INDEX IF NOT EXISTS claims_op ON claims(op_device, op_seq);
          -- The active derivations' bodies and quotes, for Task 7's candidates.
          CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5(text, tokenize='trigram');
          -- Windows whose claims lost a quote to a mask or a removal since: Task 11 sends them
@@ -146,21 +150,43 @@ pub struct Claim {
 /// `repo`'s current claims: the chain tips (no active derivation supersedes or retracts them)
 /// that are not retracted, in spec 3.4's order, (valid_from, device, seq), with the uid last so
 /// two claims of one event keep one order on every device (MUST-M7).
-#[allow(dead_code)] // Task 7's candidates read it.
+#[allow(dead_code)] // Task 7 reads it for the candidates and the carried open items.
 pub fn current(k: &Connection, repo: &str) -> Result<Vec<Claim>> {
-    schema(k)?;
-    let mut st = k.prepare(
-        "SELECT c.uid, d.kind, d.status, d.speaker, d.scope, d.body, d.valid_from,
-                d.anchor_device, d.anchor_seq
-         FROM claims c JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
-         WHERE d.repo = ?1 AND d.status <> 'retracted'
-           AND NOT EXISTS (
-             SELECT 1 FROM edges e
-             JOIN claims a ON a.op_device = e.op_device AND a.op_seq = e.op_seq
-             WHERE e.to_uid = c.uid AND a.uid <> c.uid)
-         ORDER BY d.valid_from, d.anchor_device, d.anchor_seq, c.uid",
-    )?;
-    let rows = st.query_map([repo], |r| {
+    tips(
+        k,
+        &format!("{TIPS} ORDER BY d.valid_from, d.anchor_device, d.anchor_seq, c.uid"),
+        (repo,),
+    )
+}
+
+/// `repo`'s current claims that are decided, or open items not done: at most `limit`, the newest
+/// first (`current`'s order reversed). The manifest reads these at every SessionStart, so the
+/// filter, the order and the limit are the query's.
+pub fn decisions(k: &Connection, repo: &str, limit: usize) -> Result<Vec<Claim>> {
+    tips(k, &format!("{TIPS} {DECIDED}"), (repo, limit as i64))
+}
+
+/// `decisions`' filter, order and limit (`?2`), which `derivations_repo` serves in order.
+pub(crate) const DECIDED: &str =
+    "AND (d.status = 'decided' OR (d.kind = 'open item' AND d.status <> 'done'))
+     ORDER BY d.valid_from DESC, d.anchor_device DESC, d.anchor_seq DESC, c.uid DESC
+     LIMIT ?2";
+
+/// A repository's chain tips (no active derivation supersedes or retracts them) that are not
+/// retracted; `?1` is the repository.
+pub(crate) const TIPS: &str =
+    "SELECT c.uid, d.kind, d.status, d.speaker, d.scope, d.body, d.valid_from,
+            d.anchor_device, d.anchor_seq
+     FROM claims c JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
+     WHERE d.repo = ?1 AND d.status <> 'retracted'
+       AND NOT EXISTS (
+         SELECT 1 FROM edges e
+         JOIN claims a ON a.op_device = e.op_device AND a.op_seq = e.op_seq
+         WHERE e.to_uid = c.uid AND a.uid <> c.uid)";
+
+fn tips(k: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<Vec<Claim>> {
+    let mut st = k.prepare(sql)?;
+    let rows = st.query_map(params, |r| {
         Ok(Claim {
             uid: r.get(0)?,
             kind: r.get(1)?,

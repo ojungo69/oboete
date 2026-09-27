@@ -35,6 +35,8 @@ pub const CAP: usize = 6_000;
 const CLIP: usize = 400;
 const FILES: usize = 10;
 const DIRECTIVES: usize = 10;
+/// Current decisions and open items shown, the newest first.
+const DECISIONS: usize = 15;
 const TODOS: usize = 20;
 const SESSIONS: usize = 5;
 /// ponytail: the owner lines a build reads (a negation older than these no longer matters); a
@@ -128,10 +130,61 @@ pub fn text(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    Ok(text
-        .filter(|(_, built)| built == ruleset)
-        .map(|(t, _)| without_session(&t, session)))
+    text.filter(|(_, built)| built == ruleset)
+        .map(|(t, _)| with_decisions(&k, repo, &without_session(&t, session)))
+        .transpose()
 }
+
+/// `text` with spec 4.9's current decisions and open items of `repo`, read when the text is:
+/// claims come from curation, which runs while the owner is idle and appends no record this
+/// consumer steps on, so a section built with the text would miss the last session's decisions
+/// at the next SessionStart. Before the owner's directives (spec 4.9's order); the hook's cut then
+/// drops from the end. Unchanged where curation never ran (no claims table, read only).
+fn with_decisions(k: &Connection, repo: &str, text: &str) -> Result<String> {
+    let curated = k
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'claims'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !curated {
+        return Ok(text.to_owned());
+    }
+    let lines: Vec<String> = crate::claims::decisions(k, repo, DECISIONS)?
+        .into_iter()
+        .map(|c| {
+            let date = &crate::db::utc(c.valid_from)[..10];
+            format!("- {date} {}: {}\n", c.kind, one_line(&c.body, CLIP))
+        })
+        .collect();
+    if lines.is_empty() {
+        return Ok(text.to_owned());
+    }
+    let section = format!("## Current decisions and open items\n{}", lines.concat());
+    let at = AFTER_DECISIONS
+        .iter()
+        .filter_map(|h| {
+            let h = format!("## {h}\n");
+            text.match_indices(&h)
+                .map(|(i, _)| i)
+                .find(|&i| i == 0 || text[..i].ends_with('\n'))
+        })
+        .min()
+        .unwrap_or(text.len());
+    Ok(format!("{}{section}{}", &text[..at], &text[at..]))
+}
+
+/// Spec 4.9's sections after the current decisions, in the manifest's words.
+const AFTER_DECISIONS: [&str; 6] = [
+    "Owner's directives",
+    "Todo list",
+    "Last exchange",
+    "Files touched",
+    "As of",
+    "Other active sessions",
+];
 
 /// `text` without its line for `session` under "Other active sessions" (and the heading, when
 /// that was the only one).
@@ -959,6 +1012,152 @@ mod tests {
         worker::run_once(home.path()).unwrap();
         let shown = shown(home.path(), &store).unwrap();
         assert_eq!(shown, manifest(home.path()).0);
+    }
+
+    /// A claim op for an event appended now: quoting all of its text, of `kind` and `status`.
+    fn claimed(
+        store: &mut Raw,
+        e: Event,
+        kind: &str,
+        status: &str,
+        supersedes: Vec<String>,
+    ) -> ((crate::raw::OpKind, Value), String) {
+        let seq = store.append(&e).unwrap();
+        let quote = crate::curate::long_text(&e).unwrap();
+        let evidence = crate::claims::Evidence {
+            device: store.device().to_owned(),
+            seq,
+            offset: 0,
+            length: quote.len() as i64,
+            sentence: 0,
+            quote: quote.clone(),
+        };
+        let uid = crate::claims::uid(kind, &evidence);
+        let op = crate::claims::ClaimOp {
+            id: format!("c{seq}"),
+            kind: kind.into(),
+            status: status.into(),
+            speaker: "user".into(),
+            scope: "repo".into(),
+            body: quote,
+            evidence: vec![evidence],
+            supersedes,
+            recipe: "test".into(),
+            tier: 1,
+        };
+        let op = (crate::raw::OpKind::Claim, serde_json::to_value(op).unwrap());
+        (op, uid)
+    }
+
+    /// Spec 4.9: the repository's current decisions and open items, the newest first, read when
+    /// the text is: a superseded, retracted, merely proposed or other repository's claim is not
+    /// among them, and reading writes nothing.
+    #[test]
+    fn the_manifest_lists_the_current_decisions_of_its_repo() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let min = 60_000;
+        let said = |ts: i64, text: &str| {
+            ev(
+                "prompt",
+                "s3",
+                ts,
+                cwd.path(),
+                serde_json::json!({"prompt": text}),
+            )
+        };
+        let (tabs, old) = claimed(
+            &mut store,
+            said(10 * min, "Use tabs."),
+            "decision",
+            "decided",
+            vec![],
+        );
+        let (spaces, _) = claimed(
+            &mut store,
+            said(11 * min, "Use spaces instead."),
+            "decision",
+            "decided",
+            vec![old],
+        );
+        let (flaky, _) = claimed(
+            &mut store,
+            said(12 * min, "The CI test is flaky."),
+            "open item",
+            "proposed",
+            vec![],
+        );
+        let (cache, _) = claimed(
+            &mut store,
+            said(13 * min, "Maybe cache it."),
+            "decision",
+            "proposed",
+            vec![],
+        );
+        let (gone, _) = claimed(
+            &mut store,
+            said(14 * min, "Drop the old API."),
+            "decision",
+            "retracted",
+            vec![],
+        );
+        let other = Event {
+            repo: Some("other".into()),
+            ..said(15 * min, "Other repo rule.")
+        };
+        let (elsewhere, _) = claimed(&mut store, other, "decision", "decided", vec![]);
+        store
+            .append_ops(&[tabs, spaces, flaky, cache, gone, elsewhere])
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        let knowledge = home.path().join("knowledge.db");
+        let before = std::fs::metadata(&knowledge).unwrap().modified().unwrap();
+        let text = shown(home.path(), &store).unwrap();
+        assert_eq!(
+            std::fs::metadata(&knowledge).unwrap().modified().unwrap(),
+            before
+        );
+        let section = text
+            .split("## Current decisions and open items\n")
+            .nth(1)
+            .unwrap()
+            .split("\n## ")
+            .next()
+            .unwrap();
+        assert_eq!(
+            section,
+            "- 1970-01-01 open item: The CI test is flaky.\n\
+             - 1970-01-01 decision: Use spaces instead."
+        );
+        // Before the owner's directives, as spec 4.9 orders them.
+        assert!(
+            text.find("## Current decisions").unwrap()
+                < text.find("## Owner's directives").unwrap()
+        );
+        // At most the limit, the newest first: the query stops there, not the caller.
+        let k = rusqlite::Connection::open(&knowledge).unwrap();
+        let newest: Vec<String> = crate::claims::decisions(&k, "r", 1)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.body)
+            .collect();
+        assert_eq!(newest, ["The CI test is flaky."]);
+        // Through the indexes, newest first: no scan of the claims, however many there are.
+        let sql = format!(
+            "EXPLAIN QUERY PLAN {} {}",
+            crate::claims::TIPS,
+            crate::claims::DECIDED
+        );
+        let plan: Vec<String> = k
+            .prepare(&sql)
+            .unwrap()
+            .query_map(("r", 1), |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(plan.iter().all(|p| !p.starts_with("SCAN")), "{plan:?}");
     }
 
     #[test]
