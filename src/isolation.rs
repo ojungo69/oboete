@@ -58,8 +58,16 @@ fn gate_codex(db: &Connection, exe: &Path, home: &Path) -> Result<Gate> {
     let Some(version) = version(exe, cwd) else {
         return Ok(Gate::Failed("codex --version did not answer".into()));
     };
-    // A result holds for the profile it was probed with: a changed profile is probed again.
-    let digest = Sha256::digest(format!("{}\n{}", probe_profile(), CODEX_OFF.join(",")));
+    // A result holds for the profile it was probed with and the managed configuration it was
+    // resolved under: a change to either is probed again. Anything else (macOS MDM, the user's
+    // config) is caught within a day, when a result expires.
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{}\n{}", probe_profile(), CODEX_OFF.join(",")));
+    for f in MANAGED {
+        hasher.update(format!("\n{f}\n"));
+        hasher.update(std::fs::read(f).unwrap_or_default());
+    }
+    let digest = hasher.finalize();
     let key: String = format!(
         "{version} {:02x}{:02x}{:02x}{:02x}",
         digest[0], digest[1], digest[2], digest[3]
@@ -105,11 +113,22 @@ fn version(exe: &Path, cwd: &Path) -> Option<String> {
     (out.status.success() && !v.is_empty()).then_some(v)
 }
 
+/// codex's managed configuration layers on Unix (codex 0.155-0.157): an administrator's
+/// requirements can move the curator's profile to a weaker one, with only a warning.
+const MANAGED: [&str; 3] = [
+    "/etc/codex/config.toml",
+    "/etc/codex/requirements.toml",
+    "/etc/codex/managed_config.toml",
+];
+
+/// How long a probe result holds, passed or failed.
+const HOLDS_MS: i64 = 24 * 3600 * 1000;
+
 fn stored(db: &Connection, cli: &str, key: &str) -> Result<Option<Gate>> {
     let row: Option<(bool, String)> = db
         .query_row(
-            "SELECT passed, detail FROM isolation WHERE cli=?1 AND version=?2",
-            params![cli, key],
+            "SELECT passed, detail FROM isolation WHERE cli=?1 AND version=?2 AND ts > ?3",
+            params![cli, key, crate::db::now_ms() - HOLDS_MS],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
@@ -179,7 +198,9 @@ fn probe(exe: &Path, home: &Path, cwd: &Path) -> Result<(), String> {
     let canary = Canary::new(home).map_err(|e| format!("canary: {e}"))?;
     let run = |argv: &[&str]| -> Result<String, String> {
         let out = command(exe, cwd)
-            .args(["sandbox", "-c", &probe_profile(), "-P", "curator", "--"])
+            // With the managed requirements, as `codex exec` resolves the profile.
+            .args(["sandbox", "--include-managed-config"])
+            .args(["-c", &probe_profile(), "-P", "curator", "--"])
             .args(argv)
             .output()
             .map_err(|e| format!("codex sandbox: {e}"))?;
@@ -247,13 +268,22 @@ impl Canary {
         listener.set_nonblocking(true)?;
         let hits = Arc::new(AtomicUsize::new(0));
         let done = Arc::new(AtomicBool::new(false));
-        let (seen, stop) = (Arc::clone(&hits), Arc::clone(&done));
+        let (seen, stop, want) = (Arc::clone(&hits), Arc::clone(&done), token.clone());
         std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut s, _)) => {
-                        seen.fetch_add(1, Ordering::SeqCst);
-                        let _ = s.read(&mut [0u8; 512]);
+                        // Only the probe's own request counts: another local user's connection
+                        // to the port is not the sandbox letting a command out. Counted before
+                        // the socket closes, so before the probe's curl returns.
+                        s.set_nonblocking(false).ok();
+                        s.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                            .ok();
+                        let mut buf = [0u8; 512];
+                        let n = s.read(&mut buf).unwrap_or(0);
+                        if String::from_utf8_lossy(&buf[..n]).contains(&want) {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                        }
                     }
                     Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
                 }
@@ -343,6 +373,33 @@ mod tests {
             "only --version"
         );
         assert_eq!(doctor(&db).unwrap().len(), 1);
+        // A day later the result has expired and codex is probed again.
+        db.execute("UPDATE isolation SET ts = ts - ?1", [HOLDS_MS])
+            .unwrap();
+        assert_eq!(gate_codex(&db, &exe, dir.path()).unwrap(), Gate::Passed);
+        let later = std::fs::read_to_string(dir.path().join("calls")).unwrap();
+        assert!(
+            later.lines().count() > again.lines().count() + 1,
+            "probed again"
+        );
+    }
+
+    #[test]
+    fn only_the_probes_own_request_counts_as_a_hit() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let canary = Canary::new(dir.path()).unwrap();
+        let addr = format!("127.0.0.1:{}", canary.port);
+        let mut stranger = std::net::TcpStream::connect(&addr).unwrap();
+        stranger.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
+        let mut probe = std::net::TcpStream::connect(&addr).unwrap();
+        write!(probe, "GET /{} HTTP/1.1\r\n\r\n", canary.token).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while canary.hits() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(canary.hits(), 1);
     }
 
     #[test]
