@@ -147,6 +147,11 @@ impl<'a> Chain<'a> {
                 )
             };
             let state = providers_db::state(conn, &name)?;
+            if state.down_until == providers_db::OWNER_HOLD {
+                let why = format!("stopped until the owner acts (`oboete resume {name}`)");
+                fallbacks.push((name, why));
+                continue;
+            }
             if state.down_until > db::now_ms() {
                 fallbacks.push((name, "cooling down after an earlier failure".into()));
                 continue;
@@ -976,11 +981,11 @@ fn claude_stream(stdout: &str) -> Result<String, CallError> {
     }) {
         return Err(CallError {
             status: Some(429),
-            retry_after_s: Some(MAX_COOLDOWN.as_secs_f64()),
+            retry_after_s: None,
             message: "claude: credits required (the owner must act)".into(),
             usage: Usage::default(),
             sent: true,
-            cool_until: None,
+            cool_until: Some(providers_db::OWNER_HOLD),
         });
     }
     let result = events
@@ -1456,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    fn credits_required_stops_claude_for_a_day() {
+    fn credits_required_stops_claude_until_the_owner_acts() {
         let out = [
             clean_init(),
             // claude 2.1.283 folds the API's error_code into the rate-limit info (`Kbe`).
@@ -1466,8 +1471,17 @@ mod tests {
         ]
         .map(|v| v.to_string())
         .join("\n");
-        let e = claude_stream(&out).err().unwrap();
-        assert_eq!(cooldown_for(&e), Some(MAX_COOLDOWN));
+        let e = claude_stream(&out).expect_err("credits required");
+        let s = next_state(providers_db::State::default(), &e);
+        assert_eq!(s.down_until, providers_db::OWNER_HOLD);
+        // No time ends it; the owner's `oboete resume` does.
+        let home = tempfile::tempdir().unwrap();
+        let conn = providers_db::open(home.path()).unwrap();
+        providers_db::set_state(&conn, "claude", s).unwrap();
+        assert_eq!(providers_db::held(&conn).unwrap(), ["claude"]);
+        assert!(providers_db::resume(&conn, "claude").unwrap());
+        assert!(providers_db::held(&conn).unwrap().is_empty());
+        assert_eq!(providers_db::state(&conn, "claude").unwrap().down_until, 0);
     }
 
     #[test]

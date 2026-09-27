@@ -93,6 +93,25 @@ pub fn record(conn: &Connection, c: &Call) -> Result<()> {
     Ok(())
 }
 
+/// `down_until` of a provider stopped until the owner acts (claude's `credits_required`, spec
+/// 3.1): no time ends it, only `oboete resume`.
+pub const OWNER_HOLD: i64 = i64::MAX;
+
+/// Providers stopped until the owner acts, for doctor.
+pub fn held(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT provider FROM provider_state WHERE down_until=?1")?;
+    let rows = stmt
+        .query_map([OWNER_HOLD], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// Clear `provider`'s cooldown and breaker: the owner says it can be used again. Whether it had
+/// any state.
+pub fn resume(conn: &Connection, provider: &str) -> Result<bool> {
+    Ok(conn.execute("DELETE FROM provider_state WHERE provider=?1", [provider])? > 0)
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct State {
     pub down_until: i64,

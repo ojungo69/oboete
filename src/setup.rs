@@ -1681,12 +1681,18 @@ pub fn doctor(home: &Path) -> Result<()> {
         }
     }
     if home.join("providers.db").exists() {
-        let rows = crate::providers_db::last_calls(&crate::providers_db::open(home)?, 5)?;
+        let db = crate::providers_db::open(home)?;
+        let rows = crate::providers_db::last_calls(&db, 5)?;
         if !rows.is_empty() {
             println!("  last curation calls (providers.db):");
             for r in rows {
                 println!("    {r}");
             }
+        }
+        for p in crate::providers_db::held(&db)? {
+            println!(
+                "  {p}: stopped until you act (for claude: turn on usage credits), then run `oboete resume {p}`"
+            );
         }
     }
     let exe_str = exe
