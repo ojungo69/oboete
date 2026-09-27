@@ -52,8 +52,8 @@ pub struct ChainResult {
 /// Why the chain went past a provider, which the curation phase needs to know (D10, D11).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Skip {
-    /// It may be tried from then on (unix ms): a cooldown (one its failure in this run set too), a
-    /// rate limit's reset, the owner still working (D9).
+    /// It may be tried from then on (unix ms): a cooldown (one its failure in this run set too) or
+    /// a rate limit's reset.
     Wait(i64),
     /// Its budget refuses it until then: a day's or a month's reset.
     Budget(i64),
@@ -167,8 +167,6 @@ pub struct Chain<'a> {
     providers: &'a [Provider],
     db: &'a Connection,
     paid_usd_per_month: f64,
-    /// Until when the owner is still working (D9), asked right before each subscription call.
-    working: Option<&'a dyn Fn() -> Option<i64>>,
     /// `OBOETE_FAIL_PROVIDER=<name>`: that provider fails without a call (fallback proof).
     forced_fail: Option<String>,
     check: Option<&'a AnswerCheck<'a>>,
@@ -180,7 +178,6 @@ impl<'a> Chain<'a> {
             providers,
             db,
             paid_usd_per_month: 5.0,
-            working: None,
             forced_fail: std::env::var("OBOETE_FAIL_PROVIDER").ok(),
             check: None,
         }
@@ -191,15 +188,6 @@ impl<'a> Chain<'a> {
     pub fn check(self, check: &'a AnswerCheck<'a>) -> Self {
         Self {
             check: Some(check),
-            ..self
-        }
-    }
-
-    /// The idle gate (D9): `working` says until when the owner is still working, or `None` once
-    /// they are not. A subscription entry is not called before then.
-    pub fn idle_gate(self, working: &'a dyn Fn() -> Option<i64>) -> Self {
-        Self {
-            working: Some(working),
             ..self
         }
     }
@@ -283,16 +271,6 @@ impl<'a> Chain<'a> {
                 skip(refusal.detail, refusal.skip);
                 continue;
             }
-            // The owner is still working: a subscription waits (D9), a free entry does not.
-            let working = || {
-                p.subscription()
-                    .then(|| self.working.and_then(|working| working()))
-                    .flatten()
-            };
-            if let Some(until) = working() {
-                skip("waiting for the owner to finish".into(), Skip::Wait(until));
-                continue;
-            }
             // A curator CLI that could act on what it reads is not called at all (spec 6.5). After
             // the budget: the probe takes seconds, and a call the budget refuses needs none.
             if let Provider::Cli { cli, .. } = p {
@@ -302,11 +280,6 @@ impl<'a> Chain<'a> {
                     let ms = started.elapsed().as_millis() as i64;
                     record("gate", ms, Some(&gate.why()), false, Usage::default(), None)?;
                     skip(gate.why(), Skip::Owner);
-                    continue;
-                }
-                // The probe can take seconds: asked again right before the call.
-                if let Some(until) = working() {
-                    skip("waiting for the owner to finish".into(), Skip::Wait(until));
                     continue;
                 }
             }
@@ -2133,55 +2106,6 @@ mod tests {
         assert_eq!(usage_cli("claude", &huge.to_string()).prompt, None);
     }
 
-    /// D9: while the owner works, a subscription entry is gone past with the time it may be tried
-    /// from, and a free entry is still called; once they stop, the subscription is called.
-    #[test]
-    fn a_subscription_waits_while_the_owner_works_and_a_free_entry_does_not() {
-        let home = tempfile::tempdir().unwrap();
-        let conn = crate::providers_db::open(home.path()).unwrap();
-        let answer = json!({"choices": [{"message": {"content": "{\"summary\": \"s\"}"}}]});
-        // A 400 sets no cooldown: the free entry's skip is `Failed`.
-        let (free_url, free_request) = serve("400 Bad Request", b"{}".to_vec(), "");
-        let (sub_url, sub_request) = serve_once(answer.to_string().into_bytes(), "");
-        let mut sub = stub(sub_url);
-        if let Provider::Openai {
-            name, subscription, ..
-        } = &mut sub
-        {
-            *name = "sub".into();
-            *subscription = true;
-        }
-        let until = crate::db::now_ms() + 600_000;
-        let working = || Some(until);
-        let providers = [stub(free_url), sub.clone()];
-        let err = Chain::new(&providers, &conn)
-            .idle_gate(&working)
-            .run("curator", "s", "p", &json!({}))
-            .unwrap_err();
-        let failed = err.downcast_ref::<ChainFailed>().expect("a ChainFailed");
-        let skips: Vec<(&str, &Skip)> = failed
-            .0
-            .iter()
-            .map(|f| (f.provider.as_str(), &f.skip))
-            .collect();
-        assert_eq!(
-            skips,
-            [("stub", &Skip::Failed), ("sub", &Skip::Wait(until))]
-        );
-        assert_eq!(failed.0[1].reason, "waiting for the owner to finish");
-        assert!(free_request.try_recv().is_ok(), "the free entry was called");
-        assert!(
-            sub_request.try_recv().is_err(),
-            "the subscription was called"
-        );
-        let idle = || None;
-        let r = Chain::new(std::slice::from_ref(&sub), &conn)
-            .idle_gate(&idle)
-            .run("curator", "s", "p", &json!({}))
-            .unwrap();
-        assert_eq!(r.provider, "sub");
-    }
-
     /// D10, D11: each provider gone past says whether time, a budget reset or the owner will let
     /// it be tried again, or whether it failed.
     #[test]
@@ -2735,37 +2659,6 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(sent, [0, 0]);
-    }
-
-    /// D9: the isolation probe can take seconds, so a subscription CLI is asked about the owner
-    /// again after it. The entry is forced to fail: a missing second check shows as `Failed`,
-    /// and no CLI is ever run.
-    #[test]
-    fn a_subscription_cli_is_asked_about_the_owner_again_after_its_gate() {
-        let home = tempfile::tempdir().unwrap();
-        let conn = crate::providers_db::open(home.path()).unwrap();
-        let claude = Provider::Cli {
-            name: "claude".into(),
-            cli: "claude".into(),
-            model: None,
-            daily_budget: 10,
-            timeout_s: 5,
-            limits: Default::default(),
-        };
-        let until = crate::db::now_ms() + 600_000;
-        let asked = std::cell::Cell::new(0);
-        // Idle when first asked; a hook arrives while the gate runs.
-        let working = || {
-            asked.set(asked.get() + 1);
-            (asked.get() > 1).then_some(until)
-        };
-        let providers = [claude];
-        let mut chain = Chain::new(&providers, &conn).idle_gate(&working);
-        chain.forced_fail = Some("claude".into());
-        let err = chain.run("curator", "s", "p", &json!({})).unwrap_err();
-        let failed = err.downcast_ref::<ChainFailed>().expect("a ChainFailed");
-        assert_eq!(failed.0[0].skip, Skip::Wait(until));
-        assert_eq!(asked.get(), 2);
     }
 
     /// D11: a failure that sets a cooldown passes by itself, so it is a wait, not a failure.

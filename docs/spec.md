@@ -23,7 +23,7 @@ oboete is a lightweight single-binary memory for coding agents. This spec is the
 
 ### 0.1 Owner decisions
 
-A later decision wins over an earlier one and over any section text. Decisions 1-23 are RD/owner-decisions.md; decisions 24-28 were made on 2026-09-26 and are recorded here.
+A later decision wins over an earlier one and over any section text. Decisions 1-23 are RD/owner-decisions.md; decisions 24-29 were made on 2026-09-26 and decision 30 on 2026-09-28, and they are recorded here.
 
 1. Redesign from a blank slate. The previous design is suspected of being shaped by the TypeScript prototype, not in one part but overall.
 2. Extreme lightness is not a goal. Resident background processes are acceptable if they earn their place.
@@ -54,6 +54,7 @@ A later decision wins over an earlier one and over any section text. Decisions 1
 27. (2026-09-26) The owner's machines switch to the new oboete after milestone 5 (forget and safety), not after milestone 4 as decision 22 said. Forget, mute and capture exclusion must exist on the owner's machines from the switch on: today's viewer can delete, and forget is the remedy for a leaked secret (6.1).
 28. (2026-09-26) Public setup turns subscriptions on by default, replacing decision 21's opt-in (option b): when setup finds a logged-in subscription CLI or an OpenCode Go key, the preset uses it. The tier line still quotes the policy lines and says how to turn it off (7.2). Claude had found on 2026-09-26 that the policy page does have line 52 ("Nor does it prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription").
 29. (2026-09-26) Labelling is split, replacing decision 22's labelling set. After opening the calibration page, the owner found the memories too English and technical to judge ("記憶が英語や技術的なものが多すぎて私には判断できない") and chose the split. The owner labels only what the owner alone knows: whether something is a decision or preference of theirs, and whether a later one overturned an earlier one. Each item is in plain Japanese, shown with the owner's own prompt, and "判断できない" is always a choice. Technical relevance (search pairs, no-answer and false-premise questions, answer keys, kinds) is judged by a panel of judges from different model makers, and the judge is trusted by its agreement with the panel (8.1). The owner accepted the cost: technical relevance has no human reference.
+30. (2026-09-28) Subscriptions may curate while the owner works, and they have no daily cap of calls (the owner: 「別に作業中に使っても良いし一日の上限とかいらないよ」). This replaces decision 15 and the daily cap of decision 5's subscription tier. A subscription still stops at its own limits, with a cooldown until their reset (3.1). What stays of decision 15's 10 minutes is a wait for every provider, not for subscriptions only: a window that reaches the device's last record waits until the owner stops, so a few records are not sent at every hook (3.1). Past a plan's limits, codex can draw on paid credits and OpenCode Go on a Zen balance: issue #164 settles that before the cut-over, and the default chain keeps OpenCode Go's 300 calls a day until then (Claude; owner may overrule).
 
 Notes on decisions 23-26 (context, not part of the decisions): the research asked for by decision 23 is docs/research/curator-providers-2026-09-25.md; decisions 25 and 26 and Claude decision C1 (§3.1) adopt its results. PR #56 (merged 156ae27) took grok out of `default_providers()`. PR #58 (merged e24ba89) put decision 26's models into today's `default_providers()` (claude `--model haiku`, codex `gpt-6-luna`) and made today's chain treat an answer that does not fit the schema as a failed provider (3.1).
 
@@ -89,7 +90,7 @@ Earlier decisions that still hold (RD/owner-decisions.md:16). Where the 2026-09-
 
 ### 0.3 Sources
 
-- `RD/owner-decisions.md`: owner decisions 1-23 (decisions 24-28 are in 0.1).
+- `RD/owner-decisions.md`: owner decisions 1-23 (decisions 24-30 are in 0.1).
 - The settled sections this spec compiles: `RD/sections-1-4.md` and `RD/section-5-revised.md` … `RD/section-8-revised.md`. Their text is sections 1-8 here.
 - Other RD/ files the sections cite: `RD/options-draft.md`, `RD/improvements-synthesis.md`, `RD/constraints-synthesis.md`, `RD/issue50.md`, `RD/hub-platform.md`, `RD/phase0.md`, `RD/critique.md`, and `RD/improvements-result.json` (workflow output, not committed).
 - `docs/research/curator-providers-2026-09-25.md`: the research behind decisions 23, 25 and 26 and Claude decision C1 (cited by §).
@@ -126,22 +127,21 @@ The other checked items in RD/constraints-synthesis.md (the "2. Inherited constr
 
 ### 1.4 AI tiers and provider chains
 
-- AI usage (curation) is user-selectable in tiers: none / free + local / subscription CLIs (daily cap) / paid APIs (monthly cap). With no AI, recording and search still work; more AI means finer curation (owner decision 5).
+- AI usage (curation) is user-selectable in tiers: none / free + local / subscription CLIs (no daily cap, owner decision 30) / paid APIs (monthly cap). With no AI, recording and search still work; more AI means finer curation (owner decision 5).
 - The owner's own default is the subscription tier, with paid APIs at most USD 5 per month (owner decision 5).
 - A tier is only a setup preset for the provider chain (R05, today's `[[providers]]` in config.toml). The user picks providers of five kinds, and the order of all of them (Claude; overrulable):
   - free APIs: Groq, OpenRouter free, NIM, Mistral;
   - local: Ollama;
-  - subscription CLIs: any of claude, codex, agy, each with its model and daily cap. agy stays skipped until its no-tool mode passes (section 6);
+  - subscription CLIs: any of claude, codex, agy, each with its model. agy stays skipped until its no-tool mode passes (section 6);
   - API-key subscriptions: OpenCode Go (owner decision 25);
   - paid APIs, if allowed (monthly cap).
 - Any provider entry can be marked subscription, including a `kind = "openai"` entry (docs/research/curator-providers-2026-09-25.md §3.4 item 3) (Claude; overrulable).
 - Subscriptions use cheap models, as claude-mem does: claude with Haiku 4.5 (`--model haiku`), codex with `gpt-6-luna` at low reasoning effort. Milestone 3's M3 lines decide whether their quality is enough (the curator spike's gate-quality part, §8.3); the cheapest model that passes is the default (owner decision 26).
-- OpenCode Go: the owner already subscribes. It is called as an API: `kind = "openai"`, base URL https://opencode.ai/zen/go/v1, model `glm-5.3-flash` (not used for training, 0-day retention per the OpenCode Go page). It is marked subscription, so the wait-while-working gate (3.1) and the public setup rule for subscriptions (7.2, owner decision 28) apply to it, as for subscription CLIs. It is a curator provider and may serve the judge and digest chains (owner decision 25; docs/research/curator-providers-2026-09-25.md §3.3).
+- OpenCode Go: the owner already subscribes. It is called as an API: `kind = "openai"`, base URL https://opencode.ai/zen/go/v1, model `glm-5.3-flash` (not used for training, 0-day retention per the OpenCode Go page). It is marked subscription, so the public setup rule for subscriptions (7.2, owner decision 28) applies to it, as for subscription CLIs. It is a curator provider and may serve the judge and digest chains (owner decision 25; docs/research/curator-providers-2026-09-25.md §3.3).
 - OpenCode Zen's free models are not offered: they refuse callers other than OpenCode with HTTP 403 (docs/research/curator-providers-2026-09-25.md §3.2). The opencode CLI is not a curator (§3.5 of that note) (owner decision 25).
 - The grok subscription is not used as the summarizer (curation) (owner decision 23, as corrected on 2026-09-26). Whether digests count as summarizing is asked at milestone 3, where digests are built.
 - A subscription provider that reports its limits stops being used near them, with a cooldown kept across runs (3.1, Claude decision C1) (Claude; overrulable).
 - Each role (curator, judge, digest) can use its own chain. So a cheap or local model can judge while a subscription CLI curates.
-- The wait-while-working gate applies to providers marked subscription (3.1; owner decisions 15, 25).
 - Recording, full-text search and manifests work with no AI.
 - Embeddings are a separate setting: none / local / Workers AI. Semantic search works whenever embeddings are on, whatever the curation tier (RD/constraints-synthesis.md S1-21).
 
@@ -243,11 +243,11 @@ The user settings in 1.5 change what is recorded: capture exclusion per repo or 
 - The checkpoint moves only in the same transaction as the window's knowledge.
 - When a provider fails, including an answer whose shape does not match the schema, the next one in the chain is tried (docs/research/curator-providers-2026-09-25.md §3.4 item 1).
   - Each window tries each provider of its chain at most once per attempt; next_attempt_at bounds the retries (issue #54, "fallback上限") (Claude; overrulable).
-- Every pending window carries a reason (failed, budget spent, cooldown, waiting for the owner to finish) and a next_attempt_at. doctor flags overdue windows (MUST-M9; RD/constraints-synthesis.md S3-4).
+- Every pending window carries a reason (failed, budget spent, cooldown, waiting for the owner) and a next_attempt_at. doctor flags overdue windows (MUST-M9; RD/constraints-synthesis.md S3-4).
   - A cooldown can carry a reset time taken from the provider, and it is kept across runs (Claude decision C1, below) (Claude; overrulable).
 - **Subscription allowance** (Claude decision C1, following the owner's intent to spare the quota): claude stops being used as soon as a call's stream reports `rate_limit_event` with status `allowed_warning` or `rejected`. The cooldown is stored until `resetsAt` and survives runs. `errorCode = credits_required` stops claude until the owner acts. Any subscription provider that reports its limits gets the same shape (docs/research/curator-providers-2026-09-25.md §2.2 area 4, §2.3 item 2) (Claude; overrulable).
-- Providers marked subscription (the subscription CLIs and OpenCode Go) wait while the owner is working, because each may share an allowance the owner uses while coding. Free APIs, local models and paid APIs (monthly cap) do not wait; they curate at any time (owner decisions 15, 25; RD/constraints-synthesis.md S3-5; RD/improvements-synthesis.md S9).
-- Default: a provider marked subscription curates after 10 minutes without a hook. The wait is a setting. Revisit if windows routinely wait over an hour (Claude; overrulable).
+- Providers marked subscription (the subscription CLIs and OpenCode Go) curate at any time, as free APIs, local models and paid APIs do, and they have no daily cap of calls (owner decision 30, replacing decision 15). Each stops at the limits it reports, as above; codex reports none to oboete yet (issue #164).
+- A window that reaches the device's last record (not cut by size) waits until the owner has stopped, for every provider: otherwise each hook's few new records would be sent on their own. Default: 10 minutes after the last hook, a setting of at most 30 (docs/milestone-3-plan.md D9, D10) (Claude; overrulable).
 - Today's code gets a stopgap for issue #54 (PR #57): long sessions go to the summarizer in parts, dialogue first. These windows replace it (owner decision 24).
 
 ### 3.2 Claims
@@ -1181,7 +1181,7 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
 | Window | Curation window size | The smallest size that passes M2, M3 and M6, swept on dev transcripts only (RD/constraints-synthesis.md:266); the sweep runs M6 on dev at milestone 3, ahead of M6's deciding run at milestone 4 (Claude; overrulable) (set by measurement Window at milestone 3) | section 3 |
 | Rerank | S3 reranker | The M1 line, inside milestone 4's single test run. Also CPU p95 and RSS on the M1 iMac and the slowest WSL machine (RD/improvements-synthesis.md:441) | S3 |
 | Public | JQaRA and JaCWIR sanity check | On each set, the default is at most 0.02 nDCG@10 below the better of its two legs run alone (FTS only, bge-m3 only) (Claude; overrulable). A sanity line, not a tuning set (RD/constraints-synthesis.md:377) | section 4 |
-| Cost | Per heavy day | Curator calls ≤ 20% of each daily cap. Paid ≤ USD 5/month | options-draft §9 |
+| Cost | Per heavy day | Curator calls ≤ 20% of each daily cap (subscriptions have none, owner decision 30). Paid ≤ USD 5/month | options-draft §9 |
 | Install | Fresh machines | Install, set up two agents, and recall a memory in a new session within 10 min, with a clean doctor, on all 5 targets (2 in CI only) | MUST-M23, section 7 |
 | Final | The release run | M1, M3, M5 and M6 run once on the unseen final set (§8.1) | RD/issue50.md:194 |
 
@@ -1335,7 +1335,7 @@ Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row
 | A1 | The other checked items of RD/constraints-synthesis.md are accepted by reference, without owner input | 1 (intro) | The owner reviews those items before they bind |
 | A2 | Issue #55 is met by design B's worker; today's code gets a stopgap only for #54 | 1.1, B.3 | A #55 fix in today's `src/observe.rs` before the cut-over |
 | A3 | Providers are offered in five kinds: free APIs, local, subscription CLIs, API-key subscriptions, paid APIs | 1.4 | How setup groups and offers providers |
-| A4 | Any provider entry, including `kind = "openai"`, can be marked subscription | 1.4 | Which providers the wait-while-working gate and the public subscription default cover |
+| A4 | Any provider entry, including `kind = "openai"`, can be marked subscription | 1.4 | Which providers the subscription tier and the public subscription default cover |
 | A5 | C1, subscription allowance: claude stops at `allowed_warning` or `rejected`; the cooldown is stored until `resetsAt` and survives runs; `credits_required` stops claude until the owner acts; the same shape for any subscription provider that reports its limits; doctor shows stored cooldowns | 1.4, 3.1, 7.6 | How much of the subscription allowance background curation may use (for example react only to `rejected`, or stop at a utilization cap as claude-mem does) |
 | A6 | The user settings of owner decision 16 (delegated to Claude) | 1.5 | Which settings exist |
 | A7 | Defaults of capture detail and injection are sections 2 and 4 as written; per-prompt injection may be turned on before it passes the 10% line | 1.5, 4.6 | The defaults, or keeping per-prompt injection off until it passes |
@@ -1522,7 +1522,7 @@ Every row uses no real keys, no paid APIs and no owner data, only an isolated da
 | 55-2 | A new processing request that arrives during curation, right after the last pending check, or just before or just after the lock is released is not lost. This includes configurations with embeddings off. | #55 test 2 | 3 (worker start path from 2) | 1.1 | applies | Now stated in 1.1 (B.2 #55 item 1). |
 | 55-3 | With more pending work than one run's limit, the work after the limit still progresses. The guarantee holds when #54's splitting creates more units. | #55 test 3 | 3 | 1.1, 3.1 | applies | |
 | 55-4 | Under many simultaneous starts, the number of runners, waiters and retries stays bounded, and the same knowledge is never committed twice. | #55 test 4 | 3 | 1.1, 3.1 | applies | 1.1: "A worker per device". 3.1: "The checkpoint moves only in the same transaction as the window's knowledge." Bounded waiters and retries: now stated in 1.1 (B.2 #55 item 1). |
-| 55-5 | An abnormal exit of the lock holder, an embedding timeout, 429 or failure, and recovery after the budget runs out: no new record is lost, and the state and the way to resume can be seen. | #55 test 5 | 3 (lock holder's exit, spent budget); 4 (embedding timeout, 429, failure) | 1.1, 3.1, 7.6 | applies | Pending windows carry "a reason (failed, budget spent, cooldown, waiting for the owner to finish) and a next_attempt_at" (3.1). Embedding states in doctor: now stated in 7.6 (B.2 #55 item 6). |
+| 55-5 | An abnormal exit of the lock holder, an embedding timeout, 429 or failure, and recovery after the budget runs out: no new record is lost, and the state and the way to resume can be seen. | #55 test 5 | 3 (lock holder's exit, spent budget); 4 (embedding timeout, 429, failure) | 1.1, 3.1, 7.6 | applies | Pending windows carry "a reason (failed, budget spent, cooldown, waiting for the owner) and a next_attempt_at" (3.1). Embedding states in doctor: now stated in 7.6 (B.2 #55 item 6). |
 | 55-6 | A document changed, deleted or re-indexed during processing never publishes an old vector. #46's and #50's deletion and generation consistency does not regress. | #55 test 6 | 4 (re-derivation), 5 (forget in flight) | 4.10, 6.2 | applies | 6.2 step 1: "Every write of derived rows (claims, digests, FTS, vectors) also checks the deny-list inside its own transaction". Tying a vector to its text is now stated in 4.10 (row 46-2; B.2 #46 item 2). |
 | 55-7 | While embeddings wait, hook writes, search over existing memory and curated results for another agent all work. Waiting time and resource use are measured before and after. | #55 test 7 | 4 | 1.1, 2.1, 4.1 | applies | 2.1: "Hooks never wait on AI." 4.1: "Hooks never wait on the network and never embed a query." |
 | 55-8 | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass. What was verified on WSL, Windows native and the M1 iMac and what was not is stated. | #55 test 8 | 4 | 1.1, 7.1 | applies | |
