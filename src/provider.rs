@@ -885,6 +885,31 @@ pub(crate) const CODEX_OFF: [&str; 7] = [
     "image_generation",
 ];
 
+/// The flags of the curator's `codex exec` after `exec`, with the permission profile `profile`;
+/// the isolation gate runs them too.
+pub(crate) fn codex_exec_flags(profile: &str) -> Vec<String> {
+    // Events on stdout, for the token usage of `turn.completed`; the answer is last.json.
+    let mut flags = vec!["--json", "--ephemeral", "--skip-git-repo-check"];
+    // No user config (its MCP servers, some with auto-approved tools) and no execpolicy rules; the
+    // login still comes from CODEX_HOME. Commands run under a permission profile that hides the
+    // disk and the network: `--sandbox read-only` let them read HOME
+    // (docs/spike/curator-isolation.md).
+    flags.extend(["--ignore-user-config", "--ignore-rules"]);
+    // Tools the profile does not govern: plugins (their MCP servers), apps, the built-in browser
+    // (itself an MCP server), computer use, image generation, and web search.
+    for feature in CODEX_OFF {
+        flags.extend(["--disable", feature]);
+    }
+    flags.extend(["-c", r#"web_search="disabled""#, "-c", profile]);
+    flags.extend([
+        "-c",
+        r#"default_permissions="curator""#,
+        "-c",
+        "model_reasoning_effort=low",
+    ]);
+    flags.into_iter().map(str::to_owned).collect()
+}
+
 /// The command for one headless CLI run, with the smallest configuration each one allows: no
 /// hooks, no tools, no session persistence, no user settings or MCP servers where the CLI can skip
 /// them. The prompt never goes on the command line (any local user can read another process's
@@ -979,26 +1004,7 @@ fn headless_command(
                 .arg("--output-schema")
                 .arg(write("schema.json", schema_text)?);
             cmd.arg("-o").arg(dir.join("last.json"));
-            // Events on stdout, for the token usage of `turn.completed`; the answer is last.json.
-            cmd.args(["--json", "--ephemeral", "--skip-git-repo-check"]);
-            // No user config (its MCP servers, some with auto-approved tools) and no execpolicy
-            // rules; the login still comes from CODEX_HOME. Commands run under a permission profile
-            // that hides the disk and the network:
-            // `--sandbox read-only` let them read HOME (docs/spike/curator-isolation.md).
-            cmd.args(["--ignore-user-config", "--ignore-rules"]);
-            // Tools the profile does not govern: plugins (their MCP servers), apps, the built-in
-            // browser (itself an MCP server), computer use, image generation, and web search.
-            for feature in CODEX_OFF {
-                cmd.args(["--disable", feature]);
-            }
-            cmd.args(["-c", r#"web_search="disabled""#]);
-            cmd.args([
-                "-c",
-                CODEX_PROFILE,
-                "-c",
-                r#"default_permissions="curator""#,
-            ]);
-            cmd.args(["-c", "model_reasoning_effort=low"]);
+            cmd.args(codex_exec_flags(CODEX_PROFILE));
             // A path that is not UTF-8 keeps codex's own instructions (only the saving is lost).
             // ~/.codex/AGENTS.md is still sent: codex reads it with no setting to skip it.
             let instructions = write("instructions.md", CURATOR_SYSTEM)?;
@@ -1223,6 +1229,16 @@ fn cli_headless(
     let text = match cli {
         "claude" => claude_stream(&stdout).map_err(|e| e.with_usage(usage).resting(rest))?,
         "codex" => {
+            // The gate checks each call that codex still reads `web_search`; a search in the
+            // events means it was on anyway, and the window may have gone into a query. The
+            // answer is dropped, and codex stops until the owner acts.
+            if codex_searched(&stdout) {
+                return Err(
+                    CallError::other("codex searched the web although web_search is off")
+                        .with_usage(usage)
+                        .resting(Some(providers_db::OWNER_HOLD)),
+                );
+            }
             use std::io::Read;
             let mut text = String::new();
             std::fs::File::open(&last)
@@ -1243,6 +1259,14 @@ fn cli_headless(
         cool_until: rest,
         rate: None,
     })
+}
+
+/// Whether codex's `--json` events hold a web search.
+fn codex_searched(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .any(|v| v["item"]["type"] == "web_search")
 }
 
 /// The schema-validated object out of a CLI's JSON envelope: `structured_output` (claude, agy),
@@ -1896,6 +1920,12 @@ mod tests {
                 reasoning: Some(12)
             }
         );
+        assert!(!codex_searched(&codex));
+        let searched = format!(
+            "{codex}\n{}",
+            r#"{"type":"item.completed","item":{"id":"i","type":"web_search","query":"q"}}"#
+        );
+        assert!(codex_searched(&searched));
         assert_eq!(usage_cli("grok", "{}"), Usage::default());
         let huge = json!({"usage": {"input_tokens": i64::MAX, "cache_read_input_tokens": 1}});
         assert_eq!(usage_cli("claude", &huge.to_string()).prompt, None);

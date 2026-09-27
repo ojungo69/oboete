@@ -2,14 +2,15 @@
 //! text, so it runs only when it provably cannot act. The gate tests capability, never obedience:
 //! a model that declines a planted instruction proves nothing (agy declined one holding 57 tools).
 //! - claude reports its tools in every call's init event, which `provider::claude_stream` checks.
-//! - codex reports none, so its permission profile is probed directly, with no model, before each
-//!   call (about 0.3 s): a write, a read and a fetch must each run and be refused, and the hosted
-//!   tools the profile does not govern must be off. Probing each time, not once per version,
-//!   follows whatever else changes what codex resolves: its managed requirements (from /etc or a
-//!   workspace's cloud bundle), the user's config, an MDM profile. Two of the curator's flags are not
-//!   probed, since codex prints no effective config: `-c web_search="disabled"` and
-//!   `--ignore-user-config` (the MCP servers of the owner's config; docs/spike/curator-isolation.md
-//!   shows it drops them).
+//! - codex reports none, so it is probed with no model before each call (about 3.4 s): its
+//!   permission profile directly (`codex sandbox`), then its own `codex exec` against a scripted
+//!   model (`codex_probe`), which tries a write, a read and a fetch through the exec tool, in the
+//!   sandbox and escalated, in the root and in a sub-agent. Each must be refused. The hosted tools
+//!   the profile does not govern must be off, and codex must still read `web_search`. Probing each
+//!   time, not once per version, follows whatever else changes what codex resolves: its managed
+//!   requirements (from /etc or a workspace's cloud bundle), the user's config, an MDM profile.
+//!   `--ignore-user-config` is not probed (the MCP servers of the owner's config;
+//!   docs/spike/curator-isolation.md shows it drops them).
 //! - Any other CLI (agy, grok) has no proven no-tool mode and is skipped (spec 6.5, R05).
 
 use std::net::TcpListener;
@@ -148,6 +149,17 @@ fn probe(exe: &Path, home: &Path, cwd: &Path) -> Result<(), String> {
             return Err(format!("codex feature {f} is not off"));
         }
     }
+    // Hosted web search is a setting, not a feature: `web_search="disabled"` holds only while
+    // this codex still reads that key. An invalid value must be refused by name, with the value
+    // the curator sets among the allowed ones; a codex that renamed the key would ignore any value.
+    let bad = command(exe, cwd)
+        .args(["features", "list", "-c", r#"web_search="oboete-probe""#])
+        .output()
+        .map_err(|e| format!("codex features list: {e}"))?;
+    let said = String::from_utf8_lossy(&bad.stderr);
+    if bad.status.success() || !(said.contains("`web_search`") && said.contains("`disabled`")) {
+        return Err("codex does not refuse an invalid web_search setting".into());
+    }
     let canary = Canary::new(home).map_err(|e| format!("canary: {e}"))?;
     // What the command said, and its exit code.
     let run = |argv: &[&str]| -> Result<(Option<i32>, String), String> {
@@ -196,7 +208,69 @@ fn probe(exe: &Path, home: &Path, cwd: &Path) -> Result<(), String> {
             "a command reached the network (curl exit {code:?})"
         ));
     }
-    Ok(())
+    probe_exec(exe, cwd, &canary)
+}
+
+/// The curator's `codex exec`, with the wider profile and only its model changed, against the
+/// scripted model of `codex_probe`, which makes it try each action through its exec tool: in the
+/// sandbox, escalated, and in a sub-agent. `codex sandbox` above shows the profile refuses; this
+/// shows the model's own paths do not step around it (0.155.1 runs a spawned sub-agent under
+/// `--ephemeral`, and a command may ask to run outside the sandbox).
+fn probe_exec(exe: &Path, cwd: &Path, canary: &Canary) -> Result<(), String> {
+    let quote = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', r"'\''"));
+    let model = crate::codex_probe::Model::start(crate::codex_probe::Actions {
+        cat: format!("cat {}", quote(&canary.secret)),
+        touch: format!("touch {}", quote(&canary.dir.join("touched"))),
+        curl: format!("curl -sS --noproxy '*' --max-time 3 {}", canary.url()),
+    })
+    .map_err(|e| format!("the probe's model: {e}"))?;
+    let base = format!("http://127.0.0.1:{}/v1", model.port);
+    let mut cmd = command(exe, cwd);
+    cmd.arg("exec")
+        .args(crate::provider::codex_exec_flags(&probe_profile()))
+        .args(["-c", r#"model_provider="oboeteprobe""#])
+        .args(["-c", r#"model_providers.oboeteprobe.name="oboete probe""#])
+        .args([
+            "-c",
+            &format!(
+                "model_providers.oboeteprobe.base_url={}",
+                toml::Value::from(base)
+            ),
+        ])
+        .args(["-c", r#"model_providers.oboeteprobe.wire_api="responses""#])
+        .args(["-c", "model_providers.oboeteprobe.request_max_retries=0"])
+        .args(["-c", "model_providers.oboeteprobe.stream_max_retries=0"])
+        .arg("probe")
+        // The probe's model is on this machine, never behind the environment's proxy.
+        .env("NO_PROXY", "127.0.0.1")
+        .env("no_proxy", "127.0.0.1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn().map_err(|e| format!("codex exec: {e}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("the probe's codex exec did not finish".into());
+            }
+        }
+    }
+    let touched = std::fs::read_dir(&canary.dir).is_ok_and(|d| {
+        d.flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("touched"))
+    });
+    let seen = model
+        .seen
+        .lock()
+        .map_err(|_| "the probe's model failed")?
+        .clone();
+    crate::codex_probe::verdict(&seen, &canary.content(), touched)
 }
 
 /// A private directory under HOME with a secret in it, and a port on 127.0.0.1 that accepts
@@ -256,8 +330,12 @@ impl Drop for Canary {
 mod tests {
     use super::*;
 
-    const FEATURES: &str = "for f in plugins apps browser_use browser_use_external \
-        in_app_browser computer_use image_generation; do echo \"$f  stable  false\"; done";
+    /// `codex features list` as 0.155.1 answers it: an invalid `web_search` refused by name.
+    const FEATURES: &str = "case \"$*\" in *web_search=*) \
+        echo 'Error: unknown variant `oboete-probe`, expected one of `disabled`, `cached`' >&2; \
+        echo 'in `web_search`' >&2; exit 1;; esac; for f in plugins apps browser_use \
+        browser_use_external in_app_browser computer_use image_generation; do \
+        echo \"$f  stable  false\"; done";
 
     /// A fake codex whose `sandbox` runs `body` with the probe's argv as "$@"; every call is
     /// appended to `calls`.
@@ -272,6 +350,7 @@ mod tests {
                  --version) echo 'codex-cli 9.9.9';;\n\
                  features) {features};;\n\
                  sandbox) while [ \"$1\" != -- ]; do shift; done; shift\n{body};;\n\
+                 exec) {EXEC};;\n\
                  esac\n",
                 calls.display()
             ),
@@ -280,6 +359,17 @@ mod tests {
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         exe
     }
+
+    /// codex exec as 0.155.1 ran the scripted model's calls in the dogfood user, told to the model
+    /// by `post <agent> <outputs>`: each action refused in the sandbox and escalated, in the root
+    /// and in the sub-agent.
+    const EXEC: &str = r#"for a in "$@"; do case "$a" in model_providers.oboeteprobe.base_url=*)
+        url=${a#*=}; url=${url#\"}; url=${url%\"};; esac; done
+        post() { curl -sS -o /dev/null --data "{\"client_metadata\":{\"x-codex-turn-metadata\":\"{\\\"agent_name\\\":\\\"$1\\\"}\"},\"input\":[$2]}" "$url/responses"; }
+        out() { printf '{"type":"custom_tool_call_output","output":"%s"}' "$1"; }
+        S=$(out "cat:1:cat: x: No such file or directory\ntouch:1:touch: cannot touch x\ncurl:${CURL:-7}:curl: (7) Failed\n")
+        E=$(out "cat:threw:rejected\ntouch:threw:rejected\ncurl:threw:rejected\n")
+        post /root "$S,$E,$(out spawned)"; post /root/probe "$S,$E""#;
 
     /// The refusals codex 0.155.1 gave under the probe profile in the dogfood user.
     const REFUSES: &str = "case \"$1\" in true) exit 0;;\n\
@@ -359,6 +449,30 @@ mod tests {
             Gate::Passed
         );
         println!("{:?}", doctor(&db).unwrap());
+    }
+
+    #[test]
+    fn a_fetch_the_model_makes_through_codex_fails_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = fake(dir.path(), FEATURES, REFUSES);
+        let script = std::fs::read_to_string(&exe).unwrap();
+        std::fs::write(&exe, script.replace("${CURL:-7}", "28")).unwrap();
+        let (_, g) = gate_with(&exe, dir.path());
+        assert_eq!(
+            g,
+            Gate::Failed("the curl probe was not refused (28)".into())
+        );
+    }
+
+    #[test]
+    fn a_codex_that_no_longer_reads_web_search_fails_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let ignores = FEATURES.replace("*web_search=*)", "*web_search_renamed=*)");
+        let (_, g) = gate_with(&fake(dir.path(), &ignores, REFUSES), dir.path());
+        assert_eq!(
+            g,
+            Gate::Failed("codex does not refuse an invalid web_search setting".into())
+        );
     }
 
     #[test]

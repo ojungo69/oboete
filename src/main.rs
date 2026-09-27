@@ -6,6 +6,7 @@
 mod backup;
 mod budget;
 mod capture;
+mod codex_probe;
 mod config;
 mod consumer;
 mod db;
