@@ -159,7 +159,7 @@ impl Consumer for Manifest {
         "manifest"
     }
 
-    fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> {
+    fn step(&mut self, raw: &Raw, k: &Connection, _device: &str, after: i64) -> Result<i64> {
         schema(k)?;
         let device = raw.device();
         // After a rewind, from seq 1: its checkpoint moves back, which the worker takes.

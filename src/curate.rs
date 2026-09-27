@@ -191,6 +191,58 @@ type Hidden = Option<Vec<(usize, usize)>>;
 /// One event as a window shows it: its line before its long text through the gate, its long text
 /// (the part a window may split) with what the gate hides in it found once on the whole of it, and
 /// its session.
+/// The long text of `e`: what windows are cut in and evidence offsets count bytes of (a prompt's,
+/// a reply's, a summary's or a tool output's text, with the fields this renderer does not know
+/// after it). `None` for an event with nothing to read.
+pub fn long_text(e: &Event) -> Option<String> {
+    let body: Value = serde_json::from_str(&e.body).unwrap_or(Value::String(e.body.clone()));
+    long_of(&e.kind, &body)
+}
+
+fn long_of(kind: &str, body: &Value) -> Option<String> {
+    // Fields this renderer does not know (a key a redaction rule masked at capture) are shown
+    // after the long text rather than dropped unseen.
+    let rest = |known: &[&str]| -> Option<String> {
+        let other: serde_json::Map<String, Value> = body
+            .as_object()?
+            .iter()
+            .filter(|(k, _)| !known.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        (!other.is_empty()).then(|| without_markers(&Value::Object(other).to_string()))
+    };
+    let joined = |long: Option<String>, known: &[&str]| match (long, rest(known)) {
+        (Some(l), Some(r)) => Some(format!("{l}\n{r}")),
+        (l, r) => l.or(r),
+    };
+    match kind {
+        "prompt" if body["omitted"] == true => None,
+        "prompt" | "envelope" => joined(text(&body["prompt"]), &["prompt", "omitted"]),
+        "reply" => joined(text(&body["assistant"]), &["assistant"]),
+        "compaction" => joined(text(&body["summary"]), &["summary", "trigger"]),
+        "tool" => {
+            let known = [
+                "tool",
+                "input",
+                "output",
+                "failed",
+                "agent_id",
+                "interrupted",
+            ];
+            Some(joined(text(&body["output"]), &known).unwrap_or_default())
+        }
+        _ => None,
+    }
+}
+
+fn text(v: &Value) -> Option<String> {
+    match v {
+        Value::Null => None,
+        Value::String(t) => Some(without_markers(t)),
+        v => Some(without_markers(&v.to_string())),
+    }
+}
+
 struct Prepared<'r> {
     rules: &'r Rules,
     head: String,
@@ -204,47 +256,15 @@ struct Prepared<'r> {
 impl<'r> Prepared<'r> {
     fn new(e: &Event, rules: &'r Rules) -> Self {
         let body: Value = serde_json::from_str(&e.body).unwrap_or(Value::String(e.body.clone()));
-        let text = |v: &Value| match v {
-            Value::Null => None,
-            Value::String(t) => Some(without_markers(t)),
-            v => Some(without_markers(&v.to_string())),
-        };
-        // Fields this renderer does not know (a key a redaction rule masked at capture) are shown
-        // after the long text rather than dropped unseen.
-        let rest = |known: &[&str]| -> Option<String> {
-            let other: serde_json::Map<String, Value> = body
-                .as_object()?
-                .iter()
-                .filter(|(k, _)| !known.contains(&k.as_str()))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            (!other.is_empty()).then(|| without_markers(&Value::Object(other).to_string()))
-        };
-        let joined = |long: Option<String>, known: &[&str]| match (long, rest(known)) {
-            (Some(l), Some(r)) => Some(format!("{l}\n{r}")),
-            (l, r) => l.or(r),
-        };
+        let long = long_of(&e.kind, &body);
         let gate = |s: &str| crate::redact::outbound_with(s, rules);
-        let (head, long, tool) = match e.kind.as_str() {
-            "prompt" if body["omitted"] == true => ("[user] (not stored)".into(), None, false),
-            "prompt" | "envelope" => {
-                let who = if e.kind == "prompt" {
-                    "[user]"
-                } else {
-                    "[harness]"
-                };
-                let long = joined(text(&body["prompt"]), &["prompt", "omitted"]);
-                (who.to_owned(), long, false)
-            }
-            "reply" => (
-                "[assistant]".into(),
-                joined(text(&body["assistant"]), &["assistant"]),
-                false,
-            ),
-            "compaction" => match joined(text(&body["summary"]), &["summary", "trigger"]) {
-                Some(s) => ("[compaction summary]".into(), Some(s), false),
-                None => ("[compaction]".into(), None, false),
-            },
+        let (head, tool) = match e.kind.as_str() {
+            "prompt" if body["omitted"] == true => ("[user] (not stored)".into(), false),
+            "prompt" => ("[user]".into(), false),
+            "envelope" => ("[harness]".into(), false),
+            "reply" => ("[assistant]".into(), false),
+            "compaction" if long.is_some() => ("[compaction summary]".into(), false),
+            "compaction" => ("[compaction]".into(), false),
             "tool" => {
                 let input = text(&body["input"]).unwrap_or_default();
                 // Cut like a split event: a secret across the cut is found in the whole input.
@@ -259,19 +279,12 @@ impl<'r> Prepared<'r> {
                     ""
                 };
                 let name = gate(body["tool"].as_str().unwrap_or("?"));
-                let head = format!("[tool {name}{failed}] input: {input}\n  output:");
-                let known = [
-                    "tool",
-                    "input",
-                    "output",
-                    "failed",
-                    "agent_id",
-                    "interrupted",
-                ];
-                let long = joined(text(&body["output"]), &known).unwrap_or_default();
-                (head, Some(long), true)
+                (
+                    format!("[tool {name}{failed}] input: {input}\n  output:"),
+                    true,
+                )
             }
-            _ => (String::new(), None, false), // a session's start or end: nothing to read
+            _ => (String::new(), false), // a session's start or end: nothing to read
         };
         // Each label through the gate on its own, before it is shortened or joined.
         let place = match (&e.repo, &e.branch) {
@@ -600,7 +613,7 @@ fn hold(failed: &[Fallback], now: i64) -> (&'static str, i64, bool) {
     }
 }
 
-fn sha256_hex(text: &str) -> String {
+pub(crate) fn sha256_hex(text: &str) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(text.as_bytes())
         .iter()

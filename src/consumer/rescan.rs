@@ -40,7 +40,7 @@ impl Consumer for Rescan {
     /// With the rules the records were last scanned with, it only follows new records (capture
     /// scanned them). With other rules, it starts again from seq 1: its checkpoint moves back,
     /// which the worker takes from any consumer.
-    fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> {
+    fn step(&mut self, raw: &Raw, k: &Connection, _device: &str, after: i64) -> Result<i64> {
         schema(k)?;
         // Settings that do not load stop capture too, and doctor names them. The batch is passed
         // over (a checkpoint that never moves keeps the worker from exiting), and the version is

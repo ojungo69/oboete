@@ -87,7 +87,7 @@ impl Consumer for Fts {
         "fts"
     }
 
-    fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> {
+    fn step(&mut self, raw: &Raw, k: &Connection, _device: &str, after: i64) -> Result<i64> {
         schema(k)?;
         let recs = raw.after(raw.device(), after, BATCH)?;
         for r in &recs {

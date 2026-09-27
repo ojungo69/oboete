@@ -9,12 +9,26 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// One derived view of raw.db. `step` processes records of this device after `after` and returns
-/// its new checkpoint; `rewind` deletes its output above `to`. Both run inside the knowledge.db
-/// transaction that also moves the checkpoint (D10).
+/// One derived view of raw.db. `step` processes what `device` holds after `after` and returns its
+/// new checkpoint; `rewind` deletes its output above `to`. Both run inside the knowledge.db
+/// transaction that also moves the checkpoint (D10). A consumer of raw's records reads this
+/// device's (other devices' come with sync, milestone 6); a consumer of the op log (milestone 3
+/// D4) reads every device that has ops, and counts in op_seqs.
 pub trait Consumer {
     fn name(&self) -> &'static str;
-    fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64>;
+    /// The devices `step` is called for.
+    fn devices(&self, raw: &Raw) -> Result<Vec<String>> {
+        Ok(vec![raw.device().to_owned()])
+    }
+    /// The highest checkpoint `device` allows: a checkpoint above it lost its commits (MUST-M14).
+    fn top(&self, raw: &Raw, device: &str) -> Result<i64> {
+        raw.max_seq_of(device)
+    }
+    /// Where its checkpoints are kept: `checkpoint::SEQS`, or `checkpoint::OPS` for op_seqs.
+    fn checkpoints(&self) -> &'static str {
+        checkpoint::SEQS
+    }
+    fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64>;
     fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()>;
 }
 
@@ -25,6 +39,8 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
         // The rescan first: the tombstones it appends are in raw before the others read a record.
         Box::new(crate::consumer::rescan::Rescan::new(home)),
         Box::new(crate::consumer::fts::Fts),
+        // The op log's claims (milestone 3 D4), in op_seqs of every device that has ops.
+        Box::new(crate::consumer::claims::Claims),
         Box::new(crate::consumer::manifest::Manifest::new(home)),
         Box::new(crate::consumer::gaps::Gaps::new(home)),
         Box::new(crate::consumer::compress::Compress),
@@ -42,20 +58,21 @@ pub fn drain(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>])
 
 /// One batch for each consumer: whether any checkpoint moved.
 fn pass(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> Result<bool> {
-    let device = raw.device().to_owned();
     let mut advanced = false;
     for c in consumers.iter_mut() {
-        // Immediate: a step reads before it writes, and a deferred transaction whose snapshot
-        // another writer moved meanwhile (a search creating its table in a fresh knowledge.db)
-        // fails its first write with SQLITE_BUSY at once, which stopped the worker.
-        let tx = k.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let at = checkpoint::get(&tx, c.name(), &device)?;
-        let next = c.step(raw, &tx, at)?;
-        if next != at {
-            checkpoint::set(&tx, c.name(), &device, next)?;
-            advanced = true;
+        for device in c.devices(raw)? {
+            // Immediate: a step reads before it writes, and a deferred transaction whose snapshot
+            // another writer moved meanwhile (a search creating its table in a fresh knowledge.db)
+            // fails its first write with SQLITE_BUSY at once, which stopped the worker.
+            let tx = k.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let at = checkpoint::get_in(&tx, c.checkpoints(), c.name(), &device)?;
+            let next = c.step(raw, &tx, &device, at)?;
+            if next != at {
+                checkpoint::set_in(&tx, c.checkpoints(), c.name(), &device, next)?;
+                advanced = true;
+            }
+            tx.commit()?;
         }
-        tx.commit()?;
     }
     Ok(advanced)
 }
@@ -101,10 +118,11 @@ const POLL: Duration = Duration::from_millis(200);
 
 /// Whether any consumer's checkpoint for this device is below raw's highest seq.
 fn behind(raw: &Raw, k: &Connection, consumers: &[Box<dyn Consumer>]) -> Result<bool> {
-    let top = raw.max_seq()?;
     for c in consumers {
-        if checkpoint::get(k, c.name(), raw.device())? < top {
-            return Ok(true);
+        for device in c.devices(raw)? {
+            if checkpoint::get_in(k, c.checkpoints(), c.name(), &device)? < c.top(raw, &device)? {
+                return Ok(true);
+            }
         }
     }
     Ok(false)
@@ -472,7 +490,7 @@ mod tests {
         fn name(&self) -> &'static str {
             "seen"
         }
-        fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> {
+        fn step(&mut self, raw: &Raw, k: &Connection, _device: &str, after: i64) -> Result<i64> {
             k.execute(
                 "CREATE TABLE IF NOT EXISTS seen(device TEXT, seq INTEGER)",
                 [],
@@ -492,6 +510,82 @@ mod tests {
         }
     }
 
+    /// A consumer of the op log: it counts in op_seqs, for every device with ops.
+    struct OpsSeen;
+    impl Consumer for OpsSeen {
+        fn name(&self) -> &'static str {
+            "ops-seen"
+        }
+        fn devices(&self, raw: &Raw) -> Result<Vec<String>> {
+            raw.op_devices()
+        }
+        fn top(&self, raw: &Raw, device: &str) -> Result<i64> {
+            raw.max_op_seq_of(device)
+        }
+        fn checkpoints(&self) -> &'static str {
+            checkpoint::OPS
+        }
+        fn step(&mut self, raw: &Raw, _: &Connection, device: &str, after: i64) -> Result<i64> {
+            Ok(raw
+                .ops_after(device, after, 100)?
+                .last()
+                .map_or(after, |o| o.op_seq))
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn two_ops(raw: &mut Raw) {
+        let op = || (raw::OpKind::Claim, serde_json::json!({}));
+        raw.append_ops(&[op(), op()]).unwrap();
+    }
+
+    /// MUST-M14 for the op log: a restore that lost ops moves an op consumer back to what raw
+    /// holds, even once the device has no op left, and leaves the record consumers where they
+    /// were.
+    #[test]
+    fn a_restore_that_loses_ops_rewinds_the_op_consumers_only() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        raw.append(&raw::test_event("a")).unwrap();
+        two_ops(&mut raw);
+        let mut k = knowledge::open(home.path()).unwrap();
+        let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Seen), Box::new(OpsSeen)];
+        drain(&raw, &mut k, &mut consumers).unwrap();
+        let device = raw.device().to_owned();
+        let ops_at = |k: &Connection| checkpoint::get_in(k, checkpoint::OPS, "ops-seen", &device);
+        assert_eq!(ops_at(&k).unwrap(), 2);
+        Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute("DELETE FROM ops", [])
+            .unwrap();
+        let moved = checkpoint::rewind(&raw, &k, &mut consumers).unwrap();
+        assert_eq!(moved, [("ops-seen".to_owned(), 2, 0)]);
+        assert_eq!(ops_at(&k).unwrap(), 0);
+        assert_eq!(checkpoint::get(&k, "seen", &device).unwrap(), 1);
+    }
+
+    /// Compression waits for what every record consumer has passed: an op consumer's checkpoint
+    /// is an op_seq, kept apart, and does not hold it back.
+    #[test]
+    fn compression_waits_for_the_record_consumers_only() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        for body in ["a", "b", "c"] {
+            raw.append(&raw::test_event(body)).unwrap();
+        }
+        two_ops(&mut raw);
+        let mut k = knowledge::open(home.path()).unwrap();
+        let mut consumers: Vec<Box<dyn Consumer>> = vec![
+            Box::new(Seen),
+            Box::new(OpsSeen),
+            Box::new(crate::consumer::compress::Compress),
+        ];
+        drain(&raw, &mut k, &mut consumers).unwrap();
+        assert_eq!(checkpoint::get(&k, "compress", raw.device()).unwrap(), 3);
+    }
+
     /// A consumer whose step reads, lets another connection write to knowledge.db (as a search
     /// does when it creates its table in a fresh file), then writes itself. Once. The other
     /// writer's thread is kept for the test to join.
@@ -501,7 +595,7 @@ mod tests {
         fn name(&self) -> &'static str {
             "raced"
         }
-        fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> {
+        fn step(&mut self, raw: &Raw, k: &Connection, _device: &str, after: i64) -> Result<i64> {
             if std::mem::replace(&mut self.1, true) {
                 return Ok(after.max(raw.max_seq()?));
             }
@@ -591,7 +685,7 @@ mod tests {
         fn name(&self) -> &'static str {
             "panics"
         }
-        fn step(&mut self, raw: &Raw, _: &Connection, after: i64) -> Result<i64> {
+        fn step(&mut self, raw: &Raw, _: &Connection, _device: &str, after: i64) -> Result<i64> {
             let top = raw.max_seq()?;
             assert!(top < self.0, "a crash in the middle of a run");
             Ok(after.max(top))

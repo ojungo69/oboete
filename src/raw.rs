@@ -134,6 +134,8 @@ pub struct Op {
     pub kind: OpKind,
     pub ts: i64,
     pub body: serde_json::Value,
+    /// The first op_seq of the `append_ops` it came in: one window's ops share it.
+    pub batch: i64,
 }
 
 /// One ops row as stored: the body is JSON text.
@@ -396,9 +398,14 @@ impl Raw {
 
     /// This device's highest seq, 0 for an empty store.
     pub fn max_seq(&self) -> Result<i64> {
+        self.max_seq_of(&self.device)
+    }
+
+    /// `device`'s highest seq, 0 before its first record.
+    pub fn max_seq_of(&self, device: &str) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COALESCE(MAX(seq), 0) FROM records WHERE device = ?1",
-            [&self.device],
+            [device],
             |r| r.get(0),
         )?)
     }
@@ -628,6 +635,7 @@ impl Raw {
                     ts: r.ts,
                     body: serde_json::from_str(&r.body)
                         .with_context(|| format!("op {}: body", r.op_seq))?,
+                    batch: r.batch,
                 })
             })
             .collect()
@@ -655,11 +663,32 @@ impl Raw {
 
     /// This device's highest op seq, 0 before its first op.
     pub fn max_op_seq(&self) -> Result<i64> {
+        self.max_op_seq_of(&self.device)
+    }
+
+    /// `device`'s highest op seq, 0 before its first op.
+    pub fn max_op_seq_of(&self, device: &str) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COALESCE(MAX(op_seq), 0) FROM ops WHERE device = ?1",
-            [&self.device],
+            [device],
             |r| r.get(0),
         )?)
+    }
+
+    /// The devices that have ops (this one's, and from milestone 6 other devices' through sync),
+    /// read each pass: a skip-scan over the primary key, one step per device, as `devices`.
+    pub fn op_devices(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare(
+            "WITH RECURSIVE d(device) AS (
+               SELECT MIN(device) FROM ops
+               UNION ALL
+               SELECT (SELECT MIN(device) FROM ops WHERE device > d.device) FROM d
+               WHERE d.device IS NOT NULL
+             )
+             SELECT device FROM d WHERE device IS NOT NULL",
+        )?;
+        let rows = st.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// D9: the time of this device's newest record a hook wrote, walking down from the top past
