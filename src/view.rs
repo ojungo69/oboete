@@ -389,22 +389,47 @@ fn stats(conn: &rusqlite::Connection, home: &Path, repo: Option<&str>) -> Result
             .unwrap_or(0)
     };
     let db_bytes = bytes("oboete.db") + bytes("oboete.db-wal");
-    let mut stmt = conn.prepare(
-        "SELECT provider, SUM(outcome = 'ok'), SUM(outcome IN ('error', 'invalid')),
-                SUM(outcome = 'wait'), CAST(AVG(CASE WHEN outcome = 'ok' THEN ms END) AS INTEGER)
-         FROM provider_calls WHERE ts >= ?1 GROUP BY provider ORDER BY 2 DESC, provider",
-    )?;
-    let providers: Vec<Value> = stmt
-        .query_map(params![db::now_ms() - 7 * 86_400_000], |r| {
-            Ok(json!({
-                "provider": r.get::<_, String>(0)?,
-                "ok": r.get::<_, i64>(1)?,
-                "failed": r.get::<_, i64>(2)?,
-                "waited": r.get::<_, i64>(3)?,
-                "avg_ms": r.get::<_, Option<i64>>(4)?,
-            }))
-        })?
-        .collect::<Result<_, _>>()?;
+    // Curation calls are in providers.db (milestone 3, Task 1); embedding calls and calls from
+    // before it are still in oboete.db.
+    let since = db::now_ms() - 7 * 86_400_000;
+    let mut per: std::collections::BTreeMap<String, [i64; 4]> = Default::default();
+    let mut add = |c: &rusqlite::Connection| -> Result<()> {
+        let mut stmt = c.prepare(
+            "SELECT provider, SUM(outcome = 'ok'), SUM(outcome IN ('error', 'invalid')),
+                    SUM(outcome = 'wait'), SUM(CASE WHEN outcome = 'ok' THEN ms ELSE 0 END)
+             FROM provider_calls WHERE ts >= ?1 GROUP BY provider",
+        )?;
+        let rows = stmt.query_map(params![since], |r| {
+            let n: [i64; 4] = [r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?];
+            Ok((r.get::<_, String>(0)?, n))
+        })?;
+        for row in rows {
+            let (name, n) = row?;
+            let e = per.entry(name).or_default();
+            for i in 0..4 {
+                e[i] += n[i];
+            }
+        }
+        Ok(())
+    };
+    add(conn)?;
+    if home.join("providers.db").exists() {
+        add(&crate::providers_db::open(home)?)?;
+    }
+    let mut providers: Vec<(String, [i64; 4])> = per.into_iter().collect();
+    providers.sort_by(|a, b| b.1[0].cmp(&a.1[0]).then_with(|| a.0.cmp(&b.0)));
+    let providers: Vec<Value> = providers
+        .into_iter()
+        .map(|(name, [ok, failed, waited, ok_ms])| {
+            json!({
+                "provider": name,
+                "ok": ok,
+                "failed": failed,
+                "waited": waited,
+                "avg_ms": (ok > 0).then(|| ok_ms / ok),
+            })
+        })
+        .collect();
     Ok(json!({
         "sessions": {"total": sessions.0, "summarized": sessions.1, "pending": sessions.2,
                      "injected": sessions.3, "first": sessions.4, "last": sessions.5},
@@ -462,6 +487,24 @@ mod tests {
         db::insert_event(&conn, "s2", "Stop", 1_700_000_100_000, "{}").unwrap();
         db::record_call(&conn, "groq", "ok", 800, None).unwrap();
         db::record_call(&conn, "groq", "error", 100, Some("429")).unwrap();
+        // Curation calls since milestone 3 are in providers.db; stats merges both.
+        let p = crate::providers_db::open(&dir).unwrap();
+        for (provider, outcome, ms) in [("groq", "ok", 400), ("mistral", "error", 50)] {
+            crate::providers_db::record(
+                &p,
+                &crate::providers_db::Call {
+                    provider,
+                    role: "curator",
+                    span: "s1",
+                    outcome,
+                    ms,
+                    detail: None,
+                    bytes_out: 1,
+                    usage: Default::default(),
+                },
+            )
+            .unwrap();
+        }
         let v = Viewer {
             home: dir.clone(),
             cwd_repo: "/r".into(),
@@ -641,8 +684,10 @@ mod tests {
                 st["providers"][0]["failed"].as_i64(),
                 st["providers"][0]["avg_ms"].as_i64()
             ),
-            (Some(1), Some(1), Some(800))
+            (Some(2), Some(1), Some(600))
         );
+        assert_eq!(st["providers"][1]["provider"], "mistral");
+        assert_eq!(st["providers"][1]["failed"], 1);
         let del = |t: &str| v.route("DELETE", t, &[HOST, TOKEN]).status;
         // The version marker moves on knowledge, prompts and sessions, not on other raw events.
         let v0 = get("/api/version")["v"].as_str().unwrap().to_string();

@@ -47,6 +47,8 @@ struct CallError {
     status: Option<u16>,
     retry_after_s: Option<f64>,
     message: String,
+    /// Tokens a billed answer used even though it was unusable (malformed, wrong shape).
+    usage: Usage,
 }
 
 impl CallError {
@@ -55,7 +57,11 @@ impl CallError {
             status: None,
             retry_after_s: None,
             message: message.into(),
+            usage: Usage::default(),
         }
+    }
+    fn with_usage(self, usage: Usage) -> Self {
+        Self { usage, ..self }
     }
     fn invalid(&self) -> bool {
         self.message.starts_with("invalid output")
@@ -142,9 +148,10 @@ impl<'a> Chain<'a> {
                 if fits(&v, schema) {
                     Ok((v, usage))
                 } else {
-                    Err(CallError::other(
-                        "invalid output: the answer does not match the schema",
-                    ))
+                    Err(
+                        CallError::other("invalid output: the answer does not match the schema")
+                            .with_usage(usage),
+                    )
                 }
             });
             let ms = started.elapsed().as_millis() as i64;
@@ -162,7 +169,7 @@ impl<'a> Chain<'a> {
                 }
                 Err(e) => {
                     let outcome = if e.invalid() { "invalid" } else { "error" };
-                    record(outcome, ms, Some(&e.message), !forced, Usage::default())?;
+                    record(outcome, ms, Some(&e.message), !forced, e.usage)?;
                     // A forced failure is a test of the fallback, not of the provider.
                     if !forced {
                         providers_db::set_state(conn, &name, next_state(state, &e))?;
@@ -371,16 +378,21 @@ fn openai_compat(
             status: Some(status),
             retry_after_s,
             message,
+            usage: Usage::default(),
         });
     }
     let v: Value = serde_json::from_str(&text)
         .map_err(|_| CallError::other("invalid output: response is not JSON"))?;
+    let usage = usage_openai(&v);
     let content = v["choices"][0]["message"]["content"]
         .as_str()
-        .ok_or_else(|| CallError::other("invalid output: no choices[0].message.content"))?;
-    let answer = serde_json::from_str(unfence(content))
-        .map_err(|e| CallError::other(format!("invalid output: content is not JSON ({e})")))?;
-    Ok((answer, usage_openai(&v)))
+        .ok_or_else(|| {
+            CallError::other("invalid output: no choices[0].message.content").with_usage(usage)
+        })?;
+    let answer = serde_json::from_str(unfence(content)).map_err(|e| {
+        CallError::other(format!("invalid output: content is not JSON ({e})")).with_usage(usage)
+    })?;
+    Ok((answer, usage))
 }
 
 /// A token count from a provider's answer: a non-negative integer, else nothing.
@@ -854,13 +866,17 @@ fn cli_headless(
             let mut text = String::new();
             std::fs::File::open(&last)
                 .and_then(|f| f.take(MAX_RESPONSE_BYTES).read_to_string(&mut text))
-                .map_err(|_| CallError::other("invalid output: codex wrote no last message"))?;
+                .map_err(|_| {
+                    CallError::other("invalid output: codex wrote no last message")
+                        .with_usage(usage)
+                })?;
             text
         }
-        "agy" => agy_result(&stdout)?,
+        "agy" => agy_result(&stdout).map_err(|e| e.with_usage(usage))?,
         _ => stdout.into_owned(),
     };
-    Ok((extract_structured(cli, &text)?, usage))
+    let answer = extract_structured(cli, &text).map_err(|e| e.with_usage(usage))?;
+    Ok((answer, usage))
 }
 
 /// The schema-validated object out of a CLI's JSON envelope: `structured_output` (claude, agy),
@@ -1471,6 +1487,7 @@ mod tests {
             status: Some(403),
             retry_after_s: None,
             message: "http 403 (moderation)".into(),
+            usage: Usage::default(),
         };
         assert_eq!(cooldown_for(&flagged), None);
     }
@@ -1542,6 +1559,7 @@ mod tests {
             status: Some(429),
             retry_after_s: None,
             message: "http 429".into(),
+            usage: Usage::default(),
         };
         let mut s = providers_db::State::default();
         let mut waits = Vec::new();
@@ -1588,6 +1606,33 @@ mod tests {
             (44_000..=46_000).contains(&(s.down_until - db::now_ms())),
             "{s:?}"
         );
+    }
+
+    #[test]
+    fn an_unusable_answer_still_records_the_tokens_it_billed() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let usage = json!({"prompt_tokens": 100, "completion_tokens": 20});
+        // Not JSON, then JSON of the wrong shape: both billed, both unusable.
+        for content in ["no json here", "{\"other\": 1}"] {
+            let answer = json!({"choices": [{"message": {"content": content}}], "usage": usage});
+            let (url, _) = serve_once(answer.to_string().into_bytes(), "");
+            let schema = json!({"type": "object", "required": ["summary"]});
+            assert!(
+                Chain::new(&[stub(url)], &conn)
+                    .run("curator", "s", "p", &schema)
+                    .is_err()
+            );
+        }
+        let rows: Vec<(String, Option<i64>, Option<i64>)> = conn
+            .prepare("SELECT outcome, prompt_tokens, completion_tokens FROM provider_calls")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let want = ("invalid".to_string(), Some(100), Some(20));
+        assert_eq!(rows, [want.clone(), want]);
     }
 
     #[test]
@@ -1731,6 +1776,7 @@ mod tests {
             status,
             retry_after_s: None,
             message: msg.into(),
+            usage: Usage::default(),
         };
         assert_eq!(cooldown_for(&err(Some(429), "")), Some(COOLDOWN_429));
         assert_eq!(
@@ -1832,6 +1878,7 @@ mod tests {
             status: Some(429),
             retry_after_s: retry,
             message: String::new(),
+            usage: Usage::default(),
         };
         assert_eq!(cooldown_for(&e(None)), Some(COOLDOWN_429));
         assert_eq!(cooldown_for(&e(Some(10.0))), Some(COOLDOWN_429));
