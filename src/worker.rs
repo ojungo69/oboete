@@ -25,6 +25,7 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
         Box::new(crate::consumer::rescan::Rescan::new(home)),
         Box::new(crate::consumer::fts::Fts),
         Box::new(crate::consumer::manifest::Manifest::new(home)),
+        Box::new(crate::consumer::gaps::Gaps::new(home)),
         Box::new(crate::consumer::compress::Compress),
     ]
 }

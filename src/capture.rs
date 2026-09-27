@@ -141,7 +141,14 @@ pub fn events(
                 _ => return Vec::new(),
             }
         }
-        "SessionEnd" => ("end", json!({"reason": payload.get("reason").map(clean)})),
+        "SessionEnd" => {
+            let mut body = json!({"reason": payload.get("reason").map(clean)});
+            // Task 11: the worker counts the transcript's turns against raw's.
+            if let Some(path) = str_field(payload, &["transcript_path"]) {
+                body["transcript"] = json!(path);
+            }
+            ("end", body)
+        }
         _ => return Vec::new(), // PreToolUse and the rest carry nothing to keep
     };
     vec![capture(agent, kind, body, payload, ts, settings)]
