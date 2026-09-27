@@ -3060,6 +3060,37 @@ mod tests {
         assert_eq!(status(&later, "L2", quote), "proposed");
     }
 
+    /// `oboete pref add` stores no `<private>` part, in its event or its claim, and records nothing
+    /// for a preference over the claim cap or one that is all private.
+    #[test]
+    fn pref_add_keeps_no_private_part_and_refuses_what_it_cannot_store() {
+        let home = tempfile::tempdir().unwrap();
+        let text = "Use tabs <private>for customer acme</private> always.";
+        crate::claims::pref_add(home.path(), text).unwrap();
+        let raw = crate::raw::open(home.path()).unwrap();
+        let stored: Vec<String> = raw
+            .export_lines(0, 1 << 20)
+            .unwrap()
+            .into_iter()
+            .chain(raw.export_op_lines(0, 1 << 20).unwrap())
+            .map(|(_, l)| l)
+            .collect();
+        assert_eq!(stored.len(), 2);
+        assert!(stored.iter().all(|l| !l.contains("acme")), "{stored:?}");
+        let (seq, ops) = (raw.max_seq().unwrap(), raw.max_op_seq().unwrap());
+        let long = "word ".repeat(250);
+        for text in [long.as_str(), "<private>all of it</private>"] {
+            assert!(
+                crate::claims::pref_add(home.path(), text).is_err(),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            (raw.max_seq().unwrap(), raw.max_op_seq().unwrap()),
+            (seq, ops)
+        );
+    }
+
     /// Spec 3.3, #144: global scope only through `oboete pref add`; the directive is its own
     /// claim, never a line of a window, and a curator's global draft stays repo.
     #[test]

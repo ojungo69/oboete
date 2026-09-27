@@ -282,10 +282,20 @@ pub fn correct(
 pub fn pref_add(home: &std::path::Path, text: &str) -> Result<String> {
     let settings = crate::capture::Settings::load(home)?;
     let c = crate::capture::directive(text, crate::db::now_ms(), &settings);
+    // What the gate stores: the quote reads verbatim there. Checked before either append, so a
+    // preference that cannot be a claim leaves no event behind.
+    let quote = crate::curate::long_text(&c.event).unwrap_or_default();
+    if quote.trim().is_empty() {
+        anyhow::bail!("nothing is left to record once the <private> parts are removed");
+    }
+    if quote.chars().count() > MAX_BODY_CHARS {
+        anyhow::bail!(
+            "a preference can be at most {MAX_BODY_CHARS} characters; this one has {}",
+            quote.chars().count()
+        );
+    }
     let mut raw = crate::raw::open(home)?;
     let seq = raw.append_with_ledger(&c.event, &c.ledger, settings.rules.version())?;
-    // What the gate stored: the quote reads verbatim there.
-    let quote = crate::curate::long_text(&c.event).unwrap_or_default();
     let evidence = Evidence {
         device: raw.device().to_owned(),
         seq,
