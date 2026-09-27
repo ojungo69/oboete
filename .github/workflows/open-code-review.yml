@@ -25,7 +25,7 @@ jobs:
        (github.event_name == 'workflow_dispatch' &&
         github.ref == format('refs/heads/{0}', github.event.repository.default_branch)))
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       pull-requests: write
@@ -79,10 +79,10 @@ jobs:
           llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC || 'false' }}
           # The upstream default contains a provider-specific "thinking" field.
           llm_extra_body: '{}'
-          llm_reasoning_effort: high
-          llm_timeout: '180'
+          llm_reasoning_effort: max
+          llm_timeout: '300'
           review_task_timeout: '5'
-          effort: medium
+          effort: high
           language: Japanese
           review_concurrency: '2'
           max_tokens_budget: '500000'
@@ -110,10 +110,10 @@ jobs:
           llm_model: ${{ vars.OCR_LLM_FALLBACK_MODEL }}
           llm_use_anthropic: ${{ vars.OCR_LLM_USE_ANTHROPIC || 'false' }}
           llm_extra_body: '{}'
-          llm_reasoning_effort: high
-          llm_timeout: '180'
+          llm_reasoning_effort: max
+          llm_timeout: '300'
           review_task_timeout: '5'
-          effort: medium
+          effort: high
           language: Japanese
           review_concurrency: '2'
           max_tokens_budget: '500000'
