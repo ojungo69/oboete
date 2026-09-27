@@ -1218,9 +1218,9 @@ pub(crate) fn curator_env(
 
 /// Check claude's stream (spec 6.5) and pick out its result. The `system/init` event must report
 /// no tool, MCP server or plugin and the permission mode asked for, and no turn may use a tool:
-/// otherwise the answer is discarded, since a curator that can act might have acted. A
-/// `rate_limit_event` with `allowed_warning` or `rejected` rests claude until its reset (Claude
-/// decision C1), and `credits_required` for a day, until the owner acts.
+/// otherwise the answer is discarded, since a curator that can act might have acted.
+/// `credits_required` fails the call and holds claude until the owner acts; how the stream's
+/// `rate_limit_event` rests claude is `claude_rest`'s (Claude decision C1).
 fn claude_stream(stdout: &str) -> Result<String, CallError> {
     // A line that does not parse could be the assistant turn that used a tool: the run is
     // discarded rather than judged on the lines that did parse.
@@ -1289,34 +1289,47 @@ fn claude_stream(stdout: &str) -> Result<String, CallError> {
     Ok(result.to_string())
 }
 
-/// When claude's stream said its subscription should rest: the reset of a `rate_limit_event` with
-/// `allowed_warning` or `rejected` (Claude decision C1), at most `MAX_SUBSCRIPTION_REST` away, or
-/// `OWNER_HOLD` for `credits_required`. Lines that do not parse are passed over: this only ever
+/// When claude's stream said its subscription should rest (Claude decision C1, at claude-mem's
+/// lines since 2026-09-28, owner delegated): a window's reset once it is used to its line (five
+/// hours 95%, a week 93%, the Sonnet week 92%), or in the last quarter hour of a five-hour window
+/// used to 85%, or once it is rejected; with no utilization, once it warns. Paid overage rests it
+/// at once, until the owner acts when no reset comes with it, and so does `credits_required`.
+/// At most `MAX_SUBSCRIPTION_REST` away. Lines that do not parse are passed over: this only ever
 /// adds rest, and a killed run's last line is often cut.
 fn claude_rest(stdout: &str) -> Option<i64> {
     let now = db::now_ms();
-    let events = stdout
+    let infos: Vec<Value> = stdout
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|e| e["type"] == "rate_limit_event");
-    if events
-        .clone()
-        .any(|e| e["rate_limit_info"]["errorCode"] == "credits_required")
-    {
+        .filter(|e| e["type"] == "rate_limit_event")
+        .map(|e| e["rate_limit_info"].clone())
+        .collect();
+    let reset = |i: &Value| i["resetsAt"].as_i64().map(|s| s.saturating_mul(1000));
+    if infos.iter().any(|i| {
+        i["errorCode"] == "credits_required" || i["isUsingOverage"] == true && reset(i).is_none()
+    }) {
         return Some(providers_db::OWNER_HOLD);
     }
-    events
-        .filter(|e| {
-            matches!(
-                e["rate_limit_info"]["status"].as_str(),
-                Some("allowed_warning" | "rejected")
-            )
-        })
-        .filter_map(|e| e["rate_limit_info"]["resetsAt"].as_i64())
-        .map(|s| {
-            s.saturating_mul(1000)
-                .min(now + MAX_SUBSCRIPTION_REST.as_millis() as i64)
-        })
+    let rests = |i: &Value| {
+        let window = i["rateLimitType"].as_str().unwrap_or("");
+        let line = match window {
+            "five_hour" | "overage" => 0.95,
+            "seven_day_sonnet" => 0.92,
+            _ => 0.93,
+        };
+        let ending = window == "five_hour" && reset(i).is_some_and(|t| t - now <= 15 * 60_000);
+        i["status"] == "rejected"
+            || i["isUsingOverage"] == true
+            || match i["utilization"].as_f64() {
+                Some(used) => used >= line || ending && used >= 0.85,
+                None => i["status"] == "allowed_warning",
+            }
+    };
+    infos
+        .iter()
+        .filter(|i| rests(i))
+        .filter_map(reset)
+        .map(|t| t.min(now + MAX_SUBSCRIPTION_REST.as_millis() as i64))
         .max()
 }
 
@@ -1788,6 +1801,56 @@ mod tests {
         .map(|v| v.to_string())
         .join("\n");
         assert!(claude_stream(&used).is_err());
+    }
+
+    /// Claude decision C1 at claude-mem's lines (owner delegated, 2026-09-28): a window used to
+    /// its line (five hours 95%, a week 93%, the Sonnet week 92%), the last quarter hour of a
+    /// five-hour window used to 85%, a rejection, or paid overage rests claude until the reset; a
+    /// warning under the line does not. An event with no utilization rests it on a warning.
+    #[test]
+    fn claude_rests_at_claude_mems_usage_lines() {
+        let now_s = db::now_ms() / 1000;
+        let later = now_s + 86_400;
+        let rest = |info: Value| {
+            let rate = json!({"type": "rate_limit_event", "rate_limit_info": info});
+            claude_rest(
+                &[clean_init(), rate, result_of("{}")]
+                    .map(|v| v.to_string())
+                    .join("\n"),
+            )
+        };
+        let at = |status: &str, window: &str, used: f64| {
+            json!({"status": status, "resetsAt": later, "rateLimitType": window,
+                "utilization": used})
+        };
+        // The owner's week on 2026-09-27: a warning at 87%, under the week's line.
+        assert_eq!(rest(at("allowed_warning", "seven_day", 0.87)), None);
+        assert_eq!(
+            rest(at("allowed_warning", "seven_day", 0.93)),
+            Some(later * 1000)
+        );
+        assert_eq!(
+            rest(at("allowed", "seven_day_sonnet", 0.92)),
+            Some(later * 1000)
+        );
+        assert_eq!(rest(at("allowed", "five_hour", 0.94)), None);
+        assert_eq!(rest(at("allowed", "five_hour", 0.95)), Some(later * 1000));
+        assert_eq!(rest(at("rejected", "seven_day", 0.10)), Some(later * 1000));
+        let soon = now_s + 600;
+        let ending = |used: f64| {
+            json!({"status": "allowed", "resetsAt": soon, "rateLimitType": "five_hour",
+                "utilization": used})
+        };
+        assert_eq!(rest(ending(0.85)), Some(soon * 1000));
+        assert_eq!(rest(ending(0.84)), None);
+        let paid = json!({"status": "allowed", "resetsAt": later, "rateLimitType": "overage",
+            "utilization": 0.01, "isUsingOverage": true});
+        assert_eq!(rest(paid), Some(later * 1000));
+        let paid = json!({"status": "allowed", "isUsingOverage": true});
+        assert_eq!(rest(paid), Some(providers_db::OWNER_HOLD));
+        let bare = |status: &str| json!({"status": status, "resetsAt": later});
+        assert_eq!(rest(bare("allowed_warning")), Some(later * 1000));
+        assert_eq!(rest(bare("allowed")), None);
     }
 
     #[test]
