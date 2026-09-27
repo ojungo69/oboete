@@ -479,25 +479,38 @@ pub fn rebuild(home: &Path) -> Result<()> {
     use anyhow::Context;
     let held = lock(home)?
         .ok_or_else(|| anyhow::anyhow!("a worker is running; try again when it has exited"))?;
-    let suffix = format!("rebuilding-{}", crate::db::now_ms());
-    // The sidecars first, as a quarantine does: never the file's name free with an old WAL
-    // beside it that SQLite would replay into the new file.
-    let mut aside = Vec::new();
-    for ext in ["-wal", "-shm", ""] {
-        let from = home.join(format!("knowledge.db{ext}"));
-        if from.exists() {
-            let to = home.join(format!("knowledge.db{ext}.{suffix}"));
-            std::fs::rename(&from, &to).with_context(|| format!("move {}", from.display()))?;
-            aside.push(to);
-        }
-    }
+    let (kept, aside) = set_aside(home)?;
     run_holding(home, 0, consumers(home), || {}, Some(held), None).with_context(|| {
-        format!("rebuild; the old knowledge.db is kept as knowledge.db.{suffix}")
+        format!(
+            "rebuild; the old knowledge.db is kept as {}",
+            kept.display()
+        )
     })?;
     for f in aside {
         std::fs::remove_file(&f).with_context(|| format!("remove {}", f.display()))?;
     }
     Ok(())
+}
+
+/// knowledge.db moved aside as `knowledge.db.rebuilding-<ms>`, its sidecars with it under the
+/// names SQLite looks for beside that file (`...-wal`, `...-shm`), so the kept file opens with
+/// its last commits. Under raw.lock held exclusively, as a restore moves it: every reader of
+/// knowledge.db holds raw.db open (a shared hold) while it reads. The sidecars first: never the
+/// file's name free with an old WAL beside it that SQLite would replay into the new file.
+fn set_aside(home: &Path) -> Result<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
+    use anyhow::Context;
+    let _swap = crate::raw::lock_for_swap(home)?;
+    let kept = home.join(format!("knowledge.db.rebuilding-{}", crate::db::now_ms()));
+    let mut aside = Vec::new();
+    for ext in ["-wal", "-shm", ""] {
+        let from = home.join(format!("knowledge.db{ext}"));
+        if from.exists() {
+            let to = std::path::PathBuf::from(format!("{}{ext}", kept.display()));
+            std::fs::rename(&from, &to).with_context(|| format!("move {}", from.display()))?;
+            aside.push(to);
+        }
+    }
+    Ok((kept, aside))
 }
 
 pub fn run_once(home: &Path) -> Result<()> {
@@ -572,6 +585,45 @@ mod tests {
     fn two_ops(raw: &mut Raw) {
         let op = || (raw::OpKind::Claim, serde_json::json!({}));
         raw.append_ops(&[op(), op()]).unwrap();
+    }
+
+    /// A rebuild keeps the old knowledge.db under names SQLite opens as one database: a commit
+    /// still in its WAL reads there.
+    #[test]
+    fn the_file_a_rebuild_sets_aside_opens_with_its_wal() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        {
+            let k = knowledge::open(p).unwrap();
+            k.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(7);")
+                .unwrap();
+            // A copy of the file and its WAL while the commit is only in the WAL (the last
+            // close would checkpoint it), put back in place once the connection is gone.
+            for ext in ["", "-wal"] {
+                std::fs::copy(
+                    p.join(format!("knowledge.db{ext}")),
+                    p.join(format!("copy{ext}")),
+                )
+                .unwrap();
+            }
+        }
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(p.join(format!("knowledge.db{ext}")));
+        }
+        for ext in ["", "-wal"] {
+            std::fs::rename(
+                p.join(format!("copy{ext}")),
+                p.join(format!("knowledge.db{ext}")),
+            )
+            .unwrap();
+        }
+        let (kept, aside) = set_aside(p).unwrap();
+        assert!(!p.join("knowledge.db").exists() && aside.contains(&kept));
+        let x: i64 = Connection::open(&kept)
+            .unwrap()
+            .query_row("SELECT x FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(x, 7);
     }
 
     /// MUST-M14 for the op log: a restore that lost ops moves an op consumer back to what raw

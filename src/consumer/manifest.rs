@@ -1206,11 +1206,15 @@ mod tests {
         store.append_ops(&[tabs, spaces, flaky]).unwrap();
         worker::run_once(home.path()).unwrap();
         let knowledge = home.path().join("knowledge.db");
+        // Each read holds raw.db open only while it reads, as a hook does: a rebuild moves
+        // knowledge.db aside only while no store is open.
         let snapshot = || {
             let k = rusqlite::Connection::open(&knowledge).unwrap();
             let claims = crate::claims::current(&k, "r").unwrap();
+            let store = raw::open(home.path()).unwrap();
             (claims, shown(home.path(), &store).unwrap())
         };
+        drop(store);
         let before = snapshot();
         assert_eq!(before.0.len(), 2);
         // Only the old file has it.
