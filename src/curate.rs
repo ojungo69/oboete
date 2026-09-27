@@ -503,7 +503,11 @@ fn grouped(pieces: &[Piece]) -> (String, Vec<Line>) {
 /// with the event's own byte offsets. `None` when it is in neither, or only where the gate hid
 /// something (a quote with a mask in it, or text a mask stands for).
 pub fn locate(window: &Window, line: &str, quote: &str) -> Option<crate::claims::Evidence> {
-    let line = window.lines.iter().find(|l| l.id == line)?;
+    // Models write `L4` as `4`, `[L4]` or `l4` too: 67 of 140 drafts were lost to that alone
+    // (docs/milestone-1.md, dev label drafts).
+    let id = line.trim().trim_matches(['[', ']', '"', '\'', ' ']);
+    let id = id.strip_prefix(['L', 'l']).unwrap_or(id);
+    let line = window.lines.iter().find(|l| l.id[1..] == *id)?;
     let source = line.source.as_ref()?;
     if quote.is_empty() || !line.text.contains(quote) {
         return None;
@@ -783,9 +787,19 @@ pub struct Draft {
     pub scope: String,
     pub body: String,
     pub quote: String,
+    /// A number is taken as its line's id.
+    #[serde(deserialize_with = "line_id")]
     pub line: String,
     #[serde(default)]
     pub supersedes: Vec<String>,
+}
+
+fn line_id<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<String, D::Error> {
+    match <Value as serde::Deserialize>::deserialize(d)? {
+        Value::String(s) => Ok(s),
+        Value::Number(n) => Ok(n.to_string()),
+        _ => Err(serde::de::Error::custom("a line id is text or a number")),
+    }
 }
 
 /// Why an answer gives this window nothing: each is a provider that failed (D11).
@@ -1256,6 +1270,26 @@ mod tests {
         let at = usize::try_from(ev.offset).unwrap();
         assert!(at > usize::try_from(first.to_offset.unwrap()).unwrap());
         assert_eq!(&long[at..at + yaml.len()], yaml);
+    }
+
+    #[test]
+    fn a_line_id_the_curator_writes_another_way_is_still_found() {
+        let (_h, mut raw, dev) = store();
+        raw.append(&prompt("We decided to use tabs everywhere."))
+            .unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &Rules::default())
+            .unwrap()
+            .unwrap();
+        let quote = "use tabs everywhere";
+        for id in ["L1", "1", "[L1]", "l1", " L1 ", "\"L1\""] {
+            assert!(locate(&w, id, quote).is_some(), "{id}");
+        }
+        assert_eq!(locate(&w, "L2", quote), None);
+        // A line id written as a number is taken too.
+        let answer = json!({"claims": [{"id": "c1", "kind": "decision", "status": "decided",
+            "speaker": "user", "scope": "repo", "body": "b", "quote": quote, "line": 1,
+            "supersedes": []}], "summary": "s"});
+        assert_eq!(check(&w, &answer), None);
     }
 
     #[test]

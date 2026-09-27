@@ -355,7 +355,9 @@ impl<'a> Chain<'a> {
                             "invalid output: the answer gave nothing to keep ({outcome}){not_json}"
                         )
                     }
-                    None if fits(&a.value, schema) => return Ok(a),
+                    // What the caller's check accepts is usable, whatever the schema says (a line
+                    // id written as a number).
+                    None if self.check.is_some() || fits(&a.value, schema) => return Ok(a),
                     None => "invalid output: the answer does not match the schema".into(),
                 };
                 Err(CallError::other(why)
