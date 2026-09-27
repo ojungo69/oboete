@@ -84,8 +84,13 @@ pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Resul
             let from = if r.seq == seq { offset.unwrap_or(0) } else { 0 };
             let mut piece = render(&e, r.seq, from, None, rules);
             // A session's first record also brings its heading.
-            if !piece.text.is_empty() && !sessions.contains(&piece.session) {
-                piece.tokens += crate::budget::estimate(&piece.session) + 1;
+            let heading = if sessions.contains(&piece.session) {
+                0
+            } else {
+                crate::budget::estimate(&format!("## {}\n", piece.session))
+            };
+            if !piece.text.is_empty() {
+                piece.tokens += heading;
             }
             if used + piece.tokens <= budget {
                 used += piece.tokens;
@@ -103,7 +108,13 @@ pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Resul
                     piece = elide(&e, r.seq, rules);
                     elided.push(r.seq);
                 } else {
-                    piece = split(&e, r.seq, from, budget.saturating_sub(used), rules);
+                    piece = split(
+                        &e,
+                        r.seq,
+                        from,
+                        budget.saturating_sub(used + heading),
+                        rules,
+                    );
                 }
                 pieces.push(piece);
             } else {
@@ -150,9 +161,10 @@ fn empty(seq: i64) -> Piece {
     }
 }
 
-/// An event's line before its long text, the long text (the part a window may split), and
-/// whether it is a tool call. The gate trims each, so they are joined by a space after it.
-fn parts(e: &Event) -> (String, Option<String>, bool) {
+/// An event's line before its long text, through the gate, the long text (the part a window may
+/// split, gated where it is cut), and whether it is a tool call. The gate trims each part, so they
+/// are joined by a space after it.
+fn parts(e: &Event, rules: &Rules) -> (String, Option<String>, bool) {
     let body: Value = serde_json::from_str(&e.body).unwrap_or(Value::String(e.body.clone()));
     // A field capture replaced whole with a base64 marker is an object: shown as its JSON.
     let text = |key: &str| match &body[key] {
@@ -175,13 +187,18 @@ fn parts(e: &Event) -> (String, Option<String>, bool) {
                 Value::Null => String::new(),
                 v => v.to_string(),
             };
-            let input: String = input.chars().take(TOOL_INPUT_CHARS).collect();
+            // Cut like a split event: a secret across the cut is found in the whole input.
+            let cut = input
+                .char_indices()
+                .nth(TOOL_INPUT_CHARS)
+                .map_or(input.len(), |(i, _)| i);
+            let input = crate::redact::outbound_part(&input, 0..cut, rules);
             let failed = if body["failed"] == true {
                 " failed"
             } else {
                 ""
             };
-            let name = body["tool"].as_str().unwrap_or("?");
+            let name = crate::redact::outbound_with(body["tool"].as_str().unwrap_or("?"), rules);
             let head = format!("[tool {name}{failed}] input: {input}\n  output:");
             (head, Some(text("output").unwrap_or_default()), true)
         }
@@ -191,8 +208,7 @@ fn parts(e: &Event) -> (String, Option<String>, bool) {
 
 /// `e`'s text from byte `from` of its long text to `to` (its end when none), through the gate.
 fn render(e: &Event, seq: i64, from: i64, to: Option<i64>, rules: &Rules) -> Piece {
-    let (head, long, tool) = parts(e);
-    let mut text = crate::redact::outbound_with(&head, rules);
+    let (mut text, long, tool) = parts(e, rules);
     if let Some(long) = &long {
         let start = boundary(long, from);
         let end = to.map_or(long.len(), |t| boundary(long, t));
@@ -208,7 +224,7 @@ fn render(e: &Event, seq: i64, from: i64, to: Option<i64>, rules: &Rules) -> Pie
         from,
         to,
         session: heading(e, rules),
-        tokens: crate::budget::estimate(&text),
+        tokens: line_tokens(&text),
         turn: e.kind == "prompt" && from == 0,
         tool,
         text,
@@ -217,16 +233,15 @@ fn render(e: &Event, seq: i64, from: i64, to: Option<i64>, rules: &Rules) -> Pie
 
 /// A tool call whose output is larger than a window: its line, and the output's size only.
 fn elide(e: &Event, seq: i64, rules: &Rules) -> Piece {
-    let (head, long, _) = parts(e);
+    let (head, long, _) = parts(e, rules);
     let bytes = long.map_or(0, |l| l.len());
-    let text = crate::redact::outbound_with(&head, rules)
-        + &format!(" ({bytes} bytes of output, seen, elided)");
+    let text = head + &format!(" ({bytes} bytes of output, seen, elided)");
     Piece {
         seq,
         from: 0,
         to: None,
         session: heading(e, rules),
-        tokens: crate::budget::estimate(&text),
+        tokens: line_tokens(&text),
         turn: false,
         tool: true,
         text,
@@ -236,7 +251,7 @@ fn elide(e: &Event, seq: i64, rules: &Rules) -> Piece {
 /// The part of `e` from `from` that fits in `room` tokens: as far as fits, back to a line's end
 /// when one is in its second half, and at least one character so that curation moves on.
 fn split(e: &Event, seq: i64, from: i64, room: u32, rules: &Rules) -> Piece {
-    let (_, long, _) = parts(e);
+    let (_, long, _) = parts(e, rules);
     let long = long.unwrap_or_default();
     let start = boundary(&long, from);
     let fits = |end: usize| render(e, seq, from, Some(end as i64), rules).tokens <= room;
@@ -259,6 +274,16 @@ fn split(e: &Event, seq: i64, from: i64, room: u32, rules: &Rules) -> Piece {
     let end = long[half..lo].rfind('\n').map_or(lo, |i| half + i + 1);
     let to = (end < long.len()).then_some(end as i64);
     render(e, seq, from, to, rules)
+}
+
+/// What a piece's line takes in a window, its newline included: the sum over a window's lines and
+/// headings is never less than the estimate of the text they make (each is rounded up).
+fn line_tokens(text: &str) -> u32 {
+    if text.is_empty() {
+        0
+    } else {
+        crate::budget::estimate(text) + 1
+    }
 }
 
 /// `at` moved back to a character boundary of `s`, within it.
@@ -498,5 +523,44 @@ mod tests {
             (1, MAX_RECORDS as i64, true)
         );
         assert_eq!(w.text, "");
+    }
+
+    #[test]
+    fn a_secret_across_the_tool_input_cut_does_not_leave() {
+        let (h, _raw, _) = store();
+        std::fs::write(
+            h.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme-[A-Za-z0-9]{12}' }]\n",
+        )
+        .unwrap();
+        let rules = Rules::load(h.path()).unwrap();
+        let secret = format!("acme-{}", "7Qx9Lm2Vb4Nr");
+        // The input is cut at 2,000 characters, in the middle of the secret.
+        let input = "a".repeat(TOOL_INPUT_CHARS - 6) + " " + &secret + " rest";
+        let e = event(
+            "tool",
+            serde_json::json!({"tool": "Bash", "input": input, "output": "ok", "failed": false}),
+        );
+        let text = render(&e, 1, 0, None, &rules).text;
+        assert!(!text.contains("acme-") && !text.contains("rest"), "{text}");
+    }
+
+    #[test]
+    fn a_window_that_splits_its_first_event_stays_within_its_budget_with_the_heading() {
+        let (_h, mut raw, dev) = store();
+        let reply = "one line of the answer\n".repeat(100);
+        let long_session = Event {
+            session: "a-long-session-label-".repeat(10),
+            ..event("reply", serde_json::json!({"assistant": reply}))
+        };
+        raw.append(&long_session).unwrap();
+        for budget in [120, 200, 300] {
+            let w = next_window(&raw, &dev, budget, &Rules::default())
+                .unwrap()
+                .unwrap();
+            assert!(w.to_offset.is_some());
+            let took = crate::budget::estimate(&w.text);
+            assert!(took <= budget, "{budget}: {took}");
+        }
     }
 }
