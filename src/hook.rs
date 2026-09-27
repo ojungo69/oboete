@@ -17,11 +17,17 @@ const MAX_FIELD: usize = 8_000;
 const REDACT_OVERLAP: usize = 4_000;
 /// Set on the curator CLIs oboete runs, so the curator's own session is never captured.
 pub const SKIP_ENV: &str = "OBOETE_SKIP";
-/// Blocks inside a prompt that are not part of what was asked, removed before anything is
-/// stored, in this order: context an IDE or another memory tool puts in front of the text (it may
-/// quote `<private>`), then `<private>`, the developer's opt-out (claude-mem's tag; unclosed, it
-/// hides the rest, where claude-mem would keep it all).
-pub(crate) const STRIP_BLOCKS: &[&str] = &["ide_opened_file", "hook_context", "private"];
+/// Blocks that are not part of what was asked or read, removed before anything is stored, in this
+/// order: context an IDE or another memory tool puts in front of the text (it may quote
+/// `<private>`), claude-mem's copy of the past that it writes into instruction files an agent
+/// reads, then `<private>`, the developer's opt-out (claude-mem's tag; unclosed, it hides the
+/// rest, where claude-mem would keep it all).
+pub(crate) const STRIP_BLOCKS: &[&str] = &[
+    "ide_opened_file",
+    "hook_context",
+    "claude-mem-context",
+    "private",
+];
 /// Prompts that are harness traffic, not typed: background task and teammate notifications and
 /// the /loop sentinel (13.5% of the 15,218 prompts claude-mem stored on this machine).
 /// ponytail: fixed prefix list; add one when a new envelope shows up as a prompt card.
@@ -691,9 +697,57 @@ pub fn strip_blocks(s: &str, unclosed_private_hides_rest: bool) -> String {
 pub(crate) fn without_blocks(s: &str, unclosed_private_hides_rest: bool) -> String {
     let mut out = s.to_string();
     for tag in STRIP_BLOCKS {
-        out = strip_tag(&out, tag, unclosed_private_hides_rest && *tag == "private");
+        out = if *tag == "claude-mem-context" {
+            let mut kept = String::with_capacity(out.len());
+            let mut pos = 0;
+            for (start, end) in memory_context_blocks(&out) {
+                kept.push_str(&out[pos..start]);
+                pos = end;
+            }
+            kept.push_str(&out[pos..]);
+            kept
+        } else {
+            strip_tag(&out, tag, unclosed_private_hides_rest && *tag == "private")
+        };
     }
     out
+}
+
+/// The byte ranges of claude-mem's `<claude-mem-context>` blocks in `s`. claude-mem writes both
+/// tags on lines of their own, so only such a line is a tag, with or without the line number a
+/// Read puts in front (`1\t`, `1→`, `1|`, agy's `1: `); a tag inside a line (claude-mem's own
+/// source quoting it, a pair of them too) stays text. A read cut inside a block leaves one tag
+/// unpaired: the text before a lone closer (a read that began inside) or after a lone opener
+/// (one that ended inside) is the block's too.
+pub(crate) fn memory_context_blocks(s: &str) -> Vec<(usize, usize)> {
+    static TAG: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?m)^[ \t]*(?:\d+(?:\t|\x{2192}|\||:)[ \t]?)?<(/?)claude-mem-context>[ \t]*\r?$",
+        )
+        .expect("tag pattern")
+    });
+    let (mut blocks, mut open, mut from) = (Vec::new(), None, 0);
+    for m in TAG.captures_iter(s) {
+        let whole = m.get(0).expect("match");
+        let end = whole.end() + usize::from(s[whole.end()..].starts_with('\n'));
+        match (m[1].is_empty(), open) {
+            (true, None) => open = Some(whole.start()),
+            (false, Some(start)) => {
+                blocks.push((start, end));
+                (open, from) = (None, end);
+            }
+            // A lone closer: the read began inside the block.
+            (false, None) => {
+                blocks.push((from, end));
+                from = end;
+            }
+            (true, Some(_)) => {}
+        }
+    }
+    if let Some(start) = open {
+        blocks.push((start, s.len()));
+    }
+    blocks
 }
 
 /// One pass over `<tag` openers and `</tag>` closers: each closer pairs with the nearest open
@@ -2735,6 +2789,35 @@ mod tests {
         let start = std::time::Instant::now();
         strip_blocks(&many, true);
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    /// claude-mem writes its context block into instruction files (AGENTS.md, CLAUDE.md): a file an
+    /// agent reads keeps its own text, and the other memory's copy of the past is not stored.
+    #[test]
+    fn another_memorys_context_block_is_not_stored() {
+        // Built, so this file does not hold the pair it strips when an agent reads it.
+        let tag = "claude-mem-context";
+        let file = format!(
+            "<{tag}>\n# Memory Context\n\n### Sep 27\n| #1 | decided to use tabs |\n</{tag}>\n\n# Rules\nUse spaces."
+        );
+        assert_eq!(strip_blocks(&file, false), "# Rules\nUse spaces.");
+        // A read cut before the block ends (`head`, a Read with a limit), with or without line
+        // numbers: from the opener's line on, the text is claude-mem's.
+        let cut = format!("# Title\n<{tag}>\n# Memory Context\n| #1 | decided to use tabs |");
+        assert_eq!(strip_blocks(&cut, false), "# Title");
+        let numbered = format!("     1\u{2192}<{tag}>\n     2\u{2192}# Memory Context");
+        assert_eq!(strip_blocks(&numbered, false), "");
+        let agy = format!("1: <{tag}>\n2: # Memory Context");
+        assert_eq!(strip_blocks(&agy, false), "");
+        // A read that starts inside the block: up to its closing line, the text is claude-mem's.
+        let inside = format!("| #1 | decided to use tabs |\n</{tag}>\n\n# Rules\nUse spaces.");
+        assert_eq!(strip_blocks(&inside, false), "# Rules\nUse spaces.");
+        // A mention inside a line (claude-mem's own source) is text, a pair of them too.
+        let source = format!("  const startTag = '<{tag}>';\n  write(startTag);");
+        assert_eq!(strip_blocks(&source, false), source.trim());
+        let pair =
+            format!("const open = '<{tag}>';\nconst body = render();\nconst close = '</{tag}>';");
+        assert_eq!(strip_blocks(&pair, false), pair);
     }
 
     #[test]
