@@ -40,6 +40,17 @@ pub struct Through {
 pub struct Line {
     pub text: String,
     pub uids: Vec<String>,
+    /// Each cited claim's `version` when the digest was written, in `uids`' order: a claim
+    /// corrected or derived again since reads differently, and the digest is stale (#161). None
+    /// in a digest op that predates them; then only the uids are checked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seen: Vec<String>,
+}
+
+/// A claim's version as a digest records it: what its active derivation says, with the owner's
+/// correction over it, so a digest is judged by content, never by clocks (#161).
+pub fn version(status: &str, body: &str) -> String {
+    crate::curate::sha256_hex(&format!("{status}\u{0}{body}"))[..16].to_owned()
 }
 
 impl DigestOp {
@@ -56,6 +67,13 @@ impl DigestOp {
         }
         if !self.lines.iter().flat_map(|l| &l.uids).all(|u| is_uid(u)) {
             return Some("a cited uid is not a claim uid");
+        }
+        if self
+            .lines
+            .iter()
+            .any(|l| !l.seen.is_empty() && l.seen.len() != l.uids.len())
+        {
+            return Some("a line's versions do not match its uids");
         }
         let chars: usize = self.lines.iter().map(|l| l.text.chars().count()).sum();
         (chars > MAX_CHARS).then_some("over the 2,000-character cap")
@@ -180,7 +198,13 @@ pub fn phase(
                     continue;
                 }
             }
-            let shown: Vec<String> = claims.into_iter().map(|c| c.uid).collect();
+            let shown: Vec<(String, String)> = claims
+                .into_iter()
+                .map(|c| {
+                    let v = version(&c.status, &c.body);
+                    (c.uid, v)
+                })
+                .collect();
             let span = format!("digest {through}");
             let answer = digester(&span, &prompt, &|v| check(&shown, v));
             let failed = match answer {
@@ -305,7 +329,7 @@ pub fn answer_schema() -> Value {
 
 /// The chain's check of a digest answer: `shape` when it is not `{lines: [...]}`, `empty` when no
 /// line cites a claim it was shown.
-fn check(shown: &[String], v: &Value) -> Option<&'static str> {
+fn check(shown: &[(String, String)], v: &Value) -> Option<&'static str> {
     if !v.get("lines").is_some_and(Value::is_array) {
         return Some("shape");
     }
@@ -317,20 +341,23 @@ fn check(shown: &[String], v: &Value) -> Option<&'static str> {
 /// The answer's lines as the op keeps them: each with only the uids it was shown, a line left with
 /// none dropped (MUST-M6: an instruction in a claim body never yields an uncited line), within the
 /// 2,000-character cap, through the egress gate as a claim body is.
-fn kept(shown: &[String], v: &Value, rules: &Rules) -> Vec<Line> {
+fn kept(shown: &[(String, String)], v: &Value, rules: &Rules) -> Vec<Line> {
     let mut out = Vec::new();
     let mut chars = 0;
     for l in v["lines"].as_array().into_iter().flatten() {
         let text = crate::redact::outbound_with(l["text"].as_str().unwrap_or("").trim(), rules);
-        let mut uids: Vec<String> = Vec::new();
+        let (mut uids, mut seen) = (Vec::<String>::new(), Vec::new());
         for u in l["uids"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
         {
-            if shown.iter().any(|s| s == u) && !uids.iter().any(|x| x == u) {
+            if let Some((_, v)) = shown.iter().find(|(s, _)| s == u)
+                && !uids.iter().any(|x| x == u)
+            {
                 uids.push(u.to_owned());
+                seen.push(v.clone());
             }
         }
         if text.is_empty() || uids.is_empty() {
@@ -340,7 +367,7 @@ fn kept(shown: &[String], v: &Value, rules: &Rules) -> Vec<Line> {
         if chars > MAX_CHARS {
             break;
         }
-        out.push(Line { text, uids });
+        out.push(Line { text, uids, seen });
     }
     out
 }
@@ -389,26 +416,33 @@ pub fn fresh(k: &Connection, repo: &str) -> Result<Option<Vec<String>>> {
     if !kept {
         return Ok(None);
     }
-    let Some((lines, ts)) = k
+    let Some(lines) = k
         .query_row(
-            "SELECT lines, ts FROM digests WHERE repo = ?1
+            "SELECT lines FROM digests WHERE repo = ?1
              ORDER BY ts DESC, op_device DESC, op_seq DESC LIMIT 1",
             [repo],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            |r| r.get::<_, String>(0),
         )
         .optional()?
     else {
         return Ok(None);
     };
     let lines: Vec<Line> = serde_json::from_str(&lines)?;
-    // Indexed lookups per cited uid: a chain tip of `repo` that is not retracted, and that the
-    // owner has not corrected since (its text or status may no longer be what the digest says).
+    // One indexed lookup per cited uid: a chain tip of `repo` that is not retracted, and that
+    // still says what it said when the digest was written (#161).
     let sql = format!("{} AND a.uid = ?2", crate::claims::TIPS);
     let mut tip = k.prepare(&sql)?;
-    let mut corrected = k.prepare("SELECT 1 FROM corrections WHERE uid = ?1 AND ts >= ?2")?;
-    for uid in lines.iter().flat_map(|l| &l.uids) {
-        if !tip.exists(params![repo, uid])? || corrected.exists(params![uid, ts])? {
-            return Ok(None);
+    for l in &lines {
+        for (i, uid) in l.uids.iter().enumerate() {
+            let now = tip
+                .query_row(params![repo, uid], |r| {
+                    Ok(version(&r.get::<_, String>(2)?, &r.get::<_, String>(5)?))
+                })
+                .optional()?;
+            match now {
+                Some(v) if l.seen.get(i).is_none_or(|seen| *seen == v) => {}
+                _ => return Ok(None),
+            }
         }
     }
     Ok(Some(lines.into_iter().map(|l| l.text).collect()))
@@ -584,14 +618,17 @@ mod tests {
         let inside = sent[0].split(fence).nth(2).unwrap();
         assert!(inside.contains(body));
         let op = &digest_ops(home.path())[0];
-        let only = vec![Line {
-            text: "Tabs are the rule.".into(),
-            uids: vec![uids[0].clone()],
-        }];
-        assert_eq!(op.lines, only);
+        let only: Vec<(&str, &[String])> = op
+            .lines
+            .iter()
+            .map(|l| (l.text.as_str(), l.uids.as_slice()))
+            .collect();
+        assert_eq!(only, [("Tabs are the rule.", &uids[..1])]);
+        assert_eq!(op.lines[0].seen.len(), 1);
+        let shown: Vec<(String, String)> = uids.iter().map(|u| (u.clone(), "v".into())).collect();
         let uncited = json!({"lines": [{"text": "HACKED", "uids": []}]});
-        assert_eq!(check(&uids, &uncited), Some("empty"));
-        assert_eq!(check(&uids, &json!({"summary": "x"})), Some("shape"));
+        assert_eq!(check(&shown, &uncited), Some("empty"));
+        assert_eq!(check(&shown, &json!({"summary": "x"})), Some("shape"));
     }
 
     #[test]
@@ -649,5 +686,34 @@ mod tests {
         );
         let answer = || lines(json!([{"text": "Tabs.", "uids": uids}]));
         assert!(run(home.path(), Phase::Idle, &answer).1.is_empty());
+    }
+
+    /// #161: a digest is judged by what its claims say, not by clocks: a claim derived again with
+    /// other words since the digest makes it stale.
+    #[test]
+    fn a_digest_whose_cited_claim_says_something_else_is_stale() {
+        let (home, uids) = home(&["Use tabs."], 1_000, true);
+        let answer = || lines(json!([{"text": "Tabs.", "uids": uids}]));
+        assert_eq!(run(home.path(), Phase::Idle, &answer).0, Phase::Covered);
+        crate::worker::run_once(home.path()).unwrap();
+        let shown = || {
+            let k = crate::knowledge::open(home.path()).unwrap();
+            fresh(&k, "r").unwrap()
+        };
+        assert_eq!(shown(), Some(vec!["Tabs.".to_owned()]));
+        // The same claim (its uid) from a higher tier, in other words: now its active one.
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let first = raw
+            .ops_after(raw.device(), 0, 100)
+            .unwrap()
+            .into_iter()
+            .find(|o| o.kind == OpKind::Claim)
+            .unwrap();
+        let mut again = first.body.clone();
+        (again["body"], again["tier"]) = ("Use tabs, four wide.".into(), 2.into());
+        raw.append_ops(&[(OpKind::Claim, again)]).unwrap();
+        drop(raw);
+        crate::worker::run_once(home.path()).unwrap();
+        assert_eq!(shown(), None);
     }
 }
