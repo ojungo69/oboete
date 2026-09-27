@@ -2475,7 +2475,9 @@ mod tests {
                 .or(body["max_completion_tokens"].as_u64());
             assert!(asked.is_some_and(|n| n <= 4000), "{extra}: {body}");
         }
+    }
 
+    #[test]
     fn a_curator_cli_not_proven_isolated_is_skipped_without_a_call() {
         let home = tempfile::tempdir().unwrap();
         let conn = crate::providers_db::open(home.path()).unwrap();
