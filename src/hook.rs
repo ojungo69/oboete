@@ -916,6 +916,23 @@ fn spawn_detached(home: &Path, args: &[&str]) {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    // Windows passes every inheritable handle on, this process's own stdio among them: the
+    // child would hold the agent's pipes open until it exits (60 s of a worker). The handles
+    // stay usable here; `Stdio::inherit` in a later spawn duplicates its own.
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+        for handle in [
+            std::io::stdin().as_raw_handle(),
+            std::io::stdout().as_raw_handle(),
+            std::io::stderr().as_raw_handle(),
+        ] {
+            // SAFETY: it changes one flag of a handle of this process and fails on a null or
+            // closed one, which leaves the handle as it was.
+            unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+        }
+    }
     let _ = cmd.spawn();
 }
 
