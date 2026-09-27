@@ -967,9 +967,15 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
         .map(|c| serde_json::from_value::<Draft>(c.clone()))
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|_| AnswerFailure::Shape)?;
-    // A sibling's `supersedes` names an id: two drafts with one id would link the wrong one.
+    // A sibling's `supersedes` names an id: two drafts with one id would link the wrong one, and
+    // an id shaped like a uid would be read as one where its draft gives no claim (the claims
+    // consumer takes a `supersedes` entry that names no sibling as a uid).
     let mut ids = std::collections::HashSet::new();
-    if !drafts.iter().all(|d| ids.insert(d.id.as_str())) {
+    let uid_like = |id: &str| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit());
+    if !drafts
+        .iter()
+        .all(|d| !uid_like(&d.id) && ids.insert(d.id.as_str()))
+    {
         return Err(AnswerFailure::Shape);
     }
     Ok((summary, drafts))
@@ -2822,6 +2828,12 @@ mod tests {
             ),
             (json!({"claims": many, "summary": "s"}), "over_cap"),
             (unanchored.clone(), "unanchored"),
+            (
+                json!({"claims": [{"id": "a".repeat(64), "kind": "decision",
+                    "status": "decided", "speaker": "user", "scope": "repo", "body": "b",
+                    "quote": "one", "line": "L1", "supersedes": []}], "summary": "s"}),
+                "shape",
+            ),
         ] {
             let home = tempfile::tempdir().unwrap();
             let (mut raw, db) = open(home.path());
