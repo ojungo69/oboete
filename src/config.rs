@@ -90,14 +90,34 @@ pub struct Summary {
     /// Language of observations and summaries, as written into the prompt. Never inferred.
     #[serde(default = "default_language")]
     pub language: String,
+    /// Whether the worker curates windows (milestone 3). Off until the cut-over (spec 7.5): only
+    /// a home that asks for it sends anything to a provider.
+    #[serde(default)]
+    pub curate: bool,
+    /// A window's size in estimated tokens (docs/milestone-3-plan.md D8).
+    #[serde(default = "default_window_tokens")]
+    pub window_tokens: u32,
+    /// How long after the owner's last hook record a subscription curator still waits (D9).
+    #[serde(default = "default_idle_minutes")]
+    pub idle_minutes: u32,
 }
 
 impl Default for Summary {
     fn default() -> Self {
         Self {
             language: default_language(),
+            curate: false,
+            window_tokens: default_window_tokens(),
+            idle_minutes: default_idle_minutes(),
         }
     }
+}
+
+fn default_window_tokens() -> u32 {
+    crate::curate::WINDOW_TOKENS
+}
+fn default_idle_minutes() -> u32 {
+    10
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -1705,6 +1705,28 @@ pub fn doctor(home: &Path) -> Result<()> {
         for line in crate::isolation::doctor(&db)? {
             println!("  isolation: {line}");
         }
+        // D10, D11: the window each device's curation waits on, and why.
+        let now = crate::db::now_ms();
+        for p in crate::providers_db::pending(&db)? {
+            let at = |o: Option<i64>| o.map_or(String::new(), |o| format!("+{o}"));
+            let overdue = if p.next_attempt_at < now && !crate::worker::running(home) {
+                " (overdue: no worker is running; the next hook starts one)"
+            } else {
+                ""
+            };
+            println!(
+                "  curation of seq {}{}..{}{} waits since {} ({}, {} of 3 attempts): {}; next try {}{overdue}",
+                p.from_seq,
+                at(p.from_offset),
+                p.to_seq,
+                at(p.to_offset),
+                crate::db::utc(p.since),
+                p.hold,
+                p.attempts,
+                p.reason,
+                crate::db::utc(p.next_attempt_at),
+            );
+        }
     }
     let exe_str = exe
         .canonicalize()

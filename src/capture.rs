@@ -39,6 +39,9 @@ pub struct Settings {
     pub rules: redact::Rules,
     pub store_prompts: bool,
     pub tool_output: crate::config::ToolOutput,
+    /// Who wrote the events: `hook`, or `replay` for a fixture (D9: only a hook says the owner is
+    /// at work).
+    pub source: &'static str,
 }
 
 impl Default for Settings {
@@ -48,6 +51,7 @@ impl Default for Settings {
             rules: redact::Rules::default(),
             store_prompts: c.store_prompts,
             tool_output: c.tool_output,
+            source: "hook",
         }
     }
 }
@@ -61,6 +65,7 @@ impl Settings {
             rules: redact::Rules::new(&c.redaction)?,
             store_prompts: c.capture.store_prompts,
             tool_output: c.capture.tool_output,
+            source: "hook",
         })
     }
 }
@@ -222,7 +227,7 @@ fn capture(
             head,
             gitdir,
             cwd: Some(cwd_label),
-            source: "hook".into(),
+            source: settings.source.into(),
             body,
             original_bytes: gate.cut,
         },

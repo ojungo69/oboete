@@ -182,7 +182,6 @@ impl<'a> Chain<'a> {
 
     /// The idle gate (D9): `working` says until when the owner is still working, or `None` once
     /// they are not. A subscription entry is not called before then.
-    #[allow(dead_code)] // The curation phase (Task 5, part 3b) sets it.
     pub fn idle_gate(self, working: &'a dyn Fn() -> Option<i64>) -> Self {
         Self {
             working: Some(working),
