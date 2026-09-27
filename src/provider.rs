@@ -157,6 +157,21 @@ impl CallError {
     fn invalid(&self) -> bool {
         self.message.starts_with("invalid output")
     }
+
+    /// The provider rejected the key by name (the vetted code the message ends in): every call
+    /// fails the same way until the owner replaces it. Never a bare 401: OpenCode Go answers 401
+    /// for credits and monthly limits too.
+    fn key_rejected(&self) -> bool {
+        matches!(self.status, Some(401 | 403))
+            && [
+                "invalid_api_key",
+                "authentication_error",
+                "permission_error",
+                "PERMISSION_DENIED",
+            ]
+            .iter()
+            .any(|code| self.message.contains(&format!(": {code}")))
+    }
 }
 
 /// The chain for one run. A provider that failed cools down before it is tried again; the
@@ -442,7 +457,8 @@ fn cooldown_for(e: &CallError) -> Option<Duration> {
     }
 }
 
-/// A provider's state after a failure: its cooldown, the breaker's count, and the 429 backoff.
+/// A provider's state after a failure: its cooldown, the breaker's count, and the backoff of a
+/// 429 that names no reset or of a rejected key.
 /// A 429 that names no reset doubles its cooldown each time, up to an hour: Mistral's key at
 /// 0 requests a minute refused every request that way, and a flat 45 s re-sent each window to it
 /// (2026-09-27).
@@ -461,6 +477,12 @@ fn next_state(was: providers_db::State, e: &CallError) -> providers_db::State {
         Some(_) if e.status == Some(429) && e.retry_after_s.is_none() => {
             let d = COOLDOWN_429.saturating_mul(1 << was.backoff.min(10));
             (Some(d.min(MAX_BACKOFF_429)), 0, was.backoff + 1)
+        }
+        // A rejected key: from the outage rest, doubling up to a day, so a revoked key is tried a
+        // few times a day, not every ten minutes.
+        Some(c) if e.key_rejected() => {
+            let d = c.saturating_mul(1 << was.backoff.min(10));
+            (Some(d.min(MAX_COOLDOWN)), 0, was.backoff + 1)
         }
         Some(c) => (Some(c), 0, 0),
         None if was.fails + 1 >= BREAKER_AFTER => (Some(COOLDOWN_BREAKER), 0, 0),
@@ -2856,6 +2878,41 @@ mod tests {
             ..e
         };
         assert_eq!(next_state(s, &named).backoff, 0);
+    }
+
+    /// A key the provider rejects by name fails every call until the owner replaces it: its rest
+    /// doubles up to a day instead of re-sending every window each ten minutes. A bare 401 keeps
+    /// the flat outage rest: OpenCode Go answers 401 for credits and monthly limits too.
+    #[test]
+    fn a_rejected_key_doubles_its_rest_up_to_a_day() {
+        let e = |message: &str| CallError {
+            status: Some(401),
+            retry_after_s: None,
+            message: message.into(),
+            usage: Usage::default(),
+            sent: true,
+            cool_until: None,
+            rate: None,
+        };
+        let waits = |e: &CallError| {
+            let mut s = providers_db::State::default();
+            (0..10)
+                .map(|_| {
+                    let before = db::now_ms();
+                    s = next_state(s, e);
+                    (s.down_until - before + 30_000) / 60_000
+                })
+                .collect::<Vec<_>>()
+        };
+        let day = [10, 20, 40, 80, 160, 320, 640, 1280, 1440, 1440];
+        assert_eq!(waits(&e("http 401: invalid_api_key")), day);
+        assert_eq!(waits(&e("http 401: authentication_error")), day);
+        let denied = CallError {
+            status: Some(403),
+            ..e("http 403: PERMISSION_DENIED")
+        };
+        assert_eq!(waits(&denied), day);
+        assert_eq!(waits(&e("http 401")), [10; 10]);
     }
 
     #[test]
