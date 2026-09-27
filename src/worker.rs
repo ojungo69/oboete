@@ -41,6 +41,8 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
         Box::new(crate::consumer::fts::Fts),
         // The op log's claims (milestone 3 D4), in op_seqs of every device that has ops.
         Box::new(crate::consumer::claims::Claims),
+        // Claims whose quote a later tombstone masked or removed.
+        Box::new(crate::consumer::claims::Anchors),
         Box::new(crate::consumer::manifest::Manifest::new(home)),
         Box::new(crate::consumer::gaps::Gaps::new(home)),
         Box::new(crate::consumer::compress::Compress),
