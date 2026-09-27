@@ -412,14 +412,16 @@ pub fn hidden(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
         next.push_str(&work[pos..]);
         next_from.extend_from_slice(&from[pos..]);
         (work, from) = (next, next_from);
-        if *tag == "claude-mem-context"
-            && let Some(cut) = crate::hook::memory_context_cut(&work)
-        {
-            if cut < work.len() {
-                hidden.push((from[cut].0, from[work.len() - 1].1));
+        if *tag == "claude-mem-context" {
+            let (start, end) = crate::hook::memory_context_cut(&work);
+            if start > 0 {
+                hidden.push((from[0].0, from[start - 1].1));
             }
-            work.truncate(cut);
-            from.truncate(cut);
+            if end < work.len() {
+                hidden.push((from[end].0, from[work.len() - 1].1));
+            }
+            work = work[start..end].to_owned();
+            from = from[start..end].to_vec();
         }
     }
     let start = work.len() - work.trim_start().len();
@@ -1326,6 +1328,11 @@ mod tests {
         let runs = hidden(&text, &rules).unwrap();
         assert_eq!(runs.last().map(|r| r.1), Some(text.len()));
         assert_eq!(outbound_part(&text, 0..text.len(), &rules), "# Title");
+        // A read that begins inside the block: the part up to the closer's line is hidden.
+        let inside = format!("| #1 | tabs |\n</{tag}>\n# Rules");
+        assert_eq!(outbound_with(&inside, &rules), "# Rules");
+        assert_eq!(hidden(&inside, &rules).unwrap()[0].0, 0);
+        assert_eq!(outbound_part(&inside, 0..inside.len(), &rules), "# Rules");
     }
 
     #[test]
