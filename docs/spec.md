@@ -902,7 +902,7 @@ This section follows owner decisions 8, 9, 13, 14, 16, 17-22 and 25, MUST-M23 an
   - the curator isolation check for each chosen CLI (section 6);
   - the per-agent status table (live-verified / implemented / unverified, MUST-M10);
   - one run of S5's canary round trip (RD/improvements-synthesis.md:456).
-- **Scripted setup and language**: `oboete setup --yes` takes the defaults (tier none, no embeddings, no hub, no transcript import) for scripts.
+- **Scripted setup and language**: `oboete setup --yes` takes the defaults for scripts: the preset of decision 28 (a logged-in subscription CLI or an OpenCode Go key that setup finds is used, and the tier line says so and how to turn it off), no embeddings, no hub, no transcript import. "Tier none" here predated decision 28, which replaced decision 21's opt-in (owner decision 28).
   - Setup's prompts are in English, like the rest of the CLI. The Japanese README walks through each question (r1-public-5, RD/improvements-synthesis.md:548).
   - Setup's UI does not follow the locale. There is no owner decision for it (RD/owner-decisions.md:16 says only "Japanese and English"), no budget line and no code: there is no locale detection in src/. (Claude; overrulable)
 
