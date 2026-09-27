@@ -10,6 +10,8 @@ const [file, expectedExe, expectedHome] = process.argv.slice(2);
 const homeArgs = expectedHome === undefined ? [] : ["--home", expectedHome];
 const captures = [];
 const injections = [];
+// Sessions whose SessionStart capture has closed.
+const started = new Set();
 // "ok", "error" (the child reports an error) or "throw" (spawn itself throws).
 let spawnMode = "ok";
 let active = 0;
@@ -34,6 +36,7 @@ childProcess.spawn = (exe, args, options) => {
         child.stdin.emit("error", new Error("EPIPE"));
         child.emit("error", new Error("ENOENT"));
       }
+      if (args.at(-1) === "SessionStart") started.add(JSON.parse(text).session_id);
       child.emit("close", 0);
     });
   };
@@ -44,6 +47,8 @@ childProcess.execFile = (exe, args, options, callback) => {
   assert.equal(exe, expectedExe);
   assert.deepEqual(args.slice(0, -1), [...homeArgs, "inject"]);
   assert.match(args.at(-1), /^--session=./);
+  // The manifest is read after the session's SessionStart capture has run.
+  assert(started.has(args.at(-1).slice("--session=".length)));
   assert.equal(options.timeout, 3000);
   assert.equal(options.killSignal, "SIGKILL");
   injections.push(options.cwd);
@@ -147,6 +152,13 @@ await drain();
 assert.deepEqual(captures.slice(beforeHookFirst).map((c) => c.event), ["SessionStart", "PostToolUse"]);
 assert.equal(captures.at(-1).payload.tool_response, "string form");
 assert(captures.slice(beforeHookFirst).every((c) => c.cwd === location.directory));
+
+// A context hook can be the first sign of a session too: its SessionStart still comes first.
+const contextFirst = { sessionID: "context-first", system: [] };
+await local.hooks.context(contextFirst);
+assert.deepEqual(contextFirst.system, [{ type: "text", text: "remembered context" }]);
+injections.length = 0;
+await drain();
 
 const calls = Array.from({ length: 3 }, () => ({ sessionID: "one", system: [] }));
 await Promise.all(calls.map((call) => local.hooks.context(call)));

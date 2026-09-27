@@ -90,6 +90,16 @@ fn run_io(
         tried = crate::capture::PORTED.contains(&agent);
         std::fs::create_dir_all(home)?;
         if tried {
+            let labels = agent_labels(agent, &payload);
+            if (agent, event) == ("cursor", "PreCompact") {
+                // Before the write: a compaction whose record fails still reinjects at the next
+                // prompt. A flag that cannot be written costs that reinjection, not the record.
+                if let Err(e) =
+                    crate::hookstate::set(home, agent, session_label(&labels), "compacted")
+                {
+                    eprintln!("oboete: compaction not noted: {e}");
+                }
+            }
             let settings = crate::capture::Settings::load(home)?;
             let mut store = crate::raw::open(home)?;
             let events = record(
@@ -104,7 +114,6 @@ fn run_io(
             wrote = !events.is_empty();
             ended = crate::failure::now();
             // A manifest that cannot be read is no recording failure: the row is written.
-            let labels = agent_labels(agent, &payload);
             injecting = injects(home, agent, event, &labels);
             if injecting {
                 manifest = checkout_manifest(home, &store, &labels, &settings);
@@ -193,7 +202,22 @@ fn run_io(
 /// read, so a session whose checkout has none yet gets none later either, as at SessionStart
 /// (Claude; overrulable).
 fn injects(home: &Path, agent: &str, event: &str, payload: &Value) -> bool {
-    let session = str_field(
+    let session = session_label(payload);
+    match (agent, event) {
+        ("grok", "PreToolUse") | ("agy", "PreInvocation") => {
+            crate::hookstate::claim(home, agent, session, "injected")
+        }
+        ("cursor", "SessionStart") => true,
+        ("cursor", "UserPromptSubmit") => crate::hookstate::take(home, agent, session, "compacted"),
+        ("grok" | "agy" | "cursor", _) => false,
+        (_, "SessionStart") => str_field(payload, &["source"]) != Some("resume"),
+        _ => false,
+    }
+}
+
+/// The session a hook's state is kept under (`run_io` sets Cursor's compaction marker with it).
+fn session_label(payload: &Value) -> &str {
+    str_field(
         payload,
         &[
             "session_id",
@@ -202,21 +226,7 @@ fn injects(home: &Path, agent: &str, event: &str, payload: &Value) -> bool {
             "conversationId",
         ],
     )
-    .unwrap_or("");
-    match (agent, event) {
-        ("grok", "PreToolUse") | ("agy", "PreInvocation") => {
-            crate::hookstate::claim(home, agent, session, "injected")
-        }
-        ("cursor", "SessionStart") => true,
-        ("cursor", "PreCompact") => {
-            crate::hookstate::set(home, agent, session, "compacted");
-            false
-        }
-        ("cursor", "UserPromptSubmit") => crate::hookstate::take(home, agent, session, "compacted"),
-        ("grok" | "agy" | "cursor", _) => false,
-        (_, "SessionStart") => str_field(payload, &["source"]) != Some("resume"),
-        _ => false,
-    }
+    .unwrap_or("")
 }
 
 /// The injected text in the shape the agent reads.
@@ -1430,6 +1440,7 @@ mod tests {
         // Cursor: the first prompt after its compaction marker, once.
         let c = json!({"session_id": "c"});
         assert!(!injects(h, "cursor", "UserPromptSubmit", &c));
+        crate::hookstate::set(h, "cursor", "c", "compacted").unwrap(); // run_io, at PreCompact
         assert!(!injects(h, "cursor", "PreCompact", &c));
         assert!(injects(h, "cursor", "UserPromptSubmit", &c));
         assert!(!injects(h, "cursor", "UserPromptSubmit", &c));
@@ -1841,6 +1852,42 @@ mod tests {
             events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
             ["prompt", "reply", "end", "end"]
         );
+    }
+
+    #[test]
+    fn cursor_reinjects_after_a_compaction_whose_record_failed() {
+        let dir = tmp("cursor-compact-failed");
+        let payloads = cursor_fixture(&dir);
+        hook(&dir, "cursor", "SessionStart", &payloads["SessionStart"]);
+        built_manifest(&dir, &dir, "context after compaction");
+        let conn = Connection::open(dir.join("raw.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER refuse_compaction BEFORE INSERT ON records WHEN NEW.kind='compaction'
+            BEGIN SELECT RAISE(ABORT, 'test insert failure'); END;",
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        let compact = payloads["PreCompact"].to_string();
+        assert!(
+            run_io(
+                &dir,
+                "cursor",
+                "PreCompact",
+                compact.as_bytes(),
+                &mut output
+            )
+            .is_err()
+        );
+        assert_eq!(output, b"{}\n");
+        conn.execute_batch("DROP TRIGGER refuse_compaction")
+            .unwrap();
+        let out = hook(
+            &dir,
+            "cursor",
+            "UserPromptSubmit",
+            &payloads["UserPromptSubmit"],
+        );
+        assert!(out.contains("context after compaction"), "{out}");
     }
 
     #[test]

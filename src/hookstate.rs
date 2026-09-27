@@ -37,8 +37,13 @@ pub fn claim(home: &Path, agent: &str, session: &str, flag: &str) -> bool {
 }
 
 /// Sets `flag`, whether or not it was set.
-pub fn set(home: &Path, agent: &str, session: &str, flag: &str) {
-    claim(home, agent, session, flag);
+pub fn set(home: &Path, agent: &str, session: &str, flag: &str) -> std::io::Result<()> {
+    let dir = dir(home, agent, session);
+    std::fs::create_dir_all(&dir)?;
+    match std::fs::File::create_new(dir.join(flag)) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// Clears `flag` and says whether this call cleared it: of concurrent calls, one does.
@@ -85,7 +90,8 @@ mod tests {
         assert_eq!(won, 1);
         assert!(!claim(&p, "grok", "s/1", "injected"));
         assert!(claim(&p, "grok", "s/2", "injected")); // another session
-        set(&p, "cursor", "s/1", "compacted");
+        set(&p, "cursor", "s/1", "compacted").unwrap();
+        set(&p, "cursor", "s/1", "compacted").unwrap(); // already set
         assert!(take(&p, "cursor", "s/1", "compacted"));
         assert!(!take(&p, "cursor", "s/1", "compacted"));
     }
@@ -95,8 +101,8 @@ mod tests {
     fn prune_removes_only_sessions_older_than_the_limit() {
         let home = tempfile::tempdir().unwrap();
         let p = home.path();
-        set(p, "agy", "old", "injected");
-        set(p, "agy", "new", "injected");
+        set(p, "agy", "old", "injected").unwrap();
+        set(p, "agy", "new", "injected").unwrap();
         let old = dir(p, "agy", "old");
         let past = SystemTime::now() - KEEP - Duration::from_secs(60);
         std::fs::File::open(&old)
