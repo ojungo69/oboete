@@ -269,6 +269,9 @@ fn serve(
         }
     };
     loop {
+        // What the pass below reads up to, new records or new ops of this device (an owner's
+        // correction appends only an op): one that lands after it, even before the wait, wakes it.
+        let seen = (raw.max_seq()?, raw.max_op_seq_of(raw.device())?);
         while pass(&raw, &mut k, consumers)? {
             due(&raw);
         }
@@ -284,7 +287,6 @@ fn serve(
                 Phase::Waiting { .. } | Phase::Idle => {}
             }
         }
-        let seen = raw.max_seq()?;
         // A window's time replaces the idle wait: the phase runs again then, and the idle wait
         // starts once it has nothing left to wait for.
         let wait = stay.map_or(idle_ms, |until| {
@@ -297,7 +299,7 @@ fn serve(
             if crate::backup::restore_requested(home) {
                 return Ok(true);
             }
-            if raw.max_seq()? > seen {
+            if (raw.max_seq()?, raw.max_op_seq_of(raw.device())?) != seen {
                 more = true;
                 break;
             }
@@ -1164,6 +1166,87 @@ mod tests {
         let t = Instant::now();
         run(home.path(), 60_000).unwrap(); // returns at once: the lock is held
         assert!(t.elapsed() < Duration::from_secs(1));
+    }
+
+    /// A waiting worker wakes for a new op of its device as for a record (an owner's correction
+    /// appends only an op), so it is applied before the wait ends, not after.
+    #[test]
+    fn a_worker_picks_up_ops_that_arrive_while_it_waits() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path().to_path_buf();
+        let device = {
+            let mut raw = raw::open(&p).unwrap();
+            raw.append(&raw::test_event("first")).unwrap();
+            raw.device().to_owned()
+        };
+        let writer = {
+            let p = p.clone();
+            let device = device.clone();
+            std::thread::spawn(move || {
+                // Once the worker has drained what was there and waits.
+                while knowledge::open(&p)
+                    .and_then(|k| checkpoint::get(&k, "seen", &device))
+                    .unwrap_or(0)
+                    < 1
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                std::thread::sleep(Duration::from_millis(300));
+                let mut raw = raw::open(&p).unwrap();
+                raw.append_ops(&[(raw::OpKind::Correction, serde_json::json!({}))])
+                    .unwrap();
+            })
+        };
+        // What the op consumer had passed when the first wait ended (a worker that finds more
+        // after it released the lock takes it again and waits once more).
+        let at_exit = std::cell::Cell::new(None);
+        let consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Seen), Box::new(OpsSeen)];
+        run_with(&p, 2_000, consumers, || {
+            let k = knowledge::open(&p).unwrap();
+            let passed = checkpoint::get_in(&k, checkpoint::OPS, "ops-seen", &device).unwrap();
+            at_exit.set(at_exit.get().or(Some(passed)));
+        })
+        .unwrap();
+        writer.join().unwrap();
+        assert_eq!(at_exit.get(), Some(1));
+    }
+
+    /// An op that lands after the consumers drained and before the worker waits (here from the
+    /// phase) still wakes it: the wait compares with what the pass read, not with what came after.
+    #[test]
+    fn an_op_that_lands_between_the_pass_and_the_wait_wakes_the_worker() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path().to_path_buf();
+        let device = {
+            let mut raw = raw::open(&p).unwrap();
+            raw.append(&raw::test_event("first")).unwrap();
+            raw.device().to_owned()
+        };
+        let mut appended = false;
+        let mut phase = |raw: &mut Raw, _: &Connection| -> Result<Phase> {
+            if !appended {
+                appended = true;
+                raw.append_ops(&[(raw::OpKind::Correction, serde_json::json!({}))])?;
+            }
+            Ok(Phase::Idle)
+        };
+        let at_exit = std::cell::Cell::new(None);
+        let consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Seen), Box::new(OpsSeen)];
+        let held = lock(&p).unwrap();
+        run_holding(
+            &p,
+            2_000,
+            consumers,
+            || {
+                let k = knowledge::open(&p).unwrap();
+                let passed = checkpoint::get_in(&k, checkpoint::OPS, "ops-seen", &device);
+                at_exit.set(at_exit.get().or(Some(passed.unwrap())));
+            },
+            held,
+            Some(&mut phase),
+        )
+        .unwrap();
+        assert_eq!(at_exit.get(), Some(1));
     }
 
     #[test]
