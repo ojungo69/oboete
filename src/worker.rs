@@ -98,6 +98,7 @@ fn behind(raw: &Raw, k: &Connection, consumers: &[Box<dyn Consumer>]) -> Result<
 /// more (D6): a hook that appended before the release saw the lock held and started nothing, so
 /// this last check is what finds its record; one that appends after the release gets the lock and
 /// starts a worker itself. `before_exit` runs between the release and that check (a test seam).
+#[cfg(test)] // `run` takes the lock itself, to know whether this run did the work
 pub fn run_with(
     home: &Path,
     idle_ms: u64,
@@ -222,7 +223,11 @@ fn serve(
 }
 
 pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
-    let result = run_with(home, idle_ms, consumers(home), || {});
+    // Another worker holds the lock: its run, not this one, says how the work went.
+    let Some(held) = lock(home)? else {
+        return Ok(());
+    };
+    let result = run_holding(home, idle_ms, consumers(home), || {}, Some(held));
     // A worker a hook started writes its stderr nowhere: its last failure is kept for doctor.
     let note = failed_note(home);
     match &result {
@@ -327,6 +332,11 @@ mod tests {
         let why = std::fs::read_to_string(failed_note(home.path())).unwrap();
         assert!(why.contains("backup segment"), "{why}");
         std::fs::remove_file(home.path().join("raw.db")).unwrap();
+        // A run that finds another worker holding the lock did nothing: the note stays.
+        let other = lock(home.path()).unwrap();
+        run(home.path(), 0).unwrap();
+        assert!(failed_note(home.path()).exists());
+        drop(other);
         run(home.path(), 0).unwrap();
         assert!(!failed_note(home.path()).exists());
     }
