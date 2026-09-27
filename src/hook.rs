@@ -1692,6 +1692,29 @@ mod tests {
     }
 
     #[test]
+    fn an_event_in_a_nested_repository_is_filed_under_that_repository() {
+        // Spec acceptance 30-5: a session that moves into a nested repository touches it too.
+        // Each raw event carries the repository of its own cwd.
+        let dir = tmp("nested");
+        std::fs::create_dir_all(dir.join("outer/.git")).unwrap();
+        std::fs::create_dir_all(dir.join("outer/inner/.git")).unwrap();
+        for cwd in ["outer", "outer/inner", "outer"] {
+            let payload = json!({"session_id": "s", "cwd": dir.join(cwd), "prompt": "go on"});
+            hook(&dir, "claude", "UserPromptSubmit", &payload);
+        }
+        let repos: std::collections::BTreeSet<String> = recorded(&dir, "claude", "s")
+            .into_iter()
+            .filter_map(|e| e.repo)
+            .collect();
+        let want = [
+            repo::key(&dir.join("outer")),
+            repo::key(&dir.join("outer/inner")),
+        ];
+        assert_eq!(repos, want.into_iter().collect());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn cursor_reinjects_after_a_compaction_whose_record_failed() {
         let dir = tmp("cursor-compact-failed");
         let payloads = cursor_fixture(&dir);

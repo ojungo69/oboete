@@ -159,3 +159,49 @@ Decisions (Claude; overrulable):
 - **Per-session hook state lives in files.** A few hook calls need to know what an earlier call of the same session did: Grok and agy inject once per session, and Cursor injects again on the first prompt after its compaction marker. Neither store fits: raw.db has no session key (spec 1.6), and knowledge.db is the worker's, which SessionStart only reads. So each flag is an empty file under `<home>/state/hooks/<agent>/<hash of the session id>/`, as the recording-failure marker is a file. `File::create_new` makes a claim atomic between concurrent hooks (Grok runs tool calls in parallel), and a removal succeeds once. Losing the files costs one extra injection, never a record, so they are neither backed up nor synced. The worker removes the flags of sessions unchanged for 7 days at its idle exit (agy and OpenCode send no SessionEnd).
 - **Each agent injects at its own point.** Claude Code, Codex, Pi and OpenCode: SessionStart, not on a resume. Grok ignores SessionStart's output, so its first tool call of a session injects; agy reads PreInvocation, once per session too. Cursor: SessionStart, and the first prompt after its compaction marker. The text is the manifest in its fence, after the recording-failure line, in the shape the agent reads (`hookSpecificOutput`, agy's `injectSteps`, Cursor's `additional_context`).
 - **A point is claimed before the manifest is read.** A Grok or agy session whose checkout has no manifest yet gets none later in that session, as a Claude Code session started before the worker built one gets none (v1 retried on every tool call until it had text; that is one knowledge.db read per call for a session that may never get one).
+
+## The none tier end to end (Task 13, 2026-09-27)
+
+In the dogfood user: Design B's binary (main 0434bd1 with #119's fix) as `~/.local/bin/oboete-b`, home `~/.oboete-b`, `oboete-b --home ~/.oboete-b setup claude` and `setup codex`. That user has no provider key file, so nothing was curated: the none tier. A scratch repository with one empty commit.
+
+- Two real sessions:
+  - Claude Code 2.1.278 (`claude -p`) wrote `notes.txt` ("The blue pelican ledger is balanced.") and ran a failing `ls`.
+  - codex-cli 0.155.1 (`codex exec -s workspace-write`) wrote `codex-notes.txt` ("Orange walrus inventory checked.") and ran a failing `cat`.
+- raw.db holds each session's start, prompt, tool calls, reply and end.
+- Search: `oboete search "blue pelican"` and `oboete search walrus`, run in the repository, find the prompt, the tool calls and the reply of each session. Search is scoped to the current repository: run elsewhere without `--all`, it finds nothing.
+- The manifest: a new session's text (`oboete inject`, what SessionStart shows) has these parts:
+  - the risky git state (2 untracked files);
+  - the last failing command with its error;
+  - the last exchange;
+  - the as-of line with the count of records not yet curated.
+- The worker exited on its own at idle. Two backup segments cover seq 1 to 26 of 26.
+- doctor: raw.db `integrity_check` ok, no session short of its transcript (Claude 0 of 1, Codex 0 of 3), backups through the last seq.
+- A full disk, on a 1 MiB tmpfs home (the fixture of `tests/disk_full.rs`, with this binary):
+  - the hook exits 0;
+  - doctor prints "recording has failed since … (disk full)" and a low-space line, and ends with the line that asks for attention;
+  - the next SessionStart shows the same failure line.
+- Found and fixed: Codex 0.155.1's PostToolUse carries no exit code, so a failing Codex command was stored as a success and the manifest showed an older Claude command. The hook now reads the exit code from the rollout (#119).
+- Found and restored: spec acceptance row 30-5 (a session moving into a nested repository touches it too) pointed at a v1 test that #118 removed. `an_event_in_a_nested_repository_is_filed_under_that_repository` checks it on raw.db.
+- Not exercised by the run:
+  - The todo list part: Claude Code 2.1.278 in `-p` mode offers no TodoWrite, and codex-cli 0.155.1's `exec` has no `update_plan`. The owner's 150 newest Claude Code transcripts call neither TodoWrite nor a Task* tool. The part is tested with recorded inputs; #120 tracks the agents' current task tools.
+  - Other active sessions: both sessions had ended. Tests cover the part.
+  - Files touched: both agents wrote their files through shell commands, not through edit tools.
+- doctor's `db 0 KB` is v1's oboete.db. No hook writes it since #118. It stays until the viewer and MCP move to raw.db (milestone 4).
+
+## Milestone 2 as it stands (2026-09-27)
+
+- **Built** (spec 8.4, row 2): raw.db keyed by (device, seq) with `synchronous=FULL`, full redaction with the ledger, write-failure reporting, backups with restore, tombstones with the redaction rescan, raw FTS, and the deterministic manifest. All seven agents record there (#115), and v1's write path is gone (#118).
+- **The none tier works end to end**: Task 13 above.
+- **Line M14**: measured on WSL and Windows (GNU build). The iMac was offline, so the line and the 64 KB cap are provisional (Task 12 names the iMac values that would move the cap). The MSVC build is unmeasured.
+- **MUST fixtures**:
+  - MUST-M14: FULL, and the checkpoint rewind (Task 5).
+  - MUST-M15: backups and restore (Task 8, `tests/damaged_raw.rs`).
+  - MUST-M16: `tests/disk_full.rs` and Task 13's run.
+  - MUST-M5: the manifest's negation pairing (Task 9).
+- **Not met yet**: the plan's "`cargo test` passes on the three platforms in CI". CI runs on Ubuntu only; macOS and Windows jobs come next.
+- **What milestone 3 inherits**:
+  - Curation starts from seq 0 with its own checkpoint (D10). Until then the manifest counts every record as not yet curated.
+  - The manifest's "Current decisions" part stays empty until claims exist.
+  - The provider layer: the fixes and Gemini that the owner's binary runs (#96 to #101, #116) are on `v1` only. Milestone 3 rebuilds the chain with curator isolation and S8's environment allow-list.
+  - v1's readers (MCP, viewer, observe) still read oboete.db until milestone 4 moves them.
+  - Open acceptance tests: #83 (carried from this milestone's reviews) and #120 (the todo list).
