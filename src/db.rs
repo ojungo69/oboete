@@ -248,21 +248,11 @@ fn store_file(path: &Path) -> String {
 /// so a restore's swap made the restored raw.db look like another file and changed the device.
 #[cfg(windows)]
 fn store_file(path: &Path) -> String {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
-    };
-    let Ok(f) = std::fs::File::open(path) else {
+    let Ok(info) = std::fs::File::open(path).and_then(|f| winapi_util::file::information(&f))
+    else {
         return String::new();
     };
-    // SAFETY: all-zero is a valid value of this plain C struct, which the call then fills.
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    // SAFETY: the handle stays open for the call, and `info` is writable and of the right type.
-    if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
-        return String::new();
-    }
-    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
-    format!("{}:{index}", info.dwVolumeSerialNumber)
+    format!("{}:{}", info.volume_serial_number(), info.file_index())
 }
 
 /// This device's id, 8 hex digits, chosen when the store is created and again when the store
