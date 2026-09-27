@@ -839,15 +839,21 @@ fn error_body(body: &str) -> Option<Value> {
 pub(crate) fn error_code(body: &str) -> Option<String> {
     let v = error_body(body)?;
     let e = v.get("error").unwrap_or(&v);
-    ["code", "type", "status"]
-        .iter()
-        .find_map(|k| match e.get(*k)? {
-            Value::String(s) => KNOWN_CODES.contains(&s.as_str()).then(|| s.clone()),
-            Value::Number(n) => n
-                .as_u64()
-                .filter(|n| (100..600).contains(n))
-                .map(|n| n.to_string()),
-            _ => None,
+    let keys = ["code", "type", "status"];
+    // A known name before a number: Gemini's 403 is `"code": 403, "status": "PERMISSION_DENIED"`,
+    // and the name says what failed.
+    keys.iter()
+        .find_map(|k| {
+            let s = e.get(*k)?.as_str()?;
+            KNOWN_CODES.contains(&s).then(|| s.to_owned())
+        })
+        .or_else(|| {
+            keys.iter().find_map(|k| {
+                e.get(*k)?
+                    .as_u64()
+                    .filter(|n| (100..600).contains(n))
+                    .map(|n| n.to_string())
+            })
         })
 }
 
@@ -2915,6 +2921,36 @@ mod tests {
         assert_eq!(waits(&e("http 401")), [10; 10]);
     }
 
+    /// Gemini names a rejected key in `status` next to a numeric `code`: the name is kept, so the
+    /// key's rest doubles.
+    #[test]
+    fn geminis_permission_denied_is_a_rejected_key() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let (url, _) = serve(
+            "403 Forbidden",
+            json!([{"error": {"code": 403, "status": "PERMISSION_DENIED",
+                "message": "Method doesn't allow unregistered callers canary-gemini"}}])
+            .to_string()
+            .into_bytes(),
+            "",
+        );
+        let providers = [stub(url)];
+        assert!(
+            Chain::new(&providers, &conn)
+                .run("curator", "s", "p", &json!({}))
+                .is_err()
+        );
+        let detail: String = conn
+            .query_row("SELECT detail FROM provider_calls", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(detail, "http 403: PERMISSION_DENIED");
+        assert_eq!(
+            crate::providers_db::state(&conn, "stub").unwrap().backoff,
+            1
+        );
+    }
+
     #[test]
     fn mistrals_429_is_read_from_the_body_root_and_backs_off() {
         let home = tempfile::tempdir().unwrap();
@@ -3522,8 +3558,11 @@ mod tests {
                     {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "35s"}]}}])
             .to_string()
         };
-        // The array root is read (it gave no code before).
-        assert_eq!(error_code(&body("x")).as_deref(), Some("429"));
+        // The array root is read (it gave no code before), and its status name before the number.
+        assert_eq!(
+            error_code(&body("x")).as_deref(),
+            Some("RESOURCE_EXHAUSTED")
+        );
         // A per-minute quota: its RetryInfo delay.
         let minute = body("GenerateRequestsPerMinutePerProjectPerModel-FreeTier");
         assert_eq!(retry_after_in_error(429, &minute), Some(35.0));
