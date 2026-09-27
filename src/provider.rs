@@ -1538,7 +1538,8 @@ fn codex_rest(read: &Value, now: i64) -> Option<i64> {
         limits
             .iter()
             .map(|s| {
-                [&s["primary"], &s["secondary"]]
+                // A workspace's spend control gives its reset in `individualLimit`.
+                [&s["primary"], &s["secondary"], &s["individualLimit"]]
                     .into_iter()
                     .filter_map(reset)
                     .max()
@@ -1999,6 +2000,9 @@ mod tests {
         let reached = json!({"rateLimits": {"primary": window(40, 10080, later),
             "rateLimitReachedType": "rate_limit_reached"}});
         assert_eq!(codex_rest(&reached, now), Some(later * 1000));
+        let workspace = json!({"rateLimits": {"rateLimitReachedType": "workspace_member_usage_limit_reached",
+            "individualLimit": {"limit": "10", "used": "10", "remainingPercent": 0, "resetsAt": later}}});
+        assert_eq!(codex_rest(&workspace, now), Some(later * 1000));
         let none_left = json!({"ordinaryUsageAllowed": false, "rateLimits": {}});
         assert_eq!(codex_rest(&none_left, now), Some(providers_db::OWNER_HOLD));
         // A reached limit with no reset holds codex, whatever reset another limit gives.
