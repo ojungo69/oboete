@@ -1630,6 +1630,13 @@ pub fn doctor(home: &Path) -> Result<()> {
         unhealthy.push("low free space");
     }
     if home.join("knowledge.db").exists() {
+        // raw.db first, as `search` does: its shared hold on raw.lock keeps a restore or a
+        // rebuild from moving knowledge.db aside while this reads it.
+        let _raw = if crate::raw::exists(home) {
+            Some(crate::raw::open(home)?)
+        } else {
+            None
+        };
         // MUST-M14: raw lost commits that a consumer had processed; its output was rewound.
         let k = crate::knowledge::open(home)?;
         let (n, last): (i64, Option<String>) = k.query_row(
