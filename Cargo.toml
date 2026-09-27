@@ -24,6 +24,10 @@ toml_edit = "0.23"
 ureq = { version = "3.4.2", features = ["json"] }
 zstd = "0.14"
 
+# The file identity that keeps a store's device id (db::store_file); already in the tree.
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1.11"
+
 [profile.release]
 strip = true
 

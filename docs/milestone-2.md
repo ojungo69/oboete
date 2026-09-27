@@ -198,7 +198,7 @@ In the dogfood user: Design B's binary (main 0434bd1 with #119's fix) as `~/.loc
   - MUST-M15: backups and restore (Task 8, `tests/damaged_raw.rs`).
   - MUST-M16: `tests/disk_full.rs` and Task 13's run.
   - MUST-M5: the manifest's negation pairing (Task 9).
-- **Not met yet**: the plan's "`cargo test` passes on the three platforms in CI". CI runs on Ubuntu only; macOS and Windows jobs come next.
+- **`cargo test` passes on the three platforms in CI** (the plan's "After the tasks"): macOS and Windows (MSVC) jobs joined Ubuntu in #122. Windows found one real bug. The Windows store identity was the file's creation time, and NTFS gives a file renamed into a name freed less than 15 s before the old file's creation time (tunneling). So a restore's swap made the restored raw.db look like another file, and it got a new device id. The identity is now the volume serial and NTFS file index, which a rename keeps.
 - **What milestone 3 inherits**:
   - Curation starts from seq 0 with its own checkpoint (D10). Until then the manifest counts every record as not yet curated.
   - The manifest's "Current decisions" part stays empty until claims exist.

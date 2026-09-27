@@ -237,20 +237,36 @@ fn ensure_uids(conn: &mut Connection) -> Result<()> {
 /// The store file's identity: a copy on another machine (or a restored backup) is another file.
 /// ponytail: file identity instead of host name + OS machine id (proposal §4.2 3), which needs no
 /// new dependency; a restore on the same machine also gets a new id, which costs nothing.
+#[cfg(unix)]
 fn store_file(path: &Path) -> String {
-    std::fs::metadata(path).map_or_else(|_| String::new(), |m| file_identity(&m))
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).map_or_else(|_| String::new(), |m| format!("{}:{}", m.dev(), m.ino()))
+}
+
+/// The volume and NTFS file index, which a rename keeps. Not the creation time: NTFS gives a file
+/// renamed into a name freed less than 15 s before that name's old creation time ("tunneling"),
+/// so a restore's swap made the restored raw.db look like another file and changed the device.
+#[cfg(windows)]
+fn store_file(path: &Path) -> String {
+    let Ok(info) = std::fs::File::open(path).and_then(|f| winapi_util::file::information(&f))
+    else {
+        return String::new();
+    };
+    format!("{}:{}", info.volume_serial_number(), info.file_index())
+}
+
+/// The identity a Windows store was given before #122: its creation time.
+#[cfg(windows)]
+fn legacy_store_file(path: &Path) -> Option<String> {
+    use std::os::windows::fs::MetadataExt;
+    std::fs::metadata(path)
+        .ok()
+        .map(|m| m.creation_time().to_string())
 }
 
 #[cfg(unix)]
-fn file_identity(meta: &std::fs::Metadata) -> String {
-    use std::os::unix::fs::MetadataExt;
-    format!("{}:{}", meta.dev(), meta.ino())
-}
-
-#[cfg(windows)]
-fn file_identity(meta: &std::fs::Metadata) -> String {
-    use std::os::windows::fs::MetadataExt;
-    meta.creation_time().to_string()
+fn legacy_store_file(_: &Path) -> Option<String> {
+    None
 }
 
 /// This device's id, 8 hex digits, chosen when the store is created and again when the store
@@ -264,6 +280,15 @@ pub(crate) fn ensure_device(conn: &Connection, path: &Path) -> Result<()> {
         })
         .optional()?;
     if known.as_deref() == Some(here.as_str()) {
+        return Ok(());
+    }
+    // A store from before #122 on Windows holds its creation time: the same file, so it keeps its
+    // device id and takes the new identity (its records stay under their device, Codex on #122).
+    if known.is_some() && known == legacy_store_file(path) {
+        conn.execute(
+            "UPDATE meta SET value=?1 WHERE key='store_file'",
+            params![here],
+        )?;
         return Ok(());
     }
     let mut raw = [0u8; 4];
@@ -1037,6 +1062,28 @@ mod tests {
         assert_ne!(other, first);
         assert_eq!(device_id(&open(&copy).unwrap()).unwrap(), other);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A Windows store from before #122 holds its creation time as its identity.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_store_with_the_old_identity_keeps_its_device_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(dir.path()).unwrap();
+        let first = device_id(&conn).unwrap();
+        let path = dir.path().join("oboete.db");
+        let legacy = legacy_store_file(&path).unwrap();
+        conn.execute("UPDATE meta SET value=?1 WHERE key='store_file'", [&legacy])
+            .unwrap();
+        drop(conn);
+        let conn = open(dir.path()).unwrap();
+        assert_eq!(device_id(&conn).unwrap(), first);
+        let now: String = conn
+            .query_row("SELECT value FROM meta WHERE key='store_file'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(now, store_file(&path));
     }
 
     #[test]

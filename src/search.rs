@@ -798,6 +798,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(trec_run(&conn, own, 1, None).unwrap(), "q1 Q0 p2 1 1 fts\n");
+        drop(conn); // Windows removes no file that is open
         std::fs::remove_dir_all(dir).unwrap();
     }
 
