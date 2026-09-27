@@ -106,7 +106,9 @@ fn transcript_turns(path: &Path, agent: &str, settings: &Settings) -> Result<i64
         line: Vec::new(),
         turns: 0,
     };
-    crate::transcript::convert(path, agent, &mut count)?;
+    let stats = crate::transcript::convert(path, agent, &mut count)?;
+    // A line that is not JSON may have held a turn: the count would hide the gap it shows.
+    anyhow::ensure!(stats.skipped == 0, "{} unreadable line(s)", stats.skipped);
     Ok(count.turns)
 }
 
@@ -176,7 +178,7 @@ pub fn doctor(k: &Connection) -> Vec<String> {
         .map(|(agent, ended, checked, short, missing)| {
             if checked == 0 {
                 return format!(
-                    "{agent}: {ended} ended session(s), not checked (no transcript oboete reads)"
+                    "{agent}: {ended} ended session(s), not checked (no transcript oboete could read)"
                 );
             }
             let mut line = format!(
@@ -184,7 +186,7 @@ pub fn doctor(k: &Connection) -> Vec<String> {
             );
             if ended > checked {
                 line.push_str(&format!(
-                    "; {} not checked (no transcript oboete reads)",
+                    "; {} not checked (no transcript oboete could read)",
                     ended - checked
                 ));
             }
@@ -260,6 +262,13 @@ mod tests {
         store.append(&end("claude", "s1", Some(&file))).unwrap();
         // Codex's session sent no transcript path: not checked, never a gap.
         store.append(&end("codex", "c1", None)).unwrap();
+        // A transcript with a line that is not JSON: not checked either.
+        let torn = home.path().join("s2.jsonl");
+        transcript(&torn, &["one"]);
+        let mut text = std::fs::read_to_string(&torn).unwrap();
+        text.push_str("{\"type\": \"user\", \"message\n");
+        std::fs::write(&torn, text).unwrap();
+        store.append(&end("claude", "s2", Some(&torn))).unwrap();
         worker::run_once(home.path()).unwrap();
         let k = knowledge::open(home.path()).unwrap();
         let row: (Option<i64>, i64) = k
@@ -273,8 +282,8 @@ mod tests {
         assert_eq!(
             doctor(&k),
             vec![
-                "claude: 1 of 1 ended session(s) short of their transcript (1 turn(s) not recorded)",
-                "codex: 1 ended session(s), not checked (no transcript oboete reads)",
+                "claude: 1 of 1 ended session(s) short of their transcript (1 turn(s) not recorded); 1 not checked (no transcript oboete could read)",
+                "codex: 1 ended session(s), not checked (no transcript oboete could read)",
             ]
         );
     }
