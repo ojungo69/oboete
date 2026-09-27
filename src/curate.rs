@@ -266,6 +266,52 @@ fn without_markers(s: &str) -> String {
 /// What the gate hides in a text, in its offsets (`redact::hidden`).
 type Hidden = Option<Vec<(usize, usize)>>;
 
+/// The output a window shows for a read of stored memory.
+const MEMORY_READ: &str = " (a read of stored memory, not shown)";
+
+/// A read of stored memory: a tool of oboete's own MCP server, `oboete search|get|timeline` run
+/// as a command, or a claude-mem tool. Its output repeats what memory holds, retracted and
+/// finished items too, and a curator reading it would make them current again, so a window shows
+/// the call and not the output (claude-mem's `isRecursiveMemoryTool` skips them too).
+fn memory_read(tool: &str, body: &Value) -> bool {
+    let tool = tool.to_ascii_lowercase();
+    tool.contains("oboete")
+        || tool.contains("claude-mem")
+        || tool.contains("claude_mem")
+        // Cursor names an MCP tool without its server (`MCP:<tool>`): oboete's three by name.
+        || matches!(tool.as_str(), "mcp:search" | "mcp:get" | "mcp:timeline")
+        // Only a shell runs a command: a Grep for "oboete search" read no memory.
+        || ["bash", "shell", "command", "exec", "terminal"]
+            .iter()
+            .any(|k| tool.contains(k))
+            && runs_memory_read(&body["input"])
+}
+
+/// Whether a text of a tool's input, decoded, runs `oboete search|get|timeline` in a command's
+/// place: first on a line, after a shell operator or `$(`, or first in a shell's quoted command
+/// (`bash -lc "oboete get c1"`, not `rg 'oboete search'`), after variable assignments or a
+/// wrapper (`OBOETE_HOME=x`, `env`, `sudo`), with or without a path before it (`/` or `\`,
+/// `.exe` too) and global options after it (`--home <dir>`). Rarer forms: issue #177.
+fn runs_memory_read(v: &Value) -> bool {
+    static CLI: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?m)(?:^|[;&|(]|\$\(|-l?c\s+["']|-Command\s+["'])\s*(?:(?:env|sudo|command|exec|nohup|time)\s+|[A-Za-z_]\w*=\S*\s+)*(?:[^\s"';&|]*[/\\])?oboete(?:\.exe)?(?:\s+--?[\w-]+(?:=\S+|\s+[^\s-]\S*)?)*\s+(?:search|get|timeline)\b"#,
+        )
+        .expect("memory read pattern")
+    });
+    match v {
+        // Capture stores an object input as its JSON text: decoded, a `\n` in it is a new line.
+        Value::String(s) => {
+            CLI.is_match(s)
+                || serde_json::from_str::<Value>(s)
+                    .is_ok_and(|v| (v.is_object() || v.is_array()) && runs_memory_read(&v))
+        }
+        Value::Array(a) => a.iter().any(runs_memory_read),
+        Value::Object(o) => o.values().any(runs_memory_read),
+        _ => false,
+    }
+}
+
 /// One event as a window shows it: its line before its long text through the gate, its long text
 /// (the part a window may split) with what the gate hides in it found once on the whole of it, and
 /// its session.
@@ -335,7 +381,12 @@ struct Prepared<'r> {
 impl<'r> Prepared<'r> {
     fn new(e: &Event, rules: &'r Rules) -> Self {
         let body: Value = serde_json::from_str(&e.body).unwrap_or(Value::String(e.body.clone()));
-        let long = long_of(&e.kind, &body);
+        let memory = e.kind == "tool" && memory_read(body["tool"].as_str().unwrap_or(""), &body);
+        let long = if memory {
+            None
+        } else {
+            long_of(&e.kind, &body)
+        };
         let gate = |s: &str| crate::redact::outbound_with(s, rules);
         let (head, tool) = match e.kind.as_str() {
             "prompt" if body["omitted"] == true => ("[user] (not stored)".into(), false),
@@ -358,8 +409,9 @@ impl<'r> Prepared<'r> {
                     ""
                 };
                 let name = gate(body["tool"].as_str().unwrap_or("?"));
+                let output = if memory { MEMORY_READ } else { "" };
                 (
-                    format!("[tool {name}{failed}] input: {input}\n  output:"),
+                    format!("[tool {name}{failed}] input: {input}\n  output:{output}"),
                     true,
                 )
             }
@@ -1372,6 +1424,84 @@ mod tests {
             assert_eq!(seen.matches(l.as_str()).count(), 1, "{l}");
         }
         assert!(seen.contains("[user] thanks"));
+    }
+
+    /// A read of stored memory (oboete's own tools, or claude-mem's) shows its call and not its
+    /// output: the output repeats memory, retracted and finished items too, and a curator reading
+    /// it would make them current again.
+    #[test]
+    fn a_memory_reads_output_is_not_shown_to_the_curator() {
+        let (_h, mut raw, dev) = store();
+        let rules = Rules::default();
+        let old = "We decided to use spaces, not tabs.";
+        // The input as capture stores it: an object as its JSON text (`capture::events`).
+        let tool = |name: &str, input: Value, output: &str| {
+            let input = input.to_string();
+            event(
+                "tool",
+                serde_json::json!({"tool": name, "input": input, "output": output, "failed": false}),
+            )
+        };
+        for (name, input) in [
+            (
+                "mcp__oboete__search",
+                serde_json::json!({"query": "indent"}),
+            ),
+            ("MCP:search", serde_json::json!({"query": "indent"})),
+            (
+                "mcp__plugin_claude-mem_mcp-search__search",
+                serde_json::json!({"query": "indent"}),
+            ),
+            (
+                "Bash",
+                serde_json::json!({"command": "cd x && ~/.cargo/bin/oboete search indent"}),
+            ),
+            (
+                "exec_command",
+                serde_json::json!({"command": ["bash", "-lc", "oboete get c1"]}),
+            ),
+            (
+                "Bash",
+                serde_json::json!({"command": "cd repo\noboete timeline"}),
+            ),
+            (
+                "Bash",
+                serde_json::json!({"command": "oboete --home /tmp/store search old"}),
+            ),
+            (
+                "Bash",
+                serde_json::json!({"command": "OBOETE_HOME=/tmp/store env oboete get c2"}),
+            ),
+            (
+                "PowerShell",
+                serde_json::json!({"command": "C:\\Users\\me\\bin\\oboete.exe search indent"}),
+            ),
+        ] {
+            raw.append(&tool(name, input, old)).unwrap();
+        }
+        // Any other call is shown whole, a command that only mentions oboete too.
+        let echo = serde_json::json!({"command": "echo oboete search"});
+        raw.append(&tool("Bash", echo, "ran")).unwrap();
+        let web = serde_json::json!({"query": "tabs"});
+        raw.append(&tool("MCP:web_search", web, "a page")).unwrap();
+        let pattern = serde_json::json!({"pattern": "oboete search", "path": "src"});
+        raw.append(&tool("Grep", pattern, "src/setup.rs:2"))
+            .unwrap();
+        let grep = serde_json::json!({"command": "rg 'oboete search' src"});
+        raw.append(&tool("Bash", grep, "src/mcp.rs:1")).unwrap();
+        let nested = serde_json::json!({"command": "bash -lc 'oboete search tabs'"});
+        raw.append(&tool("Bash", nested, old)).unwrap();
+        let w = next_window(&raw, &dev, 10_000, &rules).unwrap().unwrap();
+        assert!(!w.text.contains(old), "{}", w.text);
+        assert_eq!(w.text.matches(MEMORY_READ).count(), 10, "{}", w.text);
+        assert!(w.text.contains("mcp__oboete__search") && w.text.contains("ran"));
+        assert!(
+            w.text.contains("src/mcp.rs:1")
+                && w.text.contains("a page")
+                && w.text.contains("src/setup.rs:2"),
+            "{}",
+            w.text
+        );
     }
 
     #[test]
