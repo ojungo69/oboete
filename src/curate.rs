@@ -283,12 +283,13 @@ fn memory_read(tool: &str, body: &Value) -> bool {
 
 /// Whether a text of a tool's input, decoded, runs `oboete search|get|timeline` in a command's
 /// place: first on a line, after a shell operator or `$(`, or first in a quoted argument
-/// (`bash -lc "oboete get c1"`), with or without a path before it (`/` or `\`, `.exe` too) and
-/// global options after it (`--home <dir>`).
+/// (`bash -lc "oboete get c1"`), after variable assignments or a wrapper (`OBOETE_HOME=x`, `env`,
+/// `sudo`), with or without a path before it (`/` or `\`, `.exe` too) and global options after
+/// it (`--home <dir>`).
 fn runs_memory_read(v: &Value) -> bool {
     static CLI: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
-            r#"(?m)(?:^|[;&|("']|\$\()\s*(?:[^\s"';&|]*[/\\])?oboete(?:\.exe)?(?:\s+--?[\w-]+(?:=\S+|\s+[^\s-]\S*)?)*\s+(?:search|get|timeline)\b"#,
+            r#"(?m)(?:^|[;&|("']|\$\()\s*(?:(?:env|sudo|command|exec|nohup|time)\s+|[A-Za-z_]\w*=\S*\s+)*(?:[^\s"';&|]*[/\\])?oboete(?:\.exe)?(?:\s+--?[\w-]+(?:=\S+|\s+[^\s-]\S*)?)*\s+(?:search|get|timeline)\b"#,
         )
         .expect("memory read pattern")
     });
@@ -1461,6 +1462,10 @@ mod tests {
                 serde_json::json!({"command": "oboete --home /tmp/store search old"}),
             ),
             (
+                "Bash",
+                serde_json::json!({"command": "OBOETE_HOME=/tmp/store env oboete get c2"}),
+            ),
+            (
                 "PowerShell",
                 serde_json::json!({"command": "C:\\Users\\me\\bin\\oboete.exe search indent"}),
             ),
@@ -1472,7 +1477,7 @@ mod tests {
         raw.append(&tool("Bash", echo, "ran")).unwrap();
         let w = next_window(&raw, &dev, 10_000, &rules).unwrap().unwrap();
         assert!(!w.text.contains(old), "{}", w.text);
-        assert_eq!(w.text.matches(MEMORY_READ).count(), 7, "{}", w.text);
+        assert_eq!(w.text.matches(MEMORY_READ).count(), 8, "{}", w.text);
         assert!(w.text.contains("mcp__oboete__search") && w.text.contains("ran"));
     }
 
