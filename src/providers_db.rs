@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS pending(
   attempts INTEGER NOT NULL DEFAULT 0,    -- attempts that count toward D11's three
   next_attempt_at INTEGER NOT NULL,       -- unix ms: not tried again before then
   since INTEGER NOT NULL,                 -- when the window first waited
-  prompt TEXT NOT NULL                    -- the SHA-256 of the request the attempts were on, with who was asked
+  prompt TEXT NOT NULL                    -- the SHA-256 of the request the attempts were on, with who was asked and the idle gate
 );
 ";
 

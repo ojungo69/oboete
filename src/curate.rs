@@ -507,11 +507,11 @@ pub fn run_phase(
         });
     }
     let prompt = prompt(&summary.language, &w.text);
-    let sent = sha256_hex(&format!("{chain}\n{prompt}"));
+    let sent = sha256_hex(&format!("{chain}\n{idle}\n{prompt}"));
     // A row for another request is stale, and its attempts and hold were not on this one: a
     // restore or a skipped window moved the checkpoint, records added since made the window
     // longer, new rules or another language changed what would be sent, or the owner changed
-    // who is asked (`chain`: the providers and caps as text).
+    // who is asked (`chain`: the providers and caps as text) or the idle gate.
     let range = |p: &Pending| (p.from_seq, p.from_offset, p.to_seq, p.to_offset);
     let pending = providers_db::pending_of(db, &device)?.filter(|p| {
         range(p) == (w.from_seq, w.from_offset, w.to_seq, w.to_offset) && p.prompt == sent
@@ -1410,7 +1410,7 @@ mod tests {
     }
 
     /// A window held until a budget resets is tried again at once when the owner changes the
-    /// providers or their caps: the hold was the old chain's.
+    /// providers, their caps or the idle gate: the hold was under the old ones.
     #[test]
     fn a_window_held_by_one_chain_is_tried_again_by_another() {
         let home = tempfile::tempdir().unwrap();
@@ -1434,6 +1434,13 @@ mod tests {
         assert_eq!(tried.get(), 1);
         run_phase(&mut raw, &db, &rules, &summary, "budget 100", &mut chain).unwrap();
         assert_eq!(tried.get(), 2);
+        // A shorter idle gate is another gate too.
+        let sooner = Summary {
+            idle_minutes: 1,
+            ..summary.clone()
+        };
+        run_phase(&mut raw, &db, &rules, &sooner, "budget 100", &mut chain).unwrap();
+        assert_eq!(tried.get(), 3);
     }
 
     /// Milestone 2's coverage part, on a replayed day: every seq is in a window op, curated,
