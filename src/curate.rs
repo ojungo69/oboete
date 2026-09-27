@@ -282,14 +282,14 @@ fn memory_read(tool: &str, body: &Value) -> bool {
 }
 
 /// Whether a text of a tool's input, decoded, runs `oboete search|get|timeline` in a command's
-/// place: first on a line, after a shell operator or `$(`, or first in a quoted argument
-/// (`bash -lc "oboete get c1"`), after variable assignments or a wrapper (`OBOETE_HOME=x`, `env`,
-/// `sudo`), with or without a path before it (`/` or `\`, `.exe` too) and global options after
-/// it (`--home <dir>`).
+/// place: first on a line, after a shell operator or `$(`, or first in a shell's quoted command
+/// (`bash -lc "oboete get c1"`, not `rg 'oboete search'`), after variable assignments or a
+/// wrapper (`OBOETE_HOME=x`, `env`, `sudo`), with or without a path before it (`/` or `\`,
+/// `.exe` too) and global options after it (`--home <dir>`). Rarer forms: issue #177.
 fn runs_memory_read(v: &Value) -> bool {
     static CLI: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
-            r#"(?m)(?:^|[;&|("']|\$\()\s*(?:(?:env|sudo|command|exec|nohup|time)\s+|[A-Za-z_]\w*=\S*\s+)*(?:[^\s"';&|]*[/\\])?oboete(?:\.exe)?(?:\s+--?[\w-]+(?:=\S+|\s+[^\s-]\S*)?)*\s+(?:search|get|timeline)\b"#,
+            r#"(?m)(?:^|[;&|(]|\$\(|-l?c\s+["']|-Command\s+["'])\s*(?:(?:env|sudo|command|exec|nohup|time)\s+|[A-Za-z_]\w*=\S*\s+)*(?:[^\s"';&|]*[/\\])?oboete(?:\.exe)?(?:\s+--?[\w-]+(?:=\S+|\s+[^\s-]\S*)?)*\s+(?:search|get|timeline)\b"#,
         )
         .expect("memory read pattern")
     });
@@ -1475,10 +1475,15 @@ mod tests {
         // Any other call is shown whole, a command that only mentions oboete too.
         let echo = serde_json::json!({"command": "echo oboete search"});
         raw.append(&tool("Bash", echo, "ran")).unwrap();
+        let grep = serde_json::json!({"command": "rg 'oboete search' src"});
+        raw.append(&tool("Bash", grep, "src/mcp.rs:1")).unwrap();
+        let nested = serde_json::json!({"command": "bash -lc 'oboete search tabs'"});
+        raw.append(&tool("Bash", nested, old)).unwrap();
         let w = next_window(&raw, &dev, 10_000, &rules).unwrap().unwrap();
         assert!(!w.text.contains(old), "{}", w.text);
-        assert_eq!(w.text.matches(MEMORY_READ).count(), 8, "{}", w.text);
+        assert_eq!(w.text.matches(MEMORY_READ).count(), 9, "{}", w.text);
         assert!(w.text.contains("mcp__oboete__search") && w.text.contains("ran"));
+        assert!(w.text.contains("src/mcp.rs:1"), "{}", w.text);
     }
 
     #[test]
