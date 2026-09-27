@@ -1346,6 +1346,14 @@ fn cli_headless(
     prompt: &str,
     schema: &Value,
 ) -> Result<Answer, CallError> {
+    // codex's answer says nothing of its allowance (`codex exec --json`): its app server is asked
+    // before the call, and a window at its line rests codex with nothing sent (issue #166).
+    if cli == "codex"
+        && let Some(until) = codex_rest_now()
+    {
+        let e = CallError::other("codex is at its plan's usage line");
+        return Err(e.unsent().resting(Some(until)));
+    }
     let scratch = scratch_dir()?;
     let last = scratch.0.join("last.json");
     let (mut cmd, stdin) = headless_command(cli, model, &scratch.0, prompt, &schema.to_string())?;
@@ -1419,6 +1427,121 @@ fn cli_headless(
         cool_until: rest,
         rate: None,
     })
+}
+
+/// How long a reading of codex's plan under its lines is kept: a week's window moves slowly, and
+/// codex is near the end of the chain.
+const CODEX_LIMITS_EVERY_MS: i64 = 10 * 60_000;
+/// How long codex's app server may take to answer the read (0.7 s on the owner's machine).
+const CODEX_LIMITS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Until when codex should rest before this call (issue #166). A reading under the lines is kept
+/// for `CODEX_LIMITS_EVERY_MS`; one at a line becomes the chain's cooldown, so codex is not asked
+/// again before its reset. None when the read fails: the call goes ahead.
+fn codex_rest_now() -> Option<i64> {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static UNDER_UNTIL: AtomicI64 = AtomicI64::new(0);
+    let now = db::now_ms();
+    if UNDER_UNTIL.load(Ordering::Relaxed) > now {
+        return None;
+    }
+    let read = codex_limits(std::ffi::OsStr::new("codex"), CODEX_LIMITS_TIMEOUT)?;
+    let rest = codex_rest(&read, now);
+    if rest.is_none() {
+        UNDER_UNTIL.store(now + CODEX_LIMITS_EVERY_MS, Ordering::Relaxed);
+    }
+    rest
+}
+
+/// What `program app-server` answers to `account/rateLimits/read`, under the curator's environment.
+/// The server answers only while its stdin is open, so the request stays open until the answer
+/// or the timeout, and the server is killed after. No model is called.
+fn codex_limits(program: &std::ffi::OsStr, timeout: Duration) -> Option<Value> {
+    use std::io::{BufRead, Read, Write};
+    let scratch = scratch_dir().ok()?;
+    let mut cmd = Command::new(program);
+    cmd.arg("app-server")
+        .current_dir(&scratch.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env_clear()
+        .envs(curator_env(std::env::vars_os(), cfg!(windows)))
+        .env(hook::SKIP_ENV, "1");
+    let mut child = own_group(&mut cmd).spawn().ok()?;
+    let (mut stdin, stdout) = (child.stdin.take()?, child.stdout.take()?);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let lines = std::io::BufReader::new(stdout.take(MAX_RESPONSE_BYTES)).lines();
+        for line in lines.map_while(Result::ok) {
+            if let Ok(v) = serde_json::from_str::<Value>(&line)
+                && v["id"] == 1
+            {
+                let _ = tx.send(v);
+                return;
+            }
+        }
+    });
+    let requests = [
+        json!({"id": 0, "method": "initialize",
+            "params": {"clientInfo": {"name": "oboete", "version": env!("CARGO_PKG_VERSION")}}}),
+        json!({"method": "initialized"}),
+        json!({"id": 1, "method": "account/rateLimits/read"}),
+    ];
+    let sent = requests
+        .iter()
+        .all(|r| writeln!(stdin, "{r}").and_then(|()| stdin.flush()).is_ok());
+    let answer = sent.then(|| rx.recv_timeout(timeout).ok()).flatten();
+    drop(stdin);
+    kill_tree(&mut child);
+    let _ = child.wait();
+    answer.map(|a| a["result"].clone()).filter(Value::is_object)
+}
+
+/// When codex should rest, from its app server's reading: at the lines claude rests at (Claude
+/// decision C1): a window of at most five hours used to 95% or, in its last quarter hour, to 85%,
+/// a longer one to 93%, until that window's reset (`REST_WITHOUT_RESET` when it gives none). A
+/// reached limit, or no included usage left, would draw on paid credits: codex rests until the
+/// latest reset, or until the owner acts when none is given. At most `MAX_SUBSCRIPTION_REST` away.
+fn codex_rest(read: &Value, now: i64) -> Option<i64> {
+    let snapshots: Vec<&Value> = match read["rateLimitsByLimitId"].as_object() {
+        Some(m) if !m.is_empty() => m.values().collect(),
+        _ => vec![&read["rateLimits"]],
+    };
+    let windows: Vec<&Value> = snapshots
+        .iter()
+        .flat_map(|s| [&s["primary"], &s["secondary"]])
+        .filter(|w| w.is_object())
+        .collect();
+    let reset = |w: &Value| w["resetsAt"].as_i64().map(|s| s.saturating_mul(1000));
+    let cap = |t: i64| t.min(now + MAX_SUBSCRIPTION_REST.as_millis() as i64);
+    let past = read["ordinaryUsageAllowed"] == false
+        || snapshots
+            .iter()
+            .any(|s| !s["rateLimitReachedType"].is_null());
+    if past {
+        return Some(
+            windows
+                .iter()
+                .filter_map(|w| reset(w))
+                .max()
+                .map_or(providers_db::OWNER_HOLD, cap),
+        );
+    }
+    let at_line = |w: &Value| {
+        let Some(used) = w["usedPercent"].as_f64().map(|p| p / 100.0) else {
+            return false;
+        };
+        let short = w["windowDurationMins"].as_i64().is_some_and(|m| m <= 300);
+        let ending = short && reset(w).is_some_and(|t| t - now <= 15 * 60_000);
+        used >= if short { 0.95 } else { 0.93 } || ending && used >= 0.85
+    };
+    windows
+        .iter()
+        .filter(|w| at_line(w))
+        .map(|w| reset(w).unwrap_or(now + REST_WITHOUT_RESET.as_millis() as i64))
+        .map(cap)
+        .max()
 }
 
 /// Whether codex's `--json` events hold a web search.
@@ -1808,6 +1931,72 @@ mod tests {
         assert!(claude_stream(&used).is_err());
     }
 
+    /// Issue #166: codex rests at claude's lines, read from its app server's windows; a reached
+    /// limit or no included usage rests it until the latest reset, or until the owner acts.
+    #[test]
+    fn codex_rests_at_the_lines_its_app_server_reports() {
+        let now = db::now_ms();
+        let (later, soon) = (now / 1000 + 86_400, now / 1000 + 600);
+        let read = |windows: Value| json!({"rateLimits": windows});
+        let window = |used: i64, mins: i64, reset: i64| json!({"usedPercent": used, "windowDurationMins": mins, "resetsAt": reset});
+        let week = |used| read(json!({"primary": window(used, 10080, later)}));
+        // The owner's week on 2026-09-28: 47%.
+        assert_eq!(codex_rest(&week(47), now), None);
+        assert_eq!(codex_rest(&week(92), now), None);
+        assert_eq!(codex_rest(&week(93), now), Some(later * 1000));
+        let hours = |used, reset| read(json!({"primary": window(used, 300, reset)}));
+        assert_eq!(codex_rest(&hours(94, later), now), None);
+        assert_eq!(codex_rest(&hours(95, later), now), Some(later * 1000));
+        assert_eq!(codex_rest(&hours(85, soon), now), Some(soon * 1000));
+        assert_eq!(codex_rest(&hours(84, soon), now), None);
+        // Every limit counts, and the later reset holds.
+        let both = json!({"rateLimitsByLimitId": {
+            "codex": {"primary": window(10, 10080, later)},
+            "other": {"primary": window(10, 300, soon), "secondary": window(96, 10080, later + 60)},
+        }});
+        assert_eq!(codex_rest(&both, now), Some((later + 60) * 1000));
+        let reached = json!({"rateLimits": {"primary": window(40, 10080, later),
+            "rateLimitReachedType": "rate_limit_reached"}});
+        assert_eq!(codex_rest(&reached, now), Some(later * 1000));
+        let none_left = json!({"ordinaryUsageAllowed": false, "rateLimits": {}});
+        assert_eq!(codex_rest(&none_left, now), Some(providers_db::OWNER_HOLD));
+        assert_eq!(codex_rest(&json!({}), now), None);
+        // At its line with no reset: an hour, then codex is read again.
+        let unset = read(json!({"primary": {"usedPercent": 97, "windowDurationMins": 10080}}));
+        let hour = REST_WITHOUT_RESET.as_millis() as i64;
+        assert_eq!(codex_rest(&unset, now), Some(now + hour));
+    }
+
+    /// The app server answers only while its stdin is open: the read keeps it open until the
+    /// answer, and a server that never answers is given up on and killed.
+    #[cfg(unix)]
+    #[test]
+    fn codex_limits_are_read_from_a_server_that_waits_for_its_stdin() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        // As codex does: the answer comes a moment after the request, and the end of stdin ends
+        // the server before it.
+        let answering = fake(
+            "answering",
+            r#"while read -r line; do case "$line" in *'"id":1'*) (sleep 0.3; echo '{"id":1,"result":{"rateLimits":{"primary":{"usedPercent":47}}}}') & pid=$!;; esac; done; kill $pid 2>/dev/null"#,
+        );
+        let second = Duration::from_secs(1);
+        let got = codex_limits(answering.as_os_str(), second * 5).expect("an answer");
+        assert_eq!(got["rateLimits"]["primary"]["usedPercent"], 47);
+        let silent = fake("silent", "while read -r line; do :; done");
+        let started = Instant::now();
+        assert!(codex_limits(silent.as_os_str(), second).is_none());
+        assert!(started.elapsed() < second * 3);
+        let missing = dir.path().join("missing");
+        assert!(codex_limits(missing.as_os_str(), second).is_none());
+    }
+
     /// Claude decision C1 at claude-mem's lines (owner delegated, 2026-09-28): a window used to
     /// its line (five hours 95%, a week 93%, the Sonnet week 92%), the last quarter hour of a
     /// five-hour window used to 85%, a rejection, or paid overage rests claude until the reset; a
@@ -1956,6 +2145,17 @@ mod tests {
         .join("\n");
         let e = claude_stream(&out).expect_err("a truncated line");
         assert!(e.message.contains("stream line"), "{}", e.message);
+    }
+
+    /// The owner's codex, under the curator's environment: its app server reports the plan's
+    /// windows (run with `--ignored`; no model is called).
+    #[test]
+    #[ignore]
+    fn live_codex_reports_its_plan_windows() {
+        let read = codex_limits(std::ffi::OsStr::new("codex"), CODEX_LIMITS_TIMEOUT).unwrap();
+        let used = &read["rateLimits"]["primary"]["usedPercent"];
+        assert!(used.is_number(), "{read}");
+        println!("codex rest: {:?}", codex_rest(&read, db::now_ms()));
     }
 
     /// Live, with `--ignored`, in the dogfood user only (curator CLI tests run there): each
