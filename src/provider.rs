@@ -5,6 +5,10 @@
 //! waited out once,
 //! and any other error (HTTP, timeout, unparsable/invalid output) moves on to the next provider.
 
+// One error per provider call, which takes seconds on the network or in a CLI: moving a
+// large error costs nothing next to it.
+#![allow(clippy::result_large_err)]
+
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
@@ -64,6 +68,9 @@ struct CallError {
     /// Whether the prompt may have left the machine: false for a failure before dispatch (no
     /// key file, no scratch directory, a CLI that did not start), for the egress ledger.
     sent: bool,
+    /// A subscription's own reset it reported on the way (claude's `rate_limit_event`): the
+    /// provider rests until then whatever else failed.
+    cool_until: Option<i64>,
 }
 
 impl CallError {
@@ -74,10 +81,17 @@ impl CallError {
             message: message.into(),
             usage: Usage::default(),
             sent: true,
+            cool_until: None,
         }
     }
     fn with_usage(self, usage: Usage) -> Self {
         Self { usage, ..self }
+    }
+    fn resting(self, cool_until: Option<i64>) -> Self {
+        Self {
+            cool_until: self.cool_until.max(cool_until),
+            ..self
+        }
     }
     /// A failure before the request or the CLI started: nothing was uploaded.
     fn unsent(self) -> Self {
@@ -173,7 +187,8 @@ impl<'a> Chain<'a> {
                 } else {
                     Err(
                         CallError::other("invalid output: the answer does not match the schema")
-                            .with_usage(a.usage),
+                            .with_usage(a.usage)
+                            .resting(a.cool_until),
                     )
                 }
             });
@@ -279,7 +294,9 @@ fn next_state(was: providers_db::State, e: &CallError) -> providers_db::State {
         None => (None, was.fails + 1, 0),
     };
     providers_db::State {
-        down_until: cooldown.map_or(0, |c| db::now_ms() + c.as_millis() as i64),
+        down_until: cooldown
+            .map_or(0, |c| db::now_ms() + c.as_millis() as i64)
+            .max(e.cool_until.unwrap_or(0)),
         fails,
         backoff,
     }
@@ -408,6 +425,7 @@ fn openai_compat(
             message,
             usage: Usage::default(),
             sent: true,
+            cool_until: None,
         });
     }
     let v: Value = serde_json::from_str(&text)
@@ -915,19 +933,12 @@ fn curator_env(
         .collect()
 }
 
-/// What `claude -p --output-format stream-json --verbose` reported.
-struct ClaudeRun {
-    /// The `result` event, whose `result` text holds the answer.
-    result: String,
-    cool_until: Option<i64>,
-}
-
 /// Check claude's stream (spec 6.5) and pick out its result. The `system/init` event must report
 /// no tool, MCP server or plugin and the permission mode asked for, and no turn may use a tool:
 /// otherwise the answer is discarded, since a curator that can act might have acted. A
 /// `rate_limit_event` with `allowed_warning` or `rejected` rests claude until its reset (Claude
 /// decision C1), and `credits_required` for a day, until the owner acts.
-fn claude_stream(stdout: &str) -> Result<ClaudeRun, CallError> {
+fn claude_stream(stdout: &str) -> Result<String, CallError> {
     let events: Vec<Value> = stdout
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -956,22 +967,6 @@ fn claude_stream(stdout: &str) -> Result<ClaudeRun, CallError> {
              discarded",
         ));
     }
-    let now = db::now_ms();
-    let cool_until = events
-        .iter()
-        .filter(|e| e["type"] == "rate_limit_event")
-        .filter(|e| {
-            matches!(
-                e["rate_limit_info"]["status"].as_str(),
-                Some("allowed_warning" | "rejected")
-            )
-        })
-        .filter_map(|e| e["rate_limit_info"]["resetsAt"].as_i64())
-        .map(|s| {
-            s.saturating_mul(1000)
-                .min(now + MAX_SUBSCRIPTION_REST.as_millis() as i64)
-        })
-        .max();
     if events
         .iter()
         .any(|e| e["errorCode"] == "credits_required" || e["error"] == "credits_required")
@@ -982,6 +977,7 @@ fn claude_stream(stdout: &str) -> Result<ClaudeRun, CallError> {
             message: "claude: credits required (the owner must act)".into(),
             usage: Usage::default(),
             sent: true,
+            cool_until: None,
         });
     }
     let result = events
@@ -995,16 +991,36 @@ fn claude_stream(stdout: &str) -> Result<ClaudeRun, CallError> {
             .and_then(|n| u16::try_from(n).ok());
         return Err(CallError {
             status,
-            retry_after_s: cool_until.map(|t| ((t - now).max(0) / 1000) as f64),
+            retry_after_s: None,
             message: format!("claude {}", result["subtype"].as_str().unwrap_or("error")),
             usage: Usage::default(),
             sent: true,
+            cool_until: None,
         });
     }
-    Ok(ClaudeRun {
-        result: result.to_string(),
-        cool_until,
-    })
+    Ok(result.to_string())
+}
+
+/// When claude's stream said its subscription should rest: the reset of a `rate_limit_event` with
+/// `allowed_warning` or `rejected` (Claude decision C1), at most `MAX_SUBSCRIPTION_REST` away.
+fn claude_rest(stdout: &str) -> Option<i64> {
+    let now = db::now_ms();
+    stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["type"] == "rate_limit_event")
+        .filter(|e| {
+            matches!(
+                e["rate_limit_info"]["status"].as_str(),
+                Some("allowed_warning" | "rejected")
+            )
+        })
+        .filter_map(|e| e["rate_limit_info"]["resetsAt"].as_i64())
+        .map(|s| {
+            s.saturating_mul(1000)
+                .min(now + MAX_SUBSCRIPTION_REST.as_millis() as i64)
+        })
+        .max()
 }
 
 /// Run a subscription CLI headless (see `headless_command`) and return its structured answer.
@@ -1047,13 +1063,14 @@ fn cli_headless(
     })?;
     let stdout = String::from_utf8_lossy(&out);
     let usage = usage_cli(cli, &stdout);
-    let mut cool_until = None;
+    // claude's reset holds whatever else fails below.
+    let rest = if cli == "claude" {
+        claude_rest(&stdout)
+    } else {
+        None
+    };
     let text = match cli {
-        "claude" => {
-            let run = claude_stream(&stdout).map_err(|e| e.with_usage(usage))?;
-            cool_until = run.cool_until;
-            run.result
-        }
+        "claude" => claude_stream(&stdout).map_err(|e| e.with_usage(usage).resting(rest))?,
         "codex" => {
             use std::io::Read;
             let mut text = String::new();
@@ -1068,11 +1085,11 @@ fn cli_headless(
         "agy" => agy_result(&stdout).map_err(|e| e.with_usage(usage))?,
         _ => stdout.into_owned(),
     };
-    let answer = extract_structured(cli, &text).map_err(|e| e.with_usage(usage))?;
+    let answer = extract_structured(cli, &text).map_err(|e| e.with_usage(usage).resting(rest))?;
     Ok(Answer {
         value: answer,
         usage,
-        cool_until,
+        cool_until: rest,
     })
 }
 
@@ -1363,10 +1380,10 @@ mod tests {
             "allowed",
             result_of("```json\n{\"summary\": \"s\"}\n```"),
         );
-        let run = claude_stream(&out).unwrap();
-        assert_eq!(run.cool_until, None);
+        let result = claude_stream(&out).unwrap();
+        assert_eq!(claude_rest(&out), None);
         assert_eq!(
-            extract_structured("claude", &run.result).unwrap(),
+            extract_structured("claude", &result).unwrap(),
             json!({"summary": "s"})
         );
         assert_eq!(usage_cli("claude", &out).prompt, Some(109));
@@ -1384,7 +1401,7 @@ mod tests {
             let mut init = clean_init();
             init[k] = v;
             let out = claude_events(init, "allowed", result_of("{}"));
-            let e = claude_stream(&out).err().expect(k);
+            let e = claude_stream(&out).expect_err(k);
             assert!(e.message.contains("isolation"), "{k}: {}", e.message);
             assert!(!e.invalid(), "an isolation failure rests claude: {k}");
         }
@@ -1403,10 +1420,36 @@ mod tests {
     fn a_rate_limit_warning_cools_claude_down_until_its_reset() {
         for status in ["allowed_warning", "rejected"] {
             let out = claude_events(clean_init(), status, result_of("{}"));
-            let run = claude_stream(&out).unwrap();
+            assert!(claude_stream(&out).is_ok());
             // Until the weekly window's reset, days away: not capped at a day.
-            assert_eq!(run.cool_until, Some(1_790_744_400_000), "{status}");
+            assert_eq!(claude_rest(&out), Some(1_790_744_400_000), "{status}");
         }
+    }
+
+    #[test]
+    fn claudes_reset_holds_when_its_run_fails_or_its_answer_is_unusable() {
+        let reset_s = db::now_ms() / 1000 + 5 * 86_400; // a weekly window, 5 days away
+        let rejected = [
+            clean_init(),
+            json!({"type": "rate_limit_event", "rate_limit_info":
+                {"status": "rejected", "resetsAt": reset_s, "rateLimitType": "seven_day"}}),
+            json!({"type": "result", "subtype": "error_during_execution", "is_error": true}),
+        ]
+        .map(|v| v.to_string())
+        .join("\n");
+        let rest = claude_rest(&rejected);
+        assert_eq!(rest, Some(reset_s * 1000));
+        // The failed run, as cli_headless passes it on: not a 10-minute outage.
+        let e = claude_stream(&rejected).unwrap_err().resting(rest);
+        let s = next_state(providers_db::State::default(), &e);
+        assert_eq!(s.down_until, reset_s * 1000);
+        // An answer of the wrong shape under a warning, as the chain passes it on.
+        let e =
+            CallError::other("invalid output: the answer does not match the schema").resting(rest);
+        assert_eq!(
+            next_state(providers_db::State::default(), &e).down_until,
+            reset_s * 1000
+        );
     }
 
     #[test]
@@ -1864,6 +1907,7 @@ mod tests {
             message: "http 403 (moderation)".into(),
             usage: Usage::default(),
             sent: true,
+            cool_until: None,
         };
         assert_eq!(cooldown_for(&flagged), None);
     }
@@ -1937,6 +1981,7 @@ mod tests {
             message: "http 429".into(),
             usage: Usage::default(),
             sent: true,
+            cool_until: None,
         };
         let mut s = providers_db::State::default();
         let mut waits = Vec::new();
@@ -2175,6 +2220,7 @@ mod tests {
             message: msg.into(),
             usage: Usage::default(),
             sent: true,
+            cool_until: None,
         };
         assert_eq!(cooldown_for(&err(Some(429), "")), Some(COOLDOWN_429));
         assert_eq!(
@@ -2278,6 +2324,7 @@ mod tests {
             message: String::new(),
             usage: Usage::default(),
             sent: true,
+            cool_until: None,
         };
         assert_eq!(cooldown_for(&e(None)), Some(COOLDOWN_429));
         assert_eq!(cooldown_for(&e(Some(10.0))), Some(COOLDOWN_429));
