@@ -108,6 +108,7 @@ fn run_io(
             injecting = injects(home, agent, event, &labels);
             if injecting {
                 let (session, repo, branch) = crate::capture::checkout(&labels, &settings);
+                let session = own_session(session, &store);
                 // It goes to the agent's model provider: the rules as they are now apply, so a
                 // rule added after the text was built already hides its value (spec 6.4).
                 manifest = crate::consumer::manifest::text(
@@ -275,11 +276,7 @@ pub fn record(
     let mut appended = Vec::new();
     for (event, payload) in adapt(home, raw, agent, event, payload, settings)? {
         for mut c in crate::capture::events(agent, &event, &payload, ts, settings) {
-            // An idless event's session is this device's own: a bare "unknown" would be one session
-            // on every device once they sync (as `handle` does for v1).
-            if c.event.session == "unknown" {
-                c.event.session = format!("unknown-{}", raw.device());
-            }
+            c.event.session = own_session(std::mem::take(&mut c.event.session), raw);
             if let Err(e) = raw.append_with_ledger(&c.event, &c.ledger, settings.rules.version()) {
                 // The claim precedes capture; a failed append must let a later hook retry this step.
                 if agent == "agy"
@@ -299,6 +296,17 @@ pub fn record(
         }
     }
     Ok(appended)
+}
+
+/// An idless event's session is this device's own: a bare "unknown" would be one session on
+/// every device once they sync (as `handle` does for v1). Recording and the manifest's lookup
+/// both use it.
+fn own_session(session: String, raw: &crate::raw::Raw) -> String {
+    if session == "unknown" {
+        format!("unknown-{}", raw.device())
+    } else {
+        session
+    }
 }
 
 /// Recording and injection use the same labels, including IDE workspaces that differ from
@@ -436,10 +444,8 @@ fn adapt(
         && event == "SessionEnd"
         && let Some(path) = str_field(payload, &["transcript_path"])
     {
-        let (mut session, _, _) = crate::capture::checkout(&p, settings);
-        if session == "unknown" {
-            session = format!("unknown-{}", raw.device());
-        }
+        let (session, _, _) = crate::capture::checkout(&p, settings);
+        let session = own_session(session, raw);
         let counts = raw.prompt_counts(agent, &session)?;
         let mut nth = std::collections::HashMap::new();
         let mut events = Vec::new();
@@ -1341,6 +1347,29 @@ mod tests {
             let resumed = json!({"session_id": "b", "cwd": c, "source": "resume"});
             assert_eq!(hook("SessionStart", resumed), "", "{agent}");
         }
+    }
+
+    #[test]
+    fn an_idless_session_start_is_not_shown_its_own_session_as_another() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cwd.path().join(".git")).unwrap();
+        std::fs::write(cwd.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let c = cwd.path().to_string_lossy().into_owned();
+        let hook = |event: &str, payload: Value| {
+            let mut out = Vec::new();
+            let input = payload.to_string();
+            run_io(home.path(), "claude", event, input.as_bytes(), &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        hook(
+            "UserPromptSubmit",
+            json!({"cwd": c, "prompt": "look at it"}),
+        );
+        crate::worker::run_once(home.path()).unwrap();
+        let out = hook("SessionStart", json!({"cwd": c, "source": "startup"}));
+        assert!(out.contains("look at it"), "{out}");
+        assert!(!out.contains("Other active sessions"), "{out}");
     }
 
     #[test]
