@@ -146,7 +146,13 @@ The rules as applied, provisional until the iMac row is filled:
 
 ## The other agents (Task 2, part b, 2026-09-27)
 
-Pi and OpenCode send Claude Code's hook fields, so they record to raw.db through the same capture path and read the manifest at SessionStart. Grok, agy and Cursor follow, each with its own payload shape (below).
+Every agent now records to raw.db. Pi and OpenCode send Claude Code's hook fields as they are. Grok, agy and Cursor go through `hook::adapt` first, which turns their payloads into Claude Code's fields before `capture::events` and its one gate (Codex wrote the three adapters from v1's `handle`, with its tests rewritten against raw.db as the acceptance):
+
+- **Labels:** the session id is `session_id`, `sessionId` or the conversation id; agy's and Cursor's directory is their workspace, not the hook process's cwd. Recording and injection use the same labels.
+- **Grok:** its camelCase fields; `lastAssistantMessage` is the answer.
+- **agy:** each PreInvocation, PostToolUse and Stop reads one bounded tail of its transcript. The prompt is the newest explicit user step (only its `<USER_REQUEST>`), recorded once per step: a `step-N` flag (below) claims it, and is released if the write fails so a later hook records it. A tool's output is its step's content or error; the call failed when agy says so or the step's status is `ERROR`. Stop records only this turn's answer.
+- **Cursor:** Stop's text is `text`, a failed tool's output `error_message`. SessionEnd recovers the turns `cursor-agent -p` never sent through hooks from its transcript: the n-th turn with a given prompt is new only when raw holds fewer than n prompts of the session with the same stored body (the prompt passed through capture, so stripping and redaction compare alike; `Raw::prompt_counts` scans by label, once per SessionEnd). Concurrent SessionEnds of one home take a file lock, so a turn is recovered once. Known gap: when the prompt is written and the answer's write fails, a retry finds the prompt and skips the turn, answer and all.
+- v1's write path (`hook::handle` and its tables) is no longer reached by any agent; it is removed in a follow-up.
 
 Decisions (Claude; overrulable):
 

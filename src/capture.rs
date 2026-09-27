@@ -14,7 +14,7 @@ use crate::hook::{compact, field, is_envelope, str_field, strip_blocks, without_
 use crate::raw::Event;
 use crate::{redact, repo};
 
-pub const PORTED: &[&str] = &["claude", "codex", "pi", "opencode"];
+pub const PORTED: &[&str] = &["claude", "codex", "pi", "opencode", "grok", "agy", "cursor"];
 
 /// Bytes a stored string keeps before only its head and tail are kept (spec 2.4, plan D4): the
 /// largest of 64, 128 and 256 KB whose hook p95 on the slowest machine stays within the line.

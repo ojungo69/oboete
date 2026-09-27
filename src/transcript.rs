@@ -896,6 +896,7 @@ mod tests {
         let (v, _) = events(CLAUDE, "claude");
         for e in &v {
             crate::hook::record(
+                &home,
                 &mut raw,
                 "claude",
                 e["event"].as_str().unwrap(),
