@@ -242,8 +242,12 @@ fn speaker(role: Role, given: &str) -> &'static str {
     match role {
         Role::User => "user",
         Role::Tool { .. } => "tool result",
-        Role::Assistant if given == "assistant inferred" => "assistant inferred",
-        Role::Assistant => "assistant proposal",
+        // A non-strict curator's case variants are read as the label they are; a label it does
+        // not recognize is inferred, which an acceptance never promotes.
+        Role::Assistant => match given.trim().to_lowercase().as_str() {
+            "assistant proposal" | "user" => "assistant proposal",
+            _ => "assistant inferred",
+        },
         Role::Other => "assistant inferred",
     }
 }
@@ -587,6 +591,16 @@ mod tests {
             one(&w, "decided", "user", cache),
             is("proposed", "assistant proposal")
         );
+        // Case variants read as their label; one it does not know is inferred, and an acceptance
+        // right after promotes neither of those.
+        let w = window(&[reply(PROPOSAL), user("はい、それでお願いします")]);
+        for (given, got) in [
+            ("Assistant Proposal", is("decided", "assistant proposal")),
+            ("Assistant inferred", is("proposed", "assistant inferred")),
+            ("assistant-guess", is("proposed", "assistant inferred")),
+        ] {
+            assert_eq!(one(&w, "decided", given, cache), got, "{given}");
+        }
         let w = window(&[tool("Decision: use tabs everywhere.", false)]);
         let quote = "use tabs everywhere";
         assert_eq!(
