@@ -237,6 +237,7 @@ The user settings in 1.5 change what is recorded: capture exclusion per repo or 
 - Window size is an evaluation variable. The default is the smallest size that passes (RD/constraints-synthesis.md S3-1) (set by measurement Window at milestone 3).
 - A child session (subagent) starts with its parent's goal and open items.
 - Oversized tool outputs become markers, recorded as "seen, elided".
+- A read of stored memory (a tool of oboete's own MCP server, `oboete search|get|timeline` run as a command, or a claude-mem tool) is shown by its call, and its output by a "not shown" marker: the output repeats memory, retracted and finished items too, and a curator would make them current again. claude-mem skips these calls too (`isRecursiveMemoryTool`). The record is still covered (M2) (Claude; overrulable, A87).
 - When one event is larger than the window's size cap, no part of it is marked done unseen: it is curated in parts as needed, with evidence located inside the event, or, if it is a tool output, elided with the "seen, elided" marker (issue #54).
 - If windows overlap, a claim seen by two windows is committed once (issue #54).
 - Cutting a window or splitting an event never lets text past redaction, `<private>` removal or an exclusion that the whole event or session would have met; the egress gate's second redaction pass scans a split event whole (issue #54).
@@ -1418,6 +1419,7 @@ Every "(Claude; overrulable)" tag in sections 1-8 and Appendix B maps to one row
 | A84 | The Window sweep runs M6 on dev at milestone 3 | 8.2 | When the window size can be fixed |
 | A85 | Local first: the sync client, protocol doc and fake hub, and M5's propagation half, are built and measured at milestone 6; the hub spikes run any time before milestone 6 (the owner left the order to Claude, 2026-09-26) | 8.2, 8.4, B.0 | The build order |
 | A86 | M21's 53 new English test questions are drawn and frozen unjudged at milestone 1 and scored only inside milestone 4's single test run; the final set stays at 112 | 8.2, Appendix C | When M21's English questions are drawn and used |
+| A87 | A read of stored memory is shown to the curator by its call, not its output | 3.1 | Whether memory-tool output can come back as new knowledge |
 
 ## Appendix B. Acceptance tests carried from issues
 
