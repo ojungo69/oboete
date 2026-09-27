@@ -347,7 +347,7 @@ fn ensure_repo_keys(conn: &mut Connection) -> Result<()> {
 /// Rows filed under a path that is still a directory on this machine and now has another key
 /// (a repository that got an origin after it was used) move to that key; a path that is gone, or
 /// a key that is no path (`claude-mem:<project>`), stays. Run at open for older stores and by
-/// every observe run, off the hook path. The scan takes no write lock (hooks keep writing); the
+/// `oboete mcp` as it starts, off the hook path. The scan takes no write lock (hooks keep writing); the
 /// moves run in one transaction so no table is left behind. Returns the number of paths moved.
 pub fn rekey_paths(conn: &mut Connection) -> Result<usize> {
     let repos: Vec<String> = conn
@@ -1063,7 +1063,7 @@ mod tests {
             .unwrap();
         assert!(version >= 1);
 
-        // A repository used before it had an origin moves when an observe run sees one.
+        // A repository used before it had an origin moves when a later run sees one.
         let late = dir.join("late");
         std::fs::create_dir_all(late.join(".git")).unwrap();
         let late_key = crate::repo::key(&late);
