@@ -1341,6 +1341,11 @@ mod tests {
                 format!("Authorization: AWS4-HMAC-SHA256 Credential=a/b, Signature={token}"),
                 token.clone(),
             ),
+            (format!("Authorization: foo+bar_v2 {token}"), token.clone()),
+            (
+                format!("Authorization: Digest username=\"a\\\"b\", response=\"{token}\""),
+                token.clone(),
+            ),
         ];
         for (text, secret) in &cases {
             let (stored, found) = scan(text, &Rules::default());
