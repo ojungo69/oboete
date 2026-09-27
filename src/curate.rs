@@ -673,12 +673,8 @@ pub fn run_phase(
             shown_in.push((repo.to_owned(), c.uid));
         }
     }
-    let prompt = prompt(
-        &summary.language,
-        &w.text,
-        &shown,
-        &carried(raw, k, rules, &w)?,
-    );
+    let (carried_text, carried_uids) = carried(raw, k, rules, &w)?;
+    let prompt = prompt(&summary.language, &w.text, &shown, &carried_text);
     let sent = sha256_hex(&format!(
         "{chain}\n{idle}\n{}\n{}",
         summary.language, w.text
@@ -704,7 +700,7 @@ pub fn run_phase(
         curator(&span, &prompt, &|| working(raw), &|v| check(&w, v))
     };
     let failed = match answer {
-        Ok(r) => match claims_of(&w, &r.output, &r.provider, r.tier, &shown_in) {
+        Ok(r) => match claims_of(&w, &r.output, &r.provider, r.tier, &shown_in, &carried_uids) {
             Ok((summary, claims)) => {
                 let op = json!({"outcome": "curated", "provider": r.provider, "summary": summary});
                 return cover(raw, db, &w, op, claims);
@@ -922,39 +918,50 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
 /// The chain's check of a curator's answer (`provider::AnswerCheck`): the outcome it is refused
 /// under, or `None` when it gives this window something to keep.
 pub fn check(w: &Window, answer: &Value) -> Option<&'static str> {
-    claims_of(w, answer, "", 0, &[])
+    claims_of(w, answer, "", 0, &[], &[])
         .err()
         .map(AnswerFailure::outcome)
 }
 
 /// The summary and a claim op per draft whose quote is found in the window (Task 6's
-/// `ClaimOp`), with the answering entry as its recipe and tier. `shown` is each candidate's
-/// repository and uid: a draft supersedes a sibling, or a candidate of its own line's repository
-/// (another repository's claim would leave that repository's current tips).
+/// `ClaimOp`), with the answering entry as its recipe and tier. A draft supersedes a sibling of
+/// its own line's repository, a candidate shown for that repository (`shown`: repository and
+/// uid), or what its session carried in (`carried`): another repository's claim would leave that
+/// repository's current tips.
 fn claims_of(
     w: &Window,
     answer: &Value,
     recipe: &str,
     tier: i64,
     shown: &[(String, String)],
+    carried: &[(String, String)],
 ) -> std::result::Result<(String, Vec<Value>), AnswerFailure> {
     let (summary, drafts) = parse(answer)?;
-    let ids: Vec<&str> = drafts.iter().map(|d| d.id.as_str()).collect();
+    // Each draft's id and its line's repository.
+    let ids: Vec<(&str, Option<&str>)> = drafts
+        .iter()
+        .map(|d| {
+            let repo = line_index(w, &d.line).and_then(|i| w.lines[i].repo.as_deref());
+            (d.id.as_str(), repo)
+        })
+        .collect();
     let mut claims = Vec::new();
     for d in &drafts {
         let (Some(i), Some(evidence)) = (line_index(w, &d.line), locate(w, &d.line, &d.quote))
         else {
             continue; // not a claim: its quote is not in the window (Task 8 counts these)
         };
-        let repo = w.lines[i].repo.as_deref();
+        let (repo, key) = (w.lines[i].repo.as_deref(), &w.lines[i].key);
         let supersedes = d
             .supersedes
             .iter()
             .filter(|to| {
-                ids.contains(&to.as_str())
+                ids.iter()
+                    .any(|&(id, r)| id == to.as_str() && id != d.id && r == repo)
                     || shown
                         .iter()
                         .any(|(r, uid)| Some(r.as_str()) == repo && uid == *to)
+                    || carried.iter().any(|(k, uid)| k == key && uid == *to)
             })
             .cloned()
             .collect();
@@ -1019,13 +1026,17 @@ pub fn candidates(k: &Connection, repo: &str, text: &str) -> Result<Vec<crate::c
     Ok(out)
 }
 
+/// The uids `carried` showed, each with its session (agent, then session id, NUL between): a
+/// draft of that session may supersede them.
+type Carried = Vec<(String, String)>;
+
 /// What each session of the window carries in from before it (spec 3.1, 3.3; D12), as text for
 /// the prompt: its goal (its first prompt, through the gate, 200 characters), its open items,
 /// and the claims its previous window left proposed, so that an acceptance in this window can
 /// point at them. Every value goes through the gate before it is shown.
 // ponytail: a child session (a subagent) starts with nothing of its parent's until capture
 // records the link.
-fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<String> {
+fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(String, Carried)> {
     let gate = |t: &str| crate::redact::outbound_with(t, rules);
     // Each session with every repository its lines are in: an agent may change checkout.
     let mut sessions: Vec<(&str, Vec<&str>)> = Vec::new();
@@ -1046,6 +1057,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<Strin
     }
     let session_of = |device: &str, seq: i64| raw.session_key(device, seq);
     let mut out = String::new();
+    let mut uids = Vec::new();
     for (key, repos) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
         // A window that starts inside an event: its first part was in the previous window.
@@ -1078,6 +1090,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<Strin
             // The session's own, before the cap: other sessions' newer items never hide it.
             if session_of(&c.device, c.seq)?.as_deref() == Some(key) {
                 lines.push(format!("open item {}: {}", c.uid, gate(&c.body)));
+                uids.push((key.to_owned(), c.uid.clone()));
                 shown += 1;
             }
         }
@@ -1093,6 +1106,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<Strin
             {
                 let uid = crate::claims::uid(kind, first);
                 lines.push(format!("proposed before {uid}: {}", gate(&c.body)));
+                uids.push((key.to_owned(), uid));
             }
         }
         if !lines.is_empty() {
@@ -1104,7 +1118,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<Strin
             out.push_str(&format!("### {heading}\n{}\n", lines.join("\n")));
         }
     }
-    Ok(out)
+    Ok((out, uids))
 }
 
 /// The curator's prompt: what to extract and how, then everything taken from the record (the
@@ -2243,7 +2257,7 @@ mod tests {
         let dev = raw.device().to_owned();
         let rules = Rules::default();
         let w = next_window(&raw, &dev, 100_000, &rules).unwrap().unwrap();
-        let text = carried(&raw, &k, &rules, &w).unwrap();
+        let (text, _) = carried(&raw, &k, &rules, &w).unwrap();
         for body in [
             "The importer drops empty lines.",
             "The parser needs a fuzz test.",
@@ -2286,13 +2300,17 @@ mod tests {
                 .id
                 .clone()
         };
-        let draft = |id: &str, quote: &str| {
+        let draft = |id: &str, quote: &str, supersedes: Value| {
             json!({"id": id, "kind": "decision", "status": "decided", "speaker": "user",
                 "scope": "repo", "body": quote, "quote": quote, "line": line(quote),
-                "supersedes": [old]})
+                "supersedes": supersedes})
         };
-        let answer = json!({"claims": [draft("c1", "Sessions leave Postgres for SQLite"),
-            draft("c2", "Sessions leave Postgres here too")], "summary": "s"});
+        let answer = json!({"claims": [
+            draft("c1", "Sessions leave Postgres for SQLite", json!([old])),
+            // Repository b: neither a's candidate nor a's sibling.
+            draft("c2", "Sessions leave Postgres here too", json!([old, "c1"])),
+            // Repository a: its sibling.
+            draft("c3", "We store sessions in Postgres", json!(["c1"]))], "summary": "s"});
         let mut chain = |_: &str,
                          _: &str,
                          _: &dyn Fn() -> Option<i64>,
@@ -2310,7 +2328,7 @@ mod tests {
             .filter(|o| o.kind == OpKind::Claim)
             .map(|o| &o.body["supersedes"])
             .collect();
-        assert_eq!(supersedes, [&json!([old]), &json!([])]);
+        assert_eq!(supersedes, [&json!([old]), &json!([]), &json!(["c1"])]);
     }
 
     /// Spec 3.3: a tool output's text reaches the prompt only between the fence lines, which
@@ -2455,10 +2473,16 @@ mod tests {
                          _: &AnswerCheck|
          -> Result<ChainResult> {
             sent.borrow_mut().push(p.to_owned());
-            let claims = if sent.borrow().len() == 1 {
-                json!([proposal])
-            } else {
-                json!([])
+            let claims = match sent.borrow().len() {
+                1 => json!([proposal]),
+                // The acceptance supersedes the proposal it was shown as carried in.
+                3 => {
+                    let uid = p.split("proposed before ").nth(1).unwrap()[..64].to_owned();
+                    json!([{"id": "c1", "kind": "decision", "status": "decided",
+                        "speaker": "user", "scope": "repo", "body": "Cache parsed files.",
+                        "quote": "Yes, do that", "line": "L1", "supersedes": [uid]}])
+                }
+                _ => json!([]),
             };
             Ok(ChainResult {
                 output: json!({"claims": claims, "summary": "s"}),
@@ -2492,5 +2516,8 @@ mod tests {
         );
         assert!(third.contains("proposed before "), "{third}");
         assert!(third.contains(": Cache parsed files."), "{third}");
+        let ops = raw.ops_after(raw.device(), 0, 20).unwrap();
+        let accepted = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
+        assert_eq!(accepted.body["supersedes"].as_array().unwrap().len(), 1);
     }
 }
