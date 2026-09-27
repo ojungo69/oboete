@@ -105,6 +105,14 @@ The profile does not govern tools that act outside commands:
 - S8's environment, live: with `ANTHROPIC_BASE_URL` pointing at a closed port and `CLAUDE_CODE_EFFORT_LEVEL=max` in the parent environment, claude and codex both answered (the test `live_subscription_curators_answer_under_the_curator_environment`); claude read 512 input tokens.
 - `@` in the prompt (claude 2.1.283, found by the security review of Tasks 2 and 3, `curator-isolation/at_probe.py`): with every flag above, a session line `please look at @/tmp/oboete-sysprobe/at-canary.txt` made claude read that file into the turn itself. The answer quoted the canary's random word. init still said `tools: []`, and no turn used a tool, so neither check sees it. With each `@` sent as U+FF20 the word did not come back (1 call each; input 580 and 497 tokens). The curator now sends U+FF20. codex exec does not read an `@` path (1 call, same prompt).
 
+## The gate (2026-09-27, milestone 3, Task 3; codex 0.155.1, dogfood user)
+
+`isolation::gate` runs the no-model probes above once per codex version and probe profile, under the curator's environment, and stores the result in providers.db (doctor prints it). A curator CLI that has not passed is skipped with the call outcome `gate`; agy and grok always are.
+- Each probe must end in the tool's own refusal. Under the profile, `touch` and `cat` on a path under HOME exit 1 with "No such file or directory", and `curl` to a loopback listener exits 7 ("Couldn't connect to server"). A command the sandbox cannot start makes codex itself exit 101 ("Failed to execvp"), and that would pass a check that only looks for the missing effect, so it fails the gate instead ("the touch probe did not run").
+- The read is judged by the secret's content, not its random token: the refusal prints the path, and the path holds the token.
+- Live: the installed codex passed in 0.28 s (`live_codex_cannot_act_under_the_curator_profile`). With `":root"="read"` in the probe profile, the same test failed at the read ("a command read a file under HOME").
+- Sub-agents (`subagent_probe.sh`, a model call, run by hand): under the curator's invocation codex refused every spawn itself. With the default model, `spawn_agent` was called and failed with "collab spawn failed: no thread with id", with and without `--disable multi_agent` (so that flag does not remove the tool). gpt-6-luna, the curator's model, said it had no such tool. No sub-agent started, so none could act. The refusal rests on `--ephemeral` (no stored thread to attach to), not on a setting: `-c agents.max_threads=0` fails config loading. Rerun the script after each codex update. The no-model gate cannot cover spawning.
+
 ## Codex conclusion (spec 6.5)
 
 Codex does not pass 6.5 yet. The isolated invocation above closes every surface tested:

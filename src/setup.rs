@@ -1698,6 +1698,9 @@ pub fn doctor(home: &Path) -> Result<()> {
                 println!("  {p}: resting until {}", crate::db::utc(until));
             }
         }
+        for line in crate::isolation::doctor(&db)? {
+            println!("  isolation: {line}");
+        }
     }
     let exe_str = exe
         .canonicalize()

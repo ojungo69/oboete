@@ -15,6 +15,7 @@ mod hook;
 mod hookstate;
 mod import;
 mod inject;
+mod isolation;
 mod knowledge;
 mod manifest;
 mod mcp;
