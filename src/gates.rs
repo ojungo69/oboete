@@ -433,9 +433,10 @@ fn exited_nonzero(output: &str) -> bool {
 }
 
 /// Whether a tool line is a command run: an agent's shell tool by its whole name (Claude's and
-/// Pi's `bash`, Cursor's `Shell`, Codex's `exec_command`, Gemini's `run_shell_command`, Grok's
-/// `run_terminal_command`, agy's `run_command`, and the Windows and older shells' names), not a
-/// read, a search or an MCP tool that executes something else (`mcp__cloudflare_api__execute`).
+/// Pi's `bash`, Cursor's `Shell`, Codex's `exec_command` and the `exec` its code mode wraps it
+/// in (`codex_probe`), Gemini's `run_shell_command`, Grok's `run_terminal_command`, agy's
+/// `run_command`, and the Windows and older shells' names), not a read, a search or an MCP tool
+/// that executes something else (`mcp__cloudflare_api__execute`).
 fn runs(text: &str) -> bool {
     let name = text
         .strip_prefix("[tool ")
@@ -447,6 +448,7 @@ fn runs(text: &str) -> bool {
         "shell",
         "powershell",
         "exec_command",
+        "exec",
         "local_shell",
         "run_shell_command",
         "run_terminal_command",
@@ -864,6 +866,7 @@ mod tests {
             "Bash",
             "Shell",
             "exec_command",
+            "exec",
             "run_shell_command",
             "run_terminal_command",
             "run_command",
