@@ -264,16 +264,17 @@ fn accepted(w: &Window, i: usize) -> bool {
 }
 
 /// User line `i` accepts, and the turn before it in the same session, past tool calls and harness
-/// lines, is a reply of the assistant: the other end of `accepted`.
+/// lines, is a reply of the assistant in the same repository: the other end of `accepted`. A reply
+/// before a checkout change is another repository's, and the claim anchors on this line.
 fn answers_a_reply(w: &Window, i: usize) -> bool {
-    let key = &w.lines[i].key;
-    acceptance(&w.lines[i].text)
+    let line = &w.lines[i];
+    acceptance(&line.text)
         && w.lines[..i]
             .iter()
             .rev()
-            .filter(|l| &l.key == key)
+            .filter(|l| l.key == line.key)
             .find(|l| matches!(l.role, Role::User | Role::Assistant))
-            .is_some_and(|l| l.role == Role::Assistant)
+            .is_some_and(|l| l.role == Role::Assistant && l.repo == line.repo)
 }
 
 /// A turn that accepts: an acceptance word, no negation, not a question (spec 3.3).
@@ -480,6 +481,10 @@ mod tests {
             one(&window(events), "decided", "user", quote).0
         };
         assert_eq!(quoted(&[reply(PROPOSAL), user(yes)], yes), "decided");
+        // A checkout change between: the reply was another repository's.
+        let mut moved = window(&[reply(PROPOSAL), user(yes)]);
+        moved.lines[0].repo = Some("q".into());
+        assert_eq!(one(&moved, "decided", "user", yes).0, "proposed");
         assert_eq!(quoted(&[user(yes)], yes), "proposed");
         assert_eq!(
             quoted(&[user("Look at the parser."), user(yes)], yes),
