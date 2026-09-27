@@ -338,9 +338,20 @@ fn holds(text: &str, list: &[&str]) -> bool {
     })
 }
 
-/// `text`'s words: letters, digits and apostrophes, split at anything else.
+/// `text`'s words: letters, digits and apostrophes, split at anything else. A typographic
+/// apostrophe (`don’t`, as a phone or a word processor types it) is read as `'`, and full-width
+/// Latin (`ＯＫ`, as a Japanese input method types it) as its ASCII.
 fn words(text: &str) -> Vec<String> {
-    text.split(|c: char| !(c.is_alphanumeric() || c == '\''))
+    let folded: String = text
+        .chars()
+        .map(|c| match c {
+            '\u{2019}' | '\u{2018}' | '\u{02bc}' => '\'',
+            '\u{ff01}'..='\u{ff5e}' => char::from_u32(c as u32 - 0xfee0).unwrap_or(c),
+            c => c,
+        })
+        .collect();
+    folded
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
         .filter(|w| !w.is_empty())
         .map(str::to_owned)
         .collect()
@@ -461,6 +472,10 @@ mod tests {
             accepted(&[reply(PROPOSAL), user("はい、それでお願いします")]),
             "decided"
         );
+        assert_eq!(
+            accepted(&[reply(PROPOSAL), user("\u{ff2f}\u{ff2b}.")]),
+            "decided"
+        );
         // Tool calls may come between; the user's next turn still answers the proposal.
         let run = tool("ok", false);
         assert_eq!(
@@ -507,6 +522,7 @@ mod tests {
             "はい、でもそれはやめて",
             "OK, but don't cache them.",
             "OK, but we cannot do that.",
+            "OK, but don\u{2019}t do that.",
             "No, go ahead later.",
         ] {
             let w = window(&[reply(PROPOSAL), user(answer)]);
