@@ -11,15 +11,12 @@ use std::path::{Path, PathBuf};
 
 pub struct Rescan {
     pub home: PathBuf,
-    /// A second handle on raw.db, for the tombstones (the worker's own is read-only here).
-    writer: Option<Raw>,
 }
 
 impl Rescan {
     pub fn new(home: &Path) -> Self {
         Self {
             home: home.to_owned(),
-            writer: None,
         }
     }
 }
@@ -73,13 +70,17 @@ impl Consumer for Rescan {
             0
         };
         let recs = raw.after(device, from, BATCH)?;
+        // A second handle on raw.db for the tombstones (the worker's own is read-only here),
+        // closed with the step: a handle kept open would hold raw.lock, and a restore waits for
+        // every open store to close.
+        let mut writer = None;
         for r in &recs {
             let Item::Event(e) = &r.item else { continue };
             for (start, end) in crate::redact::field_ranges(&e.body, &settings.rules) {
-                if self.writer.is_none() {
-                    self.writer = Some(crate::raw::open(&self.home)?);
+                if writer.is_none() {
+                    writer = Some(crate::raw::open(&self.home)?);
                 }
-                let w = self.writer.as_mut().expect("opened");
+                let w = writer.as_mut().expect("opened");
                 w.append_tombstone(Target::Range {
                     device: device.to_owned(),
                     seq: r.seq,

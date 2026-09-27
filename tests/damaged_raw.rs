@@ -78,6 +78,12 @@ fn second_prompt(h: &Path) {
 fn a_worker_running_when_raw_db_is_damaged_restores_it_on_a_hook_s_request() {
     let home = damaged_home();
     let h = home.path();
+    // A rule added after capture: the running worker's rescan writes a tombstone to raw.db.
+    std::fs::write(
+        h.join("config.toml"),
+        "[redaction]\nextra_rules = [{ id = \"notes\", regex = 'notes' }]\n",
+    )
+    .unwrap();
     let mut worker = Command::new(env!("CARGO_BIN_EXE_oboete"))
         .arg("--home")
         .arg(h)
@@ -98,6 +104,21 @@ fn a_worker_running_when_raw_db_is_damaged_restores_it_on_a_hook_s_request() {
     while lock.try_lock().is_ok() {
         lock.unlock().unwrap();
         assert!(Instant::now() < deadline, "the worker never took the lock");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let tombstones = || -> i64 {
+        rusqlite::Connection::open(h.join("raw.db"))
+            .and_then(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM records WHERE type = 'tombstone'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap_or(0)
+    };
+    while tombstones() == 0 {
+        assert!(Instant::now() < deadline, "the rescan wrote no tombstone");
         std::thread::sleep(Duration::from_millis(50));
     }
     damage(h);
