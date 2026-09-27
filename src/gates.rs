@@ -65,6 +65,7 @@ const NEGATE: &[&str] = &[
     "反対",
     "no",
     "not",
+    "cannot",
     "never",
     "stop",
     "wait",
@@ -213,6 +214,10 @@ pub fn check(
             out.extend(why);
             why.is_none()
         });
+        // One entry per reason: a draft may name a thousand values, and the window op that lists
+        // them must stay within the op cap.
+        out.sort_unstable();
+        out.dedup();
         g.dropped
             .extend(out.into_iter().map(|why| (d.id.clone(), why)));
     }
@@ -285,15 +290,21 @@ fn bare(quote: &str) -> bool {
 }
 
 /// A tool line of the session that did not fail, printed a pass and no failure (MUST-M1): each
-/// `failed` it prints is a `0 failed`. Its output only: an input such as `echo passed` ran nothing.
+/// `failed` it prints is a `0 failed`, and it reports no error (`1 error`, a line that starts
+/// `error:`). Its output only: an input such as `echo passed` ran nothing.
 fn passing_run(w: &Window, key: &str) -> bool {
     static NONE_FAILED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static ERRORS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let none = NONE_FAILED.get_or_init(|| regex::Regex::new(r"\b0 failed").unwrap());
+    let errors = ERRORS.get_or_init(|| {
+        regex::Regex::new(r"(?m)\b[1-9]\d*\s+errors?\b|^\s*error(?:\[|:)").unwrap()
+    });
     w.lines.iter().any(|l| {
         l.key == key && l.role == (Role::Tool { failed: false }) && {
             let text = l.source_text().to_lowercase();
             PASSED.iter().any(|p| text.contains(p))
                 && text.matches("failed").count() == none.find_iter(&text).count()
+                && !errors.is_match(&text)
         }
     })
 }
@@ -478,6 +489,7 @@ mod tests {
             "はい？",
             "はい、でもそれはやめて",
             "OK, but don't cache them.",
+            "OK, but we cannot do that.",
             "No, go ahead later.",
         ] {
             let w = window(&[reply(PROPOSAL), user(answer)]);
@@ -560,6 +572,19 @@ mod tests {
         assert_eq!(done(&[piped, reply(fixed)]), "proposed");
         let ten = tool("test result: FAILED. 0 passed; 10 failed", false);
         assert_eq!(done(&[ten, reply(fixed)]), "proposed");
+        // An error is a failure too, whatever the exit code.
+        for errored in [
+            "=== 1 passed, 1 error in 0.2s ===",
+            "error: could not compile\n3 passed",
+        ] {
+            assert_eq!(
+                done(&[tool(errored, false), reply(fixed)]),
+                "proposed",
+                "{errored}"
+            );
+        }
+        let clean = tool("=== 3 passed, 0 errors in 0.2s ===", false);
+        assert_eq!(done(&[clean, reply(fixed)]), "done");
         let w = window(&[user("直った、ありがとう。")]);
         assert_eq!(one(&w, "done", "user", "直った").0, "done");
     }
@@ -653,12 +678,15 @@ mod tests {
             [
                 ("c1", "a global claim changes only by the owner"),
                 ("c1", OUTSIDE),
-                ("c1", OUTSIDE),
                 ("c2", "a proposal supersedes nothing settled"),
                 ("c2", "retiring a lesson needs the user's words"),
-                ("c2", "a proposal supersedes nothing settled"),
             ]
         );
+        // A thousand values out of reach give one reason, not a thousand.
+        let mut many = draft(&w, "c3", "decided", "user", "Use spaces, not tabs");
+        many.0.supersedes = (0..1000).map(|i| format!("x{i}")).collect();
+        let g = check(&w, &shown, &[], vec![many], &Rules::default());
+        assert_eq!(g.dropped, [("c3".to_string(), OUTSIDE)]);
     }
 
     #[test]
