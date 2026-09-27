@@ -1651,6 +1651,7 @@ pub fn doctor(home: &Path) -> Result<()> {
     }
     if let Ok(why) = std::fs::read_to_string(crate::worker::failed_note(home)) {
         println!("  the last worker run failed: {}", why.trim_end());
+        unhealthy.push("the worker stopped with an error (see above)");
     }
     if db_path.exists() {
         let conn = db::open(home)?;

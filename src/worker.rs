@@ -319,6 +319,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_failed_run_leaves_its_reason_and_the_next_good_run_clears_it() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("raw.db"), b"not a database at all").unwrap();
+        assert!(run(home.path(), 0).is_err()); // damaged, and no backup to restore from
+        let why = std::fs::read_to_string(failed_note(home.path())).unwrap();
+        assert!(why.contains("backup segment"), "{why}");
+        std::fs::remove_file(home.path().join("raw.db")).unwrap();
+        run(home.path(), 0).unwrap();
+        assert!(!failed_note(home.path()).exists());
+    }
+
     /// The Windows runner's worker stopped with "database is locked" after a restore: a search
     /// created its table in the fresh knowledge.db between a step's read and its write.
     #[test]
