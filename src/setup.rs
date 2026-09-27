@@ -70,13 +70,30 @@ pub fn run(home: &Path, agent: &str, remove: bool) -> Result<()> {
         ));
     };
     let cmd = HookCommand::current(home)?;
-    for a in agents {
-        wire(a, &cmd, remove)?;
-    }
+    let failed = wire_each(&agents, |a| wire(a, &cmd, remove));
     if !remove {
         println!("Hook files are read when an agent starts: restart running sessions.");
     }
+    anyhow::ensure!(
+        failed.is_empty(),
+        "{} failed for {} (see above); the others are done",
+        if remove { "removal" } else { "setup" },
+        failed.join(", ")
+    );
     Ok(())
+}
+
+/// Each agent in turn, whatever another's failure: one unreadable settings file must not leave
+/// the other agents unwired. Returns the agents that failed, each named with its error.
+fn wire_each<'a>(agents: &[&'a str], mut wire: impl FnMut(&str) -> Result<()>) -> Vec<&'a str> {
+    let mut failed = Vec::new();
+    for &a in agents {
+        if let Err(e) = wire(a) {
+            println!("{a}: failed: {e:#}");
+            failed.push(a);
+        }
+    }
+    failed
 }
 
 /// One agent: its hooks (plugin, extension) and MCP entry, with a line on what changed.
@@ -1629,28 +1646,43 @@ pub fn doctor(home: &Path) -> Result<()> {
         );
         unhealthy.push("low free space");
     }
+    // A store that cannot be read is a line and a failed exit, and the report goes on: doctor is
+    // needed most when a store is damaged.
+    fn section(unhealthy: &mut Vec<&str>, store: &str, read: Result<()>) {
+        if let Err(e) = read {
+            println!("  cannot read {store}: {e:#}");
+            unhealthy.push("a store cannot be read (see above)");
+        }
+    }
     if home.join("knowledge.db").exists() {
-        // raw.db first, as `search` does: its shared hold on raw.lock keeps a restore or a
-        // rebuild from moving knowledge.db aside while this reads it.
-        let _raw = if crate::raw::exists(home) {
-            Some(crate::raw::open(home)?)
-        } else {
-            None
-        };
-        // MUST-M14: raw lost commits that a consumer had processed; its output was rewound.
-        let k = crate::knowledge::open(home)?;
-        let (n, last): (i64, Option<String>) = k.query_row(
-            "SELECT COUNT(*), strftime('%Y-%m-%d %H:%M', MAX(ts) / 1000, 'unixepoch', 'localtime') FROM rewinds",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        if let Some(last) = last {
-            println!("  rewound after lost commits: {n} time(s), last {last}");
-        }
-        // Task 11: turns a transcript holds that raw did not record, per agent.
-        for l in crate::consumer::gaps::doctor(&k) {
-            println!("  {l}");
-        }
+        section(
+            &mut unhealthy,
+            "knowledge.db",
+            (|| -> Result<()> {
+                // raw.db first, as `search` does: its shared hold on raw.lock keeps a restore or a
+                // rebuild from moving knowledge.db aside while this reads it.
+                let _raw = if crate::raw::exists(home) {
+                    Some(crate::raw::open(home)?)
+                } else {
+                    None
+                };
+                // MUST-M14: raw lost commits that a consumer had processed; its output was rewound.
+                let k = crate::knowledge::open(home)?;
+                let (n, last): (i64, Option<String>) = k.query_row(
+                    "SELECT COUNT(*), strftime('%Y-%m-%d %H:%M', MAX(ts) / 1000, 'unixepoch', 'localtime') FROM rewinds",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                if let Some(last) = last {
+                    println!("  rewound after lost commits: {n} time(s), last {last}");
+                }
+                // Task 11: turns a transcript holds that raw did not record, per agent.
+                for l in crate::consumer::gaps::doctor(&k) {
+                    println!("  {l}");
+                }
+                Ok(())
+            })(),
+        );
     }
     let (backup, backup_well) = crate::backup::doctor(home);
     for l in &backup {
@@ -1661,79 +1693,94 @@ pub fn doctor(home: &Path) -> Result<()> {
         unhealthy.push("the worker stopped with an error (see above)");
     }
     if db_path.exists() {
-        let conn = db::open(home)?;
-        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
-        println!(
-            "  sessions {} | raw events {} | observations {} | summaries {}",
-            count("SELECT COUNT(*) FROM sessions"),
-            count("SELECT COUNT(*) FROM events"),
-            count("SELECT COUNT(*) FROM observations"),
-            count("SELECT COUNT(*) FROM summaries")
+        section(
+            &mut unhealthy,
+            "oboete.db",
+            (|| -> Result<()> {
+                let conn = db::open(home)?;
+                let count =
+                    |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
+                println!(
+                    "  sessions {} | raw events {} | observations {} | summaries {}",
+                    count("SELECT COUNT(*) FROM sessions"),
+                    count("SELECT COUNT(*) FROM events"),
+                    count("SELECT COUNT(*) FROM observations"),
+                    count("SELECT COUNT(*) FROM summaries")
+                );
+                let mut stmt = conn.prepare(
+                    "SELECT provider, outcome, ms, COALESCE(detail,'') FROM provider_calls ORDER BY id DESC LIMIT 5",
+                )?;
+                let rows: Vec<String> = stmt
+                    .query_map([], |r| {
+                        Ok(format!(
+                            "{} {} {}ms {}",
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, i64>(2)?,
+                            r.get::<_, String>(3)?.chars().take(60).collect::<String>()
+                        ))
+                    })?
+                    .collect::<Result<_, _>>()?;
+                if !rows.is_empty() {
+                    println!("  last provider calls:");
+                    for r in rows {
+                        println!("    {r}");
+                    }
+                }
+                Ok(())
+            })(),
         );
-        let mut stmt = conn.prepare(
-            "SELECT provider, outcome, ms, COALESCE(detail,'') FROM provider_calls ORDER BY id DESC LIMIT 5",
-        )?;
-        let rows: Vec<String> = stmt
-            .query_map([], |r| {
-                Ok(format!(
-                    "{} {} {}ms {}",
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?.chars().take(60).collect::<String>()
-                ))
-            })?
-            .collect::<Result<_, _>>()?;
-        if !rows.is_empty() {
-            println!("  last provider calls:");
-            for r in rows {
-                println!("    {r}");
-            }
-        }
     }
     if home.join("providers.db").exists() {
-        let db = crate::providers_db::open(home)?;
-        let rows = crate::providers_db::last_calls(&db, 5)?;
-        if !rows.is_empty() {
-            println!("  last curation calls (providers.db):");
-            for r in rows {
-                println!("    {r}");
-            }
-        }
-        for (p, until) in crate::providers_db::stopped(&db)? {
-            if until == crate::providers_db::OWNER_HOLD {
-                println!(
-                    "  {p}: stopped until you act (for claude: turn on usage credits), then run `oboete resume {p}`"
-                );
-            } else {
-                println!("  {p}: resting until {}", crate::db::utc(until));
-            }
-        }
-        for line in crate::isolation::doctor(&db)? {
-            println!("  isolation: {line}");
-        }
-        // D10, D11: the window each device's curation waits on, and why.
-        let now = crate::db::now_ms();
-        for p in crate::providers_db::pending(&db)? {
-            let at = |o: Option<i64>| o.map_or(String::new(), |o| format!("+{o}"));
-            let overdue = if p.next_attempt_at < now && !crate::worker::running(home) {
-                " (overdue: no worker is running; the next hook starts one)"
-            } else {
-                ""
-            };
-            println!(
-                "  curation of seq {}{}..{}{} waits since {} ({}, {} of 3 attempts): {}; next try {}{overdue}",
-                p.from_seq,
-                at(p.from_offset),
-                p.to_seq,
-                at(p.to_offset),
-                crate::db::utc(p.since),
-                p.hold,
-                p.attempts,
-                p.reason,
-                crate::db::utc(p.next_attempt_at),
-            );
-        }
+        section(
+            &mut unhealthy,
+            "providers.db",
+            (|| -> Result<()> {
+                let db = crate::providers_db::open(home)?;
+                let rows = crate::providers_db::last_calls(&db, 5)?;
+                if !rows.is_empty() {
+                    println!("  last curation calls (providers.db):");
+                    for r in rows {
+                        println!("    {r}");
+                    }
+                }
+                for (p, until) in crate::providers_db::stopped(&db)? {
+                    if until == crate::providers_db::OWNER_HOLD {
+                        println!(
+                            "  {p}: stopped until you act (for claude: turn on usage credits), then run `oboete resume {p}`"
+                        );
+                    } else {
+                        println!("  {p}: resting until {}", crate::db::utc(until));
+                    }
+                }
+                for line in crate::isolation::doctor(&db)? {
+                    println!("  isolation: {line}");
+                }
+                // D10, D11: the window each device's curation waits on, and why.
+                let now = crate::db::now_ms();
+                for p in crate::providers_db::pending(&db)? {
+                    let at = |o: Option<i64>| o.map_or(String::new(), |o| format!("+{o}"));
+                    let overdue = if p.next_attempt_at < now && !crate::worker::running(home) {
+                        " (overdue: no worker is running; the next hook starts one)"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "  curation of seq {}{}..{}{} waits since {} ({}, {} of 3 attempts): {}; next try {}{overdue}",
+                        p.from_seq,
+                        at(p.from_offset),
+                        p.to_seq,
+                        at(p.to_offset),
+                        crate::db::utc(p.since),
+                        p.hold,
+                        p.attempts,
+                        p.reason,
+                        crate::db::utc(p.next_attempt_at),
+                    );
+                }
+                Ok(())
+            })(),
+        );
     }
     let exe_str = exe
         .canonicalize()
@@ -1912,6 +1959,20 @@ fn on_path(bin: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_agent_that_fails_leaves_the_others_wired() {
+        let mut wired = Vec::new();
+        let failed = wire_each(&["claude", "codex", "grok"], |a| {
+            if a == "claude" {
+                return Err(anyhow!("settings.json is not JSON"));
+            }
+            wired.push(a.to_owned());
+            Ok(())
+        });
+        assert_eq!(failed, ["claude"]);
+        assert_eq!(wired, ["codex", "grok"]);
+    }
 
     #[test]
     fn opencode_setup_round_trip_preserves_config_and_other_plugins() {
