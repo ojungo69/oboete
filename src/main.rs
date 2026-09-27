@@ -14,6 +14,7 @@ mod hook;
 mod import;
 mod inject;
 mod knowledge;
+mod manifest;
 mod mcp;
 mod observe;
 mod provider;

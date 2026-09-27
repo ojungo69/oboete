@@ -62,6 +62,8 @@ fn run_io(
     // When the store operation ended (0 until one did): overlapping hooks change the marker in
     // this order, so it is taken before anything that runs after the write.
     let mut ended = 0;
+    // Task 9: the manifest SessionStart shows for the checkout its event names.
+    let mut manifest = None;
     let result: Result<Option<String>> = (|| {
         if std::env::var_os(SKIP_ENV).is_some() {
             return Ok(None);
@@ -86,17 +88,38 @@ fn run_io(
         tried = crate::capture::PORTED.contains(&agent);
         std::fs::create_dir_all(home)?;
         if tried {
-            // Design B: nothing is injected until the manifest (milestone 2 Task 9).
             let settings = crate::capture::Settings::load(home)?;
-            wrote = record(
-                &mut crate::raw::open(home)?,
-                agent,
-                event,
-                &payload,
-                db::now_ms(),
-                &settings,
-            )? > 0;
+            let mut store = crate::raw::open(home)?;
+            let events = record(&mut store, agent, event, &payload, db::now_ms(), &settings)?;
+            wrote = !events.is_empty();
             ended = crate::failure::now();
+            // Not on a resume: its context has the manifest already (after a compaction it
+            // does not, so it is shown again). A manifest that cannot be read is no recording
+            // failure: the row is written.
+            if let Some(start) = events.iter().find(|e| e.kind == "start")
+                && str_field(&payload, &["source"]) != Some("resume")
+                && let Some(repo) = start.repo.as_deref()
+            {
+                let branch = start.branch.as_deref().unwrap_or("");
+                // It goes to the agent's model provider: the rules as they are now apply, so a
+                // rule added after the text was built already hides its value (spec 6.4).
+                manifest = crate::consumer::manifest::text(
+                    home,
+                    &store,
+                    repo,
+                    branch,
+                    &start.session,
+                    settings.rules.version(),
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("oboete: manifest not read: {e:#}");
+                    None
+                })
+                .map(|t| {
+                    let gated = crate::redact::outbound_with(&t, &settings.rules);
+                    crate::manifest::cut(&gated, crate::consumer::manifest::CAP)
+                });
+            }
             return Ok(None);
         }
         let conn = db::open(home)?;
@@ -128,19 +151,27 @@ fn run_io(
             Ok(_) => {}
             Err(e) => crate::failure::mark(home, crate::failure::classify(e), ended),
         }
-        // Design B injects nothing at SessionStart until the manifest (Task 9), except this line.
+        // Design B's SessionStart: the recording-failure line, then the manifest in its fence.
+        let failed = crate::failure::since(home).or_else(|| {
+            // No marker when even the marker could not be written: this call's error, then.
+            result
+                .as_ref()
+                .err()
+                .map(|e| (crate::failure::classify(e), ended))
+        });
+        let parts: Vec<String> = [
+            failed.map(crate::failure::line),
+            manifest.as_deref().map(crate::manifest::fenced),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         if event == "SessionStart"
             && crate::capture::PORTED.contains(&agent)
             && out.is_none()
-            // No marker when even the marker could not be written: this call's error, then.
-            && let Some(failed) = crate::failure::since(home).or_else(|| {
-                result
-                    .as_ref()
-                    .err()
-                    .map(|e| (crate::failure::classify(e), ended))
-            })
+            && !parts.is_empty()
         {
-            let text = crate::failure::line(failed);
+            let text = parts.join("\n");
             out = Some(
                 json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
                     .to_string(),
@@ -157,7 +188,7 @@ fn run_io(
 }
 
 /// Design B (milestone 2 Task 2): the events of one hook call, appended to `raw.db` with the
-/// event's time (`now` in a hook; the fixture's in a replay). Returns how many were appended.
+/// event's time (`now` in a hook; the fixture's in a replay). Returns the appended events.
 pub fn record(
     raw: &mut crate::raw::Raw,
     agent: &str,
@@ -165,8 +196,8 @@ pub fn record(
     payload: &Value,
     ts: i64,
     settings: &crate::capture::Settings,
-) -> Result<usize> {
-    let mut n = 0;
+) -> Result<Vec<crate::raw::Event>> {
+    let mut appended = Vec::new();
     for mut c in crate::capture::events(agent, event, payload, ts, settings) {
         // An idless event's session is this device's own: a bare "unknown" would be one session
         // on every device once they sync (as `handle` does for v1).
@@ -174,9 +205,9 @@ pub fn record(
             c.event.session = format!("unknown-{}", raw.device());
         }
         raw.append_with_ledger(&c.event, &c.ledger, settings.rules.version())?;
-        n += 1;
+        appended.push(c.event);
     }
-    Ok(n)
+    Ok(appended)
 }
 
 /// The hook file `oboete setup grok` writes. While it exists, Grok delivers its own events.
@@ -898,6 +929,90 @@ mod tests {
         assert_eq!(crate::failure::since(home), None);
         let raw = crate::raw::open(home).unwrap();
         assert_eq!(raw.max_seq().unwrap(), 1);
+    }
+
+    #[test]
+    fn session_start_shows_the_manifest_with_a_directive_line_taken_back() {
+        // MUST-M5 through the hook: a directive of two lines, one taken back in a later session;
+        // a new session sees the other in the fence, and a resume sees nothing again.
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cwd.path().join(".git")).unwrap();
+        std::fs::write(cwd.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let c = cwd.path().to_string_lossy().into_owned();
+        let hook = |event: &str, payload: Value| {
+            let mut out = Vec::new();
+            let input = payload.to_string();
+            run_io(home.path(), "claude", event, input.as_bytes(), &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        hook(
+            "UserPromptSubmit",
+            json!({"session_id": "s1", "cwd": c,
+                "prompt": "今後はテストを先に書いて\nコミットの前に必ず cargo fmt を通して"}),
+        );
+        hook(
+            "UserPromptSubmit",
+            json!({"session_id": "s2", "cwd": c, "prompt": "テストを先に書くのはやめて"}),
+        );
+        crate::worker::run_once(home.path()).unwrap();
+        let out = hook(
+            "SessionStart",
+            json!({"session_id": "s3", "cwd": c, "source": "startup"}),
+        );
+        let v: Value = serde_json::from_str(out.trim()).unwrap();
+        let text = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(
+            text.starts_with("<oboete-memory>")
+                && text.contains("必ず cargo fmt を通して")
+                && !text.contains("テストを先に書いて"),
+            "{text}"
+        );
+        let resumed = hook(
+            "SessionStart",
+            json!({"session_id": "s3", "cwd": c, "source": "resume"}),
+        );
+        assert_eq!(resumed, "");
+    }
+
+    #[test]
+    fn session_start_shows_no_manifest_built_under_other_rules() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cwd.path().join(".git")).unwrap();
+        std::fs::write(cwd.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let c = cwd.path().to_string_lossy().into_owned();
+        let hook = |event: &str, payload: Value| {
+            let mut out = Vec::new();
+            let input = payload.to_string();
+            run_io(home.path(), "claude", event, input.as_bytes(), &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        hook(
+            "UserPromptSubmit",
+            json!({"session_id": "s1", "cwd": c, "prompt": "deploy acme  123456 today"}),
+        );
+        crate::worker::run_once(home.path()).unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = 'acme {2}[0-9]{6}' }]\n",
+        )
+        .unwrap();
+        let start = || {
+            hook(
+                "SessionStart",
+                json!({"session_id": "s2", "cwd": c, "source": "startup"}),
+            )
+        };
+        // Built under the old rules, and the text has its spaces flattened: the new rule cannot
+        // be applied to it, so none is shown until the worker builds it again.
+        let out = start();
+        assert!(!out.contains("deploy") && !out.contains("123456"), "{out}");
+        crate::worker::run_once(home.path()).unwrap();
+        let out = start();
+        assert!(out.contains("deploy") && !out.contains("123456"), "{out}");
     }
 
     #[test]

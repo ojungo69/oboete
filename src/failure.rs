@@ -233,7 +233,7 @@ pub fn line((class, ts): (Class, i64)) -> String {
     };
     format!(
         "oboete: recording has failed since {} ({what}); events from then on are not recorded. Run `oboete doctor`.",
-        utc(ts / 1_000_000)
+        crate::db::utc(ts / 1_000_000)
     )
 }
 
@@ -266,26 +266,6 @@ fn marker(home: &Path) -> PathBuf {
 
 fn padded(text: &str) -> String {
     format!("{text:<width$}\n", width = SIZE - 1)
-}
-
-/// `YYYY-MM-DD HH:MM UTC` for a Unix time in ms (days to a civil date: H. Hinnant's algorithm).
-fn utc(ms: i64) -> String {
-    let secs = ms.div_euclid(1000);
-    let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
-        rest / 3600,
-        rest % 3600 / 60
-    )
 }
 
 /// Free bytes where `home` lives, from `df -Pk` (Linux, macOS); `None` where that is unavailable.
