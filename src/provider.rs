@@ -52,15 +52,15 @@ pub struct ChainResult {
 /// Why the chain went past a provider, which the curation phase needs to know (D10, D11).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Skip {
-    /// It may be tried from then on (unix ms): a cooldown, a rate limit's reset, the owner still
-    /// working (D9).
+    /// It may be tried from then on (unix ms): a cooldown (one its failure in this run set too), a
+    /// rate limit's reset, the owner still working (D9).
     Wait(i64),
     /// Its budget refuses it until then: a day's or a month's reset.
     Budget(i64),
     /// It waits for the owner: stopped until `oboete resume`, or a curator CLI that is not
     /// proven unable to act.
     Owner,
-    /// It was tried and gave no valid answer.
+    /// It was tried and gave no valid answer, and its failure set no cooldown.
     Failed,
     /// It can never take this request: over its ceiling. Nothing was sent.
     TooBig,
@@ -165,6 +165,8 @@ pub struct Chain<'a> {
     paid_usd_per_month: f64,
     /// Until when the owner is still working (D9), asked right before each subscription call.
     working: Option<&'a dyn Fn() -> Option<i64>>,
+    /// `OBOETE_FAIL_PROVIDER=<name>`: that provider fails without a call (fallback proof).
+    forced_fail: Option<String>,
 }
 
 impl<'a> Chain<'a> {
@@ -174,6 +176,7 @@ impl<'a> Chain<'a> {
             db,
             paid_usd_per_month: 5.0,
             working: None,
+            forced_fail: std::env::var("OBOETE_FAIL_PROVIDER").ok(),
         }
     }
 
@@ -205,7 +208,7 @@ impl<'a> Chain<'a> {
         schema: &Value,
     ) -> Result<ChainResult> {
         let conn = self.db;
-        let forced_fail = std::env::var("OBOETE_FAIL_PROVIDER").ok();
+        let forced_fail = self.forced_fail.clone();
         let mut fallbacks = Vec::new();
         let est = budget::estimate(prompt);
         // A ceiling a provider refused this request at (413): its peers with it are skipped.
@@ -267,9 +270,12 @@ impl<'a> Chain<'a> {
                 continue;
             }
             // The owner is still working: a subscription waits (D9), a free entry does not.
-            if p.subscription()
-                && let Some(until) = self.working.and_then(|working| working())
-            {
+            let working = || {
+                p.subscription()
+                    .then(|| self.working.and_then(|working| working()))
+                    .flatten()
+            };
+            if let Some(until) = working() {
                 skip("waiting for the owner to finish".into(), Skip::Wait(until));
                 continue;
             }
@@ -282,6 +288,11 @@ impl<'a> Chain<'a> {
                     let ms = started.elapsed().as_millis() as i64;
                     record("gate", ms, Some(&gate.why()), false, Usage::default(), None)?;
                     skip(gate.why(), Skip::Owner);
+                    continue;
+                }
+                // The probe can take seconds: asked again right before the call.
+                if let Some(until) = working() {
+                    skip("waiting for the owner to finish".into(), Skip::Wait(until));
                     continue;
                 }
             }
@@ -357,13 +368,21 @@ impl<'a> Chain<'a> {
                     let usd = budget::cost(conn, p, est, e.usage, sent && e.status.is_none())?;
                     record(outcome, ms, Some(&e.message), sent, e.usage, usd)?;
                     // A forced failure is a test of the fallback, not of the provider.
+                    let mut skip = Skip::Failed;
                     if !forced {
-                        providers_db::set_state(conn, &name, next_state(state, &e))?;
+                        let next = next_state(state, &e);
+                        // A failure that set a cooldown passes by itself (D11).
+                        if next.down_until == providers_db::OWNER_HOLD {
+                            skip = Skip::Owner;
+                        } else if next.down_until > db::now_ms() {
+                            skip = Skip::Wait(next.down_until);
+                        }
+                        providers_db::set_state(conn, &name, next)?;
                     }
                     fallbacks.push(Fallback {
                         provider: name,
                         reason: e.message,
-                        skip: Skip::Failed,
+                        skip,
                     });
                 }
             }
@@ -2088,7 +2107,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let conn = crate::providers_db::open(home.path()).unwrap();
         let answer = json!({"choices": [{"message": {"content": "{\"summary\": \"s\"}"}}]});
-        let (free_url, free_request) = serve("500 Internal Server Error", b"{}".to_vec(), "");
+        // A 400 sets no cooldown: the free entry's skip is `Failed`.
+        let (free_url, free_request) = serve("400 Bad Request", b"{}".to_vec(), "");
         let (sub_url, sub_request) = serve_once(answer.to_string().into_bytes(), "");
         let mut sub = stub(sub_url);
         if let Provider::Openai {
@@ -2155,11 +2175,17 @@ mod tests {
         };
         providers_db::set_state(&conn, "held", state(providers_db::OWNER_HOLD)).unwrap();
         providers_db::set_state(&conn, "cooling", state(cool_until)).unwrap();
+        // A 400 sets no cooldown: tried, and failed.
+        let (bad, _) = serve("400 Bad Request", b"{}".to_vec(), "");
+        let mut refused = stub(bad);
+        if let Provider::Openai { name, .. } = &mut refused {
+            *name = "refused".into();
+        }
         let providers = [
             named("held", 10),
             named("cooling", 10),
             named("spent", 0),
-            named("down", 10),
+            refused,
         ];
         let err = Chain::new(&providers, &conn)
             .run("curator", "s", "p", &json!({}))
@@ -2672,6 +2698,57 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(sent, [0, 0]);
+    }
+
+    /// D9: the isolation probe can take seconds, so a subscription CLI is asked about the owner
+    /// again after it. The entry is forced to fail: a missing second check shows as `Failed`,
+    /// and no CLI is ever run.
+    #[test]
+    fn a_subscription_cli_is_asked_about_the_owner_again_after_its_gate() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let claude = Provider::Cli {
+            name: "claude".into(),
+            cli: "claude".into(),
+            model: None,
+            daily_budget: 10,
+            timeout_s: 5,
+            limits: Default::default(),
+        };
+        let until = crate::db::now_ms() + 600_000;
+        let asked = std::cell::Cell::new(0);
+        // Idle when first asked; a hook arrives while the gate runs.
+        let working = || {
+            asked.set(asked.get() + 1);
+            (asked.get() > 1).then_some(until)
+        };
+        let providers = [claude];
+        let mut chain = Chain::new(&providers, &conn).idle_gate(&working);
+        chain.forced_fail = Some("claude".into());
+        let err = chain.run("curator", "s", "p", &json!({})).unwrap_err();
+        let failed = err.downcast_ref::<ChainFailed>().expect("a ChainFailed");
+        assert_eq!(failed.0[0].skip, Skip::Wait(until));
+        assert_eq!(asked.get(), 2);
+    }
+
+    /// D11: a failure that sets a cooldown passes by itself, so it is a wait, not a failure.
+    #[test]
+    fn a_failure_that_sets_a_cooldown_is_gone_past_until_it_ends() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let (url, _) = serve(
+            "429 Too Many Requests",
+            b"{}".to_vec(),
+            "Retry-After: 600\r\n",
+        );
+        let before = crate::db::now_ms();
+        let err = Chain::new(&[stub(url)], &conn)
+            .run("curator", "s", "p", &json!({}))
+            .unwrap_err();
+        let failed = err.downcast_ref::<ChainFailed>().expect("a ChainFailed");
+        let down_until = providers_db::state(&conn, "stub").unwrap().down_until;
+        assert!(down_until >= before + 600_000, "{down_until}");
+        assert_eq!(failed.0[0].skip, Skip::Wait(down_until));
     }
 
     /// The isolation probe takes seconds: a call the budget refuses runs none.
