@@ -13,7 +13,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::db::{self, Doc};
-use crate::{hook, observe, redact};
+use crate::{curate, hook, redact};
 
 const SOURCE: &str = "claude-mem";
 
@@ -280,7 +280,7 @@ fn repo(project: &str) -> String {
 /// claude-mem's types are oboete's kinds, plus a few it wrote by mistake (`discovery>`) or keeps
 /// for itself (`security_note`); those count as discoveries.
 fn kind(t: &str) -> &'static str {
-    observe::KINDS
+    curate::KINDS
         .iter()
         .find(|k| **k == t)
         .copied()

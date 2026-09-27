@@ -243,6 +243,7 @@ impl ServerHandler for Oboete {
 
 /// Serve on stdin/stdout until the client disconnects.
 pub fn run(home: &Path) -> Result<()> {
+    rekey(home);
     let cwd = std::env::current_dir()?;
     let server = Oboete::new(home, &cwd);
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -253,6 +254,18 @@ pub fn run(home: &Path) -> Result<()> {
         service.waiting().await?;
         Ok(())
     })
+}
+
+/// Repositories that got an origin after they were used move to it (`db::rekey_paths`), once per
+/// session as the server starts: observe did it after each session, off the hook path. A home with
+/// no oboete.db gets none.
+fn rekey(home: &Path) {
+    if !home.join("oboete.db").exists() {
+        return;
+    }
+    if let Err(e) = db::open(home).and_then(|mut conn| db::rekey_paths(&mut conn)) {
+        eprintln!("oboete mcp: re-key repositories: {e:#}");
+    }
 }
 
 #[cfg(test)]
@@ -283,7 +296,6 @@ mod tests {
             &mut conn,
             &db::PendingSession {
                 id: "s1".into(),
-                agent: "claude".into(),
                 repo: repo_key.clone(),
                 last_event_at: 1_700_000_000_000,
             },
@@ -422,5 +434,38 @@ mod tests {
         names.sort();
         assert_eq!(names, ["get", "search", "timeline"]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// observe re-keyed the repositories that got an origin after they were used; the server
+    /// does it now as it starts, and a home with no oboete.db is left without one.
+    #[test]
+    fn the_server_rekeys_a_repository_that_got_an_origin() {
+        let home = tempfile::tempdir().unwrap();
+        rekey(home.path());
+        assert!(!home.path().join("oboete.db").exists());
+        let late = home.path().join("late");
+        std::fs::create_dir_all(late.join(".git")).unwrap();
+        let key = repo::key(&late);
+        {
+            // The first open migrates the store; nothing has an origin yet.
+            let conn = db::open(home.path()).unwrap();
+            db::upsert_session(&conn, "d", "claude", &key, &key, 1).unwrap();
+            db::insert_prompt(&conn, "d", 1, "before the remote").unwrap();
+        }
+        std::fs::write(
+            late.join(".git/config"),
+            "[remote \"origin\"]\n\turl = https://github.com/o/late\n",
+        )
+        .unwrap();
+        rekey(home.path());
+        let conn = db::open(home.path()).unwrap();
+        let repos: Vec<String> = conn
+            .prepare("SELECT repo FROM sessions")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(repos, ["github.com/o/late"]);
     }
 }

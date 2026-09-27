@@ -205,7 +205,7 @@ Each decision is Claude's unless marked otherwise, and the owner can overrule it
   - `a_split_events_next_part_starts_where_the_last_window_ended` (a non-tool event over `window_tokens`: its parts are curated in order across a restart between them, none twice, none skipped).
   - `the_worker_sleeps_until_the_gate_opens_and_exits_when_the_wait_is_longer` (D10).
 - [ ] **Step 2: Implement** the op log and its backup lines, then the window cut, then the phase and the worker's stay-up rule, then the doctor lines. The prompt of this task is v1's observation prompt; Task 7 replaces it with claims.
-- [ ] **Step 3: Remove `observe`** (D14) and check that no test or command still reaches `oboete.db` except MCP, the viewer and `import`.
+- [x] **Step 3: Remove `observe`** (D14) and check that no test or command still reaches `oboete.db` except MCP, the viewer and `import`. Done in part 4: what still opens it is MCP, the viewer, `import`, their CLI twins (`search`, `get`, `timeline`), `eval` and `reindex`. v1's writer (`db::apply_batch`) stays as a test fixture for those readers. Nothing embeds new `oboete.db` documents by itself any more (observe did after each run); `oboete reindex` does.
 - Curation is opt-in until the cut-over (spec 7.5): `[summary] curate = true` turns the phase on, with `window_tokens` (D8) and `idle_minutes` (D9) beside it. By default the worker sends nothing, so no test or older home reaches a provider through it.
 - [ ] **Step 4: Dogfood.** Build, install as `oboete-b`, run a day of the dogfood user's own sessions through it; doctor shows no overdue window; `provider_calls` shows which providers answered.
 - [ ] **Step 5: Commit** `curation: windows, the op log as checkpoint, and the curation phase (milestone 3, Task 5)`.

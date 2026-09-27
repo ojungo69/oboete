@@ -727,7 +727,6 @@ mod tests {
             conn,
             &db::PendingSession {
                 id: "s1".into(),
-                agent: "claude".into(),
                 repo: "/r".into(),
                 last_event_at: 1_700_000_000_000,
             },

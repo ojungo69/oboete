@@ -21,7 +21,6 @@ mod isolation;
 mod knowledge;
 mod manifest;
 mod mcp;
-mod observe;
 mod provider;
 mod providers_db;
 // Design B's store: the hook writes to it; its readers come with the worker (milestone 2 Task 5).
@@ -59,15 +58,6 @@ enum Cmd {
         agent: String,
         /// Hook event name (e.g. SessionStart, PreInvocation, UserPromptSubmit, PostToolUse, Stop, PreCompact, SessionEnd)
         event: String,
-    },
-    /// Summarize pending sessions through the provider chain
-    Observe {
-        /// Only process sessions idle for at least this long
-        #[arg(long, default_value_t = 60_000)]
-        settle_ms: u64,
-        /// Sleep this long first (hooks of agents without a session-end event)
-        #[arg(long, default_value_t = 0)]
-        wait_ms: u64,
     },
     /// Run Design B's consumers over raw.db until idle (hooks start it; one per home)
     Worker {
@@ -279,12 +269,6 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             if let Err(e) = hook::run_stdin(&home, &agent, &event) {
                 eprintln!("oboete hook: {e:#}");
             }
-            Ok(())
-        }
-        Cmd::Observe { settle_ms, wait_ms } => {
-            std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-            let stats = observe::run(&home, settle_ms)?;
-            println!("{}", serde_json::to_string(&stats)?);
             Ok(())
         }
         Cmd::Worker { idle_ms } => worker::run(&home, idle_ms),
