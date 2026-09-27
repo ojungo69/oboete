@@ -16,9 +16,11 @@ use crate::{redact, repo};
 
 pub const PORTED: &[&str] = &["claude", "codex"];
 
-/// Bytes a stored string keeps before only its head and tail are kept (spec 2.4, plan D4).
-/// Provisional: Task 12 sets it from M14 on the slowest machine.
-pub const MAX_FIELD_BYTES: usize = 256 * 1024;
+/// Bytes a stored string keeps before only its head and tail are kept (spec 2.4, plan D4): the
+/// largest of 64, 128 and 256 KB whose hook p95 on the slowest machine stays within the line.
+/// Provisional until the iMac is measured: Windows is over WSL and Windows' floor from 64 KB on,
+/// and the iMac's floor decides whether 128 or 256 KB fit (docs/milestone-2.md, Task 12).
+pub const MAX_FIELD_BYTES: usize = 64 * 1024;
 
 /// What `tool_output = "head-tail"` keeps of each tool output: its first and last halves. v1's
 /// hook kept 8,000 characters (src/hook.rs `MAX_FIELD`). (Claude; overrulable)
@@ -464,7 +466,8 @@ mod tests {
     #[test]
     fn a_long_tool_output_is_kept_whole_and_redacted_past_the_old_window() {
         let key = &format!("ghp_{}", "q9Zx8mL2vB4nR7tY1wK3pS6dJ0aF5hU2cE8g"); // split, as in import.rs, so secret scanners pass it
-        let out = "word ".repeat(20_000) + " Authorization: Bearer " + key;
+        // 50 KB: past v1's 12,000-character window, within `MAX_FIELD_BYTES`.
+        let out = "word ".repeat(10_000) + " Authorization: Bearer " + key;
         let e = one(
             "PostToolUse",
             json!({"session_id": "s", "cwd": "/", "tool_name": "Bash",
@@ -476,7 +479,7 @@ mod tests {
             b["output"]
                 .as_str()
                 .unwrap()
-                .contains(&"word ".repeat(20_000))
+                .contains(&"word ".repeat(10_000))
         );
         assert!(
             !e.body.contains(key),

@@ -156,9 +156,12 @@ enum Cmd {
         /// Directory that stands in for the fixture's repository root
         #[arg(long)]
         repo_root: Option<PathBuf>,
-        /// Also time N real `oboete hook` process spawns (startup + insert)
+        /// Also time N real `oboete hook` process spawns (startup + insert) per output size
         #[arg(long, default_value_t = 30)]
         spawn_sample: usize,
+        /// Tool-output sizes of the spawned hooks, in KB (M14: 1,64,256)
+        #[arg(long, value_delimiter = ',', default_value = "1")]
+        sizes: Vec<usize>,
         /// Only replay events of this agent: claude | codex | grok | agy | opencode | pi | cursor | all
         #[arg(long, default_value = "claude")]
         agent: String,
@@ -478,7 +481,8 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
             fixture,
             repo_root,
             spawn_sample,
+            sizes,
             agent,
-        } => replay::run(&home, &fixture, repo_root, spawn_sample, &agent),
+        } => replay::run(&home, &fixture, repo_root, spawn_sample, &sizes, &agent),
     }
 }
