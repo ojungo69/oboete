@@ -67,10 +67,18 @@ The alternate model is tried only once, even for these failures.
   gh workflow run open-code-review.yml --ref main -f pr_number=123
   ```
 
-- A newer run for the same PR cancels an older run. Ordinary PR comments do not
-  trigger or cancel reviews.
-- Each job has a 45-minute timeout. Each attempt has two concurrent review tasks,
-  a 300-second LLM request timeout, and a 500,000-token budget. The longer request
+- A newer eligible run for the same PR cancels its older queued or running run.
+  Skipped fork/draft events and ordinary PR comments do not cancel eligible reviews.
+- All PRs in this repository share one NIM review slot. GitHub's native
+  `queue: max` keeps up to 100 pending jobs, instead of replacing another PR's
+  pending review. Jobs wait until the active review finishes; additional jobs are
+  cancelled if that queue is full. Other applications or repositories using the
+  same NIM key are outside this queue.
+- At the start of a queued job, the workflow fetches the current PR metadata.
+  Automatic reviews skip closed/draft PRs and superseded head/base snapshots.
+  Manual reviews use the current head and still reject closed/draft PRs.
+- Each job has a 45-minute timeout. Each attempt reviews one file group at a time,
+  with a 600-second LLM request timeout and a 500,000-token budget. The longer request
   and job limits leave room for maximum reasoning and the fallback attempt.
   The CLI multiplies the five-minute task setting by the three rounds of explicit
   `high` review effort, giving each file group a fifteen-minute deadline. The job
@@ -96,10 +104,19 @@ must not check out or run the PR's code. Its only write permission is
 
 ## Validation and rollback
 
-Run `actionlint .github/workflows/open-code-review.yml` after editing the workflow.
+Validate the workflow against the current GitHub Actions schema and check its
+expressions with `actionlint .github/workflows/open-code-review.yml` after edits.
+Actionlint 1.7.12 has a known false positive for the supported `concurrency.queue`
+property ([upstream issue](https://github.com/rhysd/actionlint/issues/657)); do not
+remove the queue or ignore other diagnostics to accommodate that older schema.
+GitHub's workflow parser and a current schema must accept the complete file.
 After merging it to the default branch and configuring the provider, dispatch a
 review of an open PR and verify the run's head SHA, review summary, and any inline
 findings. The original CI remains the merge gate.
+
+Existing runs retain their old concurrency groups when a workflow changes.
+During rollout, let old OpenCodeReview runs finish or cancel them and requeue the
+still-open PRs before relying on the shared slot. Leave other CI workflows alone.
 
 To pause reviews, delete the `OCR_LLM_MODEL` repository variable. To remove the
 integration, revert the commit that added this workflow and document. Provider
