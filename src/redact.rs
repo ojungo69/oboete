@@ -354,22 +354,27 @@ pub fn outbound_with(text: &str, rules: &Rules) -> String {
 }
 
 /// `outbound_with` of `text[range]`, one part of the whole `text` a window cut (spec 3.1, issue
-/// #54): a secret or a `<private>`-style block the whole text holds is hidden in the part too,
-/// also where the cut splits it. `range` is on character boundaries.
+/// #54): what the gate hides in the whole text (`hidden`) is hidden in the part too, also where
+/// the cut splits it. `range` is on character boundaries.
 pub fn outbound_part(text: &str, range: std::ops::Range<usize>, rules: &Rules) -> String {
+    outbound_range(text, range, hidden(text, rules).as_deref(), rules)
+}
+
+/// `outbound_part` with `hidden(text, rules)` already found, for the many parts of one text.
+pub fn outbound_range(
+    text: &str,
+    range: std::ops::Range<usize>,
+    hidden: Option<&[(usize, usize)]>,
+    rules: &Rules,
+) -> String {
+    let Some(hidden) = hidden else {
+        return MASK.to_string();
+    };
     if range == (0..text.len()) {
         return outbound_with(text, rules);
     }
-    let found = spans(text, rules);
-    // Past the cap the whole text is one mask (`coalesce`), and so is each part of it.
-    if found.len() > MAX_FINDINGS {
-        return MASK.to_string();
-    }
-    let mut hidden: Vec<(usize, usize)> = crate::hook::block_ranges(text);
-    hidden.extend(found.into_iter().map(|(s, e, _)| (s, e)));
-    hidden.sort_unstable();
     let (mut part, mut pos) = (String::with_capacity(range.len()), range.start);
-    for (s, e) in hidden {
+    for &(s, e) in hidden {
         let (s, e) = (s.max(pos), e.min(range.end));
         if s < e {
             part.push_str(&text[pos..s]);
@@ -379,6 +384,76 @@ pub fn outbound_part(text: &str, range: std::ops::Range<usize>, rules: &Rules) -
     }
     part.push_str(&text[pos..range.end]);
     outbound_with(&part, rules)
+}
+
+/// The byte ranges of `text` that `outbound_with(text)` does not show: the blocks its block
+/// removal takes out and every run its scan masks, rescans included, found on the text as the gate
+/// sees it (blocks removed tag by tag, trimmed, then masked pass by pass) and given in `text`'s own
+/// offsets, sorted and merged. `None` when the gate masks the whole text.
+pub fn hidden(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
+    // The text as the gate sees it, and for each of its bytes the range of `text` it stands for.
+    let mut work = text.to_owned();
+    let mut from: Vec<(usize, usize)> = (0..text.len()).map(|i| (i, i + 1)).collect();
+    let mut hidden = Vec::new();
+    for tag in crate::hook::STRIP_BLOCKS {
+        let (blocks, _) = crate::hook::tag_blocks(&work, tag, false);
+        let (mut next, mut next_from, mut pos) = (String::new(), Vec::new(), 0);
+        for (s, e) in blocks {
+            if s < pos {
+                continue; // inside a block already taken
+            }
+            next.push_str(&work[pos..s]);
+            next_from.extend_from_slice(&from[pos..s]);
+            if s < e {
+                hidden.push((from[s].0, from[e - 1].1));
+            }
+            pos = e;
+        }
+        next.push_str(&work[pos..]);
+        next_from.extend_from_slice(&from[pos..]);
+        (work, from) = (next, next_from);
+    }
+    let start = work.len() - work.trim_start().len();
+    let end = work.trim_end().len().max(start);
+    let (mut work, mut from) = (work[start..end].to_owned(), from[start..end].to_vec());
+    let mut found = 0;
+    for pass in 0..=MAX_PASSES + 1 {
+        let again = spans(&work, rules);
+        if again.is_empty() {
+            break;
+        }
+        found += again.len();
+        if pass > MAX_PASSES || found > MAX_FINDINGS {
+            return None;
+        }
+        let (mut next, mut next_from, mut pos) = (String::new(), Vec::new(), 0);
+        for (s, e) in merged(&again) {
+            next.push_str(&work[pos..s]);
+            next_from.extend_from_slice(&from[pos..s]);
+            let run = from[s..e]
+                .iter()
+                .fold((usize::MAX, 0), |(a, b), &(x, y)| (a.min(x), b.max(y)));
+            hidden.push(run);
+            next.push_str(MASK);
+            next_from.extend(std::iter::repeat_n(run, MASK.len()));
+            pos = e;
+        }
+        next.push_str(&work[pos..]);
+        next_from.extend_from_slice(&from[pos..]);
+        if next == work {
+            break; // a rule matching its own mask: nothing new to hide
+        }
+        (work, from) = (next, next_from);
+    }
+    hidden.sort_unstable();
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for (s, e) in hidden {
+        match runs.last_mut() {
+            Some((_, last)) if s <= *last => *last = (*last).max(e),
+            _ => runs.push((s, e)),
+        }
+    }
+    Some(runs)
 }
 
 /// v1's import into oboete.db (`hook::clip`): the bundled rules only. Hooks go through
@@ -1370,6 +1445,42 @@ mod tests {
         let text = "a1 b1 plain ".repeat(600);
         assert_eq!(outbound_with(&text, &rules), MASK);
         assert_eq!(outbound_part(&text, 0..120, &rules), MASK);
+    }
+
+    /// A part hides what the whole field's gate hides: found after its blocks are removed tag by
+    /// tag and it is trimmed, and by the rescans after masking.
+    #[test]
+    fn a_part_hides_what_the_gate_finds_on_the_whole_field_as_it_sees_it() {
+        // A later OTP takes the greedy rule's first pass; the rescan finds the earlier one.
+        let greedy = user(
+            "[redaction]\nextra_rules = [{ id = \"otp\", regex = 'ACME.*otp=([A-Za-z0-9]+)', secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let text = "ACME otp=AAAA1111 then otp=BBBB2222";
+        let whole = outbound_with(text, &greedy);
+        assert!(
+            !whole.contains("AAAA1111") && !whole.contains("BBBB2222"),
+            "{whole}"
+        );
+        let part = outbound_part(text, 5..text.len(), &greedy);
+        assert!(!part.contains("AAAA1111"), "{part}");
+        // An anchored rule matches only once the field is trimmed.
+        let anchored = user(
+            "[redaction]\nextra_rules = [{ id = \"otp\", regex = '^ACME.* otp=([0-9]{6})', secret_group = 1 }]\n",
+        )
+        .unwrap();
+        let text = format!("  ACME {} otp=654321 ", "words ".repeat(400));
+        assert!(!outbound_with(&text, &anchored).contains("654321"));
+        let part = outbound_part(&text, 300..text.len(), &anchored);
+        assert!(!part.contains("654321"), "{part}");
+        // A block that shows only once an inner one is removed goes too.
+        let text = format!(
+            "<private<ide_opened_file>x</ide_opened_file>>HIDDEN</private>{}",
+            "padding ".repeat(50)
+        );
+        assert!(!outbound_with(&text, &Rules::default()).contains("HIDDEN"));
+        let part = outbound_part(&text, 0..100, &Rules::default());
+        assert!(!part.contains("HIDDEN"), "{part}");
     }
 
     fn user(toml: &str) -> anyhow::Result<Rules> {

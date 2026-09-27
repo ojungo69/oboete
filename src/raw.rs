@@ -441,6 +441,33 @@ impl Raw {
         Ok(counts)
     }
 
+    /// `after`, and fewer when their stored bodies pass `max_bytes` together (always one): a
+    /// reader in pages never holds more than about that much at once (spec 3.1).
+    pub fn after_within(
+        &self,
+        device: &str,
+        seq: i64,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<Record>> {
+        let mut st = self.conn.prepare(
+            "SELECT length(body) FROM records WHERE device = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
+        )?;
+        let sizes = st.query_map(
+            params![device, seq, i64::try_from(limit).unwrap_or(i64::MAX)],
+            |r| r.get::<_, Option<i64>>(0),
+        )?;
+        let (mut n, mut bytes) = (0, 0usize);
+        for size in sizes {
+            let size = usize::try_from(size?.unwrap_or(0)).unwrap_or(usize::MAX);
+            if n > 0 && bytes.saturating_add(size) > max_bytes {
+                break;
+            }
+            (n, bytes) = (n + 1, bytes.saturating_add(size));
+        }
+        self.after(device, seq, n)
+    }
+
     /// Up to `limit` records of `device` after `seq`, in seq order.
     pub fn after(&self, device: &str, seq: i64, limit: usize) -> Result<Vec<Record>> {
         let mut st = self.conn.prepare(
@@ -1252,6 +1279,19 @@ mod tests {
         let other = open(copy.path()).unwrap();
         assert_ne!(other.device(), first);
         assert_eq!(open(copy.path()).unwrap().device(), other.device());
+    }
+
+    #[test]
+    fn a_page_is_bounded_in_bytes_and_always_holds_one_record() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        for _ in 0..3 {
+            raw.append(&test_event(&"x".repeat(1000))).unwrap();
+        }
+        assert_eq!(raw.after_within(&dev, 0, 10, 1).unwrap().len(), 1);
+        assert_eq!(raw.after_within(&dev, 0, 10, 1 << 20).unwrap().len(), 3);
+        assert_eq!(raw.after_within(&dev, 0, 2, 1 << 20).unwrap().len(), 2);
     }
 
     #[test]

@@ -49,14 +49,20 @@ struct Piece {
     /// Where its text starts inside the event, and where it stops when the window split it.
     from: i64,
     to: Option<i64>,
-    /// Its session's heading, and its text (empty for a record with nothing to read).
-    session: String,
+    /// Its session as stored (what groups it) and as shown (its heading, through the gate).
+    key: String,
+    heading: String,
+    /// Its text: empty for a record with nothing to read.
     text: String,
     tokens: u32,
     /// A typed prompt that starts here: a turn boundary (D12).
     turn: bool,
     tool: bool,
 }
+
+/// Bytes of records read at a time while a window is cut, at least one record (spec 3.1: pages
+/// bounded by events and bytes).
+const PAGE_BYTES: usize = 4 << 20;
 
 /// The device's next window after its curation checkpoint, or `None` when it has no record
 /// there. `rules` are the redaction rules as they are now: a rule added after capture still
@@ -67,7 +73,7 @@ pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Resul
     let (mut pieces, mut used, mut elided, mut full) = (Vec::<Piece>::new(), 0, Vec::new(), false);
     let mut sessions = std::collections::HashSet::new();
     'read: loop {
-        let records = raw.after(device, after, PAGE)?;
+        let records = raw.after_within(device, after, PAGE, PAGE_BYTES)?;
         if records.is_empty() {
             break;
         }
@@ -82,12 +88,13 @@ pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Resul
                 continue;
             };
             let from = if r.seq == seq { offset.unwrap_or(0) } else { 0 };
-            let mut piece = render(&e, r.seq, from, None, rules);
+            let prepared = Prepared::new(&e, rules);
+            let mut piece = prepared.piece(r.seq, from, None);
             // A session's first record also brings its heading.
-            let heading = if sessions.contains(&piece.session) {
+            let heading = if sessions.contains(&piece.key) {
                 0
             } else {
-                crate::budget::estimate(&format!("## {}\n", piece.session))
+                crate::budget::estimate(&format!("## {}\n", piece.heading))
             };
             if !piece.text.is_empty() {
                 piece.tokens += heading;
@@ -95,7 +102,7 @@ pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Resul
             if used + piece.tokens <= budget {
                 used += piece.tokens;
                 if !piece.text.is_empty() {
-                    sessions.insert(piece.session.clone());
+                    sessions.insert(piece.key.clone());
                 }
                 pieces.push(piece);
                 continue;
@@ -105,16 +112,10 @@ pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Resul
                 // The first event to read does not fit: a tool output is elided, anything else is
                 // split, and the next window starts where this part stops.
                 if piece.tool {
-                    piece = elide(&e, r.seq, rules);
+                    piece = prepared.elided(r.seq);
                     elided.push(r.seq);
                 } else {
-                    piece = split(
-                        &e,
-                        r.seq,
-                        from,
-                        budget.saturating_sub(used + heading),
-                        rules,
-                    );
+                    piece = prepared.split(r.seq, from, budget.saturating_sub(used + heading));
                 }
                 pieces.push(piece);
             } else {
@@ -153,7 +154,8 @@ fn empty(seq: i64) -> Piece {
         seq,
         from: 0,
         to: None,
-        session: String::new(),
+        key: String::new(),
+        heading: String::new(),
         text: String::new(),
         tokens: 0,
         turn: false,
@@ -161,119 +163,205 @@ fn empty(seq: i64) -> Piece {
     }
 }
 
-/// An event's line before its long text, through the gate, the long text (the part a window may
-/// split, gated where it is cut), and whether it is a tool call. The gate trims each part, so they
-/// are joined by a space after it.
-fn parts(e: &Event, rules: &Rules) -> (String, Option<String>, bool) {
-    let body: Value = serde_json::from_str(&e.body).unwrap_or(Value::String(e.body.clone()));
-    // A field capture replaced whole with a base64 marker is an object: shown as its JSON.
-    let text = |key: &str| match &body[key] {
-        Value::Null => None,
-        Value::String(t) => Some(t.clone()),
-        v => Some(v.to_string()),
-    };
-    match e.kind.as_str() {
-        "prompt" if body["omitted"] == true => ("[user] (not stored)".into(), None, false),
-        "prompt" => ("[user]".into(), text("prompt"), false),
-        "envelope" => ("[harness]".into(), text("prompt"), false),
-        "reply" => ("[assistant]".into(), text("assistant"), false),
-        "compaction" => match text("summary") {
-            Some(s) => ("[compaction summary]".into(), Some(s), false),
-            None => ("[compaction]".into(), None, false),
-        },
-        "tool" => {
-            let input: String = match &body["input"] {
-                Value::String(s) => s.clone(),
-                Value::Null => String::new(),
-                v => v.to_string(),
-            };
-            // Cut like a split event: a secret across the cut is found in the whole input.
-            let cut = input
-                .char_indices()
-                .nth(TOOL_INPUT_CHARS)
-                .map_or(input.len(), |(i, _)| i);
-            let input = crate::redact::outbound_part(&input, 0..cut, rules);
-            let failed = if body["failed"] == true {
-                " failed"
-            } else {
-                ""
-            };
-            let name = crate::redact::outbound_with(body["tool"].as_str().unwrap_or("?"), rules);
-            let head = format!("[tool {name}{failed}] input: {input}\n  output:");
-            (head, Some(text("output").unwrap_or_default()), true)
+/// Capture's `{kind, mime, bytes, sha256}` markers for binary content, whole or inside a text:
+/// neither the content nor its marker goes to a curator (spec 2.3).
+fn without_markers(s: &str) -> String {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        let text = r#""(?:[^"\\]|\\.)*""#;
+        regex::Regex::new(&format!(
+            r#"\{{"kind":{text},"mime":{text},"bytes":\d+,"sha256":"[0-9a-f]{{64}}"\}}"#
+        ))
+        .expect("marker pattern")
+    });
+    RE.replace_all(s, "").into_owned()
+}
+
+/// What the gate hides in a text, in its offsets (`redact::hidden`).
+type Hidden = Option<Vec<(usize, usize)>>;
+
+/// One event as a window shows it: its line before its long text through the gate, its long text
+/// (the part a window may split) with what the gate hides in it found once on the whole of it, and
+/// its session.
+struct Prepared<'r> {
+    rules: &'r Rules,
+    head: String,
+    long: Option<(String, Hidden)>,
+    tool: bool,
+    turn: bool,
+    key: String,
+    heading: String,
+}
+
+impl<'r> Prepared<'r> {
+    fn new(e: &Event, rules: &'r Rules) -> Self {
+        let body: Value = serde_json::from_str(&e.body).unwrap_or(Value::String(e.body.clone()));
+        let text = |v: &Value| match v {
+            Value::Null => None,
+            Value::String(t) => Some(without_markers(t)),
+            v => Some(without_markers(&v.to_string())),
+        };
+        // Fields this renderer does not know (a key a redaction rule masked at capture) are shown
+        // after the long text rather than dropped unseen.
+        let rest = |known: &[&str]| -> Option<String> {
+            let other: serde_json::Map<String, Value> = body
+                .as_object()?
+                .iter()
+                .filter(|(k, _)| !known.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            (!other.is_empty()).then(|| without_markers(&Value::Object(other).to_string()))
+        };
+        let joined = |long: Option<String>, known: &[&str]| match (long, rest(known)) {
+            (Some(l), Some(r)) => Some(format!("{l}\n{r}")),
+            (l, r) => l.or(r),
+        };
+        let gate = |s: &str| crate::redact::outbound_with(s, rules);
+        let (head, long, tool) = match e.kind.as_str() {
+            "prompt" if body["omitted"] == true => ("[user] (not stored)".into(), None, false),
+            "prompt" | "envelope" => {
+                let who = if e.kind == "prompt" {
+                    "[user]"
+                } else {
+                    "[harness]"
+                };
+                let long = joined(text(&body["prompt"]), &["prompt", "omitted"]);
+                (who.to_owned(), long, false)
+            }
+            "reply" => (
+                "[assistant]".into(),
+                joined(text(&body["assistant"]), &["assistant"]),
+                false,
+            ),
+            "compaction" => match joined(text(&body["summary"]), &["summary", "trigger"]) {
+                Some(s) => ("[compaction summary]".into(), Some(s), false),
+                None => ("[compaction]".into(), None, false),
+            },
+            "tool" => {
+                let input = text(&body["input"]).unwrap_or_default();
+                // Cut like a split event: a secret across the cut is found in the whole input.
+                let cut = input
+                    .char_indices()
+                    .nth(TOOL_INPUT_CHARS)
+                    .map_or(input.len(), |(i, _)| i);
+                let input = crate::redact::outbound_part(&input, 0..cut, rules);
+                let failed = if body["failed"] == true {
+                    " failed"
+                } else {
+                    ""
+                };
+                let name = gate(body["tool"].as_str().unwrap_or("?"));
+                let head = format!("[tool {name}{failed}] input: {input}\n  output:");
+                let known = [
+                    "tool",
+                    "input",
+                    "output",
+                    "failed",
+                    "agent_id",
+                    "interrupted",
+                ];
+                let long = joined(text(&body["output"]), &known).unwrap_or_default();
+                (head, Some(long), true)
+            }
+            _ => (String::new(), None, false), // a session's start or end: nothing to read
+        };
+        // Each label through the gate on its own, before it is shortened or joined.
+        let place = match (&e.repo, &e.branch) {
+            (Some(r), b) => {
+                let repo = gate(r);
+                let name = repo.rsplit('/').next().unwrap_or(&repo).to_owned();
+                match b {
+                    Some(b) => format!(" in {name}@{}", gate(b)),
+                    None => format!(" in {name}"),
+                }
+            }
+            _ => String::new(),
+        };
+        Self {
+            rules,
+            long: long.map(|l| {
+                let hidden = crate::redact::hidden(&l, rules);
+                (l, hidden)
+            }),
+            head,
+            tool,
+            turn: e.kind == "prompt",
+            key: format!("{}\u{0}{}", e.agent, e.session),
+            heading: format!("{} session {}{place}", gate(&e.agent), gate(&e.session)),
         }
-        _ => (String::new(), None, false), // a session's start or end: nothing to read
+    }
+
+    /// Its text from byte `from` of its long text to `to` (its end when none), through the gate.
+    fn piece(&self, seq: i64, from: i64, to: Option<i64>) -> Piece {
+        let mut text = self.head.clone();
+        if let Some((long, hidden)) = &self.long {
+            let start = boundary(long, from);
+            let end = to.map_or(long.len(), |t| boundary(long, t)).max(start);
+            text.push(' ');
+            text.push_str(&crate::redact::outbound_range(
+                long,
+                start..end,
+                hidden.as_deref(),
+                self.rules,
+            ));
+        }
+        self.with(seq, from, to, text)
+    }
+
+    fn with(&self, seq: i64, from: i64, to: Option<i64>, text: String) -> Piece {
+        Piece {
+            seq,
+            from,
+            to,
+            key: self.key.clone(),
+            heading: self.heading.clone(),
+            tokens: line_tokens(&text),
+            turn: self.turn && from == 0,
+            tool: self.tool,
+            text,
+        }
+    }
+
+    /// A tool call whose output is larger than a window: its line, and the output's size only.
+    fn elided(&self, seq: i64) -> Piece {
+        let bytes = self.long.as_ref().map_or(0, |(l, _)| l.len());
+        let text = format!("{} ({bytes} bytes of output, seen, elided)", self.head);
+        Piece {
+            turn: false,
+            ..self.with(seq, 0, None, text)
+        }
+    }
+
+    /// The part from `from` that fits in `room` tokens: as far as fits, back to a line's end when
+    /// one is in its second half, and at least one character so that curation moves on.
+    fn split(&self, seq: i64, from: i64, room: u32) -> Piece {
+        let long = self.long.as_ref().map_or("", |(l, _)| l.as_str());
+        let start = boundary(long, from);
+        let fits = |end: usize| self.piece(seq, from, Some(end as i64)).tokens <= room;
+        let (mut lo, mut hi) = (next_char(long, start), long.len());
+        if !fits(lo) {
+            hi = lo;
+        }
+        // The largest end that fits, on a character boundary.
+        while lo < hi {
+            let mid = boundary(long, ((lo + hi).div_ceil(2)) as i64);
+            let mid = if mid <= lo { next_char(long, lo) } else { mid };
+            if mid <= hi && fits(mid) {
+                lo = mid;
+            } else {
+                hi = mid.saturating_sub(1).max(lo);
+                hi = boundary(long, hi as i64).max(lo);
+            }
+        }
+        let half = boundary(long, (start + (lo - start) / 2) as i64);
+        let end = long[half..lo].rfind('\n').map_or(lo, |i| half + i + 1);
+        let to = (end < long.len()).then_some(end as i64);
+        self.piece(seq, from, to)
     }
 }
 
 /// `e`'s text from byte `from` of its long text to `to` (its end when none), through the gate.
 fn render(e: &Event, seq: i64, from: i64, to: Option<i64>, rules: &Rules) -> Piece {
-    let (mut text, long, tool) = parts(e, rules);
-    if let Some(long) = &long {
-        let start = boundary(long, from);
-        let end = to.map_or(long.len(), |t| boundary(long, t));
-        text.push(' ');
-        text.push_str(&crate::redact::outbound_part(
-            long,
-            start..end.max(start),
-            rules,
-        ));
-    }
-    Piece {
-        seq,
-        from,
-        to,
-        session: heading(e, rules),
-        tokens: line_tokens(&text),
-        turn: e.kind == "prompt" && from == 0,
-        tool,
-        text,
-    }
-}
-
-/// A tool call whose output is larger than a window: its line, and the output's size only.
-fn elide(e: &Event, seq: i64, rules: &Rules) -> Piece {
-    let (head, long, _) = parts(e, rules);
-    let bytes = long.map_or(0, |l| l.len());
-    let text = head + &format!(" ({bytes} bytes of output, seen, elided)");
-    Piece {
-        seq,
-        from: 0,
-        to: None,
-        session: heading(e, rules),
-        tokens: line_tokens(&text),
-        turn: false,
-        tool: true,
-        text,
-    }
-}
-
-/// The part of `e` from `from` that fits in `room` tokens: as far as fits, back to a line's end
-/// when one is in its second half, and at least one character so that curation moves on.
-fn split(e: &Event, seq: i64, from: i64, room: u32, rules: &Rules) -> Piece {
-    let (_, long, _) = parts(e, rules);
-    let long = long.unwrap_or_default();
-    let start = boundary(&long, from);
-    let fits = |end: usize| render(e, seq, from, Some(end as i64), rules).tokens <= room;
-    let (mut lo, mut hi) = (next_char(&long, start), long.len());
-    if !fits(lo) {
-        hi = lo;
-    }
-    // The largest end that fits, on a character boundary.
-    while lo < hi {
-        let mid = boundary(&long, ((lo + hi).div_ceil(2)) as i64);
-        let mid = if mid <= lo { next_char(&long, lo) } else { mid };
-        if mid <= hi && fits(mid) {
-            lo = mid;
-        } else {
-            hi = mid.saturating_sub(1).max(lo);
-            hi = boundary(&long, hi as i64).max(lo);
-        }
-    }
-    let half = start + (lo - start) / 2;
-    let end = long[half..lo].rfind('\n').map_or(lo, |i| half + i + 1);
-    let to = (end < long.len()).then_some(end as i64);
-    render(e, seq, from, to, rules)
+    Prepared::new(e, rules).piece(seq, from, to)
 }
 
 /// What a piece's line takes in a window, its newline included: the sum over a window's lines and
@@ -303,32 +391,20 @@ fn next_char(s: &str, at: usize) -> usize {
         .map_or(s.len(), |c| at + c.len_utf8())
 }
 
-/// The session heading a record's text goes under, through the gate.
-fn heading(e: &Event, rules: &Rules) -> String {
-    let place = match (&e.repo, &e.branch) {
-        (Some(r), Some(b)) => format!(" in {}@{b}", r.rsplit('/').next().unwrap_or(r)),
-        (Some(r), None) => format!(" in {}", r.rsplit('/').next().unwrap_or(r)),
-        _ => String::new(),
-    };
-    crate::redact::outbound_with(&format!("{} session {}{place}", e.agent, e.session), rules)
-}
-
 /// D12: the window's text with each session's records together, sessions in the order they first
-/// appear, records in seq order within each.
+/// appear, records in seq order within each. Sessions are told apart as stored, not by their
+/// headings, which the gate may make alike.
 fn grouped(pieces: &[Piece]) -> String {
-    let mut sessions: Vec<&str> = Vec::new();
+    let mut sessions: Vec<(&str, &str)> = Vec::new();
     for p in pieces.iter().filter(|p| !p.text.is_empty()) {
-        if !sessions.contains(&p.session.as_str()) {
-            sessions.push(&p.session);
+        if !sessions.iter().any(|(k, _)| *k == p.key) {
+            sessions.push((&p.key, &p.heading));
         }
     }
     let mut out = String::new();
-    for s in sessions {
-        out.push_str(&format!("## {s}\n"));
-        for p in pieces
-            .iter()
-            .filter(|p| p.session == s && !p.text.is_empty())
-        {
+    for (key, heading) in sessions {
+        out.push_str(&format!("## {heading}\n"));
+        for p in pieces.iter().filter(|p| p.key == key && !p.text.is_empty()) {
             out.push_str(&p.text);
             out.push('\n');
         }
@@ -562,5 +638,85 @@ mod tests {
             let took = crate::budget::estimate(&w.text);
             assert!(took <= budget, "{budget}: {took}");
         }
+    }
+
+    #[test]
+    fn labels_binary_markers_and_masked_keys_are_shown_as_the_gate_allows() {
+        let (h, mut raw, dev) = store();
+        std::fs::write(
+            h.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"acme\", regex = '^acme-[A-Za-z0-9]{12}$' }]\n",
+        )
+        .unwrap();
+        let rules = Rules::load(h.path()).unwrap();
+        // The session label is gated whole, before it is joined into a heading.
+        let secret = format!("acme-{}", "7Qx9Lm2Vb4Nr");
+        let labelled = Event {
+            session: secret.clone(),
+            ..prompt("hello")
+        };
+        raw.append(&labelled).unwrap();
+        // A binary marker, inside a text: neither the content nor the marker goes.
+        let sha = "a".repeat(64);
+        let marker = format!(r#"{{"kind":"image","mime":"image/png","bytes":3,"sha256":"{sha}"}}"#);
+        raw.append(&prompt(&format!("see {marker} here"))).unwrap();
+        // A reply whose key a rule masked at capture keeps its text.
+        raw.append(&event(
+            "reply",
+            serde_json::json!({"[REDACTED]": "an important decision"}),
+        ))
+        .unwrap();
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
+            .unwrap()
+            .unwrap();
+        assert!(!w.text.contains("7Qx9Lm2Vb4Nr"), "{}", w.text);
+        assert!(
+            !w.text.contains(&sha) && !w.text.contains("image/png"),
+            "{}",
+            w.text
+        );
+        assert!(w.text.contains("see  here"), "{}", w.text);
+        assert!(w.text.contains("an important decision"), "{}", w.text);
+    }
+
+    #[test]
+    fn sessions_the_gate_labels_alike_stay_apart() {
+        let (h, mut raw, dev) = store();
+        std::fs::write(
+            h.path().join("config.toml"),
+            "[redaction]\nextra_rules = [{ id = \"id\", regex = '^sess-[0-9]+$' }]\n",
+        )
+        .unwrap();
+        let rules = Rules::load(h.path()).unwrap();
+        for (session, text) in [("sess-1", "one"), ("sess-2", "two"), ("sess-1", "three")] {
+            raw.append(&Event {
+                session: session.into(),
+                ..prompt(text)
+            })
+            .unwrap();
+        }
+        let w = next_window(&raw, &dev, WINDOW_TOKENS, &rules)
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.text.matches("## ").count(), 2, "{}", w.text);
+        let (first, second) = w.text.split_at(w.text.rfind("## ").unwrap());
+        assert!(first.contains("one") && first.contains("three") && second.contains("two"));
+    }
+
+    #[test]
+    fn a_split_in_japanese_text_cuts_on_character_boundaries() {
+        let (_h, mut raw, dev) = store();
+        let reply = "日".repeat(10_000);
+        raw.append(&event("reply", serde_json::json!({"assistant": reply})))
+            .unwrap();
+        let mut seen = 0;
+        let mut windows = 0;
+        while let Some(w) = next_window(&raw, &dev, 1_000, &Rules::default()).unwrap() {
+            windows += 1;
+            assert!(windows < 50, "no progress");
+            seen += w.text.matches('日').count();
+            close(&mut raw, &w);
+        }
+        assert_eq!(seen, 10_000);
     }
 }
