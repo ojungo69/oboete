@@ -1144,6 +1144,20 @@ mod tests {
             .map(|c| c.body)
             .collect();
         assert_eq!(newest, ["The CI test is flaky."]);
+        // Through the indexes, newest first: no scan of the claims, however many there are.
+        let sql = format!(
+            "EXPLAIN QUERY PLAN {} {}",
+            crate::claims::TIPS,
+            crate::claims::DECIDED
+        );
+        let plan: Vec<String> = k
+            .prepare(&sql)
+            .unwrap()
+            .query_map(("r", 1), |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(plan.iter().all(|p| !p.starts_with("SCAN")), "{plan:?}");
     }
 
     #[test]

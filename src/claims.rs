@@ -90,6 +90,9 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            PRIMARY KEY (op_device, op_seq)
          );
          CREATE INDEX IF NOT EXISTS derivations_uid ON derivations(uid);
+         -- `decisions` walks a repository's newest first and stops at its limit.
+         CREATE INDEX IF NOT EXISTS derivations_repo
+           ON derivations(repo, valid_from, anchor_device, anchor_seq);
          -- Each derivation's quotes, where they are in raw.
          CREATE TABLE IF NOT EXISTS evidence(
            op_device TEXT NOT NULL, op_seq INTEGER NOT NULL, idx INTEGER NOT NULL,
@@ -110,6 +113,7 @@ pub(crate) fn schema(k: &Connection) -> Result<()> {
            rowid INTEGER PRIMARY KEY, uid TEXT NOT NULL UNIQUE,
            op_device TEXT NOT NULL, op_seq INTEGER NOT NULL
          );
+         CREATE INDEX IF NOT EXISTS claims_op ON claims(op_device, op_seq);
          -- The active derivations' bodies and quotes, for Task 7's candidates.
          CREATE VIRTUAL TABLE IF NOT EXISTS claims_fts USING fts5(text, tokenize='trigram');
          -- Windows whose claims lost a quote to a mask or a removal since: Task 11 sends them
@@ -159,17 +163,19 @@ pub fn current(k: &Connection, repo: &str) -> Result<Vec<Claim>> {
 /// first (`current`'s order reversed). The manifest reads these at every SessionStart, so the
 /// filter, the order and the limit are the query's.
 pub fn decisions(k: &Connection, repo: &str, limit: usize) -> Result<Vec<Claim>> {
-    let sql = format!(
-        "{TIPS} AND (d.status = 'decided' OR (d.kind = 'open item' AND d.status <> 'done'))
-         ORDER BY d.valid_from DESC, d.anchor_device DESC, d.anchor_seq DESC, c.uid DESC
-         LIMIT ?2"
-    );
-    tips(k, &sql, (repo, limit as i64))
+    tips(k, &format!("{TIPS} {DECIDED}"), (repo, limit as i64))
 }
+
+/// `decisions`' filter, order and limit (`?2`), which `derivations_repo` serves in order.
+pub(crate) const DECIDED: &str =
+    "AND (d.status = 'decided' OR (d.kind = 'open item' AND d.status <> 'done'))
+     ORDER BY d.valid_from DESC, d.anchor_device DESC, d.anchor_seq DESC, c.uid DESC
+     LIMIT ?2";
 
 /// A repository's chain tips (no active derivation supersedes or retracts them) that are not
 /// retracted; `?1` is the repository.
-const TIPS: &str = "SELECT c.uid, d.kind, d.status, d.speaker, d.scope, d.body, d.valid_from,
+pub(crate) const TIPS: &str =
+    "SELECT c.uid, d.kind, d.status, d.speaker, d.scope, d.body, d.valid_from,
             d.anchor_device, d.anchor_seq
      FROM claims c JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
      WHERE d.repo = ?1 AND d.status <> 'retracted'
