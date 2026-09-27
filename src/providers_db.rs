@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS provider_calls(
   provider TEXT NOT NULL,
   role TEXT NOT NULL,                     -- curator, judge, digest
   span TEXT,                              -- what the call was for (a window, a session)
-  outcome TEXT NOT NULL,                  -- ok, invalid, error, wait, budget
+  outcome TEXT NOT NULL,                  -- ok, invalid, error, wait, budget, gate
   ms INTEGER NOT NULL,
   detail TEXT,
   bytes_out INTEGER NOT NULL DEFAULT 0,
@@ -38,6 +38,16 @@ CREATE TABLE IF NOT EXISTS provider_calls(
   usd REAL                                -- a paid entry's cost, fixed when the call is recorded
 );
 CREATE INDEX IF NOT EXISTS provider_calls_day ON provider_calls(provider, ts);
+-- Whether a curator CLI provably cannot act (docs/milestone-3-plan.md Task 3): one row per CLI
+-- version and probe profile, so a new codex or a changed profile is probed again.
+CREATE TABLE IF NOT EXISTS isolation(
+  cli TEXT NOT NULL,
+  version TEXT NOT NULL,
+  passed INTEGER NOT NULL,
+  detail TEXT NOT NULL,                   -- a fixed reason, never the CLI's output
+  ts INTEGER NOT NULL,
+  PRIMARY KEY(cli, version)
+);
 ";
 
 pub fn open(home: &Path) -> Result<Connection> {

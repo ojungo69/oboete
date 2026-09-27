@@ -6,6 +6,7 @@
 mod backup;
 mod budget;
 mod capture;
+mod codex_probe;
 mod config;
 mod consumer;
 mod db;
@@ -15,6 +16,7 @@ mod hook;
 mod hookstate;
 mod import;
 mod inject;
+mod isolation;
 mod knowledge;
 mod manifest;
 mod mcp;
