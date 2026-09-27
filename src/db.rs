@@ -255,6 +255,20 @@ fn store_file(path: &Path) -> String {
     format!("{}:{}", info.volume_serial_number(), info.file_index())
 }
 
+/// The identity a Windows store was given before #122: its creation time.
+#[cfg(windows)]
+fn legacy_store_file(path: &Path) -> Option<String> {
+    use std::os::windows::fs::MetadataExt;
+    std::fs::metadata(path)
+        .ok()
+        .map(|m| m.creation_time().to_string())
+}
+
+#[cfg(unix)]
+fn legacy_store_file(_: &Path) -> Option<String> {
+    None
+}
+
 /// This device's id, 8 hex digits, chosen when the store is created and again when the store
 /// turns up as another file (a `~/.oboete` copied to another machine), so two devices never share
 /// one. It prefixes ids that must be unique across devices.
@@ -266,6 +280,15 @@ pub(crate) fn ensure_device(conn: &Connection, path: &Path) -> Result<()> {
         })
         .optional()?;
     if known.as_deref() == Some(here.as_str()) {
+        return Ok(());
+    }
+    // A store from before #122 on Windows holds its creation time: the same file, so it keeps its
+    // device id and takes the new identity (its records stay under their device, Codex on #122).
+    if known.is_some() && known == legacy_store_file(path) {
+        conn.execute(
+            "UPDATE meta SET value=?1 WHERE key='store_file'",
+            params![here],
+        )?;
         return Ok(());
     }
     let mut raw = [0u8; 4];
@@ -1039,6 +1062,28 @@ mod tests {
         assert_ne!(other, first);
         assert_eq!(device_id(&open(&copy).unwrap()).unwrap(), other);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A Windows store from before #122 holds its creation time as its identity.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_store_with_the_old_identity_keeps_its_device_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(dir.path()).unwrap();
+        let first = device_id(&conn).unwrap();
+        let path = dir.path().join("oboete.db");
+        let legacy = legacy_store_file(&path).unwrap();
+        conn.execute("UPDATE meta SET value=?1 WHERE key='store_file'", [&legacy])
+            .unwrap();
+        drop(conn);
+        let conn = open(dir.path()).unwrap();
+        assert_eq!(device_id(&conn).unwrap(), first);
+        let now: String = conn
+            .query_row("SELECT value FROM meta WHERE key='store_file'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(now, store_file(&path));
     }
 
     #[test]
