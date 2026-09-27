@@ -2,7 +2,7 @@
 //! keeps each claim's derivations, quotes and supersedes edges in knowledge.db, with each uid's
 //! active derivation (`claims::schema`).
 
-use crate::claims::{ClaimOp, Evidence, normalize, schema, uid};
+use crate::claims::{ClaimOp, CorrectionOp, Evidence, normalize, schema, uid};
 use crate::knowledge::checkpoint;
 use crate::raw::{Item, Op, OpKind, Raw};
 use crate::worker::Consumer;
@@ -54,12 +54,20 @@ impl Consumer for Claims {
                 derived.push(d);
             }
         }
+        // The owner's corrections (Task 10): kept by uid, whether or not a claim has it yet.
+        let mut corrected = Vec::new();
+        for op in ops.iter().filter(|o| o.kind == OpKind::Correction) {
+            if let Some(uid) = correction(k, op)? {
+                corrected.push(uid);
+            }
+        }
         // Edges once the whole batch is written: a claim may supersede a sibling after it.
         let siblings: HashMap<(i64, &str), &str> = derived
             .iter()
             .map(|d| ((d.batch, d.id.as_str()), d.uid.as_str()))
             .collect();
-        let mut touched = BTreeSet::new();
+        // A corrected uid's search text is its corrected body.
+        let mut touched: BTreeSet<String> = corrected.into_iter().collect();
         for d in &derived {
             touched.insert(d.uid.clone());
             for s in &d.supersedes {
@@ -87,7 +95,10 @@ impl Consumer for Claims {
     fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> {
         schema(k)?;
         let uids: Vec<String> = k
-            .prepare("SELECT DISTINCT uid FROM derivations WHERE op_device = ?1 AND op_seq > ?2")?
+            .prepare(
+                "SELECT uid FROM derivations WHERE op_device = ?1 AND op_seq > ?2
+                 UNION SELECT uid FROM corrections WHERE op_device = ?1 AND op_seq > ?2",
+            )?
             .query_map(params![device, to], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         for table in [
@@ -96,6 +107,7 @@ impl Consumer for Claims {
             "edges",
             "claim_skips",
             "recurate",
+            "corrections",
         ] {
             k.execute(
                 &format!("DELETE FROM {table} WHERE op_device = ?1 AND op_seq > ?2"),
@@ -126,6 +138,30 @@ fn whole_batches(raw: &Raw, device: &str, after: i64) -> Result<Vec<Op>> {
         ops.extend(more);
     }
     Ok(ops)
+}
+
+/// A correction op kept in `corrections`, with its uid; otherwise its reason goes to
+/// `claim_skips`.
+fn correction(k: &Connection, op: &Op) -> Result<Option<String>> {
+    let fault = match serde_json::from_value::<CorrectionOp>(op.body.clone()) {
+        Ok(c) => match c.fault() {
+            None => {
+                k.execute(
+                    "INSERT INTO corrections(op_device, op_seq, ts, uid, status, body)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![op.device, op.op_seq, op.ts, c.uid, c.status, c.body],
+                )?;
+                return Ok(Some(c.uid));
+            }
+            Some(why) => why,
+        },
+        Err(_) => "not a correction",
+    };
+    k.execute(
+        "INSERT OR REPLACE INTO claim_skips(op_device, op_seq, reason) VALUES(?1, ?2, ?3)",
+        params![op.device, op.op_seq, fault],
+    )?;
+    Ok(None)
 }
 
 fn is_uid(s: &str) -> bool {
@@ -330,7 +366,10 @@ fn activate(k: &Connection, uid: &str) -> Result<()> {
     let active: Option<(String, i64, String)> = k
         .query_row(
             "SELECT d.op_device, d.op_seq,
-                    d.body || char(10) || COALESCE(
+                    COALESCE((SELECT x.body FROM corrections x WHERE x.uid = d.uid
+                              AND x.body IS NOT NULL
+                              ORDER BY x.ts DESC, x.op_device DESC, x.op_seq DESC LIMIT 1),
+                             d.body) || char(10) || COALESCE(
                       (SELECT group_concat(quote, char(10)) FROM evidence e
                        WHERE e.op_device = d.op_device AND e.op_seq = d.op_seq), '')
              FROM derivations d WHERE d.uid = ?1
@@ -663,6 +702,134 @@ mod tests {
         let mut k = crate::knowledge::open(home.path()).unwrap();
         run(&raw, &mut k);
         assert_eq!(bodies(&k), ["Paid."]);
+    }
+
+    /// MUST-M21 (hard), MUST-M18: the owner's correction holds over every derivation of the uid.
+    /// A recuration that rewords the claims derives the same uids, newer at the same tier, and the
+    /// corrections still apply; each field applies on its own; a rebuild from the op log gives the
+    /// same, with no provider (the consumers never call one).
+    #[test]
+    fn a_recuration_that_rewords_a_claim_keeps_its_uid_and_its_owner_correction() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let text = "Ship on Fridays. Tabs everywhere.";
+        let seq = raw.append(&event(text, 5)).unwrap();
+        let dev = raw.device().to_owned();
+        let at = |q: &str, sentence| vec![quote(&dev, seq, text, q, sentence)];
+        let ship = claim(
+            "c1",
+            "decision",
+            "Ship on Fridays.",
+            at("Ship on Fridays", 0),
+        );
+        let tabs = claim(
+            "c2",
+            "decision",
+            "Tabs everywhere.",
+            at("Tabs everywhere", 17),
+        );
+        raw.append_ops(&[op(&ship), op(&tabs)]).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        let uid_of = |k: &Connection, body: &str| {
+            current(k, "r")
+                .unwrap()
+                .into_iter()
+                .find(|c| c.body == body)
+                .unwrap()
+                .uid
+        };
+        let (ship_uid, tabs_uid) = (
+            uid_of(&k, "Ship on Fridays."),
+            uid_of(&k, "Tabs everywhere."),
+        );
+        let correct =
+            |uid: &str, status, body| crate::claims::correct(home.path(), uid, status, body);
+        correct(&ship_uid, Some("retracted"), None).unwrap();
+        correct(&tabs_uid, None, Some("Tabs, never spaces.")).unwrap();
+        assert!(correct(&"0".repeat(64), Some("done"), None).is_err());
+        run(&raw, &mut k);
+        let now = |k: &Connection| {
+            current(k, "r")
+                .unwrap()
+                .into_iter()
+                .map(|c| (c.uid, c.status, c.body))
+                .collect::<Vec<_>>()
+        };
+        let corrected = vec![(
+            tabs_uid.clone(),
+            "decided".into(),
+            "Tabs, never spaces.".into(),
+        )];
+        assert_eq!(now(&k), corrected);
+        // The recuration: the same sentences, reworded.
+        let ship2 = claim("c1", "decision", "Ship every Friday.", at("on Fridays", 0));
+        let tabs2 = claim("c2", "decision", "Use tabs.", at("everywhere", 17));
+        raw.append_ops(&[op(&ship2), op(&tabs2)]).unwrap();
+        run(&raw, &mut k);
+        assert_eq!(now(&k), corrected);
+        // A later status correction keeps the body the owner gave.
+        correct(&tabs_uid, Some("proposed"), None).unwrap();
+        run(&raw, &mut k);
+        let proposed = vec![(
+            tabs_uid.clone(),
+            "proposed".into(),
+            "Tabs, never spaces.".into(),
+        )];
+        assert_eq!(now(&k), proposed);
+        drop(k);
+        for f in ["knowledge.db", "knowledge.db-wal", "knowledge.db-shm"] {
+            let _ = std::fs::remove_file(home.path().join(f));
+        }
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        assert_eq!(now(&k), proposed);
+        assert!(!home.path().join("providers.db").exists());
+    }
+
+    /// A correction synced before its claim is kept and applies when the claim arrives; one that
+    /// corrects nothing is skipped with its reason.
+    #[test]
+    fn a_correction_that_arrives_before_its_claim_applies_when_it_does() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let text = "Ship on Fridays.";
+        let seq = raw.append(&event(text, 5)).unwrap();
+        let dev = raw.device().to_owned();
+        let ship = claim(
+            "c1",
+            "decision",
+            "Ship on Fridays.",
+            vec![quote(&dev, seq, text, "Ship", 0)],
+        );
+        let uid = crate::claims::uid("decision", &ship.evidence[0]);
+        let correction = |status: Option<&str>| {
+            let op = crate::claims::CorrectionOp {
+                uid: uid.clone(),
+                anchor: crate::claims::Anchor {
+                    device: dev.clone(),
+                    seq,
+                },
+                status: status.map(str::to_owned),
+                body: None,
+            };
+            (OpKind::Correction, serde_json::to_value(op).unwrap())
+        };
+        raw.append_ops(&[correction(Some("retracted")), correction(None)])
+            .unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        let reason: String = k
+            .query_row("SELECT reason FROM claim_skips", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(reason, "corrects nothing");
+        raw.append_ops(&[op(&ship)]).unwrap();
+        run(&raw, &mut k);
+        assert!(bodies(&k).is_empty());
+        assert!(crate::claims::tip(&k, &uid).unwrap().is_none());
+        // A restore that lost the correction op takes it back: the claim is current again.
+        Claims.rewind(&k, &dev, 0).unwrap();
+        assert_eq!(count(&k, "corrections"), 0);
     }
 
     /// #144: a quote masked since is checked per derivation: the one that quoted it goes, the

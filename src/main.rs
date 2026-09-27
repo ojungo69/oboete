@@ -70,6 +70,18 @@ enum Cmd {
     /// Rebuild knowledge.db (claims, digests, indexes, manifests) from raw.db and its op log,
     /// with no AI call
     Rebuild,
+    /// Correct a remembered claim by its uid: your status or text holds over whatever curation
+    /// derives for it, now and after any recuration or rebuild
+    Correct {
+        /// The claim's uid (as `search` and the viewer show it)
+        uid: String,
+        /// decided, proposed, done or retracted
+        #[arg(long, required_unless_present = "body")]
+        status: Option<String>,
+        /// The claim's text as it should read (at most 1,000 characters)
+        #[arg(long)]
+        body: Option<String>,
+    },
     /// Rebuild raw.db from the backup segments (MUST-M15); the current file is kept aside.
     /// The worker does this by itself when raw.db is damaged.
     Restore,
@@ -478,6 +490,13 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
         Cmd::Rebuild => {
             worker::rebuild(&home)?;
             println!("knowledge.db rebuilt from raw.db, with no AI call");
+            Ok(())
+        }
+        Cmd::Correct { uid, status, body } => {
+            claims::correct(&home, &uid, status.as_deref(), body.as_deref())?;
+            // Applied before this returns, unless a worker holds the lock: it applies it then.
+            worker::run_once(&home)?;
+            println!("corrected {uid}");
             Ok(())
         }
         Cmd::Restore => {

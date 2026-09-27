@@ -112,7 +112,7 @@ pub fn fresh(k: &Connection, repo: &str) -> Result<Option<Vec<String>>> {
     };
     let lines: Vec<Line> = serde_json::from_str(&lines)?;
     // One indexed lookup per cited uid: a chain tip of `repo` that is not retracted.
-    let sql = format!("{} AND c.uid = ?2", crate::claims::TIPS);
+    let sql = format!("{} AND a.uid = ?2", crate::claims::TIPS);
     let mut tip = k.prepare(&sql)?;
     for uid in lines.iter().flat_map(|l| &l.uids) {
         if !tip.exists(params![repo, uid])? {

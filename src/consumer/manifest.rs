@@ -144,7 +144,8 @@ pub fn text(
 fn with_decisions(k: &Connection, repo: &str, text: &str) -> Result<String> {
     let curated = k
         .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'claims'",
+            // The view the queries read: absent until the worker has run this version's schema.
+            "SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'active'",
             [],
             |_| Ok(()),
         )
