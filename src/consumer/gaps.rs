@@ -109,6 +109,41 @@ impl Consumer for Gaps {
     }
 }
 
+/// Record types the parsers pass over that hold no typed turn: those in docs/milestone-1.md's
+/// transcript notes, and every type passed over in the owner's 300 newest Claude Code and 150
+/// newest Codex transcripts (2026-09-27; Codex's are `kind:subkind`). A type not listed may be a
+/// new place for a prompt, so a transcript with one is not checked.
+const NO_TURNS: &[&str] = &[
+    // Claude Code
+    "agent-name",
+    "ai-title",
+    "atis-latch",
+    "attachment",
+    "bridge-session",
+    "cost-state",
+    "custom-title",
+    "file-history-delta",
+    "file-history-snapshot",
+    "fork-context-ref",
+    "frame-link",
+    "last-prompt",
+    "mode",
+    "permission-mode",
+    "pr-link",
+    "queue-operation",
+    "system",
+    // Codex
+    "event_msg:item_completed",
+    "event_msg:task_started",
+    "event_msg:thread_settings_applied",
+    "event_msg:token_count",
+    "inter_agent_communication_metadata",
+    "response_item:agent_message",
+    "response_item:reasoning",
+    "token_usage_record",
+    "world_state",
+];
+
 /// The turns the prompt hook would have recorded from this transcript: each prompt it implies
 /// goes through capture's own rules, so both sides count the same thing (a prompt that was all
 /// `<private>` is no turn on either).
@@ -122,6 +157,13 @@ fn transcript_turns(path: &Path, agent: &str, settings: &Settings) -> Result<i64
     let stats = crate::transcript::convert(path, agent, &mut count)?;
     // A line that is not JSON may have held a turn: the count would hide the gap it shows.
     anyhow::ensure!(stats.skipped == 0, "{} unreadable line(s)", stats.skipped);
+    anyhow::ensure!(
+        stats
+            .ignored
+            .keys()
+            .all(|k| NO_TURNS.contains(&k.trim_end_matches(':'))),
+        "a record type no parser knows"
+    );
     Ok(count.turns)
 }
 
@@ -309,6 +351,13 @@ mod tests {
         text.push_str("{\"type\": \"user\", \"message\n");
         std::fs::write(&torn, text).unwrap();
         store.append(&end("claude", "s2", Some(&torn))).unwrap();
+        // One with a record type no parser knows (it may hold a prompt): not checked.
+        let new = home.path().join("s3.jsonl");
+        transcript(&new, &["one"]);
+        let mut text = std::fs::read_to_string(&new).unwrap();
+        text.push_str("{\"type\": \"typed-request\", \"sessionId\": \"s1\"}\n");
+        std::fs::write(&new, text).unwrap();
+        store.append(&end("claude", "s3", Some(&new))).unwrap();
         worker::run_once(home.path()).unwrap();
         let k = knowledge::open(home.path()).unwrap();
         let row: (Option<i64>, i64) = k
@@ -322,7 +371,7 @@ mod tests {
         assert_eq!(
             doctor(&k),
             vec![
-                "claude: 1 of 1 ended session(s) short of their transcript (1 turn(s) not recorded); 1 not checked (no transcript oboete could read)",
+                "claude: 1 of 1 ended session(s) short of their transcript (1 turn(s) not recorded); 2 not checked (no transcript oboete could read)",
                 "codex: 1 ended session(s), not checked (no transcript oboete could read)",
             ]
         );
