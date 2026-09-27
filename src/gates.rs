@@ -124,17 +124,27 @@ pub fn check(
     let mut own = Vec::new();
     for (mut d, e, i) in drafts {
         let line = &w.lines[i];
+        // As the claims consumer stores them: a non-strict curator's "Proposed" is gated as the
+        // `unverified` it becomes, never let past a check for "proposed".
+        let (kind, status) = crate::claims::normalize(&d.kind, &d.status);
+        (d.kind, d.status) = (kind.into(), status.into());
         d.body = crate::redact::outbound_with(&d.body, rules);
         if d.body.chars().count() > MAX_BODY_CHARS {
             g.dropped.push((d.id, "over_cap"));
             continue;
         }
-        if crate::claims::normalize(&d.kind, &d.status).0 == "change" {
+        if d.kind == "change" {
             if bare_file_count(&d.body) {
                 g.dropped.push((d.id, "a bare file count"));
                 continue;
             }
-            d.why = crate::redact::outbound_with(d.why.trim(), rules);
+            // The record's words, or none: a reason no line gives is the curator's guess.
+            let why = d.why.trim();
+            d.why = if w.lines.iter().any(|l| l.text.contains(why)) {
+                crate::redact::outbound_with(why, rules)
+            } else {
+                String::new()
+            };
             if d.why.is_empty() {
                 d.why = "unknown".into();
             }
@@ -179,6 +189,7 @@ pub fn check(
         .zip(&own)
         .map(|((d, _), &(_, repo, _))| (d.id.clone(), (d.status.clone(), d.kind.clone(), repo)))
         .collect();
+    let unsettled = |s: &str| matches!(s, "proposed" | "unverified");
     for ((d, _), (own_words, repo, key)) in g.kept.iter_mut().zip(own) {
         let mut out = Vec::new();
         d.supersedes.retain(|to| {
@@ -206,7 +217,7 @@ pub fn check(
                 Some((_, "lesson", _)) if !own_words => {
                     Some("retiring a lesson needs the user's words")
                 }
-                Some((status, ..)) if d.status == "proposed" && status != "proposed" => {
+                Some((status, ..)) if unsettled(&d.status) && !unsettled(status) => {
                     Some("a proposal supersedes nothing settled")
                 }
                 _ => None,
@@ -687,6 +698,14 @@ mod tests {
         many.0.supersedes = (0..1000).map(|i| format!("x{i}")).collect();
         let g = check(&w, &shown, &[], vec![many], &Rules::default());
         assert_eq!(g.dropped, [("c3".to_string(), OUTSIDE)]);
+        // A status of another case is the unverified one it is stored as: it settles nothing.
+        let mut odd = draft(&w, "c4", "Proposed", "assistant proposal", "keep tabs");
+        odd.0.supersedes = vec![decision.clone()];
+        let g = check(&w, &shown, &[], vec![odd], &Rules::default());
+        assert_eq!(g.kept[0].0.status, "unverified");
+        assert!(g.kept[0].0.supersedes.is_empty());
+        let settled = [("c4".to_string(), "a proposal supersedes nothing settled")];
+        assert_eq!(g.dropped, settled);
     }
 
     #[test]
@@ -714,6 +733,9 @@ mod tests {
         };
         let g = change("The module is renamed.", "the old name clashed");
         assert_eq!(g.kept[0].0.why, "the old name clashed");
+        // A reason no line gives is not kept.
+        let g = change("The module is renamed.", "the old name was too long");
+        assert_eq!(g.kept[0].0.why, "unknown");
         assert_eq!(
             change("The module is renamed.", " ").kept[0].0.why,
             "unknown"

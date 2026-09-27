@@ -1306,8 +1306,8 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          - line: that line's id.\n\
          - supersedes: the ids of claims in your answer, or the uids of kept claims, that this \
          one replaces or reverses; empty otherwise.\n\
-         - why: for a change, the reason the lines give for it, in their words; empty when they \
-         give none, and for every other kind.\n\
+         - why: for a change, the reason the lines give for it, copied exactly from one line; \
+         empty when they give none, and for every other kind.\n\
          Skip routine tool noise and what the code itself shows. When nothing is worth \
          remembering, return an empty claims array.\n\
          The summary is 2-4 sentences: what was worked on, what was decided, what is still open.\n\
@@ -2840,11 +2840,13 @@ mod tests {
     /// A draft whose claim op the record cannot hold is no claim: the window is still covered.
     #[test]
     fn a_draft_over_the_op_cap_is_left_out_and_the_window_is_covered() {
-        let first = [prompt("Keep the importer simple.")];
+        // Not the body, which the gates cap at 1,000 characters (Task 8): a change's why, which
+        // is kept only as a line gives it. 4-byte characters fill the op within the window.
+        let why = "\u{1F600}".repeat(crate::raw::MAX_OP_BYTES / 4 + 100);
+        let first = [prompt(&format!("Keep the importer simple. {why}"))];
         let mut huge = claim("c1", "decided", "L1", "Keep the importer simple", json!([]));
-        // Not the body, which the gates cap at 1,000 characters (Task 8): a change's why.
         huge["kind"] = "change".into();
-        huge["why"] = "x".repeat(crate::raw::MAX_OP_BYTES).into();
+        huge["why"] = why.into();
         let answer = json!({"claims": [huge,
             claim("c2", "decided", "L1", "the importer simple", json!([]))], "summary": "s"});
         let none = |_: &str| json!({"claims": [], "summary": "s"});
@@ -2852,6 +2854,9 @@ mod tests {
         let claims: Vec<_> = ops.iter().filter(|o| o.kind == OpKind::Claim).collect();
         assert_eq!(claims.len(), 1);
         assert_eq!(claims[0].body["id"], "c2");
+        let window = ops.iter().find(|o| o.kind == OpKind::Window).unwrap();
+        let over = json!([["c1", "its claim op is over the op cap"]]);
+        assert_eq!(window.body["dropped"], over);
     }
 
     /// A session that moved to another repository: what it carried from the first stays there.
