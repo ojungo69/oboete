@@ -155,19 +155,34 @@ const TIP: &str = "d.status <> 'retracted'
       JOIN claims a ON a.op_device = e.op_device AND a.op_seq = e.op_seq
       WHERE e.to_uid = c.uid AND a.uid <> c.uid)";
 
-/// When `uid` is a current claim, its repository (`None` for one anchored outside any).
-#[allow(clippy::option_option)] // not current, or current with no repository
-pub fn tip_repo(k: &Connection, uid: &str) -> Result<Option<Option<String>>> {
+/// When `uid` is a current claim, its repository (`None` for one anchored outside any) and its
+/// active derivation.
+pub fn tip(k: &Connection, uid: &str) -> Result<Option<(Option<String>, Claim)>> {
     use rusqlite::OptionalExtension;
     schema(k)?;
     Ok(k.query_row(
         &format!(
-            "SELECT d.repo FROM claims c
+            "SELECT d.repo, c.uid, d.kind, d.status, d.speaker, d.scope, d.body, d.valid_from,
+                    d.anchor_device, d.anchor_seq
+             FROM claims c
              JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
              WHERE c.uid = ?1 AND {TIP}"
         ),
         [uid],
-        |r| r.get(0),
+        |r| {
+            let claim = Claim {
+                uid: r.get(1)?,
+                kind: r.get(2)?,
+                status: r.get(3)?,
+                speaker: r.get(4)?,
+                scope: r.get(5)?,
+                body: r.get(6)?,
+                valid_from: r.get(7)?,
+                device: r.get(8)?,
+                seq: r.get(9)?,
+            };
+            Ok((r.get(0)?, claim))
+        },
     )
     .optional()?)
 }

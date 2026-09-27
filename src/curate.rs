@@ -1023,7 +1023,12 @@ fn claims_of(
             recipe: recipe.to_owned(),
             tier,
         };
-        claims.push(serde_json::to_value(op).map_err(|_| AnswerFailure::Shape)?);
+        let op = serde_json::to_value(op).map_err(|_| AnswerFailure::Shape)?;
+        // An op the record cannot hold is no claim: kept, its append would stop the window.
+        if op.to_string().len() > crate::raw::MAX_OP_BYTES {
+            continue;
+        }
+        claims.push(op);
     }
     if !drafts.is_empty() && claims.is_empty() {
         return Err(AnswerFailure::Unanchored);
@@ -1102,7 +1107,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
         }
     }
     let session_of = |device: &str, seq: i64| raw.session_key(device, seq);
-    let mut out = String::new();
+    let (mut out, mut open) = (String::new(), String::new());
     let mut uids = Vec::new();
     for (key, repos) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
@@ -1129,20 +1134,24 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
             if status == "proposed" && session_of(&first.device, first.seq)?.as_deref() == Some(key)
             {
                 let uid = crate::claims::uid(kind, first);
-                // Only while it is still current: a sibling or a later window may have settled it.
-                if let Some(repo) = crate::claims::tip_repo(k, &uid)? {
+                // Its active derivation, once, while that is still a current proposal: a sibling
+                // or a later window may have settled or reworded it.
+                if let Some((repo, tip)) = crate::claims::tip(k, &uid)?
+                    && tip.status == "proposed"
+                    && !uids.iter().any(|(_, _, u)| *u == uid)
+                {
                     let place = repo
                         .as_deref()
                         .map(|r| format!(" in {}", repo_name(r, rules)));
                     let place = place.unwrap_or_default();
-                    lines.push(format!("proposed before {uid}{place}: {}", gate(&c.body)));
+                    lines.push(format!("proposed before {uid}{place}: {}", gate(&tip.body)));
                     uids.push((key.to_owned(), repo, uid));
                 }
             }
         }
-        let mut open: Vec<(&str, crate::claims::Claim)> = Vec::new();
+        let mut items: Vec<(&str, crate::claims::Claim)> = Vec::new();
         for repo in repos {
-            open.extend(
+            items.extend(
                 crate::claims::current(k, repo)?
                     .into_iter()
                     .filter(|c| c.kind == "open item")
@@ -1150,31 +1159,35 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
             );
         }
         // The newest first, in `current`'s order across the repositories.
-        open.sort_by(|(_, a), (_, b)| {
+        items.sort_by(|(_, a), (_, b)| {
             (b.valid_from, &b.device, b.seq, &b.uid).cmp(&(a.valid_from, &a.device, a.seq, &a.uid))
         });
-        let mut shown = 0;
-        for (c_repo, c) in open {
+        let (mut shown, mut open_lines) = (0, Vec::new());
+        for (c_repo, c) in items {
             if shown == 50 {
                 break;
             }
             // The session's own, before the cap: other sessions' newer items never hide it.
             if session_of(&c.device, c.seq)?.as_deref() == Some(key) {
                 let place = repo_name(c_repo, rules);
-                lines.push(format!("open item {} in {place}: {}", c.uid, gate(&c.body)));
+                open_lines.push(format!("open item {} in {place}: {}", c.uid, gate(&c.body)));
                 uids.push((key.to_owned(), Some(c_repo.to_owned()), c.uid.clone()));
                 shown += 1;
             }
         }
-        if !lines.is_empty() {
-            // As the window's own heading names the session, so the curator can pair them.
-            let heading: String = format!("{} session {}", gate(agent), gate(session))
-                .chars()
-                .take(HEADING_CHARS)
-                .collect();
-            out.push_str(&format!("### {heading}\n{}\n", lines.join("\n")));
+        // As the window's own heading names the session, so the curator can pair them.
+        let heading: String = format!("{} session {}", gate(agent), gate(session))
+            .chars()
+            .take(HEADING_CHARS)
+            .collect();
+        for (part, lines) in [(&mut out, lines), (&mut open, open_lines)] {
+            if !lines.is_empty() {
+                part.push_str(&format!("### {heading}\n{}\n", lines.join("\n")));
+            }
         }
     }
+    // Every session's goal and proposals before any session's open items: `fit` cuts from the end.
+    out.push_str(&open);
     Ok((out, uids))
 }
 
@@ -2587,6 +2600,108 @@ mod tests {
         let none = |_: &str| json!({"claims": [], "summary": "s"});
         let (sent, _) = two_windows(&first, answer, &[prompt("Yes.")], none);
         assert!(!sent[1].contains("proposed before"), "{}", sent[1]);
+    }
+
+    /// Two drafts of one uid (one kind, one sentence): the proposal carried is the uid's active
+    /// derivation, once, and only while that derivation is itself a proposal.
+    #[test]
+    fn a_carried_proposal_is_its_active_derivation_once() {
+        let first = [
+            prompt("Build the importer."),
+            event(
+                "reply",
+                json!({"assistant": "Maybe cache the parsed files?"}),
+            ),
+        ];
+        let draft = |id: &str, status: &str, quote: &str, body: &str| {
+            json!({"id": id, "kind": "decision", "status": status, "speaker": "assistant proposal",
+                "scope": "repo", "body": body, "quote": quote, "line": "L2", "supersedes": []})
+        };
+        let none = |_: &str| json!({"claims": [], "summary": "s"});
+        for (later, carried) in [("proposed", 1), ("decided", 0)] {
+            let answer = json!({"claims": [
+                draft("c1", "proposed", "cache the parsed files", "Cache the parsed files."),
+                draft("c2", later, "Maybe cache the parsed", "Parse once, then cache.")],
+                "summary": "s"});
+            let (sent, _) = two_windows(&first, answer, &[prompt("Yes.")], none);
+            let lines: Vec<&str> = sent[1]
+                .lines()
+                .filter(|l| l.starts_with("proposed before "))
+                .collect();
+            assert_eq!(lines.len(), carried, "{later}: {}", sent[1]);
+            assert!(
+                lines
+                    .iter()
+                    .all(|l| l.ends_with(": Parse once, then cache."))
+            );
+        }
+    }
+
+    /// Every session's proposals come before any session's open items: open items of the first
+    /// session never cut the proposal a later session's acceptance answers.
+    #[test]
+    fn every_sessions_proposals_are_carried_before_open_items() {
+        // One repository: open items are carried from the repositories of the session's lines.
+        let prompt = |t: &str| Event {
+            repo: Some("r".into()),
+            ..prompt(t)
+        };
+        let event = |kind: &str, body: Value| Event {
+            repo: Some("r".into()),
+            ..event(kind, body)
+        };
+        let other = |e: Event| Event {
+            session: "t".into(),
+            ..e
+        };
+        let pad = "and it keeps failing on the nightly build of the importer service";
+        let items: String = (0..40)
+            .map(|i| format!("Item {i} is broken {pad}. "))
+            .collect();
+        let first = [
+            prompt(&items),
+            other(prompt("Build the importer.")),
+            other(event(
+                "reply",
+                json!({"assistant": "Maybe cache the parsed files?"}),
+            )),
+        ];
+        let mut claims: Vec<Value> = (0..40)
+            .map(|i| {
+                let quote = format!("Item {i} is broken");
+                json!({"id": format!("o{i}"), "kind": "open item", "status": "decided",
+                    "speaker": "user", "scope": "repo", "body": format!("{quote} {pad}."),
+                    "quote": quote, "line": "L1", "supersedes": []})
+            })
+            .collect();
+        claims.push(claim(
+            "c1",
+            "proposed",
+            "L3",
+            "cache the parsed files",
+            json!([]),
+        ));
+        let answer = json!({"claims": claims, "summary": "s"});
+        let none = |_: &str| json!({"claims": [], "summary": "s"});
+        let second = [prompt("Go on."), other(prompt("Yes."))];
+        let (sent, _) = two_windows(&first, answer, &second, none);
+        assert!(sent[1].contains("open item "), "{}", sent[1]);
+        assert!(sent[1].contains("proposed before "), "{}", sent[1]);
+    }
+
+    /// A draft whose claim op the record cannot hold is no claim: the window is still covered.
+    #[test]
+    fn a_draft_over_the_op_cap_is_left_out_and_the_window_is_covered() {
+        let first = [prompt("Keep the importer simple.")];
+        let mut huge = claim("c1", "decided", "L1", "Keep the importer simple", json!([]));
+        huge["body"] = "x".repeat(crate::raw::MAX_OP_BYTES).into();
+        let answer = json!({"claims": [huge,
+            claim("c2", "decided", "L1", "the importer simple", json!([]))], "summary": "s"});
+        let none = |_: &str| json!({"claims": [], "summary": "s"});
+        let (_, ops) = two_windows(&first, answer, &[], none);
+        let claims: Vec<_> = ops.iter().filter(|o| o.kind == OpKind::Claim).collect();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].body["id"], "c2");
     }
 
     /// A session that moved to another repository: what it carried from the first stays there.
