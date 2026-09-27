@@ -1307,6 +1307,44 @@ mod tests {
     }
 
     #[test]
+    fn a_uri_password_a_cookie_and_an_authorization_token_are_masked() {
+        // Split literals: secret scanners flag whole ones in the repository.
+        let pass = format!("hunter{}", "22");
+        let cookie = format!("sid={}; Path=/; HttpOnly", "q9Zx8mL2vB4n");
+        let token = format!("q9Zx8mL2{}", "vB4nR7tYw");
+        let cases = [
+            (
+                format!("psql postgres://app:{pass}@db.internal:5432/prod"),
+                pass.clone(),
+            ),
+            (
+                format!("redis-cli -u redis://:{pass}@cache:6379"),
+                pass.clone(),
+            ),
+            (format!("< Set-Cookie: {cookie}"), cookie.clone()),
+            (format!("{{\"Cookie\": \"{cookie}\"}}"), cookie.clone()),
+            (format!("-H 'Authorization: Token {token}'"), token.clone()),
+            (format!("Proxy-Authorization: {token}"), token.clone()),
+        ];
+        for (text, secret) in &cases {
+            let (stored, found) = scan(text, &Rules::default());
+            assert!(!found.is_empty(), "{text}: nothing found");
+            check(&stored, &found, secret);
+        }
+        // Not credentials: a user with no password, an address in a query, prose.
+        for text in [
+            "git clone ssh://git@github.com/o/r.git",
+            "https://host:8080/p?mail=me@example.com",
+            "Authorization: required for admins",
+            "Cookie: stored by the browser",
+        ] {
+            let (stored, found) = scan(text, &Rules::default());
+            assert!(found.is_empty(), "{text}: {found:?}");
+            assert_eq!(stored, text);
+        }
+    }
+
+    #[test]
     fn every_header_after_one_curl_is_masked() {
         // curl-auth-header's lazy `.*?` finds one header per `curl` per pass, and only within five
         // lines of it; generic-basic-auth needs no `curl`.

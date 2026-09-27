@@ -1,5 +1,6 @@
-# Extra rules in gitleaks' schema for key shapes the bundled gitleaks.toml lacks (the owner's
-# providers). Same evaluation: keywords gate the regex, first capture group is the secret.
+# Extra rules in gitleaks' schema for shapes the bundled gitleaks.toml lacks: the owner's
+# providers' keys, and credentials by where they stand (a URI's password, a Cookie or
+# Authorization header). Same evaluation: keywords gate the regex, first capture group is the secret.
 
 [[rules]]
 id = "groq-api-key"
@@ -50,3 +51,23 @@ description = "Basic credentials in an Authorization header, with or without a c
 regex = '''(?i)\bauthorization["']?\s*[:=]\s*["']?basic\s+([A-Za-z0-9+/]{4,}={0,2})'''
 keywords = ["basic"]
 # No entropy gate: after "Authorization: Basic" even a weak credential is one.
+
+[[rules]]
+id = "uri-userinfo-password"
+description = "Password in a URI's userinfo (postgres://user:pass@host); a user with no password is left"
+regex = '''(?i)\b[a-z][a-z0-9+.-]{1,20}://[^\s:/?#@"'`]*:([^\s/?#@"'`]+)@'''
+keywords = ["://"]
+# No entropy gate: a connection string's password is often weak.
+
+[[rules]]
+id = "cookie-header"
+description = "Value of a Cookie or Set-Cookie header, whatever the cookie is named"
+regex = '''(?i)\b(?:set-)?cookie["']?\s*[:=]\s*["']?([^\s;=,"']+=[^\r\n"']+)'''
+keywords = ["cookie"]
+
+[[rules]]
+id = "authorization-header"
+description = "Credential in an Authorization header of any scheme (Token, ApiKey, none), with or without a curl before it"
+regex = '''(?i)\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?(?:[a-z][a-z0-9-]{1,30}\s+)?([A-Za-z0-9_\-.=+/:~]{8,})'''
+keywords = ["authorization"]
+entropy = 3.0
