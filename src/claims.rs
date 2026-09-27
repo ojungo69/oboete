@@ -146,9 +146,7 @@ pub struct Claim {
 /// `repo`'s current claims: the chain tips (no active derivation supersedes or retracts them)
 /// that are not retracted, in spec 3.4's order, (valid_from, device, seq), with the uid last so
 /// two claims of one event keep one order on every device (MUST-M7).
-#[allow(dead_code)] // Task 7's candidates read it.
 pub fn current(k: &Connection, repo: &str) -> Result<Vec<Claim>> {
-    schema(k)?;
     let mut st = k.prepare(
         "SELECT c.uid, d.kind, d.status, d.speaker, d.scope, d.body, d.valid_from,
                 d.anchor_device, d.anchor_seq
