@@ -146,10 +146,11 @@ fn serve(
             None => return Ok(false),
         }
     }
-    // Before the open: a request made after it is seen by the checks below.
-    crate::backup::take_restore_request(home);
     // Task 8: a damaged raw.db is restored from the backups, a damaged knowledge.db rebuilt.
     let raw = crate::backup::open_raw(home)?;
+    // Only once raw.db opened: a restore that failed (no segment, a reader holding raw.lock)
+    // leaves the request for the next worker, which the next hook starts.
+    crate::backup::take_restore_request(home);
     let mut k = crate::backup::open_knowledge(home)?;
     checkpoint::rewind(&raw, &k, consumers)?;
     crate::backup::check(home, &raw);
@@ -333,6 +334,18 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn a_restore_that_fails_keeps_the_request() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path();
+        drop(raw::open(p).unwrap());
+        std::fs::write(p.join("raw.db"), vec![b'x'; 4096]).unwrap();
+        crate::backup::request_restore(p);
+        // No backup segment: the restore fails, and so does the worker.
+        assert!(run_with(p, 0, vec![Box::new(Seen)], || {}).is_err());
+        assert!(crate::backup::restore_requested(p));
     }
 
     #[test]

@@ -27,16 +27,25 @@ fn oboete(home: &Path, args: &[&str], stdin: &str, spawn: bool) -> Output {
     child.wait_with_output().unwrap()
 }
 
-/// Until `search` finds the first prompt again: raw.db was restored.
+/// Until the restore's note is written (polling `search` would hold raw.lock shared over and over,
+/// against the exclusive lock the restore waits for), then `search` finds the first prompt again.
 fn restored(h: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !h.join("state").join("restored").exists() {
+        assert!(Instant::now() < deadline, "raw.db was not restored");
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let out = oboete(h, &["search", "zebra"], "", false);
         if out.status.success() && String::from_utf8_lossy(&out.stdout).contains("zebra crossing") {
             return;
         }
-        assert!(Instant::now() < deadline, "raw.db was not restored");
-        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            Instant::now() < deadline,
+            "search does not find the restored record"
+        );
+        std::thread::sleep(Duration::from_millis(500));
     }
 }
 
