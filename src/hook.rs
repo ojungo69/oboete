@@ -149,7 +149,18 @@ fn run_io(
                 }
             }
             Ok(_) => {}
-            Err(e) => crate::failure::mark(home, crate::failure::classify(e), ended),
+            Err(e) => {
+                crate::failure::mark(home, crate::failure::classify(e), ended);
+                // Task 8: the worker restores a damaged raw.db, and no hook starts one otherwise
+                // (they start it after a written row). A worker already running opened raw.db
+                // before the damage: the request makes it open the stores again.
+                if crate::backup::corrupt(e) {
+                    crate::backup::request_restore(home);
+                    if let Err(e) = start_worker(home) {
+                        eprintln!("oboete: worker not started: {e:#}");
+                    }
+                }
+            }
         }
         // Design B's SessionStart: the recording-failure line, then the manifest in its fence.
         let failed = crate::failure::since(home).or_else(|| {
