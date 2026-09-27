@@ -19,6 +19,7 @@ mod manifest;
 mod mcp;
 mod observe;
 mod provider;
+mod providers_db;
 // Design B's store: the hook writes to it; its readers come with the worker (milestone 2 Task 5).
 #[allow(dead_code)]
 mod raw;

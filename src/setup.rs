@@ -1680,6 +1680,15 @@ pub fn doctor(home: &Path) -> Result<()> {
             }
         }
     }
+    if home.join("providers.db").exists() {
+        let rows = crate::providers_db::last_calls(&crate::providers_db::open(home)?, 5)?;
+        if !rows.is_empty() {
+            println!("  last curation calls (providers.db):");
+            for r in rows {
+                println!("    {r}");
+            }
+        }
+    }
     let exe_str = exe
         .canonicalize()
         .unwrap_or(exe)

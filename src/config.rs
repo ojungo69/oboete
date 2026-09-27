@@ -13,6 +13,18 @@ pub struct Config {
     pub summary: Summary,
     #[serde(default)]
     pub embedding: Embedding,
+    /// Where Gemini joins the chain; absent, it is not in it (the owner decides, free or paid).
+    #[serde(default)]
+    pub gemini: Option<GeminiPlace>,
+}
+
+/// `gemini = "before-subscriptions"` puts it just before the first subscription CLI (it spares
+/// their quota and sees more windows); `"after-subscriptions"` at the end of the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GeminiPlace {
+    BeforeSubscriptions,
+    AfterSubscriptions,
 }
 
 /// Semantic search is a provider slot (docs/plan.md 2b, docs/pr-d.md): `none` (full-text only,
@@ -178,6 +190,22 @@ fn openai(
     }
 }
 
+/// Gemini through its OpenAI-compatible endpoint, key in `~/GEMINI_API_KEY.md`
+/// (docs/research/curator-providers-2026-09-27.md section 6). 30 calls a day keeps a paid key
+/// under the USD 5 a month paid-API cap: Flash-Lite costs about USD 0.005 a window (10,000
+/// tokens in, 1,500 out, USD 0.25 and 1.50 a million, checked 2026-09-27).
+fn gemini() -> Provider {
+    openai(
+        "gemini",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "GEMINI_API_KEY.md",
+        "gemini-3.1-flash-lite",
+        30,
+        true,
+        serde_json::json!({}),
+    )
+}
+
 fn cli(name: &str, model: Option<&str>, daily_budget: u32) -> Provider {
     Provider::Cli {
         name: name.into(),
@@ -188,7 +216,7 @@ fn cli(name: &str, model: Option<&str>, daily_budget: u32) -> Provider {
     }
 }
 
-/// Default chain, the owner's order of 2026-09-27: free first (the two Groq strict-schema models
+/// Default chain, the owner's order of 2026-09-27: free first (the three Groq strict-schema models
 /// in separate 8k-TPM buckets, OpenRouter free, Mistral, then NIM, which never answered in the
 /// owner's calls), then the flat-rate OpenCode Go, then the coding subscriptions, codex and
 /// claude. The subscription CLIs run their cheap models (claude Haiku, codex gpt-6-luna), as
@@ -209,9 +237,15 @@ fn default_providers() -> Vec<Provider> {
         true,
         serde_json::json!({}),
     );
-    if let Provider::Openai { headers, .. } = &mut opencode_go {
+    if let Provider::Openai {
+        headers, timeout_s, ..
+    } = &mut opencode_go
+    {
         // New console keys are refused without it (HTTP 400 MissingSessionID, 2026-09-26).
         headers.insert("x-opencode-session".into(), "oboete".into());
+        // glm-5.3-flash reasons first: its answers took 63 s on average and 6 calls hit 90 s
+        // (owner's store, 2026-09-22..26); a call cut off at the timeout may still be billed.
+        *timeout_s = 150;
     }
     vec![
         openai(
@@ -221,7 +255,9 @@ fn default_providers() -> Vec<Provider> {
             "openai/gpt-oss-120b",
             800,
             true,
-            serde_json::json!({}),
+            // Reasoning tokens count against Groq's 200,000 tokens a day. Low effort cut them from
+            // 533 to 9 (20b) and 386 to 75 (120b) on a short window, with valid JSON (2026-09-27).
+            serde_json::json!({"reasoning_effort": "low"}),
         ),
         openai(
             "groq-20b",
@@ -230,7 +266,21 @@ fn default_providers() -> Vec<Provider> {
             "openai/gpt-oss-20b",
             800,
             true,
-            serde_json::json!({}),
+            // Reasoning tokens count against Groq's 200,000 tokens a day. Low effort cut them from
+            // 533 to 9 (20b) and 386 to 75 (120b) on a short window, with valid JSON (2026-09-27).
+            serde_json::json!({"reasoning_effort": "low"}),
+        ),
+        // A third free Groq model with its own 200,000 tokens a day, same key and recipient. Strict
+        // schema, no reasoning: 0.9-1.2 s, valid JSON in Japanese on a 12,000-character window
+        // (probe of 2026-09-27).
+        openai(
+            "groq-qwen",
+            groq,
+            "GROQ_API_KEY.md",
+            "qwen/qwen3.8-27b",
+            800,
+            true,
+            serde_json::json!({"reasoning_effort": "none"}),
         ),
         openai(
             "openrouter",
@@ -286,13 +336,27 @@ pub fn load(home: &Path) -> Result<Config> {
             providers: default_providers(),
             summary: Summary::default(),
             embedding: Embedding::default(),
+            gemini: None,
         });
     }
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let cfg: Config = toml::from_str(&text)
+    let mut cfg: Config = toml::from_str(&text)
         .map_err(|e| toml_error(&text, &e))
         .with_context(|| format!("parse {}", path.display()))?;
+    if let Some(place) = cfg.gemini
+        && !cfg.providers.iter().any(|p| p.name() == "gemini")
+    {
+        let at = match place {
+            GeminiPlace::BeforeSubscriptions => cfg
+                .providers
+                .iter()
+                .position(|p| matches!(p, Provider::Cli { .. }))
+                .unwrap_or(cfg.providers.len()),
+            GeminiPlace::AfterSubscriptions => cfg.providers.len(),
+        };
+        cfg.providers.insert(at, gemini());
+    }
     match cfg.embedding.provider.as_str() {
         "none" => {}
         "workers-ai" => anyhow::ensure!(
@@ -438,6 +502,25 @@ mod tests {
     #[test]
     fn defaults_and_toml_extra_fields_parse() {
         let cfg: Config = toml::from_str("").unwrap();
+        for p in &cfg.providers {
+            if let Provider::Openai {
+                name,
+                extra,
+                timeout_s,
+                ..
+            } = p
+            {
+                let effort = extra.get("reasoning_effort").and_then(|v| v.as_str());
+                let want = match name.as_str() {
+                    "groq" | "groq-20b" => Some("low"),
+                    "groq-qwen" => Some("none"),
+                    _ => None,
+                };
+                assert_eq!(effort, want, "{name}");
+                let want = if name == "opencode-go" { 150 } else { 90 };
+                assert_eq!(*timeout_s, want, "{name}");
+            }
+        }
         // The owner's order (2026-09-27): free, then OpenCode Go, then the subscription CLIs.
         let names: Vec<_> = cfg.providers.iter().map(Provider::name).collect();
         assert_eq!(
@@ -445,6 +528,7 @@ mod tests {
             [
                 "groq",
                 "groq-20b",
+                "groq-qwen",
                 "openrouter",
                 "mistral",
                 "nim",
@@ -453,13 +537,13 @@ mod tests {
                 "claude"
             ]
         );
-        match &cfg.providers[4] {
+        match &cfg.providers[5] {
             Provider::Openai { extra, .. } => {
                 assert_eq!(extra["chat_template_kwargs"]["enable_thinking"], false)
             }
             _ => panic!("expected nim"),
         }
-        match &cfg.providers[5] {
+        match &cfg.providers[6] {
             Provider::Openai { headers, .. } => {
                 assert_eq!(headers["x-opencode-session"], "oboete")
             }
@@ -502,6 +586,35 @@ model = "haiku"
             _ => panic!("expected openai"),
         }
         assert!(!cfg.providers[1].retry_429());
+    }
+
+    #[test]
+    fn gemini_joins_the_chain_only_where_the_owner_puts_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let names = |toml: &str| {
+            std::fs::write(dir.join("config.toml"), toml).unwrap();
+            load(dir)
+                .unwrap()
+                .providers
+                .iter()
+                .map(|p| p.name().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(!names("").contains(&"gemini".to_owned()));
+        let before = names("gemini = \"before-subscriptions\"\n");
+        let at = before.iter().position(|n| n == "gemini").unwrap();
+        assert_eq!(before[at - 1], "opencode-go");
+        assert_eq!(before[at + 1], "codex");
+        let after = names("gemini = \"after-subscriptions\"\n");
+        assert_eq!(after.last().map(String::as_str), Some("gemini"));
+        // An entry of the owner's own named gemini is not doubled.
+        let own = names(
+            "gemini = \"after-subscriptions\"\n[[providers]]\nkind = \"openai\"\nname = \"gemini\"\nbase_url = \"https://example.test/v1\"\nmodel = \"m\"\n",
+        );
+        assert_eq!(own, ["gemini"]);
+        std::fs::write(dir.join("config.toml"), "gemini = \"first\"\n").unwrap();
+        assert!(load(dir).is_err());
     }
 
     #[test]
