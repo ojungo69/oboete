@@ -280,7 +280,11 @@ fn memory_read(tool: &str, body: &Value) -> bool {
         || tool.contains("claude_mem")
         // Cursor names an MCP tool without its server (`MCP:<tool>`): oboete's three by name.
         || matches!(tool.as_str(), "mcp:search" | "mcp:get" | "mcp:timeline")
-        || runs_memory_read(&body["input"])
+        // Only a shell runs a command: a Grep for "oboete search" read no memory.
+        || ["bash", "shell", "command", "exec", "terminal"]
+            .iter()
+            .any(|k| tool.contains(k))
+            && runs_memory_read(&body["input"])
 }
 
 /// Whether a text of a tool's input, decoded, runs `oboete search|get|timeline` in a command's
@@ -1480,6 +1484,9 @@ mod tests {
         raw.append(&tool("Bash", echo, "ran")).unwrap();
         let web = serde_json::json!({"query": "tabs"});
         raw.append(&tool("MCP:web_search", web, "a page")).unwrap();
+        let pattern = serde_json::json!({"pattern": "oboete search", "path": "src"});
+        raw.append(&tool("Grep", pattern, "src/setup.rs:2"))
+            .unwrap();
         let grep = serde_json::json!({"command": "rg 'oboete search' src"});
         raw.append(&tool("Bash", grep, "src/mcp.rs:1")).unwrap();
         let nested = serde_json::json!({"command": "bash -lc 'oboete search tabs'"});
@@ -1489,7 +1496,9 @@ mod tests {
         assert_eq!(w.text.matches(MEMORY_READ).count(), 10, "{}", w.text);
         assert!(w.text.contains("mcp__oboete__search") && w.text.contains("ran"));
         assert!(
-            w.text.contains("src/mcp.rs:1") && w.text.contains("a page"),
+            w.text.contains("src/mcp.rs:1")
+                && w.text.contains("a page")
+                && w.text.contains("src/setup.rs:2"),
             "{}",
             w.text
         );
