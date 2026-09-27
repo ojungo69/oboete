@@ -114,7 +114,8 @@ pub fn admit(
     }
     if limits.is_paid() {
         let spent = spent_this_month(db, providers)?;
-        let this = limits.usd(tokens, f64::from(limits.max_output_tokens));
+        // The output the request asks for at most, as `provider::call` sends it.
+        let this = limits.usd(tokens, f64::from(p.declared_output()));
         if spent + this > paid_usd_per_month {
             return Ok(Some(Refusal {
                 outcome: "budget",
@@ -350,6 +351,16 @@ mod tests {
         assert_eq!(r.outcome, "budget");
         assert!(
             admit(&db, &chain[2], &chain, 10_000.0, 5.0, &[])
+                .unwrap()
+                .is_none()
+        );
+        // An entry that asks for 100 output tokens is priced at 100 (0.011 in all): it fits.
+        let mut small = chain[1].clone();
+        if let Provider::Openai { extra, .. } = &mut small {
+            extra.insert("max_completion_tokens".into(), 100.into());
+        }
+        assert!(
+            admit(&db, &small, &chain, 10_000.0, 5.0, &[])
                 .unwrap()
                 .is_none()
         );

@@ -92,6 +92,10 @@ impl CallError {
     fn with_usage(self, usage: Usage) -> Self {
         Self { usage, ..self }
     }
+    /// The rate headers of the response it came from.
+    fn rated(self, rate: Option<providers_db::RateLeft>) -> Self {
+        Self { rate, ..self }
+    }
     fn resting(self, cool_until: Option<i64>) -> Self {
         Self {
             cool_until: self.cool_until.max(cool_until),
@@ -469,11 +473,12 @@ fn openai_compat(
         &mut std::io::Read::take(resp.body_mut().as_reader(), MAX_RESPONSE_BYTES + 1),
         &mut raw,
     )
-    .map_err(|e| CallError::other(format!("read body: {}", read_error(&e))))?;
+    .map_err(|e| CallError::other(format!("read body: {}", read_error(&e))).rated(rate))?;
     if raw.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(CallError::other(format!(
             "invalid output: response larger than {MAX_RESPONSE_BYTES} bytes"
-        )));
+        ))
+        .rated(rate));
     }
     let text = String::from_utf8_lossy(&raw);
     if status != 200 {
@@ -502,15 +507,19 @@ fn openai_compat(
         });
     }
     let v: Value = serde_json::from_str(&text)
-        .map_err(|_| CallError::other("invalid output: response is not JSON"))?;
+        .map_err(|_| CallError::other("invalid output: response is not JSON").rated(rate))?;
     let usage = usage_openai(&v);
     let content = v["choices"][0]["message"]["content"]
         .as_str()
         .ok_or_else(|| {
-            CallError::other("invalid output: no choices[0].message.content").with_usage(usage)
+            CallError::other("invalid output: no choices[0].message.content")
+                .with_usage(usage)
+                .rated(rate)
         })?;
     let answer = serde_json::from_str(unfence(content)).map_err(|e| {
-        CallError::other(format!("invalid output: content is not JSON ({e})")).with_usage(usage)
+        CallError::other(format!("invalid output: content is not JSON ({e})"))
+            .with_usage(usage)
+            .rated(rate)
     })?;
     Ok(Answer {
         value: answer,
@@ -2375,20 +2384,25 @@ mod tests {
 
     #[test]
     fn rate_headers_are_kept_when_the_answer_has_the_wrong_shape() {
-        let home = tempfile::tempdir().unwrap();
-        let conn = crate::providers_db::open(home.path()).unwrap();
-        let answer = json!({"choices": [{"message": {"content": "{}"}}]}).to_string();
-        let (url, _) = serve_once(
-            answer.into_bytes(),
-            "x-ratelimit-remaining-tokens: 300\r\nx-ratelimit-reset-tokens: 1m\r\n",
-        );
         let schema = json!({"type": "object", "required": ["summary"]});
-        let r = Chain::new(&[stub(url)], &conn).run("curator", "s", "short", &schema);
-        assert!(r.is_err());
-        assert_eq!(
-            crate::providers_db::rate(&conn, "stub").unwrap().tokens,
-            Some(300)
-        );
+        // Valid JSON of another shape, a body that is not JSON, and content that is not JSON.
+        let shape = json!({"choices": [{"message": {"content": "{}"}}]}).to_string();
+        let prose = json!({"choices": [{"message": {"content": "Sure!"}}]}).to_string();
+        for body in [shape, "<html>".to_owned(), prose] {
+            let home = tempfile::tempdir().unwrap();
+            let conn = crate::providers_db::open(home.path()).unwrap();
+            let (url, _) = serve_once(
+                body.clone().into_bytes(),
+                "x-ratelimit-remaining-tokens: 300\r\nx-ratelimit-reset-tokens: 1m\r\n",
+            );
+            let r = Chain::new(&[stub(url)], &conn).run("curator", "s", "short", &schema);
+            assert!(r.is_err());
+            assert_eq!(
+                crate::providers_db::rate(&conn, "stub").unwrap().tokens,
+                Some(300),
+                "{body}"
+            );
+        }
     }
 
     #[test]

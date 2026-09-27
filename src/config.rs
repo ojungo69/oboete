@@ -555,6 +555,11 @@ pub struct CaptureConfig {
     _embedding: serde::de::IgnoredAny,
     #[serde(default, rename = "backup")]
     _backup: serde::de::IgnoredAny,
+    // `Config`'s top-level keys: each one a user sets must not stop recording.
+    #[serde(default, rename = "gemini")]
+    _gemini: serde::de::IgnoredAny,
+    #[serde(default, rename = "paid_usd_per_month")]
+    _paid_usd_per_month: serde::de::IgnoredAny,
 }
 
 pub fn load_capture(home: &Path) -> Result<CaptureConfig> {
@@ -605,6 +610,24 @@ pub fn read_key(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_key_config_reads_leaves_capture_working() {
+        let text = r#"
+gemini = "before-subscriptions"
+paid_usd_per_month = 2.5
+[summary]
+[embedding]
+[backup]
+[redaction]
+[capture]
+"#;
+        let c: Config = toml::from_str(text).unwrap();
+        assert_eq!(c.paid_usd_per_month, 2.5);
+        parse_capture(Some(text)).unwrap();
+        // A table no version reads is still an error.
+        assert!(parse_capture(Some("[redactions]\n")).is_err());
+    }
 
     #[test]
     fn defaults_and_toml_extra_fields_parse() {
