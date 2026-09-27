@@ -96,10 +96,10 @@ const FILLER: &[&str] = &[
     "ありがとう",
 ];
 
-/// What a passing run prints, in a tool line that did not fail and reports no failure (MUST-M1's
-/// `done`): a piped command exits 0 whatever it ran.
+/// What a passing run prints, as whole words, in a tool line that did not fail and reports no
+/// failure (MUST-M1's `done`): a piped command exits 0 whatever it ran.
 // ponytail: a few markers; a test runner's own summary line per tool when these miss real runs.
-const PASSED: &[&str] = &["test result: ok", "passed", "build succeeded"];
+const PASSED: &str = r"\b(?:test result: ok|passed|build succeeded)\b";
 
 /// Why a `supersedes` entry is dropped when it names neither a sibling of the draft's repository,
 /// a candidate shown for it, nor what the draft's session carried in.
@@ -397,7 +397,9 @@ fn bare(quote: &str) -> bool {
 fn passing_run(w: &Window, line: &Line) -> bool {
     static NONE_FAILED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static ERRORS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static PASS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let none = NONE_FAILED.get_or_init(|| regex::Regex::new(r"\b0 failed").unwrap());
+    let pass = PASS.get_or_init(|| regex::Regex::new(PASSED).unwrap());
     let errors = ERRORS.get_or_init(|| {
         regex::Regex::new(r"(?m)\b[1-9]\d*\s+errors?\b|^\s*error(?:\[|:)").unwrap()
     });
@@ -409,7 +411,7 @@ fn passing_run(w: &Window, line: &Line) -> bool {
             && !exited_nonzero(l.source_text())
             && {
                 let text = decoded(l.source_text()).to_lowercase();
-                PASSED.iter().any(|p| text.contains(p))
+                pass.is_match(&text)
                     && text.matches("failed").count() == none.find_iter(&text).count()
                     && !errors.is_match(&text)
             }
@@ -841,6 +843,9 @@ mod tests {
         }
         let clean = tool("=== 3 passed, 0 errors in 0.2s ===", false);
         assert_eq!(done(&[clean.clone(), reply(fixed)]), "done");
+        // A marker is a whole word: a cache that was bypassed passed nothing.
+        let bypassed = tool("Compiling oboete\ncache bypassed", false);
+        assert_eq!(done(&[bypassed, reply(fixed)]), "proposed");
         // Only a run counts: a file read that says tests passed ran nothing.
         let read = (
             "tool",
