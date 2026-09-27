@@ -1173,7 +1173,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
             items.extend(
                 crate::claims::current(k, repo)?
                     .into_iter()
-                    .filter(|c| c.kind == "open item")
+                    .filter(|c| c.kind == "open item" && c.status != "done")
                     .map(|c| (repo, c)),
             );
         }
@@ -2421,6 +2421,10 @@ mod tests {
         }
         // The session moved to another checkout: its items there are carried too.
         ops.push(open(&mut raw, "s", "q", "The parser needs a fuzz test."));
+        // Done: resolved work is not an open item.
+        let (kind, mut done) = open(&mut raw, "s", "r", "The flaky retry is fixed now.");
+        done["status"] = "done".into();
+        ops.push((kind, done));
         raw.append_ops(&ops).unwrap();
         let mut k = crate::knowledge::open(home.path()).unwrap();
         consume(&raw, &mut k);
@@ -2438,6 +2442,7 @@ mod tests {
             };
             assert!(text.lines().any(item), "{body}: {text}");
         }
+        assert!(!text.contains("The flaky retry is fixed now."), "{text}");
     }
 
     /// A candidate the budget cut from the prompt, or never shown, is superseded by nothing; the
