@@ -194,7 +194,7 @@ impl<'a> Chain<'a> {
                 let gate = crate::isolation::gate(conn, cli)?;
                 if gate != crate::isolation::Gate::Passed {
                     let ms = started.elapsed().as_millis() as i64;
-                    record("gate", ms, Some(&gate.why()), false, Usage::default())?;
+                    record("gate", ms, Some(&gate.why()), false, Usage::default(), None)?;
                     fallbacks.push((name, gate.why()));
                     continue;
                 }
