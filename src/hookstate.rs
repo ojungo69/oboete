@@ -46,9 +46,22 @@ pub fn set(home: &Path, agent: &str, session: &str, flag: &str) -> std::io::Resu
     }
 }
 
-/// Clears `flag` and says whether this call cleared it: of concurrent calls, one does.
+/// Clears `flag` and says whether this call cleared it: of concurrent calls, one does. The
+/// removal alone does not say so: on macOS and Windows concurrent removals of one file can all
+/// succeed (all 4 threads in 1,479 of 2,000 rounds on the owner's iMac, and a rename is no better
+/// on Windows), so takes of a session run one at a time under its lock. A lock that cannot be had
+/// leaves the removal to decide: a second injection is the cheaper failure.
 pub fn take(home: &Path, agent: &str, session: &str, flag: &str) -> bool {
-    std::fs::remove_file(dir(home, agent, session).join(flag)).is_ok()
+    let dir = dir(home, agent, session);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".lock"));
+    if let Ok(lock) = &lock {
+        let _ = lock.lock();
+    }
+    std::fs::remove_file(dir.join(flag)).is_ok()
 }
 
 /// Removes the flags of sessions unchanged for `keep` (the worker, at its idle exit).
@@ -94,6 +107,28 @@ mod tests {
         set(&p, "cursor", "s/1", "compacted").unwrap(); // already set
         assert!(take(&p, "cursor", "s/1", "compacted"));
         assert!(!take(&p, "cursor", "s/1", "compacted"));
+    }
+
+    #[test]
+    fn a_flag_set_once_is_taken_by_one_of_concurrent_takes() {
+        let home = tempfile::tempdir().unwrap();
+        for _ in 0..200 {
+            set(home.path(), "cursor", "s", "compacted").unwrap();
+            let start = std::sync::Arc::new(std::sync::Barrier::new(4));
+            let won: usize = (0..4)
+                .map(|_| {
+                    let (p, start) = (home.path().to_path_buf(), start.clone());
+                    std::thread::spawn(move || {
+                        start.wait();
+                        take(&p, "cursor", "s", "compacted")
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|t| t.join().unwrap() as usize)
+                .sum();
+            assert_eq!(won, 1);
+        }
     }
 
     #[cfg(unix)] // setting a directory's time needs another open on Windows
