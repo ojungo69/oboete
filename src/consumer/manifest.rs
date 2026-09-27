@@ -1060,6 +1060,7 @@ mod tests {
             recipe: "test".into(),
             tier: 1,
             why: String::new(),
+            tainted: false,
         };
         let op = (crate::raw::OpKind::Claim, serde_json::to_value(op).unwrap());
         (op, uid)

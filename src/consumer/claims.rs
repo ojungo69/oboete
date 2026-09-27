@@ -446,6 +446,7 @@ mod tests {
             recipe: "test".into(),
             tier: 1,
             why: String::new(),
+            tainted: false,
         }
     }
 
