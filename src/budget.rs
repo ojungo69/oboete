@@ -313,26 +313,40 @@ mod tests {
                 ..Default::default()
             },
         );
-        // A timeout after sending: 1,000 in (0.001) and up to 4,000 out (0.04). An HTTP error
-        // response, a 429 here, was not billed.
-        for detail in ["a timed out after 90s", "http 429: rate_limit"] {
+        let row = |outcome: &str, detail: Option<&str>, usage: Usage| {
             record(
                 &db,
                 &Call {
                     provider: "a",
                     role: "curator",
                     span: "s",
-                    outcome: "error",
+                    outcome,
                     ms: 1,
-                    detail: Some(detail),
+                    detail,
                     bytes_out: 1,
                     est_tokens: Some(1_000),
-                    usage: Usage::default(),
+                    usage,
                 },
             )
             .unwrap();
-        }
+        };
+        // A timeout after sending, as openai_compat words it: 1,000 in (0.001) and up to 4,000
+        // out (0.04).
+        row(
+            "error",
+            Some("http request: timeout: global"),
+            Usage::default(),
+        );
+        // An HTTP error response was not billed.
+        row("error", Some("http 429: rate_limit"), Usage::default());
+        // An answer that gave its prompt count only: its output counts at the most (0.04), its
+        // input as reported (0.0005).
+        let partial = Usage {
+            prompt: Some(500),
+            ..Default::default()
+        };
+        row("ok", None, partial);
         let spent = spent_this_month(&db, &[paid]).unwrap();
-        assert!((spent - 0.041).abs() < 1e-9, "{spent}");
+        assert!((spent - 0.0815).abs() < 1e-9, "{spent}");
     }
 }

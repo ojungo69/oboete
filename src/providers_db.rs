@@ -266,15 +266,18 @@ pub fn tokens_this_month(conn: &Connection, provider: &str) -> Result<(i64, i64)
     )?)
 }
 
-/// This month's calls to `provider` that were sent but came back with no usage and no HTTP status
-/// (a timeout, a dropped connection, an answer without a usage block): the provider may have
-/// billed them. The sum of their estimates and their number.
+/// What this month's sent calls to `provider` may have been billed for beyond the usage they
+/// reported: the estimate of each call with no prompt count, and the number of calls with no
+/// completion count (a timeout, a dropped connection, an answer without a full usage block). A
+/// response with an HTTP error status (`http 429: …`) was not billed.
 pub fn unmetered_this_month(conn: &Connection, provider: &str) -> Result<(i64, i64)> {
     let start = chrono_free_month_start(now_ms());
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(est_tokens), 0), COUNT(*) FROM provider_calls
-         WHERE provider=?1 AND ts>=?2 AND bytes_out > 0 AND prompt_tokens IS NULL
-           AND outcome IN ('error', 'invalid') AND COALESCE(detail, '') NOT LIKE 'http %'",
+        "SELECT COALESCE(SUM(CASE WHEN prompt_tokens IS NULL THEN est_tokens END), 0),
+                COALESCE(SUM(completion_tokens IS NULL), 0)
+         FROM provider_calls
+         WHERE provider=?1 AND ts>=?2 AND bytes_out > 0 AND outcome IN ('ok', 'invalid', 'error')
+           AND COALESCE(detail, '') NOT GLOB 'http [0-9][0-9][0-9]*'",
         params![provider, start],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
