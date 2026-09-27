@@ -162,7 +162,8 @@ pub fn check(
             lower(&d, "the speaker is the quote's line");
         }
         // The user's own words carry the claim; a bare "yes" accepts only what it answers.
-        let own_words = speaker == "user" && !question(&line.text) && !bare(&d.quote);
+        let own_words =
+            speaker == "user" && !question(&line.text) && !continues(w, line) && !bare(&d.quote);
         let answers = speaker == "user" && bare(&d.quote) && answers_a_reply(w, i);
         let accepts = speaker == "assistant proposal" && accepted(w, i);
         let below = match d.status.as_str() {
@@ -248,19 +249,29 @@ fn speaker(role: Role, given: &str) -> &'static str {
 }
 
 /// Spec 3.3: a turn that ends in a question mark never promotes.
+/// Whether `line` is a part of its event that the window cut before its end: whether the turn
+/// ends in a question mark is in a later window, so its words promote nothing here.
+// ponytail: a decision in the first part of a prompt longer than a window stays proposed; the
+// gates would need the event's end to do better.
+fn continues(w: &Window, line: &Line) -> bool {
+    w.to_offset.is_some() && line.seq == w.to_seq
+}
+
 fn question(text: &str) -> bool {
     text.trim_end().ends_with(['?', '？'])
 }
 
 /// The next turn of the same session after line `i`, past tool calls and harness lines, is the
-/// user's and accepts: no other reply of the assistant comes between (spec 3.3, "right after").
+/// user's in the same repository and accepts: no other reply of the assistant comes between (spec
+/// 3.3, "right after").
 fn accepted(w: &Window, i: usize) -> bool {
-    let key = &w.lines[i].key;
+    let line = &w.lines[i];
     w.lines[i + 1..]
         .iter()
-        .filter(|l| &l.key == key)
+        .filter(|l| l.key == line.key)
         .find(|l| matches!(l.role, Role::User | Role::Assistant))
-        .is_some_and(|l| l.role == Role::User && acceptance(&l.text))
+        // After a checkout change the turn is in another repository: not this proposal's answer.
+        .is_some_and(|l| l.role == Role::User && l.repo == line.repo && acceptance(&l.text))
 }
 
 /// User line `i` accepts, and the turn before it in the same session, past tool calls and harness
@@ -506,9 +517,40 @@ mod tests {
             quoted(&[user("Look at the parser."), user(yes)], yes),
             "proposed"
         );
+        // A proposal in one repository is not accepted by a turn in another.
+        let mut moved = window(&[reply(PROPOSAL), user("はい、それでお願いします")]);
+        moved.lines[1].repo = Some("q".into());
+        let got = one(&moved, "decided", "assistant proposal", cache).0;
+        assert_eq!(got, "proposed");
         let with_words = [user("はい、タブにして")];
         assert_eq!(quoted(&with_words, "タブにして"), "decided");
         assert_eq!(quoted(&with_words, "はい"), "proposed");
+    }
+
+    /// A prompt longer than a window is cut: the part before the cut does not show whether the
+    /// turn ends in a question, so it promotes nothing.
+    #[test]
+    fn the_first_part_of_a_cut_prompt_promotes_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let text = format!(
+            "Use tabs everywhere. {}Should we?",
+            "More context here. ".repeat(400)
+        );
+        let body = json!({"prompt": text}).to_string();
+        raw.append(&crate::raw::Event {
+            kind: "prompt".into(),
+            repo: Some("r".into()),
+            ..crate::raw::test_event(&body)
+        })
+        .unwrap();
+        let dev = raw.device().to_owned();
+        let w = next_window(&raw, &dev, 500, &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert!(w.to_offset.is_some(), "the prompt is cut");
+        let quote = "Use tabs everywhere";
+        assert_eq!(one(&w, "decided", "user", quote).0, "proposed");
     }
 
     #[test]
