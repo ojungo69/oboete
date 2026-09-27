@@ -134,6 +134,8 @@ pub struct Op {
     pub kind: OpKind,
     pub ts: i64,
     pub body: serde_json::Value,
+    /// The first op_seq of the `append_ops` it came in: one window's ops share it.
+    pub batch: i64,
 }
 
 /// One ops row as stored: the body is JSON text.
@@ -633,6 +635,7 @@ impl Raw {
                     ts: r.ts,
                     body: serde_json::from_str(&r.body)
                         .with_context(|| format!("op {}: body", r.op_seq))?,
+                    batch: r.batch,
                 })
             })
             .collect()

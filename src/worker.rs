@@ -39,6 +39,8 @@ pub fn consumers(home: &Path) -> Vec<Box<dyn Consumer>> {
         // The rescan first: the tombstones it appends are in raw before the others read a record.
         Box::new(crate::consumer::rescan::Rescan::new(home)),
         Box::new(crate::consumer::fts::Fts),
+        // The op log's claims (milestone 3 D4), in op_seqs of every device that has ops.
+        Box::new(crate::consumer::claims::Claims),
         Box::new(crate::consumer::manifest::Manifest::new(home)),
         Box::new(crate::consumer::gaps::Gaps::new(home)),
         Box::new(crate::consumer::compress::Compress),
