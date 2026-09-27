@@ -56,6 +56,8 @@ struct Answer {
     /// Unix ms until which the provider should rest although it answered: claude's stream said
     /// its subscription is near a limit (spec 3.1, Claude decision C1).
     cool_until: Option<i64>,
+    /// What the provider said is left of its rate limits (Groq's `x-ratelimit-*` headers).
+    rate: Option<providers_db::RateLeft>,
 }
 
 /// One failed call, with what the chain needs to decide what to do next.
@@ -72,6 +74,7 @@ struct CallError {
     /// A subscription's own reset it reported on the way (claude's `rate_limit_event`): the
     /// provider rests until then whatever else failed.
     cool_until: Option<i64>,
+    rate: Option<providers_db::RateLeft>,
 }
 
 impl CallError {
@@ -83,6 +86,7 @@ impl CallError {
             usage: Usage::default(),
             sent: true,
             cool_until: None,
+            rate: None,
         }
     }
     fn with_usage(self, usage: Usage) -> Self {
@@ -230,6 +234,13 @@ impl<'a> Chain<'a> {
                 }
             });
             let ms = started.elapsed().as_millis() as i64;
+            let rate = match &result {
+                Ok(a) => a.rate,
+                Err(e) => e.rate,
+            };
+            if let Some(rate) = rate {
+                providers_db::set_rate(conn, &name, rate)?;
+            }
             match result {
                 Ok(a) => {
                     record("ok", ms, None, true, a.usage)?;
@@ -435,6 +446,7 @@ fn openai_compat(
         .send_json(&body)
         .map_err(|e| CallError::other(format!("http request: {}", transport(&e))))?;
     let status = resp.status().as_u16();
+    let rate = rate_left(resp.headers());
     let retry_after_s = resp
         .headers()
         .get("retry-after")
@@ -477,6 +489,7 @@ fn openai_compat(
             usage: Usage::default(),
             sent: true,
             cool_until: None,
+            rate,
         });
     }
     let v: Value = serde_json::from_str(&text)
@@ -494,6 +507,7 @@ fn openai_compat(
         value: answer,
         usage,
         cool_until: None,
+        rate,
     })
 }
 
@@ -728,7 +742,11 @@ fn until_pacific_midnight(now: SystemTime) -> f64 {
 
 /// Groq's "try again in 17.2875s", "6m20.064s", "1h2m3.5s" or "580ms", in seconds.
 fn retry_after_in_body(body: &str) -> Option<f64> {
-    let mut rest = &body[body.find("try again in ")? + "try again in ".len()..];
+    go_duration(&body[body.find("try again in ")? + "try again in ".len()..])
+}
+
+/// A Go-style duration at the start of `rest` ("2m59.56s", "7.66s", "580ms"), in seconds.
+fn go_duration(mut rest: &str) -> Option<f64> {
     let mut secs = 0.0;
     let mut parts = 0;
     loop {
@@ -747,6 +765,26 @@ fn retry_after_in_body(body: &str) -> Option<f64> {
         rest = &rest[n + len..];
     }
     (parts > 0 && secs.is_finite()).then_some(secs)
+}
+
+/// Groq's `x-ratelimit-remaining-*` and `x-ratelimit-reset-*` headers (tokens a minute, requests
+/// a day; console.groq.com/docs/rate-limits), with the resets as Unix ms. None without them.
+fn rate_left(h: &ureq::http::HeaderMap) -> Option<providers_db::RateLeft> {
+    let get = |name: &str| h.get(name).and_then(|v| v.to_str().ok()).map(str::trim);
+    let left = |name: &str| get(name).and_then(|v| v.parse::<i64>().ok());
+    let at = |name: &str| {
+        get(name)
+            .and_then(go_duration)
+            .filter(|s| s.is_finite() && *s >= 0.0 && *s < MAX_COOLDOWN.as_secs_f64())
+            .map(|s| db::now_ms() + (s * 1000.0) as i64)
+    };
+    let rate = providers_db::RateLeft {
+        tokens: left("x-ratelimit-remaining-tokens"),
+        tokens_reset_at: at("x-ratelimit-reset-tokens"),
+        requests: left("x-ratelimit-remaining-requests"),
+        requests_reset_at: at("x-ratelimit-reset-requests"),
+    };
+    (rate != providers_db::RateLeft::default()).then_some(rate)
 }
 
 /// A fresh private directory for one CLI run, removed again when dropped (on every return
@@ -1035,6 +1073,7 @@ fn claude_stream(stdout: &str) -> Result<String, CallError> {
             usage: Usage::default(),
             sent: true,
             cool_until: Some(providers_db::OWNER_HOLD),
+            rate: None,
         });
     }
     let result = events
@@ -1053,6 +1092,7 @@ fn claude_stream(stdout: &str) -> Result<String, CallError> {
             usage: Usage::default(),
             sent: true,
             cool_until: None,
+            rate: None,
         });
     }
     Ok(result.to_string())
@@ -1158,6 +1198,7 @@ fn cli_headless(
         value: answer,
         usage,
         cool_until: rest,
+        rate: None,
     })
 }
 
@@ -2045,6 +2086,7 @@ mod tests {
             usage: Usage::default(),
             sent: true,
             cool_until: None,
+            rate: None,
         };
         assert_eq!(cooldown_for(&flagged), None);
     }
@@ -2121,6 +2163,7 @@ mod tests {
             usage: Usage::default(),
             sent: true,
             cool_until: None,
+            rate: None,
         };
         let mut s = providers_db::State::default();
         let mut waits = Vec::new();
@@ -2270,6 +2313,7 @@ mod tests {
             model: None,
             daily_budget: 10,
             timeout_s: 5,
+            limits: Default::default(),
         };
         assert!(
             Chain::new(&[p, missing_cli], &conn)
@@ -2284,6 +2328,48 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(sent, [0, 0]);
+    }
+
+    #[test]
+    fn groqs_rate_headers_are_kept_and_a_request_they_cannot_take_goes_elsewhere() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let answer = json!({"choices": [{"message": {"content": "{}"}}]}).to_string();
+        let (url, _) = serve_once(
+            answer.clone().into_bytes(),
+            "x-ratelimit-remaining-tokens: 300\r\nx-ratelimit-reset-tokens: 2m59.5s\r\n\
+             x-ratelimit-remaining-requests: 999\r\nx-ratelimit-reset-requests: 7.66s\r\n",
+        );
+        let schema = json!({"type": "object"});
+        Chain::new(&[stub(url.clone())], &conn)
+            .run("curator", "s", "short", &schema)
+            .unwrap();
+        let rate = crate::providers_db::rate(&conn, "stub").unwrap();
+        assert_eq!((rate.tokens, rate.requests), (Some(300), Some(999)));
+        let left = rate.tokens_reset_at.unwrap() - db::now_ms();
+        assert!((178_000..=180_000).contains(&left), "{left}");
+        // 2,000 characters are about 560 tokens: more than the 300 left this minute.
+        let (next, _) = serve_once(answer.into_bytes(), "");
+        let providers = [stub(url), {
+            let mut p = stub(next);
+            if let Provider::Openai { name, .. } = &mut p {
+                *name = "next".into();
+            }
+            p
+        }];
+        let r = Chain::new(&providers, &conn)
+            .run("curator", "s", &"a".repeat(2000), &schema)
+            .unwrap();
+        assert_eq!(r.provider, "next");
+        assert_eq!(outcomes(&conn), ["ok", "budget", "ok"]);
+    }
+
+    #[test]
+    fn go_durations_read_as_seconds() {
+        assert_eq!(go_duration("2m59.56s"), Some(179.56));
+        assert_eq!(go_duration("7.66s"), Some(7.66));
+        assert_eq!(go_duration("580ms"), Some(0.58));
+        assert_eq!(go_duration("soon"), None);
     }
 
     #[test]
@@ -2420,6 +2506,7 @@ mod tests {
             usage: Usage::default(),
             sent: true,
             cool_until: None,
+            rate: None,
         };
         assert_eq!(cooldown_for(&err(Some(429), "")), Some(COOLDOWN_429));
         assert_eq!(
@@ -2524,6 +2611,7 @@ mod tests {
             usage: Usage::default(),
             sent: true,
             cool_until: None,
+            rate: None,
         };
         assert_eq!(cooldown_for(&e(None)), Some(COOLDOWN_429));
         assert_eq!(cooldown_for(&e(Some(10.0))), Some(COOLDOWN_429));

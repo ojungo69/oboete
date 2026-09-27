@@ -80,6 +80,26 @@ pub fn admit(
             }));
         }
     }
+    let rate = providers_db::rate(db, name)?;
+    let now = crate::db::now_ms();
+    if rate.requests == Some(0) && rate.requests_reset_at.is_some_and(|t| t > now) {
+        return Ok(Some(Refusal {
+            outcome: "budget",
+            detail: "no requests left until its reset".into(),
+        }));
+    }
+    if let (Some(left), Some(at)) = (rate.tokens, rate.tokens_reset_at)
+        && at > now
+        && (left as f64) < tokens
+    {
+        return Ok(Some(Refusal {
+            outcome: "budget",
+            detail: format!(
+                "{left} tokens left until its reset in {} s",
+                (at - now) / 1000
+            ),
+        }));
+    }
     if let Some(daily) = limits.daily_tokens {
         let today = providers_db::tokens_today(db, name)?;
         if today as f64 + tokens > daily as f64 {

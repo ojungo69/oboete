@@ -14,7 +14,9 @@ CREATE TABLE IF NOT EXISTS provider_state(
   provider TEXT PRIMARY KEY,
   down_until INTEGER NOT NULL DEFAULT 0,  -- unix ms; 0 for none
   fails INTEGER NOT NULL DEFAULT 0,       -- failures in a row that set no cooldown (the breaker)
-  backoff INTEGER NOT NULL DEFAULT 0      -- 429s in a row that named no reset
+  backoff INTEGER NOT NULL DEFAULT 0,     -- 429s in a row that named no reset
+  -- What the provider's last answer said is left (Groq's x-ratelimit-* headers), resets in ms.
+  tokens_left INTEGER, tokens_reset_at INTEGER, requests_left INTEGER, requests_reset_at INTEGER
 );
 -- What left the machine and what it cost: `bytes_out` is the recorded text sent, `detail` a vetted
 -- status, error code or retry value, never a provider's error body (issue #91).
@@ -40,9 +42,18 @@ CREATE INDEX IF NOT EXISTS provider_calls_day ON provider_calls(provider, ts);
 pub fn open(home: &Path) -> Result<Connection> {
     let path = home.join("providers.db");
     crate::db::private(home, 0o700);
-    let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+    let mut conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     crate::db::wal(&conn, "NORMAL")?;
     conn.execute_batch(SCHEMA).context("providers schema")?;
+    // Columns added after the table's first version (milestone 3, Task 4).
+    for column in [
+        "tokens_left",
+        "tokens_reset_at",
+        "requests_left",
+        "requests_reset_at",
+    ] {
+        crate::db::ensure_column(&mut conn, "provider_state", column, "INTEGER")?;
+    }
     for file in ["providers.db", "providers.db-wal", "providers.db-shm"] {
         crate::db::private(&home.join(file), 0o600);
     }
@@ -148,6 +159,52 @@ pub fn set_state(conn: &Connection, provider: &str, s: State) -> Result<()> {
          ON CONFLICT(provider) DO UPDATE SET down_until=excluded.down_until,
            fails=excluded.fails, backoff=excluded.backoff",
         params![provider, s.down_until, s.fails, s.backoff],
+    )?;
+    Ok(())
+}
+
+/// What a provider said is left of its rate limits, and when each resets (Unix ms).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RateLeft {
+    pub tokens: Option<i64>,
+    pub tokens_reset_at: Option<i64>,
+    pub requests: Option<i64>,
+    pub requests_reset_at: Option<i64>,
+}
+
+pub fn rate(conn: &Connection, provider: &str) -> Result<RateLeft> {
+    Ok(conn
+        .query_row(
+            "SELECT tokens_left, tokens_reset_at, requests_left, requests_reset_at
+             FROM provider_state WHERE provider=?1",
+            [provider],
+            |r| {
+                Ok(RateLeft {
+                    tokens: r.get(0)?,
+                    tokens_reset_at: r.get(1)?,
+                    requests: r.get(2)?,
+                    requests_reset_at: r.get(3)?,
+                })
+            },
+        )
+        .optional()?
+        .unwrap_or_default())
+}
+
+pub fn set_rate(conn: &Connection, provider: &str, r: RateLeft) -> Result<()> {
+    conn.execute(
+        "INSERT INTO provider_state(provider, tokens_left, tokens_reset_at, requests_left,
+           requests_reset_at) VALUES(?1,?2,?3,?4,?5)
+         ON CONFLICT(provider) DO UPDATE SET tokens_left=excluded.tokens_left,
+           tokens_reset_at=excluded.tokens_reset_at, requests_left=excluded.requests_left,
+           requests_reset_at=excluded.requests_reset_at",
+        params![
+            provider,
+            r.tokens,
+            r.tokens_reset_at,
+            r.requests,
+            r.requests_reset_at
+        ],
     )?;
     Ok(())
 }
