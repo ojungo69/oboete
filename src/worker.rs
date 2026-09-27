@@ -310,17 +310,14 @@ pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
     let Some(held) = lock(home)? else {
         return Ok(());
     };
-    let mut phase = curation(home).unwrap_or_else(|e| {
-        eprintln!("oboete: no curation this run: {e:#}");
-        None
-    });
+    let mut phase = curation(home);
     run_holding(
         home,
         idle_ms,
         consumers(home),
         || {},
         Some(held),
-        phase.as_deref_mut(),
+        Some(&mut *phase),
     )
 }
 
@@ -332,37 +329,49 @@ fn run_consumers(home: &Path, idle_ms: u64, consumers: Vec<Box<dyn Consumer>>) -
     run_holding(home, idle_ms, consumers, || {}, Some(held), None)
 }
 
-/// The curation phase, when `[summary] curate` asks for it: off until the cut-over (spec 7.5).
-fn curation(home: &Path) -> Result<Option<Box<CurationPhase<'static>>>> {
-    if !crate::config::load(home)?.summary.curate {
-        return Ok(None);
-    }
-    let db = crate::providers_db::open(home)?;
+/// The curation phase: it curates while `[summary] curate` asks for it, off until the cut-over
+/// (spec 7.5).
+fn curation(home: &Path) -> Box<CurationPhase<'static>> {
     let home = home.to_owned();
-    Ok(Some(Box::new(move |raw: &mut Raw| {
+    // Opened once curation is on: a home that never asks for it gets no providers.db.
+    let mut db = None;
+    Box::new(move |raw: &mut Raw| {
         // Read again for each window: a worker that stays up follows the owner's edits (turning
-        // curation off, a provider removed, a lower cap). A file that no longer loads (one the
-        // owner is still editing) stops curation for this run, as it does at the start of `run`.
-        let loaded = crate::config::load(&home)
-            .and_then(|cfg| Ok((crate::capture::Settings::load(&home)?.rules, cfg)));
+        // curation on or off, a provider removed, a lower cap). A file that no longer loads (one
+        // the owner is still editing) stops curation until it loads again, not the worker.
+        // The rules are built only when curation is on: a worker with it off pays one read.
+        let loaded = crate::config::load(&home).and_then(|cfg| {
+            if !cfg.summary.curate {
+                return Ok(None);
+            }
+            Ok(Some((crate::capture::Settings::load(&home)?.rules, cfg)))
+        });
         let (rules, cfg) = match loaded {
-            Ok(v) => v,
+            Ok(Some(v)) => v,
+            Ok(None) => return Ok(Phase::Idle),
             Err(e) => {
-                eprintln!("oboete: no curation this run: {e:#}");
+                eprintln!("oboete: no curation for now: {e:#}");
                 return Ok(Phase::Idle);
             }
         };
-        if !cfg.summary.curate {
-            return Ok(Phase::Idle);
-        }
+        let db = match &mut db {
+            Some(db) => db,
+            None => match crate::providers_db::open(&home) {
+                Ok(opened) => db.insert(opened),
+                Err(e) => {
+                    eprintln!("oboete: no curation for now: {e:#}");
+                    return Ok(Phase::Idle);
+                }
+            },
+        };
         let mut curator = |span: &str, prompt: &str, working: &dyn Fn() -> Option<i64>| {
-            crate::provider::Chain::new(&cfg.providers, &db)
+            crate::provider::Chain::new(&cfg.providers, db)
                 .paid_cap(cfg.paid_usd_per_month)
                 .idle_gate(working)
                 .run("curator", span, prompt, &crate::curate::schema())
         };
-        crate::curate::run_phase(raw, &db, &rules, &cfg.summary, &mut curator)
-    })))
+        crate::curate::run_phase(raw, db, &rules, &cfg.summary, &mut curator)
+    })
 }
 
 /// A run's outcome until it ends.
@@ -725,8 +734,8 @@ mod tests {
         assert!(p.reason.contains("spent: 0/0 calls today"), "{}", p.reason);
     }
 
-    /// A worker that stays up reads the config again for each window: turning curation off
-    /// takes effect without a new worker, and a config that no longer loads turns it off too.
+    /// A worker that stays up reads the config again for each window: turning curation on or
+    /// off takes effect without a new worker, and a config that no longer loads turns it off.
     #[test]
     fn a_worker_that_stays_up_follows_the_owners_config() {
         let home = tempfile::tempdir().unwrap();
@@ -738,10 +747,12 @@ mod tests {
             );
             std::fs::write(home.path().join("config.toml"), text).unwrap();
         };
-        config(true);
+        config(false);
         let mut raw = raw::open(home.path()).unwrap();
         raw.append(&raw::test_event("a")).unwrap();
-        let mut phase = curation(home.path()).unwrap().expect("curation is on");
+        let mut phase = curation(home.path());
+        assert_eq!(phase(&mut raw).unwrap(), Phase::Idle);
+        config(true);
         assert!(matches!(
             phase(&mut raw).unwrap(),
             Phase::Waiting { up: false, .. }
