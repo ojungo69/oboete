@@ -500,12 +500,14 @@ pub fn rebuild(home: &Path) -> Result<()> {
 fn set_aside(home: &Path) -> Result<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
     use anyhow::Context;
     let _swap = crate::raw::lock_for_swap(home)?;
-    let kept = home.join(format!("knowledge.db.rebuilding-{}", crate::db::now_ms()));
+    // Names joined to `home`, never through its display form: a home path need not be UTF-8.
+    let name = format!("knowledge.db.rebuilding-{}", crate::db::now_ms());
+    let kept = home.join(&name);
     let mut aside = Vec::new();
     for ext in ["-wal", "-shm", ""] {
         let from = home.join(format!("knowledge.db{ext}"));
         if from.exists() {
-            let to = std::path::PathBuf::from(format!("{}{ext}", kept.display()));
+            let to = home.join(format!("{name}{ext}"));
             std::fs::rename(&from, &to).with_context(|| format!("move {}", from.display()))?;
             aside.push(to);
         }
@@ -624,6 +626,20 @@ mod tests {
             .query_row("SELECT x FROM t", [], |r| r.get(0))
             .unwrap();
         assert_eq!(x, 7);
+    }
+
+    /// A home whose path is not UTF-8 (valid on Unix) keeps its file under the right name.
+    #[cfg(unix)]
+    #[test]
+    fn a_home_path_that_is_not_utf8_is_set_aside_in_place() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join(std::ffi::OsStr::from_bytes(b"home-\xff"));
+        std::fs::create_dir(&home).unwrap();
+        drop(knowledge::open(&home).unwrap());
+        let (kept, aside) = set_aside(&home).unwrap();
+        assert_eq!(kept.parent(), Some(home.as_path()));
+        assert!(kept.exists() && aside.iter().all(|f| f.exists()));
     }
 
     /// MUST-M14 for the op log: a restore that lost ops moves an op consumer back to what raw
