@@ -388,13 +388,9 @@ fn curation(home: &Path) -> Box<CurationPhase<'static>> {
                 }
             },
         };
-        let mut curator = |span: &str,
-                           prompt: &str,
-                           working: &dyn Fn() -> Option<i64>,
-                           check: &crate::provider::AnswerCheck| {
+        let mut curator = |span: &str, prompt: &str, check: &crate::provider::AnswerCheck| {
             crate::provider::Chain::new(&cfg.providers, db)
                 .paid_cap(cfg.paid_usd_per_month)
-                .idle_gate(working)
                 .check(check)
                 .run("curator", span, prompt, &crate::curate::schema())
         };

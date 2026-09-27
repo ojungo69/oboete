@@ -624,12 +624,9 @@ pub enum Phase {
     Idle,
 }
 
-/// The curator: `(span, prompt, working)` to an answer. `working` says until when the owner is
-/// still working (D9), asked right before each subscription call.
-/// The chain for one window: its span, its prompt, the idle gate, and the check its answer
-/// passes (`check`).
-pub type Curator<'a> =
-    dyn FnMut(&str, &str, &dyn Fn() -> Option<i64>, &AnswerCheck) -> Result<ChainResult> + 'a;
+/// The curator: the chain for one window, from its span, its prompt and the check its answer
+/// passes (`check`) to an answer.
+pub type Curator<'a> = dyn FnMut(&str, &str, &AnswerCheck) -> Result<ChainResult> + 'a;
 
 /// D10: a wait longer than this does not keep the worker up.
 const STAY_UP_MS: i64 = 30 * 60 * 1000;
@@ -657,9 +654,10 @@ thread_local! {
 }
 
 /// The curation phase (D3): this device's next window, curated or waited on. A window that
-/// reaches the device's last record waits until the owner has stopped (the idle gate's time),
-/// so a window is not sent for every few records while the owner works. `chain` is who is asked,
-/// as text (the providers and caps): a window held under other ones is tried again now.
+/// reaches the device's last record waits until the owner has stopped (`idle_minutes` after the
+/// last hook record, D9), so a window is not sent for every few records while the owner works.
+/// `chain` is who is asked, as text (the providers and caps): a window held under other ones is
+/// tried again now.
 pub fn run_phase(
     raw: &mut Raw,
     k: &Connection,
@@ -682,7 +680,7 @@ pub fn run_phase(
     let idle = (i64::from(summary.idle_minutes) * 60_000).min(STAY_UP_MS);
     let working = |raw: &Raw| match raw.last_hook_ts() {
         Ok(ts) => ts.map(|ts| ts + idle).filter(|&t| t > crate::db::now_ms()),
-        // Unreadable: taken for the owner at work, so no subscription is spent on a guess.
+        // Unreadable: taken for the owner at work, so the window waits rather than go out short.
         Err(_) => Some(crate::db::now_ms() + idle),
     };
     let now = crate::db::now_ms();
@@ -735,16 +733,13 @@ pub fn run_phase(
     carried_uids.retain(|(_, _, uid)| carried_text.contains(uid.as_str()));
     shown_in.retain(|(_, uid)| shown.contains(uid.as_str()));
     let prompt = prompt(&summary.language, &w.text, &shown, &carried_text);
-    let sent = sha256_hex(&format!(
-        "{chain}\n{idle}\n{}\n{}",
-        summary.language, w.text
-    ));
+    let sent = sha256_hex(&format!("{chain}\n{}\n{}", summary.language, w.text));
     // A row for another request is stale, and its attempts and hold were not on this one: a
     // restore or a skipped window moved the checkpoint, records added since made the window
     // longer, new rules or another language changed what would be sent, or the owner changed
-    // who is asked (`chain`: the providers and caps as text) or the idle gate. What the window
-    // carries in and its candidates are not part of it: they change while a window waits (a
-    // claim a rescan drops), and a window every provider fails must still reach D11's three.
+    // who is asked (`chain`: the providers and caps as text). What the window carries in and its
+    // candidates are not part of it: they change while a window waits (a claim a rescan drops),
+    // and a window every provider fails must still reach D11's three.
     let range = |p: &Pending| (p.from_seq, p.from_offset, p.to_seq, p.to_offset);
     let pending = providers_db::pending_of(db, &device)?.filter(|p| {
         range(p) == (w.from_seq, w.from_offset, w.to_seq, w.to_offset) && p.prompt == sent
@@ -755,10 +750,7 @@ pub fn run_phase(
         return Ok(waiting(p, now));
     }
     let span = format!("{}-{}", w.from_seq, w.to_seq);
-    let answer = {
-        let raw: &Raw = raw;
-        curator(&span, &prompt, &|| working(raw), &|v| check(&w, v))
-    };
+    let answer = curator(&span, &prompt, &|v| check(&w, v));
     let failed = match answer {
         Ok(r) => match claims_of(&w, &r.output, &r.provider, r.tier, &shown_in, &carried_uids) {
             Ok((summary, claims)) => {
@@ -1935,11 +1927,7 @@ mod tests {
             raw.append(&prompt(text)).unwrap();
         }
         let calls = Cell::new(0);
-        let mut curator = |_: &str,
-                           _: &str,
-                           _: &dyn Fn() -> Option<i64>,
-                           _: &AnswerCheck|
-         -> Result<ChainResult> {
+        let mut curator = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
             calls.set(calls.get() + 1);
             Ok(claimed("L2", "two"))
         };
@@ -1966,57 +1954,15 @@ mod tests {
         assert_eq!(calls.get(), 2);
     }
 
-    /// D9, Review Focus 3: while the owner works, a free provider is tried and a subscription
-    /// waits until ten minutes after the last hook record; a tombstone and a replayed record
-    /// written since do not move that time.
+    /// D9: the wait of a window at the last record reads hook records only: a tombstone and a
+    /// replayed record written since do not move it.
     #[test]
-    fn a_subscription_waits_while_hooks_arrive_and_a_free_provider_does_not() {
+    fn only_a_hook_record_moves_the_wait_of_a_window_at_the_last_record() {
         let now = crate::db::now_ms();
-        let at = |ts: i64, text: &str| Event {
-            ts,
-            ..prompt(&text.repeat(40))
-        };
-        let tried = Cell::new(0);
-        let mut chain = |_: &str,
-                         _: &str,
-                         working: &dyn Fn() -> Option<i64>,
-                         _: &AnswerCheck|
-         -> Result<ChainResult> {
-            tried.set(tried.get() + 1);
-            match working() {
-                Some(until) => Err(went_past(&[
-                    ("free", "HTTP 500", Skip::Failed),
-                    ("sub", "waiting for the owner to finish", Skip::Wait(until)),
-                ])),
-                None => Ok(answered("sub")),
-            }
-        };
-        // Two windows' worth: the first is full, so it does not wait for more records.
-        let (rules, summary) = (Rules::default(), curating(30));
-        let home = tempfile::tempdir().unwrap();
-        let (mut raw, db) = open(home.path());
-        raw.append(&at(now - 60_000, "a")).unwrap();
-        raw.append(&at(now - 60_000, "b")).unwrap();
-        let until = now - 60_000 + 600_000;
-        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut chain).unwrap();
-        assert_eq!(phase, Phase::Waiting { until, up: true });
-        let p = providers_db::pending_of(&db, raw.device())
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            (p.hold.as_str(), p.attempts, p.next_attempt_at),
-            ("time", 0, until)
-        );
-        assert!(
-            p.reason.contains("waiting for the owner to finish"),
-            "{}",
-            p.reason
-        );
-        // Not tried again before then.
-        let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut chain).unwrap();
-        assert_eq!(phase, Phase::Waiting { until, up: true });
-        assert_eq!(tried.get(), 1);
-
+        let at = |ts: i64, text: &str| Event { ts, ..prompt(text) };
+        let mut chain =
+            |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> { Ok(answered("sub")) };
+        let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
         let home = tempfile::tempdir().unwrap();
         let (mut raw, db) = open(home.path());
         raw.append(&at(now - 660_000, "a")).unwrap();
@@ -2035,7 +1981,7 @@ mod tests {
     }
 
     /// A window that reaches the device's last record is not sent while the owner works: it
-    /// would be sent again and again for every few records. It waits as a subscription does.
+    /// would be sent again and again for every few records.
     #[test]
     fn a_window_at_the_last_record_waits_until_the_owner_stops() {
         let home = tempfile::tempdir().unwrap();
@@ -2047,11 +1993,7 @@ mod tests {
         })
         .unwrap();
         let calls = Cell::new(0);
-        let mut curator = |_: &str,
-                           _: &str,
-                           _: &dyn Fn() -> Option<i64>,
-                           _: &AnswerCheck|
-         -> Result<ChainResult> {
+        let mut curator = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
             calls.set(calls.get() + 1);
             Ok(answered("groq"))
         };
@@ -2124,11 +2066,7 @@ mod tests {
             ),
         ];
         let step = Cell::new(0);
-        let mut chain = |_: &str,
-                         _: &str,
-                         _: &dyn Fn() -> Option<i64>,
-                         _: &AnswerCheck|
-         -> Result<ChainResult> {
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
             let i = step.get();
             step.set(i + 1);
             match script.get(i) {
@@ -2197,11 +2135,7 @@ mod tests {
             prompt: String::new(),
         };
         providers_db::set_pending(&db, &stale).unwrap();
-        let mut chain = |_: &str,
-                         _: &str,
-                         _: &dyn Fn() -> Option<i64>,
-                         _: &AnswerCheck|
-         -> Result<ChainResult> {
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
             Err(went_past(&[("groq", "HTTP 400", Skip::Failed)]))
         };
         let phase = run_phase(
@@ -2228,11 +2162,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let (mut raw, db) = open(home.path());
         raw.append(&prompt("one")).unwrap();
-        let mut chain = |_: &str,
-                         _: &str,
-                         _: &dyn Fn() -> Option<i64>,
-                         _: &AnswerCheck|
-         -> Result<ChainResult> {
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
             Err(went_past(&[("groq", "HTTP 400", Skip::Failed)]))
         };
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
@@ -2267,7 +2197,8 @@ mod tests {
     }
 
     /// A window held until a budget resets is tried again at once when the owner changes the
-    /// providers, their caps or the idle gate: the hold was under the old ones.
+    /// providers or their caps: the hold was under the old ones. `idle_minutes` is not part of
+    /// the request, so it changes no hold.
     #[test]
     fn a_window_held_by_one_chain_is_tried_again_by_another() {
         let home = tempfile::tempdir().unwrap();
@@ -2275,11 +2206,7 @@ mod tests {
         raw.append(&prompt("one")).unwrap();
         let tried = std::cell::Cell::new(0);
         let tomorrow = crate::db::now_ms() + 86_400_000;
-        let mut chain = |_: &str,
-                         _: &str,
-                         _: &dyn Fn() -> Option<i64>,
-                         _: &AnswerCheck|
-         -> Result<ChainResult> {
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
             tried.set(tried.get() + 1);
             Err(went_past(&[(
                 "groq",
@@ -2312,12 +2239,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tried.get(), 2);
-        // A shorter idle gate is another gate too.
         let sooner = Summary {
             idle_minutes: 1,
             ..summary.clone()
         };
-        run_phase(
+        let phase = run_phase(
             &mut raw,
             &kn(),
             &db,
@@ -2325,9 +2251,9 @@ mod tests {
             &sooner,
             "budget 100",
             &mut chain,
-        )
-        .unwrap();
-        assert_eq!(tried.get(), 3);
+        );
+        assert!(matches!(phase.unwrap(), Phase::Waiting { until, .. } if until == tomorrow));
+        assert_eq!(tried.get(), 2);
     }
 
     /// Milestone 2's coverage part, on a replayed day: every seq is in a window op, curated,
@@ -2340,11 +2266,8 @@ mod tests {
             .join("src/testdata/fixtures/long-24h.jsonl");
         crate::replay::run(home.path(), &fixture, None, 0, &[1], "claude").unwrap();
         let (mut raw, db) = open(home.path());
-        let mut curator = |_: &str,
-                           _: &str,
-                           _: &dyn Fn() -> Option<i64>,
-                           _: &AnswerCheck|
-         -> Result<ChainResult> { Ok(answered("fake")) };
+        let mut curator =
+            |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> { Ok(answered("fake")) };
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
         let mut runs = 0;
         while run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap()
@@ -2531,11 +2454,7 @@ mod tests {
             .collect();
         assert!(found.len() > 10 && found.iter().all(|u| all.contains(u)));
         let sent = std::cell::RefCell::new(String::new());
-        let mut chain = |_: &str,
-                         p: &str,
-                         _: &dyn Fn() -> Option<i64>,
-                         _: &AnswerCheck|
-         -> Result<ChainResult> {
+        let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
             *sent.borrow_mut() = p.to_owned();
             let shown = found.iter().find(|u| p.contains(u.as_str())).unwrap();
             let cut = found.iter().find(|u| !p.contains(u.as_str())).unwrap();
@@ -2605,11 +2524,7 @@ mod tests {
             draft("c2", "Sessions leave Postgres here too", json!([old, "c1"])),
             // Repository a: its sibling.
             draft("c3", "We store sessions in Postgres", json!(["c1"]))], "summary": "s"});
-        let mut chain = |_: &str,
-                         _: &str,
-                         _: &dyn Fn() -> Option<i64>,
-                         _: &AnswerCheck|
-         -> Result<ChainResult> {
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
             Ok(ChainResult {
                 output: answer.clone(),
                 ..answered("fake")
@@ -2637,11 +2552,7 @@ mod tests {
         let (mut raw, db) = open(home.path());
         let mut k = crate::knowledge::open(home.path()).unwrap();
         let sent = std::cell::RefCell::new(Vec::new());
-        let mut chain = |_: &str,
-                         p: &str,
-                         _: &dyn Fn() -> Option<i64>,
-                         _: &AnswerCheck|
-         -> Result<ChainResult> {
+        let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
             sent.borrow_mut().push(p.to_owned());
             let output = if sent.borrow().len() == 1 {
                 answer.clone()
@@ -2870,11 +2781,7 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             let (mut raw, db) = open(home.path());
             raw.append(&prompt("one")).unwrap();
-            let mut chain = |_: &str,
-                             _: &str,
-                             _: &dyn Fn() -> Option<i64>,
-                             _: &AnswerCheck|
-             -> Result<ChainResult> {
+            let mut chain = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
                 Ok(ChainResult {
                     output: output.clone(),
                     ..answered("fake")
@@ -2919,11 +2826,7 @@ mod tests {
         })
         .unwrap();
         let sent = std::cell::RefCell::new(Vec::new());
-        let mut chain = |_: &str,
-                         p: &str,
-                         _: &dyn Fn() -> Option<i64>,
-                         _: &AnswerCheck|
-         -> Result<ChainResult> {
+        let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
             sent.borrow_mut().push(p.to_owned());
             Err(went_past(&[("groq", "HTTP 400", Skip::Failed)]))
         };
@@ -2964,11 +2867,7 @@ mod tests {
             "speaker": "assistant proposal", "scope": "repo", "body": "Cache parsed files.",
             "quote": "cache the parsed files", "line": "L2", "supersedes": []});
         let sent = std::cell::RefCell::new(Vec::new());
-        let mut chain = |_: &str,
-                         p: &str,
-                         _: &dyn Fn() -> Option<i64>,
-                         _: &AnswerCheck|
-         -> Result<ChainResult> {
+        let mut chain = |_: &str, p: &str, _: &AnswerCheck| -> Result<ChainResult> {
             sent.borrow_mut().push(p.to_owned());
             let claims = match sent.borrow().len() {
                 1 => json!([proposal]),

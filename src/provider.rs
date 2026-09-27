@@ -38,6 +38,8 @@ const BREAKER_AFTER: u32 = 3;
 const COOLDOWN_BREAKER: Duration = Duration::from_secs(30 * 60);
 /// Longest rest a subscription's own reset can set: a weekly window resets within 7 days.
 const MAX_SUBSCRIPTION_REST: Duration = Duration::from_secs(8 * 24 * 3600);
+/// A subscription at its line that names no reset rests this long, and is then asked again.
+const REST_WITHOUT_RESET: Duration = Duration::from_secs(3600);
 /// Longest cooldown of a 429 that names no reset, reached by doubling from `COOLDOWN_429`.
 const MAX_BACKOFF_429: Duration = Duration::from_secs(3600);
 
@@ -52,8 +54,8 @@ pub struct ChainResult {
 /// Why the chain went past a provider, which the curation phase needs to know (D10, D11).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Skip {
-    /// It may be tried from then on (unix ms): a cooldown (one its failure in this run set too), a
-    /// rate limit's reset, the owner still working (D9).
+    /// It may be tried from then on (unix ms): a cooldown (one its failure in this run set too) or
+    /// a rate limit's reset.
     Wait(i64),
     /// Its budget refuses it until then: a day's or a month's reset.
     Budget(i64),
@@ -167,8 +169,6 @@ pub struct Chain<'a> {
     providers: &'a [Provider],
     db: &'a Connection,
     paid_usd_per_month: f64,
-    /// Until when the owner is still working (D9), asked right before each subscription call.
-    working: Option<&'a dyn Fn() -> Option<i64>>,
     /// `OBOETE_FAIL_PROVIDER=<name>`: that provider fails without a call (fallback proof).
     forced_fail: Option<String>,
     check: Option<&'a AnswerCheck<'a>>,
@@ -180,7 +180,6 @@ impl<'a> Chain<'a> {
             providers,
             db,
             paid_usd_per_month: 5.0,
-            working: None,
             forced_fail: std::env::var("OBOETE_FAIL_PROVIDER").ok(),
             check: None,
         }
@@ -191,15 +190,6 @@ impl<'a> Chain<'a> {
     pub fn check(self, check: &'a AnswerCheck<'a>) -> Self {
         Self {
             check: Some(check),
-            ..self
-        }
-    }
-
-    /// The idle gate (D9): `working` says until when the owner is still working, or `None` once
-    /// they are not. A subscription entry is not called before then.
-    pub fn idle_gate(self, working: &'a dyn Fn() -> Option<i64>) -> Self {
-        Self {
-            working: Some(working),
             ..self
         }
     }
@@ -283,16 +273,6 @@ impl<'a> Chain<'a> {
                 skip(refusal.detail, refusal.skip);
                 continue;
             }
-            // The owner is still working: a subscription waits (D9), a free entry does not.
-            let working = || {
-                p.subscription()
-                    .then(|| self.working.and_then(|working| working()))
-                    .flatten()
-            };
-            if let Some(until) = working() {
-                skip("waiting for the owner to finish".into(), Skip::Wait(until));
-                continue;
-            }
             // A curator CLI that could act on what it reads is not called at all (spec 6.5). After
             // the budget: the probe takes seconds, and a call the budget refuses needs none.
             if let Provider::Cli { cli, .. } = p {
@@ -302,11 +282,6 @@ impl<'a> Chain<'a> {
                     let ms = started.elapsed().as_millis() as i64;
                     record("gate", ms, Some(&gate.why()), false, Usage::default(), None)?;
                     skip(gate.why(), Skip::Owner);
-                    continue;
-                }
-                // The probe can take seconds: asked again right before the call.
-                if let Some(until) = working() {
-                    skip("waiting for the owner to finish".into(), Skip::Wait(until));
                     continue;
                 }
             }
@@ -1245,9 +1220,9 @@ pub(crate) fn curator_env(
 
 /// Check claude's stream (spec 6.5) and pick out its result. The `system/init` event must report
 /// no tool, MCP server or plugin and the permission mode asked for, and no turn may use a tool:
-/// otherwise the answer is discarded, since a curator that can act might have acted. A
-/// `rate_limit_event` with `allowed_warning` or `rejected` rests claude until its reset (Claude
-/// decision C1), and `credits_required` for a day, until the owner acts.
+/// otherwise the answer is discarded, since a curator that can act might have acted.
+/// `credits_required` fails the call and holds claude until the owner acts; how the stream's
+/// `rate_limit_event` rests claude is `claude_rest`'s (Claude decision C1).
 fn claude_stream(stdout: &str) -> Result<String, CallError> {
     // A line that does not parse could be the assistant turn that used a tool: the run is
     // discarded rather than judged on the lines that did parse.
@@ -1316,34 +1291,50 @@ fn claude_stream(stdout: &str) -> Result<String, CallError> {
     Ok(result.to_string())
 }
 
-/// When claude's stream said its subscription should rest: the reset of a `rate_limit_event` with
-/// `allowed_warning` or `rejected` (Claude decision C1), at most `MAX_SUBSCRIPTION_REST` away, or
-/// `OWNER_HOLD` for `credits_required`. Lines that do not parse are passed over: this only ever
-/// adds rest, and a killed run's last line is often cut.
+/// When claude's stream said its subscription should rest (Claude decision C1, at claude-mem's
+/// lines since 2026-09-28, owner delegated): a window's reset once it is used to its line (five
+/// hours 95%, a week 93%, the Sonnet week 92%), or in the last quarter hour of a five-hour window
+/// used to 85%, or once it is rejected; with no utilization or in a window it does not name, once
+/// it warns. With no reset it rests `REST_WITHOUT_RESET`, at most `MAX_SUBSCRIPTION_REST`. Paid
+/// overage rests it at once, until the owner acts when no reset comes with it, and so does
+/// `credits_required`. Lines that do not parse are passed over: this only ever adds rest, and a
+/// killed run's last line is often cut.
 fn claude_rest(stdout: &str) -> Option<i64> {
     let now = db::now_ms();
-    let events = stdout
+    let infos: Vec<Value> = stdout
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|e| e["type"] == "rate_limit_event");
-    if events
-        .clone()
-        .any(|e| e["rate_limit_info"]["errorCode"] == "credits_required")
-    {
+        .filter(|e| e["type"] == "rate_limit_event")
+        .map(|e| e["rate_limit_info"].clone())
+        .collect();
+    let reset = |i: &Value| i["resetsAt"].as_i64().map(|s| s.saturating_mul(1000));
+    if infos.iter().any(|i| {
+        i["errorCode"] == "credits_required" || i["isUsingOverage"] == true && reset(i).is_none()
+    }) {
         return Some(providers_db::OWNER_HOLD);
     }
-    events
-        .filter(|e| {
-            matches!(
-                e["rate_limit_info"]["status"].as_str(),
-                Some("allowed_warning" | "rejected")
-            )
-        })
-        .filter_map(|e| e["rate_limit_info"]["resetsAt"].as_i64())
-        .map(|s| {
-            s.saturating_mul(1000)
-                .min(now + MAX_SUBSCRIPTION_REST.as_millis() as i64)
-        })
+    let rests = |i: &Value| {
+        let window = i["rateLimitType"].as_str().unwrap_or("");
+        // Only the windows claude-mem names have a line; another is judged by its status.
+        let line = match window {
+            "five_hour" | "overage" => Some(0.95),
+            "seven_day" | "seven_day_opus" => Some(0.93),
+            "seven_day_sonnet" => Some(0.92),
+            _ => None,
+        };
+        let ending = window == "five_hour" && reset(i).is_some_and(|t| t - now <= 15 * 60_000);
+        i["status"] == "rejected"
+            || i["isUsingOverage"] == true
+            || match (i["utilization"].as_f64(), line) {
+                (Some(used), Some(line)) => used >= line || ending && used >= 0.85,
+                _ => i["status"] == "allowed_warning",
+            }
+    };
+    infos
+        .iter()
+        .filter(|i| rests(i))
+        .map(|i| reset(i).unwrap_or(now + REST_WITHOUT_RESET.as_millis() as i64))
+        .map(|t| t.min(now + MAX_SUBSCRIPTION_REST.as_millis() as i64))
         .max()
 }
 
@@ -1817,6 +1808,71 @@ mod tests {
         assert!(claude_stream(&used).is_err());
     }
 
+    /// Claude decision C1 at claude-mem's lines (owner delegated, 2026-09-28): a window used to
+    /// its line (five hours 95%, a week 93%, the Sonnet week 92%), the last quarter hour of a
+    /// five-hour window used to 85%, a rejection, or paid overage rests claude until the reset; a
+    /// warning under the line does not. An event with no utilization, or of a window with no line, rests it on a warning.
+    #[test]
+    fn claude_rests_at_claude_mems_usage_lines() {
+        let now_s = db::now_ms() / 1000;
+        let later = now_s + 86_400;
+        let rest = |info: Value| {
+            let rate = json!({"type": "rate_limit_event", "rate_limit_info": info});
+            claude_rest(
+                &[clean_init(), rate, result_of("{}")]
+                    .map(|v| v.to_string())
+                    .join("\n"),
+            )
+        };
+        let at = |status: &str, window: &str, used: f64| {
+            json!({"status": status, "resetsAt": later, "rateLimitType": window,
+                "utilization": used})
+        };
+        // The owner's week on 2026-09-27: a warning at 87%, under the week's line.
+        assert_eq!(rest(at("allowed_warning", "seven_day", 0.87)), None);
+        assert_eq!(
+            rest(at("allowed_warning", "seven_day", 0.93)),
+            Some(later * 1000)
+        );
+        assert_eq!(
+            rest(at("allowed", "seven_day_sonnet", 0.92)),
+            Some(later * 1000)
+        );
+        assert_eq!(rest(at("allowed", "five_hour", 0.94)), None);
+        assert_eq!(rest(at("allowed", "five_hour", 0.95)), Some(later * 1000));
+        assert_eq!(rest(at("rejected", "seven_day", 0.10)), Some(later * 1000));
+        let soon = now_s + 600;
+        let ending = |used: f64| {
+            json!({"status": "allowed", "resetsAt": soon, "rateLimitType": "five_hour",
+                "utilization": used})
+        };
+        assert_eq!(rest(ending(0.85)), Some(soon * 1000));
+        assert_eq!(rest(ending(0.84)), None);
+        let paid = json!({"status": "allowed", "resetsAt": later, "rateLimitType": "overage",
+            "utilization": 0.01, "isUsingOverage": true});
+        assert_eq!(rest(paid), Some(later * 1000));
+        let paid = json!({"status": "allowed", "isUsingOverage": true});
+        assert_eq!(rest(paid), Some(providers_db::OWNER_HOLD));
+        let bare = |status: &str| json!({"status": status, "resetsAt": later});
+        assert_eq!(rest(bare("allowed_warning")), Some(later * 1000));
+        assert_eq!(rest(bare("allowed")), None);
+        // A window claude-mem does not name, or none, has no line: its status decides.
+        for window in ["", "seven_day_haiku"] {
+            assert_eq!(rest(at("allowed", window, 0.99)), None, "{window}");
+            let warned = rest(at("allowed_warning", window, 0.5));
+            assert_eq!(warned, Some(later * 1000), "{window}");
+        }
+        let untyped = json!({"status": "allowed", "resetsAt": later, "utilization": 0.99});
+        assert_eq!(rest(untyped), None);
+        // At its line with no reset: an hour, then claude is asked again.
+        let hour = REST_WITHOUT_RESET.as_millis() as i64;
+        let unset = rest(json!({"status": "rejected", "rateLimitType": "five_hour"})).unwrap();
+        assert!(
+            (now_s * 1000 + hour..=db::now_ms() + hour).contains(&unset),
+            "{unset}"
+        );
+    }
+
     #[test]
     fn a_rate_limit_warning_cools_claude_down_until_its_reset() {
         for status in ["allowed_warning", "rejected"] {
@@ -2133,55 +2189,6 @@ mod tests {
         assert_eq!(usage_cli("claude", &huge.to_string()).prompt, None);
     }
 
-    /// D9: while the owner works, a subscription entry is gone past with the time it may be tried
-    /// from, and a free entry is still called; once they stop, the subscription is called.
-    #[test]
-    fn a_subscription_waits_while_the_owner_works_and_a_free_entry_does_not() {
-        let home = tempfile::tempdir().unwrap();
-        let conn = crate::providers_db::open(home.path()).unwrap();
-        let answer = json!({"choices": [{"message": {"content": "{\"summary\": \"s\"}"}}]});
-        // A 400 sets no cooldown: the free entry's skip is `Failed`.
-        let (free_url, free_request) = serve("400 Bad Request", b"{}".to_vec(), "");
-        let (sub_url, sub_request) = serve_once(answer.to_string().into_bytes(), "");
-        let mut sub = stub(sub_url);
-        if let Provider::Openai {
-            name, subscription, ..
-        } = &mut sub
-        {
-            *name = "sub".into();
-            *subscription = true;
-        }
-        let until = crate::db::now_ms() + 600_000;
-        let working = || Some(until);
-        let providers = [stub(free_url), sub.clone()];
-        let err = Chain::new(&providers, &conn)
-            .idle_gate(&working)
-            .run("curator", "s", "p", &json!({}))
-            .unwrap_err();
-        let failed = err.downcast_ref::<ChainFailed>().expect("a ChainFailed");
-        let skips: Vec<(&str, &Skip)> = failed
-            .0
-            .iter()
-            .map(|f| (f.provider.as_str(), &f.skip))
-            .collect();
-        assert_eq!(
-            skips,
-            [("stub", &Skip::Failed), ("sub", &Skip::Wait(until))]
-        );
-        assert_eq!(failed.0[1].reason, "waiting for the owner to finish");
-        assert!(free_request.try_recv().is_ok(), "the free entry was called");
-        assert!(
-            sub_request.try_recv().is_err(),
-            "the subscription was called"
-        );
-        let idle = || None;
-        let r = Chain::new(std::slice::from_ref(&sub), &conn)
-            .idle_gate(&idle)
-            .run("curator", "s", "p", &json!({}))
-            .unwrap();
-        assert_eq!(r.provider, "sub");
-    }
-
     /// D10, D11: each provider gone past says whether time, a budget reset or the owner will let
     /// it be tried again, or whether it failed.
     #[test]
@@ -2197,7 +2204,7 @@ mod tests {
             } = &mut p
             {
                 *n = name.into();
-                *daily_budget = budget;
+                *daily_budget = Some(budget);
             }
             p
         };
@@ -2508,7 +2515,7 @@ mod tests {
             base_url: url,
             key_file: None,
             model: "m".into(),
-            daily_budget: 10,
+            daily_budget: Some(10),
             timeout_s: 10,
             retry_429: false,
             extra: Default::default(),
@@ -2537,7 +2544,7 @@ mod tests {
             base_url: url,
             key_file: None,
             model: "m".into(),
-            daily_budget: 10,
+            daily_budget: Some(10),
             timeout_s: 10,
             retry_429: false,
             extra: Default::default(),
@@ -2735,37 +2742,6 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(sent, [0, 0]);
-    }
-
-    /// D9: the isolation probe can take seconds, so a subscription CLI is asked about the owner
-    /// again after it. The entry is forced to fail: a missing second check shows as `Failed`,
-    /// and no CLI is ever run.
-    #[test]
-    fn a_subscription_cli_is_asked_about_the_owner_again_after_its_gate() {
-        let home = tempfile::tempdir().unwrap();
-        let conn = crate::providers_db::open(home.path()).unwrap();
-        let claude = Provider::Cli {
-            name: "claude".into(),
-            cli: "claude".into(),
-            model: None,
-            daily_budget: 10,
-            timeout_s: 5,
-            limits: Default::default(),
-        };
-        let until = crate::db::now_ms() + 600_000;
-        let asked = std::cell::Cell::new(0);
-        // Idle when first asked; a hook arrives while the gate runs.
-        let working = || {
-            asked.set(asked.get() + 1);
-            (asked.get() > 1).then_some(until)
-        };
-        let providers = [claude];
-        let mut chain = Chain::new(&providers, &conn).idle_gate(&working);
-        chain.forced_fail = Some("claude".into());
-        let err = chain.run("curator", "s", "p", &json!({})).unwrap_err();
-        let failed = err.downcast_ref::<ChainFailed>().expect("a ChainFailed");
-        assert_eq!(failed.0[0].skip, Skip::Wait(until));
-        assert_eq!(asked.get(), 2);
     }
 
     /// D11: a failure that sets a cooldown passes by itself, so it is a wait, not a failure.

@@ -97,8 +97,9 @@ pub struct Summary {
     /// A window's size in estimated tokens (docs/milestone-3-plan.md D8).
     #[serde(default = "default_window_tokens")]
     pub window_tokens: u32,
-    /// How long after the owner's last hook record a subscription curator still waits (D9). At
-    /// most 30: a longer value is read as 30 (D10, the longest the worker stays up for a wait).
+    /// How long after the owner's last hook record a window that reaches the last record still
+    /// waits for more (D9). At most 30: a longer value is read as 30 (D10, the longest the worker
+    /// stays up for a wait).
     #[serde(default = "default_idle_minutes")]
     pub idle_minutes: u32,
 }
@@ -132,8 +133,9 @@ pub enum Provider {
         #[serde(default)]
         key_file: Option<PathBuf>,
         model: String,
-        #[serde(default = "default_budget")]
-        daily_budget: u32,
+        /// Unset: 300 calls a day, or none for a subscription (owner decision 30).
+        #[serde(default)]
+        daily_budget: Option<u32>,
         #[serde(default = "default_timeout")]
         timeout_s: u64,
         /// On 429 with a near reset, wait and retry once. Off where failed calls count
@@ -149,8 +151,9 @@ pub enum Provider {
         headers: std::collections::BTreeMap<String, String>,
         #[serde(default)]
         limits: Limits,
-        /// Paid by a subscription the owner codes with (OpenCode Go, owner decision 25): it waits
-        /// while the owner works, as a subscription CLI does (docs/milestone-3-plan.md D9).
+        /// Paid by a subscription the owner codes with (OpenCode Go, owner decision 25): its tier
+        /// is a subscription's and it has no daily cap unless it sets one, as a subscription
+        /// CLI (spec 1.4).
         #[serde(default)]
         subscription: bool,
     },
@@ -161,7 +164,8 @@ pub enum Provider {
         cli: String,
         #[serde(default)]
         model: Option<String>,
-        #[serde(default = "default_budget")]
+        /// No cap by default: a subscription has no cap of calls a day (owner decision 30).
+        #[serde(default = "no_daily_cap")]
         daily_budget: u32,
         #[serde(default = "default_cli_timeout")]
         timeout_s: u64,
@@ -247,9 +251,16 @@ impl Provider {
     }
     pub fn daily_budget(&self) -> u32 {
         match self {
-            Provider::Openai { daily_budget, .. } | Provider::Cli { daily_budget, .. } => {
-                *daily_budget
-            }
+            Provider::Openai {
+                daily_budget,
+                subscription,
+                ..
+            } => daily_budget.unwrap_or(if *subscription {
+                no_daily_cap()
+            } else {
+                default_budget()
+            }),
+            Provider::Cli { daily_budget, .. } => *daily_budget,
         }
     }
     pub fn limits(&self) -> &Limits {
@@ -269,7 +280,7 @@ impl Provider {
         }
     }
     /// Whether a call spends a subscription the owner codes with: every CLI, and an API entry
-    /// marked so. Such a call waits while the owner works (D9).
+    /// marked so.
     pub fn subscription(&self) -> bool {
         match self {
             Provider::Openai { subscription, .. } => *subscription,
@@ -286,6 +297,11 @@ impl Provider {
 
 fn default_budget() -> u32 {
     300
+}
+/// A `daily_budget` no day reaches. A subscription stops at its own limits instead: a cooldown
+/// until their reset (spec 3.1, Claude decision C1).
+fn no_daily_cap() -> u32 {
+    u32::MAX
 }
 fn default_timeout() -> u64 {
     90
@@ -324,7 +340,7 @@ fn openai(
         base_url: base_url.into(),
         key_file: Some(home_dir().join(key)),
         model: model.into(),
-        daily_budget,
+        daily_budget: Some(daily_budget),
         timeout_s: default_timeout(),
         retry_429,
         extra: extra.as_object().cloned().unwrap_or_default(),
@@ -357,12 +373,12 @@ fn gemini() -> Provider {
     p
 }
 
-fn cli(name: &str, model: Option<&str>, daily_budget: u32) -> Provider {
+fn cli(name: &str, model: Option<&str>) -> Provider {
     Provider::Cli {
         name: name.into(),
         cli: name.into(),
         model: model.map(Into::into),
-        daily_budget,
+        daily_budget: no_daily_cap(),
         timeout_s: default_cli_timeout(),
         limits: Limits::default(),
     }
@@ -385,7 +401,9 @@ fn default_providers() -> Vec<Provider> {
         "https://opencode.ai/zen/go/v1",
         "OPENCODE_API_KEY.md",
         "glm-5.3-flash",
-        300,
+        // No cap of calls a day (owner decision 30): the owner's Go account does not fall back to
+        // a paid Zen balance past its limits (the owner, 2026-09-28).
+        no_daily_cap(),
         true,
         serde_json::json!({}),
     );
@@ -471,8 +489,8 @@ fn default_providers() -> Vec<Provider> {
             serde_json::json!({"max_tokens": 4000, "chat_template_kwargs": {"enable_thinking": false}}),
         ),
         opencode_go,
-        cli("codex", Some("gpt-6-luna"), 200),
-        cli("claude", Some("haiku"), 200),
+        cli("codex", Some("gpt-6-luna")),
+        cli("claude", Some("haiku")),
     ];
     // Groq free refuses a request over 8,000 tokens (its tokens-a-minute limit is also a ceiling
     // per request; docs/research/curator-providers-2026-09-27.md section 3).
@@ -811,7 +829,7 @@ model = "haiku"
                 .collect::<Vec<_>>()
         };
         assert!(!names("").contains(&"gemini".to_owned()));
-        // D9's subscriptions: every CLI, and OpenCode Go (owner decision 25).
+        // The subscriptions: every CLI, and OpenCode Go (owner decision 25).
         let subscriptions: Vec<String> = load(dir)
             .unwrap()
             .providers
@@ -820,6 +838,28 @@ model = "haiku"
             .map(|p| p.name().to_owned())
             .collect();
         assert_eq!(subscriptions, ["opencode-go", "codex", "claude"]);
+        // The default chain's subscriptions have no cap of calls a day, nor has one the owner
+        // writes without one; another API entry has 300 (owner decision 30).
+        let caps: Vec<u32> = load(dir)
+            .unwrap()
+            .providers
+            .iter()
+            .filter(|p| p.subscription())
+            .map(Provider::daily_budget)
+            .collect();
+        assert_eq!(caps, [u32::MAX; 3]);
+        let own = |entry: &str| toml::from_str::<Provider>(entry).unwrap().daily_budget();
+        assert_eq!(
+            own("kind = \"cli\"\nname = \"codex\"\ncli = \"codex\"\n"),
+            u32::MAX
+        );
+        let api = "kind = \"openai\"\nname = \"go\"\nbase_url = \"u\"\nmodel = \"m\"\n";
+        assert_eq!(own(&format!("{api}subscription = true\n")), u32::MAX);
+        assert_eq!(
+            own(&format!("{api}subscription = true\ndaily_budget = 5\n")),
+            5
+        );
+        assert_eq!(own(api), 300);
         let before = names("gemini = \"before-subscriptions\"\n");
         let at = before.iter().position(|n| n == "gemini").unwrap();
         assert_eq!(before[at - 1], "opencode-go");
