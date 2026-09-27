@@ -528,8 +528,9 @@ mod tests {
                 body.len()
             )
             .unwrap();
+            // A refused request may be reset rather than closed: its body was never read.
             let mut answer = String::new();
-            c.read_to_string(&mut answer).unwrap();
+            c.read_to_string(&mut answer).ok()?;
             let item = answer
                 .lines()
                 .filter_map(|l| l.strip_prefix("data: "))
@@ -634,8 +635,17 @@ mod tests {
         // Idle connections take every handler; one more is closed unread.
         let idle: Vec<TcpStream> = (0..HANDLERS).map(|_| connect()).collect();
         std::thread::sleep(std::time::Duration::from_millis(200));
+        // Closed (Linux, macOS) or reset (Windows), but not left waiting.
         let mut extra = connect();
-        assert_eq!(extra.read(&mut [0u8; 16]).unwrap(), 0);
+        match extra.read(&mut [0u8; 16]) {
+            Ok(0) => {}
+            Err(e)
+                if !matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            other => panic!("the connection past the cap was answered or kept: {other:?}"),
+        }
         drop(idle);
         std::thread::sleep(std::time::Duration::from_millis(200));
         // Codex is answered again.
