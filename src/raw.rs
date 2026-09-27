@@ -430,6 +430,22 @@ impl Raw {
             }))
     }
 
+    /// The agent and session labels of `device`'s event `seq`, NUL between (how `curate` keys a
+    /// session), from the row alone: no body is read.
+    pub fn session_key(&self, device: &str, seq: i64) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let labels: Option<(Option<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT agent, session FROM records WHERE device = ?1 AND seq = ?2
+                   AND type = 'event'",
+                params![device, seq],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(labels.map(|(a, s)| format!("{}\u{0}{}", a.unwrap_or_default(), s.unwrap_or_default())))
+    }
+
     /// The typed prompts and harness envelopes this device recorded in one agent's session (Task
     /// 11). A scan by label: sessions have no index (spec 1.6).
     pub fn turns(&self, agent: &str, session: &str) -> Result<i64> {

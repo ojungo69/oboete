@@ -976,16 +976,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<Strin
             sessions.push((&l.key, l.repo.as_deref()));
         }
     }
-    let session_of = |device: &str, seq: i64| -> Result<Option<String>> {
-        Ok(raw
-            .after(device, seq - 1, 1)?
-            .into_iter()
-            .find(|r| r.seq == seq)
-            .and_then(|r| match r.item {
-                Item::Event(e) => Some(format!("{}\u{0}{}", e.agent, e.session)),
-                _ => None,
-            }))
-    };
+    let session_of = |device: &str, seq: i64| raw.session_key(device, seq);
     let mut out = String::new();
     for (key, repo) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
@@ -1005,9 +996,15 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<Strin
                 .filter(|c| c.kind == "open item")
                 .collect();
             open.reverse(); // the newest first
-            for c in open.into_iter().take(50) {
+            let mut shown = 0;
+            for c in open {
+                if shown == 50 {
+                    break;
+                }
+                // The session's own, before the cap: other sessions' newer items never hide it.
                 if session_of(&c.device, c.seq)?.as_deref() == Some(key) {
                     lines.push(format!("open item {}: {}", c.uid, gate(&c.body)));
+                    shown += 1;
                 }
             }
         }
@@ -1026,7 +1023,12 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<Strin
             }
         }
         if !lines.is_empty() {
-            out.push_str(&format!("### {}\n{}\n", gate(agent), lines.join("\n")));
+            // As the window's own heading names the session, so the curator can pair them.
+            let heading: String = format!("{} session {}", gate(agent), gate(session))
+                .chars()
+                .take(HEADING_CHARS)
+                .collect();
+            out.push_str(&format!("### {heading}\n{}\n", lines.join("\n")));
         }
     }
     Ok(out)
@@ -2110,6 +2112,37 @@ mod tests {
         assert_eq!(bodies, ["We store sessions in Postgres."]);
     }
 
+    #[test]
+    fn a_sessions_own_open_items_are_carried_past_other_sessions_newer_ones() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = crate::raw::open(home.path()).unwrap();
+        let open = |raw: &mut Raw, session: &str, text: &str| {
+            let (kind, mut op) = kept(raw, session, "r", text);
+            op["kind"] = "open item".into();
+            op["status"] = "proposed".into();
+            (kind, op)
+        };
+        let mut ops = vec![open(&mut raw, "s", "The importer drops empty lines.")];
+        for i in 0..50 {
+            ops.push(open(
+                &mut raw,
+                "t",
+                &format!("Item {i} of the other session."),
+            ));
+        }
+        raw.append_ops(&ops).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        consume(&raw, &mut k);
+        let dev = raw.device().to_owned();
+        let rules = Rules::default();
+        let w = next_window(&raw, &dev, 100_000, &rules).unwrap().unwrap();
+        let text = carried(&raw, &k, &rules, &w).unwrap();
+        let item = |l: &str| {
+            l.starts_with("open item ") && l.ends_with(": The importer drops empty lines.")
+        };
+        assert!(text.lines().any(item), "{text}");
+    }
+
     /// Spec 3.3: a tool output's text reaches the prompt only between the fence lines, which
     /// it cannot contain.
     #[test]
@@ -2271,8 +2304,17 @@ mod tests {
         run_phase(&mut raw, &k, &db, &rules, &summary, "", &mut chain).unwrap();
         let sent = sent.borrow();
         assert!(!sent[1].contains("Cache parsed files."), "{}", sent[1]);
+        // Each session's block is headed as its lines are, so the curator can pair them.
+        assert!(
+            sent[1].contains("### claude session t\ngoal: Something else."),
+            "{}",
+            sent[1]
+        );
         let third = &sent[2];
-        assert!(third.contains("goal: Build the importer."), "{third}");
+        assert!(
+            third.contains("### claude session s\ngoal: Build the importer."),
+            "{third}"
+        );
         assert!(third.contains("proposed before "), "{third}");
         assert!(third.contains(": Cache parsed files."), "{third}");
     }
