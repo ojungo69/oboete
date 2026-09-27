@@ -353,6 +353,34 @@ pub fn outbound_with(text: &str, rules: &Rules) -> String {
     scan(&crate::hook::strip_blocks(text, false), rules).0
 }
 
+/// `outbound_with` of `text[range]`, one part of the whole `text` a window cut (spec 3.1, issue
+/// #54): a secret or a `<private>`-style block the whole text holds is hidden in the part too,
+/// also where the cut splits it. `range` is on character boundaries.
+pub fn outbound_part(text: &str, range: std::ops::Range<usize>, rules: &Rules) -> String {
+    if range == (0..text.len()) {
+        return outbound_with(text, rules);
+    }
+    let found = spans(text, rules);
+    // Past the cap the whole text is one mask (`coalesce`), and so is each part of it.
+    if found.len() > MAX_FINDINGS {
+        return MASK.to_string();
+    }
+    let mut hidden: Vec<(usize, usize)> = crate::hook::block_ranges(text);
+    hidden.extend(found.into_iter().map(|(s, e, _)| (s, e)));
+    hidden.sort_unstable();
+    let (mut part, mut pos) = (String::with_capacity(range.len()), range.start);
+    for (s, e) in hidden {
+        let (s, e) = (s.max(pos), e.min(range.end));
+        if s < e {
+            part.push_str(&text[pos..s]);
+            part.push_str(MASK);
+            pos = e;
+        }
+    }
+    part.push_str(&text[pos..range.end]);
+    outbound_with(&part, rules)
+}
+
 /// v1's import into oboete.db (`hook::clip`): the bundled rules only. Hooks go through
 /// `capture` and its settings.
 pub fn redact(text: &str) -> String {
@@ -1330,6 +1358,18 @@ mod tests {
         let s = "日本語の説明。トークンは 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 です。";
         let r = redact(s);
         assert_eq!(r, "日本語の説明。トークンは [REDACTED] です。");
+    }
+
+    #[test]
+    fn a_part_of_a_text_masked_whole_is_masked_whole() {
+        let rules = user(
+            "[redaction]\nextra_rules = [{ id = \"a\", regex = 'a1' }, { id = \"b\", regex = 'b1' }]\n",
+        )
+        .unwrap();
+        // Each rule matches 600 times, below its own cap; together they pass `MAX_FINDINGS`.
+        let text = "a1 b1 plain ".repeat(600);
+        assert_eq!(outbound_with(&text, &rules), MASK);
+        assert_eq!(outbound_part(&text, 0..120, &rules), MASK);
     }
 
     fn user(toml: &str) -> anyhow::Result<Rules> {

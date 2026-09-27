@@ -8,6 +8,7 @@ mod budget;
 mod capture;
 mod config;
 mod consumer;
+mod curate;
 mod db;
 mod embed;
 mod failure;

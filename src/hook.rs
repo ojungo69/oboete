@@ -701,6 +701,32 @@ pub(crate) fn without_blocks(s: &str, unclosed_private_hides_rest: bool) -> Stri
 /// without a closer is kept as text, except with `hide_unclosed`, where the text stops at the
 /// first one. Linear in the input, so a prompt full of stray openers cannot stall the hook.
 fn strip_tag(s: &str, tag: &str, hide_unclosed: bool) -> String {
+    let (blocks, end) = tag_blocks(s, tag, hide_unclosed);
+    let (mut out, mut pos) = (String::with_capacity(s.len()), 0);
+    for (start, stop) in blocks {
+        if start >= end {
+            break;
+        }
+        if start >= pos {
+            out.push_str(&s[pos..start]);
+            pos = stop;
+        }
+    }
+    out.push_str(&s[pos.min(end)..end]);
+    out
+}
+
+/// The byte ranges `without_blocks(s, false)` removes, each tag found in `s` as it is: what a part
+/// of `s` must hide when a cut splits a block (`redact::outbound_part`).
+pub(crate) fn block_ranges(s: &str) -> Vec<(usize, usize)> {
+    STRIP_BLOCKS
+        .iter()
+        .flat_map(|tag| tag_blocks(s, tag, false).0)
+        .collect()
+}
+
+/// `tag`'s paired blocks in `s`, sorted, and where its text ends (see `strip_tag`).
+fn tag_blocks(s: &str, tag: &str, hide_unclosed: bool) -> (Vec<(usize, usize)>, usize) {
     let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
     let mut marks: Vec<(usize, bool)> = s
         .match_indices(&open)
@@ -723,18 +749,7 @@ fn strip_tag(s: &str, tag: &str, hide_unclosed: bool) -> String {
         _ => s.len(),
     };
     blocks.sort_unstable();
-    let (mut out, mut pos) = (String::with_capacity(s.len()), 0);
-    for (start, stop) in blocks {
-        if start >= end {
-            break;
-        }
-        if start >= pos {
-            out.push_str(&s[pos..start]);
-            pos = stop;
-        }
-    }
-    out.push_str(&s[pos.min(end)..end]);
-    out
+    (blocks, end)
 }
 
 /// What follows `<tag` makes it the tag (`<privateer>` is not `<private`).
