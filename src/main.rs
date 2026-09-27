@@ -258,8 +258,12 @@ fn run(cmd: Cmd, home: PathBuf) -> Result<()> {
     }
     // The egress gate (`redact::outbound`) applies the user's rules as they are now (spec 6.4).
     // Hooks load them per call inside their fail-open boundary; doctor and setup report a
-    // broken `[redaction]` table instead of stopping on it.
-    if !matches!(&cmd, Cmd::Hook { .. } | Cmd::Doctor | Cmd::Setup { .. }) {
+    // broken `[redaction]` table instead of stopping on it, and inject still prints the
+    // recording-failure line such a table causes (OpenCode reads its context there).
+    if !matches!(
+        &cmd,
+        Cmd::Hook { .. } | Cmd::Doctor | Cmd::Setup { .. } | Cmd::Inject { .. }
+    ) {
         redact::set_home(&home)?;
     }
     match cmd {
