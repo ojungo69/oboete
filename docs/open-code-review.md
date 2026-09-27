@@ -45,8 +45,9 @@ secrets fails before installing or calling OpenCodeReview.
   billing cap; a final round may exceed it, and unfinished files are reported.
 - Findings are advisory. A successful job means the tool ran, not that the PR is
   defect-free or every file was reviewed. Inspect the summary for partial results.
-- Existing inline findings are preserved; overlapping findings are not posted
-  repeatedly. Review threads are not automatically resolved. Raw reports are not
+- Existing inline findings are preserved. Each run may add findings on the same
+  lines, so a different problem is not hidden by line-based deduplication.
+  Review threads are not automatically resolved. Raw reports are not
   uploaded as artifacts; review output remains in the Actions log and PR comments.
 
 `pull_request_target` and default-branch dispatch keep the working tree on trusted

@@ -80,7 +80,8 @@ jobs:
           language: Japanese
           review_concurrency: '2'
           max_tokens_budget: '100000'
-          incremental: 'true'
+          # Line overlap alone does not prove two findings describe the same problem.
+          incremental: 'false'
           upload_artifacts: 'false'
           base_ref: ${{ steps.pr.outputs.base_ref }}
           head_sha: ${{ steps.pr.outputs.head_sha }}
