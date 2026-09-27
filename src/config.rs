@@ -182,6 +182,26 @@ fn default_max_output_tokens() -> u32 {
 }
 
 impl Provider {
+    /// The output tokens a request reserves on top of its prompt: `max_tokens` or
+    /// `max_completion_tokens` in `extra`, at most `max_output_tokens` on a paid entry (as
+    /// `provider::call` sends it), or 0 when it names none.
+    pub fn declared_output(&self) -> u32 {
+        let Provider::Openai { extra, limits, .. } = self else {
+            return 0;
+        };
+        let declared = ["max_tokens", "max_completion_tokens"]
+            .iter()
+            .filter_map(|k| extra.get(*k)?.as_u64())
+            .max();
+        let cap = u64::from(limits.max_output_tokens);
+        let n = match (declared, limits.is_paid()) {
+            (Some(n), true) => n.min(cap),
+            (None, true) => cap,
+            (Some(n), false) => n,
+            (None, false) => 0,
+        };
+        u32::try_from(n).unwrap_or(u32::MAX)
+    }
     pub fn name(&self) -> &str {
         match self {
             Provider::Openai { name, .. } | Provider::Cli { name, .. } => name,

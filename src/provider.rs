@@ -149,7 +149,7 @@ impl<'a> Chain<'a> {
         let mut fallbacks = Vec::new();
         let est = budget::estimate(prompt);
         // A ceiling a provider refused this request at (413): its peers with it are skipped.
-        let mut ceiling_hit = None;
+        let mut ceiling_hit = Vec::new();
         for p in self.providers {
             let name = p.name().to_string();
             let record = |outcome: &str, ms: i64, detail: Option<&str>, sent: bool, usage| {
@@ -185,7 +185,7 @@ impl<'a> Chain<'a> {
                 self.providers,
                 tokens,
                 self.paid_usd_per_month,
-                ceiling_hit,
+                &ceiling_hit,
             )?;
             if let Some(refusal) = admit {
                 record(
@@ -260,7 +260,7 @@ impl<'a> Chain<'a> {
                 }
                 Err(e) => {
                     if e.status == Some(413) {
-                        ceiling_hit = p.limits().max_request_tokens;
+                        ceiling_hit.extend(p.limits().max_request_tokens);
                     }
                     let outcome = if e.invalid() { "invalid" } else { "error" };
                     record(outcome, ms, Some(&e.message), !forced && e.sent, e.usage)?;

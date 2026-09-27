@@ -55,7 +55,7 @@ pub fn admit(
     providers: &[Provider],
     tokens: f64,
     paid_usd_per_month: f64,
-    ceiling_hit: Option<u32>,
+    ceiling_hit: &[u32],
 ) -> Result<Option<Refusal>> {
     let name = p.name();
     let limits = p.limits();
@@ -66,17 +66,19 @@ pub fn admit(
             detail: format!("{used}/{} calls today", p.daily_budget()),
         }));
     }
+    // The provider reserves the declared output too: a prompt that fits alone can still be refused.
+    let reserved = tokens + f64::from(p.declared_output());
     if let Some(max) = limits.max_request_tokens {
-        if ceiling_hit == Some(max) {
+        if ceiling_hit.contains(&max) {
             return Ok(Some(Refusal {
                 outcome: "too_big",
                 detail: format!("an entry with the same {max}-token ceiling refused it"),
             }));
         }
-        if tokens > f64::from(max) * CEILING_SHARE {
+        if reserved > f64::from(max) * CEILING_SHARE {
             return Ok(Some(Refusal {
                 outcome: "too_big",
-                detail: format!("about {tokens:.0} tokens, over its {max}"),
+                detail: format!("about {reserved:.0} tokens, over its {max}"),
             }));
         }
     }
@@ -90,7 +92,7 @@ pub fn admit(
     }
     if let (Some(left), Some(at)) = (rate.tokens, rate.tokens_reset_at)
         && at > now
-        && (left as f64) < tokens
+        && (left as f64) < reserved
     {
         return Ok(Some(Refusal {
             outcome: "budget",
@@ -220,23 +222,30 @@ mod tests {
         );
         let chain = std::slice::from_ref(&groq);
         assert!(
-            admit(&db, &groq, chain, 7000.0, 5.0, None)
+            admit(&db, &groq, chain, 7000.0, 5.0, &[])
                 .unwrap()
                 .is_none()
         );
-        let r = admit(&db, &groq, chain, 7700.0, 5.0, None)
-            .unwrap()
-            .unwrap();
+        let r = admit(&db, &groq, chain, 7700.0, 5.0, &[]).unwrap().unwrap();
         assert_eq!(r.outcome, "too_big"); // over 95% of the ceiling
-        let r = admit(&db, &groq, chain, 100.0, 5.0, Some(8000))
+        let r = admit(&db, &groq, chain, 100.0, 5.0, &[4000, 8000])
             .unwrap()
             .unwrap();
         assert_eq!(r.outcome, "too_big");
         assert!(
-            admit(&db, &groq, chain, 100.0, 5.0, Some(4000))
+            admit(&db, &groq, chain, 100.0, 5.0, &[4000])
                 .unwrap()
                 .is_none()
         );
+        // A declared output is reserved too: 7,000 in and 4,000 out do not fit in 8,000.
+        let mut declared = groq.clone();
+        if let Provider::Openai { extra, .. } = &mut declared {
+            extra.insert("max_completion_tokens".into(), 4000.into());
+        }
+        let r = admit(&db, &declared, chain, 7000.0, 5.0, &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.outcome, "too_big");
     }
 
     #[test]
@@ -252,8 +261,8 @@ mod tests {
         );
         call(&db, "p", None, 7000, 1000);
         let chain = std::slice::from_ref(&p);
-        assert!(admit(&db, &p, chain, 1500.0, 5.0, None).unwrap().is_none());
-        let r = admit(&db, &p, chain, 2500.0, 5.0, None).unwrap().unwrap();
+        assert!(admit(&db, &p, chain, 1500.0, 5.0, &[]).unwrap().is_none());
+        let r = admit(&db, &p, chain, 2500.0, 5.0, &[]).unwrap().unwrap();
         assert_eq!(
             (r.outcome, r.detail.as_str()),
             ("budget", "8000/10000 tokens today")
@@ -283,18 +292,18 @@ mod tests {
         assert!((spent_this_month(&db, &chain).unwrap() - 4.63).abs() < 1e-9);
         // 10,000 in (0.01) and up to 4,000 out (0.04): 4.68, inside 5.
         assert!(
-            admit(&db, &chain[0], &chain, 10_000.0, 5.0, None)
+            admit(&db, &chain[0], &chain, 10_000.0, 5.0, &[])
                 .unwrap()
                 .is_none()
         );
         // Just below the cap, the same call could cross it by its answer alone.
         call(&db, "b", None, 0, 33_000);
-        let r = admit(&db, &chain[1], &chain, 10_000.0, 5.0, None)
+        let r = admit(&db, &chain[1], &chain, 10_000.0, 5.0, &[])
             .unwrap()
             .unwrap();
         assert_eq!(r.outcome, "budget");
         assert!(
-            admit(&db, &chain[2], &chain, 10_000.0, 5.0, None)
+            admit(&db, &chain[2], &chain, 10_000.0, 5.0, &[])
                 .unwrap()
                 .is_none()
         );
