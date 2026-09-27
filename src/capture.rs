@@ -3,8 +3,6 @@
 //! kept whole up to `MAX_FIELD_BYTES`, head and tail above it; every stored string loses its
 //! `<private>`-style blocks and is scanned in full; images and other base64 content become a
 //! marker; git fields are read from files, never from `git`.
-//! Agents move here one by one: `PORTED` lists those done, and the others still go through
-//! `hook::handle` into v1's store until their port lands.
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -13,8 +11,6 @@ use std::path::Path;
 use crate::hook::{compact, field, is_envelope, str_field, strip_blocks, without_blocks};
 use crate::raw::Event;
 use crate::{redact, repo};
-
-pub const PORTED: &[&str] = &["claude", "codex", "pi", "opencode", "grok", "agy", "cursor"];
 
 /// Bytes a stored string keeps before only its head and tail are kept (spec 2.4, plan D4): the
 /// largest of 64, 128 and 256 KB whose hook p95 on the slowest machine stays within the line.

@@ -1,6 +1,6 @@
 //! Replay a JSONL fixture (one `{seq, agent, event, session, payload}` per line) through the
-//! hook path, then run observe, and report what the spike must prove: hook latency, resident
-//! size, summarizer success and fallback counts.
+//! hook path, and report what M14 must prove: hook latency in process and spawned, backup export
+//! time per segment, and resident size.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -8,7 +8,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-use crate::{db, hook, observe};
+use crate::{db, hook};
 
 const ROOT_PLACEHOLDER: &str = "__OBOETE_REPLAY_ROOT__";
 
@@ -35,19 +35,15 @@ pub fn run(
     let root_json = &root_json[1..root_json.len() - 1];
     let text =
         std::fs::read_to_string(fixture).with_context(|| format!("read {}", fixture.display()))?;
-    // Each store is opened on the first event that needs it: a replay of ported agents never
-    // touches v1's oboete.db, and one of unported agents never creates raw.db.
-    let mut conn: Option<rusqlite::Connection> = None;
+    // Opened on the first event replayed: a fixture with none of the agent's events creates no
+    // store.
     let mut raw: Option<crate::raw::Raw> = None;
     // Loaded once: the in-process loop measures the store; the spawned hooks below load it each.
     let settings = crate::capture::Settings::load(home)?;
     let clock = rusqlite::Connection::open_in_memory()?;
 
-    // 1. In-process hook path: pure store cost per event. Ported agents write Design B's
-    // raw.db (milestone 2 Task 2), the others still v1's store.
+    // 1. In-process hook path: pure store cost per event.
     let mut micros: Vec<u128> = Vec::new();
-    let mut injected = 0u32;
-    let mut v1_events = 0usize;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let line = line.replace(ROOT_PLACEHOLDER, root_json);
         let v: Value = serde_json::from_str(&line)?;
@@ -59,39 +55,22 @@ pub fn run(
         }
         let event = v["event"].as_str().unwrap_or("");
         let started = Instant::now();
-        let out = if crate::capture::PORTED.contains(&ev_agent) {
-            let ts = fixture_ms(&clock, &v["ts"]).unwrap_or_else(db::now_ms);
-            if raw.is_none() {
-                raw = Some(crate::raw::open(home)?);
-            }
-            hook::record(
-                home,
-                raw.as_mut().expect("opened"),
-                ev_agent,
-                event,
-                &v["payload"],
-                ts,
-                &settings,
-            )?;
-            None
-        } else {
-            v1_events += 1;
-            if conn.is_none() {
-                conn = Some(db::open(home)?);
-            }
-            hook::handle(
-                conn.as_ref().expect("opened"),
-                ev_agent,
-                event,
-                &v["payload"],
-            )?
-        };
-        micros.push(started.elapsed().as_micros());
-        if out.as_deref().is_some_and(|s| s != "{}") {
-            injected += 1;
+        let ts = fixture_ms(&clock, &v["ts"]).unwrap_or_else(db::now_ms);
+        if raw.is_none() {
+            raw = Some(crate::raw::open(home)?);
         }
+        hook::record(
+            home,
+            raw.as_mut().expect("opened"),
+            ev_agent,
+            event,
+            &v["payload"],
+            ts,
+            &settings,
+        )?;
+        micros.push(started.elapsed().as_micros());
     }
-    drop((conn, raw));
+    drop(raw);
 
     // 2. Real process spawns: startup + open + redaction + insert + the worker-lock attempt,
     // what the agent actually waits for, per tool-output size (M14). The replayed agent's hook.
@@ -116,15 +95,6 @@ pub fn run(
     export_us.sort_unstable();
     segment_kb.sort_unstable();
 
-    // 4. Summarize what v1's store captured (in-process; nothing spawns here). observe reads only
-    // oboete.db: ported agents' raw records wait for milestone 3's curation, so a replay of them
-    // alone reports no summary rather than a summary of nothing.
-    let stats = if v1_events > 0 {
-        Some(observe::run(home, 0)?)
-    } else {
-        None
-    };
-
     micros.sort_unstable();
     let report = json!({
         "events": micros.len(),
@@ -132,9 +102,6 @@ pub fn run(
         "hook_spawn_ms": spawns,
         "backup_export": {"segments": export_us.len(), "ms": stats_ms(&export_us), "segment_kb": {"p50": pct(&segment_kb, 50), "max": segment_kb.last().copied().unwrap_or(0)}},
         "vmhwm_kb": crate::observe::vmhwm_kb(),
-        "session_start_injections": injected,
-        "observe": stats,
-        "observe_covers": format!("the {v1_events} events of agents not in capture::PORTED {:?}", crate::capture::PORTED),
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
