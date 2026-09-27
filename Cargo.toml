@@ -23,6 +23,7 @@ tokio = { version = "1", features = ["rt", "io-std"] }
 toml_edit = "0.23"
 ureq = { version = "3.4.2", features = ["json"] }
 zstd = "0.14"
+unicode-normalization = "0.1.25"
 
 # A timed-out CLI is killed with its process group (provider::kill_tree); already in the tree.
 [target.'cfg(unix)'.dependencies]

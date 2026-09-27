@@ -41,6 +41,10 @@ pub struct ClaimOp {
     /// (Task 8). Empty for other kinds, and in an op written before the gates, which has none.
     #[serde(default)]
     pub why: String,
+    /// A proposal whose words came from tool content (MUST-M4): an acceptance in the session's
+    /// next window does not promote it (#144).
+    #[serde(default)]
+    pub tainted: bool,
 }
 
 /// Spec 3.2's kinds.

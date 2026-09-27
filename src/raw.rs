@@ -446,6 +446,23 @@ impl Raw {
         Ok(labels.map(|(a, s)| format!("{}\u{0}{}", a.unwrap_or_default(), s.unwrap_or_default())))
     }
 
+    /// Typed prompts and replies of `agent`'s `session` on this device strictly between two seqs:
+    /// none when a proposal was the session's last turn before a window (milestone 3 Task 8).
+    pub fn turns_between(
+        &self,
+        agent: &str,
+        session: &str,
+        after: i64,
+        before: i64,
+    ) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM records WHERE device = ?1 AND seq > ?2 AND seq < ?3
+               AND type = 'event' AND agent = ?4 AND session = ?5 AND kind IN ('prompt', 'reply')",
+            params![self.device, after, before, agent, session],
+            |r| r.get(0),
+        )?)
+    }
+
     /// The typed prompts and harness envelopes this device recorded in one agent's session (Task
     /// 11). A scan by label: sessions have no index (spec 1.6).
     pub fn turns(&self, agent: &str, session: &str) -> Result<i64> {
