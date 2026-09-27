@@ -318,6 +318,72 @@ mod tests {
     }
 
     #[test]
+    fn a_uri_password_a_cookie_and_an_authorization_token_are_masked() {
+        // Split literals: secret scanners flag whole ones in the repository.
+        let pass = format!("hunter{}", "22");
+        let cookie = format!("sid={}; Path=/; HttpOnly", "q9Zx8mL2vB4n");
+        let token = format!("q9Zx8mL2{}", "vB4nR7tYw");
+        let cases = [
+            (
+                format!("psql postgres://app:{pass}@db.internal:5432/prod"),
+                "psql postgres://app:[REDACTED]@db.internal:5432/prod".to_string(),
+            ),
+            (
+                format!("redis-cli -u redis://:{pass}@cache:6379"),
+                "redis-cli -u redis://:[REDACTED]@cache:6379".to_string(),
+            ),
+            (
+                format!("< Set-Cookie: {cookie}"),
+                "< Set-Cookie: [REDACTED]".to_string(),
+            ),
+            (
+                format!("-H 'Authorization: Token {token}'"),
+                "-H 'Authorization: Token [REDACTED]'".to_string(),
+            ),
+            (
+                format!("Proxy-Authorization: {token}"),
+                "Proxy-Authorization: [REDACTED]".to_string(),
+            ),
+            (
+                format!("Set-Cookie: sid=\"{token}\"; Path=/"),
+                "Set-Cookie: [REDACTED]".to_string(),
+            ),
+            (
+                format!("-H \"Cookie: sid={token}\" https://x.invalid/"),
+                "-H \"Cookie: [REDACTED]\" https://x.invalid/".to_string(),
+            ),
+            (
+                format!("Authorization: Digest username=\"u\", nonce=\"n\", response=\"{token}\""),
+                "Authorization: Digest [REDACTED]".to_string(),
+            ),
+            (
+                format!("Authorization: AWS4-HMAC-SHA256 Credential=a/b, Signature={token}"),
+                "Authorization: AWS4-HMAC-SHA256 [REDACTED]".to_string(),
+            ),
+            (
+                format!("Authorization: foo+bar_v2 {token}"),
+                "Authorization: foo+bar_v2 [REDACTED]".to_string(),
+            ),
+            (
+                format!("Authorization: Digest username=\"a\\\"b\", response=\"{token}\""),
+                "Authorization: Digest [REDACTED]".to_string(),
+            ),
+        ];
+        for (text, masked) in &cases {
+            assert_eq!(&redact(text), masked);
+        }
+        // Not credentials: a user with no password, an address in a query, prose.
+        for text in [
+            "git clone ssh://git@github.com/o/r.git",
+            "https://host:8080/p?mail=me@example.com",
+            "Authorization: required for admins",
+            "Cookie: stored by the browser",
+        ] {
+            assert_eq!(redact(text), text);
+        }
+    }
+
+    #[test]
     fn overlapping_rules_mask_the_whole_token() {
         // gitlab-pat (20 chars after the prefix) and gitlab-pat-routable (the full token)
         // start at the same place; the longer match must win, not leave a suffix.
