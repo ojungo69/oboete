@@ -715,7 +715,10 @@ fn headless_command(
             if let Some(m) = model {
                 cmd.args(["--model", m]);
             }
-            Some(prompt.to_owned())
+            // claude -p reads a file named by `@<path>` in the prompt into the turn itself, with no
+            // tool (2.1.283, 2026-09-27): a planted `@~/.ssh/id_ed25519` would be sent and could
+            // come back in a summary. No `@` reaches it; U+FF20 reads the same.
+            Some(prompt.replace('@', "\u{FF20}"))
         }
         "grok" => {
             cmd.arg("--prompt-file").arg(write("task.md", prompt)?);
@@ -1012,6 +1015,14 @@ mod tests {
         let file = table["model_instructions_file"].as_str().unwrap();
         assert_eq!(Path::new(file), dir.join("instructions.md"));
         assert_eq!(std::fs::read_to_string(file).unwrap(), CURATOR_SYSTEM);
+    }
+
+    #[test]
+    fn claude_never_sees_an_at_sign_it_would_read_as_a_file() {
+        let scratch = scratch_dir().unwrap();
+        let (_, stdin) =
+            headless_command("claude", None, &scratch.0, "look at @/etc/hostname", "{}").unwrap();
+        assert_eq!(stdin.unwrap(), "look at \u{FF20}/etc/hostname");
     }
 
     #[test]
