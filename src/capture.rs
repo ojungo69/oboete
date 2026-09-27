@@ -250,8 +250,8 @@ fn capture(
 /// it.
 pub fn directive(text: &str, ts: i64, settings: &Settings) -> Captured {
     let payload = json!({"session_id": "owner"});
-    // As a typed prompt: an opted-out part is never stored.
-    let body = json!({"text": strip_blocks(text, true), "scope": "global"});
+    // As a typed prompt: an opted-out part is never stored, and binary content is its marker.
+    let body = json!({"text": base64_runs(&strip_blocks(text, true)), "scope": "global"});
     let mut c = capture("oboete", "directive", body, &payload, ts, settings);
     c.event.repo = None;
     c.event.cwd = None;

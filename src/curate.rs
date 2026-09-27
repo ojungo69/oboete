@@ -3077,6 +3077,14 @@ mod tests {
             .collect();
         assert_eq!(stored.len(), 2);
         assert!(stored.iter().all(|l| !l.contains("acme")), "{stored:?}");
+        // Binary content becomes its marker, as in a typed prompt.
+        let logo = "Use data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAE= as the logo.";
+        crate::claims::pref_add(home.path(), logo).unwrap();
+        let stored = raw.export_lines(0, 1 << 20).unwrap();
+        assert!(
+            stored.iter().all(|(_, l)| !l.contains("iVBORw0KGgo")),
+            "{stored:?}"
+        );
         let (seq, ops) = (raw.max_seq().unwrap(), raw.max_op_seq().unwrap());
         let long = "word ".repeat(250);
         for text in [long.as_str(), "<private>all of it</private>"] {
