@@ -396,7 +396,11 @@ pub fn hidden(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
     let mut from: Vec<(usize, usize)> = (0..text.len()).map(|i| (i, i + 1)).collect();
     let mut hidden = Vec::new();
     for tag in crate::hook::STRIP_BLOCKS {
-        let (blocks, _) = crate::hook::tag_blocks(&work, tag, false);
+        let blocks = if *tag == "claude-mem-context" {
+            crate::hook::memory_context_blocks(&work)
+        } else {
+            crate::hook::tag_blocks(&work, tag, false).0
+        };
         let (mut next, mut next_from, mut pos) = (String::new(), Vec::new(), 0);
         for (s, e) in blocks {
             if s < pos {
@@ -412,17 +416,6 @@ pub fn hidden(text: &str, rules: &Rules) -> Option<Vec<(usize, usize)>> {
         next.push_str(&work[pos..]);
         next_from.extend_from_slice(&from[pos..]);
         (work, from) = (next, next_from);
-        if *tag == "claude-mem-context" {
-            let (start, end) = crate::hook::memory_context_cut(&work);
-            if start > 0 {
-                hidden.push((from[0].0, from[start - 1].1));
-            }
-            if end < work.len() {
-                hidden.push((from[end].0, from[work.len() - 1].1));
-            }
-            work = work[start..end].to_owned();
-            from = from[start..end].to_vec();
-        }
     }
     let start = work.len() - work.trim_start().len();
     let end = work.trim_end().len().max(start);

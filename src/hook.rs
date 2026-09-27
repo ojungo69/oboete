@@ -697,40 +697,57 @@ pub fn strip_blocks(s: &str, unclosed_private_hides_rest: bool) -> String {
 pub(crate) fn without_blocks(s: &str, unclosed_private_hides_rest: bool) -> String {
     let mut out = s.to_string();
     for tag in STRIP_BLOCKS {
-        out = strip_tag(&out, tag, unclosed_private_hides_rest && *tag == "private");
-        if *tag == "claude-mem-context" {
-            let (start, end) = memory_context_cut(&out);
-            out = out[start..end].to_owned();
-        }
+        out = if *tag == "claude-mem-context" {
+            let mut kept = String::with_capacity(out.len());
+            let mut pos = 0;
+            for (start, end) in memory_context_blocks(&out) {
+                kept.push_str(&out[pos..start]);
+                pos = end;
+            }
+            kept.push_str(&out[pos..]);
+            kept
+        } else {
+            strip_tag(&out, tag, unclosed_private_hides_rest && *tag == "private")
+        };
     }
     out
 }
 
-/// What a read cut inside a `<claude-mem-context>` block leaves unpaired: the part before a
-/// closer when the read began inside the block (an offset), and the part from an opener when it
-/// ended inside it (`head`, a limit). claude-mem writes both tags on lines of their own, so only
-/// such a line counts, with or without the line number a Read puts in front (`1\t`, `1→`, `1|`,
-/// agy's `1: `); a tag inside a line (claude-mem's own source quoting it) stays text. Returns
-/// where the kept text starts and ends.
-pub(crate) fn memory_context_cut(s: &str) -> (usize, usize) {
+/// The byte ranges of claude-mem's `<claude-mem-context>` blocks in `s`. claude-mem writes both
+/// tags on lines of their own, so only such a line is a tag, with or without the line number a
+/// Read puts in front (`1\t`, `1→`, `1|`, agy's `1: `); a tag inside a line (claude-mem's own
+/// source quoting it, a pair of them too) stays text. A read cut inside a block leaves one tag
+/// unpaired: the text before a lone closer (a read that began inside) or after a lone opener
+/// (one that ended inside) is the block's too.
+pub(crate) fn memory_context_blocks(s: &str) -> Vec<(usize, usize)> {
     static TAG: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
             r"(?m)^[ \t]*(?:\d+(?:\t|\x{2192}|\||:)[ \t]?)?<(/?)claude-mem-context>[ \t]*\r?$",
         )
         .expect("tag pattern")
     });
-    let (mut start, mut end) = (0, s.len());
+    let (mut blocks, mut open, mut from) = (Vec::new(), None, 0);
     for m in TAG.captures_iter(s) {
-        let (whole, closer) = (m.get(0).expect("match"), !m[1].is_empty());
-        if closer && whole.start() >= start && end == s.len() {
-            let line_end = whole.end();
-            start = line_end + usize::from(s[line_end..].starts_with('\n'));
-        } else if !closer && whole.start() >= start {
-            end = whole.start();
-            break;
+        let whole = m.get(0).expect("match");
+        let end = whole.end() + usize::from(s[whole.end()..].starts_with('\n'));
+        match (m[1].is_empty(), open) {
+            (true, None) => open = Some(whole.start()),
+            (false, Some(start)) => {
+                blocks.push((start, end));
+                (open, from) = (None, end);
+            }
+            // A lone closer: the read began inside the block.
+            (false, None) => {
+                blocks.push((from, end));
+                from = end;
+            }
+            (true, Some(_)) => {}
         }
     }
-    (start, end.max(start))
+    if let Some(start) = open {
+        blocks.push((start, s.len()));
+    }
+    blocks
 }
 
 /// One pass over `<tag` openers and `</tag>` closers: each closer pairs with the nearest open
@@ -2795,9 +2812,12 @@ mod tests {
         // A read that starts inside the block: up to its closing line, the text is claude-mem's.
         let inside = format!("| #1 | decided to use tabs |\n</{tag}>\n\n# Rules\nUse spaces.");
         assert_eq!(strip_blocks(&inside, false), "# Rules\nUse spaces.");
-        // A mention inside a line (claude-mem's own source) is text.
+        // A mention inside a line (claude-mem's own source) is text, a pair of them too.
         let source = format!("  const startTag = '<{tag}>';\n  write(startTag);");
         assert_eq!(strip_blocks(&source, false), source.trim());
+        let pair =
+            format!("const open = '<{tag}>';\nconst body = render();\nconst close = '</{tag}>';");
+        assert_eq!(strip_blocks(&pair, false), pair);
     }
 
     #[test]
