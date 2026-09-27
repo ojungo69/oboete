@@ -876,6 +876,11 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
         .map(|c| serde_json::from_value::<Draft>(c.clone()))
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|_| AnswerFailure::Shape)?;
+    // A sibling's `supersedes` names an id: two drafts with one id would link the wrong one.
+    let mut ids = std::collections::HashSet::new();
+    if !drafts.iter().all(|d| ids.insert(d.id.as_str())) {
+        return Err(AnswerFailure::Shape);
+    }
     Ok((summary, drafts))
 }
 
@@ -970,15 +975,26 @@ pub fn candidates(k: &Connection, repo: &str, text: &str) -> Result<Vec<crate::c
 // records the link.
 fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<String> {
     let gate = |t: &str| crate::redact::outbound_with(t, rules);
-    let mut sessions: Vec<(&str, Option<&str>)> = Vec::new();
+    // Each session with every repository its lines are in: an agent may change checkout.
+    let mut sessions: Vec<(&str, Vec<&str>)> = Vec::new();
     for l in &w.lines {
-        if !sessions.iter().any(|(key, _)| *key == l.key) {
-            sessions.push((&l.key, l.repo.as_deref()));
+        let at = match sessions.iter().position(|(key, _)| *key == l.key) {
+            Some(at) => at,
+            None => {
+                sessions.push((&l.key, Vec::new()));
+                sessions.len() - 1
+            }
+        };
+        let repos = &mut sessions[at].1;
+        if let Some(repo) = l.repo.as_deref()
+            && !repos.contains(&repo)
+        {
+            repos.push(repo);
         }
     }
     let session_of = |device: &str, seq: i64| raw.session_key(device, seq);
     let mut out = String::new();
-    for (key, repo) in sessions {
+    for (key, repos) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
         // A window that starts inside an event: its first part was in the previous window.
         let before = w.from_seq + i64::from(w.from_offset.is_some());
@@ -990,22 +1006,27 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<Strin
             let goal: String = gate(&goal).chars().take(200).collect();
             lines.push(format!("goal: {goal}"));
         }
-        if let Some(repo) = repo {
-            let mut open: Vec<crate::claims::Claim> = crate::claims::current(k, repo)?
-                .into_iter()
-                .filter(|c| c.kind == "open item")
-                .collect();
-            open.reverse(); // the newest first
-            let mut shown = 0;
-            for c in open {
-                if shown == 50 {
-                    break;
-                }
-                // The session's own, before the cap: other sessions' newer items never hide it.
-                if session_of(&c.device, c.seq)?.as_deref() == Some(key) {
-                    lines.push(format!("open item {}: {}", c.uid, gate(&c.body)));
-                    shown += 1;
-                }
+        let mut open: Vec<crate::claims::Claim> = Vec::new();
+        for repo in repos {
+            open.extend(
+                crate::claims::current(k, repo)?
+                    .into_iter()
+                    .filter(|c| c.kind == "open item"),
+            );
+        }
+        // The newest first, in `current`'s order across the repositories.
+        open.sort_by(|a, b| {
+            (b.valid_from, &b.device, b.seq, &b.uid).cmp(&(a.valid_from, &a.device, a.seq, &a.uid))
+        });
+        let mut shown = 0;
+        for c in open {
+            if shown == 50 {
+                break;
+            }
+            // The session's own, before the cap: other sessions' newer items never hide it.
+            if session_of(&c.device, c.seq)?.as_deref() == Some(key) {
+                lines.push(format!("open item {}: {}", c.uid, gate(&c.body)));
+                shown += 1;
             }
         }
         for op in previous.iter().filter(|o| o.kind == OpKind::Claim) {
@@ -2116,20 +2137,19 @@ mod tests {
     fn a_sessions_own_open_items_are_carried_past_other_sessions_newer_ones() {
         let home = tempfile::tempdir().unwrap();
         let mut raw = crate::raw::open(home.path()).unwrap();
-        let open = |raw: &mut Raw, session: &str, text: &str| {
-            let (kind, mut op) = kept(raw, session, "r", text);
+        let open = |raw: &mut Raw, session: &str, repo: &str, text: &str| {
+            let (kind, mut op) = kept(raw, session, repo, text);
             op["kind"] = "open item".into();
             op["status"] = "proposed".into();
             (kind, op)
         };
-        let mut ops = vec![open(&mut raw, "s", "The importer drops empty lines.")];
+        let mut ops = vec![open(&mut raw, "s", "r", "The importer drops empty lines.")];
         for i in 0..50 {
-            ops.push(open(
-                &mut raw,
-                "t",
-                &format!("Item {i} of the other session."),
-            ));
+            let other = format!("Item {i} of the other session.");
+            ops.push(open(&mut raw, "t", "r", &other));
         }
+        // The session moved to another checkout: its items there are carried too.
+        ops.push(open(&mut raw, "s", "q", "The parser needs a fuzz test."));
         raw.append_ops(&ops).unwrap();
         let mut k = crate::knowledge::open(home.path()).unwrap();
         consume(&raw, &mut k);
@@ -2137,10 +2157,13 @@ mod tests {
         let rules = Rules::default();
         let w = next_window(&raw, &dev, 100_000, &rules).unwrap().unwrap();
         let text = carried(&raw, &k, &rules, &w).unwrap();
-        let item = |l: &str| {
-            l.starts_with("open item ") && l.ends_with(": The importer drops empty lines.")
-        };
-        assert!(text.lines().any(item), "{text}");
+        for body in [
+            "The importer drops empty lines.",
+            "The parser needs a fuzz test.",
+        ] {
+            let item = |l: &str| l.starts_with("open item ") && l.ends_with(&format!(": {body}"));
+            assert!(text.lines().any(item), "{body}: {text}");
+        }
     }
 
     /// Spec 3.3: a tool output's text reaches the prompt only between the fence lines, which
@@ -2174,6 +2197,11 @@ mod tests {
             (json!({"claims": 3, "summary": "s"}), "shape"),
             (json!({"issue": "x", "decision": "z"}), "shape"),
             (json!({"claims": [{"id": "c1"}], "summary": "s"}), "shape"),
+            (
+                json!({"claims": [unanchored["claims"][0], unanchored["claims"][0]],
+                "summary": "s"}),
+                "shape",
+            ),
             (json!({"claims": many, "summary": "s"}), "over_cap"),
             (unanchored.clone(), "unanchored"),
         ] {
