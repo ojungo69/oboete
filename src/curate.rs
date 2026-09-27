@@ -2996,11 +2996,9 @@ mod tests {
             ..answered("fake")
         };
         let mut chain = Some(answer);
-        let mut curator = |_: &str,
-                           _: &str,
-                           _: &dyn Fn() -> Option<i64>,
-                           _: &AnswerCheck|
-         -> Result<ChainResult> { Ok(chain.take().unwrap()) };
+        let mut curator = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            Ok(chain.take().unwrap())
+        };
         let (rules, summary) = (Rules::default(), curating(WINDOW_TOKENS));
         let phase = run_phase(&mut raw, &kn(), &db, &rules, &summary, "", &mut curator).unwrap();
         assert_eq!(phase, Phase::Covered);
