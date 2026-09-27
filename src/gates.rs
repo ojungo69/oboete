@@ -5,7 +5,7 @@
 //! gate.
 
 use crate::claims::{Claim, Evidence};
-use crate::curate::{Draft, Role, Window};
+use crate::curate::{Draft, Line, Role, Window};
 use crate::redact::Rules;
 use std::collections::HashMap;
 
@@ -169,7 +169,7 @@ pub fn check(
             "decided" if !own_words && !answers && !accepts => {
                 Some("decided needs the user's words or an acceptance right after")
             }
-            "done" if !own_words && !passing_run(w, &line.key) => {
+            "done" if !own_words && !passing_run(w, line) => {
                 Some("done needs the user's words or a passing run")
             }
             "retracted" if !own_words => Some("retracted needs the user's words"),
@@ -301,10 +301,11 @@ fn bare(quote: &str) -> bool {
     rest.chars().filter(|c| c.is_alphanumeric()).count() <= 4
 }
 
-/// A tool line of the session that did not fail, printed a pass and no failure (MUST-M1): each
+/// A tool line of `line`'s session and repository (a run before a checkout change tested another
+/// one) that did not fail, printed a pass and no failure (MUST-M1): each
 /// `failed` it prints is a `0 failed`, and it reports no error (`1 error`, a line that starts
 /// `error:`). Its output only: an input such as `echo passed` ran nothing.
-fn passing_run(w: &Window, key: &str) -> bool {
+fn passing_run(w: &Window, line: &Line) -> bool {
     static NONE_FAILED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static ERRORS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let none = NONE_FAILED.get_or_init(|| regex::Regex::new(r"\b0 failed").unwrap());
@@ -312,7 +313,7 @@ fn passing_run(w: &Window, key: &str) -> bool {
         regex::Regex::new(r"(?m)\b[1-9]\d*\s+errors?\b|^\s*error(?:\[|:)").unwrap()
     });
     w.lines.iter().any(|l| {
-        l.key == key && l.role == (Role::Tool { failed: false }) && {
+        l.key == line.key && l.repo == line.repo && l.role == (Role::Tool { failed: false }) && {
             let text = l.source_text().to_lowercase();
             PASSED.iter().any(|p| text.contains(p))
                 && text.matches("failed").count() == none.find_iter(&text).count()
@@ -572,7 +573,14 @@ mod tests {
         let failing = tool("test result: FAILED. 3 passed; 1 failed", true);
         assert_eq!(done(&[failing, reply(fixed)]), "proposed");
         let passing = tool("test result: ok. 4 passed; 0 failed", false);
-        assert_eq!(done(&[passing, reply(fixed)]), "done");
+        assert_eq!(done(&[passing.clone(), reply(fixed)]), "done");
+        // A run before a checkout change tested another repository.
+        let mut moved = window(&[passing, reply(fixed)]);
+        moved.lines[0].repo = Some("q".into());
+        assert_eq!(
+            one(&moved, "done", "assistant proposal", quote).0,
+            "proposed"
+        );
         // A pass word in what the tool was given, not in what it printed.
         let echo = (
             "tool",
