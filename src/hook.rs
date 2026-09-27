@@ -1600,7 +1600,11 @@ mod tests {
             .map(|e| (e.kind, serde_json::from_str(&e.body).unwrap()))
             .collect();
         let prompt = |p: &str| ("prompt".to_string(), json!({"prompt": p}));
-        let end_event = ("end".to_string(), json!({"reason":"user_close"}));
+        // Task 11 keeps the transcript path in the end record.
+        let end_event = (
+            "end".to_string(),
+            json!({"reason": "user_close", "transcript": transcript}),
+        );
         assert_eq!(
             stored,
             [
