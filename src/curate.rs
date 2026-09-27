@@ -274,19 +274,29 @@ const MEMORY_READ: &str = " (a read of stored memory, not shown)";
 /// finished items too, and a curator reading it would make them current again, so a window shows
 /// the call and not the output (claude-mem's `isRecursiveMemoryTool` skips them too).
 fn memory_read(tool: &str, body: &Value) -> bool {
-    static CLI: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        // In a command's place: first, after a shell operator or `$(`, or first in a quoted
-        // argument (`bash -lc "oboete get c1"`), with or without a path before it.
-        regex::Regex::new(
-            r#"(?:^|[;&|("']|\$\()\s*(?:[^\s"';&|]*/)?oboete\s+(?:search|get|timeline)\b"#,
-        )
-        .expect("memory read pattern")
-    });
     let tool = tool.to_ascii_lowercase();
     tool.contains("oboete")
         || tool.contains("claude-mem")
         || tool.contains("claude_mem")
-        || CLI.is_match(&body["input"].to_string())
+        || runs_memory_read(&body["input"])
+}
+
+/// Whether a text of a tool's input, decoded, runs `oboete search|get|timeline` in a command's
+/// place: first on a line, after a shell operator or `$(`, or first in a quoted argument
+/// (`bash -lc "oboete get c1"`), with or without a path before it.
+fn runs_memory_read(v: &Value) -> bool {
+    static CLI: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?m)(?:^|[;&|("']|\$\()\s*(?:[^\s"';&|]*/)?oboete\s+(?:search|get|timeline)\b"#,
+        )
+        .expect("memory read pattern")
+    });
+    match v {
+        Value::String(s) => CLI.is_match(s),
+        Value::Array(a) => a.iter().any(runs_memory_read),
+        Value::Object(o) => o.values().any(runs_memory_read),
+        _ => false,
+    }
 }
 
 /// One event as a window shows it: its line before its long text through the gate, its long text
@@ -1434,6 +1444,10 @@ mod tests {
                 "exec_command",
                 serde_json::json!({"command": ["bash", "-lc", "oboete get c1"]}),
             ),
+            (
+                "Bash",
+                serde_json::json!({"command": "cd repo\noboete timeline"}),
+            ),
         ] {
             raw.append(&tool(name, input, old)).unwrap();
         }
@@ -1442,7 +1456,7 @@ mod tests {
         raw.append(&tool("Bash", echo, "ran")).unwrap();
         let w = next_window(&raw, &dev, 10_000, &rules).unwrap().unwrap();
         assert!(!w.text.contains(old), "{}", w.text);
-        assert_eq!(w.text.matches(MEMORY_READ).count(), 4, "{}", w.text);
+        assert_eq!(w.text.matches(MEMORY_READ).count(), 5, "{}", w.text);
         assert!(w.text.contains("mcp__oboete__search") && w.text.contains("ran"));
     }
 
