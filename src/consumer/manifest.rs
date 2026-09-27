@@ -69,7 +69,9 @@ fn schema(k: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS manifest_dirty(
            repo TEXT NOT NULL, branch TEXT NOT NULL, device TEXT NOT NULL,
            PRIMARY KEY (repo, branch, device)
-         );",
+         );
+         -- Devices whose facts a rewind dropped: the next step reads raw from seq 1 again.
+         CREATE TABLE IF NOT EXISTS manifest_rebuild(device TEXT PRIMARY KEY);",
     )?;
     Ok(())
 }
@@ -160,7 +162,13 @@ impl Consumer for Manifest {
     fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> {
         schema(k)?;
         let device = raw.device();
-        let recs = raw.after(device, after, BATCH)?;
+        // After a rewind, from seq 1: its checkpoint moves back, which the worker takes.
+        let from = if k.execute("DELETE FROM manifest_rebuild WHERE device = ?1", [device])? > 0 {
+            0
+        } else {
+            after
+        };
+        let recs = raw.after(device, from, BATCH)?;
         for r in &recs {
             match &r.item {
                 Item::Event(e) => facts(k, device, r.seq, e)?,
@@ -210,19 +218,19 @@ impl Consumer for Manifest {
             )?;
             rebuild(raw, k, device, &rules)?;
         }
-        Ok(recs.last().map_or(after, |r| r.seq))
+        Ok(recs.last().map_or(from, |r| r.seq))
     }
 
-    fn rewind(&mut self, k: &Connection, device: &str, to: i64) -> Result<()> {
+    /// The lost commits may hold tombstones that changed or removed older records' facts, so
+    /// the device's facts and texts are dropped and built again from seq 1, as a rebuild from an
+    /// empty knowledge.db would.
+    fn rewind(&mut self, k: &Connection, device: &str, _to: i64) -> Result<()> {
         schema(k)?;
+        for table in ["manifest_facts", "manifests", "manifest_dirty"] {
+            k.execute(&format!("DELETE FROM {table} WHERE device = ?1"), [device])?;
+        }
         k.execute(
-            "DELETE FROM manifest_facts WHERE device = ?1 AND seq > ?2",
-            params![device, to],
-        )?;
-        // Every checkout of the device is built again on the step that follows the rewind.
-        k.execute(
-            "INSERT OR IGNORE INTO manifest_dirty(repo, branch, device)
-             SELECT repo, branch, device FROM manifests WHERE device = ?1",
+            "INSERT OR IGNORE INTO manifest_rebuild(device) VALUES(?1)",
             [device],
         )?;
         Ok(())
@@ -996,6 +1004,35 @@ mod tests {
         let text = manifest(home.path()).0;
         assert!(!text.contains("look at it"), "{text}");
         assert!(text.contains("prompt: from now on"), "{text}");
+    }
+
+    #[test]
+    fn a_lost_tombstone_gives_its_target_back_to_the_manifest() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        session(home.path(), cwd.path());
+        let mut store = raw::open(home.path()).unwrap();
+        let device = store.device().to_owned();
+        let seq = store
+            .after(&device, 0, 100)
+            .unwrap()
+            .into_iter()
+            .find(|r| matches!(&r.item, Item::Event(e) if e.body.contains("look at it")))
+            .unwrap()
+            .seq;
+        store
+            .append_tombstone(Target::Record { device, seq })
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        assert!(!manifest(home.path()).0.contains("look at it"));
+        let top = store.max_seq().unwrap();
+        rusqlite::Connection::open(home.path().join("raw.db"))
+            .unwrap()
+            .execute("DELETE FROM records WHERE seq = ?1", [top]) // lost (MUST-M14)
+            .unwrap();
+        worker::run_once(home.path()).unwrap();
+        let text = manifest(home.path()).0;
+        assert!(text.contains("look at it"), "{text}"); // as a rebuild of raw now gives
     }
 
     #[test]
