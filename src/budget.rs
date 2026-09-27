@@ -44,7 +44,7 @@ pub struct Refusal {
     pub detail: String,
 }
 
-/// The output reserved on an entry with a ceiling that declares none: the largest of the 42 Groq
+/// The output reserved on an entry that declares none: the largest of the 42 Groq
 /// answers in the owner's ledger was 1,240 tokens (2026-09-27), and the largest prompt and answer
 /// together, 7,961, was taken under the 8,000 ceiling.
 const UNDECLARED_OUTPUT: u32 = 1_250;
@@ -71,10 +71,9 @@ pub fn admit(
         }));
     }
     // The answer counts against the same limits as the prompt (Groq's TPM is input and output
-    // together): the declared output, or on an entry with a ceiling and none declared, the largest
-    // answer seen (UNDECLARED_OUTPUT).
+    // together): the declared output, or with none declared, the largest answer seen.
     let output = match p.declared_output() {
-        0 if limits.max_request_tokens.is_some() => UNDECLARED_OUTPUT,
+        0 => UNDECLARED_OUTPUT,
         n => n,
     };
     let reserved = tokens + f64::from(output);
@@ -314,8 +313,9 @@ mod tests {
             },
         );
         call(&db, "p", None, 7000, 1000);
-        assert!(admit(&db, &p, 1500.0, 5.0, &[]).unwrap().is_none());
-        let r = admit(&db, &p, 2500.0, 5.0, &[]).unwrap().unwrap();
+        // With no output declared, 1,250 are reserved: 700 in fits in the 2,000 left, 800 does not.
+        assert!(admit(&db, &p, 700.0, 5.0, &[]).unwrap().is_none());
+        let r = admit(&db, &p, 800.0, 5.0, &[]).unwrap().unwrap();
         assert_eq!(
             (r.outcome, r.detail.as_str()),
             ("budget", "8000/10000 tokens today")

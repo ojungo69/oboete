@@ -17,12 +17,25 @@ pub struct Config {
     #[serde(default)]
     pub gemini: Option<GeminiPlace>,
     /// What every paid entry together may spend in a calendar month (owner decision 5: USD 5).
-    #[serde(default = "default_paid_usd_per_month")]
+    #[serde(default = "default_paid_usd_per_month", deserialize_with = "usd")]
     pub paid_usd_per_month: f64,
 }
 
 fn default_paid_usd_per_month() -> f64 {
     5.0
+}
+
+/// A USD amount of the config: finite and 0 or more. A negative price would make a paid entry
+/// free or earn it credit, and NaN compares false with every cap.
+fn usd<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<f64, D::Error> {
+    let v = f64::deserialize(d)?;
+    if v.is_finite() && v >= 0.0 {
+        Ok(v)
+    } else {
+        Err(serde::de::Error::custom(
+            "a USD amount is a number, 0 or more",
+        ))
+    }
 }
 
 /// `gemini = "before-subscriptions"` puts it just before the first subscription CLI (it spares
@@ -145,9 +158,9 @@ pub struct Limits {
     #[serde(default)]
     pub daily_tokens: Option<u64>,
     /// USD per million tokens, in and out.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "usd")]
     pub usd_per_mtok_in: f64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "usd")]
     pub usd_per_mtok_out: f64,
     /// The largest answer a paid entry may send, which its request asks for as `max_tokens`
     /// and its admission counts as spent.
@@ -624,6 +637,11 @@ paid_usd_per_month = 2.5
 "#;
         let c: Config = toml::from_str(text).unwrap();
         assert_eq!(c.paid_usd_per_month, 2.5);
+        for bad in ["-1.0", "nan", "inf"] {
+            assert!(toml::from_str::<Config>(&format!("paid_usd_per_month = {bad}")).is_err());
+            assert!(toml::from_str::<Limits>(&format!("usd_per_mtok_in = {bad}")).is_err());
+            assert!(toml::from_str::<Limits>(&format!("usd_per_mtok_out = {bad}")).is_err());
+        }
         parse_capture(Some(text)).unwrap();
         // A table no version reads is still an error.
         assert!(parse_capture(Some("[redactions]\n")).is_err());
