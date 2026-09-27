@@ -44,7 +44,10 @@ fn pass(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> R
     let device = raw.device().to_owned();
     let mut advanced = false;
     for c in consumers.iter_mut() {
-        let tx = k.transaction()?;
+        // Immediate: a step reads before it writes, and a deferred transaction whose snapshot
+        // another writer moved meanwhile (a search creating its table in a fresh knowledge.db)
+        // fails its first write with SQLITE_BUSY at once, which stopped the worker.
+        let tx = k.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let at = checkpoint::get(&tx, c.name(), &device)?;
         let next = c.step(raw, &tx, at)?;
         if next != at {
@@ -284,6 +287,49 @@ mod tests {
             )?;
             Ok(())
         }
+    }
+
+    /// A consumer whose step reads, lets another connection write to knowledge.db (as a search
+    /// does when it creates its table in a fresh file), then writes itself. Once.
+    struct Raced(std::path::PathBuf, bool);
+    impl Consumer for Raced {
+        fn name(&self) -> &'static str {
+            "raced"
+        }
+        fn step(&mut self, raw: &Raw, k: &Connection, after: i64) -> Result<i64> {
+            if std::mem::replace(&mut self.1, true) {
+                return Ok(after.max(raw.max_seq()?));
+            }
+            let _: i64 = k.query_row("SELECT COUNT(*) FROM checkpoints", [], |r| r.get(0))?;
+            let (home, (done, wait)) = (self.0.clone(), std::sync::mpsc::channel());
+            std::thread::spawn(move || {
+                let other = knowledge::open(&home).unwrap();
+                other
+                    .execute_batch("CREATE TABLE IF NOT EXISTS other(x)")
+                    .unwrap();
+                done.send(()).ok();
+            });
+            // The other write lands first unless this step already holds the write lock.
+            let _ = wait.recv_timeout(Duration::from_millis(500));
+            k.execute("CREATE TABLE IF NOT EXISTS raced(x)", [])?;
+            raw.max_seq()
+        }
+        fn rewind(&mut self, _: &Connection, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The Windows runner's worker stopped with "database is locked" after a restore: a search
+    /// created its table in the fresh knowledge.db between a step's read and its write.
+    #[test]
+    fn a_reader_writing_knowledge_db_mid_step_does_not_stop_the_pass() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        raw.append(&raw::test_event("a")).unwrap();
+        let mut k = knowledge::open(home.path()).unwrap();
+        let mut consumers: Vec<Box<dyn Consumer>> =
+            vec![Box::new(Raced(home.path().to_path_buf(), false))];
+        drain(&raw, &mut k, &mut consumers).unwrap();
     }
 
     fn seen(k: &Connection) -> Vec<i64> {
