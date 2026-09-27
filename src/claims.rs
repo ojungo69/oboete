@@ -147,10 +147,49 @@ pub struct Claim {
     pub seq: i64,
 }
 
+/// A claim `c` (with its active derivation `d`) is current: a chain tip (no active derivation of
+/// another uid supersedes or retracts it) that is not retracted.
+const TIP: &str = "d.status <> 'retracted'
+    AND NOT EXISTS (
+      SELECT 1 FROM edges e
+      JOIN claims a ON a.op_device = e.op_device AND a.op_seq = e.op_seq
+      WHERE e.to_uid = c.uid AND a.uid <> c.uid)";
+
+/// When `uid` is a current claim, its repository (`None` for one anchored outside any) and its
+/// active derivation.
+pub fn tip(k: &Connection, uid: &str) -> Result<Option<(Option<String>, Claim)>> {
+    use rusqlite::OptionalExtension;
+    schema(k)?;
+    Ok(k.query_row(
+        &format!(
+            "SELECT d.repo, c.uid, d.kind, d.status, d.speaker, d.scope, d.body, d.valid_from,
+                    d.anchor_device, d.anchor_seq
+             FROM claims c
+             JOIN derivations d ON d.op_device = c.op_device AND d.op_seq = c.op_seq
+             WHERE c.uid = ?1 AND {TIP}"
+        ),
+        [uid],
+        |r| {
+            let claim = Claim {
+                uid: r.get(1)?,
+                kind: r.get(2)?,
+                status: r.get(3)?,
+                speaker: r.get(4)?,
+                scope: r.get(5)?,
+                body: r.get(6)?,
+                valid_from: r.get(7)?,
+                device: r.get(8)?,
+                seq: r.get(9)?,
+            };
+            Ok((r.get(0)?, claim))
+        },
+    )
+    .optional()?)
+}
+
 /// `repo`'s current claims: the chain tips (no active derivation supersedes or retracts them)
 /// that are not retracted, in spec 3.4's order, (valid_from, device, seq), with the uid last so
 /// two claims of one event keep one order on every device (MUST-M7).
-#[allow(dead_code)] // Task 7 reads it for the candidates and the carried open items.
 pub fn current(k: &Connection, repo: &str) -> Result<Vec<Claim>> {
     tips(
         k,
@@ -173,7 +212,7 @@ pub(crate) const DECIDED: &str =
      LIMIT ?2";
 
 /// A repository's chain tips (no active derivation supersedes or retracts them) that are not
-/// retracted; `?1` is the repository.
+/// retracted; `?1` is the repository. `TIP`'s condition, for a whole repository.
 pub(crate) const TIPS: &str =
     "SELECT c.uid, d.kind, d.status, d.speaker, d.scope, d.body, d.valid_from,
             d.anchor_device, d.anchor_seq

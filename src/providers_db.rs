@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS provider_calls(
   provider TEXT NOT NULL,
   role TEXT NOT NULL,                     -- curator, judge, digest
   span TEXT,                              -- what the call was for (a window, a session)
-  outcome TEXT NOT NULL,                  -- ok, invalid, error, wait, budget, gate
+  outcome TEXT NOT NULL,                  -- ok, invalid, error, wait, budget, gate, too_big,
+                                          -- and an answer curate::check refused: empty, prose,
+                                          -- shape, over_cap, unanchored
   ms INTEGER NOT NULL,
   detail TEXT,
   bytes_out INTEGER NOT NULL DEFAULT 0,
@@ -252,7 +254,7 @@ pub fn calls_today(conn: &Connection, provider: &str) -> Result<u32> {
     let midnight = now_ms() / day_ms * day_ms;
     Ok(conn.query_row(
         "SELECT COUNT(*) FROM provider_calls WHERE provider=?1 AND ts>=?2
-           AND outcome IN ('ok','error','invalid','wait')",
+           AND outcome IN ('ok','error','invalid','wait','empty','prose','shape','over_cap','unanchored')",
         params![provider, midnight],
         |r| r.get(0),
     )?)
@@ -325,7 +327,8 @@ pub fn unmetered(conn: &Connection, provider: &str, start: i64) -> Result<(i64, 
         "SELECT COALESCE(SUM(CASE WHEN prompt_tokens IS NULL THEN est_tokens END), 0),
                 COALESCE(SUM(completion_tokens IS NULL), 0)
          FROM provider_calls
-         WHERE provider=?1 AND ts>=?2 AND bytes_out > 0 AND outcome IN ('ok', 'invalid', 'error')
+         WHERE provider=?1 AND ts>=?2 AND bytes_out > 0
+           AND outcome IN ('ok','invalid','error','empty','prose','shape','over_cap','unanchored')
            AND COALESCE(detail, '') NOT GLOB 'http [0-9][0-9][0-9]*'",
         params![provider, start],
         |r| Ok((r.get(0)?, r.get(1)?)),

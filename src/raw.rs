@@ -410,6 +410,42 @@ impl Raw {
         )?)
     }
 
+    /// The first prompt this device recorded in one agent's session, as `after` returns it: the
+    /// session's goal for the curator (milestone 3 Task 7). A scan by label, as `turns`.
+    pub fn first_prompt(&self, agent: &str, session: &str) -> Result<Option<Event>> {
+        let seq: Option<i64> = self.conn.query_row(
+            "SELECT MIN(seq) FROM records WHERE device = ?1 AND type = 'event' AND agent = ?2
+               AND session = ?3 AND kind = 'prompt'",
+            rusqlite::params![self.device, agent, session],
+            |r| r.get(0),
+        )?;
+        let Some(seq) = seq else { return Ok(None) };
+        Ok(self
+            .after(&self.device, seq - 1, 1)?
+            .into_iter()
+            .find(|r| r.seq == seq)
+            .and_then(|r| match r.item {
+                Item::Event(e) => Some(*e),
+                _ => None,
+            }))
+    }
+
+    /// The agent and session labels of `device`'s event `seq`, NUL between (how `curate` keys a
+    /// session), from the row alone: no body is read.
+    pub fn session_key(&self, device: &str, seq: i64) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let labels: Option<(Option<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT agent, session FROM records WHERE device = ?1 AND seq = ?2
+                   AND type = 'event'",
+                params![device, seq],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(labels.map(|(a, s)| format!("{}\u{0}{}", a.unwrap_or_default(), s.unwrap_or_default())))
+    }
+
     /// The typed prompts and harness envelopes this device recorded in one agent's session (Task
     /// 11). A scan by label: sessions have no index (spec 1.6).
     pub fn turns(&self, agent: &str, session: &str) -> Result<i64> {
@@ -754,6 +790,50 @@ impl Raw {
             Some((Some(from), Some(to))) => Some((from, to)),
             _ => None,
         })
+    }
+
+    /// The ops appended with the last window op (not a recuration) that covered this device's
+    /// latest event of `agent`'s `session` before seq `before` that has text (a resumed session's
+    /// `start` is covered on its own, by a window that holds none of its lines): the session's
+    /// previous window,
+    /// whose proposals its next window carries (milestone 3 Task 7, D12). Per session, since
+    /// sessions interleave: another session's window may come between.
+    pub fn previous_window_ops(&self, agent: &str, session: &str, before: i64) -> Result<Vec<Op>> {
+        use rusqlite::OptionalExtension;
+        // Down the primary key from `before`: the session's latest event is usually close.
+        let seq: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT seq FROM records WHERE device = ?1 AND seq < ?2 AND type = 'event'
+                   AND agent = ?3 AND session = ?4 AND kind NOT IN ('start', 'end')
+                 ORDER BY seq DESC LIMIT 1",
+                params![self.device, before, agent, session],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(seq) = seq else {
+            return Ok(Vec::new());
+        };
+        let batch: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT batch FROM ops WHERE device = ?1 AND type = 'window'
+                   AND COALESCE(json_extract(body, '$.recurate'), 0) = 0
+                   AND json_extract(body, '$.from_seq') <= ?2
+                   AND json_extract(body, '$.to_seq') >= ?2
+                 ORDER BY op_seq DESC LIMIT 1",
+                params![self.device, seq],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(batch) = batch else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .ops_after(&self.device, batch - 1, 1_000)?
+            .into_iter()
+            .take_while(|o| o.batch == batch)
+            .collect())
     }
 
     /// D1: this device's ops after `op_seq` as backup lines, from `max_bytes` of lines on only
