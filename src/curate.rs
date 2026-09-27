@@ -283,16 +283,21 @@ fn memory_read(tool: &str, body: &Value) -> bool {
 
 /// Whether a text of a tool's input, decoded, runs `oboete search|get|timeline` in a command's
 /// place: first on a line, after a shell operator or `$(`, or first in a quoted argument
-/// (`bash -lc "oboete get c1"`), with or without a path before it.
+/// (`bash -lc "oboete get c1"`), with or without a path before it (`/` or `\`, `.exe` too).
 fn runs_memory_read(v: &Value) -> bool {
     static CLI: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
-            r#"(?m)(?:^|[;&|("']|\$\()\s*(?:[^\s"';&|]*/)?oboete\s+(?:search|get|timeline)\b"#,
+            r#"(?m)(?:^|[;&|("']|\$\()\s*(?:[^\s"';&|]*[/\\])?oboete(?:\.exe)?\s+(?:search|get|timeline)\b"#,
         )
         .expect("memory read pattern")
     });
     match v {
-        Value::String(s) => CLI.is_match(s),
+        // Capture stores an object input as its JSON text: decoded, a `\n` in it is a new line.
+        Value::String(s) => {
+            CLI.is_match(s)
+                || serde_json::from_str::<Value>(s)
+                    .is_ok_and(|v| (v.is_object() || v.is_array()) && runs_memory_read(&v))
+        }
         Value::Array(a) => a.iter().any(runs_memory_read),
         Value::Object(o) => o.values().any(runs_memory_read),
         _ => false,
@@ -1421,7 +1426,9 @@ mod tests {
         let (_h, mut raw, dev) = store();
         let rules = Rules::default();
         let old = "We decided to use spaces, not tabs.";
+        // The input as capture stores it: an object as its JSON text (`capture::events`).
         let tool = |name: &str, input: Value, output: &str| {
+            let input = input.to_string();
             event(
                 "tool",
                 serde_json::json!({"tool": name, "input": input, "output": output, "failed": false}),
@@ -1448,6 +1455,10 @@ mod tests {
                 "Bash",
                 serde_json::json!({"command": "cd repo\noboete timeline"}),
             ),
+            (
+                "PowerShell",
+                serde_json::json!({"command": "C:\\Users\\me\\bin\\oboete.exe search indent"}),
+            ),
         ] {
             raw.append(&tool(name, input, old)).unwrap();
         }
@@ -1456,7 +1467,7 @@ mod tests {
         raw.append(&tool("Bash", echo, "ran")).unwrap();
         let w = next_window(&raw, &dev, 10_000, &rules).unwrap().unwrap();
         assert!(!w.text.contains(old), "{}", w.text);
-        assert_eq!(w.text.matches(MEMORY_READ).count(), 5, "{}", w.text);
+        assert_eq!(w.text.matches(MEMORY_READ).count(), 6, "{}", w.text);
         assert!(w.text.contains("mcp__oboete__search") && w.text.contains("ran"));
     }
 
