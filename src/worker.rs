@@ -190,6 +190,7 @@ fn serve(
         }
         // Under the lock: a worker started after the release cannot export the same seqs.
         crate::backup::run(home, &raw);
+        crate::hookstate::prune(home, crate::hookstate::KEEP);
         *held = None;
         before_exit();
         // A hook that asked before the release saw the lock held and started nothing.

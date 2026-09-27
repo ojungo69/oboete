@@ -14,7 +14,7 @@ use crate::hook::{compact, field, is_envelope, str_field, strip_blocks, without_
 use crate::raw::Event;
 use crate::{redact, repo};
 
-pub const PORTED: &[&str] = &["claude", "codex"];
+pub const PORTED: &[&str] = &["claude", "codex", "pi", "opencode"];
 
 /// Bytes a stored string keeps before only its head and tail are kept (spec 2.4, plan D4): the
 /// largest of 64, 128 and 256 KB whose hook p95 on the slowest machine stays within the line.
@@ -167,6 +167,25 @@ pub fn events(
         _ => return Vec::new(), // PreToolUse and the rest carry nothing to keep
     };
     vec![capture(agent, kind, body, payload, ts, settings)]
+}
+
+/// The session, repo and branch labels `capture` gives an event of this payload, through the
+/// same gate: the checkout a hook injects for, also when it records nothing (Grok's PreToolUse).
+pub fn checkout(payload: &Value, settings: &Settings) -> (String, String, Option<String>) {
+    let cwd = str_field(payload, &["cwd"]).unwrap_or(".");
+    let mut gate = Gate::new(settings);
+    let mut label =
+        |field: &str, s: &str| gate.text(field, &without_blocks(s, false), MAX_FIELD_BYTES);
+    let session = label(
+        "session",
+        str_field(payload, &["session_id", "sessionId"]).unwrap_or("unknown"),
+    );
+    let repo = label("repo", &repo::key(Path::new(cwd)));
+    let branch = git(Path::new(cwd))
+        .branch
+        .as_deref()
+        .map(|b| label("branch", b));
+    (session, repo, branch)
 }
 
 /// One event of `kind` with `body`, its labels from `payload`, all through one gate.

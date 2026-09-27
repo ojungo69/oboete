@@ -62,8 +62,10 @@ fn run_io(
     // When the store operation ended (0 until one did): overlapping hooks change the marker in
     // this order, so it is taken before anything that runs after the write.
     let mut ended = 0;
-    // Task 9: the manifest SessionStart shows for the checkout its event names.
+    // Task 9: the manifest this call injects for the checkout its payload names, and whether it
+    // is an injection point at all (Task 2b: each agent has its own, see `injects`).
     let mut manifest = None;
+    let mut injecting = false;
     let result: Result<Option<String>> = (|| {
         if std::env::var_os(SKIP_ENV).is_some() {
             return Ok(None);
@@ -93,22 +95,18 @@ fn run_io(
             let events = record(&mut store, agent, event, &payload, db::now_ms(), &settings)?;
             wrote = !events.is_empty();
             ended = crate::failure::now();
-            // Not on a resume: its context has the manifest already (after a compaction it
-            // does not, so it is shown again). A manifest that cannot be read is no recording
-            // failure: the row is written.
-            if let Some(start) = events.iter().find(|e| e.kind == "start")
-                && str_field(&payload, &["source"]) != Some("resume")
-                && let Some(repo) = start.repo.as_deref()
-            {
-                let branch = start.branch.as_deref().unwrap_or("");
+            // A manifest that cannot be read is no recording failure: the row is written.
+            injecting = injects(home, agent, event, &payload);
+            if injecting {
+                let (session, repo, branch) = crate::capture::checkout(&payload, &settings);
                 // It goes to the agent's model provider: the rules as they are now apply, so a
                 // rule added after the text was built already hides its value (spec 6.4).
                 manifest = crate::consumer::manifest::text(
                     home,
                     &store,
-                    repo,
-                    branch,
-                    &start.session,
+                    &repo,
+                    branch.as_deref().unwrap_or(""),
+                    &session,
                     settings.rules.version(),
                 )
                 .unwrap_or_else(|e| {
@@ -162,7 +160,8 @@ fn run_io(
                 }
             }
         }
-        // Design B's SessionStart: the recording-failure line, then the manifest in its fence.
+        // The recording-failure line at every SessionStart the agent reads (also when this call
+        // failed before it knew whether it injects), then the manifest in its fence.
         let failed = crate::failure::since(home).or_else(|| {
             // No marker when even the marker could not be written: this call's error, then.
             result
@@ -170,23 +169,19 @@ fn run_io(
                 .err()
                 .map(|e| (crate::failure::classify(e), ended))
         });
+        let reads_start = event == "SessionStart" && !matches!(agent, "grok" | "agy");
         let parts: Vec<String> = [
-            failed.map(crate::failure::line),
+            failed
+                .filter(|_| injecting || reads_start)
+                .map(crate::failure::line),
             manifest.as_deref().map(crate::manifest::fenced),
         ]
         .into_iter()
         .flatten()
         .collect();
-        if event == "SessionStart"
-            && crate::capture::PORTED.contains(&agent)
-            && out.is_none()
-            && !parts.is_empty()
-        {
-            let text = parts.join("\n");
-            out = Some(
-                json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
-                    .to_string(),
-            );
+        // Cursor gets its field even when empty: a reinjection is consumed either way.
+        if out.is_none() && (!parts.is_empty() || (injecting && agent == "cursor")) {
+            out = Some(injection(agent, event, &parts.join("\n")).to_string());
         }
     }
     if let Some(out) = &out {
@@ -196,6 +191,49 @@ fn run_io(
         writeln!(output, "{{}}")?;
     }
     result.map(|_| ())
+}
+
+/// Task 2b: whether this call is the agent's point to inject context. Claude Code, Codex, Pi and
+/// OpenCode read SessionStart (not on a resume: its context has it already; after a compaction it
+/// does not, so it is shown again). Grok ignores SessionStart's output, so the first tool call of
+/// a session injects, and agy reads PreInvocation, once per session too. Cursor reads SessionStart
+/// and, after its compaction marker, the next prompt. A point is claimed before the manifest is
+/// read, so a session whose checkout has none yet gets none later either, as at SessionStart
+/// (Claude; overrulable).
+fn injects(home: &Path, agent: &str, event: &str, payload: &Value) -> bool {
+    let session = str_field(
+        payload,
+        &[
+            "session_id",
+            "sessionId",
+            "conversation_id",
+            "conversationId",
+        ],
+    )
+    .unwrap_or("");
+    match (agent, event) {
+        ("grok", "PreToolUse") | ("agy", "PreInvocation") => {
+            crate::hookstate::claim(home, agent, session, "injected")
+        }
+        ("cursor", "SessionStart") => true,
+        ("cursor", "PreCompact") => {
+            crate::hookstate::set(home, agent, session, "compacted");
+            false
+        }
+        ("cursor", "UserPromptSubmit") => crate::hookstate::take(home, agent, session, "compacted"),
+        ("grok" | "agy" | "cursor", _) => false,
+        (_, "SessionStart") => str_field(payload, &["source"]) != Some("resume"),
+        _ => false,
+    }
+}
+
+/// The injected text in the shape the agent reads.
+fn injection(agent: &str, event: &str, text: &str) -> Value {
+    match agent {
+        "agy" => json!({"injectSteps": [{"ephemeralMessage": text}]}),
+        "cursor" => cursor_injection(text),
+        _ => json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}),
+    }
 }
 
 /// Design B (milestone 2 Task 2): the events of one hook call, appended to `raw.db` with the
@@ -986,6 +1024,89 @@ mod tests {
             json!({"session_id": "s3", "cwd": c, "source": "resume"}),
         );
         assert_eq!(resumed, "");
+    }
+
+    #[test]
+    fn pi_and_opencode_record_to_raw_and_get_the_manifest_at_session_start() {
+        for agent in ["pi", "opencode"] {
+            let home = tempfile::tempdir().unwrap();
+            let cwd = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(cwd.path().join(".git")).unwrap();
+            std::fs::write(cwd.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+            let c = cwd.path().to_string_lossy().into_owned();
+            let hook = |event: &str, payload: Value| {
+                let mut out = Vec::new();
+                let input = payload.to_string();
+                run_io(home.path(), agent, event, input.as_bytes(), &mut out).unwrap();
+                String::from_utf8(out).unwrap()
+            };
+            hook(
+                "UserPromptSubmit",
+                json!({"session_id": "a", "cwd": c, "prompt": "look at the <private>x</private>cache"}),
+            );
+            hook(
+                "PostToolUse",
+                json!({"session_id": "a", "cwd": c, "tool_name": "read",
+                       "tool_input": {"filePath": "a.rs"}, "tool_response": "file content"}),
+            );
+            hook(
+                "Stop",
+                json!({"session_id": "a", "cwd": c, "last_assistant_message": "Done"}),
+            );
+            let r = crate::raw::open(home.path()).unwrap();
+            let kinds: Vec<String> = r
+                .after(r.device(), 0, 100)
+                .unwrap()
+                .into_iter()
+                .filter_map(|x| match x.item {
+                    crate::raw::Item::Event(e) if e.agent == agent => Some(e.kind),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(kinds, ["prompt", "tool", "reply"], "{agent}");
+            crate::worker::run_once(home.path()).unwrap();
+            let out = hook(
+                "SessionStart",
+                json!({"session_id": "b", "cwd": c, "source": "startup"}),
+            );
+            let v: Value = serde_json::from_str(&out).unwrap();
+            let text = v["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap();
+            assert!(text.contains("look at the cache"), "{agent}: {text}");
+            let resumed = json!({"session_id": "b", "cwd": c, "source": "resume"});
+            assert_eq!(hook("SessionStart", resumed), "", "{agent}");
+        }
+    }
+
+    #[test]
+    fn each_agent_injects_at_its_own_point_once_per_session() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let s = |id: &str| json!({"session_id": id, "source": "startup"});
+        for agent in ["claude", "codex", "pi", "opencode", "cursor"] {
+            assert!(injects(h, agent, "SessionStart", &s("x")), "{agent}");
+        }
+        let resumed = json!({"session_id": "x", "source": "resume"});
+        assert!(!injects(h, "claude", "SessionStart", &resumed));
+        assert!(!injects(h, "grok", "SessionStart", &s("g")));
+        assert!(injects(h, "grok", "PreToolUse", &json!({"sessionId": "g"})));
+        assert!(!injects(
+            h,
+            "grok",
+            "PreToolUse",
+            &json!({"sessionId": "g"})
+        ));
+        assert!(!injects(h, "agy", "SessionStart", &s("a")));
+        let agy = json!({"conversationId": "a"});
+        assert!(injects(h, "agy", "PreInvocation", &agy));
+        assert!(!injects(h, "agy", "PreInvocation", &agy));
+        // Cursor: the first prompt after its compaction marker, once.
+        let c = json!({"session_id": "c"});
+        assert!(!injects(h, "cursor", "UserPromptSubmit", &c));
+        assert!(!injects(h, "cursor", "PreCompact", &c));
+        assert!(injects(h, "cursor", "UserPromptSubmit", &c));
+        assert!(!injects(h, "cursor", "UserPromptSubmit", &c));
     }
 
     #[test]

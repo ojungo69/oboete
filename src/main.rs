@@ -11,6 +11,7 @@ mod db;
 mod embed;
 mod failure;
 mod hook;
+mod hookstate;
 mod import;
 mod inject;
 mod knowledge;

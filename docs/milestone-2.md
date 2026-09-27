@@ -143,3 +143,13 @@ The rules as applied, provisional until the iMac row is filled:
 - **M14's line per size (D14)**, for sizes up to the cap: 1 KB 22.8 ms, 64 KB 25.5 ms p95 (Windows), until the iMac is measured.
 - **The backup segment cap (D11)**: p95 per 8 MB segment is 117.7 ms on WSL and 153.8 ms on Windows (18 segments each), under 1 s, so `backup::SEGMENT_BYTES` stays 8 MB. Segments were 1 to 11 KB compressed: the synthetic payload repeats, so these sizes are a lower bound for real records; only the time feeds the rule.
 - Also measured: the in-process store path per fixture event (255 events, no spawn) is 1.5 / 2.1 ms p50 / p95 on WSL and 0.8 / 1.2 ms on Windows; the replay process's peak RSS on WSL is 126,000 KB (VmHWM is read from `/proc`, so Windows reports none).
+
+## The other agents (Task 2, part b, 2026-09-27)
+
+Pi and OpenCode send Claude Code's hook fields, so they record to raw.db through the same capture path and read the manifest at SessionStart. Grok, agy and Cursor follow, each with its own payload shape (below).
+
+Decisions (Claude; overrulable):
+
+- **Per-session hook state lives in files.** A few hook calls need to know what an earlier call of the same session did: Grok and agy inject once per session, and Cursor injects again on the first prompt after its compaction marker. Neither store fits: raw.db has no session key (spec 1.6), and knowledge.db is the worker's, which SessionStart only reads. So each flag is an empty file under `<home>/state/hooks/<agent>/<hash of the session id>/`, as the recording-failure marker is a file. `File::create_new` makes a claim atomic between concurrent hooks (Grok runs tool calls in parallel), and a removal succeeds once. Losing the files costs one extra injection, never a record, so they are neither backed up nor synced. The worker removes the flags of sessions unchanged for 7 days at its idle exit (agy and OpenCode send no SessionEnd).
+- **Each agent injects at its own point.** Claude Code, Codex, Pi and OpenCode: SessionStart, not on a resume. Grok ignores SessionStart's output, so its first tool call of a session injects; agy reads PreInvocation, once per session too. Cursor: SessionStart, and the first prompt after its compaction marker. The text is the manifest in its fence, after the recording-failure line, in the shape the agent reads (`hookSpecificOutput`, agy's `injectSteps`, Cursor's `additional_context`).
+- **A point is claimed before the manifest is read.** A Grok or agy session whose checkout has no manifest yet gets none later in that session, as a Claude Code session started before the worker built one gets none (v1 retried on every tool call until it had text; that is one knowledge.db read per call for a session that may never get one).
