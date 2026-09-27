@@ -215,6 +215,11 @@ fn sample_spawns(
             .arg("--home")
             .arg(home)
             .args(["hook", agent, "PostToolUse"])
+            // A candidate above today's cap is measured as written under that cap (D4).
+            .env(
+                crate::capture::FIELD_CAP_ENV,
+                bytes.max(crate::capture::MAX_FIELD_BYTES).to_string(),
+            )
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::inherit())

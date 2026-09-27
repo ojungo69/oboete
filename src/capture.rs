@@ -22,6 +22,17 @@ pub const PORTED: &[&str] = &["claude", "codex"];
 /// and the iMac's floor decides whether 128 or 256 KB fit (docs/milestone-2.md, Task 12).
 pub const MAX_FIELD_BYTES: usize = 64 * 1024;
 
+/// Set on the hooks replay spawns (M14, D4): the cap a candidate size is measured at, so a
+/// candidate above `MAX_FIELD_BYTES` is written whole, as it would be under that cap. Read only
+/// within 1 to 256 KB, the candidates' range.
+pub const FIELD_CAP_ENV: &str = "OBOETE_FIELD_CAP";
+
+fn field_cap(v: Option<&str>) -> usize {
+    v.and_then(|v| v.parse().ok())
+        .filter(|n| (1024..=256 * 1024).contains(n))
+        .unwrap_or(MAX_FIELD_BYTES)
+}
+
 /// What `tool_output = "head-tail"` keeps of each tool output: its first and last halves. v1's
 /// hook kept 8,000 characters (src/hook.rs `MAX_FIELD`). (Claude; overrulable)
 pub const HEAD_TAIL_BYTES: usize = 8 * 1024;
@@ -171,8 +182,8 @@ fn capture(
     let git = git(Path::new(cwd));
     // Labels are stored text too (spec 2.2): a path or branch can carry a token.
     let mut gate = Gate::new(settings);
-    let mut label =
-        |field: &str, s: &str| gate.text(field, &without_blocks(s, false), MAX_FIELD_BYTES);
+    let cap = gate.cap;
+    let mut label = |field: &str, s: &str| gate.text(field, &without_blocks(s, false), cap);
     let session = label(
         "session",
         str_field(payload, &["session_id", "sessionId"]).unwrap_or("unknown"),
@@ -183,7 +194,7 @@ fn capture(
     let gitdir = git.gitdir.as_deref().map(|g| label("gitdir", g));
     let cwd_label = label("cwd", cwd);
     // One gate for the body: every string and key in it, whatever field it is.
-    let body = gate.value("", body, MAX_FIELD_BYTES).to_string();
+    let body = gate.value("", body, cap).to_string();
     Captured {
         event: Event {
             agent: agent.into(),
@@ -208,7 +219,9 @@ fn capture(
 /// length (head and tail above the cap), each finding kept with the field it is in.
 struct Gate<'a> {
     rules: &'a redact::Rules,
-    /// The cap of a tool's `/output`: `MAX_FIELD_BYTES`, or `HEAD_TAIL_BYTES` by the settings.
+    /// The cap of every stored string: `MAX_FIELD_BYTES`, unless replay measures another.
+    cap: usize,
+    /// The cap of a tool's `/output`: `cap`, or `HEAD_TAIL_BYTES` by the settings.
     output_cap: usize,
     ledger: Vec<(String, redact::Finding)>,
     /// The full size of the strings that were cut, when any was.
@@ -217,10 +230,12 @@ struct Gate<'a> {
 
 impl<'a> Gate<'a> {
     fn new(settings: &'a Settings) -> Self {
+        let cap = field_cap(std::env::var(FIELD_CAP_ENV).ok().as_deref());
         Self {
             rules: &settings.rules,
+            cap,
             output_cap: match settings.tool_output {
-                crate::config::ToolOutput::Full => MAX_FIELD_BYTES,
+                crate::config::ToolOutput::Full => cap,
                 crate::config::ToolOutput::HeadTail => HEAD_TAIL_BYTES,
             },
             ledger: Vec::new(),
@@ -247,7 +262,7 @@ impl<'a> Gate<'a> {
             Value::Array(a) => Value::Array(
                 a.into_iter()
                     .enumerate()
-                    .map(|(i, x)| self.value(&format!("{path}/{i}"), x, MAX_FIELD_BYTES))
+                    .map(|(i, x)| self.value(&format!("{path}/{i}"), x, self.cap))
                     .collect(),
             ),
             Value::Object(m) => Value::Object(
@@ -258,10 +273,10 @@ impl<'a> Gate<'a> {
                         let cap = if path.is_empty() && k == "output" {
                             self.output_cap
                         } else {
-                            MAX_FIELD_BYTES
+                            self.cap
                         };
                         // The pointer is built from the stored key, so it never holds a secret.
-                        let key = self.text(&format!("{path}#key"), &k, MAX_FIELD_BYTES);
+                        let key = self.text(&format!("{path}#key"), &k, self.cap);
                         let child = format!("{path}/{}", segment(&key));
                         let x = self.value(&child, x, cap);
                         (key, x)
@@ -461,6 +476,16 @@ mod tests {
 
     fn body(e: &Event) -> Value {
         serde_json::from_str(&e.body).unwrap()
+    }
+
+    #[test]
+    fn replay_can_measure_a_cap_candidate_but_not_outside_their_range() {
+        assert_eq!(field_cap(None), MAX_FIELD_BYTES);
+        assert_eq!(field_cap(Some("262144")), 256 * 1024);
+        assert_eq!(field_cap(Some("131072")), 128 * 1024);
+        for v in ["262145", "1023", "0", "-1", "lots"] {
+            assert_eq!(field_cap(Some(v)), MAX_FIELD_BYTES, "{v}");
+        }
     }
 
     #[test]

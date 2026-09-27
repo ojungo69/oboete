@@ -134,6 +134,7 @@ Hook, spawned, milliseconds (p50 / p95 / p99 / max):
 - The iMac is offline: Tailscale showed it last seen about an hour before 10:05 JST. FileVault stops a restart at the unlock screen, so it may need the owner at the machine. It is measured with the same command when it is back, and the rules below are applied again.
 - The Windows run found a replay bug: the fixture's root placeholder was replaced with an unescaped Windows path, which broke the JSON (`invalid escape`). It is escaped now (`a_repo_root_with_a_backslash_replays`).
 - Windows is the GNU cross-build (`cargo zigbuild`), as in Spike 1. The MSVC artifact is unmeasured until CI builds it (D14).
+- Each size is measured as written whole: the runs above were made while the cap was 256 KB, and replay now sets `OBOETE_FIELD_CAP` on the hooks it spawns to the size measured (read only between 1 and 256 KB), so the iMac run measures the same writes under the lowered cap.
 
 The rules as applied, provisional until the iMac row is filled:
 
