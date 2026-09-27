@@ -527,6 +527,10 @@ pub(crate) fn error_code(body: &str) -> Option<String> {
 /// Gemini names it in structured details instead: a `RetryInfo` delay, and a `QuotaFailure`
 /// whose quota is per day, which resets at midnight Pacific time, long after that short delay.
 fn retry_after_in_error(status: u16, body: &str) -> Option<f64> {
+    retry_after_in_error_at(status, body, SystemTime::now())
+}
+
+fn retry_after_in_error_at(status: u16, body: &str, now: SystemTime) -> Option<f64> {
     if status != 429 {
         return None;
     }
@@ -546,7 +550,7 @@ fn retry_after_in_error(status: u16, body: &str) -> Option<f64> {
                 .is_some_and(|id| id.contains("PerDay"))
         });
     if per_day {
-        return Some(until_pacific_midnight(SystemTime::now()));
+        return Some(until_pacific_midnight(now));
     }
     of("RetryInfo")
         .find_map(|d| {
@@ -1661,11 +1665,14 @@ mod tests {
         let minute = body("GenerateRequestsPerMinutePerProjectPerModel-FreeTier");
         assert_eq!(retry_after_in_error(429, &minute), Some(35.0));
         // A daily one resets at midnight Pacific, not in 35 s.
-        let day = body("GenerateRequestsPerDayPerProjectPerModel-FreeTier");
-        let wait = retry_after_in_error(429, &day).unwrap();
-        assert!(wait > 35.0 && wait <= 86_400.0, "{wait}");
-        assert_eq!(retry_after_in_error(400, &day), None);
         let at = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(s);
+        let day = body("GenerateRequestsPerDayPerProjectPerModel-FreeTier");
+        let noon = at(86_400 * 100 + 12 * 3600);
+        assert_eq!(
+            retry_after_in_error_at(429, &day, noon),
+            Some(20.0 * 3600.0)
+        );
+        assert_eq!(retry_after_in_error(400, &day), None);
         assert_eq!(until_pacific_midnight(at(86_400 * 100)), 8.0 * 3600.0);
         assert_eq!(
             until_pacific_midnight(at(86_400 * 100 + 9 * 3600)),
