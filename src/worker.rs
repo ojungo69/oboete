@@ -143,6 +143,8 @@ fn run_holding(
         &mut held,
         &mut last,
     );
+    // Released first: a hook that finds the lock free starts a worker for what it appended.
+    drop(held);
     // A run that never took the lock did no work: another worker's outcome stands.
     if last > 0 {
         record(home, last, &result);
