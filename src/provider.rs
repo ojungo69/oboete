@@ -157,6 +157,21 @@ impl CallError {
     fn invalid(&self) -> bool {
         self.message.starts_with("invalid output")
     }
+
+    /// The provider rejected the key by name (the vetted code the message ends in): every call
+    /// fails the same way until the owner replaces it. Never a bare 401: OpenCode Go answers 401
+    /// for credits and monthly limits too.
+    fn key_rejected(&self) -> bool {
+        matches!(self.status, Some(401 | 403))
+            && [
+                "invalid_api_key",
+                "authentication_error",
+                "permission_error",
+                "PERMISSION_DENIED",
+            ]
+            .iter()
+            .any(|code| self.message.contains(&format!(": {code}")))
+    }
 }
 
 /// The chain for one run. A provider that failed cools down before it is tried again; the
@@ -442,7 +457,8 @@ fn cooldown_for(e: &CallError) -> Option<Duration> {
     }
 }
 
-/// A provider's state after a failure: its cooldown, the breaker's count, and the 429 backoff.
+/// A provider's state after a failure: its cooldown, the breaker's count, and the backoff of a
+/// 429 that names no reset or of a rejected key.
 /// A 429 that names no reset doubles its cooldown each time, up to an hour: Mistral's key at
 /// 0 requests a minute refused every request that way, and a flat 45 s re-sent each window to it
 /// (2026-09-27).
@@ -461,6 +477,12 @@ fn next_state(was: providers_db::State, e: &CallError) -> providers_db::State {
         Some(_) if e.status == Some(429) && e.retry_after_s.is_none() => {
             let d = COOLDOWN_429.saturating_mul(1 << was.backoff.min(10));
             (Some(d.min(MAX_BACKOFF_429)), 0, was.backoff + 1)
+        }
+        // A rejected key: from the outage rest, doubling up to a day, so a revoked key is tried a
+        // few times a day, not every ten minutes.
+        Some(c) if e.key_rejected() => {
+            let d = c.saturating_mul(1 << was.backoff.min(10));
+            (Some(d.min(MAX_COOLDOWN)), 0, was.backoff + 1)
         }
         Some(c) => (Some(c), 0, 0),
         None if was.fails + 1 >= BREAKER_AFTER => (Some(COOLDOWN_BREAKER), 0, 0),
@@ -817,15 +839,21 @@ fn error_body(body: &str) -> Option<Value> {
 pub(crate) fn error_code(body: &str) -> Option<String> {
     let v = error_body(body)?;
     let e = v.get("error").unwrap_or(&v);
-    ["code", "type", "status"]
-        .iter()
-        .find_map(|k| match e.get(*k)? {
-            Value::String(s) => KNOWN_CODES.contains(&s.as_str()).then(|| s.clone()),
-            Value::Number(n) => n
-                .as_u64()
-                .filter(|n| (100..600).contains(n))
-                .map(|n| n.to_string()),
-            _ => None,
+    let keys = ["code", "type", "status"];
+    // A known name before a number: Gemini's 403 is `"code": 403, "status": "PERMISSION_DENIED"`,
+    // and the name says what failed.
+    keys.iter()
+        .find_map(|k| {
+            let s = e.get(*k)?.as_str()?;
+            KNOWN_CODES.contains(&s).then(|| s.to_owned())
+        })
+        .or_else(|| {
+            keys.iter().find_map(|k| {
+                e.get(*k)?
+                    .as_u64()
+                    .filter(|n| (100..600).contains(n))
+                    .map(|n| n.to_string())
+            })
         })
 }
 
@@ -2858,6 +2886,71 @@ mod tests {
         assert_eq!(next_state(s, &named).backoff, 0);
     }
 
+    /// A key the provider rejects by name fails every call until the owner replaces it: its rest
+    /// doubles up to a day instead of re-sending every window each ten minutes. A bare 401 keeps
+    /// the flat outage rest: OpenCode Go answers 401 for credits and monthly limits too.
+    #[test]
+    fn a_rejected_key_doubles_its_rest_up_to_a_day() {
+        let e = |message: &str| CallError {
+            status: Some(401),
+            retry_after_s: None,
+            message: message.into(),
+            usage: Usage::default(),
+            sent: true,
+            cool_until: None,
+            rate: None,
+        };
+        let waits = |e: &CallError| {
+            let mut s = providers_db::State::default();
+            (0..10)
+                .map(|_| {
+                    let before = db::now_ms();
+                    s = next_state(s, e);
+                    (s.down_until - before + 30_000) / 60_000
+                })
+                .collect::<Vec<_>>()
+        };
+        let day = [10, 20, 40, 80, 160, 320, 640, 1280, 1440, 1440];
+        assert_eq!(waits(&e("http 401: invalid_api_key")), day);
+        assert_eq!(waits(&e("http 401: authentication_error")), day);
+        let denied = CallError {
+            status: Some(403),
+            ..e("http 403: PERMISSION_DENIED")
+        };
+        assert_eq!(waits(&denied), day);
+        assert_eq!(waits(&e("http 401")), [10; 10]);
+    }
+
+    /// Gemini names a rejected key in `status` next to a numeric `code`: the name is kept, so the
+    /// key's rest doubles.
+    #[test]
+    fn geminis_permission_denied_is_a_rejected_key() {
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
+        let (url, _) = serve(
+            "403 Forbidden",
+            json!([{"error": {"code": 403, "status": "PERMISSION_DENIED",
+                "message": "Method doesn't allow unregistered callers canary-gemini"}}])
+            .to_string()
+            .into_bytes(),
+            "",
+        );
+        let providers = [stub(url)];
+        assert!(
+            Chain::new(&providers, &conn)
+                .run("curator", "s", "p", &json!({}))
+                .is_err()
+        );
+        let detail: String = conn
+            .query_row("SELECT detail FROM provider_calls", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(detail, "http 403: PERMISSION_DENIED");
+        assert_eq!(
+            crate::providers_db::state(&conn, "stub").unwrap().backoff,
+            1
+        );
+    }
+
     #[test]
     fn mistrals_429_is_read_from_the_body_root_and_backs_off() {
         let home = tempfile::tempdir().unwrap();
@@ -3465,8 +3558,11 @@ mod tests {
                     {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "35s"}]}}])
             .to_string()
         };
-        // The array root is read (it gave no code before).
-        assert_eq!(error_code(&body("x")).as_deref(), Some("429"));
+        // The array root is read (it gave no code before), and its status name before the number.
+        assert_eq!(
+            error_code(&body("x")).as_deref(),
+            Some("RESOURCE_EXHAUSTED")
+        );
         // A per-minute quota: its RetryInfo delay.
         let minute = body("GenerateRequestsPerMinutePerProjectPerModel-FreeTier");
         assert_eq!(retry_after_in_error(429, &minute), Some(35.0));
