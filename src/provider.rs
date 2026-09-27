@@ -1778,7 +1778,8 @@ mod tests {
         let schema = crate::curate::schema();
         let claim = |kind: &str| {
             serde_json::json!({"id": "c1", "kind": kind, "status": "decided", "speaker": "user",
-                "scope": "repo", "body": "b", "quote": "q", "line": "L1", "supersedes": []})
+                "scope": "repo", "body": "b", "quote": "q", "line": "L1", "supersedes": [],
+                "why": ""})
         };
         let ok = serde_json::json!({"claims": [claim("decision")], "summary": "s"});
         assert!(fits(&ok, &schema));

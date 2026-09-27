@@ -58,11 +58,25 @@ pub struct Line {
     pub id: String,
     pub seq: i64,
     /// Its session as stored: agent, then session id, NUL between.
-    key: String,
-    repo: Option<String>,
+    pub(crate) key: String,
+    pub(crate) repo: Option<String>,
     /// As sent, after its id.
-    text: String,
+    pub(crate) text: String,
+    pub(crate) role: Role,
     source: Option<Source>,
+}
+
+/// Whose a line's text is: the gates take a claim's speaker from its quote's line (Task 8).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Role {
+    /// A typed prompt.
+    User,
+    Assistant,
+    Tool {
+        failed: bool,
+    },
+    /// A harness envelope, a compaction summary, a session's start or end.
+    Other,
 }
 
 /// The part of an event's long text a line shows: from byte `start`, as stored, with the runs of
@@ -91,7 +105,7 @@ struct Piece {
     tokens: u32,
     /// A typed prompt that starts here: a turn boundary (D12).
     turn: bool,
-    tool: bool,
+    role: Role,
     source: Option<Source>,
     repo: Option<String>,
 }
@@ -191,7 +205,7 @@ pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Resul
             if pieces.iter().all(|p| p.text.is_empty()) {
                 // The first event to read does not fit: a tool output is elided, anything else is
                 // split, and the next window starts where this part stops.
-                if piece.tool {
+                if matches!(piece.role, Role::Tool { .. }) {
                     piece = prepared.elided(r.seq);
                     elided.push(r.seq);
                     // Covered whole: the window is full only when a record follows it.
@@ -228,7 +242,10 @@ pub fn next_window(raw: &Raw, device: &str, budget: u32, rules: &Rules) -> Resul
 fn cut_back(pieces: &mut Vec<Piece>) {
     if let Some(i) = pieces.iter().rposition(|p| p.turn).filter(|&i| i > 0) {
         pieces.truncate(i);
-    } else if let Some(i) = pieces.iter().rposition(|p| p.tool) {
+    } else if let Some(i) = pieces
+        .iter()
+        .rposition(|p| matches!(p.role, Role::Tool { .. }))
+    {
         pieces.truncate(i + 1);
     }
 }
@@ -243,7 +260,7 @@ fn empty(seq: i64) -> Piece {
         text: String::new(),
         tokens: 0,
         turn: false,
-        tool: false,
+        role: Role::Other,
         source: None,
         repo: None,
     }
@@ -371,7 +388,7 @@ struct Prepared<'r> {
     rules: &'r Rules,
     head: String,
     long: Option<(String, Hidden)>,
-    tool: bool,
+    role: Role,
     turn: bool,
     key: String,
     heading: String,
@@ -388,13 +405,13 @@ impl<'r> Prepared<'r> {
             long_of(&e.kind, &body)
         };
         let gate = |s: &str| crate::redact::outbound_with(s, rules);
-        let (head, tool) = match e.kind.as_str() {
-            "prompt" if body["omitted"] == true => ("[user] (not stored)".into(), false),
-            "prompt" => ("[user]".into(), false),
-            "envelope" => ("[harness]".into(), false),
-            "reply" => ("[assistant]".into(), false),
-            "compaction" if long.is_some() => ("[compaction summary]".into(), false),
-            "compaction" => ("[compaction]".into(), false),
+        let (head, role) = match e.kind.as_str() {
+            "prompt" if body["omitted"] == true => ("[user] (not stored)".into(), Role::User),
+            "prompt" => ("[user]".into(), Role::User),
+            "envelope" => ("[harness]".into(), Role::Other),
+            "reply" => ("[assistant]".into(), Role::Assistant),
+            "compaction" if long.is_some() => ("[compaction summary]".into(), Role::Other),
+            "compaction" => ("[compaction]".into(), Role::Other),
             "tool" => {
                 let input = text(&body["input"]).unwrap_or_default();
                 // Cut like a split event: a secret across the cut is found in the whole input.
@@ -412,10 +429,12 @@ impl<'r> Prepared<'r> {
                 let output = if memory { MEMORY_READ } else { "" };
                 (
                     format!("[tool {name}{failed}] input: {input}\n  output:{output}"),
-                    true,
+                    Role::Tool {
+                        failed: body["failed"] == true,
+                    },
                 )
             }
-            _ => (String::new(), false), // a session's start or end: nothing to read
+            _ => (String::new(), Role::Other), // a session's start or end: nothing to read
         };
         // Each label through the gate on its own, before it is shortened or joined.
         let place = match (&e.repo, &e.branch) {
@@ -440,7 +459,7 @@ impl<'r> Prepared<'r> {
                 (l, hidden)
             }),
             head,
-            tool,
+            role,
             turn: e.kind == "prompt",
             key: format!("{}\u{0}{}", e.agent, e.session),
             repo: e.repo.clone(),
@@ -489,7 +508,7 @@ impl<'r> Prepared<'r> {
             heading: self.heading.clone(),
             tokens: line_tokens(&text),
             turn: self.turn && from == 0,
-            tool: self.tool,
+            role: self.role,
             text,
             source: None,
         }
@@ -594,6 +613,7 @@ fn grouped(pieces: &[Piece]) -> (String, Vec<Line>) {
                 key: p.key.clone(),
                 repo: p.repo.clone(),
                 text: p.text.clone(),
+                role: p.role,
                 source: p.source.clone(),
             });
         }
@@ -755,7 +775,7 @@ pub fn run_phase(
     }
     // Each repository's candidates, found by its own lines and kept with it: a draft supersedes
     // only its own repository's claims.
-    let mut shown_in: Vec<(String, String)> = Vec::new();
+    let mut shown_in: Vec<(String, crate::claims::Claim)> = Vec::new();
     for repo in repos {
         let text: Vec<&str> = w
             .lines
@@ -775,15 +795,15 @@ pub fn run_phase(
                 c.uid,
                 crate::redact::outbound_with(&c.body, rules)
             ));
-            shown_in.push((repo.to_owned(), c.uid));
+            shown_in.push((repo.to_owned(), c));
         }
         shown.push(block);
     }
     let (carried_text, mut carried_uids) = carried(raw, k, rules, &w)?;
     // Within a fifth of the window's budget; a uid cut from the prompt is superseded by nothing.
     let (carried_text, shown) = fit(&carried_text, &shown, summary.window_tokens / 5);
-    carried_uids.retain(|(_, _, uid)| carried_text.contains(uid.as_str()));
-    shown_in.retain(|(_, uid)| shown.contains(uid.as_str()));
+    carried_uids.retain(|(_, _, c)| carried_text.contains(c.uid.as_str()));
+    shown_in.retain(|(_, c)| shown.contains(c.uid.as_str()));
     let prompt = prompt(&summary.language, &w.text, &shown, &carried_text);
     let sent = sha256_hex(&format!("{chain}\n{}\n{}", summary.language, w.text));
     // A row for another request is stale, and its attempts and hold were not on this one: a
@@ -804,9 +824,40 @@ pub fn run_phase(
     let span = format!("{}-{}", w.from_seq, w.to_seq);
     let answer = curator(&span, &prompt, &|v| check(&w, v));
     let failed = match answer {
-        Ok(r) => match claims_of(&w, &r.output, &r.provider, r.tier, &shown_in, &carried_uids) {
-            Ok((summary, claims)) => {
-                let op = json!({"outcome": "curated", "provider": r.provider, "summary": summary});
+        Ok(r) => match located(&w, &r.output) {
+            Ok((summary, found, lost)) => {
+                let gated = crate::gates::check(&w, &shown_in, &carried_uids, found, rules);
+                let (mut claims, mut over) = (Vec::new(), Vec::new());
+                for (d, evidence) in gated.kept {
+                    let op = crate::claims::ClaimOp {
+                        id: d.id.clone(),
+                        kind: d.kind,
+                        status: d.status,
+                        speaker: d.speaker,
+                        scope: d.scope,
+                        body: d.body,
+                        evidence: vec![evidence],
+                        supersedes: d.supersedes,
+                        recipe: r.provider.clone(),
+                        tier: r.tier,
+                        why: d.why,
+                    };
+                    let op = serde_json::to_value(op)?;
+                    // An op the record cannot hold: kept, its append would stop the window.
+                    if op.to_string().len() > crate::raw::MAX_OP_BYTES {
+                        over.push((d.id, "its claim op is over the op cap"));
+                        continue;
+                    }
+                    claims.push(op);
+                }
+                let dropped: Vec<(String, &str)> = lost
+                    .into_iter()
+                    .map(|id| (id, "its quote is not in the window"))
+                    .chain(gated.dropped)
+                    .chain(over)
+                    .collect();
+                let op = json!({"outcome": "curated", "provider": r.provider, "summary": summary,
+                    "dropped": dropped, "lowered": gated.lowered});
                 return cover(raw, db, &w, op, claims);
             }
             // Counted like a provider that failed: no answer this window can use.
@@ -931,6 +982,9 @@ pub struct Draft {
     pub line: String,
     #[serde(default)]
     pub supersedes: Vec<String>,
+    /// For a change, the reason the record gives; empty when it gives none (spec 3.3).
+    #[serde(default)]
+    pub why: String,
 }
 
 fn line_id<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<String, D::Error> {
@@ -977,6 +1031,8 @@ impl std::fmt::Display for AnswerFailure {
 
 /// Claims one window may give.
 const MAX_CLAIMS: usize = 50;
+/// A draft's id, at most.
+const MAX_ID_BYTES: usize = 64;
 
 /// The answer's summary and drafts, or why it gives none.
 pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), AnswerFailure> {
@@ -1013,12 +1069,13 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
         .map_err(|_| AnswerFailure::Shape)?;
     // A sibling's `supersedes` names an id: two drafts with one id would link the wrong one, and
     // an id shaped like a uid would be read as one where its draft gives no claim (the claims
-    // consumer takes a `supersedes` entry that names no sibling as a uid).
+    // consumer takes a `supersedes` entry that names no sibling as a uid). The window op lists
+    // the ids it drops, so an id is short, as the prompt asks (c1, c2, ...).
     let mut ids = std::collections::HashSet::new();
     let uid_like = |id: &str| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit());
     if !drafts
         .iter()
-        .all(|d| !uid_like(&d.id) && ids.insert(d.id.as_str()))
+        .all(|d| d.id.len() <= MAX_ID_BYTES && !uid_like(&d.id) && ids.insert(d.id.as_str()))
     {
         return Err(AnswerFailure::Shape);
     }
@@ -1028,78 +1085,31 @@ pub fn parse(answer: &Value) -> std::result::Result<(String, Vec<Draft>), Answer
 /// The chain's check of a curator's answer (`provider::AnswerCheck`): the outcome it is refused
 /// under, or `None` when it gives this window something to keep.
 pub fn check(w: &Window, answer: &Value) -> Option<&'static str> {
-    claims_of(w, answer, "", 0, &[], &[])
-        .err()
-        .map(AnswerFailure::outcome)
+    located(w, answer).err().map(AnswerFailure::outcome)
 }
 
-/// The summary and a claim op per draft whose quote is found in the window (Task 6's
-/// `ClaimOp`), with the answering entry as its recipe and tier. A draft supersedes a sibling of
-/// its own line's repository, a candidate shown for that repository (`shown`: repository and
-/// uid), or what its session carried in (`carried`): another repository's claim would leave that
-/// repository's current tips.
-fn claims_of(
+/// A draft with its evidence and its line's index in `w.lines`.
+type Located = (Draft, crate::claims::Evidence, usize);
+
+/// The summary, each draft whose quote is found in the window with its evidence and line, and
+/// the ids of the drafts whose quote is not (not claims: the window op counts them).
+fn located(
     w: &Window,
     answer: &Value,
-    recipe: &str,
-    tier: i64,
-    shown: &[(String, String)],
-    carried: &[(String, Option<String>, String)],
-) -> std::result::Result<(String, Vec<Value>), AnswerFailure> {
+) -> std::result::Result<(String, Vec<Located>, Vec<String>), AnswerFailure> {
     let (summary, drafts) = parse(answer)?;
-    // Each draft's id and its line's repository.
-    let ids: Vec<(&str, Option<&str>)> = drafts
-        .iter()
-        .map(|d| {
-            let repo = line_index(w, &d.line).and_then(|i| w.lines[i].repo.as_deref());
-            (d.id.as_str(), repo)
-        })
-        .collect();
-    let mut claims = Vec::new();
-    for d in &drafts {
-        let (Some(i), Some(evidence)) = (line_index(w, &d.line), locate(w, &d.line, &d.quote))
-        else {
-            continue; // not a claim: its quote is not in the window (Task 8 counts these)
-        };
-        let (repo, key) = (w.lines[i].repo.as_deref(), &w.lines[i].key);
-        let supersedes = d
-            .supersedes
-            .iter()
-            .filter(|to| {
-                ids.iter()
-                    .any(|&(id, r)| id == to.as_str() && id != d.id && r == repo)
-                    || shown
-                        .iter()
-                        .any(|(r, uid)| Some(r.as_str()) == repo && uid == *to)
-                    || carried
-                        .iter()
-                        .any(|(k, r, uid)| k == key && r.as_deref() == repo && uid == *to)
-            })
-            .cloned()
-            .collect();
-        let op = crate::claims::ClaimOp {
-            id: d.id.clone(),
-            kind: d.kind.clone(),
-            status: d.status.clone(),
-            speaker: d.speaker.clone(),
-            scope: d.scope.clone(),
-            body: d.body.clone(),
-            evidence: vec![evidence],
-            supersedes,
-            recipe: recipe.to_owned(),
-            tier,
-        };
-        let op = serde_json::to_value(op).map_err(|_| AnswerFailure::Shape)?;
-        // An op the record cannot hold is no claim: kept, its append would stop the window.
-        if op.to_string().len() > crate::raw::MAX_OP_BYTES {
-            continue;
+    let any = !drafts.is_empty();
+    let (mut found, mut lost) = (Vec::new(), Vec::new());
+    for d in drafts {
+        match line_index(w, &d.line).zip(locate(w, &d.line, &d.quote)) {
+            Some((i, e)) => found.push((d, e, i)),
+            None => lost.push(d.id),
         }
-        claims.push(op);
     }
-    if !drafts.is_empty() && claims.is_empty() {
+    if any && found.is_empty() {
         return Err(AnswerFailure::Unanchored);
     }
-    Ok((summary, claims))
+    Ok((summary, found, lost))
 }
 
 /// At most `k` of `all`, spread evenly over the whole of it (a window's trigrams: not its first
@@ -1146,9 +1156,9 @@ pub fn candidates(k: &Connection, repo: &str, text: &str) -> Result<Vec<crate::c
     Ok(out)
 }
 
-/// The uids `carried` showed, each with its session (agent, then session id, NUL between) and its
-/// repository: a draft of that session, anchored in that repository, may supersede them.
-type Carried = Vec<(String, Option<String>, String)>;
+/// The claims `carried` showed, each with its session (agent, then session id, NUL between) and
+/// its repository: a draft of that session, anchored in that repository, may supersede them.
+type Carried = Vec<(String, Option<String>, crate::claims::Claim)>;
 
 /// What each session of the window carries in from before it (spec 3.1, 3.3; D12), as text for
 /// the prompt: its goal (its first prompt, through the gate, 200 characters), its open items,
@@ -1177,7 +1187,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
     }
     let session_of = |device: &str, seq: i64| raw.session_key(device, seq);
     let (mut out, mut open) = (String::new(), String::new());
-    let mut uids = Vec::new();
+    let mut uids: Carried = Vec::new();
     for (key, repos) in sessions {
         let (agent, session) = key.split_once('\u{0}').unwrap_or((key, ""));
         // A window that starts inside an event: its first part was in the previous window.
@@ -1207,14 +1217,14 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
                 // or a later window may have settled or reworded it.
                 if let Some((repo, tip)) = crate::claims::tip(k, &uid)?
                     && tip.status == "proposed"
-                    && !uids.iter().any(|(_, _, u)| *u == uid)
+                    && !uids.iter().any(|(_, _, u)| u.uid == uid)
                 {
                     let place = repo
                         .as_deref()
                         .map(|r| format!(" in {}", repo_name(r, rules)));
                     let place = place.unwrap_or_default();
                     lines.push(format!("proposed before {uid}{place}: {}", gate(&tip.body)));
-                    uids.push((key.to_owned(), repo, uid));
+                    uids.push((key.to_owned(), repo, tip));
                 }
             }
         }
@@ -1240,7 +1250,7 @@ fn carried(raw: &Raw, k: &Connection, rules: &Rules, w: &Window) -> Result<(Stri
             if session_of(&c.device, c.seq)?.as_deref() == Some(key) {
                 let place = repo_name(c_repo, rules);
                 open_lines.push(format!("open item {} in {place}: {}", c.uid, gate(&c.body)));
-                uids.push((key.to_owned(), Some(c_repo.to_owned()), c.uid.clone()));
+                uids.push((key.to_owned(), Some(c_repo.to_owned()), c.clone()));
                 shown += 1;
             }
         }
@@ -1289,6 +1299,8 @@ pub fn prompt(language: &str, text: &str, candidates: &str, carried: &str) -> St
          - line: that line's id.\n\
          - supersedes: the ids of claims in your answer, or the uids of kept claims, that this \
          one replaces or reverses; empty otherwise.\n\
+         - why: for a change, the reason the lines give for it, in their words; empty when they \
+         give none, and for every other kind.\n\
          Skip routine tool noise and what the code itself shows. When nothing is worth \
          remembering, return an empty claims array.\n\
          The summary is 2-4 sentences: what was worked on, what was decided, what is still open.\n\
@@ -1319,10 +1331,11 @@ pub fn schema() -> Value {
                         "body": text,
                         "quote": text,
                         "line": text,
-                        "supersedes": {"type": "array", "items": text}
+                        "supersedes": {"type": "array", "items": text},
+                        "why": text
                     },
                     "required": ["id", "kind", "status", "speaker", "scope", "body", "quote",
-                        "line", "supersedes"],
+                        "line", "supersedes", "why"],
                     "additionalProperties": false
                 }
             },
@@ -2453,6 +2466,7 @@ mod tests {
             supersedes: Vec::new(),
             recipe: "test".into(),
             tier: 1,
+            why: String::new(),
         };
         (OpKind::Claim, serde_json::to_value(op).unwrap())
     }
@@ -2735,22 +2749,20 @@ mod tests {
     /// derivation, once, and only while that derivation is itself a proposal.
     #[test]
     fn a_carried_proposal_is_its_active_derivation_once() {
+        // The user's own line: the gates keep a decision there (Task 8).
         let first = [
             prompt("Build the importer."),
-            event(
-                "reply",
-                json!({"assistant": "Maybe cache the parsed files?"}),
-            ),
+            prompt("Cache the parsed files for the importer."),
         ];
         let draft = |id: &str, status: &str, quote: &str, body: &str| {
-            json!({"id": id, "kind": "decision", "status": status, "speaker": "assistant proposal",
+            json!({"id": id, "kind": "decision", "status": status, "speaker": "user",
                 "scope": "repo", "body": body, "quote": quote, "line": "L2", "supersedes": []})
         };
         let none = |_: &str| json!({"claims": [], "summary": "s"});
         for (later, carried) in [("proposed", 1), ("decided", 0)] {
             let answer = json!({"claims": [
-                draft("c1", "proposed", "cache the parsed files", "Cache the parsed files."),
-                draft("c2", later, "Maybe cache the parsed", "Parse once, then cache.")],
+                draft("c1", "proposed", "Cache the parsed files", "Cache the parsed files."),
+                draft("c2", later, "parsed files for the importer", "Parse once, then cache.")],
                 "summary": "s"});
             let (sent, _) = two_windows(&first, answer, &[prompt("Yes.")], none);
             let lines: Vec<&str> = sent[1]
@@ -2823,7 +2835,9 @@ mod tests {
     fn a_draft_over_the_op_cap_is_left_out_and_the_window_is_covered() {
         let first = [prompt("Keep the importer simple.")];
         let mut huge = claim("c1", "decided", "L1", "Keep the importer simple", json!([]));
-        huge["body"] = "x".repeat(crate::raw::MAX_OP_BYTES).into();
+        // Not the body, which the gates cap at 1,000 characters (Task 8): a change's why.
+        huge["kind"] = "change".into();
+        huge["why"] = "x".repeat(crate::raw::MAX_OP_BYTES).into();
         let answer = json!({"claims": [huge,
             claim("c2", "decided", "L1", "the importer simple", json!([]))], "summary": "s"});
         let none = |_: &str| json!({"claims": [], "summary": "s"});
@@ -2861,6 +2875,55 @@ mod tests {
         let (_, ops) = two_windows(&first, answer, &second, accept);
         let last = ops.iter().rev().find(|o| o.kind == OpKind::Claim).unwrap();
         assert_eq!(last.body["supersedes"], json!([]));
+    }
+
+    /// Task 8: the claim op holds what the gates let through, and the window op what they
+    /// dropped and lowered, with each reason.
+    #[test]
+    fn the_window_op_records_what_the_gates_dropped_and_lowered() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut raw, db) = open(home.path());
+        let reply = json!({"assistant": "We could cache the parsed files."});
+        raw.append(&event("reply", reply)).unwrap();
+        let claim = |id: &str, quote: &str| {
+            json!({"id": id, "kind": "decision", "status": "decided", "speaker": "user",
+                "scope": "repo", "body": "Cache parsed files.", "quote": quote, "line": "L1",
+                "supersedes": [], "why": ""})
+        };
+        let answer = json!({"claims": [claim("c1", "cache the parsed files"),
+            claim("c2", "not in the window")], "summary": "s"});
+        let mut chain = |_: &str, _: &str, _: &AnswerCheck| -> Result<ChainResult> {
+            Ok(ChainResult {
+                output: answer.clone(),
+                ..answered("fake")
+            })
+        };
+        let summary = curating(WINDOW_TOKENS);
+        run_phase(
+            &mut raw,
+            &kn(),
+            &db,
+            &Rules::default(),
+            &summary,
+            "",
+            &mut chain,
+        )
+        .unwrap();
+        let ops = raw.ops_after(raw.device(), 0, 10).unwrap();
+        let window = ops.iter().find(|o| o.kind == OpKind::Window).unwrap();
+        let dropped = json!([["c2", "its quote is not in the window"]]);
+        assert_eq!(window.body["dropped"], dropped);
+        let lowered = json!([
+            ["c1", "the speaker is the quote's line"],
+            [
+                "c1",
+                "decided needs the user's words or an acceptance right after"
+            ]
+        ]);
+        assert_eq!(window.body["lowered"], lowered);
+        let claim = &ops.iter().find(|o| o.kind == OpKind::Claim).unwrap().body;
+        let got = (claim["status"].as_str(), claim["speaker"].as_str());
+        assert_eq!(got, (Some("proposed"), Some("assistant proposal")));
     }
 
     /// Spec 3.3: a tool output's text reaches the prompt only between the fence lines, which
@@ -2903,6 +2966,12 @@ mod tests {
             (unanchored.clone(), "unanchored"),
             (
                 json!({"claims": [{"id": "a".repeat(64), "kind": "decision",
+                    "status": "decided", "speaker": "user", "scope": "repo", "body": "b",
+                    "quote": "one", "line": "L1", "supersedes": []}], "summary": "s"}),
+                "shape",
+            ),
+            (
+                json!({"claims": [{"id": "c".repeat(MAX_ID_BYTES + 1), "kind": "decision",
                     "status": "decided", "speaker": "user", "scope": "repo", "body": "b",
                     "quote": "one", "line": "L1", "supersedes": []}], "summary": "s"}),
                 "shape",
