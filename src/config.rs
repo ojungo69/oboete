@@ -151,7 +151,9 @@ pub enum Provider {
         #[serde(default)]
         limits: Limits,
         /// Paid by a subscription the owner codes with (OpenCode Go, owner decision 25): its tier
-        /// is a subscription's, as a subscription CLI's is (spec 1.4).
+        /// is a subscription's, as a subscription CLI's is (spec 1.4). Unlike a CLI it keeps the
+        /// API default `daily_budget` unless it sets its own: past its plan's limits an API-key
+        /// subscription may draw on a paid balance (issue #164).
         #[serde(default)]
         subscription: bool,
     },
@@ -392,7 +394,9 @@ fn default_providers() -> Vec<Provider> {
         "https://opencode.ai/zen/go/v1",
         "OPENCODE_API_KEY.md",
         "glm-5.3-flash",
-        300,
+        // No cap of calls a day (owner decision 30): the owner's Go account does not fall back to
+        // a paid Zen balance past its limits (the owner, 2026-09-28).
+        no_daily_cap(),
         true,
         serde_json::json!({}),
     );
@@ -827,16 +831,16 @@ model = "haiku"
             .map(|p| p.name().to_owned())
             .collect();
         assert_eq!(subscriptions, ["opencode-go", "codex", "claude"]);
-        // A subscription CLI has no cap of calls a day, in the default chain or when the owner
-        // writes one without it (owner decision 30).
+        // The default chain's subscriptions have no cap of calls a day, nor has a CLI the owner
+        // writes without one (owner decision 30).
         let caps: Vec<u32> = load(dir)
             .unwrap()
             .providers
             .iter()
-            .filter(|p| matches!(p, Provider::Cli { .. }))
+            .filter(|p| p.subscription())
             .map(Provider::daily_budget)
             .collect();
-        assert_eq!(caps, [u32::MAX, u32::MAX]);
+        assert_eq!(caps, [u32::MAX; 3]);
         let own: Provider =
             toml::from_str("kind = \"cli\"\nname = \"codex\"\ncli = \"codex\"\n").unwrap();
         assert_eq!(own.daily_budget(), u32::MAX);
