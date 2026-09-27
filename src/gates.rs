@@ -63,6 +63,9 @@ const NEGATE: &[&str] = &[
     "不要",
     "却下",
     "反対",
+    "いいえ",
+    "ません",
+    "かねます",
     "no",
     "not",
     "cannot",
@@ -70,6 +73,16 @@ const NEGATE: &[&str] = &[
     "stop",
     "wait",
     "instead",
+];
+
+/// Polite phrases that end in a negative form and mean yes (or are only politeness): taken out
+/// before `NEGATE` is looked for.
+const POLITE_YES: &[&str] = &[
+    "問題ありません",
+    "構いません",
+    "かまいません",
+    "差し支えありません",
+    "すみません",
 ];
 
 /// What an acceptance says besides its acceptance words, which a bare one says nothing but.
@@ -340,7 +353,12 @@ fn answers_a_reply(w: &Window, i: usize) -> bool {
 
 /// A turn that accepts: an acceptance word, no negation, not a question (spec 3.3).
 fn acceptance(text: &str) -> bool {
-    !question(text) && !holds(text, NEGATE) && holds(text, ACCEPT)
+    // A polite yes can end in ません too ("問題ありません"): those are not a negation.
+    let mut plain = text.to_owned();
+    for yes in POLITE_YES {
+        plain = plain.replace(yes, "");
+    }
+    !question(text) && !holds(&plain, NEGATE) && holds(text, ACCEPT)
 }
 
 /// A quote that only accepts: it holds an acceptance word, and once its acceptance and filler
@@ -680,11 +698,27 @@ mod tests {
             "OK, but we cannot do that.",
             "OK, but don\u{2019}t do that.",
             "No, go ahead later.",
+            "いいえ、承知できません",
+            "はい、でもそれはできません",
+            "承知しかねます",
         ] {
             let w = window(&[reply(PROPOSAL), user(answer)]);
             assert_eq!(
                 one(&w, "decided", "assistant proposal", cache).0,
                 "proposed",
+                "{answer}"
+            );
+        }
+        // A polite yes that ends in ません is still a yes.
+        for answer in [
+            "はい、問題ありません",
+            "はい、それで構いません",
+            "はい、すみません、お願いします",
+        ] {
+            let w = window(&[reply(PROPOSAL), user(answer)]);
+            assert_eq!(
+                one(&w, "decided", "assistant proposal", cache).0,
+                "decided",
                 "{answer}"
             );
         }
