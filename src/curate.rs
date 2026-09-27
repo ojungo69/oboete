@@ -710,9 +710,9 @@ pub enum Phase {
 pub type Curator<'a> = dyn FnMut(&str, &str, &AnswerCheck) -> Result<ChainResult> + 'a;
 
 /// D10: a wait longer than this does not keep the worker up.
-const STAY_UP_MS: i64 = 30 * 60 * 1000;
+pub(crate) const STAY_UP_MS: i64 = 30 * 60 * 1000;
 /// D11: attempts with no answer before a window is skipped, and the time between two of them.
-const ATTEMPTS: i64 = 3;
+pub(crate) const ATTEMPTS: i64 = 3;
 const RETRY_MS: i64 = 10 * 60 * 1000;
 /// A window that waits on the owner (a provider stopped until `oboete resume`, a curator CLI the
 /// isolation gate refused) is tried again this often, and never keeps the worker up.
@@ -911,7 +911,7 @@ pub fn run_phase(
 /// attempt counts toward D11's three: only when no provider waits on time or a budget, and at
 /// least one was tried (or can never take it). One that waits only on the owner does not count,
 /// nor does a chain with no entry at all (an owner hold too: the owner configures one).
-fn hold(failed: &[Fallback], now: i64) -> (&'static str, i64, bool) {
+pub(crate) fn hold(failed: &[Fallback], now: i64) -> (&'static str, i64, bool) {
     let timed = |budget: bool| {
         failed
             .iter()
