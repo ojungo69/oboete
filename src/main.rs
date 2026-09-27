@@ -9,6 +9,7 @@ mod capture;
 mod codex_probe;
 mod config;
 mod consumer;
+mod curate;
 mod db;
 mod embed;
 mod failure;

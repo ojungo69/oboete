@@ -21,7 +21,7 @@ pub const SKIP_ENV: &str = "OBOETE_SKIP";
 /// stored, in this order: context an IDE or another memory tool puts in front of the text (it may
 /// quote `<private>`), then `<private>`, the developer's opt-out (claude-mem's tag; unclosed, it
 /// hides the rest, where claude-mem would keep it all).
-const STRIP_BLOCKS: &[&str] = &["ide_opened_file", "hook_context", "private"];
+pub(crate) const STRIP_BLOCKS: &[&str] = &["ide_opened_file", "hook_context", "private"];
 /// Prompts that are harness traffic, not typed: background task and teammate notifications and
 /// the /loop sentinel (13.5% of the 15,218 prompts claude-mem stored on this machine).
 /// ponytail: fixed prefix list; add one when a new envelope shows up as a prompt card.
@@ -701,6 +701,23 @@ pub(crate) fn without_blocks(s: &str, unclosed_private_hides_rest: bool) -> Stri
 /// without a closer is kept as text, except with `hide_unclosed`, where the text stops at the
 /// first one. Linear in the input, so a prompt full of stray openers cannot stall the hook.
 fn strip_tag(s: &str, tag: &str, hide_unclosed: bool) -> String {
+    let (blocks, end) = tag_blocks(s, tag, hide_unclosed);
+    let (mut out, mut pos) = (String::with_capacity(s.len()), 0);
+    for (start, stop) in blocks {
+        if start >= end {
+            break;
+        }
+        if start >= pos {
+            out.push_str(&s[pos..start]);
+            pos = stop;
+        }
+    }
+    out.push_str(&s[pos.min(end)..end]);
+    out
+}
+
+/// `tag`'s paired blocks in `s`, sorted, and where its text ends (see `strip_tag`).
+pub(crate) fn tag_blocks(s: &str, tag: &str, hide_unclosed: bool) -> (Vec<(usize, usize)>, usize) {
     let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
     let mut marks: Vec<(usize, bool)> = s
         .match_indices(&open)
@@ -723,18 +740,7 @@ fn strip_tag(s: &str, tag: &str, hide_unclosed: bool) -> String {
         _ => s.len(),
     };
     blocks.sort_unstable();
-    let (mut out, mut pos) = (String::with_capacity(s.len()), 0);
-    for (start, stop) in blocks {
-        if start >= end {
-            break;
-        }
-        if start >= pos {
-            out.push_str(&s[pos..start]);
-            pos = stop;
-        }
-    }
-    out.push_str(&s[pos.min(end)..end]);
-    out
+    (blocks, end)
 }
 
 /// What follows `<tag` makes it the tag (`<privateer>` is not `<private`).

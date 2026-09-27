@@ -443,6 +443,18 @@ impl Raw {
 
     /// Up to `limit` records of `device` after `seq`, in seq order.
     pub fn after(&self, device: &str, seq: i64, limit: usize) -> Result<Vec<Record>> {
+        self.after_within(device, seq, limit, usize::MAX)
+    }
+
+    /// `after`, and fewer when their bodies, as read (decompressed), pass `max_bytes` together
+    /// (always one): a reader in pages never holds much more than that at once (spec 3.1).
+    pub fn after_within(
+        &self,
+        device: &str,
+        seq: i64,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<Record>> {
         let mut st = self.conn.prepare(
             "SELECT device, seq, type, ts, kind, agent, session, repo, branch, head, gitdir, cwd,
                     source, body, original_bytes,
@@ -500,7 +512,19 @@ impl Raw {
                 })
             },
         )?;
-        let mut recs: Vec<Record> = rows.collect::<rusqlite::Result<_>>()?;
+        let (mut recs, mut bytes) = (Vec::new(), 0usize);
+        for r in rows {
+            let r = r?;
+            let size = match &r.item {
+                Item::Event(e) => e.body.len(),
+                _ => 0,
+            };
+            if !recs.is_empty() && bytes.saturating_add(size) > max_bytes {
+                break;
+            }
+            bytes = bytes.saturating_add(size);
+            recs.push(r);
+        }
         self.hide(device, &mut recs)?;
         Ok(recs)
     }
@@ -1252,6 +1276,30 @@ mod tests {
         let other = open(copy.path()).unwrap();
         assert_ne!(other.device(), first);
         assert_eq!(open(copy.path()).unwrap().device(), other.device());
+    }
+
+    #[test]
+    fn a_page_is_bounded_in_bytes_and_always_holds_one_record() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = open(home.path()).unwrap();
+        let dev = raw.device().to_owned();
+        for _ in 0..3 {
+            raw.append(&test_event(&"x".repeat(1000))).unwrap();
+        }
+        assert_eq!(raw.after_within(&dev, 0, 10, 1).unwrap().len(), 1);
+        assert_eq!(raw.after_within(&dev, 0, 10, 1 << 20).unwrap().len(), 3);
+        assert_eq!(raw.after_within(&dev, 0, 2, 1 << 20).unwrap().len(), 2);
+        // Bodies that compress well are counted as read, not as stored.
+        raw.compress_through(&dev, 0, 3).unwrap();
+        let stored: i64 = raw
+            .conn
+            .query_row("SELECT SUM(length(body)) FROM records", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            stored < 1000,
+            "the bodies were not compressed: {stored} bytes"
+        );
+        assert_eq!(raw.after_within(&dev, 0, 10, 1500).unwrap().len(), 1);
     }
 
     #[test]
