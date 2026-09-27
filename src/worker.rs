@@ -60,7 +60,7 @@ fn pass(raw: &Raw, k: &mut Connection, consumers: &mut [Box<dyn Consumer>]) -> R
 }
 
 /// The per-home worker lock, `<home>/state/worker.lock`; released when dropped. Each taking of it
-/// has the next number of `state/worker-gen`, so a worker can tell whether anyone took it since.
+/// has the next number of `state/worker-gen`, so a run's outcome is ordered against a later run's.
 pub struct Lock(#[allow(dead_code)] std::fs::File, u64);
 
 /// The lock, or `None` when another process holds it. Hooks try it too, and start a worker only
@@ -254,14 +254,29 @@ pub fn run(home: &Path, idle_ms: u64) -> Result<()> {
 }
 
 /// A worker a hook started writes its stderr nowhere: its last failure is kept for doctor, and a
-/// good run clears it. Only under the lock, which the run has released by now (its last taking was
-/// `last`), and only when no one took the lock since: a worker that did is the last one, and
-/// records its own outcome when it ends.
+/// good run clears it. `last` numbers the run's last taking of the worker lock, which it has
+/// released by now: an outcome is recorded unless a later run's already is. Under a lock of its
+/// own, not the worker lock: a hook that finds the worker lock taken starts no worker, and this
+/// run no longer reads new records.
 fn record(home: &Path, last: u64, result: &Result<()>) {
-    let Ok(Some(held)) = lock(home) else {
+    let state = home.join("state");
+    let Ok(guard) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(state.join("worker-note.lock"))
+    else {
         return;
     };
-    if held.1 != last + 1 {
+    if guard.lock().is_err() {
+        return;
+    }
+    let recorded = state.join("worker-outcome-gen");
+    let later = std::fs::read_to_string(&recorded)
+        .ok()
+        .and_then(|g| g.trim().parse::<u64>().ok())
+        .is_some_and(|g| g > last);
+    if later {
         return;
     }
     let note = failed_note(home);
@@ -273,6 +288,7 @@ fn record(home: &Path, last: u64, result: &Result<()>) {
             let _ = std::fs::write(&note, format!("{e:#}\n"));
         }
     }
+    let _ = std::fs::write(recorded, last.to_string());
 }
 
 /// `<home>/state/worker-failed`: why the last `oboete worker` stopped with an error.
@@ -377,40 +393,34 @@ mod tests {
         assert!(!failed_note(home.path()).exists());
     }
 
-    /// A run's outcome is recorded only when no other worker has taken the lock since it let go:
-    /// that worker's outcome is the last one, whichever order the two end in.
+    /// A run's outcome is recorded unless a later run's already is, whichever order the two end
+    /// in, and recording never holds the worker lock.
     #[test]
     fn a_runs_outcome_is_not_recorded_over_a_later_workers() {
         let home = tempfile::tempdir().unwrap();
         let failed = || Err(anyhow::anyhow!("a failure"));
         let taken = |h: &Path| lock(h).unwrap().unwrap().1;
-        // A lets go; B takes the lock, fails, records and ends; then A ends well.
-        let a = taken(home.path());
-        let b = taken(home.path());
+        // A lets go; B takes the lock, fails and records; then A ends well.
+        let (a, b) = (taken(home.path()), taken(home.path()));
         record(home.path(), b, &failed());
         record(home.path(), a, &Ok(()));
         assert!(failed_note(home.path()).exists(), "A cleared B's failure");
-        // The other order: A fails after B ended well.
-        let a = taken(home.path());
-        let b = taken(home.path());
+        // B ends well; then A fails.
+        let (a, b) = (taken(home.path()), taken(home.path()));
         record(home.path(), b, &Ok(()));
-        assert!(!failed_note(home.path()).exists());
         record(home.path(), a, &failed());
         assert!(!failed_note(home.path()).exists(), "A recorded over B");
-        // While B still runs, A records nothing either.
-        let a = taken(home.path());
-        let b = lock(home.path()).unwrap().unwrap();
-        record(home.path(), a, &failed());
-        assert!(!failed_note(home.path()).exists());
-        drop(b);
-        // With no one between, the outcome is recorded.
-        let a = taken(home.path());
-        record(home.path(), a, &failed());
+        // A records before B, which fails: B's outcome is the last one.
+        let (a, b) = (taken(home.path()), taken(home.path()));
+        record(home.path(), a, &Ok(()));
+        record(home.path(), b, &failed());
         let why = std::fs::read_to_string(failed_note(home.path())).unwrap();
         assert_eq!(why, "a failure\n");
-        let a = taken(home.path());
-        record(home.path(), a, &Ok(()));
+        // A worker holding the lock does not keep an outcome from being recorded.
+        let running = lock(home.path()).unwrap().unwrap();
+        record(home.path(), running.1, &Ok(()));
         assert!(!failed_note(home.path()).exists());
+        assert!(lock(home.path()).unwrap().is_none());
     }
 
     /// The Windows runner's worker stopped with "database is locked" after a restore: a search
