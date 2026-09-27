@@ -366,13 +366,21 @@ fn call(p: &Provider, prompt: &str, schema: &Value) -> Result<Answer, CallError>
             limits,
             ..
         } => {
-            // A paid entry's answer is bounded, so its admission can count its largest cost.
+            // A paid entry's answer is bounded by what its admission counted: a larger
+            // `max_tokens` in `extra` is lowered to it.
             let mut extra = extra.clone();
-            if limits.is_paid()
-                && !extra.contains_key("max_tokens")
-                && !extra.contains_key("max_completion_tokens")
-            {
-                extra.insert("max_tokens".into(), limits.max_output_tokens.into());
+            if limits.is_paid() {
+                let cap = u64::from(limits.max_output_tokens);
+                let mut bounded = false;
+                for key in ["max_tokens", "max_completion_tokens"] {
+                    if let Some(v) = extra.get_mut(key) {
+                        *v = v.as_u64().map_or(cap, |n| n.min(cap)).into();
+                        bounded = true;
+                    }
+                }
+                if !bounded {
+                    extra.insert("max_tokens".into(), cap.into());
+                }
             }
             openai_compat(
                 base_url,
@@ -2381,6 +2389,35 @@ mod tests {
             crate::providers_db::rate(&conn, "stub").unwrap().tokens,
             Some(300)
         );
+    }
+
+    #[test]
+    fn a_paid_entry_never_asks_for_more_output_than_its_admission_counted() {
+        let answer = json!({"choices": [{"message": {"content": "{}"}}]}).to_string();
+        for extra in [
+            json!({}),
+            json!({"max_tokens": 32_000}),
+            json!({"max_completion_tokens": 100}),
+        ] {
+            let (url, got) = serve_once(answer.clone().into_bytes(), "");
+            let mut p = stub(url);
+            if let Provider::Openai {
+                extra: e, limits, ..
+            } = &mut p
+            {
+                *e = extra.as_object().unwrap().clone();
+                limits.usd_per_mtok_out = 1.0;
+                limits.max_output_tokens = 4000;
+            }
+            call(&p, "short", &json!({"type": "object"})).unwrap();
+            let req = got.recv().unwrap();
+            let body: Value =
+                serde_json::from_str(&req[req.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+            let asked = body["max_tokens"]
+                .as_u64()
+                .or(body["max_completion_tokens"].as_u64());
+            assert!(asked.is_some_and(|n| n <= 4000), "{extra}: {body}");
+        }
     }
 
     #[test]

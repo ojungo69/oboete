@@ -266,6 +266,20 @@ pub fn tokens_this_month(conn: &Connection, provider: &str) -> Result<(i64, i64)
     )?)
 }
 
+/// This month's calls to `provider` that were sent but came back with no usage and no HTTP status
+/// (a timeout, a dropped connection, an answer without a usage block): the provider may have
+/// billed them. The sum of their estimates and their number.
+pub fn unmetered_this_month(conn: &Connection, provider: &str) -> Result<(i64, i64)> {
+    let start = chrono_free_month_start(now_ms());
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(est_tokens), 0), COUNT(*) FROM provider_calls
+         WHERE provider=?1 AND ts>=?2 AND bytes_out > 0 AND prompt_tokens IS NULL
+           AND outcome IN ('error', 'invalid') AND COALESCE(detail, '') NOT LIKE 'http %'",
+        params![provider, start],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
 /// Unix ms of 00:00 UTC on the first day of `ms`'s month (civil-from-days, H. Hinnant).
 fn chrono_free_month_start(ms: i64) -> i64 {
     let days = ms.div_euclid(DAY_MS);

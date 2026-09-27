@@ -124,12 +124,19 @@ pub fn admit(
     Ok(None)
 }
 
-/// USD spent this calendar month (UTC) on every paid entry, at their current prices.
+/// USD spent this calendar month (UTC) on every paid entry, at their current prices. A sent call
+/// whose usage never came back counts at its estimate and its largest answer.
 pub fn spent_this_month(db: &Connection, providers: &[Provider]) -> Result<f64> {
     let mut usd = 0.0;
     for p in providers.iter().filter(|p| p.limits().is_paid()) {
+        let limits = p.limits();
         let (prompt, completion) = providers_db::tokens_this_month(db, p.name())?;
-        usd += p.limits().usd(prompt as f64, completion as f64);
+        usd += limits.usd(prompt as f64, completion as f64);
+        let (est, calls) = providers_db::unmetered_this_month(db, p.name())?;
+        usd += limits.usd(
+            est as f64,
+            (calls * i64::from(limits.max_output_tokens)) as f64,
+        );
     }
     Ok(usd)
 }
@@ -291,5 +298,41 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_sent_call_that_reported_no_usage_counts_at_its_largest_cost() {
+        let home = tempfile::tempdir().unwrap();
+        let db = open(home.path()).unwrap();
+        let paid = entry(
+            "a",
+            Limits {
+                usd_per_mtok_in: 1.0,
+                usd_per_mtok_out: 10.0,
+                max_output_tokens: 4000,
+                ..Default::default()
+            },
+        );
+        // A timeout after sending: 1,000 in (0.001) and up to 4,000 out (0.04). An HTTP error
+        // response, a 429 here, was not billed.
+        for detail in ["a timed out after 90s", "http 429: rate_limit"] {
+            record(
+                &db,
+                &Call {
+                    provider: "a",
+                    role: "curator",
+                    span: "s",
+                    outcome: "error",
+                    ms: 1,
+                    detail: Some(detail),
+                    bytes_out: 1,
+                    est_tokens: Some(1_000),
+                    usage: Usage::default(),
+                },
+            )
+            .unwrap();
+        }
+        let spent = spent_this_month(&db, &[paid]).unwrap();
+        assert!((spent - 0.041).abs() < 1e-9, "{spent}");
     }
 }
