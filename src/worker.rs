@@ -75,13 +75,22 @@ pub fn lock(home: &Path) -> Result<Option<Lock>> {
         .open(state.join("worker.lock"))?;
     match f.try_lock() {
         Ok(()) => {
+            // Replaced whole, never rewritten in place: a number cut off by a crash or a full disk
+            // would start the count again below the last recorded outcome's.
+            // One that is unreadable anyway goes on from the last recorded outcome's.
+            let number = |f: &str| {
+                std::fs::read_to_string(state.join(f))
+                    .ok()
+                    .and_then(|g| g.trim().parse::<u64>().ok())
+            };
             let gen_file = state.join("worker-gen");
-            let taken = std::fs::read_to_string(&gen_file)
-                .ok()
-                .and_then(|g| g.trim().parse::<u64>().ok())
+            let taken = number("worker-gen")
+                .or_else(|| number("worker-outcome-gen"))
                 .unwrap_or(0)
                 + 1;
-            std::fs::write(&gen_file, taken.to_string())?;
+            let next = state.join("worker-gen.next");
+            std::fs::write(&next, taken.to_string())?;
+            std::fs::rename(&next, &gen_file)?;
             Ok(Some(Lock(f, taken)))
         }
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
@@ -416,6 +425,14 @@ mod tests {
         record(home.path(), b, &failed());
         let why = std::fs::read_to_string(failed_note(home.path())).unwrap();
         assert_eq!(why, "a failure\n");
+        // A lock number lost to a damaged file goes on from the last recorded outcome's.
+        std::fs::write(home.path().join("state").join("worker-gen"), "").unwrap();
+        let after_damage = taken(home.path());
+        record(home.path(), after_damage, &Ok(()));
+        assert!(
+            !failed_note(home.path()).exists(),
+            "an outcome after the damage was refused"
+        );
         // A worker holding the lock does not keep an outcome from being recorded.
         let running = lock(home.path()).unwrap().unwrap();
         record(home.path(), running.1, &Ok(()));
