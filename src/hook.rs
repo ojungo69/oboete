@@ -66,6 +66,9 @@ fn run_io(
     // is an injection point at all (Task 2b: each agent has its own, see `injects`).
     let mut manifest = None;
     let mut injecting = false;
+    // Cursor's compaction flag this call took, put back if its write fails: the manifest is then
+    // shown at the next prompt, once recording works again.
+    let mut took_compaction: Option<String> = None;
     let result: Result<Option<String>> = (|| {
         if std::env::var_os(SKIP_ENV).is_some() {
             return Ok(None);
@@ -100,6 +103,13 @@ fn run_io(
                     eprintln!("oboete: compaction not noted: {e}");
                 }
             }
+            // Before the write too: when this call is the agent's injection point and its own
+            // write fails, the point still carries the recording-failure line. Grok's and agy's
+            // points stay taken then (the line is shown once per session, not at every call).
+            injecting = injects(home, agent, event, &labels);
+            if injecting && (agent, event) == ("cursor", "UserPromptSubmit") {
+                took_compaction = Some(session_label(&labels).to_owned());
+            }
             let settings = crate::capture::Settings::load(home)?;
             let mut store = crate::raw::open(home)?;
             let events = record(
@@ -114,7 +124,6 @@ fn run_io(
             wrote = !events.is_empty();
             ended = crate::failure::now();
             // A manifest that cannot be read is no recording failure: the row is written.
-            injecting = injects(home, agent, event, &labels);
             if injecting {
                 manifest = checkout_manifest(home, &store, &labels, &settings);
             }
@@ -149,6 +158,11 @@ fn run_io(
             Ok(_) => {}
             Err(e) => {
                 crate::failure::mark(home, crate::failure::classify(e), ended);
+                if let Some(session) = &took_compaction
+                    && let Err(e) = crate::hookstate::set(home, "cursor", session, "compacted")
+                {
+                    eprintln!("oboete: compaction not noted again: {e}");
+                }
                 // Task 8: the worker restores a damaged raw.db, and no hook starts one otherwise
                 // (they start it after a written row). A worker already running opened raw.db
                 // before the damage: the request makes it open the stores again.
@@ -169,7 +183,8 @@ fn run_io(
                 .err()
                 .map(|e| (crate::failure::classify(e), ended))
         });
-        // IDE adapters return {} on a failed call; the next successful injection shows it.
+        // Grok, agy and Cursor show it at their injection points only (other calls return nothing
+        // or {}); the others at every SessionStart, resumes too.
         let reads_start = event == "SessionStart" && !matches!(agent, "grok" | "agy" | "cursor");
         let parts: Vec<String> = [
             failed
@@ -1914,6 +1929,32 @@ mod tests {
     }
 
     #[test]
+    fn adapter_injection_points_warn_when_their_own_write_fails() {
+        for (agent, event) in [
+            ("grok", "PreToolUse"),
+            ("agy", "PreInvocation"),
+            ("cursor", "SessionStart"),
+        ] {
+            let dir = tmp(&format!("fail-{agent}"));
+            let payload = match agent {
+                "agy" => agy_fixture(&dir)["PreInvocation"].clone(),
+                "cursor" => cursor_fixture(&dir)["SessionStart"].clone(),
+                _ => json!({"sessionId": "g", "workspaceRoot": dir,
+                            "hookEventName": "PreToolUse", "toolName": "Read"}),
+            };
+            std::fs::create_dir_all(dir.join("raw.db")).unwrap(); // cannot be opened
+            let mut out = Vec::new();
+            let input = payload.to_string();
+            assert!(
+                run_io(&dir, agent, event, input.as_bytes(), &mut out).is_err(),
+                "{agent}"
+            );
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("recording has failed since"), "{agent}: {out}");
+        }
+    }
+
+    #[test]
     fn cursor_reinjects_after_a_compaction_whose_record_failed() {
         let dir = tmp("cursor-compact-failed");
         let payloads = cursor_fixture(&dir);
@@ -1998,7 +2039,14 @@ mod tests {
             )
             .is_err()
         );
-        assert_eq!(output, b"{}\n");
+        // The failure is shown at this prompt; the flag is put back for the next one.
+        let shown: Value = serde_json::from_slice(&output).unwrap();
+        assert!(
+            shown["additional_context"]
+                .as_str()
+                .unwrap()
+                .contains("recording has failed since")
+        );
         conn.execute_batch("DROP TRIGGER refuse_cursor_prompt")
             .unwrap();
         let workers: Vec<_> = (0..4)
@@ -2563,7 +2611,14 @@ mod tests {
             )
             .is_err()
         );
-        assert_eq!(output, b"{}\n");
+        // Its injection point: the failure is shown there, in agy's shape.
+        let shown: Value = serde_json::from_slice(&output).unwrap();
+        assert!(
+            shown["injectSteps"][0]["ephemeralMessage"]
+                .as_str()
+                .unwrap()
+                .contains("recording has failed since")
+        );
         assert!(recorded(&dir, "agy", &id).is_empty());
         conn.execute_batch("DROP TRIGGER refuse_prompt;").unwrap();
         for invocation in 0..3 {
