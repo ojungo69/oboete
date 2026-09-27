@@ -735,6 +735,27 @@ impl Raw {
         }
     }
 
+    /// The (from_seq, to_seq) of the window op appended together with `device`'s op `op_seq`:
+    /// the window a claim op's quotes were found in.
+    pub fn window_of(&self, device: &str, op_seq: i64) -> Result<Option<(i64, i64)>> {
+        use rusqlite::OptionalExtension;
+        let span: Option<(Option<i64>, Option<i64>)> = self
+            .conn
+            .query_row(
+                "SELECT json_extract(w.body, '$.from_seq'), json_extract(w.body, '$.to_seq')
+                 FROM ops o JOIN ops w
+                   ON w.device = o.device AND w.batch = o.batch AND w.type = 'window'
+                 WHERE o.device = ?1 AND o.op_seq = ?2 LIMIT 1",
+                params![device, op_seq],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(match span {
+            Some((Some(from), Some(to))) => Some((from, to)),
+            _ => None,
+        })
+    }
+
     /// D1: this device's ops after `op_seq` as backup lines, from `max_bytes` of lines on only
     /// up to the end of an append: a segment never holds a window op without the claims that
     /// committed with it. The body stays the stored JSON text, so a restore gives back the same

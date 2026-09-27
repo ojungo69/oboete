@@ -90,7 +90,13 @@ impl Consumer for Claims {
             .prepare("SELECT DISTINCT uid FROM derivations WHERE op_device = ?1 AND op_seq > ?2")?
             .query_map(params![device, to], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        for table in ["derivations", "evidence", "edges", "claim_skips"] {
+        for table in [
+            "derivations",
+            "evidence",
+            "edges",
+            "claim_skips",
+            "recurate",
+        ] {
             k.execute(
                 &format!("DELETE FROM {table} WHERE op_device = ?1 AND op_seq > ?2"),
                 params![device, to],
@@ -149,7 +155,12 @@ fn derive(raw: &Raw, k: &Connection, op: &Op) -> Result<Option<Derived>> {
         match live(raw, e)? {
             Some(event) if anchor.is_none() => anchor = Some(event),
             Some(_) => {}
-            None => return skip("a quote no longer reads in raw"),
+            None => {
+                // Masked or removed after curation: its window is sent again (Task 11), as
+                // `Anchors` does for a claim it drops, so a rebuild queues the same windows.
+                queue(raw, k, &op.device, op.op_seq, e)?;
+                return skip("a quote no longer reads in raw");
+            }
         }
     }
     let Some(anchor) = anchor else {
@@ -219,6 +230,97 @@ fn live(raw: &Raw, e: &Evidence) -> Result<Option<crate::raw::Event>> {
         })
         .unwrap_or(false);
     Ok(reads.then_some(*event))
+}
+
+/// The window the claim op `op_seq` of `op_device` came with, for Task 11 to send again: its
+/// span, or the quote's event alone when the op came without one.
+fn queue(raw: &Raw, k: &Connection, op_device: &str, op_seq: i64, e: &Evidence) -> Result<()> {
+    let (device, from, to) = match raw.window_of(op_device, op_seq)? {
+        Some((from, to)) => (op_device, from, to),
+        None => (e.device.as_str(), e.seq, e.seq),
+    };
+    k.execute(
+        "INSERT OR IGNORE INTO recurate(device, from_seq, to_seq, op_device, op_seq)
+         VALUES(?1, ?2, ?3, ?4, ?5)",
+        params![device, from, to, op_device, op_seq],
+    )?;
+    Ok(())
+}
+
+/// Claims whose quote a tombstone after them masked or removed (a rule the rescan applies after
+/// curation, or a forget): each derivation that quoted it goes, with its quotes, edges and search
+/// row, and its window is queued for recuration. A raw-seq consumer, after `Claims`.
+pub struct Anchors;
+
+impl Consumer for Anchors {
+    fn name(&self) -> &'static str {
+        "anchors"
+    }
+
+    fn step(&mut self, raw: &Raw, k: &Connection, device: &str, after: i64) -> Result<i64> {
+        schema(k)?;
+        let top = raw.max_seq_of(device)?;
+        if top <= after {
+            return Ok(after);
+        }
+        for (target, seq) in raw.tombstones_after(device, after)? {
+            let quoted: Vec<(String, i64)> = k
+                .prepare("SELECT DISTINCT op_device, op_seq FROM evidence WHERE device = ?1 AND seq = ?2")?
+                .query_map(params![target, seq], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            for (op_device, op_seq) in quoted {
+                let quotes: Vec<Evidence> = k
+                    .prepare(
+                        "SELECT device, seq, offset, length, sentence, quote FROM evidence
+                         WHERE op_device = ?1 AND op_seq = ?2 ORDER BY idx",
+                    )?
+                    .query_map(params![op_device, op_seq], |r| {
+                        Ok(Evidence {
+                            device: r.get(0)?,
+                            seq: r.get(1)?,
+                            offset: r.get(2)?,
+                            length: r.get(3)?,
+                            sentence: r.get(4)?,
+                            quote: r.get(5)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                let mut dead = None;
+                for e in &quotes {
+                    if live(raw, e)?.is_none() {
+                        dead = Some(e);
+                        break;
+                    }
+                }
+                let Some(dead) = dead else { continue };
+                queue(raw, k, &op_device, op_seq, dead)?;
+                let uid: String = k.query_row(
+                    "SELECT uid FROM derivations WHERE op_device = ?1 AND op_seq = ?2",
+                    params![op_device, op_seq],
+                    |r| r.get(0),
+                )?;
+                for table in ["derivations", "evidence", "edges"] {
+                    k.execute(
+                        &format!("DELETE FROM {table} WHERE op_device = ?1 AND op_seq = ?2"),
+                        params![op_device, op_seq],
+                    )?;
+                }
+                k.execute(
+                    "INSERT OR REPLACE INTO claim_skips(op_device, op_seq, reason)
+                     VALUES(?1, ?2, 'a quote no longer reads in raw')",
+                    params![op_device, op_seq],
+                )?;
+                activate(k, &uid)?;
+            }
+        }
+        Ok(top)
+    }
+
+    // ponytail: a restore that loses a tombstone does not bring back the claims it dropped (they
+    // stay hidden, the safe side) until `oboete rebuild` (Task 11) derives them again.
+    fn rewind(&mut self, _k: &Connection, _device: &str, _to: i64) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// `uid`'s active derivation, the highest tier, then the newest (MUST-M18; the op's time, with
@@ -312,7 +414,7 @@ mod tests {
     }
 
     fn run(raw: &Raw, k: &mut Connection) {
-        let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Claims)];
+        let mut consumers: Vec<Box<dyn Consumer>> = vec![Box::new(Claims), Box::new(Anchors)];
         drain(raw, k, &mut consumers).unwrap();
     }
 
@@ -700,5 +802,78 @@ mod tests {
             )
             .unwrap();
         assert_eq!(found, 0);
+    }
+
+    /// Spec 6.4: a rule the rescan applies after curation masks a quoted secret. The claim that
+    /// quoted it goes, with its quotes and search row, its window is queued for recuration, and a
+    /// rebuild from raw gives the same.
+    #[test]
+    fn a_rule_added_after_curation_drops_the_claims_quoting_the_masked_text() {
+        let home = tempfile::tempdir().unwrap();
+        let mut raw = raw::open(home.path()).unwrap();
+        let text = "Deploy with token hunter2 now. Staging first.";
+        let e = event(text, 5);
+        let seq = raw.append(&e).unwrap();
+        let dev = raw.device().to_owned();
+        let window = json!({"from_seq": seq, "from_offset": null, "to_seq": seq,
+            "to_offset": null, "outcome": "curated"});
+        let leaky = claim(
+            "c1",
+            "decision",
+            "Token.",
+            vec![quote(&dev, seq, text, "token hunter2", 0)],
+        );
+        let safe = claim(
+            "c2",
+            "decision",
+            "Staging first.",
+            vec![quote(&dev, seq, text, "Staging first", 31)],
+        );
+        raw.append_ops(&[(OpKind::Window, window), op(&leaky), op(&safe)])
+            .unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        assert_eq!(bodies(&k), ["Staging first.", "Token."]);
+        let offset = e.body.find("hunter2").unwrap() as i64;
+        raw.append_tombstone(Target::Range {
+            device: dev.clone(),
+            seq,
+            offset,
+            length: 7,
+        })
+        .unwrap();
+        run(&raw, &mut k);
+        let state = |k: &Connection| {
+            let spans: Vec<(String, i64, i64)> = k
+                .prepare("SELECT device, from_seq, to_seq FROM recurate")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let found: i64 = k
+                .query_row(
+                    "SELECT COUNT(*) FROM claims_fts WHERE text MATCH 'hunter2'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            (bodies(k), count(k, "evidence"), found, spans)
+        };
+        let want = (
+            vec!["Staging first.".to_owned()],
+            1,
+            0,
+            vec![(dev.clone(), seq, seq)],
+        );
+        assert_eq!(state(&k), want);
+        drop(k);
+        std::fs::remove_file(home.path().join("knowledge.db")).unwrap();
+        let mut k = crate::knowledge::open(home.path()).unwrap();
+        run(&raw, &mut k);
+        assert_eq!(state(&k), want);
+        // A restore that loses the claim op takes its span back out.
+        Claims.rewind(&k, &dev, 1).unwrap();
+        assert_eq!(count(&k, "recurate"), 0);
     }
 }
