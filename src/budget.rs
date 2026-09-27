@@ -2,6 +2,7 @@
 //! and tokens, a paid entry's share of the month's USD cap, and a request's size against the
 //! provider's own ceiling, in estimated tokens. A refused call uploads nothing and costs nothing.
 
+use crate::provider::Skip;
 use anyhow::Result;
 use rusqlite::Connection;
 
@@ -42,6 +43,8 @@ pub fn factor(db: &Connection, provider: &str) -> Result<f64> {
 pub struct Refusal {
     pub outcome: &'static str,
     pub detail: String,
+    /// Until when it holds (for the curation phase, D10 and D11).
+    pub skip: crate::provider::Skip,
 }
 
 /// The output reserved on an entry that declares none: the largest of the 42 Groq
@@ -68,6 +71,7 @@ pub fn admit(
         return Ok(Some(Refusal {
             outcome: "budget",
             detail: format!("{used}/{} calls today", p.daily_budget()),
+            skip: Skip::Budget(providers_db::next_day()),
         }));
     }
     // The answer counts against the same limits as the prompt (Groq's TPM is input and output
@@ -82,6 +86,7 @@ pub fn admit(
             return Ok(Some(Refusal {
                 outcome: "too_big",
                 detail: format!("an entry with the same {max}-token ceiling refused it"),
+                skip: Skip::TooBig,
             }));
         }
         // The estimate keeps its margin; the output is a bound, compared with the ceiling itself.
@@ -89,15 +94,19 @@ pub fn admit(
             return Ok(Some(Refusal {
                 outcome: "too_big",
                 detail: format!("about {reserved:.0} tokens, over its {max}"),
+                skip: Skip::TooBig,
             }));
         }
     }
     let rate = providers_db::rate(db, name)?;
     let now = crate::db::now_ms();
-    if rate.requests == Some(0) && rate.requests_reset_at.is_some_and(|t| t > now) {
+    if rate.requests == Some(0)
+        && let Some(at) = rate.requests_reset_at.filter(|&t| t > now)
+    {
         return Ok(Some(Refusal {
             outcome: "budget",
             detail: "no requests left until its reset".into(),
+            skip: Skip::Wait(at),
         }));
     }
     if let (Some(left), Some(at)) = (rate.tokens, rate.tokens_reset_at)
@@ -110,6 +119,7 @@ pub fn admit(
                 "{left} tokens left until its reset in {} s",
                 (at - now) / 1000
             ),
+            skip: Skip::Wait(at),
         }));
     }
     if let Some(daily) = limits.daily_tokens {
@@ -119,6 +129,7 @@ pub fn admit(
             return Ok(Some(Refusal {
                 outcome: "budget",
                 detail: format!("{today:.0}/{daily} tokens today"),
+                skip: Skip::Budget(providers_db::next_day()),
             }));
         }
     }
@@ -132,6 +143,7 @@ pub fn admit(
                 detail: format!(
                     "USD {spent:.2} of {paid_usd_per_month:.2} spent this month; this call up to {this:.3}"
                 ),
+                skip: Skip::Budget(providers_db::next_month()),
             }));
         }
     }
@@ -196,6 +208,7 @@ mod tests {
             extra: Default::default(),
             headers: Default::default(),
             limits,
+            subscription: false,
         }
     }
 

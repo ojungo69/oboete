@@ -285,6 +285,16 @@ pub fn today() -> i64 {
     now_ms() / DAY_MS * DAY_MS
 }
 
+/// When the daily counts start again: the next UTC midnight.
+pub fn next_day() -> i64 {
+    today() + DAY_MS
+}
+
+/// When the monthly spend starts again: the first of the next UTC month.
+pub fn next_month() -> i64 {
+    chrono_free_month_start(chrono_free_month_start(now_ms()) + 32 * DAY_MS)
+}
+
 /// What `provider`'s sent calls since `start` may have used beyond the usage they reported: the
 /// estimate of each call with no prompt count, and the number of calls with no completion count
 /// (a timeout, a dropped connection, an answer without a full usage block). A response with an

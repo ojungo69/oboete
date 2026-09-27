@@ -128,6 +128,10 @@ pub enum Provider {
         headers: std::collections::BTreeMap<String, String>,
         #[serde(default)]
         limits: Limits,
+        /// Paid by a subscription the owner codes with (OpenCode Go, owner decision 25): it waits
+        /// while the owner works, as a subscription CLI does (docs/milestone-3-plan.md D9).
+        #[serde(default)]
+        subscription: bool,
     },
     /// A subscription CLI run headless (`agy`, `claude`, `grok`, `codex`).
     Cli {
@@ -232,6 +236,14 @@ impl Provider {
             Provider::Openai { limits, .. } | Provider::Cli { limits, .. } => limits,
         }
     }
+    /// Whether a call spends a subscription the owner codes with: every CLI, and an API entry
+    /// marked so. Such a call waits while the owner works (D9).
+    pub fn subscription(&self) -> bool {
+        match self {
+            Provider::Openai { subscription, .. } => *subscription,
+            Provider::Cli { .. } => true,
+        }
+    }
     pub fn retry_429(&self) -> bool {
         match self {
             Provider::Openai { retry_429, .. } => *retry_429,
@@ -286,6 +298,7 @@ fn openai(
         extra: extra.as_object().cloned().unwrap_or_default(),
         headers: Default::default(),
         limits: Limits::default(),
+        subscription: false,
     }
 }
 
@@ -345,9 +358,13 @@ fn default_providers() -> Vec<Provider> {
         serde_json::json!({}),
     );
     if let Provider::Openai {
-        headers, timeout_s, ..
+        headers,
+        timeout_s,
+        subscription,
+        ..
     } = &mut opencode_go
     {
+        *subscription = true;
         // New console keys are refused without it (HTTP 400 MissingSessionID, 2026-09-26).
         headers.insert("x-opencode-session".into(), "oboete".into());
         // glm-5.3-flash reasons first: its answers took 63 s on average and 6 calls hit 90 s
@@ -762,6 +779,15 @@ model = "haiku"
                 .collect::<Vec<_>>()
         };
         assert!(!names("").contains(&"gemini".to_owned()));
+        // D9's subscriptions: every CLI, and OpenCode Go (owner decision 25).
+        let subscriptions: Vec<String> = load(dir)
+            .unwrap()
+            .providers
+            .iter()
+            .filter(|p| p.subscription())
+            .map(|p| p.name().to_owned())
+            .collect();
+        assert_eq!(subscriptions, ["opencode-go", "codex", "claude"]);
         let before = names("gemini = \"before-subscriptions\"\n");
         let at = before.iter().position(|n| n == "gemini").unwrap();
         assert_eq!(before[at - 1], "opencode-go");
