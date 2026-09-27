@@ -11,7 +11,9 @@ It supplements the existing Rust CI and SonarCloud checks; it does not approve o
 This repository uses NVIDIA NIM: `z-ai/glm-5.3` is the primary model and
 `moonshotai/kimi-k3` is the fallback. GLM is the starting choice for text-only
 code review, not a claim that it outperforms Kimi on every repository. Both use
-the same NIM account, OpenAI-compatible endpoint, and `high` reasoning effort.
+the same NIM account, OpenAI-compatible endpoint, and maximum `max` reasoning
+effort. OCR's separate review effort is also at its maximum, `high` (three
+review rounds); OCR does not accept `max` for that setting.
 
 In the repository's **Settings > Secrets and variables > Actions**, configure:
 
@@ -67,11 +69,13 @@ The alternate model is tried only once, even for these failures.
 
 - A newer run for the same PR cancels an older run. Ordinary PR comments do not
   trigger or cancel reviews.
-- Each job has a 30-minute timeout. Each attempt has two concurrent review tasks,
-  a 180-second LLM request timeout, and a 500,000-token budget. The CLI multiplies
-  the five-minute task setting by the two rounds of explicit `medium` review
-  effort, giving each file group a ten-minute deadline. The job deadline still
-  applies across all groups and both models. Fallback can consume a second budget.
+- Each job has a 45-minute timeout. Each attempt has two concurrent review tasks,
+  a 300-second LLM request timeout, and a 500,000-token budget. The longer request
+  and job limits leave room for maximum reasoning and the fallback attempt.
+  The CLI multiplies the five-minute task setting by the three rounds of explicit
+  `high` review effort, giving each file group a fifteen-minute deadline. The job
+  deadline still applies across all groups and both models. Fallback can consume
+  a second budget.
   The CLI also checks an estimated file-group cost before dispatch. The initial
   100,000-token budget rejected all nine selected files in PR #147 before review:
   the first group was estimated at 249,216 tokens with GLM and 338,132 with Kimi.
