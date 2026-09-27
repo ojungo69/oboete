@@ -1259,11 +1259,8 @@ mod tests {
 
     #[test]
     fn an_answer_records_its_token_usage() {
-        let home =
-            std::env::temp_dir().join(format!("oboete-provider-usage-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        let conn = crate::providers_db::open(&home).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
         let answer = json!({"choices": [{"message": {"content": "{\"summary\": \"s\"}"}}],
             "usage": {"prompt_tokens": 120, "completion_tokens": 30}});
         let (url, _) = serve_once(answer.to_string().into_bytes(), "");
@@ -1278,8 +1275,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, ("ok".into(), Some(120), Some(30), None));
-        drop(conn);
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -1661,11 +1656,8 @@ mod tests {
 
     #[test]
     fn a_cooldown_outlives_the_observe_run() {
-        let home =
-            std::env::temp_dir().join(format!("oboete-provider-state-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        let conn = crate::providers_db::open(&home).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
         let (url, _) = serve(
             "429 Too Many Requests",
             json!({"error": {"message": "Please try again in 6m20.064s."}})
@@ -1690,17 +1682,12 @@ mod tests {
             .down_until;
         let left = until - crate::db::now_ms();
         assert!((370_000..=381_000).contains(&left), "{left}");
-        drop(conn);
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
     fn three_bad_answers_in_a_row_open_the_breaker_and_an_answer_closes_it() {
-        let home =
-            std::env::temp_dir().join(format!("oboete-provider-breaker-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        let conn = crate::providers_db::open(&home).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let conn = crate::providers_db::open(home.path()).unwrap();
         let bad = || {
             let (url, _) = serve(
                 "400 Bad Request",
@@ -1755,8 +1742,6 @@ mod tests {
             crate::providers_db::state(&conn, "stub").unwrap(),
             crate::providers_db::State::default()
         );
-        drop(conn);
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]

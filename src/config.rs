@@ -590,11 +590,11 @@ model = "haiku"
 
     #[test]
     fn gemini_joins_the_chain_only_where_the_owner_puts_it() {
-        let dir = std::env::temp_dir().join(format!("oboete-gemini-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let names = |toml: &str| {
             std::fs::write(dir.join("config.toml"), toml).unwrap();
-            load(&dir)
+            load(dir)
                 .unwrap()
                 .providers
                 .iter()
@@ -614,8 +614,7 @@ model = "haiku"
         );
         assert_eq!(own, ["gemini"]);
         std::fs::write(dir.join("config.toml"), "gemini = \"first\"\n").unwrap();
-        assert!(load(&dir).is_err());
-        std::fs::remove_dir_all(&dir).ok();
+        assert!(load(dir).is_err());
     }
 
     #[test]

@@ -388,7 +388,15 @@ fn stats(conn: &rusqlite::Connection, home: &Path, repo: Option<&str>) -> Result
             .map(|m| m.len() as i64)
             .unwrap_or(0)
     };
-    let db_bytes = bytes("oboete.db") + bytes("oboete.db-wal");
+    let db_bytes = [
+        "oboete.db",
+        "oboete.db-wal",
+        "providers.db",
+        "providers.db-wal",
+    ]
+    .into_iter()
+    .map(bytes)
+    .sum::<i64>();
     // Curation calls are in providers.db (milestone 3, Task 1); embedding calls and calls from
     // before it are still in oboete.db.
     let since = db::now_ms() - 7 * 86_400_000;
