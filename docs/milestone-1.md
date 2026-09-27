@@ -146,7 +146,215 @@ The owner answered every task shown: 59 decisions and 63 pairs; the last answer 
 Task 7's fixtures through the owner's binary built from main f43da4d, in a temporary home with the API-only chain (`baseline.py config`):
 - `middle-only`: 12 observations; the middle decision is captured ("同期間隔を45秒に設定"). The plan's query (`LIKE '%45 秒%'`, with a space) found 0 because the title has no space; `LIKE '%45%'` finds it in 2 observations. So #57's parts-in-order stopgap holds on this fixture.
 - `long-24h`: 3 observations about the cache ("キャッシュの保存先をSQLiteに変更", "キャッシュ層の削除を決定", "キャッシュ保持に対する開発者の方針変更"), the overturned decision and the current one side by side with no status. As spec 8.1 expects, the M3 test milestone 3 writes fails against today's code.
-- Steps 3 and 4 (the dev replay through today's oboete and the judged retrieval baselines) run outside the owner's working hours: they share the owner's free tiers and Claude allowance.
+- Steps 3 and 4 (the dev replay through today's oboete and the judged retrieval baselines) run outside the owner's working hours: they share the owner's free tiers and Claude allowance. Both ran on the night of 2026-09-27 (below).
+
+## Dev baselines (Task 9 steps 3 and 4, 2026-09-27)
+
+### Curation: today's oboete and claude-mem on the 30 dev sessions
+
+`python3 baseline.py oboete` replayed the 30 dev sessions through the owner's binary of that night (executable sha256 `5fa472f04ab6`, installed before #93) with the API-only chain of `baseline.py config` (groq, groq-20b, nim, opencode-go, openrouter, mistral; 100 calls a day each). It ran from about 01:20 to 04:10 JST, and the three sessions the budgets stopped were finished from 09:26 to 10:53 JST (below). `baseline.py claude-mem` took claude-mem's own rows for the same sessions from the frozen copy: 30 sessions, 4,611 observations. Counts only; no text was printed.
+
+| session | agent | stratum | oboete observations | oboete summaries | claude-mem observations | claude-mem summaries |
+|---|---|---|---|---|---|---|
+| fdd4f4db | claude | claude/long/en | 12 | 1 | 9 | 0 |
+| ef5ceb1d | claude | claude/long/en | 20 | 2 | 28 | 3 |
+| 57d1fd58 | claude | claude/long/ja | 67 | 6 | 429 | 23 |
+| a2fec979 | claude | claude/long/ja | 22 | 2 | 223 | 12 |
+| f7dd2c15 | claude | claude/long/ja | 57 | 6 | 199 | 11 |
+| 4b4ff68d | claude | claude/long/ja | 36 | 4 | 192 | 26 |
+| cccab57b | claude | claude/long/ja | 30 | 3 | 30 | 1 |
+| b61a5b7e | claude | claude/long/ja | 42 | 4 | 233 | 18 |
+| 99de77cf | claude | claude/long/ja | 9 | 1 | 29 | 2 |
+| 6e1c07b0 | claude | claude/long/ja | 22 | 2 | 78 | 32 |
+| 8c03f2eb | claude | claude/long/ja | 42 | 5 | 244 | 5 |
+| 687b6a27 | claude | claude/long/ja | 12 | 2 | 29 | 15 |
+| 44ceb1b9 | claude | claude/long/ja | 276 | 29 | 417 | 93 |
+| 256eb7ae | claude | claude/mid/en | 20 | 2 | 64 | 4 |
+| d844d3b2 | claude | claude/mid/ja | 18 | 2 | 86 | 16 |
+| 8c5e20c4 | claude | claude/mid/ja | 12 | 1 | 85 | 1 |
+| 2e2d0bfd | claude | claude/mid/ja | 11 | 1 | 8 | 1 |
+| a8b4c575 | claude | claude/mid/ja | 12 | 1 | 3 | 1 |
+| 02816666 | claude | claude/mid/ja | 19 | 2 | 128 | 25 |
+| d6861698 | claude | claude/short/en | 8 | 1 | 4 | 0 |
+| 29b244be | claude | claude/short/en | 6 | 1 | 4 | 1 |
+| 6218b171 | claude | claude/short/ja | 12 | 1 | 35 | 2 |
+| deef39e9 | claude | claude/short/ja | 11 | 1 | 1 | 0 |
+| 568a3bac | claude | claude/short/ja | 2 | 1 | 6 | 0 |
+| 01a06da9 | codex | codex/long/en | 10 | 1 | 3 | 0 |
+| 01a04ea8 | codex | codex/long/ja | 11 | 1 | 1990 | 1 |
+| 01a07645 | codex | codex/mid/en | 6 | 1 | 21 | 0 |
+| 01a036ff | codex | codex/mid/ja | 59 | 6 | 31 | 2 |
+| 01a08bb9 | codex | codex/short/en | 8 | 1 | 1 | 1 |
+| 01a09b95 | codex | codex/short/ja | 6 | 1 | 1 | 1 |
+
+| provider | outcome | calls |
+|---|---|---|
+| groq | budget | 18 |
+| groq | error | 130 |
+| groq | ok | 6 |
+| groq | wait | 4 |
+| groq-20b | budget | 32 |
+| groq-20b | error | 122 |
+| groq-20b | ok | 11 |
+| groq-20b | wait | 6 |
+| mistral | error | 51 |
+| nim | budget | 22 |
+| nim | error | 33 |
+| nim | invalid | 99 |
+| nim | ok | 2 |
+| opencode-go | error | 44 |
+| opencode-go | ok | 23 |
+| openrouter | error | 41 |
+| openrouter | invalid | 5 |
+| openrouter | ok | 50 |
+
+- **All 30 sessions are finished.** The first night's daily budgets ran out (`budget` rows for groq, groq-20b and nim) with `44ceb1b9` (1,557 events), `01a036ff` (30) and `01a09b95` (35) partly unsummarized. They were finished on 2026-09-27 with the same binary, rebuilt from `v1` 431bafc (executable sha256 `5fa472f04ab6`, checked before the run), by repeating `observe --settle-ms 0` on the same home until no event was left. The owner's own binary had been reinstalled from `v1` 9799713 that morning, so it was not used. The provider table counts the calls of both runs.
+- The provider table is the failure pattern that docs/research/curator-providers-2026-09-27.md analyzes, on the dev sessions: nim answered 2 of 134 calls (99 `invalid`, the truncation #93 fixed), groq 6 of 136, mistral 0 of 51. openrouter (50) and opencode-go (23) carried most windows.
+- oboete keeps fewer records than claude-mem: 878 observations against 4,611. `01a04ea8` alone has 1,990 claude-mem observations. Whether fewer is worse is for the milestone 3 scorers; this task only stores the outputs they will score.
+
+### Retrieval on dev
+
+judge: claude-sonnet-5, trusted by B3 (κ = 0.88, run 2)
+
+`judge.py dev 312 600` graded every pooled pair (171 new ones came with `hybrid-d2`'s dev rows, copied from `runs-test/` as step 4 says), then `uv run --with ranx python report.py dev`. 306 of the 312 dev questions have at least one relevant document; the other 6 are left out of the scores. M1's four systems are `e0-trigram` (today's FTS), `hybrid-d2` (today's hybrid), `claude-mem` and `claude-mem-nowindow`; the other rows are the earlier runs already in `~/.oboete/eval/runs`. A superscript letter means the row is better than that row at p < 0.05 (ranx `compare`, paired). `-l2`: only grades 2 and 3 count as relevant.
+
+```
+split=dev judge=claude-sonnet-5 questions=312 judged=312 with an answer=306 without=6
+
+## all: 306 questions
+#    Model                NDCG@10     MRR@10-l2    Recall@10-l2    Hit Rate@10-l2
+---  -------------------  ----------  -----------  --------------  ----------------
+a    claude-mem-nowindow  0.282ᵇᵈ     0.337ᵇᵈ      0.073ᵇᵈ         0.578ᵇᵈ
+b    claude-mem           0.219ᵈ      0.230ᵈ       0.048ᵈ          0.392ᵈ
+c    e0-trigram           0.436ᵃᵇᵈ    0.565ᵃᵇᵈ     0.149ᵃᵇᵈ        0.817ᵃᵇᵈ
+d    fts                  0.048       0.094        0.012           0.098
+e    hybrid-d2            0.583ᵃᵇᶜᵈ   0.706ᵃᵇᶜᵈ    0.238ᵃᵇᶜᵈ       0.918ᵃᵇᶜᵈ
+f    hybrid-kf            0.586ᵃᵇᶜᵈ   0.731ᵃᵇᶜᵈᵉʰ  0.235ᵃᵇᶜᵈ       0.922ᵃᵇᶜᵈ
+g    hybrid-rrf           0.591ᵃᵇᶜᵈʰ  0.749ᵃᵇᶜᵈᵉʰ  0.236ᵃᵇᶜᵈ       0.922ᵃᵇᶜᵈ
+h    vec-bge-m3           0.564ᵃᵇᶜᵈ   0.668ᵃᵇᶜᵈ    0.223ᵃᵇᶜᵈ       0.902ᵃᵇᶜᵈ
+i    vec-kf               0.592ᵃᵇᶜᵈʰ  0.732ᵃᵇᶜᵈʰ   0.245ᵃᵇᶜᵈ       0.918ᵃᵇᶜᵈ
+
+## question in Japanese: 266 questions
+#    Model                NDCG@10     MRR@10-l2    Recall@10-l2    Hit Rate@10-l2
+---  -------------------  ----------  -----------  --------------  ----------------
+a    claude-mem-nowindow  0.251ᵇᵈ     0.303ᵇᵈ      0.059ᵇᵈ         0.538ᵇᵈ
+b    claude-mem           0.190ᵈ      0.198ᵈ       0.034ᵈ          0.342ᵈ
+c    e0-trigram           0.419ᵃᵇᵈ    0.545ᵃᵇᵈ     0.141ᵃᵇᵈ        0.805ᵃᵇᵈ
+d    fts                  0.016       0.038        0.003           0.038
+e    hybrid-d2            0.570ᵃᵇᶜᵈ   0.688ᵃᵇᶜᵈ    0.230ᵃᵇᶜᵈ       0.910ᵃᵇᶜᵈ
+f    hybrid-kf            0.577ᵃᵇᶜᵈ   0.721ᵃᵇᶜᵈᵉ   0.232ᵃᵇᶜᵈ       0.921ᵃᵇᶜᵈ
+g    hybrid-rrf           0.578ᵃᵇᶜᵈʰ  0.728ᵃᵇᶜᵈᵉʰ  0.231ᵃᵇᶜᵈ       0.914ᵃᵇᶜᵈ
+h    vec-bge-m3           0.553ᵃᵇᶜᵈ   0.661ᵃᵇᶜᵈ    0.226ᵃᵇᶜᵈ       0.910ᵃᵇᶜᵈ
+i    vec-kf               0.585ᵃᵇᶜᵈʰ  0.714ᵃᵇᶜᵈ    0.240ᵃᵇᶜᵈ       0.914ᵃᵇᶜᵈ
+
+## question in English: 40 questions
+#    Model                NDCG@10     MRR@10-l2     Recall@10-l2    Hit Rate@10-l2
+---  -------------------  ----------  ------------  --------------  ----------------
+a    claude-mem-nowindow  0.487ᵇᵈ     0.564ᵇ        0.171ᵇᵈ         0.850ᵇᵈ
+b    claude-mem           0.414ᵈ      0.446         0.142ᵈ          0.725ᵈ
+c    e0-trigram           0.549ᵇᵈ     0.703ᵇᵈ       0.206ᵇᵈ         0.900ᵇᵈ
+d    fts                  0.259       0.471         0.070           0.500
+e    hybrid-d2            0.667ᵃᵇᶜᵈ   0.826ᵃᵇᵈ      0.292ᵃᵇᶜᵈ       0.975ᵃᵇᵈ
+f    hybrid-kf            0.650ᵃᵇᶜᵈ   0.795ᵃᵇᵈ      0.257ᵃᵇᶜᵈ       0.925ᵇᵈ
+g    hybrid-rrf           0.683ᵃᵇᶜᵈᶠ  0.890ᵃᵇᶜᵈᵉᶠʰ  0.270ᵃᵇᶜᵈʰ      0.975ᵃᵇᵈʰ
+h    vec-bge-m3           0.637ᵃᵇᵈ    0.715ᵇᵈ       0.206ᵈ          0.850ᵈ
+i    vec-kf               0.641ᵃᵇᶜᵈ   0.846ᵃᵇᵈ      0.277ᵃᵇᶜᵈ       0.950ᵇᵈ
+
+## developer prompts: 284 questions
+#    Model                NDCG@10     MRR@10-l2    Recall@10-l2    Hit Rate@10-l2
+---  -------------------  ----------  -----------  --------------  ----------------
+a    claude-mem-nowindow  0.267ᵇᵈ     0.316ᵇᵈ      0.068ᵇᵈ         0.553ᵇᵈ
+b    claude-mem           0.203ᵈ      0.204ᵈ       0.043ᵈ          0.356ᵈ
+c    e0-trigram           0.419ᵃᵇᵈ    0.547ᵃᵇᵈ     0.144ᵃᵇᵈ        0.806ᵃᵇᵈ
+d    fts                  0.031       0.067        0.007           0.067
+e    hybrid-d2            0.570ᵃᵇᶜᵈ   0.692ᵃᵇᶜᵈ    0.236ᵃᵇᶜᵈ       0.915ᵃᵇᶜᵈ
+f    hybrid-kf            0.574ᵃᵇᶜᵈ   0.719ᵃᵇᶜᵈᵉ   0.234ᵃᵇᶜᵈ       0.919ᵃᵇᶜᵈ
+g    hybrid-rrf           0.580ᵃᵇᶜᵈʰ  0.738ᵃᵇᶜᵈᵉʰ  0.235ᵃᵇᶜᵈ       0.915ᵃᵇᶜᵈ
+h    vec-bge-m3           0.556ᵃᵇᶜᵈ   0.661ᵃᵇᶜᵈ    0.223ᵃᵇᶜᵈ       0.898ᵃᵇᶜᵈ
+i    vec-kf               0.582ᵃᵇᶜᵈ   0.721ᵃᵇᶜᵈʰ   0.243ᵃᵇᶜᵈ       0.912ᵃᵇᶜᵈ
+
+## agent searches: 22 questions
+#    Model                NDCG@10      MRR@10-l2    Recall@10-l2    Hit Rate@10-l2
+---  -------------------  -----------  -----------  --------------  ----------------
+a    claude-mem-nowindow  0.476ᵇᵈ      0.600        0.137ᵈ          0.909ᵈ
+b    claude-mem           0.432ᵈ       0.570        0.117           0.864ᵈ
+c    e0-trigram           0.665ᵃᵇᵈ     0.799ᵇᵈ      0.215ᵃᵇᵈ        0.955ᵈ
+d    fts                  0.261        0.447        0.083           0.500
+e    hybrid-d2            0.752ᵃᵇᶜᵈᶠʰ  0.884ᵃᵇᵈ     0.258ᵃᵇᶜᵈ       0.955ᵈ
+f    hybrid-kf            0.738ᵃᵇᶜᵈʰ   0.884ᵃᵇᵈ     0.256ᵃᵇᶜᵈ       0.955ᵈ
+g    hybrid-rrf           0.734ᵃᵇᶜᵈʰ   0.893ᵃᵇᵈ     0.252ᵃᵇᵈ        1.000ᵈ
+h    vec-bge-m3           0.668ᵃᵇᵈ     0.756ᵈ       0.227ᵃᵇᵈ        0.955ᵈ
+i    vec-kf               0.725ᵃᵇᵈʰ    0.863ᵃᵇᵈ     0.262ᵃᵇᶜᵈʰ      1.000ᵈ
+
+## prompts typed within 90 days: 73 questions
+#    Model                NDCG@10      MRR@10-l2    Recall@10-l2    Hit Rate@10-l2
+---  -------------------  -----------  -----------  --------------  ----------------
+a    claude-mem-nowindow  0.278ᵇᵈ      0.300ᵇᵈ      0.083ᵇᵈ         0.548ᵇᵈ
+b    claude-mem           0.240ᵈ       0.249ᵈ       0.064ᵈ          0.397ᵈ
+c    e0-trigram           0.408ᵃᵇᵈ     0.481ᵃᵇᵈ     0.145ᵃᵇᵈ        0.781ᵃᵇᵈ
+d    fts                  0.048        0.123        0.014           0.123
+e    hybrid-d2            0.566ᵃᵇᶜᵈ    0.657ᵃᵇᶜᵈ    0.225ᵃᵇᶜᵈ       0.890ᵃᵇᶜᵈ
+f    hybrid-kf            0.568ᵃᵇᶜᵈ    0.722ᵃᵇᶜᵈᵉ   0.220ᵃᵇᶜᵈ       0.890ᵃᵇᶜᵈ
+g    hybrid-rrf           0.579ᵃᵇᶜᵈ    0.745ᵃᵇᶜᵈᵉ   0.223ᵃᵇᶜᵈ       0.918ᵃᵇᶜᵈ
+h    vec-bge-m3           0.567ᵃᵇᶜᵈ    0.696ᵃᵇᶜᵈ    0.210ᵃᵇᶜᵈ       0.849ᵃᵇᵈ
+i    vec-kf               0.602ᵃᵇᶜᵈᵉᶠ  0.777ᵃᵇᶜᵈᵉ   0.249ᵃᵇᶜᵈ       0.932ᵃᵇᶜᵈ
+
+## prompts typed 90 days ago or earlier: 211 questions
+#    Model                NDCG@10     MRR@10-l2    Recall@10-l2    Hit Rate@10-l2
+---  -------------------  ----------  -----------  --------------  ----------------
+a    claude-mem-nowindow  0.263ᵇᵈ     0.322ᵇᵈ      0.063ᵇᵈ         0.555ᵇᵈ
+b    claude-mem           0.190ᵈ      0.188ᵈ       0.035ᵈ          0.341ᵈ
+c    e0-trigram           0.422ᵃᵇᵈ    0.570ᵃᵇᵈ     0.144ᵃᵇᵈ        0.815ᵃᵇᵈ
+d    fts                  0.025       0.047        0.004           0.047
+e    hybrid-d2            0.571ᵃᵇᶜᵈ   0.704ᵃᵇᶜᵈ    0.240ᵃᵇᶜᵈ       0.924ᵃᵇᶜᵈ
+f    hybrid-kf            0.577ᵃᵇᶜᵈ   0.718ᵃᵇᶜᵈʰ   0.238ᵃᵇᶜᵈ       0.929ᵃᵇᶜᵈ
+g    hybrid-rrf           0.581ᵃᵇᶜᵈʰ  0.735ᵃᵇᶜᵈʰ   0.239ᵃᵇᶜᵈ       0.915ᵃᵇᶜᵈ
+h    vec-bge-m3           0.552ᵃᵇᶜᵈ   0.650ᵃᵇᶜᵈ    0.227ᵃᵇᶜᵈ       0.915ᵃᵇᶜᵈ
+i    vec-kf               0.575ᵃᵇᶜᵈ   0.702ᵃᵇᶜᵈ    0.241ᵃᵇᶜᵈ       0.905ᵃᵇᶜᵈ
+
+## prompts, documents written before them only: 256 questions
+#    Model                NDCG@10       MRR@10-l2      Recall@10-l2    Hit Rate@10-l2
+---  -------------------  ------------  -------------  --------------  ----------------
+a    claude-mem-nowindow  0.218ᵇᵈ       0.250ᵇᵈ        0.087ᵇᵈ         0.383ᵇᵈ
+b    claude-mem           0.058ᵈ        0.072          0.023ᵈ          0.098ᵈ
+c    e0-trigram           0.369ᵃᵇᵈ      0.463ᵃᵇᵈ       0.216ᵃᵇᵈ        0.652ᵃᵇᵈ
+d    fts                  0.017         0.043          0.006           0.043
+e    hybrid-d2            0.481ᵃᵇᶜᵈ     0.604ᵃᵇᶜᵈ      0.301ᵃᵇᶜᵈ       0.773ᵃᵇᶜᵈ
+f    hybrid-kf            0.475ᵃᵇᶜᵈ     0.608ᵃᵇᶜᵈ      0.289ᵃᵇᶜᵈ       0.762ᵃᵇᶜᵈ
+g    hybrid-rrf           0.541ᵃᵇᶜᵈᵉᶠⁱ  0.663ᵃᵇᶜᵈᵉᶠʰⁱ  0.348ᵃᵇᶜᵈᵉᶠⁱ    0.836ᵃᵇᶜᵈᵉᶠⁱ
+h    vec-bge-m3           0.545ᵃᵇᶜᵈᵉᶠⁱ  0.564ᵃᵇᶜᵈ      0.361ᵃᵇᶜᵈᵉᶠⁱ    0.820ᵃᵇᶜᵈⁱ
+i    vec-kf               0.461ᵃᵇᶜᵈ     0.589ᵃᵇᶜᵈ      0.295ᵃᵇᶜᵈ       0.750ᵃᵇᶜᵈ
+
+## documents quoting the question removed: 306 questions
+#    Model                NDCG@10     MRR@10-l2    Recall@10-l2    Hit Rate@10-l2
+---  -------------------  ----------  -----------  --------------  ----------------
+a    claude-mem-nowindow  0.281ᵇᵈ     0.328ᵇᵈ      0.078ᵇᵈ         0.575ᵇᵈ
+b    claude-mem           0.218ᵈ      0.224ᵈ       0.051ᵈ          0.389ᵈ
+c    e0-trigram           0.421ᵃᵇᵈ    0.542ᵃᵇᵈ     0.149ᵃᵇᵈ        0.801ᵃᵇᵈ
+d    fts                  0.003       0.005        0.001           0.010
+e    hybrid-d2            0.574ᵃᵇᶜᵈ   0.697ᵃᵇᶜᵈ    0.242ᵃᵇᶜᵈ       0.908ᵃᵇᶜᵈ
+f    hybrid-kf            0.578ᵃᵇᶜᵈ   0.722ᵃᵇᶜᵈᵉʰ  0.240ᵃᵇᶜᵈ       0.915ᵃᵇᶜᵈ
+g    hybrid-rrf           0.577ᵃᵇᶜᵈʰ  0.731ᵃᵇᶜᵈᵉʰ  0.238ᵃᵇᶜᵈ       0.918ᵃᵇᶜᵈ
+h    vec-bge-m3           0.557ᵃᵇᶜᵈ   0.660ᵃᵇᶜᵈ    0.226ᵃᵇᶜᵈ       0.889ᵃᵇᶜᵈ
+i    vec-kf               0.589ᵃᵇᶜᵈʰ  0.720ᵃᵇᶜᵈʰ   0.252ᵃᵇᶜᵈʰ      0.912ᵃᵇᶜᵈ
+
+## observations only: 300 questions
+#    Model                NDCG@10      MRR@10-l2    Recall@10-l2    Hit Rate@10-l2
+---  -------------------  -----------  -----------  --------------  ----------------
+a    claude-mem-nowindow  0.322ᵇᵈ      0.343ᵇᵈ      0.122ᵇᵈ         0.590ᵇᵈ
+b    claude-mem           0.253ᵈ       0.235ᵈ       0.077ᵈ          0.400ᵈ
+c    e0-trigram           0.462ᵃᵇᵈʰ    0.531ᵃᵇᵈ     0.228ᵃᵇᵈʰ       0.777ᵃᵇᵈʰ
+d    fts                  0.021        0.042        0.007           0.043
+e    hybrid-d2            0.610ᵃᵇᶜᵈᵍʰ  0.675ᵃᵇᶜᵈᵍʰ  0.356ᵃᵇᶜᵈᵍʰ     0.893ᵃᵇᶜᵈᵍʰ
+f    hybrid-kf            0.612ᵃᵇᶜᵈᵍʰ  0.697ᵃᵇᶜᵈᵍʰ  0.353ᵃᵇᶜᵈᵍʰ     0.893ᵃᵇᶜᵈᵍʰ
+g    hybrid-rrf           0.507ᵃᵇᶜᵈʰ   0.641ᵃᵇᶜᵈʰ   0.261ᵃᵇᶜᵈʰ      0.827ᵃᵇᶜᵈʰ
+h    vec-bge-m3           0.299ᵇᵈ      0.472ᵃᵇᵈ     0.157ᵃᵇᵈ        0.540ᵇᵈ
+i    vec-kf               0.620ᵃᵇᶜᵈᵍʰ  0.690ᵃᵇᶜᵈʰ   0.371ᵃᵇᶜᵈᵍʰ     0.893ᵃᵇᶜᵈᵍʰ
+```
+
+- Today's hybrid (`hybrid-d2`) scores above both claude-mem rows in every stratum. Overall: nDCG@10 0.583 against 0.219 (0.282 without claude-mem's 90-day window), Hit Rate@10 0.918 against 0.392. The difference is significant in every metric of every stratum except the 22 agent searches, too few for it.
+- Today's FTS (`e0-trigram`, overall nDCG@10 0.436) is significantly above claude-mem with its window in every metric of every stratum, except Hit Rate in the agent searches. Against claude-mem without the window it is significant everywhere except the 40 English questions (no metric) and two metrics of the agent searches.
+- claude-mem's 90-day window hurts most on old prompts (nDCG@10 0.190 with it, 0.263 without, for prompts typed 90 days ago or earlier; 0.240 and 0.278 within 90 days) and when only documents written before the prompt count (0.058 and 0.218).
 
 ## Findings
 
