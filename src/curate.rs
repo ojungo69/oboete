@@ -278,6 +278,8 @@ fn memory_read(tool: &str, body: &Value) -> bool {
     tool.contains("oboete")
         || tool.contains("claude-mem")
         || tool.contains("claude_mem")
+        // Cursor names an MCP tool without its server (`MCP:<tool>`): oboete's three by name.
+        || matches!(tool.as_str(), "mcp:search" | "mcp:get" | "mcp:timeline")
         || runs_memory_read(&body["input"])
 }
 
@@ -1441,6 +1443,7 @@ mod tests {
                 "mcp__oboete__search",
                 serde_json::json!({"query": "indent"}),
             ),
+            ("MCP:search", serde_json::json!({"query": "indent"})),
             (
                 "mcp__plugin_claude-mem_mcp-search__search",
                 serde_json::json!({"query": "indent"}),
@@ -1475,15 +1478,21 @@ mod tests {
         // Any other call is shown whole, a command that only mentions oboete too.
         let echo = serde_json::json!({"command": "echo oboete search"});
         raw.append(&tool("Bash", echo, "ran")).unwrap();
+        let web = serde_json::json!({"query": "tabs"});
+        raw.append(&tool("MCP:web_search", web, "a page")).unwrap();
         let grep = serde_json::json!({"command": "rg 'oboete search' src"});
         raw.append(&tool("Bash", grep, "src/mcp.rs:1")).unwrap();
         let nested = serde_json::json!({"command": "bash -lc 'oboete search tabs'"});
         raw.append(&tool("Bash", nested, old)).unwrap();
         let w = next_window(&raw, &dev, 10_000, &rules).unwrap().unwrap();
         assert!(!w.text.contains(old), "{}", w.text);
-        assert_eq!(w.text.matches(MEMORY_READ).count(), 9, "{}", w.text);
+        assert_eq!(w.text.matches(MEMORY_READ).count(), 10, "{}", w.text);
         assert!(w.text.contains("mcp__oboete__search") && w.text.contains("ran"));
-        assert!(w.text.contains("src/mcp.rs:1"), "{}", w.text);
+        assert!(
+            w.text.contains("src/mcp.rs:1") && w.text.contains("a page"),
+            "{}",
+            w.text
+        );
     }
 
     #[test]
