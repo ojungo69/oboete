@@ -277,7 +277,8 @@ impl<'r> Prepared<'r> {
         let place = match (&e.repo, &e.branch) {
             (Some(r), b) => {
                 let repo = gate(r);
-                let name = repo.rsplit('/').next().unwrap_or(&repo).to_owned();
+                // A local path (no origin) as its folder, with either platform's separator.
+                let name = repo.rsplit(['/', '\\']).next().unwrap_or(&repo).to_owned();
                 match b {
                     Some(b) => format!(" in {name}@{}", gate(b)),
                     None => format!(" in {name}"),
@@ -1033,6 +1034,34 @@ mod tests {
             close(&mut raw, &w);
         }
         assert_eq!(seen, 10_000);
+    }
+
+    /// A repository with no origin is keyed by its local path: only its folder is sent, on
+    /// Windows too.
+    #[test]
+    fn a_local_repositorys_heading_names_only_its_folder() {
+        let (_h, mut raw, dev) = store();
+        for (session, repo) in [
+            ("s1", "/home/someone/work/demo"),
+            ("s2", r"C:\Users\someone\work\demo"),
+        ] {
+            raw.append(&Event {
+                session: session.into(),
+                repo: Some(repo.into()),
+                branch: Some("main".into()),
+                ..prompt("hello")
+            })
+            .unwrap();
+        }
+        let w = next_window(&raw, &dev, 2_000, &Rules::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.to_seq, 2);
+        assert!(
+            w.text.contains(" in demo@main") && !w.text.contains("someone"),
+            "{}",
+            w.text
+        );
     }
 
     #[test]
