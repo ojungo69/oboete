@@ -106,8 +106,8 @@ fn repo_name(repo: &str, rules: &Rules) -> String {
 /// The context a window's prompt adds, in whole lines from the start of each part, within `room`
 /// tokens: it shares the provider's request ceiling with the window (Groq's free tier refuses a
 /// request over 8,000 tokens). What the sessions carry in takes at most half; the candidates
-/// (MUST-M3) the rest.
-fn fit(carried: &str, shown: &str, room: u32) -> (String, String) {
+/// (MUST-M3, one block per repository) the rest, each repository a share.
+fn fit(carried: &str, shown: &[String], room: u32) -> (String, String) {
     let keep = |text: &str, room: u32| {
         let (mut out, mut used) = (String::new(), 0);
         for line in text.lines() {
@@ -122,7 +122,21 @@ fn fit(carried: &str, shown: &str, room: u32) -> (String, String) {
         (out, used)
     };
     let (carried, used) = keep(carried, room / 2);
-    (carried, keep(shown, room - used).0)
+    // The smallest block first, so what one leaves goes to the others; shown in their order.
+    let cost = |t: &str| {
+        t.lines()
+            .map(|l| crate::budget::estimate(l) + 1)
+            .sum::<u32>()
+    };
+    let mut order: Vec<usize> = (0..shown.len()).collect();
+    order.sort_by_key(|&i| cost(&shown[i]));
+    let (mut left, mut kept) = (room - used, vec![String::new(); shown.len()]);
+    for (n, &i) in order.iter().enumerate() {
+        let (text, used) = keep(&shown[i], left / (shown.len() - n) as u32);
+        left -= used;
+        kept[i] = text;
+    }
+    (carried, kept.concat())
 }
 
 /// Bytes of records read at a time while a window is cut, at least one record (spec 3.1: pages
@@ -682,7 +696,7 @@ pub fn run_phase(
     }
     // `claims::current` reads, never creates: a store the worker has not yet given claims.
     crate::claims::schema(k)?;
-    let mut shown = String::new();
+    let mut shown: Vec<String> = Vec::new();
     let mut repos: Vec<&str> = Vec::new();
     for repo in w.lines.iter().filter_map(|l| l.repo.as_deref()) {
         if !repos.contains(&repo) {
@@ -701,17 +715,19 @@ pub fn run_phase(
             .collect();
         // Under the repository's name, as the window's headings show it.
         let found = candidates(k, repo, &text.join("\n"))?;
-        if !found.is_empty() {
-            shown.push_str(&format!("### in {}\n", repo_name(repo, rules)));
+        if found.is_empty() {
+            continue;
         }
+        let mut block = format!("### in {}\n", repo_name(repo, rules));
         for c in found {
-            shown.push_str(&format!(
+            block.push_str(&format!(
                 "{}: {}\n",
                 c.uid,
                 crate::redact::outbound_with(&c.body, rules)
             ));
             shown_in.push((repo.to_owned(), c.uid));
         }
+        shown.push(block);
     }
     let (carried_text, mut carried_uids) = carried(raw, k, rules, &w)?;
     // Within a fifth of the window's budget; a uid cut from the prompt is superseded by nothing.
@@ -1481,7 +1497,7 @@ mod tests {
     fn the_context_a_window_adds_fits_its_share_of_the_budget() {
         let carried = "open item: a body of forty characters or so\n".repeat(100);
         let shown = "c0ffee: a candidate body about as long\n".repeat(100);
-        let (c, s) = fit(&carried, &shown, 200);
+        let (c, s) = fit(&carried, std::slice::from_ref(&shown), 200);
         let cost = |t: &str| {
             t.lines()
                 .map(|l| crate::budget::estimate(l) + 1)
@@ -1495,9 +1511,22 @@ mod tests {
         );
         assert!(!s.is_empty() && carried.starts_with(&c) && shown.starts_with(&s));
         // What the sessions carry in leaves its unused half to the candidates.
-        let (c, s) = fit("goal: short\n", &shown, 200);
+        let (c, s) = fit("goal: short\n", std::slice::from_ref(&shown), 200);
         assert_eq!(c, "goal: short\n");
         assert!(cost(&s) > 100, "{}", cost(&s));
+        // Each repository's candidates get a share: the first one's never crowd out the next,
+        // and what a short one leaves goes to the others.
+        let block = |r: &str, n: usize| {
+            format!(
+                "### in {r}\n{}",
+                format!("{r}{r}: a candidate body about as long\n").repeat(n)
+            )
+        };
+        let (_, s) = fit("", &[block("a", 100), block("b", 100), block("c", 1)], 200);
+        for r in ["a", "b", "c"] {
+            assert!(s.contains(&format!("{r}{r}: ")), "{r}: {s}");
+        }
+        assert!(cost(&s) > 180 && cost(&s) <= 200, "{}", cost(&s));
     }
 
     #[test]
